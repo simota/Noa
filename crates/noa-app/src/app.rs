@@ -14,6 +14,7 @@ use noa_grid::Terminal;
 use noa_pty::{Pty, PtyConfig, PtyWriter};
 use noa_render::{FrameSnapshot, Renderer, Theme};
 use winit::application::ApplicationHandler;
+use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState};
@@ -73,7 +74,12 @@ impl App {
     fn app_cursor_keys(&self) -> bool {
         self.terminal
             .as_ref()
-            .map(|t| t.lock().expect("terminal mutex poisoned").modes.app_cursor_keys())
+            .map(|t| {
+                t.lock()
+                    .expect("terminal mutex poisoned")
+                    .modes
+                    .app_cursor_keys()
+            })
             .unwrap_or(false)
     }
 
@@ -98,7 +104,9 @@ impl App {
         let frame = match graphics.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                graphics.surface.configure(&graphics.device, &graphics.surface_config);
+                graphics
+                    .surface
+                    .configure(&graphics.device, &graphics.surface_config);
                 return;
             }
             Err(e) => {
@@ -110,7 +118,9 @@ impl App {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        graphics.renderer.draw(&graphics.device, &graphics.queue, &view);
+        graphics
+            .renderer
+            .draw(&graphics.device, &graphics.queue, &view);
         frame.present();
     }
 }
@@ -122,19 +132,32 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         // Build the font grid first so we know the cell size to size the window.
-        let mut font = FontGrid::new(self.config.font_size).expect("failed to load a system monospace font");
+        // `font_size` is a logical point size; the renderer consumes physical pixels.
+        let monitor_scale_factor = event_loop
+            .primary_monitor()
+            .map(|monitor| monitor.scale_factor())
+            .unwrap_or(1.0);
+        let mut font = FontGrid::new(font_pixel_size(self.config.font_size, monitor_scale_factor))
+            .expect("failed to load a system monospace font");
         let metrics = font.metrics();
-        let px_w = (metrics.cell_w * self.grid_size.cols as f32).ceil().max(1.0) as u32;
-        let px_h = (metrics.cell_h * self.grid_size.rows as f32).ceil().max(1.0) as u32;
+        let inner_size = initial_window_logical_size(metrics, self.grid_size, monitor_scale_factor);
 
         let window_attrs = WindowAttributes::default()
             .with_title("noa")
-            .with_inner_size(winit::dpi::PhysicalSize::new(px_w, px_h));
+            .with_inner_size(inner_size);
         let window = Arc::new(
             event_loop
                 .create_window(window_attrs)
                 .expect("failed to create window"),
         );
+        let window_scale_factor = window.scale_factor();
+        if (window_scale_factor - monitor_scale_factor).abs() > f64::EPSILON {
+            font = FontGrid::new(font_pixel_size(self.config.font_size, window_scale_factor))
+                .expect("failed to load a system monospace font");
+            let inner_size =
+                initial_window_logical_size(font.metrics(), self.grid_size, window_scale_factor);
+            let _ = window.request_inner_size(inner_size);
+        }
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance
@@ -231,7 +254,12 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
         let Some(graphics) = self.graphics.as_ref() else {
             return;
         };
@@ -242,6 +270,9 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.on_scale_factor_changed(scale_factor)
+            }
             WindowEvent::Resized(size) => self.on_resize(size),
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             WindowEvent::KeyboardInput { event, .. } => {
@@ -279,6 +310,15 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
+    fn on_scale_factor_changed(&mut self, scale_factor: f64) {
+        let Some(graphics) = self.graphics.as_mut() else {
+            return;
+        };
+        graphics.font = FontGrid::new(font_pixel_size(self.config.font_size, scale_factor))
+            .expect("failed to load a system monospace font");
+        graphics.window.request_redraw();
+    }
+
     fn on_resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
         let Some(graphics) = self.graphics.as_mut() else {
             return;
@@ -288,7 +328,9 @@ impl App {
         }
         graphics.surface_config.width = size.width;
         graphics.surface_config.height = size.height;
-        graphics.surface.configure(&graphics.device, &graphics.surface_config);
+        graphics
+            .surface
+            .configure(&graphics.device, &graphics.surface_config);
         graphics.renderer.resize(PixelSize {
             w: size.width,
             h: size.height,
@@ -316,5 +358,55 @@ impl App {
         if let Some(g) = &self.graphics {
             g.window.request_redraw();
         }
+    }
+}
+
+fn font_pixel_size(point_size: f32, scale_factor: f64) -> f32 {
+    (point_size * scale_factor.max(f64::EPSILON) as f32).max(1.0)
+}
+
+fn initial_window_logical_size(
+    metrics: noa_font::Metrics,
+    grid_size: GridSize,
+    scale_factor: f64,
+) -> LogicalSize<f64> {
+    let scale_factor = scale_factor.max(f64::EPSILON) as f32;
+    let physical_w = (metrics.cell_w * grid_size.cols as f32).ceil().max(1.0);
+    let physical_h = (metrics.cell_h * grid_size.rows as f32).ceil().max(1.0);
+
+    LogicalSize::new(
+        (physical_w / scale_factor) as f64,
+        (physical_h / scale_factor) as f64,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metrics(cell_w: f32, cell_h: f32) -> noa_font::Metrics {
+        noa_font::Metrics {
+            cell_w,
+            cell_h,
+            ascent: cell_h * 0.75,
+            descent: cell_h * 0.25,
+            line_gap: 0.0,
+            underline_position: 0.0,
+            underline_thickness: 1.0,
+        }
+    }
+
+    #[test]
+    fn font_pixel_size_scales_logical_points() {
+        assert_eq!(font_pixel_size(14.0, 1.0), 14.0);
+        assert_eq!(font_pixel_size(14.0, 2.0), 28.0);
+    }
+
+    #[test]
+    fn initial_window_size_converts_physical_metrics_to_logical_size() {
+        let size = initial_window_logical_size(metrics(16.0, 32.0), GridSize::new(80, 24), 2.0);
+
+        assert_eq!(size.width, 640.0);
+        assert_eq!(size.height, 384.0);
     }
 }

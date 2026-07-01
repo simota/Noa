@@ -20,7 +20,7 @@ pub struct PtyConfig {
     pub cwd: Option<String>,
     /// Value for the `TERM` environment variable.
     pub term: String,
-    /// Run the shell as a login shell (argv0 prefixed with `-`).
+    /// Run the shell as a login shell (passes the `-l` flag).
     pub login: bool,
 }
 
@@ -74,12 +74,13 @@ impl Pty {
 
         let mut cmd = CommandBuilder::new(&shell);
         if config.login {
-            // Login shell: argv[0] is the shell basename prefixed with '-'.
-            let base = std::path::Path::new(&shell)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&shell);
-            cmd.arg(format!("-{base}"));
+            // Login shell. NOTE: portable-pty's CommandBuilder does not let us
+            // override argv[0], so the classic "-<shell>" argv[0] convention
+            // isn't available — passing "-zsh" as an argument makes zsh treat
+            // it as options ("bad option: -z") and exit. Use the `-l` flag,
+            // which zsh/bash/sh all accept. Interactivity comes from stdin
+            // being a tty (the pty slave), so no explicit `-i` is needed.
+            cmd.arg("-l");
         }
         cmd.env("TERM", &config.term);
         if let Some(cwd) = &config.cwd {
@@ -197,6 +198,23 @@ mod tests {
         let text = String::from_utf8_lossy(&collected);
         assert!(text.contains("hello"), "expected 'hello' in output: {text:?}");
         assert!(saw_exit, "expected an Exit event");
+    }
+
+    #[test]
+    fn default_login_shell_stays_interactive() {
+        // Regression: the default config spawns a login shell; a broken login
+        // argument once made zsh exit 1 immediately ("bad option: -z"), so the
+        // app quit on launch. An interactive shell must wait for input, not
+        // exit on its own.
+        let pty = Pty::spawn(PtyConfig::default()).expect("spawn");
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_millis(1500) {
+            match pty.event_rx().recv_timeout(Duration::from_millis(300)) {
+                Ok(PtyEvent::Exit(c)) => panic!("login shell exited early with code {c}"),
+                Ok(PtyEvent::Error(e)) => panic!("pty error: {e}"),
+                _ => {} // Data (a prompt) or a timeout — both mean it's alive
+            }
+        }
     }
 
     #[test]

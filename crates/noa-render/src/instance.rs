@@ -32,18 +32,26 @@ impl CellInstance {
 
 /// Per-frame uniform data shared by every pipeline (mirrors Ghostty's
 /// `Uniforms`).
+///
+/// Field order is deliberate: the 16-byte-aligned members (mat4 + vec4s) come
+/// first, then the 8-byte vec2s, then scalars + tail padding to a 16-byte
+/// multiple. Laid out this way, the tight `#[repr(C)]` Rust layout (160 bytes,
+/// no interior padding) matches the WGSL std140 uniform layout in
+/// `shaders/cell.wgsl` **byte-for-byte** — a mismatch here binds a buffer the
+/// shader reads at the wrong offsets / rejects for size (wgpu validation error
+/// at draw time). Keep the two struct definitions in lockstep.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
 pub struct Uniforms {
     pub projection: [[f32; 4]; 4],
+    /// top, right, bottom, left.
+    pub grid_padding: [f32; 4],
+    pub cursor_color: [f32; 4],
+    pub bg_color: [f32; 4],
     pub screen_size: [f32; 2],
     pub cell_size: [f32; 2],
     pub grid_size: [f32; 2],
-    /// top, right, bottom, left.
-    pub grid_padding: [f32; 4],
     pub cursor_pos: [f32; 2],
-    pub cursor_color: [f32; 4],
-    pub bg_color: [f32; 4],
     pub min_contrast: f32,
     pub _pad: [f32; 3],
 }

@@ -2,17 +2,23 @@
 // pass and the cell-text (glyph) pass. Which behavior an instance gets is
 // selected by `flags & FLAG_GLYPH`.
 
+// Field order + tail padding MUST match `instance.rs`'s `Uniforms` exactly
+// (16-byte members first, then vec2s, then scalars). The tail pad is three
+// scalars, NOT a vec3 (vec3 forces 16-byte alignment and would reintroduce a
+// size mismatch). Total: 160 bytes.
 struct Uniforms {
     projection: mat4x4<f32>,
+    grid_padding: vec4<f32>, // top, right, bottom, left
+    cursor_color: vec4<f32>,
+    bg_color: vec4<f32>,
     screen_size: vec2<f32>,
     cell_size: vec2<f32>,
     grid_size: vec2<f32>,
-    grid_padding: vec4<f32>, // top, right, bottom, left
     cursor_pos: vec2<f32>,
-    cursor_color: vec4<f32>,
-    bg_color: vec4<f32>,
     min_contrast: f32,
-    _pad: vec3<f32>,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 };
 
 @group(0) @binding(0)

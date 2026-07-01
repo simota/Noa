@@ -20,14 +20,14 @@ fn cell(t: &Terminal, x: usize, y: usize) -> crate::cell::Cell {
 #[test]
 fn deferred_wrap_latch() {
     // 80 chars into an 80-col row: cursor parks at the last column, latched, no wrap.
-    let t = run(&vec![b'x'; 80]);
+    let t = run(&[b'x'; 80]);
     assert_eq!(t.primary.cursor.x, 79);
     assert_eq!(t.primary.cursor.y, 0);
     assert!(t.primary.cursor.pending_wrap);
     assert!(!t.primary.grid[0].wrapped);
 
     // The 81st char triggers the wrap: row 0 marked wrapped, char lands at (0,1).
-    let t = run(&vec![b'x'; 81]);
+    let t = run(&[b'x'; 81]);
     assert!(t.primary.grid[0].wrapped);
     assert_eq!(cell(&t, 0, 1).ch, 'x');
     assert_eq!(t.primary.cursor.y, 1);

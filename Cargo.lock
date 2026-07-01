@@ -1338,6 +1338,7 @@ dependencies = [
  "noa-core",
  "noa-font",
  "noa-grid",
+ "pollster",
  "wgpu",
 ]
 

@@ -33,7 +33,10 @@ impl CellPipeline {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    // The vertex stage reads `textureDimensions(atlas_tex)` to
+                    // map glyph atlas pixels to UVs, so the texture must be
+                    // visible to VERTEX as well as FRAGMENT (sampling).
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,

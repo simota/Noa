@@ -16,7 +16,20 @@ use winit::event_loop::EventLoop;
 
 /// Launch the terminal. Blocks until the window closes.
 pub fn run(config: AppConfig) -> anyhow::Result<()> {
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    let mut builder = EventLoop::<UserEvent>::with_user_event();
+
+    // Present as a real foreground macOS app even when launched from a plain
+    // `cargo run` (not just from the .app bundle): a regular activation policy
+    // gives a Dock icon + focus, and the default menu bar provides the
+    // standard app menu with a working Cmd+Q.
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        builder.with_activation_policy(ActivationPolicy::Regular);
+        builder.with_default_menu(true);
+    }
+
+    let event_loop = builder.build()?;
     let proxy = event_loop.create_proxy();
     let mut app = app::App::new(config, proxy);
     event_loop.run_app(&mut app)?;

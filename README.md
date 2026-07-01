@@ -41,6 +41,22 @@ cargo run   -p noa          # launch the terminal
 
 Options: `cargo run -p noa -- --cols 100 --rows 30 --font-size 15`.
 
+### Build the macOS app
+
+`noa` runs as a proper foreground macOS app (Dock icon, standard menu bar with
+Cmd+Q, native window controls). To produce a double-clickable `.app` bundle:
+
+```bash
+scripts/bundle-macos.sh          # → target/release/noa.app  (ad-hoc signed)
+open target/release/noa.app      # or double-click it in Finder
+```
+
+The script builds a release binary, assembles the bundle (`Info.plist`, icon,
+`PkgInfo`), and ad-hoc code-signs it so it launches without a Gatekeeper
+prompt. The app icon is generated from scratch by `scripts/gen-icon.sh` (pure
+`python3` + macOS `sips`/`iconutil` — no external tools). `cargo bundle` also
+works via the `[package.metadata.bundle]` in `bin/noa/Cargo.toml`.
+
 ## Fidelity approach
 
 `noa` follows a **fidelity-over-faith** discipline: the copy's match to Ghostty is *proven*, not asserted. The Parity Map has five dimensions:

@@ -16,7 +16,7 @@ use noa_render::{FrameSnapshot, Renderer, Theme};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
-use winit::keyboard::ModifiersState;
+use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::events::UserEvent;
@@ -246,6 +246,17 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
+                    return;
+                }
+                // Cmd-based combos are macOS app shortcuts, not shell input:
+                // handle Cmd+Q / Cmd+W here and never forward a Cmd combo to
+                // the pty (the default menu bar also binds Cmd+Q).
+                if self.modifiers.super_key() {
+                    if let Key::Character(c) = &event.logical_key
+                        && matches!(c.as_str(), "q" | "w")
+                    {
+                        event_loop.exit();
+                    }
                     return;
                 }
                 let app_cursor_keys = self.app_cursor_keys();

@@ -2,7 +2,7 @@
 //! instance buffers; rebuilds them from a [`crate::FrameSnapshot`] and draws.
 
 use noa_core::{CellAttrs, Color, PixelSize};
-use noa_font::FontGrid;
+use noa_font::{FontGrid, Metrics};
 
 use crate::instance::{orthographic_projection, CellInstance, Uniforms};
 use crate::pipeline::CellPipeline;
@@ -87,10 +87,8 @@ impl Renderer {
     /// Rebuild the CPU instance list from a snapshot, re-rastering any glyphs
     /// not yet in the atlas and re-uploading the atlas texture if it grew.
     pub fn rebuild_cells(&mut self, snap: &FrameSnapshot, font: &mut FontGrid, theme: &Theme) {
-        self.cell_size = {
-            let m = font.metrics();
-            (m.cell_w, m.cell_h)
-        };
+        let metrics = font.metrics();
+        self.cell_size = (metrics.cell_w, metrics.cell_h);
 
         self.instances.clear();
 
@@ -130,7 +128,7 @@ impl Renderer {
                         self.instances.push(CellInstance {
                             glyph_pos: glyph.atlas_pos,
                             glyph_size: glyph.atlas_size,
-                            bearing: glyph.bearing,
+                            bearing: glyph_cell_bearing(metrics, glyph.bearing),
                             grid_pos: [x, y],
                             color: to_u8_color(fg),
                             flags: CellInstance::FLAG_GLYPH,
@@ -250,7 +248,11 @@ impl Renderer {
             });
         }
         if !self.instances.is_empty() {
-            queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&self.instances));
+            queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&self.instances),
+            );
         }
     }
 
@@ -286,6 +288,13 @@ fn to_u8_color(c: [f32; 4]) -> [u8; 4] {
     ]
 }
 
+fn glyph_cell_bearing(metrics: Metrics, pen_bearing: [i16; 2]) -> [i16; 2] {
+    [
+        pen_bearing[0],
+        (metrics.ascent.round() - pen_bearing[1] as f32) as i16,
+    ]
+}
+
 fn upload_atlas(queue: &wgpu::Queue, texture: &wgpu::Texture, data: &[u8], w: u32, h: u32) {
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -306,4 +315,26 @@ fn upload_atlas(queue: &wgpu::Queue, texture: &wgpu::Texture, data: &[u8], w: u3
             depth_or_array_layers: 1,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metrics(ascent: f32) -> Metrics {
+        Metrics {
+            cell_w: 10.0,
+            cell_h: 24.0,
+            ascent,
+            descent: 6.0,
+            line_gap: 0.0,
+            underline_position: 0.0,
+            underline_thickness: 1.0,
+        }
+    }
+
+    #[test]
+    fn glyph_bearing_converts_from_baseline_to_cell_top() {
+        assert_eq!(glyph_cell_bearing(metrics(18.0), [2, 14]), [2, 4]);
+    }
 }

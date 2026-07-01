@@ -24,8 +24,8 @@ pub struct GlyphKey {
     pub ch: char,
 }
 
-/// Packed glyph record. Field shapes mirror `noa-render`'s `CellInstance` so
-/// the renderer can consume them without conversion.
+/// Packed glyph record. Field shapes mirror `noa-render`'s `CellInstance`, but
+/// the vertical bearing remains pen-relative and is converted by the renderer.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct GlyphInfo {
     /// Top-left of the glyph in the atlas, in pixels `[x, y]`.

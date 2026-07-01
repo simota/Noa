@@ -1,0 +1,315 @@
+//! The active screen: a grid of rows, the cursor, the scroll region, tab
+//! stops, and all the cursor/erase/scroll primitives the [`crate::Terminal`]
+//! `Handler` implementation drives.
+
+use crate::cell::{Cell, Row};
+use crate::cursor::{Cursor, ScrollRegion};
+use crate::tabstops::Tabstops;
+use noa_vt::{EraseDisplay, EraseLine};
+
+pub struct Screen {
+    pub rows: u16,
+    pub cols: u16,
+    pub grid: Vec<Row>,
+    pub cursor: Cursor,
+    pub saved_cursor: Option<Cursor>,
+    pub region: ScrollRegion,
+    pub tabstops: Tabstops,
+}
+
+impl Screen {
+    pub fn new(cols: u16, rows: u16) -> Self {
+        Screen {
+            rows,
+            cols,
+            grid: (0..rows).map(|_| Row::new(cols)).collect(),
+            cursor: Cursor::default(),
+            saved_cursor: None,
+            region: ScrollRegion {
+                top: 0,
+                bottom: rows.saturating_sub(1),
+            },
+            tabstops: Tabstops::new(cols),
+        }
+    }
+
+    /// A blank cell carrying the current pen background (background-color-erase).
+    fn blank(&self) -> Cell {
+        Cell::blank(self.cursor.bg)
+    }
+
+    /// Resize the grid to `cols`×`rows`, clamping the cursor and resetting the
+    /// scroll region to full-screen. This is a *grid* resize: soft-wrapped
+    /// lines are not re-wrapped (reflow lands in inc≥3). On row-shrink, rows
+    /// below the cursor are dropped first; if the cursor would fall off the
+    /// bottom, rows are dropped from the top and the cursor follows.
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+
+        if cols != self.cols {
+            let blank = self.blank(); // exposed columns get the current erase bg
+            for row in &mut self.grid {
+                row.cells.resize(cols as usize, blank);
+            }
+            self.tabstops = Tabstops::new(cols);
+        }
+
+        let old_rows = self.grid.len() as u16;
+        if rows > old_rows {
+            for _ in 0..(rows - old_rows) {
+                self.grid.push(Row::new(cols));
+            }
+        } else if rows < old_rows {
+            // Drop rows *below* the cursor first; only then drop from the top,
+            // shifting the cursor (and saved cursor) up with their content, so
+            // the cursor never loses the line it is sitting on.
+            let remove = old_rows - rows;
+            let below = (old_rows - 1).saturating_sub(self.cursor.y);
+            let from_bottom = remove.min(below);
+            self.grid.truncate((old_rows - from_bottom) as usize);
+            let from_top = remove - from_bottom;
+            if from_top > 0 {
+                self.grid.drain(0..from_top as usize);
+                self.cursor.y = self.cursor.y.saturating_sub(from_top);
+                if let Some(sc) = &mut self.saved_cursor {
+                    sc.y = sc.y.saturating_sub(from_top);
+                }
+            }
+        }
+
+        self.cols = cols;
+        self.rows = rows;
+        self.region = ScrollRegion {
+            top: 0,
+            bottom: rows - 1,
+        };
+        self.cursor.x = self.cursor.x.min(cols - 1);
+        self.cursor.y = self.cursor.y.min(rows - 1);
+        self.cursor.pending_wrap = false;
+        if let Some(sc) = &mut self.saved_cursor {
+            sc.x = sc.x.min(cols - 1);
+            sc.y = sc.y.min(rows - 1);
+        }
+        for row in &mut self.grid {
+            row.dirty = true;
+        }
+    }
+
+    // ── printing ───────────────────────────────────────────────────
+
+    /// Print a scalar at the cursor, honoring the deferred-wrap latch.
+    pub fn print(&mut self, c: char, autowrap: bool) {
+        if self.cursor.pending_wrap && autowrap {
+            self.grid[self.cursor.y as usize].wrapped = true;
+            self.index();
+            self.cursor.x = 0;
+            self.cursor.pending_wrap = false;
+        }
+        let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
+        let cell = Cell {
+            ch: c,
+            fg: self.cursor.fg,
+            bg: self.cursor.bg,
+            attrs: self.cursor.attrs,
+        };
+        let row = &mut self.grid[y];
+        row.cells[x] = cell;
+        row.dirty = true;
+
+        if self.cursor.x + 1 >= self.cols {
+            self.cursor.pending_wrap = true; // latch; stay in the last column
+        } else {
+            self.cursor.x += 1;
+        }
+    }
+
+    // ── vertical motion / scroll ────────────────────────────────────
+
+    /// Index (IND / LF without CR): down one row, scrolling at the region bottom.
+    pub fn index(&mut self) {
+        self.cursor.pending_wrap = false;
+        if self.cursor.y == self.region.bottom {
+            self.scroll_up_region(1);
+        } else if self.cursor.y + 1 < self.rows {
+            self.cursor.y += 1;
+        }
+    }
+
+    /// Reverse index (RI): up one row, scrolling down at the region top.
+    pub fn reverse_index(&mut self) {
+        self.cursor.pending_wrap = false;
+        if self.cursor.y == self.region.top {
+            self.scroll_down_region(1);
+        } else if self.cursor.y > 0 {
+            self.cursor.y -= 1;
+        }
+    }
+
+    /// Scroll the scroll region up by `n` rows (top rows discarded; inc-1 has
+    /// no scrollback retention — `PageList` lands in inc≥3).
+    pub fn scroll_up_region(&mut self, n: u16) {
+        let (top, bottom) = (self.region.top as usize, self.region.bottom as usize);
+        if bottom < top {
+            return;
+        }
+        let len = bottom - top + 1;
+        let n = (n as usize).min(len);
+        let blank = self.blank();
+        self.grid[top..=bottom].rotate_left(n);
+        for r in &mut self.grid[(bottom + 1 - n)..=bottom] {
+            r.clear(blank);
+        }
+        for r in &mut self.grid[top..=bottom] {
+            r.dirty = true;
+        }
+    }
+
+    /// Scroll the scroll region down by `n` rows (bottom rows discarded).
+    pub fn scroll_down_region(&mut self, n: u16) {
+        let (top, bottom) = (self.region.top as usize, self.region.bottom as usize);
+        if bottom < top {
+            return;
+        }
+        let len = bottom - top + 1;
+        let n = (n as usize).min(len);
+        let blank = self.blank();
+        self.grid[top..=bottom].rotate_right(n);
+        for r in &mut self.grid[top..(top + n)] {
+            r.clear(blank);
+        }
+        for r in &mut self.grid[top..=bottom] {
+            r.dirty = true;
+        }
+    }
+
+    // ── horizontal / absolute motion ────────────────────────────────
+
+    pub fn carriage_return(&mut self) {
+        self.cursor.x = 0;
+        self.cursor.pending_wrap = false;
+    }
+
+    pub fn backspace(&mut self) {
+        self.cursor.pending_wrap = false;
+        self.cursor.x = self.cursor.x.saturating_sub(1);
+    }
+
+    pub fn cursor_up(&mut self, n: u16) {
+        self.cursor.pending_wrap = false;
+        let n = n.max(1);
+        self.cursor.y = self.cursor.y.saturating_sub(n).max(self.region.top);
+    }
+
+    pub fn cursor_down(&mut self, n: u16) {
+        self.cursor.pending_wrap = false;
+        let n = n.max(1);
+        self.cursor.y = (self.cursor.y + n).min(self.region.bottom);
+    }
+
+    pub fn cursor_forward(&mut self, n: u16) {
+        self.cursor.pending_wrap = false;
+        let n = n.max(1);
+        self.cursor.x = (self.cursor.x + n).min(self.cols.saturating_sub(1));
+    }
+
+    pub fn cursor_backward(&mut self, n: u16) {
+        self.cursor.pending_wrap = false;
+        let n = n.max(1);
+        self.cursor.x = self.cursor.x.saturating_sub(n);
+    }
+
+    pub fn cursor_position(&mut self, row: u16, col: u16) {
+        self.cursor.pending_wrap = false;
+        self.cursor.y = row.saturating_sub(1).min(self.rows.saturating_sub(1));
+        self.cursor.x = col.saturating_sub(1).min(self.cols.saturating_sub(1));
+    }
+
+    pub fn cursor_col_abs(&mut self, col: u16) {
+        self.cursor.pending_wrap = false;
+        self.cursor.x = col.saturating_sub(1).min(self.cols.saturating_sub(1));
+    }
+
+    pub fn cursor_row_abs(&mut self, row: u16) {
+        self.cursor.pending_wrap = false;
+        self.cursor.y = row.saturating_sub(1).min(self.rows.saturating_sub(1));
+    }
+
+    pub fn tab(&mut self, n: u16) {
+        self.cursor.pending_wrap = false;
+        for _ in 0..n.max(1) {
+            self.cursor.x = self.tabstops.next(self.cursor.x, self.cols);
+        }
+    }
+
+    pub fn set_tab_stop(&mut self) {
+        self.tabstops.set(self.cursor.x);
+    }
+
+    pub fn save_cursor(&mut self) {
+        self.saved_cursor = Some(self.cursor);
+    }
+
+    pub fn restore_cursor(&mut self) {
+        if let Some(c) = self.saved_cursor {
+            self.cursor = c;
+        }
+    }
+
+    // ── erase ────────────────────────────────────────────────────────
+
+    pub fn erase_display(&mut self, mode: EraseDisplay) {
+        let blank = self.blank();
+        let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
+        match mode {
+            EraseDisplay::Below => {
+                for c in &mut self.grid[y].cells[x..] {
+                    *c = blank;
+                }
+                self.grid[y].dirty = true;
+                for r in &mut self.grid[y + 1..] {
+                    r.clear(blank);
+                }
+            }
+            EraseDisplay::Above => {
+                for r in &mut self.grid[..y] {
+                    r.clear(blank);
+                }
+                for c in &mut self.grid[y].cells[..=x] {
+                    *c = blank;
+                }
+                self.grid[y].dirty = true;
+            }
+            EraseDisplay::Complete => {
+                for r in &mut self.grid {
+                    r.clear(blank);
+                }
+            }
+            EraseDisplay::Scrollback => {} // inc≥3
+        }
+    }
+
+    pub fn erase_line(&mut self, mode: EraseLine) {
+        let blank = self.blank();
+        let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
+        let row = &mut self.grid[y];
+        match mode {
+            EraseLine::Right => {
+                for c in &mut row.cells[x..] {
+                    *c = blank;
+                }
+            }
+            EraseLine::Left => {
+                for c in &mut row.cells[..=x] {
+                    *c = blank;
+                }
+            }
+            EraseLine::Complete => {
+                for c in &mut row.cells {
+                    *c = blank;
+                }
+            }
+        }
+        row.dirty = true;
+    }
+}

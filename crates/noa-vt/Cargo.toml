@@ -1,0 +1,9 @@
+[package]
+name = "noa-vt"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+noa-core.workspace = true
+thiserror.workspace = true

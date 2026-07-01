@@ -1,0 +1,14 @@
+[package]
+name = "noa-render"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+noa-core.workspace = true
+noa-grid.workspace = true
+noa-font.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+anyhow.workspace = true

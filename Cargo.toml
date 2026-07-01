@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "bin/noa"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+repository = "https://github.com/simota/noa"
+
+[workspace.dependencies]
+# ── internal crates ────────────────────────────────────────────────
+noa-core   = { path = "crates/noa-core" }
+noa-vt     = { path = "crates/noa-vt" }
+noa-grid   = { path = "crates/noa-grid" }
+noa-font   = { path = "crates/noa-font" }
+noa-render = { path = "crates/noa-render" }
+noa-pty    = { path = "crates/noa-pty" }
+noa-app    = { path = "crates/noa-app" }
+
+# ── windowing + gpu (only noa-app / noa-render may use these) ───────
+winit             = "0.30"
+wgpu              = "27"
+pollster          = "0.4"
+raw-window-handle = "0.6"
+
+# ── glyph pipeline ─────────────────────────────────────────────────
+swash    = "0.2"
+etagere  = "0.2"
+font-kit = "0.14"
+
+# ── pty ────────────────────────────────────────────────────────────
+portable-pty = "0.9"
+
+# ── gpu data / concurrency / unicode ───────────────────────────────
+bytemuck          = { version = "1", features = ["derive"] }
+crossbeam-channel = "0.5"
+unicode-width     = "0.2"
+
+# ── ergonomics ─────────────────────────────────────────────────────
+bitflags   = "2"
+anyhow     = "1"
+thiserror  = "2"
+log        = "0.4"
+env_logger = "0.11"
+clap       = { version = "4", features = ["derive"] }

@@ -1,0 +1,98 @@
+// noa cell shader — instanced-quad renderer for both the cell-background
+// pass and the cell-text (glyph) pass. Which behavior an instance gets is
+// selected by `flags & FLAG_GLYPH`.
+
+struct Uniforms {
+    projection: mat4x4<f32>,
+    screen_size: vec2<f32>,
+    cell_size: vec2<f32>,
+    grid_size: vec2<f32>,
+    grid_padding: vec4<f32>, // top, right, bottom, left
+    cursor_pos: vec2<f32>,
+    cursor_color: vec4<f32>,
+    bg_color: vec4<f32>,
+    min_contrast: f32,
+    _pad: vec3<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+@group(0) @binding(1)
+var atlas_tex: texture_2d<f32>;
+
+@group(0) @binding(2)
+var atlas_sampler: sampler;
+
+struct InstanceInput {
+    @location(0) glyph_pos: vec2<u32>,
+    @location(1) glyph_size: vec2<u32>,
+    @location(2) bearing: vec2<i32>,
+    @location(3) grid_pos: vec2<u32>,
+    @location(4) color: vec4<f32>,
+    @location(5) flags: u32,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) flags: u32,
+};
+
+const FLAG_GLYPH: u32 = 1u;
+
+@vertex
+fn vs_main(
+    @builtin(vertex_index) vertex_index: u32,
+    instance: InstanceInput,
+) -> VertexOutput {
+    // Unit quad corners, two triangles, generated from the vertex index.
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 1.0),
+    );
+    let corner = corners[vertex_index];
+
+    let cell_origin = vec2<f32>(f32(instance.grid_pos.x), f32(instance.grid_pos.y)) * uniforms.cell_size
+        + vec2<f32>(uniforms.grid_padding.w, uniforms.grid_padding.x);
+
+    var pixel: vec2<f32>;
+    var uv: vec2<f32>;
+
+    if (instance.flags & FLAG_GLYPH) != 0u {
+        // Glyph quad: positioned by bearing, sized by the atlas glyph rect.
+        let size = vec2<f32>(f32(instance.glyph_size.x), f32(instance.glyph_size.y));
+        let bearing = vec2<f32>(f32(instance.bearing.x), f32(instance.bearing.y));
+        // bearing.y is the distance from the cell top to the glyph top.
+        pixel = cell_origin + vec2<f32>(bearing.x, bearing.y) + corner * size;
+
+        let atlas_dims = vec2<f32>(textureDimensions(atlas_tex));
+        let atlas_origin = vec2<f32>(f32(instance.glyph_pos.x), f32(instance.glyph_pos.y));
+        uv = (atlas_origin + corner * size) / atlas_dims;
+    } else {
+        // Background / cursor quad: fills the whole cell.
+        pixel = cell_origin + corner * uniforms.cell_size;
+        uv = vec2<f32>(0.0, 0.0);
+    }
+
+    var out: VertexOutput;
+    out.clip_position = uniforms.projection * vec4<f32>(pixel, 0.0, 1.0);
+    out.uv = uv;
+    out.color = instance.color;
+    out.flags = instance.flags;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    if (in.flags & FLAG_GLYPH) != 0u {
+        let coverage = textureSample(atlas_tex, atlas_sampler, in.uv).r;
+        return vec4<f32>(in.color.rgb, in.color.a * coverage);
+    }
+    return in.color;
+}

@@ -1,0 +1,13 @@
+[package]
+name = "noa-font"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+noa-core.workspace = true
+swash.workspace = true
+etagere.workspace = true
+font-kit.workspace = true
+thiserror.workspace = true
+log.workspace = true

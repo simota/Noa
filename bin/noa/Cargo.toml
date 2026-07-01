@@ -1,0 +1,15 @@
+[package]
+name = "noa"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "noa"
+path = "src/main.rs"
+
+[dependencies]
+noa-app.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "noa-grid"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+noa-core.workspace = true
+noa-vt.workspace = true
+thiserror.workspace = true
+unicode-width.workspace = true

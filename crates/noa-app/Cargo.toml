@@ -1,0 +1,22 @@
+[package]
+name = "noa-app"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+noa-core.workspace = true
+noa-vt.workspace = true
+noa-grid.workspace = true
+noa-font.workspace = true
+noa-render.workspace = true
+noa-pty.workspace = true
+
+winit.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+raw-window-handle.workspace = true
+crossbeam-channel.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true

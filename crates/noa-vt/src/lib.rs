@@ -25,6 +25,6 @@ pub use action::Action;
 pub use csi::{Csi, Esc};
 pub use handler::{DaKind, DsrKind, EraseDisplay, EraseLine, Handler};
 pub use parser::Parser;
-pub use sgr::{parse_sgr, SgrAttr};
+pub use sgr::{SgrAttr, parse_sgr};
 pub use state::State;
 pub use stream::Stream;

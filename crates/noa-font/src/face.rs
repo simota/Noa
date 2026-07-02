@@ -56,15 +56,13 @@ pub fn load_monospace() -> Result<FontData, FontError> {
     let handle = source
         .select_best_match(&[FamilyName::Monospace], &Properties::new())
         .or_else(|_| {
-            source
-                .select_family_by_name("Menlo")
-                .and_then(|family| {
-                    family
-                        .fonts()
-                        .first()
-                        .cloned()
-                        .ok_or(font_kit::error::SelectionError::NotFound)
-                })
+            source.select_family_by_name("Menlo").and_then(|family| {
+                family
+                    .fonts()
+                    .first()
+                    .cloned()
+                    .ok_or(font_kit::error::SelectionError::NotFound)
+            })
         })
         .map_err(|_| FontError::NoFont)?;
 
@@ -191,7 +189,11 @@ impl Metrics {
         } else {
             0.0
         };
-        let cell_w = if cell_w > 0.0 { cell_w } else { m.average_width };
+        let cell_w = if cell_w > 0.0 {
+            cell_w
+        } else {
+            m.average_width
+        };
         let cell_w = if cell_w > 0.0 {
             cell_w
         } else {

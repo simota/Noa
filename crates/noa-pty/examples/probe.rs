@@ -4,7 +4,11 @@ use noa_pty::{Pty, PtyConfig, PtyEvent};
 use std::time::{Duration, Instant};
 
 fn main() {
-    println!("SHELL={:?}  TERM(parent)={:?}", std::env::var("SHELL"), std::env::var("TERM"));
+    println!(
+        "SHELL={:?}  TERM(parent)={:?}",
+        std::env::var("SHELL"),
+        std::env::var("TERM")
+    );
     let pty = Pty::spawn(PtyConfig::default()).expect("spawn pty");
     let start = Instant::now();
     loop {
@@ -25,7 +29,10 @@ fn main() {
             }
             Err(_) => {
                 if start.elapsed() > Duration::from_secs(3) {
-                    println!("[{:>6.0?}] still alive after 3s — shell is waiting (good)", start.elapsed());
+                    println!(
+                        "[{:>6.0?}] still alive after 3s — shell is waiting (good)",
+                        start.elapsed()
+                    );
                     break;
                 }
             }

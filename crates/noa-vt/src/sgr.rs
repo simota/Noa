@@ -110,7 +110,11 @@ fn parse_ext_color(csi: &Csi, i: usize) -> (Option<Color>, usize) {
             // Colon form with an (often empty) colorspace field is `38:2:cs:r:g:b`
             // (6 params); semicolon form is `38;2;r;g;b` (5 params).
             let colon = csi.sep_colon.get(i + 1).copied().unwrap_or(false);
-            let rgb_start = if colon && p.len() >= i + 6 { i + 3 } else { i + 2 };
+            let rgb_start = if colon && p.len() >= i + 6 {
+                i + 3
+            } else {
+                i + 2
+            };
             let r = p.get(rgb_start).copied().unwrap_or(0) as u8;
             let g = p.get(rgb_start + 1).copied().unwrap_or(0) as u8;
             let b = p.get(rgb_start + 2).copied().unwrap_or(0) as u8;

@@ -42,6 +42,10 @@ impl ModeState {
     pub fn app_cursor_keys(&self) -> bool {
         self.get(1, false)
     }
+    /// DECSET 2004 — bracketed paste mode.
+    pub fn bracketed_paste(&self) -> bool {
+        self.get(2004, false)
+    }
     /// LNM — line-feed/new-line mode (LF also does CR).
     pub fn linefeed_newline(&self) -> bool {
         self.get(20, true)

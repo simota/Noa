@@ -42,8 +42,49 @@ pub fn encode_key(
         Key::Named(NamedKey::ArrowDown) => Some(arrow_bytes(b'B', app_cursor_keys)),
         Key::Named(NamedKey::ArrowRight) => Some(arrow_bytes(b'C', app_cursor_keys)),
         Key::Named(NamedKey::ArrowLeft) => Some(arrow_bytes(b'D', app_cursor_keys)),
-        _ => text.filter(|s| !s.is_empty()).map(|s| s.as_bytes().to_vec()),
+        _ => text
+            .filter(|s| !s.is_empty())
+            .map(|s| s.as_bytes().to_vec()),
     }
+}
+
+/// Encode pasted text for the pty. When DECSET 2004 is active, shells and
+/// editors receive explicit paste boundaries and can avoid executing content
+/// as if it were typed interactively.
+pub fn encode_paste(text: &str, bracketed_paste: bool) -> Option<Vec<u8>> {
+    if text.is_empty() {
+        return None;
+    }
+
+    let payload = sanitize_paste_payload(text.as_bytes());
+    if payload.is_empty() {
+        return None;
+    }
+    if bracketed_paste {
+        let mut bytes = Vec::with_capacity(payload.len() + b"\x1b[200~".len() + b"\x1b[201~".len());
+        bytes.extend_from_slice(b"\x1b[200~");
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(b"\x1b[201~");
+        Some(bytes)
+    } else {
+        Some(payload)
+    }
+}
+
+fn sanitize_paste_payload(bytes: &[u8]) -> Vec<u8> {
+    let mut sanitized = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"\x1b[200~") {
+            i += b"\x1b[200~".len();
+        } else if bytes[i..].starts_with(b"\x1b[201~") {
+            i += b"\x1b[201~".len();
+        } else {
+            sanitized.push(bytes[i]);
+            i += 1;
+        }
+    }
+    sanitized
 }
 
 fn arrow_bytes(letter: u8, app_cursor_keys: bool) -> Vec<u8> {
@@ -88,11 +129,21 @@ mod tests {
     #[test]
     fn tab_and_escape() {
         assert_eq!(
-            encode_key(&Key::Named(NamedKey::Tab), None, ModifiersState::empty(), false),
+            encode_key(
+                &Key::Named(NamedKey::Tab),
+                None,
+                ModifiersState::empty(),
+                false
+            ),
             Some(vec![b'\t'])
         );
         assert_eq!(
-            encode_key(&Key::Named(NamedKey::Escape), None, ModifiersState::empty(), false),
+            encode_key(
+                &Key::Named(NamedKey::Escape),
+                None,
+                ModifiersState::empty(),
+                false
+            ),
             Some(vec![0x1b])
         );
     }
@@ -131,5 +182,44 @@ mod tests {
             encode_key(&key, None, ModifiersState::empty(), true),
             Some(vec![0x1b, b'O', b'A'])
         );
+    }
+
+    #[test]
+    fn paste_is_plain_without_bracketed_paste() {
+        assert_eq!(
+            encode_paste("echo hi\n", false),
+            Some(b"echo hi\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn paste_is_wrapped_when_bracketed_paste_is_enabled() {
+        assert_eq!(
+            encode_paste("echo hi\n", true),
+            Some(b"\x1b[200~echo hi\n\x1b[201~".to_vec())
+        );
+    }
+
+    #[test]
+    fn empty_paste_emits_no_bytes() {
+        assert_eq!(encode_paste("", false), None);
+        assert_eq!(encode_paste("", true), None);
+    }
+
+    #[test]
+    fn paste_strips_nested_bracket_markers_from_payload() {
+        assert_eq!(
+            encode_paste("a\x1b[201~b\x1b[200~c", true),
+            Some(b"\x1b[200~abc\x1b[201~".to_vec())
+        );
+        assert_eq!(
+            encode_paste("a\x1b[201~b\x1b[200~c", false),
+            Some(b"abc".to_vec())
+        );
+    }
+
+    #[test]
+    fn paste_with_only_bracket_markers_emits_no_bytes() {
+        assert_eq!(encode_paste("\x1b[200~\x1b[201~", true), None);
     }
 }

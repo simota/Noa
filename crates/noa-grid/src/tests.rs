@@ -317,6 +317,22 @@ fn full_reset_leaves_alternate_screen_and_clears_state() {
 }
 
 #[test]
+fn bracketed_paste_mode_toggles_with_dec_private_2004() {
+    let t = run(b"\x1b[?2004h");
+    assert!(t.modes.bracketed_paste());
+
+    let t = run(b"\x1b[?2004h\x1b[?2004l");
+    assert!(!t.modes.bracketed_paste());
+}
+
+#[test]
+fn full_reset_clears_bracketed_paste_mode() {
+    let t = run(b"\x1b[?2004h\x1bc");
+
+    assert!(!t.modes.bracketed_paste());
+}
+
+#[test]
 fn scrollback_records_full_screen_scrolls() {
     let t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
 

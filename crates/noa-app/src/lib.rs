@@ -15,6 +15,7 @@ mod theme;
 pub use app::AppConfig;
 pub use commands::AppCommand;
 pub use events::UserEvent;
+pub use input::encode_paste;
 
 use winit::event_loop::EventLoop;
 

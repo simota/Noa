@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 noa-app.workspace = true
+noa-config.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 env_logger.workspace = true

@@ -1353,6 +1353,7 @@ dependencies = [
  "clap",
  "env_logger",
  "noa-app",
+ "noa-config",
 ]
 
 [[package]]
@@ -1374,6 +1375,15 @@ dependencies = [
  "raw-window-handle",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "noa-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "toml_edit",
 ]
 
 [[package]]
@@ -2487,6 +2497,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -2498,6 +2509,12 @@ checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_writer"
+version = "1.1.1+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
 name = "tracing"

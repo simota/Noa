@@ -41,6 +41,19 @@ cargo run   -p noa          # launch the terminal
 
 Options: `cargo run -p noa -- --cols 100 --rows 30 --font-size 15`.
 
+### Configuration
+
+At startup, `noa` reads `config.toml` from the platform config directory
+(`~/Library/Application Support/noa/config.toml` on macOS). Missing config files
+keep the built-in defaults: `cols = 80`, `rows = 24`, and `font_size = 14.0`.
+CLI flags override config file values.
+
+```toml
+cols = 100
+rows = 30
+font_size = 15.0
+```
+
 ### Build the macOS app
 
 `noa` runs as a proper foreground macOS app (Dock icon, custom native menu bar,

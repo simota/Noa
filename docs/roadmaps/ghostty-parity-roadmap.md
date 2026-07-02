@@ -134,7 +134,7 @@ Goal: support user customization without hardcoding behavior in `noa-app`.
 
 | ID | Capability | Current State | Target |
 |----|------------|---------------|--------|
-| `REQ-CONFIG-001` | Config file | Missing | Add config discovery, parsing, defaults, validation, and error reporting |
+| `REQ-CONFIG-001` | Config file | Complete | Add config discovery, parsing, defaults, validation, and error reporting |
 | `REQ-CONFIG-002` | Runtime reload | Missing | Define reloadable vs restart-only settings and implement reload command |
 | `REQ-THEME-001` | Theme catalog | Partial | Add theme loading, built-in themes, custom themes, and light/dark selection |
 | `REQ-FONT-001` | Font fallback | Partial | Add fallback families, emoji fallback, and codepoint mapping |
@@ -250,9 +250,9 @@ Exit criteria:
 
 ### Phase 3 Checklist
 
-- [ ] `IMPL-CONFIG-001`: Define config schema, default values, validation, and
+- [x] `IMPL-CONFIG-001`: Define config schema, default values, validation, and
   diagnostic format. References `REQ-CONFIG-001`.
-- [ ] `IMPL-CONFIG-002`: Add config file discovery and CLI override precedence.
+- [x] `IMPL-CONFIG-002`: Add config file discovery and CLI override precedence.
   References `REQ-CONFIG-001`.
 - [ ] `IMPL-CONFIG-003`: Add reload command and reloadability metadata.
   References `REQ-CONFIG-002`.

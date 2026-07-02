@@ -17,6 +17,7 @@ noa-font   = { path = "crates/noa-font" }
 noa-render = { path = "crates/noa-render" }
 noa-pty    = { path = "crates/noa-pty" }
 noa-app    = { path = "crates/noa-app" }
+noa-config = { path = "crates/noa-config" }
 
 # ── windowing + gpu (only noa-app / noa-render may use these) ───────
 winit             = "0.30"
@@ -44,3 +45,5 @@ thiserror  = "2"
 log        = "0.4"
 env_logger = "0.11"
 clap       = { version = "4", features = ["derive"] }
+dirs       = "6"
+toml_edit  = "0.25.12"

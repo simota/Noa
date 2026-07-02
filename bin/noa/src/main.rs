@@ -5,22 +5,27 @@ use clap::Parser;
 #[command(name = "noa", version, about)]
 struct Args {
     /// Initial columns.
-    #[arg(long, default_value_t = 80)]
-    cols: u16,
+    #[arg(long)]
+    cols: Option<u16>,
     /// Initial rows.
-    #[arg(long, default_value_t = 24)]
-    rows: u16,
+    #[arg(long)]
+    rows: Option<u16>,
     /// Font size in points.
-    #[arg(long, default_value_t = 14.0)]
-    font_size: f32,
+    #[arg(long)]
+    font_size: Option<f32>,
 }
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = Args::parse();
-    noa_app::run(noa_app::AppConfig {
+    let config = noa_config::load_startup_config(noa_config::ConfigOverrides {
         cols: args.cols,
         rows: args.rows,
         font_size: args.font_size,
+    })?;
+    noa_app::run(noa_app::AppConfig {
+        cols: config.cols,
+        rows: config.rows,
+        font_size: config.font_size,
     })
 }

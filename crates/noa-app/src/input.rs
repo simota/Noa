@@ -68,11 +68,10 @@ pub fn encode_key(
         Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
         Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
         Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
-        Key::Named(NamedKey::ArrowUp) => Some(arrow_bytes(b'A', app_cursor_keys)),
-        Key::Named(NamedKey::ArrowDown) => Some(arrow_bytes(b'B', app_cursor_keys)),
-        Key::Named(NamedKey::ArrowRight) => Some(arrow_bytes(b'C', app_cursor_keys)),
-        Key::Named(NamedKey::ArrowLeft) => Some(arrow_bytes(b'D', app_cursor_keys)),
-        _ => text.and_then(encode_text),
+        Key::Named(named) => {
+            special_key_bytes(*named, mods, app_cursor_keys).or_else(|| encode_key_text(text, mods))
+        }
+        _ => encode_key_text(text, mods),
     }
 }
 
@@ -124,11 +123,74 @@ fn sanitize_paste_payload(bytes: &[u8]) -> Vec<u8> {
     sanitized
 }
 
-fn arrow_bytes(letter: u8, app_cursor_keys: bool) -> Vec<u8> {
-    if app_cursor_keys {
-        vec![0x1b, b'O', letter]
-    } else {
-        vec![0x1b, b'[', letter]
+fn encode_key_text(text: Option<&str>, mods: ModifiersState) -> Option<Vec<u8>> {
+    let mut bytes = encode_text(text?)?;
+    if mods.alt_key() {
+        bytes.insert(0, 0x1b);
+    }
+    Some(bytes)
+}
+
+fn special_key_bytes(
+    named: NamedKey,
+    mods: ModifiersState,
+    app_cursor_keys: bool,
+) -> Option<Vec<u8>> {
+    let modifier = modifier_value(mods);
+
+    match named {
+        NamedKey::ArrowUp => Some(final_key_bytes(b'A', modifier, app_cursor_keys)),
+        NamedKey::ArrowDown => Some(final_key_bytes(b'B', modifier, app_cursor_keys)),
+        NamedKey::ArrowRight => Some(final_key_bytes(b'C', modifier, app_cursor_keys)),
+        NamedKey::ArrowLeft => Some(final_key_bytes(b'D', modifier, app_cursor_keys)),
+        NamedKey::Home => Some(final_key_bytes(b'H', modifier, false)),
+        NamedKey::End => Some(final_key_bytes(b'F', modifier, false)),
+        NamedKey::Insert => Some(tilde_key_bytes(2, modifier)),
+        NamedKey::Delete => Some(tilde_key_bytes(3, modifier)),
+        NamedKey::PageUp => Some(tilde_key_bytes(5, modifier)),
+        NamedKey::PageDown => Some(tilde_key_bytes(6, modifier)),
+        NamedKey::F1 => Some(final_key_bytes(b'P', modifier, true)),
+        NamedKey::F2 => Some(final_key_bytes(b'Q', modifier, true)),
+        NamedKey::F3 => Some(final_key_bytes(b'R', modifier, true)),
+        NamedKey::F4 => Some(final_key_bytes(b'S', modifier, true)),
+        NamedKey::F5 => Some(tilde_key_bytes(15, modifier)),
+        NamedKey::F6 => Some(tilde_key_bytes(17, modifier)),
+        NamedKey::F7 => Some(tilde_key_bytes(18, modifier)),
+        NamedKey::F8 => Some(tilde_key_bytes(19, modifier)),
+        NamedKey::F9 => Some(tilde_key_bytes(20, modifier)),
+        NamedKey::F10 => Some(tilde_key_bytes(21, modifier)),
+        NamedKey::F11 => Some(tilde_key_bytes(23, modifier)),
+        NamedKey::F12 => Some(tilde_key_bytes(24, modifier)),
+        _ => None,
+    }
+}
+
+fn modifier_value(mods: ModifiersState) -> Option<u8> {
+    let mut value = 1;
+    if mods.shift_key() {
+        value += 1;
+    }
+    if mods.alt_key() {
+        value += 2;
+    }
+    if mods.control_key() {
+        value += 4;
+    }
+    (value > 1).then_some(value)
+}
+
+fn final_key_bytes(final_byte: u8, modifier: Option<u8>, ss3_unmodified: bool) -> Vec<u8> {
+    match modifier {
+        Some(modifier) => format!("\x1b[1;{modifier}{}", final_byte as char).into_bytes(),
+        None if ss3_unmodified => vec![0x1b, b'O', final_byte],
+        None => vec![0x1b, b'[', final_byte],
+    }
+}
+
+fn tilde_key_bytes(code: u8, modifier: Option<u8>) -> Vec<u8> {
+    match modifier {
+        Some(modifier) => format!("\x1b[{code};{modifier}~").into_bytes(),
+        None => format!("\x1b[{code}~").into_bytes(),
     }
 }
 
@@ -142,6 +204,38 @@ mod tests {
         assert_eq!(
             encode_key(&key, Some("a"), ModifiersState::empty(), false),
             Some(b"a".to_vec())
+        );
+    }
+
+    #[test]
+    fn alt_printable_uses_escape_prefix() {
+        let key = Key::Character("a".into());
+        assert_eq!(
+            encode_key(&key, Some("a"), ModifiersState::ALT, false),
+            Some(b"\x1ba".to_vec())
+        );
+    }
+
+    #[test]
+    fn ctrl_letter_takes_priority_over_alt_prefix() {
+        let key = Key::Character("c".into());
+        assert_eq!(
+            encode_key(
+                &key,
+                Some("c"),
+                ModifiersState::CONTROL | ModifiersState::ALT,
+                false
+            ),
+            Some(vec![0x03])
+        );
+    }
+
+    #[test]
+    fn named_text_key_falls_back_to_text() {
+        let key = Key::Named(NamedKey::Space);
+        assert_eq!(
+            encode_key(&key, Some(" "), ModifiersState::empty(), false),
+            Some(b" ".to_vec())
         );
     }
 
@@ -252,6 +346,118 @@ mod tests {
         assert_eq!(
             encode_key(&key, None, ModifiersState::empty(), true),
             Some(vec![0x1b, b'O', b'A'])
+        );
+    }
+
+    #[test]
+    fn unmodified_special_keys_use_standard_sequences() {
+        let cases = [
+            (NamedKey::ArrowUp, b"\x1b[A".as_slice()),
+            (NamedKey::ArrowDown, b"\x1b[B"),
+            (NamedKey::ArrowRight, b"\x1b[C"),
+            (NamedKey::ArrowLeft, b"\x1b[D"),
+            (NamedKey::Home, b"\x1b[H"),
+            (NamedKey::End, b"\x1b[F"),
+            (NamedKey::Insert, b"\x1b[2~"),
+            (NamedKey::Delete, b"\x1b[3~"),
+            (NamedKey::PageUp, b"\x1b[5~"),
+            (NamedKey::PageDown, b"\x1b[6~"),
+            (NamedKey::F1, b"\x1bOP"),
+            (NamedKey::F2, b"\x1bOQ"),
+            (NamedKey::F3, b"\x1bOR"),
+            (NamedKey::F4, b"\x1bOS"),
+            (NamedKey::F5, b"\x1b[15~"),
+            (NamedKey::F6, b"\x1b[17~"),
+            (NamedKey::F7, b"\x1b[18~"),
+            (NamedKey::F8, b"\x1b[19~"),
+            (NamedKey::F9, b"\x1b[20~"),
+            (NamedKey::F10, b"\x1b[21~"),
+            (NamedKey::F11, b"\x1b[23~"),
+            (NamedKey::F12, b"\x1b[24~"),
+        ];
+
+        for (named, expected) in cases {
+            assert_eq!(
+                encode_key(&Key::Named(named), None, ModifiersState::empty(), false),
+                Some(expected.to_vec()),
+                "{named:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn modified_final_special_keys_use_xterm_modify_key_sequences() {
+        let mods = ModifiersState::SHIFT | ModifiersState::ALT | ModifiersState::CONTROL;
+        let cases = [
+            (NamedKey::ArrowUp, b"\x1b[1;8A".as_slice()),
+            (NamedKey::ArrowDown, b"\x1b[1;8B"),
+            (NamedKey::ArrowRight, b"\x1b[1;8C"),
+            (NamedKey::ArrowLeft, b"\x1b[1;8D"),
+            (NamedKey::Home, b"\x1b[1;8H"),
+            (NamedKey::End, b"\x1b[1;8F"),
+            (NamedKey::F1, b"\x1b[1;8P"),
+            (NamedKey::F2, b"\x1b[1;8Q"),
+            (NamedKey::F3, b"\x1b[1;8R"),
+            (NamedKey::F4, b"\x1b[1;8S"),
+        ];
+
+        for (named, expected) in cases {
+            assert_eq!(
+                encode_key(&Key::Named(named), None, mods, false),
+                Some(expected.to_vec()),
+                "{named:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn modified_tilde_special_keys_use_xterm_modify_key_sequences() {
+        let cases = [
+            (
+                NamedKey::Insert,
+                ModifiersState::SHIFT,
+                b"\x1b[2;2~".as_slice(),
+            ),
+            (NamedKey::Delete, ModifiersState::ALT, b"\x1b[3;3~"),
+            (NamedKey::PageUp, ModifiersState::CONTROL, b"\x1b[5;5~"),
+            (
+                NamedKey::PageDown,
+                ModifiersState::SHIFT | ModifiersState::CONTROL,
+                b"\x1b[6;6~",
+            ),
+            (
+                NamedKey::F5,
+                ModifiersState::SHIFT | ModifiersState::ALT | ModifiersState::CONTROL,
+                b"\x1b[15;8~",
+            ),
+            (NamedKey::F6, ModifiersState::SHIFT, b"\x1b[17;2~"),
+            (NamedKey::F7, ModifiersState::ALT, b"\x1b[18;3~"),
+            (NamedKey::F8, ModifiersState::CONTROL, b"\x1b[19;5~"),
+            (NamedKey::F9, ModifiersState::SHIFT, b"\x1b[20;2~"),
+            (NamedKey::F10, ModifiersState::ALT, b"\x1b[21;3~"),
+            (NamedKey::F11, ModifiersState::CONTROL, b"\x1b[23;5~"),
+            (
+                NamedKey::F12,
+                ModifiersState::SHIFT | ModifiersState::ALT,
+                b"\x1b[24;4~",
+            ),
+        ];
+
+        for (named, mods, expected) in cases {
+            assert_eq!(
+                encode_key(&Key::Named(named), None, mods, false),
+                Some(expected.to_vec()),
+                "{named:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn modified_arrow_uses_csi_even_in_app_cursor_mode() {
+        let key = Key::Named(NamedKey::ArrowUp);
+        assert_eq!(
+            encode_key(&key, None, ModifiersState::SHIFT, true),
+            Some(b"\x1b[1;2A".to_vec())
         );
     }
 

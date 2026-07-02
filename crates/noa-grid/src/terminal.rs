@@ -443,7 +443,7 @@ impl Handler for Terminal {
         };
         if t < b {
             screen.region = ScrollRegion { top: t, bottom: b };
+            screen.cursor_position(1, 1); // DECSTBM homes the cursor after a valid region.
         }
-        screen.cursor_position(1, 1); // DECSTBM homes the cursor
     }
 }

@@ -26,6 +26,7 @@ pub struct Parser {
     osc_overflow: bool,
     utf8_acc: u32,
     utf8_rem: u8,
+    utf8_min: u32,
 }
 
 impl Default for Parser {
@@ -46,6 +47,7 @@ impl Parser {
             osc_overflow: false,
             utf8_acc: 0,
             utf8_rem: 0,
+            utf8_min: 0,
         }
     }
 
@@ -62,7 +64,11 @@ impl Parser {
                 self.utf8_acc = (self.utf8_acc << 6) | ((b & 0x3f) as u32);
                 self.utf8_rem -= 1;
                 if self.utf8_rem == 0 {
-                    let ch = char::from_u32(self.utf8_acc).unwrap_or('\u{FFFD}');
+                    let ch = if self.utf8_acc >= self.utf8_min {
+                        char::from_u32(self.utf8_acc).unwrap_or('\u{FFFD}')
+                    } else {
+                        '\u{FFFD}'
+                    };
                     sink(Action::Print(ch));
                 }
                 return;
@@ -116,19 +122,20 @@ impl Parser {
     }
 
     fn utf8_begin<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
-        let (len, init): (u8, u32) = if (0xf0..=0xf7).contains(&b) {
-            (4, (b & 0x07) as u32)
+        let (len, init, min): (u8, u32, u32) = if (0xf0..=0xf4).contains(&b) {
+            (4, (b & 0x07) as u32, 0x10000)
         } else if (0xe0..=0xef).contains(&b) {
-            (3, (b & 0x0f) as u32)
+            (3, (b & 0x0f) as u32, 0x800)
         } else if (0xc2..=0xdf).contains(&b) {
-            (2, (b & 0x1f) as u32)
+            (2, (b & 0x1f) as u32, 0x80)
         } else {
-            // 0x80..=0xc1 (stray continuation / overlong lead), 0xf8..=0xff
+            // 0x80..=0xc1 (stray continuation / overlong lead), 0xf5..=0xff
             sink(Action::Print('\u{FFFD}'));
             return;
         };
         self.utf8_acc = init;
         self.utf8_rem = len - 1;
+        self.utf8_min = min;
     }
 
     fn st_escape<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {

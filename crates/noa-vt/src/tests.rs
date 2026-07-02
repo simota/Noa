@@ -147,6 +147,41 @@ fn utf8_invalid_yields_replacement() {
 }
 
 #[test]
+fn utf8_overlong_and_out_of_range_yield_replacement() {
+    assert_eq!(actions(&[0xc2, 0x80]), vec![Action::Print('\u{80}')]);
+    assert_eq!(actions(&[0xe0, 0xa0, 0x80]), vec![Action::Print('\u{800}')]);
+    assert_eq!(
+        actions(&[0xf0, 0x90, 0x80, 0x80]),
+        vec![Action::Print('\u{10000}')]
+    );
+
+    // Overlong encodings must not decode to their shortest-form scalar.
+    assert_eq!(
+        actions(&[0xc0, 0xaf]), // overlong '/'
+        vec![Action::Print('\u{FFFD}'), Action::Print('\u{FFFD}')]
+    );
+    assert_eq!(
+        actions(&[0xe0, 0x80, 0xaf]), // overlong '/'
+        vec![Action::Print('\u{FFFD}')]
+    );
+
+    // F5..FF cannot start valid UTF-8, and F4 90 80 80 is above U+10FFFF.
+    assert_eq!(actions(&[0xf5]), vec![Action::Print('\u{FFFD}')]);
+    assert_eq!(
+        actions(&[0xf4, 0x90, 0x80, 0x80]),
+        vec![Action::Print('\u{FFFD}')]
+    );
+    assert_eq!(
+        actions(&[0xed, 0xa0, 0x80]), // surrogate range
+        vec![Action::Print('\u{FFFD}')]
+    );
+    assert_eq!(
+        actions(&[0xe2, b'A']),
+        vec![Action::Print('\u{FFFD}'), Action::Print('A')]
+    );
+}
+
+#[test]
 fn osc_title_captured() {
     // ESC ] 0 ; hi BEL
     let acts = actions(b"\x1b]0;hi\x07");

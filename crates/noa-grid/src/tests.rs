@@ -87,6 +87,33 @@ fn cursor_down_and_forward_no_overflow_on_large_csi_params() {
 }
 
 #[test]
+fn cursor_up_down_only_clamp_to_scroll_region_when_inside_it() {
+    let t = run_size(10, 8, b"\x1b[3;6r\x1b[2;1H\x1b[A");
+    assert_eq!(t.primary.cursor.y, 0);
+    assert_eq!(t.primary.cursor.x, 0);
+
+    let t = run_size(10, 8, b"\x1b[3;6r\x1b[7;1H\x1b[B");
+    assert_eq!(t.primary.cursor.y, 7);
+    assert_eq!(t.primary.cursor.x, 0);
+
+    let t = run_size(10, 8, b"\x1b[3;6r\x1b[3;1H\x1b[A");
+    assert_eq!(t.primary.cursor.y, 2);
+
+    let t = run_size(10, 8, b"\x1b[3;6r\x1b[6;1H\x1b[B");
+    assert_eq!(t.primary.cursor.y, 5);
+}
+
+#[test]
+fn invalid_scroll_region_does_not_home_or_change_existing_region() {
+    let t = run_size(10, 8, b"\x1b[2;5r\x1b[4;4H\x1b[6;3r");
+
+    assert_eq!(t.primary.region.top, 1);
+    assert_eq!(t.primary.region.bottom, 4);
+    assert_eq!(t.primary.cursor.y, 3);
+    assert_eq!(t.primary.cursor.x, 3);
+}
+
+#[test]
 fn dsr_cursor_position_reply() {
     // Move to row 3, col 5, then request DSR-6.
     let t = run(b"\x1b[3;5H\x1b[6n");

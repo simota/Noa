@@ -981,14 +981,24 @@ impl Screen {
         self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
-        self.cursor.y = self.cursor.y.saturating_sub(n).max(self.region.top);
+        let top = if self.cursor.y >= self.region.top && self.cursor.y <= self.region.bottom {
+            self.region.top
+        } else {
+            0
+        };
+        self.cursor.y = self.cursor.y.saturating_sub(n).max(top);
     }
 
     pub fn cursor_down(&mut self, n: u16) {
         self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
-        self.cursor.y = self.cursor.y.saturating_add(n).min(self.region.bottom);
+        let bottom = if self.cursor.y >= self.region.top && self.cursor.y <= self.region.bottom {
+            self.region.bottom
+        } else {
+            self.rows.saturating_sub(1)
+        };
+        self.cursor.y = self.cursor.y.saturating_add(n).min(bottom);
     }
 
     pub fn cursor_forward(&mut self, n: u16) {

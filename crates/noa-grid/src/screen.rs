@@ -169,22 +169,112 @@ impl Screen {
 
     pub fn set_viewport_selection(&mut self, anchor: Point, focus: Point) {
         let row_base = self.visible_row_base();
-        let max_x = self.cols.saturating_sub(1);
-        let max_y = self.rows.saturating_sub(1);
-        let anchor = Point {
-            x: anchor.x.min(max_x),
-            y: anchor.y.min(max_y),
-        };
-        let focus = Point {
-            x: focus.x.min(max_x),
-            y: focus.y.min(max_y),
-        };
+        let anchor = self.clamped_viewport_point(anchor);
+        let focus = self.clamped_viewport_point(focus);
 
         self.selection = Some(Selection::from_viewport_points(row_base, anchor, focus));
     }
 
+    pub fn select_word_at_viewport_point(&mut self, point: Point) {
+        let point = self.clamped_viewport_point(point);
+        let storage_y = self.visible_row_base() + point.y as usize;
+        let Some(row) = self.row_at_storage_index(storage_y) else {
+            self.selection = None;
+            return;
+        };
+        if row.cells.is_empty() {
+            self.selection = None;
+            return;
+        }
+
+        let x = Self::word_cell_x(row, (point.x as usize).min(row.cells.len() - 1));
+        let (start, end) = if Self::is_word_cell(&row.cells[x]) {
+            Self::word_bounds(row, x)
+        } else {
+            (x, x)
+        };
+
+        self.selection = Some(Selection::new(
+            SelectionPoint::new(start as u16, storage_y),
+            SelectionPoint::new(end as u16, storage_y),
+        ));
+    }
+
+    pub fn select_line_at_viewport_point(&mut self, point: Point) {
+        let point = self.clamped_viewport_point(point);
+        let storage_y = self.visible_row_base() + point.y as usize;
+
+        self.selection = Some(Selection::new(
+            SelectionPoint::new(0, storage_y),
+            SelectionPoint::new(self.cols.saturating_sub(1), storage_y),
+        ));
+    }
+
     pub fn clear_selection(&mut self) {
         self.selection = None;
+    }
+
+    fn clamped_viewport_point(&self, point: Point) -> Point {
+        Point {
+            x: point.x.min(self.cols.saturating_sub(1)),
+            y: point.y.min(self.rows.saturating_sub(1)),
+        }
+    }
+
+    fn row_at_storage_index(&self, y: usize) -> Option<&Row> {
+        if y < self.scrollback.len() {
+            self.scrollback.get(y)
+        } else {
+            self.grid.get(y - self.scrollback.len())
+        }
+    }
+
+    fn word_cell_x(row: &Row, x: usize) -> usize {
+        if x > 0
+            && row.cells[x].attrs.contains(CellAttrs::WIDE_SPACER)
+            && row.cells[x - 1].attrs.contains(CellAttrs::WIDE)
+        {
+            x - 1
+        } else {
+            x
+        }
+    }
+
+    fn word_bounds(row: &Row, x: usize) -> (usize, usize) {
+        let mut start = x;
+        while start > 0 {
+            let prev = Self::word_cell_x(row, start - 1);
+            if prev == start || !Self::is_word_cell(&row.cells[prev]) {
+                break;
+            }
+            start = prev;
+        }
+
+        let mut end = Self::visual_cell_end(row, x);
+        while end + 1 < row.cells.len() {
+            let next = Self::word_cell_x(row, end + 1);
+            if next <= end || !Self::is_word_cell(&row.cells[next]) {
+                break;
+            }
+            end = Self::visual_cell_end(row, next);
+        }
+
+        (start, end)
+    }
+
+    fn visual_cell_end(row: &Row, x: usize) -> usize {
+        if row.cells[x].attrs.contains(CellAttrs::WIDE)
+            && x + 1 < row.cells.len()
+            && row.cells[x + 1].attrs.contains(CellAttrs::WIDE_SPACER)
+        {
+            x + 1
+        } else {
+            x
+        }
+    }
+
+    fn is_word_cell(cell: &Cell) -> bool {
+        !cell.attrs.contains(CellAttrs::WIDE_SPACER) && !cell.ch.is_whitespace()
     }
 
     pub fn visible_row_base(&self) -> usize {

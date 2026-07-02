@@ -10,6 +10,7 @@ mod input;
 mod io_thread;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+mod mouse;
 mod theme;
 
 pub use app::AppConfig;

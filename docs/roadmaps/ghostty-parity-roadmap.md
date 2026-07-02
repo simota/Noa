@@ -112,7 +112,7 @@ scrolling, and key customization.
 
 | ID | Capability | Current State | Target |
 |----|------------|---------------|--------|
-| `REQ-UX-001` | Selection model | Partial | Selected-range storage and selection rendering are implemented; add mouse, word, and line selection gestures |
+| `REQ-UX-001` | Selection model | Partial | Selected-range storage, selection rendering, mouse drag, word selection, and line selection are implemented; clipboard copy remains in `REQ-UX-002` |
 | `REQ-UX-002` | Clipboard | Missing | Add copy, paste, paste protection, and OSC 52 policy |
 | `REQ-UX-003` | Mouse reporting | Missing | Implement SGR mouse protocol, reporting modes, and local selection override |
 | `REQ-UX-004` | Keybind engine | Missing | Add config-driven keybind parsing, action dispatch, and app-vs-PTY consumption rules |
@@ -231,7 +231,7 @@ Exit criteria:
 
 - [x] `IMPL-UX-001`: Add terminal selection data model and rendering.
   References `REQ-UX-001`.
-- [ ] `IMPL-UX-002`: Wire mouse press, drag, release, double-click, and
+- [x] `IMPL-UX-002`: Wire mouse press, drag, release, double-click, and
   triple-click behavior. References `REQ-UX-001`.
 - [ ] `IMPL-UX-003`: Add clipboard copy and paste actions with platform
   adapters contained in `noa-app`. References `REQ-UX-002`.

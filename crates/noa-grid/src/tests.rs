@@ -449,6 +449,52 @@ fn selection_viewport_points_are_clamped_to_screen() {
 }
 
 #[test]
+fn word_selection_expands_non_whitespace_run() {
+    let mut t = run_size(12, 1, b"foo bar");
+    t.select_word_at_viewport_point(Point { x: 5, y: 0 });
+
+    let selection = t.active().selection.expect("selection should be stored");
+    assert!(!selection.contains(crate::SelectionPoint::new(3, 0)));
+    assert!(selection.contains(crate::SelectionPoint::new(4, 0)));
+    assert!(selection.contains(crate::SelectionPoint::new(5, 0)));
+    assert!(selection.contains(crate::SelectionPoint::new(6, 0)));
+    assert!(!selection.contains(crate::SelectionPoint::new(7, 0)));
+}
+
+#[test]
+fn word_selection_on_blank_cell_selects_single_cell() {
+    let mut t = run_size(8, 1, b"foo bar");
+    t.select_word_at_viewport_point(Point { x: 3, y: 0 });
+
+    let selection = t.active().selection.expect("selection should be stored");
+    let (start, end) = selection.normalized();
+    assert_eq!(start, crate::SelectionPoint::new(3, 0));
+    assert_eq!(end, crate::SelectionPoint::new(3, 0));
+}
+
+#[test]
+fn word_selection_from_wide_spacer_selects_visual_cell() {
+    let mut t = run_size(5, 1, " 界 ".as_bytes());
+    t.select_word_at_viewport_point(Point { x: 2, y: 0 });
+
+    let selection = t.active().selection.expect("selection should be stored");
+    let (start, end) = selection.normalized();
+    assert_eq!(start, crate::SelectionPoint::new(1, 0));
+    assert_eq!(end, crate::SelectionPoint::new(2, 0));
+}
+
+#[test]
+fn line_selection_selects_entire_viewport_row() {
+    let mut t = Terminal::new(GridSize::new(4, 2));
+    t.select_line_at_viewport_point(Point { x: 99, y: 1 });
+
+    let selection = t.active().selection.expect("selection should be stored");
+    let (start, end) = selection.normalized();
+    assert_eq!(start, crate::SelectionPoint::new(0, 1));
+    assert_eq!(end, crate::SelectionPoint::new(3, 1));
+}
+
+#[test]
 fn selection_clears_on_full_reset_and_screen_switch() {
     let mut t = run(b"\x1b[?1049h");
     t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 1, y: 0 });

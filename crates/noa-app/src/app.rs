@@ -6,6 +6,7 @@
 //! the window). The io thread only touches the `Terminal` mutex and the pty.
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crossbeam_channel::Sender;
 use noa_core::{GridSize, PixelSize};
@@ -14,8 +15,8 @@ use noa_grid::Terminal;
 use noa_pty::{Pty, PtyConfig, PtyWriter};
 use noa_render::{FrameSnapshot, Renderer, Theme};
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -23,6 +24,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 use crate::AppCommand;
 use crate::events::UserEvent;
 use crate::input;
+use crate::mouse::{self, MouseSelectionState, SelectionGesture};
 
 /// Configuration the binary passes into [`crate::run`].
 #[derive(Debug, Clone)]
@@ -56,6 +58,7 @@ pub struct App {
     macos_menu: Option<crate::macos_menu::MacosMenu>,
     modifiers: ModifiersState,
     grid_size: GridSize,
+    mouse_selection: MouseSelectionState,
 }
 
 impl App {
@@ -73,6 +76,7 @@ impl App {
             macos_menu: None,
             modifiers: ModifiersState::empty(),
             grid_size,
+            mouse_selection: MouseSelectionState::default(),
         }
     }
 
@@ -303,6 +307,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Resized(size) => self.on_resize(size),
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
+            WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(position),
+            WindowEvent::MouseInput { state, button, .. } => self.on_mouse_input(state, button),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
@@ -388,6 +394,61 @@ impl App {
         }
         if let Some(g) = &self.graphics {
             g.window.request_redraw();
+        }
+    }
+
+    fn on_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
+        let Some(graphics) = self.graphics.as_ref() else {
+            return;
+        };
+        let metrics = graphics.font.metrics();
+        let cell = mouse::physical_position_to_grid_point(
+            position.x,
+            position.y,
+            metrics.cell_w,
+            metrics.cell_h,
+            self.grid_size,
+        );
+        let gesture = self.mouse_selection.cursor_moved(cell);
+        self.apply_selection_gesture(gesture);
+    }
+
+    fn on_mouse_input(&mut self, state: ElementState, button: MouseButton) {
+        if button != MouseButton::Left {
+            return;
+        }
+
+        let gesture = match state {
+            ElementState::Pressed => self.mouse_selection.left_pressed(Instant::now()),
+            ElementState::Released => self.mouse_selection.left_released(),
+        };
+        self.apply_selection_gesture(gesture);
+    }
+
+    fn apply_selection_gesture(&mut self, gesture: SelectionGesture) {
+        if gesture == SelectionGesture::None {
+            return;
+        }
+
+        if let Some(terminal) = &self.terminal {
+            let mut terminal = terminal.lock().expect("terminal mutex poisoned");
+            match gesture {
+                SelectionGesture::None => {}
+                SelectionGesture::Clear => terminal.clear_selection(),
+                SelectionGesture::Extend { anchor, focus } => {
+                    terminal.set_viewport_selection(anchor, focus);
+                }
+                SelectionGesture::SelectWord(point) => {
+                    terminal.select_word_at_viewport_point(point)
+                }
+                SelectionGesture::SelectLine(point) => {
+                    terminal.select_line_at_viewport_point(point)
+                }
+            }
+        }
+
+        if let Some(graphics) = &self.graphics {
+            graphics.window.request_redraw();
         }
     }
 }

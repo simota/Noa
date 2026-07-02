@@ -76,6 +76,14 @@ impl Terminal {
         self.active_mut().set_viewport_selection(anchor, focus);
     }
 
+    pub fn select_word_at_viewport_point(&mut self, point: Point) {
+        self.active_mut().select_word_at_viewport_point(point);
+    }
+
+    pub fn select_line_at_viewport_point(&mut self, point: Point) {
+        self.active_mut().select_line_at_viewport_point(point);
+    }
+
     pub fn clear_selection(&mut self) {
         self.active_mut().clear_selection();
     }

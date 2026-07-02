@@ -1,0 +1,128 @@
+version: 1
+feature: macos-meta-key-commands
+spec_source: docs/specs/macos-meta-key-commands.md
+links:
+  - req: REQ-001
+    title: App command coverage for terminal meta-key actions
+    priority: CRITICAL
+    acs:
+      - id: AC-META-001
+        scenarios: [SC-AC-META-001-HP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+      - id: AC-META-002
+        scenarios: [SC-AC-META-002-HP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+  - req: REQ-002
+    title: Focused-tab targeting and PTY isolation
+    priority: CRITICAL
+    acs:
+      - id: AC-META-002
+        scenarios: [SC-AC-META-002-HP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+  - req: REQ-003
+    title: Clear terminal commands
+    priority: CRITICAL
+    acs:
+      - id: AC-META-003
+        scenarios: [SC-AC-META-003-HP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+      - id: AC-META-004
+        scenarios: [SC-AC-META-004-HP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+      - id: AC-META-005
+        scenarios: [SC-AC-META-005-EP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+  - req: REQ-004
+    title: Terminal select all
+    priority: HIGH
+    acs:
+      - id: AC-META-006
+        scenarios: [SC-AC-META-006-HP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+      - id: AC-META-007
+        scenarios: [SC-AC-META-007-EP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+  - req: REQ-005
+    title: Runtime font-size controls
+    priority: HIGH
+    acs:
+      - id: AC-META-008
+        scenarios: [SC-AC-META-008-HP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+      - id: AC-META-009
+        scenarios: [SC-AC-META-009-HP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+  - req: REQ-006
+    title: Search command route cleanup
+    priority: HIGH
+    acs:
+      - id: AC-META-010
+        scenarios: [SC-AC-META-010-HP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+  - req: REQ-007
+    title: Unified keybind and native menu integration
+    priority: CRITICAL
+    acs:
+      - id: AC-META-001
+        scenarios: [SC-AC-META-001-HP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+      - id: AC-META-002
+        scenarios: [SC-AC-META-002-HP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+      - id: AC-META-011
+        scenarios: [SC-AC-META-011-HP-001]
+        tests: []
+        impl: []
+        verdict: NOT_TESTED
+  - cfr: CFR-001
+    title: Testability and traceability
+    acs: [AC-META-001, AC-META-002, AC-META-003, AC-META-004, AC-META-006, AC-META-007, AC-META-011]
+  - cfr: CFR-002
+    title: Resize and renderer consistency
+    acs: [AC-META-008, AC-META-009]
+  - cfr: CFR-003
+    title: Scope and safety boundaries
+    acs: [AC-META-002, AC-META-005, AC-META-010, AC-META-012]
+coverage:
+  forward: 0.0
+  backward: 0.0
+  orphans: []
+  gaps:
+    - AC-META-001
+    - AC-META-002
+    - AC-META-003
+    - AC-META-004
+    - AC-META-005
+    - AC-META-006
+    - AC-META-007
+    - AC-META-008
+    - AC-META-009
+    - AC-META-010
+    - AC-META-011
+    - AC-META-012

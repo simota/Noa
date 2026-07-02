@@ -1441,6 +1441,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "noa-theme"
+version = "0.1.0"
+dependencies = [
+ "noa-core",
+]
+
+[[package]]
 name = "noa-vt"
 version = "0.1.0"
 dependencies = [

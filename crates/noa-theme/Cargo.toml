@@ -1,0 +1,8 @@
+[package]
+name = "noa-theme"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+noa-core.workspace = true

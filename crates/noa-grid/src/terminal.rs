@@ -245,7 +245,7 @@ impl Handler for Terminal {
         let linefeed_newline = self.modes.linefeed_newline();
         let screen = self.active_mut();
         match byte {
-            0x07 => {} // BEL — TODO(agent): visual/audible bell (inc≥2)
+            0x07 => {} // BEL has no grid-state side effect.
             0x08 => screen.backspace(),
             0x09 => screen.tab(1),
             0x0a..=0x0c => {

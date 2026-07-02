@@ -368,7 +368,7 @@ impl Handler for Terminal {
         self.active_is_alt = false;
         self.modes = ModeState::defaults();
         self.title.clear();
-        self.colors = TerminalColors::default();
+        self.colors.reset_dynamic_overrides();
         self.pending_clipboard_writes.clear();
         self.clear_selection();
         self.clear_search();

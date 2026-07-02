@@ -20,6 +20,20 @@ fn run_size(cols: u16, rows: u16, bytes: &[u8]) -> Terminal {
     t
 }
 
+fn run_with_base_colors(
+    bytes: &[u8],
+    default_fg: Rgb,
+    default_bg: Rgb,
+    cursor: Rgb,
+    palette: [Rgb; 256],
+) -> Terminal {
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.set_base_colors(default_fg, default_bg, cursor, palette);
+    let mut s = Stream::new();
+    s.feed(bytes, &mut t);
+    t
+}
+
 fn cell(t: &Terminal, x: usize, y: usize) -> crate::cell::Cell {
     t.primary.grid[y].cells[x].clone()
 }
@@ -832,6 +846,99 @@ fn terminal_set_base_colors_seeds_colors_without_clearing_dynamic_overrides() {
     assert_eq!(t.colors.palette(1), Some(dynamic_palette));
     assert_eq!(t.colors.default_bg(), None);
     assert_eq!(t.colors.cursor(), None);
+}
+
+#[test]
+fn osc_11_and_color_queries_report_active_base_colors() {
+    let mut palette = xterm_palette();
+    palette[1] = Rgb::new(0x10, 0x20, 0x30);
+    let mut t = run_with_base_colors(
+        b"\x1b]4;1;?\x07\
+          \x1b]10;?\x07\
+          \x1b]11;?\x07\
+          \x1b]12;?\x07",
+        Rgb::new(0x0a, 0x0b, 0x0c),
+        Rgb::new(0xaa, 0xbb, 0xcc),
+        Rgb::new(0x44, 0x55, 0x66),
+        palette,
+    );
+
+    assert_eq!(
+        t.take_pending_writes(),
+        b"\x1b]4;1;rgb:1010/2020/3030\x1b\\\
+          \x1b]10;rgb:0a0a/0b0b/0c0c\x1b\\\
+          \x1b]11;rgb:aaaa/bbbb/cccc\x1b\\\
+          \x1b]12;rgb:4444/5555/6666\x1b\\"
+    );
+}
+
+#[test]
+fn osc_resets_restore_active_base_colors() {
+    let mut palette = xterm_palette();
+    palette[1] = Rgb::new(0x12, 0x34, 0x56);
+    let mut t = run_with_base_colors(
+        b"\x1b]4;1;#010203\x07\
+          \x1b]10;#040506\x07\
+          \x1b]11;#070809\x07\
+          \x1b]12;#0a0b0c\x07\
+          \x1b]104;1\x07\
+          \x1b]110\x07\
+          \x1b]111\x07\
+          \x1b]112\x07\
+          \x1b]4;1;?\x07\
+          \x1b]10;?\x07\
+          \x1b]11;?\x07\
+          \x1b]12;?\x07",
+        Rgb::new(0xde, 0xad, 0xbe),
+        Rgb::new(0x13, 0x57, 0x9b),
+        Rgb::new(0x24, 0x68, 0xac),
+        palette,
+    );
+
+    assert_eq!(t.colors.palette(1), None);
+    assert_eq!(t.colors.default_fg(), None);
+    assert_eq!(t.colors.default_bg(), None);
+    assert_eq!(t.colors.cursor(), None);
+    assert_eq!(
+        t.take_pending_writes(),
+        b"\x1b]4;1;rgb:1212/3434/5656\x1b\\\
+          \x1b]10;rgb:dede/adad/bebe\x1b\\\
+          \x1b]11;rgb:1313/5757/9b9b\x1b\\\
+          \x1b]12;rgb:2424/6868/acac\x1b\\"
+    );
+}
+
+#[test]
+fn full_reset_preserves_active_base_colors() {
+    let mut palette = xterm_palette();
+    palette[2] = Rgb::new(0x21, 0x43, 0x65);
+    let mut t = run_with_base_colors(
+        b"\x1b]4;2;#010203\x07\
+          \x1b]10;#040506\x07\
+          \x1b]11;#070809\x07\
+          \x1b]12;#0a0b0c\x07\
+          \x1bc\
+          \x1b]4;2;?\x07\
+          \x1b]10;?\x07\
+          \x1b]11;?\x07\
+          \x1b]12;?\x07",
+        Rgb::new(0x90, 0x91, 0x92),
+        Rgb::new(0x30, 0x31, 0x32),
+        Rgb::new(0x70, 0x71, 0x72),
+        palette,
+    );
+
+    assert_eq!(t.colors.palette(2), None);
+    assert_eq!(t.colors.default_fg(), None);
+    assert_eq!(t.colors.default_bg(), None);
+    assert_eq!(t.colors.cursor(), None);
+    assert_eq!(
+        t.take_pending_writes(),
+        b"\x1b]4;2;rgb:2121/4343/6565\x1b\\\
+          \x1b]10;rgb:9090/9191/9292\x1b\\\
+          \x1b]11;rgb:3030/3131/3232\x1b\\\
+          \x1b]12;rgb:7070/7171/7272\x1b\\"
+    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
 //! OSC terminal state handled by the grid layer.
 
-use noa_core::{DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, Rgb, xterm_palette, xterm_palette_color};
+use noa_core::{DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, Rgb, xterm_palette};
 
 const MAX_COLOR_OSC_BYTES: usize = 4096;
 const DEFAULT_OSC52_MAX_DECODED_BYTES: usize = 3 * 1024;
@@ -107,6 +107,13 @@ impl TerminalColors {
         self.palette.fill(None);
     }
 
+    pub fn reset_dynamic_overrides(&mut self) {
+        self.palette.fill(None);
+        self.default_fg = None;
+        self.default_bg = None;
+        self.cursor = None;
+    }
+
     pub fn set_default_fg(&mut self, rgb: Rgb) {
         self.default_fg = Some(rgb);
     }
@@ -133,19 +140,19 @@ impl TerminalColors {
 
     fn query_palette(&self, index: u8) -> Rgb {
         self.palette(index)
-            .unwrap_or_else(|| xterm_palette_color(index))
+            .unwrap_or_else(|| self.base_palette(index))
     }
 
     fn query_default_fg(&self) -> Rgb {
-        self.default_fg.unwrap_or(DEFAULT_FG)
+        self.default_fg.unwrap_or(self.base_fg)
     }
 
     fn query_default_bg(&self) -> Rgb {
-        self.default_bg.unwrap_or(DEFAULT_BG)
+        self.default_bg.unwrap_or(self.base_bg)
     }
 
     fn query_cursor(&self) -> Rgb {
-        self.cursor.unwrap_or(DEFAULT_CURSOR)
+        self.cursor.unwrap_or(self.base_cursor)
     }
 }
 

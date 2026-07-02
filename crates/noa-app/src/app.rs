@@ -1408,8 +1408,8 @@ mod tests {
             DEFAULT_GRID_PADDING,
         );
 
-        assert_eq!(size.width, 644.0);
-        assert_eq!(size.height, 384.0);
+        assert_eq!(size.width, 656.0);
+        assert_eq!(size.height, 392.0);
     }
 
     #[test]
@@ -1447,11 +1447,11 @@ mod tests {
 
         assert_eq!(
             grid_size_for_physical_size(size, metrics(12.0, 24.0), DEFAULT_GRID_PADDING),
-            GridSize::new(80, 25)
+            GridSize::new(78, 24)
         );
         assert_eq!(
             grid_size_for_physical_size(size, metrics(16.0, 30.0), DEFAULT_GRID_PADDING),
-            GridSize::new(60, 20)
+            GridSize::new(58, 19)
         );
         assert_eq!(
             grid_size_for_physical_size(
@@ -1540,7 +1540,7 @@ mod tests {
 
         assert_eq!(
             plan,
-            vec![(1, GridSize::new(60, 20)), (2, GridSize::new(30, 10))]
+            vec![(1, GridSize::new(58, 19)), (2, GridSize::new(28, 9))]
         );
     }
 
@@ -1548,7 +1548,7 @@ mod tests {
     fn ime_cursor_area_tracks_grid_cell_in_physical_pixels() {
         let (position, size) = ime_cursor_area(metrics(7.5, 15.25), 2, 3, DEFAULT_GRID_PADDING);
 
-        assert_eq!(position.x, 23);
+        assert_eq!(position.x, 31);
         assert_eq!(position.y, 46);
         assert_eq!(size.width, 8);
         assert_eq!(size.height, 16);

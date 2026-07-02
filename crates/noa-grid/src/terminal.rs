@@ -4,8 +4,9 @@
 
 use crate::cursor::ScrollRegion;
 use crate::modes::ModeState;
-use crate::osc::{TerminalColors, handle_color_osc};
+use crate::osc::{Osc52Policy, TerminalColors, handle_clipboard_osc, handle_color_osc};
 use crate::screen::Screen;
+use crate::search::SearchMatch;
 use crate::selection::SelectionPoint;
 use noa_core::{CellAttrs, Color, GridSize, Point};
 use noa_vt::{DaKind, DsrKind, EraseDisplay, EraseLine, Handler, SgrAttr};
@@ -20,9 +21,13 @@ pub struct Terminal {
     pub title: String,
     /// Dynamic colors set through safe OSC 4/10/11/12 sequences.
     pub colors: TerminalColors,
+    /// Policy for OSC 52 clipboard writes/queries.
+    pub osc52_policy: Osc52Policy,
     pub size: GridSize,
     /// Bytes the terminal must write back to the pty (query replies).
     pub pending_writes: Vec<u8>,
+    /// Text payloads accepted by OSC 52 and ready for the app clipboard layer.
+    pub pending_clipboard_writes: Vec<String>,
 }
 
 impl Terminal {
@@ -34,8 +39,10 @@ impl Terminal {
             modes: ModeState::defaults(),
             title: String::new(),
             colors: TerminalColors::default(),
+            osc52_policy: Osc52Policy::default(),
             size,
             pending_writes: Vec::new(),
+            pending_clipboard_writes: Vec::new(),
         }
     }
 
@@ -96,6 +103,22 @@ impl Terminal {
         self.active().selected_text()
     }
 
+    pub fn set_search_query(&mut self, query: impl Into<String>) {
+        self.active_mut().set_search_query(query);
+    }
+
+    pub fn clear_search(&mut self) {
+        self.active_mut().clear_search();
+    }
+
+    pub fn search_next(&mut self) -> Option<SearchMatch> {
+        self.active_mut().search_next()
+    }
+
+    pub fn search_previous(&mut self) -> Option<SearchMatch> {
+        self.active_mut().search_previous()
+    }
+
     /// Resize the terminal to a new cell grid (from a window resize). Resizes
     /// every screen and updates the recorded size; soft-wrap reflow is inc≥3.
     pub fn resize(&mut self, size: GridSize) {
@@ -109,6 +132,10 @@ impl Terminal {
     /// Take the queued report-reply bytes (for the io thread → pty writer).
     pub fn take_pending_writes(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending_writes)
+    }
+
+    pub fn take_pending_clipboard_writes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_clipboard_writes)
     }
 
     fn apply_sgr(&mut self, attrs: &[SgrAttr]) {
@@ -166,8 +193,10 @@ impl Terminal {
         }
         self.active_is_alt = true;
         self.primary.clear_selection();
+        self.primary.clear_search();
         if let Some(alt) = &mut self.alt {
             alt.clear_selection();
+            alt.clear_search();
         }
     }
 
@@ -186,8 +215,10 @@ impl Terminal {
         }
         if was_alt {
             self.primary.clear_selection();
+            self.primary.clear_search();
             if let Some(alt) = &mut self.alt {
                 alt.clear_selection();
+                alt.clear_search();
             }
         }
     }
@@ -327,7 +358,9 @@ impl Handler for Terminal {
         self.modes = ModeState::defaults();
         self.title.clear();
         self.colors = TerminalColors::default();
+        self.pending_clipboard_writes.clear();
         self.clear_selection();
+        self.clear_search();
     }
 
     fn insert_blank_chars(&mut self, n: u16) {
@@ -378,6 +411,14 @@ impl Handler for Terminal {
 
     fn osc_dispatch(&mut self, data: &[u8]) {
         if handle_color_osc(data, &mut self.colors, &mut self.pending_writes) {
+            return;
+        }
+        if handle_clipboard_osc(
+            data,
+            &self.osc52_policy,
+            &mut self.pending_clipboard_writes,
+            &mut self.pending_writes,
+        ) {
             return;
         }
 

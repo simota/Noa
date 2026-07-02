@@ -3,6 +3,9 @@
 use std::time::{Duration, Instant};
 
 use noa_core::{GridSize, Point};
+use noa_grid::modes::MouseTracking;
+use winit::event::{ElementState, MouseButton};
+use winit::keyboard::ModifiersState;
 
 const MULTI_CLICK_MAX_DELAY: Duration = Duration::from_millis(500);
 
@@ -149,6 +152,91 @@ pub fn physical_position_to_grid_point(
     Point { x: col, y: row }
 }
 
+pub fn encode_sgr_mouse_input(
+    button: MouseButton,
+    state: ElementState,
+    cell: Point,
+    mods: ModifiersState,
+) -> Option<Vec<u8>> {
+    let button_code = button_code(button)?;
+    let final_byte = match state {
+        ElementState::Pressed => b'M',
+        ElementState::Released => b'm',
+    };
+    Some(sgr_mouse_sequence(
+        button_code + modifier_bits(mods),
+        cell,
+        final_byte,
+    ))
+}
+
+pub fn encode_sgr_mouse_motion(
+    tracking: MouseTracking,
+    pressed_button: Option<MouseButton>,
+    cell: Point,
+    mods: ModifiersState,
+) -> Option<Vec<u8>> {
+    let button_code = match tracking {
+        MouseTracking::Off | MouseTracking::Press => return None,
+        MouseTracking::ButtonMotion => button_code(pressed_button?)?,
+        MouseTracking::AnyMotion => pressed_button.and_then(button_code).unwrap_or(3),
+    };
+
+    Some(sgr_mouse_sequence(
+        button_code + 32 + modifier_bits(mods),
+        cell,
+        b'M',
+    ))
+}
+
+pub fn encode_sgr_mouse_wheel(delta_y: f32, cell: Point, mods: ModifiersState) -> Option<Vec<u8>> {
+    let button_code = if delta_y > 0.0 {
+        64
+    } else if delta_y < 0.0 {
+        65
+    } else {
+        return None;
+    };
+    Some(sgr_mouse_sequence(
+        button_code + modifier_bits(mods),
+        cell,
+        b'M',
+    ))
+}
+
+fn button_code(button: MouseButton) -> Option<u16> {
+    match button {
+        MouseButton::Left => Some(0),
+        MouseButton::Middle => Some(1),
+        MouseButton::Right => Some(2),
+        _ => None,
+    }
+}
+
+fn modifier_bits(mods: ModifiersState) -> u16 {
+    let mut bits = 0;
+    if mods.shift_key() {
+        bits |= 4;
+    }
+    if mods.alt_key() {
+        bits |= 8;
+    }
+    if mods.control_key() {
+        bits |= 16;
+    }
+    bits
+}
+
+fn sgr_mouse_sequence(code: u16, cell: Point, final_byte: u8) -> Vec<u8> {
+    format!(
+        "\x1b[<{code};{};{}{}",
+        cell.x + 1,
+        cell.y + 1,
+        final_byte as char
+    )
+    .into_bytes()
+}
+
 fn coord_to_cell(coord: f64, cell: f32, max_cells: u16) -> u16 {
     if max_cells == 0 {
         return 0;
@@ -247,6 +335,75 @@ mod tests {
         assert_eq!(
             state.left_pressed(start + Duration::from_millis(200)),
             SelectionGesture::SelectLine(point(2, 0))
+        );
+    }
+
+    #[test]
+    fn sgr_mouse_input_uses_one_based_coordinates() {
+        assert_eq!(
+            encode_sgr_mouse_input(
+                MouseButton::Left,
+                ElementState::Pressed,
+                point(2, 3),
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[<0;3;4M".to_vec())
+        );
+        assert_eq!(
+            encode_sgr_mouse_input(
+                MouseButton::Left,
+                ElementState::Released,
+                point(2, 3),
+                ModifiersState::SHIFT | ModifiersState::CONTROL
+            ),
+            Some(b"\x1b[<20;3;4m".to_vec())
+        );
+    }
+
+    #[test]
+    fn sgr_mouse_motion_respects_tracking_mode() {
+        assert_eq!(
+            encode_sgr_mouse_motion(
+                MouseTracking::Press,
+                Some(MouseButton::Left),
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            None
+        );
+        assert_eq!(
+            encode_sgr_mouse_motion(
+                MouseTracking::ButtonMotion,
+                Some(MouseButton::Left),
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[<32;1;1M".to_vec())
+        );
+        assert_eq!(
+            encode_sgr_mouse_motion(
+                MouseTracking::AnyMotion,
+                None,
+                point(0, 0),
+                ModifiersState::ALT
+            ),
+            Some(b"\x1b[<43;1;1M".to_vec())
+        );
+    }
+
+    #[test]
+    fn sgr_mouse_wheel_encodes_vertical_delta() {
+        assert_eq!(
+            encode_sgr_mouse_wheel(1.0, point(0, 0), ModifiersState::empty()),
+            Some(b"\x1b[<64;1;1M".to_vec())
+        );
+        assert_eq!(
+            encode_sgr_mouse_wheel(-1.0, point(0, 0), ModifiersState::empty()),
+            Some(b"\x1b[<65;1;1M".to_vec())
+        );
+        assert_eq!(
+            encode_sgr_mouse_wheel(0.0, point(0, 0), ModifiersState::empty()),
+            None
         );
     }
 }

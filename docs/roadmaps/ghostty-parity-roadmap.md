@@ -114,10 +114,10 @@ scrolling, and key customization.
 | ID | Capability | Current State | Target |
 |----|------------|---------------|--------|
 | `REQ-UX-001` | Selection model | Partial | Selected-range storage, selection rendering, mouse drag, word selection, and line selection are implemented; selection-to-clipboard copy is tracked in `REQ-UX-002` |
-| `REQ-UX-002` | Clipboard | Partial | Native copy and paste actions are implemented through `noa-app`; add paste protection and OSC 52 policy |
-| `REQ-UX-003` | Mouse reporting | Missing | Implement SGR mouse protocol, reporting modes, and local selection override |
-| `REQ-UX-004` | Keybind engine | Missing | Add config-driven keybind parsing, action dispatch, and app-vs-PTY consumption rules |
-| `REQ-UX-005` | Search | Missing | Add search state, match highlighting, navigation, and search UI command hooks |
+| `REQ-UX-002` | Clipboard | Partial | Native copy and paste actions plus OSC 52 write policy and limits are implemented through `noa-app`; paste protection and full OSC 52 read policy remain |
+| `REQ-UX-003` | Mouse reporting | Complete | SGR mouse reporting, DECSET 1000/1002/1003 + 1006 mode accessors, wheel/motion encodings, and Shift local-selection override are implemented |
+| `REQ-UX-004` | Keybind engine | Complete | Config-style keybind parsing, action names, default action dispatch, and app-vs-PTY consumption rules are implemented |
+| `REQ-UX-005` | Search | Partial | Search state, match computation, highlight projection, navigation, and command hooks are implemented; an interactive query prompt remains future work |
 | `REQ-UX-006` | Scroll navigation | Complete | Page, line, top, and bottom viewport scrolling are implemented with app command routing and View menu entries |
 | `REQ-UX-009` | IME text input | Partial | System IME commit input is enabled and sent to the PTY; inline preedit rendering remains future work |
 
@@ -176,7 +176,7 @@ basics.
 | `REQ-PROTO-001` | OSC 8 hyperlinks | Missing | Store hyperlink ranges, render hover/activation affordances, and expose copy/open actions |
 | `REQ-PROTO-002` | OSC 7 cwd | Missing | Track per-terminal working directory for title, new surface inheritance, and AppleScript |
 | `REQ-PROTO-003` | OSC 9 notifications | Missing | Implement notification and progress policy hooks |
-| `REQ-PROTO-004` | OSC 52 clipboard | Missing | Implement read/write policy, limits, and user-safe defaults |
+| `REQ-PROTO-004` | OSC 52 clipboard | Partial | OSC 52 write policy, base64 decode, decoded-size limit, and read-deny default are implemented; full read/query policy remains |
 | `REQ-PROTO-005` | Kitty graphics | Missing | Implement image storage, placement, rendering, limits, and cleanup |
 | `REQ-PROTO-006` | Kitty keyboard | Missing | Implement enhanced keyboard protocol negotiation and encoding |
 | `REQ-PROTO-007` | DCS passthrough | Partial | Implement required DCS sequences such as `XTGETTCAP` and `DECRQSS` |
@@ -237,12 +237,12 @@ Exit criteria:
   triple-click behavior. References `REQ-UX-001`.
 - [x] `IMPL-UX-003`: Add clipboard copy and paste actions with platform
   adapters contained in `noa-app`. References `REQ-UX-002`.
-- [ ] `IMPL-UX-004`: Add OSC 52 policy and limits. References `REQ-UX-002`.
-- [ ] `IMPL-UX-005`: Implement mouse reporting modes and encodings. References
+- [x] `IMPL-UX-004`: Add OSC 52 policy and limits. References `REQ-UX-002`.
+- [x] `IMPL-UX-005`: Implement mouse reporting modes and encodings. References
   `REQ-UX-003`.
-- [ ] `IMPL-UX-006`: Add configurable keybind parser and action registry.
+- [x] `IMPL-UX-006`: Add configurable keybind parser and action registry.
   References `REQ-UX-004`.
-- [ ] `IMPL-UX-007`: Add search state, match computation, highlighting, and
+- [x] `IMPL-UX-007`: Add search state, match computation, highlighting, and
   navigation actions. References `REQ-UX-005`.
 - [x] `IMPL-UX-008`: Add viewport scrolling commands. References `REQ-UX-006`.
 - [x] `IMPL-UX-009`: Enable system IME commit input for Japanese text.

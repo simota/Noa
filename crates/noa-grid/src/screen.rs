@@ -4,6 +4,7 @@
 
 use crate::cell::{Cell, Row};
 use crate::cursor::{Cursor, ScrollRegion};
+use crate::search::{SearchMatch, SearchState, compute_matches};
 use crate::selection::{Selection, SelectionPoint};
 use crate::tabstops::Tabstops;
 use noa_core::{CellAttrs, Point};
@@ -19,6 +20,7 @@ pub struct Screen {
     pub grid: Vec<Row>,
     pub cursor: Cursor,
     pub selection: Option<Selection>,
+    pub search: SearchState,
     pub saved_cursor: Option<Cursor>,
     pub region: ScrollRegion,
     pub tabstops: Tabstops,
@@ -45,6 +47,7 @@ impl Screen {
             grid: (0..rows).map(|_| Row::new(cols)).collect(),
             cursor: Cursor::default(),
             selection: None,
+            search: SearchState::default(),
             saved_cursor: None,
             region: ScrollRegion {
                 top: 0,
@@ -216,6 +219,65 @@ impl Screen {
 
     pub fn clear_selection(&mut self) {
         self.selection = None;
+    }
+
+    pub fn set_search_query(&mut self, query: impl Into<String>) {
+        let query = query.into();
+        let matches = self.compute_search_matches(&query);
+        self.search.set_query(query, matches);
+        if let Some(active) = self.search.active_match() {
+            self.reveal_search_match(active);
+        }
+    }
+
+    pub fn clear_search(&mut self) {
+        self.search.clear();
+    }
+
+    pub fn search_next(&mut self) -> Option<SearchMatch> {
+        let m = self.search.next_match()?;
+        self.reveal_search_match(m);
+        Some(m)
+    }
+
+    pub fn search_previous(&mut self) -> Option<SearchMatch> {
+        let m = self.search.previous_match()?;
+        self.reveal_search_match(m);
+        Some(m)
+    }
+
+    fn compute_search_matches(&self, query: &str) -> Vec<SearchMatch> {
+        compute_matches(
+            query,
+            self.scrollback.iter().enumerate().chain(
+                self.grid
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, row)| (self.scrollback.len() + idx, row)),
+            ),
+        )
+    }
+
+    fn reveal_search_match(&mut self, search_match: SearchMatch) {
+        let rows = self.rows as usize;
+        let scrollback_len = self.scrollback.len();
+        let total = scrollback_len + self.grid.len();
+        let live_start = total.saturating_sub(rows);
+        let y = search_match.start.y.min(total.saturating_sub(1));
+        let current_base = self.visible_row_base();
+        let min_base = y.saturating_add(1).saturating_sub(rows);
+        let max_base = y;
+
+        let target_base = if current_base < min_base {
+            min_base
+        } else if current_base > max_base {
+            max_base
+        } else {
+            current_base
+        };
+        self.viewport_offset = live_start
+            .saturating_sub(target_base)
+            .min(self.max_viewport_offset());
     }
 
     pub fn selected_text(&self) -> Option<String> {

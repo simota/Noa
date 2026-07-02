@@ -3,6 +3,24 @@
 use noa_core::{DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, Rgb, xterm_palette_color};
 
 const MAX_COLOR_OSC_BYTES: usize = 4096;
+const DEFAULT_OSC52_MAX_DECODED_BYTES: usize = 3 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Osc52Policy {
+    pub allow_write: bool,
+    pub allow_read: bool,
+    pub max_decoded_bytes: usize,
+}
+
+impl Default for Osc52Policy {
+    fn default() -> Self {
+        Self {
+            allow_write: true,
+            allow_read: false,
+            max_decoded_bytes: DEFAULT_OSC52_MAX_DECODED_BYTES,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalColors {
@@ -160,6 +178,121 @@ pub(crate) fn handle_color_osc(
         }
         _ => false,
     }
+}
+
+/// Handle OSC 52 clipboard read/write. Returns true for any OSC 52 payload,
+/// even when the policy rejects the request.
+pub(crate) fn handle_clipboard_osc(
+    data: &[u8],
+    policy: &Osc52Policy,
+    pending_clipboard_writes: &mut Vec<String>,
+    pending_writes: &mut Vec<u8>,
+) -> bool {
+    let Some(rest) = data.strip_prefix(b"52;") else {
+        return false;
+    };
+    if !rest.iter().all(|b| (0x20..=0x7e).contains(b)) {
+        return true;
+    }
+
+    let Some(separator) = rest.iter().position(|&b| b == b';') else {
+        return true;
+    };
+    let target = &rest[..separator];
+    let payload = &rest[separator + 1..];
+    if !osc52_targets_clipboard(target) {
+        return true;
+    }
+
+    if payload == b"?" {
+        if policy.allow_read {
+            push_osc52_reply(pending_writes, b"c", b"");
+        }
+        return true;
+    }
+
+    if !policy.allow_write {
+        return true;
+    }
+    let Some(decoded) = decode_base64_limited(payload, policy.max_decoded_bytes) else {
+        return true;
+    };
+    let Ok(text) = String::from_utf8(decoded) else {
+        return true;
+    };
+    pending_clipboard_writes.push(text);
+    true
+}
+
+fn osc52_targets_clipboard(target: &[u8]) -> bool {
+    target.is_empty() || target.iter().any(|&b| b == b'c')
+}
+
+fn push_osc52_reply(pending_writes: &mut Vec<u8>, target: &[u8], encoded: &[u8]) {
+    pending_writes.extend_from_slice(b"\x1b]52;");
+    pending_writes.extend_from_slice(target);
+    pending_writes.push(b';');
+    pending_writes.extend_from_slice(encoded);
+    pending_writes.extend_from_slice(b"\x1b\\");
+}
+
+fn decode_base64_limited(input: &[u8], max_decoded_bytes: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity((input.len() / 4) * 3);
+    let mut quartet = [0u8; 4];
+    let mut quartet_len = 0;
+    let mut saw_padding = false;
+
+    for &b in input {
+        if b.is_ascii_whitespace() {
+            continue;
+        }
+        let value = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => {
+                saw_padding = true;
+                64
+            }
+            _ => return None,
+        };
+        if saw_padding && value != 64 {
+            return None;
+        }
+        quartet[quartet_len] = value;
+        quartet_len += 1;
+        if quartet_len == 4 {
+            push_decoded_quartet(&quartet, &mut out)?;
+            if out.len() > max_decoded_bytes {
+                return None;
+            }
+            quartet_len = 0;
+        }
+    }
+
+    if quartet_len != 0 {
+        return None;
+    }
+    Some(out)
+}
+
+fn push_decoded_quartet(q: &[u8; 4], out: &mut Vec<u8>) -> Option<()> {
+    if q[0] == 64 || q[1] == 64 {
+        return None;
+    }
+    out.push((q[0] << 2) | (q[1] >> 4));
+    match (q[2], q[3]) {
+        (64, 64) => {}
+        (64, _) => return None,
+        (c, 64) => out.push((q[1] << 4) | (c >> 2)),
+        (c, d) => {
+            out.push((q[1] << 4) | (c >> 2));
+            out.push((c << 6) | d);
+        }
+    }
+    Some(())
 }
 
 fn handle_palette(params: &[&[u8]], colors: &mut TerminalColors, pending_writes: &mut Vec<u8>) {

@@ -333,6 +333,28 @@ fn full_reset_clears_bracketed_paste_mode() {
 }
 
 #[test]
+fn sgr_mouse_modes_toggle_and_reset() {
+    let t = run(b"\x1b[?1000h\x1b[?1006h");
+    assert_eq!(t.modes.mouse_tracking(), crate::modes::MouseTracking::Press);
+    assert!(t.modes.sgr_mouse_reporting());
+
+    let t = run(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+    assert_eq!(
+        t.modes.mouse_tracking(),
+        crate::modes::MouseTracking::ButtonMotion
+    );
+
+    let t = run(b"\x1b[?1000h\x1b[?1003h\x1b[?1006h");
+    assert_eq!(
+        t.modes.mouse_tracking(),
+        crate::modes::MouseTracking::AnyMotion
+    );
+
+    let t = run(b"\x1b[?1000h\x1b[?1006h\x1bc");
+    assert!(!t.modes.sgr_mouse_reporting());
+}
+
+#[test]
 fn scrollback_records_full_screen_scrolls() {
     let t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
 
@@ -554,6 +576,62 @@ fn selection_clears_on_full_reset_and_screen_switch() {
 }
 
 #[test]
+fn search_matches_live_rows_and_navigates() {
+    let mut t = run_size(12, 2, b"foo bar foo");
+
+    t.set_search_query("foo");
+
+    assert_eq!(t.active().search.matches().len(), 2);
+    assert!(t.active().search.contains(crate::SelectionPoint::new(0, 0)));
+    assert!(t.active().search.contains(crate::SelectionPoint::new(8, 0)));
+
+    let next = t.search_next().expect("second match should be active");
+    assert_eq!(next.start, crate::SelectionPoint::new(8, 0));
+
+    let previous = t
+        .search_previous()
+        .expect("first match should be active again");
+    assert_eq!(previous.start, crate::SelectionPoint::new(0, 0));
+}
+
+#[test]
+fn search_reveals_scrollback_match() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+
+    t.set_search_query("A");
+
+    assert_eq!(t.viewport_offset(), 1);
+    let rows = t.active().visible_rows();
+    assert_eq!(rows_text(&rows, 0, 1), "A");
+}
+
+#[test]
+fn search_skips_wide_spacer_cells() {
+    let mut t = run_size(5, 1, "A界B".as_bytes());
+
+    t.set_search_query("界B");
+
+    let found = t.active().search.active_match().expect("wide match");
+    assert_eq!(found.start, crate::SelectionPoint::new(1, 0));
+    assert_eq!(found.end, crate::SelectionPoint::new(3, 0));
+}
+
+#[test]
+fn search_clears_on_full_reset_and_screen_switch() {
+    let mut t = run(b"foo\x1b[?1049h");
+    t.set_search_query("foo");
+    assert!(!t.active().search.query().is_empty());
+
+    let mut s = Stream::new();
+    s.feed(b"\x1b[?1049l", &mut t);
+    assert!(t.active().search.query().is_empty());
+
+    t.set_search_query("foo");
+    s.feed(b"\x1bc", &mut t);
+    assert!(t.active().search.query().is_empty());
+}
+
+#[test]
 fn resize_shrink_rows_moves_top_drained_primary_rows_to_scrollback() {
     let mut t = run_size(5, 5, b"\x1b[5;1HE");
     t.primary.grid[0].cells[0].ch = 'A';
@@ -574,6 +652,36 @@ fn resize_shrink_rows_moves_top_drained_primary_rows_to_scrollback() {
 fn title_from_osc() {
     let t = run(b"\x1b]0;my title\x07");
     assert_eq!(t.title, "my title");
+}
+
+#[test]
+fn osc52_write_is_decoded_and_queued() {
+    let mut t = run(b"\x1b]52;c;aGVsbG8=\x07");
+
+    assert_eq!(t.take_pending_clipboard_writes(), vec!["hello".to_string()]);
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn osc52_rejects_query_by_default() {
+    let mut t = run(b"\x1b]52;c;?\x07");
+
+    assert!(t.take_pending_clipboard_writes().is_empty());
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn osc52_policy_can_disable_writes_and_limit_payloads() {
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.osc52_policy.allow_write = false;
+    let mut s = Stream::new();
+    s.feed(b"\x1b]52;c;aGk=\x07", &mut t);
+    assert!(t.take_pending_clipboard_writes().is_empty());
+
+    t.osc52_policy.allow_write = true;
+    t.osc52_policy.max_decoded_bytes = 1;
+    s.feed(b"\x1b]52;c;aGk=\x07", &mut t);
+    assert!(t.take_pending_clipboard_writes().is_empty());
 }
 
 #[test]

@@ -18,6 +18,10 @@ pub struct Theme {
     pub cursor: Rgb,
     pub selection_fg: Rgb,
     pub selection_bg: Rgb,
+    pub search_fg: Rgb,
+    pub search_bg: Rgb,
+    pub active_search_fg: Rgb,
+    pub active_search_bg: Rgb,
     /// Index 0..=255: 16 ANSI + 6x6x6 color cube (16..=231) + grayscale ramp (232..=255).
     pub palette: [Rgb; 256],
 }
@@ -36,6 +40,10 @@ impl Theme {
             cursor: DEFAULT_CURSOR,
             selection_fg: DEFAULT_BG,
             selection_bg: DEFAULT_FG,
+            search_fg: Rgb::new(0x1b, 0x1b, 0x1b),
+            search_bg: Rgb::new(0xff, 0xd7, 0x5f),
+            active_search_fg: Rgb::new(0xff, 0xff, 0xff),
+            active_search_bg: Rgb::new(0x00, 0x87, 0xaf),
             palette: xterm_palette(),
         }
     }
@@ -77,6 +85,22 @@ impl Theme {
 
     pub fn selection_bg(&self) -> [f32; 4] {
         rgba(self.selection_bg)
+    }
+
+    pub fn search_fg(&self) -> [f32; 4] {
+        rgba(self.search_fg)
+    }
+
+    pub fn search_bg(&self) -> [f32; 4] {
+        rgba(self.search_bg)
+    }
+
+    pub fn active_search_fg(&self) -> [f32; 4] {
+        rgba(self.active_search_fg)
+    }
+
+    pub fn active_search_bg(&self) -> [f32; 4] {
+        rgba(self.active_search_bg)
     }
 
     fn resolve_rgb_with_colors(&self, c: Color, is_fg: bool, colors: &TerminalColors) -> Rgb {
@@ -183,5 +207,13 @@ mod tests {
 
         assert_eq!(theme.selection_fg(), theme.resolve(Color::Default, false));
         assert_eq!(theme.selection_bg(), theme.resolve(Color::Default, true));
+    }
+
+    #[test]
+    fn search_colors_are_theme_defined() {
+        let theme = Theme::new();
+
+        assert_eq!(theme.search_bg(), rgba(theme.search_bg));
+        assert_eq!(theme.active_search_bg(), rgba(theme.active_search_bg));
     }
 }

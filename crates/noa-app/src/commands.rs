@@ -9,9 +9,19 @@ pub enum AppCommand {
     Preferences,
     Copy,
     Paste,
+    Search(SearchAction),
     ScrollViewport(ViewportScroll),
     CloseWindow,
     Quit,
+}
+
+/// Search commands that can be triggered before a full search UI exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchAction {
+    Find,
+    FindNext,
+    FindPrevious,
+    Clear,
 }
 
 /// Local scrollback navigation that moves noa's viewport instead of the pty.
@@ -30,6 +40,10 @@ impl AppCommand {
     pub(crate) const PREFERENCES_MENU_ID: &'static str = "noa.app.preferences";
     pub(crate) const COPY_MENU_ID: &'static str = "noa.edit.copy";
     pub(crate) const PASTE_MENU_ID: &'static str = "noa.edit.paste";
+    pub(crate) const SEARCH_FIND_MENU_ID: &'static str = "noa.edit.find";
+    pub(crate) const SEARCH_FIND_NEXT_MENU_ID: &'static str = "noa.edit.find-next";
+    pub(crate) const SEARCH_FIND_PREVIOUS_MENU_ID: &'static str = "noa.edit.find-previous";
+    pub(crate) const SEARCH_CLEAR_MENU_ID: &'static str = "noa.edit.clear-search";
     pub(crate) const SCROLL_LINE_UP_MENU_ID: &'static str = "noa.view.scroll-line-up";
     pub(crate) const SCROLL_LINE_DOWN_MENU_ID: &'static str = "noa.view.scroll-line-down";
     pub(crate) const SCROLL_PAGE_UP_MENU_ID: &'static str = "noa.view.scroll-page-up";
@@ -45,6 +59,10 @@ impl AppCommand {
             AppCommand::Preferences => Self::PREFERENCES_MENU_ID,
             AppCommand::Copy => Self::COPY_MENU_ID,
             AppCommand::Paste => Self::PASTE_MENU_ID,
+            AppCommand::Search(SearchAction::Find) => Self::SEARCH_FIND_MENU_ID,
+            AppCommand::Search(SearchAction::FindNext) => Self::SEARCH_FIND_NEXT_MENU_ID,
+            AppCommand::Search(SearchAction::FindPrevious) => Self::SEARCH_FIND_PREVIOUS_MENU_ID,
+            AppCommand::Search(SearchAction::Clear) => Self::SEARCH_CLEAR_MENU_ID,
             AppCommand::ScrollViewport(ViewportScroll::LineUp) => Self::SCROLL_LINE_UP_MENU_ID,
             AppCommand::ScrollViewport(ViewportScroll::LineDown) => Self::SCROLL_LINE_DOWN_MENU_ID,
             AppCommand::ScrollViewport(ViewportScroll::PageUp) => Self::SCROLL_PAGE_UP_MENU_ID,
@@ -62,6 +80,10 @@ impl AppCommand {
             Self::PREFERENCES_MENU_ID => Some(Self::Preferences),
             Self::COPY_MENU_ID => Some(Self::Copy),
             Self::PASTE_MENU_ID => Some(Self::Paste),
+            Self::SEARCH_FIND_MENU_ID => Some(Self::Search(SearchAction::Find)),
+            Self::SEARCH_FIND_NEXT_MENU_ID => Some(Self::Search(SearchAction::FindNext)),
+            Self::SEARCH_FIND_PREVIOUS_MENU_ID => Some(Self::Search(SearchAction::FindPrevious)),
+            Self::SEARCH_CLEAR_MENU_ID => Some(Self::Search(SearchAction::Clear)),
             Self::SCROLL_LINE_UP_MENU_ID => Some(Self::ScrollViewport(ViewportScroll::LineUp)),
             Self::SCROLL_LINE_DOWN_MENU_ID => Some(Self::ScrollViewport(ViewportScroll::LineDown)),
             Self::SCROLL_PAGE_UP_MENU_ID => Some(Self::ScrollViewport(ViewportScroll::PageUp)),
@@ -74,40 +96,286 @@ impl AppCommand {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_cmd_character(character: &str) -> Option<Self> {
-        if character.eq_ignore_ascii_case("q") {
-            Some(Self::Quit)
-        } else if character.eq_ignore_ascii_case("w") {
-            Some(Self::CloseWindow)
-        } else if character.eq_ignore_ascii_case("c") {
-            Some(Self::Copy)
-        } else if character.eq_ignore_ascii_case("v") {
-            Some(Self::Paste)
-        } else {
-            None
+        KeybindEngine::default().resolve(
+            &Key::Character(character.to_ascii_lowercase().into()),
+            ModifiersState::SUPER,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_key(logical_key: &Key, mods: ModifiersState) -> Option<Self> {
+        KeybindEngine::default().resolve(logical_key, mods)
+    }
+
+    pub fn action_name(self) -> &'static str {
+        match self {
+            Self::About => "about",
+            Self::Preferences => "preferences",
+            Self::Copy => "copy",
+            Self::Paste => "paste",
+            Self::Search(SearchAction::Find) => "search.find",
+            Self::Search(SearchAction::FindNext) => "search.next",
+            Self::Search(SearchAction::FindPrevious) => "search.previous",
+            Self::Search(SearchAction::Clear) => "search.clear",
+            Self::ScrollViewport(ViewportScroll::LineUp) => "scroll.line-up",
+            Self::ScrollViewport(ViewportScroll::LineDown) => "scroll.line-down",
+            Self::ScrollViewport(ViewportScroll::PageUp) => "scroll.page-up",
+            Self::ScrollViewport(ViewportScroll::PageDown) => "scroll.page-down",
+            Self::ScrollViewport(ViewportScroll::Top) => "scroll.top",
+            Self::ScrollViewport(ViewportScroll::Bottom) => "scroll.bottom",
+            Self::CloseWindow => "window.close",
+            Self::Quit => "app.quit",
         }
     }
 
-    pub(crate) fn from_key(logical_key: &Key, mods: ModifiersState) -> Option<Self> {
-        if !mods.shift_key() || mods.control_key() || mods.alt_key() || mods.super_key() {
-            return None;
-        }
-
-        match logical_key {
-            Key::Named(NamedKey::ArrowUp) => Some(Self::ScrollViewport(ViewportScroll::LineUp)),
-            Key::Named(NamedKey::ArrowDown) => Some(Self::ScrollViewport(ViewportScroll::LineDown)),
-            Key::Named(NamedKey::PageUp) => Some(Self::ScrollViewport(ViewportScroll::PageUp)),
-            Key::Named(NamedKey::PageDown) => Some(Self::ScrollViewport(ViewportScroll::PageDown)),
-            Key::Named(NamedKey::Home) => Some(Self::ScrollViewport(ViewportScroll::Top)),
-            Key::Named(NamedKey::End) => Some(Self::ScrollViewport(ViewportScroll::Bottom)),
+    pub fn from_action_name(name: &str) -> Option<Self> {
+        match name {
+            "about" => Some(Self::About),
+            "preferences" => Some(Self::Preferences),
+            "copy" => Some(Self::Copy),
+            "paste" => Some(Self::Paste),
+            "search.find" => Some(Self::Search(SearchAction::Find)),
+            "search.next" => Some(Self::Search(SearchAction::FindNext)),
+            "search.previous" => Some(Self::Search(SearchAction::FindPrevious)),
+            "search.clear" => Some(Self::Search(SearchAction::Clear)),
+            "scroll.line-up" => Some(Self::ScrollViewport(ViewportScroll::LineUp)),
+            "scroll.line-down" => Some(Self::ScrollViewport(ViewportScroll::LineDown)),
+            "scroll.page-up" => Some(Self::ScrollViewport(ViewportScroll::PageUp)),
+            "scroll.page-down" => Some(Self::ScrollViewport(ViewportScroll::PageDown)),
+            "scroll.top" => Some(Self::ScrollViewport(ViewportScroll::Top)),
+            "scroll.bottom" => Some(Self::ScrollViewport(ViewportScroll::Bottom)),
+            "window.close" => Some(Self::CloseWindow),
+            "app.quit" => Some(Self::Quit),
             _ => None,
         }
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeyBinding {
+    trigger: KeyTrigger,
+    command: AppCommand,
+}
+
+impl KeyBinding {
+    pub(crate) fn parse(trigger: &str, command: AppCommand) -> Result<Self, KeybindParseError> {
+        Ok(Self {
+            trigger: KeyTrigger::parse(trigger)?,
+            command,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeybindEngine {
+    bindings: Vec<KeyBinding>,
+}
+
+impl Default for KeybindEngine {
+    fn default() -> Self {
+        let specs = [
+            ("cmd+q", AppCommand::Quit),
+            ("cmd+w", AppCommand::CloseWindow),
+            ("cmd+c", AppCommand::Copy),
+            ("cmd+v", AppCommand::Paste),
+            ("cmd+f", AppCommand::Search(SearchAction::Find)),
+            ("cmd+g", AppCommand::Search(SearchAction::FindNext)),
+            (
+                "cmd+shift+g",
+                AppCommand::Search(SearchAction::FindPrevious),
+            ),
+            (
+                "shift+arrowup",
+                AppCommand::ScrollViewport(ViewportScroll::LineUp),
+            ),
+            (
+                "shift+arrowdown",
+                AppCommand::ScrollViewport(ViewportScroll::LineDown),
+            ),
+            (
+                "shift+pageup",
+                AppCommand::ScrollViewport(ViewportScroll::PageUp),
+            ),
+            (
+                "shift+pagedown",
+                AppCommand::ScrollViewport(ViewportScroll::PageDown),
+            ),
+            (
+                "shift+home",
+                AppCommand::ScrollViewport(ViewportScroll::Top),
+            ),
+            (
+                "shift+end",
+                AppCommand::ScrollViewport(ViewportScroll::Bottom),
+            ),
+        ];
+        let bindings = specs
+            .into_iter()
+            .map(|(trigger, command)| {
+                KeyBinding::parse(trigger, command).expect("default keybind should parse")
+            })
+            .collect();
+        Self { bindings }
+    }
+}
+
+impl KeybindEngine {
+    pub(crate) fn resolve(&self, logical_key: &Key, mods: ModifiersState) -> Option<AppCommand> {
+        self.bindings
+            .iter()
+            .find(|binding| binding.trigger.matches(logical_key, mods))
+            .map(|binding| binding.command)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeyTrigger {
+    mods: TriggerMods,
+    key: KeyToken,
+}
+
+impl KeyTrigger {
+    fn parse(input: &str) -> Result<Self, KeybindParseError> {
+        let mut mods = TriggerMods::default();
+        let mut key = None;
+        for token in input
+            .split('+')
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+        {
+            let normalized = token.to_ascii_lowercase();
+            match normalized.as_str() {
+                "cmd" | "command" | "super" | "meta" => mods.super_key = true,
+                "ctrl" | "control" => mods.control = true,
+                "alt" | "option" => mods.alt = true,
+                "shift" => mods.shift = true,
+                _ => {
+                    if key.is_some() {
+                        return Err(KeybindParseError::MultipleKeys);
+                    }
+                    key = Some(KeyToken::parse(&normalized)?);
+                }
+            }
+        }
+        let Some(key) = key else {
+            return Err(KeybindParseError::MissingKey);
+        };
+        Ok(Self { mods, key })
+    }
+
+    fn matches(&self, logical_key: &Key, mods: ModifiersState) -> bool {
+        self.mods.matches(mods) && self.key.matches(logical_key)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct TriggerMods {
+    shift: bool,
+    control: bool,
+    alt: bool,
+    super_key: bool,
+}
+
+impl TriggerMods {
+    fn matches(self, mods: ModifiersState) -> bool {
+        self.shift == mods.shift_key()
+            && self.control == mods.control_key()
+            && self.alt == mods.alt_key()
+            && self.super_key == mods.super_key()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyToken {
+    Character(char),
+    Named(NamedKeyToken),
+}
+
+impl KeyToken {
+    fn parse(token: &str) -> Result<Self, KeybindParseError> {
+        let mut chars = token.chars();
+        if let (Some(ch), None) = (chars.next(), chars.next()) {
+            return Ok(Self::Character(ch));
+        }
+        Ok(Self::Named(match token {
+            "arrowup" | "up" => NamedKeyToken::ArrowUp,
+            "arrowdown" | "down" => NamedKeyToken::ArrowDown,
+            "arrowleft" | "left" => NamedKeyToken::ArrowLeft,
+            "arrowright" | "right" => NamedKeyToken::ArrowRight,
+            "pageup" => NamedKeyToken::PageUp,
+            "pagedown" => NamedKeyToken::PageDown,
+            "home" => NamedKeyToken::Home,
+            "end" => NamedKeyToken::End,
+            _ => return Err(KeybindParseError::UnknownKey(token.to_string())),
+        }))
+    }
+
+    fn matches(self, logical_key: &Key) -> bool {
+        match (self, logical_key) {
+            (Self::Character(expected), Key::Character(actual)) => actual
+                .chars()
+                .next()
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(&expected)),
+            (Self::Named(expected), Key::Named(actual)) => expected.matches(*actual),
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NamedKeyToken {
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+}
+
+impl NamedKeyToken {
+    fn matches(self, key: NamedKey) -> bool {
+        matches!(
+            (self, key),
+            (Self::ArrowUp, NamedKey::ArrowUp)
+                | (Self::ArrowDown, NamedKey::ArrowDown)
+                | (Self::ArrowLeft, NamedKey::ArrowLeft)
+                | (Self::ArrowRight, NamedKey::ArrowRight)
+                | (Self::PageUp, NamedKey::PageUp)
+                | (Self::PageDown, NamedKey::PageDown)
+                | (Self::Home, NamedKey::Home)
+                | (Self::End, NamedKey::End)
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeybindParseError {
+    MissingKey,
+    MultipleKeys,
+    UnknownKey(String),
+}
+
+impl std::fmt::Display for KeybindParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingKey => f.write_str("keybind is missing a key"),
+            Self::MultipleKeys => f.write_str("keybind contains multiple keys"),
+            Self::UnknownKey(key) => write!(f, "unknown key in keybind: {key}"),
+        }
+    }
+}
+
+impl std::error::Error for KeybindParseError {}
+
 #[cfg(test)]
 mod tests {
-    use super::{AppCommand, ViewportScroll};
+    use super::{
+        AppCommand, KeyBinding, KeybindEngine, KeybindParseError, SearchAction, ViewportScroll,
+    };
     use winit::keyboard::{Key, ModifiersState, NamedKey};
 
     #[test]
@@ -117,6 +385,10 @@ mod tests {
             AppCommand::Preferences,
             AppCommand::Copy,
             AppCommand::Paste,
+            AppCommand::Search(SearchAction::Find),
+            AppCommand::Search(SearchAction::FindNext),
+            AppCommand::Search(SearchAction::FindPrevious),
+            AppCommand::Search(SearchAction::Clear),
             AppCommand::ScrollViewport(ViewportScroll::LineUp),
             AppCommand::ScrollViewport(ViewportScroll::LineDown),
             AppCommand::ScrollViewport(ViewportScroll::PageUp),
@@ -142,6 +414,10 @@ mod tests {
         );
         assert_eq!(AppCommand::from_cmd_character("c"), Some(AppCommand::Copy));
         assert_eq!(AppCommand::from_cmd_character("V"), Some(AppCommand::Paste));
+        assert_eq!(
+            AppCommand::from_cmd_character("f"),
+            Some(AppCommand::Search(SearchAction::Find))
+        );
         assert_eq!(AppCommand::from_cmd_character(","), None);
     }
 
@@ -190,5 +466,61 @@ mod tests {
             AppCommand::from_key(&Key::Character("x".into()), ModifiersState::SHIFT),
             None
         );
+    }
+
+    #[test]
+    fn action_names_map_to_commands() {
+        for command in [
+            AppCommand::Copy,
+            AppCommand::Paste,
+            AppCommand::Search(SearchAction::Find),
+            AppCommand::Search(SearchAction::FindNext),
+            AppCommand::Search(SearchAction::FindPrevious),
+            AppCommand::Search(SearchAction::Clear),
+            AppCommand::ScrollViewport(ViewportScroll::PageUp),
+            AppCommand::Quit,
+        ] {
+            assert_eq!(
+                AppCommand::from_action_name(command.action_name()),
+                Some(command)
+            );
+        }
+        assert_eq!(AppCommand::from_action_name("nope"), None);
+    }
+
+    #[test]
+    fn keybind_parser_accepts_config_style_chords() {
+        let binding = KeyBinding::parse(
+            "cmd+shift+g",
+            AppCommand::Search(SearchAction::FindPrevious),
+        )
+        .expect("keybind should parse");
+        let engine = KeybindEngine {
+            bindings: vec![binding],
+        };
+
+        assert_eq!(
+            engine.resolve(
+                &Key::Character("g".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::Search(SearchAction::FindPrevious))
+        );
+        assert_eq!(
+            engine.resolve(&Key::Character("g".into()), ModifiersState::SUPER),
+            None
+        );
+    }
+
+    #[test]
+    fn keybind_parser_rejects_missing_or_unknown_key() {
+        assert!(matches!(
+            KeyBinding::parse("cmd+shift", AppCommand::Copy),
+            Err(KeybindParseError::MissingKey)
+        ));
+        assert!(matches!(
+            KeyBinding::parse("cmd+no-such-key", AppCommand::Copy),
+            Err(KeybindParseError::UnknownKey(_))
+        ));
     }
 }

@@ -2,7 +2,7 @@
 //! needed to rebuild a frame's GPU instances. `noa-app` takes this under the
 //! `Terminal` mutex and then calls into the renderer unlocked.
 
-use noa_grid::{Cursor, Row, Selection, SelectionPoint, Terminal, TerminalColors};
+use noa_grid::{Cursor, Row, SearchState, Selection, SelectionPoint, Terminal, TerminalColors};
 
 /// A snapshot of the active screen taken under the `Terminal` lock.
 ///
@@ -13,6 +13,7 @@ pub struct FrameSnapshot {
     pub cursor: Cursor,
     pub colors: TerminalColors,
     pub selection: Option<Selection>,
+    pub search: SearchState,
     pub row_base: usize,
     pub cols: u16,
     pub rows_n: u16,
@@ -31,6 +32,7 @@ impl FrameSnapshot {
             cursor,
             colors: terminal.colors.clone(),
             selection: screen.selection,
+            search: screen.search.clone(),
             row_base: screen.visible_row_base(),
             cols: screen.cols,
             rows_n: screen.rows,
@@ -42,6 +44,16 @@ impl FrameSnapshot {
             return false;
         };
         selection.contains(SelectionPoint::new(x, self.row_base + y as usize))
+    }
+
+    pub fn is_search_match(&self, x: u16, y: u16) -> bool {
+        self.search
+            .contains(SelectionPoint::new(x, self.row_base + y as usize))
+    }
+
+    pub fn is_active_search_match(&self, x: u16, y: u16) -> bool {
+        self.search
+            .contains_active(SelectionPoint::new(x, self.row_base + y as usize))
     }
 }
 
@@ -101,5 +113,22 @@ mod tests {
         assert!(snap.is_selected(1, 0));
         assert!(snap.is_selected(0, 1));
         assert!(!snap.is_selected(1, 1));
+    }
+
+    #[test]
+    fn snapshot_projects_search_matches_onto_visible_rows() {
+        let mut term = Terminal::new(GridSize::new(2, 2));
+        put(&mut term, 0, 'A');
+        put(&mut term, 1, 'B');
+        term.primary.scroll_up_region(1);
+        put(&mut term, 1, 'C');
+        term.set_search_query("B");
+        term.scroll_viewport_up(1);
+
+        let snap = FrameSnapshot::from_terminal(&term);
+
+        assert!(snap.is_search_match(0, 1));
+        assert!(snap.is_active_search_match(0, 1));
+        assert!(!snap.is_search_match(0, 0));
     }
 }

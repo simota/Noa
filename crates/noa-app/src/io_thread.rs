@@ -38,6 +38,9 @@ pub fn spawn(
                                 let _ = writer.write(&pending);
                                 let _ = writer.flush();
                             }
+                            for text in term.take_pending_clipboard_writes() {
+                                let _ = proxy.send_event(UserEvent::ClipboardWrite(text));
+                            }
                         }
                         if proxy.send_event(UserEvent::Redraw).is_err() {
                             break; // event loop gone

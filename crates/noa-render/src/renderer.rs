@@ -102,6 +102,8 @@ impl Renderer {
             for (col_idx, cell) in row.cells.iter().enumerate() {
                 let x = col_idx as u16;
                 let selected = snap.is_selected(x, y);
+                let active_search = snap.is_active_search_match(x, y);
+                let search_match = snap.is_search_match(x, y);
 
                 let inverse = cell.attrs.contains(CellAttrs::INVERSE);
                 let (fg_color, bg_color) = if inverse {
@@ -113,9 +115,13 @@ impl Renderer {
                 // Background quad: skip when it's the plain default bg (the
                 // clear color already fills that), unless inverted.
                 let bg_is_default = matches!(bg_color, Color::Default) && !inverse;
-                if selected || !bg_is_default {
+                if selected || active_search || search_match || !bg_is_default {
                     let bg = if selected {
                         theme.selection_bg()
+                    } else if active_search {
+                        theme.active_search_bg()
+                    } else if search_match {
+                        theme.search_bg()
                     } else {
                         theme.resolve_with_colors(bg_color, false, &snap.colors)
                     };
@@ -137,6 +143,10 @@ impl Renderer {
                     if glyph.atlas_size[0] > 0 && glyph.atlas_size[1] > 0 {
                         let fg = if selected {
                             theme.selection_fg()
+                        } else if active_search {
+                            theme.active_search_fg()
+                        } else if search_match {
+                            theme.search_fg()
                         } else {
                             theme.resolve_with_colors(fg_color, true, &snap.colors)
                         };

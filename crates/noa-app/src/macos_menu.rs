@@ -6,7 +6,7 @@ use muda::{
 };
 use winit::event_loop::EventLoopProxy;
 
-use crate::{AppCommand, UserEvent, ViewportScroll};
+use crate::{AppCommand, SearchAction, UserEvent, ViewportScroll};
 
 /// Holds the native menu alive for the lifetime of the winit event loop.
 pub(crate) struct MacosMenu {
@@ -67,6 +67,31 @@ impl MacosMenu {
                     "Paste",
                     true,
                     Some(cmd_accelerator(Code::KeyV)),
+                ),
+                &PredefinedMenuItem::separator(),
+                &MenuItem::with_id(
+                    AppCommand::Search(SearchAction::Find).menu_id(),
+                    "Find",
+                    true,
+                    Some(cmd_accelerator(Code::KeyF)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::Search(SearchAction::FindNext).menu_id(),
+                    "Find Next",
+                    true,
+                    Some(cmd_accelerator(Code::KeyG)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::Search(SearchAction::FindPrevious).menu_id(),
+                    "Find Previous",
+                    true,
+                    Some(cmd_shift_accelerator(Code::KeyG)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::Search(SearchAction::Clear).menu_id(),
+                    "Clear Search",
+                    true,
+                    None,
                 ),
                 &disabled_item("noa.edit.select-all", "Select All"),
             ],
@@ -176,6 +201,10 @@ fn disabled_item(id: &'static str, text: &'static str) -> MenuItem {
 
 fn cmd_accelerator(code: Code) -> Accelerator {
     Accelerator::new(Some(Modifiers::SUPER), code)
+}
+
+fn cmd_shift_accelerator(code: Code) -> Accelerator {
+    Accelerator::new(Some(Modifiers::SUPER | Modifiers::SHIFT), code)
 }
 
 fn shift_accelerator(code: Code) -> Accelerator {

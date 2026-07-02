@@ -3,6 +3,14 @@
 
 use std::collections::HashSet;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MouseTracking {
+    Off,
+    Press,
+    ButtonMotion,
+    AnyMotion,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ModeState {
     set: HashSet<(u16, bool)>,
@@ -45,6 +53,26 @@ impl ModeState {
     /// DECSET 2004 — bracketed paste mode.
     pub fn bracketed_paste(&self) -> bool {
         self.get(2004, false)
+    }
+    /// DECSET 1006 — SGR extended mouse coordinates.
+    pub fn sgr_mouse(&self) -> bool {
+        self.get(1006, false)
+    }
+    /// DECSET 1000/1002/1003 mouse tracking mode.
+    pub fn mouse_tracking(&self) -> MouseTracking {
+        if self.get(1003, false) {
+            MouseTracking::AnyMotion
+        } else if self.get(1002, false) {
+            MouseTracking::ButtonMotion
+        } else if self.get(1000, false) {
+            MouseTracking::Press
+        } else {
+            MouseTracking::Off
+        }
+    }
+    /// True when the app can encode mouse events for the pty.
+    pub fn sgr_mouse_reporting(&self) -> bool {
+        self.sgr_mouse() && self.mouse_tracking() != MouseTracking::Off
     }
     /// LNM — line-feed/new-line mode (LF also does CR).
     pub fn linefeed_newline(&self) -> bool {

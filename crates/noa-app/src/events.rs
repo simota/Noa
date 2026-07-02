@@ -4,10 +4,12 @@ use crate::AppCommand;
 
 /// Events posted from the io thread to the winit event loop via
 /// [`winit::event_loop::EventLoopProxy`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserEvent {
     /// A native app menu item or app-level shortcut was activated.
     AppCommand(AppCommand),
+    /// An OSC 52 clipboard write was accepted by the terminal policy.
+    ClipboardWrite(String),
     /// New terminal output is available; request a redraw.
     Redraw,
     /// The pty's child process exited (or errored) — the app should close.

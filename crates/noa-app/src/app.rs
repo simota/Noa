@@ -9,19 +9,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crossbeam_channel::Sender;
-use noa_core::{GridSize, PixelSize};
+use noa_core::{GridSize, PixelSize, Point};
 use noa_font::FontGrid;
-use noa_grid::Terminal;
+use noa_grid::{Terminal, modes::MouseTracking};
 use noa_pty::{Pty, PtyConfig, PtyWriter};
 use noa_render::{FrameSnapshot, Renderer, Theme};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState};
+use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::clipboard::SystemClipboard;
+use crate::commands::{KeybindEngine, SearchAction};
 use crate::events::UserEvent;
 use crate::input;
 use crate::mouse::{self, MouseSelectionState, SelectionGesture};
@@ -60,7 +61,10 @@ pub struct App {
     modifiers: ModifiersState,
     grid_size: GridSize,
     mouse_selection: MouseSelectionState,
+    last_mouse_cell: Option<Point>,
+    pressed_mouse_button: Option<MouseButton>,
     clipboard: SystemClipboard,
+    keybinds: KeybindEngine,
     ime_state: input::ImeState,
 }
 
@@ -80,7 +84,10 @@ impl App {
             modifiers: ModifiersState::empty(),
             grid_size,
             mouse_selection: MouseSelectionState::default(),
+            last_mouse_cell: None,
+            pressed_mouse_button: None,
             clipboard: SystemClipboard::new(),
+            keybinds: KeybindEngine::default(),
             ime_state: input::ImeState::default(),
         }
     }
@@ -154,6 +161,7 @@ impl App {
             }
             AppCommand::Copy => self.copy_selection_to_clipboard(),
             AppCommand::Paste => self.paste_clipboard_to_pty(),
+            AppCommand::Search(action) => self.handle_search_action(action),
             AppCommand::ScrollViewport(scroll) => self.scroll_viewport(scroll),
             AppCommand::CloseWindow | AppCommand::Quit => event_loop.exit(),
         }
@@ -293,6 +301,11 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::AppCommand(command) => self.handle_app_command(event_loop, command),
+            UserEvent::ClipboardWrite(text) => {
+                if let Err(err) = self.clipboard.set_text(&text) {
+                    log::warn!("failed to write OSC 52 clipboard text: {err}");
+                }
+            }
             UserEvent::Redraw => {
                 if let Some(g) = &self.graphics {
                     g.window.request_redraw();
@@ -325,27 +338,22 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(position),
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse_input(state, button),
+            WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
             WindowEvent::Ime(event) => self.on_ime_event(event),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                // Cmd-based combos are app shortcuts, not shell input. Route
-                // supported commands through the same path as the native menu,
-                // then swallow every Cmd combo before pty encoding.
-                if self.modifiers.super_key() {
-                    if let Key::Character(c) = &event.logical_key
-                        && let Some(command) = AppCommand::from_cmd_character(c.as_str())
-                    {
-                        self.handle_app_command(event_loop, command);
-                    }
-                    return;
-                }
                 if self.ime_state.preedit_active() {
                     return;
                 }
-                if let Some(command) = AppCommand::from_key(&event.logical_key, self.modifiers) {
+                if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
                     self.handle_app_command(event_loop, command);
+                    return;
+                }
+                // Cmd-based combos are app shortcuts, not shell input. Unknown
+                // Cmd combos remain swallowed to match the previous behavior.
+                if self.modifiers.super_key() {
                     return;
                 }
                 let app_cursor_keys = self.app_cursor_keys();
@@ -432,13 +440,51 @@ impl App {
             metrics.cell_h,
             self.grid_size,
         );
+        self.last_mouse_cell = Some(cell);
+
+        let tracking = self.sgr_mouse_tracking();
+        if tracking != MouseTracking::Off && !self.modifiers.shift_key() {
+            if let Some(bytes) = mouse::encode_sgr_mouse_motion(
+                tracking,
+                self.pressed_mouse_button,
+                cell,
+                self.modifiers,
+            ) {
+                self.write_pty_bytes(&bytes);
+            }
+            return;
+        }
+
         let gesture = self.mouse_selection.cursor_moved(cell);
         self.apply_selection_gesture(gesture);
     }
 
     fn on_mouse_input(&mut self, state: ElementState, button: MouseButton) {
+        let tracking = self.sgr_mouse_tracking();
+        if tracking != MouseTracking::Off && !self.modifiers.shift_key() {
+            if let Some(cell) = self.last_mouse_cell
+                && let Some(bytes) =
+                    mouse::encode_sgr_mouse_input(button, state, cell, self.modifiers)
+            {
+                self.write_pty_bytes(&bytes);
+            }
+
+            match state {
+                ElementState::Pressed => self.pressed_mouse_button = Some(button),
+                ElementState::Released => {
+                    if self.pressed_mouse_button == Some(button) {
+                        self.pressed_mouse_button = None;
+                    }
+                }
+            }
+            return;
+        }
+
         if button != MouseButton::Left {
             return;
+        }
+        if let Some(cell) = self.last_mouse_cell {
+            let _ = self.mouse_selection.cursor_moved(cell);
         }
 
         let gesture = match state {
@@ -446,6 +492,23 @@ impl App {
             ElementState::Released => self.mouse_selection.left_released(),
         };
         self.apply_selection_gesture(gesture);
+    }
+
+    fn on_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        if self.sgr_mouse_tracking() == MouseTracking::Off || self.modifiers.shift_key() {
+            return;
+        }
+
+        let Some(cell) = self.last_mouse_cell else {
+            return;
+        };
+        let delta_y = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(position) => position.y as f32,
+        };
+        if let Some(bytes) = mouse::encode_sgr_mouse_wheel(delta_y, cell, self.modifiers) {
+            self.write_pty_bytes(&bytes);
+        }
     }
 
     fn on_ime_event(&mut self, event: Ime) {
@@ -464,6 +527,32 @@ impl App {
             self.grid_size,
             scroll,
         );
+
+        if let Some(graphics) = &self.graphics {
+            graphics.window.request_redraw();
+        }
+    }
+
+    fn handle_search_action(&mut self, action: SearchAction) {
+        let Some(terminal) = &self.terminal else {
+            return;
+        };
+
+        let mut terminal = terminal.lock().expect("terminal mutex poisoned");
+        match action {
+            SearchAction::Find => {
+                log::debug!("search UI command selected before search prompt support exists");
+                return;
+            }
+            SearchAction::FindNext => {
+                terminal.search_next();
+            }
+            SearchAction::FindPrevious => {
+                terminal.search_previous();
+            }
+            SearchAction::Clear => terminal.clear_search(),
+        }
+        drop(terminal);
 
         if let Some(graphics) = &self.graphics {
             graphics.window.request_redraw();
@@ -538,6 +627,20 @@ impl App {
                     .bracketed_paste()
             })
             .unwrap_or(false)
+    }
+
+    fn sgr_mouse_tracking(&self) -> MouseTracking {
+        self.terminal
+            .as_ref()
+            .map(|terminal| {
+                let terminal = terminal.lock().expect("terminal mutex poisoned");
+                if terminal.modes.sgr_mouse_reporting() {
+                    terminal.modes.mouse_tracking()
+                } else {
+                    MouseTracking::Off
+                }
+            })
+            .unwrap_or(MouseTracking::Off)
     }
 
     fn write_pty_bytes(&self, bytes: &[u8]) {

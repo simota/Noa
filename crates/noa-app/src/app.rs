@@ -22,6 +22,7 @@ use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::AppCommand;
+use crate::clipboard::SystemClipboard;
 use crate::events::UserEvent;
 use crate::input;
 use crate::mouse::{self, MouseSelectionState, SelectionGesture};
@@ -59,6 +60,7 @@ pub struct App {
     modifiers: ModifiersState,
     grid_size: GridSize,
     mouse_selection: MouseSelectionState,
+    clipboard: SystemClipboard,
 }
 
 impl App {
@@ -77,6 +79,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             grid_size,
             mouse_selection: MouseSelectionState::default(),
+            clipboard: SystemClipboard::new(),
         }
     }
 
@@ -141,6 +144,8 @@ impl App {
             AppCommand::Preferences => {
                 log::debug!("Preferences selected before settings support exists");
             }
+            AppCommand::Copy => self.copy_selection_to_clipboard(),
+            AppCommand::Paste => self.paste_clipboard_to_pty(),
             AppCommand::CloseWindow | AppCommand::Quit => event_loop.exit(),
         }
     }
@@ -331,9 +336,8 @@ impl ApplicationHandler<UserEvent> for App {
                     self.modifiers,
                     app_cursor_keys,
                 );
-                if let (Some(bytes), Some(writer)) = (bytes, self.pty_writer.as_ref()) {
-                    let _ = writer.write(&bytes);
-                    let _ = writer.flush();
+                if let Some(bytes) = bytes {
+                    self.write_pty_bytes(&bytes);
                 }
             }
             _ => {}
@@ -449,6 +453,58 @@ impl App {
 
         if let Some(graphics) = &self.graphics {
             graphics.window.request_redraw();
+        }
+    }
+
+    fn copy_selection_to_clipboard(&mut self) {
+        let selected_text = self.terminal.as_ref().and_then(|terminal| {
+            terminal
+                .lock()
+                .expect("terminal mutex poisoned")
+                .selected_text()
+        });
+        let Some(selected_text) = selected_text else {
+            return;
+        };
+
+        if let Err(err) = self.clipboard.set_text(&selected_text) {
+            log::warn!("failed to copy selection to clipboard: {err}");
+        }
+    }
+
+    fn paste_clipboard_to_pty(&mut self) {
+        let text = match self.clipboard.get_text() {
+            Ok(text) => text,
+            Err(err) => {
+                log::warn!("failed to read clipboard for paste: {err}");
+                return;
+            }
+        };
+        let bracketed_paste = self.bracketed_paste();
+        if let Some(bytes) = input::encode_paste(&text, bracketed_paste) {
+            self.write_pty_bytes(&bytes);
+        }
+    }
+
+    fn bracketed_paste(&self) -> bool {
+        self.terminal
+            .as_ref()
+            .map(|terminal| {
+                terminal
+                    .lock()
+                    .expect("terminal mutex poisoned")
+                    .modes
+                    .bracketed_paste()
+            })
+            .unwrap_or(false)
+    }
+
+    fn write_pty_bytes(&self, bytes: &[u8]) {
+        let Some(writer) = self.pty_writer.as_ref() else {
+            return;
+        };
+        if let Err(err) = writer.write(bytes).and_then(|_| writer.flush()) {
+            log::warn!("failed to write input bytes to pty: {err}");
         }
     }
 }

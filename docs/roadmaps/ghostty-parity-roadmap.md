@@ -96,7 +96,7 @@ CLI programs.
 | `REQ-VT-003` | Alternate screen | Complete | Primary/alternate screen switching, cursor save/restore, and resize behavior are implemented with grid coverage |
 | `REQ-VT-004` | Scrollback and reflow | Partial | Scrollback storage, viewport, and clear-scrollback semantics are implemented; add soft-wrap reflow |
 | `REQ-VT-005` | Unicode cell width | Complete | Scalar cell width, zero-width non-advance, and wide-cell lead/spacer behavior are implemented; shaped grapheme clusters remain in `REQ-FONT-002` |
-| `REQ-VT-006` | Bracketed paste | Complete | Mode state, paste wrapping, and bracket marker sanitization are implemented; clipboard UI wiring remains in `REQ-UX-002` |
+| `REQ-VT-006` | Bracketed paste | Complete | Mode state, paste wrapping, and bracket marker sanitization are implemented; clipboard paste action uses this encoding through `REQ-UX-002` |
 | `REQ-VT-007` | OSC color/title surface | Complete | OSC 0/2 title handling plus bounded OSC 4/10/11/12 query/change/reset behavior is implemented where safe |
 
 Exit criteria:
@@ -112,8 +112,8 @@ scrolling, and key customization.
 
 | ID | Capability | Current State | Target |
 |----|------------|---------------|--------|
-| `REQ-UX-001` | Selection model | Partial | Selected-range storage, selection rendering, mouse drag, word selection, and line selection are implemented; clipboard copy remains in `REQ-UX-002` |
-| `REQ-UX-002` | Clipboard | Missing | Add copy, paste, paste protection, and OSC 52 policy |
+| `REQ-UX-001` | Selection model | Partial | Selected-range storage, selection rendering, mouse drag, word selection, and line selection are implemented; selection-to-clipboard copy is tracked in `REQ-UX-002` |
+| `REQ-UX-002` | Clipboard | Partial | Native copy and paste actions are implemented through `noa-app`; add paste protection and OSC 52 policy |
 | `REQ-UX-003` | Mouse reporting | Missing | Implement SGR mouse protocol, reporting modes, and local selection override |
 | `REQ-UX-004` | Keybind engine | Missing | Add config-driven keybind parsing, action dispatch, and app-vs-PTY consumption rules |
 | `REQ-UX-005` | Search | Missing | Add search state, match highlighting, navigation, and search UI command hooks |
@@ -233,7 +233,7 @@ Exit criteria:
   References `REQ-UX-001`.
 - [x] `IMPL-UX-002`: Wire mouse press, drag, release, double-click, and
   triple-click behavior. References `REQ-UX-001`.
-- [ ] `IMPL-UX-003`: Add clipboard copy and paste actions with platform
+- [x] `IMPL-UX-003`: Add clipboard copy and paste actions with platform
   adapters contained in `noa-app`. References `REQ-UX-002`.
 - [ ] `IMPL-UX-004`: Add OSC 52 policy and limits. References `REQ-UX-002`.
 - [ ] `IMPL-UX-005`: Implement mouse reporting modes and encodings. References

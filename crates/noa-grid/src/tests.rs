@@ -495,6 +495,38 @@ fn line_selection_selects_entire_viewport_row() {
 }
 
 #[test]
+fn selected_text_copies_single_row_range() {
+    let mut t = run_size(12, 1, b"hello world");
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 4, y: 0 });
+
+    assert_eq!(t.selected_text().as_deref(), Some("hello"));
+}
+
+#[test]
+fn selected_text_copies_multiline_range_with_newline() {
+    let mut t = run_size(5, 2, b"ab\r\ncd");
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 1, y: 1 });
+
+    assert_eq!(t.selected_text().as_deref(), Some("ab\ncd"));
+}
+
+#[test]
+fn selected_text_skips_wide_spacer_cells() {
+    let mut t = run_size(6, 1, "A界B".as_bytes());
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 3, y: 0 });
+
+    assert_eq!(t.selected_text().as_deref(), Some("A界B"));
+}
+
+#[test]
+fn selected_text_joins_soft_wrapped_rows() {
+    let mut t = run_size(4, 2, b"abcdZ");
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 0, y: 1 });
+
+    assert_eq!(t.selected_text().as_deref(), Some("abcdZ"));
+}
+
+#[test]
 fn selection_clears_on_full_reset_and_screen_switch() {
     let mut t = run(b"\x1b[?1049h");
     t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 1, y: 0 });

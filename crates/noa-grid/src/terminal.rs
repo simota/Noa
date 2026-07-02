@@ -88,6 +88,10 @@ impl Terminal {
         self.active_mut().clear_selection();
     }
 
+    pub fn selected_text(&self) -> Option<String> {
+        self.active().selected_text()
+    }
+
     /// Resize the terminal to a new cell grid (from a window resize). Resizes
     /// every screen and updates the recorded size; soft-wrap reflow is inc≥3.
     pub fn resize(&mut self, size: GridSize) {

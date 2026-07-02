@@ -56,8 +56,18 @@ impl MacosMenu {
                 &disabled_item("noa.edit.undo", "Undo"),
                 &PredefinedMenuItem::separator(),
                 &disabled_item("noa.edit.cut", "Cut"),
-                &disabled_item("noa.edit.copy", "Copy"),
-                &disabled_item("noa.edit.paste", "Paste"),
+                &MenuItem::with_id(
+                    AppCommand::Copy.menu_id(),
+                    "Copy",
+                    true,
+                    Some(cmd_accelerator(Code::KeyC)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::Paste.menu_id(),
+                    "Paste",
+                    true,
+                    Some(cmd_accelerator(Code::KeyV)),
+                ),
                 &disabled_item("noa.edit.select-all", "Select All"),
             ],
         )?;

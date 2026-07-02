@@ -214,6 +214,49 @@ impl Screen {
         self.selection = None;
     }
 
+    pub fn selected_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        let (start, end) = selection.normalized();
+        let mut text = String::new();
+
+        for y in start.y..=end.y {
+            let row = self.row_at_storage_index(y)?;
+            let Some(row_end) = row.cells.len().checked_sub(1) else {
+                continue;
+            };
+            let start_x = if y == start.y { start.x as usize } else { 0 }.min(row_end);
+            let end_x = if y == end.y { end.x as usize } else { row_end }.min(row_end);
+
+            if y > start.y {
+                let previous_wrapped = self
+                    .row_at_storage_index(y.saturating_sub(1))
+                    .is_some_and(|previous| previous.wrapped);
+                if !previous_wrapped {
+                    text.push('\n');
+                }
+            }
+            Self::push_selected_row_text(row, start_x, end_x, &mut text);
+        }
+
+        if text.is_empty() { None } else { Some(text) }
+    }
+
+    fn push_selected_row_text(row: &Row, start_x: usize, end_x: usize, text: &mut String) {
+        let before_len = text.len();
+        for cell in &row.cells[start_x..=end_x] {
+            if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
+                continue;
+            }
+            text.push(cell.ch);
+        }
+
+        if end_x + 1 == row.cells.len() {
+            while text.len() > before_len && text.ends_with(' ') {
+                text.pop();
+            }
+        }
+    }
+
     fn clamped_viewport_point(&self, point: Point) -> Point {
         Point {
             x: point.x.min(self.cols.saturating_sub(1)),

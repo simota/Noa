@@ -4,6 +4,7 @@
 //! `wgpu`.
 
 mod app;
+mod clipboard;
 mod commands;
 mod events;
 mod input;

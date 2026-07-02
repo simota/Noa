@@ -5,6 +5,8 @@
 pub enum AppCommand {
     About,
     Preferences,
+    Copy,
+    Paste,
     CloseWindow,
     Quit,
 }
@@ -12,6 +14,8 @@ pub enum AppCommand {
 impl AppCommand {
     pub(crate) const ABOUT_MENU_ID: &'static str = "noa.app.about";
     pub(crate) const PREFERENCES_MENU_ID: &'static str = "noa.app.preferences";
+    pub(crate) const COPY_MENU_ID: &'static str = "noa.edit.copy";
+    pub(crate) const PASTE_MENU_ID: &'static str = "noa.edit.paste";
     pub(crate) const CLOSE_WINDOW_MENU_ID: &'static str = "noa.app.close-window";
     pub(crate) const QUIT_MENU_ID: &'static str = "noa.app.quit";
 
@@ -19,6 +23,8 @@ impl AppCommand {
         match self {
             AppCommand::About => Self::ABOUT_MENU_ID,
             AppCommand::Preferences => Self::PREFERENCES_MENU_ID,
+            AppCommand::Copy => Self::COPY_MENU_ID,
+            AppCommand::Paste => Self::PASTE_MENU_ID,
             AppCommand::CloseWindow => Self::CLOSE_WINDOW_MENU_ID,
             AppCommand::Quit => Self::QUIT_MENU_ID,
         }
@@ -28,6 +34,8 @@ impl AppCommand {
         match id {
             Self::ABOUT_MENU_ID => Some(Self::About),
             Self::PREFERENCES_MENU_ID => Some(Self::Preferences),
+            Self::COPY_MENU_ID => Some(Self::Copy),
+            Self::PASTE_MENU_ID => Some(Self::Paste),
             Self::CLOSE_WINDOW_MENU_ID => Some(Self::CloseWindow),
             Self::QUIT_MENU_ID => Some(Self::Quit),
             _ => None,
@@ -39,6 +47,10 @@ impl AppCommand {
             Some(Self::Quit)
         } else if character.eq_ignore_ascii_case("w") {
             Some(Self::CloseWindow)
+        } else if character.eq_ignore_ascii_case("c") {
+            Some(Self::Copy)
+        } else if character.eq_ignore_ascii_case("v") {
+            Some(Self::Paste)
         } else {
             None
         }
@@ -54,6 +66,8 @@ mod tests {
         for command in [
             AppCommand::About,
             AppCommand::Preferences,
+            AppCommand::Copy,
+            AppCommand::Paste,
             AppCommand::CloseWindow,
             AppCommand::Quit,
         ] {
@@ -71,7 +85,8 @@ mod tests {
             AppCommand::from_cmd_character("w"),
             Some(AppCommand::CloseWindow)
         );
+        assert_eq!(AppCommand::from_cmd_character("c"), Some(AppCommand::Copy));
+        assert_eq!(AppCommand::from_cmd_character("V"), Some(AppCommand::Paste));
         assert_eq!(AppCommand::from_cmd_character(","), None);
-        assert_eq!(AppCommand::from_cmd_character("c"), None);
     }
 }

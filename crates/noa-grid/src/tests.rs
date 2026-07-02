@@ -76,10 +76,30 @@ fn cup_is_one_based() {
 }
 
 #[test]
+fn cursor_down_and_forward_no_overflow_on_large_csi_params() {
+    let t = run_size(10, 5, b"\x1b[2;3H\x1b[65535B");
+    assert_eq!(t.primary.cursor.y, 4);
+    assert_eq!(t.primary.cursor.x, 2);
+
+    let t = run_size(10, 5, b"\x1b[2;3H\x1b[65535C");
+    assert_eq!(t.primary.cursor.y, 1);
+    assert_eq!(t.primary.cursor.x, 9);
+}
+
+#[test]
 fn dsr_cursor_position_reply() {
     // Move to row 3, col 5, then request DSR-6.
     let t = run(b"\x1b[3;5H\x1b[6n");
     assert_eq!(t.pending_writes, b"\x1b[3;5R");
+}
+
+#[test]
+fn take_pending_writes_drains_queue() {
+    let mut t = run(b"\x1b[3;5H\x1b[6n");
+
+    assert_eq!(t.take_pending_writes(), b"\x1b[3;5R");
+    assert!(t.pending_writes.is_empty());
+    assert!(t.take_pending_writes().is_empty());
 }
 
 #[test]

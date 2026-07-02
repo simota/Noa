@@ -225,7 +225,7 @@ pub(crate) fn handle_clipboard_osc(
 }
 
 fn osc52_targets_clipboard(target: &[u8]) -> bool {
-    target.is_empty() || target.iter().any(|&b| b == b'c')
+    target.is_empty() || target.contains(&b'c')
 }
 
 fn push_osc52_reply(pending_writes: &mut Vec<u8>, target: &[u8], encoded: &[u8]) {

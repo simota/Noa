@@ -988,14 +988,18 @@ impl Screen {
         self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
-        self.cursor.y = (self.cursor.y + n).min(self.region.bottom);
+        self.cursor.y = self.cursor.y.saturating_add(n).min(self.region.bottom);
     }
 
     pub fn cursor_forward(&mut self, n: u16) {
         self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
-        self.cursor.x = (self.cursor.x + n).min(self.cols.saturating_sub(1));
+        self.cursor.x = self
+            .cursor
+            .x
+            .saturating_add(n)
+            .min(self.cols.saturating_sub(1));
     }
 
     pub fn cursor_backward(&mut self, n: u16) {

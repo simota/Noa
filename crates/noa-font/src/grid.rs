@@ -11,7 +11,7 @@ use crate::face::{FontStack, Metrics, load_font_stack};
 use crate::raster::rasterize;
 use crate::{FontError, GlyphInfo, GlyphKey};
 
-/// Default atlas dimensions (R8). Grows are a future task; see TODO below.
+/// Default atlas dimensions (R8). The atlas grows on demand when glyph pressure exceeds it.
 const ATLAS_DIM: u32 = 1024;
 
 /// Owns the font bytes, a swash scale context, cell metrics, the glyph atlas
@@ -46,8 +46,8 @@ impl FontGrid {
 
     /// Look up a glyph, rasterizing and packing it into the atlas on a miss.
     ///
-    /// On atlas-full the glyph is cached with a zero-sized atlas rect so the
-    /// caller still gets a valid advance and we don't retry every frame.
+    /// If the atlas cannot grow enough to fit a glyph, the returned zero-sized
+    /// rect is not cached so a future larger atlas can make the glyph visible.
     pub fn get_or_raster(&mut self, ch: char) -> GlyphInfo {
         let key = GlyphKey { ch };
         if let Some(info) = self.cache.get(&key) {
@@ -63,17 +63,18 @@ impl FontGrid {
             .expect("font bytes validated at construction");
         let glyph = rasterize(&mut self.ctx, font, glyph_id, self.px_size);
 
+        let mut cache_info = true;
         let (atlas_pos, atlas_size) = if glyph.width == 0 || glyph.height == 0 {
             ([0, 0], [0, 0])
         } else {
             match self
                 .atlas
-                .reserve_and_blit(glyph.width, glyph.height, &glyph.bitmap)
+                .reserve_and_blit_growing(glyph.width, glyph.height, &glyph.bitmap)
             {
                 Some((x, y)) => ([x, y], [glyph.width as u16, glyph.height as u16]),
                 None => {
-                    // TODO(agent): grow the atlas instead of dropping glyphs.
-                    log::warn!("glyph atlas full; dropping glyph {ch:?}");
+                    cache_info = false;
+                    log::warn!("glyph atlas full; not caching glyph {ch:?}");
                     ([0, 0], [0, 0])
                 }
             }
@@ -85,7 +86,9 @@ impl FontGrid {
             bearing: [glyph.bearing_x as i16, glyph.bearing_y as i16],
             advance: glyph.advance,
         };
-        self.cache.insert(key, info);
+        if cache_info {
+            self.cache.insert(key, info);
+        }
         info
     }
 
@@ -152,7 +155,10 @@ mod tests {
             "'M' should rasterize to a non-empty atlas region: {:?}",
             info.atlas_size
         );
-        assert!(grid.take_atlas_dirty(), "rastering 'M' should dirty the atlas");
+        assert!(
+            grid.take_atlas_dirty(),
+            "rastering 'M' should dirty the atlas"
+        );
         assert!(!grid.take_atlas_dirty(), "dirty flag should clear");
 
         // Cache hit: same info, no new dirty.
@@ -186,5 +192,51 @@ mod tests {
             grid.take_atlas_dirty(),
             "rastering '日' should dirty the atlas"
         );
+    }
+
+    #[test]
+    fn atlas_growth_keeps_glyphs_visible_after_initial_atlas_is_exceeded() {
+        let mut grid = match FontGrid::new(220.0) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+        let initial_size = grid.atlas_size();
+        let mut rastered = 0;
+
+        for ch in large_visible_glyph_set() {
+            if !grid.has_glyph(ch) {
+                continue;
+            }
+
+            let info = grid.get_or_raster(ch);
+            assert!(
+                info.atlas_size[0] > 0 && info.atlas_size[1] > 0,
+                "{ch:?} should stay visible after atlas pressure: {:?}",
+                info.atlas_size
+            );
+            rastered += 1;
+
+            if grid.atlas_size() != initial_size {
+                return;
+            }
+        }
+
+        panic!(
+            "test did not raster enough glyphs to exceed initial atlas {initial_size:?}; rastered {rastered}"
+        );
+    }
+
+    fn large_visible_glyph_set() -> impl Iterator<Item = char> {
+        ('!'..='~')
+            .chain('\u{00A1}'..='\u{00AC}')
+            .chain('\u{00AE}'..='\u{017F}')
+            .chain('\u{0370}'..='\u{03FF}')
+            .chain('\u{0400}'..='\u{04FF}')
+            .chain('\u{3041}'..='\u{3096}')
+            .chain('\u{30A1}'..='\u{30FA}')
+            .chain('\u{4E00}'..='\u{4E80}')
     }
 }

@@ -89,101 +89,10 @@ impl Renderer {
     /// Rebuild the CPU instance list from a snapshot, re-rastering any glyphs
     /// not yet in the atlas and re-uploading the atlas texture if it grew.
     pub fn rebuild_cells(&mut self, snap: &FrameSnapshot, font: &mut FontGrid, theme: &Theme) {
-        let metrics = font.metrics();
-        self.cell_size = (metrics.cell_w, metrics.cell_h);
-        self.clear_color = theme.default_bg_with_colors(&snap.colors);
-
-        self.instances.clear();
-        let mut bg_instances = Vec::new();
-        let mut glyph_instances = Vec::new();
-
-        for (row_idx, row) in snap.rows.iter().enumerate() {
-            let y = row_idx as u16;
-            for (col_idx, cell) in row.cells.iter().enumerate() {
-                let x = col_idx as u16;
-                let selected = snap.is_selected(x, y);
-                let active_search = snap.is_active_search_match(x, y);
-                let search_match = snap.is_search_match(x, y);
-
-                let inverse = cell.attrs.contains(CellAttrs::INVERSE);
-                let (fg_color, bg_color) = if inverse {
-                    (cell.bg, cell.fg)
-                } else {
-                    (cell.fg, cell.bg)
-                };
-
-                // Background quad: skip when it's the plain default bg (the
-                // clear color already fills that), unless inverted.
-                let bg_is_default = matches!(bg_color, Color::Default) && !inverse;
-                if selected || active_search || search_match || !bg_is_default {
-                    let bg = if selected {
-                        theme.selection_bg()
-                    } else if active_search {
-                        theme.active_search_bg()
-                    } else if search_match {
-                        theme.search_bg()
-                    } else {
-                        theme.resolve_with_colors(bg_color, false, &snap.colors)
-                    };
-                    bg_instances.push(CellInstance {
-                        glyph_pos: [0, 0],
-                        glyph_size: [0, 0],
-                        bearing: [0, 0],
-                        grid_pos: [x, y],
-                        color: to_u8_color(bg),
-                        flags: 0,
-                    });
-                }
-
-                // Glyph quad: skip blanks and invisible text.
-                let invisible = cell.attrs.contains(CellAttrs::INVISIBLE);
-                let wide_spacer = cell.attrs.contains(CellAttrs::WIDE_SPACER);
-                if cell.ch != ' ' && !invisible && !wide_spacer {
-                    let glyph = font.get_or_raster(cell.ch);
-                    if glyph.atlas_size[0] > 0 && glyph.atlas_size[1] > 0 {
-                        let fg = if selected {
-                            theme.selection_fg()
-                        } else if active_search {
-                            theme.active_search_fg()
-                        } else if search_match {
-                            theme.search_fg()
-                        } else {
-                            theme.resolve_with_colors(fg_color, true, &snap.colors)
-                        };
-                        glyph_instances.push(CellInstance {
-                            glyph_pos: glyph.atlas_pos,
-                            glyph_size: glyph.atlas_size,
-                            bearing: glyph_cell_bearing(metrics, glyph.bearing),
-                            grid_pos: [x, y],
-                            color: to_u8_color(fg),
-                            flags: CellInstance::FLAG_GLYPH,
-                        });
-                    }
-                }
-            }
-        }
-        self.instances.extend(bg_instances);
-        self.instances.extend(glyph_instances);
-
-        // Block cursor.
-        if snap.cursor.visible {
-            let fg = theme.resolve_with_colors(snap.cursor.fg, true, &snap.colors);
-            let cursor_color = if snap.colors.cursor().is_some() {
-                theme.cursor_with_colors(&snap.colors)
-            } else if matches!(snap.cursor.fg, Color::Default) {
-                theme.resolve_with_colors(Color::Default, true, &snap.colors)
-            } else {
-                fg
-            };
-            self.instances.push(CellInstance {
-                glyph_pos: [0, 0],
-                glyph_size: [0, 0],
-                bearing: [0, 0],
-                grid_pos: [snap.cursor.x, snap.cursor.y],
-                color: to_u8_color(cursor_color),
-                flags: CellInstance::FLAG_CURSOR,
-            });
-        }
+        let (clear_color, cell_size) =
+            rebuild_cell_instances(&mut self.instances, snap, font, theme);
+        self.clear_color = clear_color;
+        self.cell_size = cell_size;
     }
 
     /// Draw the current instance list into `view`, uploading updated GPU
@@ -308,6 +217,107 @@ impl Renderer {
     }
 }
 
+fn rebuild_cell_instances(
+    instances: &mut Vec<CellInstance>,
+    snap: &FrameSnapshot,
+    font: &mut FontGrid,
+    theme: &Theme,
+) -> ([f32; 4], (f32, f32)) {
+    let metrics = font.metrics();
+    let clear_color = theme.default_bg_with_colors(&snap.colors);
+
+    instances.clear();
+    let mut bg_instances = Vec::new();
+    let mut glyph_instances = Vec::new();
+
+    for (row_idx, row) in snap.rows.iter().enumerate() {
+        let y = row_idx as u16;
+        for (col_idx, cell) in row.cells.iter().enumerate() {
+            let x = col_idx as u16;
+            let selected = snap.is_selected(x, y);
+            let active_search = snap.is_active_search_match(x, y);
+            let search_match = snap.is_search_match(x, y);
+            let cursor_cell = snap.cursor.visible && snap.cursor.x == x && snap.cursor.y == y;
+
+            let inverse = cell.attrs.contains(CellAttrs::INVERSE);
+            let (fg_color, bg_color) = if inverse {
+                (cell.bg, cell.fg)
+            } else {
+                (cell.fg, cell.bg)
+            };
+
+            // Background quad: skip when it's the plain default bg (the
+            // clear color already fills that), unless inverted.
+            let bg_is_default = matches!(bg_color, Color::Default) && !inverse;
+            if cursor_cell || selected || active_search || search_match || !bg_is_default {
+                let bg = if cursor_cell {
+                    if snap.colors.cursor().is_some() {
+                        theme.cursor_with_colors(&snap.colors)
+                    } else {
+                        theme.resolve_with_colors(fg_color, true, &snap.colors)
+                    }
+                } else if selected {
+                    theme.selection_bg()
+                } else if active_search {
+                    theme.active_search_bg()
+                } else if search_match {
+                    theme.search_bg()
+                } else {
+                    theme.resolve_with_colors(bg_color, false, &snap.colors)
+                };
+                bg_instances.push(CellInstance {
+                    glyph_pos: [0, 0],
+                    glyph_size: [0, 0],
+                    bearing: [0, 0],
+                    grid_pos: [x, y],
+                    color: to_u8_color(bg),
+                    flags: if cursor_cell {
+                        CellInstance::FLAG_CURSOR
+                    } else {
+                        0
+                    },
+                });
+            }
+
+            // Glyph quad: skip blanks and invisible text.
+            let invisible = cell.attrs.contains(CellAttrs::INVISIBLE);
+            let wide_spacer = cell.attrs.contains(CellAttrs::WIDE_SPACER);
+            if cell.ch != ' ' && !invisible && !wide_spacer {
+                let glyph = font.get_or_raster(cell.ch);
+                if glyph.atlas_size[0] > 0 && glyph.atlas_size[1] > 0 {
+                    let fg = if cursor_cell {
+                        theme.resolve_with_colors(bg_color, false, &snap.colors)
+                    } else if selected {
+                        theme.selection_fg()
+                    } else if active_search {
+                        theme.active_search_fg()
+                    } else if search_match {
+                        theme.search_fg()
+                    } else {
+                        theme.resolve_with_colors(fg_color, true, &snap.colors)
+                    };
+                    let mut flags = CellInstance::FLAG_GLYPH;
+                    if cursor_cell {
+                        flags |= CellInstance::FLAG_CURSOR;
+                    }
+                    glyph_instances.push(CellInstance {
+                        glyph_pos: glyph.atlas_pos,
+                        glyph_size: glyph.atlas_size,
+                        bearing: glyph_cell_bearing(metrics, glyph.bearing),
+                        grid_pos: [x, y],
+                        color: to_u8_color(fg),
+                        flags,
+                    });
+                }
+            }
+        }
+    }
+    instances.extend(bg_instances);
+    instances.extend(glyph_instances);
+
+    (clear_color, (metrics.cell_w, metrics.cell_h))
+}
+
 fn to_u8_color(c: [f32; 4]) -> [u8; 4] {
     [
         (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,
@@ -349,6 +359,8 @@ fn upload_atlas(queue: &wgpu::Queue, texture: &wgpu::Texture, data: &[u8], w: u3
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noa_core::{Color, GridSize, Rgb};
+    use noa_grid::Terminal;
 
     fn metrics(ascent: f32) -> Metrics {
         Metrics {
@@ -365,5 +377,77 @@ mod tests {
     #[test]
     fn glyph_bearing_converts_from_baseline_to_cell_top() {
         assert_eq!(glyph_cell_bearing(metrics(18.0), [2, 14]), [2, 4]);
+    }
+
+    #[test]
+    fn cursor_cell_with_glyph_generates_reversed_glyph_instance() {
+        let mut font = match FontGrid::new(14.0) {
+            Ok(font) => font,
+            Err(err) => {
+                eprintln!("skipping: no system monospace font available: {err}");
+                return;
+            }
+        };
+        let glyph = font.get_or_raster('M');
+        if glyph.atlas_size == [0, 0] {
+            eprintln!("skipping: installed monospace font did not rasterize 'M'");
+            return;
+        }
+
+        let mut terminal = Terminal::new(GridSize::new(1, 1));
+        terminal.primary.cursor.x = 0;
+        terminal.primary.cursor.y = 0;
+        terminal.primary.grid[0].cells[0].ch = 'M';
+        terminal.primary.grid[0].cells[0].fg = Color::Rgb(Rgb::new(240, 10, 20));
+        terminal.primary.grid[0].cells[0].bg = Color::Rgb(Rgb::new(2, 3, 4));
+        let snap = FrameSnapshot::from_terminal(&terminal);
+
+        let mut instances = Vec::new();
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new());
+
+        let cursor_bg_index = instances
+            .iter()
+            .position(|instance| {
+                instance.grid_pos == [0, 0]
+                    && instance.flags == CellInstance::FLAG_CURSOR
+                    && instance.glyph_size == [0, 0]
+            })
+            .expect("cursor cell should have a background cursor instance");
+        let cursor_glyph_index = instances
+            .iter()
+            .position(|instance| {
+                instance.grid_pos == [0, 0]
+                    && instance.flags & CellInstance::FLAG_CURSOR != 0
+                    && instance.flags & CellInstance::FLAG_GLYPH != 0
+            })
+            .expect("cursor cell glyph must be retained as a cursor glyph instance");
+        assert!(
+            cursor_bg_index < cursor_glyph_index,
+            "cursor background must be emitted before the glyph so it does not cover text"
+        );
+        assert_eq!(
+            instances[cursor_bg_index].color,
+            [240, 10, 20, 255],
+            "cursor background should use the cell foreground"
+        );
+        let cursor_glyph = instances[cursor_glyph_index];
+
+        assert_ne!(
+            cursor_glyph.glyph_size,
+            [0, 0],
+            "cursor glyph instance must sample the atlas instead of becoming a blank quad"
+        );
+        assert_eq!(
+            cursor_glyph.color,
+            [2, 3, 4, 255],
+            "cursor glyph color should use the cell background"
+        );
+        assert_eq!(
+            instances
+                .last()
+                .map(|instance| instance.flags & CellInstance::FLAG_GLYPH),
+            Some(CellInstance::FLAG_GLYPH),
+            "the final cursor-cell instance must not be an opaque blank cursor quad"
+        );
     }
 }

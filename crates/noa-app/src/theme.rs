@@ -5,11 +5,6 @@
 
 pub use noa_render::Theme;
 
-/// The default inc-1 theme.
-pub fn default_theme() -> Theme {
-    resolve_theme(None)
-}
-
 /// Resolve a config-selected theme name into the renderer theme.
 pub fn resolve_theme(name: Option<&str>) -> Theme {
     let Some(name) = name else {
@@ -52,12 +47,12 @@ mod tests {
 
     #[test]
     fn resolve_theme_none_uses_default_theme() {
-        assert_theme_eq(&resolve_theme(None), &default_theme());
+        assert_theme_eq(&resolve_theme(None), &Theme::default());
     }
 
     #[test]
     fn resolve_theme_unknown_theme_falls_back_to_default() {
-        assert_theme_eq(&resolve_theme(Some("NoSuchTheme")), &default_theme());
+        assert_theme_eq(&resolve_theme(Some("NoSuchTheme")), &Theme::default());
     }
 
     #[test]
@@ -119,7 +114,7 @@ mod tests {
 
     #[test]
     fn search_colors_remain_default_when_vendor_theme_is_selected() {
-        let default = default_theme();
+        let default = Theme::default();
         let theme = resolve_theme(Some("3024 Day"));
 
         assert_eq!(theme.search_fg, default.search_fg);

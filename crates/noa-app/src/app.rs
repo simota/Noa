@@ -38,6 +38,7 @@ pub struct AppConfig {
     pub cols: u16,
     pub rows: u16,
     pub font_size: f32,
+    pub theme: Option<String>,
 }
 
 /// App-wide GPU and glyph state shared by every tab/window.
@@ -280,7 +281,7 @@ impl App {
                 device,
                 queue,
                 font: first_font.expect("first tab must initialize the font"),
-                theme: crate::theme::default_theme(),
+                theme: crate::theme::resolve_theme(self.config.theme.as_deref()),
             });
             surface
         } else {

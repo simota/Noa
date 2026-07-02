@@ -1,7 +1,7 @@
 //! [`Renderer`] — owns the GPU pipeline, the font atlas texture, and the
 //! instance buffers; rebuilds them from a [`crate::FrameSnapshot`] and draws.
 
-use noa_core::{CellAttrs, Color, PixelSize};
+use noa_core::{CellAttrs, Color, GridPadding, PixelSize};
 use noa_font::{FontGrid, Metrics};
 
 use crate::instance::{CellInstance, Uniforms, orthographic_projection};
@@ -22,6 +22,7 @@ pub struct Renderer {
     instances: Vec<CellInstance>,
     viewport: PixelSize,
     cell_size: (f32, f32),
+    grid_padding: GridPadding,
     clear_color: [f32; 4],
     target_format_is_srgb: bool,
     atlas_seen_generation: u64,
@@ -34,6 +35,7 @@ impl Renderer {
         queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
         font: &mut FontGrid,
+        grid_padding: GridPadding,
     ) -> anyhow::Result<Renderer> {
         let cell = CellPipeline::new(device, format);
 
@@ -79,6 +81,7 @@ impl Renderer {
             instances: Vec::new(),
             viewport: PixelSize { w: 0, h: 0 },
             cell_size: (metrics.cell_w, metrics.cell_h),
+            grid_padding,
             clear_color: [0.0, 0.0, 0.0, 1.0],
             target_format_is_srgb: format.is_srgb(),
             atlas_seen_generation,
@@ -214,15 +217,25 @@ impl Renderer {
         let (cell_w, cell_h) = self.cell_size;
         let width = self.viewport.w as f32;
         let height = self.viewport.h as f32;
+        let content_width = (width - self.grid_padding.horizontal()).max(0.0);
+        let content_height = (height - self.grid_padding.vertical()).max(0.0);
         let uniforms = Uniforms {
             projection: orthographic_projection(width.max(1.0), height.max(1.0)),
             screen_size: [width, height],
             cell_size: [cell_w, cell_h],
             grid_size: [
-                if cell_w > 0.0 { width / cell_w } else { 0.0 },
-                if cell_h > 0.0 { height / cell_h } else { 0.0 },
+                if cell_w > 0.0 {
+                    content_width / cell_w
+                } else {
+                    0.0
+                },
+                if cell_h > 0.0 {
+                    content_height / cell_h
+                } else {
+                    0.0
+                },
             ],
-            grid_padding: [0.0, 0.0, 0.0, 0.0],
+            grid_padding: self.grid_padding.as_uniform(),
             cursor_pos: [0.0, 0.0],
             cursor_color: [1.0, 1.0, 1.0, 1.0],
             bg_color: self.clear_color,

@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use noa_core::{GridSize, Point};
+use noa_core::{GridPadding, GridSize, Point};
 use noa_grid::modes::MouseTracking;
 use winit::event::{ElementState, MouseButton};
 use winit::keyboard::ModifiersState;
@@ -146,9 +146,10 @@ pub fn physical_position_to_grid_point(
     cell_w: f32,
     cell_h: f32,
     grid_size: GridSize,
+    padding: GridPadding,
 ) -> Point {
-    let col = coord_to_cell(x, cell_w, grid_size.cols);
-    let row = coord_to_cell(y, cell_h, grid_size.rows);
+    let col = coord_to_cell(x - f64::from(padding.left), cell_w, grid_size.cols);
+    let row = coord_to_cell(y - f64::from(padding.top), cell_h, grid_size.rows);
     Point { x: col, y: row }
 }
 
@@ -255,17 +256,35 @@ mod tests {
 
     #[test]
     fn physical_position_maps_to_clamped_grid_cell() {
+        let padding = GridPadding::ZERO;
+        let grid_size = GridSize::new(3, 2);
+
         assert_eq!(
-            physical_position_to_grid_point(25.0, 39.0, 10.0, 20.0, GridSize::new(3, 2)),
+            physical_position_to_grid_point(25.0, 39.0, 10.0, 20.0, grid_size, padding),
             point(2, 1)
         );
         assert_eq!(
-            physical_position_to_grid_point(-5.0, -1.0, 10.0, 20.0, GridSize::new(3, 2)),
+            physical_position_to_grid_point(-5.0, -1.0, 10.0, 20.0, grid_size, padding),
             point(0, 0)
         );
         assert_eq!(
-            physical_position_to_grid_point(500.0, 500.0, 10.0, 20.0, GridSize::new(3, 2)),
+            physical_position_to_grid_point(500.0, 500.0, 10.0, 20.0, grid_size, padding),
             point(2, 1)
+        );
+    }
+
+    #[test]
+    fn physical_position_subtracts_grid_padding_before_mapping_cells() {
+        let padding = GridPadding::new(4.0, 0.0, 0.0, 8.0);
+        let grid_size = GridSize::new(3, 3);
+
+        assert_eq!(
+            physical_position_to_grid_point(27.0, 43.0, 10.0, 20.0, grid_size, padding),
+            point(1, 1)
+        );
+        assert_eq!(
+            physical_position_to_grid_point(4.0, 2.0, 10.0, 20.0, grid_size, padding),
+            point(0, 0)
         );
     }
 

@@ -12,5 +12,5 @@ pub mod palette;
 
 pub use attrs::CellAttrs;
 pub use color::{Color, Rgb};
-pub use geometry::{CellSize, GridSize, PixelSize, Point};
+pub use geometry::{CellSize, DEFAULT_GRID_PADDING, GridPadding, GridSize, PixelSize, Point};
 pub use palette::{DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, xterm_palette, xterm_palette_color};

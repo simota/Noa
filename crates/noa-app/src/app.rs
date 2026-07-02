@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crossbeam_channel::{Sender, TrySendError};
-use noa_core::{GridSize, PixelSize, Point};
+use noa_core::{DEFAULT_GRID_PADDING, GridPadding, GridSize, PixelSize, Point};
 use noa_font::FontGrid;
 use noa_grid::{Terminal, modes::MouseTracking};
 use noa_pty::{Pty, PtyConfig};
@@ -155,6 +155,7 @@ impl App {
             gpu.font.metrics(),
             snapshot.cursor.x,
             snapshot.cursor.y,
+            DEFAULT_GRID_PADDING,
         );
 
         state
@@ -231,8 +232,12 @@ impl App {
             .map(FontGrid::metrics)
             .or_else(|| self.gpu.as_ref().map(|gpu| gpu.font.metrics()))
             .expect("font must exist before creating a tab");
-        let inner_size =
-            initial_window_logical_size(metrics, initial_grid_size, monitor_scale_factor);
+        let inner_size = initial_window_logical_size(
+            metrics,
+            initial_grid_size,
+            monitor_scale_factor,
+            DEFAULT_GRID_PADDING,
+        );
 
         let window_attrs = self.tab_window_attributes(inner_size);
         let window = Arc::new(
@@ -246,12 +251,16 @@ impl App {
         {
             *font = FontGrid::new(font_pixel_size(self.config.font_size, window_scale_factor))
                 .expect("failed to load a system monospace font");
-            let inner_size =
-                initial_window_logical_size(font.metrics(), initial_grid_size, window_scale_factor);
+            let inner_size = initial_window_logical_size(
+                font.metrics(),
+                initial_grid_size,
+                window_scale_factor,
+                DEFAULT_GRID_PADDING,
+            );
             let _ = window.request_inner_size(inner_size);
         }
         window.set_ime_allowed(true);
-        update_ime_cursor_area(&window, metrics, 0, 0);
+        update_ime_cursor_area(&window, metrics, 0, 0, DEFAULT_GRID_PADDING);
 
         let surface = if self.gpu.is_none() {
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
@@ -314,9 +323,14 @@ impl App {
             };
             surface.configure(&gpu.device, &surface_config);
 
-            let mut renderer =
-                Renderer::new(&gpu.device, &gpu.queue, surface_format, &mut gpu.font)
-                    .expect("failed to build the renderer");
+            let mut renderer = Renderer::new(
+                &gpu.device,
+                &gpu.queue,
+                surface_format,
+                &mut gpu.font,
+                DEFAULT_GRID_PADDING,
+            )
+            .expect("failed to build the renderer");
             renderer.resize(PixelSize {
                 w: surface_config.width,
                 h: surface_config.height,
@@ -626,7 +640,11 @@ impl App {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        let grid_size = grid_size_for_physical_size(state.window.inner_size(), gpu.font.metrics());
+        let grid_size = grid_size_for_physical_size(
+            state.window.inner_size(),
+            gpu.font.metrics(),
+            DEFAULT_GRID_PADDING,
+        );
         let window = state.window.clone();
         self.resize_grid(window_id, grid_size);
         window.request_redraw();
@@ -649,7 +667,7 @@ impl App {
             w: size.width,
             h: size.height,
         });
-        let grid_size = grid_size_for_physical_size(size, gpu.font.metrics());
+        let grid_size = grid_size_for_physical_size(size, gpu.font.metrics(), DEFAULT_GRID_PADDING);
         let window = state.window.clone();
         self.resize_grid(window_id, grid_size);
         window.request_redraw();
@@ -685,6 +703,7 @@ impl App {
             metrics.cell_w,
             metrics.cell_h,
             state.grid_size,
+            DEFAULT_GRID_PADDING,
         );
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.last_mouse_cell = Some(cell);
@@ -1145,10 +1164,15 @@ fn initial_window_logical_size(
     metrics: noa_font::Metrics,
     grid_size: GridSize,
     scale_factor: f64,
+    padding: GridPadding,
 ) -> LogicalSize<f64> {
     let scale_factor = scale_factor.max(f64::EPSILON) as f32;
-    let physical_w = (metrics.cell_w * grid_size.cols as f32).ceil().max(1.0);
-    let physical_h = (metrics.cell_h * grid_size.rows as f32).ceil().max(1.0);
+    let physical_w = (metrics.cell_w * grid_size.cols as f32 + padding.horizontal())
+        .ceil()
+        .max(1.0);
+    let physical_h = (metrics.cell_h * grid_size.rows as f32 + padding.vertical())
+        .ceil()
+        .max(1.0);
 
     LogicalSize::new(
         (physical_w / scale_factor) as f64,
@@ -1156,18 +1180,30 @@ fn initial_window_logical_size(
     )
 }
 
-fn grid_size_for_physical_size(size: PhysicalSize<u32>, metrics: noa_font::Metrics) -> GridSize {
-    let cols = (size.width as f32 / metrics.cell_w.max(f32::EPSILON))
+fn grid_size_for_physical_size(
+    size: PhysicalSize<u32>,
+    metrics: noa_font::Metrics,
+    padding: GridPadding,
+) -> GridSize {
+    let content_width = (size.width as f32 - padding.horizontal()).max(0.0);
+    let content_height = (size.height as f32 - padding.vertical()).max(0.0);
+    let cols = (content_width / metrics.cell_w.max(f32::EPSILON))
         .floor()
         .clamp(1.0, u16::MAX as f32) as u16;
-    let rows = (size.height as f32 / metrics.cell_h.max(f32::EPSILON))
+    let rows = (content_height / metrics.cell_h.max(f32::EPSILON))
         .floor()
         .clamp(1.0, u16::MAX as f32) as u16;
     GridSize::new(cols, rows)
 }
 
-fn update_ime_cursor_area(window: &Window, metrics: noa_font::Metrics, x: u16, y: u16) {
-    let (position, size) = ime_cursor_area(metrics, x, y);
+fn update_ime_cursor_area(
+    window: &Window,
+    metrics: noa_font::Metrics,
+    x: u16,
+    y: u16,
+    padding: GridPadding,
+) {
+    let (position, size) = ime_cursor_area(metrics, x, y, padding);
     window.set_ime_cursor_area(position, size);
 }
 
@@ -1175,10 +1211,11 @@ fn ime_cursor_area(
     metrics: noa_font::Metrics,
     x: u16,
     y: u16,
+    padding: GridPadding,
 ) -> (PhysicalPosition<i32>, PhysicalSize<u32>) {
     let position = PhysicalPosition::new(
-        (metrics.cell_w * x as f32).round().max(0.0) as i32,
-        (metrics.cell_h * y as f32).round().max(0.0) as i32,
+        (padding.left + metrics.cell_w * x as f32).round().max(0.0) as i32,
+        (padding.top + metrics.cell_h * y as f32).round().max(0.0) as i32,
     );
     let size = PhysicalSize::new(
         metrics.cell_w.ceil().max(1.0) as u32,
@@ -1219,9 +1256,14 @@ mod tests {
 
     #[test]
     fn initial_window_size_converts_physical_metrics_to_logical_size() {
-        let size = initial_window_logical_size(metrics(16.0, 32.0), GridSize::new(80, 24), 2.0);
+        let size = initial_window_logical_size(
+            metrics(16.0, 32.0),
+            GridSize::new(80, 24),
+            2.0,
+            DEFAULT_GRID_PADDING,
+        );
 
-        assert_eq!(size.width, 640.0);
+        assert_eq!(size.width, 644.0);
         assert_eq!(size.height, 384.0);
     }
 
@@ -1256,27 +1298,31 @@ mod tests {
 
     #[test]
     fn scale_factor_grid_recompute_uses_new_cell_metrics() {
-        let size = PhysicalSize::new(960, 600);
+        let size = PhysicalSize::new(968, 600);
 
         assert_eq!(
-            grid_size_for_physical_size(size, metrics(12.0, 24.0)),
+            grid_size_for_physical_size(size, metrics(12.0, 24.0), DEFAULT_GRID_PADDING),
             GridSize::new(80, 25)
         );
         assert_eq!(
-            grid_size_for_physical_size(size, metrics(16.0, 30.0)),
+            grid_size_for_physical_size(size, metrics(16.0, 30.0), DEFAULT_GRID_PADDING),
             GridSize::new(60, 20)
         );
         assert_eq!(
-            grid_size_for_physical_size(PhysicalSize::new(1, 1), metrics(16.0, 30.0)),
+            grid_size_for_physical_size(
+                PhysicalSize::new(1, 1),
+                metrics(16.0, 30.0),
+                DEFAULT_GRID_PADDING,
+            ),
             GridSize::new(1, 1)
         );
     }
 
     #[test]
     fn ime_cursor_area_tracks_grid_cell_in_physical_pixels() {
-        let (position, size) = ime_cursor_area(metrics(7.5, 15.25), 2, 3);
+        let (position, size) = ime_cursor_area(metrics(7.5, 15.25), 2, 3, DEFAULT_GRID_PADDING);
 
-        assert_eq!(position.x, 15);
+        assert_eq!(position.x, 23);
         assert_eq!(position.y, 46);
         assert_eq!(size.width, 8);
         assert_eq!(size.height, 16);

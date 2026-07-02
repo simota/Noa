@@ -12,7 +12,7 @@
 //! Both skip gracefully where no GPU adapter is available (headless CI without
 //! a Metal/Vulkan device).
 
-use noa_core::{CellAttrs, Color, PixelSize};
+use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, PixelSize};
 use noa_font::FontGrid;
 use noa_grid::{Cell, Cursor, Row, SearchState, Selection, SelectionPoint, TerminalColors};
 use noa_render::{FrameSnapshot, Renderer, Theme};
@@ -49,6 +49,7 @@ fn cell_pipeline_builds_without_validation_error() {
         &queue,
         wgpu::TextureFormat::Bgra8UnormSrgb,
         &mut font,
+        DEFAULT_GRID_PADDING,
     );
     let err = pollster::block_on(device.pop_error_scope());
 
@@ -75,6 +76,7 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         &queue,
         wgpu::TextureFormat::Bgra8UnormSrgb,
         &mut font,
+        DEFAULT_GRID_PADDING,
     )
     .expect("build renderer");
     renderer.resize(PixelSize { w: 64, h: 32 });
@@ -158,6 +160,7 @@ fn shared_font_atlas_syncs_to_multiple_renderers() {
         &queue,
         wgpu::TextureFormat::Bgra8UnormSrgb,
         &mut font,
+        DEFAULT_GRID_PADDING,
     )
     .expect("build first renderer");
     let mut second = Renderer::new(
@@ -165,6 +168,7 @@ fn shared_font_atlas_syncs_to_multiple_renderers() {
         &queue,
         wgpu::TextureFormat::Bgra8UnormSrgb,
         &mut font,
+        DEFAULT_GRID_PADDING,
     )
     .expect("build second renderer");
 

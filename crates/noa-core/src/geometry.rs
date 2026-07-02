@@ -27,6 +27,46 @@ pub struct PixelSize {
     pub h: u32,
 }
 
+/// Pixel padding around the terminal grid: top, right, bottom, left.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct GridPadding {
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub left: f32,
+}
+
+impl GridPadding {
+    pub const ZERO: Self = Self::new(0.0, 0.0, 0.0, 0.0);
+
+    pub const fn new(top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        Self {
+            top,
+            right,
+            bottom,
+            left,
+        }
+    }
+
+    pub fn horizontal(self) -> f32 {
+        self.left + self.right
+    }
+
+    pub fn vertical(self) -> f32 {
+        self.top + self.bottom
+    }
+
+    pub fn as_uniform(self) -> [f32; 4] {
+        [self.top, self.right, self.bottom, self.left]
+    }
+}
+
+/// Default grid padding in physical pixels.
+///
+/// The left inset keeps column zero from visually touching the window edge,
+/// while preserving the existing top alignment from row zero.
+pub const DEFAULT_GRID_PADDING: GridPadding = GridPadding::new(0.0, 0.0, 0.0, 8.0);
+
 /// A grid coordinate: `x` = column, `y` = row, both 0-based internally.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Point {

@@ -2,8 +2,8 @@
 //! stops, and the [`noa_vt::Handler`] implementation that mutates them.
 //!
 //! Ghostty analog: `terminal/Terminal.zig`, `Screen.zig`, `page.zig`,
-//! `modes.zig`. Inc-1 uses a flat `Vec<Row>` active area (no paged scrollback
-//! or `StyleId` interning — those land in inc≥3).
+//! `modes.zig`. The active area is still a flat `Vec<Row>`; scrollback is stored
+//! as cloned rows until paged storage, reflow, and `StyleId` interning land.
 
 pub mod cell;
 pub mod cursor;

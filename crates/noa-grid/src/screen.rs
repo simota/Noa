@@ -6,6 +6,9 @@ use crate::cell::{Cell, Row};
 use crate::cursor::{Cursor, ScrollRegion};
 use crate::tabstops::Tabstops;
 use noa_vt::{EraseDisplay, EraseLine};
+use std::collections::VecDeque;
+
+const DEFAULT_SCROLLBACK_LIMIT: usize = 10_000;
 
 pub struct Screen {
     pub rows: u16,
@@ -15,11 +18,23 @@ pub struct Screen {
     pub saved_cursor: Option<Cursor>,
     pub region: ScrollRegion,
     pub tabstops: Tabstops,
+    scrollback: VecDeque<Row>,
+    scrollback_limit: usize,
+    scrollback_enabled: bool,
+    viewport_offset: usize,
     last_printed: Option<char>,
 }
 
 impl Screen {
     pub fn new(cols: u16, rows: u16) -> Self {
+        Self::with_scrollback(cols, rows, true)
+    }
+
+    pub fn alternate(cols: u16, rows: u16) -> Self {
+        Self::with_scrollback(cols, rows, false)
+    }
+
+    fn with_scrollback(cols: u16, rows: u16, scrollback_enabled: bool) -> Self {
         Screen {
             rows,
             cols,
@@ -31,6 +46,10 @@ impl Screen {
                 bottom: rows.saturating_sub(1),
             },
             tabstops: Tabstops::new(cols),
+            scrollback: VecDeque::new(),
+            scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
+            scrollback_enabled,
+            viewport_offset: 0,
             last_printed: None,
         }
     }
@@ -38,6 +57,78 @@ impl Screen {
     /// A blank cell carrying the current pen background (background-color-erase).
     fn blank(&self) -> Cell {
         Cell::blank(self.cursor.bg)
+    }
+
+    fn follow_live_output(&mut self) {
+        self.viewport_offset = 0;
+    }
+
+    fn max_viewport_offset(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    fn clamp_viewport(&mut self) {
+        self.viewport_offset = self.viewport_offset.min(self.max_viewport_offset());
+    }
+
+    fn records_scrollback_for_region(&self, top: usize, bottom: usize) -> bool {
+        self.scrollback_enabled && top == 0 && bottom + 1 == self.rows as usize
+    }
+
+    fn push_scrollback_row(&mut self, row: Row) {
+        if !self.scrollback_enabled || self.scrollback_limit == 0 {
+            return;
+        }
+        self.scrollback.push_back(row);
+        while self.scrollback.len() > self.scrollback_limit {
+            self.scrollback.pop_front();
+        }
+        self.clamp_viewport();
+    }
+
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    pub fn viewport_offset(&self) -> usize {
+        self.viewport_offset
+    }
+
+    pub fn scroll_viewport_up(&mut self, rows: usize) {
+        self.viewport_offset = self
+            .viewport_offset
+            .saturating_add(rows)
+            .min(self.max_viewport_offset());
+    }
+
+    pub fn scroll_viewport_down(&mut self, rows: usize) {
+        self.viewport_offset = self.viewport_offset.saturating_sub(rows);
+    }
+
+    pub fn scroll_viewport_to_bottom(&mut self) {
+        self.viewport_offset = 0;
+    }
+
+    pub fn visible_rows(&self) -> Vec<Row> {
+        let rows = self.rows as usize;
+        if self.viewport_offset == 0 {
+            return self.grid.clone();
+        }
+
+        let scrollback_len = self.scrollback.len();
+        let total = scrollback_len + self.grid.len();
+        let live_start = total.saturating_sub(rows);
+        let start = live_start.saturating_sub(self.viewport_offset);
+
+        (start..start + rows)
+            .map(|idx| {
+                if idx < scrollback_len {
+                    self.scrollback[idx].clone()
+                } else {
+                    self.grid[idx - scrollback_len].clone()
+                }
+            })
+            .collect()
     }
 
     /// Resize the grid to `cols`×`rows`, clamping the cursor and resetting the
@@ -51,6 +142,9 @@ impl Screen {
 
         if cols != self.cols {
             let blank = self.blank(); // exposed columns get the current erase bg
+            for row in &mut self.scrollback {
+                row.cells.resize(cols as usize, blank);
+            }
             for row in &mut self.grid {
                 row.cells.resize(cols as usize, blank);
             }
@@ -72,7 +166,15 @@ impl Screen {
             self.grid.truncate((old_rows - from_bottom) as usize);
             let from_top = remove - from_bottom;
             if from_top > 0 {
+                let drained = if self.scrollback_enabled {
+                    self.grid[..from_top as usize].to_vec()
+                } else {
+                    Vec::new()
+                };
                 self.grid.drain(0..from_top as usize);
+                for row in drained {
+                    self.push_scrollback_row(row);
+                }
                 self.cursor.y = self.cursor.y.saturating_sub(from_top);
                 if let Some(sc) = &mut self.saved_cursor {
                     sc.y = sc.y.saturating_sub(from_top);
@@ -96,12 +198,14 @@ impl Screen {
         for row in &mut self.grid {
             row.dirty = true;
         }
+        self.clamp_viewport();
     }
 
     // ── printing ───────────────────────────────────────────────────
 
     /// Print a scalar at the cursor, honoring the deferred-wrap latch.
     pub fn print(&mut self, c: char, autowrap: bool) {
+        self.follow_live_output();
         if self.cursor.pending_wrap && autowrap {
             self.grid[self.cursor.y as usize].wrapped = true;
             self.index();
@@ -131,6 +235,7 @@ impl Screen {
 
     /// Index (IND / LF without CR): down one row, scrolling at the region bottom.
     pub fn index(&mut self) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         if self.cursor.y == self.region.bottom {
             self.scroll_up_region(1);
@@ -141,6 +246,7 @@ impl Screen {
 
     /// Reverse index (RI): up one row, scrolling down at the region top.
     pub fn reverse_index(&mut self) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         if self.cursor.y == self.region.top {
             self.scroll_down_region(1);
@@ -152,6 +258,7 @@ impl Screen {
     /// Scroll the scroll region up by `n` rows (top rows discarded; inc-1 has
     /// no scrollback retention — `PageList` lands in inc≥3).
     pub fn scroll_up_region(&mut self, n: u16) {
+        self.follow_live_output();
         let (top, bottom) = (self.region.top as usize, self.region.bottom as usize);
         if bottom < top {
             return;
@@ -161,6 +268,11 @@ impl Screen {
         if n == 0 {
             return;
         }
+        let leaving = if self.records_scrollback_for_region(top, bottom) {
+            self.grid[top..top + n].to_vec()
+        } else {
+            Vec::new()
+        };
         let blank = self.blank();
         self.grid[top..=bottom].rotate_left(n);
         for r in &mut self.grid[(bottom + 1 - n)..=bottom] {
@@ -169,10 +281,14 @@ impl Screen {
         for r in &mut self.grid[top..=bottom] {
             r.dirty = true;
         }
+        for row in leaving {
+            self.push_scrollback_row(row);
+        }
     }
 
     /// Scroll the scroll region down by `n` rows (bottom rows discarded).
     pub fn scroll_down_region(&mut self, n: u16) {
+        self.follow_live_output();
         let (top, bottom) = (self.region.top as usize, self.region.bottom as usize);
         if bottom < top {
             return;
@@ -195,56 +311,66 @@ impl Screen {
     // ── horizontal / absolute motion ────────────────────────────────
 
     pub fn carriage_return(&mut self) {
+        self.follow_live_output();
         self.cursor.x = 0;
         self.cursor.pending_wrap = false;
     }
 
     pub fn backspace(&mut self) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         self.cursor.x = self.cursor.x.saturating_sub(1);
     }
 
     pub fn cursor_up(&mut self, n: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
         self.cursor.y = self.cursor.y.saturating_sub(n).max(self.region.top);
     }
 
     pub fn cursor_down(&mut self, n: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
         self.cursor.y = (self.cursor.y + n).min(self.region.bottom);
     }
 
     pub fn cursor_forward(&mut self, n: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
         self.cursor.x = (self.cursor.x + n).min(self.cols.saturating_sub(1));
     }
 
     pub fn cursor_backward(&mut self, n: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
         self.cursor.x = self.cursor.x.saturating_sub(n);
     }
 
     pub fn cursor_position(&mut self, row: u16, col: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         self.cursor.y = row.saturating_sub(1).min(self.rows.saturating_sub(1));
         self.cursor.x = col.saturating_sub(1).min(self.cols.saturating_sub(1));
     }
 
     pub fn cursor_col_abs(&mut self, col: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         self.cursor.x = col.saturating_sub(1).min(self.cols.saturating_sub(1));
     }
 
     pub fn cursor_row_abs(&mut self, row: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         self.cursor.y = row.saturating_sub(1).min(self.rows.saturating_sub(1));
     }
 
     pub fn tab(&mut self, n: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         for _ in 0..n.max(1) {
             self.cursor.x = self.tabstops.next(self.cursor.x, self.cols);
@@ -252,6 +378,7 @@ impl Screen {
     }
 
     pub fn tab_back(&mut self, n: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         for _ in 0..n.max(1) {
             self.cursor.x = self.tabstops.prev(self.cursor.x);
@@ -259,14 +386,17 @@ impl Screen {
     }
 
     pub fn set_tab_stop(&mut self) {
+        self.follow_live_output();
         self.tabstops.set(self.cursor.x);
     }
 
     pub fn clear_tab_stop(&mut self) {
+        self.follow_live_output();
         self.tabstops.clear(self.cursor.x);
     }
 
     pub fn clear_all_tab_stops(&mut self) {
+        self.follow_live_output();
         self.tabstops.clear_all();
     }
 
@@ -283,6 +413,7 @@ impl Screen {
     // ── erase ────────────────────────────────────────────────────────
 
     pub fn erase_display(&mut self, mode: EraseDisplay) {
+        self.follow_live_output();
         let blank = self.blank();
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
         match mode {
@@ -309,11 +440,15 @@ impl Screen {
                     r.clear(blank);
                 }
             }
-            EraseDisplay::Scrollback => {} // inc≥3
+            EraseDisplay::Scrollback => {
+                self.scrollback.clear();
+                self.viewport_offset = 0;
+            }
         }
     }
 
     pub fn erase_line(&mut self, mode: EraseLine) {
+        self.follow_live_output();
         let blank = self.blank();
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
         let row = &mut self.grid[y];
@@ -340,6 +475,7 @@ impl Screen {
     // ── edit ─────────────────────────────────────────────────────────
 
     pub fn insert_blank_chars(&mut self, n: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let blank = self.blank();
         let x = self.cursor.x as usize;
@@ -355,6 +491,7 @@ impl Screen {
     }
 
     pub fn delete_chars(&mut self, n: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let blank = self.blank();
         let x = self.cursor.x as usize;
@@ -370,6 +507,7 @@ impl Screen {
     }
 
     pub fn erase_chars(&mut self, n: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let blank = self.blank();
         let x = self.cursor.x as usize;
@@ -384,6 +522,7 @@ impl Screen {
     }
 
     pub fn insert_lines(&mut self, n: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         if self.cursor.y < self.region.top || self.cursor.y > self.region.bottom {
             return;
@@ -403,6 +542,7 @@ impl Screen {
     }
 
     pub fn delete_lines(&mut self, n: u16) {
+        self.follow_live_output();
         self.cursor.pending_wrap = false;
         if self.cursor.y < self.region.top || self.cursor.y > self.region.bottom {
             return;

@@ -43,6 +43,26 @@ impl Terminal {
         }
     }
 
+    pub fn scrollback_len(&self) -> usize {
+        self.active().scrollback_len()
+    }
+
+    pub fn viewport_offset(&self) -> usize {
+        self.active().viewport_offset()
+    }
+
+    pub fn scroll_viewport_up(&mut self, rows: usize) {
+        self.active_mut().scroll_viewport_up(rows);
+    }
+
+    pub fn scroll_viewport_down(&mut self, rows: usize) {
+        self.active_mut().scroll_viewport_down(rows);
+    }
+
+    pub fn scroll_viewport_to_bottom(&mut self) {
+        self.active_mut().scroll_viewport_to_bottom();
+    }
+
     /// Resize the terminal to a new cell grid (from a window resize). Resizes
     /// every screen and updates the recorded size; soft-wrap reflow is inc≥3.
     pub fn resize(&mut self, size: GridSize) {
@@ -96,7 +116,8 @@ impl Terminal {
         if self.active_is_alt {
             let cols = self.size.cols;
             let rows = self.size.rows;
-            self.alt.get_or_insert_with(|| Screen::new(cols, rows))
+            self.alt
+                .get_or_insert_with(|| Screen::alternate(cols, rows))
         } else {
             &mut self.primary
         }
@@ -104,7 +125,7 @@ impl Terminal {
 
     fn enter_alt_screen(&mut self, clear: bool) {
         if clear || self.alt.is_none() {
-            let mut alt = Screen::new(self.size.cols, self.size.rows);
+            let mut alt = Screen::alternate(self.size.cols, self.size.rows);
             alt.cursor.visible = self.modes.cursor_visible();
             self.alt = Some(alt);
         } else if let Some(alt) = &mut self.alt {
@@ -116,12 +137,13 @@ impl Terminal {
     fn leave_alt_screen(&mut self, restore_cursor: bool, clear_alt: bool) {
         let was_alt = self.active_is_alt;
         self.active_is_alt = false;
+        self.primary.scroll_viewport_to_bottom();
         self.primary.cursor.visible = self.modes.cursor_visible();
         if restore_cursor {
             self.primary.restore_cursor();
         }
         if clear_alt && was_alt {
-            let mut alt = Screen::new(self.size.cols, self.size.rows);
+            let mut alt = Screen::alternate(self.size.cols, self.size.rows);
             alt.cursor.visible = self.modes.cursor_visible();
             self.alt = Some(alt);
         }

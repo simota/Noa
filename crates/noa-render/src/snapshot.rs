@@ -19,11 +19,42 @@ impl FrameSnapshot {
     /// Clone the active screen's rows + cursor out of `terminal`.
     pub fn from_terminal(terminal: &Terminal) -> Self {
         let screen = terminal.active();
+        let mut cursor = screen.cursor;
+        if screen.viewport_offset() > 0 {
+            cursor.visible = false;
+        }
         FrameSnapshot {
-            rows: screen.grid.clone(),
-            cursor: screen.cursor,
+            rows: screen.visible_rows(),
+            cursor,
             cols: screen.cols,
             rows_n: screen.rows,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noa_core::GridSize;
+    use noa_grid::Terminal;
+
+    fn put(term: &mut Terminal, y: usize, ch: char) {
+        term.primary.grid[y].cells[0].ch = ch;
+    }
+
+    #[test]
+    fn snapshot_uses_viewport_rows_and_hides_live_cursor() {
+        let mut term = Terminal::new(GridSize::new(2, 2));
+        put(&mut term, 0, 'A');
+        put(&mut term, 1, 'B');
+        term.primary.scroll_up_region(1);
+        put(&mut term, 1, 'C');
+        term.scroll_viewport_up(1);
+
+        let snap = FrameSnapshot::from_terminal(&term);
+
+        assert_eq!(snap.rows[0].cells[0].ch, 'A');
+        assert_eq!(snap.rows[1].cells[0].ch, 'B');
+        assert!(!snap.cursor.visible);
     }
 }

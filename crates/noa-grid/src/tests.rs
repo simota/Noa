@@ -7,7 +7,11 @@ use noa_vt::Stream;
 
 /// Feed `bytes` through a fresh 80×24 terminal and return the final state.
 fn run(bytes: &[u8]) -> Terminal {
-    let mut t = Terminal::new(GridSize::new(80, 24));
+    run_size(80, 24, bytes)
+}
+
+fn run_size(cols: u16, rows: u16, bytes: &[u8]) -> Terminal {
+    let mut t = Terminal::new(GridSize::new(cols, rows));
     let mut s = Stream::new();
     s.feed(bytes, &mut t);
     t
@@ -22,6 +26,10 @@ fn row_text(t: &Terminal, y: usize, width: usize) -> String {
         .iter()
         .map(|c| c.ch)
         .collect()
+}
+
+fn rows_text(rows: &[crate::cell::Row], y: usize, width: usize) -> String {
+    rows[y].cells[..width].iter().map(|c| c.ch).collect()
 }
 
 #[test]
@@ -306,6 +314,95 @@ fn full_reset_leaves_alternate_screen_and_clears_state() {
     assert!(t.alt.is_none());
     assert_eq!(cell(&t, 0, 0).ch, 'Z');
     assert_eq!(cell(&t, 1, 0).ch, ' ');
+}
+
+#[test]
+fn scrollback_records_full_screen_scrolls() {
+    let t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+
+    assert_eq!(t.scrollback_len(), 1);
+    assert_eq!(row_text(&t, 0, 1), "B");
+    assert_eq!(row_text(&t, 1, 1), "C");
+    assert_eq!(row_text(&t, 2, 1), "D");
+}
+
+#[test]
+fn partial_scroll_region_does_not_record_scrollback() {
+    let t = run_size(5, 4, b"\x1b[2;4r\x1b[4;1HA\r\n");
+
+    assert_eq!(t.scrollback_len(), 0);
+}
+
+#[test]
+fn viewport_can_show_scrollback_and_return_to_live() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+
+    t.scroll_viewport_up(1);
+    assert_eq!(t.viewport_offset(), 1);
+    let rows = t.active().visible_rows();
+    assert_eq!(rows_text(&rows, 0, 1), "A");
+    assert_eq!(rows_text(&rows, 1, 1), "B");
+    assert_eq!(rows_text(&rows, 2, 1), "C");
+
+    t.scroll_viewport_down(1);
+    assert_eq!(t.viewport_offset(), 0);
+    let rows = t.active().visible_rows();
+    assert_eq!(rows_text(&rows, 0, 1), "B");
+    assert_eq!(rows_text(&rows, 1, 1), "C");
+    assert_eq!(rows_text(&rows, 2, 1), "D");
+}
+
+#[test]
+fn output_returns_viewport_to_live_bottom() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+    t.scroll_viewport_up(1);
+
+    let mut s = Stream::new();
+    s.feed(b"E", &mut t);
+
+    assert_eq!(t.viewport_offset(), 0);
+    assert_eq!(row_text(&t, 2, 2), "DE");
+}
+
+#[test]
+fn erase_display_scrollback_clears_history_only() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+    t.scroll_viewport_up(1);
+
+    let mut s = Stream::new();
+    s.feed(b"\x1b[3J", &mut t);
+
+    assert_eq!(t.scrollback_len(), 0);
+    assert_eq!(t.viewport_offset(), 0);
+    assert_eq!(row_text(&t, 0, 1), "B");
+    assert_eq!(row_text(&t, 1, 1), "C");
+    assert_eq!(row_text(&t, 2, 1), "D");
+}
+
+#[test]
+fn alternate_screen_does_not_record_scrollback() {
+    let t = run_size(5, 3, b"\x1b[?1049hA\r\nB\r\nC\r\nD");
+
+    assert!(t.active_is_alt);
+    assert_eq!(t.scrollback_len(), 0);
+    assert_eq!(t.primary.scrollback_len(), 0);
+}
+
+#[test]
+fn resize_shrink_rows_moves_top_drained_primary_rows_to_scrollback() {
+    let mut t = run_size(5, 5, b"\x1b[5;1HE");
+    t.primary.grid[0].cells[0].ch = 'A';
+    t.primary.grid[1].cells[0].ch = 'B';
+    t.primary.grid[2].cells[0].ch = 'C';
+
+    t.resize(GridSize::new(5, 3));
+
+    assert_eq!(t.scrollback_len(), 2);
+    t.scroll_viewport_up(2);
+    let rows = t.active().visible_rows();
+    assert_eq!(rows_text(&rows, 0, 1), "A");
+    assert_eq!(rows_text(&rows, 1, 1), "B");
+    assert_eq!(rows_text(&rows, 2, 1), "C");
 }
 
 #[test]

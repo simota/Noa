@@ -1370,6 +1370,7 @@ dependencies = [
  "noa-grid",
  "noa-pty",
  "noa-render",
+ "noa-theme",
  "noa-vt",
  "pollster",
  "raw-window-handle",

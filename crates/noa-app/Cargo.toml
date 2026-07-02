@@ -11,6 +11,7 @@ noa-grid.workspace = true
 noa-font.workspace = true
 noa-render.workspace = true
 noa-pty.workspace = true
+noa-theme.workspace = true
 
 winit.workspace = true
 wgpu.workspace = true

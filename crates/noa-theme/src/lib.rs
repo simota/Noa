@@ -58,6 +58,19 @@ mod tests {
     }
 
     #[test]
+    fn codegen_script_derives_missing_selection_and_cursor_from_defaults() {
+        let script = include_str!("../../../scripts/gen-themes");
+
+        assert!(script.contains(r#"cursor = values.get("cursor-color", default_fg)"#));
+        assert!(
+            script.contains(r#"selection_bg = values.get("selection-background", default_fg)"#)
+        );
+        assert!(
+            script.contains(r#"selection_fg = values.get("selection-foreground", default_bg)"#)
+        );
+    }
+
+    #[test]
     fn generated_catalog_matches_vendor_snapshot_size() {
         assert_eq!(THEMES.len(), 574);
     }

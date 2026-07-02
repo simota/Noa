@@ -18,6 +18,7 @@ noa-render = { path = "crates/noa-render" }
 noa-pty    = { path = "crates/noa-pty" }
 noa-app    = { path = "crates/noa-app" }
 noa-config = { path = "crates/noa-config" }
+noa-theme  = { path = "crates/noa-theme" }
 
 # ── windowing + gpu (only noa-app / noa-render may use these) ───────
 winit             = "0.30"

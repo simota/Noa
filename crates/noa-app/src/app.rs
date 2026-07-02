@@ -512,19 +512,27 @@ impl App {
     }
 
     fn on_mouse_wheel(&mut self, delta: MouseScrollDelta) {
-        if self.sgr_mouse_tracking() == MouseTracking::Off || self.modifiers.shift_key() {
+        if self.sgr_mouse_tracking() != MouseTracking::Off && !self.modifiers.shift_key() {
+            let Some(cell) = self.last_mouse_cell else {
+                return;
+            };
+            let delta_y = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y,
+                MouseScrollDelta::PixelDelta(position) => position.y as f32,
+            };
+            if let Some(bytes) = mouse::encode_sgr_mouse_wheel(delta_y, cell, self.modifiers) {
+                self.write_pty_bytes(&bytes);
+            }
             return;
         }
 
-        let Some(cell) = self.last_mouse_cell else {
-            return;
-        };
-        let delta_y = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y,
-            MouseScrollDelta::PixelDelta(position) => position.y as f32,
-        };
-        if let Some(bytes) = mouse::encode_sgr_mouse_wheel(delta_y, cell, self.modifiers) {
-            self.write_pty_bytes(&bytes);
+        let cell_h = self
+            .graphics
+            .as_ref()
+            .map(|graphics| graphics.font.metrics().cell_h)
+            .unwrap_or(1.0);
+        if let Some(scroll) = mouse_wheel_viewport_scroll(delta, cell_h) {
+            self.scroll_mouse_wheel_viewport(scroll);
         }
     }
 
@@ -542,6 +550,21 @@ impl App {
         apply_viewport_scroll(
             &mut terminal.lock().expect("terminal mutex poisoned"),
             self.grid_size,
+            scroll,
+        );
+
+        if let Some(graphics) = &self.graphics {
+            graphics.window.request_redraw();
+        }
+    }
+
+    fn scroll_mouse_wheel_viewport(&mut self, scroll: MouseWheelViewportScroll) {
+        let Some(terminal) = &self.terminal else {
+            return;
+        };
+
+        apply_mouse_wheel_viewport_scroll(
+            &mut terminal.lock().expect("terminal mutex poisoned"),
             scroll,
         );
 
@@ -688,6 +711,43 @@ fn apply_viewport_scroll(terminal: &mut Terminal, grid_size: GridSize, scroll: V
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouseWheelViewportScroll {
+    Up(usize),
+    Down(usize),
+}
+
+fn mouse_wheel_viewport_scroll(
+    delta: MouseScrollDelta,
+    cell_height: f32,
+) -> Option<MouseWheelViewportScroll> {
+    let (delta_y, rows) = match delta {
+        MouseScrollDelta::LineDelta(_, y) => (y, y.abs().ceil() as usize),
+        MouseScrollDelta::PixelDelta(position) => {
+            let y = position.y as f32;
+            let rows = (y.abs() / cell_height.max(f32::EPSILON)).ceil() as usize;
+            (y, rows)
+        }
+    };
+
+    if !delta_y.is_finite() || delta_y == 0.0 || rows == 0 {
+        return None;
+    }
+
+    if delta_y > 0.0 {
+        Some(MouseWheelViewportScroll::Up(rows))
+    } else {
+        Some(MouseWheelViewportScroll::Down(rows))
+    }
+}
+
+fn apply_mouse_wheel_viewport_scroll(terminal: &mut Terminal, scroll: MouseWheelViewportScroll) {
+    match scroll {
+        MouseWheelViewportScroll::Up(rows) => terminal.scroll_viewport_up(rows),
+        MouseWheelViewportScroll::Down(rows) => terminal.scroll_viewport_down(rows),
+    }
+}
+
 fn font_pixel_size(point_size: f32, scale_factor: f64) -> f32 {
     (point_size * scale_factor.max(f64::EPSILON) as f32).max(1.0)
 }
@@ -826,5 +886,47 @@ mod tests {
 
         apply_viewport_scroll(&mut terminal, grid_size, ViewportScroll::Bottom);
         assert_eq!(terminal.viewport_offset(), 0);
+    }
+
+    #[test]
+    fn mouse_wheel_delta_maps_to_viewport_scroll_rows() {
+        assert_eq!(
+            mouse_wheel_viewport_scroll(MouseScrollDelta::LineDelta(0.0, 2.0), 20.0),
+            Some(MouseWheelViewportScroll::Up(2))
+        );
+        assert_eq!(
+            mouse_wheel_viewport_scroll(MouseScrollDelta::LineDelta(0.0, -1.0), 20.0),
+            Some(MouseWheelViewportScroll::Down(1))
+        );
+        assert_eq!(
+            mouse_wheel_viewport_scroll(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 45.0)),
+                15.0,
+            ),
+            Some(MouseWheelViewportScroll::Up(3))
+        );
+        assert_eq!(
+            mouse_wheel_viewport_scroll(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -20.0)),
+                15.0,
+            ),
+            Some(MouseWheelViewportScroll::Down(2))
+        );
+        assert_eq!(
+            mouse_wheel_viewport_scroll(MouseScrollDelta::LineDelta(0.0, 0.0), 20.0),
+            None
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_viewport_scroll_moves_terminal_viewport() {
+        let grid_size = GridSize::new(5, 3);
+        let mut terminal = terminal_with_scrollback(grid_size);
+
+        apply_mouse_wheel_viewport_scroll(&mut terminal, MouseWheelViewportScroll::Up(2));
+        assert_eq!(terminal.viewport_offset(), 2);
+
+        apply_mouse_wheel_viewport_scroll(&mut terminal, MouseWheelViewportScroll::Down(1));
+        assert_eq!(terminal.viewport_offset(), 1);
     }
 }

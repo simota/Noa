@@ -95,7 +95,7 @@ CLI programs.
 | `REQ-VT-002` | Cursor and margins | Partial | Implement `DECSLRM`, `DECSCUSR`, keypad modes, and cursor style state |
 | `REQ-VT-003` | Alternate screen | Complete | Primary/alternate screen switching, cursor save/restore, and resize behavior are implemented with grid coverage |
 | `REQ-VT-004` | Scrollback and reflow | Partial | Scrollback storage, viewport, and clear-scrollback semantics are implemented; add soft-wrap reflow |
-| `REQ-VT-005` | Unicode cell width | Partial | Implement grapheme-aware width handling and wide-cell continuation behavior |
+| `REQ-VT-005` | Unicode cell width | Complete | Scalar cell width, zero-width non-advance, and wide-cell lead/spacer behavior are implemented; shaped grapheme clusters remain in `REQ-FONT-002` |
 | `REQ-VT-006` | Bracketed paste | Planned | Implement mode state, paste wrapping, and safety checks |
 | `REQ-VT-007` | OSC color/title surface | Partial | Implement OSC 4/10/11/12 query/change/reset behavior where safe |
 
@@ -220,7 +220,7 @@ Exit criteria:
   References `REQ-VT-003`.
 - [x] `IMPL-VT-004`: Add scrollback storage and viewport model. References
   `REQ-VT-004`.
-- [ ] `IMPL-VT-005`: Implement grapheme and wide-cell print behavior. References
+- [x] `IMPL-VT-005`: Implement grapheme and wide-cell print behavior. References
   `REQ-VT-005`.
 - [ ] `IMPL-VT-006`: Add bracketed paste mode and paste encoding. References
   `REQ-VT-006`.

@@ -4,7 +4,7 @@
 use noa_core::{CellAttrs, Color, PixelSize};
 use noa_font::{FontGrid, Metrics};
 
-use crate::instance::{orthographic_projection, CellInstance, Uniforms};
+use crate::instance::{CellInstance, Uniforms, orthographic_projection};
 use crate::pipeline::CellPipeline;
 use crate::snapshot::FrameSnapshot;
 use crate::theme::Theme;
@@ -91,6 +91,8 @@ impl Renderer {
         self.cell_size = (metrics.cell_w, metrics.cell_h);
 
         self.instances.clear();
+        let mut bg_instances = Vec::new();
+        let mut glyph_instances = Vec::new();
 
         for (row_idx, row) in snap.rows.iter().enumerate() {
             let y = row_idx as u16;
@@ -109,7 +111,7 @@ impl Renderer {
                 let bg_is_default = matches!(bg_color, Color::Default) && !inverse;
                 if !bg_is_default {
                     let bg = theme.resolve(bg_color, false);
-                    self.instances.push(CellInstance {
+                    bg_instances.push(CellInstance {
                         glyph_pos: [0, 0],
                         glyph_size: [0, 0],
                         bearing: [0, 0],
@@ -121,11 +123,12 @@ impl Renderer {
 
                 // Glyph quad: skip blanks and invisible text.
                 let invisible = cell.attrs.contains(CellAttrs::INVISIBLE);
-                if cell.ch != ' ' && !invisible {
+                let wide_spacer = cell.attrs.contains(CellAttrs::WIDE_SPACER);
+                if cell.ch != ' ' && !invisible && !wide_spacer {
                     let glyph = font.get_or_raster(cell.ch);
                     if glyph.atlas_size[0] > 0 && glyph.atlas_size[1] > 0 {
                         let fg = theme.resolve(fg_color, true);
-                        self.instances.push(CellInstance {
+                        glyph_instances.push(CellInstance {
                             glyph_pos: glyph.atlas_pos,
                             glyph_size: glyph.atlas_size,
                             bearing: glyph_cell_bearing(metrics, glyph.bearing),
@@ -137,6 +140,8 @@ impl Renderer {
                 }
             }
         }
+        self.instances.extend(bg_instances);
+        self.instances.extend(glyph_instances);
 
         // Block cursor.
         if snap.cursor.visible {

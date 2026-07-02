@@ -5,8 +5,10 @@
 use crate::cell::{Cell, Row};
 use crate::cursor::{Cursor, ScrollRegion};
 use crate::tabstops::Tabstops;
+use noa_core::CellAttrs;
 use noa_vt::{EraseDisplay, EraseLine};
 use std::collections::VecDeque;
+use unicode_width::UnicodeWidthChar;
 
 const DEFAULT_SCROLLBACK_LIMIT: usize = 10_000;
 
@@ -57,6 +59,52 @@ impl Screen {
     /// A blank cell carrying the current pen background (background-color-erase).
     fn blank(&self) -> Cell {
         Cell::blank(self.cursor.bg)
+    }
+
+    fn pen_attrs(&self) -> CellAttrs {
+        let mut attrs = self.cursor.attrs;
+        attrs.remove(CellAttrs::WIDE | CellAttrs::WIDE_SPACER);
+        attrs
+    }
+
+    fn print_width(c: char) -> usize {
+        c.width().unwrap_or(1).min(2)
+    }
+
+    fn clear_wide_at(row: &mut Row, x: usize, blank: Cell) {
+        if x >= row.cells.len() {
+            return;
+        }
+
+        if row.cells[x].attrs.contains(CellAttrs::WIDE_SPACER) && x > 0 {
+            row.cells[x - 1] = blank;
+        }
+        if row.cells[x].attrs.contains(CellAttrs::WIDE) && x + 1 < row.cells.len() {
+            row.cells[x + 1] = blank;
+        }
+        row.cells[x] = blank;
+    }
+
+    fn sanitize_wide_row(row: &mut Row, blank: Cell) {
+        let mut x = 0;
+        while x < row.cells.len() {
+            let attrs = row.cells[x].attrs;
+            if attrs.contains(CellAttrs::WIDE) {
+                if x + 1 >= row.cells.len()
+                    || !row.cells[x + 1].attrs.contains(CellAttrs::WIDE_SPACER)
+                {
+                    row.cells[x] = blank;
+                } else {
+                    x += 2;
+                    continue;
+                }
+            } else if attrs.contains(CellAttrs::WIDE_SPACER)
+                && (x == 0 || !row.cells[x - 1].attrs.contains(CellAttrs::WIDE))
+            {
+                row.cells[x] = blank;
+            }
+            x += 1;
+        }
     }
 
     fn follow_live_output(&mut self) {
@@ -144,9 +192,11 @@ impl Screen {
             let blank = self.blank(); // exposed columns get the current erase bg
             for row in &mut self.scrollback {
                 row.cells.resize(cols as usize, blank);
+                Self::sanitize_wide_row(row, blank);
             }
             for row in &mut self.grid {
                 row.cells.resize(cols as usize, blank);
+                Self::sanitize_wide_row(row, blank);
             }
             self.tabstops = Tabstops::new(cols);
         }
@@ -206,27 +256,86 @@ impl Screen {
     /// Print a scalar at the cursor, honoring the deferred-wrap latch.
     pub fn print(&mut self, c: char, autowrap: bool) {
         self.follow_live_output();
+        let width = Self::print_width(c);
+        if width == 0 {
+            return;
+        }
+
+        if width == 2 && self.cols < 2 {
+            let blank = self.blank();
+            let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
+            let row = &mut self.grid[y];
+            Self::clear_wide_at(row, x, blank);
+            row.dirty = true;
+            self.cursor.pending_wrap = false;
+            self.last_printed = Some(c);
+            return;
+        }
+
         if self.cursor.pending_wrap && autowrap {
             self.grid[self.cursor.y as usize].wrapped = true;
             self.index();
             self.cursor.x = 0;
             self.cursor.pending_wrap = false;
         }
+
+        if width == 2 && self.cursor.x + 1 >= self.cols {
+            if autowrap {
+                self.grid[self.cursor.y as usize].wrapped = true;
+                self.index();
+                self.cursor.x = 0;
+                self.cursor.pending_wrap = false;
+            } else {
+                let blank = self.blank();
+                let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
+                let row = &mut self.grid[y];
+                Self::clear_wide_at(row, x, blank);
+                row.dirty = true;
+                self.cursor.pending_wrap = false;
+                self.last_printed = Some(c);
+                return;
+            }
+        }
+
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
+        let blank = self.blank();
+        let fg = self.cursor.fg;
+        let bg = self.cursor.bg;
+        let attrs = self.pen_attrs();
         let cell = Cell {
             ch: c,
-            fg: self.cursor.fg,
-            bg: self.cursor.bg,
-            attrs: self.cursor.attrs,
+            fg,
+            bg,
+            attrs,
         };
         let row = &mut self.grid[y];
-        row.cells[x] = cell;
+
+        if width == 1 {
+            Self::clear_wide_at(row, x, blank);
+            row.cells[x] = cell;
+        } else {
+            Self::clear_wide_at(row, x, blank);
+            Self::clear_wide_at(row, x + 1, blank);
+
+            let mut lead = cell;
+            lead.attrs.insert(CellAttrs::WIDE);
+            let mut spacer_attrs = attrs;
+            spacer_attrs.insert(CellAttrs::WIDE_SPACER);
+            row.cells[x] = lead;
+            row.cells[x + 1] = Cell {
+                ch: ' ',
+                fg,
+                bg,
+                attrs: spacer_attrs,
+            };
+        }
         row.dirty = true;
 
-        if self.cursor.x + 1 >= self.cols {
+        if self.cursor.x + width as u16 >= self.cols {
+            self.cursor.x = self.cols - 1;
             self.cursor.pending_wrap = true; // latch; stay in the last column
         } else {
-            self.cursor.x += 1;
+            self.cursor.x += width as u16;
         }
         self.last_printed = Some(c);
     }
@@ -421,6 +530,7 @@ impl Screen {
                 for c in &mut self.grid[y].cells[x..] {
                     *c = blank;
                 }
+                Self::sanitize_wide_row(&mut self.grid[y], blank);
                 self.grid[y].dirty = true;
                 for r in &mut self.grid[y + 1..] {
                     r.clear(blank);
@@ -433,6 +543,7 @@ impl Screen {
                 for c in &mut self.grid[y].cells[..=x] {
                     *c = blank;
                 }
+                Self::sanitize_wide_row(&mut self.grid[y], blank);
                 self.grid[y].dirty = true;
             }
             EraseDisplay::Complete => {
@@ -469,6 +580,7 @@ impl Screen {
                 }
             }
         }
+        Self::sanitize_wide_row(row, blank);
         row.dirty = true;
     }
 
@@ -487,6 +599,7 @@ impl Screen {
         for c in &mut row.cells[x..x + n] {
             *c = blank;
         }
+        Self::sanitize_wide_row(row, blank);
         row.dirty = true;
     }
 
@@ -503,6 +616,7 @@ impl Screen {
         for c in &mut row.cells[self.cols as usize - n..] {
             *c = blank;
         }
+        Self::sanitize_wide_row(row, blank);
         row.dirty = true;
     }
 
@@ -518,6 +632,7 @@ impl Screen {
         for c in &mut row.cells[x..x + n] {
             *c = blank;
         }
+        Self::sanitize_wide_row(row, blank);
         row.dirty = true;
     }
 

@@ -420,6 +420,118 @@ fn utf8_scalar_stored_in_cell() {
 }
 
 #[test]
+fn wide_char_marks_lead_and_spacer() {
+    let t = run_size(6, 2, "A界B".as_bytes());
+
+    assert_eq!(row_text(&t, 0, 5), "A界 B ");
+    assert!(cell(&t, 1, 0).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 2, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert!(
+        !cell(&t, 3, 0)
+            .attrs
+            .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+    );
+    assert_eq!(t.primary.cursor.x, 4);
+}
+
+#[test]
+fn wide_char_wraps_before_last_column() {
+    let t = run_size(4, 2, "abc界Z".as_bytes());
+
+    assert_eq!(row_text(&t, 0, 4), "abc ");
+    assert!(t.primary.grid[0].wrapped);
+    assert_eq!(cell(&t, 0, 1).ch, '界');
+    assert!(cell(&t, 0, 1).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 1, 1).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert_eq!(cell(&t, 2, 1).ch, 'Z');
+    assert_eq!(t.primary.cursor.x, 3);
+    assert_eq!(t.primary.cursor.y, 1);
+}
+
+#[test]
+fn wide_char_ending_at_row_end_defers_wrap_until_next_spacing_char() {
+    let t = run_size(4, 2, "ab界Z".as_bytes());
+
+    assert_eq!(row_text(&t, 0, 4), "ab界 ");
+    assert!(cell(&t, 2, 0).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 3, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert!(t.primary.grid[0].wrapped);
+    assert_eq!(cell(&t, 0, 1).ch, 'Z');
+    assert_eq!(t.primary.cursor.x, 1);
+    assert_eq!(t.primary.cursor.y, 1);
+}
+
+#[test]
+fn narrow_overwrite_on_wide_spacer_clears_whole_wide_cell() {
+    let t = run_size(4, 1, "界\x1b[1;2HX".as_bytes());
+
+    assert_eq!(row_text(&t, 0, 4), " X  ");
+    assert!(
+        !cell(&t, 0, 0)
+            .attrs
+            .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+    );
+    assert!(
+        !cell(&t, 1, 0)
+            .attrs
+            .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+    );
+}
+
+#[test]
+fn narrow_overwrite_on_wide_lead_clears_whole_wide_cell() {
+    let t = run_size(4, 1, "界\x1b[1;1HX".as_bytes());
+
+    assert_eq!(row_text(&t, 0, 4), "X   ");
+    assert!(
+        !cell(&t, 0, 0)
+            .attrs
+            .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+    );
+    assert!(
+        !cell(&t, 1, 0)
+            .attrs
+            .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+    );
+}
+
+#[test]
+fn combining_mark_does_not_advance_cell_cursor() {
+    let t = run_size(5, 1, "e\u{301}X".as_bytes());
+
+    assert_eq!(row_text(&t, 0, 4), "eX  ");
+    assert_eq!(t.primary.cursor.x, 2);
+}
+
+#[test]
+fn combining_mark_after_pending_wrap_does_not_trigger_wrap() {
+    let t = run_size(2, 2, "ab\u{301}C".as_bytes());
+
+    assert_eq!(row_text(&t, 0, 2), "ab");
+    assert!(t.primary.grid[0].wrapped);
+    assert_eq!(cell(&t, 0, 1).ch, 'C');
+    assert_eq!(t.primary.cursor.x, 1);
+    assert_eq!(t.primary.cursor.y, 1);
+}
+
+#[test]
+fn erase_chars_sanitizes_split_wide_cell() {
+    let t = run_size(5, 1, "A界B\x1b[1;3H\x1b[X".as_bytes());
+
+    assert_eq!(row_text(&t, 0, 5), "A  B ");
+    assert!(
+        !cell(&t, 1, 0)
+            .attrs
+            .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+    );
+    assert!(
+        !cell(&t, 2, 0)
+            .attrs
+            .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+    );
+}
+
+#[test]
 fn resize_grow_preserves_content() {
     let mut t = Terminal::new(GridSize::new(80, 24));
     let mut s = Stream::new();
@@ -441,6 +553,20 @@ fn resize_shrink_cols_truncates_row_width() {
     assert_eq!(t.primary.cols, 40);
     assert_eq!(t.primary.grid[0].cells.len(), 40);
     assert!(t.primary.cursor.x < 40);
+}
+
+#[test]
+fn resize_shrink_cols_drops_orphaned_wide_lead() {
+    let mut t = run_size(4, 1, "A界".as_bytes());
+
+    t.resize(GridSize::new(2, 1));
+
+    assert_eq!(row_text(&t, 0, 2), "A ");
+    assert!(
+        !cell(&t, 1, 0)
+            .attrs
+            .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+    );
 }
 
 #[test]

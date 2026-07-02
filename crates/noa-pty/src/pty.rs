@@ -1,13 +1,19 @@
 //! [`Pty`] — owns the PTY master, spawns the child, and wires up the
 //! reader/waiter threads.
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use noa_core::GridSize;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::reader::{spawn_reader, spawn_waiter};
 use crate::writer::PtyWriter;
 use crate::{PtyError, PtyEvent, Result};
+
+const PTY_EVENT_QUEUE_CAPACITY: usize = 1024;
+
+fn pty_event_channel() -> (Sender<PtyEvent>, Receiver<PtyEvent>) {
+    crossbeam_channel::bounded(PTY_EVENT_QUEUE_CAPACITY)
+}
 
 /// Configuration for spawning a [`Pty`].
 #[derive(Debug, Clone)]
@@ -108,7 +114,7 @@ impl Pty {
             .take_writer()
             .map_err(|e| PtyError::TakeWriter(e.to_string()))?;
 
-        let (tx, event_rx) = crossbeam_channel::unbounded();
+        let (tx, event_rx) = pty_event_channel();
         spawn_reader(reader, tx.clone());
         spawn_waiter(child, tx);
 
@@ -162,6 +168,23 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn event_channel_is_bounded_for_reader_backpressure() {
+        let (tx, rx) = pty_event_channel();
+        for code in 0..PTY_EVENT_QUEUE_CAPACITY {
+            tx.try_send(PtyEvent::Exit(code as i32))
+                .expect("queue has capacity");
+        }
+
+        match tx.try_send(PtyEvent::Exit(-1)) {
+            Err(crossbeam_channel::TrySendError::Full(PtyEvent::Exit(code))) => {
+                assert_eq!(code, -1);
+            }
+            other => panic!("expected a full event queue, got {other:?}"),
+        }
+        assert_eq!(rx.len(), PTY_EVENT_QUEUE_CAPACITY);
+    }
+
+    #[test]
     fn echo_hello_then_exit() {
         // Run a shell that echoes "hello" and exits, so we exercise the same
         // spawn path the real terminal uses.
@@ -196,7 +219,10 @@ mod tests {
         }
 
         let text = String::from_utf8_lossy(&collected);
-        assert!(text.contains("hello"), "expected 'hello' in output: {text:?}");
+        assert!(
+            text.contains("hello"),
+            "expected 'hello' in output: {text:?}"
+        );
         assert!(saw_exit, "expected an Exit event");
     }
 

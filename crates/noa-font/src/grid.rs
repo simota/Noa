@@ -7,7 +7,7 @@ use swash::FontRef;
 use swash::scale::ScaleContext;
 
 use crate::atlas::Atlas;
-use crate::face::{FontData, Metrics, load_monospace};
+use crate::face::{FontStack, Metrics, load_font_stack};
 use crate::raster::rasterize;
 use crate::{FontError, GlyphInfo, GlyphKey};
 
@@ -18,7 +18,7 @@ const ATLAS_DIM: u32 = 1024;
 /// and the per-`char` glyph cache.
 pub struct FontGrid {
     /// Owned font bytes; `FontRef` borrows from here (kept for its lifetime).
-    font_data: FontData,
+    font_stack: FontStack,
     ctx: ScaleContext,
     metrics: Metrics,
     atlas: Atlas,
@@ -29,13 +29,13 @@ pub struct FontGrid {
 impl FontGrid {
     /// Discover a monospace system font and build a grid at `px_size` ppem.
     pub fn new(px_size: f32) -> Result<Self, FontError> {
-        let font_data = load_monospace()?;
+        let font_stack = load_font_stack()?;
         let metrics = {
-            let font = font_data.font_ref()?;
+            let font = font_stack.primary().font_ref()?;
             Metrics::compute(font, px_size)
         };
         Ok(Self {
-            font_data,
+            font_stack,
             ctx: ScaleContext::new(),
             metrics,
             atlas: Atlas::new(ATLAS_DIM, ATLAS_DIM),
@@ -54,11 +54,13 @@ impl FontGrid {
             return *info;
         }
 
-        // Borrow only `font_data.bytes` so `self.ctx` stays mutably borrowable.
+        let (font_index, glyph_id) = self.resolve_glyph(ch);
+
+        // Borrow only `font_stack` data so `self.ctx` stays mutably borrowable.
         // Bytes were validated in `new`, so parsing here cannot fail.
-        let font = FontRef::from_index(&self.font_data.bytes, self.font_data.index)
+        let font_data = &self.font_stack.faces()[font_index];
+        let font = FontRef::from_index(&font_data.bytes, font_data.index)
             .expect("font bytes validated at construction");
-        let glyph_id = font.charmap().map(ch);
         let glyph = rasterize(&mut self.ctx, font, glyph_id, self.px_size);
 
         let (atlas_pos, atlas_size) = if glyph.width == 0 || glyph.height == 0 {
@@ -85,6 +87,23 @@ impl FontGrid {
         };
         self.cache.insert(key, info);
         info
+    }
+
+    fn resolve_glyph(&self, ch: char) -> (usize, u16) {
+        for (font_index, font_data) in self.font_stack.faces().iter().enumerate() {
+            let font = FontRef::from_index(&font_data.bytes, font_data.index)
+                .expect("font bytes validated at construction");
+            let glyph_id = font.charmap().map(ch);
+            if glyph_id != 0 {
+                return (font_index, glyph_id);
+            }
+        }
+        (0, 0)
+    }
+
+    #[cfg(test)]
+    fn has_glyph(&self, ch: char) -> bool {
+        self.resolve_glyph(ch).1 != 0
     }
 
     /// Cell / face metrics at the configured size.
@@ -140,5 +159,32 @@ mod tests {
         let info2 = grid.get_or_raster('M');
         assert_eq!(info.atlas_pos, info2.atlas_pos);
         assert!(!grid.take_atlas_dirty());
+    }
+
+    #[test]
+    fn japanese_glyph_uses_fallback_face_when_available() {
+        let mut grid = match FontGrid::new(14.0) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+        if !grid.has_glyph('日') {
+            eprintln!("skipping: no installed font can render Japanese");
+            return;
+        }
+
+        let info = grid.get_or_raster('日');
+
+        assert!(
+            info.atlas_size[0] > 0 && info.atlas_size[1] > 0,
+            "'日' should rasterize to a non-empty atlas region: {:?}",
+            info.atlas_size
+        );
+        assert!(
+            grid.take_atlas_dirty(),
+            "rastering '日' should dirty the atlas"
+        );
     }
 }

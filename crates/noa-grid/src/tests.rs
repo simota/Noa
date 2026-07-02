@@ -17,6 +17,13 @@ fn cell(t: &Terminal, x: usize, y: usize) -> crate::cell::Cell {
     t.primary.grid[y].cells[x]
 }
 
+fn row_text(t: &Terminal, y: usize, width: usize) -> String {
+    t.primary.grid[y].cells[..width]
+        .iter()
+        .map(|c| c.ch)
+        .collect()
+}
+
 #[test]
 fn deferred_wrap_latch() {
     // 80 chars into an 80-col row: cursor parks at the last column, latched, no wrap.
@@ -134,6 +141,93 @@ fn tab_advances_to_next_stop() {
     let t = run(b"\tX");
     // First tab stop is column 8; 'X' lands there.
     assert_eq!(cell(&t, 8, 0).ch, 'X');
+}
+
+#[test]
+fn csi_tab_forward_and_backward() {
+    let t = run(b"\x1b[2IZ\x1b[20G\x1b[2ZX");
+    assert_eq!(cell(&t, 16, 0).ch, 'Z');
+    assert_eq!(cell(&t, 8, 0).ch, 'X');
+}
+
+#[test]
+fn tab_clear_current_stop() {
+    let t = run(b"\x1b[5G\x1bH\x1b[g\x1b[G\tY");
+    assert_eq!(cell(&t, 4, 0).ch, ' ');
+    assert_eq!(cell(&t, 8, 0).ch, 'Y');
+}
+
+#[test]
+fn tab_clear_all_stops() {
+    let t = run(b"\x1b[3g\tZ");
+    assert_eq!(cell(&t, 79, 0).ch, 'Z');
+}
+
+#[test]
+fn insert_blank_chars_shifts_right() {
+    let t = run(b"abcdef\x1b[3G\x1b[2@");
+    assert_eq!(row_text(&t, 0, 8), "ab  cdef");
+    assert_eq!(t.primary.cursor.x, 2);
+}
+
+#[test]
+fn delete_chars_shifts_left() {
+    let t = run(b"abcdef\x1b[3G\x1b[2P");
+    assert_eq!(row_text(&t, 0, 6), "abef  ");
+    assert_eq!(t.primary.cursor.x, 2);
+}
+
+#[test]
+fn erase_chars_keeps_cursor_position() {
+    let t = run(b"abcdef\x1b[3G\x1b[2X");
+    assert_eq!(row_text(&t, 0, 6), "ab  ef");
+    assert_eq!(t.primary.cursor.x, 2);
+}
+
+#[test]
+fn insert_lines_within_scroll_region() {
+    let t = run(b"\x1b[1;1HA\x1b[2;1HB\x1b[3;1HC\x1b[4;1HD\x1b[5;1HE\x1b[2;4r\x1b[3;1H\x1b[L");
+    assert_eq!(cell(&t, 0, 0).ch, 'A');
+    assert_eq!(cell(&t, 0, 1).ch, 'B');
+    assert_eq!(cell(&t, 0, 2).ch, ' ');
+    assert_eq!(cell(&t, 0, 3).ch, 'C');
+    assert_eq!(cell(&t, 0, 4).ch, 'E');
+}
+
+#[test]
+fn delete_lines_within_scroll_region() {
+    let t = run(b"\x1b[1;1HA\x1b[2;1HB\x1b[3;1HC\x1b[4;1HD\x1b[5;1HE\x1b[2;4r\x1b[3;1H\x1b[M");
+    assert_eq!(cell(&t, 0, 0).ch, 'A');
+    assert_eq!(cell(&t, 0, 1).ch, 'B');
+    assert_eq!(cell(&t, 0, 2).ch, 'D');
+    assert_eq!(cell(&t, 0, 3).ch, ' ');
+    assert_eq!(cell(&t, 0, 4).ch, 'E');
+}
+
+#[test]
+fn scroll_up_within_scroll_region() {
+    let t = run(b"\x1b[1;1HA\x1b[2;1HB\x1b[3;1HC\x1b[4;1HD\x1b[5;1HE\x1b[2;4r\x1b[S");
+    assert_eq!(cell(&t, 0, 0).ch, 'A');
+    assert_eq!(cell(&t, 0, 1).ch, 'C');
+    assert_eq!(cell(&t, 0, 2).ch, 'D');
+    assert_eq!(cell(&t, 0, 3).ch, ' ');
+    assert_eq!(cell(&t, 0, 4).ch, 'E');
+}
+
+#[test]
+fn scroll_down_within_scroll_region() {
+    let t = run(b"\x1b[1;1HA\x1b[2;1HB\x1b[3;1HC\x1b[4;1HD\x1b[5;1HE\x1b[2;4r\x1b[T");
+    assert_eq!(cell(&t, 0, 0).ch, 'A');
+    assert_eq!(cell(&t, 0, 1).ch, ' ');
+    assert_eq!(cell(&t, 0, 2).ch, 'B');
+    assert_eq!(cell(&t, 0, 3).ch, 'C');
+    assert_eq!(cell(&t, 0, 4).ch, 'E');
+}
+
+#[test]
+fn repeat_preceding_char() {
+    let t = run(b"ab\x1b[3b");
+    assert_eq!(row_text(&t, 0, 5), "abbbb");
 }
 
 #[test]

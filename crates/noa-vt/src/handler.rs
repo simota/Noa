@@ -89,6 +89,8 @@ pub trait Handler {
     /// Index (line feed without carriage return): down one, scroll at bottom.
     fn linefeed(&mut self);
     fn tab(&mut self, n: u16);
+    /// `CBT` — move backward to the previous tab stop(s).
+    fn tab_back(&mut self, _n: u16) {}
     /// `RI` (`ESC M`) — reverse index.
     fn reverse_index(&mut self);
     /// `DECSC` (`ESC 7`) / `CSI s`.
@@ -97,8 +99,30 @@ pub trait Handler {
     fn restore_cursor(&mut self);
     /// `HTS` (`ESC H`) — set a tab stop at the cursor column.
     fn set_tab_stop(&mut self) {}
+    /// `TBC 0` — clear the tab stop at the cursor column.
+    fn clear_tab_stop(&mut self) {}
+    /// `TBC 3` — clear all horizontal tab stops.
+    fn clear_all_tab_stops(&mut self) {}
     /// `RIS` (`ESC c`) — full reset.
     fn full_reset(&mut self);
+
+    // ── edit ───────────────────────────────────────────────────────
+    /// `ICH` — insert blank cells at the cursor.
+    fn insert_blank_chars(&mut self, _n: u16) {}
+    /// `IL` — insert blank lines in the scroll region.
+    fn insert_lines(&mut self, _n: u16) {}
+    /// `DL` — delete lines in the scroll region.
+    fn delete_lines(&mut self, _n: u16) {}
+    /// `DCH` — delete cells at the cursor.
+    fn delete_chars(&mut self, _n: u16) {}
+    /// `SU` — scroll the scroll region up.
+    fn scroll_up(&mut self, _n: u16) {}
+    /// `SD` — scroll the scroll region down.
+    fn scroll_down(&mut self, _n: u16) {}
+    /// `ECH` — erase cells at the cursor without moving it.
+    fn erase_chars(&mut self, _n: u16) {}
+    /// `REP` — repeat the preceding printable character.
+    fn repeat_preceding_char(&mut self, _n: u16) {}
 
     // ── reports (terminal writes back to the pty) ──────────────────
     fn device_attributes(&mut self, kind: DaKind);

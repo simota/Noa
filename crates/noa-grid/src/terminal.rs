@@ -160,6 +160,9 @@ impl Handler for Terminal {
     fn tab(&mut self, n: u16) {
         self.primary.tab(n);
     }
+    fn tab_back(&mut self, n: u16) {
+        self.primary.tab_back(n);
+    }
     fn reverse_index(&mut self) {
         self.primary.reverse_index();
     }
@@ -172,11 +175,43 @@ impl Handler for Terminal {
     fn set_tab_stop(&mut self) {
         self.primary.set_tab_stop();
     }
+    fn clear_tab_stop(&mut self) {
+        self.primary.clear_tab_stop();
+    }
+    fn clear_all_tab_stops(&mut self) {
+        self.primary.clear_all_tab_stops();
+    }
 
     fn full_reset(&mut self) {
         self.primary = Screen::new(self.size.cols, self.size.rows);
         self.modes = ModeState::defaults();
         self.title.clear();
+    }
+
+    fn insert_blank_chars(&mut self, n: u16) {
+        self.primary.insert_blank_chars(n);
+    }
+    fn insert_lines(&mut self, n: u16) {
+        self.primary.insert_lines(n);
+    }
+    fn delete_lines(&mut self, n: u16) {
+        self.primary.delete_lines(n);
+    }
+    fn delete_chars(&mut self, n: u16) {
+        self.primary.delete_chars(n);
+    }
+    fn scroll_up(&mut self, n: u16) {
+        self.primary.scroll_up_region(n);
+    }
+    fn scroll_down(&mut self, n: u16) {
+        self.primary.scroll_down_region(n);
+    }
+    fn erase_chars(&mut self, n: u16) {
+        self.primary.erase_chars(n);
+    }
+    fn repeat_preceding_char(&mut self, n: u16) {
+        let autowrap = self.modes.autowrap();
+        self.primary.repeat_preceding_char(n, autowrap);
     }
 
     fn device_attributes(&mut self, kind: DaKind) {

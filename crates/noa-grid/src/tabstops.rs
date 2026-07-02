@@ -27,6 +27,18 @@ impl Tabstops {
         }
     }
 
+    pub fn clear(&mut self, col: u16) {
+        if let Some(s) = self.stops.get_mut(col as usize) {
+            *s = false;
+        }
+    }
+
+    pub fn clear_all(&mut self) {
+        for s in &mut self.stops {
+            *s = false;
+        }
+    }
+
     /// The next tab stop strictly greater than `from`, clamped to the last column.
     pub fn next(&self, from: u16, cols: u16) -> u16 {
         let mut i = from as usize + 1;
@@ -37,5 +49,17 @@ impl Tabstops {
             i += 1;
         }
         cols.saturating_sub(1)
+    }
+
+    /// The previous tab stop strictly less than `from`, clamped to column 0.
+    pub fn prev(&self, from: u16) -> u16 {
+        let mut i = from as usize;
+        while i > 0 {
+            i -= 1;
+            if self.stops.get(i).copied().unwrap_or(false) {
+                return i as u16;
+            }
+        }
+        0
     }
 }

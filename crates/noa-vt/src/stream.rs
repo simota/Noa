@@ -21,7 +21,8 @@ impl Stream {
     /// Feed a chunk of bytes, dispatching all resulting operations to `handler`.
     pub fn feed<H: Handler>(&mut self, bytes: &[u8], handler: &mut H) {
         for &b in bytes {
-            self.parser.advance(b, &mut |action| dispatch(action, handler));
+            self.parser
+                .advance(b, &mut |action| dispatch(action, handler));
         }
     }
 }
@@ -37,7 +38,9 @@ fn dispatch<H: Handler>(action: Action, h: &mut H) {
 }
 
 fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
+    let plain = csi.private == 0 && csi.intermediates.is_empty();
     match csi.final_byte {
+        b'@' if plain => h.insert_blank_chars(csi.param(0, 1)),
         b'A' => h.cursor_up(csi.param(0, 1)),
         b'B' | b'e' => h.cursor_down(csi.param(0, 1)),
         b'C' | b'a' => h.cursor_forward(csi.param(0, 1)),
@@ -45,6 +48,15 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
         b'E' => h.cursor_next_line(csi.param(0, 1)),
         b'F' => h.cursor_prev_line(csi.param(0, 1)),
         b'G' | b'`' => h.cursor_col_abs(csi.param(0, 1)),
+        b'I' if plain => h.tab(csi.param(0, 1)),
+        b'L' if plain => h.insert_lines(csi.param(0, 1)),
+        b'M' if plain => h.delete_lines(csi.param(0, 1)),
+        b'P' if plain => h.delete_chars(csi.param(0, 1)),
+        b'S' if plain => h.scroll_up(csi.param(0, 1)),
+        b'T' if plain => h.scroll_down(csi.param(0, 1)),
+        b'X' if plain => h.erase_chars(csi.param(0, 1)),
+        b'Z' if plain => h.tab_back(csi.param(0, 1)),
+        b'b' if plain => h.repeat_preceding_char(csi.param(0, 1)),
         b'd' => h.cursor_row_abs(csi.param(0, 1)),
         b'H' | b'f' => h.cursor_position(csi.param(0, 1), csi.param(1, 1)),
         b'J' => h.erase_display(match csi.param(0, 0) {
@@ -79,6 +91,11 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
         b'r' if csi.private == 0 => h.set_scroll_region(csi.param(0, 1), csi.param(1, 0)),
         b's' if csi.private == 0 => h.save_cursor(),
         b'u' if csi.private == 0 => h.restore_cursor(),
+        b'g' if plain => match csi.param(0, 0) {
+            0 => h.clear_tab_stop(),
+            3 => h.clear_all_tab_stops(),
+            _ => {}
+        },
         _ => {} // unknown / inc>=2
     }
 }
@@ -89,11 +106,11 @@ fn dispatch_esc<H: Handler>(esc: &Esc, h: &mut H) {
         return;
     }
     match esc.final_byte {
-        b'c' => h.full_reset(),      // RIS
-        b'7' => h.save_cursor(),     // DECSC
-        b'8' => h.restore_cursor(),  // DECRC
-        b'M' => h.reverse_index(),   // RI
-        b'D' => h.linefeed(),        // IND (index, no CR)
+        b'c' => h.full_reset(),     // RIS
+        b'7' => h.save_cursor(),    // DECSC
+        b'8' => h.restore_cursor(), // DECRC
+        b'M' => h.reverse_index(),  // RI
+        b'D' => h.linefeed(),       // IND (index, no CR)
         b'E' => {
             // NEL
             h.carriage_return();

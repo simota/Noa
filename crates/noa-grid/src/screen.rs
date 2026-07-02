@@ -15,6 +15,7 @@ pub struct Screen {
     pub saved_cursor: Option<Cursor>,
     pub region: ScrollRegion,
     pub tabstops: Tabstops,
+    last_printed: Option<char>,
 }
 
 impl Screen {
@@ -30,6 +31,7 @@ impl Screen {
                 bottom: rows.saturating_sub(1),
             },
             tabstops: Tabstops::new(cols),
+            last_printed: None,
         }
     }
 
@@ -122,6 +124,7 @@ impl Screen {
         } else {
             self.cursor.x += 1;
         }
+        self.last_printed = Some(c);
     }
 
     // ── vertical motion / scroll ────────────────────────────────────
@@ -155,6 +158,9 @@ impl Screen {
         }
         let len = bottom - top + 1;
         let n = (n as usize).min(len);
+        if n == 0 {
+            return;
+        }
         let blank = self.blank();
         self.grid[top..=bottom].rotate_left(n);
         for r in &mut self.grid[(bottom + 1 - n)..=bottom] {
@@ -173,6 +179,9 @@ impl Screen {
         }
         let len = bottom - top + 1;
         let n = (n as usize).min(len);
+        if n == 0 {
+            return;
+        }
         let blank = self.blank();
         self.grid[top..=bottom].rotate_right(n);
         for r in &mut self.grid[top..(top + n)] {
@@ -242,8 +251,23 @@ impl Screen {
         }
     }
 
+    pub fn tab_back(&mut self, n: u16) {
+        self.cursor.pending_wrap = false;
+        for _ in 0..n.max(1) {
+            self.cursor.x = self.tabstops.prev(self.cursor.x);
+        }
+    }
+
     pub fn set_tab_stop(&mut self) {
         self.tabstops.set(self.cursor.x);
+    }
+
+    pub fn clear_tab_stop(&mut self) {
+        self.tabstops.clear(self.cursor.x);
+    }
+
+    pub fn clear_all_tab_stops(&mut self) {
+        self.tabstops.clear_all();
     }
 
     pub fn save_cursor(&mut self) {
@@ -311,5 +335,97 @@ impl Screen {
             }
         }
         row.dirty = true;
+    }
+
+    // ── edit ─────────────────────────────────────────────────────────
+
+    pub fn insert_blank_chars(&mut self, n: u16) {
+        self.cursor.pending_wrap = false;
+        let blank = self.blank();
+        let x = self.cursor.x as usize;
+        let y = self.cursor.y as usize;
+        let len = self.cols as usize - x;
+        let n = (n.max(1) as usize).min(len);
+        let row = &mut self.grid[y];
+        row.cells[x..].rotate_right(n);
+        for c in &mut row.cells[x..x + n] {
+            *c = blank;
+        }
+        row.dirty = true;
+    }
+
+    pub fn delete_chars(&mut self, n: u16) {
+        self.cursor.pending_wrap = false;
+        let blank = self.blank();
+        let x = self.cursor.x as usize;
+        let y = self.cursor.y as usize;
+        let len = self.cols as usize - x;
+        let n = (n.max(1) as usize).min(len);
+        let row = &mut self.grid[y];
+        row.cells[x..].rotate_left(n);
+        for c in &mut row.cells[self.cols as usize - n..] {
+            *c = blank;
+        }
+        row.dirty = true;
+    }
+
+    pub fn erase_chars(&mut self, n: u16) {
+        self.cursor.pending_wrap = false;
+        let blank = self.blank();
+        let x = self.cursor.x as usize;
+        let y = self.cursor.y as usize;
+        let len = self.cols as usize - x;
+        let n = (n.max(1) as usize).min(len);
+        let row = &mut self.grid[y];
+        for c in &mut row.cells[x..x + n] {
+            *c = blank;
+        }
+        row.dirty = true;
+    }
+
+    pub fn insert_lines(&mut self, n: u16) {
+        self.cursor.pending_wrap = false;
+        if self.cursor.y < self.region.top || self.cursor.y > self.region.bottom {
+            return;
+        }
+        let start = self.cursor.y as usize;
+        let bottom = self.region.bottom as usize;
+        let len = bottom - start + 1;
+        let n = (n.max(1) as usize).min(len);
+        let blank = self.blank();
+        self.grid[start..=bottom].rotate_right(n);
+        for r in &mut self.grid[start..start + n] {
+            r.clear(blank);
+        }
+        for r in &mut self.grid[start..=bottom] {
+            r.dirty = true;
+        }
+    }
+
+    pub fn delete_lines(&mut self, n: u16) {
+        self.cursor.pending_wrap = false;
+        if self.cursor.y < self.region.top || self.cursor.y > self.region.bottom {
+            return;
+        }
+        let start = self.cursor.y as usize;
+        let bottom = self.region.bottom as usize;
+        let len = bottom - start + 1;
+        let n = (n.max(1) as usize).min(len);
+        let blank = self.blank();
+        self.grid[start..=bottom].rotate_left(n);
+        for r in &mut self.grid[bottom + 1 - n..=bottom] {
+            r.clear(blank);
+        }
+        for r in &mut self.grid[start..=bottom] {
+            r.dirty = true;
+        }
+    }
+
+    pub fn repeat_preceding_char(&mut self, n: u16, autowrap: bool) {
+        if let Some(c) = self.last_printed {
+            for _ in 0..n.max(1) {
+                self.print(c, autowrap);
+            }
+        }
     }
 }

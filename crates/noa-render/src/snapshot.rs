@@ -2,7 +2,7 @@
 //! needed to rebuild a frame's GPU instances. `noa-app` takes this under the
 //! `Terminal` mutex and then calls into the renderer unlocked.
 
-use noa_grid::{Cursor, Row, Terminal, TerminalColors};
+use noa_grid::{Cursor, Row, Selection, SelectionPoint, Terminal, TerminalColors};
 
 /// A snapshot of the active screen taken under the `Terminal` lock.
 ///
@@ -12,6 +12,8 @@ pub struct FrameSnapshot {
     pub rows: Vec<Row>,
     pub cursor: Cursor,
     pub colors: TerminalColors,
+    pub selection: Option<Selection>,
+    pub row_base: usize,
     pub cols: u16,
     pub rows_n: u16,
 }
@@ -28,9 +30,18 @@ impl FrameSnapshot {
             rows: screen.visible_rows(),
             cursor,
             colors: terminal.colors.clone(),
+            selection: screen.selection,
+            row_base: screen.visible_row_base(),
             cols: screen.cols,
             rows_n: screen.rows,
         }
+    }
+
+    pub fn is_selected(&self, x: u16, y: u16) -> bool {
+        let Some(selection) = self.selection else {
+            return false;
+        };
+        selection.contains(SelectionPoint::new(x, self.row_base + y as usize))
     }
 }
 
@@ -68,5 +79,27 @@ mod tests {
         let snap = FrameSnapshot::from_terminal(&term);
 
         assert_eq!(snap.colors.default_fg(), Some(Rgb::new(1, 2, 3)));
+    }
+
+    #[test]
+    fn snapshot_projects_selection_onto_visible_rows() {
+        let mut term = Terminal::new(GridSize::new(2, 2));
+        put(&mut term, 0, 'A');
+        put(&mut term, 1, 'B');
+        term.primary.scroll_up_region(1);
+        put(&mut term, 1, 'C');
+        term.scroll_viewport_up(1);
+        term.set_viewport_selection(
+            noa_core::Point { x: 1, y: 0 },
+            noa_core::Point { x: 0, y: 1 },
+        );
+
+        let snap = FrameSnapshot::from_terminal(&term);
+
+        assert_eq!(snap.row_base, 0);
+        assert!(!snap.is_selected(0, 0));
+        assert!(snap.is_selected(1, 0));
+        assert!(snap.is_selected(0, 1));
+        assert!(!snap.is_selected(1, 1));
     }
 }

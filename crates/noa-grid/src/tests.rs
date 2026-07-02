@@ -2,7 +2,7 @@
 //! replies, and captured-stream golden fixtures.
 
 use crate::terminal::Terminal;
-use noa_core::{CellAttrs, Color, GridSize, Rgb};
+use noa_core::{CellAttrs, Color, GridSize, Point, Rgb};
 use noa_vt::Stream;
 
 /// Feed `bytes` through a fresh 80×24 terminal and return the final state.
@@ -402,6 +402,65 @@ fn alternate_screen_does_not_record_scrollback() {
     assert!(t.active_is_alt);
     assert_eq!(t.scrollback_len(), 0);
     assert_eq!(t.primary.scrollback_len(), 0);
+}
+
+#[test]
+fn selection_normalizes_reversed_range() {
+    let mut t = Terminal::new(GridSize::new(5, 3));
+    t.set_viewport_selection(Point { x: 4, y: 2 }, Point { x: 1, y: 1 });
+
+    let selection = t.active().selection.expect("selection should be stored");
+    let (start, end) = selection.normalized();
+
+    assert_eq!(start.x, 1);
+    assert_eq!(start.y, 1);
+    assert_eq!(end.x, 4);
+    assert_eq!(end.y, 2);
+}
+
+#[test]
+fn selection_uses_visible_scrollback_row_base() {
+    let mut t = Terminal::new(GridSize::new(2, 2));
+    t.primary.grid[0].cells[0].ch = 'A';
+    t.primary.grid[1].cells[0].ch = 'B';
+    t.primary.scroll_up_region(1);
+    t.primary.grid[1].cells[0].ch = 'C';
+    t.scroll_viewport_up(1);
+
+    t.set_viewport_selection(Point { x: 1, y: 0 }, Point { x: 0, y: 1 });
+
+    let selection = t.active().selection.expect("selection should be stored");
+    assert!(!selection.contains(crate::SelectionPoint::new(0, 0)));
+    assert!(selection.contains(crate::SelectionPoint::new(1, 0)));
+    assert!(selection.contains(crate::SelectionPoint::new(0, 1)));
+    assert!(!selection.contains(crate::SelectionPoint::new(1, 1)));
+}
+
+#[test]
+fn selection_viewport_points_are_clamped_to_screen() {
+    let mut t = Terminal::new(GridSize::new(3, 2));
+    t.set_viewport_selection(Point { x: 9, y: 9 }, Point { x: 0, y: 0 });
+
+    let selection = t.active().selection.expect("selection should be stored");
+    let (_start, end) = selection.normalized();
+
+    assert_eq!(end.x, 2);
+    assert_eq!(end.y, 1);
+}
+
+#[test]
+fn selection_clears_on_full_reset_and_screen_switch() {
+    let mut t = run(b"\x1b[?1049h");
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 1, y: 0 });
+    assert!(t.active().selection.is_some());
+
+    let mut s = Stream::new();
+    s.feed(b"\x1b[?1049l", &mut t);
+    assert!(t.active().selection.is_none());
+
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 1, y: 0 });
+    s.feed(b"\x1bc", &mut t);
+    assert!(t.active().selection.is_none());
 }
 
 #[test]

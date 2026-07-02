@@ -14,7 +14,7 @@
 
 use noa_core::{CellAttrs, Color, PixelSize};
 use noa_font::FontGrid;
-use noa_grid::{Cell, Cursor, Row, TerminalColors};
+use noa_grid::{Cell, Cursor, Row, Selection, SelectionPoint, TerminalColors};
 use noa_render::{FrameSnapshot, Renderer, Theme};
 
 /// Acquire a real device+queue, or `None` when no adapter exists (skip).
@@ -104,6 +104,11 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         rows: vec![row],
         cursor: Cursor::default(),
         colors: TerminalColors::default(),
+        selection: Some(Selection::new(
+            SelectionPoint::new(1, 0),
+            SelectionPoint::new(1, 0),
+        )),
+        row_base: 0,
         cols: 4,
         rows_n: 1,
     };

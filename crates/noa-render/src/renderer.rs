@@ -101,6 +101,7 @@ impl Renderer {
             let y = row_idx as u16;
             for (col_idx, cell) in row.cells.iter().enumerate() {
                 let x = col_idx as u16;
+                let selected = snap.is_selected(x, y);
 
                 let inverse = cell.attrs.contains(CellAttrs::INVERSE);
                 let (fg_color, bg_color) = if inverse {
@@ -112,8 +113,12 @@ impl Renderer {
                 // Background quad: skip when it's the plain default bg (the
                 // clear color already fills that), unless inverted.
                 let bg_is_default = matches!(bg_color, Color::Default) && !inverse;
-                if !bg_is_default {
-                    let bg = theme.resolve_with_colors(bg_color, false, &snap.colors);
+                if selected || !bg_is_default {
+                    let bg = if selected {
+                        theme.selection_bg()
+                    } else {
+                        theme.resolve_with_colors(bg_color, false, &snap.colors)
+                    };
                     bg_instances.push(CellInstance {
                         glyph_pos: [0, 0],
                         glyph_size: [0, 0],
@@ -130,7 +135,11 @@ impl Renderer {
                 if cell.ch != ' ' && !invisible && !wide_spacer {
                     let glyph = font.get_or_raster(cell.ch);
                     if glyph.atlas_size[0] > 0 && glyph.atlas_size[1] > 0 {
-                        let fg = theme.resolve_with_colors(fg_color, true, &snap.colors);
+                        let fg = if selected {
+                            theme.selection_fg()
+                        } else {
+                            theme.resolve_with_colors(fg_color, true, &snap.colors)
+                        };
                         glyph_instances.push(CellInstance {
                             glyph_pos: glyph.atlas_pos,
                             glyph_size: glyph.atlas_size,

@@ -6,7 +6,8 @@ use crate::cursor::ScrollRegion;
 use crate::modes::ModeState;
 use crate::osc::{TerminalColors, handle_color_osc};
 use crate::screen::Screen;
-use noa_core::{CellAttrs, Color, GridSize};
+use crate::selection::SelectionPoint;
+use noa_core::{CellAttrs, Color, GridSize, Point};
 use noa_vt::{DaKind, DsrKind, EraseDisplay, EraseLine, Handler, SgrAttr};
 
 pub struct Terminal {
@@ -65,6 +66,18 @@ impl Terminal {
 
     pub fn scroll_viewport_to_bottom(&mut self) {
         self.active_mut().scroll_viewport_to_bottom();
+    }
+
+    pub fn set_selection(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
+        self.active_mut().set_selection(anchor, focus);
+    }
+
+    pub fn set_viewport_selection(&mut self, anchor: Point, focus: Point) {
+        self.active_mut().set_viewport_selection(anchor, focus);
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.active_mut().clear_selection();
     }
 
     /// Resize the terminal to a new cell grid (from a window resize). Resizes
@@ -136,6 +149,10 @@ impl Terminal {
             alt.cursor.visible = self.modes.cursor_visible();
         }
         self.active_is_alt = true;
+        self.primary.clear_selection();
+        if let Some(alt) = &mut self.alt {
+            alt.clear_selection();
+        }
     }
 
     fn leave_alt_screen(&mut self, restore_cursor: bool, clear_alt: bool) {
@@ -150,6 +167,12 @@ impl Terminal {
             let mut alt = Screen::alternate(self.size.cols, self.size.rows);
             alt.cursor.visible = self.modes.cursor_visible();
             self.alt = Some(alt);
+        }
+        if was_alt {
+            self.primary.clear_selection();
+            if let Some(alt) = &mut self.alt {
+                alt.clear_selection();
+            }
         }
     }
 }
@@ -288,6 +311,7 @@ impl Handler for Terminal {
         self.modes = ModeState::defaults();
         self.title.clear();
         self.colors = TerminalColors::default();
+        self.clear_selection();
     }
 
     fn insert_blank_chars(&mut self, n: u16) {

@@ -16,6 +16,8 @@ pub struct Theme {
     pub default_fg: Rgb,
     pub default_bg: Rgb,
     pub cursor: Rgb,
+    pub selection_fg: Rgb,
+    pub selection_bg: Rgb,
     /// Index 0..=255: 16 ANSI + 6x6x6 color cube (16..=231) + grayscale ramp (232..=255).
     pub palette: [Rgb; 256],
 }
@@ -32,6 +34,8 @@ impl Theme {
             default_fg: DEFAULT_FG,
             default_bg: DEFAULT_BG,
             cursor: DEFAULT_CURSOR,
+            selection_fg: DEFAULT_BG,
+            selection_bg: DEFAULT_FG,
             palette: xterm_palette(),
         }
     }
@@ -65,6 +69,14 @@ impl Theme {
 
     pub fn cursor_with_colors(&self, colors: &TerminalColors) -> [f32; 4] {
         rgba(colors.cursor().unwrap_or(self.cursor))
+    }
+
+    pub fn selection_fg(&self) -> [f32; 4] {
+        rgba(self.selection_fg)
+    }
+
+    pub fn selection_bg(&self) -> [f32; 4] {
+        rgba(self.selection_bg)
     }
 
     fn resolve_rgb_with_colors(&self, c: Color, is_fg: bool, colors: &TerminalColors) -> Rgb {
@@ -163,5 +175,13 @@ mod tests {
             theme.cursor_with_colors(&colors),
             [10.0 / 255.0, 11.0 / 255.0, 12.0 / 255.0, 1.0]
         );
+    }
+
+    #[test]
+    fn selection_colors_are_theme_defined() {
+        let theme = Theme::new();
+
+        assert_eq!(theme.selection_fg(), theme.resolve(Color::Default, false));
+        assert_eq!(theme.selection_bg(), theme.resolve(Color::Default, true));
     }
 }

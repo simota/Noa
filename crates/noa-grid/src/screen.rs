@@ -4,8 +4,9 @@
 
 use crate::cell::{Cell, Row};
 use crate::cursor::{Cursor, ScrollRegion};
+use crate::selection::{Selection, SelectionPoint};
 use crate::tabstops::Tabstops;
-use noa_core::CellAttrs;
+use noa_core::{CellAttrs, Point};
 use noa_vt::{EraseDisplay, EraseLine};
 use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
@@ -17,6 +18,7 @@ pub struct Screen {
     pub cols: u16,
     pub grid: Vec<Row>,
     pub cursor: Cursor,
+    pub selection: Option<Selection>,
     pub saved_cursor: Option<Cursor>,
     pub region: ScrollRegion,
     pub tabstops: Tabstops,
@@ -42,6 +44,7 @@ impl Screen {
             cols,
             grid: (0..rows).map(|_| Row::new(cols)).collect(),
             cursor: Cursor::default(),
+            selection: None,
             saved_cursor: None,
             region: ScrollRegion {
                 top: 0,
@@ -130,6 +133,9 @@ impl Screen {
         self.scrollback.push_back(row);
         while self.scrollback.len() > self.scrollback_limit {
             self.scrollback.pop_front();
+            self.selection = self
+                .selection
+                .and_then(|selection| selection.shift_rows_up(1));
         }
         self.clamp_viewport();
     }
@@ -157,6 +163,39 @@ impl Screen {
         self.viewport_offset = 0;
     }
 
+    pub fn set_selection(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
+        self.selection = Some(Selection::new(anchor, focus));
+    }
+
+    pub fn set_viewport_selection(&mut self, anchor: Point, focus: Point) {
+        let row_base = self.visible_row_base();
+        let max_x = self.cols.saturating_sub(1);
+        let max_y = self.rows.saturating_sub(1);
+        let anchor = Point {
+            x: anchor.x.min(max_x),
+            y: anchor.y.min(max_y),
+        };
+        let focus = Point {
+            x: focus.x.min(max_x),
+            y: focus.y.min(max_y),
+        };
+
+        self.selection = Some(Selection::from_viewport_points(row_base, anchor, focus));
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    pub fn visible_row_base(&self) -> usize {
+        let rows = self.rows as usize;
+        let scrollback_len = self.scrollback.len();
+        let total = scrollback_len + self.grid.len();
+        let live_start = total.saturating_sub(rows);
+
+        live_start.saturating_sub(self.viewport_offset)
+    }
+
     pub fn visible_rows(&self) -> Vec<Row> {
         let rows = self.rows as usize;
         if self.viewport_offset == 0 {
@@ -164,9 +203,7 @@ impl Screen {
         }
 
         let scrollback_len = self.scrollback.len();
-        let total = scrollback_len + self.grid.len();
-        let live_start = total.saturating_sub(rows);
-        let start = live_start.saturating_sub(self.viewport_offset);
+        let start = self.visible_row_base();
 
         (start..start + rows)
             .map(|idx| {

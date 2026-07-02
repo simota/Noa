@@ -112,7 +112,7 @@ scrolling, and key customization.
 
 | ID | Capability | Current State | Target |
 |----|------------|---------------|--------|
-| `REQ-UX-001` | Selection model | Missing | Add mouse selection, word/line selection, selected-range storage, and selection rendering |
+| `REQ-UX-001` | Selection model | Partial | Selected-range storage and selection rendering are implemented; add mouse, word, and line selection gestures |
 | `REQ-UX-002` | Clipboard | Missing | Add copy, paste, paste protection, and OSC 52 policy |
 | `REQ-UX-003` | Mouse reporting | Missing | Implement SGR mouse protocol, reporting modes, and local selection override |
 | `REQ-UX-004` | Keybind engine | Missing | Add config-driven keybind parsing, action dispatch, and app-vs-PTY consumption rules |
@@ -229,7 +229,7 @@ Exit criteria:
 
 ### Phase 2 Checklist
 
-- [ ] `IMPL-UX-001`: Add terminal selection data model and rendering.
+- [x] `IMPL-UX-001`: Add terminal selection data model and rendering.
   References `REQ-UX-001`.
 - [ ] `IMPL-UX-002`: Wire mouse press, drag, release, double-click, and
   triple-click behavior. References `REQ-UX-001`.

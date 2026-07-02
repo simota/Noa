@@ -15,8 +15,8 @@ use noa_grid::Terminal;
 use noa_pty::{Pty, PtyConfig, PtyWriter};
 use noa_render::{FrameSnapshot, Renderer, Theme};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -61,6 +61,7 @@ pub struct App {
     grid_size: GridSize,
     mouse_selection: MouseSelectionState,
     clipboard: SystemClipboard,
+    ime_state: input::ImeState,
 }
 
 impl App {
@@ -80,6 +81,7 @@ impl App {
             grid_size,
             mouse_selection: MouseSelectionState::default(),
             clipboard: SystemClipboard::new(),
+            ime_state: input::ImeState::default(),
         }
     }
 
@@ -105,6 +107,12 @@ impl App {
             let term = terminal.lock().expect("terminal mutex poisoned");
             FrameSnapshot::from_terminal(&term)
         };
+        update_ime_cursor_area(
+            &graphics.window,
+            graphics.font.metrics(),
+            snapshot.cursor.x,
+            snapshot.cursor.y,
+        );
 
         graphics
             .renderer
@@ -194,6 +202,8 @@ impl ApplicationHandler<UserEvent> for App {
                 initial_window_logical_size(font.metrics(), self.grid_size, window_scale_factor);
             let _ = window.request_inner_size(inner_size);
         }
+        window.set_ime_allowed(true);
+        update_ime_cursor_area(&window, font.metrics(), 0, 0);
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance
@@ -314,6 +324,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(position),
             WindowEvent::MouseInput { state, button, .. } => self.on_mouse_input(state, button),
+            WindowEvent::Ime(event) => self.on_ime_event(event),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
@@ -327,6 +338,9 @@ impl ApplicationHandler<UserEvent> for App {
                     {
                         self.handle_app_command(event_loop, command);
                     }
+                    return;
+                }
+                if self.ime_state.preedit_active() {
                     return;
                 }
                 let app_cursor_keys = self.app_cursor_keys();
@@ -429,6 +443,12 @@ impl App {
         self.apply_selection_gesture(gesture);
     }
 
+    fn on_ime_event(&mut self, event: Ime) {
+        if let Some(bytes) = self.ime_state.handle_event(&event) {
+            self.write_pty_bytes(&bytes);
+        }
+    }
+
     fn apply_selection_gesture(&mut self, gesture: SelectionGesture) {
         if gesture == SelectionGesture::None {
             return;
@@ -528,6 +548,27 @@ fn initial_window_logical_size(
     )
 }
 
+fn update_ime_cursor_area(window: &Window, metrics: noa_font::Metrics, x: u16, y: u16) {
+    let (position, size) = ime_cursor_area(metrics, x, y);
+    window.set_ime_cursor_area(position, size);
+}
+
+fn ime_cursor_area(
+    metrics: noa_font::Metrics,
+    x: u16,
+    y: u16,
+) -> (PhysicalPosition<i32>, PhysicalSize<u32>) {
+    let position = PhysicalPosition::new(
+        (metrics.cell_w * x as f32).round().max(0.0) as i32,
+        (metrics.cell_h * y as f32).round().max(0.0) as i32,
+    );
+    let size = PhysicalSize::new(
+        metrics.cell_w.ceil().max(1.0) as u32,
+        metrics.cell_h.ceil().max(1.0) as u32,
+    );
+    (position, size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,5 +597,15 @@ mod tests {
 
         assert_eq!(size.width, 640.0);
         assert_eq!(size.height, 384.0);
+    }
+
+    #[test]
+    fn ime_cursor_area_tracks_grid_cell_in_physical_pixels() {
+        let (position, size) = ime_cursor_area(metrics(7.5, 15.25), 2, 3);
+
+        assert_eq!(position.x, 15);
+        assert_eq!(position.y, 46);
+        assert_eq!(size.width, 8);
+        assert_eq!(size.height, 16);
     }
 }

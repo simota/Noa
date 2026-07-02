@@ -5,7 +5,37 @@
 //! (`logical_key`, `text`, modifiers) directly so the encoding logic stays
 //! unit-testable without a live `KeyEvent`.
 
+use winit::event::Ime;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+/// Tracks IME composition state and encodes committed IME text for the pty.
+#[derive(Debug, Default)]
+pub struct ImeState {
+    preedit_active: bool,
+}
+
+impl ImeState {
+    pub fn handle_event(&mut self, event: &Ime) -> Option<Vec<u8>> {
+        match event {
+            Ime::Enabled | Ime::Disabled => {
+                self.preedit_active = false;
+                None
+            }
+            Ime::Preedit(text, _cursor_range) => {
+                self.preedit_active = !text.is_empty();
+                None
+            }
+            Ime::Commit(text) => {
+                self.preedit_active = false;
+                encode_text(text)
+            }
+        }
+    }
+
+    pub fn preedit_active(&self) -> bool {
+        self.preedit_active
+    }
+}
 
 /// Encode a pressed key into the bytes that should be written to the pty, if
 /// any. `app_cursor_keys` mirrors `ModeState::app_cursor_keys()` (DECCKM):
@@ -42,9 +72,16 @@ pub fn encode_key(
         Key::Named(NamedKey::ArrowDown) => Some(arrow_bytes(b'B', app_cursor_keys)),
         Key::Named(NamedKey::ArrowRight) => Some(arrow_bytes(b'C', app_cursor_keys)),
         Key::Named(NamedKey::ArrowLeft) => Some(arrow_bytes(b'D', app_cursor_keys)),
-        _ => text
-            .filter(|s| !s.is_empty())
-            .map(|s| s.as_bytes().to_vec()),
+        _ => text.and_then(encode_text),
+    }
+}
+
+/// Encode already-committed text for the pty.
+pub fn encode_text(text: &str) -> Option<Vec<u8>> {
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.as_bytes().to_vec())
     }
 }
 
@@ -106,6 +143,40 @@ mod tests {
             encode_key(&key, Some("a"), ModifiersState::empty(), false),
             Some(b"a".to_vec())
         );
+    }
+
+    #[test]
+    fn committed_ime_text_is_utf8() {
+        assert_eq!(encode_text("日本語"), Some("日本語".as_bytes().to_vec()));
+        assert_eq!(encode_text(""), None);
+    }
+
+    #[test]
+    fn ime_commit_emits_text_without_leaking_preedit() {
+        let mut state = ImeState::default();
+
+        assert_eq!(state.handle_event(&Ime::Enabled), None);
+        assert!(!state.preedit_active());
+        assert_eq!(
+            state.handle_event(&Ime::Preedit("nihongo".into(), None)),
+            None
+        );
+        assert!(state.preedit_active());
+        assert_eq!(
+            state.handle_event(&Ime::Commit("日本語".into())),
+            Some("日本語".as_bytes().to_vec())
+        );
+        assert!(!state.preedit_active());
+    }
+
+    #[test]
+    fn ime_disabled_clears_preedit_state() {
+        let mut state = ImeState::default();
+
+        assert_eq!(state.handle_event(&Ime::Preedit("a".into(), None)), None);
+        assert!(state.preedit_active());
+        assert_eq!(state.handle_event(&Ime::Disabled), None);
+        assert!(!state.preedit_active());
     }
 
     #[test]

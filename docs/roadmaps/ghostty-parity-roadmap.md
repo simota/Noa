@@ -118,6 +118,7 @@ scrolling, and key customization.
 | `REQ-UX-004` | Keybind engine | Missing | Add config-driven keybind parsing, action dispatch, and app-vs-PTY consumption rules |
 | `REQ-UX-005` | Search | Missing | Add search state, match highlighting, navigation, and search UI command hooks |
 | `REQ-UX-006` | Scroll navigation | Missing | Add page/line/top/bottom scrolling and viewport reset behavior |
+| `REQ-UX-009` | IME text input | Partial | System IME commit input is enabled and sent to the PTY; inline preedit rendering remains future work |
 
 Exit criteria:
 
@@ -243,6 +244,8 @@ Exit criteria:
 - [ ] `IMPL-UX-007`: Add search state, match computation, highlighting, and
   navigation actions. References `REQ-UX-005`.
 - [ ] `IMPL-UX-008`: Add viewport scrolling commands. References `REQ-UX-006`.
+- [x] `IMPL-UX-009`: Enable system IME commit input for Japanese text.
+  References `REQ-UX-009`.
 
 ### Phase 3 Checklist
 

@@ -14,14 +14,15 @@
 
 use noa_core::{CellAttrs, Color, PixelSize};
 use noa_font::FontGrid;
-use noa_grid::{Cell, Cursor, Row};
+use noa_grid::{Cell, Cursor, Row, TerminalColors};
 use noa_render::{FrameSnapshot, Renderer, Theme};
 
 /// Acquire a real device+queue, or `None` when no adapter exists (skip).
 fn device_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("noa-test-device"),
         required_features: wgpu::Features::empty(),
@@ -51,7 +52,11 @@ fn cell_pipeline_builds_without_validation_error() {
     );
     let err = pollster::block_on(device.pop_error_scope());
 
-    assert!(renderer.is_ok(), "Renderer::new failed: {:?}", renderer.err());
+    assert!(
+        renderer.is_ok(),
+        "Renderer::new failed: {:?}",
+        renderer.err()
+    );
     assert!(
         err.is_none(),
         "wgpu validation error while building the cell pipeline: {err:?}"
@@ -98,6 +103,7 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
     let snap = FrameSnapshot {
         rows: vec![row],
         cursor: Cursor::default(),
+        colors: TerminalColors::default(),
         cols: 4,
         rows_n: 1,
     };

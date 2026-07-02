@@ -2,7 +2,7 @@
 //! needed to rebuild a frame's GPU instances. `noa-app` takes this under the
 //! `Terminal` mutex and then calls into the renderer unlocked.
 
-use noa_grid::{Cursor, Row, Terminal};
+use noa_grid::{Cursor, Row, Terminal, TerminalColors};
 
 /// A snapshot of the active screen taken under the `Terminal` lock.
 ///
@@ -11,6 +11,7 @@ use noa_grid::{Cursor, Row, Terminal};
 pub struct FrameSnapshot {
     pub rows: Vec<Row>,
     pub cursor: Cursor,
+    pub colors: TerminalColors,
     pub cols: u16,
     pub rows_n: u16,
 }
@@ -26,6 +27,7 @@ impl FrameSnapshot {
         FrameSnapshot {
             rows: screen.visible_rows(),
             cursor,
+            colors: terminal.colors.clone(),
             cols: screen.cols,
             rows_n: screen.rows,
         }
@@ -35,7 +37,7 @@ impl FrameSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noa_core::GridSize;
+    use noa_core::{GridSize, Rgb};
     use noa_grid::Terminal;
 
     fn put(term: &mut Terminal, y: usize, ch: char) {
@@ -56,5 +58,15 @@ mod tests {
         assert_eq!(snap.rows[0].cells[0].ch, 'A');
         assert_eq!(snap.rows[1].cells[0].ch, 'B');
         assert!(!snap.cursor.visible);
+    }
+
+    #[test]
+    fn snapshot_carries_terminal_color_overrides() {
+        let mut term = Terminal::new(GridSize::new(2, 2));
+        term.colors.set_default_fg(Rgb::new(1, 2, 3));
+
+        let snap = FrameSnapshot::from_terminal(&term);
+
+        assert_eq!(snap.colors.default_fg(), Some(Rgb::new(1, 2, 3)));
     }
 }

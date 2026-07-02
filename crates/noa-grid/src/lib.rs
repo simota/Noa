@@ -8,6 +8,7 @@
 pub mod cell;
 pub mod cursor;
 pub mod modes;
+mod osc;
 pub mod screen;
 pub mod tabstops;
 pub mod terminal;
@@ -18,6 +19,7 @@ mod tests;
 pub use cell::{Cell, Row};
 pub use cursor::{Cursor, ScrollRegion};
 pub use modes::ModeState;
+pub use osc::TerminalColors;
 pub use screen::Screen;
 pub use tabstops::Tabstops;
 pub use terminal::Terminal;

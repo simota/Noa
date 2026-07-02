@@ -4,6 +4,7 @@
 
 use crate::cursor::ScrollRegion;
 use crate::modes::ModeState;
+use crate::osc::{TerminalColors, handle_color_osc};
 use crate::screen::Screen;
 use noa_core::{CellAttrs, Color, GridSize};
 use noa_vt::{DaKind, DsrKind, EraseDisplay, EraseLine, Handler, SgrAttr};
@@ -16,6 +17,8 @@ pub struct Terminal {
     pub modes: ModeState,
     /// Window title from OSC 0/2 (stored; unused by the inc-1 renderer).
     pub title: String,
+    /// Dynamic colors set through safe OSC 4/10/11/12 sequences.
+    pub colors: TerminalColors,
     pub size: GridSize,
     /// Bytes the terminal must write back to the pty (query replies).
     pub pending_writes: Vec<u8>,
@@ -29,6 +32,7 @@ impl Terminal {
             active_is_alt: false,
             modes: ModeState::defaults(),
             title: String::new(),
+            colors: TerminalColors::default(),
             size,
             pending_writes: Vec::new(),
         }
@@ -283,6 +287,7 @@ impl Handler for Terminal {
         self.active_is_alt = false;
         self.modes = ModeState::defaults();
         self.title.clear();
+        self.colors = TerminalColors::default();
     }
 
     fn insert_blank_chars(&mut self, n: u16) {
@@ -332,6 +337,10 @@ impl Handler for Terminal {
     }
 
     fn osc_dispatch(&mut self, data: &[u8]) {
+        if handle_color_osc(data, &mut self.colors, &mut self.pending_writes) {
+            return;
+        }
+
         // OSC 0 (icon+title) / 2 (title): "<code>;<text>".
         let sep = data.iter().position(|&b| b == b';');
         if let Some(i) = sep {

@@ -428,6 +428,81 @@ fn title_from_osc() {
 }
 
 #[test]
+fn osc_palette_set_query_and_selected_reset() {
+    let t = run(b"\x1b]4;1;#112233\x07\
+          \x1b]4;1;?\x07\
+          \x1b]104;1\x07\
+          \x1b]4;1;?\x07");
+
+    assert_eq!(t.colors.palette(1), None);
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b]4;1;rgb:1111/2222/3333\x1b\\\
+          \x1b]4;1;rgb:cdcd/0000/0000\x1b\\"
+    );
+}
+
+#[test]
+fn osc_palette_accepts_multiple_pairs_and_resets_all() {
+    let t = run(b"\x1b]4;1;#010203;2;rgb:0404/0505/0606\x07\
+          \x1b]104\x07");
+
+    assert_eq!(t.colors.palette(1), None);
+    assert_eq!(t.colors.palette(2), None);
+}
+
+#[test]
+fn osc_default_slots_set_query_and_reset() {
+    let t = run(b"\x1b]10;#112233\x07\
+          \x1b]11;rgb:4444/5555/6666\x07\
+          \x1b]12;rgb:a/b/c\x07\
+          \x1b]10;?\x07\
+          \x1b]11;?\x07\
+          \x1b]12;?\x07\
+          \x1b]110\x07\
+          \x1b]111\x07\
+          \x1b]112\x07");
+
+    assert_eq!(t.colors.default_fg(), None);
+    assert_eq!(t.colors.default_bg(), None);
+    assert_eq!(t.colors.cursor(), None);
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b]10;rgb:1111/2222/3333\x1b\\\
+          \x1b]11;rgb:4444/5555/6666\x1b\\\
+          \x1b]12;rgb:aaaa/bbbb/cccc\x1b\\"
+    );
+}
+
+#[test]
+fn osc_default_queries_use_theme_defaults() {
+    let t = run(b"\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07");
+
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b]10;rgb:e0e0/e0e0/e0e0\x1b\\\
+          \x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\\
+          \x1b]12;rgb:e0e0/e0e0/e0e0\x1b\\"
+    );
+}
+
+#[test]
+fn osc_color_rejects_malformed_without_mutation_or_reply() {
+    let t = run(b"\x1b]4;256;#112233\x07\
+          \x1b]4;1;#bad\x07\
+          \x1b]10;#010203;#040506\x07\
+          \x1b]11;rgb:12//34\x07\
+          \x1b]12;not-a-color\x07\
+          \x1b]110;unexpected\x07");
+
+    assert_eq!(t.colors.palette(1), None);
+    assert_eq!(t.colors.default_fg(), None);
+    assert_eq!(t.colors.default_bg(), None);
+    assert_eq!(t.colors.cursor(), None);
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
 fn utf8_scalar_stored_in_cell() {
     let t = run("étä".as_bytes());
     assert_eq!(cell(&t, 0, 0).ch, 'é');

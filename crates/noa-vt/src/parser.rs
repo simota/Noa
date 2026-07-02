@@ -13,6 +13,8 @@ use crate::action::Action;
 use crate::csi::{Csi, Esc, MAX_INTERMEDIATES, MAX_PARAMS};
 use crate::state::State;
 
+const MAX_OSC_BYTES: usize = 4096;
+
 /// The from-scratch VT parser. Cheap to construct; holds only small buffers.
 pub struct Parser {
     state: State,
@@ -21,6 +23,7 @@ pub struct Parser {
     intermediates: Vec<u8>,
     private: u8,
     osc: Vec<u8>,
+    osc_overflow: bool,
     utf8_acc: u32,
     utf8_rem: u8,
 }
@@ -40,6 +43,7 @@ impl Parser {
             intermediates: Vec::new(),
             private: 0,
             osc: Vec::new(),
+            osc_overflow: false,
             utf8_acc: 0,
             utf8_rem: 0,
         }
@@ -106,7 +110,7 @@ impl Parser {
         match b {
             0x00..=0x17 | 0x19 | 0x1c..=0x1f => sink(Action::Execute(b)),
             0x20..=0x7e => sink(Action::Print(b as char)),
-            0x7f => {} // DEL ignored in ground
+            0x7f => {}                     // DEL ignored in ground
             _ => self.utf8_begin(b, sink), // 0x80..=0xff
         }
     }
@@ -232,7 +236,17 @@ impl Parser {
     fn st_osc<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
         match b {
             0x07 => self.goto(State::Ground, sink), // BEL terminates OSC
-            0x20..=0x7e | 0x80..=0xff => self.osc.push(b),
+            0x20..=0x7e | 0x80..=0xff => {
+                if self.osc_overflow {
+                    return;
+                }
+                if self.osc.len() < MAX_OSC_BYTES {
+                    self.osc.push(b);
+                } else {
+                    self.osc.clear();
+                    self.osc_overflow = true;
+                }
+            }
             _ => {} // other C0 + DEL ignored
         }
     }
@@ -293,13 +307,21 @@ impl Parser {
     /// target state's entry action (OSC end/start, `clear` on escape/CSI entry).
     fn goto<F: FnMut(Action)>(&mut self, new: State, sink: &mut F) {
         if self.state == State::OscString {
-            let data = std::mem::take(&mut self.osc);
-            sink(Action::OscDispatch(data));
+            if !self.osc_overflow {
+                let data = std::mem::take(&mut self.osc);
+                sink(Action::OscDispatch(data));
+            } else {
+                self.osc.clear();
+                self.osc_overflow = false;
+            }
         }
         self.state = new;
         match new {
             State::Escape | State::CsiEntry => self.clear(),
-            State::OscString => self.osc.clear(),
+            State::OscString => {
+                self.osc.clear();
+                self.osc_overflow = false;
+            }
             _ => {}
         }
     }

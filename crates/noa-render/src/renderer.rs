@@ -22,6 +22,7 @@ pub struct Renderer {
     instances: Vec<CellInstance>,
     viewport: PixelSize,
     cell_size: (f32, f32),
+    clear_color: [f32; 4],
 }
 
 impl Renderer {
@@ -76,6 +77,7 @@ impl Renderer {
             instances: Vec::new(),
             viewport: PixelSize { w: 0, h: 0 },
             cell_size: (metrics.cell_w, metrics.cell_h),
+            clear_color: [0.0, 0.0, 0.0, 1.0],
         })
     }
 
@@ -89,6 +91,7 @@ impl Renderer {
     pub fn rebuild_cells(&mut self, snap: &FrameSnapshot, font: &mut FontGrid, theme: &Theme) {
         let metrics = font.metrics();
         self.cell_size = (metrics.cell_w, metrics.cell_h);
+        self.clear_color = theme.default_bg_with_colors(&snap.colors);
 
         self.instances.clear();
         let mut bg_instances = Vec::new();
@@ -110,7 +113,7 @@ impl Renderer {
                 // clear color already fills that), unless inverted.
                 let bg_is_default = matches!(bg_color, Color::Default) && !inverse;
                 if !bg_is_default {
-                    let bg = theme.resolve(bg_color, false);
+                    let bg = theme.resolve_with_colors(bg_color, false, &snap.colors);
                     bg_instances.push(CellInstance {
                         glyph_pos: [0, 0],
                         glyph_size: [0, 0],
@@ -127,7 +130,7 @@ impl Renderer {
                 if cell.ch != ' ' && !invisible && !wide_spacer {
                     let glyph = font.get_or_raster(cell.ch);
                     if glyph.atlas_size[0] > 0 && glyph.atlas_size[1] > 0 {
-                        let fg = theme.resolve(fg_color, true);
+                        let fg = theme.resolve_with_colors(fg_color, true, &snap.colors);
                         glyph_instances.push(CellInstance {
                             glyph_pos: glyph.atlas_pos,
                             glyph_size: glyph.atlas_size,
@@ -145,9 +148,11 @@ impl Renderer {
 
         // Block cursor.
         if snap.cursor.visible {
-            let fg = theme.resolve(snap.cursor.fg, true);
-            let cursor_color = if matches!(snap.cursor.fg, Color::Default) {
-                theme.resolve(Color::Default, true)
+            let fg = theme.resolve_with_colors(snap.cursor.fg, true, &snap.colors);
+            let cursor_color = if snap.colors.cursor().is_some() {
+                theme.cursor_with_colors(&snap.colors)
+            } else if matches!(snap.cursor.fg, Color::Default) {
+                theme.resolve_with_colors(Color::Default, true, &snap.colors)
             } else {
                 fg
             };
@@ -187,10 +192,10 @@ impl Renderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
+                            r: f64::from(self.clear_color[0]),
+                            g: f64::from(self.clear_color[1]),
+                            b: f64::from(self.clear_color[2]),
+                            a: f64::from(self.clear_color[3]),
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -276,7 +281,7 @@ impl Renderer {
             grid_padding: [0.0, 0.0, 0.0, 0.0],
             cursor_pos: [0.0, 0.0],
             cursor_color: [1.0, 1.0, 1.0, 1.0],
-            bg_color: [0.0, 0.0, 0.0, 1.0],
+            bg_color: self.clear_color,
             min_contrast: 0.0,
             _pad: [0.0; 3],
         };

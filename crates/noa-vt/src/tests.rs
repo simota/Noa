@@ -4,7 +4,7 @@
 use crate::action::Action;
 use crate::csi::Csi;
 use crate::parser::Parser;
-use crate::sgr::{parse_sgr, SgrAttr};
+use crate::sgr::{SgrAttr, parse_sgr};
 use noa_core::{Color, Rgb};
 
 /// Run the parser over `bytes` and collect every emitted action.
@@ -19,7 +19,10 @@ fn actions(bytes: &[u8]) -> Vec<Action> {
 
 /// Extract the single CSI in `bytes` (panics otherwise).
 fn only_csi(bytes: &[u8]) -> Csi {
-    match actions(bytes).into_iter().find(|a| matches!(a, Action::CsiDispatch(_))) {
+    match actions(bytes)
+        .into_iter()
+        .find(|a| matches!(a, Action::CsiDispatch(_)))
+    {
         Some(Action::CsiDispatch(c)) => c,
         _ => panic!("no CSI dispatch in {bytes:?}"),
     }
@@ -40,7 +43,10 @@ fn executes_c0() {
 
 #[test]
 fn del_ignored_in_ground() {
-    assert_eq!(actions(b"a\x7fb"), vec![Action::Print('a'), Action::Print('b')]);
+    assert_eq!(
+        actions(b"a\x7fb"),
+        vec![Action::Print('a'), Action::Print('b')]
+    );
 }
 
 #[test]
@@ -86,7 +92,10 @@ fn sgr_bright_fg_and_bg() {
     let csi = only_csi(b"\x1b[91;100m");
     assert_eq!(
         parse_sgr(&csi),
-        vec![SgrAttr::Fg(Color::Palette(9)), SgrAttr::Bg(Color::Palette(8))]
+        vec![
+            SgrAttr::Fg(Color::Palette(9)),
+            SgrAttr::Bg(Color::Palette(8))
+        ]
     );
 }
 
@@ -152,6 +161,21 @@ fn osc_terminated_by_st() {
 }
 
 #[test]
+fn osc_payload_over_limit_is_dropped() {
+    let mut bytes = b"\x1b]0;".to_vec();
+    bytes.extend(std::iter::repeat_n(b'a', 4097));
+    bytes.push(0x07);
+
+    let acts = actions(&bytes);
+
+    assert!(
+        !acts
+            .iter()
+            .any(|action| matches!(action, Action::OscDispatch(_)))
+    );
+}
+
+#[test]
 fn esc_dispatch_ris_and_index() {
     assert_eq!(
         actions(b"\x1bc"),
@@ -187,5 +211,8 @@ fn c0_in_the_middle_of_csi_executes() {
     let acts = actions(b"\x1b[3\r1m");
     assert!(acts.contains(&Action::Execute(0x0d)));
     // The sequence still completes as SGR 31.
-    assert!(acts.iter().any(|a| matches!(a, Action::CsiDispatch(c) if c.final_byte == b'm')));
+    assert!(
+        acts.iter()
+            .any(|a| matches!(a, Action::CsiDispatch(c) if c.final_byte == b'm'))
+    );
 }

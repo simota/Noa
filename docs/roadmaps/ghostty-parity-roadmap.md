@@ -97,7 +97,7 @@ CLI programs.
 | `REQ-VT-004` | Scrollback and reflow | Partial | Scrollback storage, viewport, and clear-scrollback semantics are implemented; add soft-wrap reflow |
 | `REQ-VT-005` | Unicode cell width | Complete | Scalar cell width, zero-width non-advance, and wide-cell lead/spacer behavior are implemented; shaped grapheme clusters remain in `REQ-FONT-002` |
 | `REQ-VT-006` | Bracketed paste | Complete | Mode state, paste wrapping, and bracket marker sanitization are implemented; clipboard UI wiring remains in `REQ-UX-002` |
-| `REQ-VT-007` | OSC color/title surface | Partial | Implement OSC 4/10/11/12 query/change/reset behavior where safe |
+| `REQ-VT-007` | OSC color/title surface | Complete | OSC 0/2 title handling plus bounded OSC 4/10/11/12 query/change/reset behavior is implemented where safe |
 
 Exit criteria:
 
@@ -224,7 +224,7 @@ Exit criteria:
   `REQ-VT-005`.
 - [x] `IMPL-VT-006`: Add bracketed paste mode and paste encoding. References
   `REQ-VT-006`.
-- [ ] `IMPL-VT-007`: Implement safe OSC color query/change handling. References
+- [x] `IMPL-VT-007`: Implement safe OSC color query/change handling. References
   `REQ-VT-007`.
 
 ### Phase 2 Checklist

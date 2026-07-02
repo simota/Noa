@@ -309,7 +309,7 @@ impl App {
                 height: size.height.max(1),
                 present_mode: wgpu::PresentMode::Fifo,
                 desired_maximum_frame_latency: 2,
-                alpha_mode: caps.alpha_modes[0],
+                alpha_mode: preferred_surface_alpha_mode(&caps),
                 view_formats: vec![],
             };
             surface.configure(&gpu.device, &surface_config);
@@ -1126,6 +1126,17 @@ fn resolve_command_target<Id: Copy>(command: AppCommand, focused: Option<Id>) ->
     }
 }
 
+fn preferred_surface_alpha_mode(caps: &wgpu::SurfaceCapabilities) -> wgpu::CompositeAlphaMode {
+    if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
+        wgpu::CompositeAlphaMode::Opaque
+    } else {
+        caps.alpha_modes
+            .first()
+            .copied()
+            .unwrap_or(wgpu::CompositeAlphaMode::Auto)
+    }
+}
+
 fn font_pixel_size(point_size: f32, scale_factor: f64) -> f32 {
     (point_size * scale_factor.max(f64::EPSILON) as f32).max(1.0)
 }
@@ -1212,6 +1223,35 @@ mod tests {
 
         assert_eq!(size.width, 640.0);
         assert_eq!(size.height, 384.0);
+    }
+
+    #[test]
+    fn surface_alpha_mode_prefers_opaque_to_keep_terminal_colors_solid() {
+        let caps = wgpu::SurfaceCapabilities {
+            alpha_modes: vec![
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::Opaque,
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            preferred_surface_alpha_mode(&caps),
+            wgpu::CompositeAlphaMode::Opaque
+        );
+    }
+
+    #[test]
+    fn surface_alpha_mode_falls_back_when_opaque_is_unavailable() {
+        let caps = wgpu::SurfaceCapabilities {
+            alpha_modes: vec![wgpu::CompositeAlphaMode::Inherit],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            preferred_surface_alpha_mode(&caps),
+            wgpu::CompositeAlphaMode::Inherit
+        );
     }
 
     #[test]

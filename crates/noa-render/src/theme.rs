@@ -1,7 +1,7 @@
-//! Palette / theme resolution: `Color -> [f32; 4]` (straight, non-premultiplied,
-//! srgb-encoded 0..1 components — the surface format is `*Srgb`, so uploading
-//! plain `u8/255` values here and letting the format do the srgb decode on
-//! sampling keeps color math simple and consistent).
+//! Palette / theme resolution: `Color -> [f32; 4]` (straight,
+//! non-premultiplied, sRGB-encoded 0..1 components). The renderer converts
+//! these values to the target surface's output space immediately before
+//! uploading clear colors and cell instances.
 //!
 //! Uses the shared xterm 256-color table (16 ANSI + 6x6x6 cube + 24 grayscale
 //! ramp) plus a default foreground/background, mirroring Ghostty's default

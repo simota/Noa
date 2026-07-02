@@ -23,6 +23,7 @@ pub struct Renderer {
     viewport: PixelSize,
     cell_size: (f32, f32),
     clear_color: [f32; 4],
+    target_format_is_srgb: bool,
     atlas_seen_generation: u64,
 }
 
@@ -79,6 +80,7 @@ impl Renderer {
             viewport: PixelSize { w: 0, h: 0 },
             cell_size: (metrics.cell_w, metrics.cell_h),
             clear_color: [0.0, 0.0, 0.0, 1.0],
+            target_format_is_srgb: format.is_srgb(),
             atlas_seen_generation,
         })
     }
@@ -96,8 +98,13 @@ impl Renderer {
     /// Rebuild the CPU instance list from a snapshot, re-rastering any glyphs
     /// not yet in the atlas and re-uploading the atlas texture if it grew.
     pub fn rebuild_cells(&mut self, snap: &FrameSnapshot, font: &mut FontGrid, theme: &Theme) {
-        let (clear_color, cell_size) =
-            rebuild_cell_instances(&mut self.instances, snap, font, theme);
+        let (clear_color, cell_size) = rebuild_cell_instances(
+            &mut self.instances,
+            snap,
+            font,
+            theme,
+            self.target_format_is_srgb,
+        );
         self.clear_color = clear_color;
         self.cell_size = cell_size;
     }
@@ -231,9 +238,13 @@ fn rebuild_cell_instances(
     snap: &FrameSnapshot,
     font: &mut FontGrid,
     theme: &Theme,
+    target_format_is_srgb: bool,
 ) -> ([f32; 4], (f32, f32)) {
     let metrics = font.metrics();
-    let clear_color = theme.default_bg_with_colors(&snap.colors);
+    let clear_color = surface_output_rgba(
+        theme.default_bg_with_colors(&snap.colors),
+        target_format_is_srgb,
+    );
 
     instances.clear();
     let mut bg_instances = Vec::new();
@@ -261,18 +272,27 @@ fn rebuild_cell_instances(
             if cursor_cell || selected || active_search || search_match || !bg_is_default {
                 let bg = if cursor_cell {
                     if snap.colors.cursor().is_some() {
-                        theme.cursor_with_colors(&snap.colors)
+                        surface_output_rgba(
+                            theme.cursor_with_colors(&snap.colors),
+                            target_format_is_srgb,
+                        )
                     } else {
-                        theme.resolve_with_colors(fg_color, true, &snap.colors)
+                        surface_output_rgba(
+                            theme.resolve_with_colors(fg_color, true, &snap.colors),
+                            target_format_is_srgb,
+                        )
                     }
                 } else if selected {
-                    theme.selection_bg()
+                    surface_output_rgba(theme.selection_bg(), target_format_is_srgb)
                 } else if active_search {
-                    theme.active_search_bg()
+                    surface_output_rgba(theme.active_search_bg(), target_format_is_srgb)
                 } else if search_match {
-                    theme.search_bg()
+                    surface_output_rgba(theme.search_bg(), target_format_is_srgb)
                 } else {
-                    theme.resolve_with_colors(bg_color, false, &snap.colors)
+                    surface_output_rgba(
+                        theme.resolve_with_colors(bg_color, false, &snap.colors),
+                        target_format_is_srgb,
+                    )
                 };
                 bg_instances.push(CellInstance {
                     glyph_pos: [0, 0],
@@ -293,15 +313,21 @@ fn rebuild_cell_instances(
             let wide_spacer = cell.attrs.contains(CellAttrs::WIDE_SPACER);
             if !cell.is_blank() && !invisible && !wide_spacer {
                 let fg = if cursor_cell {
-                    theme.resolve_with_colors(bg_color, false, &snap.colors)
+                    surface_output_rgba(
+                        theme.resolve_with_colors(bg_color, false, &snap.colors),
+                        target_format_is_srgb,
+                    )
                 } else if selected {
-                    theme.selection_fg()
+                    surface_output_rgba(theme.selection_fg(), target_format_is_srgb)
                 } else if active_search {
-                    theme.active_search_fg()
+                    surface_output_rgba(theme.active_search_fg(), target_format_is_srgb)
                 } else if search_match {
-                    theme.search_fg()
+                    surface_output_rgba(theme.search_fg(), target_format_is_srgb)
                 } else {
-                    theme.resolve_with_colors(fg_color, true, &snap.colors)
+                    surface_output_rgba(
+                        theme.resolve_with_colors(fg_color, true, &snap.colors),
+                        target_format_is_srgb,
+                    )
                 };
                 let mut flags = CellInstance::FLAG_GLYPH;
                 if cursor_cell {
@@ -337,6 +363,28 @@ fn to_u8_color(c: [f32; 4]) -> [u8; 4] {
         (c[2].clamp(0.0, 1.0) * 255.0).round() as u8,
         (c[3].clamp(0.0, 1.0) * 255.0).round() as u8,
     ]
+}
+
+fn surface_output_rgba(c: [f32; 4], target_format_is_srgb: bool) -> [f32; 4] {
+    if !target_format_is_srgb {
+        return c;
+    }
+
+    [
+        srgb_to_linear(c[0]),
+        srgb_to_linear(c[1]),
+        srgb_to_linear(c[2]),
+        c[3].clamp(0.0, 1.0),
+    ]
+}
+
+fn srgb_to_linear(channel: f32) -> f32 {
+    let channel = channel.clamp(0.0, 1.0);
+    if channel <= 0.04045 {
+        channel / 12.92
+    } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn glyph_cell_bearing(metrics: Metrics, pen_bearing: [i16; 2]) -> [i16; 2] {
@@ -415,7 +463,7 @@ mod tests {
         let snap = FrameSnapshot::from_terminal(&terminal);
 
         let mut instances = Vec::new();
-        rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new());
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
 
         let cursor_bg_index = instances
             .iter()
@@ -460,6 +508,25 @@ mod tests {
                 .map(|instance| instance.flags & CellInstance::FLAG_GLYPH),
             Some(CellInstance::FLAG_GLYPH),
             "the final cursor-cell instance must not be an opaque blank cursor quad"
+        );
+    }
+
+    #[test]
+    fn srgb_surface_output_converts_theme_colors_to_linear() {
+        let srgb = [30.0 / 255.0, 30.0 / 255.0, 30.0 / 255.0, 1.0];
+
+        assert_eq!(
+            to_u8_color(surface_output_rgba(srgb, false)),
+            [30, 30, 30, 255]
+        );
+        assert_eq!(to_u8_color(surface_output_rgba(srgb, true)), [3, 3, 3, 255]);
+    }
+
+    #[test]
+    fn srgb_surface_output_preserves_extremes_and_alpha() {
+        assert_eq!(
+            surface_output_rgba([0.0, 1.0, 0.5, 0.5], true),
+            [0.0, 1.0, srgb_to_linear(0.5), 0.5]
         );
     }
 }

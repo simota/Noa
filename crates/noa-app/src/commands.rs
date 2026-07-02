@@ -11,6 +11,11 @@ pub enum AppCommand {
     Paste,
     Search(SearchAction),
     ScrollViewport(ViewportScroll),
+    NewTab,
+    CloseTab,
+    SelectTab(usize),
+    NextTab,
+    PrevTab,
     CloseWindow,
     Quit,
 }
@@ -50,6 +55,10 @@ impl AppCommand {
     pub(crate) const SCROLL_PAGE_DOWN_MENU_ID: &'static str = "noa.view.scroll-page-down";
     pub(crate) const SCROLL_TOP_MENU_ID: &'static str = "noa.view.scroll-top";
     pub(crate) const SCROLL_BOTTOM_MENU_ID: &'static str = "noa.view.scroll-bottom";
+    pub(crate) const NEW_TAB_MENU_ID: &'static str = "noa.file.new-tab";
+    pub(crate) const CLOSE_TAB_MENU_ID: &'static str = "noa.file.close-tab";
+    pub(crate) const NEXT_TAB_MENU_ID: &'static str = "noa.window.next-tab";
+    pub(crate) const PREV_TAB_MENU_ID: &'static str = "noa.window.previous-tab";
     pub(crate) const CLOSE_WINDOW_MENU_ID: &'static str = "noa.app.close-window";
     pub(crate) const QUIT_MENU_ID: &'static str = "noa.app.quit";
 
@@ -69,6 +78,11 @@ impl AppCommand {
             AppCommand::ScrollViewport(ViewportScroll::PageDown) => Self::SCROLL_PAGE_DOWN_MENU_ID,
             AppCommand::ScrollViewport(ViewportScroll::Top) => Self::SCROLL_TOP_MENU_ID,
             AppCommand::ScrollViewport(ViewportScroll::Bottom) => Self::SCROLL_BOTTOM_MENU_ID,
+            AppCommand::NewTab => Self::NEW_TAB_MENU_ID,
+            AppCommand::CloseTab => Self::CLOSE_TAB_MENU_ID,
+            AppCommand::SelectTab(_) => "",
+            AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
+            AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
             AppCommand::CloseWindow => Self::CLOSE_WINDOW_MENU_ID,
             AppCommand::Quit => Self::QUIT_MENU_ID,
         }
@@ -90,6 +104,10 @@ impl AppCommand {
             Self::SCROLL_PAGE_DOWN_MENU_ID => Some(Self::ScrollViewport(ViewportScroll::PageDown)),
             Self::SCROLL_TOP_MENU_ID => Some(Self::ScrollViewport(ViewportScroll::Top)),
             Self::SCROLL_BOTTOM_MENU_ID => Some(Self::ScrollViewport(ViewportScroll::Bottom)),
+            Self::NEW_TAB_MENU_ID => Some(Self::NewTab),
+            Self::CLOSE_TAB_MENU_ID => Some(Self::CloseTab),
+            Self::NEXT_TAB_MENU_ID => Some(Self::NextTab),
+            Self::PREV_TAB_MENU_ID => Some(Self::PrevTab),
             Self::CLOSE_WINDOW_MENU_ID => Some(Self::CloseWindow),
             Self::QUIT_MENU_ID => Some(Self::Quit),
             _ => None,
@@ -125,6 +143,22 @@ impl AppCommand {
             Self::ScrollViewport(ViewportScroll::PageDown) => "scroll.page-down",
             Self::ScrollViewport(ViewportScroll::Top) => "scroll.top",
             Self::ScrollViewport(ViewportScroll::Bottom) => "scroll.bottom",
+            Self::NewTab => "tab.new",
+            Self::CloseTab => "tab.close",
+            Self::SelectTab(index) => match index {
+                1 => "tab.select-1",
+                2 => "tab.select-2",
+                3 => "tab.select-3",
+                4 => "tab.select-4",
+                5 => "tab.select-5",
+                6 => "tab.select-6",
+                7 => "tab.select-7",
+                8 => "tab.select-8",
+                9 => "tab.select-9",
+                _ => "tab.select",
+            },
+            Self::NextTab => "tab.next",
+            Self::PrevTab => "tab.previous",
             Self::CloseWindow => "window.close",
             Self::Quit => "app.quit",
         }
@@ -146,6 +180,19 @@ impl AppCommand {
             "scroll.page-down" => Some(Self::ScrollViewport(ViewportScroll::PageDown)),
             "scroll.top" => Some(Self::ScrollViewport(ViewportScroll::Top)),
             "scroll.bottom" => Some(Self::ScrollViewport(ViewportScroll::Bottom)),
+            "tab.new" => Some(Self::NewTab),
+            "tab.close" => Some(Self::CloseTab),
+            "tab.select-1" => Some(Self::SelectTab(1)),
+            "tab.select-2" => Some(Self::SelectTab(2)),
+            "tab.select-3" => Some(Self::SelectTab(3)),
+            "tab.select-4" => Some(Self::SelectTab(4)),
+            "tab.select-5" => Some(Self::SelectTab(5)),
+            "tab.select-6" => Some(Self::SelectTab(6)),
+            "tab.select-7" => Some(Self::SelectTab(7)),
+            "tab.select-8" => Some(Self::SelectTab(8)),
+            "tab.select-9" => Some(Self::SelectTab(9)),
+            "tab.next" => Some(Self::NextTab),
+            "tab.previous" => Some(Self::PrevTab),
             "window.close" => Some(Self::CloseWindow),
             "app.quit" => Some(Self::Quit),
             _ => None,
@@ -177,7 +224,19 @@ impl Default for KeybindEngine {
     fn default() -> Self {
         let specs = [
             ("cmd+q", AppCommand::Quit),
-            ("cmd+w", AppCommand::CloseWindow),
+            ("cmd+t", AppCommand::NewTab),
+            ("cmd+w", AppCommand::CloseTab),
+            ("cmd+1", AppCommand::SelectTab(1)),
+            ("cmd+2", AppCommand::SelectTab(2)),
+            ("cmd+3", AppCommand::SelectTab(3)),
+            ("cmd+4", AppCommand::SelectTab(4)),
+            ("cmd+5", AppCommand::SelectTab(5)),
+            ("cmd+6", AppCommand::SelectTab(6)),
+            ("cmd+7", AppCommand::SelectTab(7)),
+            ("cmd+8", AppCommand::SelectTab(8)),
+            ("cmd+9", AppCommand::SelectTab(9)),
+            ("cmd+shift+]", AppCommand::NextTab),
+            ("cmd+shift+[", AppCommand::PrevTab),
             ("cmd+c", AppCommand::Copy),
             ("cmd+v", AppCommand::Paste),
             ("cmd+f", AppCommand::Search(SearchAction::Find)),
@@ -314,10 +373,13 @@ impl KeyToken {
 
     fn matches(self, logical_key: &Key) -> bool {
         match (self, logical_key) {
-            (Self::Character(expected), Key::Character(actual)) => actual
-                .chars()
-                .next()
-                .is_some_and(|actual| actual.eq_ignore_ascii_case(&expected)),
+            (Self::Character(expected), Key::Character(actual)) => {
+                actual.chars().next().is_some_and(|actual| {
+                    actual.eq_ignore_ascii_case(&expected)
+                        || (expected == '[' && actual == '{')
+                        || (expected == ']' && actual == '}')
+                })
+            }
             (Self::Named(expected), Key::Named(actual)) => expected.matches(*actual),
             _ => false,
         }
@@ -395,6 +457,10 @@ mod tests {
             AppCommand::ScrollViewport(ViewportScroll::PageDown),
             AppCommand::ScrollViewport(ViewportScroll::Top),
             AppCommand::ScrollViewport(ViewportScroll::Bottom),
+            AppCommand::NewTab,
+            AppCommand::CloseTab,
+            AppCommand::NextTab,
+            AppCommand::PrevTab,
             AppCommand::CloseWindow,
             AppCommand::Quit,
         ] {
@@ -410,7 +476,19 @@ mod tests {
         assert_eq!(AppCommand::from_cmd_character("Q"), Some(AppCommand::Quit));
         assert_eq!(
             AppCommand::from_cmd_character("w"),
-            Some(AppCommand::CloseWindow)
+            Some(AppCommand::CloseTab)
+        );
+        assert_eq!(
+            AppCommand::from_cmd_character("t"),
+            Some(AppCommand::NewTab)
+        );
+        assert_eq!(
+            AppCommand::from_cmd_character("1"),
+            Some(AppCommand::SelectTab(1))
+        );
+        assert_eq!(
+            AppCommand::from_cmd_character("9"),
+            Some(AppCommand::SelectTab(9))
         );
         assert_eq!(AppCommand::from_cmd_character("c"), Some(AppCommand::Copy));
         assert_eq!(AppCommand::from_cmd_character("V"), Some(AppCommand::Paste));
@@ -450,6 +528,38 @@ mod tests {
     }
 
     #[test]
+    fn tab_cycle_shortcuts_use_cmd_shift_brackets() {
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Character("]".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::NextTab)
+        );
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Character("}".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::NextTab)
+        );
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Character("[".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::PrevTab)
+        );
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Character("{".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::PrevTab)
+        );
+    }
+
+    #[test]
     fn viewport_scroll_shortcuts_require_shift_only() {
         assert_eq!(
             AppCommand::from_key(&Key::Named(NamedKey::PageUp), ModifiersState::empty()),
@@ -478,6 +588,11 @@ mod tests {
             AppCommand::Search(SearchAction::FindPrevious),
             AppCommand::Search(SearchAction::Clear),
             AppCommand::ScrollViewport(ViewportScroll::PageUp),
+            AppCommand::NewTab,
+            AppCommand::CloseTab,
+            AppCommand::SelectTab(3),
+            AppCommand::NextTab,
+            AppCommand::PrevTab,
             AppCommand::Quit,
         ] {
             assert_eq!(

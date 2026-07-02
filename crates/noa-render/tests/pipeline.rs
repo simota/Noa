@@ -145,3 +145,40 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         "wgpu validation error during draw (uniform/instance buffer layout?): {err:?}"
     );
 }
+
+#[test]
+fn shared_font_atlas_syncs_to_multiple_renderers() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping multi-renderer atlas test");
+        return;
+    };
+    let mut font = FontGrid::new(14.0).expect("load a system monospace font");
+    let mut first = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+    )
+    .expect("build first renderer");
+    let mut second = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+    )
+    .expect("build second renderer");
+
+    let initial_generation = font.atlas_generation();
+    let glyph = font.get_or_raster('M');
+    if glyph.atlas_size == [0, 0] || font.atlas_generation() == initial_generation {
+        eprintln!("installed monospace font did not rasterize 'M' — skipping atlas sync test");
+        return;
+    }
+    let generation = font.atlas_generation();
+
+    first.sync_atlas(&device, &queue, &mut font);
+    second.sync_atlas(&device, &queue, &mut font);
+
+    assert_eq!(first.atlas_seen_generation(), generation);
+    assert_eq!(second.atlas_seen_generation(), generation);
+}

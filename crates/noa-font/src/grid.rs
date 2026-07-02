@@ -124,9 +124,9 @@ impl FontGrid {
         self.atlas.size()
     }
 
-    /// Return whether the atlas changed since the last call, clearing the flag.
-    pub fn take_atlas_dirty(&mut self) -> bool {
-        self.atlas.take_dirty()
+    /// Monotonic atlas mutation generation.
+    pub fn atlas_generation(&self) -> u64 {
+        self.atlas.generation()
     }
 }
 
@@ -155,16 +155,13 @@ mod tests {
             "'M' should rasterize to a non-empty atlas region: {:?}",
             info.atlas_size
         );
-        assert!(
-            grid.take_atlas_dirty(),
-            "rastering 'M' should dirty the atlas"
-        );
-        assert!(!grid.take_atlas_dirty(), "dirty flag should clear");
+        let generation = grid.atlas_generation();
+        assert!(generation > 0, "rastering 'M' should advance the atlas");
 
         // Cache hit: same info, no new dirty.
         let info2 = grid.get_or_raster('M');
         assert_eq!(info.atlas_pos, info2.atlas_pos);
-        assert!(!grid.take_atlas_dirty());
+        assert_eq!(grid.atlas_generation(), generation);
     }
 
     #[test]
@@ -188,10 +185,7 @@ mod tests {
             "'日' should rasterize to a non-empty atlas region: {:?}",
             info.atlas_size
         );
-        assert!(
-            grid.take_atlas_dirty(),
-            "rastering '日' should dirty the atlas"
-        );
+        assert!(grid.atlas_generation() > 0);
     }
 
     #[test]

@@ -25,9 +25,9 @@ impl MacosMenu {
             false,
             None,
         );
-        let close_window = MenuItem::with_id(
-            AppCommand::CloseWindow.menu_id(),
-            "Close Window",
+        let close_tab = MenuItem::with_id(
+            AppCommand::CloseTab.menu_id(),
+            "Close Tab",
             true,
             Some(cmd_accelerator(Code::KeyW)),
         );
@@ -40,14 +40,28 @@ impl MacosMenu {
         let separator_one = PredefinedMenuItem::separator();
         let separator_two = PredefinedMenuItem::separator();
         let separator_three = PredefinedMenuItem::separator();
-        let file_close_window = MenuItem::with_id(
-            AppCommand::CloseWindow.menu_id(),
-            "Close Window",
+        let file_new_tab = MenuItem::with_id(
+            AppCommand::NewTab.menu_id(),
+            "New Tab",
+            true,
+            Some(cmd_accelerator(Code::KeyT)),
+        );
+        let file_close_tab = MenuItem::with_id(
+            AppCommand::CloseTab.menu_id(),
+            "Close Tab",
             true,
             Some(cmd_accelerator(Code::KeyW)),
         );
-        let file_menu =
-            Submenu::with_id_and_items("noa.menu.file", "File", true, &[&file_close_window])?;
+        let file_menu = Submenu::with_id_and_items(
+            "noa.menu.file",
+            "File",
+            true,
+            &[
+                &file_new_tab,
+                &PredefinedMenuItem::separator(),
+                &file_close_tab,
+            ],
+        )?;
         let edit_menu = Submenu::with_id_and_items(
             "noa.menu.edit",
             "Edit",
@@ -148,6 +162,19 @@ impl MacosMenu {
             &[
                 &disabled_item("noa.window.minimize", "Minimize"),
                 &disabled_item("noa.window.zoom", "Zoom"),
+                &PredefinedMenuItem::separator(),
+                &MenuItem::with_id(
+                    AppCommand::PrevTab.menu_id(),
+                    "Previous Tab",
+                    true,
+                    Some(cmd_shift_accelerator(Code::BracketLeft)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::NextTab.menu_id(),
+                    "Next Tab",
+                    true,
+                    Some(cmd_shift_accelerator(Code::BracketRight)),
+                ),
             ],
         )?;
         let help_menu = Submenu::with_id_and_items(
@@ -162,7 +189,7 @@ impl MacosMenu {
             &separator_one,
             &preferences,
             &separator_two,
-            &close_window,
+            &close_tab,
             &separator_three,
             &quit,
         ])?;

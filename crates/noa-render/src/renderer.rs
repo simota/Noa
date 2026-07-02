@@ -23,6 +23,7 @@ pub struct Renderer {
     viewport: PixelSize,
     cell_size: (f32, f32),
     clear_color: [f32; 4],
+    atlas_seen_generation: u64,
 }
 
 impl Renderer {
@@ -53,7 +54,7 @@ impl Renderer {
         let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         upload_atlas(queue, &atlas_texture, font.atlas_data(), atlas_w, atlas_h);
-        font.take_atlas_dirty(); // we just uploaded the current contents
+        let atlas_seen_generation = font.atlas_generation();
 
         let bind_group = cell.make_bind_group(device, &atlas_view);
 
@@ -78,12 +79,18 @@ impl Renderer {
             viewport: PixelSize { w: 0, h: 0 },
             cell_size: (metrics.cell_w, metrics.cell_h),
             clear_color: [0.0, 0.0, 0.0, 1.0],
+            atlas_seen_generation,
         })
     }
 
     /// Update the known viewport size (called on `WindowEvent::Resized`).
     pub fn resize(&mut self, px: PixelSize) {
         self.viewport = px;
+    }
+
+    /// Atlas generation this renderer has uploaded.
+    pub fn atlas_seen_generation(&self) -> u64 {
+        self.atlas_seen_generation
     }
 
     /// Rebuild the CPU instance list from a snapshot, re-rastering any glyphs
@@ -148,7 +155,8 @@ impl Renderer {
     /// the last upload. Call this before [`Renderer::draw`] each frame (from
     /// `noa-app`, while still holding `font` mutably for `rebuild_cells`).
     pub fn sync_atlas(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, font: &mut FontGrid) {
-        if !font.take_atlas_dirty() {
+        let generation = font.atlas_generation();
+        if generation == self.atlas_seen_generation {
             return;
         }
         let (w, h) = font.atlas_size();
@@ -173,6 +181,7 @@ impl Renderer {
             self.bind_group = self.cell.make_bind_group(device, &self.atlas_view);
         }
         upload_atlas(queue, &self.atlas_texture, font.atlas_data(), w, h);
+        self.atlas_seen_generation = generation;
     }
 
     fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {

@@ -7,13 +7,13 @@ const MAX_ATLAS_DIM: u32 = 8192;
 /// R8 glyph atlas: a shelf allocator plus a parallel CPU coverage buffer.
 ///
 /// The renderer uploads [`Atlas::data`] to a GPU texture whenever
-/// [`Atlas::take_dirty`] reports pending changes.
+/// [`Atlas::generation`] advances beyond the renderer's last seen value.
 pub struct Atlas {
     allocator: BucketedAtlasAllocator,
     data: Vec<u8>,
     width: u32,
     height: u32,
-    dirty: bool,
+    generation: u64,
 }
 
 impl Atlas {
@@ -25,7 +25,7 @@ impl Atlas {
             data: vec![0u8; (width as usize) * (height as usize)],
             width,
             height,
-            dirty: false,
+            generation: 0,
         }
     }
 
@@ -49,7 +49,7 @@ impl Atlas {
             let dst = ((y + row) as usize) * (self.width as usize) + x as usize;
             self.data[dst..dst + w as usize].copy_from_slice(&bitmap[src..src + w as usize]);
         }
-        self.dirty = true;
+        self.bump_generation();
         Some((x as u16, y as u16))
     }
 
@@ -105,7 +105,7 @@ impl Atlas {
         self.data = data;
         self.width = width;
         self.height = height;
-        self.dirty = true;
+        self.bump_generation();
     }
 
     /// Borrow the R8 pixel buffer (`width * height` bytes, row-major).
@@ -118,11 +118,13 @@ impl Atlas {
         (self.width, self.height)
     }
 
-    /// Return the dirty flag and clear it.
-    pub fn take_dirty(&mut self) -> bool {
-        let d = self.dirty;
-        self.dirty = false;
-        d
+    /// Monotonic atlas mutation generation.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn bump_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
     }
 }
 
@@ -137,11 +139,10 @@ mod tests {
     #[test]
     fn blit_marks_dirty_and_writes() {
         let mut atlas = Atlas::new(64, 64);
-        assert!(!atlas.take_dirty());
+        assert_eq!(atlas.generation(), 0);
         let bitmap = vec![0xFFu8; 4 * 3];
         let (x, y) = atlas.reserve_and_blit(4, 3, &bitmap).unwrap();
-        assert!(atlas.take_dirty());
-        assert!(!atlas.take_dirty());
+        assert_eq!(atlas.generation(), 1);
         let idx = (y as usize) * 64 + x as usize;
         assert_eq!(atlas.data()[idx], 0xFF);
         assert_eq!(atlas.size(), (64, 64));
@@ -151,7 +152,7 @@ mod tests {
     fn zero_size_is_noop() {
         let mut atlas = Atlas::new(16, 16);
         assert_eq!(atlas.reserve_and_blit(0, 0, &[]), Some((0, 0)));
-        assert!(!atlas.take_dirty());
+        assert_eq!(atlas.generation(), 0);
     }
 
     #[test]
@@ -159,7 +160,7 @@ mod tests {
         let mut atlas = Atlas::new(8, 8);
         let first_bitmap = vec![0x7Fu8; 4 * 4];
         let first = atlas.reserve_and_blit(4, 4, &first_bitmap).unwrap();
-        atlas.take_dirty();
+        let first_generation = atlas.generation();
 
         let large_bitmap = vec![0xFFu8; 8 * 8];
         let large = atlas
@@ -168,7 +169,10 @@ mod tests {
 
         let (width, height) = atlas.size();
         assert!(width > 8 && height > 8);
-        assert!(atlas.take_dirty(), "growth and blit should dirty the atlas");
+        assert!(
+            atlas.generation() > first_generation,
+            "growth and blit should advance the atlas generation"
+        );
 
         let first_idx = first.1 as usize * width as usize + first.0 as usize;
         let large_idx = large.1 as usize * width as usize + large.0 as usize;

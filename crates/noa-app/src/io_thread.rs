@@ -6,6 +6,7 @@
 //! requests come in from the main thread over crossbeam channels.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use noa_core::GridSize;
@@ -18,6 +19,44 @@ use crate::events::UserEvent;
 pub(crate) type PtyInput = Box<[u8]>;
 
 pub(crate) const PTY_INPUT_QUEUE_CAPACITY: usize = 1024;
+
+/// Owned handle for stopping and joining a PTY io thread.
+pub(crate) struct IoThreadHandle {
+    shutdown_tx: Sender<()>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl IoThreadHandle {
+    const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+    pub(crate) fn shutdown_and_join(mut self) {
+        let _ = self.shutdown_and_join_timeout(Self::JOIN_TIMEOUT);
+    }
+
+    fn shutdown_and_join_timeout(&mut self, timeout: Duration) -> bool {
+        let _ = self.shutdown_tx.send(());
+        let deadline = Instant::now() + timeout;
+        while self.join.as_ref().is_some_and(|join| !join.is_finished())
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let Some(join) = self.join.take() else {
+            return true;
+        };
+        if !join.is_finished() {
+            self.join = Some(join);
+            log::warn!("pty io thread did not stop within {timeout:?}");
+            return false;
+        }
+        if let Err(err) = join.join() {
+            log::warn!("pty io thread panicked during shutdown: {err:?}");
+            return false;
+        }
+        true
+    }
+}
 
 pub(crate) fn input_channel() -> (Sender<PtyInput>, Receiver<PtyInput>) {
     crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY)
@@ -53,14 +92,17 @@ pub fn spawn(
     pty: Pty,
     terminal: Arc<Mutex<Terminal>>,
     proxy: EventLoopProxy<UserEvent>,
+    window_id: winit::window::WindowId,
     resize_rx: Receiver<GridSize>,
     input_rx: Receiver<PtyInput>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
+) -> IoThreadHandle {
+    let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
+    let join = std::thread::spawn(move || {
         let writer = pty.writer();
         let mut stream = noa_vt::Stream::new();
         loop {
             crossbeam_channel::select! {
+                recv(shutdown_rx) -> _ => break,
                 recv(pty.event_rx()) -> msg => match msg {
                     Ok(noa_pty::PtyEvent::Data(bytes)) => {
                         let output = feed_terminal(&terminal, &mut stream, bytes.as_ref());
@@ -68,14 +110,14 @@ pub fn spawn(
                             write_pty_bytes(&writer, &output.pending_writes);
                         }
                         for text in output.pending_clipboard_writes {
-                            let _ = proxy.send_event(UserEvent::ClipboardWrite(text));
+                            let _ = proxy.send_event(UserEvent::ClipboardWrite { window_id, text });
                         }
-                        if proxy.send_event(UserEvent::Redraw).is_err() {
+                        if proxy.send_event(UserEvent::Redraw(window_id)).is_err() {
                             break; // event loop gone
                         }
                     }
                     Ok(noa_pty::PtyEvent::Exit(_)) | Ok(noa_pty::PtyEvent::Error(_)) => {
-                        let _ = proxy.send_event(UserEvent::PtyExit);
+                        let _ = proxy.send_event(UserEvent::PtyExit(window_id));
                         break;
                     }
                     Err(_) => break, // channel closed
@@ -92,7 +134,11 @@ pub fn spawn(
                 },
             }
         }
-    })
+    });
+    IoThreadHandle {
+        shutdown_tx,
+        join: Some(join),
+    }
 }
 
 #[cfg(test)]
@@ -132,5 +178,20 @@ mod tests {
             other => panic!("expected a full input queue, got {other:?}"),
         }
         assert_eq!(rx.len(), PTY_INPUT_QUEUE_CAPACITY);
+    }
+
+    #[test]
+    fn io_thread_handle_shutdown_joins_within_timeout() {
+        let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
+        let join = std::thread::spawn(move || {
+            let _ = shutdown_rx.recv();
+        });
+        let mut handle = IoThreadHandle {
+            shutdown_tx,
+            join: Some(join),
+        };
+
+        assert!(handle.shutdown_and_join_timeout(Duration::from_millis(500)));
+        assert!(handle.join.is_none());
     }
 }

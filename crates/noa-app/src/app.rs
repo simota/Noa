@@ -330,7 +330,17 @@ impl App {
             ..Default::default()
         };
         let pty = Pty::spawn(pty_config).expect("failed to spawn pty");
-        let terminal = Arc::new(Mutex::new(Terminal::new(initial_grid_size)));
+        let mut terminal = Terminal::new(initial_grid_size);
+        {
+            let theme = &self.gpu.as_ref().expect("gpu initialized").theme;
+            terminal.set_base_colors(
+                theme.default_fg,
+                theme.default_bg,
+                theme.cursor,
+                theme.palette,
+            );
+        }
+        let terminal = Arc::new(Mutex::new(terminal));
         let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
         let (pty_input_tx, pty_input_rx) = crate::io_thread::input_channel();
         let io_thread = crate::io_thread::spawn(

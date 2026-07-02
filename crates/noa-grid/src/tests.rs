@@ -2,7 +2,10 @@
 //! replies, and captured-stream golden fixtures.
 
 use crate::terminal::Terminal;
-use noa_core::{CellAttrs, Color, GridSize, Point, Rgb};
+use noa_core::{
+    CellAttrs, Color, DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, GridSize, Point, Rgb, xterm_palette,
+    xterm_palette_color,
+};
 use noa_vt::Stream;
 
 /// Feed `bytes` through a fresh 80×24 terminal and return the final state.
@@ -788,6 +791,47 @@ fn osc_default_queries_use_theme_defaults() {
           \x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\\
           \x1b]12;rgb:e0e0/e0e0/e0e0\x1b\\"
     );
+}
+
+#[test]
+fn terminal_colors_default_base_layer_matches_legacy_defaults() {
+    let colors = crate::TerminalColors::default();
+
+    assert_eq!(colors.base_default_fg(), DEFAULT_FG);
+    assert_eq!(colors.base_default_bg(), DEFAULT_BG);
+    assert_eq!(colors.base_cursor(), DEFAULT_CURSOR);
+    assert_eq!(colors.base_palette(1), xterm_palette_color(1));
+    assert_eq!(colors.default_fg(), None);
+    assert_eq!(colors.default_bg(), None);
+    assert_eq!(colors.cursor(), None);
+    assert_eq!(colors.palette(1), None);
+}
+
+#[test]
+fn terminal_set_base_colors_seeds_colors_without_clearing_dynamic_overrides() {
+    let mut palette = xterm_palette();
+    palette[1] = Rgb::new(0x10, 0x20, 0x30);
+    let dynamic_fg = Rgb::new(0x01, 0x02, 0x03);
+    let dynamic_palette = Rgb::new(0x04, 0x05, 0x06);
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.colors.set_default_fg(dynamic_fg);
+    t.colors.set_palette(1, dynamic_palette);
+
+    t.set_base_colors(
+        Rgb::new(0xaa, 0xbb, 0xcc),
+        Rgb::new(0x11, 0x22, 0x33),
+        Rgb::new(0x44, 0x55, 0x66),
+        palette,
+    );
+
+    assert_eq!(t.colors.base_default_fg(), Rgb::new(0xaa, 0xbb, 0xcc));
+    assert_eq!(t.colors.base_default_bg(), Rgb::new(0x11, 0x22, 0x33));
+    assert_eq!(t.colors.base_cursor(), Rgb::new(0x44, 0x55, 0x66));
+    assert_eq!(t.colors.base_palette(1), Rgb::new(0x10, 0x20, 0x30));
+    assert_eq!(t.colors.default_fg(), Some(dynamic_fg));
+    assert_eq!(t.colors.palette(1), Some(dynamic_palette));
+    assert_eq!(t.colors.default_bg(), None);
+    assert_eq!(t.colors.cursor(), None);
 }
 
 #[test]

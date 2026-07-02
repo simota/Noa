@@ -1,6 +1,6 @@
 //! OSC terminal state handled by the grid layer.
 
-use noa_core::{DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, Rgb, xterm_palette_color};
+use noa_core::{DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, Rgb, xterm_palette, xterm_palette_color};
 
 const MAX_COLOR_OSC_BYTES: usize = 4096;
 const DEFAULT_OSC52_MAX_DECODED_BYTES: usize = 3 * 1024;
@@ -24,6 +24,10 @@ impl Default for Osc52Policy {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TerminalColors {
+    base_fg: Rgb,
+    base_bg: Rgb,
+    base_cursor: Rgb,
+    base_palette: [Rgb; 256],
     palette: [Option<Rgb>; 256],
     default_fg: Option<Rgb>,
     default_bg: Option<Rgb>,
@@ -33,6 +37,10 @@ pub struct TerminalColors {
 impl Default for TerminalColors {
     fn default() -> Self {
         Self {
+            base_fg: DEFAULT_FG,
+            base_bg: DEFAULT_BG,
+            base_cursor: DEFAULT_CURSOR,
+            base_palette: xterm_palette(),
             palette: [None; 256],
             default_fg: None,
             default_bg: None,
@@ -42,6 +50,22 @@ impl Default for TerminalColors {
 }
 
 impl TerminalColors {
+    pub fn base_default_fg(&self) -> Rgb {
+        self.base_fg
+    }
+
+    pub fn base_default_bg(&self) -> Rgb {
+        self.base_bg
+    }
+
+    pub fn base_cursor(&self) -> Rgb {
+        self.base_cursor
+    }
+
+    pub fn base_palette(&self, index: u8) -> Rgb {
+        self.base_palette[index as usize]
+    }
+
     pub fn palette(&self, index: u8) -> Option<Rgb> {
         self.palette[index as usize]
     }
@@ -56,6 +80,19 @@ impl TerminalColors {
 
     pub fn cursor(&self) -> Option<Rgb> {
         self.cursor
+    }
+
+    pub fn set_base_colors(
+        &mut self,
+        default_fg: Rgb,
+        default_bg: Rgb,
+        cursor: Rgb,
+        palette: [Rgb; 256],
+    ) {
+        self.base_fg = default_fg;
+        self.base_bg = default_bg;
+        self.base_cursor = cursor;
+        self.base_palette = palette;
     }
 
     pub fn set_palette(&mut self, index: u8, rgb: Rgb) {

@@ -138,6 +138,17 @@ impl Terminal {
         std::mem::take(&mut self.pending_clipboard_writes)
     }
 
+    pub fn set_base_colors(
+        &mut self,
+        default_fg: noa_core::Rgb,
+        default_bg: noa_core::Rgb,
+        cursor: noa_core::Rgb,
+        palette: [noa_core::Rgb; 256],
+    ) {
+        self.colors
+            .set_base_colors(default_fg, default_bg, cursor, palette);
+    }
+
     fn apply_sgr(&mut self, attrs: &[SgrAttr]) {
         let c = &mut self.active_mut().cursor;
         for a in attrs {

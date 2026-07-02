@@ -34,9 +34,13 @@ impl Terminal {
         }
     }
 
-    /// The active screen (inc-1: always primary).
+    /// The active screen.
     pub fn active(&self) -> &Screen {
-        &self.primary
+        if self.active_is_alt {
+            self.alt.as_ref().unwrap_or(&self.primary)
+        } else {
+            &self.primary
+        }
     }
 
     /// Resize the terminal to a new cell grid (from a window resize). Resizes
@@ -55,7 +59,7 @@ impl Terminal {
     }
 
     fn apply_sgr(&mut self, attrs: &[SgrAttr]) {
-        let c = &mut self.primary.cursor;
+        let c = &mut self.active_mut().cursor;
         for a in attrs {
             match *a {
                 SgrAttr::Reset => {
@@ -87,57 +91,94 @@ impl Terminal {
             }
         }
     }
+
+    fn active_mut(&mut self) -> &mut Screen {
+        if self.active_is_alt {
+            let cols = self.size.cols;
+            let rows = self.size.rows;
+            self.alt.get_or_insert_with(|| Screen::new(cols, rows))
+        } else {
+            &mut self.primary
+        }
+    }
+
+    fn enter_alt_screen(&mut self, clear: bool) {
+        if clear || self.alt.is_none() {
+            let mut alt = Screen::new(self.size.cols, self.size.rows);
+            alt.cursor.visible = self.modes.cursor_visible();
+            self.alt = Some(alt);
+        } else if let Some(alt) = &mut self.alt {
+            alt.cursor.visible = self.modes.cursor_visible();
+        }
+        self.active_is_alt = true;
+    }
+
+    fn leave_alt_screen(&mut self, restore_cursor: bool, clear_alt: bool) {
+        let was_alt = self.active_is_alt;
+        self.active_is_alt = false;
+        self.primary.cursor.visible = self.modes.cursor_visible();
+        if restore_cursor {
+            self.primary.restore_cursor();
+        }
+        if clear_alt && was_alt {
+            let mut alt = Screen::new(self.size.cols, self.size.rows);
+            alt.cursor.visible = self.modes.cursor_visible();
+            self.alt = Some(alt);
+        }
+    }
 }
 
 impl Handler for Terminal {
     fn print(&mut self, c: char) {
         let autowrap = self.modes.autowrap();
-        self.primary.print(c, autowrap);
+        self.active_mut().print(c, autowrap);
     }
 
     fn execute_c0(&mut self, byte: u8) {
+        let linefeed_newline = self.modes.linefeed_newline();
+        let screen = self.active_mut();
         match byte {
             0x07 => {} // BEL — TODO(agent): visual/audible bell (inc≥2)
-            0x08 => self.primary.backspace(),
-            0x09 => self.primary.tab(1),
+            0x08 => screen.backspace(),
+            0x09 => screen.tab(1),
             0x0a..=0x0c => {
-                if self.modes.linefeed_newline() {
-                    self.primary.carriage_return();
+                if linefeed_newline {
+                    screen.carriage_return();
                 }
-                self.primary.index();
+                screen.index();
             }
-            0x0d => self.primary.carriage_return(),
+            0x0d => screen.carriage_return(),
             _ => {}
         }
     }
 
     fn cursor_up(&mut self, n: u16) {
-        self.primary.cursor_up(n);
+        self.active_mut().cursor_up(n);
     }
     fn cursor_down(&mut self, n: u16) {
-        self.primary.cursor_down(n);
+        self.active_mut().cursor_down(n);
     }
     fn cursor_forward(&mut self, n: u16) {
-        self.primary.cursor_forward(n);
+        self.active_mut().cursor_forward(n);
     }
     fn cursor_backward(&mut self, n: u16) {
-        self.primary.cursor_backward(n);
+        self.active_mut().cursor_backward(n);
     }
     fn cursor_position(&mut self, row: u16, col: u16) {
-        self.primary.cursor_position(row, col);
+        self.active_mut().cursor_position(row, col);
     }
     fn cursor_col_abs(&mut self, col: u16) {
-        self.primary.cursor_col_abs(col);
+        self.active_mut().cursor_col_abs(col);
     }
     fn cursor_row_abs(&mut self, row: u16) {
-        self.primary.cursor_row_abs(row);
+        self.active_mut().cursor_row_abs(row);
     }
 
     fn erase_display(&mut self, mode: EraseDisplay) {
-        self.primary.erase_display(mode);
+        self.active_mut().erase_display(mode);
     }
     fn erase_line(&mut self, mode: EraseLine) {
-        self.primary.erase_line(mode);
+        self.active_mut().erase_line(mode);
     }
 
     fn set_attributes(&mut self, attrs: &[SgrAttr]) {
@@ -146,72 +187,106 @@ impl Handler for Terminal {
 
     fn set_mode(&mut self, value: u16, ansi: bool, on: bool) {
         self.modes.set(value, ansi, on);
-        if value == 25 && !ansi {
-            self.primary.cursor.visible = on; // DECTCEM
+        if !ansi {
+            match value {
+                25 => self.active_mut().cursor.visible = on, // DECTCEM
+                47 => {
+                    if on {
+                        self.enter_alt_screen(false);
+                    } else {
+                        self.leave_alt_screen(false, false);
+                    }
+                }
+                1047 => {
+                    if on {
+                        self.enter_alt_screen(false);
+                    } else {
+                        self.leave_alt_screen(false, true);
+                    }
+                }
+                1048 => {
+                    if on {
+                        self.active_mut().save_cursor();
+                    } else {
+                        self.active_mut().restore_cursor();
+                    }
+                }
+                1049 => {
+                    if on {
+                        self.primary.save_cursor();
+                        self.enter_alt_screen(true);
+                    } else {
+                        self.leave_alt_screen(true, true);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
     fn carriage_return(&mut self) {
-        self.primary.carriage_return();
+        self.active_mut().carriage_return();
     }
     fn linefeed(&mut self) {
-        self.primary.index();
+        self.active_mut().index();
     }
     fn tab(&mut self, n: u16) {
-        self.primary.tab(n);
+        self.active_mut().tab(n);
     }
     fn tab_back(&mut self, n: u16) {
-        self.primary.tab_back(n);
+        self.active_mut().tab_back(n);
     }
     fn reverse_index(&mut self) {
-        self.primary.reverse_index();
+        self.active_mut().reverse_index();
     }
     fn save_cursor(&mut self) {
-        self.primary.save_cursor();
+        self.active_mut().save_cursor();
     }
     fn restore_cursor(&mut self) {
-        self.primary.restore_cursor();
+        self.active_mut().restore_cursor();
     }
     fn set_tab_stop(&mut self) {
-        self.primary.set_tab_stop();
+        self.active_mut().set_tab_stop();
     }
     fn clear_tab_stop(&mut self) {
-        self.primary.clear_tab_stop();
+        self.active_mut().clear_tab_stop();
     }
     fn clear_all_tab_stops(&mut self) {
-        self.primary.clear_all_tab_stops();
+        self.active_mut().clear_all_tab_stops();
     }
 
     fn full_reset(&mut self) {
         self.primary = Screen::new(self.size.cols, self.size.rows);
+        self.alt = None;
+        self.active_is_alt = false;
         self.modes = ModeState::defaults();
         self.title.clear();
     }
 
     fn insert_blank_chars(&mut self, n: u16) {
-        self.primary.insert_blank_chars(n);
+        self.active_mut().insert_blank_chars(n);
     }
     fn insert_lines(&mut self, n: u16) {
-        self.primary.insert_lines(n);
+        self.active_mut().insert_lines(n);
     }
     fn delete_lines(&mut self, n: u16) {
-        self.primary.delete_lines(n);
+        self.active_mut().delete_lines(n);
     }
     fn delete_chars(&mut self, n: u16) {
-        self.primary.delete_chars(n);
+        self.active_mut().delete_chars(n);
     }
     fn scroll_up(&mut self, n: u16) {
-        self.primary.scroll_up_region(n);
+        self.active_mut().scroll_up_region(n);
     }
     fn scroll_down(&mut self, n: u16) {
-        self.primary.scroll_down_region(n);
+        self.active_mut().scroll_down_region(n);
     }
     fn erase_chars(&mut self, n: u16) {
-        self.primary.erase_chars(n);
+        self.active_mut().erase_chars(n);
     }
     fn repeat_preceding_char(&mut self, n: u16) {
         let autowrap = self.modes.autowrap();
-        self.primary.repeat_preceding_char(n, autowrap);
+        self.active_mut().repeat_preceding_char(n, autowrap);
     }
 
     fn device_attributes(&mut self, kind: DaKind) {
@@ -226,8 +301,8 @@ impl Handler for Terminal {
         match kind {
             DsrKind::Status => self.pending_writes.extend_from_slice(b"\x1b[0n"),
             DsrKind::CursorPosition => {
-                let row = self.primary.cursor.y + 1;
-                let col = self.primary.cursor.x + 1;
+                let row = self.active().cursor.y + 1;
+                let col = self.active().cursor.x + 1;
                 self.pending_writes
                     .extend_from_slice(format!("\x1b[{row};{col}R").as_bytes());
             }
@@ -246,7 +321,8 @@ impl Handler for Terminal {
     }
 
     fn set_scroll_region(&mut self, top: u16, bottom: u16) {
-        let last = self.primary.rows.saturating_sub(1);
+        let screen = self.active_mut();
+        let last = screen.rows.saturating_sub(1);
         let t = top.saturating_sub(1).min(last);
         let b = if bottom == 0 {
             last
@@ -254,8 +330,8 @@ impl Handler for Terminal {
             bottom.saturating_sub(1).min(last)
         };
         if t < b {
-            self.primary.region = ScrollRegion { top: t, bottom: b };
+            screen.region = ScrollRegion { top: t, bottom: b };
         }
-        self.primary.cursor_position(1, 1); // DECSTBM homes the cursor
+        screen.cursor_position(1, 1); // DECSTBM homes the cursor
     }
 }

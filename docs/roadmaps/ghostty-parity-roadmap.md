@@ -93,7 +93,7 @@ CLI programs.
 |----|------------|---------------|--------|
 | `REQ-VT-001` | CSI edit set | Complete | `IL`, `DL`, `DCH`, `ICH`, `ECH`, `REP`, `SU`, `SD`, `CHT`, `CBT`, and `TBC` are implemented with grid coverage |
 | `REQ-VT-002` | Cursor and margins | Partial | Implement `DECSLRM`, `DECSCUSR`, keypad modes, and cursor style state |
-| `REQ-VT-003` | Alternate screen | Planned | Implement primary/alternate screen switching and resize behavior |
+| `REQ-VT-003` | Alternate screen | Complete | Primary/alternate screen switching, cursor save/restore, and resize behavior are implemented with grid coverage |
 | `REQ-VT-004` | Scrollback and reflow | Planned | Add paged scrollback, viewport, soft-wrap reflow, and clear-scrollback semantics |
 | `REQ-VT-005` | Unicode cell width | Partial | Implement grapheme-aware width handling and wide-cell continuation behavior |
 | `REQ-VT-006` | Bracketed paste | Planned | Implement mode state, paste wrapping, and safety checks |
@@ -216,7 +216,7 @@ Exit criteria:
   `noa-grid` screen mutation. References `REQ-VT-001`.
 - [x] `IMPL-VT-002`: Add tests for insert/delete chars and lines, scroll up/down,
   repeat char, erase char, and tab clearing. References `REQ-VT-001`.
-- [ ] `IMPL-VT-003`: Implement alternate screen mode state and screen switching.
+- [x] `IMPL-VT-003`: Implement alternate screen mode state and screen switching.
   References `REQ-VT-003`.
 - [ ] `IMPL-VT-004`: Add scrollback storage and viewport model. References
   `REQ-VT-004`.

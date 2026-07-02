@@ -231,6 +231,84 @@ fn repeat_preceding_char() {
 }
 
 #[test]
+fn alternate_screen_1049_isolated_and_restores_primary_cursor() {
+    let t = run(b"main\x1b[?1049hALT\x1b[?1049lZ");
+
+    assert!(!t.active_is_alt);
+    assert_eq!(row_text(&t, 0, 5), "mainZ");
+    let alt = t.alt.as_ref().expect("alternate screen should exist");
+    assert_eq!(alt.grid[0].cells[0].ch, ' ');
+    assert_eq!(alt.grid[0].cells[1].ch, ' ');
+}
+
+#[test]
+fn active_screen_returns_alternate_while_enabled() {
+    let t = run(b"P\x1b[?1049hA");
+
+    assert!(t.active_is_alt);
+    assert_eq!(t.primary.grid[0].cells[0].ch, 'P');
+    assert_eq!(t.active().grid[0].cells[0].ch, 'A');
+}
+
+#[test]
+fn alternate_screen_1048_saves_and_restores_cursor_without_switching() {
+    let t = run(b"\x1b[10;5H\x1b[?1048h\x1b[1;1H\x1b[?1048lX");
+
+    assert!(!t.active_is_alt);
+    assert_eq!(cell(&t, 4, 9).ch, 'X');
+}
+
+#[test]
+fn alternate_screen_47_preserves_without_clear() {
+    let t = run(b"\x1b[?47hOLD\x1b[?47l\x1b[?47h");
+
+    assert!(t.active_is_alt);
+    assert_eq!(t.active().grid[0].cells[0].ch, 'O');
+    assert_eq!(t.active().grid[0].cells[1].ch, 'L');
+    assert_eq!(t.active().grid[0].cells[2].ch, 'D');
+}
+
+#[test]
+fn alternate_screen_1047_clears_on_reset() {
+    let t = run(b"\x1b[?47hOLD\x1b[?47l\x1b[?1047h\x1b[?1047l\x1b[?47hN");
+
+    assert!(t.active_is_alt);
+    assert_eq!(t.active().grid[0].cells[0].ch, 'N');
+    assert_eq!(t.active().grid[0].cells[1].ch, ' ');
+}
+
+#[test]
+fn dsr_cursor_position_uses_active_screen() {
+    let t = run(b"\x1b[?1049h\x1b[3;5H\x1b[6n");
+
+    assert_eq!(t.pending_writes, b"\x1b[3;5R");
+}
+
+#[test]
+fn resize_updates_primary_and_alternate_screens() {
+    let mut t = run(b"\x1b[?1049h");
+    t.resize(GridSize::new(100, 30));
+
+    assert_eq!(t.primary.cols, 100);
+    assert_eq!(t.primary.rows, 30);
+    let alt = t.alt.as_ref().expect("alternate screen should exist");
+    assert_eq!(alt.cols, 100);
+    assert_eq!(alt.rows, 30);
+    assert_eq!(t.active().cols, 100);
+    assert_eq!(t.active().rows, 30);
+}
+
+#[test]
+fn full_reset_leaves_alternate_screen_and_clears_state() {
+    let t = run(b"main\x1b[?1049hALT\x1bcZ");
+
+    assert!(!t.active_is_alt);
+    assert!(t.alt.is_none());
+    assert_eq!(cell(&t, 0, 0).ch, 'Z');
+    assert_eq!(cell(&t, 1, 0).ch, ' ');
+}
+
+#[test]
 fn title_from_osc() {
     let t = run(b"\x1b]0;my title\x07");
     assert_eq!(t.title, "my title");

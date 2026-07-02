@@ -10,14 +10,15 @@ pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 
-const SUPPORTED_KEYS: &[&str] = &["cols", "rows", "font_size"];
+const SUPPORTED_KEYS: &[&str] = &["cols", "rows", "font_size", "theme"];
 
 /// Resolved, validated startup settings.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StartupConfig {
     pub cols: u16,
     pub rows: u16,
     pub font_size: f32,
+    pub theme: Option<String>,
 }
 
 impl Default for StartupConfig {
@@ -26,16 +27,18 @@ impl Default for StartupConfig {
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
             font_size: DEFAULT_FONT_SIZE,
+            theme: None,
         }
     }
 }
 
 /// Optional values from a config file or explicit CLI flags.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct ConfigOverrides {
     pub cols: Option<u16>,
     pub rows: Option<u16>,
     pub font_size: Option<f32>,
+    pub theme: Option<String>,
 }
 
 impl ConfigOverrides {
@@ -44,6 +47,7 @@ impl ConfigOverrides {
             cols: higher_priority.cols.or(self.cols),
             rows: higher_priority.rows.or(self.rows),
             font_size: higher_priority.font_size.or(self.font_size),
+            theme: higher_priority.theme.or(self.theme),
         }
     }
 
@@ -52,6 +56,7 @@ impl ConfigOverrides {
             cols: self.cols.unwrap_or(base.cols),
             rows: self.rows.unwrap_or(base.rows),
             font_size: self.font_size.unwrap_or(base.font_size),
+            theme: self.theme.or(base.theme),
         }
     }
 }
@@ -60,7 +65,7 @@ pub fn load_startup_config(cli: ConfigOverrides) -> anyhow::Result<StartupConfig
     let config = load_file_overrides()?
         .merge(cli)
         .apply_to(StartupConfig::default());
-    validate_startup_config(config, "resolved startup config")?;
+    validate_startup_config(&config, "resolved startup config")?;
     Ok(config)
 }
 
@@ -105,10 +110,11 @@ pub fn parse_overrides(path: &Path, source: &str) -> anyhow::Result<ConfigOverri
         cols: parse_u16(path, &document, "cols")?,
         rows: parse_u16(path, &document, "rows")?,
         font_size: parse_font_size(path, &document)?,
+        theme: parse_theme(path, &document)?,
     })
 }
 
-pub fn validate_startup_config(config: StartupConfig, context: &str) -> anyhow::Result<()> {
+pub fn validate_startup_config(config: &StartupConfig, context: &str) -> anyhow::Result<()> {
     validate_grid_dimension(config.cols, context, "cols")?;
     validate_grid_dimension(config.rows, context, "rows")?;
     if !config.font_size.is_finite() || config.font_size <= 0.0 {
@@ -169,6 +175,21 @@ fn parse_font_size(path: &Path, document: &DocumentMut) -> anyhow::Result<Option
     Ok(Some(value as f32))
 }
 
+fn parse_theme(path: &Path, document: &DocumentMut) -> anyhow::Result<Option<String>> {
+    let key = "theme";
+    let Some(item) = document.get(key) else {
+        return Ok(None);
+    };
+    let value = item.as_str().ok_or_else(|| invalid_type(path, key, item))?;
+    if value.starts_with("light:") || value.starts_with("dark:") {
+        bail!(
+            "invalid config value in {}: `light:`/`dark:` theme pair syntax is not supported yet; specify a single theme name as `theme = \"<name>\"`",
+            path.display()
+        );
+    }
+    Ok(Some(value.to_owned()))
+}
+
 fn validate_grid_dimension(value: u16, context: &str, key: &'static str) -> anyhow::Result<()> {
     if value == 0 {
         bail!(
@@ -203,6 +224,7 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 font_size: 14.0,
+                theme: None,
             }
         );
     }
@@ -225,6 +247,7 @@ font_size = 15.5
                 cols: Some(100),
                 rows: Some(30),
                 font_size: Some(15.5),
+                theme: None,
             }
         );
     }
@@ -235,11 +258,13 @@ font_size = 15.5
             cols: Some(100),
             rows: Some(30),
             font_size: Some(15.5),
+            theme: Some("3024 Day".to_string()),
         };
         let cli = ConfigOverrides {
             cols: Some(120),
             rows: None,
             font_size: Some(16.0),
+            theme: None,
         };
 
         let config = file.merge(cli).apply_to(StartupConfig::default());
@@ -250,6 +275,22 @@ font_size = 15.5
                 cols: 120,
                 rows: 30,
                 font_size: 16.0,
+                theme: Some("3024 Day".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn theme_key_is_accepted() {
+        let overrides = parse_overrides(test_path(), "theme = \"3024 Day\"").unwrap();
+
+        assert_eq!(
+            overrides,
+            ConfigOverrides {
+                cols: None,
+                rows: None,
+                font_size: None,
+                theme: Some("3024 Day".to_string()),
             }
         );
     }
@@ -288,12 +329,23 @@ font_size = 15.5
 
     #[test]
     fn unknown_key_is_rejected() {
-        let error = parse_overrides(test_path(), "theme = \"Builtin Dark\"").unwrap_err();
+        let error = parse_overrides(test_path(), "bogus_key = \"x\"").unwrap_err();
         let message = error.to_string();
 
         assert!(message.contains("/tmp/noa-test-config.toml"));
-        assert!(message.contains("theme"));
+        assert!(message.contains("bogus_key"));
         assert!(message.contains("supported keys"));
+    }
+
+    #[test]
+    fn light_dark_syntax_is_rejected() {
+        let error = parse_overrides(test_path(), "theme = \"light:Foo,dark:Bar\"").unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("light:"));
+        assert!(message.contains("dark:"));
+        assert!(message.contains("not supported"));
+        assert!(message.contains("single theme name"));
     }
 
     #[test]
@@ -314,10 +366,11 @@ font_size = 15.5
     #[test]
     fn validates_cli_grid_values_after_merge() {
         let error = validate_startup_config(
-            StartupConfig {
+            &StartupConfig {
                 cols: 0,
                 rows: 24,
                 font_size: 14.0,
+                theme: None,
             },
             "resolved startup config",
         )
@@ -332,10 +385,11 @@ font_size = 15.5
             cols: None,
             rows: None,
             font_size: Some(f32::NAN),
+            theme: None,
         }
         .apply_to(StartupConfig::default());
 
-        let error = validate_startup_config(config, "resolved startup config").unwrap_err();
+        let error = validate_startup_config(&config, "resolved startup config").unwrap_err();
 
         assert!(error.to_string().contains("font_size"));
     }

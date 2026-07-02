@@ -22,6 +22,7 @@ fn main() -> anyhow::Result<()> {
         cols: args.cols,
         rows: args.rows,
         font_size: args.font_size,
+        theme: None,
     })?;
     noa_app::run(noa_app::AppConfig {
         cols: config.cols,

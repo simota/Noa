@@ -39,7 +39,7 @@ impl Cell {
 #[derive(Clone, Debug)]
 pub struct Row {
     pub cells: Vec<Cell>,
-    /// This row soft-wrapped into the next (xenl fidelity for reflow, inc≥3).
+    /// This row soft-wrapped into the next (xenl fidelity and resize reflow).
     pub wrapped: bool,
     /// Damage bit; the renderer clears it on consume (optimization, inc≥2).
     pub dirty: bool,

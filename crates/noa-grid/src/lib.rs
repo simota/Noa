@@ -3,7 +3,7 @@
 //!
 //! Ghostty analog: `terminal/Terminal.zig`, `Screen.zig`, `page.zig`,
 //! `modes.zig`. The active area is still a flat `Vec<Row>`; scrollback is stored
-//! as cloned rows until paged storage, reflow, and `StyleId` interning land.
+//! as cloned rows until paged storage and `StyleId` interning land.
 
 pub mod cell;
 pub mod cursor;

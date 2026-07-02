@@ -6,7 +6,7 @@ A faithful **Rust** clone of the [Ghostty](https://ghostty.org) terminal emulato
 
 ## Status
 
-**Increment 1 — vertical slice.** A real, interactive terminal: a native window, a wgpu-rendered monospace grid, a PTY-backed `$SHELL`, a from-scratch VT parser, live colored output, and keyboard input. Later increments add soft-wrap reflow, tabs/splits, themes, Kitty protocols, and shell integration (see [Roadmap](#roadmap)).
+**Increment 1 — vertical slice.** A real, interactive terminal: a native window, a wgpu-rendered monospace grid, a PTY-backed `$SHELL`, a from-scratch VT parser, live colored output, and keyboard input. Later increments add tabs/splits, themes, Kitty protocols, and shell integration (see [Roadmap](#roadmap)).
 
 ## Architecture
 
@@ -88,8 +88,8 @@ works via the `[package.metadata.bundle]` in `bin/noa/Cargo.toml`.
 | Inc | Scope |
 |-----|-------|
 | **1** ✅ | Vertical slice: window + wgpu grid, PTY `$SHELL`, from-scratch parser (C0, core CSI, SGR 16+truecolor, deferred-wrap), block cursor, ASCII+arrow input, DA/DSR |
-| **2** | Resize & reflow, full CSI/edit set, 256+truecolor palette, alt screen, DECSC/DECRC, bracketed paste, UTF-8 wide cells, interaction basics |
-| **3** | Paged scrollback + reflow, interned styles, OSC 8 hyperlinks, interactive search UI, expanded configuration |
+| **2** | Resize behavior, full CSI/edit set, 256+truecolor palette, alt screen, DECSC/DECRC, bracketed paste, UTF-8 wide cells, interaction basics |
+| **3** | Paged scrollback storage, interned styles, OSC 8 hyperlinks, interactive search UI, expanded configuration |
 | **4** | Tabs + split tree, config file, ~460 themes, font fallback + ligatures + Nerd/box glyphs |
 | **5** | Kitty graphics + keyboard protocols, shell integration (OSC 133/7), DCS |
 | **6** | macOS-native polish: quick terminal, command palette, background blur, session restore |

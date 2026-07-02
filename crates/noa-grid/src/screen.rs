@@ -14,6 +14,31 @@ use unicode_width::UnicodeWidthChar;
 
 const DEFAULT_SCROLLBACK_LIMIT: usize = 10_000;
 
+#[derive(Clone, Copy)]
+struct ReflowPoint {
+    x: u16,
+    y: usize,
+    pending_wrap: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ReflowAnchor {
+    offset: usize,
+    prefer_cell: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ReflowPosition {
+    row: usize,
+    x: u16,
+}
+
+struct ReflowedLine {
+    rows: Vec<Row>,
+    cell_positions: Vec<Option<ReflowPosition>>,
+    boundary_positions: Vec<ReflowPosition>,
+}
+
 pub struct Screen {
     pub rows: u16,
     pub cols: u16,
@@ -141,6 +166,18 @@ impl Screen {
                 .and_then(|selection| selection.shift_rows_up(1));
         }
         self.clamp_viewport();
+    }
+
+    fn row_with_blank(cols: u16, blank: Cell) -> Row {
+        let mut row = Row::new(cols);
+        if blank != Cell::default() {
+            row.clear(blank);
+        }
+        row
+    }
+
+    fn is_default_blank(cell: &Cell) -> bool {
+        *cell == Cell::default()
     }
 
     pub fn scrollback_len(&self) -> usize {
@@ -415,37 +452,47 @@ impl Screen {
             .collect()
     }
 
-    /// Resize the grid to `cols`×`rows`, clamping the cursor and resetting the
-    /// scroll region to full-screen. This is a *grid* resize: soft-wrapped
-    /// lines are not re-wrapped (reflow lands in inc≥3). On row-shrink, rows
-    /// below the cursor are dropped first; if the cursor would fall off the
-    /// bottom, rows are dropped from the top and the cursor follows.
+    /// Resize the grid to `cols`×`rows`, reflowing soft-wrapped logical lines,
+    /// clamping the cursor, and resetting the scroll region to full-screen. On
+    /// row-shrink, rows below the cursor are dropped first; if the cursor would
+    /// fall off the bottom, rows are moved to scrollback and the cursor follows.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let cols = cols.max(1);
         let rows = rows.max(1);
 
         if cols != self.cols {
-            let blank = self.blank(); // exposed columns get the current erase bg
-            for row in &mut self.scrollback {
-                row.cells.resize(cols as usize, blank);
-                Self::sanitize_wide_row(row, blank);
-            }
-            for row in &mut self.grid {
-                row.cells.resize(cols as usize, blank);
-                Self::sanitize_wide_row(row, blank);
-            }
+            self.resize_with_reflow(cols, rows);
             self.tabstops = Tabstops::new(cols);
+        } else {
+            self.resize_rows_without_reflow(cols, rows);
         }
 
+        self.cols = cols;
+        self.rows = rows;
+        self.region = ScrollRegion {
+            top: 0,
+            bottom: rows - 1,
+        };
+        self.cursor.x = self.cursor.x.min(cols - 1);
+        self.cursor.y = self.cursor.y.min(rows - 1);
+        self.cursor.pending_wrap = false;
+        if let Some(sc) = &mut self.saved_cursor {
+            sc.x = sc.x.min(cols - 1);
+            sc.y = sc.y.min(rows - 1);
+        }
+        for row in &mut self.grid {
+            row.dirty = true;
+        }
+        self.clamp_viewport();
+    }
+
+    fn resize_rows_without_reflow(&mut self, cols: u16, rows: u16) {
         let old_rows = self.grid.len() as u16;
         if rows > old_rows {
             for _ in 0..(rows - old_rows) {
                 self.grid.push(Row::new(cols));
             }
         } else if rows < old_rows {
-            // Drop rows *below* the cursor first; only then drop from the top,
-            // shifting the cursor (and saved cursor) up with their content, so
-            // the cursor never loses the line it is sitting on.
             let remove = old_rows - rows;
             let below = (old_rows - 1).saturating_sub(self.cursor.y);
             let from_bottom = remove.min(below);
@@ -467,24 +514,287 @@ impl Screen {
                 }
             }
         }
+    }
 
-        self.cols = cols;
-        self.rows = rows;
-        self.region = ScrollRegion {
-            top: 0,
-            bottom: rows - 1,
+    fn resize_with_reflow(&mut self, cols: u16, rows: u16) {
+        let blank = self.blank();
+        let old_scrollback_len = self.scrollback.len();
+        let cursor_point = ReflowPoint {
+            x: self.cursor.x,
+            y: old_scrollback_len + self.cursor.y as usize,
+            pending_wrap: self.cursor.pending_wrap,
         };
-        self.cursor.x = self.cursor.x.min(cols - 1);
-        self.cursor.y = self.cursor.y.min(rows - 1);
-        self.cursor.pending_wrap = false;
-        if let Some(sc) = &mut self.saved_cursor {
-            sc.x = sc.x.min(cols - 1);
-            sc.y = sc.y.min(rows - 1);
+        let saved_point = self.saved_cursor.map(|cursor| ReflowPoint {
+            x: cursor.x,
+            y: old_scrollback_len + cursor.y as usize,
+            pending_wrap: cursor.pending_wrap,
+        });
+        let storage: Vec<Row> = self
+            .scrollback
+            .iter()
+            .cloned()
+            .chain(self.grid.iter().cloned())
+            .collect();
+
+        let mut reflowed = Vec::new();
+        let mut cursor_position = ReflowPosition { row: 0, x: 0 };
+        let mut saved_position = None;
+        let mut idx = 0;
+        while idx < storage.len() {
+            let line_start = idx;
+            while idx + 1 < storage.len() && storage[idx].wrapped {
+                idx += 1;
+            }
+            let line_end = idx;
+            let line_rows = &storage[line_start..=line_end];
+            let (cells, cursor_anchor, saved_anchor) =
+                Self::collect_reflow_cells(line_rows, line_start, cursor_point, saved_point);
+            let line = Self::reflow_cells(&cells, cols, blank);
+            let base_row = reflowed.len();
+
+            if let Some(anchor) = cursor_anchor {
+                cursor_position = Self::resolve_reflow_anchor(&line, anchor, base_row);
+            }
+            if let Some(anchor) = saved_anchor {
+                saved_position = Some(Self::resolve_reflow_anchor(&line, anchor, base_row));
+            }
+
+            reflowed.extend(line.rows);
+            idx += 1;
         }
-        for row in &mut self.grid {
-            row.dirty = true;
+
+        if reflowed.is_empty() {
+            reflowed.push(Self::row_with_blank(cols, blank));
         }
-        self.clamp_viewport();
+
+        let target_rows = rows as usize;
+        let cursor_row = cursor_position.row.min(reflowed.len().saturating_sub(1));
+        let max_grid_start = reflowed.len().saturating_sub(target_rows);
+        let grid_start = cursor_row
+            .saturating_sub(target_rows.saturating_sub(1))
+            .min(max_grid_start);
+        let grid_end = (grid_start + target_rows).min(reflowed.len());
+
+        self.scrollback = if self.scrollback_enabled {
+            reflowed[..grid_start].iter().cloned().collect()
+        } else {
+            VecDeque::new()
+        };
+        while self.scrollback.len() > self.scrollback_limit {
+            self.scrollback.pop_front();
+        }
+
+        self.grid = reflowed[grid_start..grid_end].to_vec();
+        while self.grid.len() < target_rows {
+            self.grid.push(Self::row_with_blank(cols, blank));
+        }
+
+        self.cursor.x = cursor_position.x.min(cols - 1);
+        self.cursor.y = cursor_row.saturating_sub(grid_start).min(target_rows - 1) as u16;
+
+        if let (Some(saved), Some(saved_cursor)) = (saved_position, &mut self.saved_cursor) {
+            saved_cursor.x = saved.x.min(cols - 1);
+            saved_cursor.y = saved.row.saturating_sub(grid_start).min(target_rows - 1) as u16;
+        }
+
+        self.selection = None;
+        self.search.clear();
+    }
+
+    fn collect_reflow_cells(
+        rows: &[Row],
+        start_y: usize,
+        cursor: ReflowPoint,
+        saved: Option<ReflowPoint>,
+    ) -> (Vec<Cell>, Option<ReflowAnchor>, Option<ReflowAnchor>) {
+        let mut cells = Vec::new();
+        let mut row_starts = Vec::with_capacity(rows.len());
+        let mut row_lens = Vec::with_capacity(rows.len());
+
+        for (idx, row) in rows.iter().enumerate() {
+            let mut len = row.cells.len();
+            if idx + 1 == rows.len() {
+                let storage_y = start_y + idx;
+                let mut min_len = 0;
+                if cursor.y == storage_y {
+                    min_len = min_len.max(cursor.x as usize);
+                }
+                if let Some(saved) = saved
+                    && saved.y == storage_y
+                {
+                    min_len = min_len.max(saved.x as usize);
+                }
+                while len > min_len && row.cells[..len].last().is_some_and(Self::is_default_blank) {
+                    len -= 1;
+                }
+            }
+
+            row_starts.push(cells.len());
+            row_lens.push(len);
+            cells.extend_from_slice(&row.cells[..len]);
+        }
+
+        let cursor_anchor =
+            Self::reflow_anchor_for_point(cursor, rows, start_y, &row_starts, &row_lens);
+        let saved_anchor = saved.and_then(|point| {
+            Self::reflow_anchor_for_point(point, rows, start_y, &row_starts, &row_lens)
+        });
+
+        (cells, cursor_anchor, saved_anchor)
+    }
+
+    fn reflow_anchor_for_point(
+        point: ReflowPoint,
+        rows: &[Row],
+        start_y: usize,
+        row_starts: &[usize],
+        row_lens: &[usize],
+    ) -> Option<ReflowAnchor> {
+        let local_y = point.y.checked_sub(start_y)?;
+        let row = rows.get(local_y)?;
+        let row_start = *row_starts.get(local_y)?;
+        let row_len = *row_lens.get(local_y)?;
+        let x = point.x as usize;
+
+        if point.pending_wrap {
+            return Some(ReflowAnchor {
+                offset: row_start + row_len,
+                prefer_cell: false,
+            });
+        }
+
+        let prefer_cell = x < row_len && !Self::is_default_blank(&row.cells[x]);
+        Some(ReflowAnchor {
+            offset: row_start + x.min(row_len),
+            prefer_cell,
+        })
+    }
+
+    fn reflow_cells(cells: &[Cell], cols: u16, blank: Cell) -> ReflowedLine {
+        if cells.is_empty() {
+            return ReflowedLine {
+                rows: vec![Self::row_with_blank(cols, blank)],
+                cell_positions: Vec::new(),
+                boundary_positions: vec![ReflowPosition { row: 0, x: 0 }],
+            };
+        }
+
+        let cols_usize = cols as usize;
+        let mut rows = vec![Self::row_with_blank(cols, blank)];
+        let mut cell_positions = vec![None; cells.len()];
+        let mut boundary_positions = vec![ReflowPosition { row: 0, x: 0 }; cells.len() + 1];
+        let mut src = 0;
+        let mut x = 0;
+
+        while src < cells.len() {
+            let source_width = if cells[src].attrs.contains(CellAttrs::WIDE)
+                && src + 1 < cells.len()
+                && cells[src + 1].attrs.contains(CellAttrs::WIDE_SPACER)
+            {
+                2
+            } else {
+                1
+            };
+            let render_width = if source_width == 2 && cols_usize < 2 {
+                1
+            } else {
+                source_width
+            };
+
+            if x > 0 && x + render_width > cols_usize {
+                if let Some(row) = rows.last_mut() {
+                    row.wrapped = true;
+                }
+                rows.push(Self::row_with_blank(cols, blank));
+                x = 0;
+            }
+
+            let row_idx = rows.len() - 1;
+            let start_x = x;
+            if source_width == 2 && cols_usize < 2 {
+                rows[row_idx].cells[start_x] = blank;
+                cell_positions[src] = Some(ReflowPosition {
+                    row: row_idx,
+                    x: start_x as u16,
+                });
+                cell_positions[src + 1] = Some(ReflowPosition {
+                    row: row_idx,
+                    x: start_x as u16,
+                });
+                boundary_positions[src + 1] =
+                    Self::cursor_position_after(row_idx, start_x + 1, cols);
+                boundary_positions[src + 2] =
+                    Self::cursor_position_after(row_idx, start_x + 1, cols);
+                x += 1;
+            } else if cells[src].attrs.contains(CellAttrs::WIDE_SPACER) {
+                rows[row_idx].cells[start_x] = blank;
+                cell_positions[src] = Some(ReflowPosition {
+                    row: row_idx,
+                    x: start_x as u16,
+                });
+                boundary_positions[src + 1] =
+                    Self::cursor_position_after(row_idx, start_x + 1, cols);
+                x += 1;
+            } else {
+                for i in 0..source_width {
+                    rows[row_idx].cells[start_x + i] = cells[src + i];
+                    cell_positions[src + i] = Some(ReflowPosition {
+                        row: row_idx,
+                        x: (start_x + i) as u16,
+                    });
+                    boundary_positions[src + i + 1] =
+                        Self::cursor_position_after(row_idx, start_x + i + 1, cols);
+                }
+                x += source_width;
+            }
+
+            src += source_width;
+        }
+
+        ReflowedLine {
+            rows,
+            cell_positions,
+            boundary_positions,
+        }
+    }
+
+    fn cursor_position_after(row: usize, x_after: usize, cols: u16) -> ReflowPosition {
+        let cols = cols as usize;
+        if x_after >= cols {
+            ReflowPosition {
+                row,
+                x: (cols - 1) as u16,
+            }
+        } else {
+            ReflowPosition {
+                row,
+                x: x_after as u16,
+            }
+        }
+    }
+
+    fn resolve_reflow_anchor(
+        line: &ReflowedLine,
+        anchor: ReflowAnchor,
+        base_row: usize,
+    ) -> ReflowPosition {
+        if anchor.prefer_cell
+            && let Some(Some(position)) = line.cell_positions.get(anchor.offset)
+        {
+            return ReflowPosition {
+                row: base_row + position.row,
+                x: position.x,
+            };
+        }
+
+        let offset = anchor
+            .offset
+            .min(line.boundary_positions.len().saturating_sub(1));
+        let position = line.boundary_positions[offset];
+        ReflowPosition {
+            row: base_row + position.row,
+            x: position.x,
+        }
     }
 
     // ── printing ───────────────────────────────────────────────────

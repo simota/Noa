@@ -904,17 +904,79 @@ fn resize_shrink_cols_truncates_row_width() {
 }
 
 #[test]
-fn resize_shrink_cols_drops_orphaned_wide_lead() {
+fn resize_reflows_soft_wrapped_rows_when_shrinking_cols() {
+    let mut t = run_size(4, 4, b"abcdef");
+
+    t.resize(GridSize::new(3, 4));
+
+    assert_eq!(row_text(&t, 0, 3), "abc");
+    assert!(t.primary.grid[0].wrapped);
+    assert_eq!(row_text(&t, 1, 3), "def");
+    assert!(!t.primary.grid[1].wrapped);
+    assert_eq!(t.primary.cursor.x, 2);
+    assert_eq!(t.primary.cursor.y, 1);
+}
+
+#[test]
+fn resize_reflows_soft_wrapped_rows_when_growing_cols() {
+    let mut t = run_size(3, 4, b"abcdef");
+
+    t.resize(GridSize::new(6, 4));
+
+    assert_eq!(row_text(&t, 0, 6), "abcdef");
+    assert!(!t.primary.grid[0].wrapped);
+    assert_eq!(row_text(&t, 1, 6), "      ");
+    assert_eq!(t.primary.cursor.x, 5);
+    assert_eq!(t.primary.cursor.y, 0);
+}
+
+#[test]
+fn resize_reflow_preserves_hard_newline_boundaries() {
+    let mut t = run_size(4, 4, b"ab\r\ncd");
+
+    t.resize(GridSize::new(6, 4));
+
+    assert_eq!(row_text(&t, 0, 6), "ab    ");
+    assert!(!t.primary.grid[0].wrapped);
+    assert_eq!(row_text(&t, 1, 6), "cd    ");
+    assert!(!t.primary.grid[1].wrapped);
+}
+
+#[test]
+fn resize_reflow_keeps_wide_cell_intact_when_shrinking_cols() {
     let mut t = run_size(4, 1, "A界".as_bytes());
 
     t.resize(GridSize::new(2, 1));
 
-    assert_eq!(row_text(&t, 0, 2), "A ");
+    assert_eq!(t.scrollback_len(), 1);
+    t.scroll_viewport_up(1);
+    let rows = t.active().visible_rows();
+    assert_eq!(rows_text(&rows, 0, 2), "A ");
     assert!(
-        !cell(&t, 1, 0)
+        !rows[0].cells[1]
             .attrs
             .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
     );
+
+    t.scroll_viewport_to_bottom();
+    let rows = t.active().visible_rows();
+    assert_eq!(rows_text(&rows, 0, 2), "界 ");
+    assert!(
+        rows[0].cells[0].attrs.contains(CellAttrs::WIDE)
+            && rows[0].cells[1].attrs.contains(CellAttrs::WIDE_SPACER)
+    );
+}
+
+#[test]
+fn resize_reflow_clears_selection_and_search_coordinates() {
+    let mut t = run_size(4, 4, b"abcdef");
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 1, y: 1 });
+    t.set_search_query("cd");
+
+    t.resize(GridSize::new(3, 4));
+
+    assert!(t.active().selection.is_none());
+    assert!(t.active().search.query().is_empty());
 }
 
 #[test]

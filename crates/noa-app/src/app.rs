@@ -411,8 +411,7 @@ impl App {
         // Grid-first ordering: resize the shared Terminal grid BEFORE telling
         // the pty its new winsize. Otherwise the shell's SIGWINCH repaint (at
         // the new size) can reach the io thread and be fed into a still-old
-        // grid, clamping it into the wrong cells until the next frame. This is
-        // a grid resize, not soft-wrap reflow (re-wrapping lands in inc≥3).
+        // grid, clamping it into the wrong cells until the next frame.
         if let Some(terminal) = &self.terminal {
             terminal
                 .lock()

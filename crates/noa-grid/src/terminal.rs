@@ -120,7 +120,7 @@ impl Terminal {
     }
 
     /// Resize the terminal to a new cell grid (from a window resize). Resizes
-    /// every screen and updates the recorded size; soft-wrap reflow is inc≥3.
+    /// every screen, reflows soft-wrapped lines, and updates the recorded size.
     pub fn resize(&mut self, size: GridSize) {
         self.primary.resize(size.cols, size.rows);
         if let Some(alt) = &mut self.alt {

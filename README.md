@@ -43,8 +43,13 @@ Options: `cargo run -p noa -- --cols 100 --rows 30 --font-size 15`.
 
 ### Build the macOS app
 
-`noa` runs as a proper foreground macOS app (Dock icon, standard menu bar with
-Cmd+Q, native window controls). To produce a double-clickable `.app` bundle:
+`noa` runs as a proper foreground macOS app (Dock icon, custom native menu bar,
+Cmd+Q/Cmd+W app shortcuts, native window controls). The menu bar shows `noa`,
+`File`, `Edit`, `View`, `Window`, and `Help`. The app menu currently includes
+`About noa`, disabled `Preferences...` (shown as `Settings…` on current macOS),
+`Close Window`, and `Quit noa`; preferences and unsupported terminal actions
+stay disabled until backing features exist. To produce a double-clickable
+`.app` bundle:
 
 ```bash
 scripts/bundle-macos.sh          # → target/release/noa.app  (ad-hoc signed)

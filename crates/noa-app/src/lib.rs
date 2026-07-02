@@ -4,12 +4,16 @@
 //! `wgpu`.
 
 mod app;
+mod commands;
 mod events;
 mod input;
 mod io_thread;
+#[cfg(target_os = "macos")]
+mod macos_menu;
 mod theme;
 
 pub use app::AppConfig;
+pub use commands::AppCommand;
 pub use events::UserEvent;
 
 use winit::event_loop::EventLoop;
@@ -19,14 +23,14 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     let mut builder = EventLoop::<UserEvent>::with_user_event();
 
     // Present as a real foreground macOS app even when launched from a plain
-    // `cargo run` (not just from the .app bundle): a regular activation policy
-    // gives a Dock icon + focus, and the default menu bar provides the
-    // standard app menu with a working Cmd+Q.
+    // `cargo run` (not just from the .app bundle). noa installs its own
+    // native menu from the winit app lifecycle, so keep winit's default menu
+    // disabled to avoid duplicate app menus.
     #[cfg(target_os = "macos")]
     {
         use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
         builder.with_activation_policy(ActivationPolicy::Regular);
-        builder.with_default_menu(true);
+        builder.with_default_menu(false);
     }
 
     let event_loop = builder.build()?;

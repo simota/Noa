@@ -20,3 +20,6 @@ crossbeam-channel.workspace = true
 anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.19", default-features = false }

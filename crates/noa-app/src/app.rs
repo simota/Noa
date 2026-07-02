@@ -20,6 +20,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+use crate::AppCommand;
 use crate::events::UserEvent;
 use crate::input;
 
@@ -51,6 +52,8 @@ pub struct App {
     pty_writer: Option<PtyWriter>,
     resize_tx: Option<Sender<GridSize>>,
     io_thread: Option<std::thread::JoinHandle<()>>,
+    #[cfg(target_os = "macos")]
+    macos_menu: Option<crate::macos_menu::MacosMenu>,
     modifiers: ModifiersState,
     grid_size: GridSize,
 }
@@ -66,6 +69,8 @@ impl App {
             pty_writer: None,
             resize_tx: None,
             io_thread: None,
+            #[cfg(target_os = "macos")]
+            macos_menu: None,
             modifiers: ModifiersState::empty(),
             grid_size,
         }
@@ -122,6 +127,28 @@ impl App {
             .renderer
             .draw(&graphics.device, &graphics.queue, &view);
         frame.present();
+    }
+
+    fn handle_app_command(&mut self, event_loop: &ActiveEventLoop, command: AppCommand) {
+        match command {
+            AppCommand::About => {
+                log::info!("About noa selected");
+            }
+            AppCommand::Preferences => {
+                log::debug!("Preferences selected before settings support exists");
+            }
+            AppCommand::CloseWindow | AppCommand::Quit => event_loop.exit(),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn install_macos_menu_if_needed(&mut self) {
+        if self.macos_menu.is_none() {
+            self.macos_menu = Some(
+                crate::macos_menu::MacosMenu::install(self.proxy.clone())
+                    .expect("failed to install macOS app menu"),
+            );
+        }
     }
 }
 
@@ -245,6 +272,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
+            UserEvent::AppCommand(command) => self.handle_app_command(event_loop, command),
             UserEvent::Redraw => {
                 if let Some(g) = &self.graphics {
                     g.window.request_redraw();
@@ -279,14 +307,14 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                // Cmd-based combos are macOS app shortcuts, not shell input:
-                // handle Cmd+Q / Cmd+W here and never forward a Cmd combo to
-                // the pty (the default menu bar also binds Cmd+Q).
+                // Cmd-based combos are app shortcuts, not shell input. Route
+                // supported commands through the same path as the native menu,
+                // then swallow every Cmd combo before pty encoding.
                 if self.modifiers.super_key() {
                     if let Key::Character(c) = &event.logical_key
-                        && matches!(c.as_str(), "q" | "w")
+                        && let Some(command) = AppCommand::from_cmd_character(c.as_str())
                     {
-                        event_loop.exit();
+                        self.handle_app_command(event_loop, command);
                     }
                     return;
                 }
@@ -306,7 +334,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {}
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        self.install_macos_menu_if_needed();
+    }
 }
 
 impl App {

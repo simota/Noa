@@ -84,12 +84,14 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         cells: vec![
             Cell {
                 ch: 'A',
+                combining: String::new(),
                 fg: Color::Palette(1),
                 bg: Color::Default,
                 attrs: CellAttrs::empty(),
             },
             Cell {
                 ch: 'g',
+                combining: String::new(),
                 fg: Color::Default,
                 bg: Color::Palette(4),
                 attrs: CellAttrs::empty(),

@@ -18,7 +18,7 @@ fn run_size(cols: u16, rows: u16, bytes: &[u8]) -> Terminal {
 }
 
 fn cell(t: &Terminal, x: usize, y: usize) -> crate::cell::Cell {
-    t.primary.grid[y].cells[x]
+    t.primary.grid[y].cells[x].clone()
 }
 
 fn row_text(t: &Terminal, y: usize, width: usize) -> String {
@@ -894,19 +894,39 @@ fn narrow_overwrite_on_wide_lead_clears_whole_wide_cell() {
 fn combining_mark_does_not_advance_cell_cursor() {
     let t = run_size(5, 1, "e\u{301}X".as_bytes());
 
+    assert_eq!(cell(&t, 0, 0).text(), "e\u{301}");
     assert_eq!(row_text(&t, 0, 4), "eX  ");
     assert_eq!(t.primary.cursor.x, 2);
+}
+
+#[test]
+fn combining_attach_keeps_mark_in_cell_text() {
+    let t = run_size(5, 1, "a\u{301}".as_bytes());
+
+    assert_eq!(cell(&t, 0, 0).text(), "a\u{301}");
+    assert_eq!(t.primary.visible_rows()[0].cells[0].text(), "a\u{301}");
+    assert_eq!(t.primary.cursor.x, 1);
 }
 
 #[test]
 fn combining_mark_after_pending_wrap_does_not_trigger_wrap() {
     let t = run_size(2, 2, "ab\u{301}C".as_bytes());
 
+    assert_eq!(cell(&t, 1, 0).text(), "b\u{301}");
     assert_eq!(row_text(&t, 0, 2), "ab");
     assert!(t.primary.grid[0].wrapped);
     assert_eq!(cell(&t, 0, 1).ch, 'C');
     assert_eq!(t.primary.cursor.x, 1);
     assert_eq!(t.primary.cursor.y, 1);
+}
+
+#[test]
+fn combining_attach_after_wide_cell_uses_lead_cell() {
+    let t = run_size(5, 1, "界\u{301}X".as_bytes());
+
+    assert_eq!(cell(&t, 0, 0).text(), "界\u{301}");
+    assert!(cell(&t, 1, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert_eq!(cell(&t, 2, 0).ch, 'X');
 }
 
 #[test]

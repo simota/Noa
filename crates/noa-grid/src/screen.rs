@@ -102,21 +102,21 @@ impl Screen {
         c.width().unwrap_or(1).min(2)
     }
 
-    fn clear_wide_at(row: &mut Row, x: usize, blank: Cell) {
+    fn clear_wide_at(row: &mut Row, x: usize, blank: &Cell) {
         if x >= row.cells.len() {
             return;
         }
 
         if row.cells[x].attrs.contains(CellAttrs::WIDE_SPACER) && x > 0 {
-            row.cells[x - 1] = blank;
+            row.cells[x - 1] = blank.clone();
         }
         if row.cells[x].attrs.contains(CellAttrs::WIDE) && x + 1 < row.cells.len() {
-            row.cells[x + 1] = blank;
+            row.cells[x + 1] = blank.clone();
         }
-        row.cells[x] = blank;
+        row.cells[x] = blank.clone();
     }
 
-    fn sanitize_wide_row(row: &mut Row, blank: Cell) {
+    fn sanitize_wide_row(row: &mut Row, blank: &Cell) {
         let mut x = 0;
         while x < row.cells.len() {
             let attrs = row.cells[x].attrs;
@@ -124,7 +124,7 @@ impl Screen {
                 if x + 1 >= row.cells.len()
                     || !row.cells[x + 1].attrs.contains(CellAttrs::WIDE_SPACER)
                 {
-                    row.cells[x] = blank;
+                    row.cells[x] = blank.clone();
                 } else {
                     x += 2;
                     continue;
@@ -132,7 +132,7 @@ impl Screen {
             } else if attrs.contains(CellAttrs::WIDE_SPACER)
                 && (x == 0 || !row.cells[x - 1].attrs.contains(CellAttrs::WIDE))
             {
-                row.cells[x] = blank;
+                row.cells[x] = blank.clone();
             }
             x += 1;
         }
@@ -168,10 +168,10 @@ impl Screen {
         self.clamp_viewport();
     }
 
-    fn row_with_blank(cols: u16, blank: Cell) -> Row {
+    fn row_with_blank(cols: u16, blank: &Cell) -> Row {
         let mut row = Row::new(cols);
-        if blank != Cell::default() {
-            row.clear(blank);
+        if blank != &Cell::default() {
+            row.clear(blank.clone());
         }
         row
     }
@@ -350,7 +350,7 @@ impl Screen {
             if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
                 continue;
             }
-            text.push(cell.ch);
+            cell.push_text_to(text);
         }
 
         if end_x + 1 == row.cells.len() {
@@ -420,7 +420,8 @@ impl Screen {
     }
 
     fn is_word_cell(cell: &Cell) -> bool {
-        !cell.attrs.contains(CellAttrs::WIDE_SPACER) && !cell.ch.is_whitespace()
+        !cell.attrs.contains(CellAttrs::WIDE_SPACER)
+            && cell.text_chars().any(|ch| !ch.is_whitespace())
     }
 
     pub fn visible_row_base(&self) -> usize {
@@ -549,7 +550,7 @@ impl Screen {
             let line_rows = &storage[line_start..=line_end];
             let (cells, cursor_anchor, saved_anchor) =
                 Self::collect_reflow_cells(line_rows, line_start, cursor_point, saved_point);
-            let line = Self::reflow_cells(&cells, cols, blank);
+            let line = Self::reflow_cells(&cells, cols, &blank);
             let base_row = reflowed.len();
 
             if let Some(anchor) = cursor_anchor {
@@ -564,7 +565,7 @@ impl Screen {
         }
 
         if reflowed.is_empty() {
-            reflowed.push(Self::row_with_blank(cols, blank));
+            reflowed.push(Self::row_with_blank(cols, &blank));
         }
 
         let target_rows = rows as usize;
@@ -586,7 +587,7 @@ impl Screen {
 
         self.grid = reflowed[grid_start..grid_end].to_vec();
         while self.grid.len() < target_rows {
-            self.grid.push(Self::row_with_blank(cols, blank));
+            self.grid.push(Self::row_with_blank(cols, &blank));
         }
 
         self.cursor.x = cursor_position.x.min(cols - 1);
@@ -670,7 +671,7 @@ impl Screen {
         })
     }
 
-    fn reflow_cells(cells: &[Cell], cols: u16, blank: Cell) -> ReflowedLine {
+    fn reflow_cells(cells: &[Cell], cols: u16, blank: &Cell) -> ReflowedLine {
         if cells.is_empty() {
             return ReflowedLine {
                 rows: vec![Self::row_with_blank(cols, blank)],
@@ -712,7 +713,7 @@ impl Screen {
             let row_idx = rows.len() - 1;
             let start_x = x;
             if source_width == 2 && cols_usize < 2 {
-                rows[row_idx].cells[start_x] = blank;
+                rows[row_idx].cells[start_x] = blank.clone();
                 cell_positions[src] = Some(ReflowPosition {
                     row: row_idx,
                     x: start_x as u16,
@@ -727,7 +728,7 @@ impl Screen {
                     Self::cursor_position_after(row_idx, start_x + 1, cols);
                 x += 1;
             } else if cells[src].attrs.contains(CellAttrs::WIDE_SPACER) {
-                rows[row_idx].cells[start_x] = blank;
+                rows[row_idx].cells[start_x] = blank.clone();
                 cell_positions[src] = Some(ReflowPosition {
                     row: row_idx,
                     x: start_x as u16,
@@ -737,7 +738,7 @@ impl Screen {
                 x += 1;
             } else {
                 for i in 0..source_width {
-                    rows[row_idx].cells[start_x + i] = cells[src + i];
+                    rows[row_idx].cells[start_x + i] = cells[src + i].clone();
                     cell_positions[src + i] = Some(ReflowPosition {
                         row: row_idx,
                         x: (start_x + i) as u16,
@@ -804,6 +805,7 @@ impl Screen {
         self.follow_live_output();
         let width = Self::print_width(c);
         if width == 0 {
+            self.attach_combining_mark(c);
             return;
         }
 
@@ -811,7 +813,7 @@ impl Screen {
             let blank = self.blank();
             let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
             let row = &mut self.grid[y];
-            Self::clear_wide_at(row, x, blank);
+            Self::clear_wide_at(row, x, &blank);
             row.dirty = true;
             self.cursor.pending_wrap = false;
             self.last_printed = Some(c);
@@ -835,7 +837,7 @@ impl Screen {
                 let blank = self.blank();
                 let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
                 let row = &mut self.grid[y];
-                Self::clear_wide_at(row, x, blank);
+                Self::clear_wide_at(row, x, &blank);
                 row.dirty = true;
                 self.cursor.pending_wrap = false;
                 self.last_printed = Some(c);
@@ -850,6 +852,7 @@ impl Screen {
         let attrs = self.pen_attrs();
         let cell = Cell {
             ch: c,
+            combining: String::new(),
             fg,
             bg,
             attrs,
@@ -857,19 +860,20 @@ impl Screen {
         let row = &mut self.grid[y];
 
         if width == 1 {
-            Self::clear_wide_at(row, x, blank);
+            Self::clear_wide_at(row, x, &blank);
             row.cells[x] = cell;
         } else {
-            Self::clear_wide_at(row, x, blank);
-            Self::clear_wide_at(row, x + 1, blank);
+            Self::clear_wide_at(row, x, &blank);
+            Self::clear_wide_at(row, x + 1, &blank);
 
-            let mut lead = cell;
+            let mut lead = cell.clone();
             lead.attrs.insert(CellAttrs::WIDE);
             let mut spacer_attrs = attrs;
             spacer_attrs.insert(CellAttrs::WIDE_SPACER);
             row.cells[x] = lead;
             row.cells[x + 1] = Cell {
                 ch: ' ',
+                combining: String::new(),
                 fg,
                 bg,
                 attrs: spacer_attrs,
@@ -884,6 +888,36 @@ impl Screen {
             self.cursor.x += width as u16;
         }
         self.last_printed = Some(c);
+    }
+
+    fn attach_combining_mark(&mut self, c: char) {
+        let y = self.cursor.y as usize;
+        let Some(row) = self.grid.get_mut(y) else {
+            return;
+        };
+        let Some(mut x) = Self::combining_target_x(self.cursor.x, self.cursor.pending_wrap) else {
+            return;
+        };
+        if x >= row.cells.len() {
+            return;
+        }
+        if row.cells[x].attrs.contains(CellAttrs::WIDE_SPACER) && x > 0 {
+            x -= 1;
+        }
+        if row.cells[x].attrs.contains(CellAttrs::WIDE_SPACER) || row.cells[x].is_blank() {
+            return;
+        }
+
+        row.cells[x].push_combining(c);
+        row.dirty = true;
+    }
+
+    fn combining_target_x(cursor_x: u16, pending_wrap: bool) -> Option<usize> {
+        if pending_wrap {
+            Some(cursor_x as usize)
+        } else {
+            cursor_x.checked_sub(1).map(usize::from)
+        }
     }
 
     // ── vertical motion / scroll ────────────────────────────────────
@@ -931,7 +965,7 @@ impl Screen {
         let blank = self.blank();
         self.grid[top..=bottom].rotate_left(n);
         for r in &mut self.grid[(bottom + 1 - n)..=bottom] {
-            r.clear(blank);
+            r.clear(blank.clone());
         }
         for r in &mut self.grid[top..=bottom] {
             r.dirty = true;
@@ -956,7 +990,7 @@ impl Screen {
         let blank = self.blank();
         self.grid[top..=bottom].rotate_right(n);
         for r in &mut self.grid[top..(top + n)] {
-            r.clear(blank);
+            r.clear(blank.clone());
         }
         for r in &mut self.grid[top..=bottom] {
             r.dirty = true;
@@ -1088,27 +1122,27 @@ impl Screen {
         match mode {
             EraseDisplay::Below => {
                 for c in &mut self.grid[y].cells[x..] {
-                    *c = blank;
+                    *c = blank.clone();
                 }
-                Self::sanitize_wide_row(&mut self.grid[y], blank);
+                Self::sanitize_wide_row(&mut self.grid[y], &blank);
                 self.grid[y].dirty = true;
                 for r in &mut self.grid[y + 1..] {
-                    r.clear(blank);
+                    r.clear(blank.clone());
                 }
             }
             EraseDisplay::Above => {
                 for r in &mut self.grid[..y] {
-                    r.clear(blank);
+                    r.clear(blank.clone());
                 }
                 for c in &mut self.grid[y].cells[..=x] {
-                    *c = blank;
+                    *c = blank.clone();
                 }
-                Self::sanitize_wide_row(&mut self.grid[y], blank);
+                Self::sanitize_wide_row(&mut self.grid[y], &blank);
                 self.grid[y].dirty = true;
             }
             EraseDisplay::Complete => {
                 for r in &mut self.grid {
-                    r.clear(blank);
+                    r.clear(blank.clone());
                 }
             }
             EraseDisplay::Scrollback => {
@@ -1126,21 +1160,21 @@ impl Screen {
         match mode {
             EraseLine::Right => {
                 for c in &mut row.cells[x..] {
-                    *c = blank;
+                    *c = blank.clone();
                 }
             }
             EraseLine::Left => {
                 for c in &mut row.cells[..=x] {
-                    *c = blank;
+                    *c = blank.clone();
                 }
             }
             EraseLine::Complete => {
                 for c in &mut row.cells {
-                    *c = blank;
+                    *c = blank.clone();
                 }
             }
         }
-        Self::sanitize_wide_row(row, blank);
+        Self::sanitize_wide_row(row, &blank);
         row.dirty = true;
     }
 
@@ -1157,9 +1191,9 @@ impl Screen {
         let row = &mut self.grid[y];
         row.cells[x..].rotate_right(n);
         for c in &mut row.cells[x..x + n] {
-            *c = blank;
+            *c = blank.clone();
         }
-        Self::sanitize_wide_row(row, blank);
+        Self::sanitize_wide_row(row, &blank);
         row.dirty = true;
     }
 
@@ -1174,9 +1208,9 @@ impl Screen {
         let row = &mut self.grid[y];
         row.cells[x..].rotate_left(n);
         for c in &mut row.cells[self.cols as usize - n..] {
-            *c = blank;
+            *c = blank.clone();
         }
-        Self::sanitize_wide_row(row, blank);
+        Self::sanitize_wide_row(row, &blank);
         row.dirty = true;
     }
 
@@ -1190,9 +1224,9 @@ impl Screen {
         let n = (n.max(1) as usize).min(len);
         let row = &mut self.grid[y];
         for c in &mut row.cells[x..x + n] {
-            *c = blank;
+            *c = blank.clone();
         }
-        Self::sanitize_wide_row(row, blank);
+        Self::sanitize_wide_row(row, &blank);
         row.dirty = true;
     }
 
@@ -1209,7 +1243,7 @@ impl Screen {
         let blank = self.blank();
         self.grid[start..=bottom].rotate_right(n);
         for r in &mut self.grid[start..start + n] {
-            r.clear(blank);
+            r.clear(blank.clone());
         }
         for r in &mut self.grid[start..=bottom] {
             r.dirty = true;
@@ -1229,7 +1263,7 @@ impl Screen {
         let blank = self.blank();
         self.grid[start..=bottom].rotate_left(n);
         for r in &mut self.grid[bottom + 1 - n..=bottom] {
-            r.clear(blank);
+            r.clear(blank.clone());
         }
         for r in &mut self.grid[start..=bottom] {
             r.dirty = true;

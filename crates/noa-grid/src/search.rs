@@ -107,8 +107,8 @@ where
             if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
                 continue;
             }
-            text.push(cell.ch);
-            cells.push(x as u16);
+            cell.push_text_to(&mut text);
+            cells.extend(std::iter::repeat_n(x as u16, cell.text_chars().count()));
         }
 
         for (byte_start, _) in text.match_indices(query) {

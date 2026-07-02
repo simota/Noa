@@ -94,6 +94,17 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_keeps_combining_cell_text() {
+        let mut term = Terminal::new(GridSize::new(2, 2));
+        term.primary.grid[0].cells[0].ch = 'a';
+        term.primary.grid[0].cells[0].push_combining('\u{301}');
+
+        let snap = FrameSnapshot::from_terminal(&term);
+
+        assert_eq!(snap.rows[0].cells[0].text(), "a\u{301}");
+    }
+
+    #[test]
     fn snapshot_projects_selection_onto_visible_rows() {
         let mut term = Terminal::new(GridSize::new(2, 2));
         put(&mut term, 0, 'A');

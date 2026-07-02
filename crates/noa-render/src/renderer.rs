@@ -282,23 +282,26 @@ fn rebuild_cell_instances(
             // Glyph quad: skip blanks and invisible text.
             let invisible = cell.attrs.contains(CellAttrs::INVISIBLE);
             let wide_spacer = cell.attrs.contains(CellAttrs::WIDE_SPACER);
-            if cell.ch != ' ' && !invisible && !wide_spacer {
-                let glyph = font.get_or_raster(cell.ch);
-                if glyph.atlas_size[0] > 0 && glyph.atlas_size[1] > 0 {
-                    let fg = if cursor_cell {
-                        theme.resolve_with_colors(bg_color, false, &snap.colors)
-                    } else if selected {
-                        theme.selection_fg()
-                    } else if active_search {
-                        theme.active_search_fg()
-                    } else if search_match {
-                        theme.search_fg()
-                    } else {
-                        theme.resolve_with_colors(fg_color, true, &snap.colors)
-                    };
-                    let mut flags = CellInstance::FLAG_GLYPH;
-                    if cursor_cell {
-                        flags |= CellInstance::FLAG_CURSOR;
+            if !cell.is_blank() && !invisible && !wide_spacer {
+                let fg = if cursor_cell {
+                    theme.resolve_with_colors(bg_color, false, &snap.colors)
+                } else if selected {
+                    theme.selection_fg()
+                } else if active_search {
+                    theme.active_search_fg()
+                } else if search_match {
+                    theme.search_fg()
+                } else {
+                    theme.resolve_with_colors(fg_color, true, &snap.colors)
+                };
+                let mut flags = CellInstance::FLAG_GLYPH;
+                if cursor_cell {
+                    flags |= CellInstance::FLAG_CURSOR;
+                }
+                for ch in cell.text_chars() {
+                    let glyph = font.get_or_raster(ch);
+                    if glyph.atlas_size[0] == 0 || glyph.atlas_size[1] == 0 {
+                        continue;
                     }
                     glyph_instances.push(CellInstance {
                         glyph_pos: glyph.atlas_pos,

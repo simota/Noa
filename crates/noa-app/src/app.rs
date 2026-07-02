@@ -8,11 +8,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, TrySendError};
 use noa_core::{GridSize, PixelSize, Point};
 use noa_font::FontGrid;
 use noa_grid::{Terminal, modes::MouseTracking};
-use noa_pty::{Pty, PtyConfig, PtyWriter};
+use noa_pty::{Pty, PtyConfig};
 use noa_render::{FrameSnapshot, Renderer, Theme};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -53,7 +53,7 @@ pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     graphics: Option<GraphicsState>,
     terminal: Option<Arc<Mutex<Terminal>>>,
-    pty_writer: Option<PtyWriter>,
+    pty_input_tx: Option<Sender<crate::io_thread::PtyInput>>,
     resize_tx: Option<Sender<GridSize>>,
     io_thread: Option<std::thread::JoinHandle<()>>,
     #[cfg(target_os = "macos")]
@@ -76,7 +76,7 @@ impl App {
             proxy,
             graphics: None,
             terminal: None,
-            pty_writer: None,
+            pty_input_tx: None,
             resize_tx: None,
             io_thread: None,
             #[cfg(target_os = "macos")]
@@ -134,6 +134,7 @@ impl App {
                 graphics
                     .surface
                     .configure(&graphics.device, &graphics.surface_config);
+                graphics.window.request_redraw();
                 return;
             }
             Err(e) => {
@@ -270,16 +271,16 @@ impl ApplicationHandler<UserEvent> for App {
             ..Default::default()
         };
         let pty = Pty::spawn(pty_config).expect("failed to spawn pty");
-        let pty_writer = pty.writer();
         let terminal = Arc::new(Mutex::new(Terminal::new(self.grid_size)));
         let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
+        let (pty_input_tx, pty_input_rx) = crate::io_thread::input_channel();
 
         let io_thread = crate::io_thread::spawn(
             pty,
-            pty_writer.clone(),
             terminal.clone(),
             self.proxy.clone(),
             resize_rx,
+            pty_input_rx,
         );
 
         self.graphics = Some(GraphicsState {
@@ -293,7 +294,7 @@ impl ApplicationHandler<UserEvent> for App {
             theme: crate::theme::default_theme(),
         });
         self.terminal = Some(terminal);
-        self.pty_writer = Some(pty_writer);
+        self.pty_input_tx = Some(pty_input_tx);
         self.resize_tx = Some(resize_tx);
         self.io_thread = Some(io_thread);
     }
@@ -379,35 +380,55 @@ impl ApplicationHandler<UserEvent> for App {
 
 impl App {
     fn on_scale_factor_changed(&mut self, scale_factor: f64) {
-        let Some(graphics) = self.graphics.as_mut() else {
-            return;
+        let (grid_size, window) = {
+            let Some(graphics) = self.graphics.as_mut() else {
+                return;
+            };
+            match FontGrid::new(font_pixel_size(self.config.font_size, scale_factor)) {
+                Ok(font) => graphics.font = font,
+                Err(err) => {
+                    log::warn!("failed to rebuild font for scale factor {scale_factor}: {err}");
+                }
+            }
+            (
+                grid_size_for_physical_size(graphics.window.inner_size(), graphics.font.metrics()),
+                graphics.window.clone(),
+            )
         };
-        graphics.font = FontGrid::new(font_pixel_size(self.config.font_size, scale_factor))
-            .expect("failed to load a system monospace font");
-        graphics.window.request_redraw();
+
+        self.resize_grid(grid_size);
+        window.request_redraw();
     }
 
     fn on_resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
-        let Some(graphics) = self.graphics.as_mut() else {
-            return;
+        let (grid_size, window) = {
+            let Some(graphics) = self.graphics.as_mut() else {
+                return;
+            };
+            if size.width == 0 || size.height == 0 {
+                return;
+            }
+            graphics.surface_config.width = size.width;
+            graphics.surface_config.height = size.height;
+            graphics
+                .surface
+                .configure(&graphics.device, &graphics.surface_config);
+            graphics.renderer.resize(PixelSize {
+                w: size.width,
+                h: size.height,
+            });
+            (
+                grid_size_for_physical_size(size, graphics.font.metrics()),
+                graphics.window.clone(),
+            )
         };
-        if size.width == 0 || size.height == 0 {
-            return;
-        }
-        graphics.surface_config.width = size.width;
-        graphics.surface_config.height = size.height;
-        graphics
-            .surface
-            .configure(&graphics.device, &graphics.surface_config);
-        graphics.renderer.resize(PixelSize {
-            w: size.width,
-            h: size.height,
-        });
 
-        let metrics = graphics.font.metrics();
-        let cols = (size.width as f32 / metrics.cell_w).floor().max(1.0) as u16;
-        let rows = (size.height as f32 / metrics.cell_h).floor().max(1.0) as u16;
-        self.grid_size = GridSize::new(cols, rows);
+        self.resize_grid(grid_size);
+        window.request_redraw();
+    }
+
+    fn resize_grid(&mut self, grid_size: GridSize) {
+        self.grid_size = grid_size;
         // Grid-first ordering: resize the shared Terminal grid BEFORE telling
         // the pty its new winsize. Otherwise the shell's SIGWINCH repaint (at
         // the new size) can reach the io thread and be fed into a still-old
@@ -421,9 +442,6 @@ impl App {
         // Then the pty winsize (the io thread owns the Pty).
         if let Some(resize_tx) = &self.resize_tx {
             let _ = resize_tx.send(self.grid_size);
-        }
-        if let Some(g) = &self.graphics {
-            g.window.request_redraw();
         }
     }
 
@@ -643,11 +661,17 @@ impl App {
     }
 
     fn write_pty_bytes(&self, bytes: &[u8]) {
-        let Some(writer) = self.pty_writer.as_ref() else {
+        let Some(input_tx) = self.pty_input_tx.as_ref() else {
             return;
         };
-        if let Err(err) = writer.write(bytes).and_then(|_| writer.flush()) {
-            log::warn!("failed to write input bytes to pty: {err}");
+        match input_tx.try_send(bytes.to_vec().into_boxed_slice()) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                log::warn!("dropping pty input because the io thread queue is full");
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                log::warn!("failed to queue pty input because the io thread is gone");
+            }
         }
     }
 }
@@ -681,6 +705,16 @@ fn initial_window_logical_size(
         (physical_w / scale_factor) as f64,
         (physical_h / scale_factor) as f64,
     )
+}
+
+fn grid_size_for_physical_size(size: PhysicalSize<u32>, metrics: noa_font::Metrics) -> GridSize {
+    let cols = (size.width as f32 / metrics.cell_w.max(f32::EPSILON))
+        .floor()
+        .clamp(1.0, u16::MAX as f32) as u16;
+    let rows = (size.height as f32 / metrics.cell_h.max(f32::EPSILON))
+        .floor()
+        .clamp(1.0, u16::MAX as f32) as u16;
+    GridSize::new(cols, rows)
 }
 
 fn update_ime_cursor_area(window: &Window, metrics: noa_font::Metrics, x: u16, y: u16) {
@@ -740,6 +774,24 @@ mod tests {
 
         assert_eq!(size.width, 640.0);
         assert_eq!(size.height, 384.0);
+    }
+
+    #[test]
+    fn scale_factor_grid_recompute_uses_new_cell_metrics() {
+        let size = PhysicalSize::new(960, 600);
+
+        assert_eq!(
+            grid_size_for_physical_size(size, metrics(12.0, 24.0)),
+            GridSize::new(80, 25)
+        );
+        assert_eq!(
+            grid_size_for_physical_size(size, metrics(16.0, 30.0)),
+            GridSize::new(60, 20)
+        );
+        assert_eq!(
+            grid_size_for_physical_size(PhysicalSize::new(1, 1), metrics(16.0, 30.0)),
+            GridSize::new(1, 1)
+        );
     }
 
     #[test]

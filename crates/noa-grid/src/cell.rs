@@ -3,10 +3,12 @@
 use noa_core::{CellAttrs, Color};
 
 /// A single grid cell. Inc-1 layout is inlined (no `StyleId` interning yet).
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Cell {
-    /// The scalar in this cell; `' '` for blank.
+    /// The base scalar in this cell; `' '` for blank.
     pub ch: char,
+    /// Zero-width combining scalars attached to `ch`.
+    pub combining: String,
     pub fg: Color,
     pub bg: Color,
     pub attrs: CellAttrs,
@@ -16,6 +18,7 @@ impl Default for Cell {
     fn default() -> Self {
         Cell {
             ch: ' ',
+            combining: String::new(),
             fg: Color::Default,
             bg: Color::Default,
             attrs: CellAttrs::empty(),
@@ -28,10 +31,34 @@ impl Cell {
     pub fn blank(bg: Color) -> Self {
         Cell {
             ch: ' ',
+            combining: String::new(),
             fg: Color::Default,
             bg,
             attrs: CellAttrs::empty(),
         }
+    }
+
+    pub fn is_blank(&self) -> bool {
+        self.ch == ' ' && self.combining.is_empty()
+    }
+
+    pub fn push_combining(&mut self, c: char) {
+        self.combining.push(c);
+    }
+
+    pub fn push_text_to(&self, text: &mut String) {
+        text.push(self.ch);
+        text.push_str(&self.combining);
+    }
+
+    pub fn text(&self) -> String {
+        let mut text = String::new();
+        self.push_text_to(&mut text);
+        text
+    }
+
+    pub fn text_chars(&self) -> impl Iterator<Item = char> + '_ {
+        std::iter::once(self.ch).chain(self.combining.chars())
     }
 }
 
@@ -57,7 +84,7 @@ impl Row {
     /// Fill every cell with `template` and reset wrap.
     pub fn clear(&mut self, template: Cell) {
         for c in &mut self.cells {
-            *c = template;
+            *c = template.clone();
         }
         self.wrapped = false;
         self.dirty = true;

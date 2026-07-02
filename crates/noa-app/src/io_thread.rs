@@ -2,18 +2,26 @@
 //! can't be shared behind an `Arc` with the main thread), reads `PtyEvent`s,
 //! feeds bytes into the shared `Terminal` through one long-lived
 //! `noa_vt::Stream`, drains any reply bytes the terminal queued back out to
-//! the pty, and pokes the winit event loop to redraw. Resize requests come
-//! in from the main thread over `resize_rx`.
+//! the pty, and pokes the winit event loop to redraw. Resize and input
+//! requests come in from the main thread over crossbeam channels.
 
 use std::sync::{Arc, Mutex};
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use noa_core::GridSize;
 use noa_grid::Terminal;
 use noa_pty::{Pty, PtyWriter};
 use winit::event_loop::EventLoopProxy;
 
 use crate::events::UserEvent;
+
+pub(crate) type PtyInput = Box<[u8]>;
+
+pub(crate) const PTY_INPUT_QUEUE_CAPACITY: usize = 1024;
+
+pub(crate) fn input_channel() -> (Sender<PtyInput>, Receiver<PtyInput>) {
+    crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY)
+}
 
 struct TerminalOutput {
     pending_writes: Vec<u8>,
@@ -33,16 +41,23 @@ fn feed_terminal(
     }
 }
 
+fn write_pty_bytes(writer: &PtyWriter, bytes: &[u8]) {
+    if let Err(err) = writer.write(bytes).and_then(|_| writer.flush()) {
+        log::warn!("failed to write bytes to pty: {err}");
+    }
+}
+
 /// Spawn the io thread, which takes ownership of `pty`. Returns immediately;
 /// the thread runs until the pty exits or errors, or the event loop is gone.
 pub fn spawn(
     pty: Pty,
-    writer: PtyWriter,
     terminal: Arc<Mutex<Terminal>>,
     proxy: EventLoopProxy<UserEvent>,
     resize_rx: Receiver<GridSize>,
+    input_rx: Receiver<PtyInput>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        let writer = pty.writer();
         let mut stream = noa_vt::Stream::new();
         loop {
             crossbeam_channel::select! {
@@ -50,8 +65,7 @@ pub fn spawn(
                     Ok(noa_pty::PtyEvent::Data(bytes)) => {
                         let output = feed_terminal(&terminal, &mut stream, bytes.as_ref());
                         if !output.pending_writes.is_empty() {
-                            let _ = writer.write(&output.pending_writes);
-                            let _ = writer.flush();
+                            write_pty_bytes(&writer, &output.pending_writes);
                         }
                         for text in output.pending_clipboard_writes {
                             let _ = proxy.send_event(UserEvent::ClipboardWrite(text));
@@ -70,6 +84,10 @@ pub fn spawn(
                     Ok(size) => {
                         let _ = pty.resize(size);
                     }
+                    Err(_) => break, // main thread / App dropped
+                },
+                recv(input_rx) -> msg => match msg {
+                    Ok(bytes) => write_pty_bytes(&writer, bytes.as_ref()),
                     Err(_) => break, // main thread / App dropped
                 },
             }
@@ -94,5 +112,25 @@ mod tests {
             terminal.try_lock().is_ok(),
             "terminal lock must be released before PTY writes"
         );
+    }
+
+    #[test]
+    fn input_channel_is_bounded_and_nonblocking_for_ui_thread() {
+        fn input(bytes: &[u8]) -> PtyInput {
+            bytes.to_vec().into_boxed_slice()
+        }
+
+        let (tx, rx) = input_channel();
+        for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
+            tx.try_send(input(b"x")).expect("queue has capacity");
+        }
+
+        match tx.try_send(input(b"y")) {
+            Err(crossbeam_channel::TrySendError::Full(bytes)) => {
+                assert_eq!(bytes.as_ref(), b"y");
+            }
+            other => panic!("expected a full input queue, got {other:?}"),
+        }
+        assert_eq!(rx.len(), PTY_INPUT_QUEUE_CAPACITY);
     }
 }

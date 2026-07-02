@@ -188,6 +188,41 @@ impl Screen {
         self.viewport_offset
     }
 
+    pub(crate) fn clear_display(&mut self) {
+        let blank = self.blank();
+        for row in &mut self.grid {
+            row.clear(blank.clone());
+        }
+        self.viewport_offset = 0;
+    }
+
+    pub(crate) fn clear_scrollback(&mut self) {
+        self.scrollback.clear();
+        self.viewport_offset = 0;
+        self.clear_selection();
+        self.clear_search();
+    }
+
+    pub(crate) fn select_all(&mut self) {
+        let total_rows = self.scrollback.len() + self.grid.len();
+        if total_rows == 0 || self.cols == 0 || !self.has_selectable_text() {
+            self.selection = None;
+            return;
+        }
+
+        self.selection = Some(Selection::new(
+            SelectionPoint::new(0, 0),
+            SelectionPoint::new(self.cols - 1, total_rows - 1),
+        ));
+    }
+
+    fn has_selectable_text(&self) -> bool {
+        self.scrollback
+            .iter()
+            .chain(&self.grid)
+            .any(|row| row.cells.iter().any(|cell| !cell.is_blank()))
+    }
+
     pub fn scroll_viewport_up(&mut self, rows: usize) {
         self.viewport_offset = self
             .viewport_offset

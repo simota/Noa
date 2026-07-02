@@ -6,7 +6,7 @@ use muda::{
 };
 use winit::event_loop::EventLoopProxy;
 
-use crate::{AppCommand, SearchAction, UserEvent, ViewportScroll};
+use crate::{AppCommand, FontSizeAction, SearchAction, TerminalAction, UserEvent, ViewportScroll};
 
 /// Holds the native menu alive for the lifetime of the winit event loop.
 pub(crate) struct MacosMenu {
@@ -82,13 +82,14 @@ impl MacosMenu {
                     true,
                     Some(cmd_accelerator(Code::KeyV)),
                 ),
-                &PredefinedMenuItem::separator(),
                 &MenuItem::with_id(
-                    AppCommand::Search(SearchAction::Find).menu_id(),
-                    "Find",
+                    AppCommand::Terminal(TerminalAction::SelectAll).menu_id(),
+                    "Select All",
                     true,
-                    Some(cmd_accelerator(Code::KeyF)),
+                    Some(cmd_accelerator(Code::KeyA)),
                 ),
+                &PredefinedMenuItem::separator(),
+                &disabled_item(AppCommand::SEARCH_FIND_MENU_ID, "Find"),
                 &MenuItem::with_id(
                     AppCommand::Search(SearchAction::FindNext).menu_id(),
                     "Find Next",
@@ -107,7 +108,6 @@ impl MacosMenu {
                     true,
                     None,
                 ),
-                &disabled_item("noa.edit.select-all", "Select All"),
             ],
         )?;
         let view_menu = Submenu::with_id_and_items(
@@ -115,6 +115,38 @@ impl MacosMenu {
             "View",
             true,
             &[
+                &MenuItem::with_id(
+                    AppCommand::Terminal(TerminalAction::Clear).menu_id(),
+                    "Clear",
+                    true,
+                    Some(cmd_accelerator(Code::KeyK)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::Terminal(TerminalAction::ClearScrollback).menu_id(),
+                    "Clear Scrollback",
+                    true,
+                    None,
+                ),
+                &PredefinedMenuItem::separator(),
+                &MenuItem::with_id(
+                    AppCommand::FontSize(FontSizeAction::Increase).menu_id(),
+                    "Increase Font Size",
+                    true,
+                    Some(cmd_accelerator(Code::Equal)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::FontSize(FontSizeAction::Decrease).menu_id(),
+                    "Decrease Font Size",
+                    true,
+                    Some(cmd_accelerator(Code::Minus)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::FontSize(FontSizeAction::Reset).menu_id(),
+                    "Reset Font Size",
+                    true,
+                    Some(cmd_accelerator(Code::Digit0)),
+                ),
+                &PredefinedMenuItem::separator(),
                 &MenuItem::with_id(
                     AppCommand::ScrollViewport(ViewportScroll::LineUp).menu_id(),
                     "Scroll Line Up",

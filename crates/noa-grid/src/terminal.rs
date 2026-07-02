@@ -119,6 +119,26 @@ impl Terminal {
         self.active_mut().search_previous()
     }
 
+    pub fn clear_active_display_and_scrollback(&mut self) {
+        if self.active_is_alt {
+            let active = self.active_mut();
+            active.clear_display();
+            active.clear_selection();
+            active.clear_search();
+        } else {
+            self.primary.clear_display();
+            self.primary.clear_scrollback();
+        }
+    }
+
+    pub fn clear_scrollback(&mut self) {
+        self.primary.clear_scrollback();
+    }
+
+    pub fn select_all(&mut self) {
+        self.active_mut().select_all();
+    }
+
     /// Resize the terminal to a new cell grid (from a window resize). Resizes
     /// every screen, reflows soft-wrapped lines, and updates the recorded size.
     pub fn resize(&mut self, size: GridSize) {

@@ -45,6 +45,13 @@ fn row_text(t: &Terminal, y: usize, width: usize) -> String {
         .collect()
 }
 
+fn active_row_text(t: &Terminal, y: usize, width: usize) -> String {
+    t.active().grid[y].cells[..width]
+        .iter()
+        .map(|c| c.ch)
+        .collect()
+}
+
 fn rows_text(rows: &[crate::cell::Row], y: usize, width: usize) -> String {
     rows[y].cells[..width].iter().map(|c| c.ch).collect()
 }
@@ -494,6 +501,117 @@ fn erase_display_scrollback_clears_history_only() {
 }
 
 #[test]
+fn clear_active_display_and_scrollback_clears_primary_state() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+    t.scroll_viewport_up(1);
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 0, y: 1 });
+    t.set_search_query("A");
+    t.pending_writes.extend_from_slice(b"reply");
+    t.pending_clipboard_writes.push("clip".to_string());
+
+    t.clear_active_display_and_scrollback();
+
+    assert_eq!(t.scrollback_len(), 0);
+    assert_eq!(t.viewport_offset(), 0);
+    assert_eq!(row_text(&t, 0, 5), "     ");
+    assert_eq!(row_text(&t, 1, 5), "     ");
+    assert_eq!(row_text(&t, 2, 5), "     ");
+    assert!(t.active().selection.is_none());
+    assert!(t.active().search.query().is_empty());
+    assert_eq!(t.pending_writes, b"reply");
+    assert_eq!(t.pending_clipboard_writes, vec!["clip"]);
+}
+
+#[test]
+fn clear_scrollback_preserves_primary_live_display() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+    t.scroll_viewport_up(1);
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 0, y: 1 });
+    t.set_search_query("A");
+
+    t.clear_scrollback();
+
+    assert_eq!(t.scrollback_len(), 0);
+    assert_eq!(t.viewport_offset(), 0);
+    assert_eq!(row_text(&t, 0, 1), "B");
+    assert_eq!(row_text(&t, 1, 1), "C");
+    assert_eq!(row_text(&t, 2, 1), "D");
+    assert!(t.active().selection.is_none());
+    assert!(t.active().search.query().is_empty());
+}
+
+#[test]
+fn alternate_clear_preserves_primary_scrollback_and_terminal_state() {
+    let mut t = run_size(
+        5,
+        3,
+        b"A\r\nB\r\nC\r\nD\x1b[?2004h\x1b]0;alt title\x07\x1b[?1049hALT",
+    );
+    t.colors.set_default_fg(Rgb::new(1, 2, 3));
+    t.pending_writes.extend_from_slice(b"reply");
+    t.pending_clipboard_writes.push("clip".to_string());
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 2, y: 0 });
+    t.set_search_query("ALT");
+    let primary_scrollback_len = t.primary.scrollback_len();
+
+    t.clear_active_display_and_scrollback();
+
+    assert!(t.active_is_alt);
+    assert_eq!(t.primary.scrollback_len(), primary_scrollback_len);
+    assert_eq!(row_text(&t, 0, 1), "B");
+    assert_eq!(row_text(&t, 1, 1), "C");
+    assert_eq!(row_text(&t, 2, 1), "D");
+    assert_eq!(active_row_text(&t, 0, 5), "     ");
+    assert_eq!(active_row_text(&t, 1, 5), "     ");
+    assert_eq!(active_row_text(&t, 2, 5), "     ");
+    assert!(t.active().selection.is_none());
+    assert!(t.active().search.query().is_empty());
+    assert!(t.modes.bracketed_paste());
+    assert_eq!(t.title, "alt title");
+    assert_eq!(t.colors.default_fg(), Some(Rgb::new(1, 2, 3)));
+    assert_eq!(t.pending_writes, b"reply");
+    assert_eq!(t.pending_clipboard_writes, vec!["clip"]);
+}
+
+#[test]
+fn select_all_primary_selects_scrollback_and_live_grid() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+
+    t.select_all();
+
+    let selection = t.active().selection.expect("select all should select text");
+    let (start, end) = selection.normalized();
+    assert_eq!(start, crate::SelectionPoint::new(0, 0));
+    assert_eq!(end, crate::SelectionPoint::new(4, 3));
+    assert_eq!(t.selected_text().as_deref(), Some("A\nB\nC\nD"));
+}
+
+#[test]
+fn select_all_alternate_selects_visible_grid_only() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD\x1b[?1049hX\r\nY\r\nZ");
+    let primary_scrollback_len = t.primary.scrollback_len();
+
+    t.select_all();
+
+    let selection = t.active().selection.expect("select all should select text");
+    let (start, end) = selection.normalized();
+    assert_eq!(start, crate::SelectionPoint::new(0, 0));
+    assert_eq!(end, crate::SelectionPoint::new(4, 2));
+    assert_eq!(t.selected_text().as_deref(), Some("X\nY\nZ"));
+    assert_eq!(t.primary.scrollback_len(), primary_scrollback_len);
+}
+
+#[test]
+fn select_all_empty_terminal_keeps_copy_payload_empty() {
+    let mut t = Terminal::new(GridSize::new(5, 3));
+
+    t.select_all();
+
+    assert!(t.active().selection.is_none());
+    assert_eq!(t.selected_text(), None);
+}
+
+#[test]
 fn alternate_screen_does_not_record_scrollback() {
     let t = run_size(5, 3, b"\x1b[?1049hA\r\nB\r\nC\r\nD");
 
@@ -656,6 +774,27 @@ fn search_matches_live_rows_and_navigates() {
         .search_previous()
         .expect("first match should be active again");
     assert_eq!(previous.start, crate::SelectionPoint::new(0, 0));
+}
+
+#[test]
+fn search_navigation_and_clear_without_query_are_noops() {
+    let mut t = run_size(8, 2, b"foo bar");
+    let row_before = row_text(&t, 0, 8);
+    let cursor_before = t.active().cursor;
+
+    assert_eq!(t.search_next(), None);
+    assert_eq!(t.search_previous(), None);
+    t.clear_search();
+
+    assert!(t.active().search.query().is_empty());
+    assert!(t.active().search.matches().is_empty());
+    assert_eq!(t.active().search.active_match(), None);
+    assert_eq!(row_text(&t, 0, 8), row_before);
+    assert_eq!(t.viewport_offset(), 0);
+    assert_eq!(t.active().cursor.x, cursor_before.x);
+    assert_eq!(t.active().cursor.y, cursor_before.y);
+    assert!(t.pending_writes.is_empty());
+    assert!(t.pending_clipboard_writes.is_empty());
 }
 
 #[test]

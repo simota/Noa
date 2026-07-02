@@ -9,6 +9,8 @@ pub enum AppCommand {
     Preferences,
     Copy,
     Paste,
+    Terminal(TerminalAction),
+    FontSize(FontSizeAction),
     Search(SearchAction),
     ScrollViewport(ViewportScroll),
     NewTab,
@@ -18,6 +20,22 @@ pub enum AppCommand {
     PrevTab,
     CloseWindow,
     Quit,
+}
+
+/// Terminal-state commands handled by noa instead of sending escape bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalAction {
+    Clear,
+    ClearScrollback,
+    SelectAll,
+}
+
+/// Runtime font-size commands for the shared application font state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontSizeAction {
+    Increase,
+    Decrease,
+    Reset,
 }
 
 /// Search commands that can be triggered before a full search UI exists.
@@ -45,10 +63,16 @@ impl AppCommand {
     pub(crate) const PREFERENCES_MENU_ID: &'static str = "noa.app.preferences";
     pub(crate) const COPY_MENU_ID: &'static str = "noa.edit.copy";
     pub(crate) const PASTE_MENU_ID: &'static str = "noa.edit.paste";
+    pub(crate) const TERMINAL_SELECT_ALL_MENU_ID: &'static str = "noa.edit.select-all";
     pub(crate) const SEARCH_FIND_MENU_ID: &'static str = "noa.edit.find";
     pub(crate) const SEARCH_FIND_NEXT_MENU_ID: &'static str = "noa.edit.find-next";
     pub(crate) const SEARCH_FIND_PREVIOUS_MENU_ID: &'static str = "noa.edit.find-previous";
     pub(crate) const SEARCH_CLEAR_MENU_ID: &'static str = "noa.edit.clear-search";
+    pub(crate) const TERMINAL_CLEAR_MENU_ID: &'static str = "noa.view.clear";
+    pub(crate) const TERMINAL_CLEAR_SCROLLBACK_MENU_ID: &'static str = "noa.view.clear-scrollback";
+    pub(crate) const FONT_SIZE_INCREASE_MENU_ID: &'static str = "noa.view.font-size-increase";
+    pub(crate) const FONT_SIZE_DECREASE_MENU_ID: &'static str = "noa.view.font-size-decrease";
+    pub(crate) const FONT_SIZE_RESET_MENU_ID: &'static str = "noa.view.font-size-reset";
     pub(crate) const SCROLL_LINE_UP_MENU_ID: &'static str = "noa.view.scroll-line-up";
     pub(crate) const SCROLL_LINE_DOWN_MENU_ID: &'static str = "noa.view.scroll-line-down";
     pub(crate) const SCROLL_PAGE_UP_MENU_ID: &'static str = "noa.view.scroll-page-up";
@@ -68,6 +92,14 @@ impl AppCommand {
             AppCommand::Preferences => Self::PREFERENCES_MENU_ID,
             AppCommand::Copy => Self::COPY_MENU_ID,
             AppCommand::Paste => Self::PASTE_MENU_ID,
+            AppCommand::Terminal(TerminalAction::Clear) => Self::TERMINAL_CLEAR_MENU_ID,
+            AppCommand::Terminal(TerminalAction::ClearScrollback) => {
+                Self::TERMINAL_CLEAR_SCROLLBACK_MENU_ID
+            }
+            AppCommand::Terminal(TerminalAction::SelectAll) => Self::TERMINAL_SELECT_ALL_MENU_ID,
+            AppCommand::FontSize(FontSizeAction::Increase) => Self::FONT_SIZE_INCREASE_MENU_ID,
+            AppCommand::FontSize(FontSizeAction::Decrease) => Self::FONT_SIZE_DECREASE_MENU_ID,
+            AppCommand::FontSize(FontSizeAction::Reset) => Self::FONT_SIZE_RESET_MENU_ID,
             AppCommand::Search(SearchAction::Find) => Self::SEARCH_FIND_MENU_ID,
             AppCommand::Search(SearchAction::FindNext) => Self::SEARCH_FIND_NEXT_MENU_ID,
             AppCommand::Search(SearchAction::FindPrevious) => Self::SEARCH_FIND_PREVIOUS_MENU_ID,
@@ -94,6 +126,14 @@ impl AppCommand {
             Self::PREFERENCES_MENU_ID => Some(Self::Preferences),
             Self::COPY_MENU_ID => Some(Self::Copy),
             Self::PASTE_MENU_ID => Some(Self::Paste),
+            Self::TERMINAL_CLEAR_MENU_ID => Some(Self::Terminal(TerminalAction::Clear)),
+            Self::TERMINAL_CLEAR_SCROLLBACK_MENU_ID => {
+                Some(Self::Terminal(TerminalAction::ClearScrollback))
+            }
+            Self::TERMINAL_SELECT_ALL_MENU_ID => Some(Self::Terminal(TerminalAction::SelectAll)),
+            Self::FONT_SIZE_INCREASE_MENU_ID => Some(Self::FontSize(FontSizeAction::Increase)),
+            Self::FONT_SIZE_DECREASE_MENU_ID => Some(Self::FontSize(FontSizeAction::Decrease)),
+            Self::FONT_SIZE_RESET_MENU_ID => Some(Self::FontSize(FontSizeAction::Reset)),
             Self::SEARCH_FIND_MENU_ID => Some(Self::Search(SearchAction::Find)),
             Self::SEARCH_FIND_NEXT_MENU_ID => Some(Self::Search(SearchAction::FindNext)),
             Self::SEARCH_FIND_PREVIOUS_MENU_ID => Some(Self::Search(SearchAction::FindPrevious)),
@@ -133,6 +173,12 @@ impl AppCommand {
             Self::Preferences => "preferences",
             Self::Copy => "copy",
             Self::Paste => "paste",
+            Self::Terminal(TerminalAction::Clear) => "terminal.clear",
+            Self::Terminal(TerminalAction::ClearScrollback) => "terminal.clear-scrollback",
+            Self::Terminal(TerminalAction::SelectAll) => "terminal.select-all",
+            Self::FontSize(FontSizeAction::Increase) => "font-size.increase",
+            Self::FontSize(FontSizeAction::Decrease) => "font-size.decrease",
+            Self::FontSize(FontSizeAction::Reset) => "font-size.reset",
             Self::Search(SearchAction::Find) => "search.find",
             Self::Search(SearchAction::FindNext) => "search.next",
             Self::Search(SearchAction::FindPrevious) => "search.previous",
@@ -170,6 +216,12 @@ impl AppCommand {
             "preferences" => Some(Self::Preferences),
             "copy" => Some(Self::Copy),
             "paste" => Some(Self::Paste),
+            "terminal.clear" => Some(Self::Terminal(TerminalAction::Clear)),
+            "terminal.clear-scrollback" => Some(Self::Terminal(TerminalAction::ClearScrollback)),
+            "terminal.select-all" => Some(Self::Terminal(TerminalAction::SelectAll)),
+            "font-size.increase" => Some(Self::FontSize(FontSizeAction::Increase)),
+            "font-size.decrease" => Some(Self::FontSize(FontSizeAction::Decrease)),
+            "font-size.reset" => Some(Self::FontSize(FontSizeAction::Reset)),
             "search.find" => Some(Self::Search(SearchAction::Find)),
             "search.next" => Some(Self::Search(SearchAction::FindNext)),
             "search.previous" => Some(Self::Search(SearchAction::FindPrevious)),
@@ -239,7 +291,15 @@ impl Default for KeybindEngine {
             ("cmd+shift+[", AppCommand::PrevTab),
             ("cmd+c", AppCommand::Copy),
             ("cmd+v", AppCommand::Paste),
-            ("cmd+f", AppCommand::Search(SearchAction::Find)),
+            ("cmd+k", AppCommand::Terminal(TerminalAction::Clear)),
+            ("cmd+a", AppCommand::Terminal(TerminalAction::SelectAll)),
+            ("cmd+=", AppCommand::FontSize(FontSizeAction::Increase)),
+            (
+                "cmd+shift+plus",
+                AppCommand::FontSize(FontSizeAction::Increase),
+            ),
+            ("cmd+-", AppCommand::FontSize(FontSizeAction::Decrease)),
+            ("cmd+0", AppCommand::FontSize(FontSizeAction::Reset)),
             ("cmd+g", AppCommand::Search(SearchAction::FindNext)),
             (
                 "cmd+shift+g",
@@ -354,6 +414,9 @@ enum KeyToken {
 
 impl KeyToken {
     fn parse(token: &str) -> Result<Self, KeybindParseError> {
+        if token == "plus" {
+            return Ok(Self::Character('+'));
+        }
         let mut chars = token.chars();
         if let (Some(ch), None) = (chars.next(), chars.next()) {
             return Ok(Self::Character(ch));
@@ -436,7 +499,8 @@ impl std::error::Error for KeybindParseError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        AppCommand, KeyBinding, KeybindEngine, KeybindParseError, SearchAction, ViewportScroll,
+        AppCommand, FontSizeAction, KeyBinding, KeybindEngine, KeybindParseError, SearchAction,
+        TerminalAction, ViewportScroll,
     };
     use winit::keyboard::{Key, ModifiersState, NamedKey};
 
@@ -447,6 +511,12 @@ mod tests {
             AppCommand::Preferences,
             AppCommand::Copy,
             AppCommand::Paste,
+            AppCommand::Terminal(TerminalAction::Clear),
+            AppCommand::Terminal(TerminalAction::ClearScrollback),
+            AppCommand::Terminal(TerminalAction::SelectAll),
+            AppCommand::FontSize(FontSizeAction::Increase),
+            AppCommand::FontSize(FontSizeAction::Decrease),
+            AppCommand::FontSize(FontSizeAction::Reset),
             AppCommand::Search(SearchAction::Find),
             AppCommand::Search(SearchAction::FindNext),
             AppCommand::Search(SearchAction::FindPrevious),
@@ -493,10 +563,60 @@ mod tests {
         assert_eq!(AppCommand::from_cmd_character("c"), Some(AppCommand::Copy));
         assert_eq!(AppCommand::from_cmd_character("V"), Some(AppCommand::Paste));
         assert_eq!(
-            AppCommand::from_cmd_character("f"),
-            Some(AppCommand::Search(SearchAction::Find))
+            AppCommand::from_cmd_character("k"),
+            Some(AppCommand::Terminal(TerminalAction::Clear))
+        );
+        assert_eq!(
+            AppCommand::from_cmd_character("A"),
+            Some(AppCommand::Terminal(TerminalAction::SelectAll))
+        );
+        assert_eq!(
+            AppCommand::from_cmd_character("="),
+            Some(AppCommand::FontSize(FontSizeAction::Increase))
+        );
+        assert_eq!(
+            AppCommand::from_cmd_character("-"),
+            Some(AppCommand::FontSize(FontSizeAction::Decrease))
+        );
+        assert_eq!(
+            AppCommand::from_cmd_character("0"),
+            Some(AppCommand::FontSize(FontSizeAction::Reset))
+        );
+        assert_eq!(AppCommand::from_cmd_character("f"), None);
+        assert_eq!(
+            AppCommand::from_cmd_character("g"),
+            Some(AppCommand::Search(SearchAction::FindNext))
+        );
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Character("+".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::FontSize(FontSizeAction::Increase))
         );
         assert_eq!(AppCommand::from_cmd_character(","), None);
+    }
+
+    #[test]
+    fn find_action_stays_addressable_but_unbound_until_prompt_exists() {
+        let command = AppCommand::Search(SearchAction::Find);
+
+        assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+        assert_eq!(
+            AppCommand::from_action_name(command.action_name()),
+            Some(command)
+        );
+        assert_eq!(
+            AppCommand::from_key(&Key::Character("f".into()), ModifiersState::SUPER),
+            None
+        );
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Character("F".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            None
+        );
     }
 
     #[test]
@@ -583,6 +703,12 @@ mod tests {
         for command in [
             AppCommand::Copy,
             AppCommand::Paste,
+            AppCommand::Terminal(TerminalAction::Clear),
+            AppCommand::Terminal(TerminalAction::ClearScrollback),
+            AppCommand::Terminal(TerminalAction::SelectAll),
+            AppCommand::FontSize(FontSizeAction::Increase),
+            AppCommand::FontSize(FontSizeAction::Decrease),
+            AppCommand::FontSize(FontSizeAction::Reset),
             AppCommand::Search(SearchAction::Find),
             AppCommand::Search(SearchAction::FindNext),
             AppCommand::Search(SearchAction::FindPrevious),
@@ -623,6 +749,30 @@ mod tests {
         );
         assert_eq!(
             engine.resolve(&Key::Character("g".into()), ModifiersState::SUPER),
+            None
+        );
+    }
+
+    #[test]
+    fn plus_alias_matches_logical_plus_key() {
+        let binding = KeyBinding::parse(
+            "cmd+shift+plus",
+            AppCommand::FontSize(FontSizeAction::Increase),
+        )
+        .expect("plus alias should parse");
+        let engine = KeybindEngine {
+            bindings: vec![binding],
+        };
+
+        assert_eq!(
+            engine.resolve(
+                &Key::Character("+".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::FontSize(FontSizeAction::Increase))
+        );
+        assert_eq!(
+            engine.resolve(&Key::Character("+".into()), ModifiersState::SUPER),
             None
         );
     }

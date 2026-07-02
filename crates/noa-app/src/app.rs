@@ -26,7 +26,7 @@ use winit::platform::macos::{WindowAttributesExtMacOS, WindowExtMacOS};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::clipboard::SystemClipboard;
-use crate::commands::{KeybindEngine, SearchAction};
+use crate::commands::{FontSizeAction, KeybindEngine, SearchAction, TerminalAction};
 use crate::events::UserEvent;
 use crate::input;
 use crate::mouse::{self, MouseSelectionState, SelectionGesture};
@@ -81,6 +81,7 @@ impl WindowState {
 
 pub struct App {
     config: AppConfig,
+    runtime_font_size: f32,
     proxy: EventLoopProxy<UserEvent>,
     gpu: Option<GpuState>,
     windows: HashMap<WindowId, WindowState>,
@@ -98,6 +99,7 @@ pub struct App {
 impl App {
     pub fn new(config: AppConfig, proxy: EventLoopProxy<UserEvent>) -> Self {
         App {
+            runtime_font_size: config.font_size,
             config,
             proxy,
             gpu: None,
@@ -206,6 +208,8 @@ impl App {
             AppCommand::PrevTab => self.select_previous_tab(),
             AppCommand::Copy => self.copy_selection_to_clipboard(),
             AppCommand::Paste => self.paste_clipboard_to_pty(),
+            AppCommand::Terminal(action) => self.handle_terminal_action(action),
+            AppCommand::FontSize(action) => self.handle_font_size_action(action),
             AppCommand::Search(action) => self.handle_search_action(action),
             AppCommand::ScrollViewport(scroll) => self.scroll_viewport(scroll),
             AppCommand::CloseWindow | AppCommand::Quit => event_loop.exit(),
@@ -221,8 +225,11 @@ impl App {
 
         let mut first_font = if self.gpu.is_none() {
             Some(
-                FontGrid::new(font_pixel_size(self.config.font_size, monitor_scale_factor))
-                    .expect("failed to load a system monospace font"),
+                FontGrid::new(font_pixel_size(
+                    self.runtime_font_size,
+                    monitor_scale_factor,
+                ))
+                .expect("failed to load a system monospace font"),
             )
         } else {
             None
@@ -249,7 +256,7 @@ impl App {
         if let Some(font) = first_font.as_mut()
             && (window_scale_factor - monitor_scale_factor).abs() > f64::EPSILON
         {
-            *font = FontGrid::new(font_pixel_size(self.config.font_size, window_scale_factor))
+            *font = FontGrid::new(font_pixel_size(self.runtime_font_size, window_scale_factor))
                 .expect("failed to load a system monospace font");
             let inner_size = initial_window_logical_size(
                 font.metrics(),
@@ -627,7 +634,7 @@ impl ApplicationHandler<UserEvent> for App {
 impl App {
     fn on_scale_factor_changed(&mut self, window_id: WindowId, scale_factor: f64) {
         if let Some(gpu) = self.gpu.as_mut() {
-            match FontGrid::new(font_pixel_size(self.config.font_size, scale_factor)) {
+            match FontGrid::new(font_pixel_size(self.runtime_font_size, scale_factor)) {
                 Ok(font) => gpu.font = font,
                 Err(err) => {
                     log::warn!("failed to rebuild font for scale factor {scale_factor}: {err}");
@@ -860,6 +867,89 @@ impl App {
         }
     }
 
+    fn handle_terminal_action(&mut self, action: TerminalAction) {
+        let Some(window_id) = resolve_command_target(AppCommand::Terminal(action), self.focused)
+        else {
+            return;
+        };
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
+
+        apply_terminal_action(
+            &mut state.terminal.lock().expect("terminal mutex poisoned"),
+            action,
+        );
+
+        if let Some(state) = self.windows.get(&window_id) {
+            state.window.request_redraw();
+        }
+    }
+
+    fn handle_font_size_action(&mut self, action: FontSizeAction) {
+        let Some(window_id) = resolve_command_target(AppCommand::FontSize(action), self.focused)
+        else {
+            return;
+        };
+        let Some(scale_factor) = self
+            .windows
+            .get(&window_id)
+            .map(|state| state.window.scale_factor())
+        else {
+            return;
+        };
+        let update =
+            runtime_font_size_update(self.runtime_font_size, self.config.font_size, action);
+        if !update.changed {
+            if let Some(state) = self.windows.get(&window_id) {
+                state.window.request_redraw();
+            }
+            return;
+        }
+
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let font = match FontGrid::new(font_pixel_size(update.point_size, scale_factor)) {
+            Ok(font) => font,
+            Err(err) => {
+                log::warn!(
+                    "failed to rebuild font for runtime size {} at scale factor {scale_factor}: {err}",
+                    update.point_size
+                );
+                return;
+            }
+        };
+        gpu.font = font;
+        self.runtime_font_size = update.point_size;
+        let metrics = gpu.font.metrics();
+        for state in self.windows.values_mut() {
+            state
+                .renderer
+                .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        }
+        let windows = self
+            .window_order
+            .iter()
+            .filter_map(|id| {
+                self.windows
+                    .get(id)
+                    .map(|state| (*id, state.window.inner_size(), state.window.clone()))
+            })
+            .collect::<Vec<_>>();
+        let resize_plan = font_size_resize_plan(
+            windows.iter().map(|(id, size, _)| (*id, *size)),
+            metrics,
+            DEFAULT_GRID_PADDING,
+        );
+        for (window_id, grid_size) in resize_plan {
+            self.resize_grid(window_id, grid_size);
+        }
+        for (_, _, window) in windows {
+            window.request_redraw();
+        }
+    }
+
     fn handle_search_action(&mut self, action: SearchAction) {
         let Some(window_id) = resolve_command_target(AppCommand::Search(action), self.focused)
         else {
@@ -1001,11 +1091,64 @@ impl App {
     }
 }
 
+const MIN_RUNTIME_FONT_SIZE: f32 = 6.0;
+const MAX_RUNTIME_FONT_SIZE: f32 = 96.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RuntimeFontSizeUpdate {
+    point_size: f32,
+    changed: bool,
+}
+
+fn runtime_font_size_update(
+    current: f32,
+    startup: f32,
+    action: FontSizeAction,
+) -> RuntimeFontSizeUpdate {
+    let requested = match action {
+        FontSizeAction::Increase => current + 1.0,
+        FontSizeAction::Decrease => current - 1.0,
+        FontSizeAction::Reset => startup,
+    };
+    let point_size = clamp_runtime_font_size(requested);
+    RuntimeFontSizeUpdate {
+        point_size,
+        changed: !current.is_finite() || (point_size - current).abs() > f32::EPSILON,
+    }
+}
+
+fn clamp_runtime_font_size(point_size: f32) -> f32 {
+    if point_size.is_finite() {
+        point_size.clamp(MIN_RUNTIME_FONT_SIZE, MAX_RUNTIME_FONT_SIZE)
+    } else {
+        MIN_RUNTIME_FONT_SIZE
+    }
+}
+
+fn font_size_resize_plan<Id: Copy>(
+    windows: impl IntoIterator<Item = (Id, PhysicalSize<u32>)>,
+    metrics: noa_font::Metrics,
+    padding: GridPadding,
+) -> Vec<(Id, GridSize)> {
+    windows
+        .into_iter()
+        .map(|(id, size)| (id, grid_size_for_physical_size(size, metrics, padding)))
+        .collect()
+}
+
 fn tab_title(title: &str) -> String {
     if title.is_empty() {
         "noa".to_string()
     } else {
         title.to_string()
+    }
+}
+
+fn apply_terminal_action(terminal: &mut Terminal, action: TerminalAction) {
+    match action {
+        TerminalAction::Clear => terminal.clear_active_display_and_scrollback(),
+        TerminalAction::ClearScrollback => terminal.clear_scrollback(),
+        TerminalAction::SelectAll => terminal.select_all(),
     }
 }
 
@@ -1123,6 +1266,8 @@ fn command_scope(command: AppCommand) -> CommandScope {
     match command {
         AppCommand::Copy
         | AppCommand::Paste
+        | AppCommand::Terminal(_)
+        | AppCommand::FontSize(_)
         | AppCommand::Search(_)
         | AppCommand::ScrollViewport(_)
         | AppCommand::CloseTab => CommandScope::FocusedTab,
@@ -1319,6 +1464,87 @@ mod tests {
     }
 
     #[test]
+    fn runtime_font_size_actions_adjust_and_reset_to_startup_size() {
+        assert_eq!(
+            runtime_font_size_update(15.0, 15.0, FontSizeAction::Increase),
+            RuntimeFontSizeUpdate {
+                point_size: 16.0,
+                changed: true
+            }
+        );
+        assert_eq!(
+            runtime_font_size_update(15.0, 15.0, FontSizeAction::Decrease),
+            RuntimeFontSizeUpdate {
+                point_size: 14.0,
+                changed: true
+            }
+        );
+        assert_eq!(
+            runtime_font_size_update(18.0, 15.0, FontSizeAction::Reset),
+            RuntimeFontSizeUpdate {
+                point_size: 15.0,
+                changed: true
+            }
+        );
+        assert_eq!(
+            runtime_font_size_update(15.0, 15.0, FontSizeAction::Reset),
+            RuntimeFontSizeUpdate {
+                point_size: 15.0,
+                changed: false
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_font_size_actions_clamp_to_supported_range() {
+        assert_eq!(
+            runtime_font_size_update(96.0, 15.0, FontSizeAction::Increase),
+            RuntimeFontSizeUpdate {
+                point_size: 96.0,
+                changed: false
+            }
+        );
+        assert_eq!(
+            runtime_font_size_update(6.0, 15.0, FontSizeAction::Decrease),
+            RuntimeFontSizeUpdate {
+                point_size: 6.0,
+                changed: false
+            }
+        );
+        assert_eq!(
+            runtime_font_size_update(120.0, 15.0, FontSizeAction::Decrease),
+            RuntimeFontSizeUpdate {
+                point_size: 96.0,
+                changed: true
+            }
+        );
+        assert_eq!(
+            runtime_font_size_update(f32::NAN, 15.0, FontSizeAction::Increase),
+            RuntimeFontSizeUpdate {
+                point_size: 6.0,
+                changed: true
+            }
+        );
+    }
+
+    #[test]
+    fn font_size_resize_plan_recomputes_each_window_grid_from_new_metrics() {
+        let plan = font_size_resize_plan(
+            [
+                (1_u8, PhysicalSize::new(968, 600)),
+                (2_u8, PhysicalSize::new(488, 300)),
+            ],
+            metrics(16.0, 30.0),
+            DEFAULT_GRID_PADDING,
+        );
+
+        assert_eq!(
+            plan,
+            vec![(1, GridSize::new(60, 20)), (2, GridSize::new(30, 10))]
+        );
+    }
+
+    #[test]
     fn ime_cursor_area_tracks_grid_cell_in_physical_pixels() {
         let (position, size) = ime_cursor_area(metrics(7.5, 15.25), 2, 3, DEFAULT_GRID_PADDING);
 
@@ -1395,6 +1621,43 @@ mod tests {
     }
 
     #[test]
+    fn terminal_clear_action_uses_grid_clear_api() {
+        let mut terminal = terminal_with_scrollback(GridSize::new(5, 3));
+        terminal.scroll_viewport_up(1);
+        terminal.pending_writes.extend_from_slice(b"reply");
+
+        apply_terminal_action(&mut terminal, TerminalAction::Clear);
+
+        assert_eq!(terminal.scrollback_len(), 0);
+        assert_eq!(terminal.viewport_offset(), 0);
+        assert_eq!(terminal.pending_writes, b"reply");
+    }
+
+    #[test]
+    fn terminal_clear_scrollback_action_preserves_live_grid() {
+        let mut terminal = terminal_with_scrollback(GridSize::new(5, 3));
+
+        apply_terminal_action(&mut terminal, TerminalAction::ClearScrollback);
+
+        assert_eq!(terminal.scrollback_len(), 0);
+        assert_eq!(terminal.primary.grid[0].cells[0].ch, 'D');
+        assert_eq!(terminal.primary.grid[1].cells[0].ch, 'E');
+        assert_eq!(terminal.primary.grid[2].cells[0].ch, 'F');
+    }
+
+    #[test]
+    fn terminal_select_all_action_uses_grid_selection_api() {
+        let mut terminal = terminal_with_scrollback(GridSize::new(5, 3));
+
+        apply_terminal_action(&mut terminal, TerminalAction::SelectAll);
+
+        assert_eq!(
+            terminal.selected_text().as_deref(),
+            Some("A\nB\nC\nD\nE\nF")
+        );
+    }
+
+    #[test]
     fn close_tab_outcome_is_unambiguous() {
         assert_eq!(
             close_tab_outcome(&[1, 2, 3], Some(2), 9),
@@ -1437,7 +1700,16 @@ mod tests {
         for command in [
             AppCommand::Copy,
             AppCommand::Paste,
+            AppCommand::Terminal(TerminalAction::Clear),
+            AppCommand::Terminal(TerminalAction::ClearScrollback),
+            AppCommand::Terminal(TerminalAction::SelectAll),
+            AppCommand::FontSize(FontSizeAction::Increase),
+            AppCommand::FontSize(FontSizeAction::Decrease),
+            AppCommand::FontSize(FontSizeAction::Reset),
+            AppCommand::Search(SearchAction::Find),
             AppCommand::Search(SearchAction::FindNext),
+            AppCommand::Search(SearchAction::FindPrevious),
+            AppCommand::Search(SearchAction::Clear),
             AppCommand::ScrollViewport(ViewportScroll::PageDown),
             AppCommand::CloseTab,
         ] {

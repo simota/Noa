@@ -6,7 +6,7 @@ A faithful **Rust** clone of the [Ghostty](https://ghostty.org) terminal emulato
 
 ## Status
 
-**Increment 1 — vertical slice.** A real, interactive terminal: a native window, a wgpu-rendered monospace grid, a PTY-backed `$SHELL`, a from-scratch VT parser, live colored output, and keyboard input. Later increments add tabs/splits, themes, Kitty protocols, and shell integration (see [Roadmap](#roadmap)).
+**Increment 4 (In Progress).** A GPU-accelerated terminal emulator written from scratch. Currently, the implementation features native window management, wgpu-based monospace grid rendering, PTY integration, CJK font fallback, custom keybindings, interactive scrollback search, multiple tabs, configuration file parsing (supporting both TOML and Ghostty formats), and over 460 vendored themes (see [Roadmap](#roadmap)).
 
 ## Architecture
 
@@ -45,14 +45,21 @@ Options: `cargo run -p noa -- --cols 100 --rows 30 --font-size 15`.
 
 At startup, `noa` reads `config.toml` from the platform config directory
 (`~/Library/Application Support/noa/config.toml` on macOS). Missing config files
-keep the built-in defaults: `cols = 80`, `rows = 24`, and `font_size = 14.0`.
-CLI flags override config file values.
+keep the built-in defaults: `cols = 80`, `rows = 24`, `font_size = 14.0`, and
+the built-in terminal theme. CLI flags override config file values.
 
 ```toml
 cols = 100
 rows = 30
 font_size = 15.0
+theme = "Catppuccin Mocha"
 ```
+
+Theme names match the vendored Ghostty-compatible catalog in
+`crates/noa-theme/vendor/themes/`, without the `.conf` suffix. For example,
+`theme = "TokyoNight Night"`, `theme = "Gruvbox Dark"`, and
+`theme = "Nord"` are valid. `--theme` is intentionally not a CLI flag; theme
+selection is config-file only.
 
 ### Build the macOS app
 
@@ -98,14 +105,14 @@ works via the `[package.metadata.bundle]` in `bin/noa/Cargo.toml`.
 
 ## Roadmap
 
-| Inc | Scope |
-|-----|-------|
-| **1** ✅ | Vertical slice: window + wgpu grid, PTY `$SHELL`, from-scratch parser (C0, core CSI, SGR 16+truecolor, deferred-wrap), block cursor, ASCII+arrow input, DA/DSR |
-| **2** | Resize behavior, full CSI/edit set, 256+truecolor palette, alt screen, DECSC/DECRC, bracketed paste, UTF-8 wide cells, interaction basics |
-| **3** | Paged scrollback storage, interned styles, OSC 8 hyperlinks, interactive search UI, expanded configuration |
-| **4** | Tabs + split tree, config file, ~460 themes, font fallback + ligatures + Nerd/box glyphs |
-| **5** | Kitty graphics + keyboard protocols, shell integration (OSC 133/7), DCS |
-| **6** | macOS-native polish: quick terminal, command palette, background blur, session restore |
+| Inc | Scope | Status |
+|-----|-------|--------|
+| **1** | Vertical slice: window + wgpu grid, PTY `$SHELL`, from-scratch parser (C0, core CSI, SGR 16+truecolor, deferred-wrap), block cursor, ASCII+arrow input, DA/DSR | ✅ Done |
+| **2** | Resize behavior, full CSI/edit set, 256+truecolor palette, alt screen, DECSC/DECRC, bracketed paste, UTF-8 wide cells, interaction basics | ✅ Done |
+| **3** | Paged scrollback storage, interned styles, OSC 8 hyperlinks, interactive search UI, expanded configuration | 🔄 In Progress (scrollback, search, OSC 52 done; OSC 8 pending) |
+| **4** | Tabs + split tree, config file, ~460 themes, font fallback + ligatures + Nerd/box glyphs | 🔄 In Progress (tabs, config, themes, font fallback done; splits, ligatures pending) |
+| **5** | Kitty graphics + keyboard protocols, shell integration (OSC 133/7), DCS | ⏳ Planned |
+| **6** | macOS-native polish: quick terminal, command palette, background blur, session restore | ⏳ Planned |
 
 ## License
 

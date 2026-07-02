@@ -53,15 +53,16 @@ Rust while preserving the dependency boundaries described in `README.md`.
 - basic grid, cursor, erase, tab stop, scroll region, resize, DA and DSR
 - SGR 16-color, 256-color, and truecolor decoding
 - OSC payload parsing with OSC 0/2 title handling
-- basic keyboard input and Cmd+Q/Cmd+W app shortcuts
+- basic keyboard input, Cmd+Q/Cmd+W app shortcuts, and Shift-key viewport
+  scroll navigation
 - system monospace font discovery, per-char rasterization, and glyph atlas
 
 Notable constraints:
 
 - The product shape is one window and one terminal session.
 - There is no persisted configuration model.
-- Scrollback, alternate screen, selection, clipboard, tabs, splits, keybinds,
-  shell integration, Kitty protocols, and native polish are still planned work.
+- Soft-wrap reflow, tabs, splits, keybinds, shell integration, Kitty protocols,
+  and native polish are still planned work.
 
 ## 4. Goals
 
@@ -117,7 +118,7 @@ scrolling, and key customization.
 | `REQ-UX-003` | Mouse reporting | Missing | Implement SGR mouse protocol, reporting modes, and local selection override |
 | `REQ-UX-004` | Keybind engine | Missing | Add config-driven keybind parsing, action dispatch, and app-vs-PTY consumption rules |
 | `REQ-UX-005` | Search | Missing | Add search state, match highlighting, navigation, and search UI command hooks |
-| `REQ-UX-006` | Scroll navigation | Missing | Add page/line/top/bottom scrolling and viewport reset behavior |
+| `REQ-UX-006` | Scroll navigation | Complete | Page, line, top, and bottom viewport scrolling are implemented with app command routing and View menu entries |
 | `REQ-UX-009` | IME text input | Partial | System IME commit input is enabled and sent to the PTY; inline preedit rendering remains future work |
 
 Exit criteria:
@@ -243,7 +244,7 @@ Exit criteria:
   References `REQ-UX-004`.
 - [ ] `IMPL-UX-007`: Add search state, match computation, highlighting, and
   navigation actions. References `REQ-UX-005`.
-- [ ] `IMPL-UX-008`: Add viewport scrolling commands. References `REQ-UX-006`.
+- [x] `IMPL-UX-008`: Add viewport scrolling commands. References `REQ-UX-006`.
 - [x] `IMPL-UX-009`: Enable system IME commit input for Japanese text.
   References `REQ-UX-009`.
 

@@ -6,7 +6,7 @@ A faithful **Rust** clone of the [Ghostty](https://ghostty.org) terminal emulato
 
 ## Status
 
-**Increment 1 — vertical slice.** A real, interactive terminal: a native window, a wgpu-rendered monospace grid, a PTY-backed `$SHELL`, a from-scratch VT parser, live colored output, and keyboard input. Later increments add resize/reflow, alt-screen, scrollback, tabs/splits, themes, Kitty protocols, and shell integration (see [Roadmap](#roadmap)).
+**Increment 1 — vertical slice.** A real, interactive terminal: a native window, a wgpu-rendered monospace grid, a PTY-backed `$SHELL`, a from-scratch VT parser, live colored output, and keyboard input. Later increments add soft-wrap reflow, tabs/splits, themes, Kitty protocols, and shell integration (see [Roadmap](#roadmap)).
 
 ## Architecture
 
@@ -48,7 +48,9 @@ Cmd+Q/Cmd+W app shortcuts, native window controls). The menu bar shows `noa`,
 `File`, `Edit`, `View`, `Window`, and `Help`. The app menu currently includes
 `About noa`, disabled `Preferences...` (shown as `Settings…` on current macOS),
 `Close Window`, and `Quit noa`; preferences and unsupported terminal actions
-stay disabled until backing features exist. To produce a double-clickable
+stay disabled until backing features exist. The `View` menu exposes scrollback
+navigation: line, page, top, and bottom scrolling via `Shift+ArrowUp/Down`,
+`Shift+PageUp/PageDown`, and `Shift+Home/End`. To produce a double-clickable
 `.app` bundle:
 
 ```bash

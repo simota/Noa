@@ -6,7 +6,7 @@ use muda::{
 };
 use winit::event_loop::EventLoopProxy;
 
-use crate::{AppCommand, UserEvent};
+use crate::{AppCommand, UserEvent, ViewportScroll};
 
 /// Holds the native menu alive for the lifetime of the winit event loop.
 pub(crate) struct MacosMenu {
@@ -75,10 +75,46 @@ impl MacosMenu {
             "noa.menu.view",
             "View",
             true,
-            &[&disabled_item(
-                "noa.view.toggle-full-screen",
-                "Toggle Full Screen",
-            )],
+            &[
+                &MenuItem::with_id(
+                    AppCommand::ScrollViewport(ViewportScroll::LineUp).menu_id(),
+                    "Scroll Line Up",
+                    true,
+                    Some(shift_accelerator(Code::ArrowUp)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::ScrollViewport(ViewportScroll::LineDown).menu_id(),
+                    "Scroll Line Down",
+                    true,
+                    Some(shift_accelerator(Code::ArrowDown)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::ScrollViewport(ViewportScroll::PageUp).menu_id(),
+                    "Scroll Page Up",
+                    true,
+                    Some(shift_accelerator(Code::PageUp)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::ScrollViewport(ViewportScroll::PageDown).menu_id(),
+                    "Scroll Page Down",
+                    true,
+                    Some(shift_accelerator(Code::PageDown)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::ScrollViewport(ViewportScroll::Top).menu_id(),
+                    "Scroll to Top",
+                    true,
+                    Some(shift_accelerator(Code::Home)),
+                ),
+                &MenuItem::with_id(
+                    AppCommand::ScrollViewport(ViewportScroll::Bottom).menu_id(),
+                    "Scroll to Bottom",
+                    true,
+                    Some(shift_accelerator(Code::End)),
+                ),
+                &PredefinedMenuItem::separator(),
+                &disabled_item("noa.view.toggle-full-screen", "Toggle Full Screen"),
+            ],
         )?;
         let window_menu = Submenu::with_id_and_items(
             "noa.menu.window",
@@ -140,4 +176,8 @@ fn disabled_item(id: &'static str, text: &'static str) -> MenuItem {
 
 fn cmd_accelerator(code: Code) -> Accelerator {
     Accelerator::new(Some(Modifiers::SUPER), code)
+}
+
+fn shift_accelerator(code: Code) -> Accelerator {
+    Accelerator::new(Some(Modifiers::SHIFT), code)
 }

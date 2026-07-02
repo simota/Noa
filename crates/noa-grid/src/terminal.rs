@@ -64,6 +64,10 @@ impl Terminal {
         self.active_mut().scroll_viewport_down(rows);
     }
 
+    pub fn scroll_viewport_to_top(&mut self) {
+        self.active_mut().scroll_viewport_to_top();
+    }
+
     pub fn scroll_viewport_to_bottom(&mut self) {
         self.active_mut().scroll_viewport_to_bottom();
     }

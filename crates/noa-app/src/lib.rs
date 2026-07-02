@@ -15,7 +15,7 @@ mod mouse;
 mod theme;
 
 pub use app::AppConfig;
-pub use commands::AppCommand;
+pub use commands::{AppCommand, ViewportScroll};
 pub use events::UserEvent;
 pub use input::encode_paste;
 

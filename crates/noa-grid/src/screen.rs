@@ -159,6 +159,10 @@ impl Screen {
         self.viewport_offset = self.viewport_offset.saturating_sub(rows);
     }
 
+    pub fn scroll_viewport_to_top(&mut self) {
+        self.viewport_offset = self.max_viewport_offset();
+    }
+
     pub fn scroll_viewport_to_bottom(&mut self) {
         self.viewport_offset = 0;
     }

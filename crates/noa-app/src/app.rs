@@ -21,11 +21,11 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::AppCommand;
 use crate::clipboard::SystemClipboard;
 use crate::events::UserEvent;
 use crate::input;
 use crate::mouse::{self, MouseSelectionState, SelectionGesture};
+use crate::{AppCommand, ViewportScroll};
 
 /// Configuration the binary passes into [`crate::run`].
 #[derive(Debug, Clone)]
@@ -154,6 +154,7 @@ impl App {
             }
             AppCommand::Copy => self.copy_selection_to_clipboard(),
             AppCommand::Paste => self.paste_clipboard_to_pty(),
+            AppCommand::ScrollViewport(scroll) => self.scroll_viewport(scroll),
             AppCommand::CloseWindow | AppCommand::Quit => event_loop.exit(),
         }
     }
@@ -343,6 +344,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.ime_state.preedit_active() {
                     return;
                 }
+                if let Some(command) = AppCommand::from_key(&event.logical_key, self.modifiers) {
+                    self.handle_app_command(event_loop, command);
+                    return;
+                }
                 let app_cursor_keys = self.app_cursor_keys();
                 let bytes = input::encode_key(
                     &event.logical_key,
@@ -449,6 +454,22 @@ impl App {
         }
     }
 
+    fn scroll_viewport(&mut self, scroll: ViewportScroll) {
+        let Some(terminal) = &self.terminal else {
+            return;
+        };
+
+        apply_viewport_scroll(
+            &mut terminal.lock().expect("terminal mutex poisoned"),
+            self.grid_size,
+            scroll,
+        );
+
+        if let Some(graphics) = &self.graphics {
+            graphics.window.request_redraw();
+        }
+    }
+
     fn apply_selection_gesture(&mut self, gesture: SelectionGesture) {
         if gesture == SelectionGesture::None {
             return;
@@ -529,6 +550,18 @@ impl App {
     }
 }
 
+fn apply_viewport_scroll(terminal: &mut Terminal, grid_size: GridSize, scroll: ViewportScroll) {
+    let page_rows = usize::from(grid_size.rows.saturating_sub(1).max(1));
+    match scroll {
+        ViewportScroll::LineUp => terminal.scroll_viewport_up(1),
+        ViewportScroll::LineDown => terminal.scroll_viewport_down(1),
+        ViewportScroll::PageUp => terminal.scroll_viewport_up(page_rows),
+        ViewportScroll::PageDown => terminal.scroll_viewport_down(page_rows),
+        ViewportScroll::Top => terminal.scroll_viewport_to_top(),
+        ViewportScroll::Bottom => terminal.scroll_viewport_to_bottom(),
+    }
+}
+
 fn font_pixel_size(point_size: f32, scale_factor: f64) -> f32 {
     (point_size * scale_factor.max(f64::EPSILON) as f32).max(1.0)
 }
@@ -572,6 +605,7 @@ fn ime_cursor_area(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noa_vt::Stream;
 
     fn metrics(cell_w: f32, cell_h: f32) -> noa_font::Metrics {
         noa_font::Metrics {
@@ -583,6 +617,13 @@ mod tests {
             underline_position: 0.0,
             underline_thickness: 1.0,
         }
+    }
+
+    fn terminal_with_scrollback(grid_size: GridSize) -> Terminal {
+        let mut terminal = Terminal::new(grid_size);
+        let mut stream = Stream::new();
+        stream.feed(b"A\r\nB\r\nC\r\nD\r\nE\r\nF", &mut terminal);
+        terminal
     }
 
     #[test]
@@ -607,5 +648,29 @@ mod tests {
         assert_eq!(position.y, 46);
         assert_eq!(size.width, 8);
         assert_eq!(size.height, 16);
+    }
+
+    #[test]
+    fn viewport_scroll_commands_move_by_line_page_and_extremes() {
+        let grid_size = GridSize::new(5, 3);
+        let mut terminal = terminal_with_scrollback(grid_size);
+
+        apply_viewport_scroll(&mut terminal, grid_size, ViewportScroll::LineUp);
+        assert_eq!(terminal.viewport_offset(), 1);
+
+        apply_viewport_scroll(&mut terminal, grid_size, ViewportScroll::PageUp);
+        assert_eq!(terminal.viewport_offset(), 3);
+
+        apply_viewport_scroll(&mut terminal, grid_size, ViewportScroll::LineDown);
+        assert_eq!(terminal.viewport_offset(), 2);
+
+        apply_viewport_scroll(&mut terminal, grid_size, ViewportScroll::PageDown);
+        assert_eq!(terminal.viewport_offset(), 0);
+
+        apply_viewport_scroll(&mut terminal, grid_size, ViewportScroll::Top);
+        assert_eq!(terminal.viewport_offset(), terminal.scrollback_len());
+
+        apply_viewport_scroll(&mut terminal, grid_size, ViewportScroll::Bottom);
+        assert_eq!(terminal.viewport_offset(), 0);
     }
 }

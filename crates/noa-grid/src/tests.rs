@@ -369,6 +369,18 @@ fn viewport_can_show_scrollback_and_return_to_live() {
 }
 
 #[test]
+fn viewport_can_jump_to_scrollback_top() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD\r\nE\r\nF");
+
+    t.scroll_viewport_to_top();
+    assert_eq!(t.viewport_offset(), t.scrollback_len());
+    let rows = t.active().visible_rows();
+    assert_eq!(rows_text(&rows, 0, 1), "A");
+    assert_eq!(rows_text(&rows, 1, 1), "B");
+    assert_eq!(rows_text(&rows, 2, 1), "C");
+}
+
+#[test]
 fn output_returns_viewport_to_live_bottom() {
     let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
     t.scroll_viewport_up(1);

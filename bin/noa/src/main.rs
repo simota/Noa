@@ -13,18 +13,50 @@ struct Args {
     /// Font size in points.
     #[arg(long)]
     font_size: Option<f32>,
+    /// Import supported settings from Ghostty config into noa config.
+    #[arg(long)]
+    import_ghostty_config: bool,
 }
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = Args::parse();
-    let config = noa_config::load_startup_config(noa_config::ConfigOverrides {
+
+    if args.import_ghostty_config {
+        return run_import();
+    }
+
+    let (config, diagnostics) = noa_config::load_startup_config(noa_config::ConfigOverrides {
         cols: args.cols,
         rows: args.rows,
         font_size: args.font_size,
         theme: None,
     })?;
+    for diagnostic in diagnostics {
+        eprintln!("{}", diagnostic.message);
+    }
+    if let Some(message) = import_hint(config_exists(), ghostty_config_exists()) {
+        eprintln!("{message}");
+    }
     noa_app::run(app_config_from_startup(config))
+}
+
+fn run_import() -> anyhow::Result<()> {
+    match noa_config::import_ghostty_config() {
+        Ok(outcome) => {
+            println!(
+                "Imported Ghostty config to {} ({} supported, {} commented out)",
+                outcome.target.display(),
+                outcome.stats.supported,
+                outcome.stats.commented_out
+            );
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!("{error:#}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn app_config_from_startup(config: noa_config::StartupConfig) -> noa_app::AppConfig {
@@ -34,6 +66,22 @@ fn app_config_from_startup(config: noa_config::StartupConfig) -> noa_app::AppCon
         font_size: config.font_size,
         theme: config.theme,
     }
+}
+
+fn config_exists() -> bool {
+    noa_config::default_config_path().is_some_and(|path| path.exists())
+}
+
+fn ghostty_config_exists() -> bool {
+    noa_config::ghostty_config_candidates()
+        .iter()
+        .any(|path| path.exists())
+}
+
+fn import_hint(config_exists: bool, any_candidate_exists: bool) -> Option<&'static str> {
+    (!config_exists && any_candidate_exists).then_some(
+        "Ghostty config detected. Run `noa --import-ghostty-config` to create a noa config.",
+    )
 }
 
 #[cfg(test)]
@@ -62,5 +110,25 @@ mod tests {
         let flag = ["--", "theme"].concat();
 
         assert!(Args::try_parse_from(["noa", flag.as_str(), "3024 Day"]).is_err());
+    }
+
+    #[test]
+    fn import_flag_is_defined() {
+        let args = Args::try_parse_from(["noa", "--import-ghostty-config"]).unwrap();
+
+        assert!(args.import_ghostty_config);
+    }
+
+    #[test]
+    fn import_hint_requires_missing_noa_config_and_existing_ghostty_config() {
+        assert_eq!(
+            import_hint(false, true),
+            Some(
+                "Ghostty config detected. Run `noa --import-ghostty-config` to create a noa config."
+            )
+        );
+        assert_eq!(import_hint(false, false), None);
+        assert_eq!(import_hint(true, false), None);
+        assert_eq!(import_hint(true, true), None);
     }
 }

@@ -47,4 +47,3 @@ log        = "0.4"
 env_logger = "0.11"
 clap       = { version = "4", features = ["derive"] }
 dirs       = "6"
-toml_edit  = "0.25.12"

@@ -4,13 +4,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use toml_edit::{DocumentMut, Item};
+
+mod ghostty;
+mod import;
+mod parser;
+
+pub use ghostty::{ghostty_config_candidates, ghostty_config_candidates_from};
+pub use import::{
+    ImportOutcome, ImportStats, build_import_output, import_ghostty_config,
+    import_ghostty_config_at,
+};
+pub use parser::{Diagnostic, Directive, parse_directives, parse_overrides};
 
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
-
-const SUPPORTED_KEYS: &[&str] = &["cols", "rows", "font_size", "theme"];
 
 /// Resolved, validated startup settings.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,57 +69,74 @@ impl ConfigOverrides {
     }
 }
 
-pub fn load_startup_config(cli: ConfigOverrides) -> anyhow::Result<StartupConfig> {
-    let config = load_file_overrides()?
-        .merge(cli)
-        .apply_to(StartupConfig::default());
-    validate_startup_config(&config, "resolved startup config")?;
-    Ok(config)
+pub fn load_startup_config(
+    cli: ConfigOverrides,
+) -> anyhow::Result<(StartupConfig, Vec<Diagnostic>)> {
+    let (Some(config_path), Some(legacy_path)) = (default_config_path(), legacy_toml_config_path())
+    else {
+        let config = cli.apply_to(StartupConfig::default());
+        validate_startup_config(&config, "resolved startup config")?;
+        return Ok((config, Vec::new()));
+    };
+    load_startup_config_from(&config_path, &legacy_path, cli)
 }
 
-pub fn load_file_overrides() -> anyhow::Result<ConfigOverrides> {
+pub fn load_startup_config_from(
+    config_path: &Path,
+    legacy_path: &Path,
+    cli: ConfigOverrides,
+) -> anyhow::Result<(StartupConfig, Vec<Diagnostic>)> {
+    let (file, mut diagnostics) = if config_path.exists() {
+        load_overrides_from_path(config_path)?
+    } else {
+        (ConfigOverrides::default(), Vec::new())
+    };
+
+    if legacy_path.exists() {
+        diagnostics.push(Diagnostic {
+            message: format!(
+                "legacy TOML config {} is no longer read; move settings to {}",
+                legacy_path.display(),
+                config_path.display()
+            ),
+        });
+    }
+
+    let config = file.merge(cli).apply_to(StartupConfig::default());
+    validate_startup_config(&config, "resolved startup config")?;
+    Ok((config, diagnostics))
+}
+
+pub fn load_file_overrides() -> anyhow::Result<(ConfigOverrides, Vec<Diagnostic>)> {
     let Some(path) = default_config_path() else {
-        return Ok(ConfigOverrides::default());
+        return Ok((ConfigOverrides::default(), Vec::new()));
     };
     if !path.exists() {
-        return Ok(ConfigOverrides::default());
+        return Ok((ConfigOverrides::default(), Vec::new()));
     }
     load_overrides_from_path(&path)
 }
 
 pub fn default_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|path| path.join("noa").join("config.toml"))
+    dirs::config_dir().map(|path| default_config_path_in(&path))
 }
 
-pub fn find_first_existing_config_path<I, P>(candidates: I) -> Option<PathBuf>
-where
-    I: IntoIterator<Item = P>,
-    P: AsRef<Path>,
-{
-    candidates
-        .into_iter()
-        .map(|path| path.as_ref().to_path_buf())
-        .find(|path| path.exists())
+pub fn default_config_path_in(config_dir: &Path) -> PathBuf {
+    config_dir.join("noa").join("config")
 }
 
-pub fn load_overrides_from_path(path: &Path) -> anyhow::Result<ConfigOverrides> {
+pub fn legacy_toml_config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|path| legacy_toml_config_path_in(&path))
+}
+
+pub fn legacy_toml_config_path_in(config_dir: &Path) -> PathBuf {
+    config_dir.join("noa").join("config.toml")
+}
+
+pub fn load_overrides_from_path(path: &Path) -> anyhow::Result<(ConfigOverrides, Vec<Diagnostic>)> {
     let source = fs::read_to_string(path)
         .with_context(|| format!("failed to read config file {}", path.display()))?;
-    parse_overrides(path, &source)
-}
-
-pub fn parse_overrides(path: &Path, source: &str) -> anyhow::Result<ConfigOverrides> {
-    let document = source
-        .parse::<DocumentMut>()
-        .with_context(|| format!("failed to parse config file {}", path.display()))?;
-    reject_unknown_keys(path, &document)?;
-
-    Ok(ConfigOverrides {
-        cols: parse_u16(path, &document, "cols")?,
-        rows: parse_u16(path, &document, "rows")?,
-        font_size: parse_font_size(path, &document)?,
-        theme: parse_theme(path, &document)?,
-    })
+    Ok(parse_overrides(path, &source))
 }
 
 pub fn validate_startup_config(config: &StartupConfig, context: &str) -> anyhow::Result<()> {
@@ -123,74 +148,7 @@ pub fn validate_startup_config(config: &StartupConfig, context: &str) -> anyhow:
     Ok(())
 }
 
-fn reject_unknown_keys(path: &Path, document: &DocumentMut) -> anyhow::Result<()> {
-    for (key, _) in document.iter() {
-        if !SUPPORTED_KEYS.contains(&key) {
-            bail!(
-                "invalid config file {}: unsupported key `{key}`; supported keys are {}",
-                path.display(),
-                SUPPORTED_KEYS.join(", ")
-            );
-        }
-    }
-    Ok(())
-}
-
-fn parse_u16(
-    path: &Path,
-    document: &DocumentMut,
-    key: &'static str,
-) -> anyhow::Result<Option<u16>> {
-    let Some(item) = document.get(key) else {
-        return Ok(None);
-    };
-    let value = item
-        .as_integer()
-        .ok_or_else(|| invalid_type(path, key, item))?;
-    if !(1..=i64::from(u16::MAX)).contains(&value) {
-        bail!(
-            "invalid config value in {}: `{key}` must be an integer between 1 and {}",
-            path.display(),
-            u16::MAX
-        );
-    }
-    Ok(Some(value as u16))
-}
-
-fn parse_font_size(path: &Path, document: &DocumentMut) -> anyhow::Result<Option<f32>> {
-    let key = "font_size";
-    let Some(item) = document.get(key) else {
-        return Ok(None);
-    };
-    let value = item
-        .as_float()
-        .or_else(|| item.as_integer().map(|value| value as f64))
-        .ok_or_else(|| invalid_type(path, key, item))?;
-    if !value.is_finite() || value <= 0.0 || value > f64::from(f32::MAX) {
-        bail!(
-            "invalid config value in {}: `{key}` must be a positive finite number",
-            path.display()
-        );
-    }
-    Ok(Some(value as f32))
-}
-
-fn parse_theme(path: &Path, document: &DocumentMut) -> anyhow::Result<Option<String>> {
-    let key = "theme";
-    let Some(item) = document.get(key) else {
-        return Ok(None);
-    };
-    let value = item.as_str().ok_or_else(|| invalid_type(path, key, item))?;
-    if value.starts_with("light:") || value.starts_with("dark:") {
-        bail!(
-            "invalid config value in {}: `light:`/`dark:` theme pair syntax is not supported yet; specify a single theme name as `theme = \"<name>\"`",
-            path.display()
-        );
-    }
-    Ok(Some(value.to_owned()))
-}
-
-fn validate_grid_dimension(value: u16, context: &str, key: &'static str) -> anyhow::Result<()> {
+pub fn validate_grid_dimension(value: u16, context: &str, key: &'static str) -> anyhow::Result<()> {
     if value == 0 {
         bail!(
             "invalid {context}: `{key}` must be an integer between 1 and {}",
@@ -200,20 +158,16 @@ fn validate_grid_dimension(value: u16, context: &str, key: &'static str) -> anyh
     Ok(())
 }
 
-fn invalid_type(path: &Path, key: &'static str, item: &Item) -> anyhow::Error {
-    anyhow::anyhow!(
-        "invalid config value in {}: `{key}` has unsupported type `{}`",
-        path.display(),
-        item.type_name()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn test_path() -> &'static Path {
-        Path::new("/tmp/noa-test-config.toml")
+        Path::new("/tmp/noa-test-config")
+    }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("noa-config-lib-{name}-{}", std::process::id()))
     }
 
     #[test]
@@ -231,16 +185,16 @@ mod tests {
 
     #[test]
     fn parses_supported_config_keys() {
-        let overrides = parse_overrides(
+        let (overrides, diagnostics) = parse_overrides(
             test_path(),
             r#"
-cols = 100
-rows = 30
-font_size = 15.5
+window-width = 100
+window-height = 30
+font-size = 15.5
 "#,
-        )
-        .unwrap();
+        );
 
+        assert!(diagnostics.is_empty());
         assert_eq!(
             overrides,
             ConfigOverrides {
@@ -282,66 +236,70 @@ font_size = 15.5
 
     #[test]
     fn theme_key_is_accepted() {
-        let overrides = parse_overrides(test_path(), "theme = \"3024 Day\"").unwrap();
+        for source in ["theme = 3024 Day", "theme = \"3024 Day\""] {
+            let (overrides, diagnostics) = parse_overrides(test_path(), source);
 
-        assert_eq!(
-            overrides,
-            ConfigOverrides {
-                cols: None,
-                rows: None,
-                font_size: None,
-                theme: Some("3024 Day".to_string()),
-            }
+            assert!(diagnostics.is_empty());
+            assert_eq!(
+                overrides,
+                ConfigOverrides {
+                    cols: None,
+                    rows: None,
+                    font_size: None,
+                    theme: Some("3024 Day".to_string()),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_file_value_warns_and_uses_default() {
+        let (overrides, diagnostics) =
+            parse_overrides(test_path(), "window-width = abc\nwindow-height = 30");
+
+        assert_eq!(overrides.cols, None);
+        assert_eq!(overrides.rows, None);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("window-width"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("abc"))
         );
     }
 
     #[test]
-    fn finds_first_existing_config_candidate() {
-        let dir = std::env::temp_dir().join(format!("noa-config-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let missing = dir.join("missing.toml");
-        let existing = dir.join("config.toml");
-        fs::write(&existing, "").unwrap();
+    fn invalid_type_warns_and_uses_default() {
+        let (overrides, diagnostics) = parse_overrides(test_path(), "font-size = large");
 
-        let found = find_first_existing_config_path([&missing, &existing]);
-
-        assert_eq!(found, Some(existing));
-        fs::remove_dir_all(dir).unwrap();
+        assert_eq!(overrides.font_size, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("/tmp/noa-test-config"));
+        assert!(diagnostics[0].message.contains("font-size"));
+        assert!(diagnostics[0].message.contains("large"));
     }
 
     #[test]
-    fn invalid_file_value_includes_path_and_key() {
-        let error = parse_overrides(test_path(), "cols = 0").unwrap_err();
-        let message = error.to_string();
+    fn unknown_key_warns_and_parsing_continues() {
+        let (overrides, diagnostics) =
+            parse_overrides(test_path(), "bogus-key = x\nfont-size = 15");
 
-        assert!(message.contains("/tmp/noa-test-config.toml"));
-        assert!(message.contains("cols"));
-    }
-
-    #[test]
-    fn invalid_type_includes_path_and_key() {
-        let error = parse_overrides(test_path(), "font_size = \"large\"").unwrap_err();
-        let message = error.to_string();
-
-        assert!(message.contains("/tmp/noa-test-config.toml"));
-        assert!(message.contains("font_size"));
-    }
-
-    #[test]
-    fn unknown_key_is_rejected() {
-        let error = parse_overrides(test_path(), "bogus_key = \"x\"").unwrap_err();
-        let message = error.to_string();
-
-        assert!(message.contains("/tmp/noa-test-config.toml"));
-        assert!(message.contains("bogus_key"));
-        assert!(message.contains("supported keys"));
+        assert_eq!(overrides.font_size, Some(15.0));
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("/tmp/noa-test-config"));
+        assert!(diagnostics[0].message.contains("bogus-key"));
     }
 
     #[test]
     fn light_dark_syntax_is_rejected() {
-        let error = parse_overrides(test_path(), "theme = \"light:Foo,dark:Bar\"").unwrap_err();
-        let message = error.to_string();
+        let (overrides, diagnostics) = parse_overrides(test_path(), "theme = light:Foo,dark:Bar");
 
+        assert_eq!(overrides.theme, None);
+        assert_eq!(diagnostics.len(), 1);
+        let message = &diagnostics[0].message;
         assert!(message.contains("light:"));
         assert!(message.contains("dark:"));
         assert!(message.contains("not supported"));
@@ -349,18 +307,163 @@ font_size = 15.5
     }
 
     #[test]
-    fn invalid_file_values_are_rejected() {
+    fn invalid_file_values_are_non_fatal() {
         for (source, key) in [
-            ("rows = 0", "rows"),
-            ("font_size = -1.0", "font_size"),
-            ("font_size = inf", "font_size"),
+            ("font-size = -1.0", "font-size"),
+            ("font-size = inf", "font-size"),
+            ("window-height = abc", "window-height"),
         ] {
-            let error = parse_overrides(test_path(), source).unwrap_err();
-            let message = error.to_string();
+            let (_, diagnostics) = parse_overrides(test_path(), source);
 
-            assert!(message.contains("/tmp/noa-test-config.toml"));
-            assert!(message.contains(key));
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(key)),
+                "{source:?} should produce {key} diagnostic: {diagnostics:?}"
+            );
         }
+    }
+
+    #[test]
+    fn default_and_legacy_paths_are_hermetic() {
+        let base = Path::new("/tmp/noa-config-root");
+
+        assert_eq!(
+            default_config_path_in(base),
+            PathBuf::from("/tmp/noa-config-root/noa/config")
+        );
+        assert_eq!(
+            legacy_toml_config_path_in(base),
+            PathBuf::from("/tmp/noa-config-root/noa/config.toml")
+        );
+    }
+
+    #[test]
+    fn load_startup_config_from_preserves_precedence_and_diagnostics() {
+        let dir = unique_temp_dir("precedence");
+        let config_path = dir.join("config");
+        let legacy_path = dir.join("config.toml");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            &config_path,
+            "bogus-key = x\nfont-size = bad\nfont-size = 16",
+        )
+        .unwrap();
+        let cli = ConfigOverrides {
+            cols: None,
+            rows: None,
+            font_size: Some(18.0),
+            theme: None,
+        };
+
+        let (config, diagnostics) =
+            load_startup_config_from(&config_path, &legacy_path, cli).unwrap();
+
+        assert_eq!(config.font_size, 18.0);
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics[0].message.contains("bogus-key"));
+        assert!(diagnostics[1].message.contains("font-size"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn load_startup_config_from_uses_defaults_when_files_are_absent() {
+        let dir = unique_temp_dir("defaults");
+        let config_path = dir.join("config");
+        let legacy_path = dir.join("config.toml");
+
+        let (config, diagnostics) =
+            load_startup_config_from(&config_path, &legacy_path, ConfigOverrides::default())
+                .unwrap();
+
+        assert_eq!(config, StartupConfig::default());
+        assert!(diagnostics.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cli_cols_remain_independent_of_config_pair_rule() {
+        let dir = unique_temp_dir("cli-cols");
+        let config_path = dir.join("config");
+        let legacy_path = dir.join("config.toml");
+        let cli = ConfigOverrides {
+            cols: Some(50),
+            rows: None,
+            font_size: None,
+            theme: None,
+        };
+
+        let (config, diagnostics) = load_startup_config_from(&config_path, &legacy_path, cli)
+            .expect("CLI-only config is valid");
+
+        assert_eq!(config.cols, 50);
+        assert_eq!(config.rows, DEFAULT_ROWS);
+        assert!(diagnostics.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_toml_config_warns_without_being_read() {
+        let dir = unique_temp_dir("legacy");
+        let config_path = dir.join("config");
+        let legacy_path = dir.join("config.toml");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&legacy_path, "font_size = 99").unwrap();
+
+        let (config, diagnostics) =
+            load_startup_config_from(&config_path, &legacy_path, ConfigOverrides::default())
+                .unwrap();
+
+        assert_eq!(config, StartupConfig::default());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("legacy TOML config"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_toml_config_warns_even_when_new_config_exists() {
+        let dir = unique_temp_dir("legacy-and-new");
+        let config_path = dir.join("config");
+        let legacy_path = dir.join("config.toml");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&config_path, "font-size = 16").unwrap();
+        fs::write(&legacy_path, "font_size = 99").unwrap();
+
+        let (config, diagnostics) =
+            load_startup_config_from(&config_path, &legacy_path, ConfigOverrides::default())
+                .unwrap();
+
+        assert_eq!(config.font_size, 16.0);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("legacy TOML config"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn config_structs_do_not_carry_diagnostics() {
+        let StartupConfig {
+            cols,
+            rows,
+            font_size,
+            theme,
+        } = StartupConfig::default();
+        let ConfigOverrides {
+            cols: override_cols,
+            rows: override_rows,
+            font_size: override_font_size,
+            theme: override_theme,
+        } = ConfigOverrides::default();
+
+        assert_eq!((cols, rows, font_size, theme), (80, 24, 14.0, None));
+        assert_eq!(
+            (
+                override_cols,
+                override_rows,
+                override_font_size,
+                override_theme
+            ),
+            (None, None, None, None)
+        );
     }
 
     #[test]

@@ -70,6 +70,8 @@ fn snapshot_for_text(text: &str) -> FrameSnapshot {
         row_base: 0,
         cols,
         rows_n: 1,
+        focused: true,
+        cursor_blink_visible: true,
     }
 }
 
@@ -282,6 +284,8 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         row_base: 0,
         cols: 4,
         rows_n: 1,
+        focused: true,
+        cursor_blink_visible: true,
     };
     let theme = Theme::new();
 
@@ -507,6 +511,8 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
             row_base: 0,
             cols: 1,
             rows_n: 2,
+            focused: true,
+            cursor_blink_visible: true,
         }
     }
 
@@ -895,6 +901,8 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
         row_base: 0,
         cols: 1,
         rows_n: 1,
+        focused: true,
+        cursor_blink_visible: true,
     };
     let theme = Theme::new();
 

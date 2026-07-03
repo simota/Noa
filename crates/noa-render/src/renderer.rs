@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use noa_core::{CellAttrs, CellSize, Color, GridPadding, PixelSize};
 use noa_font::{FontGrid, Metrics, ShapedGlyph};
-use noa_grid::{Row, SearchState, Selection, TerminalColors};
+use noa_grid::{CursorStyle, Row, SearchState, Selection, TerminalColors};
 
 use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
@@ -83,10 +83,12 @@ struct PaneRenderCache {
     glyph: Vec<Vec<CellInstance>>,
     deco: Vec<Vec<CellInstance>>,
     key: Option<FrameInvalidationKey>,
-    /// `(cursor.x, cursor.y, cursor.visible)` as of the last rebuild — used
-    /// only to detect cursor movement, which dirties exactly the two
-    /// affected rows (not a full-pane invalidation trigger).
-    prev_cursor: Option<(u16, u16, bool)>,
+    /// `(cursor.x, cursor.y, cursor.visible, cursor.style, focused,
+    /// cursor_blink_visible)` as of the last rebuild — used only to detect
+    /// a change to the cursor's position OR its rendered shape (movement,
+    /// DECSCUSR style, focus, or blink phase), which dirties exactly the
+    /// two affected rows (not a full-pane invalidation trigger).
+    prev_cursor: Option<(u16, u16, bool, CursorStyle, bool, bool)>,
 }
 
 impl PaneRenderCache {
@@ -709,12 +711,23 @@ fn rebuild_row_instances(
     let mut decoration_instances = Vec::new();
     let mut segment_cells = Vec::with_capacity(row.cells.len());
 
+    // Cursor shape only depends on pane-wide snapshot state (position,
+    // DECSCUSR style, focus, blink phase), so it is resolved once per row
+    // rather than recomputed per cell.
+    let cursor_visual = cursor_visual_for(snap);
+
     for (col_idx, cell) in row.cells.iter().enumerate() {
         let x = col_idx as u16;
         let selected = snap.is_selected(x, y);
         let active_search = snap.is_active_search_match(x, y);
         let search_match = snap.is_search_match(x, y);
-        let cursor_cell = snap.cursor.visible && snap.cursor.x == x && snap.cursor.y == y;
+        let cursor_here =
+            cursor_visual != CursorVisual::None && snap.cursor.x == x && snap.cursor.y == y;
+        // Only the block styles fill the cell and invert the glyph — bar,
+        // underline, and the unfocused hollow outline are separate
+        // decoration-pass overlays that leave the glyph's own colors alone
+        // (REQ-CURSOR-2/3/4).
+        let cursor_block_fill = cursor_here && cursor_visual == CursorVisual::Block;
 
         let inverse = cell.attrs.contains(CellAttrs::INVERSE);
         let (fg_color, bg_color) = if inverse {
@@ -726,19 +739,9 @@ fn rebuild_row_instances(
         // Background quad: skip when it's the plain default bg (the
         // clear color already fills that), unless inverted.
         let bg_is_default = matches!(bg_color, Color::Default) && !inverse;
-        if cursor_cell || selected || active_search || search_match || !bg_is_default {
-            let bg = if cursor_cell {
-                if snap.colors.cursor().is_some() {
-                    surface_output_rgba(
-                        theme.cursor_with_colors(&snap.colors),
-                        target_format_is_srgb,
-                    )
-                } else {
-                    surface_output_rgba(
-                        theme.resolve_with_colors(fg_color, true, &snap.colors),
-                        target_format_is_srgb,
-                    )
-                }
+        if cursor_block_fill || selected || active_search || search_match || !bg_is_default {
+            let bg = if cursor_block_fill {
+                cursor_fill_color(theme, snap, fg_color, target_format_is_srgb)
             } else if selected {
                 surface_output_rgba(theme.selection_bg(), target_format_is_srgb)
             } else if active_search {
@@ -757,7 +760,7 @@ fn rebuild_row_instances(
                 bearing: [0, 0],
                 grid_pos: [x, y],
                 color: to_u8_color(bg),
-                flags: if cursor_cell {
+                flags: if cursor_block_fill {
                     CellInstance::FLAG_CURSOR
                 } else {
                     0
@@ -765,7 +768,7 @@ fn rebuild_row_instances(
             });
         }
 
-        let text_color = if cursor_cell {
+        let text_color = if cursor_block_fill {
             surface_output_rgba(
                 theme.resolve_with_colors(bg_color, false, &snap.colors),
                 target_format_is_srgb,
@@ -804,6 +807,22 @@ fn rebuild_row_instances(
             );
         }
 
+        // Bar / underline / hollow-outline cursor shapes render as extra
+        // decoration-pass rects layered on top of the cell's own content
+        // (independent of the cell's own INVISIBLE/WIDE_SPACER attrs —
+        // the cursor is a UI overlay, not part of the cell's own ink).
+        if cursor_here && cursor_visual != CursorVisual::Block {
+            let cursor_rgba = cursor_fill_color(theme, snap, fg_color, target_format_is_srgb);
+            push_cursor_decorations(
+                &mut decoration_instances,
+                x,
+                y,
+                cursor_visual,
+                to_u8_color(cursor_rgba),
+                metrics,
+            );
+        }
+
         // WP2 (REQ-SHAPE-1/4/6): feed this cell into the row's
         // shape-run segmentation instead of rasterizing it inline here.
         // Invisible cells are forced blank so shaping never produces
@@ -824,7 +843,7 @@ fn rebuild_row_instances(
             selected,
             active_search,
             search_match,
-            cursor: cursor_cell,
+            cursor: cursor_block_fill,
             color: to_u8_color(text_color),
         });
     }
@@ -900,7 +919,14 @@ fn rebuild_pane_cached(
     };
 
     let rows = snap.rows.len();
-    let new_cursor = (snap.cursor.x, snap.cursor.y, snap.cursor.visible);
+    let new_cursor = (
+        snap.cursor.x,
+        snap.cursor.y,
+        snap.cursor.visible,
+        snap.cursor.style,
+        snap.focused,
+        snap.cursor_blink_visible,
+    );
     // Any of the 6 pane-wide triggers (row_base/cols/rows/colors/theme/
     // selection/search — bundled in `FrameInvalidationKey`) differing from
     // the cached previous-frame key forces every row dirty. A pane's first
@@ -913,8 +939,10 @@ fn rebuild_pane_cached(
         snap.row_dirty.clone()
     };
 
-    // 7th trigger (narrower than the 6 above): cursor movement dirties
-    // EXACTLY the two affected rows, not the whole pane.
+    // 7th trigger (narrower than the 6 above): a change to the cursor's
+    // position or its rendered shape (movement, DECSCUSR style, focus, or
+    // blink phase) dirties EXACTLY the two affected rows, not the whole
+    // pane.
     if !full
         && let Some(prev) = cache.prev_cursor
         && prev != new_cursor
@@ -1018,6 +1046,152 @@ fn emit_run_glyph_instances(
 
 fn clamp_to_i16(value: i32) -> i16 {
     value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+}
+
+/// How the cursor renders at its current cell, resolved once per row from
+/// pane-wide [`FrameSnapshot`] state (position, DECSCUSR style, focus, blink
+/// phase) — never per-cell.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CursorVisual {
+    /// DECTCEM off, viewport scrolled away from the live cursor, or a
+    /// focused `Blinking*` style in its off phase.
+    None,
+    /// Solid block fill + inverted glyph (steady or blinking-and-visible).
+    Block,
+    /// Thin vertical bar at the cell's left edge; glyph keeps its own colors.
+    Bar,
+    /// Thin horizontal strip at the cell's bottom; glyph keeps its own colors.
+    Underline,
+    /// Unfocused pane: a hollow rectangle outline regardless of DECSCUSR
+    /// style. Never blinks.
+    Hollow,
+}
+
+fn cursor_visual_for(snap: &FrameSnapshot) -> CursorVisual {
+    if !snap.cursor.visible {
+        return CursorVisual::None;
+    }
+    if !snap.focused {
+        return CursorVisual::Hollow;
+    }
+    let is_blinking_style = matches!(
+        snap.cursor.style,
+        CursorStyle::BlinkingBlock | CursorStyle::BlinkingUnderline | CursorStyle::BlinkingBar
+    );
+    if is_blinking_style && !snap.cursor_blink_visible {
+        return CursorVisual::None;
+    }
+    match snap.cursor.style {
+        CursorStyle::BlinkingBlock | CursorStyle::SteadyBlock => CursorVisual::Block,
+        CursorStyle::BlinkingUnderline | CursorStyle::SteadyUnderline => CursorVisual::Underline,
+        CursorStyle::BlinkingBar | CursorStyle::SteadyBar => CursorVisual::Bar,
+    }
+}
+
+/// The cursor's own color: an explicit OSC 12 override if set, else the
+/// cell's foreground (so an unstyled cursor tracks the text it sits on) —
+/// used for the block fill and for every bar/underline/hollow decoration.
+fn cursor_fill_color(
+    theme: &Theme,
+    snap: &FrameSnapshot,
+    fg_color: Color,
+    target_format_is_srgb: bool,
+) -> [f32; 4] {
+    if snap.colors.cursor().is_some() {
+        surface_output_rgba(
+            theme.cursor_with_colors(&snap.colors),
+            target_format_is_srgb,
+        )
+    } else {
+        surface_output_rgba(
+            theme.resolve_with_colors(fg_color, true, &snap.colors),
+            target_format_is_srgb,
+        )
+    }
+}
+
+/// Emit the decoration-pass rect(s) for a non-block cursor shape. `visual`
+/// must not be [`CursorVisual::Block`] or [`CursorVisual::None`] — those are
+/// handled by the background-quad path (block) or emit nothing (none).
+fn push_cursor_decorations(
+    instances: &mut Vec<CellInstance>,
+    x: u16,
+    y: u16,
+    visual: CursorVisual,
+    color: [u8; 4],
+    metrics: Metrics,
+) {
+    let cell = DecorationCell {
+        grid_x: x,
+        grid_y: y,
+        color,
+    };
+    let thickness = decoration_thickness(metrics);
+    let width = metrics.cell_w.round().max(1.0) as u16;
+    let height = metrics.cell_h.round().max(1.0) as u16;
+
+    match visual {
+        CursorVisual::Bar => {
+            push_cursor_decoration_rect(
+                instances,
+                cell,
+                DecorationRect::new(0, 0, thickness, height),
+            );
+        }
+        CursorVisual::Underline => {
+            let base_y = underline_y(metrics, thickness, 0.0);
+            push_cursor_decoration_rect(
+                instances,
+                cell,
+                DecorationRect::new(0, base_y, width, thickness),
+            );
+        }
+        CursorVisual::Hollow => {
+            let right = width.saturating_sub(thickness) as i16;
+            let bottom = height.saturating_sub(thickness) as i16;
+            push_cursor_decoration_rect(
+                instances,
+                cell,
+                DecorationRect::new(0, 0, width, thickness),
+            ); // top
+            push_cursor_decoration_rect(
+                instances,
+                cell,
+                DecorationRect::new(0, bottom, width, thickness),
+            ); // bottom
+            push_cursor_decoration_rect(
+                instances,
+                cell,
+                DecorationRect::new(0, 0, thickness, height),
+            ); // left
+            push_cursor_decoration_rect(
+                instances,
+                cell,
+                DecorationRect::new(right, 0, thickness, height),
+            ); // right
+        }
+        CursorVisual::Block | CursorVisual::None => {}
+    }
+}
+
+/// Like [`push_decoration_rect`], but also tags the instance `FLAG_CURSOR`
+/// so it's identifiable as a cursor-shape overlay rather than a regular
+/// text decoration (underline/strike/etc). The shader only checks
+/// `FLAG_DECORATION` for this quad's vertex path, so the extra bit is inert
+/// there — it exists for renderer-side introspection (tests).
+fn push_cursor_decoration_rect(
+    instances: &mut Vec<CellInstance>,
+    cell: DecorationCell,
+    rect: DecorationRect,
+) {
+    instances.push(CellInstance {
+        glyph_pos: [0, 0],
+        glyph_size: [rect.width.max(1), rect.height.max(1)],
+        bearing: [rect.x, rect.y],
+        grid_pos: [cell.grid_x, cell.grid_y],
+        color: cell.color,
+        flags: CellInstance::FLAG_DECORATION | CellInstance::FLAG_CURSOR,
+    });
 }
 
 fn push_cell_decorations(
@@ -1542,6 +1716,287 @@ mod tests {
         );
     }
 
+    /// Skip-on-no-font harness shared by the bar/underline/hollow/blink
+    /// cursor-shape tests below — mirrors
+    /// `cursor_cell_with_glyph_generates_reversed_glyph_instance`'s guard.
+    fn font_with_rasterized_m() -> Option<FontGrid> {
+        let mut font = match FontGrid::new(14.0, FontConfig::default()) {
+            Ok(font) => font,
+            Err(err) => {
+                eprintln!("skipping: no system monospace font available: {err}");
+                return None;
+            }
+        };
+        if font.get_or_raster('M').atlas_size == [0, 0] {
+            eprintln!("skipping: installed monospace font did not rasterize 'M'");
+            return None;
+        }
+        Some(font)
+    }
+
+    fn one_cell_terminal_with_cursor_style(style: CursorStyle) -> Terminal {
+        let mut terminal = Terminal::new(GridSize::new(1, 1));
+        terminal.primary.cursor.x = 0;
+        terminal.primary.cursor.y = 0;
+        terminal.primary.cursor.style = style;
+        terminal.primary.grid[0].cells[0].ch = 'M';
+        terminal.primary.grid[0].cells[0].fg = Color::Rgb(Rgb::new(240, 10, 20));
+        terminal.primary.grid[0].cells[0].bg = Color::Rgb(Rgb::new(2, 3, 4));
+        terminal
+    }
+
+    #[test]
+    fn bar_and_underline_cursors_do_not_fill_or_recolor_the_cell() {
+        let Some(mut font) = font_with_rasterized_m() else {
+            return;
+        };
+
+        for style in [CursorStyle::SteadyBar, CursorStyle::SteadyUnderline] {
+            let mut terminal = one_cell_terminal_with_cursor_style(style);
+            let snap = FrameSnapshot::from_terminal(&mut terminal);
+
+            let mut instances = Vec::new();
+            rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
+
+            assert!(
+                instances
+                    .iter()
+                    .all(|i| i.flags != CellInstance::FLAG_CURSOR),
+                "{style:?}: must not emit an opaque block-fill background quad"
+            );
+
+            let glyph_instance = instances
+                .iter()
+                .find(|i| i.flags & CellInstance::FLAG_GLYPH != 0)
+                .expect("cell glyph must still be drawn");
+            assert_eq!(
+                glyph_instance.color,
+                [240, 10, 20, 255],
+                "{style:?}: glyph keeps the cell's own foreground, not inverted to the background"
+            );
+
+            let cursor_decorations: Vec<_> = instances
+                .iter()
+                .filter(|i| i.flags == (CellInstance::FLAG_DECORATION | CellInstance::FLAG_CURSOR))
+                .collect();
+            assert_eq!(
+                cursor_decorations.len(),
+                1,
+                "{style:?}: exactly one cursor-shape decoration rect"
+            );
+            assert_eq!(cursor_decorations[0].grid_pos, [0, 0]);
+        }
+    }
+
+    #[test]
+    fn unfocused_pane_draws_a_hollow_outline_not_a_block_fill() {
+        let Some(mut font) = font_with_rasterized_m() else {
+            return;
+        };
+
+        let mut terminal = one_cell_terminal_with_cursor_style(CursorStyle::SteadyBlock);
+        let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+        snap.focused = false;
+
+        let mut instances = Vec::new();
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
+
+        assert!(
+            instances
+                .iter()
+                .all(|i| i.flags != CellInstance::FLAG_CURSOR),
+            "an unfocused pane must not emit a block-fill background quad, even for a block style"
+        );
+        let outline_rects: Vec<_> = instances
+            .iter()
+            .filter(|i| i.flags == (CellInstance::FLAG_DECORATION | CellInstance::FLAG_CURSOR))
+            .collect();
+        assert_eq!(
+            outline_rects.len(),
+            4,
+            "an unfocused pane's cursor is a 4-sided hollow outline"
+        );
+
+        let glyph_instance = instances
+            .iter()
+            .find(|i| i.flags & CellInstance::FLAG_GLYPH != 0)
+            .expect("cell glyph must still be drawn");
+        assert_eq!(
+            glyph_instance.color,
+            [240, 10, 20, 255],
+            "glyph keeps its own foreground when unfocused"
+        );
+    }
+
+    #[test]
+    fn focused_blinking_cursor_in_off_phase_emits_no_cursor_instances() {
+        let Some(mut font) = font_with_rasterized_m() else {
+            return;
+        };
+
+        let mut terminal = one_cell_terminal_with_cursor_style(CursorStyle::BlinkingBlock);
+        let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+        snap.cursor_blink_visible = false;
+
+        let mut instances = Vec::new();
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
+
+        assert!(
+            instances
+                .iter()
+                .all(|i| i.flags & CellInstance::FLAG_CURSOR == 0),
+            "a blinking cursor's off phase draws no block quad, decoration, or cursor-flagged glyph"
+        );
+        let glyph_instance = instances
+            .iter()
+            .find(|i| i.flags & CellInstance::FLAG_GLYPH != 0)
+            .expect("cell glyph must still be drawn");
+        assert_eq!(
+            glyph_instance.color,
+            [240, 10, 20, 255],
+            "off-phase glyph keeps its own foreground, unaffected by the hidden cursor"
+        );
+    }
+
+    #[test]
+    fn cursor_visual_resolves_per_style_focus_and_blink_phase() {
+        let mut snap = baseline_snapshot(['a', 'b', 'c']);
+        snap.cursor.style = CursorStyle::BlinkingBlock;
+
+        assert_eq!(
+            cursor_visual_for(&snap),
+            CursorVisual::Block,
+            "focused + blink-visible block style fills the cell"
+        );
+
+        snap.cursor_blink_visible = false;
+        assert_eq!(
+            cursor_visual_for(&snap),
+            CursorVisual::None,
+            "a focused blinking cursor's off phase draws nothing"
+        );
+
+        snap.cursor.style = CursorStyle::SteadyBar;
+        assert_eq!(
+            cursor_visual_for(&snap),
+            CursorVisual::Bar,
+            "a steady style ignores blink phase entirely"
+        );
+
+        snap.cursor.style = CursorStyle::SteadyUnderline;
+        assert_eq!(cursor_visual_for(&snap), CursorVisual::Underline);
+
+        snap.focused = false;
+        assert_eq!(
+            cursor_visual_for(&snap),
+            CursorVisual::Hollow,
+            "an unfocused pane always shows the hollow outline, ignoring style and blink phase"
+        );
+
+        snap.cursor.visible = false;
+        assert_eq!(
+            cursor_visual_for(&snap),
+            CursorVisual::None,
+            "a DECTCEM-hidden cursor never renders, focused or not"
+        );
+    }
+
+    #[test]
+    fn cursor_bar_decoration_is_a_full_height_left_edge_rect() {
+        let mut instances = Vec::new();
+        push_cursor_decorations(
+            &mut instances,
+            2,
+            5,
+            CursorVisual::Bar,
+            [9, 8, 7, 255],
+            metrics(18.0),
+        );
+
+        assert_eq!(instances.len(), 1);
+        let bar = instances[0];
+        assert_eq!(bar.grid_pos, [2, 5]);
+        assert_eq!(
+            bar.bearing,
+            [0, 0],
+            "bar sits flush against the cell's left edge"
+        );
+        assert_eq!(
+            bar.glyph_size,
+            [1, 24],
+            "bar width tracks decoration thickness, full cell height"
+        );
+        assert_eq!(bar.color, [9, 8, 7, 255]);
+        assert_eq!(
+            bar.flags,
+            CellInstance::FLAG_DECORATION | CellInstance::FLAG_CURSOR
+        );
+    }
+
+    #[test]
+    fn cursor_underline_decoration_reuses_the_text_underline_geometry() {
+        let mut instances = Vec::new();
+        let m = metrics(18.0);
+        push_cursor_decorations(
+            &mut instances,
+            0,
+            0,
+            CursorVisual::Underline,
+            [1, 2, 3, 255],
+            m,
+        );
+
+        assert_eq!(instances.len(), 1);
+        let strip = instances[0];
+        assert_eq!(
+            strip.glyph_size,
+            [10, 1],
+            "underline spans the full cell width at decoration thickness"
+        );
+        assert_eq!(
+            strip.bearing[1],
+            underline_y(m, decoration_thickness(m), 0.0),
+            "y matches the same baseline offset the UNDERLINE attribute decoration uses"
+        );
+        assert_eq!(
+            strip.flags,
+            CellInstance::FLAG_DECORATION | CellInstance::FLAG_CURSOR
+        );
+    }
+
+    #[test]
+    fn cursor_hollow_decoration_emits_four_edge_rects() {
+        let mut instances = Vec::new();
+        push_cursor_decorations(
+            &mut instances,
+            3,
+            1,
+            CursorVisual::Hollow,
+            [4, 5, 6, 255],
+            metrics(18.0),
+        );
+
+        assert_eq!(
+            instances.len(),
+            4,
+            "hollow outline is exactly top/bottom/left/right"
+        );
+        assert!(instances.iter().all(|i| {
+            i.grid_pos == [3, 1]
+                && i.color == [4, 5, 6, 255]
+                && i.flags == (CellInstance::FLAG_DECORATION | CellInstance::FLAG_CURSOR)
+        }));
+
+        assert_eq!(instances[0].bearing, [0, 0], "top edge");
+        assert_eq!(instances[0].glyph_size, [10, 1]);
+        assert_eq!(instances[1].bearing, [0, 23], "bottom edge");
+        assert_eq!(instances[1].glyph_size, [10, 1]);
+        assert_eq!(instances[2].bearing, [0, 0], "left edge");
+        assert_eq!(instances[2].glyph_size, [1, 24]);
+        assert_eq!(instances[3].bearing, [9, 0], "right edge");
+        assert_eq!(instances[3].glyph_size, [1, 24]);
+    }
+
     #[test]
     fn decorations_emit_rect_instances_from_cell_attrs() {
         let mut instances = Vec::new();
@@ -1905,6 +2360,8 @@ mod tests {
             row_base: 0,
             cols: 1,
             rows_n: 3,
+            focused: true,
+            cursor_blink_visible: true,
         }
     }
 

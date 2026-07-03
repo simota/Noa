@@ -24,9 +24,11 @@ pub struct CellInstance {
     pub color: [u8; 4],
     /// Bit flags: bit0 = this instance samples the atlas (text quad, not a
     /// flat background rectangle); bit1 = min-contrast (unused inc-1); bit2 =
-    /// cursor cell; bit3 = decoration rectangle; bit4 = pixel-space overlay;
-    /// bit5 = color glyph (samples the RGBA8 color atlas as passthrough
-    /// instead of the R8 mask atlas — WP1, REQ-EMOJI-2).
+    /// cursor visual (the block-fill background quad, the inverted cursor
+    /// glyph, or a bar/underline/hollow-outline decoration rect); bit3 =
+    /// decoration rectangle; bit4 = pixel-space overlay; bit5 = color glyph
+    /// (samples the RGBA8 color atlas as passthrough instead of the R8 mask
+    /// atlas — WP1, REQ-EMOJI-2).
     pub flags: u32,
 }
 

@@ -22,6 +22,17 @@ pub struct FrameSnapshot {
     pub row_base: usize,
     pub cols: u16,
     pub rows_n: u16,
+    /// Whether this pane owns keyboard focus (both its window is OS-focused
+    /// and it is the focused split pane). Cursor rendering uses this to
+    /// choose between a solid shape (focused) and a hollow outline
+    /// (unfocused) — set by the caller; `from_terminal` defaults to `true`
+    /// since a single-pane caller is focused unless told otherwise.
+    pub focused: bool,
+    /// The current blink-timer phase for `Blinking*` cursor styles: `true`
+    /// draws the cursor, `false` draws nothing. Ignored for `Steady*`
+    /// styles and for an unfocused pane's hollow outline (which never
+    /// blinks). Set by the caller; `from_terminal` defaults to `true`.
+    pub cursor_blink_visible: bool,
 }
 
 /// The screen `Terminal` is currently rendering, borrowed mutably so its
@@ -65,6 +76,8 @@ impl FrameSnapshot {
             row_base,
             cols,
             rows_n,
+            focused: true,
+            cursor_blink_visible: true,
         }
     }
 

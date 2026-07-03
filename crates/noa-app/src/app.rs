@@ -8,12 +8,12 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, TrySendError};
 use noa_core::{DEFAULT_GRID_PADDING, GridPadding, GridSize, PixelSize, Point};
 use noa_font::FontGrid;
-use noa_grid::{Terminal, modes::MouseTracking};
+use noa_grid::{CursorStyle, Terminal, modes::MouseTracking};
 use noa_pty::{Pty, PtyConfig};
 use noa_render::{
     FrameSnapshot, OverviewThumbnailResources, PaneFrame, PaneId as RenderPaneId, PaneRect,
@@ -23,7 +23,7 @@ use noa_vt::Stream;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{WindowAttributesExtMacOS, WindowExtMacOS};
@@ -222,6 +222,11 @@ impl Surface {
     }
 }
 
+/// DECSCUSR `Blinking*` cursor styles toggle visibility on this interval
+/// while focused and displayable. Matches common terminal defaults
+/// (Ghostty/iTerm2 ballpark); not user-configurable yet.
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
+
 pub struct App {
     config: AppConfig,
     runtime_font_size: f32,
@@ -240,6 +245,14 @@ pub struct App {
     clipboard: SystemClipboard,
     keybinds: KeybindEngine,
     overview_visible: bool,
+    /// Current blink-timer phase for the focused pane's cursor, fed into
+    /// `FrameSnapshot::cursor_blink_visible` on every redraw. Toggled by
+    /// `tick_cursor_blink` and snapped back to `true` on keyboard input.
+    cursor_blink_visible: bool,
+    /// Next scheduled blink toggle; `None` while no focused pane has a
+    /// displayable `Blinking*` cursor (the event loop then sits at
+    /// `ControlFlow::Wait`, no busy wake-ups).
+    cursor_blink_deadline: Option<Instant>,
 }
 
 impl App {
@@ -262,6 +275,8 @@ impl App {
             clipboard: SystemClipboard::new(),
             keybinds: KeybindEngine::default(),
             overview_visible: false,
+            cursor_blink_visible: true,
+            cursor_blink_deadline: None,
         }
     }
 
@@ -342,9 +357,12 @@ impl App {
                 title = tab_title(&term.title);
             }
             let mut snapshot = FrameSnapshot::from_terminal(&mut term);
-            if pane_id != state.focused_pane {
-                snapshot.cursor.visible = false;
-            }
+            // A pane draws a solid cursor only when it is both the split's
+            // focused pane AND its window has OS focus; otherwise (an
+            // inactive split pane, or any pane in an unfocused window) it
+            // draws the hollow outline instead of hiding the cursor outright.
+            snapshot.focused = pane_id == state.focused_pane && self.focused == Some(window_id);
+            snapshot.cursor_blink_visible = self.cursor_blink_visible;
             snapshots.push((pane_id, surface.rect, snapshot));
         }
         if state.title != title {
@@ -404,6 +422,67 @@ impl App {
             state.zoomed.map(render_pane_id),
         );
         frame.present();
+    }
+
+    /// Whether the currently OS-focused window's focused pane has a
+    /// displayable `Blinking*` cursor (DECTCEM on, viewport not scrolled
+    /// away from the live cursor). Drives whether [`App::tick_cursor_blink`]
+    /// keeps the event loop on a `WaitUntil` timer at all.
+    fn focused_cursor_wants_blink(&self) -> bool {
+        let Some(window_id) = self.focused else {
+            return false;
+        };
+        let Some(surface) = self
+            .windows
+            .get(&window_id)
+            .and_then(WindowState::focused_surface)
+        else {
+            return false;
+        };
+        let terminal = surface.terminal.lock().expect("terminal mutex poisoned");
+        let cursor = terminal.active().cursor;
+        cursor.visible
+            && terminal.viewport_offset() == 0
+            && matches!(
+                cursor.style,
+                CursorStyle::BlinkingBlock
+                    | CursorStyle::BlinkingUnderline
+                    | CursorStyle::BlinkingBar
+            )
+    }
+
+    /// Advance the cursor blink phase and keep the event loop's
+    /// `ControlFlow` in lockstep with whether a blink timer is even needed
+    /// right now — `WaitUntil` only while a blinking cursor is displayable,
+    /// `Wait` (no wake-ups) otherwise. Called from `about_to_wait` every
+    /// pass, so a style/focus/visibility change is picked up on the very
+    /// next event instead of waiting for a stale deadline.
+    fn tick_cursor_blink(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.focused_cursor_wants_blink() {
+            self.cursor_blink_visible = true;
+            self.cursor_blink_deadline = None;
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
+        let now = Instant::now();
+        let deadline = *self
+            .cursor_blink_deadline
+            .get_or_insert(now + CURSOR_BLINK_INTERVAL);
+        if now < deadline {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            return;
+        }
+
+        self.cursor_blink_visible = !self.cursor_blink_visible;
+        let next = now + CURSOR_BLINK_INTERVAL;
+        self.cursor_blink_deadline = Some(next);
+        if let Some(window_id) = self.focused
+            && let Some(state) = self.windows.get(&window_id)
+        {
+            state.window.request_redraw();
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(next));
     }
 
     fn handle_app_command(&mut self, event_loop: &ActiveEventLoop, command: AppCommand) {
@@ -1729,6 +1808,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+                // Any keypress snaps the focused cursor back to its visible
+                // blink phase and restarts the interval, matching common
+                // terminal behavior (typing shouldn't leave the cursor
+                // stuck invisible mid-blink).
+                self.cursor_blink_visible = true;
+                self.cursor_blink_deadline = None;
                 if self
                     .windows
                     .get(&window_id)
@@ -1767,9 +1852,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
         self.install_macos_menu_if_needed();
+        self.tick_cursor_blink(event_loop);
     }
 }
 

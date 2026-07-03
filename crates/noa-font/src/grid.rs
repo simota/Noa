@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use etagere::AllocId;
 use swash::FontRef;
 use swash::scale::ScaleContext;
 
@@ -17,11 +18,44 @@ const ATLAS_DIM: u32 = 1024;
 const MASK_BYTES_PER_PX: u32 = 1;
 const COLOR_BYTES_PER_PX: u32 = 4;
 
-/// Cap on the number of memoized shape runs (REQ-SHAPE-5). Mirrors the
-/// atlas's own no-eviction-but-warn posture: past the cap, `shape_run`
-/// simply stops caching new entries rather than growing unboundedly.
-/// #TODO(agent): shape-cache LRU eviction past this cap.
+/// Cap on the number of memoized shape runs (REQ-SHAPE-5). Past the cap,
+/// `shape_run` evicts the least-recently-used entry before inserting a new
+/// one (LRU), mirroring the glyph atlas's own eviction policy.
 const SHAPE_CACHE_CAP: usize = 8192;
+
+/// Which of the two atlases a packed glyph lives in — so eviction only frees
+/// space from the atlas that is actually full.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AtlasKind {
+    Mask,
+    Color,
+}
+
+/// Which cache map + key owns a packed atlas region, so eviction can drop the
+/// now-stale [`GlyphInfo`] when it reclaims the region's space.
+#[derive(Clone, Copy, Debug)]
+enum SlotOwner {
+    Char(GlyphKey),
+    Shaped(ShapedGlyphKey),
+}
+
+/// One live atlas allocation, tracked for LRU eviction. `alloc` is the
+/// etagere handle used to free the region; `last_used` is the access clock
+/// stamp (smallest = least-recently-used).
+struct AtlasSlot {
+    kind: AtlasKind,
+    alloc: AllocId,
+    owner: SlotOwner,
+    last_used: u64,
+}
+
+/// A cached glyph plus, when it occupies atlas space, the id of its
+/// [`AtlasSlot`]. Zero-sized glyphs (nothing to draw) carry `slot: None`.
+#[derive(Clone, Copy)]
+struct Cached {
+    info: GlyphInfo,
+    slot: Option<u32>,
+}
 
 /// Cache key for the shaped-glyph raster path ([`FontGrid::raster_shaped`]):
 /// a rasterized glyph identified by face + glyph id + style (style matters
@@ -49,20 +83,28 @@ pub struct FontGrid {
     metrics: Metrics,
     mask_atlas: Atlas,
     color_atlas: Atlas,
-    cache: HashMap<GlyphKey, GlyphInfo>,
+    cache: HashMap<GlyphKey, Cached>,
     px_size: f32,
     /// The config this grid was built with (WP0); `shape_run`/`raster_shaped`
     /// read features/variations/synthetic-style from here (WP2) so callers
     /// don't have to pass it on every call.
     font_cfg: FontConfig,
     /// Per-run shape cache (REQ-SHAPE-5): memoizes `shape_run` so an
-    /// unchanged run doesn't re-invoke `rustybuzz` every frame.
-    shape_cache: HashMap<ShapeRunKey, Vec<ShapedGlyph>>,
+    /// unchanged run doesn't re-invoke `rustybuzz` every frame. LRU-evicted
+    /// at `SHAPE_CACHE_CAP` (`last_used` = access clock stamp).
+    shape_cache: HashMap<ShapeRunKey, (Vec<ShapedGlyph>, u64)>,
     shape_cache_hits: u64,
     /// Cache for the shaped-glyph raster path, keyed by (face, glyph id,
     /// style) rather than by `char` (`cache` above stays the char-keyed path
     /// for `get_or_raster`).
-    raster_shaped_cache: HashMap<ShapedGlyphKey, GlyphInfo>,
+    raster_shaped_cache: HashMap<ShapedGlyphKey, Cached>,
+    /// Live atlas allocations for LRU eviction, keyed by slot id. When an
+    /// atlas is full and cannot grow, the least-recently-used slot of the
+    /// same [`AtlasKind`] is freed and its owning cache entry dropped.
+    slots: HashMap<u32, AtlasSlot>,
+    next_slot_id: u32,
+    /// Monotonic access clock; every cache read/insert stamps `last_used`.
+    clock: u64,
 }
 
 impl FontGrid {
@@ -89,6 +131,9 @@ impl FontGrid {
             shape_cache: HashMap::new(),
             shape_cache_hits: 0,
             raster_shaped_cache: HashMap::new(),
+            slots: HashMap::new(),
+            next_slot_id: 0,
+            clock: 0,
         })
     }
 
@@ -99,8 +144,9 @@ impl FontGrid {
     /// rect is not cached so a future larger atlas can make the glyph visible.
     pub fn get_or_raster(&mut self, ch: char) -> GlyphInfo {
         let key = GlyphKey { ch };
-        if let Some(info) = self.cache.get(&key) {
-            return *info;
+        if let Some(cached) = self.cache.get(&key).copied() {
+            self.touch(cached.slot);
+            return cached.info;
         }
 
         let (font_index, glyph_id) = self.resolve_glyph(ch);
@@ -112,12 +158,7 @@ impl FontGrid {
             .expect("font bytes validated at construction");
         let glyph = rasterize(&mut self.ctx, font, glyph_id, self.px_size);
 
-        let (info, cache_info) =
-            store_rasterized(&mut self.mask_atlas, &mut self.color_atlas, &glyph, ch);
-        if cache_info {
-            self.cache.insert(key, info);
-        }
-        info
+        self.store_and_cache(&glyph, SlotOwner::Char(key))
     }
 
     /// Resolve which face in the font stack a codepoint maps to (the first
@@ -167,9 +208,11 @@ impl FontGrid {
         };
         let style = first.style;
         let key = shape::shape_run_key(cells, style, &self.font_cfg);
-        if let Some(cached) = self.shape_cache.get(&key) {
+        let now = self.tick();
+        if let Some(entry) = self.shape_cache.get_mut(&key) {
+            entry.1 = now;
             self.shape_cache_hits += 1;
-            return cached.clone();
+            return entry.0.clone();
         }
 
         let face_id = self.resolve_face(first.ch);
@@ -184,9 +227,10 @@ impl FontGrid {
             &self.font_cfg,
         );
 
-        if self.shape_cache.len() < SHAPE_CACHE_CAP {
-            self.shape_cache.insert(key, glyphs.clone());
+        if self.shape_cache.len() >= SHAPE_CACHE_CAP {
+            self.evict_lru_shape_run();
         }
+        self.shape_cache.insert(key, (glyphs.clone(), now));
         glyphs
     }
 
@@ -209,8 +253,9 @@ impl FontGrid {
             glyph_id,
             style,
         };
-        if let Some(info) = self.raster_shaped_cache.get(&key) {
-            return *info;
+        if let Some(cached) = self.raster_shaped_cache.get(&key).copied() {
+            self.touch(cached.slot);
+            return cached.info;
         }
 
         let font_data = &self.font_stack.faces()[face_id.0 as usize];
@@ -227,16 +272,7 @@ impl FontGrid {
             synthesis,
         );
 
-        let (info, cache_info) = store_rasterized(
-            &mut self.mask_atlas,
-            &mut self.color_atlas,
-            &glyph,
-            (face_id, glyph_id),
-        );
-        if cache_info {
-            self.raster_shaped_cache.insert(key, info);
-        }
-        info
+        self.store_and_cache(&glyph, SlotOwner::Shaped(key))
     }
 
     /// Cell / face metrics at the configured size.
@@ -273,6 +309,216 @@ impl FontGrid {
     pub fn color_atlas_generation(&self) -> u64 {
         self.color_atlas.generation()
     }
+
+    /// Advance the access clock and return the new stamp.
+    fn tick(&mut self) -> u64 {
+        self.clock = self.clock.wrapping_add(1);
+        self.clock
+    }
+
+    /// Refresh a cached glyph's recency on a cache hit so a live glyph is not
+    /// evicted out from under an on-screen cell.
+    fn touch(&mut self, slot: Option<u32>) {
+        let now = self.tick();
+        if let Some(id) = slot
+            && let Some(s) = self.slots.get_mut(&id)
+        {
+            s.last_used = now;
+        }
+    }
+
+    fn atlas_mut(&mut self, kind: AtlasKind) -> &mut Atlas {
+        match kind {
+            AtlasKind::Mask => &mut self.mask_atlas,
+            AtlasKind::Color => &mut self.color_atlas,
+        }
+    }
+
+    /// Insert a freshly cached glyph into the map named by its owner.
+    fn insert_cached(&mut self, owner: SlotOwner, cached: Cached) {
+        match owner {
+            SlotOwner::Char(key) => {
+                self.cache.insert(key, cached);
+            }
+            SlotOwner::Shaped(key) => {
+                self.raster_shaped_cache.insert(key, cached);
+            }
+        }
+    }
+
+    /// Free the least-recently-used slot of `kind`, returning its space to the
+    /// atlas and dropping its owning cache entry. Returns `false` when no slot
+    /// of that kind exists (nothing left to evict).
+    fn evict_one(&mut self, kind: AtlasKind) -> bool {
+        let victim = self
+            .slots
+            .iter()
+            .filter(|(_, s)| s.kind == kind)
+            .min_by_key(|(_, s)| s.last_used)
+            .map(|(id, _)| *id);
+        let Some(id) = victim else {
+            return false;
+        };
+        let slot = self.slots.remove(&id).expect("victim id came from slots");
+        self.atlas_mut(kind).deallocate(slot.alloc);
+        match slot.owner {
+            SlotOwner::Char(key) => {
+                self.cache.remove(&key);
+            }
+            SlotOwner::Shaped(key) => {
+                self.raster_shaped_cache.remove(&key);
+            }
+        }
+        true
+    }
+
+    /// Evict the least-recently-used memoized shape run (LRU cap enforcement).
+    fn evict_lru_shape_run(&mut self) {
+        if let Some(key) = self
+            .shape_cache
+            .iter()
+            .min_by_key(|(_, (_, last_used))| *last_used)
+            .map(|(key, _)| key.clone())
+        {
+            self.shape_cache.remove(&key);
+        }
+    }
+
+    /// Pack a rasterized glyph into the appropriate atlas and cache the result
+    /// under `owner`. On a full atlas that cannot grow, evicts least-recently-
+    /// used glyphs of the same [`AtlasKind`] and retries; only if nothing can
+    /// be evicted is the glyph dropped uncached (so a later frame can retry).
+    fn store_and_cache(&mut self, glyph: &RasterizedGlyph, owner: SlotOwner) -> GlyphInfo {
+        // Nothing to pack (space, control chars): cache the empty info so the
+        // miss isn't repeated, but it holds no atlas slot.
+        if glyph.width == 0 || glyph.height == 0 {
+            let info = glyph_info(glyph, [0, 0], [0, 0]);
+            self.insert_cached(owner, Cached { info, slot: None });
+            return info;
+        }
+
+        let kind = if glyph.color {
+            AtlasKind::Color
+        } else {
+            AtlasKind::Mask
+        };
+        let reservation = loop {
+            if let Some(r) =
+                self.atlas_mut(kind)
+                    .reserve_and_blit_growing(glyph.width, glyph.height, &glyph.bitmap)
+            {
+                break Some(r);
+            }
+            if !self.evict_one(kind) {
+                break None;
+            }
+        };
+
+        match reservation {
+            Some(r) => {
+                let last_used = self.tick();
+                let slot_id = self.next_slot_id;
+                self.next_slot_id = self.next_slot_id.wrapping_add(1);
+                self.slots.insert(
+                    slot_id,
+                    AtlasSlot {
+                        kind,
+                        alloc: r.alloc,
+                        owner,
+                        last_used,
+                    },
+                );
+                let info = glyph_info(glyph, [r.x, r.y], [glyph.width as u16, glyph.height as u16]);
+                self.insert_cached(
+                    owner,
+                    Cached {
+                        info,
+                        slot: Some(slot_id),
+                    },
+                );
+                info
+            }
+            None => {
+                log::warn!("glyph atlas full and nothing to evict; not caching glyph {owner:?}");
+                glyph_info(glyph, [0, 0], [0, 0])
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl FontGrid {
+    /// Build a grid whose glyph atlases are pinned to a tiny, non-growing
+    /// `dim`×`dim` so a handful of glyphs fills them — forcing the eviction
+    /// path deterministically without a multi-megabyte allocation.
+    fn new_with_capped_atlas(
+        px_size: f32,
+        font_cfg: FontConfig,
+        dim: u32,
+    ) -> Result<Self, FontError> {
+        let font_stack = load_font_stack(&font_cfg)?;
+        let metrics = {
+            let font = font_stack.primary().font_ref()?;
+            Metrics::compute(font, px_size)
+        };
+        Ok(Self {
+            font_stack,
+            ctx: ScaleContext::new(),
+            metrics,
+            mask_atlas: Atlas::with_max_dim(dim, dim, MASK_BYTES_PER_PX, dim),
+            color_atlas: Atlas::with_max_dim(dim, dim, COLOR_BYTES_PER_PX, dim),
+            cache: HashMap::new(),
+            px_size,
+            font_cfg,
+            shape_cache: HashMap::new(),
+            shape_cache_hits: 0,
+            raster_shaped_cache: HashMap::new(),
+            slots: HashMap::new(),
+            next_slot_id: 0,
+            clock: 0,
+        })
+    }
+
+    fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn is_char_cached(&self, ch: char) -> bool {
+        self.cache.contains_key(&GlyphKey { ch })
+    }
+
+    /// The slot registry and the cache maps must never drift: every slot's
+    /// owner must still point back at it, and every cached glyph holding a
+    /// slot id must reference a live slot.
+    fn assert_slot_cache_consistent(&self) {
+        for (id, slot) in &self.slots {
+            match slot.owner {
+                SlotOwner::Char(key) => assert_eq!(
+                    self.cache.get(&key).and_then(|c| c.slot),
+                    Some(*id),
+                    "slot {id} owner char {key:?} does not point back at it"
+                ),
+                SlotOwner::Shaped(key) => assert_eq!(
+                    self.raster_shaped_cache.get(&key).and_then(|c| c.slot),
+                    Some(*id),
+                    "slot {id} owner shaped {key:?} does not point back at it"
+                ),
+            }
+        }
+        for cached in self.cache.values() {
+            if let Some(id) = cached.slot {
+                assert!(self.slots.contains_key(&id), "cache references dead slot {id}");
+            }
+        }
+        for cached in self.raster_shaped_cache.values() {
+            if let Some(id) = cached.slot {
+                assert!(
+                    self.slots.contains_key(&id),
+                    "raster_shaped cache references dead slot {id}"
+                );
+            }
+        }
+    }
 }
 
 /// Decide the synthetic-style transform for `style` under `font_cfg`
@@ -287,43 +533,16 @@ fn synthesis_for(font_cfg: &FontConfig, style: StyleKey) -> GlyphSynthesis {
     }
 }
 
-/// Pack a rasterized glyph into the appropriate atlas (mask or color) and
-/// build its [`GlyphInfo`]. Shared by [`FontGrid::get_or_raster`] and
-/// [`FontGrid::raster_shaped`] so the "which atlas / grow-on-demand / atlas
-/// full" logic lives in exactly one place.
-///
-/// Returns `(info, cache_info)`; `cache_info` is `false` when the atlas
-/// could not grow enough to fit the glyph — callers should not cache that
-/// zero-sized result, so a future larger atlas can make the glyph visible.
-fn store_rasterized(
-    mask_atlas: &mut Atlas,
-    color_atlas: &mut Atlas,
-    glyph: &RasterizedGlyph,
-    label: impl std::fmt::Debug,
-) -> (GlyphInfo, bool) {
-    let mut cache_info = true;
-    let (atlas_pos, atlas_size) = if glyph.width == 0 || glyph.height == 0 {
-        ([0, 0], [0, 0])
-    } else {
-        let target_atlas = if glyph.color { color_atlas } else { mask_atlas };
-        match target_atlas.reserve_and_blit_growing(glyph.width, glyph.height, &glyph.bitmap) {
-            Some((x, y)) => ([x, y], [glyph.width as u16, glyph.height as u16]),
-            None => {
-                cache_info = false;
-                log::warn!("glyph atlas full; not caching glyph {label:?}");
-                ([0, 0], [0, 0])
-            }
-        }
-    };
-
-    let info = GlyphInfo {
+/// Build a [`GlyphInfo`] from a rasterized glyph and its packed atlas
+/// placement (`[0, 0]`/`[0, 0]` when there is nothing to draw).
+fn glyph_info(glyph: &RasterizedGlyph, atlas_pos: [u16; 2], atlas_size: [u16; 2]) -> GlyphInfo {
+    GlyphInfo {
         atlas_pos,
         atlas_size,
         bearing: [glyph.bearing_x as i16, glyph.bearing_y as i16],
         advance: glyph.advance,
         color: glyph.color,
-    };
-    (info, cache_info)
+    }
 }
 
 #[cfg(test)]
@@ -469,6 +688,59 @@ mod tests {
             .chain('\u{3041}'..='\u{3096}')
             .chain('\u{30A1}'..='\u{30FA}')
             .chain('\u{4E00}'..='\u{4E80}')
+    }
+
+    /// Atlas eviction: flooding a tiny non-growing atlas evicts
+    /// least-recently-used glyphs (bounding the live slot set) while a
+    /// repeatedly-touched "hot" glyph survives, and the slot registry stays
+    /// consistent with the cache maps throughout.
+    #[test]
+    fn atlas_eviction_evicts_lru_and_keeps_hot_glyph_consistent() {
+        let mut grid = match FontGrid::new_with_capped_atlas(14.0, FontConfig::default(), 40) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+
+        let hot = 'A';
+        let cold = 'B';
+        assert!(grid.has_glyph(hot) && grid.has_glyph(cold));
+        grid.get_or_raster(hot);
+        grid.get_or_raster(cold);
+
+        // Flood the tiny atlas, keeping `hot` most-recently-used each round so
+        // it is never the eviction victim.
+        let mut flooded = 0;
+        for ch in 'C'..='~' {
+            if !grid.has_glyph(ch) {
+                continue;
+            }
+            grid.get_or_raster(hot);
+            grid.get_or_raster(ch);
+            flooded += 1;
+        }
+        assert!(
+            flooded > 40,
+            "test needs to raster more distinct glyphs than the tiny atlas holds; got {flooded}"
+        );
+
+        assert!(grid.slot_count() > 0, "at least one glyph must be packed");
+        assert!(
+            grid.slot_count() < 40,
+            "eviction must bound the live slot set well below the {flooded} rastered glyphs, got {}",
+            grid.slot_count()
+        );
+        assert!(
+            grid.is_char_cached(hot),
+            "the repeatedly-touched hot glyph must survive LRU eviction"
+        );
+        assert!(
+            !grid.is_char_cached(cold),
+            "an early, untouched glyph must have been evicted under atlas pressure"
+        );
+        grid.assert_slot_cache_consistent();
     }
 
     // ---- WP2: shaping + ligatures + shape cache -----------------------

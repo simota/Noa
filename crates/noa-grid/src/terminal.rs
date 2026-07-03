@@ -533,8 +533,9 @@ fn push_hex_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 impl Handler for Terminal {
     fn print(&mut self, c: char) {
         let autowrap = self.modes.autowrap();
+        let grapheme_clustering = self.modes.grapheme_clustering();
         let c = self.charset.translate(c);
-        self.active_mut().print(c, autowrap);
+        self.active_mut().print(c, autowrap, grapheme_clustering);
     }
 
     fn execute_c0(&mut self, byte: u8) {
@@ -804,7 +805,9 @@ impl Handler for Terminal {
     }
     fn repeat_preceding_char(&mut self, n: u16) {
         let autowrap = self.modes.autowrap();
-        self.active_mut().repeat_preceding_char(n, autowrap);
+        let grapheme_clustering = self.modes.grapheme_clustering();
+        self.active_mut()
+            .repeat_preceding_char(n, autowrap, grapheme_clustering);
     }
 
     fn device_attributes(&mut self, kind: DaKind) {

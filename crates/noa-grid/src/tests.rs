@@ -1605,7 +1605,7 @@ fn take_visible_rows_with_damage_isolates_a_single_row_and_clears_on_consume() {
     // Mutate row 1 only (a real cell-mutating path, not a direct field poke).
     // `cursor_position` is 1-based: (row=2, col=1) -> (y=1, x=0).
     screen.cursor_position(2, 1);
-    screen.print('x', true);
+    screen.print('x', true, false);
 
     let (rows, dirty) = screen.take_visible_rows_with_damage();
     assert_eq!(dirty, vec![false, true, false]);
@@ -1773,4 +1773,76 @@ fn ac_2027_005_decrqm_reports_grapheme_clustering_state() {
 
     let t = run(b"\x1b[?2027h\x1b[?2027l\x1b[?2027$p");
     assert_eq!(t.pending_writes, b"\x1b[?2027;2$y");
+}
+
+// ── WP3: cluster attachment under mode 2027 (AC-2027-001..004) ─────────
+
+#[test]
+fn ac_2027_001_zwj_family_emoji_clusters_into_one_cell() {
+    // 👨‍👩‍👧‍👦 = man ZWJ woman ZWJ girl ZWJ boy, each base emoji width-2.
+    let t = run_size(
+        10,
+        1,
+        "\x1b[?2027h\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}X".as_bytes(),
+    );
+
+    assert_eq!(
+        cell(&t, 0, 0).text(),
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"
+    );
+    assert!(cell(&t, 0, 0).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 1, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert!(cell(&t, 1, 0).is_blank());
+    // The cluster advanced the cursor by its one (wide) cell only; the
+    // trailing 'X' lands right after it, not further down the row.
+    assert_eq!(t.primary.cursor.x, 3);
+    assert_eq!(cell(&t, 2, 0).ch, 'X');
+}
+
+#[test]
+fn ac_2027_002_fitzpatrick_modifier_attaches_to_wide_lead_not_spacer() {
+    // FM-2 fixture: 👍🏽 (thumbs-up + medium skin tone) lands right on the
+    // wide lead's spacer boundary. The modifier must attach to the lead
+    // cell, and the spacer cell must stay untouched (pure blank), or the
+    // cursor desyncs from the rendered cluster.
+    let t = run_size(10, 1, "\x1b[?2027h\u{1F44D}\u{1F3FD}X".as_bytes());
+
+    assert_eq!(cell(&t, 0, 0).text(), "\u{1F44D}\u{1F3FD}");
+    assert!(cell(&t, 0, 0).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 1, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert!(cell(&t, 1, 0).is_blank());
+    assert_eq!(t.primary.cursor.x, 3);
+    assert_eq!(cell(&t, 2, 0).ch, 'X');
+}
+
+#[test]
+fn ac_2027_003_regional_indicator_pair_clusters_into_one_flag_cell() {
+    // 🇯🇵 = REGIONAL INDICATOR J + REGIONAL INDICATOR P, each width-1
+    // standalone; the second attaches to the first instead of printing
+    // into its own cell.
+    let t = run_size(10, 1, "\x1b[?2027h\u{1F1EF}\u{1F1F5}X".as_bytes());
+
+    assert_eq!(cell(&t, 0, 0).text(), "\u{1F1EF}\u{1F1F5}");
+    assert_eq!(t.primary.cursor.x, 2);
+    assert_eq!(cell(&t, 1, 0).ch, 'X');
+}
+
+#[test]
+fn ac_2027_004_mode_off_falls_back_to_plain_combining_only() {
+    // With 2027 off, the ZWJs still attach as zero-width combining marks
+    // (pre-existing, ungated behavior), but each width-2 base emoji still
+    // consumes its own cell — no cluster merge, per REQ-2027's documented
+    // out-of-scope complex clustering.
+    let t = run_size(
+        10,
+        1,
+        "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}".as_bytes(),
+    );
+
+    assert_eq!(cell(&t, 0, 0).text(), "\u{1F468}\u{200D}");
+    assert!(cell(&t, 0, 0).attrs.contains(CellAttrs::WIDE));
+    assert_eq!(cell(&t, 2, 0).text(), "\u{1F469}\u{200D}");
+    assert!(cell(&t, 2, 0).attrs.contains(CellAttrs::WIDE));
+    assert_eq!(cell(&t, 4, 0).text(), "\u{1F467}\u{200D}");
+    assert_eq!(cell(&t, 6, 0).ch, '\u{1F466}');
 }

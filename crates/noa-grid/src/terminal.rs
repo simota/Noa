@@ -589,6 +589,10 @@ impl Handler for Terminal {
         self.active_mut().erase_line(mode);
     }
 
+    fn screen_alignment_test(&mut self) {
+        self.active_mut().screen_alignment_test();
+    }
+
     fn set_attributes(&mut self, attrs: &[SgrAttr]) {
         self.apply_sgr(attrs);
     }

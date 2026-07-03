@@ -143,6 +143,7 @@ fn dispatch_esc<H: Handler>(esc: &Esc, h: &mut H) {
         // SCS: `ESC ( x` designates G0, `ESC ) x` designates G1.
         [b'('] => h.designate_charset(CharsetSlot::G0, charset_from(esc.final_byte)),
         [b')'] => h.designate_charset(CharsetSlot::G1, charset_from(esc.final_byte)),
+        [b'#'] if esc.final_byte == b'8' => h.screen_alignment_test(), // DECALN
         _ => {} // DECDHL/DECSWL etc. — no-op (out of scope)
     }
 }

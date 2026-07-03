@@ -1289,6 +1289,20 @@ impl Screen {
         row.dirty = true;
     }
 
+    /// `DECALN` — fill every cell of the active screen with `'E'` (default
+    /// attributes) and home the cursor. Margins and modes are untouched.
+    pub fn screen_alignment_test(&mut self) {
+        self.follow_live_output();
+        let template = Cell {
+            ch: 'E',
+            ..Cell::default()
+        };
+        for row in &mut self.grid {
+            row.clear(template.clone());
+        }
+        self.cursor_position(1, 1);
+    }
+
     // ── edit ─────────────────────────────────────────────────────────
 
     pub fn insert_blank_chars(&mut self, n: u16) {

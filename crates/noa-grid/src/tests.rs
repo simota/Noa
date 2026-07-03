@@ -1694,3 +1694,35 @@ fn esc_nel_moves_cursor_down_and_to_column_one() {
     assert_eq!(t.primary.cursor.y, 5);
     assert_eq!(t.primary.cursor.x, 0);
 }
+
+// ── WP4: DECALN screen alignment test (AC-ALN) ──────────────────────────
+
+#[test]
+fn ac_aln_001_fills_screen_with_e() {
+    let t = run_size(5, 3, b"\x1b#8");
+    for y in 0..3 {
+        assert_eq!(row_text(&t, y, 5), "EEEEE");
+    }
+}
+
+#[test]
+fn ac_aln_002_homes_cursor() {
+    let t = run_size(5, 3, b"\x1b[3;4H\x1b#8");
+    assert_eq!(t.primary.cursor.y, 0);
+    assert_eq!(t.primary.cursor.x, 0);
+}
+
+#[test]
+fn ac_aln_003_leaves_scroll_region_unchanged() {
+    let t = run_size(5, 8, b"\x1b[2;5r\x1b#8");
+    assert_eq!(t.primary.region.top, 1);
+    assert_eq!(t.primary.region.bottom, 4);
+}
+
+#[test]
+fn ac_aln_004_alt_screen_only_active_screen_is_filled() {
+    let t = run_size(5, 3, b"main\x1b[?1049h\x1b#8");
+    assert_eq!(active_row_text(&t, 0, 5), "EEEEE");
+    // The fill went to the alt screen only; primary still holds "main".
+    assert_eq!(row_text(&t, 0, 4), "main");
+}

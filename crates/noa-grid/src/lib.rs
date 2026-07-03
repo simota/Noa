@@ -15,6 +15,7 @@ pub mod search;
 pub mod selection;
 pub mod tabstops;
 pub mod terminal;
+pub mod url;
 
 #[cfg(test)]
 mod tests;
@@ -28,3 +29,4 @@ pub use search::{SearchMatch, SearchState};
 pub use selection::{Selection, SelectionPoint};
 pub use tabstops::Tabstops;
 pub use terminal::{ShellIntegrationMark, ShellIntegrationMarkKind, Terminal};
+pub use url::{UrlMatch, detect_url_at_column};

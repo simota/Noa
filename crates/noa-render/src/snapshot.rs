@@ -6,6 +6,22 @@ use noa_grid::{
     Cursor, Row, Screen, SearchState, Selection, SelectionPoint, Terminal, TerminalColors,
 };
 
+/// The Cmd+hover target the renderer underlines this frame, set by the
+/// caller (`from_terminal` defaults to `None`) — `noa-app` computes it from
+/// mouse position + `Cmd` modifier state, outside the `Terminal` lock this
+/// snapshot was built under.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HoverLink {
+    /// An OSC 8 hyperlink, identified by its `Terminal::hyperlinks` index.
+    /// Every viewport cell whose `Cell::hyperlink` equals this index is
+    /// underlined — an OSC 8 link highlights as a whole, matching Ghostty,
+    /// not just the cell under the pointer.
+    Registry(usize),
+    /// An explicit run of cells on one viewport row (an auto-detected
+    /// plain-text URL, which has no registry entry).
+    Range { y: u16, x_start: u16, x_end: u16 },
+}
+
 /// A snapshot of the active screen taken under the `Terminal` lock.
 ///
 /// WP4 (REQ-PERF-1/2): `row_dirty` is parallel to `rows` (same length, same
@@ -33,6 +49,9 @@ pub struct FrameSnapshot {
     /// styles and for an unfocused pane's hollow outline (which never
     /// blinks). Set by the caller; `from_terminal` defaults to `true`.
     pub cursor_blink_visible: bool,
+    /// The Cmd+hover underline target, if any. `None` draws no hover
+    /// underline at all.
+    pub hover_link: Option<HoverLink>,
 }
 
 /// The screen `Terminal` is currently rendering, borrowed mutably so its
@@ -78,6 +97,7 @@ impl FrameSnapshot {
             rows_n,
             focused: true,
             cursor_blink_visible: true,
+            hover_link: None,
         }
     }
 

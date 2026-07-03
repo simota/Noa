@@ -483,6 +483,24 @@ impl Screen {
         live_start.saturating_sub(self.viewport_offset)
     }
 
+    /// A read-only reference to one visible row (`0..rows`), without
+    /// cloning the whole screen like [`Screen::visible_rows`] does. Used by
+    /// mouse-hover paths (hyperlink/URL detection) that run on every
+    /// `CursorMoved`/`ModifiersChanged` event and only need to inspect the
+    /// single row under the pointer.
+    pub fn visible_row(&self, viewport_y: u16) -> Option<&Row> {
+        if viewport_y >= self.rows {
+            return None;
+        }
+        let idx = self.visible_row_base() + viewport_y as usize;
+        let scrollback_len = self.scrollback.len();
+        if idx < scrollback_len {
+            self.scrollback.get(idx)
+        } else {
+            self.grid.get(idx - scrollback_len)
+        }
+    }
+
     pub fn visible_rows(&self) -> Vec<Row> {
         let rows = self.rows as usize;
         if self.viewport_offset == 0 {

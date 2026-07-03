@@ -16,8 +16,8 @@ use noa_font::FontGrid;
 use noa_grid::{CursorStyle, Terminal, modes::MouseTracking};
 use noa_pty::{Pty, PtyConfig};
 use noa_render::{
-    FrameSnapshot, OverviewThumbnailResources, PaneFrame, PaneId as RenderPaneId, PaneRect,
-    Renderer, Theme,
+    FrameSnapshot, HoverLink, OverviewThumbnailResources, PaneFrame, PaneId as RenderPaneId,
+    PaneRect, Renderer, Theme,
 };
 use noa_vt::Stream;
 use winit::application::ApplicationHandler;
@@ -27,12 +27,13 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{WindowAttributesExtMacOS, WindowExtMacOS};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
 use crate::clipboard::SystemClipboard;
 use crate::commands::{FontSizeAction, KeybindEngine, SearchAction, TerminalAction};
 use crate::events::UserEvent;
 use crate::input;
+use crate::link_open;
 use crate::mouse::{self, MouseSelectionState, SelectionGesture};
 use crate::split_tree::{
     self, Direction, HitTarget, ImeOp, MIN_PANE_SIZE_PX, PaneId, Rect as PaneRectApp,
@@ -150,6 +151,12 @@ struct WindowState {
     active_split_drag: Option<SplitResizeDrag>,
     occluded: bool,
     title: String,
+    /// Set when a left press was consumed by Cmd+click-to-open, so only the
+    /// matching release is swallowed. Gating the release on "is a link
+    /// still hovered" instead would eat the release of an unrelated
+    /// selection drag or SGR-reported press whenever Cmd happens to be held
+    /// over a link at mouse-up, desyncing those state machines.
+    link_click_in_flight: bool,
 }
 
 /// State for the dedicated overview window. It deliberately is not part of
@@ -190,6 +197,10 @@ struct Surface {
     pressed_mouse_button: Option<MouseButton>,
     ime_state: input::ImeState,
     rect: PaneRectApp,
+    /// The Cmd+hover underline target for this pane, recomputed on every
+    /// `CursorMoved`/`ModifiersChanged` (`App::sync_hover_link`) and fed
+    /// into `FrameSnapshot::hover_link` at redraw.
+    hover_link: Option<HoverLink>,
 }
 
 impl WindowState {
@@ -253,6 +264,11 @@ pub struct App {
     /// displayable `Blinking*` cursor (the event loop then sits at
     /// `ControlFlow::Wait`, no busy wake-ups).
     cursor_blink_deadline: Option<Instant>,
+    /// The `(window, pane)` currently carrying a non-`None` `Surface::hover_link`,
+    /// if any — tracked so [`App::sync_hover_link`] can clear it when the
+    /// mouse moves to a different pane/window (or off any pane) without
+    /// having to scan every surface.
+    hovered_link: Option<(WindowId, PaneId)>,
 }
 
 impl App {
@@ -277,6 +293,7 @@ impl App {
             overview_visible: false,
             cursor_blink_visible: true,
             cursor_blink_deadline: None,
+            hovered_link: None,
         }
     }
 
@@ -363,6 +380,7 @@ impl App {
             // draws the hollow outline instead of hiding the cursor outright.
             snapshot.focused = pane_id == state.focused_pane && self.focused == Some(window_id);
             snapshot.cursor_blink_visible = self.cursor_blink_visible;
+            snapshot.hover_link = surface.hover_link;
             snapshots.push((pane_id, surface.rect, snapshot));
         }
         if state.title != title {
@@ -707,6 +725,7 @@ impl App {
                 active_split_drag: None,
                 occluded: false,
                 title: "noa".to_string(),
+                link_click_in_flight: false,
             },
         );
         self.window_order.push(window_id);
@@ -782,6 +801,7 @@ impl App {
             pressed_mouse_button: None,
             ime_state: input::ImeState::default(),
             rect,
+            hover_link: None,
         })
     }
 
@@ -1797,7 +1817,12 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+                // Cmd pressed/released with the mouse stationary must still
+                // toggle the hover underline + pointer cursor.
+                self.sync_hover_link(window_id);
+            }
             WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(window_id, position),
             WindowEvent::MouseInput { state, button, .. } => {
                 self.on_mouse_input(window_id, state, button)
@@ -1938,6 +1963,7 @@ impl App {
             if let Some(state) = self.windows.get_mut(&window_id) {
                 state.last_mouse_pane = None;
             }
+            self.sync_hover_link(window_id);
             return;
         };
         if self.drag_active_split(window_id, point) {
@@ -1948,6 +1974,7 @@ impl App {
             if let Some(state) = self.windows.get_mut(&window_id) {
                 state.last_mouse_pane = None;
             }
+            self.sync_hover_link(window_id);
             return;
         };
 
@@ -1957,6 +1984,7 @@ impl App {
                 surface.last_mouse_cell = Some(cell);
             }
         }
+        self.sync_hover_link(window_id);
 
         let tracking = self.sgr_mouse_tracking(window_id, pane_id);
         if tracking != MouseTracking::Off && !self.modifiers.shift_key() {
@@ -1989,9 +2017,30 @@ impl App {
                     if self.start_split_drag_at_last_mouse_point(window_id) {
                         return;
                     }
+                    // Cmd+click on a hovered link opens it and is fully
+                    // consumed: no selection start, no SGR mouse report.
+                    // Without a hovered link this falls through to the
+                    // existing click handling below.
+                    if let Some(uri) = self.open_hovered_link(window_id) {
+                        if let Some(state) = self.windows.get_mut(&window_id) {
+                            state.link_click_in_flight = true;
+                        }
+                        link_open::open_uri(&uri);
+                        return;
+                    }
                 }
                 ElementState::Released => {
                     if self.finish_active_split_drag(window_id) {
+                        return;
+                    }
+                    // The matching half of the Cmd+click-to-open consume
+                    // above: swallow the release only when its press was
+                    // consumed, so an unrelated selection drag or SGR press
+                    // still sees its mouse-up.
+                    if let Some(state) = self.windows.get_mut(&window_id)
+                        && state.link_click_in_flight
+                    {
+                        state.link_click_in_flight = false;
                         return;
                     }
                 }
@@ -2581,6 +2630,123 @@ impl App {
             DEFAULT_GRID_PADDING,
         );
         Some((pane_id, cell))
+    }
+
+    /// The Cmd+hover link under the mouse in `window_id`'s focused-under-
+    /// pointer pane, if `Cmd` is held and the cell under `last_mouse_cell`
+    /// carries an OSC 8 hyperlink or sits inside an auto-detected
+    /// `https?://` URL run. Reuses `last_mouse_pane`/`last_mouse_cell`
+    /// (already kept up to date by every `CursorMoved`) instead of
+    /// recomputing a pixel hit-test, so it can also be called from
+    /// `ModifiersChanged` with the mouse stationary.
+    fn hover_link_target(&self, window_id: WindowId) -> Option<(PaneId, HoverLink)> {
+        if !self.modifiers.super_key() {
+            return None;
+        }
+        let state = self.windows.get(&window_id)?;
+        let pane_id = state.last_mouse_pane?;
+        let surface = state.surfaces.get(&pane_id)?;
+        let cell = surface.last_mouse_cell?;
+
+        let terminal = surface.terminal.lock().expect("terminal mutex poisoned");
+        let row = terminal.active().visible_row(cell.y)?;
+        if let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink) {
+            return Some((pane_id, HoverLink::Registry(link_id)));
+        }
+        let url = noa_grid::detect_url_at_column(row, cell.x)?;
+        Some((
+            pane_id,
+            HoverLink::Range {
+                y: cell.y,
+                x_start: url.start_x,
+                x_end: url.end_x,
+            },
+        ))
+    }
+
+    /// Recompute the Cmd+hover target for `window_id` and reconcile it into
+    /// `Surface::hover_link` + the window's cursor icon. Called from every
+    /// event that can change the answer: `CursorMoved` (pointer or pane
+    /// moved) and `ModifiersChanged` (Cmd pressed/released with the mouse
+    /// stationary).
+    fn sync_hover_link(&mut self, window_id: WindowId) {
+        let target = self.hover_link_target(window_id);
+        let target_pane = target.as_ref().map(|(pane_id, _)| *pane_id);
+
+        // Clear a stale hover on whichever pane held it previously, if the
+        // target has moved to a different pane/window or disappeared. This
+        // is the only place a hover can go stale outside its own pane: a
+        // pane's own hover_link is otherwise only ever written here.
+        if let Some((prev_window, prev_pane)) = self.hovered_link
+            && (prev_window != window_id || Some(prev_pane) != target_pane)
+        {
+            let cleared = self
+                .windows
+                .get_mut(&prev_window)
+                .and_then(|state| state.surfaces.get_mut(&prev_pane))
+                .is_some_and(|surface| surface.hover_link.take().is_some());
+            if cleared && let Some(state) = self.windows.get(&prev_window) {
+                state.window.request_redraw();
+            }
+            self.hovered_link = None;
+        }
+
+        if let Some((pane_id, link)) = target {
+            self.hovered_link = Some((window_id, pane_id));
+            let changed = self
+                .windows
+                .get_mut(&window_id)
+                .and_then(|state| state.surfaces.get_mut(&pane_id))
+                .is_some_and(|surface| {
+                    let changed = surface.hover_link != Some(link);
+                    surface.hover_link = Some(link);
+                    changed
+                });
+            if changed && let Some(state) = self.windows.get(&window_id) {
+                state.window.request_redraw();
+            }
+        }
+
+        self.update_cursor_icon(window_id);
+    }
+
+    /// Pointer cursor while a link is Cmd+hovered in `window_id`'s
+    /// under-the-mouse pane, the platform default otherwise.
+    fn update_cursor_icon(&self, window_id: WindowId) {
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
+        let hovering = state
+            .last_mouse_pane
+            .and_then(|pane_id| state.surfaces.get(&pane_id))
+            .is_some_and(|surface| surface.hover_link.is_some());
+        state.window.set_cursor(if hovering {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Default
+        });
+    }
+
+    /// Resolve the currently Cmd+hovered link in `window_id`'s under-the-
+    /// mouse pane to its URI text, re-deriving it from live grid state
+    /// (rather than caching the string on `Surface::hover_link`, which the
+    /// renderer only needs the geometry of).
+    fn open_hovered_link(&self, window_id: WindowId) -> Option<String> {
+        let state = self.windows.get(&window_id)?;
+        let pane_id = state.last_mouse_pane?;
+        let surface = state.surfaces.get(&pane_id)?;
+        surface.hover_link?;
+        let cell = surface.last_mouse_cell?;
+
+        let terminal = surface.terminal.lock().expect("terminal mutex poisoned");
+        let row = terminal.active().visible_row(cell.y)?;
+        if let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink) {
+            return terminal
+                .hyperlinks
+                .get(link_id)
+                .map(|link| link.uri.clone());
+        }
+        noa_grid::detect_url_at_column(row, cell.x).map(|url| url.uri)
     }
 }
 

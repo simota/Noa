@@ -7,13 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use noa_core::{CellAttrs, CellSize, Color, GridPadding, PixelSize};
 use noa_font::{FontGrid, Metrics, ShapedGlyph};
-use noa_grid::{CursorStyle, Row, SearchState, Selection, TerminalColors};
+use noa_grid::{Cell, CursorStyle, Row, SearchState, Selection, TerminalColors};
 
 use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
 use crate::pipeline::CellPipeline;
 use crate::segment::{SegmentCell, ShapeRun, segment_row};
-use crate::snapshot::FrameSnapshot;
+use crate::snapshot::{FrameSnapshot, HoverLink};
 use crate::theme::Theme;
 
 const DEFAULT_PANE_ID: PaneId = PaneId::new(0);
@@ -71,6 +71,11 @@ struct FrameInvalidationKey {
     selection: Option<Selection>,
     search: SearchState,
     cell_size: (f32, f32),
+    /// Cmd+hover has no corresponding `Row::dirty` bit (it changes with the
+    /// mouse/modifier state, not terminal output), so it rides the same
+    /// full-pane-invalidation bundle as the other 6 pane-wide triggers
+    /// above rather than tracking affected rows individually.
+    hover_link: Option<HoverLink>,
 }
 
 /// A pane's persisted per-row instance segments (WP4, REQ-PERF-2/3). Three
@@ -805,6 +810,15 @@ fn rebuild_row_instances(
                 to_u8_color(decoration_color),
                 metrics,
             );
+            if is_hover_link_cell(snap, cell, x, y) {
+                push_hover_link_underline(
+                    &mut decoration_instances,
+                    x,
+                    y,
+                    to_u8_color(text_color),
+                    metrics,
+                );
+            }
         }
 
         // Bar / underline / hollow-outline cursor shapes render as extra
@@ -916,6 +930,7 @@ fn rebuild_pane_cached(
         selection: snap.selection,
         search: snap.search.clone(),
         cell_size,
+        hover_link: snap.hover_link,
     };
 
     let rows = snap.rows.len();
@@ -1252,6 +1267,46 @@ fn push_cell_decorations(
             DecorationRect::new(0, base_y, width, thickness),
         );
     }
+}
+
+/// Whether `cell` at `(x, y)` falls under the snapshot's current Cmd+hover
+/// target (see [`HoverLink`]).
+fn is_hover_link_cell(snap: &FrameSnapshot, cell: &Cell, x: u16, y: u16) -> bool {
+    match snap.hover_link {
+        Some(HoverLink::Registry(id)) => cell.hyperlink == Some(id),
+        Some(HoverLink::Range {
+            y: row_y,
+            x_start,
+            x_end,
+        }) => y == row_y && x >= x_start && x <= x_end,
+        None => false,
+    }
+}
+
+/// Cmd+hover underline for an OSC 8 hyperlink or auto-detected URL — an
+/// extra decoration-pass rect independent of the cell's own UNDERLINE/
+/// CURLY_UNDERLINE/etc attrs (both can coexist), using the same plain
+/// underline geometry and the cell's own (possibly selection/search-
+/// recolored) foreground.
+fn push_hover_link_underline(
+    instances: &mut Vec<CellInstance>,
+    x: u16,
+    y: u16,
+    color: [u8; 4],
+    metrics: Metrics,
+) {
+    let thickness = decoration_thickness(metrics);
+    let width = metrics.cell_w.round().max(1.0) as u16;
+    let base_y = underline_y(metrics, thickness, 0.0);
+    push_decoration_rect(
+        instances,
+        DecorationCell {
+            grid_x: x,
+            grid_y: y,
+            color,
+        },
+        DecorationRect::new(0, base_y, width, thickness),
+    );
 }
 
 fn decoration_thickness(metrics: Metrics) -> u16 {
@@ -2112,6 +2167,82 @@ mod tests {
     }
 
     #[test]
+    fn hover_link_registry_underlines_only_cells_carrying_that_link_id() {
+        let Some(mut font) = font_with_rasterized_m() else {
+            return;
+        };
+
+        let mut terminal = Terminal::new(GridSize::new(3, 1));
+        terminal.primary.grid[0].cells[0].ch = 'M';
+        terminal.primary.grid[0].cells[0].hyperlink = Some(0);
+        terminal.primary.grid[0].cells[1].ch = 'M';
+        terminal.primary.grid[0].cells[1].hyperlink = Some(1); // a different link
+        terminal.primary.grid[0].cells[2].ch = 'M'; // no link at all
+
+        let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+        assert_eq!(snap.hover_link, None, "from_terminal defaults to no hover");
+
+        let mut no_hover = Vec::new();
+        rebuild_cell_instances(&mut no_hover, &snap, &mut font, &Theme::new(), false);
+        assert!(
+            no_hover
+                .iter()
+                .all(|i| i.flags != CellInstance::FLAG_DECORATION),
+            "no hover target set: no hover underline should be emitted"
+        );
+
+        snap.hover_link = Some(HoverLink::Registry(0));
+        let mut hovered = Vec::new();
+        rebuild_cell_instances(&mut hovered, &snap, &mut font, &Theme::new(), false);
+        let underlined: Vec<[u16; 2]> = hovered
+            .iter()
+            .filter(|i| i.flags == CellInstance::FLAG_DECORATION)
+            .map(|i| i.grid_pos)
+            .collect();
+        assert_eq!(
+            underlined,
+            vec![[0, 0]],
+            "only the cell carrying the hovered registry id gets the hover underline, \
+             not the cell with a different link id or the cell with no link"
+        );
+    }
+
+    #[test]
+    fn hover_link_range_underlines_only_the_matching_run_on_its_row() {
+        let Some(mut font) = font_with_rasterized_m() else {
+            return;
+        };
+
+        let mut terminal = Terminal::new(GridSize::new(4, 2));
+        for row in 0..2 {
+            for x in 0..4 {
+                terminal.primary.grid[row].cells[x].ch = 'M';
+            }
+        }
+
+        let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+        snap.hover_link = Some(HoverLink::Range {
+            y: 0,
+            x_start: 1,
+            x_end: 2,
+        });
+
+        let mut instances = Vec::new();
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
+        let mut underlined: Vec<[u16; 2]> = instances
+            .iter()
+            .filter(|i| i.flags == CellInstance::FLAG_DECORATION)
+            .map(|i| i.grid_pos)
+            .collect();
+        underlined.sort();
+        assert_eq!(
+            underlined,
+            vec![[1, 0], [2, 0]],
+            "only columns 1..=2 on row 0 are underlined; row 1 and the rest of row 0 are not"
+        );
+    }
+
+    #[test]
     fn srgb_surface_output_converts_theme_colors_to_linear() {
         let srgb = [30.0 / 255.0, 30.0 / 255.0, 30.0 / 255.0, 1.0];
 
@@ -2362,6 +2493,7 @@ mod tests {
             rows_n: 3,
             focused: true,
             cursor_blink_visible: true,
+            hover_link: None,
         }
     }
 
@@ -2505,10 +2637,10 @@ mod tests {
 
     #[test]
     fn pane_wide_invalidation_triggers_are_covered_fm11() {
-        // FM-11: each of the 6 pane-wide triggers bundled into
+        // FM-11: each of the 7 pane-wide triggers bundled into
         // `FrameInvalidationKey` must force EVERY row in the pane dirty when
         // it differs from the previous frame, even though `row_dirty` says
-        // no cell changed. Cursor movement (the narrower 7th case) instead
+        // no cell changed. Cursor movement (the narrower 8th case) instead
         // dirties exactly the two affected rows.
         let Some((device, queue)) = device_queue() else {
             eprintln!("no wgpu adapter available — skipping FM-11 trigger table test");
@@ -2643,7 +2775,21 @@ mod tests {
             );
         }
 
-        // 7. cursor movement — the narrower case: dirties exactly the two
+        // 7. hover_link (Cmd+hover underline target). Hover changes carry no
+        // terminal damage at all (no cell/pty mutation), so this trigger is
+        // what makes the underline actually repaint.
+        {
+            let snap_a = baseline_snapshot(['A', 'B', 'C']);
+            let mut snap_b = baseline_snapshot(['A', 'B', 'C']);
+            snap_b.hover_link = Some(HoverLink::Registry(0));
+            let rebuilt = rebuild_twice(109, &snap_a, &theme, &snap_b, &theme);
+            assert_eq!(
+                rebuilt, 3,
+                "a hover_link change must force a full pane rebuild"
+            );
+        }
+
+        // 8. cursor movement — the narrower case: dirties exactly the two
         // affected rows, NOT a full-pane invalidation.
         {
             let snap_a = baseline_snapshot(['A', 'B', 'C']);

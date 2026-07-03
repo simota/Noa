@@ -9,6 +9,7 @@ mod commands;
 mod events;
 mod input;
 mod io_thread;
+mod link_open;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 mod mouse;

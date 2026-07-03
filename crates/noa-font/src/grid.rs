@@ -9,7 +9,7 @@ use swash::scale::ScaleContext;
 
 use crate::atlas::Atlas;
 use crate::face::{FontStack, Metrics, load_font_stack};
-use crate::raster::{GlyphSynthesis, RasterizedGlyph, rasterize, rasterize_with_variations};
+use crate::raster::{GlyphSynthesis, RasterizedGlyph, rasterize_with_variations};
 use crate::shape::{self, FaceId, ShapeCell, ShapeRunKey, ShapedGlyph, StyleKey};
 use crate::{FontConfig, FontError, GlyphInfo, GlyphKey};
 
@@ -156,7 +156,14 @@ impl FontGrid {
         let font_data = &self.font_stack.faces()[font_index];
         let font = FontRef::from_index(&font_data.bytes, font_data.index)
             .expect("font bytes validated at construction");
-        let glyph = rasterize(&mut self.ctx, font, glyph_id, self.px_size);
+        let synthesis = GlyphSynthesis {
+            embolden: false,
+            shear: false,
+            thicken: self.font_cfg.thicken,
+            thicken_strength: self.font_cfg.thicken_strength,
+        };
+        let glyph =
+            rasterize_with_variations(&mut self.ctx, font, glyph_id, self.px_size, &[], synthesis);
 
         self.store_and_cache(&glyph, SlotOwner::Char(key))
     }
@@ -530,6 +537,8 @@ fn synthesis_for(font_cfg: &FontConfig, style: StyleKey) -> GlyphSynthesis {
     GlyphSynthesis {
         embolden: style.bold && font_cfg.synthetic_style.bold,
         shear: style.italic && font_cfg.synthetic_style.italic,
+        thicken: font_cfg.thicken,
+        thicken_strength: font_cfg.thicken_strength,
     }
 }
 
@@ -922,11 +931,15 @@ mod tests {
     /// synthesis per style, including disabling it (`no-bold`).
     #[test]
     fn synthetic_style_decision_respects_config_toggle_per_style() {
+        // Decoupled from thicken (its own global toggle): pin it off here so
+        // the literals below stay focused on embolden/shear gating.
         let mut cfg = FontConfig {
             synthetic_style: SyntheticStyle {
                 bold: true,
                 italic: false,
             },
+            thicken: false,
+            thicken_strength: 0,
             ..Default::default()
         };
 
@@ -940,7 +953,9 @@ mod tests {
             ),
             GlyphSynthesis {
                 embolden: true,
-                shear: false
+                shear: false,
+                thicken: false,
+                thicken_strength: 0,
             }
         );
         assert_eq!(
@@ -953,7 +968,9 @@ mod tests {
             ),
             GlyphSynthesis {
                 embolden: false,
-                shear: false
+                shear: false,
+                thicken: false,
+                thicken_strength: 0,
             },
             "italic synthesis must stay off when synthetic_style.italic is false"
         );
@@ -983,7 +1000,9 @@ mod tests {
             ),
             GlyphSynthesis {
                 embolden: false,
-                shear: false
+                shear: false,
+                thicken: false,
+                thicken_strength: 0,
             },
             "font-synthetic-style = no-bold must disable bold synthesis even for a bold style"
         );

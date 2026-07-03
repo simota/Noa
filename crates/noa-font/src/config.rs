@@ -28,8 +28,11 @@ pub struct FontConfig {
     pub synthetic_style: SyntheticStyle,
     /// WP3 consumes this; WP0 only stores it.
     pub alpha_blending: AlphaBlending,
-    /// Parsed-but-deferred; never consumed in this chain (CoreText-only).
+    /// Dilate glyph coverage to emulate CoreText/Ghostty `font-thicken`
+    /// stem-darkening (swash has no native smoothing). Default on, to match
+    /// Ghostty's heavier stroke weight; see `raster::thicken_mask`.
     pub thicken: bool,
+    /// Thicken intensity `0..=255` (`font-thicken-strength`); `0` disables it.
     pub thicken_strength: u8,
 }
 
@@ -82,7 +85,7 @@ impl Default for FontConfig {
                 italic: true,
             },
             alpha_blending: AlphaBlending::Native,
-            thicken: false,
+            thicken: true,
             thicken_strength: 255,
         }
     }

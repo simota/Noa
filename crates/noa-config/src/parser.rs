@@ -365,7 +365,6 @@ fn parse_font_thicken(
             return None;
         }
     };
-    diagnostics.push(deferred_diagnostic(path, &directive.key));
     Some(parsed)
 }
 
@@ -379,7 +378,6 @@ fn parse_font_thicken_strength(
         diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
         return None;
     };
-    diagnostics.push(deferred_diagnostic(path, &directive.key));
     Some(parsed)
 }
 
@@ -458,15 +456,6 @@ fn alpha_blending_fallback_diagnostic(path: &Path, value: &str) -> Diagnostic {
     Diagnostic {
         message: format!(
             "config {}: `alpha-blending = {value}` is not implemented yet; falling back to `native`",
-            path.display()
-        ),
-    }
-}
-
-fn deferred_diagnostic(path: &Path, key: &str) -> Diagnostic {
-    Diagnostic {
-        message: format!(
-            "config {}: `{key}` is accepted but has no effect yet (deferred)",
             path.display()
         ),
     }
@@ -762,9 +751,10 @@ mod tests {
         assert!(diagnostics[0].message.contains("maybe"));
     }
 
-    // AC-WP0-04: `alpha-blending = linear`, `font-thicken = true`, and
-    // `font-thicken-strength = 128` each parse AND produce a fallback /
-    // deferred diagnostic; `alpha-blending = native` produces no diagnostic.
+    // AC-WP0-04: `alpha-blending = linear` parses AND produces a fallback
+    // diagnostic; `alpha-blending = native` produces no diagnostic.
+    // `font-thicken` / `font-thicken-strength` are now consumed (glyph
+    // coverage dilation in noa-font), so they parse with no diagnostic.
     #[test]
     fn alpha_blending_native_is_real_with_no_diagnostic() {
         let (overrides, diagnostics) = parse_overrides(path(), "alpha-blending = native");
@@ -793,23 +783,19 @@ mod tests {
     }
 
     #[test]
-    fn font_thicken_parses_and_produces_a_deferred_diagnostic() {
+    fn font_thicken_parses_with_no_diagnostic() {
         let (overrides, diagnostics) = parse_overrides(path(), "font-thicken = true");
 
         assert_eq!(overrides.font.thicken, Some(true));
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains("font-thicken"));
-        assert!(diagnostics[0].message.contains("deferred"));
+        assert!(diagnostics.is_empty(), "consumed key emits no diagnostic");
     }
 
     #[test]
-    fn font_thicken_strength_parses_and_produces_a_deferred_diagnostic() {
+    fn font_thicken_strength_parses_with_no_diagnostic() {
         let (overrides, diagnostics) = parse_overrides(path(), "font-thicken-strength = 128");
 
         assert_eq!(overrides.font.thicken_strength, Some(128));
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains("font-thicken-strength"));
-        assert!(diagnostics[0].message.contains("deferred"));
+        assert!(diagnostics.is_empty(), "consumed key emits no diagnostic");
     }
 
     #[test]

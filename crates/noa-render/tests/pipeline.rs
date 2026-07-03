@@ -12,7 +12,7 @@
 //! Both skip gracefully where no GPU adapter is available (headless CI without
 //! a Metal/Vulkan device).
 
-use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, PixelSize};
+use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, PixelSize, Rgb};
 use noa_font::FontGrid;
 use noa_grid::{Cell, Cursor, Row, SearchState, Selection, SelectionPoint, TerminalColors};
 use noa_render::{
@@ -87,11 +87,87 @@ fn render_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Bgra8UnormSrgb,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        // COPY_SRC so tests that need pixel readback (color-glyph passthrough
+        // assertion) can reuse this same target instead of a bespoke one.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = target.create_view(&wgpu::TextureViewDescriptor::default());
     (target, view)
+}
+
+/// Read back a `Bgra8UnormSrgb` render target as RGBA8 bytes (`width *
+/// height * 4`, row-major, B/R already swapped to RGBA order).
+fn read_rgba_pixels(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let unpadded_bytes_per_row = width * 4;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("noa-test-readback-buffer"),
+        size: (padded_bytes_per_row * height) as wgpu::BufferAddress,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("noa-test-readback-encoder"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll device for map_async");
+    rx.recv()
+        .expect("map_async callback never fired")
+        .expect("map readback buffer");
+
+    let data = slice.get_mapped_range();
+    let mut out = Vec::with_capacity((width * height * 4) as usize);
+    for row in 0..height as usize {
+        let start = row * padded_bytes_per_row as usize;
+        let row_bytes = &data[start..start + (width * 4) as usize];
+        // Bgra8UnormSrgb texture: swap B/R so callers get RGBA order.
+        for px in row_bytes.chunks_exact(4) {
+            out.push(px[2]);
+            out.push(px[1]);
+            out.push(px[0]);
+            out.push(px[3]);
+        }
+    }
+    drop(data);
+    buffer.unmap();
+    out
 }
 
 #[test]
@@ -249,10 +325,10 @@ fn split_pipeline_syncs_same_frame_new_glyphs_for_two_panes() {
             snapshot: &right,
         },
     ];
-    let initial_generation = font.atlas_generation();
+    let initial_generation = font.mask_atlas_generation();
 
     renderer.rebuild_panes(&panes, &mut font, &Theme::new());
-    if font.atlas_generation() == initial_generation {
+    if font.mask_atlas_generation() == initial_generation {
         eprintln!(
             "installed monospace font did not rasterize 'M' — skipping split atlas-ordering test"
         );
@@ -260,7 +336,7 @@ fn split_pipeline_syncs_same_frame_new_glyphs_for_two_panes() {
     }
     renderer.sync_atlas(&device, &queue, &mut font);
 
-    assert_eq!(renderer.atlas_seen_generation(), font.atlas_generation());
+    assert_eq!(renderer.mask_atlas_seen_generation(), font.mask_atlas_generation());
 
     let (_target, view) = render_target(&device, 128, 32);
     device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -386,7 +462,7 @@ fn split_pipeline_rebuilds_all_pane_bind_groups_after_atlas_reallocation() {
 
     let before_counts = renderer.pane_bind_group_rebuild_counts();
     assert_eq!(before_counts.len(), 2);
-    let before_size = font.atlas_size();
+    let before_size = font.mask_atlas_size();
 
     let pressure = snapshot_for_text(&large_visible_glyph_string());
     let still_visible = snapshot_for_text("Z");
@@ -403,7 +479,7 @@ fn split_pipeline_rebuilds_all_pane_bind_groups_after_atlas_reallocation() {
         },
     ];
     renderer.rebuild_panes(&pressure_panes, &mut font, &Theme::new());
-    if font.atlas_size() == before_size {
+    if font.mask_atlas_size() == before_size {
         eprintln!(
             "large glyph pressure did not grow the atlas — skipping split atlas-reallocation test"
         );
@@ -466,17 +542,260 @@ fn shared_font_atlas_syncs_to_multiple_renderers() {
     )
     .expect("build second renderer");
 
-    let initial_generation = font.atlas_generation();
+    let initial_generation = font.mask_atlas_generation();
     let glyph = font.get_or_raster('M');
-    if glyph.atlas_size == [0, 0] || font.atlas_generation() == initial_generation {
+    if glyph.atlas_size == [0, 0] || font.mask_atlas_generation() == initial_generation {
         eprintln!("installed monospace font did not rasterize 'M' — skipping atlas sync test");
         return;
     }
-    let generation = font.atlas_generation();
+    let generation = font.mask_atlas_generation();
 
     first.sync_atlas(&device, &queue, &mut font);
     second.sync_atlas(&device, &queue, &mut font);
 
-    assert_eq!(first.atlas_seen_generation(), generation);
-    assert_eq!(second.atlas_seen_generation(), generation);
+    assert_eq!(first.mask_atlas_seen_generation(), generation);
+    assert_eq!(second.mask_atlas_seen_generation(), generation);
+}
+
+/// AC-WP1-03 / FM-01: a `FLAG_COLOR_GLYPH` instance must draw with no wgpu
+/// validation error (the two-atlas bind-group layout, `vs_main`'s
+/// texel-space color UV, and `fs_main`'s `color_atlas_tex` normalization all
+/// have to agree). Also a lightweight AC-WP1-02 check: read the drawn pixels
+/// back and confirm the color glyph is *not* tinted by the cell's foreground
+/// color the way the R8 mask path would be (real color-vs-tint distinction).
+#[test]
+fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthrough() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping color-glyph GPU draw test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(32.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+
+    // 😀 U+1F600 GRINNING FACE. Probe directly first so we can skip cleanly
+    // if this environment has no color-capable emoji face resolved.
+    let probe = font.get_or_raster('\u{1F600}');
+    if !probe.color || probe.atlas_size == [0, 0] {
+        eprintln!(
+            "no color-capable emoji face resolved in this environment — skipping color-glyph GPU draw test"
+        );
+        return;
+    }
+
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: 64, h: 64 });
+
+    // fg deliberately set to a saturated magenta real emoji artwork is very
+    // unlikely to contain: if the color-glyph path tinted the atlas sample
+    // with the cell foreground (like the R8 mask path's `color.a * coverage`
+    // formula does), the rendered pixel would trend toward this exact color.
+    // Passthrough sampling (REQ-EMOJI-2) should not.
+    let magenta_fg = Color::Rgb(Rgb::new(255, 0, 255));
+    let row = Row {
+        cells: vec![Cell {
+            ch: '\u{1F600}',
+            combining: String::new(),
+            fg: magenta_fg,
+            bg: Color::Default,
+            underline_color: None,
+            hyperlink: None,
+            attrs: CellAttrs::empty(),
+        }],
+        wrapped: false,
+        dirty: true,
+    };
+    let snap = FrameSnapshot {
+        rows: vec![row],
+        cursor: Cursor::default(),
+        colors: TerminalColors::default(),
+        selection: None,
+        search: SearchState::default(),
+        row_base: 0,
+        cols: 1,
+        rows_n: 1,
+    };
+    let theme = Theme::new();
+
+    renderer.rebuild_cells(&snap, &mut font, &theme);
+    renderer.sync_atlas(&device, &queue, &mut font);
+
+    let (target, view) = render_target(&device, 64, 64);
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.draw(&device, &queue, &view);
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error drawing a FLAG_COLOR_GLYPH instance: {err:?}"
+    );
+
+    let pixels = read_rgba_pixels(&device, &queue, &target, 64, 64);
+    let has_non_tinted_opaque_pixel = pixels.chunks_exact(4).any(|p| {
+        let (r, g, b, a) = (p[0], p[1], p[2], p[3]);
+        // A tinted-like-the-mask-path pixel at near-full coverage would land
+        // near-pure magenta; require at least one clearly opaque pixel that
+        // is not that.
+        a > 200 && !(r > 230 && g < 40 && b > 230)
+    });
+    assert!(
+        has_non_tinted_opaque_pixel,
+        "expected at least one opaque pixel that is not magenta-tinted — a color glyph must \
+         sample the RGBA8 atlas as passthrough (REQ-EMOJI-2), not tint with the cell fg color"
+    );
+}
+
+/// FM-09: force the color atlas alone to grow (many emoji glyphs) while
+/// holding the mask atlas untouched, and assert every pane bind group is
+/// still rebuilt. This is the case a "fixed the mask-atlas sync block, forgot
+/// the color one" bug would slip through if `sync_atlas` duplicated its two
+/// atlas blocks instead of sharing one code path.
+#[test]
+fn split_pipeline_rebuilds_bind_groups_after_color_only_atlas_reallocation() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping color-only atlas-reallocation test");
+        return;
+    };
+    let mut font = FontGrid::new(200.0, noa_font::FontConfig::default())
+        .expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: 512, h: 256 });
+
+    let layout = [
+        (PaneId::new(1), PaneRect::new(0, 0, 256, 256)),
+        (PaneId::new(2), PaneRect::new(257, 0, 255, 256)),
+    ];
+    let stable = snapshot_for_text("Z");
+    let initial_panes = [
+        PaneFrame {
+            pane: layout[0].0,
+            rect: layout[0].1,
+            snapshot: &stable,
+        },
+        PaneFrame {
+            pane: layout[1].0,
+            rect: layout[1].1,
+            snapshot: &stable,
+        },
+    ];
+
+    renderer.rebuild_panes(&initial_panes, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+    let (_initial_target, initial_view) = render_target(&device, 512, 256);
+    renderer.draw_panes(&device, &queue, &initial_view, &layout, None, None);
+
+    let before_counts = renderer.pane_bind_group_rebuild_counts();
+    assert_eq!(before_counts.len(), 2);
+    let mask_size_before = font.mask_atlas_size();
+    let mask_generation_before = font.mask_atlas_generation();
+    let color_size_before = font.color_atlas_size();
+
+    // Populate (and, hopefully, grow) the color atlas directly via
+    // `get_or_raster` so we control exactly which characters are confirmed
+    // color glyphs — this keeps the mask atlas provably untouched by this
+    // pressure step, rather than hoping every candidate codepoint resolves
+    // to a color face.
+    let (emoji_text, color_atlas_grew) = build_color_atlas_pressure_string(&mut font);
+    if !color_atlas_grew || emoji_text.is_empty() {
+        eprintln!(
+            "no color-capable emoji pressure grew the color atlas in this environment — \
+             skipping color-only atlas-reallocation test"
+        );
+        return;
+    }
+    assert_eq!(
+        font.mask_atlas_generation(),
+        mask_generation_before,
+        "building emoji-only pressure must not touch the mask atlas"
+    );
+    assert_eq!(
+        font.mask_atlas_size(),
+        mask_size_before,
+        "building emoji-only pressure must not grow the mask atlas"
+    );
+    assert!(font.color_atlas_size() != color_size_before);
+
+    let emoji_pressure = snapshot_for_text(&emoji_text);
+    let pressure_panes = [
+        PaneFrame {
+            pane: layout[0].0,
+            rect: layout[0].1,
+            snapshot: &emoji_pressure,
+        },
+        PaneFrame {
+            pane: layout[1].0,
+            rect: layout[1].1,
+            snapshot: &stable,
+        },
+    ];
+    renderer.rebuild_panes(&pressure_panes, &mut font, &Theme::new());
+
+    // Rendering the (already-rastered, cache-hit) pressure text must not
+    // have touched the mask atlas either.
+    assert_eq!(font.mask_atlas_generation(), mask_generation_before);
+    assert_eq!(font.mask_atlas_size(), mask_size_before);
+
+    let (_target, view) = render_target(&device, 512, 256);
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.sync_atlas(&device, &queue, &mut font);
+    let after_counts = renderer.pane_bind_group_rebuild_counts();
+    renderer.draw_panes(&device, &queue, &view, &layout, None, None);
+    let err = pollster::block_on(device.pop_error_scope());
+
+    assert_eq!(after_counts.len(), before_counts.len());
+    assert!(
+        before_counts
+            .iter()
+            .zip(after_counts.iter())
+            .all(|(before, after)| after > before),
+        "color-only atlas reallocation must still rebuild every pane bind group (FM-09): \
+         before={before_counts:?} after={after_counts:?}"
+    );
+    assert!(
+        err.is_none(),
+        "wgpu validation error after color-only atlas reallocation draw: {err:?}"
+    );
+}
+
+/// Directly rasterize a range of emoji candidates, collecting only the ones
+/// confirmed as color glyphs (`GlyphInfo.color`) into a pressure string.
+/// Returns `(text, atlas_grew)`. Stops early once the color atlas has grown
+/// and a reasonable number of glyphs were collected, to bound runtime.
+fn build_color_atlas_pressure_string(font: &mut noa_font::FontGrid) -> (String, bool) {
+    let before = font.color_atlas_size();
+    let mut text = String::new();
+    let mut grew = false;
+    for ch in emoji_candidate_range() {
+        let glyph = font.get_or_raster(ch);
+        if glyph.color && glyph.atlas_size != [0, 0] {
+            text.push(ch);
+        }
+        if font.color_atlas_size() != before {
+            grew = true;
+            if text.len() >= 64 {
+                break;
+            }
+        }
+    }
+    (text, grew)
+}
+
+fn emoji_candidate_range() -> impl Iterator<Item = char> {
+    ('\u{1F300}'..='\u{1F5FF}')
+        .chain('\u{1F600}'..='\u{1F64F}')
+        .chain('\u{1F680}'..='\u{1F6FF}')
+        .chain('\u{1F900}'..='\u{1F9FF}')
 }

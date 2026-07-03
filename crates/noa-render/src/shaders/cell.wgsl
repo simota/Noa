@@ -30,6 +30,15 @@ var atlas_tex: texture_2d<f32>;
 @group(0) @binding(2)
 var atlas_sampler: sampler;
 
+// RGBA8 color-glyph atlas (emoji, WP1). FRAGMENT-only visibility — unlike
+// `atlas_tex`, the vertex stage must NOT call `textureDimensions` on this
+// texture (see the vs_main glyph branch below: color UV is emitted in texel
+// space and normalized only in fs_main). Mixing that up reintroduces the
+// CLAUDE.md "bind group visibility" GPU gotcha as a non-unwinding wgpu
+// validation abort.
+@group(0) @binding(3)
+var color_atlas_tex: texture_2d<f32>;
+
 struct InstanceInput {
     @location(0) glyph_pos: vec2<u32>,
     @location(1) glyph_size: vec2<u32>,
@@ -49,6 +58,7 @@ struct VertexOutput {
 const FLAG_GLYPH: u32 = 1u;
 const FLAG_DECORATION: u32 = 8u;
 const FLAG_DIVIDER: u32 = 16u;
+const FLAG_COLOR_GLYPH: u32 = 32u;
 
 @vertex
 fn vs_main(
@@ -85,9 +95,16 @@ fn vs_main(
         // bearing.y is the distance from the cell top to the glyph top.
         pixel = cell_origin + vec2<f32>(bearing.x, bearing.y) + corner * size;
 
-        let atlas_dims = vec2<f32>(textureDimensions(atlas_tex));
         let atlas_origin = vec2<f32>(f32(instance.glyph_pos.x), f32(instance.glyph_pos.y));
-        uv = (atlas_origin + corner * size) / atlas_dims;
+        if (instance.flags & FLAG_COLOR_GLYPH) != 0u {
+            // Color atlas: emit TEXEL-SPACE uv here — no textureDimensions on
+            // color_atlas_tex in the vertex stage (that binding is
+            // FRAGMENT-only). fs_main normalizes it before sampling.
+            uv = atlas_origin + corner * size;
+        } else {
+            let atlas_dims = vec2<f32>(textureDimensions(atlas_tex));
+            uv = (atlas_origin + corner * size) / atlas_dims;
+        }
     } else if (instance.flags & FLAG_DECORATION) != 0u {
         // Decoration quad: positioned by bearing and sized by glyph_size.
         let size = vec2<f32>(f32(instance.glyph_size.x), f32(instance.glyph_size.y));
@@ -111,6 +128,13 @@ fn vs_main(
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (in.flags & FLAG_GLYPH) != 0u {
+        if (in.flags & FLAG_COLOR_GLYPH) != 0u {
+            // Color glyph: passthrough sample, no foreground-color tint
+            // (REQ-EMOJI-2). Only place color_atlas_tex's textureDimensions
+            // is called — normalizing the texel-space uv from vs_main.
+            let cuv = in.uv / vec2<f32>(textureDimensions(color_atlas_tex));
+            return textureSample(color_atlas_tex, atlas_sampler, cuv);
+        }
         let coverage = textureSample(atlas_tex, atlas_sampler, in.uv).r;
         return vec4<f32>(in.color.rgb, in.color.a * coverage);
     }

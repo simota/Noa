@@ -1,9 +1,11 @@
 //! `noa-font` — glyph pipeline: discovery -> shaping -> rasterization -> atlas.
 //!
-//! Ghostty analog: `font/`. This crate discovers a monospace system font via
-//! `font-kit`, rasterizes glyphs with `swash`, and packs the resulting R8
-//! coverage masks into an `etagere`-backed CPU atlas that the renderer uploads
-//! to the GPU.
+//! Ghostty analog: `font/`. This crate discovers a monospace system font
+//! (plus a fallback stack, including Apple Color Emoji) via `font-kit`,
+//! rasterizes glyphs with `swash`, and packs them into two `etagere`-backed
+//! CPU atlases that the renderer uploads to the GPU: an R8 coverage-mask
+//! atlas for regular glyphs, and an RGBA8 atlas for color-bitmap glyphs
+//! (emoji) sampled as passthrough (`GlyphInfo::color`).
 //!
 //! For inc-1 shaping is trivial (per-`char` charmap lookup); the cache key is
 //! just the `char`.
@@ -38,6 +40,9 @@ pub struct GlyphInfo {
     pub bearing: [i16; 2],
     /// Horizontal advance in pixels.
     pub advance: f32,
+    /// `true` when this glyph lives in the RGBA8 color atlas (sampled as
+    /// passthrough, no foreground tint); `false` for the R8 mask atlas.
+    pub color: bool,
 }
 
 /// Errors from font discovery / loading.

@@ -11,17 +11,26 @@ use crate::face::{FontStack, Metrics, load_font_stack};
 use crate::raster::rasterize;
 use crate::{FontConfig, FontError, GlyphInfo, GlyphKey};
 
-/// Default atlas dimensions (R8). The atlas grows on demand when glyph pressure exceeds it.
+/// Default atlas dimensions. The atlas grows on demand when glyph pressure exceeds it.
 const ATLAS_DIM: u32 = 1024;
+const MASK_BYTES_PER_PX: u32 = 1;
+const COLOR_BYTES_PER_PX: u32 = 4;
 
-/// Owns the font bytes, a swash scale context, cell metrics, the glyph atlas
-/// and the per-`char` glyph cache.
+/// Owns the font bytes, a swash scale context, cell metrics, the two glyph
+/// atlases (R8 mask + RGBA8 color) and the per-`char` glyph cache.
+///
+/// Two independent atlases (WP1, REQ-EMOJI-2/3): non-color glyphs pack into
+/// the R8 `mask_atlas` as before; color-bitmap glyphs (emoji) pack into the
+/// RGBA8 `color_atlas` and are sampled as passthrough by the renderer
+/// (`GlyphInfo.color = true`). Each atlas tracks its own generation counter
+/// so the renderer can sync them independently.
 pub struct FontGrid {
     /// Owned font bytes; `FontRef` borrows from here (kept for its lifetime).
     font_stack: FontStack,
     ctx: ScaleContext,
     metrics: Metrics,
-    atlas: Atlas,
+    mask_atlas: Atlas,
+    color_atlas: Atlas,
     cache: HashMap<GlyphKey, GlyphInfo>,
     px_size: f32,
 }
@@ -42,13 +51,15 @@ impl FontGrid {
             font_stack,
             ctx: ScaleContext::new(),
             metrics,
-            atlas: Atlas::new(ATLAS_DIM, ATLAS_DIM),
+            mask_atlas: Atlas::new(ATLAS_DIM, ATLAS_DIM, MASK_BYTES_PER_PX),
+            color_atlas: Atlas::new(ATLAS_DIM, ATLAS_DIM, COLOR_BYTES_PER_PX),
             cache: HashMap::new(),
             px_size,
         })
     }
 
-    /// Look up a glyph, rasterizing and packing it into the atlas on a miss.
+    /// Look up a glyph, rasterizing and packing it into the appropriate atlas
+    /// (mask or color) on a miss.
     ///
     /// If the atlas cannot grow enough to fit a glyph, the returned zero-sized
     /// rect is not cached so a future larger atlas can make the glyph visible.
@@ -71,10 +82,12 @@ impl FontGrid {
         let (atlas_pos, atlas_size) = if glyph.width == 0 || glyph.height == 0 {
             ([0, 0], [0, 0])
         } else {
-            match self
-                .atlas
-                .reserve_and_blit_growing(glyph.width, glyph.height, &glyph.bitmap)
-            {
+            let target_atlas = if glyph.color {
+                &mut self.color_atlas
+            } else {
+                &mut self.mask_atlas
+            };
+            match target_atlas.reserve_and_blit_growing(glyph.width, glyph.height, &glyph.bitmap) {
                 Some((x, y)) => ([x, y], [glyph.width as u16, glyph.height as u16]),
                 None => {
                     cache_info = false;
@@ -89,6 +102,7 @@ impl FontGrid {
             atlas_size,
             bearing: [glyph.bearing_x as i16, glyph.bearing_y as i16],
             advance: glyph.advance,
+            color: glyph.color,
         };
         if cache_info {
             self.cache.insert(key, info);
@@ -118,19 +132,34 @@ impl FontGrid {
         self.metrics
     }
 
-    /// Borrow the R8 atlas pixel buffer.
-    pub fn atlas_data(&self) -> &[u8] {
-        self.atlas.data()
+    /// Borrow the R8 mask atlas pixel buffer.
+    pub fn mask_atlas_data(&self) -> &[u8] {
+        self.mask_atlas.data()
     }
 
-    /// Atlas dimensions `(width, height)`.
-    pub fn atlas_size(&self) -> (u32, u32) {
-        self.atlas.size()
+    /// Mask atlas dimensions `(width, height)`.
+    pub fn mask_atlas_size(&self) -> (u32, u32) {
+        self.mask_atlas.size()
     }
 
-    /// Monotonic atlas mutation generation.
-    pub fn atlas_generation(&self) -> u64 {
-        self.atlas.generation()
+    /// Monotonic mask atlas mutation generation.
+    pub fn mask_atlas_generation(&self) -> u64 {
+        self.mask_atlas.generation()
+    }
+
+    /// Borrow the RGBA8 color atlas pixel buffer.
+    pub fn color_atlas_data(&self) -> &[u8] {
+        self.color_atlas.data()
+    }
+
+    /// Color atlas dimensions `(width, height)`.
+    pub fn color_atlas_size(&self) -> (u32, u32) {
+        self.color_atlas.size()
+    }
+
+    /// Monotonic color atlas mutation generation.
+    pub fn color_atlas_generation(&self) -> u64 {
+        self.color_atlas.generation()
     }
 }
 
@@ -159,13 +188,13 @@ mod tests {
             "'M' should rasterize to a non-empty atlas region: {:?}",
             info.atlas_size
         );
-        let generation = grid.atlas_generation();
+        let generation = grid.mask_atlas_generation();
         assert!(generation > 0, "rastering 'M' should advance the atlas");
 
         // Cache hit: same info, no new dirty.
         let info2 = grid.get_or_raster('M');
         assert_eq!(info.atlas_pos, info2.atlas_pos);
-        assert_eq!(grid.atlas_generation(), generation);
+        assert_eq!(grid.mask_atlas_generation(), generation);
     }
 
     #[test]
@@ -189,7 +218,47 @@ mod tests {
             "'日' should rasterize to a non-empty atlas region: {:?}",
             info.atlas_size
         );
-        assert!(grid.atlas_generation() > 0);
+        assert!(grid.mask_atlas_generation() > 0);
+    }
+
+    #[test]
+    fn emoji_glyph_rasterizes_into_color_atlas_not_mask_atlas() {
+        let mut grid = match FontGrid::new(14.0, FontConfig::default()) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+        if !grid.has_glyph('\u{1F600}') {
+            eprintln!("skipping: no installed font can render emoji");
+            return;
+        }
+
+        let mask_generation_before = grid.mask_atlas_generation();
+        let color_generation_before = grid.color_atlas_generation();
+
+        let info = grid.get_or_raster('\u{1F600}');
+
+        assert!(
+            info.atlas_size[0] > 0 && info.atlas_size[1] > 0,
+            "emoji should rasterize to a non-empty atlas region: {:?}",
+            info.atlas_size
+        );
+        assert!(info.color, "emoji glyph must be flagged as a color glyph");
+        assert!(
+            grid.color_atlas_generation() > color_generation_before,
+            "emoji glyph must be packed into the color atlas"
+        );
+        assert_eq!(
+            grid.mask_atlas_generation(),
+            mask_generation_before,
+            "emoji glyph must not touch the mask atlas"
+        );
+
+        // The color atlas byte buffer is RGBA8 (4 bytes/px) sized.
+        let (cw, ch) = grid.color_atlas_size();
+        assert_eq!(grid.color_atlas_data().len(), cw as usize * ch as usize * 4);
     }
 
     #[test]
@@ -201,7 +270,7 @@ mod tests {
                 return;
             }
         };
-        let initial_size = grid.atlas_size();
+        let initial_size = grid.mask_atlas_size();
         let mut rastered = 0;
 
         for ch in large_visible_glyph_set() {
@@ -217,7 +286,7 @@ mod tests {
             );
             rastered += 1;
 
-            if grid.atlas_size() != initial_size {
+            if grid.mask_atlas_size() != initial_size {
                 return;
             }
         }

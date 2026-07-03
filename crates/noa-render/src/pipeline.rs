@@ -49,6 +49,26 @@ impl CellPipeline {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    // Color glyph atlas (RGBA8, WP1/emoji). Unlike binding 1,
+                    // the vertex stage never samples this texture or calls
+                    // `textureDimensions` on it — `vs_main` emits texel-space
+                    // uv for color glyphs and `fs_main` normalizes it itself
+                    // (see cell.wgsl). FRAGMENT-only visibility is
+                    // deliberate: widening this to VERTEX_FRAGMENT without a
+                    // matching vertex-stage sample is the CLAUDE.md GPU
+                    // gotcha in reverse (unused-but-declared visibility is
+                    // harmless to wgpu, but the frozen design keeps this
+                    // FRAGMENT-only to keep intent unambiguous).
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -160,7 +180,8 @@ impl CellPipeline {
         &self,
         device: &wgpu::Device,
         uniform_buffer: &wgpu::Buffer,
-        atlas_view: &wgpu::TextureView,
+        mask_atlas_view: &wgpu::TextureView,
+        color_atlas_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("noa-cell-bind-group"),
@@ -172,11 +193,15 @@ impl CellPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(atlas_view),
+                    resource: wgpu::BindingResource::TextureView(mask_atlas_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(color_atlas_view),
                 },
             ],
         })

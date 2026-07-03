@@ -84,6 +84,24 @@ pub fn load_font_stack(font_cfg: &FontConfig) -> Result<FontStack, FontError> {
     };
     let mut fallbacks = Vec::new();
 
+    // Probe for the system color-emoji family first so emoji codepoints
+    // resolve to it rather than falling through to a tofu/blank glyph or a
+    // mismatched fallback face (REQ-EMOJI-1). Same family-by-name lookup
+    // mechanism as the primary/CJK discovery below; simply yields no match
+    // on platforms/sandboxes without it, so the stack proceeds without an
+    // emoji face rather than failing.
+    if let Ok(handle) = Source::select_family_by_name(&source, emoji_fallback_family_name())
+        .and_then(|family| {
+            family
+                .fonts()
+                .first()
+                .cloned()
+                .ok_or(font_kit::error::SelectionError::NotFound)
+        })
+    {
+        push_valid_face(&mut fallbacks, handle);
+    }
+
     for postscript_name in cjk_fallback_postscript_names() {
         if let Ok(handle) = Source::select_by_postscript_name(&source, postscript_name) {
             push_valid_face(&mut fallbacks, handle);
@@ -123,6 +141,14 @@ fn push_valid_face(faces: &mut Vec<FontData>, handle: Handle) {
         return;
     }
     faces.push(face);
+}
+
+/// The macOS system color-emoji family name (REQ-EMOJI-1). `font-kit`'s
+/// `select_family_by_name` resolves this the same way it resolves any other
+/// installed family, whether the backing source is CoreText (macOS) or
+/// another platform's font database (where it will simply not be found).
+fn emoji_fallback_family_name() -> &'static str {
+    "Apple Color Emoji"
 }
 
 fn cjk_fallback_postscript_names() -> &'static [&'static str] {
@@ -242,5 +268,63 @@ impl Metrics {
                 (px / 14.0).max(1.0)
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FontConfig;
+
+    /// AC-WP1-01 (REQ-EMOJI-1): given the resolved fallback stack from
+    /// `load_font_stack`, an emoji codepoint resolves to the Apple Color
+    /// Emoji face specifically — not merely *some* fallback face, and not a
+    /// tofu/blank glyph.
+    #[test]
+    fn emoji_codepoint_resolves_to_apple_color_emoji_face() {
+        let source = SystemSource::new();
+        let Ok(emoji_family) = source.select_family_by_name(emoji_fallback_family_name()) else {
+            eprintln!(
+                "skipping: {} not installed in this environment",
+                emoji_fallback_family_name()
+            );
+            return;
+        };
+        let Some(emoji_handle) = emoji_family.fonts().first().cloned() else {
+            eprintln!(
+                "skipping: {} family has no fonts",
+                emoji_fallback_family_name()
+            );
+            return;
+        };
+        let emoji_data =
+            handle_to_data(emoji_handle).expect("load Apple Color Emoji bytes directly");
+
+        let stack = match load_font_stack(&FontConfig::default()) {
+            Ok(stack) => stack,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+
+        // 😀 U+1F600 GRINNING FACE.
+        let emoji_ch = '\u{1F600}';
+        let resolved = stack.faces().iter().find(|face| {
+            let Ok(font) = face.font_ref() else {
+                return false;
+            };
+            font.charmap().map(emoji_ch) != 0
+        });
+
+        let resolved = resolved.expect(
+            "an emoji codepoint must resolve to some face in the fallback stack, \
+             not fall through to a tofu/blank glyph",
+        );
+        assert_eq!(
+            resolved.bytes, emoji_data.bytes,
+            "emoji codepoint should resolve to the Apple Color Emoji face specifically, \
+             not an unrelated fallback face"
+        );
     }
 }

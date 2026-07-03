@@ -39,6 +39,13 @@ impl SearchState {
         self.active.and_then(|idx| self.matches.get(idx).copied())
     }
 
+    /// The 0-based index of the active match into [`SearchState::matches`],
+    /// or `None` when there is no query or no matches — the search prompt
+    /// overlay derives its `i/n` counter from this plus `matches().len()`.
+    pub fn active_index(&self) -> Option<usize> {
+        self.active
+    }
+
     pub fn set_query(&mut self, query: String, matches: Vec<SearchMatch>) {
         self.query = query;
         self.matches = matches;
@@ -128,4 +135,53 @@ where
     }
 
     matches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn matches_at(ys: &[usize]) -> Vec<SearchMatch> {
+        ys.iter()
+            .map(|&y| SearchMatch {
+                start: SelectionPoint::new(0, y),
+                end: SelectionPoint::new(0, y),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn active_index_tracks_the_active_match_through_navigation() {
+        let mut state = SearchState::default();
+        assert_eq!(state.active_index(), None, "no query yet");
+
+        state.set_query("x".to_string(), matches_at(&[0, 3, 7]));
+        assert_eq!(state.active_index(), Some(0), "first match auto-activates");
+
+        state.next_match();
+        assert_eq!(state.active_index(), Some(1));
+
+        state.next_match();
+        assert_eq!(state.active_index(), Some(2));
+
+        state.next_match();
+        assert_eq!(
+            state.active_index(),
+            Some(0),
+            "wraps back to the first match"
+        );
+
+        state.previous_match();
+        assert_eq!(state.active_index(), Some(2), "wraps backward too");
+
+        state.clear();
+        assert_eq!(state.active_index(), None);
+    }
+
+    #[test]
+    fn active_index_is_none_when_query_has_no_matches() {
+        let mut state = SearchState::default();
+        state.set_query("x".to_string(), Vec::new());
+        assert_eq!(state.active_index(), None);
+    }
 }

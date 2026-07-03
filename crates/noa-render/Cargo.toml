@@ -12,6 +12,7 @@ wgpu.workspace = true
 bytemuck.workspace = true
 log.workspace = true
 anyhow.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true

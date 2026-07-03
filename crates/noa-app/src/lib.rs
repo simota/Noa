@@ -13,6 +13,7 @@ mod link_open;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 mod mouse;
+mod search_prompt;
 pub mod split_tree;
 pub mod tab_overview;
 mod theme;

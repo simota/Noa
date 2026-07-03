@@ -52,6 +52,11 @@ pub struct FrameSnapshot {
     /// The Cmd+hover underline target, if any. `None` draws no hover
     /// underline at all.
     pub hover_link: Option<HoverLink>,
+    /// The open search-prompt buffer for this pane, if any (Cmd+F). `None`
+    /// draws no prompt overlay at all. Set by the caller (`noa-app`, from
+    /// its own prompt state); `from_terminal` defaults to `None`. The
+    /// overlay's `i/n` counter is derived from `search` alongside this.
+    pub search_prompt: Option<String>,
 }
 
 /// The screen `Terminal` is currently rendering, borrowed mutably so its
@@ -98,6 +103,7 @@ impl FrameSnapshot {
             focused: true,
             cursor_blink_visible: true,
             hover_link: None,
+            search_prompt: None,
         }
     }
 

@@ -375,6 +375,7 @@ impl Default for KeybindEngine {
             ),
             ("cmd+-", AppCommand::FontSize(FontSizeAction::Decrease)),
             ("cmd+0", AppCommand::FontSize(FontSizeAction::Reset)),
+            ("cmd+f", AppCommand::Search(SearchAction::Find)),
             ("cmd+g", AppCommand::Search(SearchAction::FindNext)),
             (
                 "cmd+shift+g",
@@ -714,7 +715,10 @@ mod tests {
             AppCommand::from_cmd_character("0"),
             Some(AppCommand::FontSize(FontSizeAction::Reset))
         );
-        assert_eq!(AppCommand::from_cmd_character("f"), None);
+        assert_eq!(
+            AppCommand::from_cmd_character("f"),
+            Some(AppCommand::Search(SearchAction::Find))
+        );
         assert_eq!(
             AppCommand::from_cmd_character("g"),
             Some(AppCommand::Search(SearchAction::FindNext))
@@ -730,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn find_action_stays_addressable_but_unbound_until_prompt_exists() {
+    fn find_action_is_addressable_and_bound_to_cmd_f() {
         let command = AppCommand::Search(SearchAction::Find);
 
         assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
@@ -740,8 +744,10 @@ mod tests {
         );
         assert_eq!(
             AppCommand::from_key(&Key::Character("f".into()), ModifiersState::SUPER),
-            None
+            Some(command)
         );
+        // cmd+shift+f is deliberately unbound (reserved, e.g. for a future
+        // "find and replace" or case-sensitive toggle).
         assert_eq!(
             AppCommand::from_key(
                 &Key::Character("F".into()),

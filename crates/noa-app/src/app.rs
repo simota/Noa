@@ -22,9 +22,9 @@ use noa_render::{
 use noa_vt::Stream;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
-use winit::keyboard::ModifiersState;
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{WindowAttributesExtMacOS, WindowExtMacOS};
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
@@ -35,6 +35,7 @@ use crate::events::UserEvent;
 use crate::input;
 use crate::link_open;
 use crate::mouse::{self, MouseSelectionState, SelectionGesture};
+use crate::search_prompt::{SearchPrompt, SearchPromptEffect};
 use crate::split_tree::{
     self, Direction, HitTarget, ImeOp, MIN_PANE_SIZE_PX, PaneId, Rect as PaneRectApp,
     SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitResizeDrag, SplitTree, equalize,
@@ -184,6 +185,17 @@ struct OverviewTileRenderState {
     last_render_at: Option<Instant>,
 }
 
+/// An open search prompt (Cmd+F), scoped to the window/pane it was opened
+/// for. Only one can be open at a time app-wide (opening a second one is a
+/// no-op — see `App::handle_search_action`'s `SearchAction::Find` arm); the
+/// `KeyboardInput` handler routes every keystroke in `window_id` here
+/// instead of the normal keybind-resolve/pty-encode path while it is open.
+struct SearchPromptSession {
+    window_id: WindowId,
+    pane_id: PaneId,
+    prompt: SearchPrompt,
+}
+
 /// Terminal-owned state for one split leaf. `split_tree` leaves store the
 /// `PaneId`; this map owns the corresponding live surface payload.
 struct Surface {
@@ -269,6 +281,8 @@ pub struct App {
     /// mouse moves to a different pane/window (or off any pane) without
     /// having to scan every surface.
     hovered_link: Option<(WindowId, PaneId)>,
+    /// The open search prompt (Cmd+F), if any — see [`SearchPromptSession`].
+    search_prompt: Option<SearchPromptSession>,
 }
 
 impl App {
@@ -294,6 +308,7 @@ impl App {
             cursor_blink_visible: true,
             cursor_blink_deadline: None,
             hovered_link: None,
+            search_prompt: None,
         }
     }
 
@@ -381,6 +396,11 @@ impl App {
             snapshot.focused = pane_id == state.focused_pane && self.focused == Some(window_id);
             snapshot.cursor_blink_visible = self.cursor_blink_visible;
             snapshot.hover_link = surface.hover_link;
+            snapshot.search_prompt = self
+                .search_prompt
+                .as_ref()
+                .filter(|session| session.window_id == window_id && session.pane_id == pane_id)
+                .map(|session| session.prompt.buffer().to_string());
             snapshots.push((pane_id, surface.rect, snapshot));
         }
         if state.title != title {
@@ -821,6 +841,17 @@ impl App {
         }
         self.window_order.retain(|id| *id != window_id);
         self.overview_tiles.remove(&window_id);
+        // A prompt targeting the closed window would otherwise linger
+        // forever: its window can no longer deliver keys (so not even
+        // Escape reaches it) and the open-guard would block every future
+        // cmd+f app-wide.
+        if self
+            .search_prompt
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.search_prompt = None;
+        }
 
         match outcome {
             TabCloseOutcome::Stale => {}
@@ -882,33 +913,42 @@ impl App {
         }
 
         let mut tab_should_close = false;
-        let window = {
-            let Some(state) = self.windows.get_mut(&window_id) else {
-                return;
-            };
-            if !state.contains_pane(pane_id) {
-                return;
-            }
+        let window =
+            {
+                let Some(state) = self.windows.get_mut(&window_id) else {
+                    return;
+                };
+                if !state.contains_pane(pane_id) {
+                    return;
+                }
 
-            if let Some(mut surface) = state.surfaces.remove(&pane_id) {
-                surface.shutdown();
-            }
-            let outcome =
-                split_tree::close_pane_with_zoom(&mut state.split_tree, pane_id, state.zoomed);
-            state.zoomed = outcome.zoomed;
-            if outcome.close_outcome.tab_should_close {
-                tab_should_close = true;
-            } else {
-                state.focused_pane = outcome
-                    .close_outcome
-                    .next_focus
-                    .filter(|pane| state.contains_pane(*pane))
-                    .or_else(|| state.surfaces.keys().copied().next())
-                    .unwrap_or(state.focused_pane);
-                state.last_mouse_pane = Some(state.focused_pane);
-            }
-            state.window.clone()
-        };
+                if let Some(mut surface) = state.surfaces.remove(&pane_id) {
+                    surface.shutdown();
+                }
+                if self.search_prompt.as_ref().is_some_and(|session| {
+                    session.window_id == window_id && session.pane_id == pane_id
+                }) {
+                    // The prompt's target pane is gone; keeping the session
+                    // would leave a modal prompt bound to a dead pane and
+                    // block every future cmd+f behind the open-guard.
+                    self.search_prompt = None;
+                }
+                let outcome =
+                    split_tree::close_pane_with_zoom(&mut state.split_tree, pane_id, state.zoomed);
+                state.zoomed = outcome.zoomed;
+                if outcome.close_outcome.tab_should_close {
+                    tab_should_close = true;
+                } else {
+                    state.focused_pane = outcome
+                        .close_outcome
+                        .next_focus
+                        .filter(|pane| state.contains_pane(*pane))
+                        .or_else(|| state.surfaces.keys().copied().next())
+                        .unwrap_or(state.focused_pane);
+                    state.last_mouse_pane = Some(state.focused_pane);
+                }
+                state.window.clone()
+            };
 
         if tab_should_close {
             self.close_tab(event_loop, window_id);
@@ -1847,6 +1887,14 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     return;
                 }
+                if self
+                    .search_prompt
+                    .as_ref()
+                    .is_some_and(|session| session.window_id == window_id)
+                {
+                    self.handle_search_prompt_key(event_loop, window_id, &event);
+                    return;
+                }
                 if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
                     self.handle_app_command(event_loop, command);
                     return;
@@ -2176,6 +2224,28 @@ impl App {
             .get_mut(&window_id)
             .and_then(|state| state.focused_surface_mut())
             .and_then(|surface| surface.ime_state.handle_event(&event));
+
+        if self
+            .search_prompt
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            // The prompt is modal: a committed IME composition edits its
+            // buffer instead of being written to the pty. `ime_state` above
+            // already observed the event (clearing its preedit flag); the
+            // pty-encoded `bytes` above are simply discarded here.
+            if let Ime::Commit(text) = &event {
+                let effect = self
+                    .search_prompt
+                    .as_mut()
+                    .and_then(|session| session.prompt.push_text(text));
+                if let Some(effect) = effect {
+                    self.apply_search_prompt_effect(window_id, effect);
+                }
+            }
+            return;
+        }
+
         if let (Some(pane_id), Some(bytes)) = (pane_id, bytes) {
             self.write_pane_pty_bytes(window_id, pane_id, &bytes);
         }
@@ -2337,7 +2407,24 @@ impl App {
         let mut terminal = terminal.lock().expect("terminal mutex poisoned");
         match action {
             SearchAction::Find => {
-                log::debug!("search UI command selected before search prompt support exists");
+                // Only one prompt is tracked app-wide; cmd+f while one is
+                // already open (in this pane or another) is a no-op —
+                // the `KeyboardInput` handler routes every other keystroke
+                // to it in the common case (same window), and this guard
+                // covers the cross-window case.
+                if self.search_prompt.is_some() {
+                    return;
+                }
+                let query = terminal.active().search.query().to_string();
+                drop(terminal);
+                self.search_prompt = Some(SearchPromptSession {
+                    window_id,
+                    pane_id,
+                    prompt: SearchPrompt::open(query),
+                });
+                if let Some(state) = self.windows.get(&window_id) {
+                    state.window.request_redraw();
+                }
                 return;
             }
             SearchAction::FindNext => {
@@ -2351,6 +2438,129 @@ impl App {
         drop(terminal);
 
         if let Some(state) = self.windows.get(&window_id) {
+            state.window.request_redraw();
+        }
+    }
+
+    /// Drives the open search prompt's buffer from a keypress instead of
+    /// the normal keybind-resolve -> pty-encode path (the prompt is modal
+    /// while open). `cmd+g`/`cmd+shift+g` still navigate matches without
+    /// closing it; every other keystroke is either consumed by the prompt
+    /// (Escape/Enter/Backspace/printable text) or swallowed outright —
+    /// nothing falls through to the pty while the prompt is open. Only
+    /// called when `self.search_prompt` targets `window_id` (checked by
+    /// the caller).
+    fn handle_search_prompt_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: &KeyEvent,
+    ) {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.close_search_prompt(true);
+                return;
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.close_search_prompt(false);
+                return;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                let effect = self
+                    .search_prompt
+                    .as_mut()
+                    .map(|session| session.prompt.backspace());
+                if let Some(effect) = effect {
+                    self.apply_search_prompt_effect(window_id, effect);
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
+            if matches!(
+                command,
+                AppCommand::Search(SearchAction::FindNext | SearchAction::FindPrevious)
+            ) {
+                self.handle_app_command(event_loop, command);
+            }
+            // Every other resolved command (including a repeated Find) is
+            // swallowed while the modal prompt owns the keyboard.
+            return;
+        }
+
+        // Cmd-held combos with no keybind (e.g. an unbound cmd+<letter>)
+        // must not leak their character into the query, matching the
+        // normal Cmd-swallow convention below the prompt-open branch.
+        if self.modifiers.super_key() {
+            return;
+        }
+        let Some(text) = event.text.as_deref() else {
+            return;
+        };
+        let effect = self
+            .search_prompt
+            .as_mut()
+            .and_then(|session| session.prompt.push_text(text));
+        if let Some(effect) = effect {
+            self.apply_search_prompt_effect(window_id, effect);
+        }
+    }
+
+    /// Apply a [`SearchPromptEffect`] to the prompt's target terminal and
+    /// redraw. No-op if `window_id` no longer matches the open prompt (the
+    /// prompt closed between the keypress and this call).
+    fn apply_search_prompt_effect(&mut self, window_id: WindowId, effect: SearchPromptEffect) {
+        let Some(pane_id) = self
+            .search_prompt
+            .as_ref()
+            .filter(|session| session.window_id == window_id)
+            .map(|session| session.pane_id)
+        else {
+            return;
+        };
+        let Some(terminal) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .map(|surface| surface.terminal.clone())
+        else {
+            return;
+        };
+        {
+            let mut terminal = terminal.lock().expect("terminal mutex poisoned");
+            match effect {
+                SearchPromptEffect::UpdateQuery(query) => terminal.set_search_query(query),
+                SearchPromptEffect::ClearQuery => terminal.clear_search(),
+            }
+        }
+        if let Some(state) = self.windows.get(&window_id) {
+            state.window.request_redraw();
+        }
+    }
+
+    /// Close the open search prompt (no-op if none is open). `clear` also
+    /// clears the underlying terminal search (Escape); committing with
+    /// Enter passes `clear = false` so highlights + the active match
+    /// survive and `cmd+g`/`cmd+shift+g` keep navigating.
+    fn close_search_prompt(&mut self, clear: bool) {
+        let Some(session) = self.search_prompt.take() else {
+            return;
+        };
+        if clear
+            && let Some(terminal) = self
+                .windows
+                .get(&session.window_id)
+                .and_then(|state| state.surfaces.get(&session.pane_id))
+                .map(|surface| surface.terminal.clone())
+        {
+            terminal
+                .lock()
+                .expect("terminal mutex poisoned")
+                .clear_search();
+        }
+        if let Some(state) = self.windows.get(&session.window_id) {
             state.window.request_redraw();
         }
     }

@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use noa_core::{CellAttrs, CellSize, Color, GridPadding, PixelSize};
 use noa_font::{FontGrid, Metrics, ShapedGlyph};
 use noa_grid::{Cell, CursorStyle, Row, SearchState, Selection, TerminalColors};
+use unicode_width::UnicodeWidthChar;
 
 use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
@@ -693,6 +694,7 @@ fn rebuild_cell_instances(
 
     instances.clear();
     flatten_row_segments(instances, &bg_rows, &glyph_rows, &deco_rows);
+    append_search_prompt_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
 
     (clear_color, (metrics.cell_w, metrics.cell_h))
 }
@@ -996,11 +998,135 @@ fn rebuild_pane_cached(
     }
 
     flatten_row_segments(instances, &cache.bg, &cache.glyph, &cache.deco);
+    append_search_prompt_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
 
     cache.key = Some(new_key);
     cache.prev_cursor = Some(new_cursor);
 
     (clear_color, cell_size, rows_rebuilt)
+}
+
+/// Append the open search-prompt overlay (Cmd+F), if any, to `instances`.
+/// Deliberately NOT part of [`PaneRenderCache`]'s per-row cache — it is
+/// recomputed fresh on every call so a buffer edit always repaints (the
+/// per-row cache is keyed on grid content/highlight state, which a prompt
+/// keystroke never touches). Appended after every other pane instance so it
+/// draws on top of the pane's normal content, one row tall, right-aligned
+/// to `snap.cols` at row 0 (REQ: top-right of the focused pane).
+fn append_search_prompt_instances(
+    instances: &mut Vec<CellInstance>,
+    snap: &FrameSnapshot,
+    font: &mut FontGrid,
+    theme: &Theme,
+    target_format_is_srgb: bool,
+    metrics: Metrics,
+) {
+    let Some(buffer) = snap.search_prompt.as_deref() else {
+        return;
+    };
+    let cols = snap.cols;
+    if cols == 0 {
+        return;
+    }
+
+    let text = search_prompt_display_text(buffer, &snap.search, cols);
+    let text_color = to_u8_color(surface_output_rgba(
+        theme.active_search_fg(),
+        target_format_is_srgb,
+    ));
+    let mut cells = search_prompt_segment_cells(&text, text_color);
+    // Second safety clamp: char-level truncation above can still overflow
+    // the column count once double-width glyphs expand into a trailing
+    // spacer cell. Drop from the front so the TAIL (the query text and the
+    // i/n counter) stays visible, matching the buffer-clamp behavior above.
+    if cells.len() > cols as usize {
+        let excess = cells.len() - cols as usize;
+        cells.drain(0..excess);
+    }
+    let x_start = cols - cells.len() as u16;
+
+    let bg_color = to_u8_color(surface_output_rgba(
+        theme.active_search_bg(),
+        target_format_is_srgb,
+    ));
+    for i in 0..cells.len() as u16 {
+        instances.push(CellInstance {
+            glyph_pos: [0, 0],
+            glyph_size: [0, 0],
+            bearing: [0, 0],
+            grid_pos: [x_start + i, 0],
+            color: bg_color,
+            flags: 0,
+        });
+    }
+
+    for mut run in segment_row(font, &cells) {
+        run.start_col += x_start;
+        let shaped = font.shape_run(&run.cells);
+        emit_run_glyph_instances(instances, font, &run, &shaped, 0, metrics);
+    }
+}
+
+/// Compose the prompt's display text: `Find: {buffer}▏ {i}/{n}`. `i`/`n`
+/// come from `search` (1-based active index / total match count, `0/0`
+/// when there is no active match). Clamps to `cols` by keeping the TAIL of
+/// a buffer too long to fit alongside the fixed prefix/counter.
+fn search_prompt_display_text(buffer: &str, search: &SearchState, cols: u16) -> String {
+    const PREFIX: &str = "Find: ";
+    const CURSOR_MARK: &str = "\u{258F}"; // "▏" left one eighth block, reads as a thin caret.
+    let total = search.matches().len();
+    let current = search.active_index().map_or(0, |idx| idx + 1);
+    let suffix = format!(" {current}/{total}");
+
+    let fixed_chars = PREFIX.chars().count() + CURSOR_MARK.chars().count() + suffix.chars().count();
+    let available = (cols as usize).saturating_sub(fixed_chars);
+    let buffer_chars: Vec<char> = buffer.chars().collect();
+    let shown: String = if buffer_chars.len() > available {
+        buffer_chars[buffer_chars.len() - available..]
+            .iter()
+            .collect()
+    } else {
+        buffer.to_string()
+    };
+
+    format!("{PREFIX}{shown}{CURSOR_MARK}{suffix}")
+}
+
+/// Turn the prompt's display text into row-local [`SegmentCell`]s, one per
+/// column — a double-width character gets a lead cell plus a blank spacer
+/// cell (mirroring `noa_grid::Screen`'s WIDE/WIDE_SPACER print path), and a
+/// zero-width combining mark attaches to the previous cell instead of
+/// consuming its own column.
+fn search_prompt_segment_cells(text: &str, color: [u8; 4]) -> Vec<SegmentCell> {
+    let blank = |color: [u8; 4]| SegmentCell {
+        ch: ' ',
+        combining: Vec::new(),
+        bold: false,
+        italic: false,
+        selected: false,
+        active_search: false,
+        search_match: false,
+        cursor: false,
+        color,
+    };
+
+    let mut cells = Vec::new();
+    for ch in text.chars() {
+        match UnicodeWidthChar::width(ch).unwrap_or(0) {
+            0 => {
+                if let Some(last) = cells.last_mut() {
+                    let last: &mut SegmentCell = last;
+                    last.combining.push(ch);
+                }
+            }
+            2 => {
+                cells.push(SegmentCell { ch, ..blank(color) });
+                cells.push(blank(color));
+            }
+            _ => cells.push(SegmentCell { ch, ..blank(color) }),
+        }
+    }
+    cells
 }
 
 /// Emit one `CellInstance` per shaped glyph in `shaped` (FM-04 structural
@@ -2243,6 +2369,104 @@ mod tests {
     }
 
     #[test]
+    fn search_prompt_display_text_keeps_the_tail_of_a_buffer_too_long_to_fit() {
+        let search = SearchState::default();
+
+        // cols=20, fixed chars ("Find: " + "▏" + " 0/0") = 11, so 9 chars of
+        // buffer fit; the last 9 of "0123456789" is "123456789".
+        let text = search_prompt_display_text("0123456789", &search, 20);
+        assert_eq!(text, "Find: 123456789\u{258F} 0/0");
+        assert_eq!(text.chars().count(), 20);
+
+        let short = search_prompt_display_text("hi", &search, 20);
+        assert_eq!(
+            short, "Find: hi\u{258F} 0/0",
+            "a short buffer is shown in full"
+        );
+    }
+
+    #[test]
+    fn search_prompt_overlay_emits_top_right_bg_and_glyph_instances_and_tracks_the_buffer() {
+        let Some(mut font) = font_with_rasterized_m() else {
+            return;
+        };
+
+        let mut terminal = Terminal::new(GridSize::new(20, 2));
+        let theme = Theme::new();
+
+        let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+        assert_eq!(
+            snap.search_prompt, None,
+            "from_terminal defaults to no prompt"
+        );
+
+        let mut without_prompt = Vec::new();
+        rebuild_cell_instances(&mut without_prompt, &snap, &mut font, &theme, false);
+        let row0_bg_before = without_prompt
+            .iter()
+            .filter(|i| i.grid_pos[1] == 0 && i.flags == 0)
+            .count();
+
+        snap.search_prompt = Some("M".to_string());
+        let mut with_prompt = Vec::new();
+        rebuild_cell_instances(&mut with_prompt, &snap, &mut font, &theme, false);
+
+        let prompt_bg: Vec<_> = with_prompt
+            .iter()
+            .filter(|i| i.grid_pos[1] == 0 && i.flags == 0)
+            .collect();
+        assert!(
+            prompt_bg.len() > row0_bg_before,
+            "opening the prompt must add background quads to row 0"
+        );
+        assert!(
+            prompt_bg
+                .iter()
+                .all(|i| i.grid_pos[0] >= snap.cols - prompt_bg.len() as u16),
+            "the prompt is right-aligned to the pane's rightmost columns: {prompt_bg:?}"
+        );
+
+        let glyphs: Vec<_> = with_prompt
+            .iter()
+            .filter(|i| i.grid_pos[1] == 0 && i.flags & CellInstance::FLAG_GLYPH != 0)
+            .collect();
+        assert!(
+            !glyphs.is_empty(),
+            "the prompt text must emit glyph instances"
+        );
+
+        // A buffer edit must always repaint — this overlay is deliberately
+        // NOT part of the per-row cache, so a longer buffer widens it on
+        // the very next rebuild.
+        snap.search_prompt = Some("Mxyz".to_string());
+        let mut with_longer_prompt = Vec::new();
+        rebuild_cell_instances(&mut with_longer_prompt, &snap, &mut font, &theme, false);
+        let longer_bg = with_longer_prompt
+            .iter()
+            .filter(|i| i.grid_pos[1] == 0 && i.flags == 0)
+            .count();
+        assert!(
+            longer_bg > prompt_bg.len(),
+            "a longer buffer must widen the overlay ({longer_bg} vs {})",
+            prompt_bg.len()
+        );
+
+        // Closing the prompt (search_prompt back to None) must remove the
+        // overlay instances on the very next rebuild too.
+        snap.search_prompt = None;
+        let mut closed = Vec::new();
+        rebuild_cell_instances(&mut closed, &snap, &mut font, &theme, false);
+        let closed_bg = closed
+            .iter()
+            .filter(|i| i.grid_pos[1] == 0 && i.flags == 0)
+            .count();
+        assert_eq!(
+            closed_bg, row0_bg_before,
+            "closing the prompt removes the overlay"
+        );
+    }
+
+    #[test]
     fn srgb_surface_output_converts_theme_colors_to_linear() {
         let srgb = [30.0 / 255.0, 30.0 / 255.0, 30.0 / 255.0, 1.0];
 
@@ -2494,6 +2718,7 @@ mod tests {
             focused: true,
             cursor_blink_visible: true,
             hover_link: None,
+            search_prompt: None,
         }
     }
 

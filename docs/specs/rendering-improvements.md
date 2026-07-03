@@ -589,7 +589,8 @@ Bidirectional REQ ↔ AC. Every REQ has ≥1 AC; every AC traces to ≥1 REQ.
 | REQ-NF-4 | AC-NF-01, AC-WP1-03, AC-WP4-03 | Must |
 
 **Coverage: 23/23 requirements traced to ≥1 AC = 100%.** (Full-scope
-minimum ≥95%.) 18 ACs total; every AC names its source REQ.
+minimum ≥95%.) 21 ACs total (18 must-have / 3 nice-to-have); every AC
+names its source REQ.
 
 ## Failure Conditions / Rollback
 

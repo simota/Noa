@@ -650,10 +650,12 @@ mod tests {
     /// synthesis per style, including disabling it (`no-bold`).
     #[test]
     fn synthetic_style_decision_respects_config_toggle_per_style() {
-        let mut cfg = FontConfig::default();
-        cfg.synthetic_style = SyntheticStyle {
-            bold: true,
-            italic: false,
+        let mut cfg = FontConfig {
+            synthetic_style: SyntheticStyle {
+                bold: true,
+                italic: false,
+            },
+            ..Default::default()
         };
 
         assert_eq!(

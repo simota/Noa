@@ -36,6 +36,11 @@ use crate::split_tree::{
     focus_in_direction, focus_switch_plan, hit_test, resize_split, resize_split_to_drag_point,
     split_pane, split_resize_drag_target_at_point, zoom_resize_targets, zoom_toggle,
 };
+use crate::tab_overview::{
+    OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_TILE_MIN_RENDER_INTERVAL,
+    OverviewRenderCandidate, compute_overview_grid, hit_test_overview_grid, overview_tile_labels,
+    select_due_overview_tile_ids,
+};
 use crate::{AppCommand, ViewportScroll};
 
 /// Configuration the binary passes into [`crate::run`].
@@ -142,6 +147,20 @@ struct WindowState {
     title: String,
 }
 
+/// State for the dedicated overview window. It deliberately is not part of
+/// `windows`/`window_order`, which are terminal-tab collections.
+struct OverviewWindowState {
+    window: Arc<Window>,
+    occluded: bool,
+    last_cursor_point: Option<split_tree::Point>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct OverviewTileRenderState {
+    dirty: bool,
+    last_render_at: Option<Instant>,
+}
+
 /// Terminal-owned state for one split leaf. `split_tree` leaves store the
 /// `PaneId`; this map owns the corresponding live surface payload.
 struct Surface {
@@ -194,6 +213,8 @@ pub struct App {
     gpu: Option<GpuState>,
     windows: HashMap<WindowId, WindowState>,
     window_order: Vec<WindowId>,
+    overview_window: Option<OverviewWindowState>,
+    overview_tiles: HashMap<WindowId, OverviewTileRenderState>,
     focused: Option<WindowId>,
     #[cfg(target_os = "macos")]
     macos_menu: Option<crate::macos_menu::MacosMenu>,
@@ -202,6 +223,7 @@ pub struct App {
     modifiers: ModifiersState,
     clipboard: SystemClipboard,
     keybinds: KeybindEngine,
+    overview_visible: bool,
 }
 
 impl App {
@@ -213,6 +235,8 @@ impl App {
             gpu: None,
             windows: HashMap::new(),
             window_order: Vec::new(),
+            overview_window: None,
+            overview_tiles: HashMap::new(),
             focused: None,
             #[cfg(target_os = "macos")]
             macos_menu: None,
@@ -221,6 +245,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             clipboard: SystemClipboard::new(),
             keybinds: KeybindEngine::default(),
+            overview_visible: false,
         }
     }
 
@@ -366,6 +391,9 @@ impl App {
     }
 
     fn handle_app_command(&mut self, event_loop: &ActiveEventLoop, command: AppCommand) {
+        if self.overview_visible && overview_command_scope(command) == CommandScope::Overview {
+            return;
+        }
         match command {
             AppCommand::About => {
                 log::info!("About noa selected");
@@ -406,6 +434,7 @@ impl App {
                     self.toggle_split_zoom(window_id);
                 }
             }
+            AppCommand::ToggleTabOverview => self.toggle_tab_overview(event_loop),
             AppCommand::CloseTab => {
                 if let Some(window_id) = self.focused {
                     self.close_focused_pane_or_tab(event_loop, window_id);
@@ -586,8 +615,10 @@ impl App {
             },
         );
         self.window_order.push(window_id);
+        self.mark_overview_tile_dirty(window_id);
         self.focused = Some(window_id);
         window.focus_window();
+        self.request_overview_redraw();
         Ok(window_id)
     }
 
@@ -603,6 +634,12 @@ impl App {
         {
             attrs
         }
+    }
+
+    fn overview_window_attributes(&self) -> WindowAttributes {
+        WindowAttributes::default()
+            .with_title("Tab Overview")
+            .with_inner_size(LogicalSize::new(900.0, 600.0))
     }
 
     fn spawn_pane_surface(
@@ -654,7 +691,12 @@ impl App {
     }
 
     fn close_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
-        let outcome = close_tab_outcome(&self.window_order, self.focused, window_id);
+        let outcome = close_tab_outcome(
+            &self.window_order,
+            self.focused,
+            window_id,
+            self.overview_visible,
+        );
         if outcome == TabCloseOutcome::Stale {
             return;
         }
@@ -663,6 +705,7 @@ impl App {
             state.shutdown();
         }
         self.window_order.retain(|id| *id != window_id);
+        self.overview_tiles.remove(&window_id);
 
         match outcome {
             TabCloseOutcome::Stale => {}
@@ -674,7 +717,10 @@ impl App {
                 self.focused = focused;
                 if let Some(window) = self.focused_window() {
                     window.focus_window();
+                } else if self.overview_visible {
+                    self.focus_overview_window();
                 }
+                self.request_overview_redraw();
             }
         }
     }
@@ -988,13 +1034,268 @@ impl App {
             log::debug!("failed to show macOS split context menu: {error:#}");
         }
     }
+
+    fn toggle_tab_overview(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(next_visible) = tab_overview_visibility_after_dispatch(
+            AppCommand::ToggleTabOverview,
+            self.overview_visible,
+        ) {
+            if next_visible {
+                self.show_tab_overview(event_loop);
+            } else {
+                self.hide_tab_overview();
+            }
+        }
+    }
+
+    fn show_tab_overview(&mut self, event_loop: &ActiveEventLoop) {
+        if self.overview_window.is_none() {
+            let window = Arc::new(
+                event_loop
+                    .create_window(self.overview_window_attributes())
+                    .expect("failed to create Tab Overview window"),
+            );
+            window.set_ime_allowed(false);
+            self.overview_window = Some(OverviewWindowState {
+                window,
+                occluded: false,
+                last_cursor_point: None,
+            });
+        }
+
+        self.overview_visible = true;
+        self.mark_all_overview_tiles_dirty();
+        if let Some(overview) = self.overview_window.as_ref() {
+            overview.window.set_visible(true);
+            overview.window.focus_window();
+            overview.window.request_redraw();
+        }
+    }
+
+    fn hide_tab_overview(&mut self) {
+        self.overview_visible = false;
+        if let Some(overview) = self.overview_window.as_ref() {
+            overview.window.set_visible(false);
+        }
+    }
+
+    fn focus_overview_window(&self) {
+        if let Some(overview) = self.overview_window.as_ref() {
+            overview.window.focus_window();
+        }
+    }
+
+    fn is_overview_window(&self, window_id: WindowId) -> bool {
+        self.overview_window
+            .as_ref()
+            .is_some_and(|overview| overview.window.id() == window_id)
+    }
+
+    fn request_overview_redraw(&self) {
+        let Some(overview) = self.overview_window.as_ref() else {
+            return;
+        };
+        if self.overview_visible && !overview.occluded {
+            overview.window.request_redraw();
+        }
+    }
+
+    fn overview_window_occluded(&self) -> bool {
+        self.overview_window
+            .as_ref()
+            .is_none_or(|overview| overview.occluded)
+    }
+
+    fn mark_overview_tile_dirty(&mut self, window_id: WindowId) {
+        self.overview_tiles.entry(window_id).or_default().dirty = true;
+    }
+
+    fn mark_all_overview_tiles_dirty(&mut self) {
+        for window_id in self.overview_source_window_ids() {
+            self.mark_overview_tile_dirty(window_id);
+        }
+    }
+
+    fn overview_redraw_decision_for_pane(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) -> TargetedRedrawDecision {
+        overview_redraw_decision(
+            self.windows
+                .get(&window_id)
+                .map(|state| (state.contains_pane(pane_id), state.occluded)),
+            self.overview_visible,
+            self.overview_window_occluded(),
+        )
+    }
+
+    fn due_overview_tile_ids(&self, source_window_ids: &[WindowId], now: Instant) -> Vec<WindowId> {
+        let candidates = source_window_ids
+            .iter()
+            .filter_map(|window_id| {
+                let source = self.windows.get(window_id)?;
+                let tile = self
+                    .overview_tiles
+                    .get(window_id)
+                    .copied()
+                    .unwrap_or_default();
+                Some(OverviewRenderCandidate {
+                    id: *window_id,
+                    dirty: tile.dirty,
+                    last_render_at: tile.last_render_at,
+                    occluded: source.occluded,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        select_due_overview_tile_ids(
+            &candidates,
+            now,
+            OVERVIEW_TILE_MIN_RENDER_INTERVAL,
+            OVERVIEW_MAX_RENDER_TILES_PER_FRAME,
+        )
+    }
+
+    fn lock_due_overview_tabs(&self, window_ids: &[WindowId]) -> usize {
+        let mut locked_tabs = 0;
+        for window_id in window_ids {
+            let Some(surface) = self
+                .windows
+                .get(window_id)
+                .and_then(WindowState::focused_surface)
+            else {
+                continue;
+            };
+            let mut term = surface.terminal.lock().expect("terminal mutex poisoned");
+            let _snapshot = FrameSnapshot::from_terminal(&mut term);
+            locked_tabs += 1;
+        }
+        locked_tabs
+    }
+
+    fn finish_overview_tile_renders(&mut self, window_ids: &[WindowId], now: Instant) {
+        for window_id in window_ids {
+            let tile = self.overview_tiles.entry(*window_id).or_default();
+            tile.dirty = false;
+            tile.last_render_at = Some(now);
+        }
+    }
+
+    fn overview_source_window_ids(&self) -> Vec<WindowId> {
+        overview_tile_source_order(
+            &self.window_order,
+            |id| self.windows.contains_key(&id),
+            None,
+        )
+    }
+
+    fn redraw_overview(&mut self) {
+        let Some(overview) = self.overview_window.as_ref() else {
+            return;
+        };
+        if !self.overview_visible || overview.occluded {
+            return;
+        }
+
+        let bounds = pane_bounds_for_size(overview.window.inner_size());
+        let source_window_ids = self.overview_source_window_ids();
+        let _layout = compute_overview_grid(source_window_ids.len(), bounds, OVERVIEW_GRID_CAP);
+        let _labels = overview_tile_labels(&source_window_ids, |id| {
+            self.windows.get(&id).map(|state| state.title.clone())
+        });
+        let now = Instant::now();
+        let due_window_ids = self.due_overview_tile_ids(&source_window_ids, now);
+        let _lock_count = self.lock_due_overview_tabs(&due_window_ids);
+        self.finish_overview_tile_renders(&due_window_ids, now);
+    }
+
+    fn focus_overview_tile_at_last_cursor(&mut self) {
+        let Some(overview) = self.overview_window.as_ref() else {
+            return;
+        };
+        let Some(point) = overview.last_cursor_point else {
+            return;
+        };
+
+        let bounds = pane_bounds_for_size(overview.window.inner_size());
+        let source_window_ids = self.overview_source_window_ids();
+        let layout = compute_overview_grid(source_window_ids.len(), bounds, OVERVIEW_GRID_CAP);
+        let Some(target) = overview_tile_target_at_point(&source_window_ids, &layout.tiles, point)
+        else {
+            return;
+        };
+        self.focus_tab_from_overview(target);
+    }
+
+    fn focus_tab_from_overview(&mut self, window_id: WindowId) {
+        let Some(window) = self
+            .windows
+            .get(&window_id)
+            .map(|state| state.window.clone())
+        else {
+            return;
+        };
+        self.focused = Some(window_id);
+        window.focus_window();
+    }
+
+    fn overview_window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        if !self.is_overview_window(window_id) {
+            return;
+        }
+
+        match event {
+            WindowEvent::CloseRequested => self.hide_tab_overview(),
+            WindowEvent::RedrawRequested => self.redraw_overview(),
+            WindowEvent::CursorMoved { position, .. } => {
+                let point = split_point_from_physical_position(position);
+                if let Some(overview) = self.overview_window.as_mut() {
+                    overview.last_cursor_point = point;
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button == MouseButton::Left && state == ElementState::Pressed {
+                    self.focus_overview_tile_at_last_cursor();
+                }
+            }
+            WindowEvent::Occluded(occluded) => {
+                if let Some(overview) = self.overview_window.as_mut() {
+                    overview.occluded = occluded;
+                    if !occluded && self.overview_visible {
+                        overview.window.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state != ElementState::Pressed {
+                    return;
+                }
+                if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
+                    self.handle_app_command(event_loop, command);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Drop for App {
     fn drop(&mut self) {
+        self.overview_window.take();
         for state in self.windows.values_mut() {
             state.shutdown();
         }
+        self.windows.clear();
+        self.window_order.clear();
+        self.focused = None;
+        self.gpu.take();
     }
 }
 
@@ -1024,18 +1325,26 @@ impl ApplicationHandler<UserEvent> for App {
                     log::warn!("failed to write OSC 52 clipboard text: {err}");
                 }
             }
-            UserEvent::Redraw(window_id, pane_id) => match pane_user_event_redraw_decision(
-                self.windows
+            UserEvent::Redraw(window_id, pane_id) => {
+                let pane_state = self
+                    .windows
                     .get(&window_id)
-                    .map(|state| (state.contains_pane(pane_id), state.occluded)),
-            ) {
-                TargetedRedrawDecision::Request => {
-                    if let Some(state) = self.windows.get(&window_id) {
-                        state.window.request_redraw();
-                    }
+                    .map(|state| (state.contains_pane(pane_id), state.occluded));
+                if pane_state.is_some_and(|(pane_exists, _)| pane_exists) {
+                    self.mark_overview_tile_dirty(window_id);
                 }
-                TargetedRedrawDecision::Stale | TargetedRedrawDecision::Suppress => {}
-            },
+                let pane_decision = pane_user_event_redraw_decision(pane_state);
+                let overview_decision = self.overview_redraw_decision_for_pane(window_id, pane_id);
+
+                if pane_decision == TargetedRedrawDecision::Request
+                    && let Some(state) = self.windows.get(&window_id)
+                {
+                    state.window.request_redraw();
+                }
+                if overview_decision == TargetedRedrawDecision::Request {
+                    self.request_overview_redraw();
+                }
+            }
             UserEvent::PtyExit(window_id, pane_id) => {
                 self.close_pane_after_pty_exit(event_loop, window_id, pane_id)
             }
@@ -1048,6 +1357,10 @@ impl ApplicationHandler<UserEvent> for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.is_overview_window(window_id) {
+            self.overview_window_event(event_loop, window_id, event);
+            return;
+        }
         if !self.windows.contains_key(&window_id) {
             return;
         }
@@ -1096,6 +1409,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
                     self.handle_app_command(event_loop, command);
+                    return;
+                }
+                if self.overview_visible {
                     return;
                 }
                 // Cmd-based combos are app shortcuts, not shell input. Unknown
@@ -2062,11 +2378,15 @@ fn close_tab_outcome<Id: Copy + Eq>(
     order: &[Id],
     focused: Option<Id>,
     closing: Id,
+    keep_alive_when_empty: bool,
 ) -> TabCloseOutcome<Id> {
     let Some(closing_index) = order.iter().position(|id| *id == closing) else {
         return TabCloseOutcome::Stale;
     };
     if order.len() == 1 {
+        if keep_alive_when_empty {
+            return TabCloseOutcome::Continue { focused: None };
+        }
         return TabCloseOutcome::Quit;
     }
 
@@ -2086,6 +2406,31 @@ fn close_tab_outcome<Id: Copy + Eq>(
     TabCloseOutcome::Continue {
         focused: next_focus.or_else(|| order.iter().copied().find(|id| *id != closing)),
     }
+}
+
+fn overview_tile_source_order<Id: Copy + Eq>(
+    window_order: &[Id],
+    mut live_window: impl FnMut(Id) -> bool,
+    overview_window: Option<Id>,
+) -> Vec<Id> {
+    window_order
+        .iter()
+        .copied()
+        .filter(|id| Some(*id) != overview_window && live_window(*id))
+        .collect()
+}
+
+fn overview_tile_target_at_point<Id: Copy>(
+    source_ids: &[Id],
+    tile_rects: &[PaneRectApp],
+    point: split_tree::Point,
+) -> Option<Id> {
+    let tiles = source_ids
+        .iter()
+        .copied()
+        .zip(tile_rects.iter().copied())
+        .collect::<Vec<_>>();
+    hit_test_overview_grid(&tiles, point)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2112,11 +2457,29 @@ fn pane_user_event_redraw_decision(pane_state: Option<(bool, bool)>) -> Targeted
     targeted_redraw_decision(pane_exists, occluded)
 }
 
+fn overview_redraw_decision(
+    source_state: Option<(bool, bool)>,
+    overview_visible: bool,
+    overview_occluded: bool,
+) -> TargetedRedrawDecision {
+    let Some((source_exists, source_occluded)) = source_state else {
+        return TargetedRedrawDecision::Stale;
+    };
+    if !overview_visible || !source_exists {
+        TargetedRedrawDecision::Stale
+    } else if overview_occluded || source_occluded {
+        TargetedRedrawDecision::Suppress
+    } else {
+        TargetedRedrawDecision::Request
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandScope {
     App,
     FocusedTab,
     NativeTabGroup,
+    Overview,
 }
 
 fn command_scope(command: AppCommand) -> CommandScope {
@@ -2134,9 +2497,10 @@ fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::EqualizeSplits
         | AppCommand::ToggleSplitZoom
         | AppCommand::CloseTab => CommandScope::FocusedTab,
-        AppCommand::SelectTab(_) | AppCommand::NextTab | AppCommand::PrevTab => {
-            CommandScope::NativeTabGroup
-        }
+        AppCommand::ToggleTabOverview
+        | AppCommand::SelectTab(_)
+        | AppCommand::NextTab
+        | AppCommand::PrevTab => CommandScope::NativeTabGroup,
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::NewTab
@@ -2145,11 +2509,46 @@ fn command_scope(command: AppCommand) -> CommandScope {
     }
 }
 
+fn overview_command_scope(command: AppCommand) -> CommandScope {
+    match command {
+        AppCommand::ToggleTabOverview => CommandScope::NativeTabGroup,
+        AppCommand::About | AppCommand::Preferences | AppCommand::Quit => CommandScope::App,
+        AppCommand::Copy
+        | AppCommand::Paste
+        | AppCommand::Terminal(_)
+        | AppCommand::FontSize(_)
+        | AppCommand::Search(_)
+        | AppCommand::ScrollViewport(_)
+        | AppCommand::NewTab
+        | AppCommand::NewSplitRight
+        | AppCommand::NewSplitDown
+        | AppCommand::FocusDirection(_)
+        | AppCommand::ResizeSplit(_)
+        | AppCommand::EqualizeSplits
+        | AppCommand::ToggleSplitZoom
+        | AppCommand::CloseTab
+        | AppCommand::SelectTab(_)
+        | AppCommand::NextTab
+        | AppCommand::PrevTab
+        | AppCommand::CloseWindow => CommandScope::Overview,
+    }
+}
+
 fn resolve_command_target<Id: Copy>(command: AppCommand, focused: Option<Id>) -> Option<Id> {
     if command_scope(command) == CommandScope::FocusedTab {
         focused
     } else {
         None
+    }
+}
+
+fn tab_overview_visibility_after_dispatch(
+    command: AppCommand,
+    overview_visible: bool,
+) -> Option<bool> {
+    match command {
+        AppCommand::ToggleTabOverview => Some(!overview_visible),
+        _ => None,
     }
 }
 
@@ -2617,21 +3016,61 @@ mod tests {
     #[test]
     fn close_tab_outcome_is_unambiguous() {
         assert_eq!(
-            close_tab_outcome(&[1, 2, 3], Some(2), 9),
+            close_tab_outcome(&[1, 2, 3], Some(2), 9, false),
             TabCloseOutcome::Stale
         );
-        assert_eq!(close_tab_outcome(&[1], Some(1), 1), TabCloseOutcome::Quit);
         assert_eq!(
-            close_tab_outcome(&[1, 2, 3], Some(2), 2),
+            close_tab_outcome(&[1], Some(1), 1, false),
+            TabCloseOutcome::Quit
+        );
+        assert_eq!(
+            close_tab_outcome(&[1], Some(1), 1, true),
+            TabCloseOutcome::Continue { focused: None }
+        );
+        assert_eq!(
+            close_tab_outcome(&[1, 2, 3], Some(2), 2, false),
             TabCloseOutcome::Continue { focused: Some(3) }
         );
         assert_eq!(
-            close_tab_outcome(&[1, 2, 3], Some(3), 3),
+            close_tab_outcome(&[1, 2, 3], Some(3), 3, false),
             TabCloseOutcome::Continue { focused: Some(2) }
         );
         assert_eq!(
-            close_tab_outcome(&[1, 2, 3], Some(1), 2),
+            close_tab_outcome(&[1, 2, 3], Some(1), 2, false),
             TabCloseOutcome::Continue { focused: Some(1) }
+        );
+    }
+
+    #[test]
+    fn overview_window_order_excludes_overview_and_closed_tabs() {
+        let window_order = [1_u8, 2, 3, 4];
+        let live_windows = |id| id != 3;
+
+        let sources = overview_tile_source_order(&window_order, live_windows, Some(4));
+
+        assert_eq!(sources, vec![1, 2]);
+    }
+
+    #[test]
+    fn overview_click_hit_test_resolves_only_live_tiles() {
+        let source_ids = [10_u8, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+        let layout = compute_overview_grid(source_ids.len(), PaneRectApp::new(0, 0, 90, 120), 9);
+
+        assert_eq!(
+            overview_tile_target_at_point(
+                &source_ids,
+                &layout.tiles,
+                split_tree::Point::new(45, 45)
+            ),
+            Some(14)
+        );
+        assert_eq!(
+            overview_tile_target_at_point(
+                &source_ids,
+                &layout.tiles,
+                split_tree::Point::new(15, 105)
+            ),
+            None
         );
     }
 
@@ -2667,6 +3106,34 @@ mod tests {
         );
         assert_eq!(
             pane_user_event_redraw_decision(Some((true, false))),
+            TargetedRedrawDecision::Request
+        );
+    }
+
+    #[test]
+    fn overview_redraw_decision_respects_visibility_and_occlusion() {
+        assert_eq!(
+            overview_redraw_decision(None, true, false),
+            TargetedRedrawDecision::Stale
+        );
+        assert_eq!(
+            overview_redraw_decision(Some((false, false)), true, false),
+            TargetedRedrawDecision::Stale
+        );
+        assert_eq!(
+            overview_redraw_decision(Some((true, false)), false, false),
+            TargetedRedrawDecision::Stale
+        );
+        assert_eq!(
+            overview_redraw_decision(Some((true, false)), true, true),
+            TargetedRedrawDecision::Suppress
+        );
+        assert_eq!(
+            overview_redraw_decision(Some((true, true)), true, false),
+            TargetedRedrawDecision::Suppress
+        );
+        assert_eq!(
+            overview_redraw_decision(Some((true, false)), true, false),
             TargetedRedrawDecision::Request
         );
     }
@@ -2735,6 +3202,69 @@ mod tests {
         ] {
             assert_eq!(resolve_command_target(command, focused), None);
         }
+    }
+
+    #[test]
+    fn toggle_tab_overview_is_a_native_tab_group_command() {
+        assert_eq!(
+            command_scope(AppCommand::ToggleTabOverview),
+            CommandScope::NativeTabGroup
+        );
+        assert_eq!(
+            resolve_command_target(AppCommand::ToggleTabOverview, Some(42_u8)),
+            None
+        );
+    }
+
+    #[test]
+    fn overview_command_scope_resolves_terminal_commands_to_no_ops() {
+        let focused = Some(42_u8);
+        for command in [
+            AppCommand::Copy,
+            AppCommand::Paste,
+            AppCommand::Terminal(TerminalAction::Clear),
+            AppCommand::Terminal(TerminalAction::ClearScrollback),
+            AppCommand::Terminal(TerminalAction::SelectAll),
+            AppCommand::FontSize(FontSizeAction::Increase),
+            AppCommand::FontSize(FontSizeAction::Decrease),
+            AppCommand::FontSize(FontSizeAction::Reset),
+            AppCommand::Search(SearchAction::Find),
+            AppCommand::Search(SearchAction::FindNext),
+            AppCommand::Search(SearchAction::FindPrevious),
+            AppCommand::Search(SearchAction::Clear),
+            AppCommand::ScrollViewport(ViewportScroll::PageDown),
+            AppCommand::NewSplitRight,
+            AppCommand::NewSplitDown,
+            AppCommand::FocusDirection(Direction::Left),
+            AppCommand::ResizeSplit(Direction::Right),
+            AppCommand::EqualizeSplits,
+            AppCommand::ToggleSplitZoom,
+            AppCommand::CloseTab,
+        ] {
+            assert_eq!(overview_command_scope(command), CommandScope::Overview);
+            assert_eq!(resolve_command_target(command, focused), focused);
+        }
+
+        assert_eq!(
+            overview_command_scope(AppCommand::ToggleTabOverview),
+            CommandScope::NativeTabGroup
+        );
+    }
+
+    #[test]
+    fn toggle_tab_overview_dispatch_flips_visibility() {
+        let overview_visible =
+            tab_overview_visibility_after_dispatch(AppCommand::ToggleTabOverview, false)
+                .expect("toggle command should update overview state");
+        assert!(overview_visible);
+        assert_eq!(
+            tab_overview_visibility_after_dispatch(AppCommand::ToggleTabOverview, overview_visible),
+            Some(false)
+        );
+        assert_eq!(
+            tab_overview_visibility_after_dispatch(AppCommand::Copy, overview_visible),
+            None
+        );
     }
 
     #[test]

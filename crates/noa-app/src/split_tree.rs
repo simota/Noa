@@ -455,6 +455,7 @@ pub fn resolve_pane_command_target(
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::NewTab
+        | AppCommand::ToggleTabOverview
         | AppCommand::SelectTab(_)
         | AppCommand::NextTab
         | AppCommand::PrevTab
@@ -1661,6 +1662,7 @@ mod tests {
             AppCommand::About,
             AppCommand::Preferences,
             AppCommand::NewTab,
+            AppCommand::ToggleTabOverview,
             AppCommand::SelectTab(1),
             AppCommand::NextTab,
             AppCommand::PrevTab,

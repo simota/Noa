@@ -21,6 +21,7 @@ pub enum AppCommand {
     ResizeSplit(Direction),
     EqualizeSplits,
     ToggleSplitZoom,
+    ToggleTabOverview,
     CloseTab,
     SelectTab(usize),
     NextTab,
@@ -99,6 +100,7 @@ impl AppCommand {
     pub(crate) const RESIZE_SPLIT_DOWN_MENU_ID: &'static str = "noa.split.resize-down";
     pub(crate) const EQUALIZE_SPLITS_MENU_ID: &'static str = "noa.split.equalize";
     pub(crate) const TOGGLE_SPLIT_ZOOM_MENU_ID: &'static str = "noa.split.toggle-zoom";
+    pub(crate) const TOGGLE_TAB_OVERVIEW_MENU_ID: &'static str = "noa.view.toggle-tab-overview";
     pub(crate) const CLOSE_TAB_MENU_ID: &'static str = "noa.file.close-tab";
     pub(crate) const NEXT_TAB_MENU_ID: &'static str = "noa.window.next-tab";
     pub(crate) const PREV_TAB_MENU_ID: &'static str = "noa.window.previous-tab";
@@ -142,6 +144,7 @@ impl AppCommand {
             AppCommand::ResizeSplit(Direction::Down) => Self::RESIZE_SPLIT_DOWN_MENU_ID,
             AppCommand::EqualizeSplits => Self::EQUALIZE_SPLITS_MENU_ID,
             AppCommand::ToggleSplitZoom => Self::TOGGLE_SPLIT_ZOOM_MENU_ID,
+            AppCommand::ToggleTabOverview => Self::TOGGLE_TAB_OVERVIEW_MENU_ID,
             AppCommand::CloseTab => Self::CLOSE_TAB_MENU_ID,
             AppCommand::SelectTab(_) => "",
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
@@ -188,6 +191,7 @@ impl AppCommand {
             Self::RESIZE_SPLIT_DOWN_MENU_ID => Some(Self::ResizeSplit(Direction::Down)),
             Self::EQUALIZE_SPLITS_MENU_ID => Some(Self::EqualizeSplits),
             Self::TOGGLE_SPLIT_ZOOM_MENU_ID => Some(Self::ToggleSplitZoom),
+            Self::TOGGLE_TAB_OVERVIEW_MENU_ID => Some(Self::ToggleTabOverview),
             Self::CLOSE_TAB_MENU_ID => Some(Self::CloseTab),
             Self::NEXT_TAB_MENU_ID => Some(Self::NextTab),
             Self::PREV_TAB_MENU_ID => Some(Self::PrevTab),
@@ -245,6 +249,7 @@ impl AppCommand {
             Self::ResizeSplit(Direction::Down) => "split.resize-down",
             Self::EqualizeSplits => "split.equalize",
             Self::ToggleSplitZoom => "split.toggle-zoom",
+            Self::ToggleTabOverview => "tab-overview.toggle",
             Self::CloseTab => "tab.close",
             Self::SelectTab(index) => match index {
                 1 => "tab.select-1",
@@ -300,6 +305,7 @@ impl AppCommand {
             "split.resize-down" => Some(Self::ResizeSplit(Direction::Down)),
             "split.equalize" => Some(Self::EqualizeSplits),
             "split.toggle-zoom" => Some(Self::ToggleSplitZoom),
+            "tab-overview.toggle" => Some(Self::ToggleTabOverview),
             "tab.close" => Some(Self::CloseTab),
             "tab.select-1" => Some(Self::SelectTab(1)),
             "tab.select-2" => Some(Self::SelectTab(2)),
@@ -426,6 +432,7 @@ impl Default for KeybindEngine {
             ),
             ("cmd+ctrl+=", AppCommand::EqualizeSplits),
             ("cmd+shift+enter", AppCommand::ToggleSplitZoom),
+            ("cmd+shift+o", AppCommand::ToggleTabOverview),
         ];
         let bindings = specs
             .into_iter()
@@ -641,6 +648,7 @@ mod tests {
             AppCommand::ResizeSplit(Direction::Down),
             AppCommand::EqualizeSplits,
             AppCommand::ToggleSplitZoom,
+            AppCommand::ToggleTabOverview,
             AppCommand::CloseTab,
             AppCommand::NextTab,
             AppCommand::PrevTab,
@@ -801,6 +809,13 @@ mod tests {
             ),
             Some(AppCommand::ToggleSplitZoom)
         );
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Character("o".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::ToggleTabOverview)
+        );
     }
 
     #[test]
@@ -883,6 +898,7 @@ mod tests {
             AppCommand::ResizeSplit(Direction::Down),
             AppCommand::EqualizeSplits,
             AppCommand::ToggleSplitZoom,
+            AppCommand::ToggleTabOverview,
             AppCommand::CloseTab,
             AppCommand::SelectTab(3),
             AppCommand::NextTab,

@@ -194,6 +194,13 @@ impl MacosMenu {
                     Some(shift_accelerator(Code::End)),
                 ),
                 &PredefinedMenuItem::separator(),
+                &MenuItem::with_id(
+                    AppCommand::ToggleTabOverview.menu_id(),
+                    "Tab Overview",
+                    true,
+                    Some(cmd_shift_accelerator(Code::KeyO)),
+                ),
+                &PredefinedMenuItem::separator(),
                 &disabled_item("noa.view.toggle-full-screen", "Toggle Full Screen"),
             ],
         )?;

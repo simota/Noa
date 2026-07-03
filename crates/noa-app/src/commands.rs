@@ -28,6 +28,7 @@ pub enum AppCommand {
     PrevTab,
     CloseWindow,
     Quit,
+    ToggleCommandPalette,
 }
 
 /// Terminal-state commands handled by noa instead of sending escape bytes.
@@ -106,6 +107,8 @@ impl AppCommand {
     pub(crate) const PREV_TAB_MENU_ID: &'static str = "noa.window.previous-tab";
     pub(crate) const CLOSE_WINDOW_MENU_ID: &'static str = "noa.app.close-window";
     pub(crate) const QUIT_MENU_ID: &'static str = "noa.app.quit";
+    pub(crate) const TOGGLE_COMMAND_PALETTE_MENU_ID: &'static str =
+        "noa.view.toggle-command-palette";
 
     pub(crate) fn menu_id(self) -> &'static str {
         match self {
@@ -151,6 +154,7 @@ impl AppCommand {
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
             AppCommand::CloseWindow => Self::CLOSE_WINDOW_MENU_ID,
             AppCommand::Quit => Self::QUIT_MENU_ID,
+            AppCommand::ToggleCommandPalette => Self::TOGGLE_COMMAND_PALETTE_MENU_ID,
         }
     }
 
@@ -197,6 +201,7 @@ impl AppCommand {
             Self::PREV_TAB_MENU_ID => Some(Self::PrevTab),
             Self::CLOSE_WINDOW_MENU_ID => Some(Self::CloseWindow),
             Self::QUIT_MENU_ID => Some(Self::Quit),
+            Self::TOGGLE_COMMAND_PALETTE_MENU_ID => Some(Self::ToggleCommandPalette),
             _ => None,
         }
     }
@@ -267,6 +272,7 @@ impl AppCommand {
             Self::PrevTab => "tab.previous",
             Self::CloseWindow => "window.close",
             Self::Quit => "app.quit",
+            Self::ToggleCommandPalette => "command-palette.toggle",
         }
     }
 
@@ -320,6 +326,7 @@ impl AppCommand {
             "tab.previous" => Some(Self::PrevTab),
             "window.close" => Some(Self::CloseWindow),
             "app.quit" => Some(Self::Quit),
+            "command-palette.toggle" => Some(Self::ToggleCommandPalette),
             _ => None,
         }
     }
@@ -434,6 +441,7 @@ impl Default for KeybindEngine {
             ("cmd+ctrl+=", AppCommand::EqualizeSplits),
             ("cmd+shift+enter", AppCommand::ToggleSplitZoom),
             ("cmd+shift+o", AppCommand::ToggleTabOverview),
+            ("cmd+shift+p", AppCommand::ToggleCommandPalette),
         ];
         let bindings = specs
             .into_iter()
@@ -451,6 +459,18 @@ impl KeybindEngine {
             .iter()
             .find(|binding| binding.trigger.matches(logical_key, mods))
             .map(|binding| binding.command)
+    }
+
+    /// The chord text (e.g. `"cmd+shift+p"`) of the first binding for
+    /// `command`, or `None` when it is unbound. Reverse of [`Self::resolve`],
+    /// used for the command palette's keybind hints (R-4) — the engine stays
+    /// the single source of truth rather than a duplicated hint table.
+    /// "First" is deterministic: bindings keep their `default()` order.
+    pub(crate) fn chord_for(&self, command: AppCommand) -> Option<String> {
+        self.bindings
+            .iter()
+            .find(|binding| binding.command == command)
+            .map(|binding| binding.trigger.to_string())
     }
 }
 
@@ -491,6 +511,27 @@ impl KeyTrigger {
 
     fn matches(&self, logical_key: &Key, mods: ModifiersState) -> bool {
         self.mods.matches(mods) && self.key.matches(logical_key)
+    }
+}
+
+impl std::fmt::Display for KeyTrigger {
+    /// Renders the config-style chord text (`cmd+ctrl+alt+shift+key`), in the
+    /// same modifier order the parser accepts, so the output round-trips back
+    /// through [`KeyTrigger::parse`].
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.mods.super_key {
+            f.write_str("cmd+")?;
+        }
+        if self.mods.control {
+            f.write_str("ctrl+")?;
+        }
+        if self.mods.alt {
+            f.write_str("alt+")?;
+        }
+        if self.mods.shift {
+            f.write_str("shift+")?;
+        }
+        write!(f, "{}", self.key)
     }
 }
 
@@ -555,6 +596,18 @@ impl KeyToken {
     }
 }
 
+impl std::fmt::Display for KeyToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // `+` parses from the `plus` alias, so render it back that way
+            // (a bare `+` would read as a separator on re-parse).
+            Self::Character('+') => f.write_str("plus"),
+            Self::Character(ch) => write!(f, "{ch}"),
+            Self::Named(named) => f.write_str(named.as_str()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NamedKeyToken {
     ArrowUp,
@@ -569,6 +622,22 @@ enum NamedKeyToken {
 }
 
 impl NamedKeyToken {
+    /// The canonical chord token for this key, matching a name
+    /// [`KeyToken::parse`] accepts (so [`KeyTrigger`]'s `Display` round-trips).
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ArrowUp => "arrowup",
+            Self::ArrowDown => "arrowdown",
+            Self::ArrowLeft => "arrowleft",
+            Self::ArrowRight => "arrowright",
+            Self::PageUp => "pageup",
+            Self::PageDown => "pagedown",
+            Self::Home => "home",
+            Self::End => "end",
+            Self::Enter => "enter",
+        }
+    }
+
     fn matches(self, key: NamedKey) -> bool {
         matches!(
             (self, key),
@@ -853,6 +922,73 @@ mod tests {
                 ModifiersState::SUPER | ModifiersState::SHIFT
             ),
             Some(AppCommand::PrevTab)
+        );
+    }
+
+    #[test]
+    fn command_palette_toggle_round_trips_and_binds_to_cmd_shift_p() {
+        let command = AppCommand::ToggleCommandPalette;
+
+        // AC-1: menu-id / action-name / keybind all round-trip.
+        assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+        assert_eq!(
+            AppCommand::from_action_name(command.action_name()),
+            Some(command)
+        );
+        assert_eq!(command.action_name(), "command-palette.toggle");
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Character("p".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(command)
+        );
+    }
+
+    #[test]
+    fn command_palette_binding_does_not_shadow_existing_cmd_shift_shortcuts() {
+        // AC-2: adding cmd+shift+p leaves the other cmd+shift+* bindings intact.
+        let engine = KeybindEngine::default();
+        let cmd_shift = ModifiersState::SUPER | ModifiersState::SHIFT;
+        for (key, expected) in [
+            ("o", AppCommand::ToggleTabOverview),
+            ("d", AppCommand::NewSplitDown),
+            ("g", AppCommand::Search(SearchAction::FindPrevious)),
+            ("]", AppCommand::NextTab),
+            ("[", AppCommand::PrevTab),
+        ] {
+            assert_eq!(
+                engine.resolve(&Key::Character(key.into()), cmd_shift),
+                Some(expected),
+                "cmd+shift+{key} must stay bound to {expected:?}"
+            );
+        }
+        assert_eq!(
+            engine.resolve(&Key::Character("p".into()), cmd_shift),
+            Some(AppCommand::ToggleCommandPalette)
+        );
+    }
+
+    #[test]
+    fn chord_for_reverse_maps_bound_commands_and_reports_none_for_unbound() {
+        // AC-5 (engine layer): chord text round-trips modifier order.
+        let engine = KeybindEngine::default();
+        assert_eq!(engine.chord_for(AppCommand::Copy).as_deref(), Some("cmd+c"));
+        assert_eq!(
+            engine
+                .chord_for(AppCommand::ToggleCommandPalette)
+                .as_deref(),
+            Some("cmd+shift+p")
+        );
+        assert_eq!(
+            engine
+                .chord_for(AppCommand::ScrollViewport(ViewportScroll::LineUp))
+                .as_deref(),
+            Some("shift+arrowup")
+        );
+        assert_eq!(
+            engine.chord_for(AppCommand::Terminal(TerminalAction::ClearScrollback)),
+            None
         );
     }
 

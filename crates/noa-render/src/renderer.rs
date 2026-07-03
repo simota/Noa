@@ -695,6 +695,7 @@ fn rebuild_cell_instances(
     instances.clear();
     flatten_row_segments(instances, &bg_rows, &glyph_rows, &deco_rows);
     append_search_prompt_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
+    append_command_palette_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
 
     (clear_color, (metrics.cell_w, metrics.cell_h))
 }
@@ -999,6 +1000,7 @@ fn rebuild_pane_cached(
 
     flatten_row_segments(instances, &cache.bg, &cache.glyph, &cache.deco);
     append_search_prompt_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
+    append_command_palette_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
 
     cache.key = Some(new_key);
     cache.prev_cursor = Some(new_cursor);
@@ -1064,6 +1066,190 @@ fn append_search_prompt_instances(
         run.start_col += x_start;
         let shaped = font.shape_run(&run.cells);
         emit_run_glyph_instances(instances, font, &run, &shaped, 0, metrics);
+    }
+}
+
+/// Append the open command-palette overlay (`cmd+shift+p`), if any, to
+/// `instances`. Like the search prompt this is recomputed fresh every call
+/// (never per-row cached — a query/selection change never touches grid
+/// content), and appended after every other pane instance so it draws on
+/// top. Extends the search-prompt pattern to a multi-row block: a query row
+/// plus one row per filtered entry (title left, keybind hint right-aligned),
+/// centered in the pane, with the selected row drawn on an accent
+/// background. Pure `CellInstance` bg-rects + shaped glyph runs — no new
+/// pipeline or bind-group/std140 surface.
+fn append_command_palette_instances(
+    instances: &mut Vec<CellInstance>,
+    snap: &FrameSnapshot,
+    font: &mut FontGrid,
+    theme: &Theme,
+    target_format_is_srgb: bool,
+    metrics: Metrics,
+) {
+    let Some(palette) = snap.command_palette.as_ref() else {
+        return;
+    };
+    let cols = snap.cols as usize;
+    let grid_rows = snap.rows_n as usize;
+    // Need at least the query row plus one padding column each side.
+    if cols < 3 || grid_rows < 1 {
+        return;
+    }
+
+    // How many entry rows fit below the query row, and which slice of the
+    // (possibly longer) list to show so the selection stays visible.
+    let entry_capacity = grid_rows - 1;
+    let (offset, shown) =
+        palette_scroll_window(palette.rows.len(), palette.selected, entry_capacity);
+    let entries = &palette.rows[offset..offset + shown];
+
+    // Inner content width: the widest of the query line and every shown
+    // entry line, clamped to leave one padding column on each side.
+    let query_text = format!("> {}", palette.query);
+    let title_w = entries
+        .iter()
+        .map(|(t, _)| t.chars().count())
+        .max()
+        .unwrap_or(0);
+    let hint_w = entries
+        .iter()
+        .map(|(_, hint)| hint.as_deref().map_or(0, |h| h.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let gap = if hint_w > 0 { 2 } else { 0 };
+    let inner = (title_w + gap + hint_w)
+        .max(query_text.chars().count())
+        .min(cols - 2);
+    let block_w = inner + 2;
+    let height = 1 + shown;
+    let x0 = ((cols - block_w) / 2) as u16;
+    let y0 = (grid_rows.saturating_sub(height) / 2) as u16;
+
+    let query_bg = to_u8_color(surface_output_rgba(
+        theme.selection_bg(),
+        target_format_is_srgb,
+    ));
+    let query_fg = to_u8_color(surface_output_rgba(
+        theme.selection_fg(),
+        target_format_is_srgb,
+    ));
+    let row_bg = query_bg;
+    let row_fg = query_fg;
+    let sel_bg = to_u8_color(surface_output_rgba(
+        theme.active_search_bg(),
+        target_format_is_srgb,
+    ));
+    let sel_fg = to_u8_color(surface_output_rgba(
+        theme.active_search_fg(),
+        target_format_is_srgb,
+    ));
+
+    append_palette_row(
+        instances,
+        font,
+        metrics,
+        x0,
+        y0,
+        &palette_line(&query_text, None, inner),
+        (query_bg, query_fg),
+    );
+
+    for (i, (title, hint)) in entries.iter().enumerate() {
+        let selected = offset + i == palette.selected;
+        let colors = if selected {
+            (sel_bg, sel_fg)
+        } else {
+            (row_bg, row_fg)
+        };
+        let text = palette_line(title, hint.as_deref(), inner);
+        append_palette_row(
+            instances,
+            font,
+            metrics,
+            x0,
+            y0 + 1 + i as u16,
+            &text,
+            colors,
+        );
+    }
+}
+
+/// Which `count`-length list slice to render given `selected` and a row
+/// `capacity`: the whole list when it fits, otherwise a `capacity`-tall
+/// window scrolled just far enough to keep `selected` on screen. Returns
+/// `(offset, shown)`.
+fn palette_scroll_window(count: usize, selected: usize, capacity: usize) -> (usize, usize) {
+    if capacity == 0 || count == 0 {
+        return (0, 0);
+    }
+    if count <= capacity {
+        return (0, count);
+    }
+    let offset = if selected < capacity {
+        0
+    } else {
+        (selected + 1 - capacity).min(count - capacity)
+    };
+    (offset, capacity)
+}
+
+/// One `inner`-column line for the palette block: `left` at the leading edge,
+/// optional `right` flush to the trailing edge, spaces between. Palette
+/// titles and keybind hints are ASCII (one column per char), so column count
+/// equals char count. A one-space pad is added on each side, producing an
+/// `inner + 2`-column string.
+fn palette_line(left: &str, right: Option<&str>, inner: usize) -> String {
+    let mut cols = vec![' '; inner];
+    for (i, ch) in left.chars().enumerate() {
+        if i >= inner {
+            break;
+        }
+        cols[i] = ch;
+    }
+    if let Some(right) = right {
+        let rlen = right.chars().count();
+        if rlen <= inner {
+            let start = inner - rlen;
+            for (i, ch) in right.chars().enumerate() {
+                cols[start + i] = ch;
+            }
+        }
+    }
+    let mut line = String::with_capacity(inner + 2);
+    line.push(' ');
+    line.extend(cols);
+    line.push(' ');
+    line
+}
+
+/// Emit one palette row's background rects + shaped glyphs at grid row `y`,
+/// starting at column `x0`. `text` already spans the full block width;
+/// `colors` is `(background, foreground)`.
+fn append_palette_row(
+    instances: &mut Vec<CellInstance>,
+    font: &mut FontGrid,
+    metrics: Metrics,
+    x0: u16,
+    y: u16,
+    text: &str,
+    colors: ([u8; 4], [u8; 4]),
+) {
+    let (bg, fg) = colors;
+    let cells = search_prompt_segment_cells(text, fg);
+    for i in 0..cells.len() as u16 {
+        instances.push(CellInstance {
+            glyph_pos: [0, 0],
+            glyph_size: [0, 0],
+            bearing: [0, 0],
+            grid_pos: [x0 + i, y],
+            color: bg,
+            flags: 0,
+        });
+    }
+    for mut run in segment_row(font, &cells) {
+        run.start_col += x0;
+        let shaped = font.shape_run(&run.cells);
+        emit_run_glyph_instances(instances, font, &run, &shaped, y, metrics);
     }
 }
 
@@ -2467,6 +2653,85 @@ mod tests {
     }
 
     #[test]
+    fn palette_scroll_window_keeps_the_selection_visible() {
+        // Fits entirely: whole list, no scroll.
+        assert_eq!(palette_scroll_window(3, 2, 5), (0, 3));
+        // Taller than capacity, selection near the top: window pinned to 0.
+        assert_eq!(palette_scroll_window(10, 1, 4), (0, 4));
+        // Selection past the first window: scroll just far enough.
+        assert_eq!(palette_scroll_window(10, 5, 4), (2, 4));
+        // Selection at the end: window pinned to the bottom.
+        assert_eq!(palette_scroll_window(10, 9, 4), (6, 4));
+        // Degenerate inputs never panic.
+        assert_eq!(palette_scroll_window(0, 0, 4), (0, 0));
+        assert_eq!(palette_scroll_window(5, 0, 0), (0, 0));
+    }
+
+    #[test]
+    fn command_palette_overlay_emits_bg_and_glyph_instances_and_clears_on_close() {
+        let Some(mut font) = font_with_rasterized_m() else {
+            return;
+        };
+
+        let mut terminal = Terminal::new(GridSize::new(30, 8));
+        let theme = Theme::new();
+
+        let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+        assert_eq!(
+            snap.command_palette, None,
+            "from_terminal defaults to no palette"
+        );
+
+        let mut closed = Vec::new();
+        rebuild_cell_instances(&mut closed, &snap, &mut font, &theme, false);
+        let bg_before = closed.iter().filter(|i| i.flags == 0).count();
+
+        snap.command_palette = Some(crate::CommandPaletteSnapshot {
+            query: "sp".to_string(),
+            rows: vec![
+                ("Split Right".to_string(), Some("cmd+d".to_string())),
+                ("Split Down".to_string(), Some("cmd+shift+d".to_string())),
+                ("Toggle Split Zoom".to_string(), None),
+            ],
+            selected: 1,
+        });
+        let mut with_palette = Vec::new();
+        rebuild_cell_instances(&mut with_palette, &snap, &mut font, &theme, false);
+
+        let bg_with = with_palette.iter().filter(|i| i.flags == 0).count();
+        assert!(
+            bg_with > bg_before,
+            "opening the palette must add background quads"
+        );
+        // The block spans 4 grid rows (query + 3 entries); at least those
+        // rows must carry palette instances.
+        let rows_touched: std::collections::BTreeSet<u16> = with_palette
+            .iter()
+            .filter(|i| i.flags == 0)
+            .map(|i| i.grid_pos[1])
+            .collect();
+        assert!(
+            rows_touched.len() >= 4,
+            "query row plus three entry rows must all draw: {rows_touched:?}"
+        );
+        assert!(
+            with_palette
+                .iter()
+                .any(|i| i.flags & CellInstance::FLAG_GLYPH != 0),
+            "the palette text must emit glyph instances"
+        );
+
+        snap.command_palette = None;
+        let mut reclosed = Vec::new();
+        rebuild_cell_instances(&mut reclosed, &snap, &mut font, &theme, false);
+        assert_eq!(
+            reclosed.iter().filter(|i| i.flags == 0).count(),
+            bg_before,
+            "closing the palette removes its overlay instances"
+        );
+    }
+
+    #[test]
     fn srgb_surface_output_converts_theme_colors_to_linear() {
         let srgb = [30.0 / 255.0, 30.0 / 255.0, 30.0 / 255.0, 1.0];
 
@@ -2719,6 +2984,7 @@ mod tests {
             cursor_blink_visible: true,
             hover_link: None,
             search_prompt: None,
+            command_palette: None,
         }
     }
 

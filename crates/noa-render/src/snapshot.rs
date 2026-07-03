@@ -22,6 +22,23 @@ pub enum HoverLink {
     Range { y: u16, x_start: u16, x_end: u16 },
 }
 
+/// The open command palette's render payload (`cmd+shift+p`), built by the
+/// caller (`noa-app`) from its own palette session — the renderer never sees
+/// `AppCommand`. Titles and keybind hints are already resolved to strings in
+/// the app layer, keeping noa-render terminal- and command-agnostic. `rows`
+/// is the filtered entry list in display order; `selected` indexes into it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommandPaletteSnapshot {
+    /// The live query text (may be empty).
+    pub query: String,
+    /// One `(title, keybind hint)` pair per filtered entry, in display order.
+    /// The hint is `None` for an unbound command.
+    pub rows: Vec<(String, Option<String>)>,
+    /// The highlighted row's index into `rows`. Out of range only when
+    /// `rows` is empty (nothing highlighted), which the renderer tolerates.
+    pub selected: usize,
+}
+
 /// A snapshot of the active screen taken under the `Terminal` lock.
 ///
 /// WP4 (REQ-PERF-1/2): `row_dirty` is parallel to `rows` (same length, same
@@ -57,6 +74,11 @@ pub struct FrameSnapshot {
     /// its own prompt state); `from_terminal` defaults to `None`. The
     /// overlay's `i/n` counter is derived from `search` alongside this.
     pub search_prompt: Option<String>,
+    /// The open command-palette overlay (`cmd+shift+p`) for this pane, if
+    /// any. `None` draws no palette. Set by the caller only on the palette's
+    /// focused pane so it draws once, not once per split; `from_terminal`
+    /// defaults to `None`.
+    pub command_palette: Option<CommandPaletteSnapshot>,
 }
 
 /// The screen `Terminal` is currently rendering, borrowed mutably so its
@@ -104,6 +126,7 @@ impl FrameSnapshot {
             cursor_blink_visible: true,
             hover_link: None,
             search_prompt: None,
+            command_palette: None,
         }
     }
 

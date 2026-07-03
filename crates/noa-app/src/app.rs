@@ -16,8 +16,8 @@ use noa_font::FontGrid;
 use noa_grid::{CursorStyle, Terminal, modes::MouseTracking};
 use noa_pty::{Pty, PtyConfig};
 use noa_render::{
-    FrameSnapshot, HoverLink, OverviewThumbnailResources, PaneFrame, PaneId as RenderPaneId,
-    PaneRect, Renderer, Theme,
+    CommandPaletteSnapshot, FrameSnapshot, HoverLink, OverviewThumbnailResources, PaneFrame,
+    PaneId as RenderPaneId, PaneRect, Renderer, Theme,
 };
 use noa_vt::Stream;
 use winit::application::ApplicationHandler;
@@ -30,6 +30,7 @@ use winit::platform::macos::{WindowAttributesExtMacOS, WindowExtMacOS};
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
 use crate::clipboard::{self, PasteContents, SystemClipboard};
+use crate::command_palette::{self, CommandPalette};
 use crate::commands::{FontSizeAction, KeybindEngine, SearchAction, TerminalAction};
 use crate::events::UserEvent;
 use crate::input;
@@ -196,6 +197,18 @@ struct SearchPromptSession {
     prompt: SearchPrompt,
 }
 
+/// An open command palette (`cmd+shift+p`), bound to the window it was opened
+/// from. Only one exists at a time app-wide (`App::toggle_command_palette`).
+/// Unlike [`SearchPromptSession`] it carries **no `pane_id`**: the palette's
+/// commands re-resolve their own target at dispatch (R-10), so it is window-
+/// bound only — which also simplifies leak cleanup to a single `close_tab`
+/// site (R-11). The `KeyboardInput` handler routes every keystroke in
+/// `window_id` to [`App::handle_command_palette_key`] while it is open.
+struct CommandPaletteSession {
+    window_id: WindowId,
+    palette: CommandPalette,
+}
+
 /// Terminal-owned state for one split leaf. `split_tree` leaves store the
 /// `PaneId`; this map owns the corresponding live surface payload.
 struct Surface {
@@ -283,6 +296,9 @@ pub struct App {
     hovered_link: Option<(WindowId, PaneId)>,
     /// The open search prompt (Cmd+F), if any — see [`SearchPromptSession`].
     search_prompt: Option<SearchPromptSession>,
+    /// The open command palette (`cmd+shift+p`), if any — see
+    /// [`CommandPaletteSession`].
+    command_palette: Option<CommandPaletteSession>,
 }
 
 impl App {
@@ -309,6 +325,7 @@ impl App {
             cursor_blink_deadline: None,
             hovered_link: None,
             search_prompt: None,
+            command_palette: None,
         }
     }
 
@@ -401,6 +418,13 @@ impl App {
                 .as_ref()
                 .filter(|session| session.window_id == window_id && session.pane_id == pane_id)
                 .map(|session| session.prompt.buffer().to_string());
+            // C3: draw the window-bound palette exactly once — over the
+            // focused pane — rather than once per visible split.
+            snapshot.command_palette = self
+                .command_palette
+                .as_ref()
+                .filter(|session| session.window_id == window_id && pane_id == state.focused_pane)
+                .map(|session| command_palette_snapshot(&self.keybinds, &session.palette));
             snapshots.push((pane_id, surface.rect, snapshot));
         }
         if state.title != title {
@@ -527,6 +551,14 @@ impl App {
         if self.overview_visible && overview_command_scope(command) == CommandScope::Overview {
             return;
         }
+        // C1 (FM1): dispatching any command means leaving the palette. Close
+        // it here so a command routed around the palette's own Enter path —
+        // notably a menu-bar click while the palette is open — can't leave
+        // two modals owning the keyboard. Idempotent with the Enter-path
+        // close; skipped for the toggle itself so re-pressing still works.
+        if command != AppCommand::ToggleCommandPalette {
+            self.command_palette = None;
+        }
         match command {
             AppCommand::About => {
                 log::info!("About noa selected");
@@ -582,7 +614,28 @@ impl App {
             AppCommand::FontSize(action) => self.handle_font_size_action(action),
             AppCommand::Search(action) => self.handle_search_action(action),
             AppCommand::ScrollViewport(scroll) => self.scroll_viewport(scroll),
+            AppCommand::ToggleCommandPalette => self.toggle_command_palette(),
             AppCommand::CloseWindow | AppCommand::Quit => event_loop.exit(),
+        }
+    }
+
+    /// Toggle the single app-wide command palette (R-5). Opening binds it to
+    /// the focused window with an empty query and every entry shown;
+    /// re-firing while open closes it. A no-op when there is no focused
+    /// window to bind to.
+    fn toggle_command_palette(&mut self) {
+        if self.command_palette.is_some() {
+            self.command_palette = None;
+        } else if let Some(window_id) = self.focused {
+            self.command_palette = Some(CommandPaletteSession {
+                window_id,
+                palette: CommandPalette::open(),
+            });
+        }
+        if let Some(window_id) = self.focused
+            && let Some(state) = self.windows.get(&window_id)
+        {
+            state.window.request_redraw();
         }
     }
 
@@ -851,6 +904,19 @@ impl App {
             .is_some_and(|session| session.window_id == window_id)
         {
             self.search_prompt = None;
+        }
+        // C4 (R-11, FM3): the window-bound palette leaks the same way — a
+        // closed window can deliver no keys (not even Escape), so a palette
+        // still targeting it would strand a dead-window reference and the
+        // toggle would never rebuild a fresh session. `close_pane` needs no
+        // twin clear: the palette is window-bound, so a pane-only close
+        // leaves it valid, and a whole-tab close always routes here.
+        if self
+            .command_palette
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.command_palette = None;
         }
 
         match outcome {
@@ -1895,6 +1961,22 @@ impl ApplicationHandler<UserEvent> for App {
                     self.handle_search_prompt_key(event_loop, window_id, &event);
                     return;
                 }
+                // C2 (FM2): the palette branch sits exactly between the
+                // search-prompt branch and keybind-resolve. Order is
+                // load-bearing — IME-preedit → search_prompt → palette →
+                // keybind-resolve. Because search_prompt is checked first a
+                // palette cannot open while it is up (its keys are consumed
+                // there); because this branch consumes every key while the
+                // palette is open, nothing leaks to keybind-resolve or the
+                // pty (modal).
+                if self
+                    .command_palette
+                    .as_ref()
+                    .is_some_and(|session| session.window_id == window_id)
+                {
+                    self.handle_command_palette_key(event_loop, window_id, &event);
+                    return;
+                }
                 if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
                     self.handle_app_command(event_loop, command);
                     return;
@@ -2561,6 +2643,95 @@ impl App {
                 .clear_search();
         }
         if let Some(state) = self.windows.get(&session.window_id) {
+            state.window.request_redraw();
+        }
+    }
+
+    /// Drive the open command palette from a keypress instead of the normal
+    /// keybind-resolve → pty-encode path (the palette is modal while open,
+    /// R-6). Mirrors [`App::handle_search_prompt_key`]: Escape cancels, Enter
+    /// runs the highlighted command, arrows move the selection, Backspace and
+    /// printable text edit the query; every other key is swallowed so nothing
+    /// reaches the pty. Only called when `self.command_palette` targets
+    /// `window_id` (checked by the caller).
+    fn handle_command_palette_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: &KeyEvent,
+    ) {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                // Close without executing (R-8).
+                self.command_palette = None;
+                self.request_window_redraw(window_id);
+                return;
+            }
+            Key::Named(NamedKey::Enter) => {
+                let command = self
+                    .command_palette
+                    .as_ref()
+                    .and_then(|session| session.palette.selected_command());
+                // With a highlighted command, close BEFORE the side effect
+                // (R-10): a command that opens another modal (e.g.
+                // Search(Find)) must not leave the palette open alongside it.
+                // An empty result set yields `None` — a no-op that leaves the
+                // palette open (R-9).
+                if let Some(command) = command {
+                    self.command_palette = None;
+                    self.handle_app_command(event_loop, command);
+                }
+                return;
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if let Some(session) = self.command_palette.as_mut() {
+                    session.palette.move_up();
+                }
+                self.request_window_redraw(window_id);
+                return;
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if let Some(session) = self.command_palette.as_mut() {
+                    session.palette.move_down();
+                }
+                self.request_window_redraw(window_id);
+                return;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(session) = self.command_palette.as_mut() {
+                    session.palette.backspace();
+                }
+                self.request_window_redraw(window_id);
+                return;
+            }
+            _ => {}
+        }
+
+        if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
+            // Re-pressing cmd+shift+p toggles the palette closed; every other
+            // resolved command is swallowed while the modal owns the keyboard.
+            if command == AppCommand::ToggleCommandPalette {
+                self.handle_app_command(event_loop, command);
+            }
+            return;
+        }
+
+        // Cmd-held combos with no binding must not leak their character into
+        // the query (mirrors the search prompt's Cmd-swallow).
+        if self.modifiers.super_key() {
+            return;
+        }
+        let Some(text) = event.text.as_deref() else {
+            return;
+        };
+        if let Some(session) = self.command_palette.as_mut() {
+            session.palette.push_text(text);
+        }
+        self.request_window_redraw(window_id);
+    }
+
+    fn request_window_redraw(&self, window_id: WindowId) {
+        if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();
         }
     }
@@ -3357,8 +3528,33 @@ fn command_scope(command: AppCommand) -> CommandScope {
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::NewTab
+        | AppCommand::ToggleCommandPalette
         | AppCommand::CloseWindow
         | AppCommand::Quit => CommandScope::App,
+    }
+}
+
+/// Build the render-facing palette payload from the app-side session,
+/// resolving each filtered command's title and (current) keybind hint. Takes
+/// no terminal lock — the palette is terminal-independent (R-12).
+fn command_palette_snapshot(
+    keybinds: &KeybindEngine,
+    palette: &CommandPalette,
+) -> CommandPaletteSnapshot {
+    let rows = palette
+        .filtered()
+        .iter()
+        .map(|&command| {
+            (
+                command_palette::command_palette_title(command).to_string(),
+                command_palette::command_palette_keybind(keybinds, command),
+            )
+        })
+        .collect();
+    CommandPaletteSnapshot {
+        query: palette.query().to_string(),
+        rows,
+        selected: palette.selected(),
     }
 }
 
@@ -3366,7 +3562,10 @@ fn overview_command_scope(command: AppCommand) -> CommandScope {
     match command {
         AppCommand::ToggleTabOverview => CommandScope::NativeTabGroup,
         AppCommand::About | AppCommand::Preferences | AppCommand::Quit => CommandScope::App,
-        AppCommand::Copy
+        // The palette does not open while the overview is focused (v1, R-10):
+        // Overview scope makes `ToggleCommandPalette` a no-op there (AC-15).
+        AppCommand::ToggleCommandPalette
+        | AppCommand::Copy
         | AppCommand::Paste
         | AppCommand::Terminal(_)
         | AppCommand::FontSize(_)
@@ -4189,5 +4388,43 @@ mod tests {
     fn empty_terminal_title_falls_back_to_app_name() {
         assert_eq!(tab_title(""), "noa");
         assert_eq!(tab_title("shell"), "shell");
+    }
+
+    #[test]
+    fn command_palette_toggle_is_app_scoped_and_overview_no_op() {
+        // AC-1: openable from any tab. AC-15: a no-op while the overview is
+        // focused (Overview scope).
+        assert_eq!(
+            command_scope(AppCommand::ToggleCommandPalette),
+            CommandScope::App
+        );
+        assert_eq!(
+            overview_command_scope(AppCommand::ToggleCommandPalette),
+            CommandScope::Overview
+        );
+    }
+
+    #[test]
+    fn command_palette_snapshot_reflects_query_selection_and_keybinds() {
+        // AC-18: the render payload mirrors the session (query / filtered
+        // titles + keybind hints / selected) with no terminal involved.
+        let keybinds = KeybindEngine::default();
+        let palette = CommandPalette::open();
+
+        let snapshot = command_palette_snapshot(&keybinds, &palette);
+        assert_eq!(snapshot.query, "");
+        assert_eq!(snapshot.selected, 0);
+        assert_eq!(
+            snapshot.rows.len(),
+            command_palette::command_palette_entries().len()
+        );
+        // First entry is About (no binding); Copy carries its cmd+c hint.
+        assert_eq!(snapshot.rows[0], ("About noa".to_string(), None));
+        assert!(
+            snapshot
+                .rows
+                .contains(&("Copy to Clipboard".to_string(), Some("cmd+c".to_string()))),
+            "keybind hints are resolved from the engine"
+        );
     }
 }

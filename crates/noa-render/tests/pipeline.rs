@@ -16,8 +16,8 @@ use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, PixelSize, Rgb};
 use noa_font::FontGrid;
 use noa_grid::{Cell, Cursor, Row, SearchState, Selection, SelectionPoint, TerminalColors};
 use noa_render::{
-    DrawOp, FrameSnapshot, OverviewThumbnailResources, PaneFrame, PaneId, PaneRect, Renderer,
-    Theme, build_draw_plan, renderer_construction_count,
+    CommandPaletteSnapshot, DrawOp, FrameSnapshot, OverviewThumbnailResources, PaneFrame, PaneId,
+    PaneRect, Renderer, Theme, build_draw_plan, renderer_construction_count,
 };
 
 /// Acquire a real device+queue, or `None` when no adapter exists (skip).
@@ -74,6 +74,7 @@ fn snapshot_for_text(text: &str) -> FrameSnapshot {
         cursor_blink_visible: true,
         hover_link: None,
         search_prompt: None,
+        command_palette: None,
     }
 }
 
@@ -290,6 +291,7 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         cursor_blink_visible: true,
         hover_link: None,
         search_prompt: None,
+        command_palette: None,
     };
     let theme = Theme::new();
 
@@ -319,6 +321,76 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
     assert!(
         err.is_none(),
         "wgpu validation error during draw (uniform/instance buffer layout?): {err:?}"
+    );
+}
+
+#[test]
+fn command_palette_overlay_draws_one_frame_without_validation_error() {
+    // AC-19 (headless): a FrameSnapshot carrying a command-palette payload
+    // (query row + multiple entry rows, one selected) draws on a real
+    // adapter with no wgpu validation error — the multi-row overlay reuses
+    // the existing cell pipeline, adding no new bind-group/std140 surface.
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping command-palette GPU draw test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: 320, h: 160 });
+
+    let cols = 30u16;
+    let rows_n = 8u16;
+    let rows: Vec<Row> = (0..rows_n)
+        .map(|_| Row {
+            cells: vec![Cell::default(); cols as usize],
+            wrapped: false,
+            dirty: true,
+        })
+        .collect();
+    let snap = FrameSnapshot {
+        row_dirty: vec![true; rows.len()],
+        rows,
+        cursor: Cursor::default(),
+        colors: TerminalColors::default(),
+        selection: None,
+        search: SearchState::default(),
+        row_base: 0,
+        cols,
+        rows_n,
+        focused: true,
+        cursor_blink_visible: true,
+        hover_link: None,
+        search_prompt: None,
+        command_palette: Some(CommandPaletteSnapshot {
+            query: "sp".to_string(),
+            rows: vec![
+                ("Split Right".to_string(), Some("cmd+d".to_string())),
+                ("Split Down".to_string(), Some("cmd+shift+d".to_string())),
+                ("Toggle Split Zoom".to_string(), None),
+            ],
+            selected: 1,
+        }),
+    };
+
+    renderer.rebuild_cells(&snap, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+
+    let (_target, view) = render_target(&device, 320, 160);
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.draw(&device, &queue, &view);
+    let err = pollster::block_on(device.pop_error_scope());
+
+    assert!(
+        err.is_none(),
+        "wgpu validation error drawing the command-palette overlay: {err:?}"
     );
 }
 
@@ -519,6 +591,7 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
             cursor_blink_visible: true,
             hover_link: None,
             search_prompt: None,
+            command_palette: None,
         }
     }
 
@@ -911,6 +984,7 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
         cursor_blink_visible: true,
         hover_link: None,
         search_prompt: None,
+        command_palette: None,
     };
     let theme = Theme::new();
 

@@ -5,6 +5,7 @@
 
 mod app;
 mod clipboard;
+mod command_palette;
 mod commands;
 mod events;
 mod input;

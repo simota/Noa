@@ -200,6 +200,12 @@ impl MacosMenu {
                     true,
                     Some(cmd_shift_accelerator(Code::KeyO)),
                 ),
+                &MenuItem::with_id(
+                    AppCommand::ToggleCommandPalette.menu_id(),
+                    "Command Palette",
+                    true,
+                    Some(cmd_shift_accelerator(Code::KeyP)),
+                ),
                 &PredefinedMenuItem::separator(),
                 &disabled_item("noa.view.toggle-full-screen", "Toggle Full Screen"),
             ],

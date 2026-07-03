@@ -35,12 +35,17 @@ impl ImeState {
     pub fn preedit_active(&self) -> bool {
         self.preedit_active
     }
+
+    pub fn commit_preedit(&mut self) {
+        self.preedit_active = false;
+    }
 }
 
 /// Encode a pressed key into the bytes that should be written to the pty, if
 /// any. `app_cursor_keys` mirrors `ModeState::app_cursor_keys()` (DECCKM):
 /// when set, arrow keys send `SS3` (`ESC O <letter>`) instead of `CSI`
 /// (`ESC [ <letter>`).
+#[cfg(test)]
 pub fn encode_key(
     logical_key: &Key,
     text: Option<&str>,

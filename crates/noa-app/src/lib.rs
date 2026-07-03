@@ -12,6 +12,7 @@ mod io_thread;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 mod mouse;
+pub mod split_tree;
 mod theme;
 
 pub use app::AppConfig;

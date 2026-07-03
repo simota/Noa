@@ -5,13 +5,15 @@
 //!
 //! Ghostty analog: `renderer/generic.zig` + `Metal.zig`.
 
+mod draw_plan;
 mod instance;
 mod pipeline;
 mod renderer;
 mod snapshot;
 mod theme;
 
-pub use instance::{CellInstance, Uniforms};
-pub use renderer::Renderer;
+pub use draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
+pub use instance::{CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform};
+pub use renderer::{PaneFrame, Renderer};
 pub use snapshot::FrameSnapshot;
 pub use theme::Theme;

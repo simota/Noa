@@ -1,6 +1,6 @@
 //! The custom winit user event this app drives its event loop with.
 
-use crate::AppCommand;
+use crate::{AppCommand, split_tree::PaneId};
 use winit::window::WindowId;
 
 /// Events posted from the io thread to the winit event loop via
@@ -10,9 +10,13 @@ pub enum UserEvent {
     /// A native app menu item or app-level shortcut was activated.
     AppCommand(AppCommand),
     /// An OSC 52 clipboard write was accepted by the terminal policy.
-    ClipboardWrite { window_id: WindowId, text: String },
+    ClipboardWrite {
+        window_id: WindowId,
+        pane_id: PaneId,
+        text: String,
+    },
     /// New terminal output is available; request a redraw.
-    Redraw(WindowId),
+    Redraw(WindowId, PaneId),
     /// The pty's child process exited (or errored) — the app should close.
-    PtyExit(WindowId),
+    PtyExit(WindowId, PaneId),
 }

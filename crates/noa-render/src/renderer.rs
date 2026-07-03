@@ -1,13 +1,37 @@
 //! [`Renderer`] — owns the GPU pipeline, the font atlas texture, and the
 //! instance buffers; rebuilds them from a [`crate::FrameSnapshot`] and draws.
 
-use noa_core::{CellAttrs, Color, GridPadding, PixelSize};
+use std::ops::Range;
+
+use noa_core::{CellAttrs, CellSize, Color, GridPadding, PixelSize};
 use noa_font::{FontGrid, Metrics};
 
-use crate::instance::{CellInstance, Uniforms, orthographic_projection};
+use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
+use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
 use crate::pipeline::CellPipeline;
 use crate::snapshot::FrameSnapshot;
 use crate::theme::Theme;
+
+const DEFAULT_PANE_ID: PaneId = PaneId::new(0);
+const DIVIDER_RGBA: [u8; 4] = [82, 82, 82, 255];
+
+/// One pane's immutable frame input.
+pub struct PaneFrame<'a> {
+    pub pane: PaneId,
+    pub rect: PaneRect,
+    pub snapshot: &'a FrameSnapshot,
+}
+
+struct PaneGpuState {
+    uniform_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    bind_group_rebuilds: u64,
+}
+
+struct PaneInstances {
+    pane: PaneId,
+    range: Range<u32>,
+}
 
 /// The wgpu instanced-cell renderer. Windowing-agnostic: it receives an
 /// already-created `Device`/`Queue`/surface format and never touches
@@ -16,10 +40,14 @@ pub struct Renderer {
     cell: CellPipeline,
     atlas_texture: wgpu::Texture,
     atlas_view: wgpu::TextureView,
-    bind_group: wgpu::BindGroup,
+    pane_gpu: Vec<PaneGpuState>,
     instance_buffer: wgpu::Buffer,
     instance_capacity: usize,
     instances: Vec<CellInstance>,
+    cell_instance_len: usize,
+    pane_instances: Vec<PaneInstances>,
+    pane_layout: Vec<(PaneId, PaneRect)>,
+    divider_range: Range<u32>,
     viewport: PixelSize,
     cell_size: (f32, f32),
     grid_padding: GridPadding,
@@ -59,8 +87,6 @@ impl Renderer {
         upload_atlas(queue, &atlas_texture, font.atlas_data(), atlas_w, atlas_h);
         let atlas_seen_generation = font.atlas_generation();
 
-        let bind_group = cell.make_bind_group(device, &atlas_view);
-
         let instance_capacity = 4096;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("noa-instance-buffer"),
@@ -75,10 +101,14 @@ impl Renderer {
             cell,
             atlas_texture,
             atlas_view,
-            bind_group,
+            pane_gpu: Vec::new(),
             instance_buffer,
             instance_capacity,
             instances: Vec::new(),
+            cell_instance_len: 0,
+            pane_instances: Vec::new(),
+            pane_layout: Vec::new(),
+            divider_range: 0..0,
             viewport: PixelSize { w: 0, h: 0 },
             cell_size: (metrics.cell_w, metrics.cell_h),
             grid_padding,
@@ -98,31 +128,100 @@ impl Renderer {
         self.atlas_seen_generation
     }
 
+    /// Per-pane bind-group rebuild counters, exposed for headless pipeline
+    /// tests that assert atlas reallocation refreshes every pane binding.
+    pub fn pane_bind_group_rebuild_counts(&self) -> Vec<u64> {
+        self.pane_gpu
+            .iter()
+            .map(|pane| pane.bind_group_rebuilds)
+            .collect()
+    }
+
     /// Rebuild the CPU instance list from a snapshot, re-rastering any glyphs
     /// not yet in the atlas and re-uploading the atlas texture if it grew.
     pub fn rebuild_cells(&mut self, snap: &FrameSnapshot, font: &mut FontGrid, theme: &Theme) {
-        let (clear_color, cell_size) = rebuild_cell_instances(
-            &mut self.instances,
-            snap,
-            font,
-            theme,
-            self.target_format_is_srgb,
-        );
-        self.clear_color = clear_color;
-        self.cell_size = cell_size;
+        let panes = [PaneFrame {
+            pane: DEFAULT_PANE_ID,
+            rect: self.full_viewport_rect(),
+            snapshot: snap,
+        }];
+        self.rebuild_panes(&panes, font, theme);
+    }
+
+    /// Rebuild the CPU instance list for all visible panes in one frame.
+    ///
+    /// The caller should rebuild every pane first, then call [`Renderer::sync_atlas`]
+    /// once before drawing so all panes observe the same atlas mutation point.
+    /// A noisy pane still causes all visible pane snapshots to be rebuilt and
+    /// the full window to be redrawn each frame; dirty-row diffing remains a
+    /// follow-up beyond the v1 split-pane renderer.
+    pub fn rebuild_panes(&mut self, panes: &[PaneFrame<'_>], font: &mut FontGrid, theme: &Theme) {
+        self.instances.clear();
+        self.pane_instances.clear();
+        self.pane_layout.clear();
+        self.divider_range = 0..0;
+
+        let mut first_clear_color = None;
+        for pane in panes {
+            let start = self.instances.len() as u32;
+            let mut pane_instances = Vec::new();
+            let (clear_color, cell_size) = rebuild_cell_instances(
+                &mut pane_instances,
+                pane.snapshot,
+                font,
+                theme,
+                self.target_format_is_srgb,
+            );
+            first_clear_color.get_or_insert(clear_color);
+            self.cell_size = cell_size;
+            self.instances.extend(pane_instances);
+            let end = self.instances.len() as u32;
+            self.pane_instances.push(PaneInstances {
+                pane: pane.pane,
+                range: start..end,
+            });
+            self.pane_layout.push((pane.pane, pane.rect));
+        }
+
+        if let Some(clear_color) = first_clear_color {
+            self.clear_color = clear_color;
+        }
+        self.cell_instance_len = self.instances.len();
     }
 
     /// Draw the current instance list into `view`, uploading updated GPU
     /// state (uniforms, atlas, instance buffer) first.
     pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView) {
-        // Re-upload the atlas if the caller rastered new glyphs into it
-        // since our last upload. We don't own `FontGrid` here, so the atlas
-        // resize/upload happens in `rebuild_cells`'s caller via `sync_atlas`;
-        // for inc-1 the atlas is fixed-size and allocated once in `new`, so a
-        // dirty check happens each `rebuild_cells` call through `sync_atlas`.
+        let layout = [(DEFAULT_PANE_ID, self.full_viewport_rect())];
+        self.draw_panes(device, queue, view, &layout, None);
+    }
 
+    /// Draw the layout most recently supplied to [`Renderer::rebuild_panes`].
+    pub fn draw_rebuilt_panes(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        zoomed: Option<PaneId>,
+    ) {
+        let layout = self.pane_layout.clone();
+        self.draw_panes(device, queue, view, &layout, zoomed);
+    }
+
+    /// Draw a split-pane layout into `view` using the pure draw-plan order.
+    pub fn draw_panes(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        layout: &[(PaneId, PaneRect)],
+        zoomed: Option<PaneId>,
+    ) {
+        let plan = build_draw_plan(layout, zoomed);
+        self.ensure_pane_gpu_count(device, layout.len());
+        self.upload_uniforms(queue, layout);
+        self.prepare_divider_instances(&plan);
         self.upload_instances(device, queue);
-        self.upload_uniforms(queue);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("noa-frame-encoder"),
@@ -152,9 +251,44 @@ impl Renderer {
 
             if !self.instances.is_empty() {
                 pass.set_pipeline(&self.cell.pipeline);
-                pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-                pass.draw(0..6, 0..self.instances.len() as u32);
+                for op in &plan {
+                    match op {
+                        DrawOp::Clear => {}
+                        DrawOp::PaneCells {
+                            pane,
+                            scissor,
+                            bind_group_index,
+                        } => {
+                            let Some(range) = self.instance_range_for(*pane) else {
+                                continue;
+                            };
+                            if range.is_empty() || scissor.w == 0 || scissor.h == 0 {
+                                continue;
+                            }
+                            let Some(gpu) = self.pane_gpu.get(*bind_group_index) else {
+                                continue;
+                            };
+                            pass.set_scissor_rect(scissor.x, scissor.y, scissor.w, scissor.h);
+                            pass.set_bind_group(0, &gpu.bind_group, &[]);
+                            pass.draw(0..6, range);
+                        }
+                        DrawOp::Dividers { .. } => {
+                            if self.divider_range.is_empty()
+                                || self.viewport.w == 0
+                                || self.viewport.h == 0
+                            {
+                                continue;
+                            }
+                            let Some(gpu) = self.pane_gpu.first() else {
+                                continue;
+                            };
+                            pass.set_scissor_rect(0, 0, self.viewport.w, self.viewport.h);
+                            pass.set_bind_group(0, &gpu.bind_group, &[]);
+                            pass.draw(0..6, self.divider_range.clone());
+                        }
+                    }
+                }
             }
         }
 
@@ -188,10 +322,37 @@ impl Renderer {
             self.atlas_view = self
                 .atlas_texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
-            self.bind_group = self.cell.make_bind_group(device, &self.atlas_view);
+            self.rebuild_pane_bind_groups(device);
         }
         upload_atlas(queue, &self.atlas_texture, font.atlas_data(), w, h);
         self.atlas_seen_generation = generation;
+    }
+
+    fn full_viewport_rect(&self) -> PaneRect {
+        PaneRect::new(0, 0, self.viewport.w, self.viewport.h)
+    }
+
+    fn ensure_pane_gpu_count(&mut self, device: &wgpu::Device, count: usize) {
+        while self.pane_gpu.len() < count {
+            let uniform_buffer = self.cell.make_uniform_buffer(device);
+            let bind_group = self
+                .cell
+                .make_bind_group(device, &uniform_buffer, &self.atlas_view);
+            self.pane_gpu.push(PaneGpuState {
+                uniform_buffer,
+                bind_group,
+                bind_group_rebuilds: 1,
+            });
+        }
+    }
+
+    fn rebuild_pane_bind_groups(&mut self, device: &wgpu::Device) {
+        for pane in &mut self.pane_gpu {
+            pane.bind_group =
+                self.cell
+                    .make_bind_group(device, &pane.uniform_buffer, &self.atlas_view);
+            pane.bind_group_rebuilds = pane.bind_group_rebuilds.saturating_add(1);
+        }
     }
 
     fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
@@ -213,37 +374,62 @@ impl Renderer {
         }
     }
 
-    fn upload_uniforms(&self, queue: &wgpu::Queue) {
+    fn upload_uniforms(&self, queue: &wgpu::Queue, layout: &[(PaneId, PaneRect)]) {
         let (cell_w, cell_h) = self.cell_size;
-        let width = self.viewport.w as f32;
-        let height = self.viewport.h as f32;
-        let content_width = (width - self.grid_padding.horizontal()).max(0.0);
-        let content_height = (height - self.grid_padding.vertical()).max(0.0);
-        let uniforms = Uniforms {
-            projection: orthographic_projection(width.max(1.0), height.max(1.0)),
-            screen_size: [width, height],
-            cell_size: [cell_w, cell_h],
-            grid_size: [
-                if cell_w > 0.0 {
-                    content_width / cell_w
-                } else {
-                    0.0
+        for (index, (_, rect)) in layout.iter().enumerate() {
+            let Some(gpu) = self.pane_gpu.get(index) else {
+                continue;
+            };
+            let uniforms = populate_pane_uniform(PaneUniformParams {
+                pane_rect: *rect,
+                window_size: self.viewport,
+                grid_padding: self.grid_padding,
+                cell_size: CellSize {
+                    w: cell_w,
+                    h: cell_h,
                 },
-                if cell_h > 0.0 {
-                    content_height / cell_h
-                } else {
-                    0.0
-                },
-            ],
-            grid_padding: self.grid_padding.as_uniform(),
-            cursor_pos: [0.0, 0.0],
-            cursor_color: [1.0, 1.0, 1.0, 1.0],
-            bg_color: self.clear_color,
-            min_contrast: 0.0,
-            _pad: [0.0; 3],
-        };
-        queue.write_buffer(&self.cell.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+                bg_color: self.clear_color,
+            });
+            queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        }
     }
+
+    fn prepare_divider_instances(&mut self, plan: &[DrawOp]) {
+        self.instances.truncate(self.cell_instance_len);
+        let start = self.instances.len() as u32;
+        for op in plan {
+            let DrawOp::Dividers { rects } = op else {
+                continue;
+            };
+            for rect in rects {
+                self.instances.push(divider_instance(*rect));
+            }
+        }
+        let end = self.instances.len() as u32;
+        self.divider_range = start..end;
+    }
+
+    fn instance_range_for(&self, pane: PaneId) -> Option<Range<u32>> {
+        self.pane_instances
+            .iter()
+            .find(|entry| entry.pane == pane)
+            .map(|entry| entry.range.clone())
+    }
+}
+
+fn divider_instance(rect: PaneRect) -> CellInstance {
+    CellInstance {
+        glyph_pos: [0, 0],
+        glyph_size: [to_u16_saturating(rect.w), to_u16_saturating(rect.h)],
+        bearing: [0, 0],
+        grid_pos: [to_u16_saturating(rect.x), to_u16_saturating(rect.y)],
+        color: DIVIDER_RGBA,
+        flags: CellInstance::FLAG_DIVIDER,
+    }
+}
+
+fn to_u16_saturating(value: u32) -> u16 {
+    value.min(u32::from(u16::MAX)) as u16
 }
 
 fn rebuild_cell_instances(
@@ -401,50 +587,53 @@ fn push_cell_decorations(
 ) {
     let thickness = decoration_thickness(metrics);
     let width = metrics.cell_w.round().max(1.0) as u16;
+    let cell = DecorationCell {
+        grid_x: x,
+        grid_y: y,
+        color,
+    };
 
     if attrs.contains(CellAttrs::OVERLINE) {
-        push_decoration_rect(instances, x, y, 0, 0, width, thickness, color);
+        push_decoration_rect(instances, cell, DecorationRect::new(0, 0, width, thickness));
     }
     if attrs.contains(CellAttrs::STRIKETHROUGH) {
         let strike_y = clamp_decoration_y(metrics.ascent * 0.55, thickness, metrics);
-        push_decoration_rect(instances, x, y, 0, strike_y, width, thickness, color);
+        push_decoration_rect(
+            instances,
+            cell,
+            DecorationRect::new(0, strike_y, width, thickness),
+        );
     }
 
     if attrs.contains(CellAttrs::DOUBLE_UNDERLINE) {
         let first_y = underline_y(metrics, thickness, -1.0);
         let second_y = underline_y(metrics, thickness, thickness as f32 + 1.0);
-        push_decoration_rect(instances, x, y, 0, first_y, width, thickness, color);
-        push_decoration_rect(instances, x, y, 0, second_y, width, thickness, color);
+        push_decoration_rect(
+            instances,
+            cell,
+            DecorationRect::new(0, first_y, width, thickness),
+        );
+        push_decoration_rect(
+            instances,
+            cell,
+            DecorationRect::new(0, second_y, width, thickness),
+        );
     } else if attrs.contains(CellAttrs::CURLY_UNDERLINE) {
         let base_y = underline_y(metrics, thickness, 0.0);
-        push_segmented_decoration(
-            instances,
-            x,
-            y,
-            width,
-            thickness,
-            base_y,
-            color,
-            CurlPattern,
-        );
+        push_segmented_decoration(instances, cell, width, thickness, base_y, CurlPattern);
     } else if attrs.contains(CellAttrs::DOTTED_UNDERLINE) {
         let base_y = underline_y(metrics, thickness, 0.0);
-        push_segmented_decoration(instances, x, y, width, thickness, base_y, color, DotPattern);
+        push_segmented_decoration(instances, cell, width, thickness, base_y, DotPattern);
     } else if attrs.contains(CellAttrs::DASHED_UNDERLINE) {
         let base_y = underline_y(metrics, thickness, 0.0);
-        push_segmented_decoration(
-            instances,
-            x,
-            y,
-            width,
-            thickness,
-            base_y,
-            color,
-            DashPattern,
-        );
+        push_segmented_decoration(instances, cell, width, thickness, base_y, DashPattern);
     } else if attrs.contains(CellAttrs::UNDERLINE) {
         let base_y = underline_y(metrics, thickness, 0.0);
-        push_decoration_rect(instances, x, y, 0, base_y, width, thickness, color);
+        push_decoration_rect(
+            instances,
+            cell,
+            DecorationRect::new(0, base_y, width, thickness),
+        );
     }
 }
 
@@ -481,6 +670,32 @@ trait SegmentPattern {
 struct DotPattern;
 struct DashPattern;
 struct CurlPattern;
+
+#[derive(Clone, Copy)]
+struct DecorationCell {
+    grid_x: u16,
+    grid_y: u16,
+    color: [u8; 4],
+}
+
+#[derive(Clone, Copy)]
+struct DecorationRect {
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+}
+
+impl DecorationRect {
+    const fn new(x: i16, y: i16, width: u16, height: u16) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
 
 impl SegmentPattern for DotPattern {
     fn segment(
@@ -526,7 +741,11 @@ impl SegmentPattern for CurlPattern {
         thickness: u16,
         base_y: i16,
     ) -> ([i16; 2], [u16; 2]) {
-        let y_offset = if index % 2 == 0 { 0 } else { thickness as i16 };
+        let y_offset = if index.is_multiple_of(2) {
+            0
+        } else {
+            thickness as i16
+        };
         (
             [x as i16, base_y.saturating_sub(y_offset)],
             [width.min(thickness.saturating_mul(2).max(2)), thickness],
@@ -540,12 +759,10 @@ impl SegmentPattern for CurlPattern {
 
 fn push_segmented_decoration<P: SegmentPattern>(
     instances: &mut Vec<CellInstance>,
-    grid_x: u16,
-    grid_y: u16,
+    cell: DecorationCell,
     width: u16,
     thickness: u16,
     base_y: i16,
-    color: [u8; 4],
     pattern: P,
 ) {
     let advance = pattern.advance(thickness);
@@ -555,7 +772,9 @@ fn push_segmented_decoration<P: SegmentPattern>(
         let remaining = width - x;
         let (bearing, size) = pattern.segment(index, x, remaining, thickness, base_y);
         push_decoration_rect(
-            instances, grid_x, grid_y, bearing[0], bearing[1], size[0], size[1], color,
+            instances,
+            cell,
+            DecorationRect::new(bearing[0], bearing[1], size[0], size[1]),
         );
         index += 1;
         x = x.saturating_add(advance);
@@ -564,20 +783,15 @@ fn push_segmented_decoration<P: SegmentPattern>(
 
 fn push_decoration_rect(
     instances: &mut Vec<CellInstance>,
-    grid_x: u16,
-    grid_y: u16,
-    x: i16,
-    y: i16,
-    width: u16,
-    height: u16,
-    color: [u8; 4],
+    cell: DecorationCell,
+    rect: DecorationRect,
 ) {
     instances.push(CellInstance {
         glyph_pos: [0, 0],
-        glyph_size: [width.max(1), height.max(1)],
-        bearing: [x, y],
-        grid_pos: [grid_x, grid_y],
-        color,
+        glyph_size: [rect.width.max(1), rect.height.max(1)],
+        bearing: [rect.x, rect.y],
+        grid_pos: [cell.grid_x, cell.grid_y],
+        color: cell.color,
         flags: CellInstance::FLAG_DECORATION,
     });
 }

@@ -497,7 +497,7 @@ fn push_color_params(
 }
 
 fn decode_xtgettcap_name(encoded: &[u8]) -> Option<Vec<u8>> {
-    if encoded.len() % 2 != 0 {
+    if !encoded.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(encoded.len() / 2);

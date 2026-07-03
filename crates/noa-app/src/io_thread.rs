@@ -15,6 +15,7 @@ use noa_pty::{Pty, PtyWriter};
 use winit::event_loop::EventLoopProxy;
 
 use crate::events::UserEvent;
+use crate::split_tree::PaneId;
 
 pub(crate) type PtyInput = Box<[u8]>;
 
@@ -99,6 +100,7 @@ pub fn spawn(
     terminal: Arc<Mutex<Terminal>>,
     proxy: EventLoopProxy<UserEvent>,
     window_id: winit::window::WindowId,
+    pane_id: PaneId,
     resize_rx: Receiver<GridSize>,
     input_rx: Receiver<PtyInput>,
 ) -> IoThreadHandle {
@@ -117,14 +119,18 @@ pub fn spawn(
                         }
                         let should_redraw = should_request_redraw_after_terminal_output(&output);
                         for text in output.pending_clipboard_writes {
-                            let _ = proxy.send_event(UserEvent::ClipboardWrite { window_id, text });
+                            let _ = proxy.send_event(UserEvent::ClipboardWrite {
+                                window_id,
+                                pane_id,
+                                text,
+                            });
                         }
-                        if should_redraw && proxy.send_event(UserEvent::Redraw(window_id)).is_err() {
+                        if should_redraw && proxy.send_event(UserEvent::Redraw(window_id, pane_id)).is_err() {
                             break; // event loop gone
                         }
                     }
                     Ok(noa_pty::PtyEvent::Exit(_)) | Ok(noa_pty::PtyEvent::Error(_)) => {
-                        let _ = proxy.send_event(UserEvent::PtyExit(window_id));
+                        let _ = proxy.send_event(UserEvent::PtyExit(window_id, pane_id));
                         break;
                     }
                     Err(_) => break, // channel closed
@@ -217,5 +223,25 @@ mod tests {
 
         assert!(handle.shutdown_and_join_timeout(Duration::from_millis(500)));
         assert!(handle.join.is_none());
+    }
+
+    #[test]
+    fn pane_io_thread_shutdown_joins_all_blocked_handles_within_timeout() {
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
+            let join = std::thread::spawn(move || {
+                let _ = shutdown_rx.recv();
+            });
+            handles.push(IoThreadHandle {
+                shutdown_tx,
+                join: Some(join),
+            });
+        }
+
+        for handle in &mut handles {
+            assert!(handle.shutdown_and_join_timeout(Duration::from_millis(500)));
+            assert!(handle.join.is_none());
+        }
     }
 }

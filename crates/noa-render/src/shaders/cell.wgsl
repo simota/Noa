@@ -48,6 +48,7 @@ struct VertexOutput {
 
 const FLAG_GLYPH: u32 = 1u;
 const FLAG_DECORATION: u32 = 8u;
+const FLAG_DIVIDER: u32 = 16u;
 
 @vertex
 fn vs_main(
@@ -71,7 +72,13 @@ fn vs_main(
     var pixel: vec2<f32>;
     var uv: vec2<f32>;
 
-    if (instance.flags & FLAG_GLYPH) != 0u {
+    if (instance.flags & FLAG_DIVIDER) != 0u {
+        // Divider quad: grid_pos/glyph_size carry a pixel-space rect.
+        let origin = vec2<f32>(f32(instance.grid_pos.x), f32(instance.grid_pos.y));
+        let size = vec2<f32>(f32(instance.glyph_size.x), f32(instance.glyph_size.y));
+        pixel = origin + corner * size;
+        uv = vec2<f32>(0.0, 0.0);
+    } else if (instance.flags & FLAG_GLYPH) != 0u {
         // Glyph quad: positioned by bearing, sized by the atlas glyph rect.
         let size = vec2<f32>(f32(instance.glyph_size.x), f32(instance.glyph_size.y));
         let bearing = vec2<f32>(f32(instance.bearing.x), f32(instance.bearing.y));

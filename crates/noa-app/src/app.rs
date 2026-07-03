@@ -15,7 +15,7 @@ use noa_core::{DEFAULT_GRID_PADDING, GridPadding, GridSize, PixelSize, Point};
 use noa_font::FontGrid;
 use noa_grid::{Terminal, modes::MouseTracking};
 use noa_pty::{Pty, PtyConfig};
-use noa_render::{FrameSnapshot, Renderer, Theme};
+use noa_render::{FrameSnapshot, PaneFrame, PaneId as RenderPaneId, PaneRect, Renderer, Theme};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
@@ -30,6 +30,11 @@ use crate::commands::{FontSizeAction, KeybindEngine, SearchAction, TerminalActio
 use crate::events::UserEvent;
 use crate::input;
 use crate::mouse::{self, MouseSelectionState, SelectionGesture};
+use crate::split_tree::{
+    self, Direction, HitTarget, ImeOp, MIN_PANE_SIZE_PX, PaneId, Rect as PaneRectApp,
+    SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitTree, equalize, focus_in_direction,
+    focus_switch_plan, hit_test, resize_split, split_pane, zoom_resize_targets, zoom_toggle,
+};
 use crate::{AppCommand, ViewportScroll};
 
 /// Configuration the binary passes into [`crate::run`].
@@ -58,6 +63,19 @@ struct WindowState {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
+    split_tree: SplitTree,
+    zoomed: Option<PaneId>,
+    focused_pane: PaneId,
+    next_pane_id: u64,
+    surfaces: HashMap<PaneId, Surface>,
+    last_mouse_pane: Option<PaneId>,
+    occluded: bool,
+    title: String,
+}
+
+/// Terminal-owned state for one split leaf. `split_tree` leaves store the
+/// `PaneId`; this map owns the corresponding live surface payload.
+struct Surface {
     terminal: Arc<Mutex<Terminal>>,
     pty_input_tx: Sender<crate::io_thread::PtyInput>,
     resize_tx: Sender<GridSize>,
@@ -67,11 +85,32 @@ struct WindowState {
     last_mouse_cell: Option<Point>,
     pressed_mouse_button: Option<MouseButton>,
     ime_state: input::ImeState,
-    occluded: bool,
-    title: String,
+    rect: PaneRectApp,
 }
 
 impl WindowState {
+    fn shutdown(&mut self) {
+        shutdown_pane_io_threads(self.surfaces.values_mut());
+    }
+
+    fn focused_surface(&self) -> Option<&Surface> {
+        self.surfaces.get(&self.focused_pane)
+    }
+
+    fn focused_surface_mut(&mut self) -> Option<&mut Surface> {
+        self.surfaces.get_mut(&self.focused_pane)
+    }
+
+    fn pane_count(&self) -> usize {
+        self.surfaces.len()
+    }
+
+    fn contains_pane(&self, pane_id: PaneId) -> bool {
+        self.surfaces.contains_key(&pane_id)
+    }
+}
+
+impl Surface {
     fn shutdown(&mut self) {
         if let Some(io_thread) = self.io_thread.take() {
             io_thread.shutdown_and_join();
@@ -125,8 +164,9 @@ impl App {
     fn app_cursor_keys(&self, window_id: WindowId) -> bool {
         self.windows
             .get(&window_id)
-            .map(|state| {
-                state
+            .and_then(WindowState::focused_surface)
+            .map(|surface| {
+                surface
                     .terminal
                     .lock()
                     .expect("terminal mutex poisoned")
@@ -139,8 +179,9 @@ impl App {
     fn app_keypad(&self, window_id: WindowId) -> bool {
         self.windows
             .get(&window_id)
-            .map(|state| {
-                state
+            .and_then(WindowState::focused_surface)
+            .map(|surface| {
+                surface
                     .terminal
                     .lock()
                     .expect("terminal mutex poisoned")
@@ -153,8 +194,9 @@ impl App {
     fn focus_reporting(&self, window_id: WindowId) -> bool {
         self.windows
             .get(&window_id)
-            .map(|state| {
-                state
+            .and_then(WindowState::focused_surface)
+            .map(|surface| {
+                surface
                     .terminal
                     .lock()
                     .expect("terminal mutex poisoned")
@@ -178,25 +220,48 @@ impl App {
             return;
         }
 
-        let (snapshot, title) = {
-            let term = state.terminal.lock().expect("terminal mutex poisoned");
-            (FrameSnapshot::from_terminal(&term), tab_title(&term.title))
-        };
+        let mut snapshots = Vec::new();
+        let mut title = "noa".to_string();
+        let visible_panes = visible_pane_ids(&state.split_tree, state.zoomed);
+        for pane_id in visible_panes {
+            let Some(surface) = state.surfaces.get(&pane_id) else {
+                continue;
+            };
+            let term = surface.terminal.lock().expect("terminal mutex poisoned");
+            if pane_id == state.focused_pane {
+                title = tab_title(&term.title);
+            }
+            snapshots.push((pane_id, surface.rect, FrameSnapshot::from_terminal(&term)));
+        }
         if state.title != title {
             state.window.set_title(&title);
             state.title = title;
         }
-        update_ime_cursor_area(
-            &state.window,
-            gpu.font.metrics(),
-            snapshot.cursor.x,
-            snapshot.cursor.y,
-            DEFAULT_GRID_PADDING,
-        );
+        if let Some((_, rect, snapshot)) = snapshots
+            .iter()
+            .find(|(pane_id, _, _)| *pane_id == state.focused_pane)
+        {
+            update_ime_cursor_area(
+                &state.window,
+                gpu.font.metrics(),
+                snapshot.cursor.x,
+                snapshot.cursor.y,
+                *rect,
+                DEFAULT_GRID_PADDING,
+            );
+        }
 
+        let panes = snapshots
+            .iter()
+            .map(|(pane_id, rect, snapshot)| PaneFrame {
+                pane: render_pane_id(*pane_id),
+                rect: render_pane_rect(*rect),
+                snapshot,
+            })
+            .collect::<Vec<_>>();
         state
             .renderer
-            .rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+            .rebuild_panes(&panes, &mut gpu.font, &gpu.theme);
         state
             .renderer
             .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
@@ -217,7 +282,12 @@ impl App {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        state.renderer.draw(&gpu.device, &gpu.queue, &view);
+        state.renderer.draw_rebuilt_panes(
+            &gpu.device,
+            &gpu.queue,
+            &view,
+            state.zoomed.map(render_pane_id),
+        );
         frame.present();
     }
 
@@ -232,9 +302,39 @@ impl App {
             AppCommand::NewTab => {
                 let _ = self.spawn_tab(event_loop);
             }
+            AppCommand::NewSplitRight => {
+                if let Some(window_id) = self.focused {
+                    self.new_split(window_id, SplitOrientation::Horizontal);
+                }
+            }
+            AppCommand::NewSplitDown => {
+                if let Some(window_id) = self.focused {
+                    self.new_split(window_id, SplitOrientation::Vertical);
+                }
+            }
+            AppCommand::FocusDirection(direction) => {
+                if let Some(window_id) = self.focused {
+                    self.focus_split_direction(window_id, direction);
+                }
+            }
+            AppCommand::ResizeSplit(direction) => {
+                if let Some(window_id) = self.focused {
+                    self.resize_focused_split(window_id, direction);
+                }
+            }
+            AppCommand::EqualizeSplits => {
+                if let Some(window_id) = self.focused {
+                    self.equalize_splits(window_id);
+                }
+            }
+            AppCommand::ToggleSplitZoom => {
+                if let Some(window_id) = self.focused {
+                    self.toggle_split_zoom(window_id);
+                }
+            }
             AppCommand::CloseTab => {
                 if let Some(window_id) = self.focused {
-                    self.close_tab(event_loop, window_id);
+                    self.close_focused_pane_or_tab(event_loop, window_id);
                 }
             }
             AppCommand::SelectTab(index) => self.select_tab(index),
@@ -301,7 +401,14 @@ impl App {
             let _ = window.request_inner_size(inner_size);
         }
         window.set_ime_allowed(true);
-        update_ime_cursor_area(&window, metrics, 0, 0, DEFAULT_GRID_PADDING);
+        update_ime_cursor_area(
+            &window,
+            metrics,
+            0,
+            0,
+            PaneRectApp::new(0, 0, 0, 0),
+            DEFAULT_GRID_PADDING,
+        );
 
         let surface = if self.gpu.is_none() {
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
@@ -380,32 +487,12 @@ impl App {
         };
 
         let window_id = window.id();
-        let pty_config = PtyConfig {
-            size: initial_grid_size,
-            ..Default::default()
-        };
-        let pty = Pty::spawn(pty_config).expect("failed to spawn pty");
-        let mut terminal = Terminal::new(initial_grid_size);
-        {
-            let theme = &self.gpu.as_ref().expect("gpu initialized").theme;
-            terminal.set_base_colors(
-                theme.default_fg,
-                theme.default_bg,
-                theme.cursor,
-                theme.palette,
-            );
-        }
-        let terminal = Arc::new(Mutex::new(terminal));
-        let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
-        let (pty_input_tx, pty_input_rx) = crate::io_thread::input_channel();
-        let io_thread = crate::io_thread::spawn(
-            pty,
-            terminal.clone(),
-            self.proxy.clone(),
-            window_id,
-            resize_rx,
-            pty_input_rx,
-        );
+        let initial_pane = PaneId::new(1);
+        let initial_rect = PaneRectApp::new(0, 0, surface_config.width, surface_config.height);
+        let initial_surface =
+            self.spawn_pane_surface(window_id, initial_pane, initial_grid_size, initial_rect)?;
+        let mut surfaces = HashMap::new();
+        surfaces.insert(initial_pane, initial_surface);
 
         self.windows.insert(
             window_id,
@@ -414,15 +501,12 @@ impl App {
                 surface,
                 surface_config,
                 renderer,
-                terminal,
-                pty_input_tx,
-                resize_tx,
-                io_thread: Some(io_thread),
-                grid_size: initial_grid_size,
-                mouse_selection: MouseSelectionState::default(),
-                last_mouse_cell: None,
-                pressed_mouse_button: None,
-                ime_state: input::ImeState::default(),
+                split_tree: SplitTree::leaf(initial_pane),
+                zoomed: None,
+                focused_pane: initial_pane,
+                next_pane_id: 2,
+                surfaces,
+                last_mouse_pane: Some(initial_pane),
                 occluded: false,
                 title: "noa".to_string(),
             },
@@ -445,6 +529,54 @@ impl App {
         {
             attrs
         }
+    }
+
+    fn spawn_pane_surface(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        grid_size: GridSize,
+        rect: PaneRectApp,
+    ) -> anyhow::Result<Surface> {
+        let pty_config = PtyConfig {
+            size: grid_size,
+            ..Default::default()
+        };
+        let pty = Pty::spawn(pty_config)?;
+        let mut terminal = Terminal::new(grid_size);
+        if let Some(gpu) = self.gpu.as_ref() {
+            terminal.set_base_colors(
+                gpu.theme.default_fg,
+                gpu.theme.default_bg,
+                gpu.theme.cursor,
+                gpu.theme.palette,
+            );
+        }
+        let terminal = Arc::new(Mutex::new(terminal));
+        let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
+        let (pty_input_tx, pty_input_rx) = crate::io_thread::input_channel();
+        let io_thread = crate::io_thread::spawn(
+            pty,
+            terminal.clone(),
+            self.proxy.clone(),
+            window_id,
+            pane_id,
+            resize_rx,
+            pty_input_rx,
+        );
+
+        Ok(Surface {
+            terminal,
+            pty_input_tx,
+            resize_tx,
+            io_thread: Some(io_thread),
+            grid_size,
+            mouse_selection: MouseSelectionState::default(),
+            last_mouse_cell: None,
+            pressed_mouse_button: None,
+            ime_state: input::ImeState::default(),
+            rect,
+        })
     }
 
     fn close_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
@@ -471,6 +603,227 @@ impl App {
                 }
             }
         }
+    }
+
+    fn close_focused_pane_or_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
+        if state.pane_count() <= 1 {
+            self.close_tab(event_loop, window_id);
+            return;
+        }
+        let pane_id = state.focused_pane;
+        self.close_pane(event_loop, window_id, pane_id);
+    }
+
+    fn close_pane_after_pty_exit(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) {
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
+        if !state.contains_pane(pane_id) {
+            return;
+        }
+        if state.pane_count() <= 1 {
+            self.close_tab(event_loop, window_id);
+            return;
+        }
+        self.close_pane(event_loop, window_id, pane_id);
+    }
+
+    fn close_pane(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, pane_id: PaneId) {
+        let should_close_tab = self
+            .windows
+            .get(&window_id)
+            .is_some_and(|state| state.contains_pane(pane_id) && state.pane_count() <= 1);
+        if should_close_tab {
+            self.close_tab(event_loop, window_id);
+            return;
+        }
+
+        let mut tab_should_close = false;
+        let window = {
+            let Some(state) = self.windows.get_mut(&window_id) else {
+                return;
+            };
+            if !state.contains_pane(pane_id) {
+                return;
+            }
+
+            if let Some(mut surface) = state.surfaces.remove(&pane_id) {
+                surface.shutdown();
+            }
+            let outcome =
+                split_tree::close_pane_with_zoom(&mut state.split_tree, pane_id, state.zoomed);
+            state.zoomed = outcome.zoomed;
+            if outcome.close_outcome.tab_should_close {
+                tab_should_close = true;
+            } else {
+                state.focused_pane = outcome
+                    .close_outcome
+                    .next_focus
+                    .filter(|pane| state.contains_pane(*pane))
+                    .or_else(|| state.surfaces.keys().copied().next())
+                    .unwrap_or(state.focused_pane);
+                state.last_mouse_pane = Some(state.focused_pane);
+            }
+            state.window.clone()
+        };
+
+        if tab_should_close {
+            self.close_tab(event_loop, window_id);
+            return;
+        }
+        self.relayout_and_resize_window(window_id);
+        self.update_focused_ime_cursor_area(window_id);
+        window.request_redraw();
+    }
+
+    fn new_split(&mut self, window_id: WindowId, orientation: SplitOrientation) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some((focused_pane, new_pane, focused_rect)) =
+            self.windows.get_mut(&window_id).and_then(|state| {
+                let focused_rect = state.focused_surface()?.rect;
+                if !can_split_rect(focused_rect, orientation) {
+                    return None;
+                }
+                let new_pane = PaneId::new(state.next_pane_id);
+                state.next_pane_id = state.next_pane_id.saturating_add(1);
+                Some((state.focused_pane, new_pane, focused_rect))
+            })
+        else {
+            return;
+        };
+
+        let grid_size =
+            grid_size_for_pane_rect(focused_rect, gpu.font.metrics(), DEFAULT_GRID_PADDING);
+        let new_surface =
+            match self.spawn_pane_surface(window_id, new_pane, grid_size, focused_rect) {
+                Ok(surface) => surface,
+                Err(err) => {
+                    log::warn!("failed to spawn split pty: {err}");
+                    return;
+                }
+            };
+
+        let window = {
+            let Some(state) = self.windows.get_mut(&window_id) else {
+                let mut surface = new_surface;
+                surface.shutdown();
+                return;
+            };
+            if !split_pane(&mut state.split_tree, focused_pane, new_pane, orientation) {
+                let mut surface = new_surface;
+                surface.shutdown();
+                return;
+            }
+            state.surfaces.insert(new_pane, new_surface);
+            state.focused_pane = new_pane;
+            state.zoomed = None;
+            state.last_mouse_pane = Some(new_pane);
+            state.window.clone()
+        };
+
+        self.relayout_and_resize_window(window_id);
+        self.update_focused_ime_cursor_area(window_id);
+        window.request_redraw();
+    }
+
+    fn focus_split_direction(&mut self, window_id: WindowId, direction: Direction) {
+        let Some(next) = self.windows.get(&window_id).and_then(|state| {
+            focus_in_direction(&state.split_tree, state.focused_pane, direction)
+                .filter(|pane| state.contains_pane(*pane))
+        }) else {
+            return;
+        };
+        self.focus_pane(window_id, next);
+    }
+
+    fn focus_pane(&mut self, window_id: WindowId, pane_id: PaneId) {
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
+        if !state.contains_pane(pane_id) || state.focused_pane == pane_id {
+            return;
+        }
+        let losing = state.focused_pane;
+        let plan = focus_switch_plan(losing, pane_id);
+
+        if let Some(state) = self.windows.get_mut(&window_id) {
+            for op in plan {
+                match op {
+                    ImeOp::CommitPreedit(pane) => {
+                        if let Some(surface) = state.surfaces.get_mut(&pane) {
+                            surface.ime_state.commit_preedit();
+                        }
+                    }
+                    ImeOp::RetargetIme(pane) => {
+                        if state.contains_pane(pane) {
+                            state.focused_pane = pane;
+                            state.last_mouse_pane = Some(pane);
+                        }
+                    }
+                }
+            }
+        }
+        self.update_focused_ime_cursor_area(window_id);
+        if let Some(state) = self.windows.get(&window_id) {
+            state.window.request_redraw();
+        }
+    }
+
+    fn resize_focused_split(&mut self, window_id: WindowId, direction: Direction) {
+        let window = {
+            let Some(state) = self.windows.get_mut(&window_id) else {
+                return;
+            };
+            resize_split(
+                &mut state.split_tree,
+                state.focused_pane,
+                direction,
+                SPLIT_RESIZE_STEP_PX,
+            );
+            state.window.clone()
+        };
+        self.relayout_and_resize_window(window_id);
+        window.request_redraw();
+    }
+
+    fn equalize_splits(&mut self, window_id: WindowId) {
+        let window = {
+            let Some(state) = self.windows.get_mut(&window_id) else {
+                return;
+            };
+            equalize(&mut state.split_tree);
+            state.window.clone()
+        };
+        self.relayout_and_resize_window(window_id);
+        window.request_redraw();
+    }
+
+    fn toggle_split_zoom(&mut self, window_id: WindowId) {
+        let bounds = self
+            .windows
+            .get(&window_id)
+            .map(|state| pane_bounds_for_size(state.window.inner_size()))
+            .unwrap_or(PaneRectApp::new(0, 0, 0, 0));
+        let window = {
+            let Some(state) = self.windows.get_mut(&window_id) else {
+                return;
+            };
+            let decision = zoom_toggle(&state.split_tree, state.zoomed, state.focused_pane, bounds);
+            state.zoomed = decision.zoomed;
+            state.window.clone()
+        };
+        self.relayout_and_resize_window(window_id);
+        window.request_redraw();
     }
 
     fn select_tab(&mut self, index: usize) {
@@ -564,20 +917,26 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::AppCommand(command) => self.handle_app_command(event_loop, command),
-            UserEvent::ClipboardWrite { window_id, text } => {
-                if !self.windows.contains_key(&window_id) {
+            UserEvent::ClipboardWrite {
+                window_id,
+                pane_id,
+                text,
+            } => {
+                if !self
+                    .windows
+                    .get(&window_id)
+                    .is_some_and(|state| state.contains_pane(pane_id))
+                {
                     return;
                 }
                 if let Err(err) = self.clipboard.set_text(&text) {
                     log::warn!("failed to write OSC 52 clipboard text: {err}");
                 }
             }
-            UserEvent::Redraw(window_id) => match targeted_redraw_decision(
-                self.windows.contains_key(&window_id),
+            UserEvent::Redraw(window_id, pane_id) => match pane_user_event_redraw_decision(
                 self.windows
                     .get(&window_id)
-                    .map(|state| state.occluded)
-                    .unwrap_or(false),
+                    .map(|state| (state.contains_pane(pane_id), state.occluded)),
             ) {
                 TargetedRedrawDecision::Request => {
                     if let Some(state) = self.windows.get(&window_id) {
@@ -586,7 +945,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 TargetedRedrawDecision::Stale | TargetedRedrawDecision::Suppress => {}
             },
-            UserEvent::PtyExit(window_id) => self.close_tab(event_loop, window_id),
+            UserEvent::PtyExit(window_id, pane_id) => {
+                self.close_pane_after_pty_exit(event_loop, window_id, pane_id)
+            }
         }
     }
 
@@ -634,7 +995,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if self
                     .windows
                     .get(&window_id)
-                    .is_some_and(|state| state.ime_state.preedit_active())
+                    .and_then(WindowState::focused_surface)
+                    .is_some_and(|surface| surface.ime_state.preedit_active())
                 {
                     return;
                 }
@@ -684,16 +1046,8 @@ impl App {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        let Some(gpu) = self.gpu.as_ref() else {
-            return;
-        };
-        let grid_size = grid_size_for_physical_size(
-            state.window.inner_size(),
-            gpu.font.metrics(),
-            DEFAULT_GRID_PADDING,
-        );
         let window = state.window.clone();
-        self.resize_grid(window_id, grid_size);
+        self.relayout_and_resize_window(window_id);
         window.request_redraw();
     }
 
@@ -714,58 +1068,41 @@ impl App {
             w: size.width,
             h: size.height,
         });
-        let grid_size = grid_size_for_physical_size(size, gpu.font.metrics(), DEFAULT_GRID_PADDING);
         let window = state.window.clone();
-        self.resize_grid(window_id, grid_size);
+        self.relayout_and_resize_window(window_id);
         window.request_redraw();
-    }
-
-    fn resize_grid(&mut self, window_id: WindowId, grid_size: GridSize) {
-        let Some(state) = self.windows.get_mut(&window_id) else {
-            return;
-        };
-        state.grid_size = grid_size;
-        // Grid-first ordering: resize the tab's Terminal grid BEFORE telling
-        // the pty its new winsize. Otherwise the shell's SIGWINCH repaint can
-        // reach the io thread and be fed into a still-old grid.
-        state
-            .terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .resize(state.grid_size);
-        let _ = state.resize_tx.send(state.grid_size);
     }
 
     fn on_cursor_moved(&mut self, window_id: WindowId, position: PhysicalPosition<f64>) {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        let Some(state) = self.windows.get(&window_id) else {
+        let metrics = gpu.font.metrics();
+        let Some((pane_id, cell)) = self.pane_cell_at_position(window_id, position, metrics) else {
+            if let Some(state) = self.windows.get_mut(&window_id) {
+                state.last_mouse_pane = None;
+            }
             return;
         };
-        let metrics = gpu.font.metrics();
-        let cell = mouse::physical_position_to_grid_point(
-            position.x,
-            position.y,
-            metrics.cell_w,
-            metrics.cell_h,
-            state.grid_size,
-            DEFAULT_GRID_PADDING,
-        );
+
         if let Some(state) = self.windows.get_mut(&window_id) {
-            state.last_mouse_cell = Some(cell);
+            state.last_mouse_pane = Some(pane_id);
+            if let Some(surface) = state.surfaces.get_mut(&pane_id) {
+                surface.last_mouse_cell = Some(cell);
+            }
         }
 
-        let tracking = self.sgr_mouse_tracking(window_id);
+        let tracking = self.sgr_mouse_tracking(window_id, pane_id);
         if tracking != MouseTracking::Off && !self.modifiers.shift_key() {
             let pressed_mouse_button = self
                 .windows
                 .get(&window_id)
-                .and_then(|state| state.pressed_mouse_button);
+                .and_then(|state| state.surfaces.get(&pane_id))
+                .and_then(|surface| surface.pressed_mouse_button);
             if let Some(bytes) =
                 mouse::encode_sgr_mouse_motion(tracking, pressed_mouse_button, cell, self.modifiers)
             {
-                self.write_pty_bytes(window_id, &bytes);
+                self.write_pane_pty_bytes(window_id, pane_id, &bytes);
             }
             return;
         }
@@ -773,31 +1110,48 @@ impl App {
         let gesture = self
             .windows
             .get_mut(&window_id)
-            .map(|state| state.mouse_selection.cursor_moved(cell))
+            .and_then(|state| state.surfaces.get_mut(&pane_id))
+            .map(|surface| surface.mouse_selection.cursor_moved(cell))
             .unwrap_or(SelectionGesture::None);
-        self.apply_selection_gesture(window_id, gesture);
+        self.apply_selection_gesture(window_id, pane_id, gesture);
     }
 
     fn on_mouse_input(&mut self, window_id: WindowId, state: ElementState, button: MouseButton) {
-        let tracking = self.sgr_mouse_tracking(window_id);
+        let pane_id = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.last_mouse_pane)
+            .or_else(|| self.windows.get(&window_id).map(|state| state.focused_pane));
+        let Some(pane_id) = pane_id else {
+            return;
+        };
+
+        if button == MouseButton::Left && state == ElementState::Pressed {
+            self.focus_pane(window_id, pane_id);
+        }
+
+        let tracking = self.sgr_mouse_tracking(window_id, pane_id);
         if tracking != MouseTracking::Off && !self.modifiers.shift_key() {
             let last_mouse_cell = self
                 .windows
                 .get(&window_id)
-                .and_then(|state| state.last_mouse_cell);
+                .and_then(|state| state.surfaces.get(&pane_id))
+                .and_then(|surface| surface.last_mouse_cell);
             if let Some(cell) = last_mouse_cell
                 && let Some(bytes) =
                     mouse::encode_sgr_mouse_input(button, state, cell, self.modifiers)
             {
-                self.write_pty_bytes(window_id, &bytes);
+                self.write_pane_pty_bytes(window_id, pane_id, &bytes);
             }
 
-            if let Some(tab) = self.windows.get_mut(&window_id) {
+            if let Some(tab) = self.windows.get_mut(&window_id)
+                && let Some(surface) = tab.surfaces.get_mut(&pane_id)
+            {
                 match state {
-                    ElementState::Pressed => tab.pressed_mouse_button = Some(button),
+                    ElementState::Pressed => surface.pressed_mouse_button = Some(button),
                     ElementState::Released => {
-                        if tab.pressed_mouse_button == Some(button) {
-                            tab.pressed_mouse_button = None;
+                        if surface.pressed_mouse_button == Some(button) {
+                            surface.pressed_mouse_button = None;
                         }
                     }
                 }
@@ -811,29 +1165,44 @@ impl App {
         if let Some(cell) = self
             .windows
             .get(&window_id)
-            .and_then(|tab| tab.last_mouse_cell)
+            .and_then(|tab| tab.surfaces.get(&pane_id))
+            .and_then(|surface| surface.last_mouse_cell)
             && let Some(tab) = self.windows.get_mut(&window_id)
+            && let Some(surface) = tab.surfaces.get_mut(&pane_id)
         {
-            let _ = tab.mouse_selection.cursor_moved(cell);
+            let _ = surface.mouse_selection.cursor_moved(cell);
         }
 
         let gesture = self
             .windows
             .get_mut(&window_id)
-            .map(|tab| match state {
-                ElementState::Pressed => tab.mouse_selection.left_pressed(Instant::now()),
-                ElementState::Released => tab.mouse_selection.left_released(),
+            .and_then(|tab| tab.surfaces.get_mut(&pane_id))
+            .map(|surface| match state {
+                ElementState::Pressed => surface.mouse_selection.left_pressed(Instant::now()),
+                ElementState::Released => surface.mouse_selection.left_released(),
             })
             .unwrap_or(SelectionGesture::None);
-        self.apply_selection_gesture(window_id, gesture);
+        self.apply_selection_gesture(window_id, pane_id, gesture);
     }
 
     fn on_mouse_wheel(&mut self, window_id: WindowId, delta: MouseScrollDelta) {
-        if self.sgr_mouse_tracking(window_id) != MouseTracking::Off && !self.modifiers.shift_key() {
+        let pane_id = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.last_mouse_pane)
+            .or_else(|| self.windows.get(&window_id).map(|state| state.focused_pane));
+        let Some(pane_id) = pane_id else {
+            return;
+        };
+
+        if self.sgr_mouse_tracking(window_id, pane_id) != MouseTracking::Off
+            && !self.modifiers.shift_key()
+        {
             let Some(cell) = self
                 .windows
                 .get(&window_id)
-                .and_then(|state| state.last_mouse_cell)
+                .and_then(|state| state.surfaces.get(&pane_id))
+                .and_then(|surface| surface.last_mouse_cell)
             else {
                 return;
             };
@@ -842,7 +1211,7 @@ impl App {
                 MouseScrollDelta::PixelDelta(position) => position.y as f32,
             };
             if let Some(bytes) = mouse::encode_sgr_mouse_wheel(delta_y, cell, self.modifiers) {
-                self.write_pty_bytes(window_id, &bytes);
+                self.write_pane_pty_bytes(window_id, pane_id, &bytes);
             }
             return;
         }
@@ -853,33 +1222,40 @@ impl App {
             .map(|gpu| gpu.font.metrics().cell_h)
             .unwrap_or(1.0);
         if let Some(scroll) = mouse_wheel_viewport_scroll(delta, cell_h) {
-            self.scroll_mouse_wheel_viewport(window_id, scroll);
+            self.scroll_mouse_wheel_viewport(window_id, pane_id, scroll);
         }
     }
 
     fn on_ime_event(&mut self, window_id: WindowId, event: Ime) {
+        let pane_id = self.windows.get(&window_id).map(|state| state.focused_pane);
         let bytes = self
             .windows
             .get_mut(&window_id)
-            .and_then(|state| state.ime_state.handle_event(&event));
-        if let Some(bytes) = bytes {
-            self.write_pty_bytes(window_id, &bytes);
+            .and_then(|state| state.focused_surface_mut())
+            .and_then(|surface| surface.ime_state.handle_event(&event));
+        if let (Some(pane_id), Some(bytes)) = (pane_id, bytes) {
+            self.write_pane_pty_bytes(window_id, pane_id, &bytes);
         }
     }
 
     fn scroll_viewport(&mut self, scroll: ViewportScroll) {
-        let Some(window_id) =
-            resolve_command_target(AppCommand::ScrollViewport(scroll), self.focused)
+        let Some((window_id, pane_id)) =
+            self.resolve_pane_command_target(AppCommand::ScrollViewport(scroll))
         else {
             return;
         };
-        let Some(state) = self.windows.get(&window_id) else {
+        let Some((terminal, grid_size)) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .map(|surface| (surface.terminal.clone(), surface.grid_size))
+        else {
             return;
         };
 
         apply_viewport_scroll(
-            &mut state.terminal.lock().expect("terminal mutex poisoned"),
-            state.grid_size,
+            &mut terminal.lock().expect("terminal mutex poisoned"),
+            grid_size,
             scroll,
         );
 
@@ -891,14 +1267,20 @@ impl App {
     fn scroll_mouse_wheel_viewport(
         &mut self,
         window_id: WindowId,
+        pane_id: PaneId,
         scroll: MouseWheelViewportScroll,
     ) {
-        let Some(state) = self.windows.get(&window_id) else {
+        let Some(terminal) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .map(|surface| surface.terminal.clone())
+        else {
             return;
         };
 
         apply_mouse_wheel_viewport_scroll(
-            &mut state.terminal.lock().expect("terminal mutex poisoned"),
+            &mut terminal.lock().expect("terminal mutex poisoned"),
             scroll,
         );
 
@@ -908,16 +1290,22 @@ impl App {
     }
 
     fn handle_terminal_action(&mut self, action: TerminalAction) {
-        let Some(window_id) = resolve_command_target(AppCommand::Terminal(action), self.focused)
+        let Some((window_id, pane_id)) =
+            self.resolve_pane_command_target(AppCommand::Terminal(action))
         else {
             return;
         };
-        let Some(state) = self.windows.get(&window_id) else {
+        let Some(terminal) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .map(|surface| surface.terminal.clone())
+        else {
             return;
         };
 
         apply_terminal_action(
-            &mut state.terminal.lock().expect("terminal mutex poisoned"),
+            &mut terminal.lock().expect("terminal mutex poisoned"),
             action,
         );
 
@@ -927,7 +1315,8 @@ impl App {
     }
 
     fn handle_font_size_action(&mut self, action: FontSizeAction) {
-        let Some(window_id) = resolve_command_target(AppCommand::FontSize(action), self.focused)
+        let Some((window_id, _pane_id)) =
+            self.resolve_pane_command_target(AppCommand::FontSize(action))
         else {
             return;
         };
@@ -962,7 +1351,6 @@ impl App {
         };
         gpu.font = font;
         self.runtime_font_size = update.point_size;
-        let metrics = gpu.font.metrics();
         for state in self.windows.values_mut() {
             state
                 .renderer
@@ -977,13 +1365,8 @@ impl App {
                     .map(|state| (*id, state.window.inner_size(), state.window.clone()))
             })
             .collect::<Vec<_>>();
-        let resize_plan = font_size_resize_plan(
-            windows.iter().map(|(id, size, _)| (*id, *size)),
-            metrics,
-            DEFAULT_GRID_PADDING,
-        );
-        for (window_id, grid_size) in resize_plan {
-            self.resize_grid(window_id, grid_size);
+        for (window_id, _, _) in &windows {
+            self.relayout_and_resize_window(*window_id);
         }
         for (_, _, window) in windows {
             window.request_redraw();
@@ -991,15 +1374,21 @@ impl App {
     }
 
     fn handle_search_action(&mut self, action: SearchAction) {
-        let Some(window_id) = resolve_command_target(AppCommand::Search(action), self.focused)
+        let Some((window_id, pane_id)) =
+            self.resolve_pane_command_target(AppCommand::Search(action))
         else {
             return;
         };
-        let Some(state) = self.windows.get(&window_id) else {
+        let Some(terminal) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .map(|surface| surface.terminal.clone())
+        else {
             return;
         };
 
-        let mut terminal = state.terminal.lock().expect("terminal mutex poisoned");
+        let mut terminal = terminal.lock().expect("terminal mutex poisoned");
         match action {
             SearchAction::Find => {
                 log::debug!("search UI command selected before search prompt support exists");
@@ -1020,13 +1409,22 @@ impl App {
         }
     }
 
-    fn apply_selection_gesture(&mut self, window_id: WindowId, gesture: SelectionGesture) {
+    fn apply_selection_gesture(
+        &mut self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        gesture: SelectionGesture,
+    ) {
         if gesture == SelectionGesture::None {
             return;
         }
 
-        if let Some(state) = self.windows.get(&window_id) {
-            let mut terminal = state.terminal.lock().expect("terminal mutex poisoned");
+        if let Some(surface) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+        {
+            let mut terminal = surface.terminal.lock().expect("terminal mutex poisoned");
             match gesture {
                 SelectionGesture::None => {}
                 SelectionGesture::Clear => terminal.clear_selection(),
@@ -1048,16 +1446,20 @@ impl App {
     }
 
     fn copy_selection_to_clipboard(&mut self) {
-        let Some(window_id) = resolve_command_target(AppCommand::Copy, self.focused) else {
+        let Some((window_id, pane_id)) = self.resolve_pane_command_target(AppCommand::Copy) else {
             return;
         };
-        let selected_text = self.windows.get(&window_id).and_then(|state| {
-            state
-                .terminal
-                .lock()
-                .expect("terminal mutex poisoned")
-                .selected_text()
-        });
+        let selected_text = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .and_then(|surface| {
+                surface
+                    .terminal
+                    .lock()
+                    .expect("terminal mutex poisoned")
+                    .selected_text()
+            });
         let Some(selected_text) = selected_text else {
             return;
         };
@@ -1068,7 +1470,7 @@ impl App {
     }
 
     fn paste_clipboard_to_pty(&mut self) {
-        let Some(window_id) = resolve_command_target(AppCommand::Paste, self.focused) else {
+        let Some((window_id, pane_id)) = self.resolve_pane_command_target(AppCommand::Paste) else {
             return;
         };
         let text = match self.clipboard.get_text() {
@@ -1078,17 +1480,18 @@ impl App {
                 return;
             }
         };
-        let bracketed_paste = self.bracketed_paste(window_id);
+        let bracketed_paste = self.bracketed_paste(window_id, pane_id);
         if let Some(bytes) = input::encode_paste(&text, bracketed_paste) {
-            self.write_pty_bytes(window_id, &bytes);
+            self.write_pane_pty_bytes(window_id, pane_id, &bytes);
         }
     }
 
-    fn bracketed_paste(&self, window_id: WindowId) -> bool {
+    fn bracketed_paste(&self, window_id: WindowId, pane_id: PaneId) -> bool {
         self.windows
             .get(&window_id)
-            .map(|state| {
-                state
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .map(|surface| {
+                surface
                     .terminal
                     .lock()
                     .expect("terminal mutex poisoned")
@@ -1098,11 +1501,12 @@ impl App {
             .unwrap_or(false)
     }
 
-    fn sgr_mouse_tracking(&self, window_id: WindowId) -> MouseTracking {
+    fn sgr_mouse_tracking(&self, window_id: WindowId, pane_id: PaneId) -> MouseTracking {
         self.windows
             .get(&window_id)
-            .map(|state| {
-                let terminal = state.terminal.lock().expect("terminal mutex poisoned");
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .map(|surface| {
+                let terminal = surface.terminal.lock().expect("terminal mutex poisoned");
                 if terminal.modes.sgr_mouse_reporting() {
                     terminal.modes.mouse_tracking()
                 } else {
@@ -1113,10 +1517,21 @@ impl App {
     }
 
     fn write_pty_bytes(&self, window_id: WindowId, bytes: &[u8]) {
-        let Some(state) = self.windows.get(&window_id) else {
+        let Some(pane_id) = self.windows.get(&window_id).map(|state| state.focused_pane) else {
             return;
         };
-        match state
+        self.write_pane_pty_bytes(window_id, pane_id, bytes);
+    }
+
+    fn write_pane_pty_bytes(&self, window_id: WindowId, pane_id: PaneId, bytes: &[u8]) {
+        let Some(surface) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+        else {
+            return;
+        };
+        match surface
             .pty_input_tx
             .try_send(bytes.to_vec().into_boxed_slice())
         {
@@ -1128,6 +1543,97 @@ impl App {
                 log::warn!("failed to queue pty input because the io thread is gone");
             }
         }
+    }
+
+    fn resolve_pane_command_target(&self, command: AppCommand) -> Option<(WindowId, PaneId)> {
+        let window_id = resolve_command_target(command, self.focused)?;
+        let state = self.windows.get(&window_id)?;
+        let pane_id = split_tree::resolve_pane_command_target(command, Some(state.focused_pane))?;
+        state.contains_pane(pane_id).then_some((window_id, pane_id))
+    }
+
+    fn relayout_and_resize_window(&mut self, window_id: WindowId) {
+        let Some(metrics) = self.gpu.as_ref().map(|gpu| gpu.font.metrics()) else {
+            return;
+        };
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
+        let bounds = pane_bounds_for_size(state.window.inner_size());
+        let targets = zoom_resize_targets(&state.split_tree, state.zoomed, bounds)
+            .into_iter()
+            .map(|(pane_id, rect)| {
+                (
+                    pane_id,
+                    rect,
+                    grid_size_for_pane_rect(rect, metrics, DEFAULT_GRID_PADDING),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        apply_pane_resize_batch(state, &targets);
+    }
+
+    fn update_focused_ime_cursor_area(&self, window_id: WindowId) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
+        let Some(surface) = state.focused_surface() else {
+            return;
+        };
+        let cursor = {
+            let terminal = surface.terminal.lock().expect("terminal mutex poisoned");
+            terminal.active().cursor
+        };
+        update_ime_cursor_area(
+            &state.window,
+            gpu.font.metrics(),
+            cursor.x,
+            cursor.y,
+            surface.rect,
+            DEFAULT_GRID_PADDING,
+        );
+    }
+
+    fn pane_cell_at_position(
+        &self,
+        window_id: WindowId,
+        position: PhysicalPosition<f64>,
+        metrics: noa_font::Metrics,
+    ) -> Option<(PaneId, Point)> {
+        let state = self.windows.get(&window_id)?;
+        let point = split_point_from_physical_position(position)?;
+        let layout = visible_pane_ids(&state.split_tree, state.zoomed)
+            .into_iter()
+            .filter_map(|pane_id| {
+                state
+                    .surfaces
+                    .get(&pane_id)
+                    .map(|surface| (pane_id, surface.rect))
+            })
+            .collect::<Vec<_>>();
+        let pane_id = match hit_test(&layout, point) {
+            Some(HitTarget::Pane(pane_id)) => pane_id,
+            Some(HitTarget::Divider) | None => return None,
+        };
+        let surface = state.surfaces.get(&pane_id)?;
+        let local_x = position.x - f64::from(surface.rect.x);
+        let local_y = position.y - f64::from(surface.rect.y);
+        let cell = mouse::physical_position_to_grid_point(
+            local_x,
+            local_y,
+            metrics.cell_w,
+            metrics.cell_h,
+            surface.grid_size,
+            DEFAULT_GRID_PADDING,
+        );
+        Some((pane_id, cell))
     }
 }
 
@@ -1165,6 +1671,7 @@ fn clamp_runtime_font_size(point_size: f32) -> f32 {
     }
 }
 
+#[cfg(test)]
 fn font_size_resize_plan<Id: Copy>(
     windows: impl IntoIterator<Item = (Id, PhysicalSize<u32>)>,
     metrics: noa_font::Metrics,
@@ -1174,6 +1681,117 @@ fn font_size_resize_plan<Id: Copy>(
         .into_iter()
         .map(|(id, size)| (id, grid_size_for_physical_size(size, metrics, padding)))
         .collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaneResizeAction<Id> {
+    GridResize(Id, GridSize),
+    PtyResize(Id, GridSize),
+}
+
+fn pane_resize_batch_plan<Id: Copy>(
+    panes: impl IntoIterator<Item = (Id, GridSize)>,
+) -> Vec<PaneResizeAction<Id>> {
+    let panes = panes.into_iter().collect::<Vec<_>>();
+    let mut plan = Vec::with_capacity(panes.len().saturating_mul(2));
+    plan.extend(
+        panes
+            .iter()
+            .map(|(pane_id, grid_size)| PaneResizeAction::GridResize(*pane_id, *grid_size)),
+    );
+    plan.extend(
+        panes
+            .iter()
+            .map(|(pane_id, grid_size)| PaneResizeAction::PtyResize(*pane_id, *grid_size)),
+    );
+    plan
+}
+
+fn apply_pane_resize_batch(state: &mut WindowState, targets: &[(PaneId, PaneRectApp, GridSize)]) {
+    let plan = pane_resize_batch_plan(
+        targets
+            .iter()
+            .map(|(pane_id, _, grid_size)| (*pane_id, *grid_size)),
+    );
+
+    for action in &plan {
+        let PaneResizeAction::GridResize(pane_id, grid_size) = *action else {
+            continue;
+        };
+        let Some(surface) = state.surfaces.get_mut(&pane_id) else {
+            continue;
+        };
+        if let Some((_, rect, _)) = targets.iter().find(|(target, _, _)| *target == pane_id) {
+            surface.rect = *rect;
+        }
+        surface.grid_size = grid_size;
+        surface
+            .terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .resize(grid_size);
+    }
+
+    for action in plan {
+        let PaneResizeAction::PtyResize(pane_id, grid_size) = action else {
+            continue;
+        };
+        if let Some(surface) = state.surfaces.get(&pane_id) {
+            let _ = surface.resize_tx.send(grid_size);
+        }
+    }
+}
+
+fn shutdown_pane_io_threads<'a>(surfaces: impl IntoIterator<Item = &'a mut Surface>) {
+    for surface in surfaces {
+        surface.shutdown();
+    }
+}
+
+fn pane_bounds_for_size(size: PhysicalSize<u32>) -> PaneRectApp {
+    PaneRectApp::new(0, 0, size.width, size.height)
+}
+
+fn can_split_rect(rect: PaneRectApp, orientation: SplitOrientation) -> bool {
+    let required = MIN_PANE_SIZE_PX
+        .saturating_mul(2)
+        .saturating_add(split_tree::DIVIDER_WIDTH_PX);
+    match orientation {
+        SplitOrientation::Horizontal => rect.w >= required,
+        SplitOrientation::Vertical => rect.h >= required,
+    }
+}
+
+fn grid_size_for_pane_rect(
+    rect: PaneRectApp,
+    metrics: noa_font::Metrics,
+    padding: GridPadding,
+) -> GridSize {
+    grid_size_for_physical_size(PhysicalSize::new(rect.w, rect.h), metrics, padding)
+}
+
+fn split_point_from_physical_position(
+    position: PhysicalPosition<f64>,
+) -> Option<split_tree::Point> {
+    if !position.x.is_finite() || !position.y.is_finite() || position.x < 0.0 || position.y < 0.0 {
+        return None;
+    }
+    Some(split_tree::Point::new(
+        position.x.floor().min(f64::from(u32::MAX)) as u32,
+        position.y.floor().min(f64::from(u32::MAX)) as u32,
+    ))
+}
+
+fn render_pane_id(pane_id: PaneId) -> RenderPaneId {
+    RenderPaneId::new(pane_id.get())
+}
+
+fn render_pane_rect(rect: PaneRectApp) -> PaneRect {
+    PaneRect::new(rect.x, rect.y, rect.w, rect.h)
+}
+
+fn visible_pane_ids(tree: &SplitTree, zoomed: Option<PaneId>) -> Vec<PaneId> {
+    split_tree::zoom_decision(tree, zoomed, PaneRectApp::new(0, 0, 0, 0)).draw_panes
 }
 
 fn tab_title(title: &str) -> String {
@@ -1295,6 +1913,13 @@ fn targeted_redraw_decision(exists: bool, occluded: bool) -> TargetedRedrawDecis
     }
 }
 
+fn pane_user_event_redraw_decision(pane_state: Option<(bool, bool)>) -> TargetedRedrawDecision {
+    let Some((pane_exists, occluded)) = pane_state else {
+        return TargetedRedrawDecision::Stale;
+    };
+    targeted_redraw_decision(pane_exists, occluded)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandScope {
     App,
@@ -1310,6 +1935,12 @@ fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::FontSize(_)
         | AppCommand::Search(_)
         | AppCommand::ScrollViewport(_)
+        | AppCommand::NewSplitRight
+        | AppCommand::NewSplitDown
+        | AppCommand::FocusDirection(_)
+        | AppCommand::ResizeSplit(_)
+        | AppCommand::EqualizeSplits
+        | AppCommand::ToggleSplitZoom
         | AppCommand::CloseTab => CommandScope::FocusedTab,
         AppCommand::SelectTab(_) | AppCommand::NextTab | AppCommand::PrevTab => {
             CommandScope::NativeTabGroup
@@ -1397,9 +2028,10 @@ fn update_ime_cursor_area(
     metrics: noa_font::Metrics,
     x: u16,
     y: u16,
+    pane_rect: PaneRectApp,
     padding: GridPadding,
 ) {
-    let (position, size) = ime_cursor_area(metrics, x, y, padding);
+    let (position, size) = ime_cursor_area(metrics, x, y, pane_rect, padding);
     window.set_ime_cursor_area(position, size);
 }
 
@@ -1407,11 +2039,16 @@ fn ime_cursor_area(
     metrics: noa_font::Metrics,
     x: u16,
     y: u16,
+    pane_rect: PaneRectApp,
     padding: GridPadding,
 ) -> (PhysicalPosition<i32>, PhysicalSize<u32>) {
     let position = PhysicalPosition::new(
-        (padding.left + metrics.cell_w * x as f32).round().max(0.0) as i32,
-        (padding.top + metrics.cell_h * y as f32).round().max(0.0) as i32,
+        (pane_rect.x as f32 + padding.left + metrics.cell_w * x as f32)
+            .round()
+            .max(0.0) as i32,
+        (pane_rect.y as f32 + padding.top + metrics.cell_h * y as f32)
+            .round()
+            .max(0.0) as i32,
     );
     let size = PhysicalSize::new(
         metrics.cell_w.ceil().max(1.0) as u32,
@@ -1597,7 +2234,13 @@ mod tests {
 
     #[test]
     fn ime_cursor_area_tracks_grid_cell_in_physical_pixels() {
-        let (position, size) = ime_cursor_area(metrics(7.5, 15.25), 2, 3, DEFAULT_GRID_PADDING);
+        let (position, size) = ime_cursor_area(
+            metrics(7.5, 15.25),
+            2,
+            3,
+            PaneRectApp::new(0, 0, 100, 100),
+            DEFAULT_GRID_PADDING,
+        );
 
         assert_eq!(position.x, 31);
         assert_eq!(position.y, 46);
@@ -1742,6 +2385,51 @@ mod tests {
         assert_eq!(
             targeted_redraw_decision(true, false),
             TargetedRedrawDecision::Request
+        );
+    }
+
+    #[test]
+    fn stale_pane_user_event_redraw_decision_noops_without_panicking() {
+        assert_eq!(
+            pane_user_event_redraw_decision(None),
+            TargetedRedrawDecision::Stale
+        );
+        assert_eq!(
+            pane_user_event_redraw_decision(Some((false, false))),
+            TargetedRedrawDecision::Stale
+        );
+        assert_eq!(
+            pane_user_event_redraw_decision(Some((true, true))),
+            TargetedRedrawDecision::Suppress
+        );
+        assert_eq!(
+            pane_user_event_redraw_decision(Some((true, false))),
+            TargetedRedrawDecision::Request
+        );
+    }
+
+    #[test]
+    fn multi_pane_resize_batching_resizes_all_grids_before_pty_winsize_sends() {
+        let first = PaneId::new(1);
+        let second = PaneId::new(2);
+        let third = PaneId::new(3);
+
+        let plan = pane_resize_batch_plan([
+            (first, GridSize::new(40, 12)),
+            (second, GridSize::new(41, 12)),
+            (third, GridSize::new(80, 6)),
+        ]);
+
+        assert_eq!(
+            plan,
+            vec![
+                PaneResizeAction::GridResize(first, GridSize::new(40, 12)),
+                PaneResizeAction::GridResize(second, GridSize::new(41, 12)),
+                PaneResizeAction::GridResize(third, GridSize::new(80, 6)),
+                PaneResizeAction::PtyResize(first, GridSize::new(40, 12)),
+                PaneResizeAction::PtyResize(second, GridSize::new(41, 12)),
+                PaneResizeAction::PtyResize(third, GridSize::new(80, 6)),
+            ]
         );
     }
 

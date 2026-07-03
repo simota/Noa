@@ -2,20 +2,15 @@
 
 use noa_core::{CellAttrs, Color};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CursorStyle {
+    #[default]
     BlinkingBlock,
     SteadyBlock,
     BlinkingUnderline,
     SteadyUnderline,
     BlinkingBar,
     SteadyBar,
-}
-
-impl Default for CursorStyle {
-    fn default() -> Self {
-        Self::BlinkingBlock
-    }
 }
 
 /// The terminal cursor: position, the deferred-wrap latch, and the active pen.

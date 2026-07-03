@@ -8,7 +8,6 @@ pub struct CellPipeline {
     pub pipeline: wgpu::RenderPipeline,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
-    pub uniform_buffer: wgpu::Buffer,
 }
 
 impl CellPipeline {
@@ -141,23 +140,26 @@ impl CellPipeline {
             ..Default::default()
         });
 
-        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("noa-uniform-buffer"),
-            contents: bytemuck::bytes_of(&Uniforms::zeroed_for_init()),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
         Self {
             pipeline,
             bind_group_layout,
             sampler,
-            uniform_buffer,
         }
+    }
+
+    pub fn make_uniform_buffer(&self, device: &wgpu::Device) -> wgpu::Buffer {
+        let zeroed_uniforms: Uniforms = bytemuck::Zeroable::zeroed();
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("noa-pane-uniform-buffer"),
+            contents: bytemuck::bytes_of(&zeroed_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        })
     }
 
     pub fn make_bind_group(
         &self,
         device: &wgpu::Device,
+        uniform_buffer: &wgpu::Buffer,
         atlas_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -166,7 +168,7 @@ impl CellPipeline {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: self.uniform_buffer.as_entire_binding(),
+                    resource: uniform_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -178,11 +180,5 @@ impl CellPipeline {
                 },
             ],
         })
-    }
-}
-
-impl Uniforms {
-    fn zeroed_for_init() -> Self {
-        bytemuck::Zeroable::zeroed()
     }
 }

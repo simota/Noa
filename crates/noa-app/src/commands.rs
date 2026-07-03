@@ -1,5 +1,6 @@
 //! App-level commands that must not be encoded as terminal input.
 
+use crate::split_tree::Direction;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 /// Commands handled by the application layer rather than the pty.
@@ -14,6 +15,12 @@ pub enum AppCommand {
     Search(SearchAction),
     ScrollViewport(ViewportScroll),
     NewTab,
+    NewSplitRight,
+    NewSplitDown,
+    FocusDirection(Direction),
+    ResizeSplit(Direction),
+    EqualizeSplits,
+    ToggleSplitZoom,
     CloseTab,
     SelectTab(usize),
     NextTab,
@@ -80,6 +87,18 @@ impl AppCommand {
     pub(crate) const SCROLL_TOP_MENU_ID: &'static str = "noa.view.scroll-top";
     pub(crate) const SCROLL_BOTTOM_MENU_ID: &'static str = "noa.view.scroll-bottom";
     pub(crate) const NEW_TAB_MENU_ID: &'static str = "noa.file.new-tab";
+    pub(crate) const NEW_SPLIT_RIGHT_MENU_ID: &'static str = "noa.file.new-split-right";
+    pub(crate) const NEW_SPLIT_DOWN_MENU_ID: &'static str = "noa.file.new-split-down";
+    pub(crate) const FOCUS_SPLIT_LEFT_MENU_ID: &'static str = "noa.split.focus-left";
+    pub(crate) const FOCUS_SPLIT_RIGHT_MENU_ID: &'static str = "noa.split.focus-right";
+    pub(crate) const FOCUS_SPLIT_UP_MENU_ID: &'static str = "noa.split.focus-up";
+    pub(crate) const FOCUS_SPLIT_DOWN_MENU_ID: &'static str = "noa.split.focus-down";
+    pub(crate) const RESIZE_SPLIT_LEFT_MENU_ID: &'static str = "noa.split.resize-left";
+    pub(crate) const RESIZE_SPLIT_RIGHT_MENU_ID: &'static str = "noa.split.resize-right";
+    pub(crate) const RESIZE_SPLIT_UP_MENU_ID: &'static str = "noa.split.resize-up";
+    pub(crate) const RESIZE_SPLIT_DOWN_MENU_ID: &'static str = "noa.split.resize-down";
+    pub(crate) const EQUALIZE_SPLITS_MENU_ID: &'static str = "noa.split.equalize";
+    pub(crate) const TOGGLE_SPLIT_ZOOM_MENU_ID: &'static str = "noa.split.toggle-zoom";
     pub(crate) const CLOSE_TAB_MENU_ID: &'static str = "noa.file.close-tab";
     pub(crate) const NEXT_TAB_MENU_ID: &'static str = "noa.window.next-tab";
     pub(crate) const PREV_TAB_MENU_ID: &'static str = "noa.window.previous-tab";
@@ -111,6 +130,18 @@ impl AppCommand {
             AppCommand::ScrollViewport(ViewportScroll::Top) => Self::SCROLL_TOP_MENU_ID,
             AppCommand::ScrollViewport(ViewportScroll::Bottom) => Self::SCROLL_BOTTOM_MENU_ID,
             AppCommand::NewTab => Self::NEW_TAB_MENU_ID,
+            AppCommand::NewSplitRight => Self::NEW_SPLIT_RIGHT_MENU_ID,
+            AppCommand::NewSplitDown => Self::NEW_SPLIT_DOWN_MENU_ID,
+            AppCommand::FocusDirection(Direction::Left) => Self::FOCUS_SPLIT_LEFT_MENU_ID,
+            AppCommand::FocusDirection(Direction::Right) => Self::FOCUS_SPLIT_RIGHT_MENU_ID,
+            AppCommand::FocusDirection(Direction::Up) => Self::FOCUS_SPLIT_UP_MENU_ID,
+            AppCommand::FocusDirection(Direction::Down) => Self::FOCUS_SPLIT_DOWN_MENU_ID,
+            AppCommand::ResizeSplit(Direction::Left) => Self::RESIZE_SPLIT_LEFT_MENU_ID,
+            AppCommand::ResizeSplit(Direction::Right) => Self::RESIZE_SPLIT_RIGHT_MENU_ID,
+            AppCommand::ResizeSplit(Direction::Up) => Self::RESIZE_SPLIT_UP_MENU_ID,
+            AppCommand::ResizeSplit(Direction::Down) => Self::RESIZE_SPLIT_DOWN_MENU_ID,
+            AppCommand::EqualizeSplits => Self::EQUALIZE_SPLITS_MENU_ID,
+            AppCommand::ToggleSplitZoom => Self::TOGGLE_SPLIT_ZOOM_MENU_ID,
             AppCommand::CloseTab => Self::CLOSE_TAB_MENU_ID,
             AppCommand::SelectTab(_) => "",
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
@@ -145,6 +176,18 @@ impl AppCommand {
             Self::SCROLL_TOP_MENU_ID => Some(Self::ScrollViewport(ViewportScroll::Top)),
             Self::SCROLL_BOTTOM_MENU_ID => Some(Self::ScrollViewport(ViewportScroll::Bottom)),
             Self::NEW_TAB_MENU_ID => Some(Self::NewTab),
+            Self::NEW_SPLIT_RIGHT_MENU_ID => Some(Self::NewSplitRight),
+            Self::NEW_SPLIT_DOWN_MENU_ID => Some(Self::NewSplitDown),
+            Self::FOCUS_SPLIT_LEFT_MENU_ID => Some(Self::FocusDirection(Direction::Left)),
+            Self::FOCUS_SPLIT_RIGHT_MENU_ID => Some(Self::FocusDirection(Direction::Right)),
+            Self::FOCUS_SPLIT_UP_MENU_ID => Some(Self::FocusDirection(Direction::Up)),
+            Self::FOCUS_SPLIT_DOWN_MENU_ID => Some(Self::FocusDirection(Direction::Down)),
+            Self::RESIZE_SPLIT_LEFT_MENU_ID => Some(Self::ResizeSplit(Direction::Left)),
+            Self::RESIZE_SPLIT_RIGHT_MENU_ID => Some(Self::ResizeSplit(Direction::Right)),
+            Self::RESIZE_SPLIT_UP_MENU_ID => Some(Self::ResizeSplit(Direction::Up)),
+            Self::RESIZE_SPLIT_DOWN_MENU_ID => Some(Self::ResizeSplit(Direction::Down)),
+            Self::EQUALIZE_SPLITS_MENU_ID => Some(Self::EqualizeSplits),
+            Self::TOGGLE_SPLIT_ZOOM_MENU_ID => Some(Self::ToggleSplitZoom),
             Self::CLOSE_TAB_MENU_ID => Some(Self::CloseTab),
             Self::NEXT_TAB_MENU_ID => Some(Self::NextTab),
             Self::PREV_TAB_MENU_ID => Some(Self::PrevTab),
@@ -190,6 +233,18 @@ impl AppCommand {
             Self::ScrollViewport(ViewportScroll::Top) => "scroll.top",
             Self::ScrollViewport(ViewportScroll::Bottom) => "scroll.bottom",
             Self::NewTab => "tab.new",
+            Self::NewSplitRight => "split.new-right",
+            Self::NewSplitDown => "split.new-down",
+            Self::FocusDirection(Direction::Left) => "split.focus-left",
+            Self::FocusDirection(Direction::Right) => "split.focus-right",
+            Self::FocusDirection(Direction::Up) => "split.focus-up",
+            Self::FocusDirection(Direction::Down) => "split.focus-down",
+            Self::ResizeSplit(Direction::Left) => "split.resize-left",
+            Self::ResizeSplit(Direction::Right) => "split.resize-right",
+            Self::ResizeSplit(Direction::Up) => "split.resize-up",
+            Self::ResizeSplit(Direction::Down) => "split.resize-down",
+            Self::EqualizeSplits => "split.equalize",
+            Self::ToggleSplitZoom => "split.toggle-zoom",
             Self::CloseTab => "tab.close",
             Self::SelectTab(index) => match index {
                 1 => "tab.select-1",
@@ -233,6 +288,18 @@ impl AppCommand {
             "scroll.top" => Some(Self::ScrollViewport(ViewportScroll::Top)),
             "scroll.bottom" => Some(Self::ScrollViewport(ViewportScroll::Bottom)),
             "tab.new" => Some(Self::NewTab),
+            "split.new-right" => Some(Self::NewSplitRight),
+            "split.new-down" => Some(Self::NewSplitDown),
+            "split.focus-left" => Some(Self::FocusDirection(Direction::Left)),
+            "split.focus-right" => Some(Self::FocusDirection(Direction::Right)),
+            "split.focus-up" => Some(Self::FocusDirection(Direction::Up)),
+            "split.focus-down" => Some(Self::FocusDirection(Direction::Down)),
+            "split.resize-left" => Some(Self::ResizeSplit(Direction::Left)),
+            "split.resize-right" => Some(Self::ResizeSplit(Direction::Right)),
+            "split.resize-up" => Some(Self::ResizeSplit(Direction::Up)),
+            "split.resize-down" => Some(Self::ResizeSplit(Direction::Down)),
+            "split.equalize" => Some(Self::EqualizeSplits),
+            "split.toggle-zoom" => Some(Self::ToggleSplitZoom),
             "tab.close" => Some(Self::CloseTab),
             "tab.select-1" => Some(Self::SelectTab(1)),
             "tab.select-2" => Some(Self::SelectTab(2)),
@@ -277,6 +344,8 @@ impl Default for KeybindEngine {
         let specs = [
             ("cmd+q", AppCommand::Quit),
             ("cmd+t", AppCommand::NewTab),
+            ("cmd+d", AppCommand::NewSplitRight),
+            ("cmd+shift+d", AppCommand::NewSplitDown),
             ("cmd+w", AppCommand::CloseTab),
             ("cmd+1", AppCommand::SelectTab(1)),
             ("cmd+2", AppCommand::SelectTab(2)),
@@ -329,6 +398,34 @@ impl Default for KeybindEngine {
                 "shift+end",
                 AppCommand::ScrollViewport(ViewportScroll::Bottom),
             ),
+            (
+                "cmd+alt+arrowleft",
+                AppCommand::FocusDirection(Direction::Left),
+            ),
+            (
+                "cmd+alt+arrowright",
+                AppCommand::FocusDirection(Direction::Right),
+            ),
+            ("cmd+alt+arrowup", AppCommand::FocusDirection(Direction::Up)),
+            (
+                "cmd+alt+arrowdown",
+                AppCommand::FocusDirection(Direction::Down),
+            ),
+            (
+                "cmd+ctrl+arrowleft",
+                AppCommand::ResizeSplit(Direction::Left),
+            ),
+            (
+                "cmd+ctrl+arrowright",
+                AppCommand::ResizeSplit(Direction::Right),
+            ),
+            ("cmd+ctrl+arrowup", AppCommand::ResizeSplit(Direction::Up)),
+            (
+                "cmd+ctrl+arrowdown",
+                AppCommand::ResizeSplit(Direction::Down),
+            ),
+            ("cmd+ctrl+=", AppCommand::EqualizeSplits),
+            ("cmd+shift+enter", AppCommand::ToggleSplitZoom),
         ];
         let bindings = specs
             .into_iter()
@@ -430,6 +527,7 @@ impl KeyToken {
             "pagedown" => NamedKeyToken::PageDown,
             "home" => NamedKeyToken::Home,
             "end" => NamedKeyToken::End,
+            "enter" | "return" => NamedKeyToken::Enter,
             _ => return Err(KeybindParseError::UnknownKey(token.to_string())),
         }))
     }
@@ -459,6 +557,7 @@ enum NamedKeyToken {
     PageDown,
     Home,
     End,
+    Enter,
 }
 
 impl NamedKeyToken {
@@ -473,6 +572,7 @@ impl NamedKeyToken {
                 | (Self::PageDown, NamedKey::PageDown)
                 | (Self::Home, NamedKey::Home)
                 | (Self::End, NamedKey::End)
+                | (Self::Enter, NamedKey::Enter)
         )
     }
 }
@@ -502,6 +602,7 @@ mod tests {
         AppCommand, FontSizeAction, KeyBinding, KeybindEngine, KeybindParseError, SearchAction,
         TerminalAction, ViewportScroll,
     };
+    use crate::split_tree::Direction;
     use winit::keyboard::{Key, ModifiersState, NamedKey};
 
     #[test]
@@ -528,6 +629,18 @@ mod tests {
             AppCommand::ScrollViewport(ViewportScroll::Top),
             AppCommand::ScrollViewport(ViewportScroll::Bottom),
             AppCommand::NewTab,
+            AppCommand::NewSplitRight,
+            AppCommand::NewSplitDown,
+            AppCommand::FocusDirection(Direction::Left),
+            AppCommand::FocusDirection(Direction::Right),
+            AppCommand::FocusDirection(Direction::Up),
+            AppCommand::FocusDirection(Direction::Down),
+            AppCommand::ResizeSplit(Direction::Left),
+            AppCommand::ResizeSplit(Direction::Right),
+            AppCommand::ResizeSplit(Direction::Up),
+            AppCommand::ResizeSplit(Direction::Down),
+            AppCommand::EqualizeSplits,
+            AppCommand::ToggleSplitZoom,
             AppCommand::CloseTab,
             AppCommand::NextTab,
             AppCommand::PrevTab,
@@ -551,6 +664,17 @@ mod tests {
         assert_eq!(
             AppCommand::from_cmd_character("t"),
             Some(AppCommand::NewTab)
+        );
+        assert_eq!(
+            AppCommand::from_cmd_character("d"),
+            Some(AppCommand::NewSplitRight)
+        );
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Character("D".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::NewSplitDown)
         );
         assert_eq!(
             AppCommand::from_cmd_character("1"),
@@ -648,6 +772,38 @@ mod tests {
     }
 
     #[test]
+    fn split_shortcuts_map_to_pane_commands() {
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Named(NamedKey::ArrowLeft),
+                ModifiersState::SUPER | ModifiersState::ALT
+            ),
+            Some(AppCommand::FocusDirection(Direction::Left))
+        );
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Named(NamedKey::ArrowRight),
+                ModifiersState::SUPER | ModifiersState::CONTROL
+            ),
+            Some(AppCommand::ResizeSplit(Direction::Right))
+        );
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Character("=".into()),
+                ModifiersState::SUPER | ModifiersState::CONTROL
+            ),
+            Some(AppCommand::EqualizeSplits)
+        );
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Named(NamedKey::Enter),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::ToggleSplitZoom)
+        );
+    }
+
+    #[test]
     fn tab_cycle_shortcuts_use_cmd_shift_brackets() {
         assert_eq!(
             AppCommand::from_key(
@@ -715,6 +871,18 @@ mod tests {
             AppCommand::Search(SearchAction::Clear),
             AppCommand::ScrollViewport(ViewportScroll::PageUp),
             AppCommand::NewTab,
+            AppCommand::NewSplitRight,
+            AppCommand::NewSplitDown,
+            AppCommand::FocusDirection(Direction::Left),
+            AppCommand::FocusDirection(Direction::Right),
+            AppCommand::FocusDirection(Direction::Up),
+            AppCommand::FocusDirection(Direction::Down),
+            AppCommand::ResizeSplit(Direction::Left),
+            AppCommand::ResizeSplit(Direction::Right),
+            AppCommand::ResizeSplit(Direction::Up),
+            AppCommand::ResizeSplit(Direction::Down),
+            AppCommand::EqualizeSplits,
+            AppCommand::ToggleSplitZoom,
             AppCommand::CloseTab,
             AppCommand::SelectTab(3),
             AppCommand::NextTab,

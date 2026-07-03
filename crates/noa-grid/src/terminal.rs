@@ -637,6 +637,7 @@ impl Handler for Terminal {
             | (1048, false)
             | (1049, false)
             | (2026, false)
+            | (2027, false)
             | (2004, false) => {
                 if self.modes.get(request.value, request.ansi) {
                     1

@@ -1763,3 +1763,14 @@ fn ac_str_005_soft_reset_clears_saved_cursor_to_default() {
     assert_eq!(t.primary.cursor.x, 0);
     assert_eq!(t.primary.cursor.fg, Color::Default);
 }
+
+// ── WP2: mode 2027 grapheme clustering negotiation (AC-2027-005) ───────
+
+#[test]
+fn ac_2027_005_decrqm_reports_grapheme_clustering_state() {
+    let t = run(b"\x1b[?2027h\x1b[?2027$p");
+    assert_eq!(t.pending_writes, b"\x1b[?2027;1$y");
+
+    let t = run(b"\x1b[?2027h\x1b[?2027l\x1b[?2027$p");
+    assert_eq!(t.pending_writes, b"\x1b[?2027;2$y");
+}

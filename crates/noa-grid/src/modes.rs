@@ -74,6 +74,11 @@ impl ModeState {
     pub fn synchronized_output(&self) -> bool {
         self.get(2026, false)
     }
+    /// DECSET 2027 — grapheme clustering (candidate-1 scope: ZWJ / Fitzpatrick
+    /// modifier / regional-indicator pairing; full UAX#29 is out of scope).
+    pub fn grapheme_clustering(&self) -> bool {
+        self.get(2027, false)
+    }
     /// DECSET 1000/1002/1003 mouse tracking mode.
     pub fn mouse_tracking(&self) -> MouseTracking {
         if self.get(1003, false) {

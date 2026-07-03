@@ -1,21 +1,31 @@
 //! Native macOS menu construction.
 
 use muda::{
-    Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
+    ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     accelerator::{Accelerator, Code, Modifiers},
 };
-use winit::event_loop::EventLoopProxy;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use winit::{dpi::PhysicalPosition, event_loop::EventLoopProxy, window::Window};
 
 use crate::{AppCommand, FontSizeAction, SearchAction, TerminalAction, UserEvent, ViewportScroll};
+
+const SPLIT_CONTEXT_MENU_ITEMS: &[(AppCommand, &str)] = &[
+    (AppCommand::NewSplitRight, "Split Right"),
+    (AppCommand::NewSplitDown, "Split Down"),
+    (AppCommand::EqualizeSplits, "Equalize Splits"),
+    (AppCommand::ToggleSplitZoom, "Toggle Split Zoom"),
+];
 
 /// Holds the native menu alive for the lifetime of the winit event loop.
 pub(crate) struct MacosMenu {
     _menu: Menu,
+    split_context_menu: Menu,
 }
 
 impl MacosMenu {
     pub(crate) fn install(proxy: EventLoopProxy<UserEvent>) -> anyhow::Result<Self> {
         let menu = Menu::new();
+        let split_context_menu = build_split_context_menu()?;
         let app_menu = Submenu::with_id("noa.menu.app", "noa", true);
 
         let about = MenuItem::with_id(AppCommand::About.menu_id(), "About noa", true, None);
@@ -250,8 +260,61 @@ impl MacosMenu {
         window_menu.set_as_windows_menu_for_nsapp();
         help_menu.set_as_help_menu_for_nsapp();
 
-        Ok(Self { _menu: menu })
+        Ok(Self {
+            _menu: menu,
+            split_context_menu,
+        })
     }
+
+    pub(crate) fn show_split_context_menu(
+        &self,
+        window: &Window,
+        position: Option<PhysicalPosition<f64>>,
+    ) -> anyhow::Result<()> {
+        let raw_handle = window.window_handle()?.as_raw();
+        let ns_view = match raw_handle {
+            RawWindowHandle::AppKit(handle) => handle.ns_view.as_ptr(),
+            _ => anyhow::bail!("expected AppKit window handle"),
+        };
+        let position = position.map(|position| {
+            muda::dpi::PhysicalPosition {
+                x: position.x,
+                y: position.y,
+            }
+            .into()
+        });
+
+        // SAFETY: The NSView pointer comes from winit's live AppKit window
+        // handle, and this is called from the main winit event loop thread.
+        unsafe {
+            self.split_context_menu
+                .show_context_menu_for_nsview(ns_view, position);
+        }
+        Ok(())
+    }
+}
+
+fn build_split_context_menu() -> anyhow::Result<Menu> {
+    let split_right = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[0]);
+    let split_down = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[1]);
+    let separator = PredefinedMenuItem::separator();
+    let equalize = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[2]);
+    let toggle_zoom = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[3]);
+
+    Ok(Menu::with_id_and_items(
+        "noa.menu.split-context",
+        &[
+            &split_right,
+            &split_down,
+            &separator,
+            &equalize,
+            &toggle_zoom,
+        ],
+    )?)
+}
+
+fn context_menu_item((command, label): (AppCommand, &'static str)) -> MenuItem {
+    MenuItem::with_id(command.menu_id(), label, true, None)
 }
 
 fn disabled_item(id: &'static str, text: &'static str) -> MenuItem {
@@ -268,4 +331,25 @@ fn cmd_shift_accelerator(code: Code) -> Accelerator {
 
 fn shift_accelerator(code: Code) -> Accelerator {
     Accelerator::new(Some(Modifiers::SHIFT), code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_context_menu_items_use_app_commands() {
+        assert_eq!(
+            SPLIT_CONTEXT_MENU_ITEMS,
+            &[
+                (AppCommand::NewSplitRight, "Split Right"),
+                (AppCommand::NewSplitDown, "Split Down"),
+                (AppCommand::EqualizeSplits, "Equalize Splits"),
+                (AppCommand::ToggleSplitZoom, "Toggle Split Zoom"),
+            ]
+        );
+        for (command, _) in SPLIT_CONTEXT_MENU_ITEMS {
+            assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(*command));
+        }
+    }
 }

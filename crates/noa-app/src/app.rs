@@ -897,6 +897,23 @@ impl App {
             );
         }
     }
+
+    #[cfg(target_os = "macos")]
+    fn show_macos_split_context_menu(&self, window_id: WindowId) {
+        let Some(menu) = self.macos_menu.as_ref() else {
+            return;
+        };
+        let Some(window) = self
+            .windows
+            .get(&window_id)
+            .map(|state| state.window.clone())
+        else {
+            return;
+        };
+        if let Err(error) = menu.show_split_context_menu(window.as_ref(), None) {
+            log::debug!("failed to show macOS split context menu: {error:#}");
+        }
+    }
 }
 
 impl Drop for App {
@@ -1154,6 +1171,19 @@ impl App {
                             surface.pressed_mouse_button = None;
                         }
                     }
+                }
+            }
+            return;
+        }
+
+        if button == MouseButton::Right {
+            if state == ElementState::Pressed {
+                self.focused = Some(window_id);
+                self.focus_pane(window_id, pane_id);
+                #[cfg(target_os = "macos")]
+                {
+                    self.install_macos_menu_if_needed();
+                    self.show_macos_split_context_menu(window_id);
                 }
             }
             return;

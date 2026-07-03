@@ -5,6 +5,7 @@
 //!
 //! Ghostty analog: `renderer/generic.zig` + `Metal.zig`.
 
+mod blit;
 mod draw_plan;
 mod instance;
 mod pipeline;
@@ -13,8 +14,9 @@ mod segment;
 mod snapshot;
 mod theme;
 
+pub use blit::{BlitPipeline, OverviewThumbnailResources};
 pub use draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 pub use instance::{CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform};
-pub use renderer::{PaneFrame, Renderer};
+pub use renderer::{PaneFrame, Renderer, renderer_construction_count};
 pub use snapshot::FrameSnapshot;
 pub use theme::Theme;

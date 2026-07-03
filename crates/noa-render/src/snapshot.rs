@@ -2,7 +2,9 @@
 //! needed to rebuild a frame's GPU instances. `noa-app` takes this under the
 //! `Terminal` mutex and then calls into the renderer unlocked.
 
-use noa_grid::{Cursor, Row, Screen, SearchState, Selection, SelectionPoint, Terminal, TerminalColors};
+use noa_grid::{
+    Cursor, Row, Screen, SearchState, Selection, SelectionPoint, Terminal, TerminalColors,
+};
 
 /// A snapshot of the active screen taken under the `Terminal` lock.
 ///

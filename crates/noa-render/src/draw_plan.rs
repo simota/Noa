@@ -165,7 +165,7 @@ fn focus_indicator(
 ) -> Option<(PaneId, Vec<PaneRect>)> {
     let visible_count = layout
         .iter()
-        .filter(|(pane, _)| zoomed.map_or(true, |zoomed| zoomed == *pane))
+        .filter(|(pane, _)| zoomed.is_none_or(|zoomed| zoomed == *pane))
         .count();
     if visible_count <= 1 {
         return None;

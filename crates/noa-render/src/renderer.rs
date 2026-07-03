@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use noa_core::{CellAttrs, CellSize, Color, GridPadding, PixelSize};
 use noa_font::{FontGrid, Metrics, ShapedGlyph};
@@ -18,6 +19,11 @@ use crate::theme::Theme;
 const DEFAULT_PANE_ID: PaneId = PaneId::new(0);
 const DIVIDER_RGBA: [u8; 4] = [82, 82, 82, 255];
 const FOCUS_INDICATOR_RGBA: [u8; 4] = [95, 175, 255, 230];
+static RENDERER_CONSTRUCTION_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn renderer_construction_count() -> u64 {
+    RENDERER_CONSTRUCTION_COUNT.load(Ordering::Relaxed)
+}
 
 /// One pane's immutable frame input.
 pub struct PaneFrame<'a> {
@@ -117,6 +123,7 @@ pub struct Renderer {
     cell_size: (f32, f32),
     grid_padding: GridPadding,
     clear_color: [f32; 4],
+    target_format: wgpu::TextureFormat,
     target_format_is_srgb: bool,
     mask_atlas_seen_generation: u64,
     color_atlas_seen_generation: u64,
@@ -138,6 +145,7 @@ impl Renderer {
         font: &mut FontGrid,
         grid_padding: GridPadding,
     ) -> anyhow::Result<Renderer> {
+        RENDERER_CONSTRUCTION_COUNT.fetch_add(1, Ordering::Relaxed);
         let cell = CellPipeline::new(device, format);
 
         let (mask_w, mask_h) = font.mask_atlas_size();
@@ -211,6 +219,7 @@ impl Renderer {
             cell_size: (metrics.cell_w, metrics.cell_h),
             grid_padding,
             clear_color: [0.0, 0.0, 0.0, 1.0],
+            target_format: format,
             target_format_is_srgb: format.is_srgb(),
             mask_atlas_seen_generation,
             color_atlas_seen_generation,
@@ -232,6 +241,10 @@ impl Renderer {
     /// Color atlas generation this renderer has uploaded.
     pub fn color_atlas_seen_generation(&self) -> u64 {
         self.color_atlas_seen_generation
+    }
+
+    pub fn target_format(&self) -> wgpu::TextureFormat {
+        self.target_format
     }
 
     /// Per-pane bind-group rebuild counters, exposed for headless pipeline
@@ -902,7 +915,8 @@ fn rebuild_pane_cached(
 
     // 7th trigger (narrower than the 6 above): cursor movement dirties
     // EXACTLY the two affected rows, not the whole pane.
-    if !full && let Some(prev) = cache.prev_cursor
+    if !full
+        && let Some(prev) = cache.prev_cursor
         && prev != new_cursor
     {
         if let Some(slot) = dirty.get_mut(prev.1 as usize) {
@@ -1386,16 +1400,15 @@ mod tests {
         let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
                 .ok()?;
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("noa-renderer-test-device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                experimental_features: wgpu::ExperimentalFeatures::default(),
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::Off,
-            }))
-            .ok()?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("noa-renderer-test-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+        }))
+        .ok()?;
         Some((device, queue))
     }
 
@@ -2061,15 +2074,27 @@ mod tests {
         // Each sub-case gets its own PaneId so it starts from a fresh cache
         // without needing a fresh Renderer (cheaper: one GPU device for the
         // whole table).
-        let mut rebuild_twice = |pane_id: u64, snap_a: &FrameSnapshot, theme_a: &Theme, snap_b: &FrameSnapshot, theme_b: &Theme| {
+        let mut rebuild_twice = |pane_id: u64,
+                                 snap_a: &FrameSnapshot,
+                                 theme_a: &Theme,
+                                 snap_b: &FrameSnapshot,
+                                 theme_b: &Theme| {
             let pane = PaneId::new(pane_id);
             renderer.rebuild_panes(
-                &[PaneFrame { pane, rect, snapshot: snap_a }],
+                &[PaneFrame {
+                    pane,
+                    rect,
+                    snapshot: snap_a,
+                }],
                 &mut font,
                 theme_a,
             );
             renderer.rebuild_panes(
-                &[PaneFrame { pane, rect, snapshot: snap_b }],
+                &[PaneFrame {
+                    pane,
+                    rect,
+                    snapshot: snap_b,
+                }],
                 &mut font,
                 theme_b,
             );
@@ -2135,7 +2160,10 @@ mod tests {
                 SelectionPoint::new(0, 0),
             ));
             let rebuilt = rebuild_twice(106, &snap_a, &theme, &snap_b, &theme);
-            assert_eq!(rebuilt, 3, "a selection change must force a full pane rebuild");
+            assert_eq!(
+                rebuilt, 3,
+                "a selection change must force a full pane rebuild"
+            );
         }
 
         // 6. search state (active-match / search-match spans).
@@ -2152,7 +2180,10 @@ mod tests {
             );
             snap_b.search = search;
             let rebuilt = rebuild_twice(107, &snap_a, &theme, &snap_b, &theme);
-            assert_eq!(rebuilt, 3, "a search-state change must force a full pane rebuild");
+            assert_eq!(
+                rebuilt, 3,
+                "a search-state change must force a full pane rebuild"
+            );
         }
 
         // 7. cursor movement — the narrower case: dirties exactly the two
@@ -2205,8 +2236,16 @@ mod tests {
         let snap_b1 = FrameSnapshot::from_terminal(&mut term_b);
         renderer.rebuild_panes(
             &[
-                PaneFrame { pane: pane_a, rect: rect_a, snapshot: &snap_a1 },
-                PaneFrame { pane: pane_b, rect: rect_b, snapshot: &snap_b1 },
+                PaneFrame {
+                    pane: pane_a,
+                    rect: rect_a,
+                    snapshot: &snap_a1,
+                },
+                PaneFrame {
+                    pane: pane_b,
+                    rect: rect_b,
+                    snapshot: &snap_b1,
+                },
             ],
             &mut font,
             &theme,
@@ -2222,8 +2261,16 @@ mod tests {
         let snap_b2 = FrameSnapshot::from_terminal(&mut term_b);
         renderer.rebuild_panes(
             &[
-                PaneFrame { pane: pane_a, rect: rect_a, snapshot: &snap_a2 },
-                PaneFrame { pane: pane_b, rect: rect_b, snapshot: &snap_b2 },
+                PaneFrame {
+                    pane: pane_a,
+                    rect: rect_a,
+                    snapshot: &snap_a2,
+                },
+                PaneFrame {
+                    pane: pane_b,
+                    rect: rect_b,
+                    snapshot: &snap_b2,
+                },
             ],
             &mut font,
             &theme,
@@ -2259,14 +2306,7 @@ mod tests {
              (no overlay appended yet)"
         );
 
-        renderer.draw_panes(
-            &device,
-            &queue,
-            &view,
-            &layout,
-            Some(pane_a),
-            None,
-        );
+        renderer.draw_panes(&device, &queue, &view, &layout, Some(pane_a), None);
 
         let all_instances = renderer.instances_for_test();
         assert!(

@@ -283,7 +283,7 @@ fn dcs_payload_dispatches_on_c1_st() {
 #[test]
 fn dcs_overflow_is_discarded_without_dispatch() {
     let mut bytes = b"\x1bP".to_vec();
-    bytes.extend(std::iter::repeat(b'a').take(4097));
+    bytes.extend(std::iter::repeat_n(b'a', 4097));
     bytes.extend_from_slice(b"\x1b\\");
 
     assert!(

@@ -16,7 +16,8 @@ use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, PixelSize, Rgb};
 use noa_font::FontGrid;
 use noa_grid::{Cell, Cursor, Row, SearchState, Selection, SelectionPoint, TerminalColors};
 use noa_render::{
-    DrawOp, FrameSnapshot, PaneFrame, PaneId, PaneRect, Renderer, Theme, build_draw_plan,
+    DrawOp, FrameSnapshot, OverviewThumbnailResources, PaneFrame, PaneId, PaneRect, Renderer,
+    Theme, build_draw_plan, renderer_construction_count,
 };
 
 /// Acquire a real device+queue, or `None` when no adapter exists (skip).
@@ -148,7 +149,9 @@ fn read_rgba_pixels(
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = tx.send(result);
     });
-    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll device for map_async");
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll device for map_async");
     rx.recv()
         .expect("map_async callback never fired")
         .expect("map readback buffer");
@@ -169,6 +172,26 @@ fn read_rgba_pixels(
     drop(data);
     buffer.unmap();
     out
+}
+
+fn hash_pixels(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn rebuild_text_frame(
+    renderer: &mut Renderer,
+    font: &mut FontGrid,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    text: &str,
+) {
+    let snap = snapshot_for_text(text);
+    renderer.rebuild_cells(&snap, font, &Theme::new());
+    renderer.sync_atlas(device, queue, font);
 }
 
 #[test]
@@ -291,6 +314,153 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
     );
 }
 
+#[test]
+fn overview_blit_pipeline_draws_tile_without_validation_error() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping overview blit GPU draw test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let scratch_size = PixelSize { w: 128, h: 64 };
+    let tile_size = PixelSize { w: 64, h: 32 };
+    let mut font =
+        FontGrid::new(24.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(&device, &queue, format, &mut font, DEFAULT_GRID_PADDING)
+        .expect("build renderer");
+    renderer.resize(scratch_size);
+    rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "overview");
+
+    let mut overview =
+        OverviewThumbnailResources::for_renderer(&device, &renderer, scratch_size, tile_size, 1);
+    assert_eq!(overview.format(), renderer.target_format());
+    assert_eq!(overview.scratch_size(), scratch_size);
+    assert_eq!(overview.tile_size(), tile_size);
+    assert_eq!(overview.tile_count(), 1);
+
+    let before_blit = renderer_construction_count();
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    overview
+        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, 0)
+        .expect("blit existing renderer to overview tile");
+    let err = pollster::block_on(device.pop_error_scope());
+
+    assert_eq!(
+        renderer_construction_count(),
+        before_blit,
+        "overview_renderer_reuse: blitting a tile must reuse the existing Renderer"
+    );
+    assert!(
+        err.is_none(),
+        "wgpu validation error during overview blit draw: {err:?}"
+    );
+}
+
+#[test]
+fn overview_blit_tile_pixel_hash_tracks_content_changes() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping overview blit pixel-hash test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let scratch_size = PixelSize { w: 160, h: 80 };
+    let tile_size = PixelSize { w: 80, h: 40 };
+    let mut font =
+        FontGrid::new(28.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(&device, &queue, format, &mut font, DEFAULT_GRID_PADDING)
+        .expect("build renderer");
+    renderer.resize(scratch_size);
+    let mut overview =
+        OverviewThumbnailResources::for_renderer(&device, &renderer, scratch_size, tile_size, 1);
+
+    rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "AAA");
+    overview
+        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, 0)
+        .expect("render first tile");
+    let first = hash_pixels(&read_rgba_pixels(
+        &device,
+        &queue,
+        overview.tile_texture_for_test(0).expect("tile exists"),
+        tile_size.w,
+        tile_size.h,
+    ));
+
+    rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "AAA");
+    overview
+        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, 0)
+        .expect("render unchanged tile");
+    let unchanged = hash_pixels(&read_rgba_pixels(
+        &device,
+        &queue,
+        overview.tile_texture_for_test(0).expect("tile exists"),
+        tile_size.w,
+        tile_size.h,
+    ));
+    assert_eq!(
+        first, unchanged,
+        "unchanged tab content should produce the same overview tile hash"
+    );
+
+    rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "WWW");
+    overview
+        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, 0)
+        .expect("render changed tile");
+    let changed = hash_pixels(&read_rgba_pixels(
+        &device,
+        &queue,
+        overview.tile_texture_for_test(0).expect("tile exists"),
+        tile_size.w,
+        tile_size.h,
+    ));
+    assert_ne!(
+        unchanged, changed,
+        "changed tab content should change the overview tile pixel hash"
+    );
+}
+
+#[test]
+fn overview_blit_resources_drop_before_renderer_without_validation_error() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping overview blit teardown test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let scratch_size = PixelSize { w: 96, h: 48 };
+    let tile_size = PixelSize { w: 48, h: 24 };
+    let mut font =
+        FontGrid::new(18.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    {
+        let mut renderer = Renderer::new(&device, &queue, format, &mut font, DEFAULT_GRID_PADDING)
+            .expect("build renderer");
+        renderer.resize(scratch_size);
+        rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "drop");
+
+        {
+            let mut overview = OverviewThumbnailResources::for_renderer(
+                &device,
+                &renderer,
+                scratch_size,
+                tile_size,
+                1,
+            );
+            overview
+                .render_existing_renderer_to_tile(&device, &queue, &mut renderer, 0)
+                .expect("render before teardown");
+        }
+        drop(renderer);
+    }
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll device after overview teardown");
+    let err = pollster::block_on(device.pop_error_scope());
+
+    assert!(
+        err.is_none(),
+        "wgpu validation error during overview resources -> renderer teardown: {err:?}"
+    );
+}
+
 /// WP4 (REQ-NF-4, AC-WP4-03): draw one frame via a full rebuild (the first
 /// frame through a fresh `PaneRenderCache`) and a second frame via the
 /// per-row dirty-patch path (only one of two rows marked dirty), asserting
@@ -325,7 +495,10 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
             dirty,
         };
         FrameSnapshot {
-            rows: vec![make_row(first, row_dirty[0]), make_row(second, row_dirty[1])],
+            rows: vec![
+                make_row(first, row_dirty[0]),
+                make_row(second, row_dirty[1]),
+            ],
             row_dirty: row_dirty.to_vec(),
             cursor: Cursor::default(),
             colors: TerminalColors::default(),
@@ -434,7 +607,10 @@ fn split_pipeline_syncs_same_frame_new_glyphs_for_two_panes() {
     }
     renderer.sync_atlas(&device, &queue, &mut font);
 
-    assert_eq!(renderer.mask_atlas_seen_generation(), font.mask_atlas_generation());
+    assert_eq!(
+        renderer.mask_atlas_seen_generation(),
+        font.mask_atlas_generation()
+    );
 
     let (_target, view) = render_target(&device, 128, 32);
     device.push_error_scope(wgpu::ErrorFilter::Validation);

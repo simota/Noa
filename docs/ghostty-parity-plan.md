@@ -58,6 +58,9 @@ GUI 非依存 → ユニットテストで完結。
 - **BEL**: Handler に bell イベント（鳴らすのは Phase 3 の UX 側）。
 - **OSC 8 / 7 / 133**: グリッド側の状態保持（ハイパーリンク ID をセル属性に、cwd・プロンプトマークを
   Terminal に）。UI 反映は Phase 3。
+- **2026-07-03 実装済み**: DECSCUSR / DECSLRM / keypad modes / cursor style state、SGR 21・4:x・58/59 と
+  装飾描画、OSC 8/7/133 の状態保持、bounded DCS + DECRQSS/XTGETTCAP/XTVERSION/DECRQM、DECSET
+  1004 focus reporting、DECSET 2026 synchronized output。
 - **パリティハーネス新設**: esctest2 / vttest を CI 外部オラクルとして流す薄いランナー +
   「同一バイト列 → Ghostty と noa のスクリーンダンプ比較」fixture 形式を `tests/parity/` に確立。
   以降のフェーズの受け入れ基準を「ハーネス緑」に統一する。

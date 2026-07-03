@@ -93,7 +93,7 @@ CLI programs.
 | ID | Capability | Current State | Target |
 |----|------------|---------------|--------|
 | `REQ-VT-001` | CSI edit set | Complete | `IL`, `DL`, `DCH`, `ICH`, `ECH`, `REP`, `SU`, `SD`, `CHT`, `CBT`, and `TBC` are implemented with grid coverage |
-| `REQ-VT-002` | Cursor and margins | Partial | Implement `DECSLRM`, `DECSCUSR`, keypad modes, and cursor style state |
+| `REQ-VT-002` | Cursor and margins | Complete | `DECSLRM`, `DECSCUSR`, keypad modes, and cursor style state are implemented with focused coverage |
 | `REQ-VT-003` | Alternate screen | Complete | Primary/alternate screen switching, cursor save/restore, and resize behavior are implemented with grid coverage |
 | `REQ-VT-004` | Scrollback and reflow | Complete | Scrollback storage, viewport, clear-scrollback semantics, and soft-wrap reflow are implemented with grid coverage |
 | `REQ-VT-005` | Unicode cell width | Complete | Scalar cell width, zero-width non-advance, and wide-cell lead/spacer behavior are implemented; shaped grapheme clusters remain in `REQ-FONT-002` |
@@ -173,14 +173,14 @@ basics.
 
 | ID | Capability | Current State | Target |
 |----|------------|---------------|--------|
-| `REQ-PROTO-001` | OSC 8 hyperlinks | Missing | Store hyperlink ranges, render hover/activation affordances, and expose copy/open actions |
-| `REQ-PROTO-002` | OSC 7 cwd | Missing | Track per-terminal working directory for title, new surface inheritance, and AppleScript |
+| `REQ-PROTO-001` | OSC 8 hyperlinks | Partial | Hyperlink range state is stored; hover/activation affordances and copy/open actions remain |
+| `REQ-PROTO-002` | OSC 7 cwd | Partial | Per-terminal cwd tracking is implemented; title, new surface inheritance, and AppleScript integration remain |
 | `REQ-PROTO-003` | OSC 9 notifications | Missing | Implement notification and progress policy hooks |
 | `REQ-PROTO-004` | OSC 52 clipboard | Partial | OSC 52 write policy, base64 decode, decoded-size limit, and read-deny default are implemented; full read/query policy remains |
 | `REQ-PROTO-005` | Kitty graphics | Missing | Implement image storage, placement, rendering, limits, and cleanup |
 | `REQ-PROTO-006` | Kitty keyboard | Missing | Implement enhanced keyboard protocol negotiation and encoding |
-| `REQ-PROTO-007` | DCS passthrough | Partial | Implement required DCS sequences such as `XTGETTCAP` and `DECRQSS` |
-| `REQ-PROTO-008` | Synchronized rendering | Missing | Implement synchronized output mode if needed by supported apps |
+| `REQ-PROTO-007` | DCS passthrough | Complete | Bounded DCS dispatch plus selected `DECRQSS`, `XTGETTCAP`, `XTVERSION`, and `DECRQM` responses are implemented |
+| `REQ-PROTO-008` | Synchronized rendering | Complete | DECSET 2026 synchronized output state and redraw suppression/release behavior are implemented |
 
 Exit criteria:
 
@@ -280,9 +280,10 @@ Exit criteria:
 
 ### Phase 5 Checklist
 
-- [ ] `IMPL-PROTO-001`: Implement OSC 8 range storage and open/copy actions.
+- [ ] `IMPL-PROTO-001`: Complete OSC 8 hover/activation affordances and copy/open actions
+  over stored hyperlink ranges.
   References `REQ-PROTO-001`.
-- [ ] `IMPL-PROTO-002`: Implement OSC 7 working directory tracking. References
+- [x] `IMPL-PROTO-002`: Implement OSC 7 working directory tracking. References
   `REQ-PROTO-002`.
 - [ ] `IMPL-PROTO-003`: Add notification and progress event hooks. References
   `REQ-PROTO-003`.
@@ -292,9 +293,9 @@ Exit criteria:
   and resource limits. References `REQ-PROTO-005`.
 - [ ] `IMPL-PROTO-006`: Add Kitty keyboard negotiation and encoding. References
   `REQ-PROTO-006`.
-- [ ] `IMPL-PROTO-007`: Implement selected DCS query/response protocols.
+- [x] `IMPL-PROTO-007`: Implement selected DCS query/response protocols.
   References `REQ-PROTO-007`.
-- [ ] `IMPL-PROTO-008`: Add synchronized rendering state and flush behavior.
+- [x] `IMPL-PROTO-008`: Add synchronized rendering state and flush behavior.
   References `REQ-PROTO-008`.
 
 ### Phase 6 Checklist

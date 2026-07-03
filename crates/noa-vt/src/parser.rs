@@ -10,10 +10,11 @@
 //! control bytes are 7-bit ASCII.
 
 use crate::action::Action;
-use crate::csi::{Csi, Esc, MAX_INTERMEDIATES, MAX_PARAMS};
+use crate::csi::{Csi, DcsPayload, Esc, MAX_INTERMEDIATES, MAX_PARAMS};
 use crate::state::State;
 
 const MAX_OSC_BYTES: usize = 4096;
+const MAX_DCS_BYTES: usize = 4096;
 
 /// The from-scratch VT parser. Cheap to construct; holds only small buffers.
 pub struct Parser {
@@ -24,6 +25,8 @@ pub struct Parser {
     private: u8,
     osc: Vec<u8>,
     osc_overflow: bool,
+    dcs: Vec<u8>,
+    dcs_overflow: bool,
     utf8_acc: u32,
     utf8_rem: u8,
     utf8_min: u32,
@@ -45,6 +48,8 @@ impl Parser {
             private: 0,
             osc: Vec::new(),
             osc_overflow: false,
+            dcs: Vec::new(),
+            dcs_overflow: false,
             utf8_acc: 0,
             utf8_rem: 0,
             utf8_min: 0,
@@ -58,6 +63,15 @@ impl Parser {
 
     /// Feed one byte, emitting any resulting actions through `sink`.
     pub fn advance<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
+        if self.state == State::DcsEscape {
+            self.st_dcs_escape(b, sink);
+            return;
+        }
+        if self.state == State::DcsPassthrough && b == 0x1b {
+            self.state = State::DcsEscape;
+            return;
+        }
+
         // (1) A UTF-8 multibyte sequence in progress (ground path only).
         if self.utf8_rem > 0 {
             if (0x80..=0xbf).contains(&b) {
@@ -101,11 +115,10 @@ impl Parser {
             State::CsiParam => self.st_csi_param(b, sink),
             State::CsiIntermediate => self.st_csi_intermediate(b, sink),
             State::CsiIgnore => self.st_csi_ignore(b, sink),
-            // Inc-1: DCS carries no side effects — consume until ST/ESC.
-            // TODO(agent): DCS passthrough (XTGETTCAP / DECRQSS) — inc-5.
-            State::DcsPassthrough => {}
+            State::DcsPassthrough => self.st_dcs(b, sink),
+            State::DcsEscape => unreachable!("handled before anywhere transitions"),
             State::OscString => self.st_osc(b, sink),
-            // APC / SOS / PM: consume until ST/ESC.
+            // APC / SOS / PM string payloads are ignored by the state model.
             State::SosPmApcString => {}
         }
     }
@@ -145,10 +158,10 @@ impl Parser {
                 self.collect(b);
                 self.state = State::EscapeIntermediate;
             }
-            0x50 => self.state = State::DcsPassthrough, // 'P' DCS
+            0x50 => self.goto(State::DcsPassthrough, sink), // 'P' DCS
             0x58 | 0x5e | 0x5f => self.state = State::SosPmApcString, // X ^ _
-            0x5b => self.goto(State::CsiEntry, sink),   // '[' CSI
-            0x5d => self.goto(State::OscString, sink),  // ']' OSC
+            0x5b => self.goto(State::CsiEntry, sink),       // '[' CSI
+            0x5d => self.goto(State::OscString, sink),      // ']' OSC
             0x30..=0x4f | 0x51..=0x57 | 0x59 | 0x5a | 0x5c | 0x60..=0x7e => {
                 self.esc_dispatch(b, sink);
                 self.state = State::Ground;
@@ -258,6 +271,35 @@ impl Parser {
         }
     }
 
+    fn st_dcs<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
+        match b {
+            0x9c => self.finish_dcs(sink),
+            0x20..=0x7e | 0x80..=0xff => {
+                if self.dcs_overflow {
+                    return;
+                }
+                if self.dcs.len() < MAX_DCS_BYTES {
+                    self.dcs.push(b);
+                } else {
+                    self.dcs.clear();
+                    self.dcs_overflow = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn st_dcs_escape<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
+        if b == b'\\' {
+            self.finish_dcs(sink);
+        } else {
+            self.dcs.clear();
+            self.dcs_overflow = false;
+            self.goto(State::Escape, sink);
+            self.advance(b, sink);
+        }
+    }
+
     // ── primitive actions ──────────────────────────────────────────
 
     fn collect(&mut self, b: u8) {
@@ -310,6 +352,17 @@ impl Parser {
         }));
     }
 
+    fn finish_dcs<F: FnMut(Action)>(&mut self, sink: &mut F) {
+        if !self.dcs_overflow {
+            let data = std::mem::take(&mut self.dcs);
+            sink(Action::DcsDispatch(DcsPayload { data }));
+        } else {
+            self.dcs.clear();
+            self.dcs_overflow = false;
+        }
+        self.state = State::Ground;
+    }
+
     /// Transition to `new`, running the source state's exit action and the
     /// target state's entry action (OSC end/start, `clear` on escape/CSI entry).
     fn goto<F: FnMut(Action)>(&mut self, new: State, sink: &mut F) {
@@ -328,6 +381,10 @@ impl Parser {
             State::OscString => {
                 self.osc.clear();
                 self.osc_overflow = false;
+            }
+            State::DcsPassthrough => {
+                self.dcs.clear();
+                self.dcs_overflow = false;
             }
             _ => {}
         }

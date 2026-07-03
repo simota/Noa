@@ -262,6 +262,7 @@ fn rebuild_cell_instances(
     instances.clear();
     let mut bg_instances = Vec::new();
     let mut glyph_instances = Vec::new();
+    let mut decoration_instances = Vec::new();
 
     for (row_idx, row) in snap.rows.iter().enumerate() {
         let y = row_idx as u16;
@@ -321,27 +322,47 @@ fn rebuild_cell_instances(
                 });
             }
 
-            // Glyph quad: skip blanks and invisible text.
+            let text_color = if cursor_cell {
+                surface_output_rgba(
+                    theme.resolve_with_colors(bg_color, false, &snap.colors),
+                    target_format_is_srgb,
+                )
+            } else if selected {
+                surface_output_rgba(theme.selection_fg(), target_format_is_srgb)
+            } else if active_search {
+                surface_output_rgba(theme.active_search_fg(), target_format_is_srgb)
+            } else if search_match {
+                surface_output_rgba(theme.search_fg(), target_format_is_srgb)
+            } else {
+                surface_output_rgba(
+                    theme.resolve_with_colors(fg_color, true, &snap.colors),
+                    target_format_is_srgb,
+                )
+            };
+
             let invisible = cell.attrs.contains(CellAttrs::INVISIBLE);
             let wide_spacer = cell.attrs.contains(CellAttrs::WIDE_SPACER);
-            if !cell.is_blank() && !invisible && !wide_spacer {
-                let fg = if cursor_cell {
+            if !invisible && !wide_spacer {
+                let decoration_color = if let Some(color) = cell.underline_color {
                     surface_output_rgba(
-                        theme.resolve_with_colors(bg_color, false, &snap.colors),
+                        theme.resolve_with_colors(color, true, &snap.colors),
                         target_format_is_srgb,
                     )
-                } else if selected {
-                    surface_output_rgba(theme.selection_fg(), target_format_is_srgb)
-                } else if active_search {
-                    surface_output_rgba(theme.active_search_fg(), target_format_is_srgb)
-                } else if search_match {
-                    surface_output_rgba(theme.search_fg(), target_format_is_srgb)
                 } else {
-                    surface_output_rgba(
-                        theme.resolve_with_colors(fg_color, true, &snap.colors),
-                        target_format_is_srgb,
-                    )
+                    text_color
                 };
+                push_cell_decorations(
+                    &mut decoration_instances,
+                    x,
+                    y,
+                    cell.attrs,
+                    to_u8_color(decoration_color),
+                    metrics,
+                );
+            }
+
+            // Glyph quad: skip blanks and invisible text.
+            if !cell.is_blank() && !invisible && !wide_spacer {
                 let mut flags = CellInstance::FLAG_GLYPH;
                 if cursor_cell {
                     flags |= CellInstance::FLAG_CURSOR;
@@ -356,7 +377,7 @@ fn rebuild_cell_instances(
                         glyph_size: glyph.atlas_size,
                         bearing: glyph_cell_bearing(metrics, glyph.bearing),
                         grid_pos: [x, y],
-                        color: to_u8_color(fg),
+                        color: to_u8_color(text_color),
                         flags,
                     });
                 }
@@ -365,8 +386,200 @@ fn rebuild_cell_instances(
     }
     instances.extend(bg_instances);
     instances.extend(glyph_instances);
+    instances.extend(decoration_instances);
 
     (clear_color, (metrics.cell_w, metrics.cell_h))
+}
+
+fn push_cell_decorations(
+    instances: &mut Vec<CellInstance>,
+    x: u16,
+    y: u16,
+    attrs: CellAttrs,
+    color: [u8; 4],
+    metrics: Metrics,
+) {
+    let thickness = decoration_thickness(metrics);
+    let width = metrics.cell_w.round().max(1.0) as u16;
+
+    if attrs.contains(CellAttrs::OVERLINE) {
+        push_decoration_rect(instances, x, y, 0, 0, width, thickness, color);
+    }
+    if attrs.contains(CellAttrs::STRIKETHROUGH) {
+        let strike_y = clamp_decoration_y(metrics.ascent * 0.55, thickness, metrics);
+        push_decoration_rect(instances, x, y, 0, strike_y, width, thickness, color);
+    }
+
+    if attrs.contains(CellAttrs::DOUBLE_UNDERLINE) {
+        let first_y = underline_y(metrics, thickness, -1.0);
+        let second_y = underline_y(metrics, thickness, thickness as f32 + 1.0);
+        push_decoration_rect(instances, x, y, 0, first_y, width, thickness, color);
+        push_decoration_rect(instances, x, y, 0, second_y, width, thickness, color);
+    } else if attrs.contains(CellAttrs::CURLY_UNDERLINE) {
+        let base_y = underline_y(metrics, thickness, 0.0);
+        push_segmented_decoration(
+            instances,
+            x,
+            y,
+            width,
+            thickness,
+            base_y,
+            color,
+            CurlPattern,
+        );
+    } else if attrs.contains(CellAttrs::DOTTED_UNDERLINE) {
+        let base_y = underline_y(metrics, thickness, 0.0);
+        push_segmented_decoration(instances, x, y, width, thickness, base_y, color, DotPattern);
+    } else if attrs.contains(CellAttrs::DASHED_UNDERLINE) {
+        let base_y = underline_y(metrics, thickness, 0.0);
+        push_segmented_decoration(
+            instances,
+            x,
+            y,
+            width,
+            thickness,
+            base_y,
+            color,
+            DashPattern,
+        );
+    } else if attrs.contains(CellAttrs::UNDERLINE) {
+        let base_y = underline_y(metrics, thickness, 0.0);
+        push_decoration_rect(instances, x, y, 0, base_y, width, thickness, color);
+    }
+}
+
+fn decoration_thickness(metrics: Metrics) -> u16 {
+    metrics
+        .underline_thickness
+        .round()
+        .max(1.0)
+        .min(metrics.cell_h.max(1.0)) as u16
+}
+
+fn underline_y(metrics: Metrics, thickness: u16, offset: f32) -> i16 {
+    let center = metrics.ascent - metrics.underline_position + offset;
+    clamp_decoration_y(center - thickness as f32 / 2.0, thickness, metrics)
+}
+
+fn clamp_decoration_y(y: f32, thickness: u16, metrics: Metrics) -> i16 {
+    let max_y = (metrics.cell_h - thickness as f32).max(0.0);
+    y.round().clamp(0.0, max_y) as i16
+}
+
+trait SegmentPattern {
+    fn segment(
+        &self,
+        index: u16,
+        x: u16,
+        width: u16,
+        thickness: u16,
+        base_y: i16,
+    ) -> ([i16; 2], [u16; 2]);
+    fn advance(&self, thickness: u16) -> u16;
+}
+
+struct DotPattern;
+struct DashPattern;
+struct CurlPattern;
+
+impl SegmentPattern for DotPattern {
+    fn segment(
+        &self,
+        _index: u16,
+        x: u16,
+        width: u16,
+        thickness: u16,
+        base_y: i16,
+    ) -> ([i16; 2], [u16; 2]) {
+        ([x as i16, base_y], [width.min(thickness), thickness])
+    }
+
+    fn advance(&self, thickness: u16) -> u16 {
+        thickness.saturating_mul(2).max(2)
+    }
+}
+
+impl SegmentPattern for DashPattern {
+    fn segment(
+        &self,
+        _index: u16,
+        x: u16,
+        width: u16,
+        thickness: u16,
+        base_y: i16,
+    ) -> ([i16; 2], [u16; 2]) {
+        let dash_width = width.min(thickness.saturating_mul(4).max(4));
+        ([x as i16, base_y], [dash_width, thickness])
+    }
+
+    fn advance(&self, thickness: u16) -> u16 {
+        thickness.saturating_mul(6).max(6)
+    }
+}
+
+impl SegmentPattern for CurlPattern {
+    fn segment(
+        &self,
+        index: u16,
+        x: u16,
+        width: u16,
+        thickness: u16,
+        base_y: i16,
+    ) -> ([i16; 2], [u16; 2]) {
+        let y_offset = if index % 2 == 0 { 0 } else { thickness as i16 };
+        (
+            [x as i16, base_y.saturating_sub(y_offset)],
+            [width.min(thickness.saturating_mul(2).max(2)), thickness],
+        )
+    }
+
+    fn advance(&self, thickness: u16) -> u16 {
+        thickness.saturating_mul(2).max(2)
+    }
+}
+
+fn push_segmented_decoration<P: SegmentPattern>(
+    instances: &mut Vec<CellInstance>,
+    grid_x: u16,
+    grid_y: u16,
+    width: u16,
+    thickness: u16,
+    base_y: i16,
+    color: [u8; 4],
+    pattern: P,
+) {
+    let advance = pattern.advance(thickness);
+    let mut index = 0;
+    let mut x = 0;
+    while x < width {
+        let remaining = width - x;
+        let (bearing, size) = pattern.segment(index, x, remaining, thickness, base_y);
+        push_decoration_rect(
+            instances, grid_x, grid_y, bearing[0], bearing[1], size[0], size[1], color,
+        );
+        index += 1;
+        x = x.saturating_add(advance);
+    }
+}
+
+fn push_decoration_rect(
+    instances: &mut Vec<CellInstance>,
+    grid_x: u16,
+    grid_y: u16,
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+    color: [u8; 4],
+) {
+    instances.push(CellInstance {
+        glyph_pos: [0, 0],
+        glyph_size: [width.max(1), height.max(1)],
+        bearing: [x, y],
+        grid_pos: [grid_x, grid_y],
+        color,
+        flags: CellInstance::FLAG_DECORATION,
+    });
 }
 
 fn to_u8_color(c: [f32; 4]) -> [u8; 4] {
@@ -521,6 +734,110 @@ mod tests {
                 .map(|instance| instance.flags & CellInstance::FLAG_GLYPH),
             Some(CellInstance::FLAG_GLYPH),
             "the final cursor-cell instance must not be an opaque blank cursor quad"
+        );
+    }
+
+    #[test]
+    fn decorations_emit_rect_instances_from_cell_attrs() {
+        let mut instances = Vec::new();
+        let metrics = Metrics {
+            cell_w: 12.0,
+            cell_h: 24.0,
+            ascent: 18.0,
+            descent: 6.0,
+            line_gap: 0.0,
+            underline_position: -2.0,
+            underline_thickness: 2.0,
+        };
+
+        push_cell_decorations(
+            &mut instances,
+            3,
+            4,
+            CellAttrs::DOUBLE_UNDERLINE | CellAttrs::STRIKETHROUGH | CellAttrs::OVERLINE,
+            [1, 2, 3, 255],
+            metrics,
+        );
+
+        assert_eq!(instances.len(), 4);
+        assert!(
+            instances
+                .iter()
+                .all(|instance| instance.flags == CellInstance::FLAG_DECORATION)
+        );
+        assert!(
+            instances
+                .iter()
+                .all(|instance| instance.grid_pos == [3, 4] && instance.color == [1, 2, 3, 255])
+        );
+        assert_eq!(
+            instances[0].bearing,
+            [0, 0],
+            "overline starts at the cell top"
+        );
+        assert_eq!(
+            instances[2].glyph_size,
+            [12, 2],
+            "double underline keeps full-cell width and metric thickness"
+        );
+        assert!(
+            instances[2].bearing[1] < instances[3].bearing[1],
+            "double underline emits two vertically separated strokes"
+        );
+    }
+
+    #[test]
+    fn patterned_underlines_emit_segmented_rectangles() {
+        let metrics = Metrics {
+            cell_w: 9.0,
+            cell_h: 20.0,
+            ascent: 14.0,
+            descent: 6.0,
+            line_gap: 0.0,
+            underline_position: -1.0,
+            underline_thickness: 1.0,
+        };
+
+        let mut dotted = Vec::new();
+        push_cell_decorations(
+            &mut dotted,
+            0,
+            0,
+            CellAttrs::DOTTED_UNDERLINE,
+            [9, 9, 9, 255],
+            metrics,
+        );
+        assert!(
+            dotted.len() > 1,
+            "dotted underline should be split into repeated dot rectangles"
+        );
+        assert!(dotted.iter().all(|instance| instance.glyph_size[0] == 1));
+
+        let mut dashed = Vec::new();
+        push_cell_decorations(
+            &mut dashed,
+            0,
+            0,
+            CellAttrs::DASHED_UNDERLINE,
+            [9, 9, 9, 255],
+            metrics,
+        );
+        assert!(dashed.iter().any(|instance| instance.glyph_size[0] > 1));
+
+        let mut curly = Vec::new();
+        push_cell_decorations(
+            &mut curly,
+            0,
+            0,
+            CellAttrs::CURLY_UNDERLINE,
+            [9, 9, 9, 255],
+            metrics,
+        );
+        assert!(
+            curly
+                .windows(2)
+                .any(|pair| pair[0].bearing[1] != pair[1].bearing[1]),
+            "curly underline should alternate segment vertical positions"
         );
     }
 

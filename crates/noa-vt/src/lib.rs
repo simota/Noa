@@ -22,8 +22,8 @@ pub mod stream;
 mod tests;
 
 pub use action::Action;
-pub use csi::{Csi, Esc};
-pub use handler::{DaKind, DsrKind, EraseDisplay, EraseLine, Handler};
+pub use csi::{Csi, DcsPayload, Esc};
+pub use handler::{CursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine, Handler, ModeRequest};
 pub use parser::Parser;
 pub use sgr::{SgrAttr, parse_sgr};
 pub use state::State;

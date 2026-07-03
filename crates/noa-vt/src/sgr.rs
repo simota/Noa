@@ -13,6 +13,10 @@ pub enum SgrAttr {
     Faint,
     Italic,
     Underline,
+    DoubleUnderline,
+    CurlyUnderline,
+    DottedUnderline,
+    DashedUnderline,
     Blink,
     Inverse,
     Invisible,
@@ -28,8 +32,10 @@ pub enum SgrAttr {
     ResetOverline,
     Fg(Color),
     Bg(Color),
+    UnderlineColor(Color),
     DefaultFg,
     DefaultBg,
+    DefaultUnderlineColor,
 }
 
 /// Decode an SGR (`CSI … m`) sequence into a list of attribute changes.
@@ -47,13 +53,28 @@ pub fn parse_sgr(csi: &Csi) -> Vec<SgrAttr> {
             1 => out.push(SgrAttr::Bold),
             2 => out.push(SgrAttr::Faint),
             3 => out.push(SgrAttr::Italic),
-            4 => out.push(SgrAttr::Underline),
+            4 => {
+                if csi.sep_colon.get(i).copied().unwrap_or(false) {
+                    match p.get(i + 1).copied().unwrap_or(1) {
+                        0 => out.push(SgrAttr::ResetUnderline),
+                        1 => out.push(SgrAttr::Underline),
+                        2 => out.push(SgrAttr::DoubleUnderline),
+                        3 => out.push(SgrAttr::CurlyUnderline),
+                        4 => out.push(SgrAttr::DottedUnderline),
+                        5 => out.push(SgrAttr::DashedUnderline),
+                        _ => {}
+                    }
+                    i += 2;
+                    continue;
+                }
+                out.push(SgrAttr::Underline);
+            }
             5 | 6 => out.push(SgrAttr::Blink),
             7 => out.push(SgrAttr::Inverse),
             8 => out.push(SgrAttr::Invisible),
             9 => out.push(SgrAttr::Strike),
-            // 21 = double-underline; treated as bold-off for inc-1.
-            21 | 22 => out.push(SgrAttr::ResetBold),
+            21 => out.push(SgrAttr::DoubleUnderline),
+            22 => out.push(SgrAttr::ResetBold),
             23 => out.push(SgrAttr::ResetItalic),
             24 => out.push(SgrAttr::ResetUnderline),
             25 => out.push(SgrAttr::ResetBlink),
@@ -82,12 +103,15 @@ pub fn parse_sgr(csi: &Csi) -> Vec<SgrAttr> {
             49 => out.push(SgrAttr::DefaultBg),
             53 => out.push(SgrAttr::Overline),
             55 => out.push(SgrAttr::ResetOverline),
-            // 58 = underline color; consume its operand, act on it in inc>=2.
             58 => {
-                let (_c, adv) = parse_ext_color(csi, i);
+                let (c, adv) = parse_ext_color(csi, i);
+                if let Some(col) = c {
+                    out.push(SgrAttr::UnderlineColor(col));
+                }
                 i += adv;
                 continue;
             }
+            59 => out.push(SgrAttr::DefaultUnderlineColor),
             90..=97 => out.push(SgrAttr::Fg(Color::Palette((p[i] - 90 + 8) as u8))),
             100..=107 => out.push(SgrAttr::Bg(Color::Palette((p[i] - 100 + 8) as u8))),
             _ => {}

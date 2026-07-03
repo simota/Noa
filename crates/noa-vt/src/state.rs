@@ -1,8 +1,7 @@
 //! Parser DFA states (the vt100.net / DEC ANSI state machine).
 //!
-//! Inc-1 implements the ground/escape/CSI path fully; DCS sub-states are
-//! collapsed to a single consuming `DcsPassthrough` (DCS carries no inc-1
-//! side effects — full DCS handling lands in inc≥5).
+//! DCS collection is represented by a compact payload state plus an ESC-after-
+//! payload state for ST termination.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum State {
@@ -14,6 +13,7 @@ pub enum State {
     CsiIntermediate,
     CsiIgnore,
     DcsPassthrough,
+    DcsEscape,
     OscString,
     SosPmApcString,
 }

@@ -2,6 +2,12 @@
 
 use noa_core::{CellAttrs, Color};
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Hyperlink {
+    pub uri: String,
+    pub id: Option<String>,
+}
+
 /// A single grid cell. Inc-1 layout is inlined (no `StyleId` interning yet).
 #[derive(Clone, PartialEq, Debug)]
 pub struct Cell {
@@ -11,6 +17,8 @@ pub struct Cell {
     pub combining: String,
     pub fg: Color,
     pub bg: Color,
+    pub underline_color: Option<Color>,
+    pub hyperlink: Option<usize>,
     pub attrs: CellAttrs,
 }
 
@@ -21,6 +29,8 @@ impl Default for Cell {
             combining: String::new(),
             fg: Color::Default,
             bg: Color::Default,
+            underline_color: None,
+            hyperlink: None,
             attrs: CellAttrs::empty(),
         }
     }
@@ -34,6 +44,8 @@ impl Cell {
             combining: String::new(),
             fg: Color::Default,
             bg,
+            underline_color: None,
+            hyperlink: None,
             attrs: CellAttrs::empty(),
         }
     }

@@ -136,6 +136,40 @@ impl App {
             .unwrap_or(false)
     }
 
+    fn app_keypad(&self, window_id: WindowId) -> bool {
+        self.windows
+            .get(&window_id)
+            .map(|state| {
+                state
+                    .terminal
+                    .lock()
+                    .expect("terminal mutex poisoned")
+                    .modes
+                    .app_keypad()
+            })
+            .unwrap_or(false)
+    }
+
+    fn focus_reporting(&self, window_id: WindowId) -> bool {
+        self.windows
+            .get(&window_id)
+            .map(|state| {
+                state
+                    .terminal
+                    .lock()
+                    .expect("terminal mutex poisoned")
+                    .modes
+                    .focus_reporting()
+            })
+            .unwrap_or(false)
+    }
+
+    fn report_focus_event(&self, window_id: WindowId, focused: bool) {
+        if let Some(bytes) = focus_report_bytes(focused, self.focus_reporting(window_id)) {
+            self.write_pty_bytes(window_id, bytes);
+        }
+    }
+
     fn redraw(&mut self, window_id: WindowId) {
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
             return;
@@ -573,8 +607,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.on_scale_factor_changed(window_id, scale_factor)
             }
             WindowEvent::Resized(size) => self.on_resize(window_id, size),
-            WindowEvent::Focused(true) => self.focused = Some(window_id),
-            WindowEvent::Focused(false) => {}
+            WindowEvent::Focused(true) => {
+                self.focused = Some(window_id);
+                self.report_focus_event(window_id, true);
+            }
+            WindowEvent::Focused(false) => self.report_focus_event(window_id, false),
             WindowEvent::Occluded(occluded) => {
                 if let Some(state) = self.windows.get_mut(&window_id) {
                     state.occluded = occluded;
@@ -611,11 +648,14 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 let app_cursor_keys = self.app_cursor_keys(window_id);
-                let bytes = input::encode_key(
+                let app_keypad = self.app_keypad(window_id);
+                let bytes = input::encode_key_with_modes(
                     &event.logical_key,
+                    Some(event.physical_key),
                     event.text.as_deref(),
                     self.modifiers,
                     app_cursor_keys,
+                    app_keypad,
                 );
                 if let Some(bytes) = bytes {
                     self.write_pty_bytes(window_id, &bytes);
@@ -1301,6 +1341,17 @@ fn preferred_surface_alpha_mode(caps: &wgpu::SurfaceCapabilities) -> wgpu::Compo
     }
 }
 
+fn focus_report_bytes(focused: bool, focus_reporting: bool) -> Option<&'static [u8]> {
+    if !focus_reporting {
+        return None;
+    }
+    if focused {
+        Some(b"\x1b[I")
+    } else {
+        Some(b"\x1b[O")
+    }
+}
+
 fn font_pixel_size(point_size: f32, scale_factor: f64) -> f32 {
     (point_size * scale_factor.max(f64::EPSILON) as f32).max(1.0)
 }
@@ -1692,6 +1743,14 @@ mod tests {
             targeted_redraw_decision(true, false),
             TargetedRedrawDecision::Request
         );
+    }
+
+    #[test]
+    fn focus_reporting_encodes_csi_i_and_csi_o_only_when_enabled() {
+        assert_eq!(focus_report_bytes(true, true), Some(b"\x1b[I".as_slice()));
+        assert_eq!(focus_report_bytes(false, true), Some(b"\x1b[O".as_slice()));
+        assert_eq!(focus_report_bytes(true, false), None);
+        assert_eq!(focus_report_bytes(false, false), None);
     }
 
     #[test]

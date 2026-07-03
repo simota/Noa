@@ -6,7 +6,7 @@
 //! unit-testable without a live `KeyEvent`.
 
 use winit::event::Ime;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 /// Tracks IME composition state and encodes committed IME text for the pty.
 #[derive(Debug, Default)]
@@ -47,6 +47,17 @@ pub fn encode_key(
     mods: ModifiersState,
     app_cursor_keys: bool,
 ) -> Option<Vec<u8>> {
+    encode_key_with_modes(logical_key, None, text, mods, app_cursor_keys, false)
+}
+
+pub fn encode_key_with_modes(
+    logical_key: &Key,
+    physical_key: Option<PhysicalKey>,
+    text: Option<&str>,
+    mods: ModifiersState,
+    app_cursor_keys: bool,
+    app_keypad: bool,
+) -> Option<Vec<u8>> {
     // Ctrl+letter -> the corresponding C0 control byte. Checked before the
     // general text path since terminals expect Ctrl+A..Z to send 0x01..0x1a
     // regardless of what `text` the platform layer produced.
@@ -63,6 +74,13 @@ pub fn encode_key(
         }
     }
 
+    if app_keypad
+        && modifier_value(mods).is_none()
+        && let Some(bytes) = application_keypad_bytes(physical_key)
+    {
+        return Some(bytes);
+    }
+
     match logical_key {
         Key::Named(NamedKey::Enter) => Some(vec![0x0d]),
         Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
@@ -73,6 +91,33 @@ pub fn encode_key(
         }
         _ => encode_key_text(text, mods),
     }
+}
+
+fn application_keypad_bytes(physical_key: Option<PhysicalKey>) -> Option<Vec<u8>> {
+    let PhysicalKey::Code(code) = physical_key? else {
+        return None;
+    };
+    let final_byte = match code {
+        KeyCode::Numpad0 => b'p',
+        KeyCode::Numpad1 => b'q',
+        KeyCode::Numpad2 => b'r',
+        KeyCode::Numpad3 => b's',
+        KeyCode::Numpad4 => b't',
+        KeyCode::Numpad5 => b'u',
+        KeyCode::Numpad6 => b'v',
+        KeyCode::Numpad7 => b'w',
+        KeyCode::Numpad8 => b'x',
+        KeyCode::Numpad9 => b'y',
+        KeyCode::NumpadDecimal => b'n',
+        KeyCode::NumpadAdd => b'k',
+        KeyCode::NumpadSubtract => b'm',
+        KeyCode::NumpadMultiply => b'j',
+        KeyCode::NumpadDivide => b'o',
+        KeyCode::NumpadEnter => b'M',
+        KeyCode::NumpadEqual => b'X',
+        _ => return None,
+    };
+    Some(vec![0x1b, b'O', final_byte])
 }
 
 /// Encode already-committed text for the pty.
@@ -346,6 +391,58 @@ mod tests {
         assert_eq!(
             encode_key(&key, None, ModifiersState::empty(), true),
             Some(vec![0x1b, b'O', b'A'])
+        );
+    }
+
+    #[test]
+    fn application_keypad_uses_ss3_for_numpad_digits_and_enter() {
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Character("1".into()),
+                Some(PhysicalKey::Code(KeyCode::Numpad1)),
+                Some("1"),
+                ModifiersState::empty(),
+                false,
+                true,
+            ),
+            Some(b"\x1bOq".to_vec())
+        );
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Named(NamedKey::Enter),
+                Some(PhysicalKey::Code(KeyCode::NumpadEnter)),
+                Some("\r"),
+                ModifiersState::empty(),
+                false,
+                true,
+            ),
+            Some(b"\x1bOM".to_vec())
+        );
+    }
+
+    #[test]
+    fn numeric_keypad_uses_text_or_standard_enter() {
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Character("1".into()),
+                Some(PhysicalKey::Code(KeyCode::Numpad1)),
+                Some("1"),
+                ModifiersState::empty(),
+                false,
+                false,
+            ),
+            Some(b"1".to_vec())
+        );
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Named(NamedKey::Enter),
+                Some(PhysicalKey::Code(KeyCode::NumpadEnter)),
+                Some("\r"),
+                ModifiersState::empty(),
+                false,
+                false,
+            ),
+            Some(vec![0x0d])
         );
     }
 

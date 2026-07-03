@@ -1,6 +1,6 @@
 //! The low-level actions emitted by [`crate::Parser::advance`].
 
-use crate::csi::{Csi, Esc};
+use crate::csi::{Csi, DcsPayload, Esc};
 
 /// A single primitive action produced by the parser DFA. [`crate::Stream`]
 /// maps these onto [`crate::Handler`] method calls.
@@ -16,4 +16,6 @@ pub enum Action {
     EscDispatch(Esc),
     /// A completed OSC string (raw bytes between `ESC ]` and `ST`/`BEL`).
     OscDispatch(Vec<u8>),
+    /// A completed DCS string (raw bytes between `ESC P` and `ST`).
+    DcsDispatch(DcsPayload),
 }

@@ -65,6 +65,7 @@ pub(crate) fn input_channel() -> (Sender<PtyInput>, Receiver<PtyInput>) {
 struct TerminalOutput {
     pending_writes: Vec<u8>,
     pending_clipboard_writes: Vec<String>,
+    synchronized_output: bool,
 }
 
 fn feed_terminal(
@@ -77,6 +78,7 @@ fn feed_terminal(
     TerminalOutput {
         pending_writes: term.take_pending_writes(),
         pending_clipboard_writes: term.take_pending_clipboard_writes(),
+        synchronized_output: term.modes.synchronized_output(),
     }
 }
 
@@ -84,6 +86,10 @@ fn write_pty_bytes(writer: &PtyWriter, bytes: &[u8]) {
     if let Err(err) = writer.write(bytes).and_then(|_| writer.flush()) {
         log::warn!("failed to write bytes to pty: {err}");
     }
+}
+
+fn should_request_redraw_after_terminal_output(output: &TerminalOutput) -> bool {
+    !output.synchronized_output
 }
 
 /// Spawn the io thread, which takes ownership of `pty`. Returns immediately;
@@ -109,10 +115,11 @@ pub fn spawn(
                         if !output.pending_writes.is_empty() {
                             write_pty_bytes(&writer, &output.pending_writes);
                         }
+                        let should_redraw = should_request_redraw_after_terminal_output(&output);
                         for text in output.pending_clipboard_writes {
                             let _ = proxy.send_event(UserEvent::ClipboardWrite { window_id, text });
                         }
-                        if proxy.send_event(UserEvent::Redraw(window_id)).is_err() {
+                        if should_redraw && proxy.send_event(UserEvent::Redraw(window_id)).is_err() {
                             break; // event loop gone
                         }
                     }
@@ -154,10 +161,27 @@ mod tests {
 
         assert_eq!(output.pending_writes, b"\x1b[1;1R");
         assert!(output.pending_clipboard_writes.is_empty());
+        assert!(!output.synchronized_output);
         assert!(
             terminal.try_lock().is_ok(),
             "terminal lock must be released before PTY writes"
         );
+    }
+
+    #[test]
+    fn synchronized_output_suppresses_redraw_until_release() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+        let mut stream = noa_vt::Stream::new();
+
+        let output = feed_terminal(&terminal, &mut stream, b"\x1b[?2026hhidden");
+
+        assert!(output.synchronized_output);
+        assert!(!should_request_redraw_after_terminal_output(&output));
+
+        let output = feed_terminal(&terminal, &mut stream, b"\x1b[?2026l");
+
+        assert!(!output.synchronized_output);
+        assert!(should_request_redraw_after_terminal_output(&output));
     }
 
     #[test]

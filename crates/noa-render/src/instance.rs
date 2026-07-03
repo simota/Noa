@@ -20,7 +20,7 @@ pub struct CellInstance {
     pub color: [u8; 4],
     /// Bit flags: bit0 = this instance samples the atlas (text quad, not a
     /// flat background rectangle); bit1 = min-contrast (unused inc-1); bit2 =
-    /// cursor cell.
+    /// cursor cell; bit3 = decoration rectangle.
     pub flags: u32,
 }
 
@@ -28,6 +28,7 @@ impl CellInstance {
     pub const FLAG_GLYPH: u32 = 1 << 0;
     pub const FLAG_MIN_CONTRAST: u32 = 1 << 1;
     pub const FLAG_CURSOR: u32 = 1 << 2;
+    pub const FLAG_DECORATION: u32 = 1 << 3;
 }
 
 /// Per-frame uniform data shared by every pipeline (mirrors Ghostty's

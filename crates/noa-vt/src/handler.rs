@@ -44,6 +44,23 @@ pub enum DsrKind {
     CursorPosition,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CursorStyle {
+    BlinkingBlock,
+    SteadyBlock,
+    BlinkingUnderline,
+    SteadyUnderline,
+    BlinkingBar,
+    SteadyBar,
+}
+
+/// `DECRQM` (`CSI Ps $ p` / `CSI ? Ps $ p`) request target.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ModeRequest {
+    pub value: u16,
+    pub ansi: bool,
+}
+
 /// The terminal-state operations a parsed VT stream drives.
 ///
 /// Methods with default no-op / composed bodies are the ones a minimal inc-1
@@ -83,6 +100,14 @@ pub trait Handler {
     // ── rendition / modes ──────────────────────────────────────────
     fn set_attributes(&mut self, attrs: &[SgrAttr]);
     fn set_mode(&mut self, value: u16, ansi: bool, on: bool);
+    /// `DECSCUSR` (`CSI Ps SP q`) — cursor style.
+    fn set_cursor_style(&mut self, _style: CursorStyle) {}
+    /// `DECSLRM` (`CSI Pl;Pr s`) — set horizontal margins.
+    fn set_horizontal_margins(&mut self, _left: u16, _right: u16) {}
+    /// `DECPAM`/`DECPNM` (`ESC =`/`ESC >`) — application/numeric keypad.
+    fn set_application_keypad(&mut self, _on: bool) {}
+    /// `DECRQM` — request mode state; replies with `DECRPM`.
+    fn request_mode(&mut self, _request: ModeRequest) {}
 
     // ── control ────────────────────────────────────────────────────
     fn carriage_return(&mut self);
@@ -131,6 +156,8 @@ pub trait Handler {
     // ── parsed but inc-1 no-ops ────────────────────────────────────
     /// OSC payload (`ESC ] … ST`). Inc-1: parse title (`0`/`2`), drop the rest.
     fn osc_dispatch(&mut self, _data: &[u8]) {}
+    /// DCS payload (`ESC P … ST`) for query protocols such as DECRQSS and XTGETTCAP.
+    fn dcs_dispatch(&mut self, _data: &[u8]) {}
     /// `DECSTBM` — set the vertical scroll region (1-based; `bottom = 0` = last row).
     fn set_scroll_region(&mut self, _top: u16, _bottom: u16) {}
 }

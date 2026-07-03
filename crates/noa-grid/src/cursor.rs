@@ -2,6 +2,22 @@
 
 use noa_core::{CellAttrs, Color};
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CursorStyle {
+    BlinkingBlock,
+    SteadyBlock,
+    BlinkingUnderline,
+    SteadyUnderline,
+    BlinkingBar,
+    SteadyBar,
+}
+
+impl Default for CursorStyle {
+    fn default() -> Self {
+        Self::BlinkingBlock
+    }
+}
+
 /// The terminal cursor: position, the deferred-wrap latch, and the active pen.
 #[derive(Clone, Copy, Debug)]
 pub struct Cursor {
@@ -14,9 +30,12 @@ pub struct Cursor {
     pub pending_wrap: bool,
     pub fg: Color,
     pub bg: Color,
+    pub underline_color: Option<Color>,
+    pub hyperlink: Option<usize>,
     pub attrs: CellAttrs,
     /// DECTCEM (mode 25).
     pub visible: bool,
+    pub style: CursorStyle,
 }
 
 impl Default for Cursor {
@@ -27,8 +46,11 @@ impl Default for Cursor {
             pending_wrap: false,
             fg: Color::Default,
             bg: Color::Default,
+            underline_color: None,
+            hyperlink: None,
             attrs: CellAttrs::empty(),
             visible: true,
+            style: CursorStyle::default(),
         }
     }
 }
@@ -38,4 +60,11 @@ impl Default for Cursor {
 pub struct ScrollRegion {
     pub top: u16,
     pub bottom: u16,
+}
+
+/// The horizontal left/right margins (0-based, inclusive).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct HorizontalMargins {
+    pub left: u16,
+    pub right: u16,
 }

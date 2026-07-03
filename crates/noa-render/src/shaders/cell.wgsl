@@ -47,6 +47,7 @@ struct VertexOutput {
 };
 
 const FLAG_GLYPH: u32 = 1u;
+const FLAG_DECORATION: u32 = 8u;
 
 @vertex
 fn vs_main(
@@ -80,6 +81,12 @@ fn vs_main(
         let atlas_dims = vec2<f32>(textureDimensions(atlas_tex));
         let atlas_origin = vec2<f32>(f32(instance.glyph_pos.x), f32(instance.glyph_pos.y));
         uv = (atlas_origin + corner * size) / atlas_dims;
+    } else if (instance.flags & FLAG_DECORATION) != 0u {
+        // Decoration quad: positioned by bearing and sized by glyph_size.
+        let size = vec2<f32>(f32(instance.glyph_size.x), f32(instance.glyph_size.y));
+        let bearing = vec2<f32>(f32(instance.bearing.x), f32(instance.bearing.y));
+        pixel = cell_origin + bearing + corner * size;
+        uv = vec2<f32>(0.0, 0.0);
     } else {
         // Background / cursor quad: fills the whole cell.
         pixel = cell_origin + corner * uniforms.cell_size;

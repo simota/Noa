@@ -3,7 +3,7 @@
 
 use crate::action::Action;
 use crate::csi::{Csi, Esc};
-use crate::handler::{DaKind, DsrKind, EraseDisplay, EraseLine, Handler};
+use crate::handler::{CursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine, Handler, ModeRequest};
 use crate::parser::Parser;
 use crate::sgr::parse_sgr;
 
@@ -34,6 +34,7 @@ fn dispatch<H: Handler>(action: Action, h: &mut H) {
         Action::CsiDispatch(csi) => dispatch_csi(&csi, h),
         Action::EscDispatch(esc) => dispatch_esc(&esc, h),
         Action::OscDispatch(data) => h.osc_dispatch(&data),
+        Action::DcsDispatch(payload) => h.dcs_dispatch(&payload.data),
     }
 }
 
@@ -71,6 +72,23 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
             _ => EraseLine::Right,
         }),
         b'm' => h.set_attributes(&parse_sgr(csi)),
+        b'p' if csi.intermediates.as_slice() == [b'$'] => {
+            h.request_mode(ModeRequest {
+                value: csi.param(0, 0),
+                ansi: csi.private != b'?',
+            });
+        }
+        b'q' if csi.private == 0 && csi.intermediates.as_slice() == [b' '] => {
+            let style = match csi.param(0, 1) {
+                3 => CursorStyle::BlinkingUnderline,
+                4 => CursorStyle::SteadyUnderline,
+                5 => CursorStyle::BlinkingBar,
+                6 => CursorStyle::SteadyBar,
+                2 => CursorStyle::SteadyBlock,
+                _ => CursorStyle::BlinkingBlock,
+            };
+            h.set_cursor_style(style);
+        }
         b'h' | b'l' => {
             let on = csi.final_byte == b'h';
             let ansi = csi.private != b'?';
@@ -89,7 +107,8 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
             _ => {}
         },
         b'r' if csi.private == 0 => h.set_scroll_region(csi.param(0, 1), csi.param(1, 0)),
-        b's' if csi.private == 0 => h.save_cursor(),
+        b's' if csi.private == 0 && csi.params.is_empty() => h.save_cursor(),
+        b's' if csi.private == 0 => h.set_horizontal_margins(csi.param(0, 1), csi.param(1, 0)),
         b'u' if csi.private == 0 => h.restore_cursor(),
         b'g' if plain => match csi.param(0, 0) {
             0 => h.clear_tab_stop(),
@@ -106,11 +125,13 @@ fn dispatch_esc<H: Handler>(esc: &Esc, h: &mut H) {
         return;
     }
     match esc.final_byte {
-        b'c' => h.full_reset(),     // RIS
-        b'7' => h.save_cursor(),    // DECSC
-        b'8' => h.restore_cursor(), // DECRC
-        b'M' => h.reverse_index(),  // RI
-        b'D' => h.linefeed(),       // IND (index, no CR)
+        b'c' => h.full_reset(),                  // RIS
+        b'7' => h.save_cursor(),                 // DECSC
+        b'8' => h.restore_cursor(),              // DECRC
+        b'=' => h.set_application_keypad(true),  // DECPAM
+        b'>' => h.set_application_keypad(false), // DECPNM
+        b'M' => h.reverse_index(),               // RI
+        b'D' => h.linefeed(),                    // IND (index, no CR)
         b'E' => {
             // NEL
             h.carriage_return();

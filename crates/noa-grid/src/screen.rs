@@ -3,7 +3,7 @@
 //! `Handler` implementation drives.
 
 use crate::cell::{Cell, Row};
-use crate::cursor::{Cursor, ScrollRegion};
+use crate::cursor::{Cursor, HorizontalMargins, ScrollRegion};
 use crate::search::{SearchMatch, SearchState, compute_matches};
 use crate::selection::{Selection, SelectionPoint};
 use crate::tabstops::Tabstops;
@@ -48,6 +48,7 @@ pub struct Screen {
     pub search: SearchState,
     pub saved_cursor: Option<Cursor>,
     pub region: ScrollRegion,
+    pub horizontal_margins: Option<HorizontalMargins>,
     pub tabstops: Tabstops,
     scrollback: VecDeque<Row>,
     scrollback_limit: usize,
@@ -78,6 +79,7 @@ impl Screen {
                 top: 0,
                 bottom: rows.saturating_sub(1),
             },
+            horizontal_margins: None,
             tabstops: Tabstops::new(cols),
             scrollback: VecDeque::new(),
             scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
@@ -100,6 +102,19 @@ impl Screen {
 
     fn print_width(c: char) -> usize {
         c.width().unwrap_or(1).min(2)
+    }
+
+    fn left_margin(&self) -> u16 {
+        self.horizontal_margins.map_or(0, |m| m.left)
+    }
+
+    fn right_margin(&self) -> u16 {
+        self.horizontal_margins
+            .map_or(self.cols.saturating_sub(1), |m| m.right)
+    }
+
+    fn clamp_x_to_margins(&self, x: u16) -> u16 {
+        x.max(self.left_margin()).min(self.right_margin())
     }
 
     fn clear_wide_at(row: &mut Row, x: usize, blank: &Cell) {
@@ -509,6 +524,7 @@ impl Screen {
             top: 0,
             bottom: rows - 1,
         };
+        self.horizontal_margins = None;
         self.cursor.x = self.cursor.x.min(cols - 1);
         self.cursor.y = self.cursor.y.min(rows - 1);
         self.cursor.pending_wrap = false;
@@ -844,7 +860,7 @@ impl Screen {
             return;
         }
 
-        if width == 2 && self.cols < 2 {
+        if width == 2 && self.right_margin() <= self.left_margin() {
             let blank = self.blank();
             let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
             let row = &mut self.grid[y];
@@ -858,15 +874,15 @@ impl Screen {
         if self.cursor.pending_wrap && autowrap {
             self.grid[self.cursor.y as usize].wrapped = true;
             self.index();
-            self.cursor.x = 0;
+            self.cursor.x = self.left_margin();
             self.cursor.pending_wrap = false;
         }
 
-        if width == 2 && self.cursor.x + 1 >= self.cols {
+        if width == 2 && self.cursor.x.saturating_add(1) > self.right_margin() {
             if autowrap {
                 self.grid[self.cursor.y as usize].wrapped = true;
                 self.index();
-                self.cursor.x = 0;
+                self.cursor.x = self.left_margin();
                 self.cursor.pending_wrap = false;
             } else {
                 let blank = self.blank();
@@ -884,12 +900,16 @@ impl Screen {
         let blank = self.blank();
         let fg = self.cursor.fg;
         let bg = self.cursor.bg;
+        let underline_color = self.cursor.underline_color;
+        let hyperlink = self.cursor.hyperlink;
         let attrs = self.pen_attrs();
         let cell = Cell {
             ch: c,
             combining: String::new(),
             fg,
             bg,
+            underline_color,
+            hyperlink,
             attrs,
         };
         let row = &mut self.grid[y];
@@ -911,13 +931,15 @@ impl Screen {
                 combining: String::new(),
                 fg,
                 bg,
+                underline_color,
+                hyperlink,
                 attrs: spacer_attrs,
             };
         }
         row.dirty = true;
 
-        if self.cursor.x + width as u16 >= self.cols {
-            self.cursor.x = self.cols - 1;
+        if self.cursor.x.saturating_add(width as u16) > self.right_margin() {
+            self.cursor.x = self.right_margin();
             self.cursor.pending_wrap = true; // latch; stay in the last column
         } else {
             self.cursor.x += width as u16;
@@ -1036,14 +1058,14 @@ impl Screen {
 
     pub fn carriage_return(&mut self) {
         self.follow_live_output();
-        self.cursor.x = 0;
+        self.cursor.x = self.left_margin();
         self.cursor.pending_wrap = false;
     }
 
     pub fn backspace(&mut self) {
         self.follow_live_output();
         self.cursor.pending_wrap = false;
-        self.cursor.x = self.cursor.x.saturating_sub(1);
+        self.cursor.x = self.cursor.x.saturating_sub(1).max(self.left_margin());
     }
 
     pub fn cursor_up(&mut self, n: u16) {
@@ -1074,31 +1096,27 @@ impl Screen {
         self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
-        self.cursor.x = self
-            .cursor
-            .x
-            .saturating_add(n)
-            .min(self.cols.saturating_sub(1));
+        self.cursor.x = self.cursor.x.saturating_add(n).min(self.right_margin());
     }
 
     pub fn cursor_backward(&mut self, n: u16) {
         self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
-        self.cursor.x = self.cursor.x.saturating_sub(n);
+        self.cursor.x = self.cursor.x.saturating_sub(n).max(self.left_margin());
     }
 
     pub fn cursor_position(&mut self, row: u16, col: u16) {
         self.follow_live_output();
         self.cursor.pending_wrap = false;
         self.cursor.y = row.saturating_sub(1).min(self.rows.saturating_sub(1));
-        self.cursor.x = col.saturating_sub(1).min(self.cols.saturating_sub(1));
+        self.cursor.x = self.clamp_x_to_margins(col.saturating_sub(1));
     }
 
     pub fn cursor_col_abs(&mut self, col: u16) {
         self.follow_live_output();
         self.cursor.pending_wrap = false;
-        self.cursor.x = col.saturating_sub(1).min(self.cols.saturating_sub(1));
+        self.cursor.x = self.clamp_x_to_margins(col.saturating_sub(1));
     }
 
     pub fn cursor_row_abs(&mut self, row: u16) {
@@ -1136,6 +1154,33 @@ impl Screen {
     pub fn clear_all_tab_stops(&mut self) {
         self.follow_live_output();
         self.tabstops.clear_all();
+    }
+
+    pub fn enable_horizontal_margins(&mut self) {
+        self.horizontal_margins = Some(HorizontalMargins {
+            left: 0,
+            right: self.cols.saturating_sub(1),
+        });
+        self.cursor.x = self.clamp_x_to_margins(self.cursor.x);
+    }
+
+    pub fn disable_horizontal_margins(&mut self) {
+        self.horizontal_margins = None;
+        self.cursor.x = self.cursor.x.min(self.cols.saturating_sub(1));
+    }
+
+    pub fn set_horizontal_margins(&mut self, left: u16, right: u16) {
+        let last = self.cols.saturating_sub(1);
+        let l = left.saturating_sub(1).min(last);
+        let r = if right == 0 {
+            last
+        } else {
+            right.saturating_sub(1).min(last)
+        };
+        if l < r {
+            self.horizontal_margins = Some(HorizontalMargins { left: l, right: r });
+            self.cursor_position(1, 1);
+        }
     }
 
     pub fn save_cursor(&mut self) {

@@ -1,5 +1,6 @@
 //! OSC terminal state handled by the grid layer.
 
+use crate::cell::Hyperlink;
 use noa_core::{DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, Rgb, xterm_palette};
 
 const MAX_COLOR_OSC_BYTES: usize = 4096;
@@ -10,6 +11,36 @@ pub struct Osc52Policy {
     pub allow_write: bool,
     pub allow_read: bool,
     pub max_decoded_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HyperlinkOsc {
+    Start(Hyperlink),
+    End,
+    Malformed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CwdOsc {
+    Set(String),
+    Malformed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShellIntegrationOscKind {
+    PromptStart,
+    InputStart,
+    CommandStart,
+    CommandEnd,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ShellIntegrationOsc {
+    Mark {
+        kind: ShellIntegrationOscKind,
+        exit_status: Option<i32>,
+    },
+    Malformed,
 }
 
 impl Default for Osc52Policy {
@@ -266,6 +297,151 @@ pub(crate) fn handle_clipboard_osc(
     };
     pending_clipboard_writes.push(text);
     true
+}
+
+pub(crate) fn parse_hyperlink_osc(data: &[u8]) -> Option<HyperlinkOsc> {
+    let rest = data.strip_prefix(b"8;")?;
+    let Some(separator) = rest.iter().position(|&b| b == b';') else {
+        return Some(HyperlinkOsc::Malformed);
+    };
+    let params = &rest[..separator];
+    let uri = &rest[separator + 1..];
+
+    if uri.is_empty() {
+        return Some(HyperlinkOsc::End);
+    }
+
+    let Some(uri) = utf8_no_controls(uri) else {
+        return Some(HyperlinkOsc::Malformed);
+    };
+    let Some(id) = hyperlink_id(params) else {
+        return Some(HyperlinkOsc::Malformed);
+    };
+
+    Some(HyperlinkOsc::Start(Hyperlink { uri, id }))
+}
+
+pub(crate) fn parse_cwd_osc(data: &[u8]) -> Option<CwdOsc> {
+    let uri = data.strip_prefix(b"7;")?;
+    let Some(uri) = utf8_no_controls(uri) else {
+        return Some(CwdOsc::Malformed);
+    };
+    let Some(path) = parse_file_uri_path(&uri) else {
+        return Some(CwdOsc::Malformed);
+    };
+    Some(CwdOsc::Set(path))
+}
+
+pub(crate) fn parse_shell_integration_osc(data: &[u8]) -> Option<ShellIntegrationOsc> {
+    let rest = data.strip_prefix(b"133;")?;
+    if !rest.iter().all(|b| (0x20..=0x7e).contains(b)) {
+        return Some(ShellIntegrationOsc::Malformed);
+    }
+
+    let mut parts = rest.split(|&b| b == b';');
+    let Some(action) = parts.next() else {
+        return Some(ShellIntegrationOsc::Malformed);
+    };
+
+    let kind = match action {
+        b"A" => ShellIntegrationOscKind::PromptStart,
+        b"B" => ShellIntegrationOscKind::InputStart,
+        b"C" => ShellIntegrationOscKind::CommandStart,
+        b"D" => ShellIntegrationOscKind::CommandEnd,
+        _ => return Some(ShellIntegrationOsc::Malformed),
+    };
+    let status = parts.next();
+    if parts.next().is_some() {
+        return Some(ShellIntegrationOsc::Malformed);
+    }
+    let exit_status = match (kind, status) {
+        (ShellIntegrationOscKind::CommandEnd, None | Some(b"")) => None,
+        (ShellIntegrationOscKind::CommandEnd, Some(status)) => {
+            let Some(status) = parse_i32_ascii(status) else {
+                return Some(ShellIntegrationOsc::Malformed);
+            };
+            Some(status)
+        }
+        (_, None) => None,
+        (_, Some(_)) => return Some(ShellIntegrationOsc::Malformed),
+    };
+
+    Some(ShellIntegrationOsc::Mark { kind, exit_status })
+}
+
+fn hyperlink_id(params: &[u8]) -> Option<Option<String>> {
+    if !params.iter().all(|b| (0x20..=0x7e).contains(b)) {
+        return None;
+    }
+    for param in params.split(|&b| b == b':') {
+        let Some(id) = param.strip_prefix(b"id=") else {
+            continue;
+        };
+        if id.is_empty() {
+            return None;
+        }
+        return utf8_no_controls(id).map(Some);
+    }
+    Some(None)
+}
+
+fn parse_file_uri_path(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+    let path_start = rest.find('/')?;
+    let path = &rest[path_start..];
+    if !path.starts_with('/') {
+        return None;
+    }
+    let decoded = percent_decode_utf8(path)?;
+    if decoded.starts_with('/') && !decoded.chars().any(char::is_control) {
+        Some(decoded)
+    } else {
+        None
+    }
+}
+
+fn percent_decode_utf8(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = percent_hex_value(bytes[i + 1])?;
+            let lo = percent_hex_value(bytes[i + 2])?;
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn percent_hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn parse_i32_ascii(bytes: &[u8]) -> Option<i32> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    s.parse().ok()
+}
+
+fn utf8_no_controls(bytes: &[u8]) -> Option<String> {
+    let s = String::from_utf8(bytes.to_vec()).ok()?;
+    if s.chars().any(char::is_control) {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 fn osc52_targets_clipboard(target: &[u8]) -> bool {

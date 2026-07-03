@@ -1,7 +1,8 @@
 //! Terminal state tests: deferred-wrap latch, cursor clamps, erase, DSR
 //! replies, and captured-stream golden fixtures.
 
-use crate::terminal::Terminal;
+use crate::cursor::{CursorStyle, HorizontalMargins};
+use crate::terminal::{ShellIntegrationMarkKind, Terminal};
 use noa_core::{
     CellAttrs, Color, DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, GridSize, Point, Rgb, xterm_palette,
     xterm_palette_color,
@@ -93,10 +94,85 @@ fn cursor_position_clamped() {
 }
 
 #[test]
+fn decscusr_updates_cursor_style() {
+    let t = run(b"\x1b[4 q");
+    assert_eq!(t.primary.cursor.style, CursorStyle::SteadyUnderline);
+
+    let t = run(b"\x1b[6 q");
+    assert_eq!(t.primary.cursor.style, CursorStyle::SteadyBar);
+
+    let t = run(b"\x1b[0 q");
+    assert_eq!(t.primary.cursor.style, CursorStyle::BlinkingBlock);
+}
+
+#[test]
 fn cup_is_one_based() {
     let t = run(b"\x1b[3;5H");
     assert_eq!(t.primary.cursor.y, 2);
     assert_eq!(t.primary.cursor.x, 4);
+}
+
+#[test]
+fn decslrm_requires_left_right_margin_mode() {
+    let t = run_size(10, 5, b"\x1b[3;7s");
+
+    assert_eq!(t.primary.horizontal_margins, None);
+    assert_eq!(t.primary.cursor.x, 0);
+    assert_eq!(t.primary.cursor.y, 0);
+}
+
+#[test]
+fn decslrm_sets_horizontal_margins_and_homes_to_left_margin() {
+    let t = run_size(10, 5, b"\x1b[?69h\x1b[3;7s");
+
+    assert_eq!(
+        t.primary.horizontal_margins,
+        Some(HorizontalMargins { left: 2, right: 6 })
+    );
+    assert_eq!(t.primary.cursor.x, 2);
+    assert_eq!(t.primary.cursor.y, 0);
+}
+
+#[test]
+fn horizontal_margins_clamp_cursor_motion_and_carriage_return() {
+    let t = run_size(10, 5, b"\x1b[?69h\x1b[3;7s\x1b[99C");
+    assert_eq!(t.primary.cursor.x, 6);
+
+    let t = run_size(10, 5, b"\x1b[?69h\x1b[3;7s\x1b[99C\x1b[99D");
+    assert_eq!(t.primary.cursor.x, 2);
+
+    let t = run_size(10, 5, b"\x1b[?69h\x1b[3;7s\x1b[99C\r");
+    assert_eq!(t.primary.cursor.x, 2);
+}
+
+#[test]
+fn horizontal_margins_wrap_printing_to_left_margin() {
+    let t = run_size(10, 5, b"\x1b[?69h\x1b[3;7sabcdeZ");
+
+    assert_eq!(row_text(&t, 0, 8), "  abcde ");
+    assert_eq!(cell(&t, 2, 1).ch, 'Z');
+    assert_eq!(t.primary.cursor.x, 3);
+    assert_eq!(t.primary.cursor.y, 1);
+}
+
+#[test]
+fn left_right_margin_reset_restores_full_width_motion() {
+    let t = run_size(10, 5, b"\x1b[?69h\x1b[3;7s\x1b[?69l\x1b[1G");
+
+    assert_eq!(t.primary.horizontal_margins, None);
+    assert_eq!(t.primary.cursor.x, 0);
+}
+
+#[test]
+fn keypad_mode_tracks_esc_and_dec_private_mode() {
+    let t = run(b"\x1b=");
+    assert!(t.modes.app_keypad());
+
+    let t = run(b"\x1b=\x1b>");
+    assert!(!t.modes.app_keypad());
+
+    let t = run(b"\x1b[?66h");
+    assert!(t.modes.app_keypad());
 }
 
 #[test]
@@ -160,6 +236,61 @@ fn da1_reply() {
 }
 
 #[test]
+fn decrqss_reports_sgr_cursor_and_margins() {
+    let t = run_size(
+        10,
+        5,
+        b"\x1b[31;4:3m\
+          \x1b[6 q\
+          \x1b[2;4r\
+          \x1b[?69h\x1b[3;7s\
+          \x1bP$qm\x1b\\\
+          \x1bP$q q\x1b\\\
+          \x1bP$qr\x1b\\\
+          \x1bP$qs\x1b\\\
+          \x1bP$qBAD\x1b\\",
+    );
+
+    assert_eq!(
+        t.pending_writes,
+        b"\x1bP1$r0;4:3;31m\x1b\\\
+          \x1bP1$r6 q\x1b\\\
+          \x1bP1$r2;4r\x1b\\\
+          \x1bP1$r3;7s\x1b\\\
+          \x1bP0$rBAD\x1b\\"
+    );
+}
+
+#[test]
+fn xtgettcap_and_xtversion_report_selected_capabilities() {
+    let t = run(b"\x1bP+q544e;524742;7878\x1b\\\
+          \x1bP>q\x1b\\");
+
+    assert_eq!(
+        t.pending_writes,
+        concat!(
+            "\x1bP1+r544e=6e6f61\x1b\\",
+            "\x1bP1+r524742=383a383a38\x1b\\",
+            "\x1bP0+r7878\x1b\\",
+            "\x1bP>|noa ",
+            env!("CARGO_PKG_VERSION"),
+            "\x1b\\"
+        )
+        .as_bytes()
+    );
+}
+
+#[test]
+fn decrqm_reports_known_mode_state() {
+    let t = run(b"\x1b[?25$p\x1b[?25l\x1b[?25$p\x1b[20$p\x1b[?9999$p");
+
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b[?25;1$y\x1b[?25;2$y\x1b[20;2$y\x1b[?9999;0$y"
+    );
+}
+
+#[test]
 fn erase_display_and_home() {
     let mut t = Terminal::new(GridSize::new(80, 24));
     let mut s = Stream::new();
@@ -191,6 +322,36 @@ fn bold_attribute_set_then_reset() {
     let t = run(b"\x1b[1mB\x1b[22mn");
     assert!(cell(&t, 0, 0).attrs.contains(CellAttrs::BOLD));
     assert!(!cell(&t, 1, 0).attrs.contains(CellAttrs::BOLD));
+}
+
+#[test]
+fn sgr_underline_styles_and_color_written_to_cells() {
+    let t = run(b"\x1b[4:2;58;5;123mD\x1b[4:5;59mE\x1b[24mF");
+
+    let double = cell(&t, 0, 0);
+    assert!(double.attrs.contains(CellAttrs::DOUBLE_UNDERLINE));
+    assert_eq!(double.underline_color, Some(Color::Palette(123)));
+
+    let dashed = cell(&t, 1, 0);
+    assert!(dashed.attrs.contains(CellAttrs::DASHED_UNDERLINE));
+    assert!(!dashed.attrs.contains(CellAttrs::DOUBLE_UNDERLINE));
+    assert_eq!(dashed.underline_color, None);
+
+    let reset = cell(&t, 2, 0);
+    assert!(!reset.attrs.intersects(CellAttrs::underline_styles()));
+}
+
+#[test]
+fn sgr_reset_clears_underline_color() {
+    let t = run(b"\x1b[4:3;58;2;1;2;3mA\x1b[0mB");
+
+    let styled = cell(&t, 0, 0);
+    assert!(styled.attrs.contains(CellAttrs::CURLY_UNDERLINE));
+    assert_eq!(styled.underline_color, Some(Color::Rgb(Rgb::new(1, 2, 3))));
+
+    let reset = cell(&t, 1, 0);
+    assert_eq!(reset.underline_color, None);
+    assert!(!reset.attrs.intersects(CellAttrs::underline_styles()));
 }
 
 #[test]
@@ -423,6 +584,25 @@ fn sgr_mouse_modes_toggle_and_reset() {
 
     let t = run(b"\x1b[?1000h\x1b[?1006h\x1bc");
     assert!(!t.modes.sgr_mouse_reporting());
+}
+
+#[test]
+fn focus_reporting_and_synchronized_output_modes_toggle_and_reset() {
+    let t = run(b"\x1b[?1004h\x1b[?2026h\x1b[?1004$p\x1b[?2026$p");
+
+    assert!(t.modes.focus_reporting());
+    assert!(t.modes.synchronized_output());
+    assert_eq!(t.pending_writes, b"\x1b[?1004;1$y\x1b[?2026;1$y");
+
+    let t = run(b"\x1b[?1004h\x1b[?2026h\x1b[?1004l\x1b[?2026l");
+
+    assert!(!t.modes.focus_reporting());
+    assert!(!t.modes.synchronized_output());
+
+    let t = run(b"\x1b[?1004h\x1b[?2026h\x1bc");
+
+    assert!(!t.modes.focus_reporting());
+    assert!(!t.modes.synchronized_output());
 }
 
 #[test]
@@ -855,6 +1035,66 @@ fn resize_shrink_rows_moves_top_drained_primary_rows_to_scrollback() {
 fn title_from_osc() {
     let t = run(b"\x1b]0;my title\x07");
     assert_eq!(t.title, "my title");
+}
+
+#[test]
+fn osc8_hyperlink_state_is_stored_on_printed_cells() {
+    let t = run(b"\x1b]8;id=docs;https://example.test/docs\x1b\\AB\
+          \x1b]8;;\x1b\\C");
+
+    let link_id = cell(&t, 0, 0).hyperlink.expect("A should carry link");
+    assert_eq!(cell(&t, 1, 0).hyperlink, Some(link_id));
+    assert_eq!(cell(&t, 2, 0).hyperlink, None);
+    assert_eq!(t.hyperlinks[link_id].uri, "https://example.test/docs");
+    assert_eq!(t.hyperlinks[link_id].id.as_deref(), Some("docs"));
+}
+
+#[test]
+fn osc8_malformed_payload_is_ignored_without_mutating_active_link() {
+    let t = run(b"\x1b]8;;https://example.test\x07A\x1b]8;missing-separator\x07B");
+
+    assert_eq!(cell(&t, 0, 0).hyperlink, cell(&t, 1, 0).hyperlink);
+    assert_eq!(t.hyperlinks.len(), 1);
+    assert_eq!(t.hyperlinks[0].uri, "https://example.test");
+}
+
+#[test]
+fn osc7_cwd_updates_from_file_uri_and_rejects_malformed_payloads() {
+    let t = run(b"\x1b]7;file://localhost/Users/noa%20dev/project\x07\
+          \x1b]7;file://localhost/%zz\x07");
+
+    assert_eq!(t.cwd.as_deref(), Some("/Users/noa dev/project"));
+}
+
+#[test]
+fn osc133_prompt_marks_record_cursor_positions_and_exit_status() {
+    let t = run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\x1b]133;D;7\x07");
+
+    assert_eq!(t.shell_marks.len(), 4);
+    assert_eq!(t.shell_marks[0].kind, ShellIntegrationMarkKind::PromptStart);
+    assert_eq!(t.shell_marks[0].point, crate::SelectionPoint::new(0, 0));
+    assert_eq!(t.shell_marks[1].kind, ShellIntegrationMarkKind::InputStart);
+    assert_eq!(t.shell_marks[1].point, crate::SelectionPoint::new(2, 0));
+    assert_eq!(
+        t.shell_marks[2].kind,
+        ShellIntegrationMarkKind::CommandStart
+    );
+    assert_eq!(t.shell_marks[2].point, crate::SelectionPoint::new(5, 0));
+    assert_eq!(t.shell_marks[3].kind, ShellIntegrationMarkKind::CommandEnd);
+    assert_eq!(t.shell_marks[3].exit_status, Some(7));
+}
+
+#[test]
+fn osc_protocol_state_clears_on_full_reset() {
+    let t = run(b"\x1b]7;file://localhost/tmp\x07\
+          \x1b]8;;https://example.test\x07A\
+          \x1b]133;A\x07\
+          \x1bc");
+
+    assert!(t.cwd.is_none());
+    assert!(t.hyperlinks.is_empty());
+    assert!(t.shell_marks.is_empty());
+    assert_eq!(cell(&t, 0, 0).hyperlink, None);
 }
 
 #[test]

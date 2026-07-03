@@ -89,6 +89,8 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
                 combining: String::new(),
                 fg: Color::Palette(1),
                 bg: Color::Default,
+                underline_color: None,
+                hyperlink: None,
                 attrs: CellAttrs::empty(),
             },
             Cell {
@@ -96,6 +98,8 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
                 combining: String::new(),
                 fg: Color::Default,
                 bg: Color::Palette(4),
+                underline_color: None,
+                hyperlink: None,
                 attrs: CellAttrs::empty(),
             },
             Cell::default(),

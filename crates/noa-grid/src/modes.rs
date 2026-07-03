@@ -50,6 +50,14 @@ impl ModeState {
     pub fn app_cursor_keys(&self) -> bool {
         self.get(1, false)
     }
+    /// DECNKM / DECPAM — application keypad mode.
+    pub fn app_keypad(&self) -> bool {
+        self.get(66, false)
+    }
+    /// DECLRMM — left/right margin mode.
+    pub fn left_right_margin(&self) -> bool {
+        self.get(69, false)
+    }
     /// DECSET 2004 — bracketed paste mode.
     pub fn bracketed_paste(&self) -> bool {
         self.get(2004, false)
@@ -57,6 +65,14 @@ impl ModeState {
     /// DECSET 1006 — SGR extended mouse coordinates.
     pub fn sgr_mouse(&self) -> bool {
         self.get(1006, false)
+    }
+    /// DECSET 1004 — focus event reporting.
+    pub fn focus_reporting(&self) -> bool {
+        self.get(1004, false)
+    }
+    /// DECSET 2026 — synchronized output mode.
+    pub fn synchronized_output(&self) -> bool {
+        self.get(2026, false)
     }
     /// DECSET 1000/1002/1003 mouse tracking mode.
     pub fn mouse_tracking(&self) -> MouseTracking {

@@ -2,14 +2,22 @@
 //! dispatching parsed operations onto the active [`Screen`] and queuing report
 //! replies (DA/DSR) for the pty writer.
 
-use crate::cursor::ScrollRegion;
+use crate::cell::Hyperlink;
+use crate::cursor::{CursorStyle, ScrollRegion};
 use crate::modes::ModeState;
-use crate::osc::{Osc52Policy, TerminalColors, handle_clipboard_osc, handle_color_osc};
+use crate::osc::{
+    CwdOsc, HyperlinkOsc, Osc52Policy, ShellIntegrationOsc, ShellIntegrationOscKind,
+    TerminalColors, handle_clipboard_osc, handle_color_osc, parse_cwd_osc, parse_hyperlink_osc,
+    parse_shell_integration_osc,
+};
 use crate::screen::Screen;
 use crate::search::SearchMatch;
 use crate::selection::SelectionPoint;
 use noa_core::{CellAttrs, Color, GridSize, Point};
-use noa_vt::{DaKind, DsrKind, EraseDisplay, EraseLine, Handler, SgrAttr};
+use noa_vt::{
+    CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine, Handler, ModeRequest,
+    SgrAttr,
+};
 
 pub struct Terminal {
     pub primary: Screen,
@@ -19,6 +27,12 @@ pub struct Terminal {
     pub modes: ModeState,
     /// Window title from OSC 0/2 (stored; unused by the inc-1 renderer).
     pub title: String,
+    /// Current working directory reported by OSC 7 as a decoded absolute path.
+    pub cwd: Option<String>,
+    /// OSC 8 hyperlink registry. Cells store indices into this table.
+    pub hyperlinks: Vec<Hyperlink>,
+    /// OSC 133 shell integration marks recorded at cursor positions.
+    pub shell_marks: Vec<ShellIntegrationMark>,
     /// Dynamic colors set through safe OSC 4/10/11/12 sequences.
     pub colors: TerminalColors,
     /// Policy for OSC 52 clipboard writes/queries.
@@ -30,6 +44,21 @@ pub struct Terminal {
     pub pending_clipboard_writes: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellIntegrationMarkKind {
+    PromptStart,
+    InputStart,
+    CommandStart,
+    CommandEnd,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellIntegrationMark {
+    pub kind: ShellIntegrationMarkKind,
+    pub point: SelectionPoint,
+    pub exit_status: Option<i32>,
+}
+
 impl Terminal {
     pub fn new(size: GridSize) -> Self {
         Terminal {
@@ -38,6 +67,9 @@ impl Terminal {
             active_is_alt: false,
             modes: ModeState::defaults(),
             title: String::new(),
+            cwd: None,
+            hyperlinks: Vec::new(),
+            shell_marks: Vec::new(),
             colors: TerminalColors::default(),
             osc52_policy: Osc52Policy::default(),
             size,
@@ -176,12 +208,32 @@ impl Terminal {
                 SgrAttr::Reset => {
                     c.fg = Color::Default;
                     c.bg = Color::Default;
+                    c.underline_color = None;
                     c.attrs = CellAttrs::empty();
                 }
                 SgrAttr::Bold => c.attrs.insert(CellAttrs::BOLD),
                 SgrAttr::Faint => c.attrs.insert(CellAttrs::FAINT),
                 SgrAttr::Italic => c.attrs.insert(CellAttrs::ITALIC),
-                SgrAttr::Underline => c.attrs.insert(CellAttrs::UNDERLINE),
+                SgrAttr::Underline => {
+                    c.attrs.remove(CellAttrs::underline_styles());
+                    c.attrs.insert(CellAttrs::UNDERLINE);
+                }
+                SgrAttr::DoubleUnderline => {
+                    c.attrs.remove(CellAttrs::underline_styles());
+                    c.attrs.insert(CellAttrs::DOUBLE_UNDERLINE);
+                }
+                SgrAttr::CurlyUnderline => {
+                    c.attrs.remove(CellAttrs::underline_styles());
+                    c.attrs.insert(CellAttrs::CURLY_UNDERLINE);
+                }
+                SgrAttr::DottedUnderline => {
+                    c.attrs.remove(CellAttrs::underline_styles());
+                    c.attrs.insert(CellAttrs::DOTTED_UNDERLINE);
+                }
+                SgrAttr::DashedUnderline => {
+                    c.attrs.remove(CellAttrs::underline_styles());
+                    c.attrs.insert(CellAttrs::DASHED_UNDERLINE);
+                }
                 SgrAttr::Blink => c.attrs.insert(CellAttrs::BLINK),
                 SgrAttr::Inverse => c.attrs.insert(CellAttrs::INVERSE),
                 SgrAttr::Invisible => c.attrs.insert(CellAttrs::INVISIBLE),
@@ -189,7 +241,7 @@ impl Terminal {
                 SgrAttr::Overline => c.attrs.insert(CellAttrs::OVERLINE),
                 SgrAttr::ResetBold => c.attrs.remove(CellAttrs::BOLD | CellAttrs::FAINT),
                 SgrAttr::ResetItalic => c.attrs.remove(CellAttrs::ITALIC),
-                SgrAttr::ResetUnderline => c.attrs.remove(CellAttrs::UNDERLINE),
+                SgrAttr::ResetUnderline => c.attrs.remove(CellAttrs::underline_styles()),
                 SgrAttr::ResetBlink => c.attrs.remove(CellAttrs::BLINK),
                 SgrAttr::ResetInverse => c.attrs.remove(CellAttrs::INVERSE),
                 SgrAttr::ResetInvisible => c.attrs.remove(CellAttrs::INVISIBLE),
@@ -197,8 +249,10 @@ impl Terminal {
                 SgrAttr::ResetOverline => c.attrs.remove(CellAttrs::OVERLINE),
                 SgrAttr::Fg(col) => c.fg = col,
                 SgrAttr::Bg(col) => c.bg = col,
+                SgrAttr::UnderlineColor(col) => c.underline_color = Some(col),
                 SgrAttr::DefaultFg => c.fg = Color::Default,
                 SgrAttr::DefaultBg => c.bg = Color::Default,
+                SgrAttr::DefaultUnderlineColor => c.underline_color = None,
             }
         }
     }
@@ -212,6 +266,173 @@ impl Terminal {
         } else {
             &mut self.primary
         }
+    }
+
+    fn set_current_hyperlink(&mut self, hyperlink: Hyperlink) {
+        let id = self
+            .hyperlinks
+            .iter()
+            .position(|existing| existing == &hyperlink)
+            .unwrap_or_else(|| {
+                self.hyperlinks.push(hyperlink);
+                self.hyperlinks.len() - 1
+            });
+        self.active_mut().cursor.hyperlink = Some(id);
+    }
+
+    fn clear_current_hyperlink(&mut self) {
+        self.active_mut().cursor.hyperlink = None;
+    }
+
+    fn record_shell_mark(&mut self, kind: ShellIntegrationMarkKind, exit_status: Option<i32>) {
+        let screen = self.active();
+        let point = SelectionPoint::new(
+            screen.cursor.x,
+            screen.scrollback_len() + screen.cursor.y as usize,
+        );
+        self.shell_marks.push(ShellIntegrationMark {
+            kind,
+            point,
+            exit_status,
+        });
+    }
+
+    fn push_dcs_response(&mut self, body: &[u8]) {
+        self.pending_writes.extend_from_slice(b"\x1bP");
+        self.pending_writes.extend_from_slice(body);
+        self.pending_writes.extend_from_slice(b"\x1b\\");
+    }
+
+    fn push_decrqss_response(&mut self, valid: bool, request: &[u8], setting: &[u8]) {
+        self.pending_writes.extend_from_slice(b"\x1bP");
+        if valid {
+            self.pending_writes.extend_from_slice(b"1$r");
+            self.pending_writes.extend_from_slice(setting);
+        } else {
+            self.pending_writes.extend_from_slice(b"0$r");
+            self.pending_writes.extend_from_slice(request);
+        }
+        self.pending_writes.extend_from_slice(b"\x1b\\");
+    }
+
+    fn handle_decrqss(&mut self, request: &[u8]) {
+        match request {
+            b"m" => {
+                let setting = self.current_sgr_report();
+                self.push_decrqss_response(true, request, setting.as_bytes());
+            }
+            b" q" => {
+                let setting = format!("{} q", self.cursor_style_number());
+                self.push_decrqss_response(true, request, setting.as_bytes());
+            }
+            b"r" => {
+                let region = self.active().region;
+                let setting = format!("{};{}r", region.top + 1, region.bottom + 1);
+                self.push_decrqss_response(true, request, setting.as_bytes());
+            }
+            b"s" => {
+                let (left, right) = self
+                    .active()
+                    .horizontal_margins
+                    .map(|m| (m.left + 1, m.right + 1))
+                    .unwrap_or((1, self.size.cols));
+                let setting = format!("{left};{right}s");
+                self.push_decrqss_response(true, request, setting.as_bytes());
+            }
+            _ => self.push_decrqss_response(false, request, &[]),
+        }
+    }
+
+    fn cursor_style_number(&self) -> u8 {
+        match self.active().cursor.style {
+            CursorStyle::BlinkingBlock => 1,
+            CursorStyle::SteadyBlock => 2,
+            CursorStyle::BlinkingUnderline => 3,
+            CursorStyle::SteadyUnderline => 4,
+            CursorStyle::BlinkingBar => 5,
+            CursorStyle::SteadyBar => 6,
+        }
+    }
+
+    fn current_sgr_report(&self) -> String {
+        let c = &self.active().cursor;
+        let mut params = vec!["0".to_string()];
+        if c.attrs.contains(CellAttrs::BOLD) {
+            params.push("1".to_string());
+        }
+        if c.attrs.contains(CellAttrs::FAINT) {
+            params.push("2".to_string());
+        }
+        if c.attrs.contains(CellAttrs::ITALIC) {
+            params.push("3".to_string());
+        }
+        if c.attrs.contains(CellAttrs::UNDERLINE) {
+            params.push("4".to_string());
+        } else if c.attrs.contains(CellAttrs::DOUBLE_UNDERLINE) {
+            params.push("21".to_string());
+        } else if c.attrs.contains(CellAttrs::CURLY_UNDERLINE) {
+            params.push("4:3".to_string());
+        } else if c.attrs.contains(CellAttrs::DOTTED_UNDERLINE) {
+            params.push("4:4".to_string());
+        } else if c.attrs.contains(CellAttrs::DASHED_UNDERLINE) {
+            params.push("4:5".to_string());
+        }
+        if c.attrs.contains(CellAttrs::BLINK) {
+            params.push("5".to_string());
+        }
+        if c.attrs.contains(CellAttrs::INVERSE) {
+            params.push("7".to_string());
+        }
+        if c.attrs.contains(CellAttrs::INVISIBLE) {
+            params.push("8".to_string());
+        }
+        if c.attrs.contains(CellAttrs::STRIKETHROUGH) {
+            params.push("9".to_string());
+        }
+        if c.attrs.contains(CellAttrs::OVERLINE) {
+            params.push("53".to_string());
+        }
+        push_color_params(&mut params, 30, 90, 38, c.fg);
+        push_color_params(&mut params, 40, 100, 48, c.bg);
+        if let Some(color) = c.underline_color {
+            push_color_params(&mut params, 0, 0, 58, color);
+        }
+        format!("{}m", params.join(";"))
+    }
+
+    fn handle_xtgettcap(&mut self, payload: &[u8]) {
+        for encoded_name in payload
+            .split(|&b| b == b';')
+            .filter(|name| !name.is_empty())
+        {
+            let Some(name) = decode_xtgettcap_name(encoded_name) else {
+                self.push_xtgettcap_response(false, encoded_name, &[]);
+                continue;
+            };
+            let value = match name.as_slice() {
+                b"TN" => Some(b"noa".as_slice()),
+                b"RGB" => Some(b"8:8:8".as_slice()),
+                b"Co" => Some(b"256".as_slice()),
+                _ => None,
+            };
+            if let Some(value) = value {
+                self.push_xtgettcap_response(true, encoded_name, value);
+            } else {
+                self.push_xtgettcap_response(false, encoded_name, &[]);
+            }
+        }
+    }
+
+    fn push_xtgettcap_response(&mut self, valid: bool, encoded_name: &[u8], value: &[u8]) {
+        self.pending_writes.extend_from_slice(b"\x1bP");
+        self.pending_writes
+            .extend_from_slice(if valid { b"1+r" } else { b"0+r" });
+        self.pending_writes.extend_from_slice(encoded_name);
+        if valid {
+            self.pending_writes.push(b'=');
+            push_hex_bytes(&mut self.pending_writes, value);
+        }
+        self.pending_writes.extend_from_slice(b"\x1b\\");
     }
 
     fn enter_alt_screen(&mut self, clear: bool) {
@@ -252,6 +473,56 @@ impl Terminal {
                 alt.clear_search();
             }
         }
+    }
+}
+
+fn push_color_params(
+    params: &mut Vec<String>,
+    base: u16,
+    bright_base: u16,
+    extended: u16,
+    color: Color,
+) {
+    match color {
+        Color::Default => {}
+        Color::Palette(index) if index < 8 && base != 0 => {
+            params.push((base + index as u16).to_string());
+        }
+        Color::Palette(index) if index < 16 && bright_base != 0 => {
+            params.push((bright_base + index as u16 - 8).to_string());
+        }
+        Color::Palette(index) => params.push(format!("{extended};5;{index}")),
+        Color::Rgb(rgb) => params.push(format!("{extended};2;{};{};{}", rgb.r, rgb.g, rgb.b)),
+    }
+}
+
+fn decode_xtgettcap_name(encoded: &[u8]) -> Option<Vec<u8>> {
+    if encoded.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(encoded.len() / 2);
+    for pair in encoded.chunks_exact(2) {
+        let hi = hex_value(pair[0])?;
+        let lo = hex_value(pair[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Some(out)
+}
+
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn push_hex_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize]);
+        out.push(HEX[(b & 0x0f) as usize]);
     }
 }
 
@@ -312,11 +583,75 @@ impl Handler for Terminal {
         self.apply_sgr(attrs);
     }
 
+    fn set_cursor_style(&mut self, style: VtCursorStyle) {
+        self.active_mut().cursor.style = match style {
+            VtCursorStyle::BlinkingBlock => CursorStyle::BlinkingBlock,
+            VtCursorStyle::SteadyBlock => CursorStyle::SteadyBlock,
+            VtCursorStyle::BlinkingUnderline => CursorStyle::BlinkingUnderline,
+            VtCursorStyle::SteadyUnderline => CursorStyle::SteadyUnderline,
+            VtCursorStyle::BlinkingBar => CursorStyle::BlinkingBar,
+            VtCursorStyle::SteadyBar => CursorStyle::SteadyBar,
+        };
+    }
+
+    fn set_horizontal_margins(&mut self, left: u16, right: u16) {
+        if self.modes.left_right_margin() {
+            self.active_mut().set_horizontal_margins(left, right);
+        }
+    }
+
+    fn set_application_keypad(&mut self, on: bool) {
+        self.modes.set(66, false, on);
+    }
+
+    fn request_mode(&mut self, request: ModeRequest) {
+        let state = match (request.value, request.ansi) {
+            (20, true)
+            | (1, false)
+            | (7, false)
+            | (25, false)
+            | (47, false)
+            | (66, false)
+            | (69, false)
+            | (1004, false)
+            | (1000, false)
+            | (1002, false)
+            | (1003, false)
+            | (1006, false)
+            | (1047, false)
+            | (1048, false)
+            | (1049, false)
+            | (2026, false)
+            | (2004, false) => {
+                if self.modes.get(request.value, request.ansi) {
+                    1
+                } else {
+                    2
+                }
+            }
+            _ => 0,
+        };
+        if request.ansi {
+            self.pending_writes
+                .extend_from_slice(format!("\x1b[{};{}$y", request.value, state).as_bytes());
+        } else {
+            self.pending_writes
+                .extend_from_slice(format!("\x1b[?{};{}$y", request.value, state).as_bytes());
+        }
+    }
+
     fn set_mode(&mut self, value: u16, ansi: bool, on: bool) {
         self.modes.set(value, ansi, on);
         if !ansi {
             match value {
                 25 => self.active_mut().cursor.visible = on, // DECTCEM
+                69 => {
+                    if on {
+                        self.active_mut().enable_horizontal_margins();
+                    } else {
+                        self.active_mut().disable_horizontal_margins();
+                    }
+                }
                 47 => {
                     if on {
                         self.enter_alt_screen(false);
@@ -388,6 +723,9 @@ impl Handler for Terminal {
         self.active_is_alt = false;
         self.modes = ModeState::defaults();
         self.title.clear();
+        self.cwd = None;
+        self.hyperlinks.clear();
+        self.shell_marks.clear();
         self.colors.reset_dynamic_overrides();
         self.pending_clipboard_writes.clear();
         self.clear_selection();
@@ -452,6 +790,32 @@ impl Handler for Terminal {
         ) {
             return;
         }
+        if let Some(action) = parse_hyperlink_osc(data) {
+            match action {
+                HyperlinkOsc::Start(hyperlink) => self.set_current_hyperlink(hyperlink),
+                HyperlinkOsc::End => self.clear_current_hyperlink(),
+                HyperlinkOsc::Malformed => {}
+            }
+            return;
+        }
+        if let Some(action) = parse_cwd_osc(data) {
+            if let CwdOsc::Set(cwd) = action {
+                self.cwd = Some(cwd);
+            }
+            return;
+        }
+        if let Some(action) = parse_shell_integration_osc(data) {
+            if let ShellIntegrationOsc::Mark { kind, exit_status } = action {
+                let kind = match kind {
+                    ShellIntegrationOscKind::PromptStart => ShellIntegrationMarkKind::PromptStart,
+                    ShellIntegrationOscKind::InputStart => ShellIntegrationMarkKind::InputStart,
+                    ShellIntegrationOscKind::CommandStart => ShellIntegrationMarkKind::CommandStart,
+                    ShellIntegrationOscKind::CommandEnd => ShellIntegrationMarkKind::CommandEnd,
+                };
+                self.record_shell_mark(kind, exit_status);
+            }
+            return;
+        }
 
         // OSC 0 (icon+title) / 2 (title): "<code>;<text>".
         let sep = data.iter().position(|&b| b == b';');
@@ -460,6 +824,16 @@ impl Handler for Terminal {
             if code == b"0" || code == b"2" {
                 self.title = String::from_utf8_lossy(&data[i + 1..]).into_owned();
             }
+        }
+    }
+
+    fn dcs_dispatch(&mut self, data: &[u8]) {
+        if let Some(request) = data.strip_prefix(b"$q") {
+            self.handle_decrqss(request);
+        } else if let Some(payload) = data.strip_prefix(b"+q") {
+            self.handle_xtgettcap(payload);
+        } else if data == b">q" {
+            self.push_dcs_response(format!(">|noa {}", env!("CARGO_PKG_VERSION")).as_bytes());
         }
     }
 

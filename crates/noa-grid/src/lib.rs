@@ -18,12 +18,12 @@ pub mod terminal;
 #[cfg(test)]
 mod tests;
 
-pub use cell::{Cell, Row};
-pub use cursor::{Cursor, ScrollRegion};
+pub use cell::{Cell, Hyperlink, Row};
+pub use cursor::{Cursor, CursorStyle, HorizontalMargins, ScrollRegion};
 pub use modes::ModeState;
 pub use osc::{Osc52Policy, TerminalColors};
 pub use screen::Screen;
 pub use search::{SearchMatch, SearchState};
 pub use selection::{Selection, SelectionPoint};
 pub use tabstops::Tabstops;
-pub use terminal::Terminal;
+pub use terminal::{ShellIntegrationMark, ShellIntegrationMarkKind, Terminal};

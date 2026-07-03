@@ -100,6 +100,26 @@ fn sgr_bright_fg_and_bg() {
 }
 
 #[test]
+fn sgr_underline_styles_and_color() {
+    let csi = only_csi(b"\x1b[21;4:3;58;2;10;20;30;59m");
+    assert_eq!(
+        parse_sgr(&csi),
+        vec![
+            SgrAttr::DoubleUnderline,
+            SgrAttr::CurlyUnderline,
+            SgrAttr::UnderlineColor(Color::Rgb(Rgb::new(10, 20, 30))),
+            SgrAttr::DefaultUnderlineColor,
+        ]
+    );
+}
+
+#[test]
+fn sgr_colon_underline_does_not_consume_semicolon_params() {
+    let csi = only_csi(b"\x1b[4;3m");
+    assert_eq!(parse_sgr(&csi), vec![SgrAttr::Underline, SgrAttr::Italic]);
+}
+
+#[test]
 fn cup_two_params() {
     let csi = only_csi(b"\x1b[5;10H");
     assert_eq!(csi.params, vec![5, 10]);
@@ -123,6 +143,42 @@ fn private_mode_marker() {
     assert_eq!(csi.private, b'?');
     assert_eq!(csi.params, vec![25]);
     assert_eq!(csi.final_byte, b'h');
+}
+
+#[test]
+fn decscusr_has_space_intermediate() {
+    let csi = only_csi(b"\x1b[4 q");
+
+    assert_eq!(csi.params, vec![4]);
+    assert_eq!(csi.intermediates, vec![b' ']);
+    assert_eq!(csi.final_byte, b'q');
+}
+
+#[test]
+fn decslrm_uses_plain_s_final() {
+    let csi = only_csi(b"\x1b[3;7s");
+
+    assert_eq!(csi.params, vec![3, 7]);
+    assert!(csi.intermediates.is_empty());
+    assert_eq!(csi.private, 0);
+    assert_eq!(csi.final_byte, b's');
+}
+
+#[test]
+fn keypad_modes_parse_as_esc_dispatch() {
+    assert_eq!(
+        actions(b"\x1b=\x1b>"),
+        vec![
+            Action::EscDispatch(crate::csi::Esc {
+                intermediates: Vec::new(),
+                final_byte: b'=',
+            }),
+            Action::EscDispatch(crate::csi::Esc {
+                intermediates: Vec::new(),
+                final_byte: b'>',
+            }),
+        ]
+    );
 }
 
 #[test]
@@ -193,6 +249,55 @@ fn osc_terminated_by_st() {
     // ESC ] 2 ; t ESC \
     let acts = actions(b"\x1b]2;t\x1b\\");
     assert!(acts.contains(&Action::OscDispatch(b"2;t".to_vec())));
+}
+
+#[test]
+fn osc8_hyperlink_payload_captured() {
+    let acts = actions(b"\x1b]8;id=docs;https://example.test\x1b\\");
+
+    assert!(acts.contains(&Action::OscDispatch(
+        b"8;id=docs;https://example.test".to_vec()
+    )));
+}
+
+#[test]
+fn dcs_payload_dispatches_on_st() {
+    assert_eq!(
+        actions(b"\x1bP$qm\x1b\\"),
+        vec![Action::DcsDispatch(crate::DcsPayload {
+            data: b"$qm".to_vec(),
+        })]
+    );
+}
+
+#[test]
+fn dcs_payload_dispatches_on_c1_st() {
+    assert_eq!(
+        actions(b"\x1bP+q544e\x9c"),
+        vec![Action::DcsDispatch(crate::DcsPayload {
+            data: b"+q544e".to_vec(),
+        })]
+    );
+}
+
+#[test]
+fn dcs_overflow_is_discarded_without_dispatch() {
+    let mut bytes = b"\x1bP".to_vec();
+    bytes.extend(std::iter::repeat(b'a').take(4097));
+    bytes.extend_from_slice(b"\x1b\\");
+
+    assert!(
+        actions(&bytes)
+            .into_iter()
+            .all(|action| !matches!(action, Action::DcsDispatch(_)))
+    );
+}
+
+#[test]
+fn osc133_prompt_mark_payload_captured() {
+    let acts = actions(b"\x1b]133;D;0\x07");
+
+    assert_eq!(acts, vec![Action::OscDispatch(b"133;D;0".to_vec())]);
 }
 
 #[test]

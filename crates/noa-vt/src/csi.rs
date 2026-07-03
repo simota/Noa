@@ -36,3 +36,9 @@ pub struct Esc {
     pub intermediates: Vec<u8>,
     pub final_byte: u8,
 }
+
+/// A completed DCS payload (raw bytes between `ESC P` and ST).
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct DcsPayload {
+    pub data: Vec<u8>,
+}

@@ -53,17 +53,26 @@ pub enum DrawOp {
     Dividers {
         rects: Vec<PaneRect>,
     },
+    FocusIndicator {
+        pane: PaneId,
+        rects: Vec<PaneRect>,
+    },
 }
 
 /// Build the single-pass draw plan for the visible pane set.
 ///
 /// The returned order is always one [`DrawOp::Clear`], then one scissored
 /// [`DrawOp::PaneCells`] per visible pane in layout order, then
-/// [`DrawOp::Dividers`]. When `zoomed` names a live pane, only that pane emits
-/// cells and divider geometry is suppressed.
-pub fn build_draw_plan(layout: &[(PaneId, PaneRect)], zoomed: Option<PaneId>) -> Vec<DrawOp> {
+/// [`DrawOp::Dividers`], then an optional [`DrawOp::FocusIndicator`]. When
+/// `zoomed` names a live pane, only that pane emits cells and divider/focus
+/// geometry is suppressed.
+pub fn build_draw_plan(
+    layout: &[(PaneId, PaneRect)],
+    focused: Option<PaneId>,
+    zoomed: Option<PaneId>,
+) -> Vec<DrawOp> {
     let zoomed = zoomed.filter(|pane| layout.iter().any(|(candidate, _)| candidate == pane));
-    let mut plan = Vec::with_capacity(layout.len() + 2);
+    let mut plan = Vec::with_capacity(layout.len() + 3);
     plan.push(DrawOp::Clear);
 
     for (index, (pane, rect)) in layout.iter().enumerate() {
@@ -84,6 +93,10 @@ pub fn build_draw_plan(layout: &[(PaneId, PaneRect)], zoomed: Option<PaneId>) ->
         divider_rects(layout)
     };
     plan.push(DrawOp::Dividers { rects });
+
+    if let Some((pane, rects)) = focus_indicator(layout, focused, zoomed) {
+        plan.push(DrawOp::FocusIndicator { pane, rects });
+    }
 
     plan
 }
@@ -145,6 +158,65 @@ fn push_unique(rects: &mut Vec<PaneRect>, rect: PaneRect) {
     }
 }
 
+fn focus_indicator(
+    layout: &[(PaneId, PaneRect)],
+    focused: Option<PaneId>,
+    zoomed: Option<PaneId>,
+) -> Option<(PaneId, Vec<PaneRect>)> {
+    let visible_count = layout
+        .iter()
+        .filter(|(pane, _)| zoomed.map_or(true, |zoomed| zoomed == *pane))
+        .count();
+    if visible_count <= 1 {
+        return None;
+    }
+
+    let focused = focused?;
+    if zoomed.is_some_and(|zoomed| zoomed != focused) {
+        return None;
+    }
+    let rect = layout
+        .iter()
+        .find_map(|(pane, rect)| (*pane == focused).then_some(*rect))?;
+    let rects = focus_indicator_rects(rect);
+    (!rects.is_empty()).then_some((focused, rects))
+}
+
+fn focus_indicator_rects(rect: PaneRect) -> Vec<PaneRect> {
+    let thickness = 2.min(rect.w).min(rect.h);
+    if thickness == 0 {
+        return Vec::new();
+    }
+
+    let mut rects = Vec::with_capacity(4);
+    rects.push(PaneRect::new(rect.x, rect.y, rect.w, thickness));
+
+    if rect.h > thickness {
+        rects.push(PaneRect::new(
+            rect.x,
+            rect.bottom() - thickness,
+            rect.w,
+            thickness,
+        ));
+    }
+
+    let vertical_h = rect.h.saturating_sub(thickness.saturating_mul(2));
+    if vertical_h > 0 {
+        let vertical_y = rect.y + thickness;
+        rects.push(PaneRect::new(rect.x, vertical_y, thickness, vertical_h));
+        if rect.w > thickness {
+            rects.push(PaneRect::new(
+                rect.right() - thickness,
+                vertical_y,
+                thickness,
+                vertical_h,
+            ));
+        }
+    }
+
+    rects
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,7 +229,7 @@ mod tests {
                     scissor,
                     bind_group_index,
                 } => Some((*pane, *scissor, *bind_group_index)),
-                DrawOp::Clear | DrawOp::Dividers { .. } => None,
+                DrawOp::Clear | DrawOp::Dividers { .. } | DrawOp::FocusIndicator { .. } => None,
             })
             .collect()
     }
@@ -171,7 +243,7 @@ mod tests {
             (right, PaneRect::new(51, 0, 49, 20)),
         ];
 
-        let plan = build_draw_plan(&layout, None);
+        let plan = build_draw_plan(&layout, None, None);
 
         assert_eq!(plan.first(), Some(&DrawOp::Clear));
         assert!(matches!(plan.get(1), Some(DrawOp::PaneCells { pane, .. }) if *pane == left));
@@ -190,7 +262,7 @@ mod tests {
             (PaneId::new(3), PaneRect::new(51, 21, 49, 20)),
         ];
 
-        let plan = build_draw_plan(&layout, None);
+        let plan = build_draw_plan(&layout, None, None);
         let cells = pane_cells(&plan);
 
         assert_eq!(
@@ -219,12 +291,64 @@ mod tests {
             (PaneId::new(2), PaneRect::new(51, 0, 49, 20)),
         ];
 
-        let plan = build_draw_plan(&layout, Some(PaneId::new(2)));
+        let plan = build_draw_plan(&layout, None, Some(PaneId::new(2)));
 
         assert_eq!(
             pane_cells(&plan),
             vec![(PaneId::new(2), PaneRect::new(51, 0, 49, 20), 1)]
         );
         assert!(matches!(plan.last(), Some(DrawOp::Dividers { rects }) if rects.is_empty()));
+    }
+
+    #[test]
+    fn focused_plan_draws_two_pixel_indicator_after_dividers() {
+        let left = PaneId::new(1);
+        let right = PaneId::new(2);
+        let layout = [
+            (left, PaneRect::new(0, 0, 50, 20)),
+            (right, PaneRect::new(51, 0, 49, 20)),
+        ];
+
+        let plan = build_draw_plan(&layout, Some(right), None);
+
+        assert!(matches!(plan.get(3), Some(DrawOp::Dividers { .. })));
+        assert!(
+            matches!(
+                plan.get(4),
+                Some(DrawOp::FocusIndicator { pane, rects })
+                    if *pane == right
+                        && rects == &vec![
+                            PaneRect::new(51, 0, 49, 2),
+                            PaneRect::new(51, 18, 49, 2),
+                            PaneRect::new(51, 2, 2, 16),
+                            PaneRect::new(98, 2, 2, 16),
+                        ]
+            ),
+            "focused pane should get a stable 2px pixel-space focus ring"
+        );
+        assert_eq!(plan.len(), 5);
+    }
+
+    #[test]
+    fn focus_indicator_is_suppressed_for_single_or_zoomed_visible_pane() {
+        let layout = [
+            (PaneId::new(1), PaneRect::new(0, 0, 50, 20)),
+            (PaneId::new(2), PaneRect::new(51, 0, 49, 20)),
+        ];
+
+        let single = build_draw_plan(&layout[..1], Some(PaneId::new(1)), None);
+        assert!(
+            single
+                .iter()
+                .all(|op| !matches!(op, DrawOp::FocusIndicator { .. }))
+        );
+
+        let zoomed = build_draw_plan(&layout, Some(PaneId::new(2)), Some(PaneId::new(2)));
+        assert!(
+            zoomed
+                .iter()
+                .all(|op| !matches!(op, DrawOp::FocusIndicator { .. }))
+        );
+        assert!(matches!(zoomed.last(), Some(DrawOp::Dividers { rects }) if rects.is_empty()));
     }
 }

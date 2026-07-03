@@ -24,7 +24,7 @@ pub struct CellInstance {
     pub color: [u8; 4],
     /// Bit flags: bit0 = this instance samples the atlas (text quad, not a
     /// flat background rectangle); bit1 = min-contrast (unused inc-1); bit2 =
-    /// cursor cell; bit3 = decoration rectangle; bit4 = pixel-space divider.
+    /// cursor cell; bit3 = decoration rectangle; bit4 = pixel-space overlay.
     pub flags: u32,
 }
 

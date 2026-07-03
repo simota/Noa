@@ -102,6 +102,14 @@ pub enum HitTarget {
     Divider,
 }
 
+/// Stable target captured when a split divider drag starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SplitResizeDrag {
+    path: Vec<ChildSide>,
+    bounds: Rect,
+    orientation: SplitOrientation,
+}
+
 /// Pure decision returned after removing a pane from the split tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CloseOutcome {
@@ -277,6 +285,36 @@ pub fn resize_split(tree: &mut SplitTree, focused: PaneId, direction: Direction,
     };
 
     apply_resize_target(tree, &target, step);
+}
+
+/// Find the split boundary under `point` that can be resized by dragging.
+pub fn split_resize_drag_target_at_point(
+    tree: &SplitTree,
+    bounds: Rect,
+    point: Point,
+) -> Option<SplitResizeDrag> {
+    let mut path = Vec::new();
+    split_resize_drag_target_in_tree(tree, bounds, point, &mut path)
+}
+
+/// Resize a captured split drag target so its divider follows `point`.
+pub fn resize_split_to_drag_point(tree: &mut SplitTree, drag: &SplitResizeDrag, point: Point) {
+    let Some(SplitTree::Split {
+        orientation, ratio, ..
+    }) = split_node_at_path_mut(tree, &drag.path)
+    else {
+        return;
+    };
+    if *orientation != drag.orientation {
+        return;
+    }
+
+    let available = split_available(drag.bounds, *orientation);
+    let requested = dragged_first_extent(drag.bounds, *orientation, point);
+    let Some(new_ratio) = ratio_for_first_extent(requested, available) else {
+        return;
+    };
+    *ratio = new_ratio;
 }
 
 /// Reset every split ratio in the tree to equal children.
@@ -616,6 +654,48 @@ fn horizontal_divider_hit(top: Rect, bottom: Rect, point: Point) -> bool {
     point.y >= hit_top && point.y < hit_bottom && point.x >= overlap_left && point.x < overlap_right
 }
 
+fn split_resize_drag_target_in_tree(
+    tree: &SplitTree,
+    bounds: Rect,
+    point: Point,
+    path: &mut Vec<ChildSide>,
+) -> Option<SplitResizeDrag> {
+    let SplitTree::Split {
+        orientation,
+        ratio,
+        first,
+        second,
+    } = tree
+    else {
+        return None;
+    };
+
+    let (first_bounds, second_bounds) = split_bounds(bounds, *orientation, *ratio);
+    let current_hit = match orientation {
+        SplitOrientation::Horizontal => vertical_divider_hit(first_bounds, second_bounds, point),
+        SplitOrientation::Vertical => horizontal_divider_hit(first_bounds, second_bounds, point),
+    };
+    if current_hit {
+        return Some(SplitResizeDrag {
+            path: path.to_vec(),
+            bounds,
+            orientation: *orientation,
+        });
+    }
+
+    path.push(ChildSide::First);
+    let first_hit = split_resize_drag_target_in_tree(first, first_bounds, point, path);
+    path.pop();
+    if first_hit.is_some() {
+        return first_hit;
+    }
+
+    path.push(ChildSide::Second);
+    let second_hit = split_resize_drag_target_in_tree(second, second_bounds, point, path);
+    path.pop();
+    second_hit
+}
+
 fn range_overlap(a_start: u32, a_end: u32, b_start: u32, b_end: u32) -> u32 {
     a_end.min(b_end).saturating_sub(a_start.max(b_start))
 }
@@ -777,6 +857,22 @@ fn resized_ratio(ratio: f32, available: u32, grow_first: bool, step: u32) -> Opt
     };
     let clamped = clamp_pane_extent_to_min_floor(resized, available);
 
+    Some((clamped as f32) / (available as f32))
+}
+
+fn dragged_first_extent(bounds: Rect, orientation: SplitOrientation, point: Point) -> u32 {
+    match orientation {
+        SplitOrientation::Horizontal => point.x.saturating_sub(bounds.x),
+        SplitOrientation::Vertical => point.y.saturating_sub(bounds.y),
+    }
+}
+
+fn ratio_for_first_extent(extent: u32, available: u32) -> Option<f32> {
+    if available < MIN_PANE_SIZE_PX.saturating_mul(2) {
+        return None;
+    }
+
+    let clamped = clamp_pane_extent_to_min_floor(extent.min(available), available);
     Some((clamped as f32) / (available as f32))
 }
 
@@ -1224,6 +1320,59 @@ mod tests {
         for (name, point, expected) in cases {
             assert_eq!(hit_test(&layout, point), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn split_resize_drag_moves_horizontal_divider_to_pointer_and_clamps() {
+        let left = PaneId::new(1);
+        let right = PaneId::new(2);
+        let bounds = Rect::new(0, 0, 100, 20);
+        let mut tree = SplitTree::split_even(
+            SplitOrientation::Horizontal,
+            SplitTree::leaf(left),
+            SplitTree::leaf(right),
+        );
+
+        assert!(split_resize_drag_target_at_point(&tree, bounds, Point::new(10, 10)).is_none());
+        let drag = split_resize_drag_target_at_point(&tree, bounds, Point::new(50, 10)).unwrap();
+        resize_split_to_drag_point(&mut tree, &drag, Point::new(60, 10));
+        let layout = compute_layout(&tree, bounds);
+        assert_eq!(rect_for(&layout, left).w, 60);
+        assert_eq!(rect_for(&layout, right).w, 39);
+
+        resize_split_to_drag_point(&mut tree, &drag, Point::new(0, 10));
+        let layout = compute_layout(&tree, bounds);
+        assert_eq!(rect_for(&layout, left).w, MIN_PANE_SIZE_PX);
+        assert_all_panes_at_or_above_floor(&layout);
+
+        resize_split_to_drag_point(&mut tree, &drag, Point::new(500, 10));
+        let layout = compute_layout(&tree, bounds);
+        assert_eq!(rect_for(&layout, right).w, MIN_PANE_SIZE_PX);
+        assert_all_panes_at_or_above_floor(&layout);
+    }
+
+    #[test]
+    fn split_resize_drag_targets_nested_vertical_divider() {
+        let left = PaneId::new(1);
+        let top_right = PaneId::new(2);
+        let bottom_right = PaneId::new(3);
+        let bounds = Rect::new(0, 0, 101, 101);
+        let mut tree = SplitTree::split_even(
+            SplitOrientation::Horizontal,
+            SplitTree::leaf(left),
+            SplitTree::split_even(
+                SplitOrientation::Vertical,
+                SplitTree::leaf(top_right),
+                SplitTree::leaf(bottom_right),
+            ),
+        );
+
+        let drag = split_resize_drag_target_at_point(&tree, bounds, Point::new(75, 50)).unwrap();
+        resize_split_to_drag_point(&mut tree, &drag, Point::new(75, 70));
+        let layout = compute_layout(&tree, bounds);
+        assert_eq!(rect_for(&layout, left).w, 50);
+        assert_eq!(rect_for(&layout, top_right).h, 70);
+        assert_eq!(rect_for(&layout, bottom_right).h, 30);
     }
 
     #[test]

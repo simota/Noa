@@ -14,6 +14,7 @@ use crate::theme::Theme;
 
 const DEFAULT_PANE_ID: PaneId = PaneId::new(0);
 const DIVIDER_RGBA: [u8; 4] = [82, 82, 82, 255];
+const FOCUS_INDICATOR_RGBA: [u8; 4] = [95, 175, 255, 230];
 
 /// One pane's immutable frame input.
 pub struct PaneFrame<'a> {
@@ -48,6 +49,7 @@ pub struct Renderer {
     pane_instances: Vec<PaneInstances>,
     pane_layout: Vec<(PaneId, PaneRect)>,
     divider_range: Range<u32>,
+    focus_indicator_range: Range<u32>,
     viewport: PixelSize,
     cell_size: (f32, f32),
     grid_padding: GridPadding,
@@ -109,6 +111,7 @@ impl Renderer {
             pane_instances: Vec::new(),
             pane_layout: Vec::new(),
             divider_range: 0..0,
+            focus_indicator_range: 0..0,
             viewport: PixelSize { w: 0, h: 0 },
             cell_size: (metrics.cell_w, metrics.cell_h),
             grid_padding,
@@ -193,7 +196,7 @@ impl Renderer {
     /// state (uniforms, atlas, instance buffer) first.
     pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView) {
         let layout = [(DEFAULT_PANE_ID, self.full_viewport_rect())];
-        self.draw_panes(device, queue, view, &layout, None);
+        self.draw_panes(device, queue, view, &layout, None, None);
     }
 
     /// Draw the layout most recently supplied to [`Renderer::rebuild_panes`].
@@ -202,10 +205,11 @@ impl Renderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         view: &wgpu::TextureView,
+        focused: Option<PaneId>,
         zoomed: Option<PaneId>,
     ) {
         let layout = self.pane_layout.clone();
-        self.draw_panes(device, queue, view, &layout, zoomed);
+        self.draw_panes(device, queue, view, &layout, focused, zoomed);
     }
 
     /// Draw a split-pane layout into `view` using the pure draw-plan order.
@@ -215,12 +219,13 @@ impl Renderer {
         queue: &wgpu::Queue,
         view: &wgpu::TextureView,
         layout: &[(PaneId, PaneRect)],
+        focused: Option<PaneId>,
         zoomed: Option<PaneId>,
     ) {
-        let plan = build_draw_plan(layout, zoomed);
+        let plan = build_draw_plan(layout, focused, zoomed);
         self.ensure_pane_gpu_count(device, layout.len());
         self.upload_uniforms(queue, layout);
-        self.prepare_divider_instances(&plan);
+        self.prepare_overlay_instances(&plan);
         self.upload_instances(device, queue);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -274,18 +279,13 @@ impl Renderer {
                             pass.draw(0..6, range);
                         }
                         DrawOp::Dividers { .. } => {
-                            if self.divider_range.is_empty()
-                                || self.viewport.w == 0
-                                || self.viewport.h == 0
-                            {
-                                continue;
-                            }
-                            let Some(gpu) = self.pane_gpu.first() else {
-                                continue;
-                            };
-                            pass.set_scissor_rect(0, 0, self.viewport.w, self.viewport.h);
-                            pass.set_bind_group(0, &gpu.bind_group, &[]);
-                            pass.draw(0..6, self.divider_range.clone());
+                            self.draw_pixel_overlay_range(&mut pass, self.divider_range.clone());
+                        }
+                        DrawOp::FocusIndicator { .. } => {
+                            self.draw_pixel_overlay_range(
+                                &mut pass,
+                                self.focus_indicator_range.clone(),
+                            );
                         }
                     }
                 }
@@ -394,19 +394,44 @@ impl Renderer {
         }
     }
 
-    fn prepare_divider_instances(&mut self, plan: &[DrawOp]) {
+    fn prepare_overlay_instances(&mut self, plan: &[DrawOp]) {
         self.instances.truncate(self.cell_instance_len);
-        let start = self.instances.len() as u32;
+        self.divider_range = 0..0;
+        self.focus_indicator_range = 0..0;
+
         for op in plan {
-            let DrawOp::Dividers { rects } = op else {
-                continue;
-            };
-            for rect in rects {
-                self.instances.push(divider_instance(*rect));
+            match op {
+                DrawOp::Dividers { rects } => {
+                    let start = self.instances.len() as u32;
+                    for rect in rects {
+                        self.instances.push(divider_instance(*rect));
+                    }
+                    let end = self.instances.len() as u32;
+                    self.divider_range = start..end;
+                }
+                DrawOp::FocusIndicator { rects, .. } => {
+                    let start = self.instances.len() as u32;
+                    for rect in rects {
+                        self.instances.push(focus_indicator_instance(*rect));
+                    }
+                    let end = self.instances.len() as u32;
+                    self.focus_indicator_range = start..end;
+                }
+                DrawOp::Clear | DrawOp::PaneCells { .. } => {}
             }
         }
-        let end = self.instances.len() as u32;
-        self.divider_range = start..end;
+    }
+
+    fn draw_pixel_overlay_range(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
+        if range.is_empty() || self.viewport.w == 0 || self.viewport.h == 0 {
+            return;
+        }
+        let Some(gpu) = self.pane_gpu.first() else {
+            return;
+        };
+        pass.set_scissor_rect(0, 0, self.viewport.w, self.viewport.h);
+        pass.set_bind_group(0, &gpu.bind_group, &[]);
+        pass.draw(0..6, range);
     }
 
     fn instance_range_for(&self, pane: PaneId) -> Option<Range<u32>> {
@@ -418,12 +443,20 @@ impl Renderer {
 }
 
 fn divider_instance(rect: PaneRect) -> CellInstance {
+    pixel_overlay_instance(rect, DIVIDER_RGBA)
+}
+
+fn focus_indicator_instance(rect: PaneRect) -> CellInstance {
+    pixel_overlay_instance(rect, FOCUS_INDICATOR_RGBA)
+}
+
+fn pixel_overlay_instance(rect: PaneRect, color: [u8; 4]) -> CellInstance {
     CellInstance {
         glyph_pos: [0, 0],
         glyph_size: [to_u16_saturating(rect.w), to_u16_saturating(rect.h)],
         bearing: [0, 0],
         grid_pos: [to_u16_saturating(rect.x), to_u16_saturating(rect.y)],
-        color: DIVIDER_RGBA,
+        color,
         flags: CellInstance::FLAG_DIVIDER,
     }
 }
@@ -998,6 +1031,16 @@ mod tests {
             instances[2].bearing[1] < instances[3].bearing[1],
             "double underline emits two vertically separated strokes"
         );
+    }
+
+    #[test]
+    fn focus_indicator_instance_uses_pixel_overlay_path_and_accent_color() {
+        let instance = focus_indicator_instance(PaneRect::new(11, 13, 17, 2));
+
+        assert_eq!(instance.grid_pos, [11, 13]);
+        assert_eq!(instance.glyph_size, [17, 2]);
+        assert_eq!(instance.color, FOCUS_INDICATOR_RGBA);
+        assert_eq!(instance.flags, CellInstance::FLAG_DIVIDER);
     }
 
     #[test]

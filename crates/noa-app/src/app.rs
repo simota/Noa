@@ -32,8 +32,9 @@ use crate::input;
 use crate::mouse::{self, MouseSelectionState, SelectionGesture};
 use crate::split_tree::{
     self, Direction, HitTarget, ImeOp, MIN_PANE_SIZE_PX, PaneId, Rect as PaneRectApp,
-    SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitTree, equalize, focus_in_direction,
-    focus_switch_plan, hit_test, resize_split, split_pane, zoom_resize_targets, zoom_toggle,
+    SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitResizeDrag, SplitTree, equalize,
+    focus_in_direction, focus_switch_plan, hit_test, resize_split, resize_split_to_drag_point,
+    split_pane, split_resize_drag_target_at_point, zoom_resize_targets, zoom_toggle,
 };
 use crate::{AppCommand, ViewportScroll};
 
@@ -69,6 +70,8 @@ struct WindowState {
     next_pane_id: u64,
     surfaces: HashMap<PaneId, Surface>,
     last_mouse_pane: Option<PaneId>,
+    last_mouse_point: Option<split_tree::Point>,
+    active_split_drag: Option<SplitResizeDrag>,
     occluded: bool,
     title: String,
 }
@@ -231,7 +234,11 @@ impl App {
             if pane_id == state.focused_pane {
                 title = tab_title(&term.title);
             }
-            snapshots.push((pane_id, surface.rect, FrameSnapshot::from_terminal(&term)));
+            let mut snapshot = FrameSnapshot::from_terminal(&term);
+            if pane_id != state.focused_pane {
+                snapshot.cursor.visible = false;
+            }
+            snapshots.push((pane_id, surface.rect, snapshot));
         }
         if state.title != title {
             state.window.set_title(&title);
@@ -286,6 +293,7 @@ impl App {
             &gpu.device,
             &gpu.queue,
             &view,
+            Some(render_pane_id(state.focused_pane)),
             state.zoomed.map(render_pane_id),
         );
         frame.present();
@@ -507,6 +515,8 @@ impl App {
                 next_pane_id: 2,
                 surfaces,
                 last_mouse_pane: Some(initial_pane),
+                last_mouse_point: None,
+                active_split_drag: None,
                 occluded: false,
                 title: "noa".to_string(),
             },
@@ -989,7 +999,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.focused = Some(window_id);
                 self.report_focus_event(window_id, true);
             }
-            WindowEvent::Focused(false) => self.report_focus_event(window_id, false),
+            WindowEvent::Focused(false) => {
+                self.finish_active_split_drag(window_id);
+                self.report_focus_event(window_id, false);
+            }
             WindowEvent::Occluded(occluded) => {
                 if let Some(state) = self.windows.get_mut(&window_id) {
                     state.occluded = occluded;
@@ -1095,6 +1108,20 @@ impl App {
             return;
         };
         let metrics = gpu.font.metrics();
+        let point = split_point_from_physical_position(position);
+        if let Some(state) = self.windows.get_mut(&window_id) {
+            state.last_mouse_point = point;
+        }
+        let Some(point) = point else {
+            if let Some(state) = self.windows.get_mut(&window_id) {
+                state.last_mouse_pane = None;
+            }
+            return;
+        };
+        if self.drag_active_split(window_id, point) {
+            return;
+        }
+
         let Some((pane_id, cell)) = self.pane_cell_at_position(window_id, position, metrics) else {
             if let Some(state) = self.windows.get_mut(&window_id) {
                 state.last_mouse_pane = None;
@@ -1134,6 +1161,21 @@ impl App {
     }
 
     fn on_mouse_input(&mut self, window_id: WindowId, state: ElementState, button: MouseButton) {
+        if button == MouseButton::Left {
+            match state {
+                ElementState::Pressed => {
+                    if self.start_split_drag_at_last_mouse_point(window_id) {
+                        return;
+                    }
+                }
+                ElementState::Released => {
+                    if self.finish_active_split_drag(window_id) {
+                        return;
+                    }
+                }
+            }
+        }
+
         let pane_id = self
             .windows
             .get(&window_id)
@@ -1473,6 +1515,56 @@ impl App {
         if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();
         }
+    }
+
+    fn start_split_drag_at_last_mouse_point(&mut self, window_id: WindowId) -> bool {
+        let Some(target) = self.split_drag_target_at_last_mouse_point(window_id) else {
+            return false;
+        };
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return false;
+        };
+        self.focused = Some(window_id);
+        state.last_mouse_pane = None;
+        state.active_split_drag = Some(target);
+        true
+    }
+
+    fn split_drag_target_at_last_mouse_point(
+        &self,
+        window_id: WindowId,
+    ) -> Option<SplitResizeDrag> {
+        let state = self.windows.get(&window_id)?;
+        if state.zoomed.is_some() {
+            return None;
+        }
+        let point = state.last_mouse_point?;
+        let bounds = pane_bounds_for_size(state.window.inner_size());
+        split_resize_drag_target_at_point(&state.split_tree, bounds, point)
+    }
+
+    fn drag_active_split(&mut self, window_id: WindowId, point: split_tree::Point) -> bool {
+        let window = {
+            let Some(state) = self.windows.get_mut(&window_id) else {
+                return false;
+            };
+            let Some(target) = state.active_split_drag.clone() else {
+                return false;
+            };
+            resize_split_to_drag_point(&mut state.split_tree, &target, point);
+            state.window.clone()
+        };
+        self.relayout_and_resize_window(window_id);
+        self.update_focused_ime_cursor_area(window_id);
+        window.request_redraw();
+        true
+    }
+
+    fn finish_active_split_drag(&mut self, window_id: WindowId) -> bool {
+        self.windows
+            .get_mut(&window_id)
+            .and_then(|state| state.active_split_drag.take())
+            .is_some()
     }
 
     fn copy_selection_to_clipboard(&mut self) {

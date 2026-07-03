@@ -261,7 +261,7 @@ fn split_pipeline_syncs_same_frame_new_glyphs_for_two_panes() {
 
     let (_target, view) = render_target(&device, 128, 32);
     device.push_error_scope(wgpu::ErrorFilter::Validation);
-    renderer.draw_panes(&device, &queue, &view, &layout, None);
+    renderer.draw_panes(&device, &queue, &view, &layout, None, None);
     let err = pollster::block_on(device.pop_error_scope());
 
     assert!(
@@ -271,7 +271,7 @@ fn split_pipeline_syncs_same_frame_new_glyphs_for_two_panes() {
 }
 
 #[test]
-fn split_pipeline_draws_three_pane_plan_with_dividers_without_validation_error() {
+fn split_pipeline_draws_three_pane_plan_with_overlays_without_validation_error() {
     let Some((device, queue)) = device_queue() else {
         eprintln!("no wgpu adapter available — skipping split draw-plan GPU test");
         return;
@@ -312,10 +312,16 @@ fn split_pipeline_draws_three_pane_plan_with_dividers_without_validation_error()
             snapshot: &c,
         },
     ];
-    let plan = build_draw_plan(&layout, None);
+    let focused = layout[1].0;
+    let plan = build_draw_plan(&layout, Some(focused), None);
     assert!(
-        matches!(plan.last(), Some(DrawOp::Dividers { rects }) if !rects.is_empty()),
+        plan.iter()
+            .any(|op| matches!(op, DrawOp::Dividers { rects } if !rects.is_empty())),
         "3-pane split plan should include same-pass divider geometry"
+    );
+    assert!(
+        matches!(plan.last(), Some(DrawOp::FocusIndicator { pane, rects }) if *pane == focused && !rects.is_empty()),
+        "focused split plan should include focus overlay geometry"
     );
 
     renderer.rebuild_panes(&panes, &mut font, &Theme::new());
@@ -323,7 +329,7 @@ fn split_pipeline_draws_three_pane_plan_with_dividers_without_validation_error()
 
     let (_target, view) = render_target(&device, 160, 96);
     device.push_error_scope(wgpu::ErrorFilter::Validation);
-    renderer.draw_panes(&device, &queue, &view, &layout, None);
+    renderer.draw_panes(&device, &queue, &view, &layout, Some(focused), None);
     let err = pollster::block_on(device.pop_error_scope());
 
     assert!(
@@ -371,7 +377,7 @@ fn split_pipeline_rebuilds_all_pane_bind_groups_after_atlas_reallocation() {
     renderer.rebuild_panes(&initial_panes, &mut font, &Theme::new());
     renderer.sync_atlas(&device, &queue, &mut font);
     let (_initial_target, initial_view) = render_target(&device, 512, 256);
-    renderer.draw_panes(&device, &queue, &initial_view, &layout, None);
+    renderer.draw_panes(&device, &queue, &initial_view, &layout, None, None);
 
     let before_counts = renderer.pane_bind_group_rebuild_counts();
     assert_eq!(before_counts.len(), 2);
@@ -403,7 +409,7 @@ fn split_pipeline_rebuilds_all_pane_bind_groups_after_atlas_reallocation() {
     device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.sync_atlas(&device, &queue, &mut font);
     let after_counts = renderer.pane_bind_group_rebuild_counts();
-    renderer.draw_panes(&device, &queue, &view, &layout, None);
+    renderer.draw_panes(&device, &queue, &view, &layout, None, None);
     let err = pollster::block_on(device.pop_error_scope());
 
     assert_eq!(after_counts.len(), before_counts.len());

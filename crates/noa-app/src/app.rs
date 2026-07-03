@@ -29,7 +29,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::macos::{WindowAttributesExtMacOS, WindowExtMacOS};
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
-use crate::clipboard::SystemClipboard;
+use crate::clipboard::{self, PasteContents, SystemClipboard};
 use crate::commands::{FontSizeAction, KeybindEngine, SearchAction, TerminalAction};
 use crate::events::UserEvent;
 use crate::input;
@@ -2679,12 +2679,24 @@ impl App {
         let Some((window_id, pane_id)) = self.resolve_pane_command_target(AppCommand::Paste) else {
             return;
         };
-        let text = match self.clipboard.get_text() {
-            Ok(text) => text,
+        let contents = match self.clipboard.get_paste_contents() {
+            Ok(contents) => contents,
             Err(err) => {
                 log::warn!("failed to read clipboard for paste: {err}");
                 return;
             }
+        };
+        let text = match contents {
+            PasteContents::FileUrls(paths) => clipboard::file_urls_to_paste_string(&paths),
+            PasteContents::Image(png_bytes) => match clipboard::write_temp_png(&png_bytes) {
+                Ok(path) => clipboard::shell_escape(&path.to_string_lossy()),
+                Err(err) => {
+                    log::warn!("failed to save pasted image to a temp file: {err}");
+                    return;
+                }
+            },
+            PasteContents::Text(text) => text,
+            PasteContents::Empty => String::new(),
         };
         let bracketed_paste = self.bracketed_paste(window_id, pane_id);
         if let Some(bytes) = input::encode_paste(&text, bracketed_paste) {

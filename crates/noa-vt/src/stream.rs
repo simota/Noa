@@ -81,6 +81,7 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
                 ansi: csi.private != b'?',
             });
         }
+        b'p' if csi.intermediates.as_slice() == [b'!'] => h.soft_reset(), // DECSTR
         b'q' if csi.private == 0 && csi.intermediates.as_slice() == [b' '] => {
             let style = match csi.param(0, 1) {
                 3 => CursorStyle::BlinkingUnderline,

@@ -1726,3 +1726,40 @@ fn ac_aln_004_alt_screen_only_active_screen_is_filled() {
     // The fill went to the alt screen only; primary still holds "main".
     assert_eq!(row_text(&t, 0, 4), "main");
 }
+
+// ── WP5: DECSTR soft reset (AC-STR) ─────────────────────────────────────
+
+#[test]
+fn ac_str_001_soft_reset_clears_decom_reported_via_decrqm() {
+    let t = run(b"\x1b[?6h\x1b[!p\x1b[?6$p");
+    assert_eq!(t.pending_writes, b"\x1b[?6;2$y");
+}
+
+#[test]
+fn ac_str_002_soft_reset_restores_full_screen_scroll_region() {
+    let t = run_size(10, 8, b"\x1b[2;5r\x1b[!p");
+    assert_eq!(t.primary.region.top, 0);
+    assert_eq!(t.primary.region.bottom, 7);
+}
+
+#[test]
+fn ac_str_003_soft_reset_resets_charset() {
+    let t = run(b"\x1b(0\x1b[!pq");
+    assert_eq!(cell(&t, 0, 0).ch, 'q');
+}
+
+#[test]
+fn ac_str_004_soft_reset_leaves_screen_content_untouched() {
+    let t = run(b"hello\x1b[!p");
+    assert_eq!(row_text(&t, 0, 5), "hello");
+}
+
+#[test]
+fn ac_str_005_soft_reset_clears_saved_cursor_to_default() {
+    // Move + color, DECSC, DECSTR (which re-arms the saved cursor to
+    // default), then DECRC must land on the default, not the DECSC'd state.
+    let t = run(b"\x1b[5;10H\x1b[31m\x1b7\x1b[!p\x1b8");
+    assert_eq!(t.primary.cursor.y, 0);
+    assert_eq!(t.primary.cursor.x, 0);
+    assert_eq!(t.primary.cursor.fg, Color::Default);
+}

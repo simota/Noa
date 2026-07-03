@@ -4,7 +4,7 @@
 
 use crate::cell::Hyperlink;
 use crate::charset::CharsetState;
-use crate::cursor::{CursorStyle, ScrollRegion};
+use crate::cursor::{Cursor, CursorStyle, ScrollRegion};
 use crate::modes::ModeState;
 use crate::osc::{
     CwdOsc, HyperlinkOsc, Osc52Policy, ShellIntegrationOsc, ShellIntegrationOscKind,
@@ -622,6 +622,7 @@ impl Handler for Terminal {
         let state = match (request.value, request.ansi) {
             (20, true)
             | (1, false)
+            | (6, false)
             | (7, false)
             | (25, false)
             | (47, false)
@@ -753,6 +754,30 @@ impl Handler for Terminal {
         self.pending_clipboard_writes.clear();
         self.clear_selection();
         self.clear_search();
+    }
+
+    fn soft_reset(&mut self) {
+        // DECTCEM on, DECOM off — tracked bits only; screen content untouched.
+        self.modes.set(25, false, true);
+        self.modes.set(6, false, false);
+        self.charset = CharsetState::default();
+        let last_row = self.size.rows.saturating_sub(1);
+        let screen = self.active_mut();
+        screen.cursor.visible = true;
+        screen.region = ScrollRegion {
+            top: 0,
+            bottom: last_row,
+        };
+        // Clears the margin value only; the DECLRMM capability bit (mode 69)
+        // in `self.modes` is untouched.
+        screen.disable_horizontal_margins();
+        screen.cursor.fg = Color::Default;
+        screen.cursor.bg = Color::Default;
+        screen.cursor.underline_color = None;
+        screen.cursor.attrs = CellAttrs::empty();
+        // Next DECRC restores to the default position/attributes, not
+        // whatever was saved before the reset.
+        screen.saved_cursor = Some(Cursor::default());
     }
 
     fn insert_blank_chars(&mut self, n: u16) {

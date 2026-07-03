@@ -1846,3 +1846,33 @@ fn ac_2027_004_mode_off_falls_back_to_plain_combining_only() {
     assert_eq!(cell(&t, 4, 0).text(), "\u{1F467}\u{200D}");
     assert_eq!(cell(&t, 6, 0).ch, '\u{1F466}');
 }
+
+// ── WP6: BEL surfaced as a drainable terminal event (AC-BEL) ───────────
+
+#[test]
+fn ac_bel_001_take_pending_bell_drains_once() {
+    let mut t = run(b"\x07");
+    assert!(t.take_pending_bell());
+    assert!(!t.take_pending_bell());
+}
+
+#[test]
+fn ac_bel_002_bell_has_no_grid_side_effect() {
+    let t = run(b"\x1b[5;10Hhi\x07");
+    assert_eq!(t.primary.cursor.y, 4);
+    assert_eq!(t.primary.cursor.x, 11);
+    assert_eq!(row_text(&t, 4, 12), "         hi ");
+}
+
+#[test]
+fn ac_bel_003_consecutive_bels_in_one_feed_drain_true() {
+    let mut t = run(b"\x07\x07\x07");
+    assert!(t.take_pending_bell());
+    assert!(!t.take_pending_bell());
+}
+
+#[test]
+fn ac_bel_004_full_reset_clears_pending_bell() {
+    let mut t = run(b"\x07\x1bc");
+    assert!(!t.take_pending_bell());
+}

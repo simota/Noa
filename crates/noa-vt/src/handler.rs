@@ -132,6 +132,8 @@ pub trait Handler {
     fn locking_shift(&mut self, _slot: CharsetSlot) {}
 
     // ── control ────────────────────────────────────────────────────
+    /// `BEL` (`0x07`) — ring the terminal bell. No grid-state side effect.
+    fn bell(&mut self) {}
     fn carriage_return(&mut self);
     /// Index (line feed without carriage return): down one, scroll at bottom.
     fn linefeed(&mut self);

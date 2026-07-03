@@ -45,6 +45,8 @@ pub struct Terminal {
     pub pending_writes: Vec<u8>,
     /// Text payloads accepted by OSC 52 and ready for the app clipboard layer.
     pub pending_clipboard_writes: Vec<String>,
+    /// Set by `BEL` (`0x07`); drained by [`Terminal::take_pending_bell`].
+    pending_bell: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +81,7 @@ impl Terminal {
             size,
             pending_writes: Vec::new(),
             pending_clipboard_writes: Vec::new(),
+            pending_bell: false,
         }
     }
 
@@ -192,6 +195,12 @@ impl Terminal {
 
     pub fn take_pending_clipboard_writes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_clipboard_writes)
+    }
+
+    /// Drain the BEL latch: `true` the first call after a `0x07`, `false`
+    /// otherwise. Mirrors [`Terminal::take_pending_writes`]'s drain shape.
+    pub fn take_pending_bell(&mut self) -> bool {
+        std::mem::take(&mut self.pending_bell)
     }
 
     pub fn set_base_colors(
@@ -542,12 +551,12 @@ impl Handler for Terminal {
         match byte {
             0x0e => return self.locking_shift(CharsetSlot::G1), // SO
             0x0f => return self.locking_shift(CharsetSlot::G0), // SI
+            0x07 => return self.bell(),                         // BEL — no grid-state side effect.
             _ => {}
         }
         let linefeed_newline = self.modes.linefeed_newline();
         let screen = self.active_mut();
         match byte {
-            0x07 => {} // BEL has no grid-state side effect.
             0x08 => screen.backspace(),
             0x09 => screen.tab(1),
             0x0a..=0x0c => {
@@ -657,6 +666,10 @@ impl Handler for Terminal {
         }
     }
 
+    fn bell(&mut self) {
+        self.pending_bell = true;
+    }
+
     fn designate_charset(&mut self, slot: CharsetSlot, set: Charset) {
         self.charset.designate(slot, set);
     }
@@ -754,6 +767,7 @@ impl Handler for Terminal {
         self.shell_marks.clear();
         self.colors.reset_dynamic_overrides();
         self.pending_clipboard_writes.clear();
+        self.pending_bell = false;
         self.clear_selection();
         self.clear_search();
     }

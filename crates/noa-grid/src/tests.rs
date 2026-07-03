@@ -1656,7 +1656,10 @@ fn ac_cs_003_so_si_switches_between_g1_and_g0() {
 #[test]
 fn ac_cs_004_dec_special_graphics_box_drawing_glyphs() {
     let t = run(b"\x1b(0jklmx");
-    assert_eq!(row_text(&t, 0, 5), "\u{2518}\u{2510}\u{250c}\u{2514}\u{2502}");
+    assert_eq!(
+        row_text(&t, 0, 5),
+        "\u{2518}\u{2510}\u{250c}\u{2514}\u{2502}"
+    );
 }
 
 #[test]

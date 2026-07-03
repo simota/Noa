@@ -9,7 +9,7 @@ use swash::scale::ScaleContext;
 use crate::atlas::Atlas;
 use crate::face::{FontStack, Metrics, load_font_stack};
 use crate::raster::rasterize;
-use crate::{FontError, GlyphInfo, GlyphKey};
+use crate::{FontConfig, FontError, GlyphInfo, GlyphKey};
 
 /// Default atlas dimensions (R8). The atlas grows on demand when glyph pressure exceeds it.
 const ATLAS_DIM: u32 = 1024;
@@ -28,8 +28,12 @@ pub struct FontGrid {
 
 impl FontGrid {
     /// Discover a monospace system font and build a grid at `px_size` ppem.
-    pub fn new(px_size: f32) -> Result<Self, FontError> {
-        let font_stack = load_font_stack()?;
+    ///
+    /// `font_cfg` carries the configured family stack, features, variations
+    /// etc. (see [`FontConfig`]); WP0 threads it through the constructor so
+    /// later WPs can consume it for real without re-breaking this signature.
+    pub fn new(px_size: f32, font_cfg: FontConfig) -> Result<Self, FontError> {
+        let font_stack = load_font_stack(&font_cfg)?;
         let metrics = {
             let font = font_stack.primary().font_ref()?;
             Metrics::compute(font, px_size)
@@ -136,7 +140,7 @@ mod tests {
 
     #[test]
     fn new_and_raster() {
-        let mut grid = match FontGrid::new(14.0) {
+        let mut grid = match FontGrid::new(14.0, FontConfig::default()) {
             Ok(g) => g,
             Err(e) => {
                 // No system font in this environment; skip rather than fail.
@@ -166,7 +170,7 @@ mod tests {
 
     #[test]
     fn japanese_glyph_uses_fallback_face_when_available() {
-        let mut grid = match FontGrid::new(14.0) {
+        let mut grid = match FontGrid::new(14.0, FontConfig::default()) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("skipping: no system monospace font available: {e}");
@@ -190,7 +194,7 @@ mod tests {
 
     #[test]
     fn atlas_growth_keeps_glyphs_visible_after_initial_atlas_is_exceeded() {
-        let mut grid = match FontGrid::new(220.0) {
+        let mut grid = match FontGrid::new(220.0, FontConfig::default()) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("skipping: no system monospace font available: {e}");

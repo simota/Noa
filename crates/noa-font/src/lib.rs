@@ -9,11 +9,13 @@
 //! just the `char`.
 
 mod atlas;
+mod config;
 mod face;
 mod grid;
 mod raster;
 
 pub use atlas::Atlas;
+pub use config::{AlphaBlending, FontConfig, FontFeature, FontVariation, SyntheticStyle};
 pub use face::Metrics;
 pub use grid::FontGrid;
 pub use raster::RasterizedGlyph;

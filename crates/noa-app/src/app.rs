@@ -45,6 +45,72 @@ pub struct AppConfig {
     pub rows: u16,
     pub font_size: f32,
     pub theme: Option<String>,
+    /// Parsed font settings from `noa-config` (ADR-R1: a distinct type from
+    /// `noa_font::FontConfig` — mapped to it via [`font_config_from_noa_config`]
+    /// right before each `FontGrid::new` call, keeping `noa-font` free of any
+    /// `noa-config`/`dirs` dependency).
+    pub font: noa_config::FontConfig,
+}
+
+/// Maps the parsed `noa-config` font settings onto the `noa-font` runtime
+/// config consumed by `FontGrid::new` (ADR-R1). WP0 only threads the values
+/// through; later WPs make more of them observably load-bearing.
+fn font_config_from_noa_config(cfg: &noa_config::FontConfig) -> noa_font::FontConfig {
+    let default = noa_font::FontConfig::default();
+    let synthetic_style = match cfg.synthetic_style {
+        None | Some(noa_config::SyntheticStyleMode::Both) => default.synthetic_style,
+        Some(noa_config::SyntheticStyleMode::Neither) => noa_font::SyntheticStyle {
+            bold: false,
+            italic: false,
+        },
+        Some(noa_config::SyntheticStyleMode::NoBold) => noa_font::SyntheticStyle {
+            bold: false,
+            italic: true,
+        },
+        Some(noa_config::SyntheticStyleMode::NoItalic) => noa_font::SyntheticStyle {
+            bold: true,
+            italic: false,
+        },
+    };
+    let alpha_blending = match cfg.alpha_blending {
+        None | Some(noa_config::AlphaBlendingMode::Native) => noa_font::AlphaBlending::Native,
+        Some(
+            noa_config::AlphaBlendingMode::Linear | noa_config::AlphaBlendingMode::LinearCorrected,
+        ) => noa_font::AlphaBlending::LinearFallback,
+    };
+
+    noa_font::FontConfig {
+        families: cfg.families.clone(),
+        families_bold: cfg.families_bold.clone(),
+        families_italic: cfg.families_italic.clone(),
+        families_bold_italic: cfg.families_bold_italic.clone(),
+        features: cfg
+            .features
+            .iter()
+            .map(|feature| noa_font::FontFeature {
+                tag: feature.tag,
+                enabled: feature.enabled,
+            })
+            .collect(),
+        variations: map_font_variations(&cfg.variations),
+        variations_bold: map_font_variations(&cfg.variations_bold),
+        variations_italic: map_font_variations(&cfg.variations_italic),
+        variations_bold_italic: map_font_variations(&cfg.variations_bold_italic),
+        synthetic_style,
+        alpha_blending,
+        thicken: cfg.thicken.unwrap_or(default.thicken),
+        thicken_strength: cfg.thicken_strength.unwrap_or(default.thicken_strength),
+    }
+}
+
+fn map_font_variations(variations: &[noa_config::FontVariation]) -> Vec<noa_font::FontVariation> {
+    variations
+        .iter()
+        .map(|variation| noa_font::FontVariation {
+            tag: variation.tag,
+            value: variation.value,
+        })
+        .collect()
 }
 
 /// App-wide GPU and glyph state shared by every tab/window.
@@ -367,10 +433,10 @@ impl App {
 
         let mut first_font = if self.gpu.is_none() {
             Some(
-                FontGrid::new(font_pixel_size(
-                    self.runtime_font_size,
-                    monitor_scale_factor,
-                ))
+                FontGrid::new(
+                    font_pixel_size(self.runtime_font_size, monitor_scale_factor),
+                    font_config_from_noa_config(&self.config.font),
+                )
                 .expect("failed to load a system monospace font"),
             )
         } else {
@@ -398,8 +464,11 @@ impl App {
         if let Some(font) = first_font.as_mut()
             && (window_scale_factor - monitor_scale_factor).abs() > f64::EPSILON
         {
-            *font = FontGrid::new(font_pixel_size(self.runtime_font_size, window_scale_factor))
-                .expect("failed to load a system monospace font");
+            *font = FontGrid::new(
+                font_pixel_size(self.runtime_font_size, window_scale_factor),
+                font_config_from_noa_config(&self.config.font),
+            )
+            .expect("failed to load a system monospace font");
             let inner_size = initial_window_logical_size(
                 font.metrics(),
                 initial_grid_size,
@@ -1066,7 +1135,10 @@ impl ApplicationHandler<UserEvent> for App {
 impl App {
     fn on_scale_factor_changed(&mut self, window_id: WindowId, scale_factor: f64) {
         if let Some(gpu) = self.gpu.as_mut() {
-            match FontGrid::new(font_pixel_size(self.runtime_font_size, scale_factor)) {
+            match FontGrid::new(
+                font_pixel_size(self.runtime_font_size, scale_factor),
+                font_config_from_noa_config(&self.config.font),
+            ) {
                 Ok(font) => gpu.font = font,
                 Err(err) => {
                     log::warn!("failed to rebuild font for scale factor {scale_factor}: {err}");
@@ -1411,7 +1483,10 @@ impl App {
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
-        let font = match FontGrid::new(font_pixel_size(update.point_size, scale_factor)) {
+        let font = match FontGrid::new(
+            font_pixel_size(update.point_size, scale_factor),
+            font_config_from_noa_config(&self.config.font),
+        ) {
             Ok(font) => font,
             Err(err) => {
                 log::warn!(

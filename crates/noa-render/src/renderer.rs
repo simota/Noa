@@ -914,7 +914,7 @@ mod tests {
 
     #[test]
     fn cursor_cell_with_glyph_generates_reversed_glyph_instance() {
-        let mut font = match FontGrid::new(14.0) {
+        let mut font = match FontGrid::new(14.0, noa_font::FontConfig::default()) {
             Ok(font) => font,
             Err(err) => {
                 eprintln!("skipping: no system monospace font available: {err}");

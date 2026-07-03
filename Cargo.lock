@@ -1365,6 +1365,7 @@ dependencies = [
  "env_logger",
  "log",
  "muda",
+ "noa-config",
  "noa-core",
  "noa-font",
  "noa-grid",

@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use crate::ConfigOverrides;
+use crate::{
+    AlphaBlendingMode, ConfigOverrides, FontConfig, FontFeature, FontVariation, SyntheticStyleMode,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Directive {
@@ -36,6 +38,7 @@ pub(crate) fn build_overrides(
     let mut rows = None;
     let mut font_size = None;
     let mut theme = None;
+    let mut font = FontConfig::default();
     let mut diagnostics = Vec::new();
 
     for directive in directives {
@@ -52,7 +55,62 @@ pub(crate) fn build_overrides(
             "theme" => {
                 theme = parse_theme(path, directive, &mut diagnostics);
             }
-            "keybind" | "palette" | "font-family" => {
+            "font-family" => {
+                parse_family(path, directive, &mut diagnostics, &mut font.families);
+            }
+            "font-family-bold" => {
+                parse_family(path, directive, &mut diagnostics, &mut font.families_bold);
+            }
+            "font-family-italic" => {
+                parse_family(path, directive, &mut diagnostics, &mut font.families_italic);
+            }
+            "font-family-bold-italic" => {
+                parse_family(
+                    path,
+                    directive,
+                    &mut diagnostics,
+                    &mut font.families_bold_italic,
+                );
+            }
+            "font-feature" => {
+                parse_font_feature(path, directive, &mut diagnostics, &mut font.features);
+            }
+            "font-variation" => {
+                parse_font_variation(path, directive, &mut diagnostics, &mut font.variations);
+            }
+            "font-variation-bold" => {
+                parse_font_variation(path, directive, &mut diagnostics, &mut font.variations_bold);
+            }
+            "font-variation-italic" => {
+                parse_font_variation(
+                    path,
+                    directive,
+                    &mut diagnostics,
+                    &mut font.variations_italic,
+                );
+            }
+            "font-variation-bold-italic" => {
+                parse_font_variation(
+                    path,
+                    directive,
+                    &mut diagnostics,
+                    &mut font.variations_bold_italic,
+                );
+            }
+            "font-synthetic-style" => {
+                font.synthetic_style = parse_synthetic_style(path, directive, &mut diagnostics);
+            }
+            "alpha-blending" => {
+                font.alpha_blending = parse_alpha_blending(path, directive, &mut diagnostics);
+            }
+            "font-thicken" => {
+                font.thicken = parse_font_thicken(path, directive, &mut diagnostics);
+            }
+            "font-thicken-strength" => {
+                font.thicken_strength =
+                    parse_font_thicken_strength(path, directive, &mut diagnostics);
+            }
+            "keybind" | "palette" => {
                 diagnostics.push(list_key_diagnostic(path, &directive.key));
             }
             "config-file" => {
@@ -79,6 +137,7 @@ pub(crate) fn build_overrides(
             rows,
             font_size,
             theme,
+            font,
         },
         diagnostics,
     )
@@ -172,6 +231,158 @@ fn parse_theme(
     Some(value.to_string())
 }
 
+fn parse_family(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+    target: &mut Vec<String>,
+) {
+    match directive.value.as_deref() {
+        Some(value) if !value.is_empty() => target.push(value.to_string()),
+        _ => diagnostics.push(empty_family_diagnostic(path, &directive.key)),
+    }
+}
+
+fn parse_font_feature(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+    target: &mut Vec<FontFeature>,
+) {
+    let Some(value) = directive.value.as_deref() else {
+        diagnostics.push(invalid_font_feature_diagnostic(path, ""));
+        return;
+    };
+    let (enabled, tag_str) = match value.strip_prefix('-') {
+        Some(rest) => (false, rest),
+        None => (true, value),
+    };
+    let Some(tag) = ascii_tag4(tag_str) else {
+        diagnostics.push(invalid_font_feature_diagnostic(path, value));
+        return;
+    };
+    target.push(FontFeature { tag, enabled });
+}
+
+fn parse_font_variation(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+    target: &mut Vec<FontVariation>,
+) {
+    let Some(value) = directive.value.as_deref() else {
+        diagnostics.push(invalid_font_variation_diagnostic(path, &directive.key, ""));
+        return;
+    };
+    let Some((axis, value_str)) = value.split_once('=') else {
+        diagnostics.push(invalid_font_variation_diagnostic(
+            path,
+            &directive.key,
+            value,
+        ));
+        return;
+    };
+    let (Some(tag), Ok(parsed)) = (ascii_tag4(axis), value_str.parse::<f32>()) else {
+        diagnostics.push(invalid_font_variation_diagnostic(
+            path,
+            &directive.key,
+            value,
+        ));
+        return;
+    };
+    if !parsed.is_finite() {
+        diagnostics.push(invalid_font_variation_diagnostic(
+            path,
+            &directive.key,
+            value,
+        ));
+        return;
+    }
+    target.push(FontVariation { tag, value: parsed });
+}
+
+/// Parse a 4-ASCII-char OpenType tag (feature tag or variation axis).
+fn ascii_tag4(tag_str: &str) -> Option<[u8; 4]> {
+    let bytes = tag_str.as_bytes();
+    if bytes.len() != 4 || !tag_str.is_ascii() {
+        return None;
+    }
+    Some([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+fn parse_synthetic_style(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<SyntheticStyleMode> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "true" => Some(SyntheticStyleMode::Both),
+        "false" => Some(SyntheticStyleMode::Neither),
+        "no-bold" => Some(SyntheticStyleMode::NoBold),
+        "no-italic" => Some(SyntheticStyleMode::NoItalic),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+fn parse_alpha_blending(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<AlphaBlendingMode> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "native" => Some(AlphaBlendingMode::Native),
+        "linear" => {
+            diagnostics.push(alpha_blending_fallback_diagnostic(path, value));
+            Some(AlphaBlendingMode::Linear)
+        }
+        "linear-corrected" => {
+            diagnostics.push(alpha_blending_fallback_diagnostic(path, value));
+            Some(AlphaBlendingMode::LinearCorrected)
+        }
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+fn parse_font_thicken(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<bool> {
+    let value = directive.value.as_deref()?;
+    let parsed = match value {
+        "true" => true,
+        "false" => false,
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            return None;
+        }
+    };
+    diagnostics.push(deferred_diagnostic(path, &directive.key));
+    Some(parsed)
+}
+
+fn parse_font_thicken_strength(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<u8> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<u8>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    diagnostics.push(deferred_diagnostic(path, &directive.key));
+    Some(parsed)
+}
+
 fn unknown_key_diagnostic(path: &Path, key: &str) -> Diagnostic {
     Diagnostic {
         message: format!("config {}: unsupported key `{key}` ignored", path.display()),
@@ -209,6 +420,53 @@ fn theme_pair_diagnostic(path: &Path) -> Diagnostic {
     Diagnostic {
         message: format!(
             "config {}: `light:`/`dark:` theme pair syntax is not supported yet; specify a single theme name",
+            path.display()
+        ),
+    }
+}
+
+fn empty_family_diagnostic(path: &Path, key: &str) -> Diagnostic {
+    Diagnostic {
+        message: format!(
+            "config {}: `{key}` requires a non-empty font family name; value ignored",
+            path.display()
+        ),
+    }
+}
+
+fn invalid_font_feature_diagnostic(path: &Path, value: &str) -> Diagnostic {
+    Diagnostic {
+        message: format!(
+            "config {}: invalid value for `font-feature`: `{value}`; expected a 4-character \
+             OpenType tag, optionally prefixed with `-` to disable (e.g. `calt`, `-liga`)",
+            path.display()
+        ),
+    }
+}
+
+fn invalid_font_variation_diagnostic(path: &Path, key: &str, value: &str) -> Diagnostic {
+    Diagnostic {
+        message: format!(
+            "config {}: invalid value for `{key}`: `{value}`; expected `AXIS=VALUE` with a \
+             4-character axis tag and a numeric value (e.g. `wght=700`)",
+            path.display()
+        ),
+    }
+}
+
+fn alpha_blending_fallback_diagnostic(path: &Path, value: &str) -> Diagnostic {
+    Diagnostic {
+        message: format!(
+            "config {}: `alpha-blending = {value}` is not implemented yet; falling back to `native`",
+            path.display()
+        ),
+    }
+}
+
+fn deferred_diagnostic(path: &Path, key: &str) -> Diagnostic {
+    Diagnostic {
+        message: format!(
+            "config {}: `{key}` is accepted but has no effect yet (deferred)",
             path.display()
         ),
     }
@@ -319,7 +577,7 @@ mod tests {
 
     #[test]
     fn list_keys_are_recognized_but_not_retained() {
-        for key in ["keybind", "palette", "font-family"] {
+        for key in ["keybind", "palette"] {
             let (overrides, diagnostics) = parse_overrides(path(), &format!("{key} = value"));
 
             assert_eq!(overrides, ConfigOverrides::default());
@@ -327,6 +585,231 @@ mod tests {
             assert!(diagnostics[0].message.contains(key));
             assert!(diagnostics[0].message.contains("list key"));
         }
+    }
+
+    // AC-WP0-01: `font-family` and its per-style variants parse for real
+    // (no "not yet supported" diagnostic) and land in `FontConfig`; an
+    // empty value yields a precise diagnostic instead.
+    #[test]
+    fn font_family_and_style_variants_are_retained_for_real() {
+        let (overrides, diagnostics) = parse_overrides(
+            path(),
+            "font-family = JetBrains Mono\n\
+             font-family-bold = JetBrains Mono Bold\n\
+             font-family-italic = JetBrains Mono Italic\n\
+             font-family-bold-italic = JetBrains Mono Bold Italic",
+        );
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.font.families, vec!["JetBrains Mono".to_string()]);
+        assert_eq!(
+            overrides.font.families_bold,
+            vec!["JetBrains Mono Bold".to_string()]
+        );
+        assert_eq!(
+            overrides.font.families_italic,
+            vec!["JetBrains Mono Italic".to_string()]
+        );
+        assert_eq!(
+            overrides.font.families_bold_italic,
+            vec!["JetBrains Mono Bold Italic".to_string()]
+        );
+    }
+
+    #[test]
+    fn font_family_accumulates_a_stack_across_directives() {
+        let (overrides, diagnostics) = parse_overrides(
+            path(),
+            "font-family = JetBrains Mono\nfont-family = Fira Code",
+        );
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            overrides.font.families,
+            vec!["JetBrains Mono".to_string(), "Fira Code".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_font_family_value_produces_a_precise_diagnostic() {
+        for key in [
+            "font-family",
+            "font-family-bold",
+            "font-family-italic",
+            "font-family-bold-italic",
+        ] {
+            let (overrides, diagnostics) = parse_overrides(path(), &format!("{key} ="));
+
+            assert_eq!(overrides.font, FontConfig::default());
+            assert_eq!(diagnostics.len(), 1, "{key}: {diagnostics:?}");
+            assert!(diagnostics[0].message.contains(key));
+            assert!(diagnostics[0].message.contains("non-empty"));
+        }
+    }
+
+    // AC-WP0-03: `font-feature`, `font-variation` (+ per-style variants), and
+    // `font-synthetic-style` parse and validate into `FontConfig`; malformed
+    // values yield a precise diagnostic.
+    #[test]
+    fn font_feature_parses_enabled_and_disabled_tags() {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), "font-feature = calt\nfont-feature = -liga");
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            overrides.font.features,
+            vec![
+                FontFeature {
+                    tag: *b"calt",
+                    enabled: true
+                },
+                FontFeature {
+                    tag: *b"liga",
+                    enabled: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_font_feature_tag_produces_a_diagnostic() {
+        for value in ["ca", "toolong", ""] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("font-feature = {value}"));
+
+            assert!(overrides.font.features.is_empty(), "{value:?}");
+            assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+            assert!(diagnostics[0].message.contains("font-feature"));
+        }
+    }
+
+    #[test]
+    fn font_variation_and_style_variants_parse_axis_value_pairs() {
+        let (overrides, diagnostics) = parse_overrides(
+            path(),
+            "font-variation = wght=700\n\
+             font-variation-bold = wght=800\n\
+             font-variation-italic = slnt=-10\n\
+             font-variation-bold-italic = wght=800",
+        );
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            overrides.font.variations,
+            vec![FontVariation {
+                tag: *b"wght",
+                value: 700.0
+            }]
+        );
+        assert_eq!(
+            overrides.font.variations_bold,
+            vec![FontVariation {
+                tag: *b"wght",
+                value: 800.0
+            }]
+        );
+        assert_eq!(
+            overrides.font.variations_italic,
+            vec![FontVariation {
+                tag: *b"slnt",
+                value: -10.0
+            }]
+        );
+        assert_eq!(
+            overrides.font.variations_bold_italic,
+            vec![FontVariation {
+                tag: *b"wght",
+                value: 800.0
+            }]
+        );
+    }
+
+    #[test]
+    fn font_variation_missing_value_produces_a_diagnostic() {
+        for value in ["wght", "wght=", "toolong=700", "wght=not-a-number"] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("font-variation = {value}"));
+
+            assert!(overrides.font.variations.is_empty(), "{value:?}");
+            assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+            assert!(diagnostics[0].message.contains("font-variation"));
+        }
+    }
+
+    #[test]
+    fn font_synthetic_style_accepts_all_documented_modes() {
+        for (value, expected) in [
+            ("true", SyntheticStyleMode::Both),
+            ("false", SyntheticStyleMode::Neither),
+            ("no-bold", SyntheticStyleMode::NoBold),
+            ("no-italic", SyntheticStyleMode::NoItalic),
+        ] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("font-synthetic-style = {value}"));
+
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+            assert_eq!(overrides.font.synthetic_style, Some(expected));
+        }
+    }
+
+    #[test]
+    fn font_synthetic_style_rejects_unknown_values() {
+        let (overrides, diagnostics) = parse_overrides(path(), "font-synthetic-style = maybe");
+
+        assert_eq!(overrides.font.synthetic_style, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("font-synthetic-style"));
+        assert!(diagnostics[0].message.contains("maybe"));
+    }
+
+    // AC-WP0-04: `alpha-blending = linear`, `font-thicken = true`, and
+    // `font-thicken-strength = 128` each parse AND produce a fallback /
+    // deferred diagnostic; `alpha-blending = native` produces no diagnostic.
+    #[test]
+    fn alpha_blending_native_is_real_with_no_diagnostic() {
+        let (overrides, diagnostics) = parse_overrides(path(), "alpha-blending = native");
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            overrides.font.alpha_blending,
+            Some(AlphaBlendingMode::Native)
+        );
+    }
+
+    #[test]
+    fn alpha_blending_linear_parses_and_falls_back_with_a_diagnostic() {
+        for (value, expected) in [
+            ("linear", AlphaBlendingMode::Linear),
+            ("linear-corrected", AlphaBlendingMode::LinearCorrected),
+        ] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("alpha-blending = {value}"));
+
+            assert_eq!(overrides.font.alpha_blending, Some(expected));
+            assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+            assert!(diagnostics[0].message.contains("alpha-blending"));
+            assert!(diagnostics[0].message.contains("native"));
+        }
+    }
+
+    #[test]
+    fn font_thicken_parses_and_produces_a_deferred_diagnostic() {
+        let (overrides, diagnostics) = parse_overrides(path(), "font-thicken = true");
+
+        assert_eq!(overrides.font.thicken, Some(true));
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("font-thicken"));
+        assert!(diagnostics[0].message.contains("deferred"));
+    }
+
+    #[test]
+    fn font_thicken_strength_parses_and_produces_a_deferred_diagnostic() {
+        let (overrides, diagnostics) = parse_overrides(path(), "font-thicken-strength = 128");
+
+        assert_eq!(overrides.font.thicken_strength, Some(128));
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("font-thicken-strength"));
+        assert!(diagnostics[0].message.contains("deferred"));
     }
 
     #[test]

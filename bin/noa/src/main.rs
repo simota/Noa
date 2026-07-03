@@ -31,6 +31,7 @@ fn main() -> anyhow::Result<()> {
         rows: args.rows,
         font_size: args.font_size,
         theme: None,
+        ..Default::default()
     })?;
     for diagnostic in diagnostics {
         eprintln!("{}", diagnostic.message);
@@ -65,6 +66,7 @@ fn app_config_from_startup(config: noa_config::StartupConfig) -> noa_app::AppCon
         rows: config.rows,
         font_size: config.font_size,
         theme: config.theme,
+        font: config.font,
     }
 }
 
@@ -95,6 +97,7 @@ mod tests {
             rows: 30,
             font_size: 15.0,
             theme: Some("3024 Day".to_string()),
+            font: noa_config::FontConfig::default(),
         };
 
         let app_config = app_config_from_startup(config);
@@ -103,6 +106,7 @@ mod tests {
         assert_eq!(app_config.rows, 30);
         assert_eq!(app_config.font_size, 15.0);
         assert_eq!(app_config.theme.as_deref(), Some("3024 Day"));
+        assert_eq!(app_config.font, noa_config::FontConfig::default());
     }
 
     #[test]

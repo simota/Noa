@@ -20,6 +20,117 @@ pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 
+/// A single OpenType feature toggle, e.g. `calt` (enabled) or `-liga`
+/// (`enabled: false`, explicitly disabled). Consumed for real in WP2; WP0
+/// only parses and stores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FontFeature {
+    pub tag: [u8; 4],
+    pub enabled: bool,
+}
+
+/// A single variable-font axis coordinate, e.g. `wght=700`. Consumed for
+/// real in WP2; WP0 only parses and stores it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FontVariation {
+    pub tag: [u8; 4],
+    pub value: f32,
+}
+
+/// `font-synthetic-style` mode: whether faux-bold/faux-italic synthesis is
+/// enabled, and whether either style is individually disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyntheticStyleMode {
+    Both,
+    Neither,
+    NoBold,
+    NoItalic,
+}
+
+/// `alpha-blending` mode. `Native` is a real value; `Linear` /
+/// `LinearCorrected` are parsed-but-fallback (REQ-CFG-4) — `noa-config`
+/// emits a diagnostic and the renderer falls back to `Native` (WP3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlphaBlendingMode {
+    Native,
+    Linear,
+    LinearCorrected,
+}
+
+/// Font configuration parsed from `font-*` / `alpha-blending` directives.
+///
+/// This is a `noa-config`-local type, distinct from `noa_font::FontConfig`
+/// (ADR-R1): `noa-config` must not depend on `noa-font`/swash/font-kit, so
+/// the two crates' `FontConfig` types stay separate. The `noa-app` layer
+/// maps this type to `noa_font::FontConfig` before calling `FontGrid::new`.
+///
+/// Repeatable keys (`font-family*`, `font-feature`, `font-variation*`)
+/// accumulate into `Vec`s across directives in one source (parser.rs); a
+/// higher-priority source (CLI over file) replaces a base source's list
+/// wholesale rather than concatenating, mirroring this file's scalar
+/// last-wins semantics. Scalar keys (`font-synthetic-style`,
+/// `alpha-blending`, `font-thicken`, `font-thicken-strength`) are
+/// straightforward last-wins `Option`s.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct FontConfig {
+    pub families: Vec<String>,
+    pub families_bold: Vec<String>,
+    pub families_italic: Vec<String>,
+    pub families_bold_italic: Vec<String>,
+    pub features: Vec<FontFeature>,
+    pub variations: Vec<FontVariation>,
+    pub variations_bold: Vec<FontVariation>,
+    pub variations_italic: Vec<FontVariation>,
+    pub variations_bold_italic: Vec<FontVariation>,
+    pub synthetic_style: Option<SyntheticStyleMode>,
+    pub alpha_blending: Option<AlphaBlendingMode>,
+    pub thicken: Option<bool>,
+    pub thicken_strength: Option<u8>,
+}
+
+impl FontConfig {
+    pub fn merge(self, higher_priority: Self) -> Self {
+        Self {
+            families: merge_list(self.families, higher_priority.families),
+            families_bold: merge_list(self.families_bold, higher_priority.families_bold),
+            families_italic: merge_list(self.families_italic, higher_priority.families_italic),
+            families_bold_italic: merge_list(
+                self.families_bold_italic,
+                higher_priority.families_bold_italic,
+            ),
+            features: merge_list(self.features, higher_priority.features),
+            variations: merge_list(self.variations, higher_priority.variations),
+            variations_bold: merge_list(self.variations_bold, higher_priority.variations_bold),
+            variations_italic: merge_list(
+                self.variations_italic,
+                higher_priority.variations_italic,
+            ),
+            variations_bold_italic: merge_list(
+                self.variations_bold_italic,
+                higher_priority.variations_bold_italic,
+            ),
+            synthetic_style: higher_priority.synthetic_style.or(self.synthetic_style),
+            alpha_blending: higher_priority.alpha_blending.or(self.alpha_blending),
+            thicken: higher_priority.thicken.or(self.thicken),
+            thicken_strength: higher_priority.thicken_strength.or(self.thicken_strength),
+        }
+    }
+
+    pub fn apply_to(self, base: Self) -> Self {
+        // `apply_to` composes the same way `merge` does: `self` (the
+        // override) wins over `base` (the resolved default).
+        base.merge(self)
+    }
+}
+
+fn merge_list<T>(base: Vec<T>, higher_priority: Vec<T>) -> Vec<T> {
+    if higher_priority.is_empty() {
+        base
+    } else {
+        higher_priority
+    }
+}
+
 /// Resolved, validated startup settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StartupConfig {
@@ -27,6 +138,7 @@ pub struct StartupConfig {
     pub rows: u16,
     pub font_size: f32,
     pub theme: Option<String>,
+    pub font: FontConfig,
 }
 
 impl Default for StartupConfig {
@@ -36,6 +148,7 @@ impl Default for StartupConfig {
             rows: DEFAULT_ROWS,
             font_size: DEFAULT_FONT_SIZE,
             theme: None,
+            font: FontConfig::default(),
         }
     }
 }
@@ -47,6 +160,7 @@ pub struct ConfigOverrides {
     pub rows: Option<u16>,
     pub font_size: Option<f32>,
     pub theme: Option<String>,
+    pub font: FontConfig,
 }
 
 impl ConfigOverrides {
@@ -56,6 +170,7 @@ impl ConfigOverrides {
             rows: higher_priority.rows.or(self.rows),
             font_size: higher_priority.font_size.or(self.font_size),
             theme: higher_priority.theme.or(self.theme),
+            font: self.font.merge(higher_priority.font),
         }
     }
 
@@ -65,6 +180,7 @@ impl ConfigOverrides {
             rows: self.rows.unwrap_or(base.rows),
             font_size: self.font_size.unwrap_or(base.font_size),
             theme: self.theme.or(base.theme),
+            font: self.font.apply_to(base.font),
         }
     }
 }
@@ -179,6 +295,7 @@ mod tests {
                 rows: 24,
                 font_size: 14.0,
                 theme: None,
+                font: FontConfig::default(),
             }
         );
     }
@@ -202,6 +319,7 @@ font-size = 15.5
                 rows: Some(30),
                 font_size: Some(15.5),
                 theme: None,
+                font: FontConfig::default(),
             }
         );
     }
@@ -213,12 +331,14 @@ font-size = 15.5
             rows: Some(30),
             font_size: Some(15.5),
             theme: Some("3024 Day".to_string()),
+            font: FontConfig::default(),
         };
         let cli = ConfigOverrides {
             cols: Some(120),
             rows: None,
             font_size: Some(16.0),
             theme: None,
+            font: FontConfig::default(),
         };
 
         let config = file.merge(cli).apply_to(StartupConfig::default());
@@ -230,6 +350,7 @@ font-size = 15.5
                 rows: 30,
                 font_size: 16.0,
                 theme: Some("3024 Day".to_string()),
+                font: FontConfig::default(),
             }
         );
     }
@@ -247,6 +368,7 @@ font-size = 15.5
                     rows: None,
                     font_size: None,
                     theme: Some("3024 Day".to_string()),
+                    font: FontConfig::default(),
                 }
             );
         }
@@ -354,6 +476,7 @@ font-size = 15.5
             rows: None,
             font_size: Some(18.0),
             theme: None,
+            font: FontConfig::default(),
         };
 
         let (config, diagnostics) =
@@ -391,6 +514,7 @@ font-size = 15.5
             rows: None,
             font_size: None,
             theme: None,
+            font: FontConfig::default(),
         };
 
         let (config, diagnostics) = load_startup_config_from(&config_path, &legacy_path, cli)
@@ -446,15 +570,18 @@ font-size = 15.5
             rows,
             font_size,
             theme,
+            font,
         } = StartupConfig::default();
         let ConfigOverrides {
             cols: override_cols,
             rows: override_rows,
             font_size: override_font_size,
             theme: override_theme,
+            font: override_font,
         } = ConfigOverrides::default();
 
         assert_eq!((cols, rows, font_size, theme), (80, 24, 14.0, None));
+        assert_eq!(font, FontConfig::default());
         assert_eq!(
             (
                 override_cols,
@@ -464,6 +591,7 @@ font-size = 15.5
             ),
             (None, None, None, None)
         );
+        assert_eq!(override_font, FontConfig::default());
     }
 
     #[test]
@@ -474,6 +602,7 @@ font-size = 15.5
                 rows: 24,
                 font_size: 14.0,
                 theme: None,
+                font: FontConfig::default(),
             },
             "resolved startup config",
         )
@@ -489,6 +618,7 @@ font-size = 15.5
             rows: None,
             font_size: Some(f32::NAN),
             theme: None,
+            font: FontConfig::default(),
         }
         .apply_to(StartupConfig::default());
 

@@ -100,7 +100,8 @@ fn cell_pipeline_builds_without_validation_error() {
         eprintln!("no wgpu adapter available — skipping GPU pipeline-build test");
         return;
     };
-    let mut font = FontGrid::new(14.0).expect("load a system monospace font");
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
 
     device.push_error_scope(wgpu::ErrorFilter::Validation);
     let renderer = Renderer::new(
@@ -129,7 +130,8 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         eprintln!("no wgpu adapter available — skipping GPU draw test");
         return;
     };
-    let mut font = FontGrid::new(14.0).expect("load a system monospace font");
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
     let mut renderer = Renderer::new(
         &device,
         &queue,
@@ -217,7 +219,8 @@ fn split_pipeline_syncs_same_frame_new_glyphs_for_two_panes() {
         eprintln!("no wgpu adapter available — skipping split atlas-ordering test");
         return;
     };
-    let mut font = FontGrid::new(14.0).expect("load a system monospace font");
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
     let mut renderer = Renderer::new(
         &device,
         &queue,
@@ -276,7 +279,8 @@ fn split_pipeline_draws_three_pane_plan_with_overlays_without_validation_error()
         eprintln!("no wgpu adapter available — skipping split draw-plan GPU test");
         return;
     };
-    let mut font = FontGrid::new(14.0).expect("load a system monospace font");
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
     let mut renderer = Renderer::new(
         &device,
         &queue,
@@ -344,7 +348,8 @@ fn split_pipeline_rebuilds_all_pane_bind_groups_after_atlas_reallocation() {
         eprintln!("no wgpu adapter available — skipping split atlas-reallocation test");
         return;
     };
-    let mut font = FontGrid::new(220.0).expect("load a system monospace font");
+    let mut font = FontGrid::new(220.0, noa_font::FontConfig::default())
+        .expect("load a system monospace font");
     let mut renderer = Renderer::new(
         &device,
         &queue,
@@ -442,7 +447,8 @@ fn shared_font_atlas_syncs_to_multiple_renderers() {
         eprintln!("no wgpu adapter available — skipping multi-renderer atlas test");
         return;
     };
-    let mut font = FontGrid::new(14.0).expect("load a system monospace font");
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
     let mut first = Renderer::new(
         &device,
         &queue,

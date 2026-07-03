@@ -7,7 +7,7 @@ use font_kit::source::Source;
 use font_kit::source::SystemSource;
 use swash::FontRef;
 
-use crate::FontError;
+use crate::{FontConfig, FontError};
 
 /// Raw font file bytes plus the face index within a collection.
 ///
@@ -69,9 +69,19 @@ pub fn load_monospace() -> Result<FontData, FontError> {
     handle_to_data(handle)
 }
 
-pub fn load_font_stack() -> Result<FontStack, FontError> {
+/// Discover the font stack described by `font_cfg`, falling back to the
+/// system monospace / Menlo discovery (see [`load_monospace`]) when
+/// `font_cfg.families` is empty or none of the configured families resolve.
+///
+/// WP0 wires the config input through so the constructor signature doesn't
+/// need to change again later; fully resolving custom family stacks
+/// (weights/styles, missing-family diagnostics, etc.) is WP1's job.
+pub fn load_font_stack(font_cfg: &FontConfig) -> Result<FontStack, FontError> {
     let source = SystemSource::new();
-    let primary = load_monospace()?;
+    let primary = match load_configured_primary(&source, font_cfg) {
+        Some(primary) => primary,
+        None => load_monospace()?,
+    };
     let mut fallbacks = Vec::new();
 
     for postscript_name in cjk_fallback_postscript_names() {
@@ -87,6 +97,22 @@ pub fn load_font_stack() -> Result<FontStack, FontError> {
     }
 
     Ok(FontStack::new(primary, fallbacks))
+}
+
+/// Try each configured family name in order, returning the first that
+/// resolves to a loadable face. `None` (not an error) means the caller
+/// should fall back to system monospace discovery.
+fn load_configured_primary(source: &SystemSource, font_cfg: &FontConfig) -> Option<FontData> {
+    font_cfg.families.iter().find_map(|family_name| {
+        let handle = source
+            .select_family_by_name(family_name)
+            .ok()?
+            .fonts()
+            .first()
+            .cloned()?;
+        let data = handle_to_data(handle).ok()?;
+        data.font_ref().is_ok().then_some(data)
+    })
 }
 
 fn push_valid_face(faces: &mut Vec<FontData>, handle: Handle) {

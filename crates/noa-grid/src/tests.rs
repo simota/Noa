@@ -1876,3 +1876,99 @@ fn ac_bel_004_full_reset_clears_pending_bell() {
     let mut t = run(b"\x07\x1bc");
     assert!(!t.take_pending_bell());
 }
+
+// ── WP7: XTWINOPS report subset + title stack (AC-WIN) ─────────────────
+
+#[test]
+fn ac_win_001_report_size_in_chars() {
+    let t = run_size(80, 24, b"\x1b[18t");
+    assert_eq!(t.pending_writes, b"\x1b[8;24;80t");
+}
+
+#[test]
+fn ac_win_002_report_window_title() {
+    let t = run(b"\x1b]2;foo\x1b\\\x1b[21t");
+    assert_eq!(t.pending_writes, b"\x1b]lfoo\x1b\\");
+}
+
+#[test]
+fn ac_win_003_report_text_area_px() {
+    let mut t = run(b"");
+    t.set_pixel_metrics(9, 18, 720, 432);
+    let mut s = Stream::new();
+    s.feed(b"\x1b[14t", &mut t);
+    assert_eq!(t.pending_writes, b"\x1b[4;432;720t");
+}
+
+#[test]
+fn ac_win_004_report_cell_size_px() {
+    let mut t = run(b"");
+    t.set_pixel_metrics(9, 18, 720, 432);
+    let mut s = Stream::new();
+    s.feed(b"\x1b[16t", &mut t);
+    assert_eq!(t.pending_writes, b"\x1b[6;18;9t");
+}
+
+#[test]
+fn ac_win_005_pixel_metrics_reflect_latest_set_no_stale_values() {
+    let mut t = run(b"");
+    t.set_pixel_metrics(9, 18, 720, 432);
+    t.set_pixel_metrics(10, 20, 800, 480);
+    let mut s = Stream::new();
+    s.feed(b"\x1b[14t\x1b[16t", &mut t);
+    assert_eq!(t.pending_writes, b"\x1b[4;480;800t\x1b[6;20;10t");
+}
+
+#[test]
+fn ac_win_006_title_stack_push_pop_restores_pushed_title() {
+    let t = run(b"\x1b]2;first\x1b\\\x1b[22;2t\x1b]2;second\x1b\\\x1b[23;2t\x1b[21t");
+    assert_eq!(t.pending_writes, b"\x1b]lfirst\x1b\\");
+}
+
+#[test]
+fn ac_win_007_ps1_zero_and_two_are_equivalent() {
+    let t = run(b"\x1b]2;first\x1b\\\x1b[22;0t\x1b]2;second\x1b\\\x1b[23;0t\x1b[21t");
+    assert_eq!(t.pending_writes, b"\x1b]lfirst\x1b\\");
+}
+
+#[test]
+fn ac_win_008_ps1_one_icon_only_is_a_noop() {
+    let t = run(b"\x1b]2;first\x1b\\\x1b[22;1t\x1b]2;second\x1b\\\x1b[23;1t\x1b[21t");
+    // Push/pop with Ps[1]=1 never touched the stack, so title stays "second".
+    assert_eq!(t.pending_writes, b"\x1b]lsecond\x1b\\");
+}
+
+#[test]
+fn ac_win_009_unsupported_ps_values_produce_no_reply() {
+    let t = run(b"\x1b[4t\x1b[8t\x1b[9t\x1b[10t\x1b[19t\x1b[20t");
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn ac_win_010_third_param_stack_index_round_trips() {
+    let t = run(b"\x1b]2;first\x1b\\\x1b[22;2;5t\x1b]2;second\x1b\\\x1b[23;2;5t\x1b[21t");
+    assert_eq!(t.pending_writes, b"\x1b]lfirst\x1b\\");
+}
+
+// FM-7 regression: cap eviction must check length *before* pushing (cap=64,
+// not 65). Push 65 distinct titles (evicting the oldest), then pop all 64
+// surviving entries and confirm the stack is empty — a 65th surviving entry
+// would make one more pop restore a pushed title instead of no-op'ing.
+#[test]
+fn title_stack_evicts_oldest_entry_past_cap_of_64() {
+    let mut t = run(b"");
+    let mut s = Stream::new();
+    for i in 0..65 {
+        s.feed(
+            format!("\x1b]2;title-{i}\x1b\\\x1b[22;2t").as_bytes(),
+            &mut t,
+        );
+    }
+    for _ in 0..64 {
+        s.feed(b"\x1b[23;2t", &mut t);
+    }
+    s.feed(b"\x1b]2;sentinel\x1b\\\x1b[23;2t\x1b[21t", &mut t);
+    // The stack was already empty (only 64 of the 65 pushes survived), so
+    // this final pop is a no-op and the title stays "sentinel".
+    assert_eq!(t.pending_writes, b"\x1b]lsentinel\x1b\\");
+}

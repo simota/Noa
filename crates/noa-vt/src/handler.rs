@@ -182,6 +182,11 @@ pub trait Handler {
     // ── reports (terminal writes back to the pty) ──────────────────
     fn device_attributes(&mut self, kind: DaKind);
     fn device_status_report(&mut self, kind: DsrKind);
+    /// `XTWINOPS` (`CSI Ps ; Ps1 ; Ps2 t`) — window operation / report
+    /// request. Ghostty-parity subset only: `Ps` 14/16/18/21 report; 22/23
+    /// push/pop the window-title stack; every other `Ps` (4/8/9/10/19/20/…)
+    /// is ignored with no reply.
+    fn window_op(&mut self, _ps: u16, _p1: u16, _p2: u16) {}
 
     // ── parsed but inc-1 no-ops ────────────────────────────────────
     /// OSC payload (`ESC ] … ST`). Inc-1: parse title (`0`/`2`), drop the rest.

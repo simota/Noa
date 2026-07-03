@@ -2,6 +2,8 @@
 //! dispatching parsed operations onto the active [`Screen`] and queuing report
 //! replies (DA/DSR) for the pty writer.
 
+use std::collections::VecDeque;
+
 use crate::cell::Hyperlink;
 use crate::charset::CharsetState;
 use crate::cursor::{Cursor, CursorStyle, ScrollRegion};
@@ -19,6 +21,11 @@ use noa_vt::{
     Charset, CharsetSlot, CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine,
     Handler, ModeRequest, SgrAttr,
 };
+
+/// Cap on the `XTWINOPS` title stack (`CSI 22/23 t`), mirroring the
+/// unbounded-growth guardrails already used for `Screen::scrollback` and the
+/// parser's `MAX_OSC_BYTES`/`MAX_PARAMS`. The oldest entry is evicted first.
+const TITLE_STACK_CAP: usize = 64;
 
 pub struct Terminal {
     pub primary: Screen,
@@ -47,6 +54,17 @@ pub struct Terminal {
     pub pending_clipboard_writes: Vec<String>,
     /// Set by `BEL` (`0x07`); drained by [`Terminal::take_pending_bell`].
     pending_bell: bool,
+    /// Cell size in pixels, from the last `noa-app` pixel-metrics update.
+    /// Zero until the first resize (`CSI 16 t`).
+    cell_width_px: u32,
+    cell_height_px: u32,
+    /// Text-area (grid content) size in pixels. Zero until the first resize
+    /// (`CSI 14 t`).
+    text_area_width_px: u32,
+    text_area_height_px: u32,
+    /// `XTWINOPS` window-title stack (`CSI 22/23 t`), window-title only —
+    /// icon-title variants (`Ps[1] == 1`) are unsupported and no-op.
+    title_stack: VecDeque<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +100,11 @@ impl Terminal {
             pending_writes: Vec::new(),
             pending_clipboard_writes: Vec::new(),
             pending_bell: false,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            text_area_width_px: 0,
+            text_area_height_px: 0,
+            title_stack: VecDeque::new(),
         }
     }
 
@@ -203,6 +226,23 @@ impl Terminal {
         std::mem::take(&mut self.pending_bell)
     }
 
+    /// Update the pixel-metric fields backing `XTWINOPS` reports
+    /// (`CSI 14/16 t`). The sole caller is `noa-app`'s pane-resize path —
+    /// the only place outside this crate that reaches into `Terminal`'s
+    /// window-geometry state.
+    pub fn set_pixel_metrics(
+        &mut self,
+        cell_w: u32,
+        cell_h: u32,
+        text_area_w: u32,
+        text_area_h: u32,
+    ) {
+        self.cell_width_px = cell_w;
+        self.cell_height_px = cell_h;
+        self.text_area_width_px = text_area_w;
+        self.text_area_height_px = text_area_h;
+    }
+
     pub fn set_base_colors(
         &mut self,
         default_fg: noa_core::Rgb,
@@ -308,6 +348,23 @@ impl Terminal {
             point,
             exit_status,
         });
+    }
+
+    /// `CSI 22 t` — push the current window title onto the title stack,
+    /// evicting the oldest entry once [`TITLE_STACK_CAP`] is reached.
+    fn push_title(&mut self) {
+        if self.title_stack.len() >= TITLE_STACK_CAP {
+            self.title_stack.pop_front();
+        }
+        self.title_stack.push_back(self.title.clone());
+    }
+
+    /// `CSI 23 t` — pop the most recently pushed title back into effect.
+    /// No-op on an empty stack.
+    fn pop_title(&mut self) {
+        if let Some(title) = self.title_stack.pop_back() {
+            self.title = title;
+        }
     }
 
     fn push_dcs_response(&mut self, body: &[u8]) {
@@ -841,6 +898,35 @@ impl Handler for Terminal {
                 self.pending_writes
                     .extend_from_slice(format!("\x1b[{row};{col}R").as_bytes());
             }
+        }
+    }
+
+    fn window_op(&mut self, ps: u16, p1: u16, _p2: u16) {
+        match ps {
+            14 => self.pending_writes.extend_from_slice(
+                format!(
+                    "\x1b[4;{};{}t",
+                    self.text_area_height_px, self.text_area_width_px
+                )
+                .as_bytes(),
+            ),
+            16 => self.pending_writes.extend_from_slice(
+                format!("\x1b[6;{};{}t", self.cell_height_px, self.cell_width_px).as_bytes(),
+            ),
+            18 => self.pending_writes.extend_from_slice(
+                format!("\x1b[8;{};{}t", self.size.rows, self.size.cols).as_bytes(),
+            ),
+            21 => {
+                self.pending_writes.extend_from_slice(b"\x1b]l");
+                self.pending_writes.extend_from_slice(self.title.as_bytes());
+                self.pending_writes.extend_from_slice(b"\x1b\\");
+            }
+            // Ps[1] == 0 or 2 both mean "window title" (icon-title tracking
+            // is unsupported); Ps[1] == 1 (icon-only) and anything else
+            // falls through to the no-op/no-reply arm below.
+            22 if matches!(p1, 0 | 2) => self.push_title(),
+            23 if matches!(p1, 0 | 2) => self.pop_title(),
+            _ => {} // 4/8/9/10/19/20, icon-only push/pop, unknown Ps — ignore (Ghostty parity).
         }
     }
 

@@ -119,6 +119,7 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
             3 => h.clear_all_tab_stops(),
             _ => {}
         },
+        b't' if plain => h.window_op(csi.param(0, 0), csi.param(1, 0), csi.param(2, 0)), // XTWINOPS
         _ => {} // unknown / inc>=2
     }
 }

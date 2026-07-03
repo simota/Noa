@@ -2435,7 +2435,7 @@ impl App {
         let Some(state) = self.windows.get_mut(&window_id) else {
             return;
         };
-        apply_pane_resize_batch(state, &targets);
+        apply_pane_resize_batch(state, &targets, metrics);
     }
 
     fn update_focused_ime_cursor_area(&self, window_id: WindowId) {
@@ -2568,7 +2568,28 @@ fn pane_resize_batch_plan<Id: Copy>(
     plan
 }
 
-fn apply_pane_resize_batch(state: &mut WindowState, targets: &[(PaneId, PaneRectApp, GridSize)]) {
+/// Pixel metrics for `XTWINOPS` reports (`CSI 14/16 t`). Derived from the
+/// same `rect`/`padding` the caller already used to compute this pane's
+/// `GridSize` (via `grid_size_for_pane_rect`) — not reconstructed
+/// independently as `cell_w × cols`, which would drift from `rect` whenever
+/// the pane's pixel size isn't an exact multiple of the cell size.
+fn pixel_metrics_for_pane(
+    rect: PaneRectApp,
+    metrics: noa_font::Metrics,
+    padding: GridPadding,
+) -> (u32, u32, u32, u32) {
+    let cell_w_px = metrics.cell_w.round().max(0.0) as u32;
+    let cell_h_px = metrics.cell_h.round().max(0.0) as u32;
+    let text_area_w_px = (rect.w as f32 - padding.horizontal()).max(0.0).round() as u32;
+    let text_area_h_px = (rect.h as f32 - padding.vertical()).max(0.0).round() as u32;
+    (cell_w_px, cell_h_px, text_area_w_px, text_area_h_px)
+}
+
+fn apply_pane_resize_batch(
+    state: &mut WindowState,
+    targets: &[(PaneId, PaneRectApp, GridSize)],
+    metrics: noa_font::Metrics,
+) {
     let plan = pane_resize_batch_plan(
         targets
             .iter()
@@ -2582,15 +2603,20 @@ fn apply_pane_resize_batch(state: &mut WindowState, targets: &[(PaneId, PaneRect
         let Some(surface) = state.surfaces.get_mut(&pane_id) else {
             continue;
         };
-        if let Some((_, rect, _)) = targets.iter().find(|(target, _, _)| *target == pane_id) {
-            surface.rect = *rect;
+        let rect = targets
+            .iter()
+            .find(|(target, _, _)| *target == pane_id)
+            .map(|(_, rect, _)| *rect);
+        if let Some(rect) = rect {
+            surface.rect = rect;
         }
         surface.grid_size = grid_size;
-        surface
-            .terminal
-            .lock()
-            .expect("terminal mutex poisoned")
-            .resize(grid_size);
+        let mut terminal = surface.terminal.lock().expect("terminal mutex poisoned");
+        terminal.resize(grid_size);
+        if let Some(rect) = rect {
+            let (cw, ch, taw, tah) = pixel_metrics_for_pane(rect, metrics, DEFAULT_GRID_PADDING);
+            terminal.set_pixel_metrics(cw, ch, taw, tah);
+        }
     }
 
     for action in plan {
@@ -3549,6 +3575,36 @@ mod tests {
                 PaneResizeAction::PtyResize(third, GridSize::new(80, 6)),
             ]
         );
+    }
+
+    // FM-4 regression: text-area px must come from the same `rect`/padding
+    // grid_size_for_pane_rect used, not an independent cell_w × cols
+    // multiplication — which would drift whenever the pane's pixel size
+    // isn't an exact multiple of the cell size (as here: 137px / 9px cells).
+    #[test]
+    fn pixel_metrics_for_pane_derive_text_area_from_rect_not_from_grid_size() {
+        let rect = PaneRectApp::new(0, 0, 137, 245);
+        let metrics = metrics(9.0, 18.0);
+
+        let (cw, ch, taw, tah) = pixel_metrics_for_pane(rect, metrics, DEFAULT_GRID_PADDING);
+
+        assert_eq!(cw, 9);
+        assert_eq!(ch, 18);
+        // 137 - (16 left + 16 right) = 105, 245 - (0 top + 16 bottom) = 229 —
+        // NOT floor(105/9)=11 cols * 9 = 99, which cell_w × cols would give.
+        assert_eq!(taw, 105);
+        assert_eq!(tah, 229);
+    }
+
+    #[test]
+    fn pixel_metrics_for_pane_clamps_padding_larger_than_rect_to_zero() {
+        let rect = PaneRectApp::new(0, 0, 10, 10);
+        let metrics = metrics(9.0, 18.0);
+
+        let (_, _, taw, tah) = pixel_metrics_for_pane(rect, metrics, DEFAULT_GRID_PADDING);
+
+        assert_eq!(taw, 0);
+        assert_eq!(tah, 0);
     }
 
     #[test]

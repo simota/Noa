@@ -1589,6 +1589,34 @@ fn resize_shrink_rows_keeps_cursor_in_bounds() {
 }
 
 #[test]
+fn take_visible_rows_with_damage_isolates_a_single_row_and_clears_on_consume() {
+    // AC-WP4-01: a single cell mutation in one row sets ONLY that row's
+    // dirty flag; all other rows stay clean. `take_visible_rows_with_damage`
+    // then clears the flag it just reported.
+    let mut t = run_size(4, 3, b""); // fresh terminal: every row starts dirty.
+    let screen = &mut t.primary;
+
+    // Drain the initial all-dirty state so the next assertion is meaningful.
+    let (_, initial_dirty) = screen.take_visible_rows_with_damage();
+    assert_eq!(initial_dirty, vec![true, true, true]);
+    let (_, drained_dirty) = screen.take_visible_rows_with_damage();
+    assert_eq!(drained_dirty, vec![false, false, false]);
+
+    // Mutate row 1 only (a real cell-mutating path, not a direct field poke).
+    // `cursor_position` is 1-based: (row=2, col=1) -> (y=1, x=0).
+    screen.cursor_position(2, 1);
+    screen.print('x', true);
+
+    let (rows, dirty) = screen.take_visible_rows_with_damage();
+    assert_eq!(dirty, vec![false, true, false]);
+    assert_eq!(rows[1].cells[0].ch, 'x');
+
+    // Consuming clears the flag; an unchanged next frame reports all clean.
+    let (_, dirty_after) = screen.take_visible_rows_with_damage();
+    assert_eq!(dirty_after, vec![false, false, false]);
+}
+
+#[test]
 fn resize_shrink_rows_keeps_cursor_on_its_content() {
     // Cursor mid-screen (row 11 → y=10) with a marker on its line; shrinking
     // to 10 rows must keep the cursor on that same content, not drop it.

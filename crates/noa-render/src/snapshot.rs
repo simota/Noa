@@ -2,14 +2,17 @@
 //! needed to rebuild a frame's GPU instances. `noa-app` takes this under the
 //! `Terminal` mutex and then calls into the renderer unlocked.
 
-use noa_grid::{Cursor, Row, SearchState, Selection, SelectionPoint, Terminal, TerminalColors};
+use noa_grid::{Cursor, Row, Screen, SearchState, Selection, SelectionPoint, Terminal, TerminalColors};
 
 /// A snapshot of the active screen taken under the `Terminal` lock.
 ///
-/// Inc-1 clones every row rather than diffing dirty rows — correctness over
-/// micro-optimization; dirty-row diffing is a natural inc≥2 follow-up.
+/// WP4 (REQ-PERF-1/2): `row_dirty` is parallel to `rows` (same length, same
+/// index order) and reports each row's `noa_grid::Row::dirty` bit as it
+/// stood *before* this snapshot cleared it — the renderer's dirty-row patch
+/// path consumes it to skip instance work for unchanged rows.
 pub struct FrameSnapshot {
     pub rows: Vec<Row>,
+    pub row_dirty: Vec<bool>,
     pub cursor: Cursor,
     pub colors: TerminalColors,
     pub selection: Option<Selection>,
@@ -19,23 +22,47 @@ pub struct FrameSnapshot {
     pub rows_n: u16,
 }
 
+/// The screen `Terminal` is currently rendering, borrowed mutably so its
+/// rows' dirty bits can be consumed-and-cleared in the same locked pass
+/// (`Screen::take_visible_rows_with_damage`). Mirrors `Terminal::active()`'s
+/// selection logic; kept here rather than as a new `noa-grid` API because
+/// `Terminal::primary`/`alt`/`active_is_alt` are already public fields (WP4
+/// frozen contract: the only new `noa-grid` surface is the one `Screen`
+/// method).
+fn active_screen_mut(terminal: &mut Terminal) -> &mut Screen {
+    if terminal.active_is_alt {
+        terminal.alt.as_mut().unwrap_or(&mut terminal.primary)
+    } else {
+        &mut terminal.primary
+    }
+}
+
 impl FrameSnapshot {
-    /// Clone the active screen's rows + cursor out of `terminal`.
-    pub fn from_terminal(terminal: &Terminal) -> Self {
-        let screen = terminal.active();
+    /// Clone the active screen's rows + cursor out of `terminal`, consuming
+    /// (and clearing) each visible row's dirty bit in the same lock.
+    pub fn from_terminal(terminal: &mut Terminal) -> Self {
+        let colors = terminal.colors.clone();
+        let screen = active_screen_mut(terminal);
         let mut cursor = screen.cursor;
         if screen.viewport_offset() > 0 {
             cursor.visible = false;
         }
+        let row_base = screen.visible_row_base();
+        let cols = screen.cols;
+        let rows_n = screen.rows;
+        let selection = screen.selection;
+        let search = screen.search.clone();
+        let (rows, row_dirty) = screen.take_visible_rows_with_damage();
         FrameSnapshot {
-            rows: screen.visible_rows(),
+            rows,
+            row_dirty,
             cursor,
-            colors: terminal.colors.clone(),
-            selection: screen.selection,
-            search: screen.search.clone(),
-            row_base: screen.visible_row_base(),
-            cols: screen.cols,
-            rows_n: screen.rows,
+            colors,
+            selection,
+            search,
+            row_base,
+            cols,
+            rows_n,
         }
     }
 
@@ -76,7 +103,7 @@ mod tests {
         put(&mut term, 1, 'C');
         term.scroll_viewport_up(1);
 
-        let snap = FrameSnapshot::from_terminal(&term);
+        let snap = FrameSnapshot::from_terminal(&mut term);
 
         assert_eq!(snap.rows[0].cells[0].ch, 'A');
         assert_eq!(snap.rows[1].cells[0].ch, 'B');
@@ -88,7 +115,7 @@ mod tests {
         let mut term = Terminal::new(GridSize::new(2, 2));
         term.colors.set_default_fg(Rgb::new(1, 2, 3));
 
-        let snap = FrameSnapshot::from_terminal(&term);
+        let snap = FrameSnapshot::from_terminal(&mut term);
 
         assert_eq!(snap.colors.default_fg(), Some(Rgb::new(1, 2, 3)));
     }
@@ -99,7 +126,7 @@ mod tests {
         term.primary.grid[0].cells[0].ch = 'a';
         term.primary.grid[0].cells[0].push_combining('\u{301}');
 
-        let snap = FrameSnapshot::from_terminal(&term);
+        let snap = FrameSnapshot::from_terminal(&mut term);
 
         assert_eq!(snap.rows[0].cells[0].text(), "a\u{301}");
     }
@@ -117,7 +144,7 @@ mod tests {
             noa_core::Point { x: 0, y: 1 },
         );
 
-        let snap = FrameSnapshot::from_terminal(&term);
+        let snap = FrameSnapshot::from_terminal(&mut term);
 
         assert_eq!(snap.row_base, 0);
         assert!(!snap.is_selected(0, 0));
@@ -136,7 +163,7 @@ mod tests {
         term.set_search_query("B");
         term.scroll_viewport_up(1);
 
-        let snap = FrameSnapshot::from_terminal(&term);
+        let snap = FrameSnapshot::from_terminal(&mut term);
 
         assert!(snap.is_search_match(0, 1));
         assert!(snap.is_active_search_match(0, 1));

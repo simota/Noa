@@ -11,7 +11,11 @@ use noa_core::{Color, DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, Rgb, xterm_palette
 use noa_grid::TerminalColors;
 
 /// A resolved terminal color theme: default fg/bg plus the 256-color palette.
-#[derive(Clone, Debug)]
+///
+/// `PartialEq` (WP4): every field is an integer `Rgb`, so value equality is
+/// cheap and exact — used by the renderer's per-pane invalidation key to
+/// detect a theme swap without needing a separate identity/id field.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
     pub default_fg: Rgb,
     pub default_bg: Rgb,

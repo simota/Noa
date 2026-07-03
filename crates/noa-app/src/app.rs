@@ -296,11 +296,11 @@ impl App {
             let Some(surface) = state.surfaces.get(&pane_id) else {
                 continue;
             };
-            let term = surface.terminal.lock().expect("terminal mutex poisoned");
+            let mut term = surface.terminal.lock().expect("terminal mutex poisoned");
             if pane_id == state.focused_pane {
                 title = tab_title(&term.title);
             }
-            let mut snapshot = FrameSnapshot::from_terminal(&term);
+            let mut snapshot = FrameSnapshot::from_terminal(&mut term);
             if pane_id != state.focused_pane {
                 snapshot.cursor.visible = false;
             }

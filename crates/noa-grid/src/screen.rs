@@ -503,6 +503,37 @@ impl Screen {
             .collect()
     }
 
+    /// Clone the visible rows AND report which were dirty, clearing the
+    /// source dirty bits in the same locked pass (WP4, REQ-PERF-1).
+    ///
+    /// Atomicity: a concurrent io-thread write landing after the clear
+    /// correctly re-dirties the row for the *next* frame; a write between
+    /// clone-and-clear cannot happen because both steps run under the one
+    /// `&mut self` call. The returned `Vec<bool>` is parallel to the
+    /// returned `Vec<Row>` (same length, same index order) and reports each
+    /// row's dirty state *before* this call cleared it.
+    pub fn take_visible_rows_with_damage(&mut self) -> (Vec<Row>, Vec<bool>) {
+        let rows = self.rows as usize;
+        let scrollback_len = self.scrollback.len();
+        let start = self.visible_row_base();
+
+        let mut out_rows = Vec::with_capacity(rows);
+        let mut out_dirty = Vec::with_capacity(rows);
+
+        for idx in start..start + rows {
+            let row: &mut Row = if idx < scrollback_len {
+                &mut self.scrollback[idx]
+            } else {
+                &mut self.grid[idx - scrollback_len]
+            };
+            out_dirty.push(row.dirty);
+            out_rows.push(row.clone());
+            row.dirty = false;
+        }
+
+        (out_rows, out_dirty)
+    }
+
     /// Resize the grid to `cols`×`rows`, reflowing soft-wrapped logical lines,
     /// clamping the cursor, and resetting the scroll region to full-screen. On
     /// row-shrink, rows below the cursor are dropped first; if the cursor would

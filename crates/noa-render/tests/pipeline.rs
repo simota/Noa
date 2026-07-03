@@ -61,6 +61,7 @@ fn snapshot_for_text(text: &str) -> FrameSnapshot {
             wrapped: false,
             dirty: true,
         }],
+        row_dirty: vec![true],
         cursor: Cursor::default(),
         colors: TerminalColors::default(),
         selection: None,
@@ -247,6 +248,7 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
     };
     let snap = FrameSnapshot {
         rows: vec![row],
+        row_dirty: vec![true],
         cursor: Cursor::default(),
         colors: TerminalColors::default(),
         selection: Some(Selection::new(
@@ -286,6 +288,102 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
     assert!(
         err.is_none(),
         "wgpu validation error during draw (uniform/instance buffer layout?): {err:?}"
+    );
+}
+
+/// WP4 (REQ-NF-4, AC-WP4-03): draw one frame via a full rebuild (the first
+/// frame through a fresh `PaneRenderCache`) and a second frame via the
+/// per-row dirty-patch path (only one of two rows marked dirty), asserting
+/// neither draw trips a wgpu validation error — mirrors the class of bug
+/// this file exists to catch (uniform/instance buffer layout mismatches),
+/// now specifically for the row-indexed segment cache introduced by WP4.
+#[test]
+fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping WP4 full-then-patched draw test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: 64, h: 64 });
+
+    fn two_row_snapshot(first: char, second: char, row_dirty: [bool; 2]) -> FrameSnapshot {
+        let make_row = |ch: char, dirty: bool| Row {
+            cells: vec![Cell {
+                ch,
+                ..Cell::default()
+            }],
+            wrapped: false,
+            dirty,
+        };
+        FrameSnapshot {
+            rows: vec![make_row(first, row_dirty[0]), make_row(second, row_dirty[1])],
+            row_dirty: row_dirty.to_vec(),
+            cursor: Cursor::default(),
+            colors: TerminalColors::default(),
+            selection: None,
+            search: SearchState::default(),
+            row_base: 0,
+            cols: 1,
+            rows_n: 2,
+        }
+    }
+
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("noa-wp4-test-target"),
+        size: wgpu::Extent3d {
+            width: 64,
+            height: 64,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Bgra8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let theme = Theme::new();
+
+    // First frame: fresh cache -> every row is a full rebuild.
+    let snap1 = two_row_snapshot('A', 'B', [true, true]);
+    renderer.rebuild_cells(&snap1, &mut font, &theme);
+    renderer.sync_atlas(&device, &queue, &mut font);
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.draw(&device, &queue, &view);
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error during the full-rebuild draw: {err:?}"
+    );
+
+    // Second frame: only row 1 is dirty -> exercises the per-row dirty-patch
+    // path (row 0's cached bg/glyph/decoration segments are reused as-is).
+    let snap2 = two_row_snapshot('A', 'X', [false, true]);
+    renderer.rebuild_cells(&snap2, &mut font, &theme);
+    assert_eq!(
+        renderer.rows_rebuilt_last_frame(),
+        1,
+        "the second frame should rebuild exactly the one dirtied row"
+    );
+    renderer.sync_atlas(&device, &queue, &mut font);
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.draw(&device, &queue, &view);
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error during the dirty-row-patch draw: {err:?}"
     );
 }
 
@@ -613,6 +711,7 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
     };
     let snap = FrameSnapshot {
         rows: vec![row],
+        row_dirty: vec![true],
         cursor: Cursor::default(),
         colors: TerminalColors::default(),
         selection: None,

@@ -1,10 +1,12 @@
 //! [`Renderer`] — owns the GPU pipeline, the font atlas texture, and the
 //! instance buffers; rebuilds them from a [`crate::FrameSnapshot`] and draws.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use noa_core::{CellAttrs, CellSize, Color, GridPadding, PixelSize};
 use noa_font::{FontGrid, Metrics, ShapedGlyph};
+use noa_grid::{Row, SearchState, Selection, TerminalColors};
 
 use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
@@ -35,6 +37,64 @@ struct PaneInstances {
     range: Range<u32>,
 }
 
+/// Everything that must be identical between two frames for a pane's
+/// per-row instance cache to stay valid (WP4, ADR-R4 / FM-11). Bundled into
+/// one `PartialEq`-compared struct on purpose: any single field drifting
+/// forces a full rebuild, and a struct comparison is structurally harder to
+/// under-implement (forget one field) than N scattered `if` checks.
+///
+/// `Row.dirty` (consumed via `FrameSnapshot::row_dirty`) only tracks CELL
+/// mutations; every field here changes a row's *rendered* instances without
+/// necessarily touching a cell, so a difference in any one of them forces
+/// every row in the pane dirty for this rebuild. Cursor movement is handled
+/// separately (see `PaneRenderCache::prev_cursor`) since it only dirties the
+/// two affected rows, not the whole pane.
+///
+/// Atlas realloc is deliberately NOT part of this key: `etagere`'s packing
+/// never moves an already-packed rect, so a realloc changes the atlas
+/// texture size but not any existing glyph's `atlas_pos` — retained
+/// instances referencing already-rastered glyphs stay valid, and newly
+/// rastered glyphs only appear on rows that are dirty by construction.
+#[derive(Clone, PartialEq)]
+struct FrameInvalidationKey {
+    row_base: usize,
+    cols: u16,
+    rows: u16,
+    colors: TerminalColors,
+    theme: Theme,
+    selection: Option<Selection>,
+    search: SearchState,
+    cell_size: (f32, f32),
+}
+
+/// A pane's persisted per-row instance segments (WP4, REQ-PERF-2/3). Three
+/// row-indexed vectors — NOT a per-row `[bg, glyph, deco]` grouping — so the
+/// flatten step can reproduce the existing GLOBAL 3-pass order (all bg, then
+/// all glyph, then all decoration) that a glyph descender overflowing into
+/// the row below depends on for correct paint order (FM-12).
+struct PaneRenderCache {
+    bg: Vec<Vec<CellInstance>>,
+    glyph: Vec<Vec<CellInstance>>,
+    deco: Vec<Vec<CellInstance>>,
+    key: Option<FrameInvalidationKey>,
+    /// `(cursor.x, cursor.y, cursor.visible)` as of the last rebuild — used
+    /// only to detect cursor movement, which dirties exactly the two
+    /// affected rows (not a full-pane invalidation trigger).
+    prev_cursor: Option<(u16, u16, bool)>,
+}
+
+impl PaneRenderCache {
+    fn empty() -> Self {
+        PaneRenderCache {
+            bg: Vec::new(),
+            glyph: Vec::new(),
+            deco: Vec::new(),
+            key: None,
+            prev_cursor: None,
+        }
+    }
+}
+
 /// The wgpu instanced-cell renderer. Windowing-agnostic: it receives an
 /// already-created `Device`/`Queue`/surface format and never touches
 /// `winit` or `wgpu::Surface`.
@@ -60,6 +120,13 @@ pub struct Renderer {
     target_format_is_srgb: bool,
     mask_atlas_seen_generation: u64,
     color_atlas_seen_generation: u64,
+    /// Per-pane row-instance cache for dirty-row diffing (WP4), keyed by the
+    /// pane's stable render-side identity so it survives split reordering
+    /// across frames.
+    pane_render_cache: HashMap<PaneId, PaneRenderCache>,
+    /// Total rows regenerated across all panes in the most recent
+    /// `rebuild_panes` call (AC-WP4-02).
+    rows_rebuilt_last_frame: u64,
 }
 
 impl Renderer {
@@ -147,6 +214,8 @@ impl Renderer {
             target_format_is_srgb: format.is_srgb(),
             mask_atlas_seen_generation,
             color_atlas_seen_generation,
+            pane_render_cache: HashMap::new(),
+            rows_rebuilt_last_frame: 0,
         })
     }
 
@@ -174,6 +243,13 @@ impl Renderer {
             .collect()
     }
 
+    /// Total rows regenerated across all panes in the most recent
+    /// `rebuild_panes` (or `rebuild_cells`) call — 0 when every visible
+    /// row's cached instances were reused unchanged (AC-WP4-02).
+    pub fn rows_rebuilt_last_frame(&self) -> u64 {
+        self.rows_rebuilt_last_frame
+    }
+
     /// Rebuild the CPU instance list from a snapshot, re-rastering any glyphs
     /// not yet in the atlas and re-uploading the atlas texture if it grew.
     pub fn rebuild_cells(&mut self, snap: &FrameSnapshot, font: &mut FontGrid, theme: &Theme) {
@@ -189,9 +265,17 @@ impl Renderer {
     ///
     /// The caller should rebuild every pane first, then call [`Renderer::sync_atlas`]
     /// once before drawing so all panes observe the same atlas mutation point.
-    /// A noisy pane still causes all visible pane snapshots to be rebuilt and
-    /// the full window to be redrawn each frame; dirty-row diffing remains a
-    /// follow-up beyond the v1 split-pane renderer.
+    ///
+    /// WP4 (REQ-PERF-2/3): each pane keeps a [`PaneRenderCache`] of its
+    /// per-row bg/glyph/decoration instance segments across frames. A row is
+    /// only regenerated when `FrameSnapshot::row_dirty` says it changed, the
+    /// cursor moved into or out of it, or a pane-wide invalidation trigger
+    /// fired (see [`FrameInvalidationKey`]) — an unchanged row costs zero
+    /// instance-rebuild work. The final instance list is still flattened in
+    /// the exact bg-then-glyph-then-decoration GLOBAL order the shader relies
+    /// on (FM-12): a glyph descender overflowing into the row below must
+    /// blend over that row's background, which only holds if every row's bg
+    /// instance precedes every row's glyph instance across the whole pane.
     pub fn rebuild_panes(&mut self, panes: &[PaneFrame<'_>], font: &mut FontGrid, theme: &Theme) {
         self.instances.clear();
         self.pane_instances.clear();
@@ -199,19 +283,24 @@ impl Renderer {
         self.divider_range = 0..0;
 
         let mut first_clear_color = None;
+        let mut rows_rebuilt_total: u64 = 0;
         for pane in panes {
             let start = self.instances.len() as u32;
-            let mut pane_instances = Vec::new();
-            let (clear_color, cell_size) = rebuild_cell_instances(
-                &mut pane_instances,
+            let cache = self
+                .pane_render_cache
+                .entry(pane.pane)
+                .or_insert_with(PaneRenderCache::empty);
+            let (clear_color, cell_size, rows_rebuilt) = rebuild_pane_cached(
+                cache,
+                &mut self.instances,
                 pane.snapshot,
                 font,
                 theme,
                 self.target_format_is_srgb,
             );
+            rows_rebuilt_total += rows_rebuilt;
             first_clear_color.get_or_insert(clear_color);
             self.cell_size = cell_size;
-            self.instances.extend(pane_instances);
             let end = self.instances.len() as u32;
             self.pane_instances.push(PaneInstances {
                 pane: pane.pane,
@@ -220,10 +309,16 @@ impl Renderer {
             self.pane_layout.push((pane.pane, pane.rect));
         }
 
+        // Drop caches for panes that are no longer visible (split closed) so
+        // this map doesn't grow unbounded over a long session.
+        self.pane_render_cache
+            .retain(|id, _| panes.iter().any(|pane| pane.pane == *id));
+
         if let Some(clear_color) = first_clear_color {
             self.clear_color = clear_color;
         }
         self.cell_instance_len = self.instances.len();
+        self.rows_rebuilt_last_frame = rows_rebuilt_total;
     }
 
     /// Draw the current instance list into `view`, uploading updated GPU
@@ -498,6 +593,20 @@ impl Renderer {
             .find(|entry| entry.pane == pane)
             .map(|entry| entry.range.clone())
     }
+
+    /// Test-only window into the built instance list (AC-WP4-03, FM-16):
+    /// lets unit tests compare the per-row-patched output against a full
+    /// rebuild's output without needing a full draw/readback round trip.
+    #[cfg(test)]
+    fn instances_for_test(&self) -> &[CellInstance] {
+        &self.instances
+    }
+
+    /// Test-only accessor for the cell/overlay instance boundary (FM-16).
+    #[cfg(test)]
+    fn cell_instance_len_for_test(&self) -> usize {
+        self.cell_instance_len
+    }
 }
 
 fn divider_instance(rect: PaneRect) -> CellInstance {
@@ -523,6 +632,14 @@ fn to_u16_saturating(value: u32) -> u16 {
     value.min(u32::from(u16::MAX)) as u16
 }
 
+/// Full (always-rebuild-every-row) instance build, used directly by unit
+/// tests that exercise the per-cell/per-glyph logic in isolation and as the
+/// reference path `PaneRenderCache`'s per-row patching must stay
+/// output-identical to (AC-WP4-03). `Renderer::rebuild_panes` does not call
+/// this — it drives [`rebuild_row_instances`] per pane through
+/// [`rebuild_pane_cached`] instead, so unchanged rows can be skipped.
+/// `cfg(test)`-only: nothing in the non-test build calls it anymore.
+#[cfg(test)]
 fn rebuild_cell_instances(
     instances: &mut Vec<CellInstance>,
     snap: &FrameSnapshot,
@@ -536,152 +653,297 @@ fn rebuild_cell_instances(
         target_format_is_srgb,
     );
 
+    let mut bg_rows = Vec::with_capacity(snap.rows.len());
+    let mut glyph_rows = Vec::with_capacity(snap.rows.len());
+    let mut deco_rows = Vec::with_capacity(snap.rows.len());
+    for (row_idx, row) in snap.rows.iter().enumerate() {
+        let (bg, glyph, deco) = rebuild_row_instances(
+            row_idx as u16,
+            row,
+            snap,
+            font,
+            theme,
+            target_format_is_srgb,
+            metrics,
+        );
+        bg_rows.push(bg);
+        glyph_rows.push(glyph);
+        deco_rows.push(deco);
+    }
+
     instances.clear();
+    flatten_row_segments(instances, &bg_rows, &glyph_rows, &deco_rows);
+
+    (clear_color, (metrics.cell_w, metrics.cell_h))
+}
+
+/// Build one row's background / glyph / decoration instance segments. Pure
+/// function of `(y, row, snap, ...)` — no cross-row state — which is what
+/// makes per-row caching in [`PaneRenderCache`] safe: a clean row's segments
+/// from a previous frame are byte-identical to what this function would
+/// produce again, because nothing here reaches outside the row.
+fn rebuild_row_instances(
+    y: u16,
+    row: &Row,
+    snap: &FrameSnapshot,
+    font: &mut FontGrid,
+    theme: &Theme,
+    target_format_is_srgb: bool,
+    metrics: Metrics,
+) -> (Vec<CellInstance>, Vec<CellInstance>, Vec<CellInstance>) {
     let mut bg_instances = Vec::new();
     let mut glyph_instances = Vec::new();
     let mut decoration_instances = Vec::new();
+    let mut segment_cells = Vec::with_capacity(row.cells.len());
 
-    for (row_idx, row) in snap.rows.iter().enumerate() {
-        let y = row_idx as u16;
-        let mut segment_cells = Vec::with_capacity(row.cells.len());
-        for (col_idx, cell) in row.cells.iter().enumerate() {
-            let x = col_idx as u16;
-            let selected = snap.is_selected(x, y);
-            let active_search = snap.is_active_search_match(x, y);
-            let search_match = snap.is_search_match(x, y);
-            let cursor_cell = snap.cursor.visible && snap.cursor.x == x && snap.cursor.y == y;
+    for (col_idx, cell) in row.cells.iter().enumerate() {
+        let x = col_idx as u16;
+        let selected = snap.is_selected(x, y);
+        let active_search = snap.is_active_search_match(x, y);
+        let search_match = snap.is_search_match(x, y);
+        let cursor_cell = snap.cursor.visible && snap.cursor.x == x && snap.cursor.y == y;
 
-            let inverse = cell.attrs.contains(CellAttrs::INVERSE);
-            let (fg_color, bg_color) = if inverse {
-                (cell.bg, cell.fg)
-            } else {
-                (cell.fg, cell.bg)
-            };
+        let inverse = cell.attrs.contains(CellAttrs::INVERSE);
+        let (fg_color, bg_color) = if inverse {
+            (cell.bg, cell.fg)
+        } else {
+            (cell.fg, cell.bg)
+        };
 
-            // Background quad: skip when it's the plain default bg (the
-            // clear color already fills that), unless inverted.
-            let bg_is_default = matches!(bg_color, Color::Default) && !inverse;
-            if cursor_cell || selected || active_search || search_match || !bg_is_default {
-                let bg = if cursor_cell {
-                    if snap.colors.cursor().is_some() {
-                        surface_output_rgba(
-                            theme.cursor_with_colors(&snap.colors),
-                            target_format_is_srgb,
-                        )
-                    } else {
-                        surface_output_rgba(
-                            theme.resolve_with_colors(fg_color, true, &snap.colors),
-                            target_format_is_srgb,
-                        )
-                    }
-                } else if selected {
-                    surface_output_rgba(theme.selection_bg(), target_format_is_srgb)
-                } else if active_search {
-                    surface_output_rgba(theme.active_search_bg(), target_format_is_srgb)
-                } else if search_match {
-                    surface_output_rgba(theme.search_bg(), target_format_is_srgb)
-                } else {
+        // Background quad: skip when it's the plain default bg (the
+        // clear color already fills that), unless inverted.
+        let bg_is_default = matches!(bg_color, Color::Default) && !inverse;
+        if cursor_cell || selected || active_search || search_match || !bg_is_default {
+            let bg = if cursor_cell {
+                if snap.colors.cursor().is_some() {
                     surface_output_rgba(
-                        theme.resolve_with_colors(bg_color, false, &snap.colors),
+                        theme.cursor_with_colors(&snap.colors),
                         target_format_is_srgb,
                     )
-                };
-                bg_instances.push(CellInstance {
-                    glyph_pos: [0, 0],
-                    glyph_size: [0, 0],
-                    bearing: [0, 0],
-                    grid_pos: [x, y],
-                    color: to_u8_color(bg),
-                    flags: if cursor_cell {
-                        CellInstance::FLAG_CURSOR
-                    } else {
-                        0
-                    },
-                });
-            }
-
-            let text_color = if cursor_cell {
+                } else {
+                    surface_output_rgba(
+                        theme.resolve_with_colors(fg_color, true, &snap.colors),
+                        target_format_is_srgb,
+                    )
+                }
+            } else if selected {
+                surface_output_rgba(theme.selection_bg(), target_format_is_srgb)
+            } else if active_search {
+                surface_output_rgba(theme.active_search_bg(), target_format_is_srgb)
+            } else if search_match {
+                surface_output_rgba(theme.search_bg(), target_format_is_srgb)
+            } else {
                 surface_output_rgba(
                     theme.resolve_with_colors(bg_color, false, &snap.colors),
                     target_format_is_srgb,
                 )
-            } else if selected {
-                surface_output_rgba(theme.selection_fg(), target_format_is_srgb)
-            } else if active_search {
-                surface_output_rgba(theme.active_search_fg(), target_format_is_srgb)
-            } else if search_match {
-                surface_output_rgba(theme.search_fg(), target_format_is_srgb)
-            } else {
-                surface_output_rgba(
-                    theme.resolve_with_colors(fg_color, true, &snap.colors),
-                    target_format_is_srgb,
-                )
             };
-
-            let invisible = cell.attrs.contains(CellAttrs::INVISIBLE);
-            let wide_spacer = cell.attrs.contains(CellAttrs::WIDE_SPACER);
-            if !invisible && !wide_spacer {
-                let decoration_color = if let Some(color) = cell.underline_color {
-                    surface_output_rgba(
-                        theme.resolve_with_colors(color, true, &snap.colors),
-                        target_format_is_srgb,
-                    )
+            bg_instances.push(CellInstance {
+                glyph_pos: [0, 0],
+                glyph_size: [0, 0],
+                bearing: [0, 0],
+                grid_pos: [x, y],
+                color: to_u8_color(bg),
+                flags: if cursor_cell {
+                    CellInstance::FLAG_CURSOR
                 } else {
-                    text_color
-                };
-                push_cell_decorations(
-                    &mut decoration_instances,
-                    x,
-                    y,
-                    cell.attrs,
-                    to_u8_color(decoration_color),
-                    metrics,
-                );
-            }
-
-            // WP2 (REQ-SHAPE-1/4/6): feed this cell into the row's
-            // shape-run segmentation instead of rasterizing it inline here.
-            // Invisible cells are forced blank so shaping never produces
-            // ink for them (mirrors the old `!invisible` glyph-skip check);
-            // a plain blank/wide-spacer cell needs no special-casing here
-            // because it naturally rasterizes to an empty glyph, filtered
-            // out in `emit_run_glyph_instances`.
-            let (shape_ch, shape_combining) = if invisible {
-                (' ', Vec::new())
-            } else {
-                (cell.ch, cell.combining.chars().collect())
-            };
-            segment_cells.push(SegmentCell {
-                ch: shape_ch,
-                combining: shape_combining,
-                bold: cell.attrs.contains(CellAttrs::BOLD),
-                italic: cell.attrs.contains(CellAttrs::ITALIC),
-                selected,
-                active_search,
-                search_match,
-                cursor: cursor_cell,
-                color: to_u8_color(text_color),
+                    0
+                },
             });
         }
 
-        // REQ-SHAPE-1/6: shape this row's runs and emit glyph instances from
-        // the SHAPED GLYPH list, not per source cell (FM-04) — see
-        // `emit_run_glyph_instances`. A ligature therefore naturally
-        // collapses to one instance at its cluster-start cell (the cells it
-        // covers get no glyph instance at all), and a combining mark
-        // becomes an extra instance anchored at its base cell, positioned
-        // by its own shaped offset instead of an independent per-char pen
-        // bearing (REQ-SHAPE-4).
-        for run in segment_row(font, &segment_cells) {
-            let shaped = font.shape_run(&run.cells);
-            emit_run_glyph_instances(&mut glyph_instances, font, &run, &shaped, y, metrics);
+        let text_color = if cursor_cell {
+            surface_output_rgba(
+                theme.resolve_with_colors(bg_color, false, &snap.colors),
+                target_format_is_srgb,
+            )
+        } else if selected {
+            surface_output_rgba(theme.selection_fg(), target_format_is_srgb)
+        } else if active_search {
+            surface_output_rgba(theme.active_search_fg(), target_format_is_srgb)
+        } else if search_match {
+            surface_output_rgba(theme.search_fg(), target_format_is_srgb)
+        } else {
+            surface_output_rgba(
+                theme.resolve_with_colors(fg_color, true, &snap.colors),
+                target_format_is_srgb,
+            )
+        };
+
+        let invisible = cell.attrs.contains(CellAttrs::INVISIBLE);
+        let wide_spacer = cell.attrs.contains(CellAttrs::WIDE_SPACER);
+        if !invisible && !wide_spacer {
+            let decoration_color = if let Some(color) = cell.underline_color {
+                surface_output_rgba(
+                    theme.resolve_with_colors(color, true, &snap.colors),
+                    target_format_is_srgb,
+                )
+            } else {
+                text_color
+            };
+            push_cell_decorations(
+                &mut decoration_instances,
+                x,
+                y,
+                cell.attrs,
+                to_u8_color(decoration_color),
+                metrics,
+            );
+        }
+
+        // WP2 (REQ-SHAPE-1/4/6): feed this cell into the row's
+        // shape-run segmentation instead of rasterizing it inline here.
+        // Invisible cells are forced blank so shaping never produces
+        // ink for them (mirrors the old `!invisible` glyph-skip check);
+        // a plain blank/wide-spacer cell needs no special-casing here
+        // because it naturally rasterizes to an empty glyph, filtered
+        // out in `emit_run_glyph_instances`.
+        let (shape_ch, shape_combining) = if invisible {
+            (' ', Vec::new())
+        } else {
+            (cell.ch, cell.combining.chars().collect())
+        };
+        segment_cells.push(SegmentCell {
+            ch: shape_ch,
+            combining: shape_combining,
+            bold: cell.attrs.contains(CellAttrs::BOLD),
+            italic: cell.attrs.contains(CellAttrs::ITALIC),
+            selected,
+            active_search,
+            search_match,
+            cursor: cursor_cell,
+            color: to_u8_color(text_color),
+        });
+    }
+
+    // REQ-SHAPE-1/6: shape this row's runs and emit glyph instances from
+    // the SHAPED GLYPH list, not per source cell (FM-04) — see
+    // `emit_run_glyph_instances`. A ligature therefore naturally
+    // collapses to one instance at its cluster-start cell (the cells it
+    // covers get no glyph instance at all), and a combining mark
+    // becomes an extra instance anchored at its base cell, positioned
+    // by its own shaped offset instead of an independent per-char pen
+    // bearing (REQ-SHAPE-4).
+    for run in segment_row(font, &segment_cells) {
+        let shaped = font.shape_run(&run.cells);
+        emit_run_glyph_instances(&mut glyph_instances, font, &run, &shaped, y, metrics);
+    }
+
+    (bg_instances, glyph_instances, decoration_instances)
+}
+
+/// Concatenate row-indexed bg/glyph/decoration segments in the GLOBAL
+/// bg-then-glyph-then-decoration order every row depends on (FM-12): a
+/// glyph descender from row `r` can overflow into row `r+1`'s space and
+/// must blend OVER row `r+1`'s background, which only holds if EVERY row's
+/// bg instance precedes EVERY row's glyph instance in the flattened list.
+/// Grouping instances per-row (`[row0: bg,glyph,deco, row1: ...]`) would
+/// break this and is NOT a valid alternative here.
+fn flatten_row_segments(
+    instances: &mut Vec<CellInstance>,
+    bg_rows: &[Vec<CellInstance>],
+    glyph_rows: &[Vec<CellInstance>],
+    deco_rows: &[Vec<CellInstance>],
+) {
+    for row in bg_rows {
+        instances.extend_from_slice(row);
+    }
+    for row in glyph_rows {
+        instances.extend_from_slice(row);
+    }
+    for row in deco_rows {
+        instances.extend_from_slice(row);
+    }
+}
+
+/// WP4 (REQ-PERF-2/3): rebuild `cache`'s per-row segments against `snap`,
+/// regenerating only dirty rows, then append the flattened result to
+/// `instances` (the caller owns clearing `instances` once per frame across
+/// all panes). Returns `(clear_color, cell_size, rows_rebuilt)`.
+fn rebuild_pane_cached(
+    cache: &mut PaneRenderCache,
+    instances: &mut Vec<CellInstance>,
+    snap: &FrameSnapshot,
+    font: &mut FontGrid,
+    theme: &Theme,
+    target_format_is_srgb: bool,
+) -> ([f32; 4], (f32, f32), u64) {
+    let metrics = font.metrics();
+    let clear_color = surface_output_rgba(
+        theme.default_bg_with_colors(&snap.colors),
+        target_format_is_srgb,
+    );
+    let cell_size = (metrics.cell_w, metrics.cell_h);
+
+    let new_key = FrameInvalidationKey {
+        row_base: snap.row_base,
+        cols: snap.cols,
+        rows: snap.rows_n,
+        colors: snap.colors.clone(),
+        theme: theme.clone(),
+        selection: snap.selection,
+        search: snap.search.clone(),
+        cell_size,
+    };
+
+    let rows = snap.rows.len();
+    let new_cursor = (snap.cursor.x, snap.cursor.y, snap.cursor.visible);
+    // Any of the 6 pane-wide triggers (row_base/cols/rows/colors/theme/
+    // selection/search — bundled in `FrameInvalidationKey`) differing from
+    // the cached previous-frame key forces every row dirty. A pane's first
+    // frame (`cache.key` still `None`) is also a full rebuild.
+    let full = cache.key.as_ref() != Some(&new_key) || cache.bg.len() != rows;
+
+    let mut dirty: Vec<bool> = if full {
+        vec![true; rows]
+    } else {
+        snap.row_dirty.clone()
+    };
+
+    // 7th trigger (narrower than the 6 above): cursor movement dirties
+    // EXACTLY the two affected rows, not the whole pane.
+    if !full && let Some(prev) = cache.prev_cursor
+        && prev != new_cursor
+    {
+        if let Some(slot) = dirty.get_mut(prev.1 as usize) {
+            *slot = true;
+        }
+        if let Some(slot) = dirty.get_mut(new_cursor.1 as usize) {
+            *slot = true;
         }
     }
-    instances.extend(bg_instances);
-    instances.extend(glyph_instances);
-    instances.extend(decoration_instances);
 
-    (clear_color, (metrics.cell_w, metrics.cell_h))
+    if full {
+        cache.bg = vec![Vec::new(); rows];
+        cache.glyph = vec![Vec::new(); rows];
+        cache.deco = vec![Vec::new(); rows];
+    }
+
+    let mut rows_rebuilt: u64 = 0;
+    for (row_idx, row) in snap.rows.iter().enumerate() {
+        if dirty.get(row_idx).copied().unwrap_or(true) {
+            let (bg, glyph, deco) = rebuild_row_instances(
+                row_idx as u16,
+                row,
+                snap,
+                font,
+                theme,
+                target_format_is_srgb,
+                metrics,
+            );
+            cache.bg[row_idx] = bg;
+            cache.glyph[row_idx] = glyph;
+            cache.deco[row_idx] = deco;
+            rows_rebuilt += 1;
+        }
+    }
+
+    flatten_row_segments(instances, &cache.bg, &cache.glyph, &cache.deco);
+
+    cache.key = Some(new_key);
+    cache.prev_cursor = Some(new_cursor);
+
+    (clear_color, cell_size, rows_rebuilt)
 }
 
 /// Emit one `CellInstance` per shaped glyph in `shaped` (FM-04 structural
@@ -1103,7 +1365,7 @@ mod tests {
     use super::*;
     use noa_core::{Color, GridSize, Rgb};
     use noa_font::{FontConfig, ShapeCell, StyleKey};
-    use noa_grid::Terminal;
+    use noa_grid::{Cell, Cursor, SearchMatch, SelectionPoint, Terminal};
 
     use crate::segment::CellRenderInfo;
 
@@ -1216,7 +1478,7 @@ mod tests {
         terminal.primary.grid[0].cells[0].ch = 'M';
         terminal.primary.grid[0].cells[0].fg = Color::Rgb(Rgb::new(240, 10, 20));
         terminal.primary.grid[0].cells[0].bg = Color::Rgb(Rgb::new(2, 3, 4));
-        let snap = FrameSnapshot::from_terminal(&terminal);
+        let snap = FrameSnapshot::from_terminal(&mut terminal);
 
         let mut instances = Vec::new();
         rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
@@ -1577,7 +1839,7 @@ mod tests {
         for (i, ch) in "hello!!==".chars().enumerate() {
             terminal.primary.grid[0].cells[i].ch = ch;
         }
-        let snap = FrameSnapshot::from_terminal(&terminal);
+        let snap = FrameSnapshot::from_terminal(&mut terminal);
         let theme = Theme::new();
         let mut instances = Vec::new();
 
@@ -1599,5 +1861,426 @@ mod tests {
             "a 3rd unchanged render pass must ALSO hit the cache, not just the 2nd \
              (pass2={hits_after_pass_2}, pass3={hits_after_pass_3})"
         );
+    }
+
+    // ── WP4: dirty-row diffing ────────────────────────────────────────
+
+    /// A 3-row, 1-col snapshot with distinct content per row and every
+    /// pane-wide field at a neutral baseline. `row_dirty` is all-false —
+    /// on a second call through the SAME pane cache this represents "no
+    /// row-level cell mutation happened," isolating whichever single
+    /// pane-wide field a FM-11 sub-case varies.
+    fn baseline_snapshot(chars: [char; 3]) -> FrameSnapshot {
+        let rows = chars
+            .into_iter()
+            .map(|ch| Row {
+                cells: vec![Cell {
+                    ch,
+                    ..Cell::default()
+                }],
+                wrapped: false,
+                dirty: false,
+            })
+            .collect();
+        FrameSnapshot {
+            rows,
+            row_dirty: vec![false, false, false],
+            cursor: Cursor::default(),
+            colors: TerminalColors::default(),
+            selection: None,
+            search: SearchState::default(),
+            row_base: 0,
+            cols: 1,
+            rows_n: 3,
+        }
+    }
+
+    #[test]
+    fn rebuild_panes_reports_zero_rows_rebuilt_when_nothing_changed() {
+        // AC-WP4-02 (REQ-PERF-2): a frame in which no row changed since the
+        // last rebuild produces a rows_rebuilt count of exactly 0.
+        let Some((device, queue)) = device_queue() else {
+            eprintln!("no wgpu adapter available — skipping rows_rebuilt zero-count test");
+            return;
+        };
+        let Some(mut font) = skip_font() else { return };
+        let mut renderer = Renderer::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Bgra8Unorm,
+            &mut font,
+            GridPadding::ZERO,
+        )
+        .expect("build renderer");
+        renderer.resize(PixelSize { w: 64, h: 64 });
+
+        let mut terminal = Terminal::new(GridSize::new(4, 2));
+        terminal.primary.grid[0].cells[0].ch = 'A';
+        let theme = Theme::new();
+        let pane = PaneId::new(1);
+        let rect = PaneRect::new(0, 0, 64, 64);
+
+        let snap1 = FrameSnapshot::from_terminal(&mut terminal);
+        renderer.rebuild_panes(
+            &[PaneFrame {
+                pane,
+                rect,
+                snapshot: &snap1,
+            }],
+            &mut font,
+            &theme,
+        );
+        assert!(
+            renderer.rows_rebuilt_last_frame() > 0,
+            "the first frame through a fresh cache must rebuild at least one row"
+        );
+
+        // `from_terminal` already cleared the grid's dirty bits when snap1
+        // was taken; the terminal has not been mutated since, so this
+        // second snapshot reports every row clean.
+        let snap2 = FrameSnapshot::from_terminal(&mut terminal);
+        renderer.rebuild_panes(
+            &[PaneFrame {
+                pane,
+                rect,
+                snapshot: &snap2,
+            }],
+            &mut font,
+            &theme,
+        );
+        assert_eq!(
+            renderer.rows_rebuilt_last_frame(),
+            0,
+            "an unchanged second frame must rebuild zero rows"
+        );
+    }
+
+    #[test]
+    fn per_row_patch_output_matches_a_full_rebuild_ac_wp4_03() {
+        // AC-WP4-03 (REQ-PERF-3): identical terminal state rendered once via
+        // a full rebuild and once via the per-row patch path must produce
+        // an IDENTICAL instance list.
+        let Some((device, queue)) = device_queue() else {
+            eprintln!("no wgpu adapter available — skipping AC-WP4-03 identical-output test");
+            return;
+        };
+        let Some(mut font) = skip_font() else { return };
+        let mut renderer = Renderer::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Bgra8Unorm,
+            &mut font,
+            GridPadding::ZERO,
+        )
+        .expect("build renderer");
+        renderer.resize(PixelSize { w: 64, h: 64 });
+
+        let theme = Theme::new();
+        let pane = PaneId::new(1);
+        let rect = PaneRect::new(0, 0, 64, 64);
+
+        let mut terminal = Terminal::new(GridSize::new(4, 3));
+        terminal.primary.grid[0].cells[0].ch = 'A';
+        terminal.primary.grid[1].cells[0].ch = 'B';
+        terminal.primary.grid[2].cells[0].ch = 'C';
+
+        // First frame: fresh cache -> full rebuild.
+        let snap1 = FrameSnapshot::from_terminal(&mut terminal);
+        renderer.rebuild_panes(
+            &[PaneFrame {
+                pane,
+                rect,
+                snapshot: &snap1,
+            }],
+            &mut font,
+            &theme,
+        );
+
+        // Mutate ONE row only, so the second frame is a genuine per-row
+        // patch: rows 0 and 2 are reused untouched from the cache, only
+        // row 1 regenerates. Direct field mutation bypasses the real
+        // cell-mutating paths that set `Row::dirty` (e.g. `Screen::print`),
+        // so mark it explicitly — mirrors how `noa-render/tests/pipeline.rs`
+        // constructs `Row { dirty: true, .. }` literals directly.
+        terminal.primary.grid[1].cells[0].ch = 'X';
+        terminal.primary.grid[1].dirty = true;
+        let snap2 = FrameSnapshot::from_terminal(&mut terminal);
+        renderer.rebuild_panes(
+            &[PaneFrame {
+                pane,
+                rect,
+                snapshot: &snap2,
+            }],
+            &mut font,
+            &theme,
+        );
+        assert_eq!(
+            renderer.rows_rebuilt_last_frame(),
+            1,
+            "only the mutated row should have been rebuilt on the second frame"
+        );
+        let patched = renderer.instances_for_test().to_vec();
+
+        // Reference: an unconditional full rebuild of the SAME
+        // (post-mutation) state via the always-full free function.
+        let mut reference = Vec::new();
+        rebuild_cell_instances(&mut reference, &snap2, &mut font, &theme, false);
+
+        assert_eq!(
+            patched, reference,
+            "the per-row-patched instance list must be byte-identical to a full \
+             rebuild of the same state (bg-then-glyph-then-decoration GLOBAL order, FM-12)"
+        );
+    }
+
+    #[test]
+    fn pane_wide_invalidation_triggers_are_covered_fm11() {
+        // FM-11: each of the 6 pane-wide triggers bundled into
+        // `FrameInvalidationKey` must force EVERY row in the pane dirty when
+        // it differs from the previous frame, even though `row_dirty` says
+        // no cell changed. Cursor movement (the narrower 7th case) instead
+        // dirties exactly the two affected rows.
+        let Some((device, queue)) = device_queue() else {
+            eprintln!("no wgpu adapter available — skipping FM-11 trigger table test");
+            return;
+        };
+        let Some(mut font) = skip_font() else { return };
+        let mut renderer = Renderer::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Bgra8Unorm,
+            &mut font,
+            GridPadding::ZERO,
+        )
+        .expect("build renderer");
+        renderer.resize(PixelSize { w: 64, h: 64 });
+
+        let theme = Theme::new();
+        let rect = PaneRect::new(0, 0, 64, 64);
+
+        // Each sub-case gets its own PaneId so it starts from a fresh cache
+        // without needing a fresh Renderer (cheaper: one GPU device for the
+        // whole table).
+        let mut rebuild_twice = |pane_id: u64, snap_a: &FrameSnapshot, theme_a: &Theme, snap_b: &FrameSnapshot, theme_b: &Theme| {
+            let pane = PaneId::new(pane_id);
+            renderer.rebuild_panes(
+                &[PaneFrame { pane, rect, snapshot: snap_a }],
+                &mut font,
+                theme_a,
+            );
+            renderer.rebuild_panes(
+                &[PaneFrame { pane, rect, snapshot: snap_b }],
+                &mut font,
+                theme_b,
+            );
+            renderer.rows_rebuilt_last_frame()
+        };
+
+        // 1. row_base (viewport scroll offset).
+        {
+            let snap_a = baseline_snapshot(['A', 'B', 'C']);
+            let mut snap_b = baseline_snapshot(['A', 'B', 'C']);
+            snap_b.row_base = 1;
+            let rebuilt = rebuild_twice(101, &snap_a, &theme, &snap_b, &theme);
+            assert_eq!(rebuilt, 3, "row_base change must force a full pane rebuild");
+        }
+
+        // 2a. cols (resize).
+        {
+            let snap_a = baseline_snapshot(['A', 'B', 'C']);
+            let mut snap_b = baseline_snapshot(['A', 'B', 'C']);
+            snap_b.cols = 2;
+            let rebuilt = rebuild_twice(102, &snap_a, &theme, &snap_b, &theme);
+            assert_eq!(rebuilt, 3, "cols change must force a full pane rebuild");
+        }
+
+        // 2b. rows_n (resize).
+        {
+            let snap_a = baseline_snapshot(['A', 'B', 'C']);
+            let mut snap_b = baseline_snapshot(['A', 'B', 'C']);
+            snap_b.rows_n = 4;
+            let rebuilt = rebuild_twice(103, &snap_a, &theme, &snap_b, &theme);
+            assert_eq!(rebuilt, 3, "rows_n change must force a full pane rebuild");
+        }
+
+        // 3. colors (terminal palette override).
+        {
+            let snap_a = baseline_snapshot(['A', 'B', 'C']);
+            let mut snap_b = baseline_snapshot(['A', 'B', 'C']);
+            let mut colors = TerminalColors::default();
+            colors.set_default_fg(Rgb::new(9, 9, 9));
+            snap_b.colors = colors;
+            let rebuilt = rebuild_twice(104, &snap_a, &theme, &snap_b, &theme);
+            assert_eq!(
+                rebuilt, 3,
+                "a terminal color override change must force a full pane rebuild"
+            );
+        }
+
+        // 4. active Theme identity.
+        {
+            let snap = baseline_snapshot(['A', 'B', 'C']);
+            let mut theme_b = Theme::new();
+            theme_b.default_fg = Rgb::new(5, 6, 7);
+            let rebuilt = rebuild_twice(105, &snap, &theme, &snap, &theme_b);
+            assert_eq!(rebuilt, 3, "a theme swap must force a full pane rebuild");
+        }
+
+        // 5. selection state.
+        {
+            let snap_a = baseline_snapshot(['A', 'B', 'C']);
+            let mut snap_b = baseline_snapshot(['A', 'B', 'C']);
+            snap_b.selection = Some(Selection::new(
+                SelectionPoint::new(0, 0),
+                SelectionPoint::new(0, 0),
+            ));
+            let rebuilt = rebuild_twice(106, &snap_a, &theme, &snap_b, &theme);
+            assert_eq!(rebuilt, 3, "a selection change must force a full pane rebuild");
+        }
+
+        // 6. search state (active-match / search-match spans).
+        {
+            let snap_a = baseline_snapshot(['A', 'B', 'C']);
+            let mut snap_b = baseline_snapshot(['A', 'B', 'C']);
+            let mut search = SearchState::default();
+            search.set_query(
+                "A".to_string(),
+                vec![SearchMatch {
+                    start: SelectionPoint::new(0, 0),
+                    end: SelectionPoint::new(0, 0),
+                }],
+            );
+            snap_b.search = search;
+            let rebuilt = rebuild_twice(107, &snap_a, &theme, &snap_b, &theme);
+            assert_eq!(rebuilt, 3, "a search-state change must force a full pane rebuild");
+        }
+
+        // 7. cursor movement — the narrower case: dirties exactly the two
+        // affected rows, NOT a full-pane invalidation.
+        {
+            let snap_a = baseline_snapshot(['A', 'B', 'C']);
+            let mut snap_b = baseline_snapshot(['A', 'B', 'C']);
+            snap_b.cursor.y = 2;
+            let rebuilt = rebuild_twice(108, &snap_a, &theme, &snap_b, &theme);
+            assert_eq!(
+                rebuilt, 2,
+                "cursor movement must dirty exactly the two affected rows, not the whole pane"
+            );
+        }
+    }
+
+    #[test]
+    fn overlay_boundary_stays_correct_after_a_per_row_patched_rebuild_fm16() {
+        // FM-16: the cell/overlay instance boundary (`cell_instance_len`)
+        // must still be computed correctly — and overlay instances must
+        // still land at the right offset — after a rebuild that only
+        // per-row-patched some rows instead of doing a full rebuild.
+        let Some((device, queue)) = device_queue() else {
+            eprintln!("no wgpu adapter available — skipping FM-16 overlay boundary test");
+            return;
+        };
+        let Some(mut font) = skip_font() else { return };
+        let mut renderer = Renderer::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Bgra8Unorm,
+            &mut font,
+            GridPadding::ZERO,
+        )
+        .expect("build renderer");
+        renderer.resize(PixelSize { w: 128, h: 64 });
+
+        let theme = Theme::new();
+        let pane_a = PaneId::new(1);
+        let pane_b = PaneId::new(2);
+        let rect_a = PaneRect::new(0, 0, 64, 64);
+        let rect_b = PaneRect::new(65, 0, 63, 64);
+
+        let mut term_a = Terminal::new(GridSize::new(4, 2));
+        term_a.primary.grid[0].cells[0].ch = 'A';
+        let mut term_b = Terminal::new(GridSize::new(4, 2));
+        term_b.primary.grid[0].cells[0].ch = 'Z';
+
+        let snap_a1 = FrameSnapshot::from_terminal(&mut term_a);
+        let snap_b1 = FrameSnapshot::from_terminal(&mut term_b);
+        renderer.rebuild_panes(
+            &[
+                PaneFrame { pane: pane_a, rect: rect_a, snapshot: &snap_a1 },
+                PaneFrame { pane: pane_b, rect: rect_b, snapshot: &snap_b1 },
+            ],
+            &mut font,
+            &theme,
+        ); // full first frame for both panes
+
+        // Mutate one row in pane A only -> the next rebuild is a genuine
+        // per-row patch (pane B rebuilds zero rows; pane A rebuilds one).
+        // Direct field mutation bypasses `Screen::print`'s `dirty = true`,
+        // so mark it explicitly (see the AC-WP4-03 test above for detail).
+        term_a.primary.grid[1].cells[0].ch = 'B';
+        term_a.primary.grid[1].dirty = true;
+        let snap_a2 = FrameSnapshot::from_terminal(&mut term_a);
+        let snap_b2 = FrameSnapshot::from_terminal(&mut term_b);
+        renderer.rebuild_panes(
+            &[
+                PaneFrame { pane: pane_a, rect: rect_a, snapshot: &snap_a2 },
+                PaneFrame { pane: pane_b, rect: rect_b, snapshot: &snap_b2 },
+            ],
+            &mut font,
+            &theme,
+        );
+        assert_eq!(
+            renderer.rows_rebuilt_last_frame(),
+            1,
+            "only pane A's single mutated row should rebuild"
+        );
+
+        let layout = [(pane_a, rect_a), (pane_b, rect_b)];
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("noa-fm16-test-target"),
+            size: wgpu::Extent3d {
+                width: 128,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let cell_instance_len_before = renderer.cell_instance_len_for_test();
+        assert_eq!(
+            cell_instance_len_before,
+            renderer.instances_for_test().len(),
+            "cell_instance_len must equal the instance list length right after rebuild_panes \
+             (no overlay appended yet)"
+        );
+
+        renderer.draw_panes(
+            &device,
+            &queue,
+            &view,
+            &layout,
+            Some(pane_a),
+            None,
+        );
+
+        let all_instances = renderer.instances_for_test();
+        assert!(
+            all_instances.len() > cell_instance_len_before,
+            "draw_panes over two panes with a focused pane must append at least one \
+             overlay (divider/focus) instance past the cell-instance boundary"
+        );
+        for inst in &all_instances[cell_instance_len_before..] {
+            assert_eq!(
+                inst.flags,
+                CellInstance::FLAG_DIVIDER,
+                "every instance appended past cell_instance_len must be an overlay \
+                 (divider/focus) quad, not leftover or corrupted cell data"
+            );
+        }
     }
 }

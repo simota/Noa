@@ -8,7 +8,7 @@ use crate::draw_plan::PaneRect;
 /// `CellText`). Used for both the background pass and the glyph pass — the
 /// `flags` bit0 selects which the shader is drawing.
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
 pub struct CellInstance {
     /// Atlas texel top-left `[x, y]` (glyph passes only).
     pub glyph_pos: [u16; 2],

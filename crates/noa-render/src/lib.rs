@@ -9,6 +9,7 @@ mod draw_plan;
 mod instance;
 mod pipeline;
 mod renderer;
+mod segment;
 mod snapshot;
 mod theme;
 

@@ -2,25 +2,31 @@
 //!
 //! Ghostty analog: `font/`. This crate discovers a monospace system font
 //! (plus a fallback stack, including Apple Color Emoji) via `font-kit`,
-//! rasterizes glyphs with `swash`, and packs them into two `etagere`-backed
-//! CPU atlases that the renderer uploads to the GPU: an R8 coverage-mask
-//! atlas for regular glyphs, and an RGBA8 atlas for color-bitmap glyphs
-//! (emoji) sampled as passthrough (`GlyphInfo::color`).
+//! shapes text runs with `rustybuzz` (pure-Rust HarfBuzz port), rasterizes
+//! glyphs with `swash`, and packs them into two `etagere`-backed CPU atlases
+//! that the renderer uploads to the GPU: an R8 coverage-mask atlas for
+//! regular glyphs, and an RGBA8 atlas for color-bitmap glyphs (emoji)
+//! sampled as passthrough (`GlyphInfo::color`).
 //!
-//! For inc-1 shaping is trivial (per-`char` charmap lookup); the cache key is
-//! just the `char`.
+//! [`FontGrid::get_or_raster`] remains the simple per-`char` cache path
+//! (used for glyphs outside a shaped run); [`FontGrid::shape_run`] +
+//! [`FontGrid::raster_shaped`] (WP2) are the run-based shape/raster path —
+//! see the `shape` module for the frozen `ShapeCell`/`ShapedGlyph` seam
+//! `noa-render` consumes.
 
 mod atlas;
 mod config;
 mod face;
 mod grid;
 mod raster;
+mod shape;
 
 pub use atlas::Atlas;
 pub use config::{AlphaBlending, FontConfig, FontFeature, FontVariation, SyntheticStyle};
 pub use face::Metrics;
 pub use grid::FontGrid;
-pub use raster::RasterizedGlyph;
+pub use raster::{GlyphSynthesis, RasterizedGlyph};
+pub use shape::{FaceId, ShapeCell, ShapedGlyph, StyleKey};
 
 /// Cache key for a rasterized glyph. Inc-1: a single `char`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

@@ -218,11 +218,13 @@ mod tests {
             .expect("atlas should grow to fit the second RGBA glyph");
         let (grown_width, grown_height) = atlas.size();
         assert!(grown_width > 8 && grown_height > 8);
-        assert_eq!(atlas.data().len(), grown_width as usize * grown_height as usize * 4);
+        assert_eq!(
+            atlas.data().len(),
+            grown_width as usize * grown_height as usize * 4
+        );
 
         // Original RGBA pixel must survive the grow's row-by-row copy.
-        let first_idx_after_grow =
-            (first.1 as usize * grown_width as usize + first.0 as usize) * 4;
+        let first_idx_after_grow = (first.1 as usize * grown_width as usize + first.0 as usize) * 4;
         assert_eq!(
             &atlas.data()[first_idx_after_grow..first_idx_after_grow + 4],
             &[10, 20, 30, 255]

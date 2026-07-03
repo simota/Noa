@@ -27,9 +27,10 @@ pollster          = "0.4"
 raw-window-handle = "0.6"
 
 # ── glyph pipeline ─────────────────────────────────────────────────
-swash    = "0.2"
-etagere  = "0.2"
-font-kit = "0.14"
+swash     = "0.2"
+etagere   = "0.2"
+font-kit  = "0.14"
+rustybuzz = "0.20"
 
 # ── pty ────────────────────────────────────────────────────────────
 portable-pty = "0.9"

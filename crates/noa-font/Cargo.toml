@@ -9,5 +9,6 @@ noa-core.workspace = true
 swash.workspace = true
 etagere.workspace = true
 font-kit.workspace = true
+rustybuzz.workspace = true
 thiserror.workspace = true
 log.workspace = true

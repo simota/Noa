@@ -3,7 +3,7 @@
 use swash::FontRef;
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
-use swash::zeno::Format;
+use swash::zeno::{Format, Transform};
 
 /// A rasterized glyph bitmap plus placement info.
 ///
@@ -29,11 +29,23 @@ pub struct RasterizedGlyph {
     pub color: bool,
 }
 
-/// Rasterize a single glyph at `px` pixels-per-em.
-///
-/// Color-bitmap glyphs (e.g. emoji `sbix`/CBDT strikes, detected via swash's
-/// [`Content::Color`]) keep their full RGBA data (REQ-EMOJI-2); everything
-/// else rasterizes to an R8 alpha mask, as before.
+/// Faux-bold / faux-italic synthesis knobs for a rasterize call (REQ-SHAPE-7,
+/// [Should]). `FontGrid::raster_shaped` decides these from
+/// `FontConfig.synthetic_style` + the run's `StyleKey`: noa currently has no
+/// separate bold/italic font-family loading (WP0 stores
+/// `families_bold`/`families_italic` but nothing resolves a distinct face
+/// from them yet), so any requested bold/italic style is treated as "the
+/// resolved face lacks the native style" and synthesized whenever the
+/// corresponding config toggle is on.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GlyphSynthesis {
+    pub embolden: bool,
+    pub shear: bool,
+}
+
+/// Rasterize a single glyph at `px` pixels-per-em, with no variation-axis
+/// coordinates and no synthetic style. Thin wrapper over
+/// [`rasterize_with_variations`] for the (still common) unvaried case.
 ///
 /// Returns an empty (zero-sized) glyph for whitespace / glyphs with no
 /// outline coverage; callers can treat that as "nothing to blit".
@@ -43,20 +55,72 @@ pub fn rasterize(
     glyph_id: u16,
     px: f32,
 ) -> RasterizedGlyph {
-    let advance = font.glyph_metrics(&[]).scale(px).advance_width(glyph_id);
+    rasterize_with_variations(ctx, font, glyph_id, px, &[], GlyphSynthesis::default())
+}
 
-    let mut scaler = ctx.builder(font).size(px).hint(true).build();
+/// Rasterize a single glyph at `px` pixels-per-em, applying `variation_coords`
+/// (D1: MUST be the same coords `FontGrid::shape_run` used for shaping this
+/// style — see `shape::variation_coords_for`) and optional synthetic-style
+/// transforms.
+///
+/// Color-bitmap glyphs (e.g. emoji `sbix`/CBDT strikes, detected via swash's
+/// [`Content::Color`]) keep their full RGBA data (REQ-EMOJI-2); everything
+/// else rasterizes to an R8 alpha mask, as before.
+///
+/// Returns an empty (zero-sized) glyph for whitespace / glyphs with no
+/// outline coverage; callers can treat that as "nothing to blit".
+pub fn rasterize_with_variations(
+    ctx: &mut ScaleContext,
+    font: FontRef<'_>,
+    glyph_id: u16,
+    px: f32,
+    variation_coords: &[(u32, f32)],
+    synthesis: GlyphSynthesis,
+) -> RasterizedGlyph {
+    let normalized_coords: Vec<swash::NormalizedCoord> = if variation_coords.is_empty() {
+        Vec::new()
+    } else {
+        font.variations()
+            .normalized_coords(variation_coords.iter().copied())
+            .collect()
+    };
+
+    let advance = font
+        .glyph_metrics(&normalized_coords)
+        .scale(px)
+        .advance_width(glyph_id);
+
+    let mut scaler = ctx
+        .builder(font)
+        .size(px)
+        .hint(true)
+        .normalized_coords(normalized_coords.iter().copied())
+        .build();
 
     // Prefer color bitmap strikes, then alpha bitmap strikes, then outlines.
     // `.format(Format::Alpha)` only affects the outline path (Format is
     // meaningless for bitmap strikes, which carry their own native format).
-    let image = Render::new(&[
+    let mut render = Render::new(&[
         Source::ColorBitmap(StrikeWith::BestFit),
         Source::Bitmap(StrikeWith::BestFit),
         Source::Outline,
-    ])
-    .format(Format::Alpha)
-    .render(&mut scaler, glyph_id);
+    ]);
+    render.format(Format::Alpha);
+    if synthesis.embolden {
+        // A modest embolden strength proportional to size — a best-effort
+        // approximation (REQ-SHAPE-7 is [Should]; exact CoreText-matching
+        // stroke-width tuning is out of scope for this chain).
+        render.embolden(px * 0.02);
+    }
+    if synthesis.shear {
+        // Faux-italic shear. Bitmap strikes (color emoji, pre-rendered
+        // bitmap fonts) ignore this — shearing only affects outline
+        // rendering, which matches Ghostty/CoreText behavior of never
+        // synthesizing italic onto a bitmap strike.
+        render.transform(Some(Transform::new(1.0, 0.0, -0.25, 1.0, 0.0, 0.0)));
+    }
+
+    let image = render.render(&mut scaler, glyph_id);
 
     let Some(img) = image else {
         return RasterizedGlyph {

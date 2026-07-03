@@ -4,11 +4,12 @@
 use std::ops::Range;
 
 use noa_core::{CellAttrs, CellSize, Color, GridPadding, PixelSize};
-use noa_font::{FontGrid, Metrics};
+use noa_font::{FontGrid, Metrics, ShapedGlyph};
 
 use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
 use crate::pipeline::CellPipeline;
+use crate::segment::{SegmentCell, ShapeRun, segment_row};
 use crate::snapshot::FrameSnapshot;
 use crate::theme::Theme;
 
@@ -80,7 +81,8 @@ impl Renderer {
             wgpu::TextureFormat::R8Unorm,
             "noa-glyph-mask-atlas",
         );
-        let mask_atlas_view = mask_atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mask_atlas_view =
+            mask_atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
         upload_atlas(
             queue,
             &mask_atlas_texture,
@@ -541,6 +543,7 @@ fn rebuild_cell_instances(
 
     for (row_idx, row) in snap.rows.iter().enumerate() {
         let y = row_idx as u16;
+        let mut segment_cells = Vec::with_capacity(row.cells.len());
         for (col_idx, cell) in row.cells.iter().enumerate() {
             let x = col_idx as u16;
             let selected = snap.is_selected(x, y);
@@ -636,31 +639,42 @@ fn rebuild_cell_instances(
                 );
             }
 
-            // Glyph quad: skip blanks and invisible text.
-            if !cell.is_blank() && !invisible && !wide_spacer {
-                let mut flags = CellInstance::FLAG_GLYPH;
-                if cursor_cell {
-                    flags |= CellInstance::FLAG_CURSOR;
-                }
-                for ch in cell.text_chars() {
-                    let glyph = font.get_or_raster(ch);
-                    if glyph.atlas_size[0] == 0 || glyph.atlas_size[1] == 0 {
-                        continue;
-                    }
-                    let mut glyph_flags = flags;
-                    if glyph.color {
-                        glyph_flags |= CellInstance::FLAG_COLOR_GLYPH;
-                    }
-                    glyph_instances.push(CellInstance {
-                        glyph_pos: glyph.atlas_pos,
-                        glyph_size: glyph.atlas_size,
-                        bearing: glyph_cell_bearing(metrics, glyph.bearing),
-                        grid_pos: [x, y],
-                        color: to_u8_color(text_color),
-                        flags: glyph_flags,
-                    });
-                }
-            }
+            // WP2 (REQ-SHAPE-1/4/6): feed this cell into the row's
+            // shape-run segmentation instead of rasterizing it inline here.
+            // Invisible cells are forced blank so shaping never produces
+            // ink for them (mirrors the old `!invisible` glyph-skip check);
+            // a plain blank/wide-spacer cell needs no special-casing here
+            // because it naturally rasterizes to an empty glyph, filtered
+            // out in `emit_run_glyph_instances`.
+            let (shape_ch, shape_combining) = if invisible {
+                (' ', Vec::new())
+            } else {
+                (cell.ch, cell.combining.chars().collect())
+            };
+            segment_cells.push(SegmentCell {
+                ch: shape_ch,
+                combining: shape_combining,
+                bold: cell.attrs.contains(CellAttrs::BOLD),
+                italic: cell.attrs.contains(CellAttrs::ITALIC),
+                selected,
+                active_search,
+                search_match,
+                cursor: cursor_cell,
+                color: to_u8_color(text_color),
+            });
+        }
+
+        // REQ-SHAPE-1/6: shape this row's runs and emit glyph instances from
+        // the SHAPED GLYPH list, not per source cell (FM-04) — see
+        // `emit_run_glyph_instances`. A ligature therefore naturally
+        // collapses to one instance at its cluster-start cell (the cells it
+        // covers get no glyph instance at all), and a combining mark
+        // becomes an extra instance anchored at its base cell, positioned
+        // by its own shaped offset instead of an independent per-char pen
+        // bearing (REQ-SHAPE-4).
+        for run in segment_row(font, &segment_cells) {
+            let shaped = font.shape_run(&run.cells);
+            emit_run_glyph_instances(&mut glyph_instances, font, &run, &shaped, y, metrics);
         }
     }
     instances.extend(bg_instances);
@@ -668,6 +682,66 @@ fn rebuild_cell_instances(
     instances.extend(decoration_instances);
 
     (clear_color, (metrics.cell_w, metrics.cell_h))
+}
+
+/// Emit one `CellInstance` per shaped glyph in `shaped` (FM-04 structural
+/// mitigation: iterate the shaped-glyph list, never ask a source cell
+/// "should I draw a glyph" — there is no per-cell suppressed flag to
+/// forget). Each glyph is anchored at `run.start_col + glyph.cluster`: for
+/// a ligature that is the cluster-start cell (the cells it covers get no
+/// instance at all, since no `ShapedGlyph` in `shaped` carries their
+/// cluster index — no double-draw); for a combining mark it is the mark's
+/// base cell, positioned by the shaped `x_offset`/`y_offset` rather than an
+/// independent per-char pen bearing.
+fn emit_run_glyph_instances(
+    glyph_instances: &mut Vec<CellInstance>,
+    font: &mut FontGrid,
+    run: &ShapeRun,
+    shaped: &[ShapedGlyph],
+    row: u16,
+    metrics: Metrics,
+) {
+    for glyph in shaped {
+        let cluster = glyph.cluster as usize;
+        let (Some(cell), Some(render_info)) =
+            (run.cells.get(cluster), run.cell_render.get(cluster))
+        else {
+            continue;
+        };
+
+        let raster = font.raster_shaped(glyph.face_id, glyph.glyph_id, cell.style);
+        if raster.atlas_size[0] == 0 || raster.atlas_size[1] == 0 {
+            continue;
+        }
+
+        let mut flags = CellInstance::FLAG_GLYPH;
+        if render_info.cursor {
+            flags |= CellInstance::FLAG_CURSOR;
+        }
+        if raster.color {
+            flags |= CellInstance::FLAG_COLOR_GLYPH;
+        }
+
+        let base_bearing = glyph_cell_bearing(metrics, raster.bearing);
+        let bearing = [
+            base_bearing[0].saturating_add(clamp_to_i16(glyph.x_offset)),
+            base_bearing[1].saturating_sub(clamp_to_i16(glyph.y_offset)),
+        ];
+        let anchor_col = run.start_col.saturating_add(glyph.cluster as u16);
+
+        glyph_instances.push(CellInstance {
+            glyph_pos: raster.atlas_pos,
+            glyph_size: raster.atlas_size,
+            bearing,
+            grid_pos: [anchor_col, row],
+            color: render_info.color,
+            flags,
+        });
+    }
+}
+
+fn clamp_to_i16(value: i32) -> i16 {
+    value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
 fn push_cell_decorations(
@@ -1028,7 +1102,20 @@ fn sync_one_atlas(
 mod tests {
     use super::*;
     use noa_core::{Color, GridSize, Rgb};
+    use noa_font::{FontConfig, ShapeCell, StyleKey};
     use noa_grid::Terminal;
+
+    use crate::segment::CellRenderInfo;
+
+    fn skip_font() -> Option<FontGrid> {
+        match FontGrid::new(14.0, FontConfig::default()) {
+            Ok(font) => Some(font),
+            Err(err) => {
+                eprintln!("skipping: no system monospace font available: {err}");
+                None
+            }
+        }
+    }
 
     fn metrics(ascent: f32) -> Metrics {
         Metrics {
@@ -1249,6 +1336,207 @@ mod tests {
         assert_eq!(
             surface_output_rgba([0.0, 1.0, 0.5, 0.5], true),
             [0.0, 1.0, srgb_to_linear(0.5), 0.5]
+        );
+    }
+
+    // ---- WP2: shaping + ligatures + shape cache -----------------------
+
+    /// AC-WP2-01 [noa-render half of the FM-04 mitigation]: a single
+    /// shaped glyph covering 2 source cells (simulating a ligature — real
+    /// ligature-font availability isn't guaranteed in every environment, so
+    /// this constructs the shaped-glyph list directly instead of depending
+    /// on one) must emit exactly ONE glyph instance, anchored at the
+    /// cluster-start cell; the covered (non-start) cell must get none.
+    /// Proves the consumer iterates the shaped-glyph list rather than
+    /// asking each source cell "should I draw" (no per-cell suppression
+    /// flag to forget).
+    #[test]
+    fn ligature_shaped_glyph_emits_one_instance_and_covered_cell_emits_none() {
+        let Some(mut font) = skip_font() else { return };
+        let style = StyleKey::default();
+
+        let real = font
+            .shape_run(&[ShapeCell {
+                ch: 'M',
+                combining: Vec::new(),
+                style,
+            }])
+            .into_iter()
+            .next()
+            .expect("shaping 'M' must yield a glyph");
+
+        let run = ShapeRun {
+            start_col: 5,
+            cells: vec![
+                ShapeCell {
+                    ch: '!',
+                    combining: Vec::new(),
+                    style,
+                },
+                ShapeCell {
+                    ch: '=',
+                    combining: Vec::new(),
+                    style,
+                },
+            ],
+            cell_render: vec![
+                CellRenderInfo {
+                    color: [10, 20, 30, 255],
+                    cursor: false,
+                },
+                CellRenderInfo {
+                    color: [40, 50, 60, 255],
+                    cursor: false,
+                },
+            ],
+        };
+        // Exactly one shaped glyph for a 2-cell run: the ligature case.
+        let shaped = vec![ShapedGlyph {
+            glyph_id: real.glyph_id,
+            face_id: real.face_id,
+            x_advance: real.x_advance,
+            x_offset: 0,
+            y_offset: 0,
+            cluster: 0,
+        }];
+
+        let mut glyph_instances = Vec::new();
+        let metrics = font.metrics();
+        emit_run_glyph_instances(&mut glyph_instances, &mut font, &run, &shaped, 7, metrics);
+
+        assert_eq!(
+            glyph_instances.len(),
+            1,
+            "a ligature (one shaped glyph for 2 source cells) must emit exactly one instance"
+        );
+        assert_eq!(
+            glyph_instances[0].grid_pos,
+            [5, 7],
+            "the ligature instance must be anchored at start_col + cluster (the cluster-start cell)"
+        );
+        assert_eq!(
+            glyph_instances[0].color,
+            [10, 20, 30, 255],
+            "instance color must come from the cluster-start cell's render context"
+        );
+    }
+
+    /// AC-WP2-04 [noa-render half]: multiple shaped glyphs sharing one
+    /// cluster (a base glyph plus an attached mark glyph) must each be
+    /// emitted, anchored at the SAME cell, positioned by their OWN shaped
+    /// `x_offset`/`y_offset` — not merged into one draw and not positioned
+    /// by an independent per-char pen bearing.
+    #[test]
+    fn combining_mark_glyph_is_positioned_by_shaped_offset_not_pen_bearing() {
+        let Some(mut font) = skip_font() else { return };
+        let style = StyleKey::default();
+
+        let base = font
+            .shape_run(&[ShapeCell {
+                ch: 'M',
+                combining: Vec::new(),
+                style,
+            }])
+            .into_iter()
+            .next()
+            .expect("shaping 'M' must yield a glyph");
+
+        let run = ShapeRun {
+            start_col: 2,
+            cells: vec![ShapeCell {
+                ch: 'M',
+                combining: vec!['\u{301}'],
+                style,
+            }],
+            cell_render: vec![CellRenderInfo {
+                color: [1, 2, 3, 255],
+                cursor: false,
+            }],
+        };
+        // Two glyphs sharing cluster 0: the base, and a stand-in "mark"
+        // glyph (reusing a real, rasterizable glyph id so it isn't
+        // filtered as empty) offset from it.
+        let shaped = vec![
+            ShapedGlyph {
+                glyph_id: base.glyph_id,
+                face_id: base.face_id,
+                x_advance: base.x_advance,
+                x_offset: 0,
+                y_offset: 0,
+                cluster: 0,
+            },
+            ShapedGlyph {
+                glyph_id: base.glyph_id,
+                face_id: base.face_id,
+                x_advance: 0,
+                x_offset: 3,
+                y_offset: 5,
+                cluster: 0,
+            },
+        ];
+
+        let mut glyph_instances = Vec::new();
+        let metrics = font.metrics();
+        emit_run_glyph_instances(&mut glyph_instances, &mut font, &run, &shaped, 9, metrics);
+
+        assert_eq!(
+            glyph_instances.len(),
+            2,
+            "both the base and the attached mark glyph must be emitted (attached cluster)"
+        );
+        assert!(
+            glyph_instances.iter().all(|inst| inst.grid_pos == [2, 9]),
+            "both glyphs must share the base cell's anchor position"
+        );
+        let base_bearing = glyph_instances[0].bearing;
+        let mark_bearing = glyph_instances[1].bearing;
+        assert_eq!(
+            mark_bearing[0],
+            base_bearing[0] + 3,
+            "the mark's x position must come from its own shaped x_offset"
+        );
+        assert_eq!(
+            mark_bearing[1],
+            base_bearing[1] - 5,
+            "the mark's y position must come from its own shaped y_offset (HarfBuzz y-up -> cell y-down)"
+        );
+    }
+
+    /// AC-WP2-05 (FM-08 gap-closer): unlike a hand-built `ShapeCell` slice
+    /// passed directly to `shape_run`, this exercises the REAL
+    /// segmentation -> `shape_run` path (`rebuild_cell_instances`) across 3
+    /// consecutive render passes over unchanged terminal content, and
+    /// asserts the shape cache keeps hitting from the 2nd pass onward — not
+    /// just once.
+    #[test]
+    fn repeated_render_passes_hit_the_shape_cache_via_the_real_segmentation_path() {
+        let Some(mut font) = skip_font() else { return };
+
+        let mut terminal = Terminal::new(GridSize::new(12, 1));
+        for (i, ch) in "hello!!==".chars().enumerate() {
+            terminal.primary.grid[0].cells[i].ch = ch;
+        }
+        let snap = FrameSnapshot::from_terminal(&terminal);
+        let theme = Theme::new();
+        let mut instances = Vec::new();
+
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+        let hits_after_pass_1 = font.shape_cache_hits();
+
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+        let hits_after_pass_2 = font.shape_cache_hits();
+        assert!(
+            hits_after_pass_2 > hits_after_pass_1,
+            "an unchanged frame's 2nd render pass must hit the shape cache \
+             (pass1={hits_after_pass_1}, pass2={hits_after_pass_2})"
+        );
+
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+        let hits_after_pass_3 = font.shape_cache_hits();
+        assert!(
+            hits_after_pass_3 > hits_after_pass_2,
+            "a 3rd unchanged render pass must ALSO hit the cache, not just the 2nd \
+             (pass2={hits_after_pass_2}, pass3={hits_after_pass_3})"
         );
     }
 }

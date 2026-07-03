@@ -69,7 +69,10 @@ impl Atlas {
     /// Returns the packed [`Reservation`] on success, or `None` if the atlas
     /// is full.
     pub fn reserve_and_blit(&mut self, w: u32, h: u32, bitmap: &[u8]) -> Option<Reservation> {
-        debug_assert!(w > 0 && h > 0, "reserve_and_blit requires a non-empty glyph");
+        debug_assert!(
+            w > 0 && h > 0,
+            "reserve_and_blit requires a non-empty glyph"
+        );
         // Pad by 1px on each side to avoid bilinear bleed between neighbours.
         let alloc = self.allocator.allocate(size2(w as i32 + 1, h as i32 + 1))?;
         let min = alloc.rectangle.min;
@@ -222,7 +225,10 @@ mod tests {
         while let Some(r) = atlas.reserve_and_blit(6, 6, &bitmap) {
             allocs.push(r.alloc);
         }
-        assert!(allocs.len() >= 2, "atlas should pack at least two 6x6 glyphs");
+        assert!(
+            allocs.len() >= 2,
+            "atlas should pack at least two 6x6 glyphs"
+        );
         assert!(
             atlas.reserve_and_blit_growing(6, 6, &bitmap).is_none(),
             "a capped, full atlas must not grow or allocate further"

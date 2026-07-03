@@ -410,10 +410,11 @@ impl FontGrid {
             AtlasKind::Mask
         };
         let reservation = loop {
-            if let Some(r) =
-                self.atlas_mut(kind)
-                    .reserve_and_blit_growing(glyph.width, glyph.height, &glyph.bitmap)
-            {
+            if let Some(r) = self.atlas_mut(kind).reserve_and_blit_growing(
+                glyph.width,
+                glyph.height,
+                &glyph.bitmap,
+            ) {
                 break Some(r);
             }
             if !self.evict_one(kind) {
@@ -514,7 +515,10 @@ impl FontGrid {
         }
         for cached in self.cache.values() {
             if let Some(id) = cached.slot {
-                assert!(self.slots.contains_key(&id), "cache references dead slot {id}");
+                assert!(
+                    self.slots.contains_key(&id),
+                    "cache references dead slot {id}"
+                );
             }
         }
         for cached in self.raster_shaped_cache.values() {

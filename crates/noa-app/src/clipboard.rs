@@ -38,8 +38,13 @@ pub(crate) enum PasteContents {
 /// up only of characters that are never special to a shell are left as-is.
 pub(crate) fn shell_escape(s: &str) -> String {
     let is_safe = !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/' | b':' | b'@' | b'%' | b'+' | b'='));
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'-' | b'_' | b'.' | b'/' | b':' | b'@' | b'%' | b'+' | b'='
+                )
+        });
     if is_safe {
         return s.to_string();
     }

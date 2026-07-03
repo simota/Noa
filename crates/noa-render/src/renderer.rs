@@ -1117,6 +1117,67 @@ mod tests {
         }
     }
 
+    /// Acquire a real device+queue, or `None` when no adapter exists (skip).
+    /// Mirrors `noa-render/tests/pipeline.rs`'s headless-GPU skip pattern.
+    fn device_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("noa-renderer-test-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                experimental_features: wgpu::ExperimentalFeatures::default(),
+                memory_hints: wgpu::MemoryHints::default(),
+                trace: wgpu::Trace::Off,
+            }))
+            .ok()?;
+        Some((device, queue))
+    }
+
+    #[test]
+    fn renderer_target_format_is_srgb_stays_in_lockstep_with_surface_format() {
+        // WP3 / REQ-AA-1 / AC-WP3-01: `Renderer::new` derives
+        // `target_format_is_srgb` straight from the surface format passed
+        // in, so `surface_output_rgba` only linearizes when the surface
+        // actually is sRGB — no double-gamma, no no-gamma artifact.
+        let Some((device, queue)) = device_queue() else {
+            eprintln!("no wgpu adapter available — skipping target_format_is_srgb lockstep test");
+            return;
+        };
+        let Some(mut font) = skip_font() else {
+            return;
+        };
+
+        let non_srgb = Renderer::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Bgra8Unorm,
+            &mut font,
+            GridPadding::ZERO,
+        )
+        .expect("build renderer with non-sRGB surface format");
+        assert!(
+            !non_srgb.target_format_is_srgb,
+            "Bgra8Unorm is not sRGB; native gamma-correct blending requires no linearization"
+        );
+
+        let srgb = Renderer::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            &mut font,
+            GridPadding::ZERO,
+        )
+        .expect("build renderer with sRGB surface format");
+        assert!(
+            srgb.target_format_is_srgb,
+            "Bgra8UnormSrgb is sRGB; solid colors must still be pre-linearized on this fallback path"
+        );
+    }
+
     fn metrics(ascent: f32) -> Metrics {
         Metrics {
             cell_w: 10.0,

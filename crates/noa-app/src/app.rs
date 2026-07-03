@@ -528,12 +528,7 @@ impl App {
         let (surface_config, renderer) = {
             let gpu = self.gpu.as_mut().expect("gpu initialized");
             let caps = surface.get_capabilities(&gpu.adapter);
-            let surface_format = caps
-                .formats
-                .iter()
-                .copied()
-                .find(|f| *f == wgpu::TextureFormat::Bgra8UnormSrgb)
-                .unwrap_or(caps.formats[0]);
+            let surface_format = preferred_surface_format(&caps.formats);
 
             let size = window.inner_size();
             let surface_config = wgpu::SurfaceConfiguration {
@@ -2158,6 +2153,44 @@ fn resolve_command_target<Id: Copy>(command: AppCommand, focused: Option<Id>) ->
     }
 }
 
+/// Choose the swapchain surface format, preferring a **non-sRGB** format
+/// (`Bgra8Unorm`) over an sRGB one (`Bgra8UnormSrgb`).
+///
+/// This is the WP3 (REQ-AA-1) "native gamma-correct AA" fix. When the
+/// surface format `.is_srgb()`, the GPU's fixed-function alpha blend unit
+/// decodes stored texels to linear before blending and re-encodes to sRGB
+/// on write — so `wgpu::BlendState::ALPHA_BLENDING` (`pipeline.rs`) executes
+/// in **linear** space. That's a different blend space than Ghostty's
+/// `native` macOS text-rendering mode, which blends glyph coverage against
+/// the background directly in gamma-encoded space (how CoreText/FreeType
+/// render by default) — the mismatch visibly thins dark-on-light glyph
+/// edges relative to Ghostty.
+///
+/// Preferring a non-sRGB surface format makes all blending — solid
+/// backgrounds, selection highlights, and glyph coverage — happen in gamma
+/// space, matching `native`. This is in lockstep with
+/// `Renderer::new`'s `target_format_is_srgb: format.is_srgb()`
+/// (`noa-render/src/renderer.rs`), which routes `surface_output_rgba`
+/// (`noa-render/src/renderer.rs`) into its no-op branch whenever the
+/// surface format is non-sRGB: colors are written to the target unchanged,
+/// no double-gamma. Do **not** "fix" this back to preferring
+/// `Bgra8UnormSrgb` — that reintroduces the linear-blend thinning bug.
+/// Falls back to `Bgra8UnormSrgb`, then to the first available format, if
+/// the adapter offers no non-sRGB option.
+fn preferred_surface_format(available: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
+    available
+        .iter()
+        .copied()
+        .find(|f| *f == wgpu::TextureFormat::Bgra8Unorm)
+        .or_else(|| {
+            available
+                .iter()
+                .copied()
+                .find(|f| *f == wgpu::TextureFormat::Bgra8UnormSrgb)
+        })
+        .unwrap_or(available[0])
+}
+
 fn preferred_surface_alpha_mode(caps: &wgpu::SurfaceCapabilities) -> wgpu::CompositeAlphaMode {
     if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
         wgpu::CompositeAlphaMode::Opaque
@@ -2295,6 +2328,39 @@ mod tests {
 
         assert_eq!(size.width, 656.0);
         assert_eq!(size.height, 392.0);
+    }
+
+    #[test]
+    fn surface_format_prefers_non_srgb_for_native_gamma_correct_blending() {
+        // WP3 / REQ-AA-1 / AC-WP3-01: a non-sRGB surface format keeps the
+        // fixed-function alpha blend unit in gamma space, matching
+        // Ghostty's `native` macOS text-rendering mode.
+        assert_eq!(
+            preferred_surface_format(&[
+                wgpu::TextureFormat::Bgra8UnormSrgb,
+                wgpu::TextureFormat::Bgra8Unorm,
+            ]),
+            wgpu::TextureFormat::Bgra8Unorm
+        );
+    }
+
+    #[test]
+    fn surface_format_falls_back_to_srgb_when_no_non_srgb_option_exists() {
+        assert_eq!(
+            preferred_surface_format(&[wgpu::TextureFormat::Bgra8UnormSrgb]),
+            wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+    }
+
+    #[test]
+    fn surface_format_falls_back_to_first_available_when_neither_bgra8_option_exists() {
+        assert_eq!(
+            preferred_surface_format(&[
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureFormat::Rgba8Unorm,
+            ]),
+            wgpu::TextureFormat::Rgba16Float
+        );
     }
 
     #[test]

@@ -23,7 +23,10 @@ mod tests;
 
 pub use action::Action;
 pub use csi::{Csi, DcsPayload, Esc};
-pub use handler::{CursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine, Handler, ModeRequest};
+pub use handler::{
+    Charset, CharsetSlot, CursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine, Handler,
+    ModeRequest,
+};
 pub use parser::Parser;
 pub use sgr::{SgrAttr, parse_sgr};
 pub use state::State;

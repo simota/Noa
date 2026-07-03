@@ -6,6 +6,7 @@
 //! as cloned rows until paged storage and `StyleId` interning land.
 
 pub mod cell;
+mod charset;
 pub mod cursor;
 pub mod modes;
 mod osc;

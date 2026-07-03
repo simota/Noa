@@ -3,7 +3,10 @@
 
 use crate::action::Action;
 use crate::csi::{Csi, Esc};
-use crate::handler::{CursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine, Handler, ModeRequest};
+use crate::handler::{
+    Charset, CharsetSlot, CursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine, Handler,
+    ModeRequest,
+};
 use crate::parser::Parser;
 use crate::sgr::parse_sgr;
 
@@ -120,24 +123,36 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
 }
 
 fn dispatch_esc<H: Handler>(esc: &Esc, h: &mut H) {
-    if !esc.intermediates.is_empty() {
-        // Charset designation (`ESC ( B`, …) etc. — no-op in inc-1 (single ASCII charset).
-        return;
+    match esc.intermediates.as_slice() {
+        [] => match esc.final_byte {
+            b'c' => h.full_reset(),                  // RIS
+            b'7' => h.save_cursor(),                 // DECSC
+            b'8' => h.restore_cursor(),              // DECRC
+            b'=' => h.set_application_keypad(true),  // DECPAM
+            b'>' => h.set_application_keypad(false), // DECPNM
+            b'M' => h.reverse_index(),               // RI
+            b'D' => h.linefeed(),                    // IND (index, no CR)
+            b'E' => {
+                // NEL
+                h.carriage_return();
+                h.linefeed();
+            }
+            b'H' => h.set_tab_stop(), // HTS
+            _ => {}
+        },
+        // SCS: `ESC ( x` designates G0, `ESC ) x` designates G1.
+        [b'('] => h.designate_charset(CharsetSlot::G0, charset_from(esc.final_byte)),
+        [b')'] => h.designate_charset(CharsetSlot::G1, charset_from(esc.final_byte)),
+        _ => {} // DECDHL/DECSWL etc. — no-op (out of scope)
     }
-    match esc.final_byte {
-        b'c' => h.full_reset(),                  // RIS
-        b'7' => h.save_cursor(),                 // DECSC
-        b'8' => h.restore_cursor(),              // DECRC
-        b'=' => h.set_application_keypad(true),  // DECPAM
-        b'>' => h.set_application_keypad(false), // DECPNM
-        b'M' => h.reverse_index(),               // RI
-        b'D' => h.linefeed(),                    // IND (index, no CR)
-        b'E' => {
-            // NEL
-            h.carriage_return();
-            h.linefeed();
-        }
-        b'H' => h.set_tab_stop(), // HTS
-        _ => {}
+}
+
+/// Map an `SCS` final byte to the [`Charset`] it designates. Lite scope only
+/// distinguishes ASCII vs DEC Special Graphics; every other final byte (UK,
+/// …) falls back to ASCII.
+fn charset_from(final_byte: u8) -> Charset {
+    match final_byte {
+        b'0' => Charset::DecSpecialGraphics,
+        _ => Charset::Ascii,
     }
 }

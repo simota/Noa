@@ -3,6 +3,7 @@
 //! replies (DA/DSR) for the pty writer.
 
 use crate::cell::Hyperlink;
+use crate::charset::CharsetState;
 use crate::cursor::{CursorStyle, ScrollRegion};
 use crate::modes::ModeState;
 use crate::osc::{
@@ -15,8 +16,8 @@ use crate::search::SearchMatch;
 use crate::selection::SelectionPoint;
 use noa_core::{CellAttrs, Color, GridSize, Point};
 use noa_vt::{
-    CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine, Handler, ModeRequest,
-    SgrAttr,
+    Charset, CharsetSlot, CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine,
+    Handler, ModeRequest, SgrAttr,
 };
 
 pub struct Terminal {
@@ -25,6 +26,8 @@ pub struct Terminal {
     pub alt: Option<Screen>,
     pub active_is_alt: bool,
     pub modes: ModeState,
+    /// G0/G1 designation + active (GL) slot for `SCS`/`SO`/`SI`.
+    charset: CharsetState,
     /// Window title from OSC 0/2 (stored; unused by the inc-1 renderer).
     pub title: String,
     /// Current working directory reported by OSC 7 as a decoded absolute path.
@@ -66,6 +69,7 @@ impl Terminal {
             alt: None,
             active_is_alt: false,
             modes: ModeState::defaults(),
+            charset: CharsetState::default(),
             title: String::new(),
             cwd: None,
             hyperlinks: Vec::new(),
@@ -529,10 +533,16 @@ fn push_hex_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 impl Handler for Terminal {
     fn print(&mut self, c: char) {
         let autowrap = self.modes.autowrap();
+        let c = self.charset.translate(c);
         self.active_mut().print(c, autowrap);
     }
 
     fn execute_c0(&mut self, byte: u8) {
+        match byte {
+            0x0e => return self.locking_shift(CharsetSlot::G1), // SO
+            0x0f => return self.locking_shift(CharsetSlot::G0), // SI
+            _ => {}
+        }
         let linefeed_newline = self.modes.linefeed_newline();
         let screen = self.active_mut();
         match byte {
@@ -640,6 +650,14 @@ impl Handler for Terminal {
         }
     }
 
+    fn designate_charset(&mut self, slot: CharsetSlot, set: Charset) {
+        self.charset.designate(slot, set);
+    }
+
+    fn locking_shift(&mut self, slot: CharsetSlot) {
+        self.charset.shift(slot);
+    }
+
     fn set_mode(&mut self, value: u16, ansi: bool, on: bool) {
         self.modes.set(value, ansi, on);
         if !ansi {
@@ -722,6 +740,7 @@ impl Handler for Terminal {
         self.alt = None;
         self.active_is_alt = false;
         self.modes = ModeState::defaults();
+        self.charset = CharsetState::default();
         self.title.clear();
         self.cwd = None;
         self.hyperlinks.clear();

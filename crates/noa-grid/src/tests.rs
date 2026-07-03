@@ -1629,3 +1629,68 @@ fn resize_shrink_rows_keeps_cursor_on_its_content() {
     assert!(cy < 10);
     assert_eq!(cell(&t, 0, cy).ch, 'Z');
 }
+
+// ── WP1: G0/G1 charset designation + DEC Special Graphics (AC-CS) ──────
+
+#[test]
+fn ac_cs_001_dec_special_graphics_g0() {
+    // ESC ( 0 designates G0 as DEC Special Graphics; `q` draws a horizontal line.
+    let t = run(b"\x1b(0q");
+    assert_eq!(cell(&t, 0, 0).ch, '\u{2500}');
+}
+
+#[test]
+fn ac_cs_002_redesignate_g0_back_to_ascii() {
+    let t = run(b"\x1b(0\x1b(Bq");
+    assert_eq!(cell(&t, 0, 0).ch, 'q');
+}
+
+#[test]
+fn ac_cs_003_so_si_switches_between_g1_and_g0() {
+    // ESC ) 0 designates G1 as DEC Special Graphics; SO shifts to G1, SI back to G0.
+    let t = run(b"\x1b)0\x0eq\x0fq");
+    assert_eq!(cell(&t, 0, 0).ch, '\u{2500}');
+    assert_eq!(cell(&t, 1, 0).ch, 'q');
+}
+
+#[test]
+fn ac_cs_004_dec_special_graphics_box_drawing_glyphs() {
+    let t = run(b"\x1b(0jklmx");
+    assert_eq!(row_text(&t, 0, 5), "\u{2518}\u{2510}\u{250c}\u{2514}\u{2502}");
+}
+
+#[test]
+fn ac_cs_005_ris_resets_charset_state() {
+    let t = run(b"\x1b(0\x1bcq");
+    assert_eq!(cell(&t, 0, 0).ch, 'q');
+}
+
+// ── FM-1 regression: existing ESC final-byte arms (dispatch_esc rebuilt to
+// match on `esc.intermediates` for SCS) must still dispatch unchanged ──────
+
+#[test]
+fn esc_decsc_decrc_save_and_restore_cursor() {
+    let t = run(b"\x1b[5;10H\x1b7\x1b[1;1H\x1b8");
+    assert_eq!(t.primary.cursor.y, 4);
+    assert_eq!(t.primary.cursor.x, 9);
+}
+
+#[test]
+fn esc_ri_reverse_index_moves_cursor_up() {
+    let t = run(b"\x1b[5;1H\x1bM");
+    assert_eq!(t.primary.cursor.y, 3);
+}
+
+#[test]
+fn esc_ind_linefeed_moves_cursor_down_without_cr() {
+    let t = run(b"\x1b[5;10H\x1bD");
+    assert_eq!(t.primary.cursor.y, 5);
+    assert_eq!(t.primary.cursor.x, 9);
+}
+
+#[test]
+fn esc_nel_moves_cursor_down_and_to_column_one() {
+    let t = run(b"\x1b[5;10H\x1bE");
+    assert_eq!(t.primary.cursor.y, 5);
+    assert_eq!(t.primary.cursor.x, 0);
+}

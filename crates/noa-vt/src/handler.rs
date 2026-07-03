@@ -54,6 +54,22 @@ pub enum CursorStyle {
     SteadyBar,
 }
 
+/// `SCS` (`ESC ( x` / `ESC ) x`) target slot — which of G0/G1 is designated.
+/// G2/G3 and `SS2`/`SS3` are out of scope (Lite slice).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CharsetSlot {
+    G0,
+    G1,
+}
+
+/// A designated character set. Lite scope: ASCII and DEC Special Graphics
+/// (VT100 line-drawing) only.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Charset {
+    Ascii,
+    DecSpecialGraphics,
+}
+
 /// `DECRQM` (`CSI Ps $ p` / `CSI ? Ps $ p`) request target.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ModeRequest {
@@ -109,6 +125,12 @@ pub trait Handler {
     /// `DECRQM` — request mode state; replies with `DECRPM`.
     fn request_mode(&mut self, _request: ModeRequest) {}
 
+    // ── charsets ───────────────────────────────────────────────────
+    /// `SCS` (`ESC ( x` / `ESC ) x`) — designate `set` into `slot` (G0/G1).
+    fn designate_charset(&mut self, _slot: CharsetSlot, _set: Charset) {}
+    /// `SO`/`SI` (`0x0E`/`0x0F`) — shift the active (GL) charset slot.
+    fn locking_shift(&mut self, _slot: CharsetSlot) {}
+
     // ── control ────────────────────────────────────────────────────
     fn carriage_return(&mut self);
     /// Index (line feed without carriage return): down one, scroll at bottom.
@@ -130,6 +152,12 @@ pub trait Handler {
     fn clear_all_tab_stops(&mut self) {}
     /// `RIS` (`ESC c`) — full reset.
     fn full_reset(&mut self);
+    /// `DECALN` (`ESC # 8`) — screen alignment test: fill the active screen
+    /// with `'E'`, home the cursor, leave margins/mode untouched.
+    fn screen_alignment_test(&mut self) {}
+    /// `DECSTR` (`CSI ! p`) — soft reset. Unlike `RIS`, screen content and
+    /// scrollback are left untouched.
+    fn soft_reset(&mut self) {}
 
     // ── edit ───────────────────────────────────────────────────────
     /// `ICH` — insert blank cells at the cursor.

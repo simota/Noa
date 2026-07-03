@@ -34,7 +34,6 @@ pub struct OverviewRenderCandidate<Id> {
     pub id: Id,
     pub dirty: bool,
     pub last_render_at: Option<Instant>,
-    pub occluded: bool,
 }
 
 /// Title label associated with a live or placeholder overview tile.
@@ -136,6 +135,14 @@ pub fn should_render_tile(
 }
 
 /// Select the dirty-and-due tile ids for one overview frame.
+///
+/// Source-window occlusion must NOT gate this selection: tabs mirrored in the
+/// overview are almost always occluded (they sit behind the overview window
+/// itself and/or in a macOS native tab group), so filtering them out would
+/// leave every live tile permanently blank and defeat REQ-OV-4's live mirror.
+/// REQ-NF-7's occlusion-aware redraw suppression is honored at the tab-window
+/// redraw layer (`TargetedRedrawDecision`) instead, which the overview tile
+/// path does not bypass.
 pub fn select_due_overview_tile_ids<Id: Copy>(
     candidates: &[OverviewRenderCandidate<Id>],
     now: Instant,
@@ -144,7 +151,6 @@ pub fn select_due_overview_tile_ids<Id: Copy>(
 ) -> Vec<Id> {
     candidates
         .iter()
-        .filter(|candidate| !candidate.occluded)
         .filter(|candidate| {
             should_render_tile(candidate.dirty, candidate.last_render_at, now, min_interval)
         })
@@ -182,6 +188,28 @@ pub fn overview_tile_labels<Id: Copy>(
             id,
             label: title_for_id(id).unwrap_or_else(|| "noa".to_string()),
         })
+        .collect()
+}
+
+/// Overflow window ids relegated to title-only placeholder rows (REQ-OV-10):
+/// the tail of `source_ids` beyond the live tile cap. Index-parallel with
+/// `OverviewLayout::placeholders` (both walk the same overflow ids in order).
+pub fn overview_placeholder_source_ids<Id: Copy>(
+    source_ids: &[Id],
+    live_tile_count: usize,
+) -> &[Id] {
+    source_ids.get(live_tile_count..).unwrap_or(&[])
+}
+
+/// Sanitize a tab title for display in a single-row placeholder tile: tab
+/// titles arrive via OSC 0/2 with no control-character filtering, and a
+/// placeholder tile has no live mirror to clip an overlong string visually,
+/// so this strips control characters and clamps to `max_cols` characters.
+pub fn sanitize_placeholder_label(label: &str, max_cols: u16) -> String {
+    label
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(max_cols as usize)
         .collect()
 }
 
@@ -361,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_lock_count_selects_only_dirty_due_non_occluded_tiles_up_to_cap() {
+    fn overview_lock_count_selects_only_dirty_due_tiles_up_to_cap() {
         let now = Instant::now();
         let due = now - OVERVIEW_TILE_MIN_RENDER_INTERVAL;
         let too_recent = now - OVERVIEW_TILE_MIN_RENDER_INTERVAL / 2;
@@ -370,45 +398,58 @@ mod tests {
                 id: 1,
                 dirty: false,
                 last_render_at: Some(due),
-                occluded: false,
             },
             OverviewRenderCandidate {
                 id: 2,
                 dirty: true,
                 last_render_at: Some(too_recent),
-                occluded: false,
             },
             OverviewRenderCandidate {
                 id: 3,
                 dirty: true,
                 last_render_at: Some(due),
-                occluded: true,
             },
             OverviewRenderCandidate {
                 id: 4,
                 dirty: true,
-                last_render_at: Some(due),
-                occluded: false,
+                last_render_at: None,
             },
             OverviewRenderCandidate {
                 id: 5,
                 dirty: true,
-                last_render_at: None,
-                occluded: false,
-            },
-            OverviewRenderCandidate {
-                id: 6,
-                dirty: true,
                 last_render_at: Some(due),
-                occluded: false,
             },
         ];
 
         let locked_tabs =
             select_due_overview_tile_ids(&candidates, now, OVERVIEW_TILE_MIN_RENDER_INTERVAL, 2);
 
-        assert_eq!(locked_tabs, vec![4, 5]);
+        assert_eq!(locked_tabs, vec![3, 4]);
         assert_eq!(locked_tabs.len(), 2, "lock_count");
+    }
+
+    /// Tabs mirrored by the overview are almost always occluded (behind the
+    /// overview window itself or in a native tab group); their tiles must
+    /// still be selected for rendering (REQ-OV-4). Candidates carry no
+    /// occlusion input at all, so a dirty+due tile from a fully hidden source
+    /// window is selected like any other.
+    #[test]
+    fn tiles_from_occluded_source_windows_are_still_selected_when_dirty_and_due() {
+        let now = Instant::now();
+        let hidden_source = OverviewRenderCandidate {
+            id: 7,
+            dirty: true,
+            last_render_at: None,
+        };
+
+        let selected = select_due_overview_tile_ids(
+            &[hidden_source],
+            now,
+            OVERVIEW_TILE_MIN_RENDER_INTERVAL,
+            2,
+        );
+
+        assert_eq!(selected, vec![7]);
     }
 
     #[test]
@@ -455,6 +496,33 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn overview_placeholder_source_ids_is_the_tail_beyond_the_live_cap() {
+        let source_ids = [1_u8, 2, 3, 4, 5];
+
+        assert_eq!(overview_placeholder_source_ids(&source_ids, 3), &[4_u8, 5]);
+        assert_eq!(
+            overview_placeholder_source_ids(&source_ids, 5),
+            &[] as &[u8]
+        );
+        assert_eq!(
+            overview_placeholder_source_ids(&source_ids, 8),
+            &[] as &[u8]
+        );
+    }
+
+    #[test]
+    fn sanitize_placeholder_label_strips_control_chars_and_clamps_to_max_cols() {
+        assert_eq!(sanitize_placeholder_label("build", 10), "build");
+        assert_eq!(sanitize_placeholder_label("build", 3), "bui");
+        assert_eq!(
+            sanitize_placeholder_label("build\x07\x1b[31m", 20),
+            "build[31m"
+        );
+        assert_eq!(sanitize_placeholder_label("", 10), "");
+        assert_eq!(sanitize_placeholder_label("build", 0), "");
     }
 
     fn assert_equal_tile_size(tiles: &[TileRect]) {

@@ -15,7 +15,11 @@ use noa_core::{DEFAULT_GRID_PADDING, GridPadding, GridSize, PixelSize, Point};
 use noa_font::FontGrid;
 use noa_grid::{Terminal, modes::MouseTracking};
 use noa_pty::{Pty, PtyConfig};
-use noa_render::{FrameSnapshot, PaneFrame, PaneId as RenderPaneId, PaneRect, Renderer, Theme};
+use noa_render::{
+    FrameSnapshot, OverviewThumbnailResources, PaneFrame, PaneId as RenderPaneId, PaneRect,
+    Renderer, Theme,
+};
+use noa_vt::Stream;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
@@ -38,7 +42,8 @@ use crate::split_tree::{
 };
 use crate::tab_overview::{
     OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_TILE_MIN_RENDER_INTERVAL,
-    OverviewRenderCandidate, compute_overview_grid, hit_test_overview_grid, overview_tile_labels,
+    OverviewLayout, OverviewRenderCandidate, compute_overview_grid, hit_test_overview_grid,
+    overview_placeholder_source_ids, overview_tile_labels, sanitize_placeholder_label,
     select_due_overview_tile_ids,
 };
 use crate::{AppCommand, ViewportScroll};
@@ -153,6 +158,17 @@ struct OverviewWindowState {
     window: Arc<Window>,
     occluded: bool,
     last_cursor_point: Option<split_tree::Point>,
+    surface: wgpu::Surface<'static>,
+    surface_config: wgpu::SurfaceConfiguration,
+    /// Shared scratch + per-tile textures (REQ-NF-3), sized for every live
+    /// mirror tile *and* every title-only placeholder tile (REQ-OV-10).
+    /// Rebuilt lazily in `redraw_overview` whenever the grid layout or
+    /// surface size changes; `None` while there are zero tabs to show.
+    thumbnails: Option<OverviewThumbnailResources>,
+    /// Single small `Renderer` dedicated to drawing placeholder-row title
+    /// text (REQ-OV-10). Reused across every placeholder tile and frame —
+    /// this is not a per-tab renderer, so it doesn't violate REQ-NF-1.
+    label_renderer: Option<Renderer>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1056,10 +1072,45 @@ impl App {
                     .expect("failed to create Tab Overview window"),
             );
             window.set_ime_allowed(false);
+
+            // The overview window only ever opens once a tab already exists
+            // (it is reachable only via a keybind/menu/command dispatched to
+            // a live tab), so GPU state is always initialized here.
+            let gpu = self
+                .gpu
+                .as_ref()
+                .expect("gpu initialized before overview window opens");
+            let surface = gpu
+                .instance
+                .create_surface(window.clone())
+                .expect("failed to create wgpu overview surface");
+            let caps = surface.get_capabilities(&gpu.adapter);
+            let surface_format = preferred_surface_format(&caps.formats);
+            let size = window.inner_size();
+            let surface_config = wgpu::SurfaceConfiguration {
+                // COPY_DST (in addition to the RENDER_ATTACHMENT every
+                // surface needs) lets `present_overview_frame` composite
+                // per-tab tile textures directly via `copy_texture_to_texture`
+                // instead of a second blit pass.
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
+                format: surface_format,
+                width: size.width.max(1),
+                height: size.height.max(1),
+                present_mode: wgpu::PresentMode::Fifo,
+                desired_maximum_frame_latency: 2,
+                alpha_mode: preferred_surface_alpha_mode(&caps),
+                view_formats: vec![],
+            };
+            surface.configure(&gpu.device, &surface_config);
+
             self.overview_window = Some(OverviewWindowState {
                 window,
                 occluded: false,
                 last_cursor_point: None,
+                surface,
+                surface_config,
+                thumbnails: None,
+                label_renderer: None,
             });
         }
 
@@ -1134,7 +1185,7 @@ impl App {
         let candidates = source_window_ids
             .iter()
             .filter_map(|window_id| {
-                let source = self.windows.get(window_id)?;
+                self.windows.get(window_id)?;
                 let tile = self
                     .overview_tiles
                     .get(window_id)
@@ -1144,7 +1195,6 @@ impl App {
                     id: *window_id,
                     dirty: tile.dirty,
                     last_render_at: tile.last_render_at,
-                    occluded: source.occluded,
                 })
             })
             .collect::<Vec<_>>();
@@ -1157,21 +1207,283 @@ impl App {
         )
     }
 
-    fn lock_due_overview_tabs(&self, window_ids: &[WindowId]) -> usize {
-        let mut locked_tabs = 0;
-        for window_id in window_ids {
-            let Some(surface) = self
-                .windows
-                .get(window_id)
-                .and_then(WindowState::focused_surface)
-            else {
+    /// (Re)build the shared scratch + per-tile thumbnail textures (REQ-NF-3)
+    /// whenever the grid layout, overview surface size, or surface format has
+    /// drifted from what they were built for. Cheap to call every frame: the
+    /// common case (nothing changed) is a handful of field comparisons.
+    fn ensure_overview_thumbnails(&mut self, layout: &OverviewLayout) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(overview) = self.overview_window.as_mut() else {
+            return;
+        };
+
+        // Placeholder tiles (REQ-OV-10) are the same uniform size as live
+        // tiles (`rect_at` computes one `tile_w`/`tile_h` for the whole
+        // grid), so they share this single texture pool; live tiles occupy
+        // indices `[0, tiles.len())`, placeholders `[tiles.len(), tile_count)`.
+        let tile_count = layout.tiles.len() + layout.placeholders.len();
+        if tile_count == 0 {
+            overview.thumbnails = None;
+            return;
+        }
+        let tile_size = PixelSize {
+            w: layout.tiles[0].w.max(1),
+            h: layout.tiles[0].h.max(1),
+        };
+        let scratch_size = PixelSize {
+            w: overview.surface_config.width,
+            h: overview.surface_config.height,
+        };
+        let format = overview.surface_config.format;
+
+        let stale = overview.thumbnails.as_ref().is_none_or(|thumbnails| {
+            thumbnails.format() != format
+                || thumbnails.scratch_size() != scratch_size
+                || thumbnails.tile_size() != tile_size
+                || thumbnails.tile_count() != tile_count
+        });
+        if stale {
+            overview.thumbnails = Some(OverviewThumbnailResources::new(
+                &gpu.device,
+                format,
+                scratch_size,
+                tile_size,
+                tile_count,
+            ));
+        }
+    }
+
+    /// Render each due tile's source tab into the shared scratch texture and
+    /// blit it down into that tab's tile texture (REQ-OV-4 live mirror,
+    /// REQ-NF-1 reuse the tab's own `Renderer`, REQ-NF-3 shared-scratch
+    /// blit-downscale). `tile_index` is `source_window_ids`' position, which
+    /// is index-parallel with `layout.tiles` (see `overview_tile_target_at_point`).
+    fn render_due_overview_tiles(
+        &mut self,
+        due_window_ids: &[WindowId],
+        source_window_ids: &[WindowId],
+    ) {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let Some(overview) = self.overview_window.as_mut() else {
+            return;
+        };
+        let Some(thumbnails) = overview.thumbnails.as_mut() else {
+            return;
+        };
+
+        for &window_id in due_window_ids {
+            let Some(tile_index) = source_window_ids.iter().position(|id| *id == window_id) else {
                 continue;
             };
-            let mut term = surface.terminal.lock().expect("terminal mutex poisoned");
-            let _snapshot = FrameSnapshot::from_terminal(&mut term);
-            locked_tabs += 1;
+            let Some(state) = self.windows.get_mut(&window_id) else {
+                continue;
+            };
+            let Some(surface) = state.surfaces.get(&state.focused_pane) else {
+                continue;
+            };
+            let mut snapshot = {
+                let mut term = surface.terminal.lock().expect("terminal mutex poisoned");
+                FrameSnapshot::from_terminal(&mut term)
+            };
+            // Mirrors the "not the focused pane" convention `redraw()` already
+            // uses for background panes within one window.
+            snapshot.cursor.visible = false;
+
+            // Reuse this tab's own `Renderer` unmodified (REQ-NF-1): point it
+            // at the shared scratch resolution just long enough to draw one
+            // frame into it, then restore its real surface viewport so the
+            // tab's own next redraw is unaffected.
+            let own_viewport = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            state.renderer.resize(thumbnails.scratch_size());
+            state
+                .renderer
+                .rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+            state
+                .renderer
+                .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+            if let Err(err) = thumbnails.render_existing_renderer_to_tile(
+                &gpu.device,
+                &gpu.queue,
+                &mut state.renderer,
+                tile_index,
+            ) {
+                log::warn!("overview tile render failed for {window_id:?}: {err:#}");
+            }
+            state.renderer.resize(own_viewport);
         }
-        locked_tabs
+    }
+
+    /// Lazily (re)build the dedicated placeholder-title `Renderer` (REQ-OV-10).
+    /// A single instance is reused across every placeholder tile and frame —
+    /// this does not create a per-tab renderer, so it doesn't conflict with
+    /// REQ-NF-1's "reuse the tab's own `Renderer`" rule for live mirrors.
+    fn ensure_overview_label_renderer(&mut self) {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let Some(overview) = self.overview_window.as_mut() else {
+            return;
+        };
+        let format = overview.surface_config.format;
+        let stale = overview
+            .label_renderer
+            .as_ref()
+            .is_none_or(|renderer| renderer.target_format() != format);
+        if stale {
+            overview.label_renderer = Some(
+                Renderer::new(
+                    &gpu.device,
+                    &gpu.queue,
+                    format,
+                    &mut gpu.font,
+                    DEFAULT_GRID_PADDING,
+                )
+                .expect("failed to build the overview label renderer"),
+            );
+        }
+    }
+
+    /// Render title-only text into every placeholder-row tile (REQ-OV-10):
+    /// tabs beyond the live tile cap get no live mirror, just their title.
+    /// Cheap enough to redo on every redraw — placeholders only exist once
+    /// tab count exceeds `OVERVIEW_GRID_CAP`, and each is a synthetic 1-row
+    /// `Terminal`, not a real pty-backed one.
+    fn render_overview_placeholder_labels(
+        &mut self,
+        source_window_ids: &[WindowId],
+        layout: &OverviewLayout,
+    ) {
+        if layout.placeholders.is_empty() {
+            return;
+        }
+        let live_count = layout.tiles.len();
+        let overflow_ids = overview_placeholder_source_ids(source_window_ids, live_count);
+        let labels = overview_tile_labels(overflow_ids, |id| {
+            self.windows.get(&id).map(|state| state.title.clone())
+        });
+
+        self.ensure_overview_label_renderer();
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let Some(overview) = self.overview_window.as_mut() else {
+            return;
+        };
+        let (Some(label_renderer), Some(thumbnails)) = (
+            overview.label_renderer.as_mut(),
+            overview.thumbnails.as_mut(),
+        ) else {
+            return;
+        };
+        let metrics = gpu.font.metrics();
+
+        for (index, label) in labels.iter().enumerate() {
+            let Some(rect) = layout.placeholders.get(index) else {
+                continue;
+            };
+            let tile_index = live_count + index;
+            let tile_size = PixelSize {
+                w: rect.w.max(1),
+                h: rect.h.max(1),
+            };
+            let grid_size = grid_size_for_pane_rect(
+                PaneRectApp::new(0, 0, rect.w, rect.h),
+                metrics,
+                DEFAULT_GRID_PADDING,
+            );
+
+            let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
+            let text = sanitize_placeholder_label(&label.label, grid_size.cols);
+            Stream::new().feed(text.as_bytes(), &mut term);
+            let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+            snapshot.cursor.visible = false;
+
+            label_renderer.resize(tile_size);
+            label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+            label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+
+            let Some(tile_texture) = thumbnails.tile_texture_for_test(tile_index) else {
+                continue;
+            };
+            let view = tile_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            label_renderer.draw(&gpu.device, &gpu.queue, &view);
+        }
+    }
+
+    /// Composite every live-mirror and placeholder-title tile texture into
+    /// the overview surface and present it. Empty grid cells are left as the
+    /// clear color.
+    fn present_overview_frame(&mut self, layout: &OverviewLayout) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(overview) = self.overview_window.as_mut() else {
+            return;
+        };
+
+        let frame = match overview.surface.get_current_texture() {
+            Ok(frame) => frame,
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                overview
+                    .surface
+                    .configure(&gpu.device, &overview.surface_config);
+                overview.window.request_redraw();
+                return;
+            }
+            Err(e) => {
+                log::warn!("overview surface error: {e}");
+                return;
+            }
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("noa-overview-composite-encoder"),
+            });
+        {
+            let _clear_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("noa-overview-clear-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        if let Some(thumbnails) = overview.thumbnails.as_ref() {
+            let live_count = layout.tiles.len();
+            let placeholder_tiles = layout
+                .placeholders
+                .iter()
+                .enumerate()
+                .map(|(index, rect)| (live_count + index, rect));
+            for (tile_index, rect) in layout.tiles.iter().enumerate().chain(placeholder_tiles) {
+                let Some(tile_texture) = thumbnails.tile_texture_for_test(tile_index) else {
+                    continue;
+                };
+                composite_overview_tile(&mut encoder, tile_texture, &frame.texture, *rect);
+            }
+        }
+        gpu.queue.submit(Some(encoder.finish()));
+        frame.present();
     }
 
     fn finish_overview_tile_renders(&mut self, window_ids: &[WindowId], now: Instant) {
@@ -1200,14 +1512,31 @@ impl App {
 
         let bounds = pane_bounds_for_size(overview.window.inner_size());
         let source_window_ids = self.overview_source_window_ids();
-        let _layout = compute_overview_grid(source_window_ids.len(), bounds, OVERVIEW_GRID_CAP);
-        let _labels = overview_tile_labels(&source_window_ids, |id| {
-            self.windows.get(&id).map(|state| state.title.clone())
-        });
+        let layout = compute_overview_grid(source_window_ids.len(), bounds, OVERVIEW_GRID_CAP);
         let now = Instant::now();
         let due_window_ids = self.due_overview_tile_ids(&source_window_ids, now);
-        let _lock_count = self.lock_due_overview_tabs(&due_window_ids);
+
+        self.ensure_overview_thumbnails(&layout);
+        self.render_due_overview_tiles(&due_window_ids, &source_window_ids);
+        self.render_overview_placeholder_labels(&source_window_ids, &layout);
+        self.present_overview_frame(&layout);
+
         self.finish_overview_tile_renders(&due_window_ids, now);
+
+        // OVERVIEW_MAX_RENDER_TILES_PER_FRAME caps how many tiles one frame
+        // regenerates, and idle tabs produce no pty output to trigger the
+        // next frame — so keep requesting redraws until the dirty backlog
+        // drains (a full 9-tile grid fills in ~5 frames). Stops as soon as
+        // every source tile is clean; a dirty-but-throttled tile may re-run
+        // this for up to OVERVIEW_TILE_MIN_RENDER_INTERVAL transiently.
+        let backlog_remains = source_window_ids.iter().any(|window_id| {
+            self.overview_tiles
+                .get(window_id)
+                .is_some_and(|tile| tile.dirty)
+        });
+        if backlog_remains {
+            self.request_overview_redraw();
+        }
     }
 
     fn focus_overview_tile_at_last_cursor(&mut self) {
@@ -1253,6 +1582,7 @@ impl App {
         match event {
             WindowEvent::CloseRequested => self.hide_tab_overview(),
             WindowEvent::RedrawRequested => self.redraw_overview(),
+            WindowEvent::Resized(size) => self.on_overview_resize(size),
             WindowEvent::CursorMoved { position, .. } => {
                 let point = split_point_from_physical_position(position);
                 if let Some(overview) = self.overview_window.as_mut() {
@@ -1483,6 +1813,29 @@ impl App {
         });
         let window = state.window.clone();
         self.relayout_and_resize_window(window_id);
+        window.request_redraw();
+    }
+
+    fn on_overview_resize(&mut self, size: PhysicalSize<u32>) {
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(overview) = self.overview_window.as_mut() else {
+            return;
+        };
+        overview.surface_config.width = size.width;
+        overview.surface_config.height = size.height;
+        overview
+            .surface
+            .configure(&gpu.device, &overview.surface_config);
+        // Stale relative to the new surface size; `ensure_overview_thumbnails`
+        // rebuilds it from the next recomputed grid layout.
+        overview.thumbnails = None;
+        let window = overview.window.clone();
+        self.mark_all_overview_tiles_dirty();
         window.request_redraw();
     }
 
@@ -2552,6 +2905,42 @@ fn tab_overview_visibility_after_dispatch(
     }
 }
 
+/// Copy one overview tile texture (live mirror or placeholder title, both
+/// already rendered at exactly `rect`'s pixel size) into its grid position on
+/// the overview surface texture. No scaling: `copy_texture_to_texture` needs
+/// matching extents, which holds because every tile texture is allocated at
+/// its `OverviewLayout` rect's size (`ensure_overview_thumbnails`).
+fn composite_overview_tile(
+    encoder: &mut wgpu::CommandEncoder,
+    tile_texture: &wgpu::Texture,
+    surface_texture: &wgpu::Texture,
+    rect: PaneRectApp,
+) {
+    encoder.copy_texture_to_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: tile_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyTextureInfo {
+            texture: surface_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: rect.x,
+                y: rect.y,
+                z: 0,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::Extent3d {
+            width: rect.w,
+            height: rect.h,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
 /// Choose the swapchain surface format, preferring a **non-sRGB** format
 /// (`Bgra8Unorm`) over an sRGB one (`Bgra8UnormSrgb`).
 ///
@@ -2689,7 +3078,6 @@ fn ime_cursor_area(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use noa_vt::Stream;
 
     fn metrics(cell_w: f32, cell_h: f32) -> noa_font::Metrics {
         noa_font::Metrics {

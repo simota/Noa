@@ -186,6 +186,18 @@ fn special_key_bytes(
     mods: ModifiersState,
     app_cursor_keys: bool,
 ) -> Option<Vec<u8>> {
+    // Ghostty's macOS default keybinds map bare alt+left/right to the
+    // readline word-motion escapes (`esc:b` / `esc:f`) instead of the xterm
+    // modified-arrow sequences, regardless of DECCKM. Any extra modifier
+    // falls through to the normal modified-arrow encoding below.
+    if cfg!(target_os = "macos") && mods == ModifiersState::ALT {
+        match named {
+            NamedKey::ArrowLeft => return Some(vec![0x1b, b'b']),
+            NamedKey::ArrowRight => return Some(vec![0x1b, b'f']),
+            _ => {}
+        }
+    }
+
     let modifier = modifier_value(mods);
 
     match named {
@@ -552,6 +564,64 @@ mod tests {
                 "{named:?}"
             );
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn alt_left_right_send_readline_word_motion_escapes() {
+        // Ghostty macOS default keybinds: alt+left = esc:b, alt+right = esc:f.
+        assert_eq!(
+            encode_key(
+                &Key::Named(NamedKey::ArrowLeft),
+                None,
+                ModifiersState::ALT,
+                false
+            ),
+            Some(b"\x1bb".to_vec())
+        );
+        assert_eq!(
+            encode_key(
+                &Key::Named(NamedKey::ArrowRight),
+                None,
+                ModifiersState::ALT,
+                false
+            ),
+            Some(b"\x1bf".to_vec())
+        );
+        // The keybind wins even in DECCKM application-cursor mode.
+        assert_eq!(
+            encode_key(
+                &Key::Named(NamedKey::ArrowLeft),
+                None,
+                ModifiersState::ALT,
+                true
+            ),
+            Some(b"\x1bb".to_vec())
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn alt_with_extra_modifiers_keeps_modified_arrow_encoding() {
+        assert_eq!(
+            encode_key(
+                &Key::Named(NamedKey::ArrowLeft),
+                None,
+                ModifiersState::ALT | ModifiersState::SHIFT,
+                false
+            ),
+            Some(b"\x1b[1;4D".to_vec())
+        );
+        // Alt+up/down have no word-motion binding and stay modified arrows.
+        assert_eq!(
+            encode_key(
+                &Key::Named(NamedKey::ArrowUp),
+                None,
+                ModifiersState::ALT,
+                false
+            ),
+            Some(b"\x1b[1;3A".to_vec())
+        );
     }
 
     #[test]

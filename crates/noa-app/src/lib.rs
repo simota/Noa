@@ -13,6 +13,7 @@ mod io_thread;
 mod macos_menu;
 mod mouse;
 pub mod split_tree;
+pub mod tab_overview;
 mod theme;
 
 pub use app::AppConfig;

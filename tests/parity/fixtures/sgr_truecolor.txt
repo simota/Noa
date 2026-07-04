@@ -1,0 +1,13 @@
+## cols: 10
+## rows: 2
+## mode: attrs
+## input:
+\e[38;2;255;128;0mA\e[48;2;0;64;255mB\e[m
+## expect:
+0: [0-0] "A" fg=#ff8000
+0: [1-1] "B" fg=#ff8000 bg=#0040ff
+# cursor: 0,2
+## why:
+Truecolor SGR (38;2;r;g;b / 48;2;r;g;b): 24-bit colors are stored exactly, not
+quantized to the palette, and fg/bg are independent slots. Matches
+xterm/Ghostty direct-color handling.

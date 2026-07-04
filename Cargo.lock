@@ -1440,6 +1440,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "noa-parity"
+version = "0.1.0"
+dependencies = [
+ "noa-core",
+ "noa-grid",
+ "noa-vt",
+]
+
+[[package]]
 name = "noa-pty"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,17 @@
+## cols: 8
+## rows: 5
+## mode: text
+## input:
+X\e[5;1HY\e[2;4r\e[2;1HT\e[3;1HM\e[4;1HB\eD\e[2;1H\eM
+## expect:
+X
+
+M
+B
+Y
+# cursor: 1,0
+## why:
+IND/RI at the DECSTBM margins: with margins 2-4 holding T/M/B, IND (ESC D) at
+the bottom margin scrolls the region up (T is discarded at the top margin),
+then RI (ESC M) at the top margin scrolls it back down inserting a blank —
+net result M/B one row lower. Rows 1 and 5, outside the margins, never move.

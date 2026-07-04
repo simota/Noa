@@ -1,0 +1,17 @@
+## cols: 8
+## rows: 5
+## mode: text
+## input:
+R0\r\nR1\r\nR2\r\nR3\r\nR4\e[2;4r\e[2;1H\e[L\e[3;1H\e[M
+## expect:
+R0
+
+R2
+
+R4
+# cursor: 2,0
+## why:
+IL/DL inside DECSTBM margins (rows 2-4): IL at the top margin pushes R1/R2
+down and R3 past the bottom margin — it is discarded, never spilling into
+row 5. DL at row 3 then removes R1 and pulls R2 up, back-filling a blank at
+the bottom margin. R0 and R4, outside the region, are untouched throughout.

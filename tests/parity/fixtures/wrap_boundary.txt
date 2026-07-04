@@ -1,0 +1,14 @@
+## cols: 10
+## rows: 3
+## mode: text
+## input:
+0123456789A
+## expect:
+0123456789
+A
+
+# cursor: 1,1
+## why:
+Autowrap boundary: the 11th character on a 10-column row resolves the pending
+wrap — it prints at column 0 of the next row (which is marked soft-wrapped),
+and the cursor advances to column 1. Verifies xenl release, not just the latch.

@@ -1,0 +1,15 @@
+## cols: 10
+## rows: 3
+## mode: text
+## input:
+primary\e[?1049haltscreen\e[?1049l
+## expect:
+primary
+
+
+# cursor: 0,7
+## why:
+Alt screen round trip (mode 1049): entering saves the primary cursor and
+switches to a cleared alternate screen (no scrollback); leaving discards
+everything drawn there and restores both the primary content and the saved
+cursor position. Nothing printed on the alt screen may leak back.

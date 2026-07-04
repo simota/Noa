@@ -1,0 +1,14 @@
+## cols: 6
+## rows: 2
+## mode: attrs
+## input:
+\e[44m\e[2J
+## expect:
+0: [0-5] "      " bg=4
+1: [0-5] "      " bg=4
+# cursor: 0,0
+## why:
+Background color erase (BCE): ED 2 with an active blue background must fill
+every erased cell with that background, not the default — the classic vim/less
+full-screen-color behavior. Foreground and attributes stay default on the
+blanks; only bg carries.

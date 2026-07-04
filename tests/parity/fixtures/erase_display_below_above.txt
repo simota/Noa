@@ -1,0 +1,17 @@
+## cols: 8
+## rows: 4
+## mode: text
+## input:
+AAAAAAAA\r\nBBBBBBBB\r\nCCCCCCCC\r\nDDDDDDDD\e[2;4H\e[J\e[1;2H\e[1J
+## expect:
+  AAAAAA
+BBB
+
+
+# cursor: 0,1
+## why:
+ED 0 (below) from row 2 column 4 erases the cursor cell through the end of the
+screen — "BBB" survives to the cursor's left, rows 3-4 clear entirely. ED 1
+(above) from row 1 column 2 then erases from home through the cursor
+INCLUSIVE, blanking columns 1-2 of the top row. Off-by-one at the cursor cell
+is the classic divergence this pins.

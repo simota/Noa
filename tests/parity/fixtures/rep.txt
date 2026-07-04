@@ -1,0 +1,13 @@
+## cols: 12
+## rows: 2
+## mode: text
+## input:
+A\e[3b-\e[2b
+## expect:
+AAAA---
+
+# cursor: 0,7
+## why:
+REP (CSI Ps b) repeats the preceding graphic character: after "A" a REP 3
+yields "AAAA", and the repeat target updates to the newest printable, so
+"-" followed by REP 2 appends "--" (never more copies of "A").

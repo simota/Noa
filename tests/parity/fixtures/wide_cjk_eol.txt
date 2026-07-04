@@ -1,0 +1,16 @@
+## cols: 6
+## rows: 3
+## mode: text
+## input:
+abcde漢x
+## expect:
+abcde
+漢x
+
+# cursor: 1,3
+## why:
+Wide (CJK) character at the line end: with one cell left in the row, the
+two-cell 漢 cannot be split — the whole character wraps to the next row
+(the previous row is marked soft-wrapped, its last cell stays blank) and the
+following narrow char lands right after the wide pair. A split lead/spacer
+across rows would corrupt the grid.

@@ -1,0 +1,16 @@
+## cols: 8
+## rows: 4
+## mode: text
+## input:
+AA\r\nBB\r\nCC\e[2;1H\e[L\e[1;1H\e[M
+## expect:
+
+BB
+CC
+
+# cursor: 0,0
+## why:
+IL at row 2 pushes BB/CC down one row, inserting a blank line at the cursor
+(the bottom row falls off). DL at row 1 then deletes the top row (AA is
+already gone — the inserted blank moved up), shifting everything up and
+back-filling a blank at the bottom of the scroll region.

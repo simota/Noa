@@ -1,0 +1,16 @@
+## cols: 10
+## rows: 4
+## mode: text
+## input:
+0123456789\r\n0123456789\r\n0123456789\r\nKEEP\e[1;5H\e[K\e[2;5H\e[1K\e[3;5H\e[2K
+## expect:
+0123
+     56789
+
+KEEP
+# cursor: 2,4
+## why:
+EL variants from column 5: EL 0 erases the cursor cell through the line end
+(leaving "0123"), EL 1 erases from the line start through the cursor INCLUSIVE
+(leaving "56789" after five blanks), EL 2 blanks the whole line. Other rows
+are untouched and the cursor never moves.

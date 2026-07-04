@@ -1,0 +1,13 @@
+## cols: 10
+## rows: 2
+## mode: attrs
+## input:
+\e[38;5;196mA\e[48;5;21mB\e[m
+## expect:
+0: [0-0] "A" fg=196
+0: [1-1] "B" fg=196 bg=21
+# cursor: 0,2
+## why:
+256-color SGR (38;5;n / 48;5;n): indexed colors land in the 256-entry palette
+slots verbatim, and setting bg does not disturb the still-active indexed fg —
+the second cell carries both.

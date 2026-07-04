@@ -1,0 +1,15 @@
+## cols: 10
+## rows: 2
+## mode: attrs
+## input:
+\e[31mred\e[m\e[1;44mB\e[m\e[91;107mX\e[m
+## expect:
+0: [0-2] "red" fg=1
+0: [3-3] "B" bg=4 attrs=bold
+0: [4-4] "X" fg=9 bg=15
+# cursor: 0,5
+## why:
+16-color SGR: 30-37/40-47 map to palette 0-7, the aixterm brights 90-97/100-107
+map to palette 8-15, and SGR 0 fully resets the pen between prints. Bold is an
+attribute bit, not a palette shift (brightening bold text is a render-time
+policy, never stored state) — matches xterm/Ghostty storage semantics.

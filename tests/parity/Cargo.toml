@@ -1,0 +1,13 @@
+[package]
+name = "noa-parity"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# noa-core only for the primitives noa-grid's public API is expressed in
+# (GridSize, Color, CellAttrs) — noa-grid does not re-export them.
+noa-core.workspace = true
+noa-vt.workspace = true
+noa-grid.workspace = true

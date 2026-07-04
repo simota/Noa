@@ -1,0 +1,15 @@
+## cols: 30
+## rows: 3
+## mode: text
+## input:
+A\tB\tC\r\n\e[3g\e[2;6H\eH\rX\tY
+## expect:
+A       B       C
+X    Y
+
+# cursor: 1,6
+## why:
+Tab stops: default stops sit every 8 columns (TAB from column 1 reaches 8,
+then 16). TBC 3 clears every stop, HTS (ESC H) sets a new one at the cursor
+(column 6, index 5), and the next TAB from column 1 jumps exactly there —
+proving both the clear-all and the custom stop.

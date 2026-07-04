@@ -1,0 +1,14 @@
+## cols: 10
+## rows: 4
+## mode: attrs
+## input:
+\e[31mAB\e7\e[m\e[3;1HCD\e8EF
+## expect:
+0: [0-3] "ABEF" fg=1
+2: [0-1] "CD"
+# cursor: 0,4
+## why:
+DECSC/DECRC: ESC 7 saves position AND pen (SGR) state; ESC 8 restores both.
+After the save the pen is reset and CD prints unstyled elsewhere, then DECRC
+must bring back column 2 of row 0 and the red foreground, so EF continues the
+original run seamlessly (one style run "ABEF").

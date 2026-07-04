@@ -1,0 +1,13 @@
+## cols: 6
+## rows: 2
+## mode: text
+## input:
+AB\r\nCD\e[2JZ
+## expect:
+
+  Z
+# cursor: 1,3
+## why:
+ED 2 (complete) blanks the whole screen but must NOT move the cursor: the
+cursor stays at row 2 column 3 (after "CD"), so the next printable lands
+exactly there. Terminals that home on ED 2 misplace every following repaint.

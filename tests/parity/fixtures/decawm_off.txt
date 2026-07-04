@@ -1,0 +1,15 @@
+## cols: 8
+## rows: 3
+## mode: text
+## input:
+\e[?7l0123456789XY
+## expect:
+0123456Y
+
+
+# cursor: 0,7 (pending-wrap)
+## why:
+DECAWM off (?7l): output past the right edge never wraps — every further
+printable overstrikes the last column, so only the final "Y" survives there
+and rows below stay empty. The last-column latch is still tracked (it simply
+never releases into a wrap while autowrap is off).

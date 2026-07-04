@@ -1,0 +1,15 @@
+## cols: 10
+## rows: 3
+## mode: text
+## input:
+ABCDEF\r\nABCDEF\e[1;3H\e[2@XY\e[2;3H\e[2P
+## expect:
+ABXYCDEF
+ABEF
+
+# cursor: 1,2
+## why:
+ICH 2 at column 3 shifts "CDEF" right by two, opening blanks the following XY
+fills without overwriting (insert, not overstrike). DCH 2 at column 3 deletes
+"CD" and pulls "EF" left, back-filling the row end with blanks. Both edit only
+the cursor row.

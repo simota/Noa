@@ -1,0 +1,15 @@
+## cols: 10
+## rows: 3
+## mode: text
+## input:
+0123456789
+## expect:
+0123456789
+
+
+# cursor: 0,9 (pending-wrap)
+## why:
+Deferred autowrap (xenl): printing into the last column must leave the cursor
+in that column with the wrap latch set — the line break happens only when the
+next printable character arrives. xterm and Ghostty both defer; an eager wrap
+here would break every full-width shell prompt repaint.

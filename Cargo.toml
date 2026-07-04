@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "bin/noa"]
+members = ["crates/*", "bin/noa", "tests/parity"]
 
 [workspace.package]
 edition = "2024"

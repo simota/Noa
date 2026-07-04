@@ -15,6 +15,10 @@ use crate::state::State;
 
 const MAX_OSC_BYTES: usize = 4096;
 const MAX_DCS_BYTES: usize = 4096;
+/// APC payloads carry whole Kitty-graphics transfers, so the cap is generous
+/// (spec-compliant clients chunk at ≤4096B, but non-conforming tools send in
+/// one shot). Overflow truncates rather than discards — see [`Action::ApcDispatch`].
+const MAX_APC_BYTES: usize = 1 << 20; // 1 MiB
 
 /// The from-scratch VT parser. Cheap to construct; holds only small buffers.
 pub struct Parser {
@@ -27,6 +31,8 @@ pub struct Parser {
     osc_overflow: bool,
     dcs: Vec<u8>,
     dcs_overflow: bool,
+    apc: Vec<u8>,
+    apc_overflow: bool,
     utf8_acc: u32,
     utf8_rem: u8,
     utf8_min: u32,
@@ -50,6 +56,8 @@ impl Parser {
             osc_overflow: false,
             dcs: Vec::new(),
             dcs_overflow: false,
+            apc: Vec::new(),
+            apc_overflow: false,
             utf8_acc: 0,
             utf8_rem: 0,
             utf8_min: 0,
@@ -69,6 +77,14 @@ impl Parser {
         }
         if self.state == State::DcsPassthrough && b == 0x1b {
             self.state = State::DcsEscape;
+            return;
+        }
+        if self.state == State::ApcEscape {
+            self.st_apc_escape(b, sink);
+            return;
+        }
+        if self.state == State::ApcString && b == 0x1b {
+            self.state = State::ApcEscape;
             return;
         }
 
@@ -118,7 +134,9 @@ impl Parser {
             State::DcsPassthrough => self.st_dcs(b, sink),
             State::DcsEscape => unreachable!("handled before anywhere transitions"),
             State::OscString => self.st_osc(b, sink),
-            // APC / SOS / PM string payloads are ignored by the state model.
+            State::ApcString => self.st_apc(b, sink),
+            State::ApcEscape => unreachable!("handled before anywhere transitions"),
+            // SOS / PM string payloads are ignored by the state model.
             State::SosPmApcString => {}
         }
     }
@@ -159,7 +177,8 @@ impl Parser {
                 self.state = State::EscapeIntermediate;
             }
             0x50 => self.goto(State::DcsPassthrough, sink), // 'P' DCS
-            0x58 | 0x5e | 0x5f => self.state = State::SosPmApcString, // X ^ _
+            0x58 | 0x5e => self.state = State::SosPmApcString, // 'X' SOS / '^' PM (discarded)
+            0x5f => self.goto(State::ApcString, sink),        // '_' APC (captured)
             0x5b => self.goto(State::CsiEntry, sink),       // '[' CSI
             0x5d => self.goto(State::OscString, sink),      // ']' OSC
             0x30..=0x4f | 0x51..=0x57 | 0x59 | 0x5a | 0x5c | 0x60..=0x7e => {
@@ -300,6 +319,36 @@ impl Parser {
         }
     }
 
+    fn st_apc<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
+        match b {
+            0x9c => self.finish_apc(sink), // 8-bit ST
+            0x20..=0x7e | 0x80..=0xff => {
+                // Unlike OSC/DCS, overflow keeps the captured prefix and marks
+                // it truncated so the dispatch still fires (Kitty must reply).
+                if !self.apc_overflow {
+                    if self.apc.len() < MAX_APC_BYTES {
+                        self.apc.push(b);
+                    } else {
+                        self.apc_overflow = true;
+                    }
+                }
+            }
+            _ => {} // other C0 + DEL ignored
+        }
+    }
+
+    fn st_apc_escape<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
+        if b == b'\\' {
+            self.finish_apc(sink);
+        } else {
+            // Not an ST: abandon the APC and reprocess the byte from Escape.
+            self.apc.clear();
+            self.apc_overflow = false;
+            self.goto(State::Escape, sink);
+            self.advance(b, sink);
+        }
+    }
+
     // ── primitive actions ──────────────────────────────────────────
 
     fn collect(&mut self, b: u8) {
@@ -363,6 +412,14 @@ impl Parser {
         self.state = State::Ground;
     }
 
+    fn finish_apc<F: FnMut(Action)>(&mut self, sink: &mut F) {
+        let data = std::mem::take(&mut self.apc);
+        let truncated = self.apc_overflow;
+        self.apc_overflow = false;
+        sink(Action::ApcDispatch { data, truncated });
+        self.state = State::Ground;
+    }
+
     /// Transition to `new`, running the source state's exit action and the
     /// target state's entry action (OSC end/start, `clear` on escape/CSI entry).
     fn goto<F: FnMut(Action)>(&mut self, new: State, sink: &mut F) {
@@ -385,6 +442,10 @@ impl Parser {
             State::DcsPassthrough => {
                 self.dcs.clear();
                 self.dcs_overflow = false;
+            }
+            State::ApcString => {
+                self.apc.clear();
+                self.apc_overflow = false;
             }
             _ => {}
         }

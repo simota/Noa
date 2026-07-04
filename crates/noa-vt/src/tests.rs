@@ -356,3 +356,100 @@ fn c0_in_the_middle_of_csi_executes() {
             .any(|a| matches!(a, Action::CsiDispatch(c) if c.final_byte == b'm'))
     );
 }
+
+// ── APC bounded capture (Kitty graphics transport) ─────────────────
+
+/// Extract the single APC dispatch in `bytes` (panics otherwise).
+fn only_apc(bytes: &[u8]) -> (Vec<u8>, bool) {
+    match actions(bytes)
+        .into_iter()
+        .find(|a| matches!(a, Action::ApcDispatch { .. }))
+    {
+        Some(Action::ApcDispatch { data, truncated }) => (data, truncated),
+        _ => panic!("no APC dispatch in {bytes:?}"),
+    }
+}
+
+#[test]
+fn apc_payload_dispatches_on_st() {
+    let (data, truncated) = only_apc(b"\x1b_Gi=1,a=q;AAAA\x1b\\");
+    assert_eq!(data, b"Gi=1,a=q;AAAA");
+    assert!(!truncated);
+}
+
+#[test]
+fn apc_payload_dispatches_on_c1_st() {
+    // 8-bit ST (0x9c) terminates the APC just like 7-bit `ESC \`.
+    let (data, truncated) = only_apc(b"\x1b_Gf=24;payload\x9c");
+    assert_eq!(data, b"Gf=24;payload");
+    assert!(!truncated);
+}
+
+#[test]
+fn apc_sos_pm_still_discarded() {
+    // ESC X (SOS) and ESC ^ (PM) keep the old discard behavior — no dispatch.
+    for lead in [b"\x1bX".as_slice(), b"\x1b^".as_slice()] {
+        let mut bytes = lead.to_vec();
+        bytes.extend_from_slice(b"whatever\x1b\\");
+        assert!(
+            actions(&bytes)
+                .into_iter()
+                .all(|a| !matches!(a, Action::ApcDispatch { .. })),
+            "lead {lead:?} should not dispatch"
+        );
+    }
+}
+
+#[test]
+fn apc_can_aborts_without_dispatch() {
+    // CAN (0x18) mid-payload abandons the APC entirely.
+    let acts = actions(b"\x1b_Gi=1;AAAA\x18more");
+    assert!(
+        acts.iter().all(|a| !matches!(a, Action::ApcDispatch { .. })),
+        "CAN should abort the APC"
+    );
+    // ...and the trailing bytes print normally in ground.
+    assert_eq!(acts.last(), Some(&Action::Print('e')));
+}
+
+#[test]
+fn apc_overflow_dispatches_truncated() {
+    let mut bytes = b"\x1b_G".to_vec();
+    bytes.extend(std::iter::repeat_n(b'a', (1 << 20) + 10));
+    bytes.extend_from_slice(b"\x1b\\");
+
+    let (data, truncated) = only_apc(&bytes);
+    assert!(truncated, "over-limit APC must be flagged truncated");
+    assert_eq!(data.len(), 1 << 20, "capture caps at MAX_APC_BYTES");
+    assert!(data.starts_with(b"Ga"));
+}
+
+#[test]
+fn apc_survives_byte_at_a_time_feed() {
+    // Feeding one byte per advance() call must not change capture (split resistance).
+    let mut p = Parser::new();
+    let mut out = Vec::new();
+    for &b in b"\x1b_Gi=2,f=100;Zm9v\x1b\\" {
+        p.advance(b, &mut |a| out.push(a));
+    }
+    let dispatched: Vec<_> = out
+        .into_iter()
+        .filter_map(|a| match a {
+            Action::ApcDispatch { data, truncated } => Some((data, truncated)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dispatched, vec![(b"Gi=2,f=100;Zm9v".to_vec(), false)]);
+}
+
+#[test]
+fn apc_esc_non_backslash_aborts_and_reprocesses() {
+    // ESC inside APC followed by a non-`\` byte abandons the APC and the ESC
+    // sequence is reparsed from Escape (here ESC c = RIS).
+    let acts = actions(b"\x1b_Gi=1;AA\x1bc");
+    assert!(acts.iter().all(|a| !matches!(a, Action::ApcDispatch { .. })));
+    assert!(acts.iter().any(|a| matches!(
+        a,
+        Action::EscDispatch(e) if e.final_byte == b'c'
+    )));
+}

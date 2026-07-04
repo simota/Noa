@@ -82,6 +82,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::Quit => "Quit noa",
         AppCommand::ToggleCommandPalette => "Toggle Command Palette",
         AppCommand::ToggleQuickTerminal => "Toggle Quick Terminal",
+        AppCommand::ToggleSecureKeyboardEntry => "Toggle Secure Keyboard Entry",
     }
 }
 
@@ -132,6 +133,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ToggleSplitZoom,
         AppCommand::ToggleTabOverview,
         AppCommand::ToggleQuickTerminal,
+        AppCommand::ToggleSecureKeyboardEntry,
         AppCommand::CloseTab,
         AppCommand::NextTab,
         AppCommand::PrevTab,

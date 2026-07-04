@@ -1,7 +1,7 @@
 //! Native macOS menu construction.
 
 use muda::{
-    ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
+    CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     accelerator::{Accelerator, Code, Modifiers},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -20,6 +20,9 @@ const SPLIT_CONTEXT_MENU_ITEMS: &[(AppCommand, &str)] = &[
 pub(crate) struct MacosMenu {
     _menu: Menu,
     split_context_menu: Menu,
+    /// The "Secure Keyboard Entry" item, retained so its checkmark can track
+    /// the toggle state (see [`MacosMenu::set_secure_keyboard_entry_checked`]).
+    secure_keyboard_entry: CheckMenuItem,
 }
 
 impl MacosMenu {
@@ -32,6 +35,13 @@ impl MacosMenu {
         let preferences = MenuItem::with_id(
             AppCommand::Preferences.menu_id(),
             "Preferences...",
+            false,
+            None,
+        );
+        let secure_keyboard_entry = CheckMenuItem::with_id(
+            AppCommand::ToggleSecureKeyboardEntry.menu_id(),
+            "Secure Keyboard Entry",
+            true,
             false,
             None,
         );
@@ -50,6 +60,7 @@ impl MacosMenu {
         let separator_one = PredefinedMenuItem::separator();
         let separator_two = PredefinedMenuItem::separator();
         let separator_three = PredefinedMenuItem::separator();
+        let separator_secure = PredefinedMenuItem::separator();
         let file_new_tab = MenuItem::with_id(
             AppCommand::NewTab.menu_id(),
             "New Tab",
@@ -266,6 +277,8 @@ impl MacosMenu {
             &about,
             &separator_one,
             &preferences,
+            &separator_secure,
+            &secure_keyboard_entry,
             &separator_two,
             &close_tab,
             &separator_three,
@@ -299,7 +312,13 @@ impl MacosMenu {
         Ok(Self {
             _menu: menu,
             split_context_menu,
+            secure_keyboard_entry,
         })
+    }
+
+    /// Reflect the current Secure Keyboard Entry state in the menu checkmark.
+    pub(crate) fn set_secure_keyboard_entry_checked(&self, checked: bool) {
+        self.secure_keyboard_entry.set_checked(checked);
     }
 
     pub(crate) fn show_split_context_menu(

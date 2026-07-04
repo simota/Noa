@@ -582,6 +582,9 @@ pub struct App {
     /// running NSApplication, so it happens lazily in `about_to_wait`, like
     /// the native menu).
     hotkey_install_attempted: bool,
+    /// Secure Keyboard Entry state. Enabled only while both the user has
+    /// toggled it on and the app is frontmost, and always released on exit.
+    secure_input: crate::secure_input::SecureInput,
 }
 
 impl App {
@@ -621,6 +624,7 @@ impl App {
             quick_terminal: None,
             quick_terminal_hotkey: None,
             hotkey_install_attempted: false,
+            secure_input: crate::secure_input::SecureInput::new(),
         }
     }
 
@@ -965,6 +969,7 @@ impl App {
             AppCommand::ScrollViewport(scroll) => self.scroll_viewport(scroll),
             AppCommand::ToggleCommandPalette => self.toggle_command_palette(),
             AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
+            AppCommand::ToggleSecureKeyboardEntry => self.toggle_secure_keyboard_entry(),
             AppCommand::CloseWindow => self.close_window(event_loop),
             AppCommand::Quit => event_loop.exit(),
         }
@@ -988,6 +993,20 @@ impl App {
         {
             state.window.request_redraw();
         }
+    }
+
+    /// Toggle Secure Keyboard Entry. A toggle only reaches us while the app is
+    /// frontmost, so the switch takes effect immediately; focus changes and app
+    /// exit reconcile it afterwards. The menu checkmark tracks the user intent.
+    fn toggle_secure_keyboard_entry(&mut self) {
+        let desired = self
+            .secure_input
+            .toggle(true, &mut crate::secure_input::CarbonSecureInput);
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = self.macos_menu.as_ref() {
+            menu.set_secure_keyboard_entry_checked(desired);
+        }
+        let _ = desired;
     }
 
     fn spawn_tab(
@@ -3588,6 +3607,11 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Release Secure Keyboard Entry if we still hold it, so the process
+        // never leaves the process-global switch enabled for the rest of the
+        // system after quitting.
+        self.secure_input
+            .disable_for_exit(&mut crate::secure_input::CarbonSecureInput);
         // Clean-quit (cmd+Q) path: windows are still live here, so capture the
         // freshest topology/cwd/focus. The all-windows-closed path leaves the
         // last file written by `persist_session` intact (this is a no-op when
@@ -3717,10 +3741,18 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(true) => {
                 self.focused = Some(window_id);
                 self.report_focus_event(window_id, true);
+                self.secure_input
+                    .on_focus_change(true, &mut crate::secure_input::CarbonSecureInput);
             }
             WindowEvent::Focused(false) => {
                 self.finish_active_split_drag(window_id);
                 self.report_focus_event(window_id, false);
+                // Release Secure Keyboard Entry while backgrounded so it never
+                // blocks key input to the rest of the system; a matching
+                // `Focused(true)` (including switching between our own windows)
+                // restores it.
+                self.secure_input
+                    .on_focus_change(false, &mut crate::secure_input::CarbonSecureInput);
                 if self.is_quick_terminal_window(window_id) {
                     self.maybe_autohide_quick_terminal();
                 }
@@ -5548,6 +5580,7 @@ fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::NewWindow
         | AppCommand::ToggleCommandPalette
         | AppCommand::ToggleQuickTerminal
+        | AppCommand::ToggleSecureKeyboardEntry
         | AppCommand::CloseWindow
         | AppCommand::Quit => CommandScope::App,
     }
@@ -5583,7 +5616,8 @@ fn overview_command_scope(command: AppCommand) -> CommandScope {
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::Quit
-        | AppCommand::ToggleQuickTerminal => CommandScope::App,
+        | AppCommand::ToggleQuickTerminal
+        | AppCommand::ToggleSecureKeyboardEntry => CommandScope::App,
         // The palette does not open while the overview is focused (v1, R-10):
         // Overview scope makes `ToggleCommandPalette` a no-op there (AC-15).
         AppCommand::ToggleCommandPalette

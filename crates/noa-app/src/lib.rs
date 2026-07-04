@@ -20,6 +20,7 @@ mod macos_window;
 mod mouse;
 mod notification;
 mod search_prompt;
+mod secure_input;
 mod session;
 pub mod split_tree;
 pub mod tab_overview;

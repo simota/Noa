@@ -31,6 +31,7 @@ pub enum AppCommand {
     Quit,
     ToggleCommandPalette,
     ToggleQuickTerminal,
+    ToggleSecureKeyboardEntry,
 }
 
 /// Terminal-state commands handled by noa instead of sending escape bytes.
@@ -119,6 +120,8 @@ impl AppCommand {
     pub(crate) const TOGGLE_COMMAND_PALETTE_MENU_ID: &'static str =
         "noa.view.toggle-command-palette";
     pub(crate) const TOGGLE_QUICK_TERMINAL_MENU_ID: &'static str = "noa.view.toggle-quick-terminal";
+    pub(crate) const TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID: &'static str =
+        "noa.app.toggle-secure-keyboard-entry";
 
     pub(crate) fn menu_id(self) -> &'static str {
         match self {
@@ -173,6 +176,7 @@ impl AppCommand {
             AppCommand::Quit => Self::QUIT_MENU_ID,
             AppCommand::ToggleCommandPalette => Self::TOGGLE_COMMAND_PALETTE_MENU_ID,
             AppCommand::ToggleQuickTerminal => Self::TOGGLE_QUICK_TERMINAL_MENU_ID,
+            AppCommand::ToggleSecureKeyboardEntry => Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID,
         }
     }
 
@@ -228,6 +232,7 @@ impl AppCommand {
             Self::QUIT_MENU_ID => Some(Self::Quit),
             Self::TOGGLE_COMMAND_PALETTE_MENU_ID => Some(Self::ToggleCommandPalette),
             Self::TOGGLE_QUICK_TERMINAL_MENU_ID => Some(Self::ToggleQuickTerminal),
+            Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID => Some(Self::ToggleSecureKeyboardEntry),
             _ => None,
         }
     }
@@ -303,6 +308,7 @@ impl AppCommand {
             Self::Quit => "app.quit",
             Self::ToggleCommandPalette => "command-palette.toggle",
             Self::ToggleQuickTerminal => "quick-terminal.toggle",
+            Self::ToggleSecureKeyboardEntry => "secure-keyboard-entry.toggle",
         }
     }
 
@@ -361,6 +367,7 @@ impl AppCommand {
             "app.quit" => Some(Self::Quit),
             "command-palette.toggle" => Some(Self::ToggleCommandPalette),
             "quick-terminal.toggle" => Some(Self::ToggleQuickTerminal),
+            "secure-keyboard-entry.toggle" => Some(Self::ToggleSecureKeyboardEntry),
             _ => None,
         }
     }

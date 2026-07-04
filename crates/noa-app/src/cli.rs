@@ -155,8 +155,7 @@ fn theme_variant(theme: &noa_theme::ThemeDef) -> &'static str {
     // Rec. 709 relative luminance of the default background: bright
     // backgrounds read as light themes, dark backgrounds as dark themes.
     let bg = theme.default_bg;
-    let luma =
-        0.2126 * f32::from(bg.r) + 0.7152 * f32::from(bg.g) + 0.0722 * f32::from(bg.b);
+    let luma = 0.2126 * f32::from(bg.r) + 0.7152 * f32::from(bg.g) + 0.0722 * f32::from(bg.b);
     if luma >= 128.0 { "light" } else { "dark" }
 }
 
@@ -269,8 +268,21 @@ fn show_config_output(config: &StartupConfig) -> String {
     push_color_line(&mut out, "background", config.background);
     push_color_line(&mut out, "foreground", config.foreground);
     push_color_line(&mut out, "cursor-color", config.cursor_color);
-    push_color_line(&mut out, "selection-foreground", config.selection_foreground);
-    push_color_line(&mut out, "selection-background", config.selection_background);
+    push_color_line(
+        &mut out,
+        "selection-foreground",
+        config.selection_foreground,
+    );
+    push_color_line(
+        &mut out,
+        "selection-background",
+        config.selection_background,
+    );
+    push_line(
+        &mut out,
+        "minimum-contrast",
+        &config.minimum_contrast.to_string(),
+    );
     push_line(
         &mut out,
         "cursor-style",
@@ -503,7 +515,10 @@ mod tests {
                 "{action} must be a registered action name"
             );
         }
-        assert_eq!(output.lines().count(), KeybindEngine::default().list().len());
+        assert_eq!(
+            output.lines().count(),
+            KeybindEngine::default().list().len()
+        );
     }
 
     #[test]
@@ -525,6 +540,7 @@ mod tests {
         assert!(output.contains("font-family = \n"));
         assert!(output.contains("clipboard-read = ask\n"));
         assert!(output.contains("clipboard-paste-protection = true\n"));
+        assert!(output.contains("minimum-contrast = 1\n"));
         assert!(output.contains("background-opacity = 1\n"));
         assert!(output.contains("background-blur-radius = 0\n"));
         assert!(output.contains("window-save-state = default\n"));
@@ -541,6 +557,7 @@ mod tests {
         let config = StartupConfig {
             theme: Some("3024 Day".to_string()),
             background: Some(Rgb::new(0x10, 0x20, 0x30)),
+            minimum_contrast: 3.0,
             cursor_style: Some(CursorShape::Bar),
             macos_option_as_alt: MacosOptionAsAlt::Right,
             macos_titlebar_style: MacosTitlebarStyle::Hidden,
@@ -563,6 +580,7 @@ mod tests {
 
         assert!(output.contains("theme = 3024 Day\n"));
         assert!(output.contains("background = #102030\n"));
+        assert!(output.contains("minimum-contrast = 3\n"));
         assert!(output.contains("cursor-style = bar\n"));
         assert!(output.contains("macos-option-as-alt = right\n"));
         assert!(output.contains("macos-titlebar-style = hidden\n"));

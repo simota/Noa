@@ -96,6 +96,7 @@ fn app_config_from_startup(
         cursor_color: config.cursor_color,
         selection_foreground: config.selection_foreground,
         selection_background: config.selection_background,
+        minimum_contrast: config.minimum_contrast,
         cursor_style: config.cursor_style,
         cursor_style_blink: config.cursor_style_blink,
         background_opacity: config.background_opacity,
@@ -139,6 +140,7 @@ mod tests {
             font_size: 15.0,
             theme: Some("3024 Day".to_string()),
             font: noa_config::FontConfig::default(),
+            minimum_contrast: 3.0,
             macos_option_as_alt: noa_config::MacosOptionAsAlt::Both,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Transparent,
             ..Default::default()
@@ -151,6 +153,7 @@ mod tests {
         assert_eq!(app_config.font_size, 15.0);
         assert_eq!(app_config.theme.as_deref(), Some("3024 Day"));
         assert_eq!(app_config.font, noa_config::FontConfig::default());
+        assert_eq!(app_config.minimum_contrast, 3.0);
         assert_eq!(
             app_config.macos_option_as_alt,
             noa_config::MacosOptionAsAlt::Both

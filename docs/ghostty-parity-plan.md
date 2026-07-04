@@ -79,7 +79,7 @@ GUI 非依存 → ユニットテストで完結。
 - **カラー絵文字**: sbix/CBDT を swash でラスタ → RGBA アトラス（既存 R8 と 2 枚持ち）。
 - **シェーピング/リガチャ**: swash shaper で行単位シェーピング（`=>` 等の合字、既定 ON・設定で OFF）。
   セル→グリフのマッピングを 1:1 から m:n に一般化する、このフェーズ最大の構造変更。
-- **minimum-contrast**: 既存 uniform を実配線し設定公開。
+- **minimum-contrast**: `minimum-contrast` 設定を公開済み。CPU 側の色解決で文字・下線・カーソル色を背景との WCAG コントラスト比に引き上げる。
 - **背景 opacity**: サーフェス α + clear color α、`background-opacity` 設定。
 - 検証: pipeline.rs 拡張 + スナップショット画像比較（wgpu offscreen readback）を導入し、
   Ghostty と同一コマンドのスクリーンショット目視パリティをチェックリスト化。

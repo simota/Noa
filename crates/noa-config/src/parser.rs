@@ -51,6 +51,7 @@ pub(crate) fn build_overrides(
     let mut cursor_color = None;
     let mut selection_foreground = None;
     let mut selection_background = None;
+    let mut minimum_contrast = None;
     let mut cursor_style = None;
     let mut cursor_style_blink = None;
     let mut background_opacity = None;
@@ -161,6 +162,9 @@ pub(crate) fn build_overrides(
             "selection-background" => {
                 selection_background = parse_color(path, directive, &mut diagnostics);
             }
+            "minimum-contrast" => {
+                minimum_contrast = parse_minimum_contrast(path, directive, &mut diagnostics);
+            }
             "cursor-style" => {
                 cursor_style = parse_cursor_style(path, directive, &mut diagnostics);
             }
@@ -232,6 +236,7 @@ pub(crate) fn build_overrides(
             cursor_color,
             selection_foreground,
             selection_background,
+            minimum_contrast,
             cursor_style,
             cursor_style_blink,
             background_opacity,
@@ -264,6 +269,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "cursor-color"
             | "selection-foreground"
             | "selection-background"
+            | "minimum-contrast"
             | "cursor-style"
             | "cursor-style-blink"
             | "alpha-blending"
@@ -594,6 +600,27 @@ fn parse_opacity(
         return None;
     }
     Some(parsed.clamp(0.0, 1.0))
+}
+
+/// Parse `minimum-contrast`: a WCAG contrast ratio from 1.0 through 21.0.
+/// Unlike opacity/quick-terminal-size, Ghostty documents this as a bounded
+/// ratio rather than a clamped percentage, so invalid values diagnose and fall
+/// back to the default.
+fn parse_minimum_contrast(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<f32> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<f32>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if !parsed.is_finite() || !(1.0..=21.0).contains(&parsed) {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(parsed)
 }
 
 /// Maximum `background-blur-radius`. Beyond this the CGS blur stops looking
@@ -1257,6 +1284,29 @@ mod tests {
     }
 
     #[test]
+    fn minimum_contrast_accepts_wcag_ratio_range() {
+        for (value, expected) in [("1", 1.0), ("1.1", 1.1), ("21", 21.0)] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("minimum-contrast = {value}"));
+
+            assert!(diagnostics.is_empty(), "{value}: {diagnostics:?}");
+            assert_eq!(overrides.minimum_contrast, Some(expected));
+        }
+    }
+
+    #[test]
+    fn minimum_contrast_rejects_out_of_range_values() {
+        for value in ["0.9", "22", "nan", "hard"] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("minimum-contrast = {value}"));
+
+            assert_eq!(overrides.minimum_contrast, None, "{value}");
+            assert_eq!(diagnostics.len(), 1, "{value}");
+            assert!(diagnostics[0].message.contains("minimum-contrast"));
+        }
+    }
+
+    #[test]
     fn invalid_color_warns_and_falls_back() {
         for source in [
             "background = #12345",
@@ -1350,7 +1400,11 @@ mod tests {
             let (overrides, diagnostics) =
                 parse_overrides(path(), &format!("background-blur-radius = {value}"));
 
-            assert_eq!(overrides.background_blur_radius, Some(expected), "{value:?}");
+            assert_eq!(
+                overrides.background_blur_radius,
+                Some(expected),
+                "{value:?}"
+            );
             assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
         }
     }

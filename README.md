@@ -43,23 +43,26 @@ Options: `cargo run -p noa -- --cols 100 --rows 30 --font-size 15`.
 
 ### Configuration
 
-At startup, `noa` reads `config.toml` from the platform config directory
-(`~/Library/Application Support/noa/config.toml` on macOS). Missing config files
-keep the built-in defaults: `cols = 80`, `rows = 24`, `font_size = 14.0`, and
-the built-in terminal theme. CLI flags override config file values.
+At startup, `noa` reads `config` from the platform config directory
+(`~/Library/Application Support/noa/config` on macOS). Missing config files keep
+the built-in defaults: `window-width = 80`, `window-height = 24`,
+`font-size = 14.0`, `minimum-contrast = 1.0`, and the built-in terminal theme.
+CLI flags override config file values.
 
-```toml
-cols = 100
-rows = 30
-font_size = 15.0
+```conf
+window-width = 100
+window-height = 30
+font-size = 15.0
 theme = "Catppuccin Mocha"
+minimum-contrast = 3.0
 ```
 
 Theme names match the vendored Ghostty-compatible catalog in
 `crates/noa-theme/vendor/themes/`, without the `.conf` suffix. For example,
 `theme = "TokyoNight Night"`, `theme = "Gruvbox Dark"`, and
 `theme = "Nord"` are valid. `--theme` is intentionally not a CLI flag; theme
-selection is config-file only.
+selection is config-file only. `minimum-contrast` accepts a WCAG contrast-ratio
+floor from `1.0` through `21.0`; `1.0` preserves theme colors unchanged.
 
 ### Build the macOS app
 

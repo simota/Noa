@@ -32,6 +32,9 @@ pub struct AppConfig {
     pub cursor_color: Option<noa_core::Rgb>,
     pub selection_foreground: Option<noa_core::Rgb>,
     pub selection_background: Option<noa_core::Rgb>,
+    /// `minimum-contrast`: WCAG contrast-ratio floor for rendered text/cursor
+    /// colors. `1.0` disables adjustment.
+    pub minimum_contrast: f32,
     /// `cursor-style` shape and `cursor-style-blink` toggle.
     pub cursor_style: Option<noa_config::CursorShape>,
     pub cursor_style_blink: Option<bool>,

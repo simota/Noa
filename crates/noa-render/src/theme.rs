@@ -10,6 +10,8 @@
 use noa_core::{Color, DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, Rgb, xterm_palette};
 use noa_grid::TerminalColors;
 
+pub const DEFAULT_MINIMUM_CONTRAST: f32 = 1.0;
+
 /// A resolved terminal color theme: default fg/bg plus the 256-color palette.
 ///
 /// `PartialEq` (WP4): every field is an integer `Rgb`, so value equality is
@@ -26,6 +28,9 @@ pub struct Theme {
     pub search_bg: Rgb,
     pub active_search_fg: Rgb,
     pub active_search_bg: Rgb,
+    /// WCAG contrast-ratio floor for rendered text/cursor colors. `1.0`
+    /// leaves theme colors untouched; `21.0` is the theoretical maximum.
+    pub minimum_contrast: f32,
     /// Index 0..=255: 16 ANSI + 6x6x6 color cube (16..=231) + grayscale ramp (232..=255).
     pub palette: [Rgb; 256],
 }
@@ -48,6 +53,7 @@ impl Theme {
             search_bg: Rgb::new(0xff, 0xd7, 0x5f),
             active_search_fg: Rgb::new(0xff, 0xff, 0xff),
             active_search_bg: Rgb::new(0x00, 0x87, 0xaf),
+            minimum_contrast: DEFAULT_MINIMUM_CONTRAST,
             palette: xterm_palette(),
         }
     }
@@ -107,7 +113,12 @@ impl Theme {
         rgba(self.active_search_bg)
     }
 
-    fn resolve_rgb_with_colors(&self, c: Color, is_fg: bool, colors: &TerminalColors) -> Rgb {
+    pub(crate) fn resolve_rgb_with_colors(
+        &self,
+        c: Color,
+        is_fg: bool,
+        colors: &TerminalColors,
+    ) -> Rgb {
         match c {
             Color::Default => {
                 if is_fg {
@@ -120,9 +131,13 @@ impl Theme {
             Color::Rgb(rgb) => rgb,
         }
     }
+
+    pub(crate) fn contrast_adjusted_fg(&self, fg: Rgb, bg: Rgb) -> Rgb {
+        ensure_minimum_contrast(fg, bg, self.minimum_contrast)
+    }
 }
 
-fn rgba(rgb: Rgb) -> [f32; 4] {
+pub(crate) fn rgba(rgb: Rgb) -> [f32; 4] {
     [
         rgb.r as f32 / 255.0,
         rgb.g as f32 / 255.0,
@@ -139,6 +154,91 @@ pub fn blend(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let t = t.clamp(0.0, 1.0);
     let lerp = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
     Rgb::new(lerp(a.r, b.r), lerp(a.g, b.g), lerp(a.b, b.b))
+}
+
+/// WCAG contrast ratio between two sRGB colors (`1.0..=21.0`).
+pub fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
+    let la = relative_luminance(a);
+    let lb = relative_luminance(b);
+    let (lighter, darker) = if la >= lb { (la, lb) } else { (lb, la) };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+/// Return a foreground color adjusted toward black or white until it reaches
+/// `minimum` contrast against `bg`, preserving the original color when it
+/// already passes. If a very high target is physically impossible for that
+/// background, use the better endpoint.
+pub fn ensure_minimum_contrast(fg: Rgb, bg: Rgb, minimum: f32) -> Rgb {
+    let minimum = minimum.clamp(1.0, 21.0);
+    if minimum <= 1.0 || contrast_ratio(fg, bg) >= minimum {
+        return fg;
+    }
+
+    let black = Rgb::new(0, 0, 0);
+    let white = Rgb::new(255, 255, 255);
+    let dark = contrast_candidate(fg, bg, black, minimum);
+    let light = contrast_candidate(fg, bg, white, minimum);
+    let dark_ratio = contrast_ratio(dark, bg);
+    let light_ratio = contrast_ratio(light, bg);
+    let dark_ok = dark_ratio >= minimum;
+    let light_ok = light_ratio >= minimum;
+
+    match (dark_ok, light_ok) {
+        (true, true) => {
+            if rgb_distance_sq(fg, dark) <= rgb_distance_sq(fg, light) {
+                dark
+            } else {
+                light
+            }
+        }
+        (true, false) => dark,
+        (false, true) => light,
+        (false, false) => {
+            if dark_ratio >= light_ratio {
+                dark
+            } else {
+                light
+            }
+        }
+    }
+}
+
+fn contrast_candidate(fg: Rgb, bg: Rgb, endpoint: Rgb, minimum: f32) -> Rgb {
+    if contrast_ratio(endpoint, bg) < minimum {
+        return endpoint;
+    }
+
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    for _ in 0..10 {
+        let mid = (lo + hi) * 0.5;
+        let candidate = blend(fg, endpoint, mid);
+        if contrast_ratio(candidate, bg) >= minimum {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    blend(fg, endpoint, hi)
+}
+
+fn relative_luminance(c: Rgb) -> f32 {
+    let lin = |v: u8| {
+        let v = f32::from(v) / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+fn rgb_distance_sq(a: Rgb, b: Rgb) -> i32 {
+    let dr = i32::from(a.r) - i32::from(b.r);
+    let dg = i32::from(a.g) - i32::from(b.g);
+    let db = i32::from(a.b) - i32::from(b.b);
+    dr * dr + dg * dg + db * db
 }
 
 /// A modal-overlay surface palette derived from a [`Theme`]'s own default
@@ -306,6 +406,37 @@ mod tests {
         // Out-of-range t clamps to the endpoints.
         assert_eq!(blend(a, b, -1.0), a);
         assert_eq!(blend(a, b, 2.0), b);
+    }
+
+    #[test]
+    fn contrast_ratio_matches_wcag_endpoints() {
+        assert!((contrast_ratio(Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)) - 21.0).abs() < 0.01);
+        assert!(
+            (contrast_ratio(Rgb::new(0x77, 0x77, 0x77), Rgb::new(0x77, 0x77, 0x77)) - 1.0).abs()
+                < 0.01
+        );
+    }
+
+    #[test]
+    fn ensure_minimum_contrast_preserves_or_adjusts_foreground() {
+        let bg = Rgb::new(0, 0, 0);
+        let readable = Rgb::new(0xd0, 0xd0, 0xd0);
+        assert_eq!(ensure_minimum_contrast(readable, bg, 4.5), readable);
+
+        let low = Rgb::new(0x22, 0x22, 0x22);
+        let adjusted = ensure_minimum_contrast(low, bg, 4.5);
+        assert_ne!(adjusted, low);
+        assert!(
+            contrast_ratio(adjusted, bg) >= 4.5,
+            "adjusted={adjusted:?} ratio={}",
+            contrast_ratio(adjusted, bg)
+        );
+
+        assert_eq!(
+            ensure_minimum_contrast(low, bg, 1.0),
+            low,
+            "1.0 disables adjustment"
+        );
     }
 
     #[test]

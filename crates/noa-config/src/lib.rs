@@ -22,6 +22,9 @@ pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 /// `scrollback-limit` default: 10 MB of scrollback storage, matching Ghostty.
 pub const DEFAULT_SCROLLBACK_LIMIT: usize = 10_000_000;
+/// `minimum-contrast` default: 1.0 means no automatic adjustment, matching
+/// Ghostty's contrast-ratio scale where 1 permits identical colors.
+pub const DEFAULT_MINIMUM_CONTRAST: f32 = 1.0;
 /// `quick-terminal-size` default: 40% of the screen height. (Ghostty's own
 /// default is 25%; noa opts for a slightly taller default drop-down.)
 pub const DEFAULT_QUICK_TERMINAL_SIZE: f32 = 0.4;
@@ -239,6 +242,10 @@ pub struct StartupConfig {
     /// overrides.
     pub selection_foreground: Option<Rgb>,
     pub selection_background: Option<Rgb>,
+    /// `minimum-contrast`: WCAG contrast-ratio floor for foreground text
+    /// against its resolved background. `1.0` disables adjustment; valid
+    /// configured values are `1.0..=21.0`.
+    pub minimum_contrast: f32,
     /// `cursor-style` shape and `cursor-style-blink` toggle. `None` keeps the
     /// terminal default (Ghostty: blinking block).
     pub cursor_style: Option<CursorShape>,
@@ -293,6 +300,7 @@ impl Default for StartupConfig {
             cursor_color: None,
             selection_foreground: None,
             selection_background: None,
+            minimum_contrast: DEFAULT_MINIMUM_CONTRAST,
             cursor_style: None,
             cursor_style_blink: None,
             background_opacity: 1.0,
@@ -325,6 +333,7 @@ pub struct ConfigOverrides {
     pub cursor_color: Option<Rgb>,
     pub selection_foreground: Option<Rgb>,
     pub selection_background: Option<Rgb>,
+    pub minimum_contrast: Option<f32>,
     pub cursor_style: Option<CursorShape>,
     pub cursor_style_blink: Option<bool>,
     pub background_opacity: Option<f32>,
@@ -361,6 +370,7 @@ impl ConfigOverrides {
             selection_background: higher_priority
                 .selection_background
                 .or(self.selection_background),
+            minimum_contrast: higher_priority.minimum_contrast.or(self.minimum_contrast),
             cursor_style: higher_priority.cursor_style.or(self.cursor_style),
             cursor_style_blink: higher_priority
                 .cursor_style_blink
@@ -409,6 +419,7 @@ impl ConfigOverrides {
             cursor_color: self.cursor_color.or(base.cursor_color),
             selection_foreground: self.selection_foreground.or(base.selection_foreground),
             selection_background: self.selection_background.or(base.selection_background),
+            minimum_contrast: self.minimum_contrast.unwrap_or(base.minimum_contrast),
             cursor_style: self.cursor_style.or(base.cursor_style),
             cursor_style_blink: self.cursor_style_blink.or(base.cursor_style_blink),
             background_opacity: self.background_opacity.unwrap_or(base.background_opacity),
@@ -518,6 +529,9 @@ pub fn validate_startup_config(config: &StartupConfig, context: &str) -> anyhow:
     if !config.font_size.is_finite() || config.font_size <= 0.0 {
         bail!("invalid {context}: `font_size` must be a positive finite number");
     }
+    if !config.minimum_contrast.is_finite() || !(1.0..=21.0).contains(&config.minimum_contrast) {
+        bail!("invalid {context}: `minimum_contrast` must be between 1 and 21");
+    }
     Ok(())
 }
 
@@ -562,6 +576,7 @@ mod tests {
                 cursor_color: None,
                 selection_foreground: None,
                 selection_background: None,
+                minimum_contrast: DEFAULT_MINIMUM_CONTRAST,
                 cursor_style: None,
                 cursor_style_blink: None,
                 background_opacity: 1.0,
@@ -643,6 +658,7 @@ font-size = 15.5
             "window-padding-x = 8\n\
              window-padding-y = 4\n\
              background = #101010\n\
+             minimum-contrast = 3.5\n\
              cursor-style = bar\n\
              cursor-style-blink = false\n\
              background-opacity = 0.8",
@@ -654,6 +670,7 @@ font-size = 15.5
         assert_eq!(config.window_padding_x, Some(8.0));
         assert_eq!(config.window_padding_y, Some(4.0));
         assert_eq!(config.background, Some(Rgb::new(0x10, 0x10, 0x10)));
+        assert_eq!(config.minimum_contrast, 3.5);
         assert_eq!(config.cursor_style, Some(CursorShape::Bar));
         assert_eq!(config.cursor_style_blink, Some(false));
         assert_eq!(config.background_opacity, 0.8);
@@ -661,8 +678,7 @@ font-size = 15.5
 
     #[test]
     fn scrollback_limit_flows_through_parse_apply_and_precedence() {
-        let (overrides, diagnostics) =
-            parse_overrides(test_path(), "scrollback-limit = 2000000");
+        let (overrides, diagnostics) = parse_overrides(test_path(), "scrollback-limit = 2000000");
         assert!(diagnostics.is_empty());
         assert_eq!(overrides.scrollback_limit, Some(2_000_000));
 
@@ -682,7 +698,9 @@ font-size = 15.5
             ..Default::default()
         };
         assert_eq!(
-            file.merge(cli).apply_to(StartupConfig::default()).scrollback_limit,
+            file.merge(cli)
+                .apply_to(StartupConfig::default())
+                .scrollback_limit,
             0
         );
     }
@@ -751,12 +769,14 @@ font-size = 15.5
         let file = ConfigOverrides {
             window_padding_x: Some(2.0),
             background_opacity: Some(0.5),
+            minimum_contrast: Some(3.0),
             cursor_style: Some(CursorShape::Block),
             ..Default::default()
         };
         let cli = ConfigOverrides {
             window_padding_x: Some(9.0),
             background_opacity: Some(0.9),
+            minimum_contrast: Some(4.5),
             ..Default::default()
         };
 
@@ -764,6 +784,7 @@ font-size = 15.5
 
         assert_eq!(config.window_padding_x, Some(9.0));
         assert_eq!(config.background_opacity, 0.9);
+        assert_eq!(config.minimum_contrast, 4.5);
         // Not overridden by CLI: the file value survives.
         assert_eq!(config.cursor_style, Some(CursorShape::Block));
     }
@@ -1045,5 +1066,18 @@ font-size = 15.5
         let error = validate_startup_config(&config, "resolved startup config").unwrap_err();
 
         assert!(error.to_string().contains("font_size"));
+    }
+
+    #[test]
+    fn validates_minimum_contrast_after_merge() {
+        let config = ConfigOverrides {
+            minimum_contrast: Some(0.5),
+            ..Default::default()
+        }
+        .apply_to(StartupConfig::default());
+
+        let error = validate_startup_config(&config, "resolved startup config").unwrap_err();
+
+        assert!(error.to_string().contains("minimum_contrast"));
     }
 }

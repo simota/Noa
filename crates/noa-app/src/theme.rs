@@ -10,13 +10,27 @@ pub use noa_render::Theme;
 /// Per-key color overrides (`background`, `foreground`, `cursor-color`,
 /// `selection-foreground`, `selection-background`) applied on top of the
 /// resolved theme. A `None` field keeps the theme's value.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThemeOverrides {
     pub background: Option<Rgb>,
     pub foreground: Option<Rgb>,
     pub cursor: Option<Rgb>,
     pub selection_fg: Option<Rgb>,
     pub selection_bg: Option<Rgb>,
+    pub minimum_contrast: f32,
+}
+
+impl Default for ThemeOverrides {
+    fn default() -> Self {
+        Self {
+            background: None,
+            foreground: None,
+            cursor: None,
+            selection_fg: None,
+            selection_bg: None,
+            minimum_contrast: Theme::default().minimum_contrast,
+        }
+    }
 }
 
 /// Resolve a config-selected theme name into the renderer theme.
@@ -51,6 +65,7 @@ pub fn resolve_theme_with_overrides(name: Option<&str>, overrides: &ThemeOverrid
     if let Some(selection_bg) = overrides.selection_bg {
         theme.selection_bg = selection_bg;
     }
+    theme.minimum_contrast = overrides.minimum_contrast;
     theme
 }
 
@@ -72,6 +87,7 @@ fn theme_from_definition(definition: &noa_theme::ThemeDef) -> Theme {
         search_bg,
         active_search_fg: contrast_fg(active_search_bg),
         active_search_bg,
+        minimum_contrast: Theme::default().minimum_contrast,
         palette: definition.palette,
     }
 }
@@ -142,6 +158,7 @@ mod tests {
             assert_eq!(theme.cursor, definition.cursor);
             assert_eq!(theme.selection_fg, definition.selection_fg);
             assert_eq!(theme.selection_bg, definition.selection_bg);
+            assert_eq!(theme.minimum_contrast, Theme::default().minimum_contrast);
             assert_eq!(theme.palette, definition.palette);
         }
     }
@@ -228,6 +245,7 @@ mod tests {
             background: Some(Rgb::new(1, 2, 3)),
             cursor: Some(Rgb::new(4, 5, 6)),
             selection_bg: Some(Rgb::new(7, 8, 9)),
+            minimum_contrast: 4.5,
             ..Default::default()
         };
 
@@ -236,6 +254,7 @@ mod tests {
         assert_eq!(theme.default_bg, Rgb::new(1, 2, 3));
         assert_eq!(theme.cursor, Rgb::new(4, 5, 6));
         assert_eq!(theme.selection_bg, Rgb::new(7, 8, 9));
+        assert_eq!(theme.minimum_contrast, 4.5);
         // Untouched fields keep the resolved theme's value.
         assert_eq!(theme.default_fg, base.default_fg);
         assert_eq!(theme.selection_fg, base.selection_fg);
@@ -261,6 +280,7 @@ mod tests {
         assert_eq!(actual.search_bg, expected.search_bg);
         assert_eq!(actual.active_search_fg, expected.active_search_fg);
         assert_eq!(actual.active_search_bg, expected.active_search_bg);
+        assert_eq!(actual.minimum_contrast, expected.minimum_contrast);
         assert_eq!(actual.palette, expected.palette);
     }
 

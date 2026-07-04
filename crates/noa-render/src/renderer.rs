@@ -17,7 +17,7 @@ use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
 use crate::pipeline::CellPipeline;
 use crate::segment::{SegmentCell, ShapeRun, segment_row};
 use crate::snapshot::{FrameSnapshot, HoverLink, ImagePlacementSnapshot, SnapshotImage};
-use crate::theme::{OverlayStyle, Theme};
+use crate::theme::{OverlayStyle, Theme, rgba};
 
 const DEFAULT_PANE_ID: PaneId = PaneId::new(0);
 const DIVIDER_RGBA: [u8; 4] = [82, 82, 82, 255];
@@ -911,25 +911,30 @@ fn rebuild_row_instances(
         } else {
             (cell.fg, cell.bg)
         };
+        let cell_bg_rgb = theme.resolve_rgb_with_colors(bg_color, false, &snap.colors);
+        let (bg_rgb, text_base_rgb) = if cursor_block_fill {
+            (
+                cursor_fill_rgb(theme, snap, fg_color, cell_bg_rgb),
+                cell_bg_rgb,
+            )
+        } else if selected {
+            (theme.selection_bg, theme.selection_fg)
+        } else if active_search {
+            (theme.active_search_bg, theme.active_search_fg)
+        } else if search_match {
+            (theme.search_bg, theme.search_fg)
+        } else {
+            (
+                cell_bg_rgb,
+                theme.resolve_rgb_with_colors(fg_color, true, &snap.colors),
+            )
+        };
 
         // Background quad: skip when it's the plain default bg (the
         // clear color already fills that), unless inverted.
         let bg_is_default = matches!(bg_color, Color::Default) && !inverse;
         if cursor_block_fill || selected || active_search || search_match || !bg_is_default {
-            let bg = if cursor_block_fill {
-                cursor_fill_color(theme, snap, fg_color, target_format_is_srgb)
-            } else if selected {
-                surface_output_rgba(theme.selection_bg(), target_format_is_srgb)
-            } else if active_search {
-                surface_output_rgba(theme.active_search_bg(), target_format_is_srgb)
-            } else if search_match {
-                surface_output_rgba(theme.search_bg(), target_format_is_srgb)
-            } else {
-                surface_output_rgba(
-                    theme.resolve_with_colors(bg_color, false, &snap.colors),
-                    target_format_is_srgb,
-                )
-            };
+            let bg = surface_output_rgb(bg_rgb, target_format_is_srgb);
             bg_instances.push(CellInstance {
                 glyph_pos: [0, 0],
                 glyph_size: [0, 0],
@@ -944,30 +949,16 @@ fn rebuild_row_instances(
             });
         }
 
-        let text_color = if cursor_block_fill {
-            surface_output_rgba(
-                theme.resolve_with_colors(bg_color, false, &snap.colors),
-                target_format_is_srgb,
-            )
-        } else if selected {
-            surface_output_rgba(theme.selection_fg(), target_format_is_srgb)
-        } else if active_search {
-            surface_output_rgba(theme.active_search_fg(), target_format_is_srgb)
-        } else if search_match {
-            surface_output_rgba(theme.search_fg(), target_format_is_srgb)
-        } else {
-            surface_output_rgba(
-                theme.resolve_with_colors(fg_color, true, &snap.colors),
-                target_format_is_srgb,
-            )
-        };
+        let text_rgb = theme.contrast_adjusted_fg(text_base_rgb, bg_rgb);
+        let text_color = surface_output_rgb(text_rgb, target_format_is_srgb);
 
         let invisible = cell.attrs.contains(CellAttrs::INVISIBLE);
         let wide_spacer = cell.attrs.contains(CellAttrs::WIDE_SPACER);
         if !invisible && !wide_spacer {
             let decoration_color = if let Some(color) = cell.underline_color {
-                surface_output_rgba(
-                    theme.resolve_with_colors(color, true, &snap.colors),
+                let underline = theme.resolve_rgb_with_colors(color, true, &snap.colors);
+                surface_output_rgb(
+                    theme.contrast_adjusted_fg(underline, bg_rgb),
                     target_format_is_srgb,
                 )
             } else {
@@ -997,7 +988,10 @@ fn rebuild_row_instances(
         // (independent of the cell's own INVISIBLE/WIDE_SPACER attrs —
         // the cursor is a UI overlay, not part of the cell's own ink).
         if cursor_here && cursor_visual != CursorVisual::Block {
-            let cursor_rgba = cursor_fill_color(theme, snap, fg_color, target_format_is_srgb);
+            let cursor_rgba = surface_output_rgb(
+                cursor_fill_rgb(theme, snap, fg_color, bg_rgb),
+                target_format_is_srgb,
+            );
             push_cursor_decorations(
                 &mut decoration_instances,
                 x,
@@ -2085,25 +2079,25 @@ fn cursor_visual_for(snap: &FrameSnapshot) -> CursorVisual {
 }
 
 /// The cursor's own color: an explicit OSC 12 override if set, else the
-/// cell's foreground (so an unstyled cursor tracks the text it sits on) —
-/// used for the block fill and for every bar/underline/hollow decoration.
-fn cursor_fill_color(
+/// cell's foreground (so an unstyled cursor tracks the text it sits on).
+/// The returned color is contrast-adjusted against the effective cell
+/// background so the cursor stays visible even on low-contrast themes.
+fn cursor_fill_rgb(
     theme: &Theme,
     snap: &FrameSnapshot,
     fg_color: Color,
-    target_format_is_srgb: bool,
-) -> [f32; 4] {
-    if snap.colors.cursor().is_some() {
-        surface_output_rgba(
-            theme.cursor_with_colors(&snap.colors),
-            target_format_is_srgb,
-        )
+    bg_rgb: noa_core::Rgb,
+) -> noa_core::Rgb {
+    let base = if let Some(cursor) = snap.colors.cursor() {
+        cursor
     } else {
-        surface_output_rgba(
-            theme.resolve_with_colors(fg_color, true, &snap.colors),
-            target_format_is_srgb,
-        )
-    }
+        theme.resolve_rgb_with_colors(fg_color, true, &snap.colors)
+    };
+    theme.contrast_adjusted_fg(base, bg_rgb)
+}
+
+fn surface_output_rgb(rgb: noa_core::Rgb, target_format_is_srgb: bool) -> [f32; 4] {
+    surface_output_rgba(rgba(rgb), target_format_is_srgb)
 }
 
 /// Emit the decoration-pass rect(s) for a non-block cursor shape. `visual`
@@ -2851,6 +2845,10 @@ mod tests {
         Some(font)
     }
 
+    fn rgb_from_instance(instance: &CellInstance) -> Rgb {
+        Rgb::new(instance.color[0], instance.color[1], instance.color[2])
+    }
+
     fn one_cell_terminal_with_cursor_style(style: CursorStyle) -> Terminal {
         let mut terminal = Terminal::new(GridSize::new(1, 1));
         terminal.primary.cursor.x = 0;
@@ -2860,6 +2858,75 @@ mod tests {
         terminal.primary.grid[0].cells[0].fg = Color::Rgb(Rgb::new(240, 10, 20));
         terminal.primary.grid[0].cells[0].bg = Color::Rgb(Rgb::new(2, 3, 4));
         terminal
+    }
+
+    #[test]
+    fn minimum_contrast_adjusts_low_contrast_glyph_color() {
+        let Some(mut font) = font_with_rasterized_m() else {
+            return;
+        };
+
+        let mut terminal = Terminal::new(GridSize::new(1, 1));
+        terminal.primary.cursor.visible = false;
+        terminal.primary.grid[0].cells[0].ch = 'M';
+        terminal.primary.grid[0].cells[0].fg = Color::Rgb(Rgb::new(0x22, 0x22, 0x22));
+        terminal.primary.grid[0].cells[0].bg = Color::Rgb(Rgb::new(0x00, 0x00, 0x00));
+        let snap = FrameSnapshot::from_terminal(&mut terminal);
+        let mut theme = Theme::new();
+        theme.minimum_contrast = 4.5;
+
+        let mut instances = Vec::new();
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+
+        let glyph = instances
+            .iter()
+            .find(|i| i.flags & CellInstance::FLAG_GLYPH != 0)
+            .expect("glyph must be drawn");
+        let adjusted = rgb_from_instance(glyph);
+        let bg = Rgb::new(0x00, 0x00, 0x00);
+        assert_ne!(adjusted, Rgb::new(0x22, 0x22, 0x22));
+        assert!(
+            crate::theme::contrast_ratio(adjusted, bg) >= 4.5,
+            "adjusted={adjusted:?} ratio={}",
+            crate::theme::contrast_ratio(adjusted, bg)
+        );
+    }
+
+    #[test]
+    fn minimum_contrast_keeps_cursor_visible_against_cell_background() {
+        let Some(mut font) = font_with_rasterized_m() else {
+            return;
+        };
+
+        let mut terminal = Terminal::new(GridSize::new(1, 1));
+        terminal.primary.cursor.x = 0;
+        terminal.primary.cursor.y = 0;
+        terminal.primary.grid[0].cells[0].ch = 'M';
+        terminal.primary.grid[0].cells[0].fg = Color::Rgb(Rgb::new(0x00, 0x00, 0x00));
+        terminal.primary.grid[0].cells[0].bg = Color::Rgb(Rgb::new(0x00, 0x00, 0x00));
+        let snap = FrameSnapshot::from_terminal(&mut terminal);
+        let mut theme = Theme::new();
+        theme.minimum_contrast = 3.0;
+
+        let mut instances = Vec::new();
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+
+        let cursor_bg = instances
+            .iter()
+            .find(|i| {
+                i.grid_pos == [0, 0]
+                    && i.flags == CellInstance::FLAG_CURSOR
+                    && i.glyph_size == [0, 0]
+            })
+            .expect("cursor block fill must be drawn");
+        let cursor_rgb = rgb_from_instance(cursor_bg);
+        let bg = Rgb::new(0x00, 0x00, 0x00);
+        assert_ne!(cursor_rgb, bg);
+        assert!(
+            crate::theme::contrast_ratio(cursor_rgb, bg) >= 3.0,
+            "cursor={cursor_rgb:?} ratio={}",
+            crate::theme::contrast_ratio(cursor_rgb, bg)
+        );
     }
 
     #[test]

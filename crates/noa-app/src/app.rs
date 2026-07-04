@@ -498,6 +498,7 @@ impl App {
             cursor: self.config.cursor_color,
             selection_fg: self.config.selection_foreground,
             selection_bg: self.config.selection_background,
+            minimum_contrast: self.config.minimum_contrast,
         }
     }
 

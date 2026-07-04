@@ -28,6 +28,10 @@ pub const DEFAULT_MINIMUM_CONTRAST: f32 = 1.0;
 /// `quick-terminal-size` default: 40% of the screen height. (Ghostty's own
 /// default is 25%; noa opts for a slightly taller default drop-down.)
 pub const DEFAULT_QUICK_TERMINAL_SIZE: f32 = 0.4;
+/// `quick-terminal-hotkey` default: `cmd+grave` (⌘+`), the iTerm2 hotkey-window
+/// convention. (Ghostty ships no default; noa binds one so the drop-down works
+/// out of the box. Set `quick-terminal-hotkey = none` to disable it.)
+pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "cmd+grave";
 
 /// `clipboard-read` policy for OSC 52 clipboard *read* (query) requests.
 /// Mirrors Ghostty, whose default is `ask`.
@@ -271,9 +275,11 @@ pub struct StartupConfig {
     /// windows. Default is native.
     pub macos_titlebar_style: MacosTitlebarStyle,
     /// `quick-terminal-hotkey`: the global hotkey chord that toggles the
-    /// drop-down quick terminal (e.g. `cmd+grave`). `None` disables the
-    /// feature (no hotkey is registered). noa-specific key; Ghostty expresses
-    /// the same thing as `keybind = global:<chord>=toggle_quick_terminal`.
+    /// drop-down quick terminal (e.g. `cmd+grave`). Defaults to
+    /// [`DEFAULT_QUICK_TERMINAL_HOTKEY`]; set the config value to `none` (or
+    /// leave it empty) to register no hotkey and disable the feature. An empty
+    /// string is the "explicitly disabled" sentinel. noa-specific key; Ghostty
+    /// expresses the same thing as `keybind = global:<chord>=toggle_quick_terminal`.
     pub quick_terminal_hotkey: Option<String>,
     /// `quick-terminal-size`: the quick terminal's height as a fraction of the
     /// screen height, clamped to `0.1..=1.0`. Ghostty default is 25%.
@@ -309,7 +315,7 @@ impl Default for StartupConfig {
             window_save_state: WindowSaveState::default(),
             macos_option_as_alt: MacosOptionAsAlt::default(),
             macos_titlebar_style: MacosTitlebarStyle::default(),
-            quick_terminal_hotkey: None,
+            quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
             quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
             quick_terminal_autohide: true,
         }
@@ -585,7 +591,7 @@ mod tests {
                 window_save_state: WindowSaveState::default(),
                 macos_option_as_alt: MacosOptionAsAlt::default(),
                 macos_titlebar_style: MacosTitlebarStyle::default(),
-                quick_terminal_hotkey: None,
+                quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
                 quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
                 quick_terminal_autohide: true,
             }

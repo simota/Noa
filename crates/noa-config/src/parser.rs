@@ -191,7 +191,16 @@ pub(crate) fn build_overrides(
                     parse_macos_titlebar_style(path, directive, &mut diagnostics);
             }
             "quick-terminal-hotkey" => {
-                quick_terminal_hotkey = directive.value.clone();
+                // `none`/`off`/`false`/empty explicitly disable the hotkey,
+                // normalized to the empty-string sentinel so it overrides the
+                // built-in default through the `.or()` merge.
+                quick_terminal_hotkey = Some(match directive.value.as_deref() {
+                    None => String::new(),
+                    Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+                        "" | "none" | "off" | "false" => String::new(),
+                        _ => value.to_string(),
+                    },
+                });
             }
             "quick-terminal-size" => {
                 quick_terminal_size = parse_quick_terminal_size(path, directive, &mut diagnostics);
@@ -1549,6 +1558,25 @@ mod tests {
             overrides.quick_terminal_hotkey.as_deref(),
             Some("cmd+grave")
         );
+    }
+
+    #[test]
+    fn quick_terminal_hotkey_none_disables_via_empty_sentinel() {
+        // `none` (and empty) normalize to the empty-string sentinel so they
+        // override the built-in default hotkey through the `.or()` merge.
+        for input in [
+            "quick-terminal-hotkey = none",
+            "quick-terminal-hotkey = off",
+            "quick-terminal-hotkey =",
+        ] {
+            let (overrides, diagnostics) = parse_overrides(path(), input);
+            assert!(diagnostics.is_empty(), "unexpected diagnostics for {input:?}");
+            assert_eq!(
+                overrides.quick_terminal_hotkey.as_deref(),
+                Some(""),
+                "{input:?} should disable via empty sentinel"
+            );
+        }
     }
 
     #[test]

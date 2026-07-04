@@ -79,6 +79,10 @@ impl App {
         let Some(spec) = self.config.quick_terminal_hotkey.clone() else {
             return;
         };
+        // Empty spec is the "explicitly disabled" sentinel (config `none`).
+        if spec.trim().is_empty() {
+            return;
+        }
         match crate::macos_hotkey::GlobalHotKey::register(&spec, self.proxy.clone()) {
             Some(hotkey) => self.quick_terminal_hotkey = Some(hotkey),
             None => log::warn!("failed to register quick-terminal-hotkey `{spec}`"),

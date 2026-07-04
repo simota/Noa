@@ -28,7 +28,7 @@ pub use kitty_keyboard::{
     KITTY_REPORT_ASSOCIATED_TEXT, KITTY_REPORT_EVENT_TYPES, KittyKeyboard, SetMode,
 };
 pub use modes::ModeState;
-pub use osc::{Osc52Policy, TerminalColors};
+pub use osc::{Notification, Osc52Policy, TerminalColors};
 pub use screen::Screen;
 pub use search::{SearchMatch, SearchState};
 pub use selection::{Selection, SelectionPoint};

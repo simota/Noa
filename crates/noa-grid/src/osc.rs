@@ -323,6 +323,45 @@ pub(crate) fn parse_hyperlink_osc(data: &[u8]) -> Option<HyperlinkOsc> {
     Some(HyperlinkOsc::Start(Hyperlink { uri, id }))
 }
 
+/// A desktop notification requested via OSC 9 or OSC 777. `title` is `None`
+/// for OSC 9 (body only); OSC 777's `notify` subcommand carries both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notification {
+    pub title: Option<String>,
+    pub body: String,
+}
+
+/// Parse OSC 9 (`9;<body>`) and OSC 777 (`777;notify;<title>;<body>`) desktop
+/// notification requests. Returns `None` when `data` is neither, when the body
+/// is empty, or when OSC 777's subcommand isn't `notify`. OSC 9's body is taken
+/// whole (any `;` it contains is part of the body, iTerm2/kitty compatible);
+/// OSC 777 splits only on the first `;` after the title, so its body may too.
+pub(crate) fn parse_notification_osc(data: &[u8]) -> Option<Notification> {
+    if let Some(body) = data.strip_prefix(b"9;") {
+        if body.is_empty() {
+            return None;
+        }
+        return Some(Notification {
+            title: None,
+            body: String::from_utf8_lossy(body).into_owned(),
+        });
+    }
+
+    let rest = data.strip_prefix(b"777;")?;
+    // Only the `notify` subcommand is supported; every other one is ignored.
+    let after = rest.strip_prefix(b"notify;")?;
+    let sep = after.iter().position(|&b| b == b';')?;
+    let title = &after[..sep];
+    let body = &after[sep + 1..];
+    if body.is_empty() {
+        return None;
+    }
+    Some(Notification {
+        title: Some(String::from_utf8_lossy(title).into_owned()),
+        body: String::from_utf8_lossy(body).into_owned(),
+    })
+}
+
 pub(crate) fn parse_cwd_osc(data: &[u8]) -> Option<CwdOsc> {
     let uri = data.strip_prefix(b"7;")?;
     let Some(uri) = utf8_no_controls(uri) else {

@@ -1231,6 +1231,77 @@ fn osc_protocol_state_clears_on_full_reset() {
 }
 
 #[test]
+fn osc9_queues_a_notification_with_no_title() {
+    let mut t = run(b"\x1b]9;build finished\x07");
+
+    let notifications = t.take_pending_notifications();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].title, None);
+    assert_eq!(notifications[0].body, "build finished");
+}
+
+#[test]
+fn osc9_body_keeps_embedded_semicolons() {
+    let mut t = run(b"\x1b]9;a;b;c\x1b\\");
+
+    let notifications = t.take_pending_notifications();
+    assert_eq!(notifications[0].body, "a;b;c");
+}
+
+#[test]
+fn osc9_empty_body_queues_nothing() {
+    let mut t = run(b"\x1b]9;\x07");
+    assert!(t.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn osc777_notify_queues_title_and_body() {
+    let mut t = run(b"\x1b]777;notify;Title;the body\x1b\\");
+
+    let notifications = t.take_pending_notifications();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].title.as_deref(), Some("Title"));
+    assert_eq!(notifications[0].body, "the body");
+}
+
+#[test]
+fn osc777_notify_body_keeps_embedded_semicolons() {
+    let mut t = run(b"\x1b]777;notify;T;a;b\x07");
+
+    let notifications = t.take_pending_notifications();
+    assert_eq!(notifications[0].title.as_deref(), Some("T"));
+    assert_eq!(notifications[0].body, "a;b");
+}
+
+#[test]
+fn osc777_ignores_non_notify_subcommands() {
+    let mut t = run(b"\x1b]777;precmd;foo\x07");
+    assert!(t.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn osc777_without_a_body_queues_nothing() {
+    let mut t = run(b"\x1b]777;notify;just a title\x07");
+    assert!(t.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn notification_queue_drops_the_oldest_past_the_cap() {
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    let mut s = Stream::new();
+    // 40 notifications into a queue capped at 32: the first 8 are evicted, so
+    // the survivors are bodies 8..=39, oldest first.
+    for i in 0..40 {
+        s.feed(format!("\x1b]9;n{i}\x07").as_bytes(), &mut t);
+    }
+
+    let notifications = t.take_pending_notifications();
+    assert_eq!(notifications.len(), 32);
+    assert_eq!(notifications.first().unwrap().body, "n8");
+    assert_eq!(notifications.last().unwrap().body, "n39");
+}
+
+#[test]
 fn osc52_write_is_decoded_and_queued() {
     let mut t = run(b"\x1b]52;c;aGVsbG8=\x07");
 

@@ -10,9 +10,9 @@ use crate::cursor::{Cursor, CursorStyle, ScrollRegion};
 use crate::kitty_keyboard::{KittyKeyboard, SetMode};
 use crate::modes::ModeState;
 use crate::osc::{
-    CwdOsc, HyperlinkOsc, Osc52Policy, ShellIntegrationOsc, ShellIntegrationOscKind,
+    CwdOsc, HyperlinkOsc, Notification, Osc52Policy, ShellIntegrationOsc, ShellIntegrationOscKind,
     TerminalColors, handle_clipboard_osc, handle_color_osc, parse_cwd_osc, parse_hyperlink_osc,
-    parse_shell_integration_osc,
+    parse_notification_osc, parse_shell_integration_osc,
 };
 use crate::screen::Screen;
 use crate::search::SearchMatch;
@@ -27,6 +27,11 @@ use noa_vt::{
 /// unbounded-growth guardrails already used for `Screen::scrollback` and the
 /// parser's `MAX_OSC_BYTES`/`MAX_PARAMS`. The oldest entry is evicted first.
 const TITLE_STACK_CAP: usize = 64;
+
+/// Cap on queued desktop notifications (OSC 9 / OSC 777) awaiting drain by the
+/// app layer. A misbehaving program can emit these faster than the main thread
+/// consumes them; the oldest entry is evicted first, same as the title stack.
+const NOTIFICATION_QUEUE_CAP: usize = 32;
 
 pub struct Terminal {
     pub primary: Screen,
@@ -58,6 +63,10 @@ pub struct Terminal {
     /// The grid can't read the system clipboard, so the app layer fulfills
     /// these and writes the base64 reply back to the pty.
     pub pending_clipboard_reads: Vec<String>,
+    /// Desktop notifications requested via OSC 9 / OSC 777, awaiting drain by
+    /// [`Terminal::take_pending_notifications`]. Bounded at
+    /// [`NOTIFICATION_QUEUE_CAP`]; the oldest is evicted on overflow.
+    pending_notifications: VecDeque<Notification>,
     /// Set by `BEL` (`0x07`); drained by [`Terminal::take_pending_bell`].
     pending_bell: bool,
     /// Cell size in pixels, from the last `noa-app` pixel-metrics update.
@@ -120,6 +129,7 @@ impl Terminal {
             pending_writes: Vec::new(),
             pending_clipboard_writes: Vec::new(),
             pending_clipboard_reads: Vec::new(),
+            pending_notifications: VecDeque::new(),
             pending_bell: false,
             cell_width_px: 0,
             cell_height_px: 0,
@@ -264,6 +274,12 @@ impl Terminal {
         std::mem::take(&mut self.pending_clipboard_reads)
     }
 
+    /// Drain queued desktop notifications (OSC 9 / OSC 777) for the app layer,
+    /// oldest first. Empty when nothing was requested since the last drain.
+    pub fn take_pending_notifications(&mut self) -> Vec<Notification> {
+        self.pending_notifications.drain(..).collect()
+    }
+
     /// Build the OSC 52 reply carrying `text` for selection `target`
     /// (e.g. `"c"`), to be written back to the pty by the app layer.
     pub fn osc52_read_reply(target: &str, text: &str) -> Vec<u8> {
@@ -401,6 +417,13 @@ impl Terminal {
             point,
             exit_status,
         });
+    }
+
+    fn push_notification(&mut self, notification: Notification) {
+        if self.pending_notifications.len() >= NOTIFICATION_QUEUE_CAP {
+            self.pending_notifications.pop_front();
+        }
+        self.pending_notifications.push_back(notification);
     }
 
     /// Scroll the viewport to the nearest shell-integration prompt mark
@@ -914,6 +937,7 @@ impl Handler for Terminal {
         self.colors.reset_dynamic_overrides();
         self.pending_clipboard_writes.clear();
         self.pending_clipboard_reads.clear();
+        self.pending_notifications.clear();
         self.pending_bell = false;
         self.kitty_keyboard.reset();
         self.clear_selection();
@@ -1058,6 +1082,10 @@ impl Handler for Terminal {
                 HyperlinkOsc::End => self.clear_current_hyperlink(),
                 HyperlinkOsc::Malformed => {}
             }
+            return;
+        }
+        if let Some(notification) = parse_notification_osc(data) {
+            self.push_notification(notification);
             return;
         }
         if let Some(action) = parse_cwd_osc(data) {

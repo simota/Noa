@@ -23,6 +23,15 @@ pub enum UserEvent {
         pane_id: PaneId,
         target: String,
     },
+    /// A desktop notification requested by the terminal via OSC 9 / OSC 777.
+    /// The app posts it to the macOS notification center (unless the target
+    /// window is focused) and bounces the Dock.
+    Notify {
+        window_id: WindowId,
+        pane_id: PaneId,
+        title: Option<String>,
+        body: String,
+    },
     /// New terminal output is available; request a redraw.
     Redraw(WindowId, PaneId),
     /// The pty's child process exited (or errored) — the app should close.

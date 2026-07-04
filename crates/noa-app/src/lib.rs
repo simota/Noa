@@ -16,6 +16,7 @@ mod macos_blur;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 mod mouse;
+mod notification;
 mod search_prompt;
 pub mod split_tree;
 pub mod tab_overview;

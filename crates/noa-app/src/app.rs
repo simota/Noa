@@ -2732,6 +2732,23 @@ impl ApplicationHandler<UserEvent> for App {
                     noa_config::ClipboardAccess::Deny => {}
                 }
             }
+            UserEvent::Notify {
+                window_id,
+                pane_id,
+                title,
+                body,
+            } => {
+                if !self
+                    .windows
+                    .get(&window_id)
+                    .is_some_and(|state| state.contains_pane(pane_id))
+                {
+                    return;
+                }
+                if crate::notification::should_notify(self.focused == Some(window_id)) {
+                    crate::notification::post_notification(title.as_deref(), &body);
+                }
+            }
             UserEvent::Redraw(window_id, pane_id) => {
                 let pane_state = self
                     .windows

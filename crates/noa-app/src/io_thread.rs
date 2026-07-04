@@ -93,6 +93,7 @@ struct TerminalOutput {
     pending_writes: Vec<u8>,
     pending_clipboard_writes: Vec<String>,
     pending_clipboard_reads: Vec<String>,
+    pending_notifications: Vec<noa_grid::Notification>,
     synchronized_output: bool,
     /// Trailing-flush deadline owed by this feed's throttled overview
     /// publish (Fix B defect 1: a burst's final feed can land inside the
@@ -119,6 +120,7 @@ fn feed_terminal(
         pending_writes: term.take_pending_writes(),
         pending_clipboard_writes: term.take_pending_clipboard_writes(),
         pending_clipboard_reads: term.take_pending_clipboard_reads(),
+        pending_notifications: term.take_pending_notifications(),
         synchronized_output: term.modes.synchronized_output(),
         overview_publish_pending,
     }
@@ -302,6 +304,14 @@ pub fn spawn(
                                 window_id,
                                 pane_id,
                                 target,
+                            });
+                        }
+                        for notification in output.pending_notifications {
+                            let _ = proxy.send_event(UserEvent::Notify {
+                                window_id,
+                                pane_id,
+                                title: notification.title,
+                                body: notification.body,
                             });
                         }
                         if should_redraw

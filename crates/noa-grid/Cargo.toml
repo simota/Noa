@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 noa-core.workspace = true
+bitflags.workspace = true
 noa-vt.workspace = true
 thiserror.workspace = true
 unicode-width.workspace = true

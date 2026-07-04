@@ -12,6 +12,7 @@ pub mod kitty_keyboard;
 pub mod modes;
 mod osc;
 pub mod screen;
+mod scrollback;
 pub mod search;
 pub mod selection;
 pub mod tabstops;

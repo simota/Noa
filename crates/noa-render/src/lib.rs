@@ -14,7 +14,9 @@ mod segment;
 mod snapshot;
 mod theme;
 
-pub use blit::{BlitPipeline, OverviewThumbnailResources};
+pub use blit::{
+    BlitPipeline, CardPipeline, CardStyle, CardTilePlacement, OverviewThumbnailResources,
+};
 pub use draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 pub use instance::{CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform};
 pub use renderer::{PaneFrame, Renderer, renderer_construction_count};

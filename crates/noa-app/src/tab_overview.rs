@@ -31,6 +31,41 @@ pub const OVERVIEW_OUTER_MARGIN: u32 = 24;
 /// placeholder (REQ-OV-12/REQ-OV-13). Compile-time constant.
 pub const OVERVIEW_TITLE_BAR_H: u32 = 28;
 
+/// Height reserved at the *top* of the Overview window for the "Search tabs"
+/// field (REQ-OV-16). v2/P2 only *reserves* this band in the grid-bounds math
+/// so P3's search-field draw doesn't reflow the grid; P2 draws nothing here.
+/// Compile-time constant (⚠G precedent: no config knob).
+pub const OVERVIEW_SEARCH_BAND_H: u32 = 48;
+
+/// Height reserved at the *bottom* of the Overview window for the hint bar
+/// (REQ-OV-17). Compile-time constant.
+pub const OVERVIEW_HINT_BAND_H: u32 = 34;
+
+/// Mockup-parity chrome palette (REQ-OV-12/14, v2). All compile-time
+/// constants — no config knob (⚠G precedent). Stored as straight display-space
+/// RGBA because the Overview surface uses a **non-sRGB** format
+/// (`Bgra8Unorm`, see `preferred_surface_format`), so these are written to the
+/// target unchanged (no gamma re-encode).
+///
+/// Near-black navy backdrop behind every card (mockup: "暗色の背景").
+pub const OVERVIEW_BG_COLOR: [f32; 4] = [0.043, 0.055, 0.086, 1.0];
+/// Card face — one step lighter than [`OVERVIEW_BG_COLOR`] (mockup: "一段明るいカード面").
+pub const OVERVIEW_CARD_COLOR: [f32; 4] = [0.102, 0.118, 0.157, 1.0];
+/// Title-bar band — distinguishable from the card face (mockup: "区別可能な帯").
+pub const OVERVIEW_TITLE_BAR_COLOR: [f32; 4] = [0.145, 0.165, 0.216, 1.0];
+/// Thin resting card border.
+pub const OVERVIEW_BORDER_COLOR: [f32; 4] = [0.235, 0.259, 0.325, 1.0];
+/// Blue accent focus ring for the selected tile (REQ-OV-14).
+pub const OVERVIEW_FOCUS_RING_COLOR: [f32; 4] = [0.259, 0.545, 0.961, 1.0];
+/// Corner radius (px) of every card.
+pub const OVERVIEW_CARD_CORNER_RADIUS: f32 = 10.0;
+/// Resting border thickness (px).
+pub const OVERVIEW_CARD_BORDER_WIDTH: f32 = 1.5;
+/// Focus-ring thickness (px) — thicker than the resting border so the
+/// selection reads as a single bright ring (the glow is approximated by a
+/// solid thicker stroke, per the P2 brief).
+pub const OVERVIEW_CARD_FOCUS_WIDTH: f32 = 3.0;
+
 /// Width of the close (✕) button's clickable region at the title bar's right
 /// edge (REQ-OV-13). Square with the title bar.
 const OVERVIEW_CLOSE_BUTTON_W: u32 = OVERVIEW_TITLE_BAR_H;
@@ -436,6 +471,71 @@ pub fn sanitize_placeholder_label(label: &str, max_cols: u16) -> String {
         .filter(|c| !c.is_control())
         .take(max_cols as usize)
         .collect()
+}
+
+/// The three horizontal bands the Overview window is split into (REQ-OV-11/16/17):
+/// a reserved top search band, the middle tile-grid area, and a bottom hint
+/// band. `grid_bounds` is what feeds [`compute_overview_grid`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverviewChrome {
+    pub search_band: TileRect,
+    pub grid_bounds: TileRect,
+    pub hint_band: TileRect,
+}
+
+/// Carve `bounds` into the search / grid / hint bands (REQ-OV-11, v2 mockup
+/// parity). Reserving both bands here — rather than only around the grid —
+/// keeps the grid origin stable when P3 starts drawing the search field, and
+/// routes hit-testing + selection nav through the same `grid_bounds` the tiles
+/// are laid out in. Both band heights clamp so a very short window degrades to
+/// an empty grid instead of underflowing.
+pub fn overview_chrome_bands(bounds: TileRect) -> OverviewChrome {
+    let search_h = OVERVIEW_SEARCH_BAND_H.min(bounds.h);
+    let after_search = bounds.h - search_h;
+    let hint_h = OVERVIEW_HINT_BAND_H.min(after_search);
+    let grid_h = after_search - hint_h;
+
+    OverviewChrome {
+        search_band: TileRect::new(bounds.x, bounds.y, bounds.w, search_h),
+        grid_bounds: TileRect::new(bounds.x, bounds.y + search_h, bounds.w, grid_h),
+        hint_band: TileRect::new(bounds.x, bounds.y + search_h + grid_h, bounds.w, hint_h),
+    }
+}
+
+/// Build the bottom hint-bar text (REQ-OV-17). `live_tile_count` is the number
+/// of live thumbnail tiles (`min(tab_count, cap)`); the `⌘1-N` range tracks it
+/// dynamically rather than hard-coding the mockup's "1-6".
+///
+/// NOTE (manual-verify): the `⌘`, arrow, and `・` glyphs depend on font
+/// fallback. If they render as tofu, swap to the ASCII form returned by
+/// [`overview_hint_bar_text_ascii`] (a compile-time swap at the one call site)
+/// and record the deviation.
+pub fn overview_hint_bar_text(live_tile_count: usize) -> String {
+    let n = live_tile_count.max(1);
+    format!("⌘1-{n} to switch・↑↓←→ to navigate・Return to open・esc to close")
+}
+
+/// ASCII fallback for [`overview_hint_bar_text`] when the Unicode glyphs tofu.
+pub fn overview_hint_bar_text_ascii(live_tile_count: usize) -> String {
+    let n = live_tile_count.max(1);
+    format!("cmd+1-{n} to switch / arrows to navigate / return to open / esc to close")
+}
+
+/// Horizontally center `text` within `cols` columns by left-padding with
+/// spaces (used for title-bar and hint-bar labels rendered through a synthetic
+/// single-row `Terminal`). Longer-than-`cols` text is returned unpadded; the
+/// renderer clips it to the tile.
+pub fn center_label(text: &str, cols: u16) -> String {
+    let width = text.chars().count();
+    let cols = cols as usize;
+    if width >= cols {
+        return text.to_string();
+    }
+    let pad = (cols - width) / 2;
+    let mut out = String::with_capacity(cols);
+    out.extend(std::iter::repeat_n(' ', pad));
+    out.push_str(text);
+    out
 }
 
 fn ceil_sqrt(n: usize) -> usize {
@@ -1009,6 +1109,78 @@ mod tests {
             overview_close_hit_test(&tiles, Point::new(1000, 1000)),
             None
         );
+    }
+
+    #[test]
+    fn chrome_bands_reserve_search_and_hint_and_keep_grid_in_between() {
+        let bounds = TileRect::new(0, 0, 800, 600);
+        let chrome = overview_chrome_bands(bounds);
+
+        // Search band pinned to the top, hint band to the bottom.
+        assert_eq!(
+            chrome.search_band,
+            TileRect::new(0, 0, 800, OVERVIEW_SEARCH_BAND_H)
+        );
+        assert_eq!(
+            chrome.hint_band,
+            TileRect::new(0, 600 - OVERVIEW_HINT_BAND_H, 800, OVERVIEW_HINT_BAND_H)
+        );
+        // Grid sits between them, full width, no overlap, no gap.
+        assert_eq!(chrome.grid_bounds.x, 0);
+        assert_eq!(chrome.grid_bounds.y, OVERVIEW_SEARCH_BAND_H);
+        assert_eq!(chrome.grid_bounds.w, 800);
+        assert_eq!(
+            chrome.grid_bounds.h,
+            600 - OVERVIEW_SEARCH_BAND_H - OVERVIEW_HINT_BAND_H
+        );
+        // The three bands exactly tile the bounds vertically.
+        assert_eq!(
+            chrome.search_band.h + chrome.grid_bounds.h + chrome.hint_band.h,
+            600
+        );
+    }
+
+    #[test]
+    fn chrome_bands_clamp_without_underflow_in_a_short_window() {
+        // Window shorter than the search band alone: grid + hint collapse to
+        // zero height, nothing underflows.
+        let chrome = overview_chrome_bands(TileRect::new(0, 0, 100, 20));
+        assert_eq!(chrome.search_band.h, 20);
+        assert_eq!(chrome.grid_bounds.h, 0);
+        assert_eq!(chrome.hint_band.h, 0);
+    }
+
+    #[test]
+    fn hint_bar_text_substitutes_the_live_tile_count() {
+        assert_eq!(
+            overview_hint_bar_text(6),
+            "⌘1-6 to switch・↑↓←→ to navigate・Return to open・esc to close"
+        );
+        assert_eq!(
+            overview_hint_bar_text(9),
+            "⌘1-9 to switch・↑↓←→ to navigate・Return to open・esc to close"
+        );
+        // Never renders "1-0": a zero-tile overview still shows "1-1".
+        assert_eq!(
+            overview_hint_bar_text(0),
+            "⌘1-1 to switch・↑↓←→ to navigate・Return to open・esc to close"
+        );
+    }
+
+    #[test]
+    fn hint_bar_ascii_fallback_mirrors_the_unicode_range() {
+        assert_eq!(
+            overview_hint_bar_text_ascii(6),
+            "cmd+1-6 to switch / arrows to navigate / return to open / esc to close"
+        );
+    }
+
+    #[test]
+    fn center_label_pads_to_center_and_passes_overflow_through() {
+        assert_eq!(center_label("ab", 6), "  ab");
+        assert_eq!(center_label("abc", 3), "abc");
+        // Wider than the field: returned unpadded (renderer clips it).
+        assert_eq!(center_label("abcdef", 3), "abcdef");
     }
 
     fn assert_equal_tile_size(tiles: &[TileRect]) {

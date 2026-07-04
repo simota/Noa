@@ -17,8 +17,8 @@ use noa_font::FontGrid;
 use noa_grid::{CursorStyle, Terminal, modes::MouseTracking};
 use noa_pty::{Pty, PtyConfig};
 use noa_render::{
-    CommandPaletteSnapshot, FrameSnapshot, HoverLink, OverviewThumbnailResources, PaneFrame,
-    PaneId as RenderPaneId, PaneRect, Renderer, Theme,
+    CardStyle, CardTilePlacement, CommandPaletteSnapshot, FrameSnapshot, HoverLink,
+    OverviewThumbnailResources, PaneFrame, PaneId as RenderPaneId, PaneRect, Renderer, Theme,
 };
 use noa_vt::Stream;
 use winit::application::ApplicationHandler;
@@ -45,12 +45,15 @@ use crate::split_tree::{
     split_pane, split_resize_drag_target_at_point, zoom_resize_targets, zoom_toggle,
 };
 use crate::tab_overview::{
+    OVERVIEW_BG_COLOR, OVERVIEW_BORDER_COLOR, OVERVIEW_CARD_BORDER_WIDTH, OVERVIEW_CARD_COLOR,
+    OVERVIEW_CARD_CORNER_RADIUS, OVERVIEW_CARD_FOCUS_WIDTH, OVERVIEW_FOCUS_RING_COLOR,
     OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_OUTER_MARGIN,
-    OVERVIEW_TILE_GUTTER, OVERVIEW_TILE_MIN_RENDER_INTERVAL, OverviewAction, OverviewLayout,
-    OverviewRenderCandidate, compute_overview_grid, hit_test_overview_grid,
-    move_overview_selection, overview_backlog_decision, overview_initial_selection,
-    overview_key_action, overview_placeholder_source_ids, overview_tile_labels,
-    sanitize_placeholder_label, select_due_overview_tile_ids,
+    OVERVIEW_TILE_GUTTER, OVERVIEW_TILE_MIN_RENDER_INTERVAL, OVERVIEW_TITLE_BAR_COLOR,
+    OVERVIEW_TITLE_BAR_H, OverviewAction, OverviewChrome, OverviewLayout, OverviewRenderCandidate,
+    center_label, compute_overview_grid, hit_test_overview_grid, move_overview_selection,
+    overview_backlog_decision, overview_chrome_bands, overview_hint_bar_text,
+    overview_initial_selection, overview_key_action, overview_placeholder_source_ids,
+    overview_tile_labels, sanitize_placeholder_label, select_due_overview_tile_ids,
 };
 use crate::{AppCommand, ViewportScroll};
 
@@ -280,6 +283,18 @@ impl Surface {
 /// while focused and displayable. Matches common terminal defaults
 /// (Ghostty/iTerm2 ballpark); not user-configurable yet.
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
+
+/// Compile-time card styling for the Tab Overview composite (REQ-OV-12/14, v2
+/// mockup parity; ⚠G: no config knob). Bundles the `tab_overview` color/metric
+/// constants into the `noa-render` [`CardStyle`] carrier.
+const OVERVIEW_CARD_STYLE: CardStyle = CardStyle {
+    background: OVERVIEW_BG_COLOR,
+    border_color: OVERVIEW_BORDER_COLOR,
+    focus_color: OVERVIEW_FOCUS_RING_COLOR,
+    corner_radius: OVERVIEW_CARD_CORNER_RADIUS,
+    border_width: OVERVIEW_CARD_BORDER_WIDTH,
+    focus_width: OVERVIEW_CARD_FOCUS_WIDTH,
+};
 
 pub struct App {
     config: AppConfig,
@@ -1563,6 +1578,8 @@ impl App {
                 scratch_size,
                 tile_size,
                 tile_count,
+                OVERVIEW_TITLE_BAR_H,
+                OVERVIEW_CARD_COLOR,
             ));
         }
     }
@@ -1670,11 +1687,38 @@ impl App {
         }
     }
 
-    /// Render title-only text into every placeholder-row tile (REQ-OV-10):
-    /// tabs beyond the live tile cap get no live mirror, just their title.
-    /// Cheap enough to redo on every redraw — placeholders only exist once
-    /// tab count exceeds `OVERVIEW_GRID_CAP`, and each is a synthetic 1-row
-    /// `Terminal`, not a real pty-backed one.
+    /// Draw the tab title into the top title-bar band of every due live tile
+    /// (REQ-OV-12). Runs after `render_due_overview_tiles`, whose mirror blit
+    /// re-clears the band to the card color, so the title must be re-stamped
+    /// for exactly the tiles that were re-rendered this frame. Live titles are
+    /// routed through the same tested `overview_tile_labels` seam as
+    /// placeholder titles (AC-OV-12).
+    fn render_due_overview_title_bands(
+        &mut self,
+        due_window_ids: &[WindowId],
+        source_window_ids: &[WindowId],
+        layout: &OverviewLayout,
+    ) {
+        let live_count = layout.tiles.len().min(source_window_ids.len());
+        let live_ids = &source_window_ids[..live_count];
+        let labels = overview_tile_labels(live_ids, |id| {
+            self.windows.get(&id).map(|state| state.title.clone())
+        });
+
+        let jobs: Vec<(usize, String)> = labels
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| due_window_ids.contains(&live_ids[*index]))
+            .map(|(index, label)| (index, label.label.clone()))
+            .collect();
+        for (tile_index, title) in jobs {
+            self.render_tile_title_band(tile_index, &title);
+        }
+    }
+
+    /// Fill every placeholder-row tile (REQ-OV-10) with the card color and its
+    /// tab title band. Placeholders have no live mirror, so the whole tile is
+    /// cleared to the card face before the title band is stamped on top.
     fn render_overview_placeholder_labels(
         &mut self,
         source_window_ids: &[WindowId],
@@ -1689,6 +1733,27 @@ impl App {
             self.windows.get(&id).map(|state| state.title.clone())
         });
 
+        let jobs: Vec<(usize, String)> = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| (live_count + index, label.label.clone()))
+            .collect();
+        for (tile_index, title) in jobs {
+            if let (Some(gpu), Some(overview)) = (self.gpu.as_ref(), self.overview_window.as_ref())
+                && let Some(thumbnails) = overview.thumbnails.as_ref()
+            {
+                thumbnails.clear_tile(&gpu.device, &gpu.queue, tile_index);
+            }
+            self.render_tile_title_band(tile_index, &title);
+        }
+    }
+
+    /// Render `title` into `tile_index`'s dedicated title-band texture via the
+    /// shared label `Renderer`, then stamp it onto the top `OVERVIEW_TITLE_BAR_H`
+    /// rows of the tile (REQ-OV-12). The band is cleared to a distinct
+    /// title-bar color (`set_clear_color` after `rebuild_cells`) so it reads as
+    /// a band separate from the card face. Shared by live and placeholder tiles.
+    fn render_tile_title_band(&mut self, tile_index: usize, title: &str) {
         self.ensure_overview_label_renderer();
         let Some(gpu) = self.gpu.as_mut() else {
             return;
@@ -1702,45 +1767,111 @@ impl App {
         ) else {
             return;
         };
-        let metrics = gpu.font.metrics();
-
-        for (index, label) in labels.iter().enumerate() {
-            let Some(rect) = layout.placeholders.get(index) else {
-                continue;
-            };
-            let tile_index = live_count + index;
-            let tile_size = PixelSize {
-                w: rect.w.max(1),
-                h: rect.h.max(1),
-            };
-            let grid_size = grid_size_for_pane_rect(
-                PaneRectApp::new(0, 0, rect.w, rect.h),
-                metrics,
-                DEFAULT_GRID_PADDING,
-            );
-
-            let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
-            let text = sanitize_placeholder_label(&label.label, grid_size.cols);
-            Stream::new().feed(text.as_bytes(), &mut term);
-            let mut snapshot = FrameSnapshot::from_terminal(&mut term);
-            snapshot.cursor.visible = false;
-
-            label_renderer.resize(tile_size);
-            label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
-            label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
-
-            let Some(tile_texture) = thumbnails.tile_texture_for_test(tile_index) else {
-                continue;
-            };
-            let view = tile_texture.create_view(&wgpu::TextureViewDescriptor::default());
-            label_renderer.draw(&gpu.device, &gpu.queue, &view);
+        let tile_w = thumbnails.tile_size().w;
+        let bar_h = thumbnails.title_bar_h();
+        if tile_w == 0 || bar_h == 0 {
+            return;
         }
+        let band_size = PixelSize {
+            w: tile_w.max(1),
+            h: bar_h.max(1),
+        };
+        let grid_size = grid_size_for_pane_rect(
+            PaneRectApp::new(0, 0, band_size.w, band_size.h),
+            gpu.font.metrics(),
+            DEFAULT_GRID_PADDING,
+        );
+        let sanitized = sanitize_placeholder_label(title, grid_size.cols);
+        let text = center_label(&sanitized, grid_size.cols);
+
+        let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
+        Stream::new().feed(text.as_bytes(), &mut term);
+        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+        snapshot.cursor.visible = false;
+
+        label_renderer.resize(band_size);
+        label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        // After `rebuild_cells` (which resets it from the snapshot bg) so the
+        // band gets its distinct title-bar color, not the terminal default.
+        label_renderer.set_clear_color(OVERVIEW_TITLE_BAR_COLOR);
+        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+
+        let Some(view) = thumbnails.title_texture_view(tile_index) else {
+            return;
+        };
+        label_renderer.draw(&gpu.device, &gpu.queue, &view);
+        thumbnails.stamp_title_band(&gpu.device, &gpu.queue, tile_index);
     }
 
-    /// Composite every live-mirror and placeholder-title tile texture into
-    /// the overview surface and present it. Empty grid cells are left as the
-    /// clear color.
+    /// Render the bottom hint bar (REQ-OV-17) into a fresh band-sized texture
+    /// and return it for compositing onto the surface. `None` when there is no
+    /// hint band (a window too short to reserve one). The `⌘1-N` range tracks
+    /// the live tile count dynamically.
+    fn render_overview_hint_texture(&mut self, live_tile_count: usize) -> Option<wgpu::Texture> {
+        let chrome = self.overview_chrome()?;
+        if chrome.hint_band.w == 0 || chrome.hint_band.h == 0 {
+            return None;
+        }
+        self.ensure_overview_label_renderer();
+        let gpu = self.gpu.as_mut()?;
+        let overview = self.overview_window.as_mut()?;
+        let label_renderer = overview.label_renderer.as_mut()?;
+
+        let band_size = PixelSize {
+            w: chrome.hint_band.w.max(1),
+            h: chrome.hint_band.h.max(1),
+        };
+        let hint_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("noa-overview-hint-band"),
+            size: wgpu::Extent3d {
+                width: band_size.w,
+                height: band_size.h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: overview.surface_config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = hint_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let grid_size = grid_size_for_pane_rect(
+            PaneRectApp::new(0, 0, band_size.w, band_size.h),
+            gpu.font.metrics(),
+            DEFAULT_GRID_PADDING,
+        );
+        let text = center_label(&overview_hint_bar_text(live_tile_count), grid_size.cols);
+        let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
+        Stream::new().feed(text.as_bytes(), &mut term);
+        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+        snapshot.cursor.visible = false;
+
+        label_renderer.resize(band_size);
+        label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        label_renderer.set_clear_color(OVERVIEW_BG_COLOR);
+        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        label_renderer.draw(&gpu.device, &gpu.queue, &view);
+
+        Some(hint_texture)
+    }
+
+    /// Composite every live-mirror and placeholder tile onto the overview
+    /// surface as a rounded card (REQ-OV-12/14), then overlay the bottom hint
+    /// bar (REQ-OV-17), and present. Empty grid cells stay the backdrop color.
     fn present_overview_frame(&mut self, layout: &OverviewLayout) {
+        // Render the hint band first (it borrows the label renderer / gpu
+        // mutably); the returned texture is owned, so the borrows are released
+        // before compositing.
+        let live_count = layout.tiles.len();
+        let hint_texture = self.render_overview_hint_texture(live_count);
+        let hint_band = self.overview_chrome().map(|chrome| chrome.hint_band);
+        let selected = self
+            .overview_window
+            .as_ref()
+            .map_or(0, |overview| overview.selected);
+
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
@@ -1765,44 +1896,79 @@ impl App {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let surface_size = PixelSize {
+            w: overview.surface_config.width,
+            h: overview.surface_config.height,
+        };
 
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("noa-overview-composite-encoder"),
-            });
-        {
-            let _clear_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("noa-overview-clear-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-        }
+        // Card composite (also clears the surface to the backdrop color).
         if let Some(thumbnails) = overview.thumbnails.as_ref() {
             let live_count = layout.tiles.len();
-            let placeholder_tiles = layout
+            let placeholders = layout
                 .placeholders
                 .iter()
                 .enumerate()
                 .map(|(index, rect)| (live_count + index, rect));
-            for (tile_index, rect) in layout.tiles.iter().enumerate().chain(placeholder_tiles) {
-                let Some(tile_texture) = thumbnails.tile_texture_for_test(tile_index) else {
-                    continue;
-                };
-                composite_overview_tile(&mut encoder, tile_texture, &frame.texture, *rect);
-            }
+            let placements: Vec<CardTilePlacement> = layout
+                .tiles
+                .iter()
+                .enumerate()
+                .chain(placeholders)
+                .map(|(tile_index, rect)| CardTilePlacement {
+                    tile_index,
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                    selected: tile_index == selected,
+                })
+                .collect();
+            thumbnails.composite_cards(
+                &gpu.device,
+                &gpu.queue,
+                &view,
+                surface_size,
+                &OVERVIEW_CARD_STYLE,
+                &placements,
+            );
+        } else {
+            // No tiles: still clear the surface to the backdrop color.
+            clear_overview_surface(&gpu.device, &gpu.queue, &view, OVERVIEW_BG_COLOR);
         }
-        gpu.queue.submit(Some(encoder.finish()));
+
+        // Overlay the hint bar into its reserved bottom band.
+        if let (Some(hint_texture), Some(hint_band)) = (hint_texture.as_ref(), hint_band) {
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("noa-overview-hint-copy-encoder"),
+                });
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: hint_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &frame.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: hint_band.x,
+                        y: hint_band.y,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: hint_band.w.max(1),
+                    height: hint_band.h.max(1),
+                    depth_or_array_layers: 1,
+                },
+            );
+            gpu.queue.submit(Some(encoder.finish()));
+        }
+
         frame.present();
     }
 
@@ -1822,17 +1988,20 @@ impl App {
         )
     }
 
-    /// Compute the Overview grid layout for `source_window_ids` against the
-    /// current window bounds (REQ-OV-11, gutter/margin included). Centralizes
-    /// what were three independently-computed call sites (present, click hit
-    /// test, selection nav) behind one helper so hit-testing and tile
-    /// textures can never drift out of sync with each other.
-    fn overview_layout(&self, source_window_ids: &[WindowId]) -> Option<OverviewLayout> {
+    /// The Overview window's search / grid / hint bands (REQ-OV-11/16/17).
+    /// The grid is laid out inside `grid_bounds`, so P3's search-field draw
+    /// won't reflow the tiles, and the hint bar draws into `hint_band`.
+    fn overview_chrome(&self) -> Option<OverviewChrome> {
         let overview = self.overview_window.as_ref()?;
         let bounds = pane_bounds_for_size(overview.window.inner_size());
+        Some(overview_chrome_bands(bounds))
+    }
+
+    fn overview_layout(&self, source_window_ids: &[WindowId]) -> Option<OverviewLayout> {
+        let chrome = self.overview_chrome()?;
         Some(compute_overview_grid(
             source_window_ids.len(),
-            bounds,
+            chrome.grid_bounds,
             OVERVIEW_GRID_CAP,
             OVERVIEW_TILE_GUTTER,
             OVERVIEW_OUTER_MARGIN,
@@ -1862,6 +2031,7 @@ impl App {
 
         self.ensure_overview_thumbnails(&layout);
         self.render_due_overview_tiles(&due_window_ids, &source_window_ids);
+        self.render_due_overview_title_bands(&due_window_ids, &source_window_ids, &layout);
         self.render_overview_placeholder_labels(&source_window_ids, &layout);
         self.present_overview_frame(&layout);
 
@@ -3843,35 +4013,40 @@ fn tab_overview_visibility_after_dispatch(
 /// the overview surface texture. No scaling: `copy_texture_to_texture` needs
 /// matching extents, which holds because every tile texture is allocated at
 /// its `OverviewLayout` rect's size (`ensure_overview_thumbnails`).
-fn composite_overview_tile(
-    encoder: &mut wgpu::CommandEncoder,
-    tile_texture: &wgpu::Texture,
-    surface_texture: &wgpu::Texture,
-    rect: PaneRectApp,
+/// Clear the overview surface to the backdrop color when there are no tiles to
+/// composite (the card composite pass otherwise does the clear itself).
+fn clear_overview_surface(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    view: &wgpu::TextureView,
+    color: [f32; 4],
 ) {
-    encoder.copy_texture_to_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: tile_texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyTextureInfo {
-            texture: surface_texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d {
-                x: rect.x,
-                y: rect.y,
-                z: 0,
-            },
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::Extent3d {
-            width: rect.w,
-            height: rect.h,
-            depth_or_array_layers: 1,
-        },
-    );
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("noa-overview-empty-clear-encoder"),
+    });
+    {
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("noa-overview-empty-clear-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: f64::from(color[0]),
+                        g: f64::from(color[1]),
+                        b: f64::from(color[2]),
+                        a: f64::from(color[3]),
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+    }
+    queue.submit(Some(encoder.finish()));
 }
 
 /// Choose the swapchain surface format, preferring a **non-sRGB** format

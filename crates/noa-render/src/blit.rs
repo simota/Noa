@@ -1,8 +1,23 @@
 //! Offscreen thumbnail resources for Tab Overview.
+//!
+//! Two pipelines live here. [`BlitPipeline`] downscales a tab's full-resolution
+//! scratch render into a small tile texture (REQ-NF-3). [`CardPipeline`]
+//! composites those tile textures onto the Overview surface as rounded cards
+//! with a border / focus ring (REQ-OV-12/14, v2 mockup parity), replacing the
+//! earlier plain `copy_texture_to_texture`, which could not mask corners.
 
 use noa_core::PixelSize;
 
 use crate::renderer::Renderer;
+
+fn wgpu_color(rgba: [f32; 4]) -> wgpu::Color {
+    wgpu::Color {
+        r: f64::from(rgba[0]),
+        g: f64::from(rgba[1]),
+        b: f64::from(rgba[2]),
+        a: f64::from(rgba[3]),
+    }
+}
 
 pub struct BlitPipeline {
     pipeline: wgpu::RenderPipeline,
@@ -97,12 +112,19 @@ impl BlitPipeline {
         }
     }
 
-    pub fn blit(
+    /// Clear `dst` to `clear`, then (if `viewport` has a non-zero area)
+    /// downscale-sample `src` into that sub-rectangle of `dst`. The clear runs
+    /// regardless, so a live tile's title band (outside the content viewport)
+    /// ends up filled with the card color even when the mirror only covers the
+    /// content region below it.
+    fn blit(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         src: &wgpu::TextureView,
         dst: &wgpu::TextureView,
+        clear: wgpu::Color,
+        viewport: (f32, f32, f32, f32),
     ) {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("noa-overview-blit-bind-group"),
@@ -130,7 +152,7 @@ impl BlitPipeline {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(clear),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -138,11 +160,158 @@ impl BlitPipeline {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..6, 0..1);
+            let (vx, vy, vw, vh) = viewport;
+            if vw > 0.0 && vh > 0.0 {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+                pass.draw(0..6, 0..1);
+            }
         }
         queue.submit(Some(encoder.finish()));
+    }
+}
+
+/// Per-tile card styling for [`OverviewThumbnailResources::composite_cards`].
+/// All values are compile-time constants owned by `noa-app` (⚠G: no config
+/// knob); this struct just carries them across the crate boundary.
+#[derive(Clone, Copy, Debug)]
+pub struct CardStyle {
+    pub background: [f32; 4],
+    pub border_color: [f32; 4],
+    pub focus_color: [f32; 4],
+    pub corner_radius: f32,
+    pub border_width: f32,
+    pub focus_width: f32,
+}
+
+/// One tile's placement + selection state for the card composite.
+#[derive(Clone, Copy, Debug)]
+pub struct CardTilePlacement {
+    pub tile_index: usize,
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub selected: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct CardUniformsRaw {
+    rect: [f32; 4],
+    border_color: [f32; 4],
+    surface_size: [f32; 2],
+    corner_radius: f32,
+    border_width: f32,
+}
+
+pub struct CardPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+}
+
+impl CardPipeline {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("noa-overview-card-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/card.wgsl").into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("noa-overview-card-bind-group-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // The uniform is read in the vertex stage (`rect`,
+                // `surface_size`) as well as the fragment stage, so its
+                // visibility must be VERTEX_FRAGMENT (CLAUDE.md GPU gotcha).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("noa-overview-card-pipeline-layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("noa-overview-card-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    // Alpha-blend so the rounded corners (coverage -> 0) reveal
+                    // the backdrop the composite pass clears to.
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("noa-overview-card-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        Self {
+            pipeline,
+            bind_group_layout,
+            sampler,
+        }
     }
 }
 
@@ -159,41 +328,69 @@ struct OverviewTileTexture {
 
 pub struct OverviewThumbnailResources {
     blit: BlitPipeline,
+    card: CardPipeline,
     scratch: OverviewScratchTexture,
+    /// Full card textures (`[title band | content]`), one per live or
+    /// placeholder tile; sampled by [`CardPipeline`] at composite time.
     tiles: Vec<OverviewTileTexture>,
+    /// Small title-band textures (`tile_w x title_bar_h`), drawn into by the
+    /// app's label `Renderer` then stamped onto the top of `tiles` — kept
+    /// separate because the label renderer clears its whole target, which
+    /// would otherwise wipe a live tile's mirror (REQ-OV-12).
+    title_tiles: Vec<OverviewTileTexture>,
     format: wgpu::TextureFormat,
     tile_size: PixelSize,
+    title_bar_h: u32,
+    card_color: [f32; 4],
 }
 
 impl OverviewThumbnailResources {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         scratch_size: PixelSize,
         tile_size: PixelSize,
         tile_count: usize,
+        title_bar_h: u32,
+        card_color: [f32; 4],
     ) -> Self {
         let blit = BlitPipeline::new(device, format);
+        let card = CardPipeline::new(device, format);
         let scratch = OverviewScratchTexture::new(device, format, scratch_size);
         let tiles = (0..tile_count)
             .map(|_| OverviewTileTexture::new(device, format, tile_size))
             .collect();
+        let title_size = PixelSize {
+            w: tile_size.w,
+            h: title_bar_h.max(1),
+        };
+        let title_tiles = (0..tile_count)
+            .map(|_| OverviewTileTexture::new(device, format, title_size))
+            .collect();
 
         Self {
             blit,
+            card,
             scratch,
             tiles,
+            title_tiles,
             format,
             tile_size,
+            title_bar_h,
+            card_color,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn for_renderer(
         device: &wgpu::Device,
         renderer: &Renderer,
         scratch_size: PixelSize,
         tile_size: PixelSize,
         tile_count: usize,
+        title_bar_h: u32,
+        card_color: [f32; 4],
     ) -> Self {
         Self::new(
             device,
@@ -201,6 +398,8 @@ impl OverviewThumbnailResources {
             scratch_size,
             tile_size,
             tile_count,
+            title_bar_h,
+            card_color,
         )
     }
 
@@ -220,8 +419,84 @@ impl OverviewThumbnailResources {
         self.tiles.len()
     }
 
+    pub fn title_bar_h(&self) -> u32 {
+        self.title_bar_h
+    }
+
     pub fn tile_texture_for_test(&self, index: usize) -> Option<&wgpu::Texture> {
         self.tiles.get(index).map(|tile| &tile.texture)
+    }
+
+    /// A view of the title-band texture for `tile_index`, for the app's label
+    /// `Renderer` to draw the tab title into (REQ-OV-12). Stamp it onto the
+    /// tile with [`stamp_title_band`] afterward.
+    pub fn title_texture_view(&self, tile_index: usize) -> Option<wgpu::TextureView> {
+        self.title_tiles.get(tile_index).map(|tile| {
+            tile.texture
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        })
+    }
+
+    /// Copy the title band drawn into `title_tiles[tile_index]` onto the top
+    /// `title_bar_h` rows of `tiles[tile_index]` (REQ-OV-12).
+    pub fn stamp_title_band(&self, device: &wgpu::Device, queue: &wgpu::Queue, tile_index: usize) {
+        let (Some(title), Some(tile)) =
+            (self.title_tiles.get(tile_index), self.tiles.get(tile_index))
+        else {
+            return;
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("noa-overview-title-stamp-encoder"),
+        });
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &title.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &tile.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: self.tile_size.w.max(1),
+                height: self.title_bar_h.max(1),
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Clear a whole tile texture to the card color — used for placeholder
+    /// tiles, whose content region below the title band has no live mirror.
+    pub fn clear_tile(&self, device: &wgpu::Device, queue: &wgpu::Queue, tile_index: usize) {
+        let Some(tile) = self.tiles.get(tile_index) else {
+            return;
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("noa-overview-tile-clear-encoder"),
+        });
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("noa-overview-tile-clear-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &tile.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu_color(self.card_color)),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
+        queue.submit(Some(encoder.finish()));
     }
 
     pub fn render_existing_renderer_to_tile(
@@ -244,10 +519,119 @@ impl OverviewThumbnailResources {
             .get(tile_index)
             .ok_or_else(|| anyhow::anyhow!("overview tile index {tile_index} is out of range"))?;
 
+        // The mirror lands in the content region below the title band; the
+        // blit clears the whole tile to the card color first so the band area
+        // (later overwritten by `stamp_title_band`) is never left uninitialized.
+        let content_h = self.tile_size.h.saturating_sub(self.title_bar_h);
         renderer.draw(device, queue, &self.scratch.view);
-        self.blit
-            .blit(device, queue, &self.scratch.view, &tile.view);
+        self.blit.blit(
+            device,
+            queue,
+            &self.scratch.view,
+            &tile.view,
+            wgpu_color(self.card_color),
+            (
+                0.0,
+                self.title_bar_h as f32,
+                self.tile_size.w as f32,
+                content_h as f32,
+            ),
+        );
         Ok(())
+    }
+
+    /// Composite every placed tile onto `target` as a rounded card with a
+    /// border / focus ring (REQ-OV-12/14). The pass clears `target` to the
+    /// card `background`, so this both clears the surface and draws the cards.
+    pub fn composite_cards(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        surface_size: PixelSize,
+        style: &CardStyle,
+        placements: &[CardTilePlacement],
+    ) {
+        let surface = [surface_size.w.max(1) as f32, surface_size.h.max(1) as f32];
+
+        // Each card needs its own uniform buffer + bind group live for the
+        // whole pass, so build them up front and hold them until submit.
+        let mut resources = Vec::with_capacity(placements.len());
+        for placement in placements {
+            let Some(tile) = self.tiles.get(placement.tile_index) else {
+                continue;
+            };
+            let (border_color, border_width) = if placement.selected {
+                (style.focus_color, style.focus_width)
+            } else {
+                (style.border_color, style.border_width)
+            };
+            let uniforms = CardUniformsRaw {
+                rect: [
+                    placement.x as f32,
+                    placement.y as f32,
+                    placement.w as f32,
+                    placement.h as f32,
+                ],
+                border_color,
+                surface_size: surface,
+                corner_radius: style.corner_radius,
+                border_width,
+            };
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("noa-overview-card-uniform"),
+                size: std::mem::size_of::<CardUniformsRaw>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniforms));
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("noa-overview-card-bind-group"),
+                layout: &self.card.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&tile.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.card.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: buffer.as_entire_binding(),
+                    },
+                ],
+            });
+            resources.push((buffer, bind_group));
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("noa-overview-card-encoder"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("noa-overview-card-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu_color(style.background)),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.card.pipeline);
+            for (_buffer, bind_group) in &resources {
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.draw(0..6, 0..1);
+            }
+        }
+        queue.submit(Some(encoder.finish()));
     }
 }
 
@@ -280,7 +664,8 @@ impl OverviewTileTexture {
             size,
             wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         Self { texture, view }

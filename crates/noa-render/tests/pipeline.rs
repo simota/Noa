@@ -16,9 +16,16 @@ use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, PixelSize, Rgb};
 use noa_font::FontGrid;
 use noa_grid::{Cell, Cursor, Row, SearchState, Selection, SelectionPoint, TerminalColors};
 use noa_render::{
-    CommandPaletteSnapshot, DrawOp, FrameSnapshot, OverviewThumbnailResources, PaneFrame, PaneId,
-    PaneRect, Renderer, Theme, build_draw_plan, renderer_construction_count,
+    CardStyle, CardTilePlacement, CommandPaletteSnapshot, DrawOp, FrameSnapshot,
+    OverviewThumbnailResources, PaneFrame, PaneId, PaneRect, Renderer, Theme, build_draw_plan,
+    renderer_construction_count,
 };
+
+/// Shared title-bar band height + card color for the overview headless tests
+/// (mirrors `noa_app::tab_overview`'s compile-time constants; noa-render can't
+/// depend on noa-app, so the tests re-state them).
+const TEST_TITLE_BAR_H: u32 = 28;
+const TEST_CARD_COLOR: [f32; 4] = [0.102, 0.118, 0.157, 1.0];
 
 /// Acquire a real device+queue, or `None` when no adapter exists (skip).
 fn device_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
@@ -410,8 +417,15 @@ fn overview_blit_pipeline_draws_tile_without_validation_error() {
     renderer.resize(scratch_size);
     rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "overview");
 
-    let mut overview =
-        OverviewThumbnailResources::for_renderer(&device, &renderer, scratch_size, tile_size, 1);
+    let mut overview = OverviewThumbnailResources::for_renderer(
+        &device,
+        &renderer,
+        scratch_size,
+        tile_size,
+        1,
+        TEST_TITLE_BAR_H,
+        TEST_CARD_COLOR,
+    );
     assert_eq!(overview.format(), renderer.target_format());
     assert_eq!(overview.scratch_size(), scratch_size);
     assert_eq!(overview.tile_size(), tile_size);
@@ -449,8 +463,15 @@ fn overview_blit_tile_pixel_hash_tracks_content_changes() {
     let mut renderer = Renderer::new(&device, &queue, format, &mut font, DEFAULT_GRID_PADDING)
         .expect("build renderer");
     renderer.resize(scratch_size);
-    let mut overview =
-        OverviewThumbnailResources::for_renderer(&device, &renderer, scratch_size, tile_size, 1);
+    let mut overview = OverviewThumbnailResources::for_renderer(
+        &device,
+        &renderer,
+        scratch_size,
+        tile_size,
+        1,
+        TEST_TITLE_BAR_H,
+        TEST_CARD_COLOR,
+    );
 
     rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "AAA");
     overview
@@ -523,6 +544,8 @@ fn overview_blit_resources_drop_before_renderer_without_validation_error() {
                 scratch_size,
                 tile_size,
                 1,
+                TEST_TITLE_BAR_H,
+                TEST_CARD_COLOR,
             );
             overview
                 .render_existing_renderer_to_tile(&device, &queue, &mut renderer, 0)
@@ -1163,4 +1186,101 @@ fn emoji_candidate_range() -> impl Iterator<Item = char> {
         .chain('\u{1F600}'..='\u{1F64F}')
         .chain('\u{1F680}'..='\u{1F6FF}')
         .chain('\u{1F900}'..='\u{1F9FF}')
+}
+
+/// AC-OV-12/14 (headless): the rounded-card composite pipeline builds its
+/// bind-group layout (texture + sampler in the fragment stage, uniform in the
+/// **vertex+fragment** stage) and draws two cards — one selected — onto a
+/// surface-format target with no wgpu validation error. This guards the CardUniforms
+/// `#[repr(C)]` <-> WGSL std140 layout and the VERTEX_FRAGMENT visibility of the
+/// card uniform (CLAUDE.md GPU gotcha).
+#[test]
+fn overview_card_pipeline_composites_tiles_without_validation_error() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping overview card composite test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let scratch_size = PixelSize { w: 160, h: 120 };
+    let tile_size = PixelSize { w: 80, h: 60 };
+    let mut font =
+        FontGrid::new(24.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(&device, &queue, format, &mut font, DEFAULT_GRID_PADDING)
+        .expect("build renderer");
+    renderer.resize(scratch_size);
+    rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "card");
+
+    let mut overview = OverviewThumbnailResources::for_renderer(
+        &device,
+        &renderer,
+        scratch_size,
+        tile_size,
+        2,
+        TEST_TITLE_BAR_H,
+        TEST_CARD_COLOR,
+    );
+    // Populate both tiles (mirror in the content region, card color in the band).
+    for tile_index in 0..2 {
+        overview
+            .render_existing_renderer_to_tile(&device, &queue, &mut renderer, tile_index)
+            .expect("render tile for card composite");
+    }
+
+    let surface_size = PixelSize { w: 220, h: 160 };
+    let (target_tex, target_view) = render_target(&device, surface_size.w, surface_size.h);
+    let style = CardStyle {
+        background: [0.043, 0.055, 0.086, 1.0],
+        border_color: [0.235, 0.259, 0.325, 1.0],
+        focus_color: [0.259, 0.545, 0.961, 1.0],
+        corner_radius: 10.0,
+        border_width: 1.5,
+        focus_width: 3.0,
+    };
+    let placements = [
+        CardTilePlacement {
+            tile_index: 0,
+            x: 20,
+            y: 20,
+            w: tile_size.w,
+            h: tile_size.h,
+            selected: true,
+        },
+        CardTilePlacement {
+            tile_index: 1,
+            x: 120,
+            y: 20,
+            w: tile_size.w,
+            h: tile_size.h,
+            selected: false,
+        },
+    ];
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    overview.composite_cards(
+        &device,
+        &queue,
+        &target_view,
+        surface_size,
+        &style,
+        &placements,
+    );
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll device after card composite");
+    let err = pollster::block_on(device.pop_error_scope());
+
+    assert!(
+        err.is_none(),
+        "wgpu validation error during overview card composite: {err:?}"
+    );
+
+    // The composite must actually paint: the backdrop clear + at least one
+    // card make the target non-uniform, so a coarse content check is that not
+    // every pixel is identical.
+    let pixels = read_rgba_pixels(&device, &queue, &target_tex, surface_size.w, surface_size.h);
+    let first = &pixels[0..4];
+    assert!(
+        pixels.chunks_exact(4).any(|px| px != first),
+        "card composite produced a uniform frame (nothing drawn)"
+    );
 }

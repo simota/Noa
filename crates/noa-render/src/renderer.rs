@@ -241,6 +241,17 @@ impl Renderer {
         self.viewport = px;
     }
 
+    /// Force the background clear color used by the next [`Renderer::draw`],
+    /// overriding the value [`Renderer::rebuild_cells`] derives from the
+    /// snapshot's default background. Call this **after** `rebuild_cells`
+    /// (which resets `clear_color`) — the Tab Overview uses it to paint a
+    /// title-bar tile in a distinct band color while its glyphs still draw
+    /// over that band, since cells matching the default background emit no
+    /// background quad and so inherit the clear color.
+    pub fn set_clear_color(&mut self, color: [f32; 4]) {
+        self.clear_color = color;
+    }
+
     /// Mask atlas generation this renderer has uploaded.
     pub fn mask_atlas_seen_generation(&self) -> u64 {
         self.mask_atlas_seen_generation

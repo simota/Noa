@@ -67,6 +67,8 @@ fn app_config_from_startup(config: noa_config::StartupConfig) -> noa_app::AppCon
         font_size: config.font_size,
         theme: config.theme,
         font: config.font,
+        clipboard_read: config.clipboard_read,
+        clipboard_paste_protection: config.clipboard_paste_protection,
     }
 }
 
@@ -98,6 +100,7 @@ mod tests {
             font_size: 15.0,
             theme: Some("3024 Day".to_string()),
             font: noa_config::FontConfig::default(),
+            ..Default::default()
         };
 
         let app_config = app_config_from_startup(config);

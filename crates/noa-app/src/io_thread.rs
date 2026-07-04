@@ -66,6 +66,7 @@ pub(crate) fn input_channel() -> (Sender<PtyInput>, Receiver<PtyInput>) {
 struct TerminalOutput {
     pending_writes: Vec<u8>,
     pending_clipboard_writes: Vec<String>,
+    pending_clipboard_reads: Vec<String>,
     synchronized_output: bool,
 }
 
@@ -79,6 +80,7 @@ fn feed_terminal(
     TerminalOutput {
         pending_writes: term.take_pending_writes(),
         pending_clipboard_writes: term.take_pending_clipboard_writes(),
+        pending_clipboard_reads: term.take_pending_clipboard_reads(),
         synchronized_output: term.modes.synchronized_output(),
     }
 }
@@ -123,6 +125,13 @@ pub fn spawn(
                                 window_id,
                                 pane_id,
                                 text,
+                            });
+                        }
+                        for target in output.pending_clipboard_reads {
+                            let _ = proxy.send_event(UserEvent::ClipboardRead {
+                                window_id,
+                                pane_id,
+                                target,
                             });
                         }
                         if should_redraw && proxy.send_event(UserEvent::Redraw(window_id, pane_id)).is_err() {

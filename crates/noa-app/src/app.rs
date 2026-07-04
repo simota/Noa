@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Sender, TrySendError};
 use noa_core::{DEFAULT_GRID_PADDING, GridPadding, GridSize, PixelSize, Point};
 use noa_font::FontGrid;
-use noa_grid::{CursorStyle, Terminal, modes::MouseTracking};
+use noa_grid::{CursorStyle, PromptJump, Terminal, modes::MouseTracking};
 use noa_pty::{Pty, PtyConfig};
 use noa_render::{
     CommandPaletteSnapshot, FrameSnapshot, HoverLink, OverviewThumbnailResources, PaneFrame,
@@ -63,6 +63,10 @@ pub struct AppConfig {
     /// right before each `FontGrid::new` call, keeping `noa-font` free of any
     /// `noa-config`/`dirs` dependency).
     pub font: noa_config::FontConfig,
+    /// OSC 52 clipboard read (query) policy.
+    pub clipboard_read: noa_config::ClipboardAccess,
+    /// Whether to confirm before pasting content that could run commands.
+    pub clipboard_paste_protection: bool,
 }
 
 /// Maps the parsed `noa-config` font settings onto the `noa-font` runtime
@@ -209,6 +213,35 @@ struct CommandPaletteSession {
     palette: CommandPalette,
 }
 
+/// An open confirmation dialog (paste protection or OSC 52 clipboard-read),
+/// bound to the window it was raised from. Fully modal: while it is up the
+/// `KeyboardInput` handler routes every keystroke in `window_id` to
+/// [`App::handle_confirm_dialog_key`] — Enter/`y` confirms, Escape/`n`
+/// cancels. Only one exists at a time app-wide.
+struct ConfirmDialogSession {
+    window_id: WindowId,
+    message: String,
+    hint: String,
+    action: ConfirmAction,
+}
+
+/// The deferred side effect a [`ConfirmDialogSession`] runs on confirmation.
+enum ConfirmAction {
+    /// Send already-encoded paste bytes to the pane's pty.
+    Paste {
+        window_id: WindowId,
+        pane_id: PaneId,
+        bytes: Vec<u8>,
+    },
+    /// Fulfill an OSC 52 clipboard read: read the clipboard now and write the
+    /// base64 reply to the pane's pty.
+    ClipboardRead {
+        window_id: WindowId,
+        pane_id: PaneId,
+        target: String,
+    },
+}
+
 /// Terminal-owned state for one split leaf. `split_tree` leaves store the
 /// `PaneId`; this map owns the corresponding live surface payload.
 struct Surface {
@@ -299,6 +332,9 @@ pub struct App {
     /// The open command palette (`cmd+shift+p`), if any — see
     /// [`CommandPaletteSession`].
     command_palette: Option<CommandPaletteSession>,
+    /// The open confirmation dialog (paste protection / clipboard-read), if
+    /// any — see [`ConfirmDialogSession`].
+    confirm_dialog: Option<ConfirmDialogSession>,
 }
 
 impl App {
@@ -326,6 +362,7 @@ impl App {
             hovered_link: None,
             search_prompt: None,
             command_palette: None,
+            confirm_dialog: None,
         }
     }
 
@@ -425,6 +462,16 @@ impl App {
                 .as_ref()
                 .filter(|session| session.window_id == window_id && pane_id == state.focused_pane)
                 .map(|session| command_palette_snapshot(&self.keybinds, &session.palette));
+            // Like the palette: draw the window-bound confirm dialog once,
+            // over the focused pane.
+            snapshot.confirm_dialog = self
+                .confirm_dialog
+                .as_ref()
+                .filter(|session| session.window_id == window_id && pane_id == state.focused_pane)
+                .map(|session| noa_render::ConfirmDialogSnapshot {
+                    message: session.message.clone(),
+                    hint: session.hint.clone(),
+                });
             snapshots.push((pane_id, surface.rect, snapshot));
         }
         if state.title != title {
@@ -640,6 +687,9 @@ impl App {
     }
 
     fn spawn_tab(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<WindowId> {
+        // Inherit the focused shell's cwd before `self.focused` is repointed
+        // at the new tab below.
+        let inherited_cwd = self.focused_pane_cwd();
         let initial_grid_size = GridSize::new(self.config.cols, self.config.rows);
         let monitor_scale_factor = event_loop
             .primary_monitor()
@@ -776,8 +826,13 @@ impl App {
         let window_id = window.id();
         let initial_pane = PaneId::new(1);
         let initial_rect = PaneRectApp::new(0, 0, surface_config.width, surface_config.height);
-        let initial_surface =
-            self.spawn_pane_surface(window_id, initial_pane, initial_grid_size, initial_rect)?;
+        let initial_surface = self.spawn_pane_surface(
+            window_id,
+            initial_pane,
+            initial_grid_size,
+            initial_rect,
+            inherited_cwd,
+        )?;
         let mut surfaces = HashMap::new();
         surfaces.insert(initial_pane, initial_surface);
 
@@ -829,19 +884,52 @@ impl App {
             .with_inner_size(LogicalSize::new(900.0, 600.0))
     }
 
+    /// The working directory reported by a pane's shell over OSC 7, if it
+    /// points at a directory that still exists locally. A new tab or split
+    /// inherits it so it opens where the focused shell is (Ghostty parity).
+    /// Stale or remote paths (which usually don't resolve locally) fall back
+    /// to `None`, i.e. the process's own cwd.
+    fn pane_cwd(&self, window_id: WindowId, pane_id: PaneId) -> Option<String> {
+        let cwd = self
+            .windows
+            .get(&window_id)?
+            .surfaces
+            .get(&pane_id)?
+            .terminal
+            .lock()
+            .expect("terminal mutex poisoned")
+            .cwd
+            .clone()?;
+        std::path::Path::new(&cwd).is_dir().then_some(cwd)
+    }
+
+    /// cwd of the currently focused pane, for a newly spawned tab to inherit.
+    fn focused_pane_cwd(&self) -> Option<String> {
+        let window_id = self.focused?;
+        let pane_id = self.windows.get(&window_id)?.focused_pane;
+        self.pane_cwd(window_id, pane_id)
+    }
+
     fn spawn_pane_surface(
         &self,
         window_id: WindowId,
         pane_id: PaneId,
         grid_size: GridSize,
         rect: PaneRectApp,
+        cwd: Option<String>,
     ) -> anyhow::Result<Surface> {
         let pty_config = PtyConfig {
             size: grid_size,
+            cwd,
             ..Default::default()
         };
         let pty = Pty::spawn(pty_config)?;
         let mut terminal = Terminal::new(grid_size);
+        // A read (query) request is only queued when reads aren't fully
+        // denied; the finer allow-vs-ask decision is made by the app layer
+        // when a request arrives.
+        terminal.osc52_policy.allow_read =
+            self.config.clipboard_read != noa_config::ClipboardAccess::Deny;
         if let Some(gpu) = self.gpu.as_ref() {
             terminal.set_base_colors(
                 gpu.theme.default_fg,
@@ -917,6 +1005,15 @@ impl App {
             .is_some_and(|session| session.window_id == window_id)
         {
             self.command_palette = None;
+        }
+        // Same leak shape as the palette: a confirm dialog bound to the closed
+        // window could deliver no keys (not even Escape), stranding a modal.
+        if self
+            .confirm_dialog
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.confirm_dialog = None;
         }
 
         match outcome {
@@ -1045,8 +1142,10 @@ impl App {
 
         let grid_size =
             grid_size_for_pane_rect(focused_rect, gpu.font.metrics(), DEFAULT_GRID_PADDING);
+        let inherited_cwd = self.pane_cwd(window_id, focused_pane);
         let new_surface =
-            match self.spawn_pane_surface(window_id, new_pane, grid_size, focused_rect) {
+            match self.spawn_pane_surface(window_id, new_pane, grid_size, focused_rect, inherited_cwd)
+            {
                 Ok(surface) => surface,
                 Err(err) => {
                     log::warn!("failed to spawn split pty: {err}");
@@ -1860,6 +1959,30 @@ impl ApplicationHandler<UserEvent> for App {
                     log::warn!("failed to write OSC 52 clipboard text: {err}");
                 }
             }
+            UserEvent::ClipboardRead {
+                window_id,
+                pane_id,
+                target,
+            } => {
+                if !self
+                    .windows
+                    .get(&window_id)
+                    .is_some_and(|state| state.contains_pane(pane_id))
+                {
+                    return;
+                }
+                match self.config.clipboard_read {
+                    noa_config::ClipboardAccess::Allow => {
+                        self.fulfill_clipboard_read(window_id, pane_id, &target);
+                    }
+                    noa_config::ClipboardAccess::Ask => {
+                        self.prompt_clipboard_read(window_id, pane_id, target);
+                    }
+                    // The grid only queues reads when not denied; a Deny here
+                    // would be a stale policy — ignore it.
+                    noa_config::ClipboardAccess::Deny => {}
+                }
+            }
             UserEvent::Redraw(window_id, pane_id) => {
                 let pane_state = self
                     .windows
@@ -1951,6 +2074,17 @@ impl ApplicationHandler<UserEvent> for App {
                     .and_then(WindowState::focused_surface)
                     .is_some_and(|surface| surface.ime_state.preedit_active())
                 {
+                    return;
+                }
+                // A confirmation dialog is fully modal — it sits ahead of
+                // every other keyboard branch so nothing (search prompt,
+                // palette, keybinds, pty) sees a key while it is up.
+                if self
+                    .confirm_dialog
+                    .as_ref()
+                    .is_some_and(|session| session.window_id == window_id)
+                {
+                    self.handle_confirm_dialog_key(window_id, &event);
                     return;
                 }
                 if self
@@ -2870,9 +3004,28 @@ impl App {
             PasteContents::Empty => String::new(),
         };
         let bracketed_paste = self.bracketed_paste(window_id, pane_id);
-        if let Some(bytes) = input::encode_paste(&text, bracketed_paste) {
-            self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+        let Some(bytes) = input::encode_paste(&text, bracketed_paste) else {
+            return;
+        };
+        // Paste protection: confirm before sending content that could run a
+        // command on its own (a newline), or that tries to break out of
+        // bracketed paste.
+        if self.config.clipboard_paste_protection
+            && input::paste_is_unsafe(&text, bracketed_paste)
+        {
+            let lines = text.lines().count().max(1);
+            self.open_confirm_dialog(
+                window_id,
+                format!("Paste {lines} line(s) of text?"),
+                ConfirmAction::Paste {
+                    window_id,
+                    pane_id,
+                    bytes,
+                },
+            );
+            return;
         }
+        self.write_pane_pty_bytes(window_id, pane_id, &bytes);
     }
 
     fn bracketed_paste(&self, window_id: WindowId, pane_id: PaneId) -> bool {
@@ -2888,6 +3041,87 @@ impl App {
                     .bracketed_paste()
             })
             .unwrap_or(false)
+    }
+
+    /// Read the system clipboard and write its OSC 52 base64 reply to the
+    /// pane's pty. The reply travels the same route as DA/DSR reports — into
+    /// the pty so the requesting program reads it on its input.
+    fn fulfill_clipboard_read(&mut self, window_id: WindowId, pane_id: PaneId, target: &str) {
+        let text = match self.clipboard.get_text() {
+            Ok(text) => text,
+            Err(err) => {
+                log::warn!("failed to read clipboard for OSC 52 reply: {err}");
+                return;
+            }
+        };
+        let reply = Terminal::osc52_read_reply(target, &text);
+        self.write_pane_pty_bytes(window_id, pane_id, &reply);
+    }
+
+    /// Raise a confirmation dialog before revealing the clipboard to a program
+    /// over OSC 52 (`clipboard-read = ask`).
+    fn prompt_clipboard_read(&mut self, window_id: WindowId, pane_id: PaneId, target: String) {
+        self.open_confirm_dialog(
+            window_id,
+            "Send clipboard contents to the terminal?".to_string(),
+            ConfirmAction::ClipboardRead {
+                window_id,
+                pane_id,
+                target,
+            },
+        );
+    }
+
+    /// Open the single app-wide confirmation dialog bound to `window_id`. Any
+    /// existing dialog is replaced (the newest request wins).
+    fn open_confirm_dialog(
+        &mut self,
+        window_id: WindowId,
+        message: String,
+        action: ConfirmAction,
+    ) {
+        self.confirm_dialog = Some(ConfirmDialogSession {
+            window_id,
+            message,
+            hint: "Enter: confirm    Esc: cancel".to_string(),
+            action,
+        });
+        self.request_window_redraw(window_id);
+    }
+
+    /// Keystroke routing for the modal confirmation dialog. Enter (or `y`)
+    /// confirms and runs the deferred action; Escape (or `n`) cancels; every
+    /// other key is swallowed.
+    fn handle_confirm_dialog_key(&mut self, window_id: WindowId, event: &KeyEvent) {
+        let confirm = match &event.logical_key {
+            Key::Named(NamedKey::Enter) => true,
+            Key::Named(NamedKey::Escape) => false,
+            Key::Character(s) if s.eq_ignore_ascii_case("y") => true,
+            Key::Character(s) if s.eq_ignore_ascii_case("n") => false,
+            _ => return, // swallow anything else while modal
+        };
+        let Some(session) = self.confirm_dialog.take() else {
+            return;
+        };
+        if confirm {
+            self.run_confirm_action(session.action);
+        }
+        self.request_window_redraw(window_id);
+    }
+
+    fn run_confirm_action(&mut self, action: ConfirmAction) {
+        match action {
+            ConfirmAction::Paste {
+                window_id,
+                pane_id,
+                bytes,
+            } => self.write_pane_pty_bytes(window_id, pane_id, &bytes),
+            ConfirmAction::ClipboardRead {
+                window_id,
+                pane_id,
+                target,
+            } => self.fulfill_clipboard_read(window_id, pane_id, &target),
+        }
     }
 
     fn sgr_mouse_tracking(&self, window_id: WindowId, pane_id: PaneId) -> MouseTracking {
@@ -3351,6 +3585,12 @@ fn apply_viewport_scroll(terminal: &mut Terminal, grid_size: GridSize, scroll: V
         ViewportScroll::PageDown => terminal.scroll_viewport_down(page_rows),
         ViewportScroll::Top => terminal.scroll_viewport_to_top(),
         ViewportScroll::Bottom => terminal.scroll_viewport_to_bottom(),
+        ViewportScroll::PrevPrompt => {
+            terminal.scroll_to_prompt(PromptJump::Prev);
+        }
+        ViewportScroll::NextPrompt => {
+            terminal.scroll_to_prompt(PromptJump::Next);
+        }
     }
 }
 

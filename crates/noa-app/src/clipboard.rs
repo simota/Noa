@@ -14,6 +14,11 @@ impl SystemClipboard {
         platform::set_text(text)
     }
 
+    /// Plain-text clipboard contents, for an OSC 52 read reply.
+    pub(crate) fn get_text(&mut self) -> anyhow::Result<String> {
+        platform::get_text()
+    }
+
     /// Reads the clipboard the way Ghostty's paste command does: file URLs
     /// and images take priority over plain text, so pasting a Finder
     /// selection or a copied screenshot inserts a shell-escaped path instead

@@ -15,6 +15,14 @@ pub enum UserEvent {
         pane_id: PaneId,
         text: String,
     },
+    /// An OSC 52 clipboard read (query) the policy allowed; the app fulfills
+    /// it (subject to the ask/allow policy) by writing a base64 reply to the
+    /// pane's pty. `target` is the selection identifier to echo (e.g. `"c"`).
+    ClipboardRead {
+        window_id: WindowId,
+        pane_id: PaneId,
+        target: String,
+    },
     /// New terminal output is available; request a redraw.
     Redraw(WindowId, PaneId),
     /// The pty's child process exited (or errored) — the app should close.

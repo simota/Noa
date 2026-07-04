@@ -157,6 +157,15 @@ pub fn encode_paste(text: &str, bracketed_paste: bool) -> Option<Vec<u8>> {
     }
 }
 
+/// Whether a paste should be confirmed before being sent
+/// (`clipboard-paste-protection`). A newline can submit a command line on its
+/// own, so unbracketed multi-line pastes are the risk. In bracketed-paste
+/// mode the receiving program frames the paste itself, so it is treated as
+/// safe (Ghostty's `clipboard-paste-bracketed-safe`, on by default).
+pub(crate) fn paste_is_unsafe(text: &str, bracketed_paste: bool) -> bool {
+    !bracketed_paste && text.contains(['\n', '\r'])
+}
+
 fn sanitize_paste_payload(bytes: &[u8]) -> Vec<u8> {
     let mut sanitized = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -259,6 +268,18 @@ fn tilde_key_bytes(code: u8, modifier: Option<u8>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_protection_flags_unbracketed_multiline_only() {
+        // Newline outside bracketed paste can submit a command → unsafe.
+        assert!(paste_is_unsafe("git push\n", false));
+        assert!(paste_is_unsafe("a\rb", false));
+        // Bracketed paste frames the data itself → safe even with newlines.
+        assert!(!paste_is_unsafe("git push\n", true));
+        // Single-line paste has nothing to auto-submit.
+        assert!(!paste_is_unsafe("just some words", false));
+        assert!(!paste_is_unsafe("", false));
+    }
 
     #[test]
     fn printable_uses_text() {

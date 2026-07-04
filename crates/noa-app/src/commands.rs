@@ -65,6 +65,10 @@ pub enum ViewportScroll {
     PageDown,
     Top,
     Bottom,
+    /// Jump to the nearest shell-integration prompt above the viewport top.
+    PrevPrompt,
+    /// Jump to the nearest shell-integration prompt below the viewport top.
+    NextPrompt,
 }
 
 impl AppCommand {
@@ -88,6 +92,8 @@ impl AppCommand {
     pub(crate) const SCROLL_PAGE_DOWN_MENU_ID: &'static str = "noa.view.scroll-page-down";
     pub(crate) const SCROLL_TOP_MENU_ID: &'static str = "noa.view.scroll-top";
     pub(crate) const SCROLL_BOTTOM_MENU_ID: &'static str = "noa.view.scroll-bottom";
+    pub(crate) const SCROLL_PREV_PROMPT_MENU_ID: &'static str = "noa.view.scroll-prev-prompt";
+    pub(crate) const SCROLL_NEXT_PROMPT_MENU_ID: &'static str = "noa.view.scroll-next-prompt";
     pub(crate) const NEW_TAB_MENU_ID: &'static str = "noa.file.new-tab";
     pub(crate) const NEW_SPLIT_RIGHT_MENU_ID: &'static str = "noa.file.new-split-right";
     pub(crate) const NEW_SPLIT_DOWN_MENU_ID: &'static str = "noa.file.new-split-down";
@@ -134,6 +140,12 @@ impl AppCommand {
             AppCommand::ScrollViewport(ViewportScroll::PageDown) => Self::SCROLL_PAGE_DOWN_MENU_ID,
             AppCommand::ScrollViewport(ViewportScroll::Top) => Self::SCROLL_TOP_MENU_ID,
             AppCommand::ScrollViewport(ViewportScroll::Bottom) => Self::SCROLL_BOTTOM_MENU_ID,
+            AppCommand::ScrollViewport(ViewportScroll::PrevPrompt) => {
+                Self::SCROLL_PREV_PROMPT_MENU_ID
+            }
+            AppCommand::ScrollViewport(ViewportScroll::NextPrompt) => {
+                Self::SCROLL_NEXT_PROMPT_MENU_ID
+            }
             AppCommand::NewTab => Self::NEW_TAB_MENU_ID,
             AppCommand::NewSplitRight => Self::NEW_SPLIT_RIGHT_MENU_ID,
             AppCommand::NewSplitDown => Self::NEW_SPLIT_DOWN_MENU_ID,
@@ -182,6 +194,12 @@ impl AppCommand {
             Self::SCROLL_PAGE_DOWN_MENU_ID => Some(Self::ScrollViewport(ViewportScroll::PageDown)),
             Self::SCROLL_TOP_MENU_ID => Some(Self::ScrollViewport(ViewportScroll::Top)),
             Self::SCROLL_BOTTOM_MENU_ID => Some(Self::ScrollViewport(ViewportScroll::Bottom)),
+            Self::SCROLL_PREV_PROMPT_MENU_ID => {
+                Some(Self::ScrollViewport(ViewportScroll::PrevPrompt))
+            }
+            Self::SCROLL_NEXT_PROMPT_MENU_ID => {
+                Some(Self::ScrollViewport(ViewportScroll::NextPrompt))
+            }
             Self::NEW_TAB_MENU_ID => Some(Self::NewTab),
             Self::NEW_SPLIT_RIGHT_MENU_ID => Some(Self::NewSplitRight),
             Self::NEW_SPLIT_DOWN_MENU_ID => Some(Self::NewSplitDown),
@@ -241,6 +259,8 @@ impl AppCommand {
             Self::ScrollViewport(ViewportScroll::PageDown) => "scroll.page-down",
             Self::ScrollViewport(ViewportScroll::Top) => "scroll.top",
             Self::ScrollViewport(ViewportScroll::Bottom) => "scroll.bottom",
+            Self::ScrollViewport(ViewportScroll::PrevPrompt) => "scroll.prev-prompt",
+            Self::ScrollViewport(ViewportScroll::NextPrompt) => "scroll.next-prompt",
             Self::NewTab => "tab.new",
             Self::NewSplitRight => "split.new-right",
             Self::NewSplitDown => "split.new-down",
@@ -298,6 +318,8 @@ impl AppCommand {
             "scroll.page-down" => Some(Self::ScrollViewport(ViewportScroll::PageDown)),
             "scroll.top" => Some(Self::ScrollViewport(ViewportScroll::Top)),
             "scroll.bottom" => Some(Self::ScrollViewport(ViewportScroll::Bottom)),
+            "scroll.prev-prompt" => Some(Self::ScrollViewport(ViewportScroll::PrevPrompt)),
+            "scroll.next-prompt" => Some(Self::ScrollViewport(ViewportScroll::NextPrompt)),
             "tab.new" => Some(Self::NewTab),
             "split.new-right" => Some(Self::NewSplitRight),
             "split.new-down" => Some(Self::NewSplitDown),
@@ -411,6 +433,14 @@ impl Default for KeybindEngine {
             (
                 "shift+end",
                 AppCommand::ScrollViewport(ViewportScroll::Bottom),
+            ),
+            (
+                "cmd+arrowup",
+                AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
+            ),
+            (
+                "cmd+arrowdown",
+                AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
             ),
             (
                 "cmd+alt+arrowleft",
@@ -705,6 +735,8 @@ mod tests {
             AppCommand::ScrollViewport(ViewportScroll::PageDown),
             AppCommand::ScrollViewport(ViewportScroll::Top),
             AppCommand::ScrollViewport(ViewportScroll::Bottom),
+            AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
+            AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
             AppCommand::NewTab,
             AppCommand::NewSplitRight,
             AppCommand::NewSplitDown,

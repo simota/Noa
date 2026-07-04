@@ -38,8 +38,12 @@ fn dispatch<H: Handler>(action: Action, h: &mut H) {
         Action::EscDispatch(esc) => dispatch_esc(&esc, h),
         Action::OscDispatch(data) => h.osc_dispatch(&data),
         Action::DcsDispatch(payload) => h.dcs_dispatch(&payload.data),
-        // Kitty graphics parse wiring lands in the next commit.
-        Action::ApcDispatch { .. } => {}
+        Action::ApcDispatch { data, truncated } => {
+            // Only Kitty graphics (`G`) is captured; other APC strings are dropped.
+            if let [b'G', rest @ ..] = data.as_slice() {
+                h.kitty_graphics(crate::kitty_graphics::parse(rest, truncated));
+            }
+        }
     }
 }
 

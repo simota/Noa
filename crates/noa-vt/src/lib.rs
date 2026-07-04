@@ -13,6 +13,7 @@
 pub mod action;
 pub mod csi;
 pub mod handler;
+pub mod kitty_graphics;
 pub mod parser;
 pub mod sgr;
 pub mod state;
@@ -26,6 +27,9 @@ pub use csi::{Csi, DcsPayload, Esc};
 pub use handler::{
     Charset, CharsetSlot, CursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine, Handler,
     ModeRequest,
+};
+pub use kitty_graphics::{
+    KittyAction, KittyCompression, KittyDelete, KittyFormat, KittyGraphicsCommand, KittyMedium,
 };
 pub use parser::Parser;
 pub use sgr::{SgrAttr, parse_sgr};

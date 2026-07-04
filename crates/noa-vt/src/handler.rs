@@ -206,6 +206,9 @@ pub trait Handler {
     fn osc_dispatch(&mut self, _data: &[u8]) {}
     /// DCS payload (`ESC P … ST`) for query protocols such as DECRQSS and XTGETTCAP.
     fn dcs_dispatch(&mut self, _data: &[u8]) {}
+    /// Kitty graphics command (`ESC _ G … ST`). Parsed by `noa-vt`; the grid
+    /// layer decodes the payload, stores the image, and queues any reply.
+    fn kitty_graphics(&mut self, _cmd: crate::kitty_graphics::KittyGraphicsCommand) {}
     /// `DECSTBM` — set the vertical scroll region (1-based; `bottom = 0` = last row).
     fn set_scroll_region(&mut self, _top: u16, _bottom: u16) {}
 }

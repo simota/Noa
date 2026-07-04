@@ -453,3 +453,78 @@ fn apc_esc_non_backslash_aborts_and_reprocesses() {
         Action::EscDispatch(e) if e.final_byte == b'c'
     )));
 }
+
+// ── APC → Kitty graphics dispatch (Stream integration) ─────────────
+
+/// Feed `bytes` through a full [`crate::Stream`] and return the Kitty graphics
+/// commands the handler received.
+fn kitty_commands(bytes: &[u8]) -> Vec<crate::KittyGraphicsCommand> {
+    use crate::handler::{DaKind, DsrKind, EraseDisplay, EraseLine, Handler};
+    use crate::sgr::SgrAttr;
+
+    #[derive(Default)]
+    struct Capture {
+        cmds: Vec<crate::KittyGraphicsCommand>,
+    }
+    // Only `kitty_graphics` is meaningful here; every required method no-ops.
+    impl Handler for Capture {
+        fn print(&mut self, _c: char) {}
+        fn execute_c0(&mut self, _byte: u8) {}
+        fn cursor_up(&mut self, _n: u16) {}
+        fn cursor_down(&mut self, _n: u16) {}
+        fn cursor_forward(&mut self, _n: u16) {}
+        fn cursor_backward(&mut self, _n: u16) {}
+        fn cursor_position(&mut self, _row: u16, _col: u16) {}
+        fn cursor_col_abs(&mut self, _col: u16) {}
+        fn cursor_row_abs(&mut self, _row: u16) {}
+        fn erase_display(&mut self, _mode: EraseDisplay) {}
+        fn erase_line(&mut self, _mode: EraseLine) {}
+        fn set_attributes(&mut self, _attrs: &[SgrAttr]) {}
+        fn set_mode(&mut self, _value: u16, _ansi: bool, _on: bool) {}
+        fn carriage_return(&mut self) {}
+        fn linefeed(&mut self) {}
+        fn tab(&mut self, _n: u16) {}
+        fn reverse_index(&mut self) {}
+        fn save_cursor(&mut self) {}
+        fn restore_cursor(&mut self) {}
+        fn full_reset(&mut self) {}
+        fn device_attributes(&mut self, _kind: DaKind) {}
+        fn device_status_report(&mut self, _kind: DsrKind) {}
+        fn kitty_graphics(&mut self, cmd: crate::KittyGraphicsCommand) {
+            self.cmds.push(cmd);
+        }
+    }
+
+    let mut stream = crate::Stream::new();
+    let mut cap = Capture::default();
+    stream.feed(bytes, &mut cap);
+    cap.cmds
+}
+
+#[test]
+fn apc_kitty_dispatch_parses_control_and_payload() {
+    let cmds = kitty_commands(b"\x1b_Gi=5,a=T,f=100;iVBORw0K\x1b\\");
+    assert_eq!(cmds.len(), 1);
+    let c = &cmds[0];
+    assert_eq!(c.image_id, 5);
+    assert_eq!(c.action, crate::KittyAction::TransmitAndDisplay);
+    assert_eq!(c.format, crate::KittyFormat::Png);
+    assert_eq!(c.payload, b"iVBORw0K");
+    assert!(!c.parse_error);
+}
+
+#[test]
+fn apc_non_g_is_ignored() {
+    // APC not starting with 'G' is dropped (no Kitty dispatch).
+    assert!(kitty_commands(b"\x1b_Xother\x1b\\").is_empty());
+}
+
+#[test]
+fn apc_truncated_still_dispatches() {
+    let mut bytes = b"\x1b_Gi=1;".to_vec();
+    bytes.extend(std::iter::repeat_n(b'A', (1 << 20) + 4));
+    bytes.extend_from_slice(b"\x1b\\");
+    let cmds = kitty_commands(&bytes);
+    assert_eq!(cmds.len(), 1);
+    assert!(cmds[0].truncated);
+}

@@ -505,7 +505,10 @@ impl Renderer {
                         // in three z bands (design Step R): band 0 under the
                         // background, band 1 between background and text, band 2
                         // over text but under the UI overlays.
-                        let bands = image_draws.iter().find(|(id, _)| id == pane).map(|(_, b)| b);
+                        let bands = image_draws
+                            .iter()
+                            .find(|(id, _)| id == pane)
+                            .map(|(_, b)| b);
                         if let Some(b) = bands {
                             self.image_layer.draw_band(&mut pass, &b[0]);
                         }
@@ -523,7 +526,10 @@ impl Renderer {
                         self.draw_pixel_overlay_range(&mut pass, self.divider_range.clone());
                     }
                     DrawOp::FocusIndicator { .. } => {
-                        self.draw_pixel_overlay_range(&mut pass, self.focus_indicator_range.clone());
+                        self.draw_pixel_overlay_range(
+                            &mut pass,
+                            self.focus_indicator_range.clone(),
+                        );
                     }
                 }
             }
@@ -1220,13 +1226,13 @@ fn append_search_prompt_instances(
     ));
     let mut cells = search_prompt_segment_cells(&text, text_color);
 
-    // Dim the ` {i}/{n}` counter (the trailing suffix of the display text) so
-    // it reads as secondary to the query — same muted tone as palette hints.
-    // The suffix is all narrow ASCII, so its column count equals its char
-    // count, and it always sits at the very end even after the front-drop
-    // clamp below (which only removes leading cells).
+    // Dim the trailing status suffix (` {i}/{n}` or ` no matches`) so it reads
+    // as secondary to the query — same muted tone as palette hints. The suffix
+    // is all narrow ASCII, so its column count equals its char count, and it
+    // always sits at the very end even after the front-drop clamp below (which
+    // only removes leading cells).
     let muted_color = to_u8_color(surface_output_rgba(style.muted_fg(), target_format_is_srgb));
-    let suffix_cols = search_prompt_counter_cols(&snap.search);
+    let suffix_cols = search_prompt_suffix_cols(buffer, &snap.search);
 
     // Second safety clamp: char-level truncation above can still overflow
     // the column count once double-width glyphs expand into a trailing
@@ -1311,22 +1317,29 @@ fn append_command_palette_instances(
     ));
     let border = to_u8_color(surface_output_rgba(style.border(), target_format_is_srgb));
 
-    // A blank row separates the query from the entries when the grid is tall
-    // enough to spare it; the entry window shrinks to make room for it.
+    // A blank row separates the query from the entries/empty state when the
+    // grid is tall enough to spare it; the entry window shrinks to make room.
     let pad = usize::from(grid_rows >= 4);
     let entry_capacity = grid_rows.saturating_sub(1 + pad);
     let (offset, shown) =
         palette_scroll_window(palette.rows.len(), palette.selected, entry_capacity);
     let entries = &palette.rows[offset..offset + shown];
+    let show_empty = palette.rows.is_empty() && entry_capacity > 0;
+    const EMPTY_PALETTE_LABEL: &str = "No commands found";
 
     // Inner content width: the widest of the query line and every shown
-    // entry line, clamped to leave one padding column on each side.
+    // entry/empty-state line, clamped to leave one padding column on each side.
     let query_text = format!("> {}", palette.query);
     let title_w = entries
         .iter()
         .map(|(t, _)| t.chars().count())
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .max(if show_empty {
+            EMPTY_PALETTE_LABEL.chars().count()
+        } else {
+            0
+        });
     let hint_w = entries
         .iter()
         .map(|(_, hint)| hint.as_deref().map_or(0, |h| h.chars().count()))
@@ -1337,7 +1350,7 @@ fn append_command_palette_instances(
         .max(query_text.chars().count())
         .min(cols - 2);
     let block_w = inner + 2;
-    let height = 1 + pad + shown;
+    let height = 1 + pad + shown + usize::from(show_empty);
     let x0 = ((cols - block_w) / 2) as u16;
     let y0 = (grid_rows.saturating_sub(height) / 2) as u16;
 
@@ -1355,18 +1368,26 @@ fn append_command_palette_instances(
             surface_fg,
         ));
     }
-    for (i, (title, hint)) in entries.iter().enumerate() {
-        let selected = offset + i == palette.selected;
-        let text = palette_line(title, hint.as_deref(), inner);
-        if selected {
-            // Selected entry: whole row on the accent background, one color.
-            rows.push(OverlayRow::uniform(text, accent_bg, accent_fg));
-        } else {
-            // Title in surface_fg, the right-aligned keybind hint dimmed.
-            let hint_cols = hint.as_deref().map_or(0, |h| h.chars().count());
-            rows.push(OverlayRow::title_hint(
-                text, surface_bg, surface_fg, muted_fg, inner, hint_cols,
-            ));
+    if show_empty {
+        rows.push(OverlayRow::uniform(
+            palette_line(EMPTY_PALETTE_LABEL, None, inner),
+            surface_bg,
+            muted_fg,
+        ));
+    } else {
+        for (i, (title, hint)) in entries.iter().enumerate() {
+            let selected = offset + i == palette.selected;
+            let text = palette_line(title, hint.as_deref(), inner);
+            if selected {
+                // Selected entry: whole row on the accent background, one color.
+                rows.push(OverlayRow::uniform(text, accent_bg, accent_fg));
+            } else {
+                // Title in surface_fg, the right-aligned keybind hint dimmed.
+                let hint_cols = hint.as_deref().map_or(0, |h| h.chars().count());
+                rows.push(OverlayRow::title_hint(
+                    text, surface_bg, surface_fg, muted_fg, inner, hint_cols,
+                ));
+            }
         }
     }
 
@@ -1728,14 +1749,14 @@ fn palette_line(left: &str, right: Option<&str>, inner: usize) -> String {
     line
 }
 
-/// Compose the prompt's display text: `Find: {buffer}▏ {i}/{n}`. `i`/`n`
-/// come from `search` (1-based active index / total match count, `0/0`
-/// when there is no active match). Clamps to `cols` by keeping the TAIL of
-/// a buffer too long to fit alongside the fixed prefix/counter.
+/// Compose the prompt's display text: `Find: {buffer}▏ {status}`. The status
+/// is either the 1-based active match counter or an explicit `no matches`
+/// state for a non-empty query with zero hits. Clamps to `cols` by keeping the
+/// TAIL of a buffer too long to fit alongside the fixed prefix/status.
 fn search_prompt_display_text(buffer: &str, search: &SearchState, cols: u16) -> String {
     const PREFIX: &str = "Find: ";
     const CURSOR_MARK: &str = "\u{258F}"; // "▏" left one eighth block, reads as a thin caret.
-    let suffix = search_prompt_counter(search);
+    let suffix = search_prompt_suffix(buffer, search);
 
     let fixed_chars = PREFIX.chars().count() + CURSOR_MARK.chars().count() + suffix.chars().count();
     let available = (cols as usize).saturating_sub(fixed_chars);
@@ -1751,20 +1772,23 @@ fn search_prompt_display_text(buffer: &str, search: &SearchState, cols: u16) -> 
     format!("{PREFIX}{shown}{CURSOR_MARK}{suffix}")
 }
 
-/// The ` {i}/{n}` match counter suffix of the search prompt (1-based active
-/// index / total, `0/0` when no active match). Shared by the display-text
-/// composer and the overlay so the latter knows how many trailing columns to
-/// render in the muted counter color.
-fn search_prompt_counter(search: &SearchState) -> String {
+/// The trailing status suffix of the search prompt. A non-empty query with no
+/// hits gets a readable state instead of an ambiguous `0/0`; otherwise the
+/// suffix is the 1-based active index / total match count.
+fn search_prompt_suffix(buffer: &str, search: &SearchState) -> String {
+    if !buffer.is_empty() && !search.query().is_empty() && search.matches().is_empty() {
+        return " no matches".to_string();
+    }
+
     let total = search.matches().len();
     let current = search.active_index().map_or(0, |idx| idx + 1);
     format!(" {current}/{total}")
 }
 
-/// Column count of the search prompt's match counter (all narrow ASCII, so
+/// Column count of the search prompt's status suffix (all narrow ASCII, so
 /// columns == chars).
-fn search_prompt_counter_cols(search: &SearchState) -> usize {
-    search_prompt_counter(search).chars().count()
+fn search_prompt_suffix_cols(buffer: &str, search: &SearchState) -> usize {
+    search_prompt_suffix(buffer, search).chars().count()
 }
 
 /// Turn the prompt's display text into row-local [`SegmentCell`]s, one per
@@ -3121,6 +3145,16 @@ mod tests {
     }
 
     #[test]
+    fn search_prompt_display_text_reports_no_matches_for_non_empty_query() {
+        let mut search = SearchState::default();
+        search.set_query("needle".to_string(), Vec::new());
+
+        let text = search_prompt_display_text("needle", &search, 30);
+
+        assert_eq!(text, "Find: needle\u{258F} no matches");
+    }
+
+    #[test]
     fn search_prompt_overlay_emits_top_right_bg_and_glyph_instances_and_tracks_the_buffer() {
         let Some(mut font) = font_with_rasterized_m() else {
             return;
@@ -3277,6 +3311,41 @@ mod tests {
             reclosed.iter().filter(|i| i.flags == 0).count(),
             bg_before,
             "closing the palette removes its overlay instances"
+        );
+    }
+
+    #[test]
+    fn command_palette_overlay_shows_empty_state_for_zero_results() {
+        let Some(mut font) = font_with_rasterized_m() else {
+            return;
+        };
+
+        let mut terminal = Terminal::new(GridSize::new(30, 8));
+        let theme = Theme::new();
+        let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+        snap.command_palette = Some(crate::CommandPaletteSnapshot {
+            query: "zzzzzz".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+        });
+
+        let mut with_empty_palette = Vec::new();
+        rebuild_cell_instances(&mut with_empty_palette, &snap, &mut font, &theme, false);
+
+        let rows_touched: std::collections::BTreeSet<u16> = with_empty_palette
+            .iter()
+            .filter(|i| i.flags == 0)
+            .map(|i| i.grid_pos[1])
+            .collect();
+        assert!(
+            rows_touched.len() >= 3,
+            "query row, spacer, and empty-state row must all draw: {rows_touched:?}"
+        );
+        assert!(
+            with_empty_palette
+                .iter()
+                .any(|i| i.flags & CellInstance::FLAG_GLYPH != 0),
+            "the empty-state text must emit glyph instances"
         );
     }
 

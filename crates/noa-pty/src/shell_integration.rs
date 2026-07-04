@@ -149,14 +149,16 @@ mod tests {
         let integration =
             integration_for("/bin/zsh", dir, true, Some("/home/u/.zdot"), None).unwrap();
 
-        assert!(integration.env.contains(&(
-            "ZDOTDIR".to_string(),
-            "/tmp/noa-si/zsh".to_string()
-        )));
-        assert!(integration.env.contains(&(
-            "NOA_ZDOTDIR".to_string(),
-            "/home/u/.zdot".to_string()
-        )));
+        assert!(
+            integration
+                .env
+                .contains(&("ZDOTDIR".to_string(), "/tmp/noa-si/zsh".to_string()))
+        );
+        assert!(
+            integration
+                .env
+                .contains(&("NOA_ZDOTDIR".to_string(), "/home/u/.zdot".to_string()))
+        );
         assert!(!integration.suppress_login_flag);
         assert!(integration.args.is_empty());
     }
@@ -191,10 +193,7 @@ mod tests {
 
         assert_eq!(
             integration.env,
-            vec![(
-                "XDG_DATA_DIRS".to_string(),
-                "/tmp/noa-si/fish".to_string()
-            )]
+            vec![("XDG_DATA_DIRS".to_string(), "/tmp/noa-si/fish".to_string())]
         );
     }
 
@@ -211,8 +210,16 @@ mod tests {
             ]
         );
         assert!(integration.suppress_login_flag);
-        assert!(integration.env.contains(&("NOA_BASH_INJECT".to_string(), "1".to_string())));
-        assert!(integration.env.contains(&("NOA_BASH_LOGIN".to_string(), "1".to_string())));
+        assert!(
+            integration
+                .env
+                .contains(&("NOA_BASH_INJECT".to_string(), "1".to_string()))
+        );
+        assert!(
+            integration
+                .env
+                .contains(&("NOA_BASH_LOGIN".to_string(), "1".to_string()))
+        );
     }
 
     #[test]
@@ -233,7 +240,10 @@ mod tests {
     fn materialize_writes_all_scripts() {
         let dir = resources_dir().expect("materialize should succeed in temp dir");
         assert!(dir.join("zsh/.zshrc").is_file());
-        assert!(dir.join("fish/vendor_conf.d/noa-integration.fish").is_file());
+        assert!(
+            dir.join("fish/vendor_conf.d/noa-integration.fish")
+                .is_file()
+        );
         assert!(dir.join("bash/noa.bash").is_file());
     }
 }

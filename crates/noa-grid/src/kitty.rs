@@ -453,11 +453,7 @@ fn is_temp_path(path: &std::path::Path) -> bool {
     path.to_string_lossy().contains("tty-graphics-protocol")
 }
 
-fn read_file_range(
-    path: &std::path::Path,
-    offset: u64,
-    len: usize,
-) -> Result<Vec<u8>, KittyError> {
+fn read_file_range(path: &std::path::Path, offset: u64, len: usize) -> Result<Vec<u8>, KittyError> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path).map_err(|_| KittyError::NoEnt)?;
     if offset > 0 {
@@ -535,7 +531,9 @@ fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), KittyError> {
     }
     let buf_size = reader.output_buffer_size().ok_or(KittyError::TooBig)?;
     let mut buf = vec![0u8; buf_size];
-    let frame = reader.next_frame(&mut buf).map_err(|_| KittyError::BadPng)?;
+    let frame = reader
+        .next_frame(&mut buf)
+        .map_err(|_| KittyError::BadPng)?;
     buf.truncate(frame.buffer_size());
 
     let rgba = normalize_to_rgba(&buf, width, height, frame.color_type, frame.bit_depth)?;
@@ -672,7 +670,7 @@ mod tests {
 
     #[test]
     fn zlib_compressed_direct() {
-        use flate2::{write::ZlibEncoder, Compression};
+        use flate2::{Compression, write::ZlibEncoder};
         use std::io::Write;
         let px = vec![9u8, 8, 7, 6];
         let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
@@ -919,7 +917,9 @@ mod tests {
         assert_eq!((img.width, img.height), (2, 2));
         assert_eq!(
             &*img.rgba,
-            &[1, 2, 3, 0xff, 4, 5, 6, 0xff, 7, 8, 9, 0xff, 10, 11, 12, 0xff]
+            &[
+                1, 2, 3, 0xff, 4, 5, 6, 0xff, 7, 8, 9, 0xff, 10, 11, 12, 0xff
+            ]
         );
     }
 

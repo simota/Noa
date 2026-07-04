@@ -405,7 +405,8 @@ fn apc_can_aborts_without_dispatch() {
     // CAN (0x18) mid-payload abandons the APC entirely.
     let acts = actions(b"\x1b_Gi=1;AAAA\x18more");
     assert!(
-        acts.iter().all(|a| !matches!(a, Action::ApcDispatch { .. })),
+        acts.iter()
+            .all(|a| !matches!(a, Action::ApcDispatch { .. })),
         "CAN should abort the APC"
     );
     // ...and the trailing bytes print normally in ground.
@@ -447,7 +448,10 @@ fn apc_esc_non_backslash_aborts_and_reprocesses() {
     // ESC inside APC followed by a non-`\` byte abandons the APC and the ESC
     // sequence is reparsed from Escape (here ESC c = RIS).
     let acts = actions(b"\x1b_Gi=1;AA\x1bc");
-    assert!(acts.iter().all(|a| !matches!(a, Action::ApcDispatch { .. })));
+    assert!(
+        acts.iter()
+            .all(|a| !matches!(a, Action::ApcDispatch { .. }))
+    );
     assert!(acts.iter().any(|a| matches!(
         a,
         Action::EscDispatch(e) if e.final_byte == b'c'

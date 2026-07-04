@@ -1407,7 +1407,11 @@ mod tests {
                 None,
                 ModifiersState::empty(),
             ),
-            (Key::Character("c".into()), Some("c"), ModifiersState::CONTROL),
+            (
+                Key::Character("c".into()),
+                Some("c"),
+                ModifiersState::CONTROL,
+            ),
         ];
         for (logical, text, mods) in cases {
             assert!(

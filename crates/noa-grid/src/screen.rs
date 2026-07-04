@@ -382,7 +382,9 @@ impl Screen {
         let rows = self.rows as usize;
         let total = self.scrollback.len() + self.grid.len();
         let live_start = total.saturating_sub(rows);
-        self.viewport_offset = live_start.saturating_sub(index).min(self.max_viewport_offset());
+        self.viewport_offset = live_start
+            .saturating_sub(index)
+            .min(self.max_viewport_offset());
     }
 
     pub fn set_selection(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
@@ -991,8 +993,10 @@ impl Screen {
         let (cells, cursor_anchor, saved_anchor) =
             Self::collect_reflow_cells(line_rows, line_start, cursor, saved);
         let line = Self::reflow_cells(&cells, cols, blank);
-        let cursor_pos = cursor_anchor.map(|anchor| Self::resolve_reflow_anchor(&line, anchor, base_row));
-        let saved_pos = saved_anchor.map(|anchor| Self::resolve_reflow_anchor(&line, anchor, base_row));
+        let cursor_pos =
+            cursor_anchor.map(|anchor| Self::resolve_reflow_anchor(&line, anchor, base_row));
+        let saved_pos =
+            saved_anchor.map(|anchor| Self::resolve_reflow_anchor(&line, anchor, base_row));
         (line.rows, cursor_pos, saved_pos)
     }
 

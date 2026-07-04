@@ -149,7 +149,12 @@ fn flush_run(lines: &mut Vec<String>, y: usize, run: &mut Option<Run>) {
     let Some(run) = run.take() else {
         return;
     };
-    let mut line = format!("{y}: [{}-{}] \"{}\"", run.x0, run.x1, escape_text(&run.text));
+    let mut line = format!(
+        "{y}: [{}-{}] \"{}\"",
+        run.x0,
+        run.x1,
+        escape_text(&run.text)
+    );
     if run.style.fg != Color::Default {
         line.push_str(&format!(" fg={}", color_token(run.style.fg)));
     }

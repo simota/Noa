@@ -488,7 +488,10 @@ mod tests {
     #[test]
     fn band_classification_splits_at_zero_and_bg_threshold() {
         assert_eq!(classify_band(-2_000_000_000), ImageBand::BelowBackground);
-        assert_eq!(classify_band(Z_BG_THRESHOLD - 1), ImageBand::BelowBackground);
+        assert_eq!(
+            classify_band(Z_BG_THRESHOLD - 1),
+            ImageBand::BelowBackground
+        );
         assert_eq!(classify_band(Z_BG_THRESHOLD), ImageBand::BelowText);
         assert_eq!(classify_band(-1), ImageBand::BelowText);
         assert_eq!(classify_band(0), ImageBand::AboveText);

@@ -576,10 +576,7 @@ mod json {
 
         fn parse_number(&mut self) -> Option<Value> {
             let start = self.pos;
-            while matches!(
-                self.peek(),
-                Some('0'..='9' | '-' | '+' | '.' | 'e' | 'E')
-            ) {
+            while matches!(self.peek(), Some('0'..='9' | '-' | '+' | '.' | 'e' | 'E')) {
                 self.pos += 1;
             }
             if self.pos == start {
@@ -596,7 +593,10 @@ mod json {
         fn consume(&mut self, literal: &str) -> bool {
             let end = self.pos + literal.chars().count();
             if end <= self.chars.len()
-                && self.chars[self.pos..end].iter().copied().eq(literal.chars())
+                && self.chars[self.pos..end]
+                    .iter()
+                    .copied()
+                    .eq(literal.chars())
             {
                 self.pos = end;
                 true

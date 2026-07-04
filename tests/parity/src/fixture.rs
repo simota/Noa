@@ -71,8 +71,7 @@ impl Fixture {
                     }
                 }
                 Section::Input => {
-                    let bytes =
-                        unescape(line).map_err(|err| format!("line {lineno}: {err}"))?;
+                    let bytes = unescape(line).map_err(|err| format!("line {lineno}: {err}"))?;
                     input.extend(bytes);
                 }
                 Section::Expect => expect_lines.push(line),

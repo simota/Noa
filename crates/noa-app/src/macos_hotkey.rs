@@ -139,10 +139,9 @@ impl GlobalHotKey {
         let chord = parse_hotkey(spec)?;
         #[cfg(target_os = "macos")]
         {
-            macos::Registration::install(chord, proxy)
-                .map(|registration| Self {
-                    _registration: registration,
-                })
+            macos::Registration::install(chord, proxy).map(|registration| Self {
+                _registration: registration,
+            })
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -167,8 +166,7 @@ mod macos {
     type EventHandlerCallRef = *mut c_void;
     type EventRef = *mut c_void;
     type EventHotKeyRef = *mut c_void;
-    type EventHandlerUpp =
-        extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> OsStatus;
+    type EventHandlerUpp = extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> OsStatus;
 
     #[repr(C)]
     struct EventTypeSpec {

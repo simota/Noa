@@ -28,7 +28,10 @@ fn text_dump_trims_trailing_blanks_and_reports_cursor() {
 
 #[test]
 fn text_dump_marks_deferred_wrap() {
-    assert_eq!(run_fixture(b"abcde", 5, 1), "abcde\n# cursor: 0,4 (pending-wrap)");
+    assert_eq!(
+        run_fixture(b"abcde", 5, 1),
+        "abcde\n# cursor: 0,4 (pending-wrap)"
+    );
 }
 
 #[test]
@@ -78,8 +81,10 @@ fn parse_rejects_missing_sections() {
     assert!(Fixture::parse("## cols: 5\n## rows: 2\n## mode: text\n").is_err());
     assert!(Fixture::parse(&SAMPLE.replace("## why:\n", "## why:\n\n")).is_ok());
     assert!(
-        Fixture::parse("## cols: 5\n## rows: 2\n## mode: bogus\n## input:\n## expect:\n## why:\nx\n")
-            .is_err()
+        Fixture::parse(
+            "## cols: 5\n## rows: 2\n## mode: bogus\n## input:\n## expect:\n## why:\nx\n"
+        )
+        .is_err()
     );
 }
 

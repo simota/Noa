@@ -24,7 +24,10 @@ fn fixtures_match_expectations() {
     let mut failures = Vec::new();
     let mut blessed = 0usize;
     for path in &paths {
-        let name = path.file_name().expect("fixture file name").to_string_lossy();
+        let name = path
+            .file_name()
+            .expect("fixture file name")
+            .to_string_lossy();
         let source = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("{name}: cannot read fixture: {err}"));
         let fx = Fixture::parse(&source).unwrap_or_else(|err| panic!("{name}: {err}"));

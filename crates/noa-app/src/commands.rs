@@ -1014,7 +1014,10 @@ mod tests {
             Some(AppCommand::NewWindow)
         );
         // cmd+n must not shadow cmd+t (New Tab) — they stay distinct.
-        assert_eq!(AppCommand::from_cmd_character("t"), Some(AppCommand::NewTab));
+        assert_eq!(
+            AppCommand::from_cmd_character("t"),
+            Some(AppCommand::NewTab)
+        );
     }
 
     #[test]

@@ -178,7 +178,7 @@ impl Parser {
             }
             0x50 => self.goto(State::DcsPassthrough, sink), // 'P' DCS
             0x58 | 0x5e => self.state = State::SosPmApcString, // 'X' SOS / '^' PM (discarded)
-            0x5f => self.goto(State::ApcString, sink),        // '_' APC (captured)
+            0x5f => self.goto(State::ApcString, sink),      // '_' APC (captured)
             0x5b => self.goto(State::CsiEntry, sink),       // '[' CSI
             0x5d => self.goto(State::OscString, sink),      // ']' OSC
             0x30..=0x4f | 0x51..=0x57 | 0x59 | 0x5a | 0x5c | 0x60..=0x7e => {

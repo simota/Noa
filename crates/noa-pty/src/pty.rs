@@ -100,9 +100,7 @@ impl Pty {
         } else {
             None
         };
-        let suppress_login = integration
-            .as_ref()
-            .is_some_and(|i| i.suppress_login_flag);
+        let suppress_login = integration.as_ref().is_some_and(|i| i.suppress_login_flag);
 
         if config.login && !suppress_login {
             // Login shell. NOTE: portable-pty's CommandBuilder does not let us
@@ -308,7 +306,9 @@ mod tests {
                 Ok(PtyEvent::Data(chunk)) => {
                     collected.extend_from_slice(&chunk);
                     if collected.windows(7).any(|w| w == b"\x1b]133;A")
-                        && collected.windows(11).any(|w| w == b"\x1b]7;file://".as_ref())
+                        && collected
+                            .windows(11)
+                            .any(|w| w == b"\x1b]7;file://".as_ref())
                     {
                         break;
                     }
@@ -358,7 +358,9 @@ mod tests {
                 Ok(PtyEvent::Data(chunk)) => {
                     collected.extend_from_slice(&chunk);
                     if collected.windows(7).any(|w| w == b"\x1b]133;A")
-                        && collected.windows(11).any(|w| w == b"\x1b]7;file://".as_ref())
+                        && collected
+                            .windows(11)
+                            .any(|w| w == b"\x1b]7;file://".as_ref())
                     {
                         break;
                     }

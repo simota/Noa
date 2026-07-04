@@ -550,7 +550,11 @@ impl Terminal {
             Ok(()) => b"OK",
             Err(e) => e.reply_body().as_bytes(),
         };
-        let id = if assigned_id != 0 { assigned_id } else { req_id };
+        let id = if assigned_id != 0 {
+            assigned_id
+        } else {
+            req_id
+        };
         self.push_apc_response(id, req_number, placement, body);
     }
 
@@ -570,7 +574,8 @@ impl Terminal {
                 });
                 let assigned = *result.as_ref().unwrap_or(&ctrl.image_id);
                 if result.is_ok() {
-                    self.kitty_images.enforce_quota(&self.referenced_image_ids());
+                    self.kitty_images
+                        .enforce_quota(&self.referenced_image_ids());
                 }
                 self.kitty_reply(
                     ctrl.image_id,
@@ -659,8 +664,7 @@ impl Terminal {
         };
         let cols = cols.clamp(1, u16::MAX as u32) as u16;
         let rows = rows.clamp(1, u16::MAX as u32) as u16;
-        let cropped =
-            ctrl.src_x != 0 || ctrl.src_y != 0 || ctrl.src_w != 0 || ctrl.src_h != 0;
+        let cropped = ctrl.src_x != 0 || ctrl.src_y != 0 || ctrl.src_w != 0 || ctrl.src_h != 0;
         let src = cropped.then_some([ctrl.src_x, ctrl.src_y, src_w, src_h]);
         let cell_x_off = ctrl.cell_x_off.min(cell_w - 1) as u16;
         let cell_y_off = ctrl.cell_y_off.min(cell_h - 1) as u16;
@@ -744,15 +748,12 @@ impl Terminal {
             KittyDelete::AtCellZ { .. } => {
                 p.covers_abs(target_abs, target_col) && p.z == cmd.z_index
             }
-            KittyDelete::ByIdRange { .. } => {
-                p.image_id >= cmd.src_x && p.image_id <= cmd.src_y
-            }
+            KittyDelete::ByIdRange { .. } => p.image_id >= cmd.src_x && p.image_id <= cmd.src_y,
             KittyDelete::ByColumn { .. } => {
                 target_col >= p.anchor_col && target_col < p.anchor_col.saturating_add(p.cols)
             }
             KittyDelete::ByRow { .. } => {
-                target_abs >= p.anchor_abs_row
-                    && target_abs < p.anchor_abs_row + p.rows as usize
+                target_abs >= p.anchor_abs_row && target_abs < p.anchor_abs_row + p.rows as usize
             }
             KittyDelete::ByZ { .. } => p.z == cmd.z_index,
             KittyDelete::AnimationFrames { .. } => false,

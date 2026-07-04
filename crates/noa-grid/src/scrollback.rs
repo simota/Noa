@@ -582,7 +582,9 @@ mod tests {
             1000,
             "every non-retained row is reported as evicted"
         );
-        assert!(sb.bytes() <= PAGE_TARGET_BYTES + PAGE_HEADER_COST * 4 + sb.pages[0].cells.len() * 8);
+        assert!(
+            sb.bytes() <= PAGE_TARGET_BYTES + PAGE_HEADER_COST * 4 + sb.pages[0].cells.len() * 8
+        );
     }
 
     #[test]
@@ -657,7 +659,10 @@ mod tests {
         let mut sb = PagedScrollback::new(usize::MAX);
         sb.push_row(&text_row("", 10));
         sb.push_row(&row_from(vec![Cell::blank(Color::Palette(3)); 10]));
-        assert!(!sb.has_text(), "blank + BCE-only history has no selectable text");
+        assert!(
+            !sb.has_text(),
+            "blank + BCE-only history has no selectable text"
+        );
         sb.push_row(&text_row("x", 10));
         assert!(sb.has_text());
     }

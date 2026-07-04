@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, TrySendError};
 use noa_core::GridSize;
 use noa_grid::Terminal;
 use noa_pty::{Pty, PtyWriter};
@@ -87,6 +87,49 @@ impl IoThreadHandle {
 
 pub(crate) fn input_channel() -> (Sender<PtyInput>, Receiver<PtyInput>) {
     crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY)
+}
+
+#[derive(Debug)]
+pub(crate) enum QueuePtyInputError {
+    Full(PtyInput),
+    Disconnected,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LosslessQueueResult {
+    Queued,
+    Deferred,
+    Disconnected,
+}
+
+pub(crate) fn try_queue_input(
+    tx: &Sender<PtyInput>,
+    input: PtyInput,
+) -> Result<(), QueuePtyInputError> {
+    tx.try_send(input).map_err(|err| match err {
+        TrySendError::Full(input) => QueuePtyInputError::Full(input),
+        TrySendError::Disconnected(_) => QueuePtyInputError::Disconnected,
+    })
+}
+
+pub(crate) fn queue_input_lossless(tx: Sender<PtyInput>, input: PtyInput) -> LosslessQueueResult {
+    match try_queue_input(&tx, input) {
+        Ok(()) => LosslessQueueResult::Queued,
+        Err(QueuePtyInputError::Full(input)) => {
+            match std::thread::Builder::new()
+                .name("noa-pty-input-send".to_string())
+                .spawn(move || {
+                    let _ = tx.send(input);
+                }) {
+                Ok(_) => LosslessQueueResult::Deferred,
+                Err(err) => {
+                    log::warn!("failed to defer pty input onto a sender thread: {err}");
+                    LosslessQueueResult::Disconnected
+                }
+            }
+        }
+        Err(QueuePtyInputError::Disconnected) => LosslessQueueResult::Disconnected,
+    }
 }
 
 struct TerminalOutput {
@@ -593,6 +636,32 @@ mod tests {
             other => panic!("expected a full input queue, got {other:?}"),
         }
         assert_eq!(rx.len(), PTY_INPUT_QUEUE_CAPACITY);
+    }
+
+    #[test]
+    fn lossless_input_defers_instead_of_dropping_when_queue_is_full() {
+        fn input(bytes: &[u8]) -> PtyInput {
+            bytes.to_vec().into_boxed_slice()
+        }
+
+        let (tx, rx) = input_channel();
+        for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
+            try_queue_input(&tx, input(b"x")).expect("queue has capacity");
+        }
+
+        assert_eq!(
+            queue_input_lossless(tx, input(b"paste")),
+            LosslessQueueResult::Deferred
+        );
+        for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
+            assert_eq!(rx.recv().expect("queued input").as_ref(), b"x");
+        }
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("deferred paste should be delivered")
+                .as_ref(),
+            b"paste"
+        );
     }
 
     #[test]

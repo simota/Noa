@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Sender, TrySendError};
+use crossbeam_channel::Sender;
 use noa_core::{DEFAULT_GRID_PADDING, GridPadding, GridSize, PixelSize, Point};
 use noa_font::FontGrid;
 use noa_grid::{
@@ -4879,7 +4879,7 @@ impl App {
             );
             return;
         }
-        self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+        self.write_pane_pty_bytes_lossless(window_id, pane_id, &bytes);
     }
 
     fn bracketed_paste(&self, window_id: WindowId, pane_id: PaneId) -> bool {
@@ -4964,7 +4964,7 @@ impl App {
                 window_id,
                 pane_id,
                 bytes,
-            } => self.write_pane_pty_bytes(window_id, pane_id, &bytes),
+            } => self.write_pane_pty_bytes_lossless(window_id, pane_id, &bytes),
             ConfirmAction::ClipboardRead {
                 window_id,
                 pane_id,
@@ -5006,15 +5006,37 @@ impl App {
         else {
             return;
         };
-        match surface
-            .pty_input_tx
-            .try_send(bytes.to_vec().into_boxed_slice())
-        {
+        match crate::io_thread::try_queue_input(
+            &surface.pty_input_tx,
+            bytes.to_vec().into_boxed_slice(),
+        ) {
             Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
+            Err(crate::io_thread::QueuePtyInputError::Full(_)) => {
                 log::warn!("dropping pty input because the io thread queue is full");
             }
-            Err(TrySendError::Disconnected(_)) => {
+            Err(crate::io_thread::QueuePtyInputError::Disconnected) => {
+                log::warn!("failed to queue pty input because the io thread is gone");
+            }
+        }
+    }
+
+    fn write_pane_pty_bytes_lossless(&self, window_id: WindowId, pane_id: PaneId, bytes: &[u8]) {
+        let Some(surface) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+        else {
+            return;
+        };
+        match crate::io_thread::queue_input_lossless(
+            surface.pty_input_tx.clone(),
+            bytes.to_vec().into_boxed_slice(),
+        ) {
+            crate::io_thread::LosslessQueueResult::Queued => {}
+            crate::io_thread::LosslessQueueResult::Deferred => {
+                log::debug!("deferred pty input until the io thread queue has capacity");
+            }
+            crate::io_thread::LosslessQueueResult::Disconnected => {
                 log::warn!("failed to queue pty input because the io thread is gone");
             }
         }

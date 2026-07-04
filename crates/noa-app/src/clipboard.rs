@@ -38,6 +38,26 @@ pub(crate) enum PasteContents {
     Empty,
 }
 
+fn non_empty_text(text: String) -> Option<String> {
+    (!text.is_empty()).then_some(text)
+}
+
+fn paste_contents_from_parts(
+    file_urls: Vec<PathBuf>,
+    image: Option<Vec<u8>>,
+    text: Option<String>,
+) -> PasteContents {
+    if !file_urls.is_empty() {
+        PasteContents::FileUrls(file_urls)
+    } else if let Some(image) = image {
+        PasteContents::Image(image)
+    } else if let Some(text) = text.and_then(non_empty_text) {
+        PasteContents::Text(text)
+    } else {
+        PasteContents::Empty
+    }
+}
+
 /// Shell-escapes a string for use as a single word on a POSIX command line:
 /// single-quotes it, escaping embedded single quotes as `'\''`. Strings made
 /// up only of characters that are never special to a shell are left as-is.
@@ -101,13 +121,22 @@ mod platform {
     use anyhow::{Context, ensure};
     use objc2_app_kit::{
         NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypeFileURL,
-        NSPasteboardTypePNG, NSPasteboardTypeTIFF,
+        NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
     };
     use objc2_foundation::{NSDictionary, NSURL};
 
     use super::PasteContents;
 
     pub(super) fn get_text() -> anyhow::Result<String> {
+        let pasteboard = NSPasteboard::generalPasteboard();
+        if let Some(text) = pasteboard_text(&pasteboard) {
+            return Ok(text);
+        }
+
+        pbpaste_text()
+    }
+
+    fn pbpaste_text() -> anyhow::Result<String> {
         let output = Command::new("/usr/bin/pbpaste")
             .arg("-Prefer")
             .arg("txt")
@@ -143,17 +172,29 @@ mod platform {
 
         let file_urls = file_urls(&pasteboard);
         if !file_urls.is_empty() {
-            return Ok(PasteContents::FileUrls(file_urls));
+            return Ok(super::paste_contents_from_parts(file_urls, None, None));
         }
 
         if let Some(png) = image_png(&pasteboard) {
-            return Ok(PasteContents::Image(png));
+            return Ok(super::paste_contents_from_parts(
+                Vec::new(),
+                Some(png),
+                None,
+            ));
         }
 
-        match get_text() {
-            Ok(text) if !text.is_empty() => Ok(PasteContents::Text(text)),
-            _ => Ok(PasteContents::Empty),
-        }
+        let text = match pasteboard_text(&pasteboard) {
+            Some(text) => Some(text),
+            None => Some(pbpaste_text()?),
+        };
+        Ok(super::paste_contents_from_parts(Vec::new(), None, text))
+    }
+
+    fn pasteboard_text(pasteboard: &NSPasteboard) -> Option<String> {
+        pasteboard
+            .stringForType(unsafe { NSPasteboardTypeString })
+            .map(|text| text.to_string())
+            .and_then(super::non_empty_text)
     }
 
     fn file_urls(pasteboard: &NSPasteboard) -> Vec<PathBuf> {
@@ -237,6 +278,32 @@ mod tests {
         assert_eq!(
             file_urls_to_paste_string(&paths),
             "/tmp/a.txt '/tmp/my file.txt'"
+        );
+    }
+
+    #[test]
+    fn paste_contents_prioritizes_file_urls_over_image_and_text() {
+        let paths = vec![PathBuf::from("/tmp/a.txt")];
+
+        assert_eq!(
+            paste_contents_from_parts(paths.clone(), Some(vec![1, 2, 3]), Some("text".to_string())),
+            PasteContents::FileUrls(paths)
+        );
+    }
+
+    #[test]
+    fn paste_contents_prioritizes_image_over_text() {
+        assert_eq!(
+            paste_contents_from_parts(Vec::new(), Some(vec![1, 2, 3]), Some("text".to_string())),
+            PasteContents::Image(vec![1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn paste_contents_treats_empty_text_as_empty_clipboard() {
+        assert_eq!(
+            paste_contents_from_parts(Vec::new(), None, Some(String::new())),
+            PasteContents::Empty
         );
     }
 

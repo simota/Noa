@@ -589,6 +589,13 @@ impl FontGrid {
         self.cache.contains_key(&GlyphKey { ch })
     }
 
+    fn primary_has_glyph(&self, ch: char) -> bool {
+        let Ok(font) = self.font_stack.primary().font_ref() else {
+            return false;
+        };
+        font.charmap().map(ch) != 0
+    }
+
     /// The slot registry and the cache maps must never drift: every slot's
     /// owner must still point back at it, and every cached glyph holding a
     /// slot id must reference a live slot.
@@ -679,7 +686,10 @@ fn glyph_info(glyph: &RasterizedGlyph, atlas_pos: [u16; 2], atlas_size: [u16; 2]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::face::nerd_font_fallback_candidate_has_glyph;
     use crate::{FontFeature, FontVariation, SyntheticStyle};
+
+    const NERD_FONT_HOME_PUA: char = '\u{F015}';
 
     #[test]
     fn new_and_raster() {
@@ -773,6 +783,53 @@ mod tests {
         // The color atlas byte buffer is RGBA8 (4 bytes/px) sized.
         let (cw, ch) = grid.color_atlas_size();
         assert_eq!(grid.color_atlas_data().len(), cw as usize * ch as usize * 4);
+    }
+
+    #[test]
+    fn nerd_font_pua_fallback_rasterizes_into_mask_atlas() {
+        let mut grid = match FontGrid::new(14.0, FontConfig::default()) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+        if !nerd_font_fallback_candidate_has_glyph(NERD_FONT_HOME_PUA) {
+            eprintln!("skipping: no installed Nerd Font candidate can render U+F015");
+            return;
+        }
+        if grid.primary_has_glyph(NERD_FONT_HOME_PUA) {
+            eprintln!("skipping: primary font already renders U+F015");
+            return;
+        }
+
+        let pua_face = grid.resolve_face(NERD_FONT_HOME_PUA);
+        assert_ne!(
+            pua_face,
+            FaceId(0),
+            "U+F015 should resolve to a fallback face when the primary font lacks it"
+        );
+
+        let mask_generation_before = grid.mask_atlas_generation();
+        let color_generation_before = grid.color_atlas_generation();
+
+        let info = grid.get_or_raster(NERD_FONT_HOME_PUA);
+
+        assert!(
+            info.atlas_size[0] > 0 && info.atlas_size[1] > 0,
+            "Nerd Font PUA glyph should rasterize to a non-empty atlas region: {:?}",
+            info.atlas_size
+        );
+        assert!(!info.color, "Nerd Font PUA glyph should use the mask atlas");
+        assert!(
+            grid.mask_atlas_generation() > mask_generation_before,
+            "Nerd Font PUA glyph must be packed into the mask atlas"
+        );
+        assert_eq!(
+            grid.color_atlas_generation(),
+            color_generation_before,
+            "Nerd Font PUA glyph must not touch the color atlas"
+        );
     }
 
     #[test]

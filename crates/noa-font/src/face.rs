@@ -233,6 +233,17 @@ pub fn load_font_stack(font_cfg: &FontConfig) -> Result<FontStack, FontError> {
         push_valid_face(&mut fallbacks, handle);
     }
 
+    // Private-use icons from Nerd Fonts are not present in the normal system
+    // monospace/CJK stack. Keep these after emoji (so color emoji wins) but
+    // before CJK (so PUA icons don't accidentally resolve to a CJK private
+    // glyph when a Nerd Font candidate is installed).
+    for family_name in nerd_font_fallback_family_names(&source) {
+        let family = [FamilyName::Title(family_name)];
+        if let Ok(handle) = Source::select_best_match(&source, &family, &Properties::new()) {
+            push_valid_face(&mut fallbacks, handle);
+        }
+    }
+
     for postscript_name in cjk_fallback_postscript_names() {
         if let Ok(handle) = Source::select_by_postscript_name(&source, postscript_name) {
             push_valid_face(&mut fallbacks, handle);
@@ -378,6 +389,58 @@ fn emoji_fallback_family_name() -> &'static str {
     "Apple Color Emoji"
 }
 
+fn nerd_font_fallback_family_names(source: &SystemSource) -> Vec<String> {
+    let mut names: Vec<String> = [
+        "Symbols Nerd Font Mono",
+        "Symbols Nerd Font",
+        "Hack Nerd Font Mono",
+        "Hack Nerd Font",
+        "Hack Nerd Font Propo",
+        "JetBrainsMono Nerd Font Mono",
+        "JetBrainsMono Nerd Font",
+        "FiraCode Nerd Font Mono",
+        "FiraCode Nerd Font",
+        "CaskaydiaCove Nerd Font Mono",
+        "CaskaydiaCove Nerd Font",
+        "SauceCodePro Nerd Font Mono",
+        "SauceCodePro Nerd Font",
+        "MesloLGS NF",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    if let Ok(mut discovered) = source.all_families() {
+        discovered.retain(|name| is_nerd_font_family_name(name));
+        names.extend(discovered);
+    }
+
+    let mut deduped = Vec::with_capacity(names.len());
+    for name in names {
+        if !deduped.iter().any(|existing: &String| existing == &name) {
+            deduped.push(name);
+        }
+    }
+    deduped.sort_by_key(|name| (nerd_font_family_priority(name), name.to_ascii_lowercase()));
+    deduped
+}
+
+fn is_nerd_font_family_name(name: &str) -> bool {
+    name.contains("Nerd Font") || name.ends_with(" NF")
+}
+
+fn nerd_font_family_priority(name: &str) -> u8 {
+    if name.contains("Symbols Nerd Font") {
+        0
+    } else if name.contains("Nerd Font Mono") || name.ends_with(" NF") {
+        1
+    } else if name.contains("Nerd Font Propo") {
+        3
+    } else {
+        2
+    }
+}
+
 fn cjk_fallback_postscript_names() -> &'static [&'static str] {
     #[cfg(target_os = "macos")]
     {
@@ -427,6 +490,26 @@ fn handle_to_data(handle: Handle) -> Result<FontData, FontError> {
             })
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn nerd_font_fallback_candidate_has_glyph(ch: char) -> bool {
+    let source = SystemSource::new();
+    nerd_font_fallback_family_names(&source)
+        .into_iter()
+        .any(|family_name| {
+            let family = [FamilyName::Title(family_name)];
+            let Ok(handle) = Source::select_best_match(&source, &family, &Properties::new()) else {
+                return false;
+            };
+            let Some(data) = load_valid_handle(handle) else {
+                return false;
+            };
+            let Ok(font) = data.font_ref() else {
+                return false;
+            };
+            font.charmap().map(ch) != 0
+        })
 }
 
 /// Scaled per-face metrics, in pixels, at a given pixels-per-em size.
@@ -560,6 +643,23 @@ mod tests {
         assert_eq!(quantize_cell_dimension(7.5), 8.0);
         assert_eq!(quantize_cell_dimension(0.25), 1.0);
         assert_eq!(quantize_cell_dimension(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn nerd_font_family_detection_prioritizes_symbols_and_mono() {
+        assert!(is_nerd_font_family_name("Symbols Nerd Font Mono"));
+        assert!(is_nerd_font_family_name("CaskaydiaCove Nerd Font"));
+        assert!(is_nerd_font_family_name("MesloLGS NF"));
+        assert!(!is_nerd_font_family_name("Menlo"));
+
+        assert!(
+            nerd_font_family_priority("Symbols Nerd Font Mono")
+                < nerd_font_family_priority("Hack Nerd Font Mono")
+        );
+        assert!(
+            nerd_font_family_priority("Hack Nerd Font Mono")
+                < nerd_font_family_priority("Hack Nerd Font Propo")
+        );
     }
 
     /// AC-WP1-01 (REQ-EMOJI-1): given the resolved fallback stack from

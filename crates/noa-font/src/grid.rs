@@ -9,7 +9,7 @@ use swash::scale::ScaleContext;
 
 use crate::atlas::Atlas;
 use crate::boxdraw::{self, is_builtin_glyph};
-use crate::face::{FontStack, Metrics, load_font_stack};
+use crate::face::{FontStack, FontStyle, Metrics, load_font_stack};
 use crate::raster::{GlyphSynthesis, RasterizedGlyph, rasterize_with_variations};
 use crate::shape::{self, FaceId, ShapeCell, ShapeRunKey, ShapedGlyph, StyleKey};
 use crate::{FontConfig, FontError, GlyphInfo, GlyphKey};
@@ -221,17 +221,30 @@ impl FontGrid {
     /// face to shape a run against — a run is guaranteed single-face by the
     /// caller (segmentation breaks at face boundaries).
     pub fn resolve_face(&self, ch: char) -> FaceId {
+        self.resolve_face_for_style(ch, StyleKey::default())
+    }
+
+    /// Resolve a codepoint using the style-specific face stack. Native
+    /// bold/italic faces are tried first when available; otherwise the regular
+    /// face stays first and synthetic style remains eligible during raster.
+    pub fn resolve_face_for_style(&self, ch: char, style: StyleKey) -> FaceId {
         // Builtin (procedurally-drawn) codepoints resolve to a sentinel face so
         // segmentation isolates them into their own runs — see
         // [`FaceId::BUILTIN`] and [`FontGrid::raster_shaped`]'s builtin branch.
         if is_builtin_glyph(ch) {
             return FaceId::BUILTIN;
         }
-        FaceId(self.resolve_glyph(ch).0 as u16)
+        FaceId(self.resolve_glyph_for_style(ch, style).0 as u16)
     }
 
     fn resolve_glyph(&self, ch: char) -> (usize, u16) {
-        for (font_index, font_data) in self.font_stack.faces().iter().enumerate() {
+        self.resolve_glyph_for_style(ch, StyleKey::default())
+    }
+
+    fn resolve_glyph_for_style(&self, ch: char, style: StyleKey) -> (usize, u16) {
+        let font_style = FontStyle::from_bold_italic(style.bold, style.italic);
+        for &font_index in self.font_stack.face_indices_for_style(font_style) {
+            let font_data = &self.font_stack.faces()[font_index];
             let font = FontRef::from_index(&font_data.bytes, font_data.index)
                 .expect("font bytes validated at construction");
             let glyph_id = font.charmap().map(ch);
@@ -280,7 +293,7 @@ impl FontGrid {
         // (all builtin codepoints fit in `u16`) for `raster_shaped` to draw.
         // Segmentation guarantees the whole run is builtin (all cells share
         // `FaceId::BUILTIN`).
-        if self.resolve_face(first.ch) == FaceId::BUILTIN {
+        if self.resolve_face_for_style(first.ch, style) == FaceId::BUILTIN {
             let x_advance = self.metrics.cell_w.round() as i32;
             let glyphs: Vec<ShapedGlyph> = cells
                 .iter()
@@ -301,7 +314,7 @@ impl FontGrid {
             return glyphs;
         }
 
-        let face_id = self.resolve_face(first.ch);
+        let face_id = self.resolve_face_for_style(first.ch, style);
         let variation_coords = self.variation_coords(style);
         let font_data = &self.font_stack.faces()[face_id.0 as usize];
         let glyphs = shape::shape_with_rustybuzz(
@@ -358,7 +371,13 @@ impl FontGrid {
         let font = FontRef::from_index(&font_data.bytes, font_data.index)
             .expect("font bytes validated at construction");
         let variation_coords = shape::variation_coords_for(&self.font_cfg, style);
-        let synthesis = synthesis_for(&self.font_cfg, style);
+        let font_style = FontStyle::from_bold_italic(style.bold, style.italic);
+        let synthesis = synthesis_for(
+            &self.font_cfg,
+            style,
+            self.font_stack
+                .is_native_style_face(face_id.0 as usize, font_style),
+        );
         let glyph = rasterize_with_variations(
             &mut self.ctx,
             font,
@@ -612,10 +631,14 @@ impl FontGrid {
 /// actually requests that style AND the config toggle for it is on. Pulled
 /// out as a standalone function so the decision is unit-testable without
 /// rasterizing a real glyph.
-fn synthesis_for(font_cfg: &FontConfig, style: StyleKey) -> GlyphSynthesis {
+fn synthesis_for(
+    font_cfg: &FontConfig,
+    style: StyleKey,
+    native_style_face: bool,
+) -> GlyphSynthesis {
     GlyphSynthesis {
-        embolden: style.bold && font_cfg.synthetic_style.bold,
-        shear: style.italic && font_cfg.synthetic_style.italic,
+        embolden: style.bold && font_cfg.synthetic_style.bold && !native_style_face,
+        shear: style.italic && font_cfg.synthetic_style.italic && !native_style_face,
         thicken: font_cfg.thicken,
         thicken_strength: font_cfg.thicken_strength,
     }
@@ -1052,7 +1075,8 @@ mod tests {
                 StyleKey {
                     bold: true,
                     italic: false
-                }
+                },
+                false,
             ),
             GlyphSynthesis {
                 embolden: true,
@@ -1067,7 +1091,8 @@ mod tests {
                 StyleKey {
                     bold: false,
                     italic: true
-                }
+                },
+                false,
             ),
             GlyphSynthesis {
                 embolden: false,
@@ -1083,7 +1108,8 @@ mod tests {
                 StyleKey {
                     bold: false,
                     italic: false
-                }
+                },
+                false,
             ),
             GlyphSynthesis::default(),
             "a plain (non-bold, non-italic) style must never synthesize anything"
@@ -1099,7 +1125,8 @@ mod tests {
                 StyleKey {
                     bold: true,
                     italic: false
-                }
+                },
+                false,
             ),
             GlyphSynthesis {
                 embolden: false,
@@ -1108,6 +1135,37 @@ mod tests {
                 thicken_strength: 0,
             },
             "font-synthetic-style = no-bold must disable bold synthesis even for a bold style"
+        );
+    }
+
+    #[test]
+    fn synthetic_style_is_suppressed_for_native_style_faces() {
+        let cfg = FontConfig {
+            synthetic_style: SyntheticStyle {
+                bold: true,
+                italic: true,
+            },
+            thicken: false,
+            thicken_strength: 0,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            synthesis_for(
+                &cfg,
+                StyleKey {
+                    bold: true,
+                    italic: true,
+                },
+                true,
+            ),
+            GlyphSynthesis {
+                embolden: false,
+                shear: false,
+                thicken: false,
+                thicken_strength: 0,
+            },
+            "native bold-italic faces must not get faux embolden/shear on top"
         );
     }
 

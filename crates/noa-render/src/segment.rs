@@ -73,7 +73,7 @@ fn boundary_key(font: &FontGrid, cell: &SegmentCell) -> (BoundaryKey, StyleKey) 
         italic: cell.italic,
     };
     let key = BoundaryKey {
-        face: font.resolve_face(cell.ch),
+        face: font.resolve_face_for_style(cell.ch, style),
         style,
         selected: cell.selected,
         active_search: cell.active_search,

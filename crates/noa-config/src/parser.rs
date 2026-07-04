@@ -266,6 +266,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "selection-background"
             | "cursor-style"
             | "cursor-style-blink"
+            | "alpha-blending"
             | "background-opacity"
             | "background-blur-radius"
             | "scrollback-limit"
@@ -1389,6 +1390,11 @@ mod tests {
     #[test]
     fn scrollback_limit_is_a_supported_scalar_key_for_import() {
         assert!(is_supported_scalar_key("scrollback-limit"));
+    }
+
+    #[test]
+    fn alpha_blending_is_a_supported_scalar_key_for_import() {
+        assert!(is_supported_scalar_key("alpha-blending"));
     }
 
     #[test]

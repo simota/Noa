@@ -1,8 +1,9 @@
 //! Font discovery (font-kit) and scaled font metrics (swash).
 
 use font_kit::family_name::FamilyName;
+use font_kit::font::Font;
 use font_kit::handle::Handle;
-use font_kit::properties::Properties;
+use font_kit::properties::{Properties, Style, Weight};
 use font_kit::source::Source;
 use font_kit::source::SystemSource;
 use swash::FontRef;
@@ -27,23 +28,143 @@ impl FontData {
 
 pub struct FontStack {
     faces: Vec<FontData>,
+    regular_faces: Vec<usize>,
+    bold_faces: Vec<usize>,
+    italic_faces: Vec<usize>,
+    bold_italic_faces: Vec<usize>,
+    native_bold_face: Option<usize>,
+    native_italic_face: Option<usize>,
+    native_bold_italic_face: Option<usize>,
 }
 
 impl FontStack {
-    pub fn new(primary: FontData, fallbacks: Vec<FontData>) -> Self {
-        let mut faces = Vec::with_capacity(fallbacks.len() + 1);
-        faces.push(primary);
-        faces.extend(fallbacks);
-        Self { faces }
+    pub fn new(
+        primary: FontData,
+        bold_primary: Option<FontData>,
+        italic_primary: Option<FontData>,
+        bold_italic_primary: Option<FontData>,
+        fallbacks: Vec<FontData>,
+    ) -> Self {
+        let mut faces = Vec::with_capacity(
+            1 + usize::from(bold_primary.is_some())
+                + usize::from(italic_primary.is_some())
+                + usize::from(bold_italic_primary.is_some())
+                + fallbacks.len(),
+        );
+        let primary_index = push_unique_face(&mut faces, primary);
+        let native_bold_face = push_native_style_face(&mut faces, primary_index, bold_primary);
+        let native_italic_face = push_native_style_face(&mut faces, primary_index, italic_primary);
+        let native_bold_italic_face =
+            push_native_style_face(&mut faces, primary_index, bold_italic_primary);
+
+        let fallback_faces: Vec<_> = fallbacks
+            .into_iter()
+            .map(|face| push_unique_face(&mut faces, face))
+            .collect();
+
+        let regular_faces = stack_for_style(primary_index, None, &fallback_faces);
+        let bold_faces = stack_for_style(primary_index, native_bold_face, &fallback_faces);
+        let italic_faces = stack_for_style(primary_index, native_italic_face, &fallback_faces);
+        let bold_italic_faces =
+            stack_for_style(primary_index, native_bold_italic_face, &fallback_faces);
+
+        Self {
+            faces,
+            regular_faces,
+            bold_faces,
+            italic_faces,
+            bold_italic_faces,
+            native_bold_face,
+            native_italic_face,
+            native_bold_italic_face,
+        }
     }
 
     pub fn primary(&self) -> &FontData {
-        &self.faces[0]
+        &self.faces[self.regular_faces[0]]
     }
 
     pub fn faces(&self) -> &[FontData] {
         &self.faces
     }
+
+    pub fn face_indices_for_style(&self, style: FontStyle) -> &[usize] {
+        match style {
+            FontStyle::Regular => &self.regular_faces,
+            FontStyle::Bold => &self.bold_faces,
+            FontStyle::Italic => &self.italic_faces,
+            FontStyle::BoldItalic => &self.bold_italic_faces,
+        }
+    }
+
+    pub fn is_native_style_face(&self, face_index: usize, style: FontStyle) -> bool {
+        match style {
+            FontStyle::Regular => true,
+            FontStyle::Bold => self.native_bold_face == Some(face_index),
+            FontStyle::Italic => self.native_italic_face == Some(face_index),
+            FontStyle::BoldItalic => self.native_bold_italic_face == Some(face_index),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontStyle {
+    Regular,
+    Bold,
+    Italic,
+    BoldItalic,
+}
+
+impl FontStyle {
+    pub fn from_bold_italic(bold: bool, italic: bool) -> Self {
+        match (bold, italic) {
+            (false, false) => Self::Regular,
+            (true, false) => Self::Bold,
+            (false, true) => Self::Italic,
+            (true, true) => Self::BoldItalic,
+        }
+    }
+}
+
+fn stack_for_style(
+    primary_index: usize,
+    native_style_index: Option<usize>,
+    fallback_faces: &[usize],
+) -> Vec<usize> {
+    let mut stack = Vec::with_capacity(1 + fallback_faces.len());
+    stack.push(native_style_index.unwrap_or(primary_index));
+    stack.extend_from_slice(fallback_faces);
+    stack
+}
+
+fn push_unique_face(faces: &mut Vec<FontData>, face: FontData) -> usize {
+    if let Some((idx, _)) = faces
+        .iter()
+        .enumerate()
+        .find(|(_, existing)| font_data_matches(existing, &face))
+    {
+        return idx;
+    }
+
+    let idx = faces.len();
+    faces.push(face);
+    idx
+}
+
+fn push_native_style_face(
+    faces: &mut Vec<FontData>,
+    primary_index: usize,
+    face: Option<FontData>,
+) -> Option<usize> {
+    let face = face?;
+    if font_data_matches(&faces[primary_index], &face) {
+        return None;
+    }
+    Some(push_unique_face(faces, face))
+}
+
+fn font_data_matches(a: &FontData, b: &FontData) -> bool {
+    a.index == b.index && a.bytes == b.bytes
 }
 
 /// Enumerate every font family name known to the system source, sorted and
@@ -63,18 +184,14 @@ pub fn list_families() -> Result<Vec<String>, FontError> {
 /// (the macOS default terminal face).
 pub fn load_monospace() -> Result<FontData, FontError> {
     let source = SystemSource::new();
+    load_monospace_from_source(&source)
+}
 
+fn load_monospace_from_source(source: &SystemSource) -> Result<FontData, FontError> {
+    let properties = properties_for_style(FontStyle::Regular);
     let handle = source
-        .select_best_match(&[FamilyName::Monospace], &Properties::new())
-        .or_else(|_| {
-            source.select_family_by_name("Menlo").and_then(|family| {
-                family
-                    .fonts()
-                    .first()
-                    .cloned()
-                    .ok_or(font_kit::error::SelectionError::NotFound)
-            })
-        })
+        .select_best_match(&[FamilyName::Monospace], &properties)
+        .or_else(|_| select_title_best_match(source, "Menlo", &properties))
         .map_err(|_| FontError::NoFont)?;
 
     handle_to_data(handle)
@@ -84,15 +201,18 @@ pub fn load_monospace() -> Result<FontData, FontError> {
 /// system monospace / Menlo discovery (see [`load_monospace`]) when
 /// `font_cfg.families` is empty or none of the configured families resolve.
 ///
-/// WP0 wires the config input through so the constructor signature doesn't
-/// need to change again later; fully resolving custom family stacks
-/// (weights/styles, missing-family diagnostics, etc.) is WP1's job.
+/// Configured regular/bold/italic families are resolved with font-kit's CSS
+/// matcher. If a native style face is unavailable, the style stack falls back
+/// to the regular primary and rasterization may synthesize the missing style.
 pub fn load_font_stack(font_cfg: &FontConfig) -> Result<FontStack, FontError> {
     let source = SystemSource::new();
     let primary = match load_configured_primary(&source, font_cfg) {
         Some(primary) => primary,
         None => load_monospace()?,
     };
+    let bold_primary = load_style_primary(&source, font_cfg, FontStyle::Bold);
+    let italic_primary = load_style_primary(&source, font_cfg, FontStyle::Italic);
+    let bold_italic_primary = load_style_primary(&source, font_cfg, FontStyle::BoldItalic);
     let mut fallbacks = Vec::new();
 
     // Probe for the system color-emoji family first so emoji codepoints
@@ -125,23 +245,119 @@ pub fn load_font_stack(font_cfg: &FontConfig) -> Result<FontStack, FontError> {
         }
     }
 
-    Ok(FontStack::new(primary, fallbacks))
+    Ok(FontStack::new(
+        primary,
+        bold_primary,
+        italic_primary,
+        bold_italic_primary,
+        fallbacks,
+    ))
 }
 
 /// Try each configured family name in order, returning the first that
 /// resolves to a loadable face. `None` (not an error) means the caller
 /// should fall back to system monospace discovery.
 fn load_configured_primary(source: &SystemSource, font_cfg: &FontConfig) -> Option<FontData> {
-    font_cfg.families.iter().find_map(|family_name| {
-        let handle = source
-            .select_family_by_name(family_name)
-            .ok()?
-            .fonts()
-            .first()
-            .cloned()?;
-        let data = handle_to_data(handle).ok()?;
-        data.font_ref().is_ok().then_some(data)
+    let properties = properties_for_style(FontStyle::Regular);
+    load_first_matching_family(source, &font_cfg.families, &properties, None)
+}
+
+fn load_style_primary(
+    source: &SystemSource,
+    font_cfg: &FontConfig,
+    style: FontStyle,
+) -> Option<FontData> {
+    let properties = properties_for_style(style);
+    let explicit_families = match style {
+        FontStyle::Regular => &font_cfg.families,
+        FontStyle::Bold => &font_cfg.families_bold,
+        FontStyle::Italic => &font_cfg.families_italic,
+        FontStyle::BoldItalic => &font_cfg.families_bold_italic,
+    };
+
+    load_first_matching_family(source, explicit_families, &properties, Some(style))
+        .or_else(|| {
+            load_first_matching_family(source, &font_cfg.families, &properties, Some(style))
+        })
+        .or_else(|| load_system_style_primary(source, &properties, style))
+}
+
+fn load_system_style_primary(
+    source: &SystemSource,
+    properties: &Properties,
+    style: FontStyle,
+) -> Option<FontData> {
+    source
+        .select_best_match(&[FamilyName::Monospace], properties)
+        .ok()
+        .filter(|handle| handle_supports_style(handle, style))
+        .and_then(load_valid_handle)
+        .or_else(|| {
+            select_title_best_match(source, "Menlo", properties)
+                .ok()
+                .filter(|handle| handle_supports_style(handle, style))
+                .and_then(load_valid_handle)
+        })
+}
+
+fn load_first_matching_family(
+    source: &SystemSource,
+    families: &[String],
+    properties: &Properties,
+    required_style: Option<FontStyle>,
+) -> Option<FontData> {
+    families.iter().find_map(|family_name| {
+        let handle = select_title_best_match(source, family_name, properties).ok()?;
+        if let Some(style) = required_style
+            && !handle_supports_style(&handle, style)
+        {
+            return None;
+        }
+        load_valid_handle(handle)
     })
+}
+
+fn select_title_best_match(
+    source: &SystemSource,
+    family_name: &str,
+    properties: &Properties,
+) -> Result<Handle, font_kit::error::SelectionError> {
+    let family = [FamilyName::Title(family_name.to_string())];
+    source.select_best_match(&family, properties)
+}
+
+fn load_valid_handle(handle: Handle) -> Option<FontData> {
+    let data = handle_to_data(handle).ok()?;
+    data.font_ref().is_ok().then_some(data)
+}
+
+fn properties_for_style(style: FontStyle) -> Properties {
+    let mut properties = Properties::new();
+    match style {
+        FontStyle::Regular => {}
+        FontStyle::Bold => {
+            properties.weight(Weight::BOLD);
+        }
+        FontStyle::Italic => {
+            properties.style(Style::Italic);
+        }
+        FontStyle::BoldItalic => {
+            properties.weight(Weight::BOLD).style(Style::Italic);
+        }
+    }
+    properties
+}
+
+fn handle_supports_style(handle: &Handle, style: FontStyle) -> bool {
+    let Ok(font) = Font::from_handle(handle) else {
+        return false;
+    };
+    let properties = font.properties();
+    let wants_bold = matches!(style, FontStyle::Bold | FontStyle::BoldItalic);
+    let wants_italic = matches!(style, FontStyle::Italic | FontStyle::BoldItalic);
+    let has_bold = !wants_bold || properties.weight >= Weight::SEMIBOLD;
+    let has_italic = !wants_italic || matches!(properties.style, Style::Italic | Style::Oblique);
+    has_bold && has_italic
 }
 
 fn push_valid_face(faces: &mut Vec<FontData>, handle: Handle) {
@@ -264,7 +480,8 @@ impl Metrics {
             px * 0.6
         };
 
-        let cell_h = (ascent + descent + line_gap).ceil().max(1.0);
+        let cell_w = quantize_cell_dimension(cell_w);
+        let cell_h = quantize_cell_dimension(ascent + descent + line_gap);
 
         Metrics {
             cell_w,
@@ -282,10 +499,68 @@ impl Metrics {
     }
 }
 
+fn quantize_cell_dimension(value: f32) -> f32 {
+    if value.is_finite() {
+        value.round().max(1.0)
+    } else {
+        1.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::FontConfig;
+
+    #[test]
+    fn font_stack_tracks_native_style_faces_separately() {
+        let primary = FontData {
+            bytes: vec![1, 2, 3],
+            index: 0,
+        };
+        let bold = FontData {
+            bytes: vec![4, 5, 6],
+            index: 0,
+        };
+        let fallback = FontData {
+            bytes: vec![7, 8, 9],
+            index: 0,
+        };
+
+        let stack = FontStack::new(primary, Some(bold), None, None, vec![fallback]);
+
+        assert_eq!(stack.face_indices_for_style(FontStyle::Regular), &[0, 2]);
+        assert_eq!(stack.face_indices_for_style(FontStyle::Bold), &[1, 2]);
+        assert_eq!(stack.face_indices_for_style(FontStyle::Italic), &[0, 2]);
+        assert!(stack.is_native_style_face(1, FontStyle::Bold));
+        assert!(!stack.is_native_style_face(0, FontStyle::Bold));
+    }
+
+    #[test]
+    fn duplicate_style_face_falls_back_to_regular_stack() {
+        let primary = FontData {
+            bytes: vec![1, 2, 3],
+            index: 0,
+        };
+        let same_as_primary = FontData {
+            bytes: vec![1, 2, 3],
+            index: 0,
+        };
+
+        let stack = FontStack::new(primary, Some(same_as_primary), None, None, Vec::new());
+
+        assert_eq!(stack.faces().len(), 1);
+        assert_eq!(stack.face_indices_for_style(FontStyle::Bold), &[0]);
+        assert!(!stack.is_native_style_face(0, FontStyle::Bold));
+    }
+
+    #[test]
+    fn cell_metrics_are_quantized_to_whole_pixels() {
+        assert_eq!(quantize_cell_dimension(7.49), 7.0);
+        assert_eq!(quantize_cell_dimension(7.5), 8.0);
+        assert_eq!(quantize_cell_dimension(0.25), 1.0);
+        assert_eq!(quantize_cell_dimension(f32::NAN), 1.0);
+    }
 
     /// AC-WP1-01 (REQ-EMOJI-1): given the resolved fallback stack from
     /// `load_font_stack`, an emoji codepoint resolves to the Apple Color

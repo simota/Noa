@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use noa_core::{CellAttrs, CellSize, Color, GridPadding, PixelSize};
@@ -117,6 +118,7 @@ struct PaneRenderCache {
     bg: Vec<Vec<CellInstance>>,
     glyph: Vec<Vec<CellInstance>>,
     deco: Vec<Vec<CellInstance>>,
+    flat: Vec<CellInstance>,
     key: Option<FrameInvalidationKey>,
     /// `(cursor.x, cursor.y, cursor.visible, cursor.style, focused,
     /// cursor_blink_visible)` as of the last rebuild — used only to detect
@@ -132,6 +134,7 @@ impl PaneRenderCache {
             bg: Vec::new(),
             glyph: Vec::new(),
             deco: Vec::new(),
+            flat: Vec::new(),
             key: None,
             prev_cursor: None,
         }
@@ -886,12 +889,14 @@ fn rebuild_row_instances(
     // DECSCUSR style, focus, blink phase), so it is resolved once per row
     // rather than recomputed per cell.
     let cursor_visual = cursor_visual_for(snap);
+    let row_highlights = RowHighlights::new(snap, y, row.cells.len());
 
     for (col_idx, cell) in row.cells.iter().enumerate() {
         let x = col_idx as u16;
-        let selected = snap.is_selected(x, y);
-        let active_search = snap.is_active_search_match(x, y);
-        let search_match = snap.is_search_match(x, y);
+        let highlight = row_highlights.get(col_idx);
+        let selected = highlight.selected;
+        let active_search = highlight.active_search;
+        let search_match = highlight.search_match;
         let cursor_here =
             cursor_visual != CursorVisual::None && snap.cursor.x == x && snap.cursor.y == y;
         // Only the block styles fill the cell and invert the glyph — bar,
@@ -1048,6 +1053,90 @@ fn rebuild_row_instances(
     (bg_instances, glyph_instances, decoration_instances)
 }
 
+#[derive(Clone, Copy, Default)]
+struct CellHighlight {
+    selected: bool,
+    active_search: bool,
+    search_match: bool,
+}
+
+struct RowHighlights {
+    cells: Option<Vec<CellHighlight>>,
+}
+
+impl RowHighlights {
+    fn new(snap: &FrameSnapshot, y: u16, cols: usize) -> Self {
+        if cols == 0 || (snap.selection.is_none() && snap.search.matches().is_empty()) {
+            return Self { cells: None };
+        }
+
+        let mut cells = vec![CellHighlight::default(); cols];
+
+        let storage_y = snap.row_base + y as usize;
+        if let Some(selection) = snap.selection {
+            let (start, end) = selection.normalized();
+            if start.y <= storage_y && storage_y <= end.y {
+                let start_x = if storage_y == start.y { start.x } else { 0 };
+                let end_x = if storage_y == end.y { end.x } else { u16::MAX };
+                mark_highlight_span(&mut cells, start_x, end_x, |cell| {
+                    cell.selected = true;
+                });
+            }
+        }
+
+        for search_match in snap.search.matches() {
+            if search_match.start.y == storage_y && search_match.end.y == storage_y {
+                mark_highlight_span(
+                    &mut cells,
+                    search_match.start.x,
+                    search_match.end.x,
+                    |cell| {
+                        cell.search_match = true;
+                    },
+                );
+            }
+        }
+
+        if let Some(active) = snap.search.active_match()
+            && active.start.y == storage_y
+            && active.end.y == storage_y
+        {
+            mark_highlight_span(&mut cells, active.start.x, active.end.x, |cell| {
+                cell.active_search = true;
+            });
+        }
+
+        Self { cells: Some(cells) }
+    }
+
+    fn get(&self, idx: usize) -> CellHighlight {
+        self.cells
+            .as_ref()
+            .and_then(|cells| cells.get(idx))
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+fn mark_highlight_span(
+    cells: &mut [CellHighlight],
+    start_x: u16,
+    end_x: u16,
+    mut mark: impl FnMut(&mut CellHighlight),
+) {
+    let Some(max_x) = cells.len().checked_sub(1) else {
+        return;
+    };
+    let start = usize::from(start_x).min(max_x);
+    let end = usize::from(end_x).min(max_x);
+    if start > end {
+        return;
+    }
+    for cell in &mut cells[start..=end] {
+        mark(cell);
+    }
+}
+
 /// Concatenate row-indexed bg/glyph/decoration segments in the GLOBAL
 /// bg-then-glyph-then-decoration order every row depends on (FM-12): a
 /// glyph descender from row `r` can overflow into row `r+1`'s space and
@@ -1128,7 +1217,7 @@ fn rebuild_pane_cached(
         snap.cursor_blink_visible,
     );
     let mut rows_rebuilt: u64 = 0;
-    let mut pane_instances = Vec::new();
+    let instance_start = instances.len();
     let mut bg_len = 0;
     let mut glyph_len = 0;
     let mut deco_len = 0;
@@ -1169,8 +1258,10 @@ fn rebuild_pane_cached(
             cache.bg = vec![Vec::new(); rows];
             cache.glyph = vec![Vec::new(); rows];
             cache.deco = vec![Vec::new(); rows];
+            cache.flat.clear();
         }
 
+        let mut rebuilt_rows_this_pass = 0_u64;
         for (row_idx, row) in snap.rows.iter().enumerate() {
             if dirty.get(row_idx).copied().unwrap_or(true) {
                 let (bg, glyph, deco) = rebuild_row_instances(
@@ -1186,6 +1277,7 @@ fn rebuild_pane_cached(
                 cache.glyph[row_idx] = glyph;
                 cache.deco[row_idx] = deco;
                 rows_rebuilt += 1;
+                rebuilt_rows_this_pass += 1;
             }
         }
 
@@ -1193,10 +1285,15 @@ fn rebuild_pane_cached(
         glyph_len = cache.glyph.iter().map(|row| row.len() as u32).sum();
         deco_len = cache.deco.iter().map(|row| row.len() as u32).sum();
 
-        pane_instances.clear();
-        flatten_row_segments(&mut pane_instances, &cache.bg, &cache.glyph, &cache.deco);
+        if full || rebuilt_rows_this_pass > 0 || cache.flat.is_empty() {
+            cache.flat.clear();
+            flatten_row_segments(&mut cache.flat, &cache.bg, &cache.glyph, &cache.deco);
+        }
+
+        instances.truncate(instance_start);
+        instances.extend_from_slice(&cache.flat);
         append_search_prompt_instances(
-            &mut pane_instances,
+            instances,
             snap,
             font,
             theme,
@@ -1204,7 +1301,7 @@ fn rebuild_pane_cached(
             metrics,
         );
         append_command_palette_instances(
-            &mut pane_instances,
+            instances,
             snap,
             font,
             theme,
@@ -1212,7 +1309,7 @@ fn rebuild_pane_cached(
             metrics,
         );
         append_confirm_dialog_instances(
-            &mut pane_instances,
+            instances,
             snap,
             font,
             theme,
@@ -1239,8 +1336,6 @@ fn rebuild_pane_cached(
         );
         cache.key = None;
     }
-
-    instances.extend_from_slice(&pane_instances);
 
     if stable {
         cache.key = Some(new_key);
@@ -2391,6 +2486,27 @@ fn surface_output_rgba(c: [f32; 4], target_format_is_srgb: bool) -> [f32; 4] {
 
 fn srgb_to_linear(channel: f32) -> f32 {
     let channel = channel.clamp(0.0, 1.0);
+    let scaled = channel * 255.0;
+    let rounded = scaled.round();
+    if (scaled - rounded).abs() <= 0.0001 {
+        return srgb_to_linear_u8_lut()[rounded as usize];
+    }
+
+    srgb_to_linear_exact(channel)
+}
+
+fn srgb_to_linear_u8_lut() -> &'static [f32; 256] {
+    static LUT: OnceLock<[f32; 256]> = OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut lut = [0.0; 256];
+        for (idx, slot) in lut.iter_mut().enumerate() {
+            *slot = srgb_to_linear_exact(idx as f32 / 255.0);
+        }
+        lut
+    })
+}
+
+fn srgb_to_linear_exact(channel: f32) -> f32 {
     if channel <= 0.04045 {
         channel / 12.92
     } else {

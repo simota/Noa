@@ -9,7 +9,7 @@ use portable_pty::Child;
 use crate::PtyEvent;
 
 /// Size of each read buffer chunk (bytes).
-const READ_CHUNK: usize = 4096;
+const READ_CHUNK: usize = 64 * 1024;
 
 /// Spawn a thread that reads from `reader` until EOF/error, forwarding data
 /// chunks as [`PtyEvent::Data`]. On read error it emits [`PtyEvent::Error`].

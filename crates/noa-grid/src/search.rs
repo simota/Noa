@@ -1,5 +1,7 @@
 //! Search state over the active screen's combined scrollback + live rows.
 
+use std::sync::Arc;
+
 use crate::cell::Row;
 use crate::selection::SelectionPoint;
 use noa_core::CellAttrs;
@@ -22,7 +24,7 @@ impl SearchMatch {
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct SearchState {
     query: String,
-    matches: Vec<SearchMatch>,
+    matches: Arc<[SearchMatch]>,
     active: Option<usize>,
 }
 
@@ -32,7 +34,7 @@ impl SearchState {
     }
 
     pub fn matches(&self) -> &[SearchMatch] {
-        &self.matches
+        &self.matches[..]
     }
 
     pub fn active_match(&self) -> Option<SearchMatch> {
@@ -48,7 +50,7 @@ impl SearchState {
 
     pub fn set_query(&mut self, query: String, matches: Vec<SearchMatch>) {
         self.query = query;
-        self.matches = matches;
+        self.matches = Arc::from(matches.into_boxed_slice());
         self.active = (!self.matches.is_empty()).then_some(0);
     }
 

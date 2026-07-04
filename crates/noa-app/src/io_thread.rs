@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError};
 use noa_core::GridSize;
 use noa_grid::Terminal;
 use noa_pty::{Pty, PtyWriter};
@@ -46,6 +46,7 @@ pub(crate) struct OverviewPublish {
 pub(crate) type PtyInput = Box<[u8]>;
 
 pub(crate) const PTY_INPUT_QUEUE_CAPACITY: usize = 1024;
+const PTY_DATA_DRAIN_BYTE_LIMIT: usize = 256 * 1024;
 
 /// Owned handle for stopping and joining a PTY io thread.
 pub(crate) struct IoThreadHandle {
@@ -148,6 +149,7 @@ struct TerminalOutput {
     overview_publish_pending: Option<Instant>,
 }
 
+#[cfg(test)]
 fn feed_terminal(
     terminal: &Arc<Mutex<Terminal>>,
     stream: &mut noa_vt::Stream,
@@ -155,8 +157,29 @@ fn feed_terminal(
     overview: &OverviewPublish,
     last_overview_publish: &mut Option<Instant>,
 ) -> TerminalOutput {
+    feed_terminal_batch(
+        terminal,
+        stream,
+        bytes,
+        std::iter::empty::<&[u8]>(),
+        overview,
+        last_overview_publish,
+    )
+}
+
+fn feed_terminal_batch<'a>(
+    terminal: &Arc<Mutex<Terminal>>,
+    stream: &mut noa_vt::Stream,
+    first: &[u8],
+    rest: impl IntoIterator<Item = &'a [u8]>,
+    overview: &OverviewPublish,
+    last_overview_publish: &mut Option<Instant>,
+) -> TerminalOutput {
     let mut term = terminal.lock().expect("terminal mutex poisoned");
-    stream.feed(bytes, &mut *term);
+    stream.feed(first, &mut *term);
+    for bytes in rest {
+        stream.feed(bytes, &mut *term);
+    }
     let overview_publish_pending =
         publish_overview_snapshot(&term, overview, last_overview_publish);
     TerminalOutput {
@@ -167,6 +190,33 @@ fn feed_terminal(
         synchronized_output: term.modes.synchronized_output(),
         overview_publish_pending,
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PtyDrainTerminalEvent {
+    ExitOrError,
+    Disconnected,
+}
+
+fn drain_queued_pty_data(
+    rx: &Receiver<noa_pty::PtyEvent>,
+    chunks: &mut Vec<Box<[u8]>>,
+    mut buffered_bytes: usize,
+) -> Option<PtyDrainTerminalEvent> {
+    while buffered_bytes < PTY_DATA_DRAIN_BYTE_LIMIT {
+        match rx.try_recv() {
+            Ok(noa_pty::PtyEvent::Data(bytes)) => {
+                buffered_bytes = buffered_bytes.saturating_add(bytes.len());
+                chunks.push(bytes);
+            }
+            Ok(noa_pty::PtyEvent::Exit(_)) | Ok(noa_pty::PtyEvent::Error(_)) => {
+                return Some(PtyDrainTerminalEvent::ExitOrError);
+            }
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => return Some(PtyDrainTerminalEvent::Disconnected),
+        }
+    }
+    None
 }
 
 /// Pure decision for whether an overview publish should fire now, stay
@@ -323,10 +373,14 @@ pub fn spawn(
                 }
                 i if i == pty_op => match oper.recv(pty.event_rx()) {
                     Ok(noa_pty::PtyEvent::Data(bytes)) => {
-                        let output = feed_terminal(
+                        let mut drained = Vec::new();
+                        let terminal_event =
+                            drain_queued_pty_data(pty.event_rx(), &mut drained, bytes.len());
+                        let output = feed_terminal_batch(
                             &terminal,
                             &mut stream,
                             bytes.as_ref(),
+                            drained.iter().map(|chunk| chunk.as_ref()),
                             &overview,
                             &mut last_overview_publish,
                         );
@@ -363,6 +417,14 @@ pub fn spawn(
                                 .is_err()
                         {
                             break; // event loop gone
+                        }
+                        match terminal_event {
+                            Some(PtyDrainTerminalEvent::ExitOrError) => {
+                                let _ = proxy.send_event(UserEvent::PtyExit(window_id, pane_id));
+                                break;
+                            }
+                            Some(PtyDrainTerminalEvent::Disconnected) => break,
+                            None => {}
                         }
                     }
                     Ok(noa_pty::PtyEvent::Exit(_)) | Ok(noa_pty::PtyEvent::Error(_)) => {
@@ -480,6 +542,43 @@ mod tests {
             output.overview_publish_pending.is_none(),
             "not-visible must not owe a trailing flush either"
         );
+    }
+
+    #[test]
+    fn drain_queued_pty_data_preserves_data_before_terminal_event() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        tx.send(noa_pty::PtyEvent::Data(
+            b"queued".to_vec().into_boxed_slice(),
+        ))
+        .unwrap();
+        tx.send(noa_pty::PtyEvent::Exit(0)).unwrap();
+
+        let mut chunks = Vec::new();
+        let terminal_event = drain_queued_pty_data(&rx, &mut chunks, 0);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].as_ref(), b"queued");
+        assert_eq!(terminal_event, Some(PtyDrainTerminalEvent::ExitOrError));
+    }
+
+    #[test]
+    fn drain_queued_pty_data_stops_after_byte_cap() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        tx.send(noa_pty::PtyEvent::Data(b"a".to_vec().into_boxed_slice()))
+            .unwrap();
+        tx.send(noa_pty::PtyEvent::Data(b"b".to_vec().into_boxed_slice()))
+            .unwrap();
+
+        let mut chunks = Vec::new();
+        let terminal_event = drain_queued_pty_data(&rx, &mut chunks, PTY_DATA_DRAIN_BYTE_LIMIT - 1);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].as_ref(), b"a");
+        assert_eq!(terminal_event, None);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(noa_pty::PtyEvent::Data(bytes)) if bytes.as_ref() == b"b"
+        ));
     }
 
     #[test]

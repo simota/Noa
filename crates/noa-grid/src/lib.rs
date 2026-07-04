@@ -28,5 +28,5 @@ pub use screen::Screen;
 pub use search::{SearchMatch, SearchState};
 pub use selection::{Selection, SelectionPoint};
 pub use tabstops::Tabstops;
-pub use terminal::{ShellIntegrationMark, ShellIntegrationMarkKind, Terminal};
+pub use terminal::{PromptJump, ShellIntegrationMark, ShellIntegrationMarkKind, Terminal};
 pub use url::{UrlMatch, detect_url_at_column};

@@ -54,6 +54,12 @@ pub struct Screen {
     scrollback_limit: usize,
     scrollback_enabled: bool,
     viewport_offset: usize,
+    /// Rows evicted from the front of the scrollback over this screen's whole
+    /// lifetime. Lets callers keep session-absolute row coordinates (e.g.
+    /// shell-integration marks) stable across scrollback trimming: a stored
+    /// `rows_evicted + history_index` stays valid, and a coordinate below the
+    /// current `rows_evicted` denotes content that has scrolled off for good.
+    rows_evicted: usize,
     last_printed: Option<char>,
 }
 
@@ -85,6 +91,7 @@ impl Screen {
             scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
             scrollback_enabled,
             viewport_offset: 0,
+            rows_evicted: 0,
             last_printed: None,
         }
     }
@@ -176,6 +183,7 @@ impl Screen {
         self.scrollback.push_back(row);
         while self.scrollback.len() > self.scrollback_limit {
             self.scrollback.pop_front();
+            self.rows_evicted += 1;
             self.selection = self
                 .selection
                 .and_then(|selection| selection.shift_rows_up(1));
@@ -255,6 +263,22 @@ impl Screen {
 
     pub fn scroll_viewport_to_bottom(&mut self) {
         self.viewport_offset = 0;
+    }
+
+    /// Rows evicted from the front of the scrollback over this screen's whole
+    /// lifetime (see the field docs).
+    pub fn rows_evicted(&self) -> usize {
+        self.rows_evicted
+    }
+
+    /// Scroll so the history row at `index` (into the current
+    /// `scrollback + grid`, `0` = oldest retained row) becomes the top visible
+    /// row, clamped to the scrollable range. Used by prompt-jump.
+    pub fn scroll_viewport_to_history_index(&mut self, index: usize) {
+        let rows = self.rows as usize;
+        let total = self.scrollback.len() + self.grid.len();
+        let live_start = total.saturating_sub(rows);
+        self.viewport_offset = live_start.saturating_sub(index).min(self.max_viewport_offset());
     }
 
     pub fn set_selection(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {

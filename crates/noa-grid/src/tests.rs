@@ -2,7 +2,7 @@
 //! replies, and captured-stream golden fixtures.
 
 use crate::cursor::{CursorStyle, HorizontalMargins};
-use crate::terminal::{ShellIntegrationMarkKind, Terminal};
+use crate::terminal::{PromptJump, ShellIntegrationMarkKind, Terminal};
 use noa_core::{
     CellAttrs, Color, DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, GridSize, Point, Rgb, xterm_palette,
     xterm_palette_color,
@@ -1085,6 +1085,68 @@ fn osc133_prompt_marks_record_cursor_positions_and_exit_status() {
 }
 
 #[test]
+fn scroll_to_prompt_jumps_between_prompt_marks() {
+    // A 3-row screen with three prompts (OSC 133;A) separated by output, so
+    // history scrolls and the prompts land at known absolute rows:
+    // history = [p0, a, b, p1, c, d, p2] (indices 0..=6), prompts at 0/3/6.
+    let mut t = Terminal::new(GridSize::new(20, 3));
+    let mut s = Stream::new();
+    s.feed(b"\x1b]133;A\x07p0\r\na\r\nb\r\n", &mut t);
+    s.feed(b"\x1b]133;A\x07p1\r\nc\r\nd\r\n", &mut t);
+    s.feed(b"\x1b]133;A\x07p2", &mut t);
+
+    let prompt_rows: Vec<usize> = t
+        .shell_marks
+        .iter()
+        .filter(|mark| mark.kind == ShellIntegrationMarkKind::PromptStart)
+        .map(|mark| mark.point.y)
+        .collect();
+    assert_eq!(prompt_rows, vec![0, 3, 6]);
+
+    // First cell pair of the top visible row, to identify which prompt line
+    // is at the viewport top after a jump.
+    let top_line = |t: &Terminal| -> String {
+        let rows = t.primary.visible_rows();
+        let row = &rows[0];
+        row.cells[0]
+            .text_chars()
+            .chain(row.cells[1].text_chars())
+            .collect()
+    };
+
+    t.scroll_viewport_to_bottom();
+    assert_eq!(t.viewport_offset(), 0);
+
+    // Prev from the bottom lands on the prompt just above the viewport top (p1).
+    assert!(t.scroll_to_prompt(PromptJump::Prev));
+    assert_eq!(t.viewport_offset(), 1);
+    assert_eq!(top_line(&t), "p1");
+
+    // Another Prev climbs to the oldest prompt (p0), clamped to the top.
+    assert!(t.scroll_to_prompt(PromptJump::Prev));
+    assert_eq!(t.viewport_offset(), 4);
+    assert_eq!(top_line(&t), "p0");
+
+    // No prompt above the top: no-op, viewport unchanged.
+    assert!(!t.scroll_to_prompt(PromptJump::Prev));
+    assert_eq!(t.viewport_offset(), 4);
+
+    // Next walks back down through the prompts.
+    assert!(t.scroll_to_prompt(PromptJump::Next));
+    assert_eq!(t.viewport_offset(), 1);
+    assert_eq!(top_line(&t), "p1");
+}
+
+#[test]
+fn scroll_to_prompt_without_marks_is_a_noop() {
+    let mut t = run_size(20, 3, b"hello\r\nworld\r\nfoo\r\nbar\r\n");
+    let before = t.viewport_offset();
+    assert!(!t.scroll_to_prompt(PromptJump::Prev));
+    assert!(!t.scroll_to_prompt(PromptJump::Next));
+    assert_eq!(t.viewport_offset(), before);
+}
+
+#[test]
 fn osc_protocol_state_clears_on_full_reset() {
     let t = run(b"\x1b]7;file://localhost/tmp\x07\
           \x1b]8;;https://example.test\x07A\
@@ -1110,7 +1172,35 @@ fn osc52_rejects_query_by_default() {
     let mut t = run(b"\x1b]52;c;?\x07");
 
     assert!(t.take_pending_clipboard_writes().is_empty());
+    assert!(t.take_pending_clipboard_reads().is_empty());
     assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn osc52_query_queues_a_read_request_when_allowed() {
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.osc52_policy.allow_read = true;
+    let mut s = Stream::new();
+    s.feed(b"\x1b]52;c;?\x07", &mut t);
+
+    // The grid queues a read request rather than replying inline (it can't
+    // read the system clipboard); no bytes go to the pty yet.
+    assert_eq!(t.take_pending_clipboard_reads(), vec!["c".to_string()]);
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn osc52_read_reply_base64_encodes_the_clipboard_text() {
+    // "hi" -> "aGk=", full ST-terminated OSC 52 reply.
+    assert_eq!(
+        Terminal::osc52_read_reply("c", "hi"),
+        b"\x1b]52;c;aGk=\x1b\\".to_vec()
+    );
+    // Round-trips the write test's payload ("hello" -> "aGVsbG8=").
+    assert_eq!(
+        Terminal::osc52_read_reply("c", "hello"),
+        b"\x1b]52;c;aGVsbG8=\x1b\\".to_vec()
+    );
 }
 
 #[test]

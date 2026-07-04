@@ -261,7 +261,7 @@ pub(crate) fn handle_clipboard_osc(
     data: &[u8],
     policy: &Osc52Policy,
     pending_clipboard_writes: &mut Vec<String>,
-    pending_writes: &mut Vec<u8>,
+    pending_clipboard_reads: &mut Vec<String>,
 ) -> bool {
     let Some(rest) = data.strip_prefix(b"52;") else {
         return false;
@@ -280,8 +280,10 @@ pub(crate) fn handle_clipboard_osc(
     }
 
     if payload == b"?" {
+        // The grid can't read the system clipboard synchronously; queue a
+        // request for the app layer to fulfill (and possibly prompt for).
         if policy.allow_read {
-            push_osc52_reply(pending_writes, b"c", b"");
+            pending_clipboard_reads.push("c".to_string());
         }
         return true;
     }
@@ -448,12 +450,41 @@ fn osc52_targets_clipboard(target: &[u8]) -> bool {
     target.is_empty() || target.contains(&b'c')
 }
 
-fn push_osc52_reply(pending_writes: &mut Vec<u8>, target: &[u8], encoded: &[u8]) {
-    pending_writes.extend_from_slice(b"\x1b]52;");
-    pending_writes.extend_from_slice(target);
-    pending_writes.push(b';');
-    pending_writes.extend_from_slice(encoded);
-    pending_writes.extend_from_slice(b"\x1b\\");
+/// Build a full `OSC 52` reply (`ESC ] 52 ; <target> ; <base64(raw)> ST`)
+/// for an accepted clipboard read, base64-encoding `raw`.
+pub(crate) fn osc52_reply_bytes(target: &[u8], raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 + raw.len() * 4 / 3 + 4);
+    out.extend_from_slice(b"\x1b]52;");
+    out.extend_from_slice(target);
+    out.push(b';');
+    encode_base64(raw, &mut out);
+    out.extend_from_slice(b"\x1b\\");
+    out
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Standard base64 (RFC 4648, with `=` padding), appended to `out`.
+fn encode_base64(input: &[u8], out: &mut Vec<u8>) {
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied();
+        let b2 = chunk.get(2).copied();
+        let n = ((b0 as u32) << 16) | ((b1.unwrap_or(0) as u32) << 8) | b2.unwrap_or(0) as u32;
+        out.push(BASE64_ALPHABET[(n >> 18) as usize & 0x3f]);
+        out.push(BASE64_ALPHABET[(n >> 12) as usize & 0x3f]);
+        out.push(if b1.is_some() {
+            BASE64_ALPHABET[(n >> 6) as usize & 0x3f]
+        } else {
+            b'='
+        });
+        out.push(if b2.is_some() {
+            BASE64_ALPHABET[n as usize & 0x3f]
+        } else {
+            b'='
+        });
+    }
 }
 
 fn decode_base64_limited(input: &[u8], max_decoded_bytes: usize) -> Option<Vec<u8>> {

@@ -52,6 +52,11 @@ pub struct Terminal {
     pub pending_writes: Vec<u8>,
     /// Text payloads accepted by OSC 52 and ready for the app clipboard layer.
     pub pending_clipboard_writes: Vec<String>,
+    /// OSC 52 clipboard *read* requests (`OSC 52;<t>;?`) the policy allowed.
+    /// Each entry is the selection target to echo in the reply (e.g. `"c"`).
+    /// The grid can't read the system clipboard, so the app layer fulfills
+    /// these and writes the base64 reply back to the pty.
+    pub pending_clipboard_reads: Vec<String>,
     /// Set by `BEL` (`0x07`); drained by [`Terminal::take_pending_bell`].
     pending_bell: bool,
     /// Cell size in pixels, from the last `noa-app` pixel-metrics update.
@@ -73,6 +78,15 @@ pub enum ShellIntegrationMarkKind {
     InputStart,
     CommandStart,
     CommandEnd,
+}
+
+/// Direction for [`Terminal::scroll_to_prompt`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptJump {
+    /// The nearest prompt above the current viewport top.
+    Prev,
+    /// The nearest prompt below the current viewport top.
+    Next,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +113,7 @@ impl Terminal {
             size,
             pending_writes: Vec::new(),
             pending_clipboard_writes: Vec::new(),
+            pending_clipboard_reads: Vec::new(),
             pending_bell: false,
             cell_width_px: 0,
             cell_height_px: 0,
@@ -220,6 +235,18 @@ impl Terminal {
         std::mem::take(&mut self.pending_clipboard_writes)
     }
 
+    /// Drain OSC 52 clipboard read requests for the app to fulfill. Each is a
+    /// selection target string to echo in the base64 reply.
+    pub fn take_pending_clipboard_reads(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_clipboard_reads)
+    }
+
+    /// Build the OSC 52 reply carrying `text` for selection `target`
+    /// (e.g. `"c"`), to be written back to the pty by the app layer.
+    pub fn osc52_read_reply(target: &str, text: &str) -> Vec<u8> {
+        crate::osc::osc52_reply_bytes(target.as_bytes(), text.as_bytes())
+    }
+
     /// Drain the BEL latch: `true` the first call after a `0x07`, `false`
     /// otherwise. Mirrors [`Terminal::take_pending_writes`]'s drain shape.
     pub fn take_pending_bell(&mut self) -> bool {
@@ -339,15 +366,53 @@ impl Terminal {
 
     fn record_shell_mark(&mut self, kind: ShellIntegrationMarkKind, exit_status: Option<i32>) {
         let screen = self.active();
+        // Session-absolute row: stays valid across scrollback trimming, so a
+        // recorded mark keeps pointing at the same line as history scrolls off
+        // (see `Screen::rows_evicted`).
         let point = SelectionPoint::new(
             screen.cursor.x,
-            screen.scrollback_len() + screen.cursor.y as usize,
+            screen.rows_evicted() + screen.scrollback_len() + screen.cursor.y as usize,
         );
         self.shell_marks.push(ShellIntegrationMark {
             kind,
             point,
             exit_status,
         });
+    }
+
+    /// Scroll the viewport to the nearest shell-integration prompt mark
+    /// (`OSC 133;A`) in `direction`, relative to the current viewport top.
+    /// Returns `true` if a target prompt was found and the viewport moved.
+    ///
+    /// Marks are compared in session-absolute coordinates so trimmed history
+    /// (evicted rows) is skipped rather than jumped into.
+    pub fn scroll_to_prompt(&mut self, direction: PromptJump) -> bool {
+        let screen = self.active();
+        let rows_evicted = screen.rows_evicted();
+        let abs_top = rows_evicted + screen.visible_row_base();
+
+        let target = self
+            .shell_marks
+            .iter()
+            .filter(|mark| mark.kind == ShellIntegrationMarkKind::PromptStart)
+            .map(|mark| mark.point.y)
+            .filter(|&abs| abs >= rows_evicted)
+            .fold(None, |best: Option<usize>, abs| match direction {
+                PromptJump::Prev if abs < abs_top => {
+                    Some(best.map_or(abs, |b| b.max(abs)))
+                }
+                PromptJump::Next if abs > abs_top => {
+                    Some(best.map_or(abs, |b| b.min(abs)))
+                }
+                _ => best,
+            });
+
+        let Some(target_abs) = target else {
+            return false;
+        };
+        self.active_mut()
+            .scroll_viewport_to_history_index(target_abs - rows_evicted);
+        true
     }
 
     /// `CSI 22 t` — push the current window title onto the title stack,
@@ -824,6 +889,7 @@ impl Handler for Terminal {
         self.shell_marks.clear();
         self.colors.reset_dynamic_overrides();
         self.pending_clipboard_writes.clear();
+        self.pending_clipboard_reads.clear();
         self.pending_bell = false;
         self.clear_selection();
         self.clear_search();
@@ -938,7 +1004,7 @@ impl Handler for Terminal {
             data,
             &self.osc52_policy,
             &mut self.pending_clipboard_writes,
-            &mut self.pending_writes,
+            &mut self.pending_clipboard_reads,
         ) {
             return;
         }

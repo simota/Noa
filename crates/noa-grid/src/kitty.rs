@@ -221,21 +221,25 @@ impl ImageStore {
     }
 
     fn continue_chunk(&mut self, cmd: &KittyGraphicsCommand) -> TransmitStep {
+        // Errors on a continuation chunk must be reported against the *start*
+        // chunk's ctrl: only it carries the `i=`/`I=`/`q=` keys. Continuation
+        // chunks omit them, so replying from `cmd` would trip the "no reply
+        // without i= or I=" rule and silently swallow the error.
         let chunk = match decode_base64_limited(&cmd.payload, SINGLE_IMAGE_LIMIT) {
             Some(bytes) => bytes,
             None => {
-                self.transfer = None;
+                let ctrl = self.transfer.take().expect("transfer in progress").ctrl;
                 return TransmitStep::Done(TransmitDone {
-                    ctrl: cmd.clone(),
+                    ctrl,
                     result: Err(KittyError::Invalid),
                 });
             }
         };
         let transfer = self.transfer.as_mut().expect("transfer in progress");
         if transfer.decoded.len() + chunk.len() > SINGLE_IMAGE_LIMIT {
-            self.transfer = None;
+            let ctrl = self.transfer.take().expect("transfer in progress").ctrl;
             return TransmitStep::Done(TransmitDone {
-                ctrl: cmd.clone(),
+                ctrl,
                 result: Err(KittyError::TooBig),
             });
         }
@@ -701,6 +705,28 @@ mod tests {
         };
         assert_eq!(done.result, Ok(3));
         assert_eq!(&*store.get(3).unwrap().rgba, px.as_slice());
+    }
+
+    #[test]
+    fn continuation_chunk_error_reports_start_chunk_ctrl() {
+        // A continuation chunk carries no `i=`/`I=`/`q=`; an error on it must be
+        // reported against the start chunk's ctrl so the reply isn't suppressed.
+        let mut store = ImageStore::new();
+        let mut first = b"a=t,f=32,s=2,v=1,i=5,q=0,m=1;".to_vec();
+        first.extend_from_slice(&b64(&[1, 2, 3, 4]));
+        let c1 = noa_vt::kitty_graphics::parse(&first, false);
+        assert!(matches!(store.transmit(&c1), TransmitStep::NeedMore));
+
+        // Continuation chunk with invalid base64.
+        let bad = noa_vt::kitty_graphics::parse(b"m=0;@@@not base64@@@", false);
+        assert_eq!(bad.image_id, 0, "continuation chunk carries no i=");
+        let TransmitStep::Done(done) = store.transmit(&bad) else {
+            panic!("expected done")
+        };
+        assert_eq!(done.result, Err(KittyError::Invalid));
+        assert_eq!(done.ctrl.image_id, 5, "reply must use start chunk's i=");
+        assert_eq!(done.ctrl.quiet, 0);
+        assert!(!store.transfer_in_progress());
     }
 
     #[test]

@@ -39,6 +39,17 @@ struct ReflowPosition {
     x: u16,
 }
 
+/// How one logical line moved during a reflow pass: the old stream rows it
+/// occupied (`old_start..old_start + old_len`) and the first row it now
+/// occupies in the reflowed output (`new_base`). Used to re-anchor Kitty
+/// placements onto the new row numbering.
+#[derive(Clone, Copy)]
+struct LineRemap {
+    old_start: usize,
+    old_len: usize,
+    new_base: usize,
+}
+
 struct ReflowedLine {
     rows: Vec<Row>,
     cell_positions: Vec<Option<ReflowPosition>>,
@@ -255,6 +266,7 @@ impl Screen {
             self.selection = self
                 .selection
                 .and_then(|selection| selection.shift_rows_up(evicted));
+            self.prune_evicted_placements();
         }
         self.clamp_viewport();
     }
@@ -308,6 +320,7 @@ impl Screen {
             self.selection = self
                 .selection
                 .and_then(|selection| selection.shift_rows_up(evicted));
+            self.prune_evicted_placements();
         }
         self.clamp_viewport();
     }
@@ -775,8 +788,17 @@ impl Screen {
         // pass 1 measures the reflowed length and resolves the cursor/saved
         // anchors; pass 2 re-reflows and routes each row straight into the new
         // byte-bounded paged scrollback or the grid window, dropping the rest.
-        let (reflowed_len, cursor_position, saved_position) =
-            self.stream_reflow_lines(cols, &blank, cursor_point, saved_point, |_, _| {});
+        // Records where each old logical line landed, so placements can be
+        // re-anchored onto the new row numbering after reflow re-packs history.
+        let mut line_remaps: Vec<LineRemap> = Vec::new();
+        let (reflowed_len, cursor_position, saved_position) = self.stream_reflow_lines(
+            cols,
+            &blank,
+            cursor_point,
+            saved_point,
+            |_, _| {},
+            |remap| line_remaps.push(remap),
+        );
 
         let cursor_row = cursor_position.row.min(reflowed_len.saturating_sub(1));
         let max_grid_start = reflowed_len.saturating_sub(target_rows);
@@ -790,21 +812,30 @@ impl Screen {
         // column-count resize). The byte limit is enforced during push.
         let mut scrollback = PagedScrollback::new(if enabled { limit } else { 0 });
         let mut grid: Vec<Row> = Vec::with_capacity(target_rows);
-        self.stream_reflow_lines(cols, &blank, cursor_point, saved_point, |r, row| {
-            if r < grid_start {
-                if enabled {
-                    scrollback.push_row(&row);
+        self.stream_reflow_lines(
+            cols,
+            &blank,
+            cursor_point,
+            saved_point,
+            |r, row| {
+                if r < grid_start {
+                    if enabled {
+                        scrollback.push_row(&row);
+                    }
+                } else if r < grid_end {
+                    grid.push(row);
                 }
-            } else if r < grid_end {
-                grid.push(row);
-            }
-        });
+            },
+            |_| {},
+        );
         self.scrollback = scrollback;
 
         self.grid = grid;
         while self.grid.len() < target_rows {
             self.grid.push(Self::row_with_blank(cols, &blank));
         }
+
+        self.reanchor_placements_after_reflow(&line_remaps, grid_start, grid_end);
 
         self.cursor.x = cursor_position.x.min(cols - 1);
         self.cursor.y = cursor_row.saturating_sub(grid_start).min(target_rows - 1) as u16;
@@ -816,6 +847,49 @@ impl Screen {
 
         self.selection = None;
         self.search.clear();
+    }
+
+    /// Re-anchor Kitty placements onto the post-reflow row numbering.
+    ///
+    /// Reflow re-packs history per logical line, so a placement's old
+    /// session-absolute anchor row no longer points at the same content. Each
+    /// placement is mapped to the new first row of the logical line it belonged
+    /// to (`line_remaps`), matching how the cursor anchor is carried across.
+    /// `rows_evicted` is unchanged by reflow, so the old anchor's stream index
+    /// is `anchor_abs_row - rows_evicted`.
+    ///
+    /// Retained reflowed rows span `[front_dropped, grid_end)`, where
+    /// `front_dropped = grid_start - scrollback.len()` is the count of leading
+    /// rows the byte-bounded scrollback (or a disabled scrollback) dropped. A
+    /// placement whose logical line falls outside that window — its anchor
+    /// content scrolled off for good — is removed for safety.
+    fn reanchor_placements_after_reflow(
+        &mut self,
+        line_remaps: &[LineRemap],
+        grid_start: usize,
+        grid_end: usize,
+    ) {
+        if self.kitty_placements.is_empty() {
+            return;
+        }
+        let evicted = self.rows_evicted;
+        let front_dropped = grid_start.saturating_sub(self.scrollback.len());
+        self.kitty_placements.retain_mut(|p| {
+            let Some(old_pos) = p.anchor_abs_row.checked_sub(evicted) else {
+                return false;
+            };
+            let Some(remap) = line_remaps
+                .iter()
+                .find(|r| old_pos >= r.old_start && old_pos < r.old_start + r.old_len)
+            else {
+                return false;
+            };
+            if remap.new_base < front_dropped || remap.new_base >= grid_end {
+                return false;
+            }
+            p.anchor_abs_row = evicted + (remap.new_base - front_dropped);
+            true
+        });
     }
 
     /// Walk the combined `scrollback + grid` storage one logical (wrapped-chain)
@@ -834,6 +908,7 @@ impl Screen {
         cursor_point: ReflowPoint,
         saved_point: Option<ReflowPoint>,
         mut on_row: impl FnMut(usize, Row),
+        mut on_line: impl FnMut(LineRemap),
     ) -> (usize, ReflowPosition, Option<ReflowPosition>) {
         let scrollback_len = self.scrollback.len();
         let total = scrollback_len + self.grid.len();
@@ -862,6 +937,11 @@ impl Screen {
                 }
                 let base = reflowed_len;
                 let count = rows_out.len();
+                on_line(LineRemap {
+                    old_start: line_start,
+                    old_len: line_rows.len(),
+                    new_base: base,
+                });
                 for (i, row) in rows_out.into_iter().enumerate() {
                     on_row(base + i, row);
                 }

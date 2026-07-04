@@ -1255,6 +1255,29 @@ fn osc9_empty_body_queues_nothing() {
 }
 
 #[test]
+fn osc9_4_progress_report_is_not_a_notification() {
+    // ConEmu/Windows Terminal progress: `OSC 9;4;<state>;<pct>`. noa has no
+    // progress UI, so it is silently ignored rather than notified.
+    let mut t = run(b"\x1b]9;4;1;50\x07");
+    assert!(t.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn osc9_4_progress_clear_is_not_a_notification() {
+    let mut t = run(b"\x1b]9;4;0\x07");
+    assert!(t.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn osc9_4x_body_is_still_a_notification() {
+    // Starts with `4` but is not the `9;4;` progress form, so it notifies.
+    let mut t = run(b"\x1b]9;4x\x07");
+    let notifications = t.take_pending_notifications();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].body, "4x");
+}
+
+#[test]
 fn osc777_notify_queues_title_and_body() {
     let mut t = run(b"\x1b]777;notify;Title;the body\x1b\\");
 
@@ -2759,6 +2782,89 @@ fn kitty_alt_screen_placement_is_separated() {
         "alt-screen placement vanishes on return to primary"
     );
     // Image data survives (only placements are per-screen).
+    assert!(t.kitty_images.get(1).is_some());
+}
+
+#[test]
+fn kitty_reflow_reanchors_placement_to_same_content_row() {
+    let mut t = Terminal::new(GridSize::new(20, 4));
+    t.set_pixel_metrics(10, 20, 200, 80);
+    // A 30-char logical line at the top wraps into two rows at 20 cols.
+    feed(&mut t, b"\x1b[H");
+    feed(&mut t, &[b'A'; 30]);
+    feed(&mut t, b"\r\nIMGROW\r");
+    // Place a 1×1 image over the IMGROW row (C=1 keeps the cursor put).
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1,C=1", &vec![0u8; 10 * 20 * 4]));
+    // Scroll once from the bottom so the wrapped line moves into scrollback.
+    feed(&mut t, b"\x1b[4;1H\r\nTAIL\n");
+
+    let find_imgrow = |t: &Terminal| -> i32 {
+        (0..t.primary.rows as usize)
+            .find(|&y| row_text(t, y, 6) == "IMGROW")
+            .map(|y| y as i32)
+            .expect("IMGROW still on screen")
+    };
+    let before = t.kitty_visible_placements();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].grid_y, find_imgrow(&t), "anchored on IMGROW row");
+
+    // Widen so the 30-char line un-wraps to one row: the scrollback shrinks by a
+    // row and every row below shifts up. The placement must track IMGROW.
+    t.resize(GridSize::new(40, 4));
+
+    let after = t.kitty_visible_placements();
+    assert_eq!(after.len(), 1, "placement survives the reflow");
+    assert_eq!(
+        after[0].grid_y,
+        find_imgrow(&t),
+        "placement follows IMGROW to its new row"
+    );
+}
+
+#[test]
+fn kitty_reflow_drops_placement_whose_anchor_is_discarded() {
+    let mut t = Terminal::new(GridSize::new(20, 4));
+    t.set_pixel_metrics(10, 20, 200, 80);
+    // Six short lines: L0/L1 spill into scrollback, L2..L5 fill the grid.
+    for i in 0..6 {
+        feed(&mut t, format!("L{i}\r\n").as_bytes());
+    }
+    // Place a 1×1 image on the last content row, then move the cursor to the top.
+    feed(&mut t, b"\x1b[4;1H");
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1,C=1", &vec![0u8; 10 * 20 * 4]));
+    feed(&mut t, b"\x1b[1;1H");
+    assert_eq!(t.primary.kitty_placements.len(), 1);
+
+    // Reflow with the cursor near the top drops the rows below the grid window,
+    // including the placement's anchor line — the content is gone, so is it.
+    t.resize(GridSize::new(40, 4));
+    assert!(
+        t.primary.kitty_placements.is_empty(),
+        "a placement whose anchor content the reflow discards is removed"
+    );
+}
+
+#[test]
+fn kitty_placement_pruned_when_its_row_is_evicted() {
+    let mut t = Terminal::new(GridSize::new(20, 4));
+    t.set_pixel_metrics(10, 20, 200, 80);
+    t.set_scrollback_limit_bytes(1); // keep essentially no history
+    // Place a 1×1 image at the top, then scroll far past it. Eviction is
+    // page-granular, so it takes more than a page of full-width rows to strand
+    // the anchor.
+    feed(&mut t, b"\x1b[1;1H");
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1,C=1", &vec![0u8; 10 * 20 * 4]));
+    assert_eq!(t.primary.kitty_placements.len(), 1);
+    let mut s = Stream::new();
+    feed_full_rows(&mut s, &mut t, 20, 1000);
+
+    assert!(t.primary.rows_evicted() > 1, "the anchor row scrolled off");
+    assert!(
+        t.primary.kitty_placements.is_empty(),
+        "eviction prunes the stranded placement"
+    );
+    // The image data lingers but nothing references it now, so a quota sweep is
+    // free to reclaim it (it no longer appears in the referenced-id set).
     assert!(t.kitty_images.get(1).is_some());
 }
 

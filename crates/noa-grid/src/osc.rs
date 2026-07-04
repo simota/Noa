@@ -341,6 +341,14 @@ pub(crate) fn parse_notification_osc(data: &[u8]) -> Option<Notification> {
         if body.is_empty() {
             return None;
         }
+        // `OSC 9;4;<state>;<pct> ST` is the ConEmu/Windows Terminal progress
+        // report, not a desktop notification. noa has no progress UI, so (like
+        // Ghostty) it is silently ignored rather than shown as a notification.
+        // Only the exact `9;4;` form is a progress report; `9;4x…` and a bare
+        // `9;4` stay ordinary notifications.
+        if body.starts_with(b"4;") {
+            return None;
+        }
         return Some(Notification {
             title: None,
             body: String::from_utf8_lossy(body).into_owned(),

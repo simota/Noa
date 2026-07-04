@@ -296,6 +296,15 @@ fn show_config_output(config: &StartupConfig) -> String {
         "scrollback-limit",
         &config.scrollback_limit.to_string(),
     );
+    push_line(
+        &mut out,
+        "window-save-state",
+        match config.window_save_state {
+            noa_config::WindowSaveState::Default => "default",
+            noa_config::WindowSaveState::Never => "never",
+            noa_config::WindowSaveState::Always => "always",
+        },
+    );
     out
 }
 
@@ -481,6 +490,7 @@ mod tests {
         assert!(output.contains("clipboard-paste-protection = true\n"));
         assert!(output.contains("background-opacity = 1\n"));
         assert!(output.contains("background-blur-radius = 0\n"));
+        assert!(output.contains("window-save-state = default\n"));
         assert!(
             output.lines().all(|line| line.contains(" = ")),
             "every line must be `key = value`"

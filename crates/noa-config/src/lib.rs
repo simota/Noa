@@ -72,6 +72,29 @@ pub enum CursorShape {
     Underline,
 }
 
+/// `window-save-state`: whether to persist and restore the window/tab/split
+/// topology across launches. Ghostty accepts `default | never | always`; noa
+/// treats `default` as `always` (there is no OS-level "restore on relaunch"
+/// signal to defer to), which [`WindowSaveState::restores`] encodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowSaveState {
+    /// Save and restore (noa's default behavior).
+    #[default]
+    Default,
+    /// Never save or restore session state.
+    Never,
+    /// Always save and restore.
+    Always,
+}
+
+impl WindowSaveState {
+    /// Whether session state should be saved on exit and restored on launch.
+    /// Both `default` and `always` restore; only `never` opts out.
+    pub fn restores(self) -> bool {
+        !matches!(self, WindowSaveState::Never)
+    }
+}
+
 /// `alpha-blending` mode. `Native` is a real value; `Linear` /
 /// `LinearCorrected` are parsed-but-fallback (REQ-CFG-4) — `noa-config`
 /// emits a diagnostic and the renderer falls back to `Native` (WP3).
@@ -199,6 +222,9 @@ pub struct StartupConfig {
     /// `scrollback-limit`: total bytes of scrollback storage retained before
     /// page-granular eviction (`0` disables scrollback). Ghostty default 10 MB.
     pub scrollback_limit: usize,
+    /// `window-save-state`: whether the window/tab/split session is persisted
+    /// and restored across launches. Default restores.
+    pub window_save_state: WindowSaveState,
 }
 
 impl Default for StartupConfig {
@@ -223,6 +249,7 @@ impl Default for StartupConfig {
             background_opacity: 1.0,
             background_blur_radius: 0,
             scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
+            window_save_state: WindowSaveState::default(),
         }
     }
 }
@@ -249,6 +276,7 @@ pub struct ConfigOverrides {
     pub background_opacity: Option<f32>,
     pub background_blur_radius: Option<u16>,
     pub scrollback_limit: Option<usize>,
+    pub window_save_state: Option<WindowSaveState>,
 }
 
 impl ConfigOverrides {
@@ -285,6 +313,7 @@ impl ConfigOverrides {
                 .background_blur_radius
                 .or(self.background_blur_radius),
             scrollback_limit: higher_priority.scrollback_limit.or(self.scrollback_limit),
+            window_save_state: higher_priority.window_save_state.or(self.window_save_state),
         }
     }
 
@@ -313,6 +342,7 @@ impl ConfigOverrides {
                 .background_blur_radius
                 .unwrap_or(base.background_blur_radius),
             scrollback_limit: self.scrollback_limit.unwrap_or(base.scrollback_limit),
+            window_save_state: self.window_save_state.unwrap_or(base.window_save_state),
         }
     }
 }
@@ -381,6 +411,18 @@ pub fn legacy_toml_config_path_in(config_dir: &Path) -> PathBuf {
     config_dir.join("noa").join("config.toml")
 }
 
+/// Path to the persisted session-state file
+/// (`<data-dir>/noa/session.json`; on macOS `<data-dir>` is
+/// `~/Library/Application Support`). Holds the window/tab/split topology and
+/// per-pane cwd restored on launch when `window-save-state` is not `never`.
+pub fn session_state_path() -> Option<PathBuf> {
+    dirs::data_dir().map(|path| session_state_path_in(&path))
+}
+
+pub fn session_state_path_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("noa").join("session.json")
+}
+
 pub fn load_overrides_from_path(path: &Path) -> anyhow::Result<(ConfigOverrides, Vec<Diagnostic>)> {
     let source = fs::read_to_string(path)
         .with_context(|| format!("failed to read config file {}", path.display()))?;
@@ -442,6 +484,7 @@ mod tests {
                 background_opacity: 1.0,
                 background_blur_radius: 0,
                 scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
+                window_save_state: WindowSaveState::default(),
             }
         );
     }
@@ -554,6 +597,31 @@ font-size = 15.5
             file.merge(cli).apply_to(StartupConfig::default()).scrollback_limit,
             0
         );
+    }
+
+    #[test]
+    fn window_save_state_flows_through_parse_apply_and_precedence() {
+        let (overrides, diagnostics) = parse_overrides(test_path(), "window-save-state = never");
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.window_save_state, Some(WindowSaveState::Never));
+
+        // Absent key keeps the default (which restores).
+        let default = ConfigOverrides::default().apply_to(StartupConfig::default());
+        assert_eq!(default.window_save_state, WindowSaveState::Default);
+        assert!(default.window_save_state.restores());
+
+        // CLI wins over the file.
+        let file = ConfigOverrides {
+            window_save_state: Some(WindowSaveState::Never),
+            ..Default::default()
+        };
+        let cli = ConfigOverrides {
+            window_save_state: Some(WindowSaveState::Always),
+            ..Default::default()
+        };
+        let resolved = file.merge(cli).apply_to(StartupConfig::default());
+        assert_eq!(resolved.window_save_state, WindowSaveState::Always);
+        assert!(!WindowSaveState::Never.restores());
     }
 
     #[test]

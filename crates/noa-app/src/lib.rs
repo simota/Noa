@@ -18,6 +18,7 @@ mod macos_menu;
 mod mouse;
 mod notification;
 mod search_prompt;
+mod session;
 pub mod split_tree;
 pub mod tab_overview;
 mod theme;

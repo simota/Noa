@@ -52,7 +52,11 @@ fn main() -> anyhow::Result<()> {
     if let Some(message) = import_hint(config_exists(), ghostty_config_exists()) {
         eprintln!("{message}");
     }
-    noa_app::run(app_config_from_startup(config))
+    // An explicit `--cols`/`--rows` means the user asked for specific
+    // dimensions, which suppresses session restore (the saved topology would
+    // otherwise override them).
+    let cli_grid_override = args.cols.is_some() || args.rows.is_some();
+    noa_app::run(app_config_from_startup(config, cli_grid_override))
 }
 
 fn run_import() -> anyhow::Result<()> {
@@ -73,7 +77,10 @@ fn run_import() -> anyhow::Result<()> {
     }
 }
 
-fn app_config_from_startup(config: noa_config::StartupConfig) -> noa_app::AppConfig {
+fn app_config_from_startup(
+    config: noa_config::StartupConfig,
+    cli_grid_override: bool,
+) -> noa_app::AppConfig {
     noa_app::AppConfig {
         cols: config.cols,
         rows: config.rows,
@@ -94,6 +101,8 @@ fn app_config_from_startup(config: noa_config::StartupConfig) -> noa_app::AppCon
         background_opacity: config.background_opacity,
         background_blur_radius: config.background_blur_radius,
         scrollback_limit: config.scrollback_limit,
+        window_save_state: config.window_save_state,
+        cli_grid_override,
     }
 }
 
@@ -128,7 +137,7 @@ mod tests {
             ..Default::default()
         };
 
-        let app_config = app_config_from_startup(config);
+        let app_config = app_config_from_startup(config, false);
 
         assert_eq!(app_config.cols, 100);
         assert_eq!(app_config.rows, 30);

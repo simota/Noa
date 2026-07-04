@@ -4,7 +4,7 @@ use noa_core::Rgb;
 
 use crate::{
     AlphaBlendingMode, ClipboardAccess, ConfigOverrides, CursorShape, FontConfig, FontFeature,
-    FontVariation, SyntheticStyleMode,
+    FontVariation, SyntheticStyleMode, WindowSaveState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +56,7 @@ pub(crate) fn build_overrides(
     let mut background_opacity = None;
     let mut background_blur_radius = None;
     let mut scrollback_limit = None;
+    let mut window_save_state = None;
     let mut diagnostics = Vec::new();
 
     for directive in directives {
@@ -170,6 +171,9 @@ pub(crate) fn build_overrides(
             "scrollback-limit" => {
                 scrollback_limit = parse_usize(path, directive, &mut diagnostics);
             }
+            "window-save-state" => {
+                window_save_state = parse_window_save_state(path, directive, &mut diagnostics);
+            }
             "keybind" | "palette" => {
                 diagnostics.push(list_key_diagnostic(path, &directive.key));
             }
@@ -212,6 +216,7 @@ pub(crate) fn build_overrides(
             background_opacity,
             background_blur_radius,
             scrollback_limit,
+            window_save_state,
         },
         diagnostics,
     )
@@ -238,6 +243,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "background-opacity"
             | "background-blur-radius"
             | "scrollback-limit"
+            | "window-save-state"
     )
 }
 
@@ -628,6 +634,23 @@ fn parse_cursor_style(
             diagnostics.push(cursor_style_unsupported_diagnostic(path, value));
             None
         }
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+fn parse_window_save_state(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<WindowSaveState> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "default" => Some(WindowSaveState::Default),
+        "never" => Some(WindowSaveState::Never),
+        "always" => Some(WindowSaveState::Always),
         other => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
             None
@@ -1271,6 +1294,35 @@ mod tests {
     #[test]
     fn scrollback_limit_is_a_supported_scalar_key_for_import() {
         assert!(is_supported_scalar_key("scrollback-limit"));
+    }
+
+    #[test]
+    fn window_save_state_parses_each_mode() {
+        for (value, expected) in [
+            ("default", WindowSaveState::Default),
+            ("never", WindowSaveState::Never),
+            ("always", WindowSaveState::Always),
+        ] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("window-save-state = {value}"));
+            assert_eq!(overrides.window_save_state, Some(expected), "{value:?}");
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+    }
+
+    #[test]
+    fn window_save_state_rejects_unknown_value() {
+        let (overrides, diagnostics) = parse_overrides(path(), "window-save-state = sometimes");
+
+        assert_eq!(overrides.window_save_state, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("window-save-state"));
+        assert!(diagnostics[0].message.contains("sometimes"));
+    }
+
+    #[test]
+    fn window_save_state_is_a_supported_scalar_key_for_import() {
+        assert!(is_supported_scalar_key("window-save-state"));
     }
 
     #[test]

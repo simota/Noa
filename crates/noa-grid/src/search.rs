@@ -93,48 +93,50 @@ impl SearchState {
     }
 }
 
-pub(crate) fn compute_matches<'a, I>(query: &str, rows: I) -> Vec<SearchMatch>
-where
-    I: IntoIterator<Item = (usize, &'a Row)>,
-{
-    if query.is_empty() {
-        return Vec::new();
+/// Number of scalars in `query`, or `None` if the query can never match
+/// (empty). Callers hoist this out of their per-row loop.
+pub(crate) fn needle_len(query: &str) -> Option<usize> {
+    match query.chars().count() {
+        0 => None,
+        n => Some(n),
     }
+}
 
-    let needle_chars = query.chars().count();
-    if needle_chars == 0 {
-        return Vec::new();
-    }
-
-    let mut matches = Vec::new();
-    for (storage_y, row) in rows {
-        let mut text = String::new();
-        let mut cells = Vec::new();
-        for (x, cell) in row.cells.iter().enumerate() {
-            if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
-                continue;
-            }
-            cell.push_text_to(&mut text);
-            cells.extend(std::iter::repeat_n(x as u16, cell.text_chars().count()));
+/// Append every match of `query` within a single row `row` at storage index
+/// `storage_y` to `matches`. `needle_chars` is `query.chars().count()` (from
+/// [`needle_len`]), hoisted so a full-scrollback scan computes it once. The
+/// unit both the live grid and the paged scrollback feed rows through, one at a
+/// time, so neither storage needs to hand out a shared iterator.
+pub(crate) fn append_row_matches(
+    query: &str,
+    needle_chars: usize,
+    storage_y: usize,
+    row: &Row,
+    matches: &mut Vec<SearchMatch>,
+) {
+    let mut text = String::new();
+    let mut cells = Vec::new();
+    for (x, cell) in row.cells.iter().enumerate() {
+        if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
+            continue;
         }
-
-        for (byte_start, _) in text.match_indices(query) {
-            let start_char = text[..byte_start].chars().count();
-            let Some(end_char) = start_char.checked_add(needle_chars - 1) else {
-                continue;
-            };
-            let (Some(&start_x), Some(&end_x)) = (cells.get(start_char), cells.get(end_char))
-            else {
-                continue;
-            };
-            matches.push(SearchMatch {
-                start: SelectionPoint::new(start_x, storage_y),
-                end: SelectionPoint::new(end_x, storage_y),
-            });
-        }
+        cell.push_text_to(&mut text);
+        cells.extend(std::iter::repeat_n(x as u16, cell.text_chars().count()));
     }
 
-    matches
+    for (byte_start, _) in text.match_indices(query) {
+        let start_char = text[..byte_start].chars().count();
+        let Some(end_char) = start_char.checked_add(needle_chars - 1) else {
+            continue;
+        };
+        let (Some(&start_x), Some(&end_x)) = (cells.get(start_char), cells.get(end_char)) else {
+            continue;
+        };
+        matches.push(SearchMatch {
+            start: SelectionPoint::new(start_x, storage_y),
+            end: SelectionPoint::new(end_x, storage_y),
+        });
+    }
 }
 
 #[cfg(test)]

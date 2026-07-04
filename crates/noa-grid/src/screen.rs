@@ -4,12 +4,14 @@
 
 use crate::cell::{Cell, Row};
 use crate::cursor::{Cursor, HorizontalMargins, ScrollRegion};
-use crate::search::{SearchMatch, SearchState, compute_matches};
+use crate::search::{SearchMatch, SearchState, append_row_matches, needle_len};
 use crate::selection::{Selection, SelectionPoint};
 use crate::tabstops::Tabstops;
 use noa_core::{CellAttrs, Point};
 use noa_vt::{EraseDisplay, EraseLine};
+use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
 
 const DEFAULT_SCROLLBACK_LIMIT: usize = 10_000;
@@ -240,9 +242,16 @@ impl Screen {
     }
 
     fn has_selectable_text(&self) -> bool {
+        self.scrollback_has_text()
+            || self
+                .grid
+                .iter()
+                .any(|row| row.cells.iter().any(|cell| !cell.is_blank()))
+    }
+
+    fn scrollback_has_text(&self) -> bool {
         self.scrollback
             .iter()
-            .chain(&self.grid)
             .any(|row| row.cells.iter().any(|cell| !cell.is_blank()))
     }
 
@@ -296,10 +305,11 @@ impl Screen {
     pub fn select_word_at_viewport_point(&mut self, point: Point) {
         let point = self.clamped_viewport_point(point);
         let storage_y = self.visible_row_base() + point.y as usize;
-        let Some(row) = self.row_at_storage_index(storage_y) else {
+        let Some(row) = self.storage_row(storage_y) else {
             self.selection = None;
             return;
         };
+        let row: &Row = &row;
         if row.cells.is_empty() {
             self.selection = None;
             return;
@@ -357,16 +367,19 @@ impl Screen {
         Some(m)
     }
 
-    fn compute_search_matches(&self, query: &str) -> Vec<SearchMatch> {
-        compute_matches(
-            query,
-            self.scrollback.iter().enumerate().chain(
-                self.grid
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, row)| (self.scrollback.len() + idx, row)),
-            ),
-        )
+    fn compute_search_matches(&mut self, query: &str) -> Vec<SearchMatch> {
+        let Some(needle_chars) = needle_len(query) else {
+            return Vec::new();
+        };
+        let scrollback_len = self.scrollback_len();
+        let mut matches = Vec::new();
+        self.for_each_scrollback_row(0..scrollback_len, |y, row| {
+            append_row_matches(query, needle_chars, y, row, &mut matches);
+        });
+        for (idx, row) in self.grid.iter().enumerate() {
+            append_row_matches(query, needle_chars, scrollback_len + idx, row, &mut matches);
+        }
+        matches
     }
 
     fn reveal_search_match(&mut self, search_match: SearchMatch) {
@@ -396,23 +409,20 @@ impl Screen {
         let (start, end) = selection.normalized();
         let mut text = String::new();
 
+        let mut previous_wrapped = false;
         for y in start.y..=end.y {
-            let row = self.row_at_storage_index(y)?;
+            let row = self.storage_row(y)?;
             let Some(row_end) = row.cells.len().checked_sub(1) else {
                 continue;
             };
             let start_x = if y == start.y { start.x as usize } else { 0 }.min(row_end);
             let end_x = if y == end.y { end.x as usize } else { row_end }.min(row_end);
 
-            if y > start.y {
-                let previous_wrapped = self
-                    .row_at_storage_index(y.saturating_sub(1))
-                    .is_some_and(|previous| previous.wrapped);
-                if !previous_wrapped {
-                    text.push('\n');
-                }
+            if y > start.y && !previous_wrapped {
+                text.push('\n');
             }
-            Self::push_selected_row_text(row, start_x, end_x, &mut text);
+            Self::push_selected_row_text(&row, start_x, end_x, &mut text);
+            previous_wrapped = row.wrapped;
         }
 
         if text.is_empty() { None } else { Some(text) }
@@ -441,11 +451,28 @@ impl Screen {
         }
     }
 
-    fn row_at_storage_index(&self, y: usize) -> Option<&Row> {
-        if y < self.scrollback.len() {
-            self.scrollback.get(y)
+    /// A row from the combined `scrollback + live grid` storage: borrowed for a
+    /// live row, cloned for a history row (materialized straight from packed
+    /// storage once scrollback is paged). Random-access; callers that walk a
+    /// contiguous history range should prefer [`Self::for_each_scrollback_row`]
+    /// to avoid per-row allocation.
+    fn storage_row(&self, y: usize) -> Option<Cow<'_, Row>> {
+        let scrollback_len = self.scrollback.len();
+        if y < scrollback_len {
+            self.scrollback.get(y).map(Cow::Borrowed)
         } else {
-            self.grid.get(y - self.scrollback.len())
+            self.grid.get(y - scrollback_len).map(Cow::Borrowed)
+        }
+    }
+
+    /// Visit scrollback rows `range` (`0` = oldest) in order. The single seam
+    /// history consumers (search, selection) go through, so paged storage can
+    /// hand back a reused buffer instead of cloning each row.
+    fn for_each_scrollback_row(&mut self, range: Range<usize>, mut f: impl FnMut(usize, &Row)) {
+        for y in range {
+            if let Some(row) = self.scrollback.get(y) {
+                f(y, row);
+            }
         }
     }
 
@@ -512,17 +539,12 @@ impl Screen {
     /// mouse-hover paths (hyperlink/URL detection) that run on every
     /// `CursorMoved`/`ModifiersChanged` event and only need to inspect the
     /// single row under the pointer.
-    pub fn visible_row(&self, viewport_y: u16) -> Option<&Row> {
+    pub fn visible_row(&self, viewport_y: u16) -> Option<Cow<'_, Row>> {
         if viewport_y >= self.rows {
             return None;
         }
         let idx = self.visible_row_base() + viewport_y as usize;
-        let scrollback_len = self.scrollback.len();
-        if idx < scrollback_len {
-            self.scrollback.get(idx)
-        } else {
-            self.grid.get(idx - scrollback_len)
-        }
+        self.storage_row(idx)
     }
 
     pub fn visible_rows(&self) -> Vec<Row> {

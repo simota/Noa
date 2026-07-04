@@ -4080,7 +4080,7 @@ impl App {
         if let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink) {
             return Some((pane_id, HoverLink::Registry(link_id)));
         }
-        let url = noa_grid::detect_url_at_column(row, cell.x)?;
+        let url = noa_grid::detect_url_at_column(&row, cell.x)?;
         Some((
             pane_id,
             HoverLink::Range {
@@ -4173,7 +4173,7 @@ impl App {
                 .get(link_id)
                 .map(|link| link.uri.clone());
         }
-        noa_grid::detect_url_at_column(row, cell.x).map(|url| url.uri)
+        noa_grid::detect_url_at_column(&row, cell.x).map(|url| url.uri)
     }
 }
 

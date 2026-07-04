@@ -625,6 +625,34 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "benchmark; run with `--ignored --nocapture`"]
+    fn bench_push_throughput_and_memory_bound() {
+        let limit = 10_000_000;
+        let mut sb = PagedScrollback::new(limit);
+        let filler: String = "x".repeat(200);
+        let row = text_row(&filler, 200);
+        let n = 1_000_000;
+
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            sb.push_row(&row);
+        }
+        let elapsed = start.elapsed();
+
+        println!(
+            "push: {n} rows of 200 cols in {elapsed:?} ({:.0} rows/s)",
+            n as f64 / elapsed.as_secs_f64()
+        );
+        println!(
+            "retained {} rows, {} bytes (limit {limit})",
+            sb.len(),
+            sb.bytes()
+        );
+        // Retention stays within the limit plus at most one over-target page.
+        assert!(sb.bytes() <= limit + PAGE_TARGET_BYTES + PAGE_HEADER_COST);
+    }
+
+    #[test]
     fn has_text_ignores_blank_and_bce_rows() {
         let mut sb = PagedScrollback::new(usize::MAX);
         sb.push_row(&text_row("", 10));

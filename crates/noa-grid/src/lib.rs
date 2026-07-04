@@ -2,8 +2,9 @@
 //! stops, and the [`noa_vt::Handler`] implementation that mutates them.
 //!
 //! Ghostty analog: `terminal/Terminal.zig`, `Screen.zig`, `page.zig`,
-//! `modes.zig`. The active area is still a flat `Vec<Row>`; scrollback is stored
-//! as cloned rows until paged storage and `StyleId` interning land.
+//! `modes.zig`. The active area is a flat `Vec<Row>` of inlined `Cell`s;
+//! scrollback is paged, style-interned, byte-bounded storage (`scrollback.rs`)
+//! sized by the `scrollback-limit` config.
 
 pub mod cell;
 mod charset;

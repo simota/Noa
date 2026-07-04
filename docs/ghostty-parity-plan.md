@@ -7,7 +7,7 @@
 
 **堅実に動いている**: CSI 編集系ほぼ全部 / SGR 16・256・truecolor / alt screen / DECSTBM /
 DECSC・DECRC / bracketed paste / SGR マウス報告 / ワイド文字 / リサイズ・リフロー（カーソルアンカー保持）/
-scrollback 10k 行 + 選択 + 検索エンジン / OSC 0・2・4・10-12・52 / DA・DSR 応答 / クリップボード /
+ページ化 scrollback（バイト量上限 `scrollback-limit`）+ 選択 + 検索エンジン / OSC 0・2・4・10-12・52 / DA・DSR 応答 / クリップボード /
 IME preedit / ネイティブメニュー / コード内キーバインドエンジン / headless GPU 回帰テスト。
 
 **主要ギャップ**（監査 + 棚卸しより）:
@@ -86,9 +86,11 @@ GUI 非依存 → ユニットテストで完結。
 
 ## Phase 3 — スクロールバック基盤・リンク・検索 UI・設定（≒ inc 3）
 
-- **ページ化 scrollback**: `VecDeque<Row>` 行クローン方式 → ページ（固定サイズブロック）+
+- **ページ化 scrollback**（実装済み）: `VecDeque<Row>` 行クローン方式 → 64KiB 目標ページ +
   **インターン化スタイル**（page-local style table、Ghostty の PageList/style set 相当）。
-  上限を行数でなくバイト量で設定（`scrollback-limit`）。Phase 2 の描画高速化と併せ長大出力を実用域に。
+  上限を行数でなくバイト量で設定（`scrollback-limit`、既定 10MB、0=無効、ページ粒度 eviction）。
+  アクティブ画面は非ページのまま（scrollback は push 後不変なので refcount 不要）。列変更リサイズは
+  ストリーミングリフローで再パックし一時メモリスパイクを回避。`crates/noa-grid/src/scrollback.rs`。
 - **OSC 8 ハイパーリンク UI + URL 自動検出**: hover 下線、Cmd+クリックで `open`。
   正規表現 URL matcher は Ghostty の `link` 設定互換の形に。
 - **検索 UI**: エンジンは実装済 → オーバーレイ入力プロンプト、マッチ件数、n/N 移動、

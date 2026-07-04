@@ -6,7 +6,7 @@ A faithful **Rust** clone of the [Ghostty](https://ghostty.org) terminal emulato
 
 ## Status
 
-**Increment 4 (In Progress).** A GPU-accelerated terminal emulator written from scratch. Currently, the implementation features native window management, wgpu-based monospace grid rendering, PTY integration, CJK font fallback, custom keybindings, interactive scrollback search, multiple tabs, configuration file parsing (supporting both TOML and Ghostty formats), and over 460 vendored themes (see [Roadmap](#roadmap)).
+**Increment 6 (In Progress).** A GPU-accelerated terminal emulator written from scratch. Currently, the implementation features native multi-window/tab/split management, wgpu-based grid rendering with a Kitty-graphics image layer, PTY integration, CJK font fallback + ligatures, the Kitty keyboard protocol, paged byte-limited scrollback with interactive search, shell integration (OSC 133/7), desktop notifications, session restore, a quick terminal, configuration file parsing (supporting both TOML and Ghostty formats), and over 460 vendored themes (see [Roadmap](#roadmap)).
 
 ## Architecture
 
@@ -109,10 +109,10 @@ works via the `[package.metadata.bundle]` in `bin/noa/Cargo.toml`.
 |-----|-------|--------|
 | **1** | Vertical slice: window + wgpu grid, PTY `$SHELL`, from-scratch parser (C0, core CSI, SGR 16+truecolor, deferred-wrap), block cursor, ASCII+arrow input, DA/DSR | ✅ Done |
 | **2** | Resize behavior, full CSI/edit set, 256+truecolor palette, alt screen, DECSC/DECRC, bracketed paste, UTF-8 wide cells, interaction basics | ✅ Done |
-| **3** | Paged scrollback storage, interned styles, OSC 8 hyperlinks, interactive search UI, expanded configuration | 🔄 In Progress (scrollback, search, OSC 52 done; OSC 8 pending) |
-| **4** | Tabs + split tree, config file, ~460 themes, font fallback + ligatures + Nerd/box glyphs | 🔄 In Progress (tabs, config, themes, font fallback done; splits, ligatures pending) |
-| **5** | Kitty graphics + keyboard protocols, shell integration (OSC 133/7), DCS | ⏳ Planned |
-| **6** | macOS-native polish: quick terminal, command palette, background blur, session restore | ⏳ Planned |
+| **3** | Paged scrollback storage, interned styles, OSC 8 hyperlinks, interactive search UI, expanded configuration | ✅ Done |
+| **4** | Tabs + split tree + multi-window, config file, ~460 themes, font fallback + ligatures + Nerd/box glyphs | ✅ Done |
+| **5** | Kitty graphics + keyboard protocols, shell integration (OSC 133/7), DCS, legacy mouse encodings | ✅ Done |
+| **6** | macOS-native polish: quick terminal, command palette, background blur, session restore, secure keyboard entry, notifications (OSC 9/777), CLI actions (`+list-themes` …) | 🔄 In Progress (remaining: titlebar styles, Option-as-Alt config) |
 
 ## License
 

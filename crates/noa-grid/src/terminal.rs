@@ -306,6 +306,17 @@ impl Terminal {
         std::mem::take(&mut self.pending_bell)
     }
 
+    /// Whether shell integration currently reports a foreground command.
+    ///
+    /// OSC 133 `C` marks command start and the next `D`/prompt mark clears it.
+    /// If no integration marks have arrived, return false rather than treating
+    /// an idle login shell as a running program.
+    pub fn has_running_program(&self) -> bool {
+        self.shell_marks
+            .last()
+            .is_some_and(|mark| mark.kind == ShellIntegrationMarkKind::CommandStart)
+    }
+
     /// Update the pixel-metric fields backing `XTWINOPS` reports
     /// (`CSI 14/16 t`). The sole caller is `noa-app`'s pane-resize path —
     /// the only place outside this crate that reaches into `Terminal`'s

@@ -1156,6 +1156,21 @@ fn osc133_prompt_marks_record_cursor_positions_and_exit_status() {
 }
 
 #[test]
+fn osc133_latest_command_start_marks_running_program() {
+    assert!(!run(b"plain shell output").has_running_program());
+    assert!(!run(b"\x1b]133;A\x07$ \x1b]133;B\x07").has_running_program());
+    assert!(run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07").has_running_program());
+    assert!(
+        !run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\x1b]133;D;0\x07")
+            .has_running_program()
+    );
+    assert!(
+        !run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\x1b]133;A\x07")
+            .has_running_program()
+    );
+}
+
+#[test]
 fn scroll_to_prompt_jumps_between_prompt_marks() {
     // A 3-row screen with three prompts (OSC 133;A) separated by output, so
     // history scrolls and the prompts land at known absolute rows:

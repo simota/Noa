@@ -4391,20 +4391,31 @@ impl App {
         else {
             return;
         };
-        let Some((terminal, grid_size)) = self
+        let Some((terminal, grid_size, overview_snapshot)) = self
             .windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
-            .map(|surface| (surface.terminal.clone(), surface.grid_size))
+            .map(|surface| {
+                (
+                    surface.terminal.clone(),
+                    surface.grid_size,
+                    surface.overview_snapshot.clone(),
+                )
+            })
         else {
             return;
         };
 
-        apply_viewport_scroll(
+        let snapshot = apply_viewport_scroll_and_snapshot(
             &mut terminal.lock().expect("terminal mutex poisoned"),
             grid_size,
             scroll,
         );
+        *overview_snapshot
+            .lock()
+            .expect("overview snapshot mutex poisoned") = Some(snapshot);
+        self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
+        self.request_overview_redraw();
 
         if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();
@@ -4417,19 +4428,24 @@ impl App {
         pane_id: PaneId,
         scroll: MouseWheelViewportScroll,
     ) {
-        let Some(terminal) = self
+        let Some((terminal, overview_snapshot)) = self
             .windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
-            .map(|surface| surface.terminal.clone())
+            .map(|surface| (surface.terminal.clone(), surface.overview_snapshot.clone()))
         else {
             return;
         };
 
-        apply_mouse_wheel_viewport_scroll(
+        let snapshot = apply_mouse_wheel_viewport_scroll_and_snapshot(
             &mut terminal.lock().expect("terminal mutex poisoned"),
             scroll,
         );
+        *overview_snapshot
+            .lock()
+            .expect("overview snapshot mutex poisoned") = Some(snapshot);
+        self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
+        self.request_overview_redraw();
 
         if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();
@@ -5533,6 +5549,15 @@ fn apply_viewport_scroll(terminal: &mut Terminal, grid_size: GridSize, scroll: V
     }
 }
 
+fn apply_viewport_scroll_and_snapshot(
+    terminal: &mut Terminal,
+    grid_size: GridSize,
+    scroll: ViewportScroll,
+) -> Arc<FrameSnapshot> {
+    apply_viewport_scroll(terminal, grid_size, scroll);
+    Arc::new(FrameSnapshot::peek(terminal))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MouseWheelViewportScroll {
     Up(usize),
@@ -5568,6 +5593,14 @@ fn apply_mouse_wheel_viewport_scroll(terminal: &mut Terminal, scroll: MouseWheel
         MouseWheelViewportScroll::Up(rows) => terminal.scroll_viewport_up(rows),
         MouseWheelViewportScroll::Down(rows) => terminal.scroll_viewport_down(rows),
     }
+}
+
+fn apply_mouse_wheel_viewport_scroll_and_snapshot(
+    terminal: &mut Terminal,
+    scroll: MouseWheelViewportScroll,
+) -> Arc<FrameSnapshot> {
+    apply_mouse_wheel_viewport_scroll(terminal, scroll);
+    Arc::new(FrameSnapshot::peek(terminal))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6484,6 +6517,29 @@ mod tests {
     }
 
     #[test]
+    fn viewport_scroll_snapshot_tracks_scrolled_row_base() {
+        let grid_size = GridSize::new(5, 3);
+        let mut terminal = terminal_with_scrollback(grid_size);
+        let before_row_base = terminal.active().visible_row_base();
+
+        let snapshot =
+            apply_viewport_scroll_and_snapshot(&mut terminal, grid_size, ViewportScroll::LineUp);
+
+        assert_eq!(terminal.viewport_offset(), 1);
+        assert_ne!(snapshot.row_base, before_row_base);
+        assert_eq!(snapshot.row_base, terminal.active().visible_row_base());
+        assert_eq!(
+            snapshot.abs_row_base,
+            terminal.active().rows_evicted() + terminal.active().visible_row_base()
+        );
+        assert!(
+            snapshot.row_dirty.iter().all(|&dirty| dirty),
+            "overview snapshots are full-row dirty"
+        );
+        assert!(!snapshot.cursor.visible);
+    }
+
+    #[test]
     fn mouse_wheel_delta_maps_to_viewport_scroll_rows() {
         assert_eq!(
             mouse_wheel_viewport_scroll(MouseScrollDelta::LineDelta(0.0, 2.0), 20.0),
@@ -6523,6 +6579,25 @@ mod tests {
 
         apply_mouse_wheel_viewport_scroll(&mut terminal, MouseWheelViewportScroll::Down(1));
         assert_eq!(terminal.viewport_offset(), 1);
+    }
+
+    #[test]
+    fn mouse_wheel_viewport_scroll_snapshot_tracks_scrolled_row_base() {
+        let grid_size = GridSize::new(5, 3);
+        let mut terminal = terminal_with_scrollback(grid_size);
+
+        let snapshot = apply_mouse_wheel_viewport_scroll_and_snapshot(
+            &mut terminal,
+            MouseWheelViewportScroll::Up(2),
+        );
+
+        assert_eq!(terminal.viewport_offset(), 2);
+        assert_eq!(snapshot.row_base, terminal.active().visible_row_base());
+        assert_eq!(
+            snapshot.abs_row_base,
+            terminal.active().rows_evicted() + terminal.active().visible_row_base()
+        );
+        assert!(!snapshot.cursor.visible);
     }
 
     #[test]

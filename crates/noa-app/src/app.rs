@@ -14,7 +14,10 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Sender, TrySendError};
 use noa_core::{DEFAULT_GRID_PADDING, GridPadding, GridSize, PixelSize, Point};
 use noa_font::FontGrid;
-use noa_grid::{CursorStyle, PromptJump, Terminal, modes::MouseTracking};
+use noa_grid::{
+    CursorStyle, PromptJump, Terminal,
+    modes::{MouseFormat, MouseTracking},
+};
 use noa_pty::{Pty, PtyConfig};
 use noa_render::{
     CardStyle, CardTilePlacement, CommandPaletteSnapshot, FrameSnapshot, HoverLink,
@@ -2996,16 +2999,20 @@ impl App {
         }
         self.sync_hover_link(window_id);
 
-        let tracking = self.sgr_mouse_tracking(window_id, pane_id);
+        let (tracking, format) = self.mouse_report_modes(window_id, pane_id);
         if tracking != MouseTracking::Off && !self.modifiers.shift_key() {
             let pressed_mouse_button = self
                 .windows
                 .get(&window_id)
                 .and_then(|state| state.surfaces.get(&pane_id))
                 .and_then(|surface| surface.pressed_mouse_button);
-            if let Some(bytes) =
-                mouse::encode_sgr_mouse_motion(tracking, pressed_mouse_button, cell, self.modifiers)
-            {
+            if let Some(bytes) = mouse::encode_mouse_motion(
+                format,
+                tracking,
+                pressed_mouse_button,
+                cell,
+                self.modifiers,
+            ) {
                 self.write_pane_pty_bytes(window_id, pane_id, &bytes);
             }
             return;
@@ -3070,7 +3077,7 @@ impl App {
             self.focus_pane(window_id, pane_id);
         }
 
-        let tracking = self.sgr_mouse_tracking(window_id, pane_id);
+        let (tracking, format) = self.mouse_report_modes(window_id, pane_id);
         if tracking != MouseTracking::Off && !self.modifiers.shift_key() {
             let last_mouse_cell = self
                 .windows
@@ -3079,7 +3086,7 @@ impl App {
                 .and_then(|surface| surface.last_mouse_cell);
             if let Some(cell) = last_mouse_cell
                 && let Some(bytes) =
-                    mouse::encode_sgr_mouse_input(button, state, cell, self.modifiers)
+                    mouse::encode_mouse_input(format, tracking, button, state, cell, self.modifiers)
             {
                 self.write_pane_pty_bytes(window_id, pane_id, &bytes);
             }
@@ -3148,9 +3155,8 @@ impl App {
             return;
         };
 
-        if self.sgr_mouse_tracking(window_id, pane_id) != MouseTracking::Off
-            && !self.modifiers.shift_key()
-        {
+        let (tracking, format) = self.mouse_report_modes(window_id, pane_id);
+        if tracking != MouseTracking::Off && !self.modifiers.shift_key() {
             let Some(cell) = self
                 .windows
                 .get(&window_id)
@@ -3163,7 +3169,9 @@ impl App {
                 MouseScrollDelta::LineDelta(_, y) => y,
                 MouseScrollDelta::PixelDelta(position) => position.y as f32,
             };
-            if let Some(bytes) = mouse::encode_sgr_mouse_wheel(delta_y, cell, self.modifiers) {
+            if let Some(bytes) =
+                mouse::encode_mouse_wheel(format, tracking, delta_y, cell, self.modifiers)
+            {
                 self.write_pane_pty_bytes(window_id, pane_id, &bytes);
             }
             return;
@@ -3864,19 +3872,22 @@ impl App {
         }
     }
 
-    fn sgr_mouse_tracking(&self, window_id: WindowId, pane_id: PaneId) -> MouseTracking {
+    fn mouse_report_modes(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) -> (MouseTracking, MouseFormat) {
         self.windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
             .map(|surface| {
                 let terminal = surface.terminal.lock().expect("terminal mutex poisoned");
-                if terminal.modes.sgr_mouse_reporting() {
-                    terminal.modes.mouse_tracking()
-                } else {
-                    MouseTracking::Off
-                }
+                (
+                    terminal.modes.mouse_tracking(),
+                    terminal.modes.mouse_format(),
+                )
             })
-            .unwrap_or(MouseTracking::Off)
+            .unwrap_or((MouseTracking::Off, MouseFormat::Legacy))
     }
 
     fn write_pty_bytes(&self, window_id: WindowId, bytes: &[u8]) {

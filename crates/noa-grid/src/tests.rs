@@ -584,7 +584,8 @@ fn full_reset_clears_bracketed_paste_mode() {
 fn sgr_mouse_modes_toggle_and_reset() {
     let t = run(b"\x1b[?1000h\x1b[?1006h");
     assert_eq!(t.modes.mouse_tracking(), crate::modes::MouseTracking::Press);
-    assert!(t.modes.sgr_mouse_reporting());
+    assert_eq!(t.modes.mouse_format(), crate::modes::MouseFormat::Sgr);
+    assert!(t.modes.mouse_reporting());
 
     let t = run(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h");
     assert_eq!(
@@ -599,7 +600,61 @@ fn sgr_mouse_modes_toggle_and_reset() {
     );
 
     let t = run(b"\x1b[?1000h\x1b[?1006h\x1bc");
-    assert!(!t.modes.sgr_mouse_reporting());
+    assert!(!t.modes.mouse_reporting());
+    assert_eq!(t.modes.mouse_format(), crate::modes::MouseFormat::Legacy);
+}
+
+#[test]
+fn x10_mouse_tracking_mode_toggles_and_yields_to_vt200_modes() {
+    let t = run(b"\x1b[?9h");
+    assert_eq!(t.modes.mouse_tracking(), crate::modes::MouseTracking::X10);
+    assert!(t.modes.mouse_reporting());
+    assert_eq!(t.modes.mouse_format(), crate::modes::MouseFormat::Legacy);
+
+    // Any VT200-style tracking mode outranks X10 while both are set.
+    let t = run(b"\x1b[?9h\x1b[?1000h");
+    assert_eq!(t.modes.mouse_tracking(), crate::modes::MouseTracking::Press);
+    let t = run(b"\x1b[?9h\x1b[?1000h\x1b[?1000l");
+    assert_eq!(t.modes.mouse_tracking(), crate::modes::MouseTracking::X10);
+
+    let t = run(b"\x1b[?9h\x1b[?9l");
+    assert_eq!(t.modes.mouse_tracking(), crate::modes::MouseTracking::Off);
+    assert!(!t.modes.mouse_reporting());
+}
+
+#[test]
+fn mouse_format_modes_are_exclusive_and_last_set_wins() {
+    use crate::modes::MouseFormat;
+
+    assert_eq!(run(b"").modes.mouse_format(), MouseFormat::Legacy);
+    assert_eq!(run(b"\x1b[?1005h").modes.mouse_format(), MouseFormat::Utf8);
+    assert_eq!(run(b"\x1b[?1015h").modes.mouse_format(), MouseFormat::Urxvt);
+
+    // The last format set displaces the previous one…
+    let t = run(b"\x1b[?1005h\x1b[?1015h\x1b[?1006h");
+    assert_eq!(t.modes.mouse_format(), MouseFormat::Sgr);
+    let t = run(b"\x1b[?1006h\x1b[?1005h");
+    assert_eq!(t.modes.mouse_format(), MouseFormat::Utf8);
+
+    // …so resetting a displaced format leaves the active one untouched,
+    // while resetting the active format falls back to Legacy.
+    let t = run(b"\x1b[?1005h\x1b[?1006h\x1b[?1005l");
+    assert_eq!(t.modes.mouse_format(), MouseFormat::Sgr);
+    let t = run(b"\x1b[?1005h\x1b[?1006h\x1b[?1006l");
+    assert_eq!(t.modes.mouse_format(), MouseFormat::Legacy);
+}
+
+#[test]
+fn decrqm_reports_mouse_tracking_and_format_modes() {
+    let t = run(b"\x1b[?9h\x1b[?9$p\x1b[?1005$p\x1b[?1015$p");
+    assert_eq!(t.pending_writes, b"\x1b[?9;1$y\x1b[?1005;2$y\x1b[?1015;2$y");
+
+    // Only the active (last-set) format mode reports as set.
+    let t = run(b"\x1b[?1005h\x1b[?1015h\x1b[?1005$p\x1b[?1015$p\x1b[?1006$p");
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b[?1005;2$y\x1b[?1015;1$y\x1b[?1006;2$y"
+    );
 }
 
 #[test]

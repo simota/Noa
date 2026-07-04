@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use noa_core::{GridPadding, GridSize, Point};
-use noa_grid::modes::MouseTracking;
+use noa_grid::modes::{MouseFormat, MouseTracking};
 use winit::event::{ElementState, MouseButton};
 use winit::keyboard::ModifiersState;
 
@@ -153,44 +153,66 @@ pub fn physical_position_to_grid_point(
     Point { x: col, y: row }
 }
 
-pub fn encode_sgr_mouse_input(
+pub fn encode_mouse_input(
+    format: MouseFormat,
+    tracking: MouseTracking,
     button: MouseButton,
     state: ElementState,
     cell: Point,
     mods: ModifiersState,
 ) -> Option<Vec<u8>> {
     let button_code = button_code(button)?;
-    let final_byte = match state {
-        ElementState::Pressed => b'M',
-        ElementState::Released => b'm',
-    };
-    Some(sgr_mouse_sequence(
-        button_code + modifier_bits(mods),
-        cell,
-        final_byte,
-    ))
+    // X10 compatibility mode (DECSET 9): presses only, no modifier bits.
+    if tracking == MouseTracking::X10 {
+        return match state {
+            ElementState::Pressed => encode_mouse_report(format, button_code, false, cell),
+            ElementState::Released => None,
+        };
+    }
+    match state {
+        ElementState::Pressed => {
+            encode_mouse_report(format, button_code + modifier_bits(mods), false, cell)
+        }
+        // SGR is the only format that can name the released button; the
+        // legacy encodings all report a release as button value 3.
+        ElementState::Released => {
+            let code = if format == MouseFormat::Sgr {
+                button_code
+            } else {
+                3
+            };
+            encode_mouse_report(format, code + modifier_bits(mods), true, cell)
+        }
+    }
 }
 
-pub fn encode_sgr_mouse_motion(
+pub fn encode_mouse_motion(
+    format: MouseFormat,
     tracking: MouseTracking,
     pressed_button: Option<MouseButton>,
     cell: Point,
     mods: ModifiersState,
 ) -> Option<Vec<u8>> {
     let button_code = match tracking {
-        MouseTracking::Off | MouseTracking::Press => return None,
+        MouseTracking::Off | MouseTracking::X10 | MouseTracking::Press => return None,
         MouseTracking::ButtonMotion => button_code(pressed_button?)?,
         MouseTracking::AnyMotion => pressed_button.and_then(button_code).unwrap_or(3),
     };
 
-    Some(sgr_mouse_sequence(
-        button_code + 32 + modifier_bits(mods),
-        cell,
-        b'M',
-    ))
+    encode_mouse_report(format, button_code + 32 + modifier_bits(mods), false, cell)
 }
 
-pub fn encode_sgr_mouse_wheel(delta_y: f32, cell: Point, mods: ModifiersState) -> Option<Vec<u8>> {
+pub fn encode_mouse_wheel(
+    format: MouseFormat,
+    tracking: MouseTracking,
+    delta_y: f32,
+    cell: Point,
+    mods: ModifiersState,
+) -> Option<Vec<u8>> {
+    // X10 compatibility mode predates wheel buttons: never reported.
+    if tracking == MouseTracking::X10 {
+        return None;
+    }
     let button_code = if delta_y > 0.0 {
         64
     } else if delta_y < 0.0 {
@@ -198,11 +220,59 @@ pub fn encode_sgr_mouse_wheel(delta_y: f32, cell: Point, mods: ModifiersState) -
     } else {
         return None;
     };
-    Some(sgr_mouse_sequence(
-        button_code + modifier_bits(mods),
-        cell,
-        b'M',
-    ))
+    encode_mouse_report(format, button_code + modifier_bits(mods), false, cell)
+}
+
+/// Serialize one mouse report in the active format. `code` is the final
+/// button value (button + modifier + motion bits) *without* the +32 bias;
+/// `release` only matters for SGR, whose final byte distinguishes it.
+fn encode_mouse_report(
+    format: MouseFormat,
+    code: u16,
+    release: bool,
+    cell: Point,
+) -> Option<Vec<u8>> {
+    let (cx, cy) = (cell.x + 1, cell.y + 1);
+    match format {
+        MouseFormat::Sgr => {
+            let final_byte = if release { b'm' } else { b'M' };
+            Some(sgr_mouse_sequence(code, cell, final_byte))
+        }
+        MouseFormat::Legacy => {
+            // Each field is one raw byte: 223 + 32 = 255 is the last
+            // representable coordinate; xterm drops events past it.
+            if cx > 223 || cy > 223 {
+                return None;
+            }
+            Some(vec![
+                0x1b,
+                b'[',
+                b'M',
+                (code + 32) as u8,
+                (cx + 32) as u8,
+                (cy + 32) as u8,
+            ])
+        }
+        MouseFormat::Utf8 => {
+            // Same values as Legacy but written as UTF-8 code points, which
+            // extends the range to 2015 + 32 = 2047 (the two-byte limit).
+            if cx > 2015 || cy > 2015 {
+                return None;
+            }
+            let mut bytes = vec![0x1b, b'[', b'M'];
+            for value in [code + 32, cx + 32, cy + 32] {
+                push_utf8(&mut bytes, value);
+            }
+            Some(bytes)
+        }
+        MouseFormat::Urxvt => Some(format!("\x1b[{};{cx};{cy}M", code + 32).into_bytes()),
+    }
+}
+
+fn push_utf8(bytes: &mut Vec<u8>, value: u16) {
+    let mut buf = [0u8; 4];
+    let ch = char::from_u32(u32::from(value)).expect("mouse report values stay below surrogates");
+    bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
 }
 
 fn button_code(button: MouseButton) -> Option<u16> {
@@ -360,7 +430,9 @@ mod tests {
     #[test]
     fn sgr_mouse_input_uses_one_based_coordinates() {
         assert_eq!(
-            encode_sgr_mouse_input(
+            encode_mouse_input(
+                MouseFormat::Sgr,
+                MouseTracking::Press,
                 MouseButton::Left,
                 ElementState::Pressed,
                 point(2, 3),
@@ -369,7 +441,9 @@ mod tests {
             Some(b"\x1b[<0;3;4M".to_vec())
         );
         assert_eq!(
-            encode_sgr_mouse_input(
+            encode_mouse_input(
+                MouseFormat::Sgr,
+                MouseTracking::Press,
                 MouseButton::Left,
                 ElementState::Released,
                 point(2, 3),
@@ -382,7 +456,8 @@ mod tests {
     #[test]
     fn sgr_mouse_motion_respects_tracking_mode() {
         assert_eq!(
-            encode_sgr_mouse_motion(
+            encode_mouse_motion(
+                MouseFormat::Sgr,
                 MouseTracking::Press,
                 Some(MouseButton::Left),
                 point(0, 0),
@@ -391,7 +466,8 @@ mod tests {
             None
         );
         assert_eq!(
-            encode_sgr_mouse_motion(
+            encode_mouse_motion(
+                MouseFormat::Sgr,
                 MouseTracking::ButtonMotion,
                 Some(MouseButton::Left),
                 point(0, 0),
@@ -400,7 +476,8 @@ mod tests {
             Some(b"\x1b[<32;1;1M".to_vec())
         );
         assert_eq!(
-            encode_sgr_mouse_motion(
+            encode_mouse_motion(
+                MouseFormat::Sgr,
                 MouseTracking::AnyMotion,
                 None,
                 point(0, 0),
@@ -413,16 +490,297 @@ mod tests {
     #[test]
     fn sgr_mouse_wheel_encodes_vertical_delta() {
         assert_eq!(
-            encode_sgr_mouse_wheel(1.0, point(0, 0), ModifiersState::empty()),
+            encode_mouse_wheel(
+                MouseFormat::Sgr,
+                MouseTracking::Press,
+                1.0,
+                point(0, 0),
+                ModifiersState::empty()
+            ),
             Some(b"\x1b[<64;1;1M".to_vec())
         );
         assert_eq!(
-            encode_sgr_mouse_wheel(-1.0, point(0, 0), ModifiersState::empty()),
+            encode_mouse_wheel(
+                MouseFormat::Sgr,
+                MouseTracking::Press,
+                -1.0,
+                point(0, 0),
+                ModifiersState::empty()
+            ),
             Some(b"\x1b[<65;1;1M".to_vec())
         );
         assert_eq!(
-            encode_sgr_mouse_wheel(0.0, point(0, 0), ModifiersState::empty()),
+            encode_mouse_wheel(
+                MouseFormat::Sgr,
+                MouseTracking::Press,
+                0.0,
+                point(0, 0),
+                ModifiersState::empty()
+            ),
             None
+        );
+    }
+
+    #[test]
+    fn legacy_mouse_input_emits_raw_bytes() {
+        // Press: Cb = 0 + 32, coordinates 1-based + 32.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Legacy,
+                MouseTracking::Press,
+                MouseButton::Left,
+                ElementState::Pressed,
+                point(2, 3),
+                ModifiersState::empty()
+            ),
+            Some(vec![0x1b, b'[', b'M', 32, 35, 36])
+        );
+        // Release: button value 3, modifiers still encoded.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Legacy,
+                MouseTracking::Press,
+                MouseButton::Left,
+                ElementState::Released,
+                point(0, 0),
+                ModifiersState::SHIFT
+            ),
+            Some(vec![0x1b, b'[', b'M', 32 + 3 + 4, 33, 33])
+        );
+        // Middle/right buttons map to Cb 1 and 2.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Legacy,
+                MouseTracking::Press,
+                MouseButton::Right,
+                ElementState::Pressed,
+                point(0, 0),
+                ModifiersState::CONTROL
+            ),
+            Some(vec![0x1b, b'[', b'M', 32 + 2 + 16, 33, 33])
+        );
+    }
+
+    #[test]
+    fn legacy_mouse_motion_and_wheel_share_the_raw_encoding() {
+        assert_eq!(
+            encode_mouse_motion(
+                MouseFormat::Legacy,
+                MouseTracking::ButtonMotion,
+                Some(MouseButton::Left),
+                point(4, 5),
+                ModifiersState::empty()
+            ),
+            Some(vec![0x1b, b'[', b'M', 32 + 32, 37, 38])
+        );
+        assert_eq!(
+            encode_mouse_wheel(
+                MouseFormat::Legacy,
+                MouseTracking::Press,
+                1.0,
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            Some(vec![0x1b, b'[', b'M', 32 + 64, 33, 33])
+        );
+    }
+
+    #[test]
+    fn legacy_mouse_drops_coordinates_past_223() {
+        // Column 223 (0-based 222) is the last representable byte: 255.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Legacy,
+                MouseTracking::Press,
+                MouseButton::Left,
+                ElementState::Pressed,
+                point(222, 0),
+                ModifiersState::empty()
+            ),
+            Some(vec![0x1b, b'[', b'M', 32, 255, 33])
+        );
+        // Column 224 (0-based 223) would overflow a byte: dropped.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Legacy,
+                MouseTracking::Press,
+                MouseButton::Left,
+                ElementState::Pressed,
+                point(223, 0),
+                ModifiersState::empty()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn utf8_mouse_encodes_wide_coordinates_as_two_bytes() {
+        // Coordinates that fit in one byte match the Legacy encoding.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Utf8,
+                MouseTracking::Press,
+                MouseButton::Left,
+                ElementState::Pressed,
+                point(2, 3),
+                ModifiersState::empty()
+            ),
+            Some(vec![0x1b, b'[', b'M', 32, 35, 36])
+        );
+        // Column 300 (0-based 299): 300 + 32 = 332 = U+014C → 0xC5 0x8C.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Utf8,
+                MouseTracking::Press,
+                MouseButton::Left,
+                ElementState::Pressed,
+                point(299, 0),
+                ModifiersState::empty()
+            ),
+            Some(vec![0x1b, b'[', b'M', 32, 0xC5, 0x8C, 33])
+        );
+        // Column 2015 is the two-byte UTF-8 limit (2047 = U+07FF)…
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Utf8,
+                MouseTracking::Press,
+                MouseButton::Left,
+                ElementState::Pressed,
+                point(2014, 0),
+                ModifiersState::empty()
+            ),
+            Some(vec![0x1b, b'[', b'M', 32, 0xDF, 0xBF, 33])
+        );
+        // …and column 2016 is past it: dropped.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Utf8,
+                MouseTracking::Press,
+                MouseButton::Left,
+                ElementState::Pressed,
+                point(2015, 0),
+                ModifiersState::empty()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn urxvt_mouse_uses_decimal_csi_with_unlimited_coordinates() {
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Urxvt,
+                MouseTracking::Press,
+                MouseButton::Left,
+                ElementState::Pressed,
+                point(2, 3),
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[32;3;4M".to_vec())
+        );
+        // Release reports button value 3 with the press final byte.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Urxvt,
+                MouseTracking::Press,
+                MouseButton::Left,
+                ElementState::Released,
+                point(2, 3),
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[35;3;4M".to_vec())
+        );
+        // No coordinate ceiling: columns past the legacy limits still encode.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Urxvt,
+                MouseTracking::Press,
+                MouseButton::Left,
+                ElementState::Pressed,
+                point(2999, 0),
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[32;3000;1M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_motion(
+                MouseFormat::Urxvt,
+                MouseTracking::AnyMotion,
+                None,
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[67;1;1M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_wheel(
+                MouseFormat::Urxvt,
+                MouseTracking::Press,
+                -1.0,
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[97;1;1M".to_vec())
+        );
+    }
+
+    #[test]
+    fn x10_tracking_reports_presses_only_without_modifiers() {
+        // Press: reported, and modifier bits are omitted.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Legacy,
+                MouseTracking::X10,
+                MouseButton::Left,
+                ElementState::Pressed,
+                point(0, 0),
+                ModifiersState::SHIFT | ModifiersState::CONTROL
+            ),
+            Some(vec![0x1b, b'[', b'M', 32, 33, 33])
+        );
+        // Release, motion, and wheel are all suppressed.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Legacy,
+                MouseTracking::X10,
+                MouseButton::Left,
+                ElementState::Released,
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            None
+        );
+        assert_eq!(
+            encode_mouse_motion(
+                MouseFormat::Legacy,
+                MouseTracking::X10,
+                Some(MouseButton::Left),
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            None
+        );
+        assert_eq!(
+            encode_mouse_wheel(
+                MouseFormat::Legacy,
+                MouseTracking::X10,
+                1.0,
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            None
+        );
+        // The format stays orthogonal: X10 presses honor SGR encoding too.
+        assert_eq!(
+            encode_mouse_input(
+                MouseFormat::Sgr,
+                MouseTracking::X10,
+                MouseButton::Left,
+                ElementState::Pressed,
+                point(2, 3),
+                ModifiersState::CONTROL
+            ),
+            Some(b"\x1b[<0;3;4M".to_vec())
         );
     }
 }

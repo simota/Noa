@@ -6,10 +6,34 @@ use std::collections::HashSet;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MouseTracking {
     Off,
+    /// DECSET 9 — X10 compatibility mode: presses only, no modifiers.
+    X10,
     Press,
     ButtonMotion,
     AnyMotion,
 }
+
+/// Coordinate encoding for mouse reports, selected by DECSET 1005/1015/1006.
+///
+/// Orthogonal to [`MouseTracking`]: the tracking mode decides *which* events
+/// are reported, the format decides *how* they are written to the pty.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MouseFormat {
+    /// X10/normal encoding: `ESC [ M` followed by three raw bytes.
+    #[default]
+    Legacy,
+    /// DECSET 1005 — legacy values encoded as UTF-8 code points.
+    Utf8,
+    /// DECSET 1015 — urxvt decimal encoding `CSI Cb ; Cx ; Cy M`.
+    Urxvt,
+    /// DECSET 1006 — SGR encoding `CSI < Cb ; Cx ; Cy M/m`.
+    Sgr,
+}
+
+/// The DEC private mode numbers that select a [`MouseFormat`]. They are
+/// mutually exclusive: the last one set wins (xterm keeps a single
+/// "extended coordinates" slot, not one flag per mode).
+const MOUSE_FORMAT_MODES: [u16; 3] = [1005, 1015, 1006];
 
 #[derive(Clone, Debug, Default)]
 pub struct ModeState {
@@ -26,6 +50,14 @@ impl ModeState {
     }
 
     pub fn set(&mut self, value: u16, ansi: bool, on: bool) {
+        // Mouse-format modes displace each other: setting one clears the
+        // others, and resetting a non-active one leaves the active format
+        // untouched (matching xterm's single extend_coords slot).
+        if on && !ansi && MOUSE_FORMAT_MODES.contains(&value) {
+            for mode in MOUSE_FORMAT_MODES {
+                self.set.remove(&(mode, false));
+            }
+        }
         if on {
             self.set.insert((value, ansi));
         } else {
@@ -62,9 +94,19 @@ impl ModeState {
     pub fn bracketed_paste(&self) -> bool {
         self.get(2004, false)
     }
-    /// DECSET 1006 — SGR extended mouse coordinates.
-    pub fn sgr_mouse(&self) -> bool {
-        self.get(1006, false)
+    /// DECSET 1005/1015/1006 — the active mouse report encoding. At most one
+    /// of the format modes is set at a time (see [`ModeState::set`]), so the
+    /// probe order here is irrelevant.
+    pub fn mouse_format(&self) -> MouseFormat {
+        if self.get(1006, false) {
+            MouseFormat::Sgr
+        } else if self.get(1015, false) {
+            MouseFormat::Urxvt
+        } else if self.get(1005, false) {
+            MouseFormat::Utf8
+        } else {
+            MouseFormat::Legacy
+        }
     }
     /// DECSET 1004 — focus event reporting.
     pub fn focus_reporting(&self) -> bool {
@@ -79,7 +121,7 @@ impl ModeState {
     pub fn grapheme_clustering(&self) -> bool {
         self.get(2027, false)
     }
-    /// DECSET 1000/1002/1003 mouse tracking mode.
+    /// DECSET 9/1000/1002/1003 mouse tracking mode.
     pub fn mouse_tracking(&self) -> MouseTracking {
         if self.get(1003, false) {
             MouseTracking::AnyMotion
@@ -87,13 +129,16 @@ impl ModeState {
             MouseTracking::ButtonMotion
         } else if self.get(1000, false) {
             MouseTracking::Press
+        } else if self.get(9, false) {
+            MouseTracking::X10
         } else {
             MouseTracking::Off
         }
     }
-    /// True when the app can encode mouse events for the pty.
-    pub fn sgr_mouse_reporting(&self) -> bool {
-        self.sgr_mouse() && self.mouse_tracking() != MouseTracking::Off
+    /// True when the app should encode mouse events for the pty. The format
+    /// is always defined (Legacy by default), so only tracking gates this.
+    pub fn mouse_reporting(&self) -> bool {
+        self.mouse_tracking() != MouseTracking::Off
     }
     /// LNM — line-feed/new-line mode (LF also does CR).
     pub fn linefeed_newline(&self) -> bool {

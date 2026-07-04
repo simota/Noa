@@ -226,7 +226,7 @@ impl MacosMenu {
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id(
                     AppCommand::ToggleTabOverview.menu_id(),
-                    "Tab Overview",
+                    "Session Overview",
                     true,
                     Some(cmd_shift_accelerator(Code::KeyO)),
                 ),

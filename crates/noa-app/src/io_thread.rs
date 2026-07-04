@@ -29,7 +29,7 @@ pub(crate) struct IoThreadTarget {
     pub(crate) pane_id: PaneId,
 }
 
-/// Read-only publish channel from `feed_terminal` to the Tab Overview's
+/// Read-only publish channel from `feed_terminal` to the Session Overview's
 /// main-thread render path (Fix B, REQ-NF-6): the overview must never lock
 /// a tab's `Arc<Mutex<Terminal>>` itself, so the io thread — which already
 /// holds that lock on every pty feed — opportunistically drops a

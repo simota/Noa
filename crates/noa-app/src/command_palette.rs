@@ -62,7 +62,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ResizeSplit(Direction::Down) => "Resize Split Down",
         AppCommand::EqualizeSplits => "Equalize Splits",
         AppCommand::ToggleSplitZoom => "Toggle Split Zoom",
-        AppCommand::ToggleTabOverview => "Toggle Tab Overview",
+        AppCommand::ToggleTabOverview => "Toggle Session Overview",
         AppCommand::CloseTab => "Close Tab",
         AppCommand::SelectTab(index) => match index {
             1 => "Go to Tab 1",

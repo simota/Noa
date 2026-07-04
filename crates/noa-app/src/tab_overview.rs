@@ -1,4 +1,4 @@
-//! Pure Tab Overview layout and hit-test math.
+//! Pure Session Overview layout and hit-test math.
 //!
 //! This module deliberately stays independent of windows, terminals, ptys, and
 //! GPU state so overview behavior can be tested without constructing app
@@ -31,7 +31,7 @@ pub const OVERVIEW_OUTER_MARGIN: u32 = 26;
 /// placeholder (REQ-OV-12/REQ-OV-13). Compile-time constant.
 pub const OVERVIEW_TITLE_BAR_H: u32 = 30;
 
-/// Height reserved at the *top* of the Overview window for the "Search tabs"
+/// Height reserved at the *top* of the Overview window for the "Search sessions"
 /// field (REQ-OV-16). v2/P2 only *reserves* this band in the grid-bounds math
 /// so P3's search-field draw doesn't reflow the grid; P2 draws nothing here.
 /// Compile-time constant (⚠G precedent: no config knob).
@@ -83,7 +83,7 @@ pub const OVERVIEW_HINT_BAR_MAX_W: u32 = 460;
 /// edge (REQ-OV-13). Square with the title bar.
 const OVERVIEW_CLOSE_BUTTON_W: u32 = OVERVIEW_TITLE_BAR_H;
 
-/// Pure layout result for the Tab Overview grid.
+/// Pure layout result for the Session Overview grid.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OverviewLayout {
     pub cols: usize,
@@ -131,7 +131,7 @@ pub enum OverviewAction {
 
 /// Resolve an Overview-focused keypress to its [`OverviewAction`], or `None`
 /// if the key isn't part of the Overview keymap (REQ-OV-15) — printable text
-/// for the "Search tabs" field (REQ-OV-16) is handled separately by the
+/// for the "Search sessions" field (REQ-OV-16) is handled separately by the
 /// caller, since it isn't an action but a query edit.
 pub fn overview_key_action(logical_key: &Key, modifiers: ModifiersState) -> Option<OverviewAction> {
     match logical_key {
@@ -212,7 +212,7 @@ pub fn overview_initial_selection<Id: PartialEq>(
 /// Case-insensitive **contiguous substring** filter over tab titles
 /// (REQ-OV-16) — deliberately distinct from
 /// `command_palette::is_subsequence_ci`'s non-contiguous subsequence
-/// semantics; "Search tabs" is a plain substring search, not fuzzy matching.
+/// semantics; "Search sessions" is a plain substring search, not fuzzy matching.
 /// An empty query matches every title.
 pub fn overview_tab_filter<Id: Copy>(query: &str, titles: &[(Id, String)]) -> Vec<Id> {
     let query = query.to_ascii_lowercase();
@@ -244,9 +244,9 @@ pub fn overview_close_hit_test<T: Copy>(tiles: &[(T, TileRect)], point: Point) -
         .map(|(id, _)| *id)
 }
 
-/// Placeholder shown in the "Search tabs" field while the query is empty
+/// Placeholder shown in the "Search sessions" field while the query is empty
 /// (REQ-OV-16). Compile-time constant (⚠G precedent: no config knob).
-pub const OVERVIEW_SEARCH_PLACEHOLDER: &str = "Search tabs";
+pub const OVERVIEW_SEARCH_PLACEHOLDER: &str = "Search sessions";
 
 /// The text to render in the top search field (REQ-OV-16): the live query, or
 /// the [`OVERVIEW_SEARCH_PLACEHOLDER`] when it is empty. Kept pure so the
@@ -329,7 +329,7 @@ pub enum OverviewResourceEvent {
     SurfaceLost,
 }
 
-/// Compute equal-size row-major tile rectangles for the Tab Overview.
+/// Compute equal-size row-major tile rectangles for the Session Overview.
 ///
 /// `cap` is part of the pure seam so tests can exercise the degradation
 /// boundary directly; production uses [`OVERVIEW_GRID_CAP`]. `gutter` is the
@@ -460,7 +460,7 @@ pub fn select_due_overview_tile_ids<Id: Copy>(
 }
 
 /// Outcome of the post-frame dirty-backlog check `redraw_overview` runs
-/// after each Tab Overview frame (Fix A): either an immediate redraw is
+/// after each Session Overview frame (Fix A): either an immediate redraw is
 /// warranted right now, or — if every remaining dirty tile is merely
 /// throttle-blocked — the single instant at which the earliest one becomes
 /// due, so the caller can schedule one delayed wake-up instead of spinning.
@@ -1249,7 +1249,7 @@ mod tests {
 
     #[test]
     fn overview_search_field_row_adds_search_affordance_and_clips() {
-        assert_eq!(overview_search_field_row("", 20), "  ⌕  Search tabs");
+        assert_eq!(overview_search_field_row("", 20), "  ⌕  Search sessions");
         assert_eq!(overview_search_field_row("build", 20), "  ⌕  build");
         assert_eq!(overview_search_field_row("abcdef", 6), "  ⌕  a");
         assert_eq!(overview_search_field_row("build", 0), "");

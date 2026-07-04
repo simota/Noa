@@ -1,4 +1,4 @@
-//! Offscreen thumbnail resources for Tab Overview.
+//! Offscreen thumbnail resources for Session Overview.
 //!
 //! Two pipelines live here. [`BlitPipeline`] downscales a tab's full-resolution
 //! scratch render into a small tile texture (REQ-NF-3). [`CardPipeline`]
@@ -369,7 +369,7 @@ impl CardPipeline {
     }
 
     /// Overlay already-rendered textures as rounded cards without clearing the
-    /// target. The Tab Overview uses this for the centered search and hint
+    /// target. The Session Overview uses this for the centered search and hint
     /// pills after the tile grid has been composited.
     pub fn overlay_texture_cards(
         &self,

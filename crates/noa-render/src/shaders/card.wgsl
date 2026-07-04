@@ -1,4 +1,4 @@
-// Rounded-card composite for the Tab Overview (REQ-OV-12/14, v2 mockup
+// Rounded-card composite for the Session Overview (REQ-OV-12/14, v2 mockup
 // parity). Draws one tile texture as a rounded-corner card with a border /
 // focus ring, sampled over the near-black backdrop the composite pass clears
 // to. One draw call per tile; `rect`/`surface_size` place the quad, and the

@@ -220,7 +220,7 @@ per-crate のシームのみ定義する(コードは書かない)。
 | 31 | `ResizeSplit(Down)` | Resize Split Down | cmd+ctrl+↓ | ✓ |
 | 32 | `EqualizeSplits` | Equalize Splits | cmd+ctrl+= | ✓ |
 | 33 | `ToggleSplitZoom` | Toggle Split Zoom | cmd+shift+enter | ✓ |
-| 34 | `ToggleTabOverview` | Toggle Tab Overview | cmd+shift+o | ✓ |
+| 34 | `ToggleTabOverview` | Toggle Session Overview | cmd+shift+o | ✓ |
 | 35 | `CloseTab` | Close Tab | cmd+w | ✓ |
 | 36 | `SelectTab(1)` | Go to Tab 1 | cmd+1 | — (CUT) |
 | 37 | `SelectTab(2)` | Go to Tab 2 | cmd+2 | — (CUT) |

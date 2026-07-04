@@ -254,7 +254,7 @@ impl FrameSnapshot {
     }
 
     /// Read-only counterpart to [`Self::from_terminal`] — takes `&Terminal`
-    /// and does not consume row damage. This is the Tab Overview mirror's
+    /// and does not consume row damage. This is the Session Overview mirror's
     /// only snapshot source: the overview render path must never lock a
     /// tab's `Terminal` itself (spec REQ-NF-6), so `noa-app`'s io thread
     /// calls this instead while it already holds that lock feeding pty

@@ -341,7 +341,7 @@ struct OverviewWindowState {
     /// selectable too). Reset on every `show_tab_overview` and clamped in
     /// `redraw_overview` as source panes come and go.
     selected: usize,
-    /// The live "Search tabs" filter query (REQ-OV-16). Printable keys append
+    /// The live "Search sessions" filter query (REQ-OV-16). Printable keys append
     /// and Backspace pops while the Overview is focused; the filtered result
     /// set drives every downstream consumer via `App::overview_source_tile_ids`
     /// (redraw, hit-test, nav, Cmd+N, title bars, placeholders). Cleared on
@@ -446,7 +446,7 @@ struct Surface {
     /// `CursorMoved`/`ModifiersChanged` (`App::sync_hover_link`) and fed
     /// into `FrameSnapshot::hover_link` at redraw.
     hover_link: Option<HoverLink>,
-    /// The Tab Overview mirror's read-only publish slot (Fix B, REQ-NF-6):
+    /// The Session Overview mirror's read-only publish slot (Fix B, REQ-NF-6):
     /// this pane's io thread opportunistically drops a fresh
     /// `FrameSnapshot::peek` here whenever it already holds the `Terminal`
     /// lock feeding pty bytes in and the overview is visible (see
@@ -551,7 +551,7 @@ fn quick_terminal_height(screen_height: u32, size: f32) -> u32 {
     raw.clamp(1, screen_height.max(1))
 }
 
-/// Compile-time card styling for the Tab Overview composite (REQ-OV-12/14, v2
+/// Compile-time card styling for the Session Overview composite (REQ-OV-12/14, v2
 /// mockup parity; ⚠G: no config knob). Bundles the `tab_overview` color/metric
 /// constants into the `noa-render` [`CardStyle`] carrier.
 const OVERVIEW_CARD_STYLE: CardStyle = CardStyle {
@@ -615,7 +615,7 @@ pub struct App {
     /// single atomic load instead of touching app state (Fix B, REQ-NF-6).
     /// Kept in lockstep with `overview_visible` at every write site.
     overview_visible_gate: Arc<AtomicBool>,
-    /// Next scheduled Tab Overview wake-up, set by `redraw_overview`'s
+    /// Next scheduled Session Overview wake-up, set by `redraw_overview`'s
     /// post-frame backlog check (Fix A) when every remaining dirty tile is
     /// merely throttle-blocked rather than due right now. Consumed by
     /// `tick_overview_backlog`, which piggybacks on the cursor-blink
@@ -963,7 +963,7 @@ impl App {
         Some(next)
     }
 
-    /// Wake the Tab Overview once the earliest throttle-blocked dirty tile
+    /// Wake the Session Overview once the earliest throttle-blocked dirty tile
     /// becomes due, instead of `redraw_overview` re-requesting a redraw
     /// every pass while `should_render_tile` keeps rejecting it until
     /// `OVERVIEW_TILE_MIN_RENDER_INTERVAL` has elapsed (Fix A — see
@@ -1368,7 +1368,7 @@ impl App {
 
     fn overview_window_attributes(&self) -> WindowAttributes {
         WindowAttributes::default()
-            .with_title("Tab Overview")
+            .with_title("Session Overview")
             .with_inner_size(LogicalSize::new(900.0, 600.0))
     }
 
@@ -1910,7 +1910,7 @@ impl App {
             let window = Arc::new(
                 event_loop
                     .create_window(self.overview_window_attributes())
-                    .expect("failed to create Tab Overview window"),
+                    .expect("failed to create Session Overview window"),
             );
             window.set_ime_allowed(false);
 
@@ -2405,7 +2405,7 @@ impl App {
         thumbnails.stamp_title_band(&gpu.device, &gpu.queue, tile_index);
     }
 
-    /// Render the top "Search tabs" field (REQ-OV-16) into a fresh pill-sized
+    /// Render the top "Search sessions" field (REQ-OV-16) into a fresh pill-sized
     /// texture and return it for compositing into the reserved top search band.
     /// Shows the live query, or the placeholder while it is empty. `None` when
     /// there is no usable search band (a window too short to reserve one).
@@ -2673,7 +2673,7 @@ impl App {
         .into_iter()
         .map(|(window_id, pane_id)| OverviewTileId::new(window_id, pane_id))
         .collect::<Vec<_>>();
-        // REQ-OV-16: the "Search tabs" filter narrows the source set here, the
+        // REQ-OV-16: the "Search sessions" filter narrows the source set here, the
         // single seam every downstream consumer (redraw / hit-test / nav /
         // Cmd+N / title bars / placeholders) reads, so the whole Overview sees
         // one filtered order. An empty query is the identity (short-circuited
@@ -2865,7 +2865,7 @@ impl App {
             }
             return;
         }
-        // Printable text / Backspace edits the "Search tabs" query (REQ-OV-16),
+        // Printable text / Backspace edits the "Search sessions" query (REQ-OV-16),
         // slotted after the Overview action keymap (arrows/Return/Esc/Cmd+N win)
         // and before the normal keybind fallthrough. Nothing here reaches a pty
         // (REQ-OV-7).
@@ -2892,7 +2892,7 @@ impl App {
         }
     }
 
-    /// Apply a printable-text append or Backspace pop to the "Search tabs"
+    /// Apply a printable-text append or Backspace pop to the "Search sessions"
     /// query (REQ-OV-16). Returns `true` when the key was consumed as a query
     /// edit. Cmd/Ctrl/Alt combos are not swallowed here (they fall through to
     /// the keybind path, mirroring the command palette's Cmd-swallow), so e.g.

@@ -169,7 +169,9 @@ pub struct Renderer {
     clear_color: [f32; 4],
     target_format: wgpu::TextureFormat,
     target_format_is_srgb: bool,
+    mask_atlas_seen_identity: u64,
     mask_atlas_seen_generation: u64,
+    color_atlas_seen_identity: u64,
     color_atlas_seen_generation: u64,
     /// Per-pane row-instance cache for dirty-row diffing (WP4), keyed by the
     /// pane's stable render-side identity so it survives split reordering
@@ -217,6 +219,7 @@ impl Renderer {
             mask_h,
             MASK_BYTES_PER_PX,
         );
+        let mask_atlas_seen_identity = font.atlas_identity();
         let mask_atlas_seen_generation = font.mask_atlas_generation();
 
         // RGBA8Unorm (not sRGB) — the color bitmap is sampled verbatim as
@@ -239,6 +242,7 @@ impl Renderer {
             color_h,
             COLOR_BYTES_PER_PX,
         );
+        let color_atlas_seen_identity = font.atlas_identity();
         let color_atlas_seen_generation = font.color_atlas_generation();
 
         let instance_capacity = 4096;
@@ -274,7 +278,9 @@ impl Renderer {
             clear_color: [0.0, 0.0, 0.0, 1.0],
             target_format: format,
             target_format_is_srgb: format.is_srgb(),
+            mask_atlas_seen_identity,
             mask_atlas_seen_generation,
+            color_atlas_seen_identity,
             color_atlas_seen_generation,
             pane_render_cache: HashMap::new(),
             rows_rebuilt_last_frame: 0,
@@ -621,10 +627,12 @@ impl Renderer {
             queue,
             &mut self.mask_atlas_texture,
             &mut self.mask_atlas_view,
+            &mut self.mask_atlas_seen_identity,
             &mut self.mask_atlas_seen_generation,
             AtlasSyncInput {
                 data: font.mask_atlas_data(),
                 size: font.mask_atlas_size(),
+                identity: font.atlas_identity(),
                 generation: font.mask_atlas_generation(),
                 format: wgpu::TextureFormat::R8Unorm,
                 bytes_per_px: MASK_BYTES_PER_PX,
@@ -636,10 +644,12 @@ impl Renderer {
             queue,
             &mut self.color_atlas_texture,
             &mut self.color_atlas_view,
+            &mut self.color_atlas_seen_identity,
             &mut self.color_atlas_seen_generation,
             AtlasSyncInput {
                 data: font.color_atlas_data(),
                 size: font.color_atlas_size(),
+                identity: font.atlas_identity(),
                 generation: font.color_atlas_generation(),
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 bytes_per_px: COLOR_BYTES_PER_PX,
@@ -2576,6 +2586,7 @@ fn create_atlas_texture(
 struct AtlasSyncInput<'a> {
     data: &'a [u8],
     size: (u32, u32),
+    identity: u64,
     generation: u64,
     format: wgpu::TextureFormat,
     bytes_per_px: u32,
@@ -2594,10 +2605,14 @@ fn sync_one_atlas(
     queue: &wgpu::Queue,
     texture: &mut wgpu::Texture,
     view: &mut wgpu::TextureView,
+    seen_identity: &mut u64,
     seen_generation: &mut u64,
     input: AtlasSyncInput<'_>,
 ) -> bool {
-    if input.generation == *seen_generation {
+    if input.identity == *seen_identity
+        && input.generation == *seen_generation
+        && input.size == (texture.width(), texture.height())
+    {
         return false;
     }
     let (w, h) = input.size;
@@ -2608,6 +2623,7 @@ fn sync_one_atlas(
         recreated = true;
     }
     upload_atlas(queue, texture, input.data, w, h, input.bytes_per_px);
+    *seen_identity = input.identity;
     *seen_generation = input.generation;
     recreated
 }
@@ -2618,6 +2634,7 @@ mod tests {
     use noa_core::{Color, GridSize, Rgb};
     use noa_font::{FontConfig, ShapeCell, StyleKey};
     use noa_grid::{Cell, Cursor, SearchMatch, SelectionPoint, Terminal};
+    use noa_vt::Stream;
 
     use crate::segment::CellRenderInfo;
 
@@ -2648,6 +2665,55 @@ mod tests {
         }))
         .ok()?;
         Some((device, queue))
+    }
+
+    #[test]
+    fn sync_atlas_uploads_rebuilt_font_grid_even_when_generation_restarts() {
+        let Some((device, queue)) = device_queue() else {
+            eprintln!("no wgpu adapter available — skipping rebuilt FontGrid atlas sync test");
+            return;
+        };
+        let Some(mut first_font) = skip_font() else {
+            return;
+        };
+        let mut renderer = Renderer::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Bgra8Unorm,
+            &mut first_font,
+            GridPadding::ZERO,
+        )
+        .expect("build renderer");
+        let first_identity = first_font.atlas_identity();
+        assert_eq!(renderer.mask_atlas_seen_identity, first_identity);
+        assert_eq!(renderer.color_atlas_seen_identity, first_identity);
+
+        let mut rebuilt_font = match FontGrid::new(14.0, FontConfig::default()) {
+            Ok(font) => font,
+            Err(err) => {
+                eprintln!("skipping: no system monospace font available: {err}");
+                return;
+            }
+        };
+        assert_ne!(rebuilt_font.atlas_identity(), first_identity);
+        assert_eq!(
+            rebuilt_font.mask_atlas_generation(),
+            renderer.mask_atlas_seen_generation(),
+            "the regression requires a fresh FontGrid whose atlas generation restarts"
+        );
+
+        renderer.sync_atlas(&device, &queue, &mut rebuilt_font);
+
+        assert_eq!(
+            renderer.mask_atlas_seen_identity,
+            rebuilt_font.atlas_identity(),
+            "mask atlas sync must not skip a rebuilt FontGrid just because generation matches"
+        );
+        assert_eq!(
+            renderer.color_atlas_seen_identity,
+            rebuilt_font.atlas_identity(),
+            "color atlas sync must not skip a rebuilt FontGrid just because generation matches"
+        );
     }
 
     #[test]

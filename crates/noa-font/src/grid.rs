@@ -2,6 +2,7 @@
 //! packing together behind a per-`char` cache.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use etagere::AllocId;
 use swash::FontRef;
@@ -23,6 +24,11 @@ const COLOR_BYTES_PER_PX: u32 = 4;
 /// `shape_run` evicts the least-recently-used entry before inserting a new
 /// one (LRU), mirroring the glyph atlas's own eviction policy.
 const SHAPE_CACHE_CAP: usize = 8192;
+static NEXT_ATLAS_IDENTITY: AtomicU64 = AtomicU64::new(1);
+
+fn next_atlas_identity() -> u64 {
+    NEXT_ATLAS_IDENTITY.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Which of the two atlases a packed glyph lives in — so eviction only frees
 /// space from the atlas that is actually full.
@@ -84,6 +90,10 @@ pub struct FontGrid {
     metrics: Metrics,
     mask_atlas: Atlas,
     color_atlas: Atlas,
+    /// Stable identity for this pair of atlas buffers. Atlas generation values
+    /// restart at zero when a `FontGrid` is rebuilt; renderers use this id to
+    /// distinguish a brand-new empty atlas from an already-uploaded old one.
+    atlas_identity: u64,
     cache: HashMap<GlyphKey, Cached>,
     px_size: f32,
     /// The config this grid was built with (WP0); `shape_run`/`raster_shaped`
@@ -130,6 +140,7 @@ impl FontGrid {
             metrics,
             mask_atlas: Atlas::new(ATLAS_DIM, ATLAS_DIM, MASK_BYTES_PER_PX),
             color_atlas: Atlas::new(ATLAS_DIM, ATLAS_DIM, COLOR_BYTES_PER_PX),
+            atlas_identity: next_atlas_identity(),
             cache: HashMap::new(),
             px_size,
             font_cfg,
@@ -163,6 +174,7 @@ impl FontGrid {
             metrics,
             mask_atlas: Atlas::with_max_dim(dim, dim, MASK_BYTES_PER_PX, dim),
             color_atlas: Atlas::with_max_dim(dim, dim, COLOR_BYTES_PER_PX, dim),
+            atlas_identity: next_atlas_identity(),
             cache: HashMap::new(),
             px_size,
             font_cfg,
@@ -423,6 +435,12 @@ impl FontGrid {
     /// Monotonic color atlas mutation generation.
     pub fn color_atlas_generation(&self) -> u64 {
         self.color_atlas.generation()
+    }
+
+    /// Identity of this pair of atlas buffers. Unlike atlas generations, this
+    /// changes whenever a new `FontGrid` is constructed.
+    pub fn atlas_identity(&self) -> u64 {
+        self.atlas_identity
     }
 
     /// Monotonic generation bumped whenever a glyph atlas slot is evicted.

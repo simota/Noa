@@ -103,6 +103,9 @@ fn app_config_from_startup(
         scrollback_limit: config.scrollback_limit,
         window_save_state: config.window_save_state,
         cli_grid_override,
+        quick_terminal_hotkey: config.quick_terminal_hotkey,
+        quick_terminal_size: config.quick_terminal_size,
+        quick_terminal_autohide: config.quick_terminal_autohide,
     }
 }
 

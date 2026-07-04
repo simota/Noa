@@ -30,6 +30,7 @@ pub enum AppCommand {
     CloseWindow,
     Quit,
     ToggleCommandPalette,
+    ToggleQuickTerminal,
 }
 
 /// Terminal-state commands handled by noa instead of sending escape bytes.
@@ -117,6 +118,7 @@ impl AppCommand {
     pub(crate) const QUIT_MENU_ID: &'static str = "noa.app.quit";
     pub(crate) const TOGGLE_COMMAND_PALETTE_MENU_ID: &'static str =
         "noa.view.toggle-command-palette";
+    pub(crate) const TOGGLE_QUICK_TERMINAL_MENU_ID: &'static str = "noa.view.toggle-quick-terminal";
 
     pub(crate) fn menu_id(self) -> &'static str {
         match self {
@@ -170,6 +172,7 @@ impl AppCommand {
             AppCommand::CloseWindow => Self::CLOSE_WINDOW_MENU_ID,
             AppCommand::Quit => Self::QUIT_MENU_ID,
             AppCommand::ToggleCommandPalette => Self::TOGGLE_COMMAND_PALETTE_MENU_ID,
+            AppCommand::ToggleQuickTerminal => Self::TOGGLE_QUICK_TERMINAL_MENU_ID,
         }
     }
 
@@ -224,6 +227,7 @@ impl AppCommand {
             Self::CLOSE_WINDOW_MENU_ID => Some(Self::CloseWindow),
             Self::QUIT_MENU_ID => Some(Self::Quit),
             Self::TOGGLE_COMMAND_PALETTE_MENU_ID => Some(Self::ToggleCommandPalette),
+            Self::TOGGLE_QUICK_TERMINAL_MENU_ID => Some(Self::ToggleQuickTerminal),
             _ => None,
         }
     }
@@ -298,6 +302,7 @@ impl AppCommand {
             Self::CloseWindow => "window.close",
             Self::Quit => "app.quit",
             Self::ToggleCommandPalette => "command-palette.toggle",
+            Self::ToggleQuickTerminal => "quick-terminal.toggle",
         }
     }
 
@@ -355,6 +360,7 @@ impl AppCommand {
             "window.close" => Some(Self::CloseWindow),
             "app.quit" => Some(Self::Quit),
             "command-palette.toggle" => Some(Self::ToggleCommandPalette),
+            "quick-terminal.toggle" => Some(Self::ToggleQuickTerminal),
             _ => None,
         }
     }

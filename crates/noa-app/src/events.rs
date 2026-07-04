@@ -32,6 +32,10 @@ pub enum UserEvent {
         title: Option<String>,
         body: String,
     },
+    /// The global quick-terminal hotkey fired (posted from the Carbon hotkey
+    /// handler thread via the [`winit::event_loop::EventLoopProxy`]). Toggles
+    /// the drop-down quick terminal's visibility.
+    ToggleQuickTerminal,
     /// New terminal output is available; request a redraw.
     Redraw(WindowId, PaneId),
     /// The pty's child process exited (or errored) — the app should close.

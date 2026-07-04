@@ -112,6 +112,14 @@ pub struct AppConfig {
     /// `--rows`). Session restore is suppressed in that case so the requested
     /// dimensions win over the saved topology (Ghostty parity).
     pub cli_grid_override: bool,
+    /// `quick-terminal-hotkey`: the global hotkey chord toggling the drop-down
+    /// quick terminal (e.g. `cmd+grave`). `None` leaves the feature disabled.
+    pub quick_terminal_hotkey: Option<String>,
+    /// `quick-terminal-size`: the quick terminal's height as a fraction of the
+    /// screen height (`0.1..=1.0`).
+    pub quick_terminal_size: f32,
+    /// `quick-terminal-autohide`: hide the quick terminal when it loses focus.
+    pub quick_terminal_autohide: bool,
 }
 
 /// Maps the parsed `noa-config` font settings onto the `noa-font` runtime
@@ -421,6 +429,66 @@ impl Surface {
 /// (Ghostty/iTerm2 ballpark); not user-configurable yet.
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
+/// How long the quick terminal takes to slide fully in or out.
+const QUICK_TERMINAL_SLIDE_DURATION: Duration = Duration::from_millis(200);
+/// The quick terminal repaints/repositions at roughly this cadence while
+/// sliding (≈60 fps), driven off the `about_to_wait` `WaitUntil` timer.
+const QUICK_TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Runtime state for the drop-down quick terminal. The window itself is a
+/// normal [`WindowState`] entry in `App::windows`; this tracks the slide
+/// geometry (physical px, relative to the target monitor) and animation.
+struct QuickTerminalState {
+    window_id: WindowId,
+    /// Left edge of the panel (monitor origin x).
+    origin_x: i32,
+    /// The monitor's top edge — the panel's fully-revealed top.
+    top_y: i32,
+    /// Panel width and height in physical pixels.
+    width: u32,
+    height: u32,
+    /// Whether the panel is revealed (or animating toward revealed). When
+    /// `false` and `anim` is `None`, the window is hidden.
+    visible: bool,
+    /// The in-flight slide, if any.
+    anim: Option<QuickTerminalAnim>,
+}
+
+/// One in-flight quick-terminal slide.
+struct QuickTerminalAnim {
+    start: Instant,
+    /// `true` while sliding in (revealing), `false` while sliding out (hiding).
+    revealing: bool,
+}
+
+/// Cubic ease-out (fast start, gentle stop) for the quick-terminal slide.
+fn ease_out_cubic(t: f32) -> f32 {
+    let inv = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - inv * inv * inv
+}
+
+/// The panel's top edge in physical px relative to the monitor top, for a
+/// slide `progress` in `0.0..=1.0` (0 = fully hidden above the screen, 1 =
+/// fully revealed). `height` is the panel height in px.
+fn quick_terminal_top_offset(height: f32, progress: f32) -> f32 {
+    -height * (1.0 - ease_out_cubic(progress))
+}
+
+/// Linear slide progress (`0.0..=1.0`) for `elapsed` of `duration`.
+fn quick_terminal_progress(elapsed: Duration, duration: Duration) -> f32 {
+    if duration.is_zero() {
+        return 1.0;
+    }
+    (elapsed.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
+}
+
+/// The panel height in physical px for a screen `screen_height` px tall and a
+/// `size` fraction, clamped to at least one row's worth of pixels.
+fn quick_terminal_height(screen_height: u32, size: f32) -> u32 {
+    let raw = (screen_height as f32 * size.clamp(0.05, 1.0)).round() as u32;
+    raw.clamp(1, screen_height.max(1))
+}
+
 /// Compile-time card styling for the Tab Overview composite (REQ-OV-12/14, v2
 /// mockup parity; ⚠G: no config knob). Bundles the `tab_overview` color/metric
 /// constants into the `noa-render` [`CardStyle`] carrier.
@@ -500,6 +568,20 @@ pub struct App {
     /// `persist_session` calls don't write half-built intermediate sessions
     /// back to disk.
     restoring: bool,
+    /// The drop-down quick terminal, if it has ever been opened. Its window
+    /// lives in `windows` (so it reuses the whole redraw/input/resize path)
+    /// but is deliberately kept out of `window_order`, so it is excluded from
+    /// session capture and the tab select/cycle collections — mirroring the
+    /// `overview_window` precedent for a non-tab auxiliary window.
+    quick_terminal: Option<QuickTerminalState>,
+    /// The registered global quick-terminal hotkey, kept alive for the app's
+    /// lifetime (dropping it unregisters). `None` until installed, or when no
+    /// `quick-terminal-hotkey` is configured / registration failed.
+    quick_terminal_hotkey: Option<crate::macos_hotkey::GlobalHotKey>,
+    /// Guards global-hotkey registration to a single attempt (it needs a
+    /// running NSApplication, so it happens lazily in `about_to_wait`, like
+    /// the native menu).
+    hotkey_install_attempted: bool,
 }
 
 impl App {
@@ -536,6 +618,9 @@ impl App {
             confirm_dialog: None,
             session_restore_attempted: false,
             restoring: false,
+            quick_terminal: None,
+            quick_terminal_hotkey: None,
+            hotkey_install_attempted: false,
         }
     }
 
@@ -879,6 +964,7 @@ impl App {
             AppCommand::Search(action) => self.handle_search_action(action),
             AppCommand::ScrollViewport(scroll) => self.scroll_viewport(scroll),
             AppCommand::ToggleCommandPalette => self.toggle_command_palette(),
+            AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             AppCommand::CloseWindow => self.close_window(event_loop),
             AppCommand::Quit => event_loop.exit(),
         }
@@ -3185,6 +3271,306 @@ fn capture_window_frame(window: &Window) -> session::WindowFrame {
     }
 }
 
+/// Quick terminal (drop-down) support.
+impl App {
+    fn is_quick_terminal_window(&self, window_id: WindowId) -> bool {
+        self.quick_terminal
+            .as_ref()
+            .is_some_and(|qt| qt.window_id == window_id)
+    }
+
+    /// Register the global `quick-terminal-hotkey` once, after the app is
+    /// running. A no-op when unset, already attempted, or registration failed
+    /// (the failure is logged, not fatal).
+    fn install_global_hotkey_if_needed(&mut self) {
+        if self.hotkey_install_attempted {
+            return;
+        }
+        self.hotkey_install_attempted = true;
+        let Some(spec) = self.config.quick_terminal_hotkey.clone() else {
+            return;
+        };
+        match crate::macos_hotkey::GlobalHotKey::register(&spec, self.proxy.clone()) {
+            Some(hotkey) => self.quick_terminal_hotkey = Some(hotkey),
+            None => log::warn!("failed to register quick-terminal-hotkey `{spec}`"),
+        }
+    }
+
+    /// Toggle the quick terminal: reveal it (creating its window on first use)
+    /// when hidden, slide it away when shown. A no-op before the GPU exists
+    /// (i.e. before the first real window), which also means it can't be the
+    /// app's only window.
+    fn toggle_quick_terminal(&mut self, event_loop: &ActiveEventLoop) {
+        if self.gpu.is_none() {
+            return;
+        }
+        match self.quick_terminal.as_ref() {
+            Some(qt) if qt.visible => self.start_quick_terminal_hide(),
+            _ => self.start_quick_terminal_show(event_loop),
+        }
+    }
+
+    /// The target monitor's origin and the panel's full-width × fractional-
+    /// height footprint, all in physical pixels.
+    fn quick_terminal_geometry(
+        &self,
+        event_loop: &ActiveEventLoop,
+    ) -> Option<(i32, i32, u32, u32)> {
+        let monitor = event_loop
+            .primary_monitor()
+            .or_else(|| self.focused_window().and_then(|window| window.current_monitor()))?;
+        let position = monitor.position();
+        let size = monitor.size();
+        let height = quick_terminal_height(size.height, self.config.quick_terminal_size);
+        Some((position.x, position.y, size.width, height))
+    }
+
+    fn start_quick_terminal_show(&mut self, event_loop: &ActiveEventLoop) {
+        let Some((origin_x, top_y, width, height)) = self.quick_terminal_geometry(event_loop)
+        else {
+            return;
+        };
+        if self.quick_terminal.is_none() {
+            let Some(window_id) =
+                self.create_quick_terminal(event_loop, origin_x, top_y, width, height)
+            else {
+                return;
+            };
+            self.quick_terminal = Some(QuickTerminalState {
+                window_id,
+                origin_x,
+                top_y,
+                width,
+                height,
+                visible: false,
+                anim: None,
+            });
+        } else if let Some(qt) = self.quick_terminal.as_mut() {
+            // Re-derive geometry each open: the active monitor (or its
+            // resolution) may have changed since last time.
+            qt.origin_x = origin_x;
+            qt.top_y = top_y;
+            qt.width = width;
+            qt.height = height;
+            if let Some(state) = self.windows.get(&qt.window_id) {
+                let _ = state
+                    .window
+                    .request_inner_size(PhysicalSize::new(width, height));
+            }
+        }
+
+        let Some(qt) = self.quick_terminal.as_mut() else {
+            return;
+        };
+        qt.visible = true;
+        qt.anim = Some(QuickTerminalAnim {
+            start: Instant::now(),
+            revealing: true,
+        });
+        let window_id = qt.window_id;
+        let hidden_top = top_y + quick_terminal_top_offset(height as f32, 0.0).round() as i32;
+        if let Some(state) = self.windows.get(&window_id) {
+            state
+                .window
+                .set_outer_position(PhysicalPosition::new(origin_x, hidden_top));
+            state.window.set_visible(true);
+            state.window.focus_window();
+            state.window.request_redraw();
+        }
+        self.focused = Some(window_id);
+    }
+
+    fn start_quick_terminal_hide(&mut self) {
+        let Some(qt) = self.quick_terminal.as_mut() else {
+            return;
+        };
+        let already_hiding = !qt.visible && qt.anim.as_ref().is_some_and(|anim| !anim.revealing);
+        if already_hiding {
+            return;
+        }
+        qt.visible = false;
+        qt.anim = Some(QuickTerminalAnim {
+            start: Instant::now(),
+            revealing: false,
+        });
+        let window_id = qt.window_id;
+        if let Some(state) = self.windows.get(&window_id) {
+            state.window.request_redraw();
+        }
+    }
+
+    /// Hide the quick terminal when it loses focus, if `quick-terminal-autohide`
+    /// is enabled. Called from the window's `Focused(false)` event.
+    fn maybe_autohide_quick_terminal(&mut self) {
+        if !self.config.quick_terminal_autohide {
+            return;
+        }
+        if self.quick_terminal.as_ref().is_some_and(|qt| qt.visible) {
+            self.start_quick_terminal_hide();
+        }
+    }
+
+    /// Advance the slide, repositioning the window each frame. Reports the next
+    /// wake instant while animating (folded into `about_to_wait`'s deadline),
+    /// and `None` once the slide settles — hiding the window on a completed
+    /// slide-out.
+    fn tick_quick_terminal(&mut self) -> Option<Instant> {
+        let (window_id, origin_x, top_y, height, start, revealing) = {
+            let qt = self.quick_terminal.as_ref()?;
+            let anim = qt.anim.as_ref()?;
+            (
+                qt.window_id,
+                qt.origin_x,
+                qt.top_y,
+                qt.height,
+                anim.start,
+                anim.revealing,
+            )
+        };
+        let now = Instant::now();
+        let progress =
+            quick_terminal_progress(now.duration_since(start), QUICK_TERMINAL_SLIDE_DURATION);
+        let reveal = if revealing { progress } else { 1.0 - progress };
+        let top = top_y + quick_terminal_top_offset(height as f32, reveal).round() as i32;
+        if let Some(state) = self.windows.get(&window_id) {
+            state
+                .window
+                .set_outer_position(PhysicalPosition::new(origin_x, top));
+            state.window.request_redraw();
+        }
+        if progress >= 1.0 {
+            if let Some(qt) = self.quick_terminal.as_mut() {
+                qt.anim = None;
+            }
+            if !revealing && let Some(state) = self.windows.get(&window_id) {
+                state.window.set_visible(false);
+            }
+            return None;
+        }
+        Some(now + QUICK_TERMINAL_FRAME_INTERVAL)
+    }
+
+    /// Tear down the quick terminal outright (its shell exited). Unlike hide,
+    /// this drops the window and io thread so a fresh one is spawned next open.
+    fn destroy_quick_terminal(&mut self) {
+        let Some(qt) = self.quick_terminal.take() else {
+            return;
+        };
+        if let Some(mut state) = self.windows.remove(&qt.window_id) {
+            state.shutdown();
+        }
+        if self.focused == Some(qt.window_id) {
+            self.focused = self.window_order.last().copied();
+            if let Some(window_id) = self.focused
+                && let Some(state) = self.windows.get(&window_id)
+            {
+                state.window.focus_window();
+            }
+        }
+    }
+
+    /// Build the quick-terminal window + its single pane, inserting it into
+    /// `windows` (but deliberately not `window_order`). Assumes the GPU is
+    /// already initialized (guaranteed by `toggle_quick_terminal`).
+    fn create_quick_terminal(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        origin_x: i32,
+        top_y: i32,
+        width: u32,
+        height: u32,
+    ) -> Option<WindowId> {
+        let attrs = WindowAttributes::default()
+            .with_title("Quick Terminal")
+            .with_decorations(false)
+            .with_inner_size(PhysicalSize::new(width, height))
+            .with_position(PhysicalPosition::new(origin_x, top_y - height as i32))
+            .with_transparent(self.config.background_opacity < 1.0);
+        let window = Arc::new(event_loop.create_window(attrs).ok()?);
+        window.set_ime_allowed(true);
+        crate::macos_blur::apply_background_blur(
+            &window,
+            self.config.background_blur_radius,
+            self.config.background_opacity,
+        );
+        crate::macos_window::configure_quick_terminal_window(&window);
+
+        let surface = {
+            let gpu = self.gpu.as_ref()?;
+            gpu.instance.create_surface(window.clone()).ok()?
+        };
+        let (surface_config, renderer) = {
+            let gpu = self.gpu.as_mut()?;
+            let caps = surface.get_capabilities(&gpu.adapter);
+            let surface_format = preferred_surface_format(&caps.formats);
+            let size = window.inner_size();
+            let surface_config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: surface_format,
+                width: size.width.max(1),
+                height: size.height.max(1),
+                present_mode: wgpu::PresentMode::Fifo,
+                desired_maximum_frame_latency: 2,
+                alpha_mode: preferred_surface_alpha_mode(
+                    &caps,
+                    self.config.background_opacity < 1.0,
+                ),
+                view_formats: vec![],
+            };
+            surface.configure(&gpu.device, &surface_config);
+            let mut renderer = Renderer::new(
+                &gpu.device,
+                &gpu.queue,
+                surface_format,
+                &mut gpu.font,
+                self.padding,
+            )
+            .ok()?;
+            renderer.set_background_opacity(self.config.background_opacity);
+            renderer.resize(PixelSize {
+                w: surface_config.width,
+                h: surface_config.height,
+            });
+            (surface_config, renderer)
+        };
+
+        let window_id = window.id();
+        let initial_pane = PaneId::new(1);
+        let initial_rect = PaneRectApp::new(0, 0, surface_config.width, surface_config.height);
+        let metrics = self.gpu.as_ref()?.font.metrics();
+        let grid = grid_size_for_pane_rect(initial_rect, metrics, self.padding);
+        let initial_surface = self
+            .spawn_pane_surface(window_id, initial_pane, grid, initial_rect, None)
+            .ok()?;
+        let mut surfaces = HashMap::new();
+        surfaces.insert(initial_pane, initial_surface);
+        let group = self.allocate_group_id();
+        self.windows.insert(
+            window_id,
+            WindowState {
+                window,
+                group,
+                surface,
+                surface_config,
+                renderer,
+                split_tree: SplitTree::leaf(initial_pane),
+                zoomed: None,
+                focused_pane: initial_pane,
+                next_pane_id: 2,
+                surfaces,
+                last_mouse_pane: Some(initial_pane),
+                last_mouse_point: None,
+                active_split_drag: None,
+                occluded: false,
+                title: "noa".to_string(),
+                link_click_in_flight: false,
+            },
+        );
+        self.relayout_and_resize_window(window_id);
+        Some(window_id)
+    }
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if !self.windows.is_empty() {
@@ -3212,6 +3598,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::AppCommand(command) => self.handle_app_command(event_loop, command),
+            UserEvent::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             UserEvent::ClipboardWrite {
                 window_id,
                 pane_id,
@@ -3290,7 +3677,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::PtyExit(window_id, pane_id) => {
-                self.close_pane_after_pty_exit(event_loop, window_id, pane_id)
+                // The quick terminal isn't a saved/tabbed window, so its shell
+                // exiting tears the whole drop-down down rather than routing
+                // through the tab-close path (which walks `window_order`).
+                if self.is_quick_terminal_window(window_id) {
+                    self.destroy_quick_terminal();
+                } else {
+                    self.close_pane_after_pty_exit(event_loop, window_id, pane_id)
+                }
             }
         }
     }
@@ -3310,6 +3704,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         match event {
+            WindowEvent::CloseRequested if self.is_quick_terminal_window(window_id) => {
+                // Closing the drop-down just hides it; it isn't a real tab.
+                self.start_quick_terminal_hide();
+            }
             WindowEvent::CloseRequested => self.close_tab(event_loop, window_id),
             WindowEvent::RedrawRequested => self.redraw(window_id),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -3323,6 +3721,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(false) => {
                 self.finish_active_split_drag(window_id);
                 self.report_focus_event(window_id, false);
+                if self.is_quick_terminal_window(window_id) {
+                    self.maybe_autohide_quick_terminal();
+                }
             }
             WindowEvent::Occluded(occluded) => {
                 if let Some(state) = self.windows.get_mut(&window_id) {
@@ -3447,17 +3848,18 @@ impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
         self.install_macos_menu_if_needed();
-        // Both ticks report their own next wake-up instead of setting
+        self.install_global_hotkey_if_needed();
+        // Each tick reports its own next wake-up instead of setting
         // `ControlFlow` directly, so a `WaitUntil` from one can't clobber a
-        // more urgent one from the other — this pass sets it exactly once,
-        // at the earliest of the two.
+        // more urgent one from the others — this pass sets it exactly once,
+        // at the earliest across them.
         let blink_deadline = self.tick_cursor_blink();
         let overview_deadline = self.tick_overview_backlog();
-        let deadline = match (blink_deadline, overview_deadline) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
-            (None, None) => None,
-        };
+        let quick_terminal_deadline = self.tick_quick_terminal();
+        let deadline = [blink_deadline, overview_deadline, quick_terminal_deadline]
+            .into_iter()
+            .flatten()
+            .min();
         event_loop.set_control_flow(match deadline {
             Some(deadline) => ControlFlow::WaitUntil(deadline),
             None => ControlFlow::Wait,
@@ -5145,6 +5547,7 @@ fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::NewTab
         | AppCommand::NewWindow
         | AppCommand::ToggleCommandPalette
+        | AppCommand::ToggleQuickTerminal
         | AppCommand::CloseWindow
         | AppCommand::Quit => CommandScope::App,
     }
@@ -5177,7 +5580,10 @@ fn command_palette_snapshot(
 fn overview_command_scope(command: AppCommand) -> CommandScope {
     match command {
         AppCommand::ToggleTabOverview => CommandScope::NativeTabGroup,
-        AppCommand::About | AppCommand::Preferences | AppCommand::Quit => CommandScope::App,
+        AppCommand::About
+        | AppCommand::Preferences
+        | AppCommand::Quit
+        | AppCommand::ToggleQuickTerminal => CommandScope::App,
         // The palette does not open while the overview is focused (v1, R-10):
         // Overview scope makes `ToggleCommandPalette` a no-op there (AC-15).
         AppCommand::ToggleCommandPalette
@@ -5414,6 +5820,52 @@ fn ime_cursor_area(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_terminal_slide_offset_spans_hidden_to_revealed() {
+        let height = 400.0;
+        // Fully hidden: the whole panel sits above the screen top.
+        assert!((quick_terminal_top_offset(height, 0.0) - (-height)).abs() < 0.001);
+        // Fully revealed: flush with the screen top.
+        assert!(quick_terminal_top_offset(height, 1.0).abs() < 0.001);
+        // Monotonic: more reveal never moves the panel back up.
+        let quarter = quick_terminal_top_offset(height, 0.25);
+        let half = quick_terminal_top_offset(height, 0.5);
+        assert!(quarter < half);
+        assert!(half < 0.0);
+    }
+
+    #[test]
+    fn ease_out_cubic_is_clamped_and_anchored() {
+        assert!((ease_out_cubic(0.0)).abs() < 0.001);
+        assert!((ease_out_cubic(1.0) - 1.0).abs() < 0.001);
+        // Clamps out-of-range input rather than overshooting.
+        assert!((ease_out_cubic(-1.0)).abs() < 0.001);
+        assert!((ease_out_cubic(2.0) - 1.0).abs() < 0.001);
+        // Ease-out front-loads progress: past the midpoint by t=0.5.
+        assert!(ease_out_cubic(0.5) > 0.5);
+    }
+
+    #[test]
+    fn quick_terminal_progress_is_linear_and_clamped() {
+        let duration = Duration::from_millis(200);
+        assert!((quick_terminal_progress(Duration::ZERO, duration)).abs() < 0.001);
+        assert!(
+            (quick_terminal_progress(Duration::from_millis(100), duration) - 0.5).abs() < 0.001
+        );
+        assert!((quick_terminal_progress(Duration::from_millis(400), duration) - 1.0).abs() < 0.001);
+        // A zero-length slide is instantly complete (no divide-by-zero).
+        assert!((quick_terminal_progress(Duration::ZERO, Duration::ZERO) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn quick_terminal_height_is_a_clamped_screen_fraction() {
+        assert_eq!(quick_terminal_height(1000, 0.4), 400);
+        assert_eq!(quick_terminal_height(1000, 1.0), 1000);
+        // Fraction is clamped to a usable range and never exceeds the screen.
+        assert_eq!(quick_terminal_height(1000, 2.0), 1000);
+        assert_eq!(quick_terminal_height(1000, 0.0), 50);
+    }
 
     fn metrics(cell_w: f32, cell_h: f32) -> noa_font::Metrics {
         noa_font::Metrics {

@@ -132,13 +132,41 @@ GUI 非依存 → ユニットテストで完結。
 
 ## Phase 6 — macOS ネイティブ磨き（≒ inc 6）
 
-- クイックターミナル（グローバルホットキー + 上端スライドイン、NSPanel 相当）。
+- クイックターミナル（グローバルホットキー + 上端スライドイン、NSPanel 相当）。**実装済み** — 下記「クイックターミナル」節を参照。
 - コマンドパレット (Cmd+Shift+P、実装済みコマンド機構を列挙 UI 化)。
 - 背景ブラー（private API `CGSSetWindowBackgroundBlurRadius` — Ghostty 同等）。
 - セッション復元（ウィンドウ/タブ/分割トポロジ + cwd を再現。Ghostty 同様コンテンツは復元しない）。
 - Secure Keyboard Entry、タイトルバースタイル (`macos-titlebar-style`)、Option-as-Alt 設定、
   通知 (OSC 9 / 777)。
 - `noa +list-themes` / `+list-keybinds` 等の CLI アクション。
+
+### クイックターミナル（実装ノート）
+
+グローバルホットキーで画面上端からスライドインするドロップダウン端末。
+
+**設定キー**（`noa-config`）:
+
+| キー | 型 | 既定 | 意味 |
+|---|---|---|---|
+| `quick-terminal-hotkey` | 文字列 | 未設定（無効） | トグル用グローバルホットキー。`cmd+grave` 形式（アプリ内キーバインドと同表記）。未設定ならホットキー登録自体を行わない。 |
+| `quick-terminal-size` | 分数 or `%` | `0.4` | 画面高に対するパネル高の割合。`0.4` または `40%`。`0.1..=1.0` にクランプ。 |
+| `quick-terminal-autohide` | bool | `true` | フォーカスを失ったら自動的に隠す。 |
+
+**挙動**: 画面上端いっぱいの幅 × `quick-terminal-size` の高さ。トグルで ~200ms の上端スライドイン/アウト（`ease_out_cubic`、`about_to_wait` の `WaitUntil` タイマー駆動でウィンドウ位置を毎フレーム補間）。`View > Quick Terminal` メニューとコマンドパレットからもトグル可能。セッション復元の対象外（`window_order` に含めないことで自動的に除外）。
+
+**Ghostty との差分**:
+- ホットキー表現: Ghostty は `keybind = global:<chord>=toggle_quick_terminal`。noa は専用キー `quick-terminal-hotkey` を採用（noa のキーバインドは現状ファイル設定不可のため）。
+- グローバルホットキーは Carbon `RegisterEventHotKey`（アクセシビリティ権限不要。`CGEventTap` を避ける理由）。
+- 位置は上端固定（Ghostty の `quick-terminal-position` top/bottom/left/right/center は未対応）。`quick-terminal-space-behavior` も未対応。
+- winit で真の `NSPanel` は生成できないため、装飾なし `NSWindow` を `setLevel: floating` + `collectionBehavior: canJoinAllSpaces | fullScreenAuxiliary` で近似。
+- 既定サイズは 40%（Ghostty 既定は 25%）。
+
+**実機確認手順**（GUI 起動が必要なため未自動化）:
+1. `~/.config/noa/config` に `quick-terminal-hotkey = cmd+grave` を記述して `cargo run -p noa`。
+2. 任意のアプリ最前面で `Cmd+\`` → 上端からスライドインし、フォーカスが移る。
+3. 再度 `Cmd+\`` またはフォーカスを外す（autohide）→ スライドアウトして隠れる。
+4. 別 Space / フルスクリーンアプリ上でも出現することを確認。
+5. ドロップダウン内でシェルを `exit` → ウィンドウが破棄され、次回トグルで再生成される。
 
 ---
 

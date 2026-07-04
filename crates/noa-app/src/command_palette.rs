@@ -81,6 +81,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::CloseWindow => "Close Window",
         AppCommand::Quit => "Quit noa",
         AppCommand::ToggleCommandPalette => "Toggle Command Palette",
+        AppCommand::ToggleQuickTerminal => "Toggle Quick Terminal",
     }
 }
 
@@ -130,6 +131,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::EqualizeSplits,
         AppCommand::ToggleSplitZoom,
         AppCommand::ToggleTabOverview,
+        AppCommand::ToggleQuickTerminal,
         AppCommand::CloseTab,
         AppCommand::NextTab,
         AppCommand::PrevTab,
@@ -304,6 +306,7 @@ mod tests {
             AppCommand::CloseWindow,
             AppCommand::Quit,
             AppCommand::ToggleCommandPalette,
+            AppCommand::ToggleQuickTerminal,
         ];
         commands.extend((1..=9).map(AppCommand::SelectTab));
         commands

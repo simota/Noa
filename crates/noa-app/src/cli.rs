@@ -305,6 +305,21 @@ fn show_config_output(config: &StartupConfig) -> String {
             noa_config::WindowSaveState::Always => "always",
         },
     );
+    push_line(
+        &mut out,
+        "quick-terminal-hotkey",
+        config.quick_terminal_hotkey.as_deref().unwrap_or(""),
+    );
+    push_line(
+        &mut out,
+        "quick-terminal-size",
+        &config.quick_terminal_size.to_string(),
+    );
+    push_line(
+        &mut out,
+        "quick-terminal-autohide",
+        &config.quick_terminal_autohide.to_string(),
+    );
     out
 }
 

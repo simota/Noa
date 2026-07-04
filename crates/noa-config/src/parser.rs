@@ -57,6 +57,9 @@ pub(crate) fn build_overrides(
     let mut background_blur_radius = None;
     let mut scrollback_limit = None;
     let mut window_save_state = None;
+    let mut quick_terminal_hotkey = None;
+    let mut quick_terminal_size = None;
+    let mut quick_terminal_autohide = None;
     let mut diagnostics = Vec::new();
 
     for directive in directives {
@@ -174,6 +177,15 @@ pub(crate) fn build_overrides(
             "window-save-state" => {
                 window_save_state = parse_window_save_state(path, directive, &mut diagnostics);
             }
+            "quick-terminal-hotkey" => {
+                quick_terminal_hotkey = directive.value.clone();
+            }
+            "quick-terminal-size" => {
+                quick_terminal_size = parse_quick_terminal_size(path, directive, &mut diagnostics);
+            }
+            "quick-terminal-autohide" => {
+                quick_terminal_autohide = parse_bool_directive(path, directive, &mut diagnostics);
+            }
             "keybind" | "palette" => {
                 diagnostics.push(list_key_diagnostic(path, &directive.key));
             }
@@ -217,6 +229,9 @@ pub(crate) fn build_overrides(
             background_blur_radius,
             scrollback_limit,
             window_save_state,
+            quick_terminal_hotkey,
+            quick_terminal_size,
+            quick_terminal_autohide,
         },
         diagnostics,
     )
@@ -244,6 +259,9 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "background-blur-radius"
             | "scrollback-limit"
             | "window-save-state"
+            | "quick-terminal-hotkey"
+            | "quick-terminal-size"
+            | "quick-terminal-autohide"
     )
 }
 
@@ -591,6 +609,35 @@ fn parse_blur_radius(
             }
         },
     }
+}
+
+/// Smallest allowed `quick-terminal-size` fraction; below this the drop-down
+/// would be too short to be usable.
+const MIN_QUICK_TERMINAL_SIZE: f32 = 0.1;
+
+/// Parse `quick-terminal-size`: the drop-down height as a fraction of the
+/// screen height. Accepts either a bare fraction (`0.4`) or a percentage
+/// (`40%`). Out-of-range values clamp to `0.1..=1.0`; only an unparseable
+/// value produces a diagnostic.
+fn parse_quick_terminal_size(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<f32> {
+    let value = directive.value.as_deref()?;
+    let parsed = match value.strip_suffix('%') {
+        Some(percent) => percent.trim().parse::<f32>().map(|n| n / 100.0),
+        None => value.parse::<f32>(),
+    };
+    let Ok(parsed) = parsed else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if !parsed.is_finite() || parsed <= 0.0 {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(parsed.clamp(MIN_QUICK_TERMINAL_SIZE, 1.0))
 }
 
 /// Parse a `#RRGGBB` or `RRGGBB` (case-insensitive) hex color.
@@ -1323,6 +1370,58 @@ mod tests {
     #[test]
     fn window_save_state_is_a_supported_scalar_key_for_import() {
         assert!(is_supported_scalar_key("window-save-state"));
+    }
+
+    #[test]
+    fn quick_terminal_hotkey_is_retained_verbatim() {
+        let (overrides, diagnostics) = parse_overrides(path(), "quick-terminal-hotkey = cmd+grave");
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            overrides.quick_terminal_hotkey.as_deref(),
+            Some("cmd+grave")
+        );
+    }
+
+    #[test]
+    fn quick_terminal_size_parses_fraction_and_percent_and_clamps() {
+        for (value, expected) in [
+            ("0.4", 0.4),
+            ("40%", 0.4),
+            ("100%", 1.0),
+            ("2.0", 1.0),
+            ("0.01", 0.1),
+        ] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("quick-terminal-size = {value}"));
+
+            assert_eq!(overrides.quick_terminal_size, Some(expected), "{value:?}");
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+    }
+
+    #[test]
+    fn quick_terminal_size_rejects_non_numeric() {
+        let (overrides, diagnostics) = parse_overrides(path(), "quick-terminal-size = tall");
+
+        assert_eq!(overrides.quick_terminal_size, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("quick-terminal-size"));
+    }
+
+    #[test]
+    fn quick_terminal_autohide_parses_bool() {
+        let (overrides, diagnostics) = parse_overrides(path(), "quick-terminal-autohide = false");
+
+        assert_eq!(overrides.quick_terminal_autohide, Some(false));
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn quick_terminal_keys_are_supported_scalar_keys_for_import() {
+        assert!(is_supported_scalar_key("quick-terminal-hotkey"));
+        assert!(is_supported_scalar_key("quick-terminal-size"));
+        assert!(is_supported_scalar_key("quick-terminal-autohide"));
     }
 
     #[test]

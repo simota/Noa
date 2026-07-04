@@ -220,6 +220,15 @@ impl MacosMenu {
                     true,
                     Some(cmd_shift_accelerator(Code::KeyP)),
                 ),
+                // No accelerator: the quick terminal is driven by the global
+                // `quick-terminal-hotkey` (a system-wide Carbon hotkey), which
+                // muda's app-local accelerators can't represent.
+                &MenuItem::with_id(
+                    AppCommand::ToggleQuickTerminal.menu_id(),
+                    "Quick Terminal",
+                    true,
+                    None,
+                ),
                 &PredefinedMenuItem::separator(),
                 &disabled_item("noa.view.toggle-full-screen", "Toggle Full Screen"),
             ],

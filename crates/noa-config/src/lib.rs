@@ -22,6 +22,9 @@ pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 /// `scrollback-limit` default: 10 MB of scrollback storage, matching Ghostty.
 pub const DEFAULT_SCROLLBACK_LIMIT: usize = 10_000_000;
+/// `quick-terminal-size` default: 40% of the screen height. (Ghostty's own
+/// default is 25%; noa opts for a slightly taller default drop-down.)
+pub const DEFAULT_QUICK_TERMINAL_SIZE: f32 = 0.4;
 
 /// `clipboard-read` policy for OSC 52 clipboard *read* (query) requests.
 /// Mirrors Ghostty, whose default is `ask`.
@@ -225,6 +228,17 @@ pub struct StartupConfig {
     /// `window-save-state`: whether the window/tab/split session is persisted
     /// and restored across launches. Default restores.
     pub window_save_state: WindowSaveState,
+    /// `quick-terminal-hotkey`: the global hotkey chord that toggles the
+    /// drop-down quick terminal (e.g. `cmd+grave`). `None` disables the
+    /// feature (no hotkey is registered). noa-specific key; Ghostty expresses
+    /// the same thing as `keybind = global:<chord>=toggle_quick_terminal`.
+    pub quick_terminal_hotkey: Option<String>,
+    /// `quick-terminal-size`: the quick terminal's height as a fraction of the
+    /// screen height, clamped to `0.1..=1.0`. Ghostty default is 25%.
+    pub quick_terminal_size: f32,
+    /// `quick-terminal-autohide`: hide the quick terminal when it loses focus.
+    /// Ghostty default is on.
+    pub quick_terminal_autohide: bool,
 }
 
 impl Default for StartupConfig {
@@ -250,6 +264,9 @@ impl Default for StartupConfig {
             background_blur_radius: 0,
             scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
             window_save_state: WindowSaveState::default(),
+            quick_terminal_hotkey: None,
+            quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
+            quick_terminal_autohide: true,
         }
     }
 }
@@ -277,6 +294,9 @@ pub struct ConfigOverrides {
     pub background_blur_radius: Option<u16>,
     pub scrollback_limit: Option<usize>,
     pub window_save_state: Option<WindowSaveState>,
+    pub quick_terminal_hotkey: Option<String>,
+    pub quick_terminal_size: Option<f32>,
+    pub quick_terminal_autohide: Option<bool>,
 }
 
 impl ConfigOverrides {
@@ -314,6 +334,15 @@ impl ConfigOverrides {
                 .or(self.background_blur_radius),
             scrollback_limit: higher_priority.scrollback_limit.or(self.scrollback_limit),
             window_save_state: higher_priority.window_save_state.or(self.window_save_state),
+            quick_terminal_hotkey: higher_priority
+                .quick_terminal_hotkey
+                .or(self.quick_terminal_hotkey),
+            quick_terminal_size: higher_priority
+                .quick_terminal_size
+                .or(self.quick_terminal_size),
+            quick_terminal_autohide: higher_priority
+                .quick_terminal_autohide
+                .or(self.quick_terminal_autohide),
         }
     }
 
@@ -343,6 +372,11 @@ impl ConfigOverrides {
                 .unwrap_or(base.background_blur_radius),
             scrollback_limit: self.scrollback_limit.unwrap_or(base.scrollback_limit),
             window_save_state: self.window_save_state.unwrap_or(base.window_save_state),
+            quick_terminal_hotkey: self.quick_terminal_hotkey.or(base.quick_terminal_hotkey),
+            quick_terminal_size: self.quick_terminal_size.unwrap_or(base.quick_terminal_size),
+            quick_terminal_autohide: self
+                .quick_terminal_autohide
+                .unwrap_or(base.quick_terminal_autohide),
         }
     }
 }
@@ -485,6 +519,9 @@ mod tests {
                 background_blur_radius: 0,
                 scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
                 window_save_state: WindowSaveState::default(),
+                quick_terminal_hotkey: None,
+                quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
+                quick_terminal_autohide: true,
             }
         );
     }

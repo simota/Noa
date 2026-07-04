@@ -24,7 +24,7 @@ mod shape;
 
 pub use atlas::Atlas;
 pub use config::{AlphaBlending, FontConfig, FontFeature, FontVariation, SyntheticStyle};
-pub use face::Metrics;
+pub use face::{Metrics, list_families};
 pub use grid::FontGrid;
 pub use raster::{GlyphSynthesis, RasterizedGlyph};
 pub use shape::{FaceId, ShapeCell, ShapedGlyph, StyleKey};
@@ -61,4 +61,7 @@ pub enum FontError {
     /// The font bytes could not be parsed by swash.
     #[error("failed to parse font data")]
     Parse,
+    /// The system font source could not enumerate its families.
+    #[error("failed to enumerate system font families")]
+    Enumerate,
 }

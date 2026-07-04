@@ -502,6 +502,17 @@ impl KeybindEngine {
             .find(|binding| binding.command == command)
             .map(|binding| binding.trigger.to_string())
     }
+
+    /// `(chord, action-name)` pairs for every binding, in `default()` order.
+    /// Backs the `+list-keybinds` CLI action (cli.rs); like
+    /// [`Self::chord_for`], the engine stays the single source of truth for
+    /// the effective binding set.
+    pub(crate) fn list(&self) -> Vec<(String, &'static str)> {
+        self.bindings
+            .iter()
+            .map(|binding| (binding.trigger.to_string(), binding.command.action_name()))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -46,6 +46,17 @@ impl FontStack {
     }
 }
 
+/// Enumerate every font family name known to the system source, sorted and
+/// deduplicated. Backs the `noa +list-fonts` CLI action.
+pub fn list_families() -> Result<Vec<String>, FontError> {
+    let mut families = SystemSource::new()
+        .all_families()
+        .map_err(|_| FontError::Enumerate)?;
+    families.sort();
+    families.dedup();
+    Ok(families)
+}
+
 /// Discover a monospace system font and load its raw bytes.
 ///
 /// Tries `select_best_match(Monospace)` first, then falls back to `Menlo`
@@ -325,6 +336,20 @@ mod tests {
             resolved.bytes, emoji_data.bytes,
             "emoji codepoint should resolve to the Apple Color Emoji face specifically, \
              not an unrelated fallback face"
+        );
+    }
+
+    /// `+list-fonts` relies on this shape: at least one family exists on a
+    /// system with fonts, and the list is strictly sorted (which also proves
+    /// deduplication).
+    #[test]
+    fn list_families_is_non_empty_sorted_and_deduped() {
+        let families = list_families().expect("system font source should enumerate");
+
+        assert!(!families.is_empty());
+        assert!(
+            families.windows(2).all(|pair| pair[0] < pair[1]),
+            "family list must be strictly sorted (sorted + deduped)"
         );
     }
 }

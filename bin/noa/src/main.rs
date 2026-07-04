@@ -20,6 +20,19 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
+
+    // `noa +<action>` runs a one-shot query and exits without the GUI, so it
+    // must be dispatched before clap sees (and rejects) the `+` argument.
+    let argv: Vec<String> = std::env::args().collect();
+    match noa_app::parse_invocation(&argv) {
+        noa_app::Invocation::Action(action) => return noa_app::run_action(action),
+        noa_app::Invocation::Unknown(name) => {
+            eprint!("{}", noa_app::unknown_action_message(&name));
+            std::process::exit(1);
+        }
+        noa_app::Invocation::Gui => {}
+    }
+
     let args = Args::parse();
 
     if args.import_ghostty_config {
@@ -135,6 +148,21 @@ mod tests {
         let args = Args::try_parse_from(["noa", "--import-ghostty-config"]).unwrap();
 
         assert!(args.import_ghostty_config);
+    }
+
+    #[test]
+    fn plus_actions_must_be_dispatched_before_clap() {
+        // clap rejects `+version` outright, which is why main() classifies
+        // the invocation first and only falls through to clap for the GUI.
+        assert!(Args::try_parse_from(["noa", "+version"]).is_err());
+        assert_eq!(
+            noa_app::parse_invocation(&["noa", "+version"]),
+            noa_app::Invocation::Action(noa_app::CliAction::Version)
+        );
+        assert_eq!(
+            noa_app::parse_invocation(&["noa", "--cols", "100"]),
+            noa_app::Invocation::Gui
+        );
     }
 
     #[test]

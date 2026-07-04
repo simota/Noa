@@ -4,6 +4,7 @@
 //! `wgpu`.
 
 mod app;
+mod cli;
 mod clipboard;
 mod command_palette;
 mod commands;
@@ -21,6 +22,7 @@ pub mod tab_overview;
 mod theme;
 
 pub use app::AppConfig;
+pub use cli::{CliAction, Invocation, parse_invocation, run_action, unknown_action_message};
 pub use commands::{AppCommand, FontSizeAction, SearchAction, TerminalAction, ViewportScroll};
 pub use events::UserEvent;
 pub use input::encode_paste;

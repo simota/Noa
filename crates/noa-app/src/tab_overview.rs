@@ -54,7 +54,7 @@ pub const OVERVIEW_CARD_COLOR: [f32; 4] = [0.078, 0.091, 0.127, 1.0];
 /// Title-bar band — distinguishable from the card face (mockup: "区別可能な帯").
 pub const OVERVIEW_TITLE_BAR_COLOR: [f32; 4] = [0.118, 0.129, 0.176, 1.0];
 /// Thin resting card border.
-pub const OVERVIEW_BORDER_COLOR: [f32; 4] = [0.298, 0.318, 0.380, 1.0];
+pub const OVERVIEW_BORDER_COLOR: [f32; 4] = [0.298, 0.3176, 0.380, 1.0];
 /// Blue accent focus ring for the selected tile (REQ-OV-14).
 pub const OVERVIEW_FOCUS_RING_COLOR: [f32; 4] = [0.078, 0.635, 1.0, 1.0];
 /// Search / hint pill face in the overview chrome.

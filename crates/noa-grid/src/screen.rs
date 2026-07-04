@@ -4,17 +4,21 @@
 
 use crate::cell::{Cell, Row};
 use crate::cursor::{Cursor, HorizontalMargins, ScrollRegion};
+use crate::scrollback::PagedScrollback;
 use crate::search::{SearchMatch, SearchState, append_row_matches, needle_len};
 use crate::selection::{Selection, SelectionPoint};
 use crate::tabstops::Tabstops;
 use noa_core::{CellAttrs, Point};
 use noa_vt::{EraseDisplay, EraseLine};
 use std::borrow::Cow;
-use std::collections::VecDeque;
 use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
 
-const DEFAULT_SCROLLBACK_LIMIT: usize = 10_000;
+/// Default `scrollback-limit`: total bytes of *scrollback* storage kept before
+/// page-granular eviction. Matches Ghostty's 10 MB default (`0` disables
+/// scrollback). Unlike Ghostty this bounds only the paged history, not the
+/// active grid (which is unbounded-small at rows×cols).
+const DEFAULT_SCROLLBACK_LIMIT_BYTES: usize = 10_000_000;
 
 #[derive(Clone, Copy)]
 struct ReflowPoint {
@@ -52,8 +56,7 @@ pub struct Screen {
     pub region: ScrollRegion,
     pub horizontal_margins: Option<HorizontalMargins>,
     pub tabstops: Tabstops,
-    scrollback: VecDeque<Row>,
-    scrollback_limit: usize,
+    scrollback: PagedScrollback,
     scrollback_enabled: bool,
     viewport_offset: usize,
     /// Rows evicted from the front of the scrollback over this screen's whole
@@ -89,8 +92,11 @@ impl Screen {
             },
             horizontal_margins: None,
             tabstops: Tabstops::new(cols),
-            scrollback: VecDeque::new(),
-            scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
+            scrollback: PagedScrollback::new(if scrollback_enabled {
+                DEFAULT_SCROLLBACK_LIMIT_BYTES
+            } else {
+                0
+            }),
             scrollback_enabled,
             viewport_offset: 0,
             rows_evicted: 0,
@@ -179,16 +185,15 @@ impl Screen {
     }
 
     fn push_scrollback_row(&mut self, row: Row) {
-        if !self.scrollback_enabled || self.scrollback_limit == 0 {
+        if !self.scrollback_enabled {
             return;
         }
-        self.scrollback.push_back(row);
-        while self.scrollback.len() > self.scrollback_limit {
-            self.scrollback.pop_front();
-            self.rows_evicted += 1;
+        let evicted = self.scrollback.push_row(&row);
+        if evicted > 0 {
+            self.rows_evicted += evicted;
             self.selection = self
                 .selection
-                .and_then(|selection| selection.shift_rows_up(1));
+                .and_then(|selection| selection.shift_rows_up(evicted));
         }
         self.clamp_viewport();
     }
@@ -250,9 +255,7 @@ impl Screen {
     }
 
     fn scrollback_has_text(&self) -> bool {
-        self.scrollback
-            .iter()
-            .any(|row| row.cells.iter().any(|cell| !cell.is_blank()))
+        self.scrollback.has_text()
     }
 
     pub fn scroll_viewport_up(&mut self, rows: usize) {
@@ -459,7 +462,7 @@ impl Screen {
     fn storage_row(&self, y: usize) -> Option<Cow<'_, Row>> {
         let scrollback_len = self.scrollback.len();
         if y < scrollback_len {
-            self.scrollback.get(y).map(Cow::Borrowed)
+            self.scrollback.row(y).map(Cow::Owned)
         } else {
             self.grid.get(y - scrollback_len).map(Cow::Borrowed)
         }
@@ -468,12 +471,8 @@ impl Screen {
     /// Visit scrollback rows `range` (`0` = oldest) in order. The single seam
     /// history consumers (search, selection) go through, so paged storage can
     /// hand back a reused buffer instead of cloning each row.
-    fn for_each_scrollback_row(&mut self, range: Range<usize>, mut f: impl FnMut(usize, &Row)) {
-        for y in range {
-            if let Some(row) = self.scrollback.get(y) {
-                f(y, row);
-            }
-        }
+    fn for_each_scrollback_row(&mut self, range: Range<usize>, f: impl FnMut(usize, &Row)) {
+        self.scrollback.for_each_row(range, f);
     }
 
     fn word_cell_x(row: &Row, x: usize) -> usize {
@@ -559,7 +558,9 @@ impl Screen {
         (start..start + rows)
             .map(|idx| {
                 if idx < scrollback_len {
-                    self.scrollback[idx].clone()
+                    self.scrollback
+                        .row(idx)
+                        .unwrap_or_else(|| Row::new(self.cols))
                 } else {
                     self.grid[idx - scrollback_len].clone()
                 }
@@ -576,6 +577,11 @@ impl Screen {
     /// `&mut self` call. The returned `Vec<bool>` is parallel to the
     /// returned `Vec<Row>` (same length, same index order) and reports each
     /// row's dirty state *before* this call cleared it.
+    ///
+    /// Scrollback rows never mutate after being pushed (they are immutable
+    /// packed history) and always report `dirty = false`; the renderer's
+    /// `row_base`-keyed invalidation forces a full pane rebuild whenever the
+    /// viewport scrolls into history, so no per-history-row damage is needed.
     pub fn take_visible_rows_with_damage(&mut self) -> (Vec<Row>, Vec<bool>) {
         let rows = self.rows as usize;
         let scrollback_len = self.scrollback.len();
@@ -585,14 +591,19 @@ impl Screen {
         let mut out_dirty = Vec::with_capacity(rows);
 
         for idx in start..start + rows {
-            let row: &mut Row = if idx < scrollback_len {
-                &mut self.scrollback[idx]
+            if idx < scrollback_len {
+                out_dirty.push(false);
+                out_rows.push(
+                    self.scrollback
+                        .row(idx)
+                        .unwrap_or_else(|| Row::new(self.cols)),
+                );
             } else {
-                &mut self.grid[idx - scrollback_len]
-            };
-            out_dirty.push(row.dirty);
-            out_rows.push(row.clone());
-            row.dirty = false;
+                let row = &mut self.grid[idx - scrollback_len];
+                out_dirty.push(row.dirty);
+                out_rows.push(row.clone());
+                row.dirty = false;
+            }
         }
 
         (out_rows, out_dirty)
@@ -676,12 +687,14 @@ impl Screen {
             y: old_scrollback_len + cursor.y as usize,
             pending_wrap: cursor.pending_wrap,
         });
-        let storage: Vec<Row> = self
-            .scrollback
-            .iter()
-            .cloned()
-            .chain(self.grid.iter().cloned())
-            .collect();
+        // Reflow v1: fully materialize the paged scrollback into `Row`s, reflow,
+        // then re-pack the history portion into fresh pages below. Streaming
+        // this to avoid the transient `Row` spike lands in a later step.
+        let mut storage: Vec<Row> = Vec::with_capacity(old_scrollback_len + self.grid.len());
+        for y in 0..old_scrollback_len {
+            storage.push(self.scrollback.row(y).unwrap_or_else(|| Row::new(self.cols)));
+        }
+        storage.extend(self.grid.iter().cloned());
 
         let mut reflowed = Vec::new();
         let mut cursor_position = ReflowPosition { row: 0, x: 0 };
@@ -722,14 +735,17 @@ impl Screen {
             .min(max_grid_start);
         let grid_end = (grid_start + target_rows).min(reflowed.len());
 
-        self.scrollback = if self.scrollback_enabled {
-            reflowed[..grid_start].iter().cloned().collect()
-        } else {
-            VecDeque::new()
-        };
-        while self.scrollback.len() > self.scrollback_limit {
-            self.scrollback.pop_front();
+        let limit = self.scrollback.limit_bytes();
+        let mut scrollback = PagedScrollback::new(if self.scrollback_enabled { limit } else { 0 });
+        if self.scrollback_enabled {
+            // The byte limit is enforced during push; reflow trimming does not
+            // bump `rows_evicted` (pre-existing quirk: reflow already renumbers
+            // rows, so shell-integration marks shift with a column-count resize).
+            for row in &reflowed[..grid_start] {
+                scrollback.push_row(row);
+            }
         }
+        self.scrollback = scrollback;
 
         self.grid = reflowed[grid_start..grid_end].to_vec();
         while self.grid.len() < target_rows {

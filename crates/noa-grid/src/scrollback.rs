@@ -12,9 +12,6 @@
 //! and materialized back to `Row`/`Cell` on the way out ([`PagedScrollback::row`]
 //! / [`PagedScrollback::for_each_row`]), so the renderer's `FrameSnapshot`
 //! boundary is unchanged.
-// Standalone module: `Screen` wires it in as its scrollback store in a later
-// step. Until then the non-test build sees the API as unused.
-#![allow(dead_code)]
 
 use crate::cell::{Cell, Row};
 use noa_core::{CellAttrs, Color};
@@ -75,12 +72,6 @@ struct PackedCell {
 }
 
 impl PackedCell {
-    /// The base scalar carries no text and the style is the default pen: the
-    /// exact packed image of `Cell::default()`. Used for trailing-blank trim.
-    fn is_default_blank(&self) -> bool {
-        self.ch == ' ' && self.style.0 == 0 && self.flags.is_empty()
-    }
-
     /// Whether this cell holds selectable/searchable text (mirrors
     /// `Cell::is_blank` inverted): a non-space base or attached graphemes.
     fn has_text(&self) -> bool {
@@ -276,10 +267,9 @@ impl PagedScrollback {
         self.total_rows
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.total_rows == 0
-    }
-
+    /// Deterministic accounting size of all retained pages. Introspection for
+    /// tests and the retention benchmark.
+    #[cfg(test)]
     pub(crate) fn bytes(&self) -> usize {
         self.total_bytes
     }
@@ -408,6 +398,8 @@ impl PagedScrollback {
 
     /// Change the retention limit at runtime, evicting immediately. Returns the
     /// number of rows evicted. `0` disables scrollback and drops all history.
+    // Wired into `Screen::set_scrollback_limit_bytes` in the next step.
+    #[allow(dead_code)]
     pub(crate) fn set_limit_bytes(&mut self, bytes: usize) -> usize {
         self.limit_bytes = bytes;
         if bytes == 0 {
@@ -600,7 +592,7 @@ mod tests {
         let mut sb = PagedScrollback::new(0);
         let evicted = sb.push_row(&text_row("ignored", 20));
         assert_eq!(evicted, 0);
-        assert!(sb.is_empty());
+        assert_eq!(sb.len(), 0);
         assert_eq!(sb.bytes(), 0);
         assert!(sb.row(0).is_none());
     }

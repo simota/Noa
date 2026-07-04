@@ -100,6 +100,10 @@ pub struct AppConfig {
     /// `background-blur-radius` in points (`0..=64`, 0 = off). Applied as a
     /// native macOS window background blur; a no-op on other platforms.
     pub background_blur_radius: u16,
+    /// `scrollback-limit`: total bytes of scrollback storage retained per pane
+    /// before page-granular eviction (`0` disables scrollback). Applied to each
+    /// new terminal at surface creation.
+    pub scrollback_limit: usize,
 }
 
 /// Maps the parsed `noa-config` font settings onto the `noa-font` runtime
@@ -1117,6 +1121,7 @@ impl App {
         // when a request arrives.
         terminal.osc52_policy.allow_read =
             self.config.clipboard_read != noa_config::ClipboardAccess::Deny;
+        terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
         if let Some(gpu) = self.gpu.as_ref() {
             terminal.set_base_colors(
                 gpu.theme.default_fg,

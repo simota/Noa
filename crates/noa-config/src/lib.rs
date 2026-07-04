@@ -20,6 +20,8 @@ pub use parser::{Diagnostic, Directive, parse_directives, parse_overrides};
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
+/// `scrollback-limit` default: 10 MB of scrollback storage, matching Ghostty.
+pub const DEFAULT_SCROLLBACK_LIMIT: usize = 10_000_000;
 
 /// `clipboard-read` policy for OSC 52 clipboard *read* (query) requests.
 /// Mirrors Ghostty, whose default is `ask`.
@@ -194,6 +196,9 @@ pub struct StartupConfig {
     /// points, `0..=64` (0 = no blur). Only visible with `background_opacity`
     /// below 1.0. No-op on non-macOS.
     pub background_blur_radius: u16,
+    /// `scrollback-limit`: total bytes of scrollback storage retained before
+    /// page-granular eviction (`0` disables scrollback). Ghostty default 10 MB.
+    pub scrollback_limit: usize,
 }
 
 impl Default for StartupConfig {
@@ -217,6 +222,7 @@ impl Default for StartupConfig {
             cursor_style_blink: None,
             background_opacity: 1.0,
             background_blur_radius: 0,
+            scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
         }
     }
 }
@@ -242,6 +248,7 @@ pub struct ConfigOverrides {
     pub cursor_style_blink: Option<bool>,
     pub background_opacity: Option<f32>,
     pub background_blur_radius: Option<u16>,
+    pub scrollback_limit: Option<usize>,
 }
 
 impl ConfigOverrides {
@@ -277,6 +284,7 @@ impl ConfigOverrides {
             background_blur_radius: higher_priority
                 .background_blur_radius
                 .or(self.background_blur_radius),
+            scrollback_limit: higher_priority.scrollback_limit.or(self.scrollback_limit),
         }
     }
 
@@ -304,6 +312,7 @@ impl ConfigOverrides {
             background_blur_radius: self
                 .background_blur_radius
                 .unwrap_or(base.background_blur_radius),
+            scrollback_limit: self.scrollback_limit.unwrap_or(base.scrollback_limit),
         }
     }
 }
@@ -432,6 +441,7 @@ mod tests {
                 cursor_style_blink: None,
                 background_opacity: 1.0,
                 background_blur_radius: 0,
+                scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
             }
         );
     }
@@ -516,6 +526,34 @@ font-size = 15.5
         assert_eq!(config.cursor_style, Some(CursorShape::Bar));
         assert_eq!(config.cursor_style_blink, Some(false));
         assert_eq!(config.background_opacity, 0.8);
+    }
+
+    #[test]
+    fn scrollback_limit_flows_through_parse_apply_and_precedence() {
+        let (overrides, diagnostics) =
+            parse_overrides(test_path(), "scrollback-limit = 2000000");
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.scrollback_limit, Some(2_000_000));
+
+        // Absent key keeps the default; a CLI override wins over the file.
+        assert_eq!(
+            ConfigOverrides::default()
+                .apply_to(StartupConfig::default())
+                .scrollback_limit,
+            DEFAULT_SCROLLBACK_LIMIT
+        );
+        let file = ConfigOverrides {
+            scrollback_limit: Some(2_000_000),
+            ..Default::default()
+        };
+        let cli = ConfigOverrides {
+            scrollback_limit: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            file.merge(cli).apply_to(StartupConfig::default()).scrollback_limit,
+            0
+        );
     }
 
     #[test]

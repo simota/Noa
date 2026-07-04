@@ -93,6 +93,7 @@ fn app_config_from_startup(config: noa_config::StartupConfig) -> noa_app::AppCon
         cursor_style_blink: config.cursor_style_blink,
         background_opacity: config.background_opacity,
         background_blur_radius: config.background_blur_radius,
+        scrollback_limit: config.scrollback_limit,
     }
 }
 

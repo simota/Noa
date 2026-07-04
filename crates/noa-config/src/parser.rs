@@ -55,6 +55,7 @@ pub(crate) fn build_overrides(
     let mut cursor_style_blink = None;
     let mut background_opacity = None;
     let mut background_blur_radius = None;
+    let mut scrollback_limit = None;
     let mut diagnostics = Vec::new();
 
     for directive in directives {
@@ -166,6 +167,9 @@ pub(crate) fn build_overrides(
             "background-blur-radius" => {
                 background_blur_radius = parse_blur_radius(path, directive, &mut diagnostics);
             }
+            "scrollback-limit" => {
+                scrollback_limit = parse_usize(path, directive, &mut diagnostics);
+            }
             "keybind" | "palette" => {
                 diagnostics.push(list_key_diagnostic(path, &directive.key));
             }
@@ -207,6 +211,7 @@ pub(crate) fn build_overrides(
             cursor_style_blink,
             background_opacity,
             background_blur_radius,
+            scrollback_limit,
         },
         diagnostics,
     )
@@ -232,6 +237,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "cursor-style-blink"
             | "background-opacity"
             | "background-blur-radius"
+            | "scrollback-limit"
     )
 }
 
@@ -284,6 +290,23 @@ fn parse_u16(path: &Path, directive: &Directive, diagnostics: &mut Vec<Diagnosti
         return None;
     };
     Some(parsed)
+}
+
+/// Parse a non-negative integer byte count (`scrollback-limit`). `0` is valid
+/// and disables scrollback; a negative or non-numeric value diagnoses.
+fn parse_usize(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<usize> {
+    let value = directive.value.as_deref()?;
+    match value.parse::<usize>() {
+        Ok(parsed) => Some(parsed),
+        Err(_) => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+            None
+        }
+    }
 }
 
 fn parse_font_size(
@@ -1220,6 +1243,34 @@ mod tests {
         assert_eq!(overrides.background_blur_radius, None);
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("background-blur-radius"));
+    }
+
+    #[test]
+    fn scrollback_limit_parses_byte_counts_including_zero() {
+        for (value, expected) in [("10000000", 10_000_000), ("0", 0), ("512", 512)] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("scrollback-limit = {value}"));
+
+            assert_eq!(overrides.scrollback_limit, Some(expected), "{value:?}");
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+    }
+
+    #[test]
+    fn scrollback_limit_rejects_negative_and_non_numeric() {
+        for value in ["-1", "lots", "1.5"] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("scrollback-limit = {value}"));
+
+            assert_eq!(overrides.scrollback_limit, None, "{value:?}");
+            assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+            assert!(diagnostics[0].message.contains("scrollback-limit"));
+        }
+    }
+
+    #[test]
+    fn scrollback_limit_is_a_supported_scalar_key_for_import() {
+        assert!(is_supported_scalar_key("scrollback-limit"));
     }
 
     #[test]

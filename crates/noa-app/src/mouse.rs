@@ -223,6 +223,25 @@ pub fn encode_mouse_wheel(
     encode_mouse_report(format, button_code + modifier_bits(mods), false, cell)
 }
 
+/// Route a wheel event: `Some(bytes)` to report to the pty, `None` to scroll
+/// the local viewport instead. A tracked mode that doesn't report this wheel
+/// event (X10, or a zero delta) falls through to local scrolling rather than
+/// swallowing it; so do tracking-off, a Shift override, and a missing mouse
+/// cell.
+pub fn route_mouse_wheel(
+    tracking: MouseTracking,
+    format: MouseFormat,
+    shift: bool,
+    delta_y: f32,
+    cell: Option<Point>,
+    mods: ModifiersState,
+) -> Option<Vec<u8>> {
+    if tracking == MouseTracking::Off || shift {
+        return None;
+    }
+    encode_mouse_wheel(format, tracking, delta_y, cell?, mods)
+}
+
 /// Serialize one mouse report in the active format. `code` is the final
 /// button value (button + modifier + motion bits) *without* the +32 bias;
 /// `release` only matters for SGR, whose final byte distinguishes it.
@@ -721,6 +740,70 @@ mod tests {
                 ModifiersState::empty()
             ),
             Some(b"\x1b[97;1;1M".to_vec())
+        );
+    }
+
+    #[test]
+    fn wheel_routes_to_local_scroll_when_mode_does_not_report_it() {
+        // X10 never reports wheels → route yields None so the caller scrolls
+        // the local viewport instead of eating the event.
+        assert_eq!(
+            route_mouse_wheel(
+                MouseTracking::X10,
+                MouseFormat::Sgr,
+                false,
+                1.0,
+                Some(point(0, 0)),
+                ModifiersState::empty()
+            ),
+            None
+        );
+        // A reporting mode produces bytes and suppresses local scroll.
+        assert_eq!(
+            route_mouse_wheel(
+                MouseTracking::Press,
+                MouseFormat::Sgr,
+                false,
+                1.0,
+                Some(point(0, 0)),
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[<64;1;1M".to_vec())
+        );
+        // Shift is a temporary override → local scroll even while tracking.
+        assert_eq!(
+            route_mouse_wheel(
+                MouseTracking::Press,
+                MouseFormat::Sgr,
+                true,
+                1.0,
+                Some(point(0, 0)),
+                ModifiersState::empty()
+            ),
+            None
+        );
+        // Tracking off and a missing cell both fall through to local scroll.
+        assert_eq!(
+            route_mouse_wheel(
+                MouseTracking::Off,
+                MouseFormat::Sgr,
+                false,
+                1.0,
+                Some(point(0, 0)),
+                ModifiersState::empty()
+            ),
+            None
+        );
+        assert_eq!(
+            route_mouse_wheel(
+                MouseTracking::Press,
+                MouseFormat::Sgr,
+                false,
+                1.0,
+                None,
+                ModifiersState::empty()
+            ),
+            None
         );
     }
 

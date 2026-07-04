@@ -516,7 +516,16 @@ pub struct App {
     window_order: Vec<WindowId>,
     overview_window: Option<OverviewWindowState>,
     overview_tiles: HashMap<WindowId, OverviewTileRenderState>,
+    /// The window the user last interacted with — drives tab/window spawning,
+    /// command targets, and the quick terminal. Deliberately *sticky*: it keeps
+    /// pointing at the last-focused window while the app is backgrounded so a
+    /// global hotkey still has a target. Not a source of truth for "does a
+    /// window have OS focus right now" — use [`Self::os_focused`] for that.
     focused: Option<WindowId>,
+    /// The window that currently holds real OS focus, or `None` when the whole
+    /// app is backgrounded. Unlike [`Self::focused`] this is cleared on
+    /// `Focused(false)`, so notification suppression reflects actual focus.
+    os_focused: Option<WindowId>,
     #[cfg(target_os = "macos")]
     macos_menu: Option<crate::macos_menu::MacosMenu>,
     /// Monotonic source of [`WindowGroupId`]s; bumped by
@@ -604,6 +613,7 @@ impl App {
             overview_window: None,
             overview_tiles: HashMap::new(),
             focused: None,
+            os_focused: None,
             #[cfg(target_os = "macos")]
             macos_menu: None,
             next_group_id: 0,
@@ -3676,7 +3686,7 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     return;
                 }
-                if crate::notification::should_notify(self.focused == Some(window_id)) {
+                if crate::notification::should_notify(self.os_focused, window_id) {
                     crate::notification::post_notification(title.as_deref(), &body);
                 }
             }
@@ -3740,11 +3750,19 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Resized(size) => self.on_resize(window_id, size),
             WindowEvent::Focused(true) => {
                 self.focused = Some(window_id);
+                self.os_focused = Some(window_id);
                 self.report_focus_event(window_id, true);
                 self.secure_input
                     .on_focus_change(true, &mut crate::secure_input::CarbonSecureInput);
             }
             WindowEvent::Focused(false) => {
+                // Only clear if this window is the one we recorded as focused —
+                // when macOS switches between our own windows the incoming
+                // `Focused(true)` may already have repointed `os_focused`, and
+                // the outgoing window's `Focused(false)` must not undo it.
+                if self.os_focused == Some(window_id) {
+                    self.os_focused = None;
+                }
                 self.finish_active_split_drag(window_id);
                 self.report_focus_event(window_id, false);
                 // Release Secure Keyboard Entry while backgrounded so it never
@@ -4158,24 +4176,26 @@ impl App {
         };
 
         let (tracking, format) = self.mouse_report_modes(window_id, pane_id);
-        if tracking != MouseTracking::Off && !self.modifiers.shift_key() {
-            let Some(cell) = self
-                .windows
-                .get(&window_id)
-                .and_then(|state| state.surfaces.get(&pane_id))
-                .and_then(|surface| surface.last_mouse_cell)
-            else {
-                return;
-            };
-            let delta_y = match delta {
-                MouseScrollDelta::LineDelta(_, y) => y,
-                MouseScrollDelta::PixelDelta(position) => position.y as f32,
-            };
-            if let Some(bytes) =
-                mouse::encode_mouse_wheel(format, tracking, delta_y, cell, self.modifiers)
-            {
-                self.write_pane_pty_bytes(window_id, pane_id, &bytes);
-            }
+        let cell = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .and_then(|surface| surface.last_mouse_cell);
+        let delta_y = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(position) => position.y as f32,
+        };
+        // A tracked mode that reports this wheel event consumes it; otherwise
+        // (X10, Shift override, no known cell) fall through to local scrolling.
+        if let Some(bytes) = mouse::route_mouse_wheel(
+            tracking,
+            format,
+            self.modifiers.shift_key(),
+            delta_y,
+            cell,
+            self.modifiers,
+        ) {
+            self.write_pane_pty_bytes(window_id, pane_id, &bytes);
             return;
         }
 

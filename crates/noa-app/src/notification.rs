@@ -8,10 +8,13 @@
 //! checkout. A no-op on every non-macOS platform.
 
 /// Whether a terminal-requested notification should surface. Ghostty suppresses
-/// notifications for the window that already has OS focus (the user is looking
-/// at that terminal), so they fire only for background activity.
-pub(crate) fn should_notify(target_window_focused: bool) -> bool {
-    !target_window_focused
+/// notifications only for the window that *actually* holds OS focus (the user is
+/// looking at that terminal); a backgrounded app (`os_focused == None`, no
+/// window focused) always surfaces them. `os_focused` must reflect real OS
+/// focus, not the last-focused window — otherwise the main case (a build
+/// finishing while the user is in another app) never fires.
+pub(crate) fn should_notify<Id: PartialEq>(os_focused: Option<Id>, target: Id) -> bool {
+    os_focused != Some(target)
 }
 
 /// The title to display: the requested one when non-empty, else `"noa"`.
@@ -98,9 +101,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn suppresses_notifications_for_the_focused_window() {
-        assert!(!should_notify(true));
-        assert!(should_notify(false));
+    fn suppresses_notifications_only_for_the_os_focused_window() {
+        // The OS-focused target is suppressed…
+        assert!(!should_notify(Some(1), 1));
+        // …but a different focused window still surfaces it…
+        assert!(should_notify(Some(2), 1));
+        // …and a fully backgrounded app (nothing focused) always fires.
+        assert!(should_notify(None, 1));
     }
 
     #[test]

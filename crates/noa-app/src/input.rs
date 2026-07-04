@@ -106,6 +106,15 @@ pub fn encode_key_with_modes(
         }
     }
 
+    // The legacy encoding only ever sends bytes for a press or an OS
+    // auto-repeat; a release produces no legacy input (the Kitty path above is
+    // the only one that reports releases). Without this guard a released
+    // non-text key (Enter/Backspace/Ctrl+C) would encode a second time and
+    // double-send.
+    if !pressed {
+        return None;
+    }
+
     // Ctrl+letter -> the corresponding C0 control byte. Checked before the
     // general text path since terminals expect Ctrl+A..Z to send 0x01..0x1a
     // regardless of what `text` the platform layer produced.
@@ -472,13 +481,15 @@ fn encode_kitty(
     ))
 }
 
-/// A press falls back to the legacy encoding; a release/repeat of a legacy key
-/// is not reported.
+/// A press or repeat falls back to the legacy encoding; only a release of a
+/// legacy key is dropped. Keys that keep their legacy/text encoding under the
+/// active flags must still repeat on OS auto-repeat (Kitty spec), so `event`
+/// 2 (repeat) is delegated to the legacy path just like a press.
 fn legacy_or_ignore(event: u8) -> KittyOutcome {
-    if event == 1 {
-        KittyOutcome::Legacy
-    } else {
+    if event == 3 {
         KittyOutcome::Ignore
+    } else {
+        KittyOutcome::Legacy
     }
 }
 
@@ -1322,6 +1333,116 @@ mod tests {
                 false,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn legacy_release_sends_nothing() {
+        // flags=0: a released non-text key must not re-encode its press bytes
+        // (Enter/Backspace/Ctrl+C would otherwise double-send).
+        let cases: [(Key, Option<&str>, ModifiersState); 3] = [
+            (
+                Key::Named(NamedKey::Enter),
+                Some("\r"),
+                ModifiersState::empty(),
+            ),
+            (
+                Key::Named(NamedKey::Backspace),
+                None,
+                ModifiersState::empty(),
+            ),
+            (Key::Character("c".into()), Some("c"), ModifiersState::CONTROL),
+        ];
+        for (logical, text, mods) in cases {
+            assert!(
+                encode_key_with_modes(&logical, None, text, mods, false, false, 0, true, false)
+                    .is_some(),
+                "press {logical:?} should still send"
+            );
+            assert_eq!(
+                encode_key_with_modes(&logical, None, text, mods, false, false, 0, false, false),
+                None,
+                "release {logical:?} should send nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn kitty_event_types_repeat_legacy_keys_but_drop_their_release() {
+        // Event-types on, report-all off: keys that keep legacy/text encoding
+        // must still repeat on OS auto-repeat, while their release is dropped.
+        let flags = KITTY_DISAMBIGUATE | KITTY_REPORT_EVENT_TYPES; // 3
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Character("a".into()),
+                None,
+                Some("a"),
+                ModifiersState::empty(),
+                false,
+                false,
+                flags,
+                true,
+                true, // repeat
+            ),
+            Some(b"a".to_vec())
+        );
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Named(NamedKey::Backspace),
+                None,
+                None,
+                ModifiersState::empty(),
+                false,
+                false,
+                flags,
+                true,
+                true, // repeat
+            ),
+            Some(vec![0x7f])
+        );
+        // Release of the same legacy keys stays silent.
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Character("a".into()),
+                None,
+                Some("a"),
+                ModifiersState::empty(),
+                false,
+                false,
+                flags,
+                false,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Named(NamedKey::Backspace),
+                None,
+                None,
+                ModifiersState::empty(),
+                false,
+                false,
+                flags,
+                false,
+                false,
+            ),
+            None
+        );
+        // A CSI-u key (Ctrl+A) still reports its repeat with the :2 suffix.
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Character("a".into()),
+                None,
+                Some("a"),
+                ModifiersState::CONTROL,
+                false,
+                false,
+                flags,
+                true,
+                true,
+            ),
+            Some(b"\x1b[97;5:2u".to_vec())
         );
     }
 

@@ -2136,3 +2136,113 @@ fn title_stack_evicts_oldest_entry_past_cap_of_64() {
     // this final pop is a no-op and the title stays "sentinel".
     assert_eq!(t.pending_writes, b"\x1b]lsentinel\x1b\\");
 }
+
+// ── Kitty keyboard protocol progressive enhancement ────────────────────
+
+#[test]
+fn kitty_keyboard_query_reports_zero_by_default() {
+    let mut t = run(b"");
+    let mut s = Stream::new();
+    s.feed(b"\x1b[?u", &mut t);
+    assert_eq!(t.pending_writes, b"\x1b[?0u");
+    assert_eq!(t.kitty_keyboard_flags(), 0);
+}
+
+#[test]
+fn kitty_keyboard_push_pop_query_roundtrip() {
+    let mut t = run(b"");
+    let mut s = Stream::new();
+    // Push flags 5 (disambiguate | alternate keys), then query.
+    s.feed(b"\x1b[>5u\x1b[?u", &mut t);
+    assert_eq!(t.kitty_keyboard_flags(), 5);
+    assert_eq!(t.take_pending_writes(), b"\x1b[?5u");
+    // Push again with 1, query, then pop back to 5.
+    s.feed(b"\x1b[>1u\x1b[?u", &mut t);
+    assert_eq!(t.take_pending_writes(), b"\x1b[?1u");
+    s.feed(b"\x1b[<1u\x1b[?u", &mut t);
+    assert_eq!(t.take_pending_writes(), b"\x1b[?5u");
+}
+
+#[test]
+fn kitty_keyboard_push_without_param_is_zero() {
+    let mut t = run(b"");
+    let mut s = Stream::new();
+    s.feed(b"\x1b[>3u\x1b[>u\x1b[?u", &mut t);
+    assert_eq!(t.kitty_keyboard_flags(), 0);
+    assert_eq!(t.pending_writes, b"\x1b[?0u");
+}
+
+#[test]
+fn kitty_keyboard_set_modes_replace_or_clear() {
+    let mut t = run(b"");
+    let mut s = Stream::new();
+    // Replace (mode omitted) → 1, OR mode 2 → 3, clear mode 3 → 2.
+    s.feed(b"\x1b[=1u", &mut t);
+    assert_eq!(t.kitty_keyboard_flags(), 1);
+    s.feed(b"\x1b[=2;2u", &mut t);
+    assert_eq!(t.kitty_keyboard_flags(), 3);
+    s.feed(b"\x1b[=1;3u", &mut t);
+    assert_eq!(t.kitty_keyboard_flags(), 2);
+}
+
+#[test]
+fn kitty_keyboard_pop_past_bottom_clears_flags() {
+    let mut t = run(b"");
+    let mut s = Stream::new();
+    s.feed(b"\x1b[>1u\x1b[<5u\x1b[?u", &mut t);
+    assert_eq!(t.kitty_keyboard_flags(), 0);
+    assert_eq!(t.pending_writes, b"\x1b[?0u");
+}
+
+#[test]
+fn kitty_keyboard_stack_evicts_oldest_past_depth_eight() {
+    let mut t = run(b"");
+    let mut s = Stream::new();
+    // Push nine distinct flag values; the first (1) is evicted.
+    for flags in [1u8, 2, 4, 8, 16, 3, 5, 9, 17] {
+        s.feed(format!("\x1b[>{flags}u").as_bytes(), &mut t);
+    }
+    assert_eq!(t.kitty_keyboard_flags(), 17);
+    // Eight entries remain (2,4,8,16,3,5,9,17); seven pops reach `2`.
+    s.feed(b"\x1b[<7u\x1b[?u", &mut t);
+    assert_eq!(t.kitty_keyboard_flags(), 2);
+}
+
+#[test]
+fn kitty_keyboard_main_and_alt_stacks_are_separate() {
+    let mut t = run(b"");
+    let mut s = Stream::new();
+    // Set flags on the main screen, enter the alt screen (DECSET 1049), and
+    // confirm the alt stack starts empty and is independent.
+    s.feed(b"\x1b[>7u", &mut t);
+    assert_eq!(t.kitty_keyboard_flags(), 7);
+    s.feed(b"\x1b[?1049h", &mut t);
+    assert_eq!(t.kitty_keyboard_flags(), 0);
+    s.feed(b"\x1b[>1u", &mut t);
+    assert_eq!(t.kitty_keyboard_flags(), 1);
+    // Leaving the alt screen restores the main flags.
+    s.feed(b"\x1b[?1049l", &mut t);
+    assert_eq!(t.kitty_keyboard_flags(), 7);
+}
+
+#[test]
+fn kitty_keyboard_ris_clears_both_stacks() {
+    let mut t = run(b"");
+    let mut s = Stream::new();
+    s.feed(b"\x1b[>7u\x1b[?1049h\x1b[>1u", &mut t);
+    s.feed(b"\x1bc", &mut t); // RIS
+    assert_eq!(t.kitty_keyboard_flags(), 0);
+    s.feed(b"\x1b[?1049h", &mut t);
+    assert_eq!(t.kitty_keyboard_flags(), 0);
+}
+
+#[test]
+fn plain_csi_u_is_still_restore_cursor() {
+    // CSI u with no private marker must remain SCORC (restore cursor), not be
+    // captured by the Kitty keyboard dispatch. Save at (2,3), move, restore.
+    let t = run(b"\x1b[2;3H\x1b[s\x1b[10;10H\x1b[u");
+    assert_eq!(t.primary.cursor.y, 1);
+    assert_eq!(t.primary.cursor.x, 2);
+    // And the DECSC/DECRC `CSI u` form leaves no pending writes (not a query).
+    assert!(t.pending_writes.is_empty());
+}

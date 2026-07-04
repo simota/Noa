@@ -5,6 +5,10 @@
 //! (`logical_key`, `text`, modifiers) directly so the encoding logic stays
 //! unit-testable without a live `KeyEvent`.
 
+use noa_grid::{
+    KITTY_REPORT_ALL_KEYS, KITTY_REPORT_ALTERNATE_KEYS, KITTY_REPORT_ASSOCIATED_TEXT,
+    KITTY_REPORT_EVENT_TYPES,
+};
 use winit::event::Ime;
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
@@ -52,9 +56,25 @@ pub fn encode_key(
     mods: ModifiersState,
     app_cursor_keys: bool,
 ) -> Option<Vec<u8>> {
-    encode_key_with_modes(logical_key, None, text, mods, app_cursor_keys, false)
+    encode_key_with_modes(
+        logical_key,
+        None,
+        text,
+        mods,
+        app_cursor_keys,
+        false,
+        0,
+        true,
+        false,
+    )
 }
 
+/// Encode a key event for the pty. `kitty_flags` are the active Kitty keyboard
+/// progressive-enhancement flags (`Terminal::kitty_keyboard_flags`); `0`
+/// selects the legacy encoding and every existing behavior is preserved
+/// unchanged. `pressed`/`repeat` come from the winit `KeyEvent` and only affect
+/// the Kitty path.
+#[allow(clippy::too_many_arguments)]
 pub fn encode_key_with_modes(
     logical_key: &Key,
     physical_key: Option<PhysicalKey>,
@@ -62,7 +82,30 @@ pub fn encode_key_with_modes(
     mods: ModifiersState,
     app_cursor_keys: bool,
     app_keypad: bool,
+    kitty_flags: u8,
+    pressed: bool,
+    repeat: bool,
 ) -> Option<Vec<u8>> {
+    // Kitty keyboard protocol: when any progressive-enhancement flag is active
+    // it fully governs encoding. Keys that stay legacy under the active flags
+    // (bare printables, unmodified Enter/Tab/Backspace) fall through to the
+    // legacy path below; released legacy keys are dropped.
+    if kitty_flags != 0 {
+        match encode_kitty(
+            logical_key,
+            physical_key,
+            text,
+            mods,
+            kitty_flags,
+            pressed,
+            repeat,
+        ) {
+            KittyOutcome::Escape(bytes) => return Some(bytes),
+            KittyOutcome::Ignore => return None,
+            KittyOutcome::Legacy => {}
+        }
+    }
+
     // Ctrl+letter -> the corresponding C0 control byte. Checked before the
     // general text path since terminals expect Ctrl+A..Z to send 0x01..0x1a
     // regardless of what `text` the platform layer produced.
@@ -265,6 +308,341 @@ fn tilde_key_bytes(code: u8, modifier: Option<u8>) -> Vec<u8> {
     }
 }
 
+/// Outcome of the Kitty keyboard encoder.
+enum KittyOutcome {
+    /// A complete Kitty escape sequence to send.
+    Escape(Vec<u8>),
+    /// This key is sent with its legacy encoding under the active flags —
+    /// delegate to the legacy path (only reached for presses).
+    Legacy,
+    /// Nothing to send (e.g. a released text key, or a key winit can't map).
+    Ignore,
+}
+
+/// How a key maps into the Kitty CSI form once we decide to escape-encode it.
+struct KittyKey {
+    /// Primary unicode-key-code / functional number.
+    number: u32,
+    /// Final byte: `u`, `~`, or a legacy letter (`A`/`H`/`P`/…).
+    suffix: u8,
+    /// Shifted alternate key code (reported only under alternate-keys flag).
+    shifted: Option<u32>,
+}
+
+/// Kitty modifier bitmask value: `1 + sum of active-modifier bits`. winit only
+/// surfaces shift/alt/ctrl/super, so hyper/meta/caps-lock/num-lock are never set.
+fn kitty_modifier_value(mods: ModifiersState) -> u32 {
+    let mut value = 1;
+    if mods.shift_key() {
+        value += 1;
+    }
+    if mods.alt_key() {
+        value += 2;
+    }
+    if mods.control_key() {
+        value += 4;
+    }
+    if mods.super_key() {
+        value += 8;
+    }
+    value
+}
+
+fn encode_kitty(
+    logical_key: &Key,
+    physical_key: Option<PhysicalKey>,
+    text: Option<&str>,
+    mods: ModifiersState,
+    flags: u8,
+    pressed: bool,
+    repeat: bool,
+) -> KittyOutcome {
+    let report_events = flags & KITTY_REPORT_EVENT_TYPES != 0;
+    let report_all = flags & KITTY_REPORT_ALL_KEYS != 0;
+    let report_alt = flags & KITTY_REPORT_ALTERNATE_KEYS != 0;
+    let report_text = flags & KITTY_REPORT_ASSOCIATED_TEXT != 0;
+
+    // Release/repeat are only distinguished when event reporting is on; without
+    // it, a release is not sent at all and a repeat is an ordinary press.
+    if !pressed && !report_events {
+        return KittyOutcome::Ignore;
+    }
+    let event = if !pressed {
+        3 // release
+    } else if repeat && report_events {
+        2 // repeat
+    } else {
+        1 // press
+    };
+
+    let mods_value = kitty_modifier_value(mods);
+    let has_non_shift = mods.control_key() || mods.alt_key() || mods.super_key();
+
+    // Classify the key and decide whether it escape-encodes under these flags.
+    let key = match logical_key {
+        Key::Named(NamedKey::Escape) => KittyKey {
+            number: 27,
+            suffix: b'u',
+            shifted: None,
+        },
+        Key::Named(NamedKey::Enter) => {
+            if mods_value == 1 && !report_all {
+                return legacy_or_ignore(event);
+            }
+            KittyKey {
+                number: 13,
+                suffix: b'u',
+                shifted: None,
+            }
+        }
+        Key::Named(NamedKey::Tab) => {
+            if mods_value == 1 && !report_all {
+                return legacy_or_ignore(event);
+            }
+            KittyKey {
+                number: 9,
+                suffix: b'u',
+                shifted: None,
+            }
+        }
+        Key::Named(NamedKey::Backspace) => {
+            if mods_value == 1 && !report_all {
+                return legacy_or_ignore(event);
+            }
+            KittyKey {
+                number: 127,
+                suffix: b'u',
+                shifted: None,
+            }
+        }
+        Key::Named(named) => match functional_key(*named) {
+            // Functional keys (arrows, F-keys, Home/End/…) always escape-encode.
+            Some((number, suffix)) => KittyKey {
+                number,
+                suffix,
+                shifted: None,
+            },
+            // Modifier keys alone are reported only with report-all-keys.
+            None => match modifier_key_code(physical_key) {
+                Some(number) if report_all => KittyKey {
+                    number,
+                    suffix: b'u',
+                    shifted: None,
+                },
+                _ => return KittyOutcome::Ignore,
+            },
+        },
+        Key::Character(s) => {
+            // Numpad keys get their dedicated codes only under report-all.
+            if report_all && let Some(number) = keypad_key_code(physical_key) {
+                KittyKey {
+                    number,
+                    suffix: b'u',
+                    shifted: None,
+                }
+            } else {
+                let Some((base, shifted)) = character_key_codes(s, mods) else {
+                    return legacy_or_ignore(event);
+                };
+                // A bare (or shift-only) printable stays legacy text unless
+                // report-all forces the escape form.
+                if !report_all && !has_non_shift {
+                    return legacy_or_ignore(event);
+                }
+                KittyKey {
+                    number: base,
+                    suffix: b'u',
+                    shifted,
+                }
+            }
+        }
+        _ => return legacy_or_ignore(event),
+    };
+
+    // Associated text: only for press/repeat, only when no modifier other than
+    // shift is active, and only for genuinely printable text.
+    let assoc_text = if report_text && event != 3 && !has_non_shift {
+        associated_text_codepoints(text)
+    } else {
+        None
+    };
+
+    KittyOutcome::Escape(assemble_kitty(
+        &key, mods_value, event, report_alt, assoc_text,
+    ))
+}
+
+/// A press falls back to the legacy encoding; a release/repeat of a legacy key
+/// is not reported.
+fn legacy_or_ignore(event: u8) -> KittyOutcome {
+    if event == 1 {
+        KittyOutcome::Legacy
+    } else {
+        KittyOutcome::Ignore
+    }
+}
+
+/// Assemble `CSI number[:shifted] [; mods[:event]] [; text] suffix`.
+fn assemble_kitty(
+    key: &KittyKey,
+    mods_value: u32,
+    event: u8,
+    report_alt: bool,
+    assoc_text: Option<String>,
+) -> Vec<u8> {
+    let mut number_field = key.number.to_string();
+    if report_alt && let Some(shifted) = key.shifted {
+        number_field.push(':');
+        number_field.push_str(&shifted.to_string());
+    }
+
+    let mods_needed = mods_value > 1 || event != 1;
+    let mods_field = if mods_needed {
+        if event != 1 {
+            format!("{mods_value}:{event}")
+        } else {
+            mods_value.to_string()
+        }
+    } else {
+        String::new()
+    };
+
+    let letter_suffix = key.suffix != b'u' && key.suffix != b'~';
+    let mut seq = String::from("\x1b[");
+    // Letter-final keys with number 1 and no trailing fields collapse to the
+    // bare legacy form (`CSI A`), matching xterm.
+    if letter_suffix && number_field == "1" && !mods_needed && assoc_text.is_none() {
+        seq.push(key.suffix as char);
+        return seq.into_bytes();
+    }
+    seq.push_str(&number_field);
+    if mods_needed || assoc_text.is_some() {
+        seq.push(';');
+        seq.push_str(&mods_field);
+        if let Some(text) = assoc_text {
+            seq.push(';');
+            seq.push_str(&text);
+        }
+    }
+    seq.push(key.suffix as char);
+    seq.into_bytes()
+}
+
+/// Base (unshifted) and shifted key codes for a character key. The base is the
+/// lowercased code point; the shifted alternate is set only when shift changed
+/// the produced character.
+fn character_key_codes(s: &str, mods: ModifiersState) -> Option<(u32, Option<u32>)> {
+    let mut chars = s.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None; // multi-char logical keys are out of scope
+    }
+    let base_char = c.to_lowercase().next().unwrap_or(c);
+    let base = base_char as u32;
+    let shifted = (mods.shift_key() && c as u32 != base).then_some(c as u32);
+    Some((base, shifted))
+}
+
+/// Associated-text code points (`c1:c2:…`) for genuinely printable text.
+fn associated_text_codepoints(text: Option<&str>) -> Option<String> {
+    let text = text?;
+    if text.is_empty() || text.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    let joined = text
+        .chars()
+        .map(|c| (c as u32).to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+    Some(joined)
+}
+
+/// Kitty functional-key table: `NamedKey` → `(unicode number, final byte)`.
+/// Covers the keys with legacy escape forms; text keys and modifiers are
+/// handled elsewhere.
+fn functional_key(named: NamedKey) -> Option<(u32, u8)> {
+    let entry = match named {
+        NamedKey::ArrowUp => (1, b'A'),
+        NamedKey::ArrowDown => (1, b'B'),
+        NamedKey::ArrowRight => (1, b'C'),
+        NamedKey::ArrowLeft => (1, b'D'),
+        NamedKey::Home => (1, b'H'),
+        NamedKey::End => (1, b'F'),
+        NamedKey::Insert => (2, b'~'),
+        NamedKey::Delete => (3, b'~'),
+        NamedKey::PageUp => (5, b'~'),
+        NamedKey::PageDown => (6, b'~'),
+        NamedKey::F1 => (1, b'P'),
+        NamedKey::F2 => (1, b'Q'),
+        NamedKey::F3 => (13, b'~'),
+        NamedKey::F4 => (1, b'S'),
+        NamedKey::F5 => (15, b'~'),
+        NamedKey::F6 => (17, b'~'),
+        NamedKey::F7 => (18, b'~'),
+        NamedKey::F8 => (19, b'~'),
+        NamedKey::F9 => (20, b'~'),
+        NamedKey::F10 => (21, b'~'),
+        NamedKey::F11 => (23, b'~'),
+        NamedKey::F12 => (24, b'~'),
+        NamedKey::CapsLock => (57358, b'u'),
+        NamedKey::ScrollLock => (57359, b'u'),
+        NamedKey::NumLock => (57360, b'u'),
+        NamedKey::PrintScreen => (57361, b'u'),
+        NamedKey::Pause => (57362, b'u'),
+        NamedKey::ContextMenu => (57363, b'u'),
+        _ => return None,
+    };
+    Some(entry)
+}
+
+/// Kitty code points for modifier keys pressed alone, distinguished left/right
+/// by physical key.
+fn modifier_key_code(physical_key: Option<PhysicalKey>) -> Option<u32> {
+    let PhysicalKey::Code(code) = physical_key? else {
+        return None;
+    };
+    let number = match code {
+        KeyCode::ShiftLeft => 57441,
+        KeyCode::ControlLeft => 57442,
+        KeyCode::AltLeft => 57443,
+        KeyCode::SuperLeft => 57444,
+        KeyCode::ShiftRight => 57447,
+        KeyCode::ControlRight => 57448,
+        KeyCode::AltRight => 57449,
+        KeyCode::SuperRight => 57450,
+        _ => return None,
+    };
+    Some(number)
+}
+
+/// Kitty dedicated keypad code points (`KP_0`=57399 …), by physical key.
+fn keypad_key_code(physical_key: Option<PhysicalKey>) -> Option<u32> {
+    let PhysicalKey::Code(code) = physical_key? else {
+        return None;
+    };
+    let number = match code {
+        KeyCode::Numpad0 => 57399,
+        KeyCode::Numpad1 => 57400,
+        KeyCode::Numpad2 => 57401,
+        KeyCode::Numpad3 => 57402,
+        KeyCode::Numpad4 => 57403,
+        KeyCode::Numpad5 => 57404,
+        KeyCode::Numpad6 => 57405,
+        KeyCode::Numpad7 => 57406,
+        KeyCode::Numpad8 => 57407,
+        KeyCode::Numpad9 => 57408,
+        KeyCode::NumpadDecimal => 57409,
+        KeyCode::NumpadDivide => 57410,
+        KeyCode::NumpadMultiply => 57411,
+        KeyCode::NumpadSubtract => 57412,
+        KeyCode::NumpadAdd => 57413,
+        KeyCode::NumpadEnter => 57414,
+        KeyCode::NumpadEqual => 57415,
+        _ => return None,
+    };
+    Some(number)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +820,9 @@ mod tests {
                 ModifiersState::empty(),
                 false,
                 true,
+                0,
+                true,
+                false,
             ),
             Some(b"\x1bOq".to_vec())
         );
@@ -453,6 +834,9 @@ mod tests {
                 ModifiersState::empty(),
                 false,
                 true,
+                0,
+                true,
+                false,
             ),
             Some(b"\x1bOM".to_vec())
         );
@@ -468,6 +852,9 @@ mod tests {
                 ModifiersState::empty(),
                 false,
                 false,
+                0,
+                true,
+                false,
             ),
             Some(b"1".to_vec())
         );
@@ -478,6 +865,9 @@ mod tests {
                 Some("\r"),
                 ModifiersState::empty(),
                 false,
+                false,
+                0,
+                true,
                 false,
             ),
             Some(vec![0x0d])
@@ -691,5 +1081,265 @@ mod tests {
     #[test]
     fn paste_with_only_bracket_markers_emits_no_bytes() {
         assert_eq!(encode_paste("\x1b[200~\x1b[201~", true), None);
+    }
+
+    // ── Kitty keyboard protocol encoding ───────────────────────────────
+
+    use noa_grid::KITTY_DISAMBIGUATE;
+
+    /// Encode a press with the given Kitty flags (no physical key, not repeat).
+    fn kitty_press(
+        logical: &Key,
+        text: Option<&str>,
+        mods: ModifiersState,
+        flags: u8,
+    ) -> Option<Vec<u8>> {
+        encode_key_with_modes(logical, None, text, mods, false, false, flags, true, false)
+    }
+
+    #[test]
+    fn kitty_disambiguate_escape_key() {
+        // Escape always uses the CSI-u form once any flag is set.
+        assert_eq!(
+            kitty_press(
+                &Key::Named(NamedKey::Escape),
+                None,
+                ModifiersState::empty(),
+                1
+            ),
+            Some(b"\x1b[27u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_disambiguate_ctrl_c_is_csi_u() {
+        // Ctrl+C legacy-collides with 0x03; disambiguate sends CSI 99 ; 5 u.
+        assert_eq!(
+            kitty_press(
+                &Key::Character("c".into()),
+                Some("c"),
+                ModifiersState::CONTROL,
+                1
+            ),
+            Some(b"\x1b[99;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_disambiguate_plain_char_stays_text() {
+        // A bare or shift-only printable is still sent as legacy text.
+        assert_eq!(
+            kitty_press(
+                &Key::Character("a".into()),
+                Some("a"),
+                ModifiersState::empty(),
+                1
+            ),
+            Some(b"a".to_vec())
+        );
+        assert_eq!(
+            kitty_press(
+                &Key::Character("A".into()),
+                Some("A"),
+                ModifiersState::SHIFT,
+                1
+            ),
+            Some(b"A".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_disambiguate_modified_arrow() {
+        // Ctrl+Shift+Up: modifier value = 1 + shift(1) + ctrl(4) = 6.
+        assert_eq!(
+            kitty_press(
+                &Key::Named(NamedKey::ArrowUp),
+                None,
+                ModifiersState::SHIFT | ModifiersState::CONTROL,
+                1,
+            ),
+            Some(b"\x1b[1;6A".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_unmodified_arrow_collapses_to_bare_csi() {
+        // With no modifier/event/text the letter-final form drops the leading 1.
+        assert_eq!(
+            kitty_press(
+                &Key::Named(NamedKey::ArrowUp),
+                None,
+                ModifiersState::empty(),
+                1
+            ),
+            Some(b"\x1b[A".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_report_all_keys_encodes_enter_and_char() {
+        // Report-all-keys escape-encodes even text-producing keys.
+        assert_eq!(
+            kitty_press(
+                &Key::Named(NamedKey::Enter),
+                Some("\r"),
+                ModifiersState::empty(),
+                8
+            ),
+            Some(b"\x1b[13u".to_vec())
+        );
+        assert_eq!(
+            kitty_press(
+                &Key::Character("a".into()),
+                Some("a"),
+                ModifiersState::empty(),
+                8
+            ),
+            Some(b"\x1b[97u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_alternate_keys_report_shifted_code() {
+        // Ctrl+Shift+A with alternate-keys flag: 97:65 base:shifted, mods 6.
+        assert_eq!(
+            kitty_press(
+                &Key::Character("A".into()),
+                Some("A"),
+                ModifiersState::SHIFT | ModifiersState::CONTROL,
+                KITTY_REPORT_ALTERNATE_KEYS,
+            ),
+            Some(b"\x1b[97:65;6u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_associated_text_appended_for_shifted_char() {
+        // Report-all + associated-text: shift+a -> CSI 97 ; 2 ; 65 u.
+        assert_eq!(
+            kitty_press(
+                &Key::Character("A".into()),
+                Some("A"),
+                ModifiersState::SHIFT,
+                KITTY_REPORT_ALL_KEYS | KITTY_REPORT_ASSOCIATED_TEXT,
+            ),
+            Some(b"\x1b[97;2;65u".to_vec())
+        );
+        // Plain 'a' keeps an empty modifier field before the text field.
+        assert_eq!(
+            kitty_press(
+                &Key::Character("a".into()),
+                Some("a"),
+                ModifiersState::empty(),
+                KITTY_REPORT_ALL_KEYS | KITTY_REPORT_ASSOCIATED_TEXT,
+            ),
+            Some(b"\x1b[97;;97u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_event_types_report_release_and_repeat() {
+        // Release of a bare arrow: event 3 forces the modifier field (1:3).
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Named(NamedKey::ArrowUp),
+                None,
+                None,
+                ModifiersState::empty(),
+                false,
+                false,
+                KITTY_REPORT_EVENT_TYPES,
+                false, // released
+                false,
+            ),
+            Some(b"\x1b[1;1:3A".to_vec())
+        );
+        // Repeat of the same key: event 2.
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Named(NamedKey::ArrowUp),
+                None,
+                None,
+                ModifiersState::empty(),
+                false,
+                false,
+                KITTY_REPORT_EVENT_TYPES,
+                true,
+                true, // repeat
+            ),
+            Some(b"\x1b[1;1:2A".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_release_of_text_key_without_report_all_is_dropped() {
+        // A plain char release is not reported under event-types alone.
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Character("a".into()),
+                None,
+                Some("a"),
+                ModifiersState::empty(),
+                false,
+                false,
+                KITTY_REPORT_EVENT_TYPES,
+                false,
+                false,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_modifier_key_alone_reported_only_with_report_all() {
+        // Left Shift pressed alone with report-all: dedicated code 57441,
+        // modifier value 2 (shift now active).
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Named(NamedKey::Shift),
+                Some(PhysicalKey::Code(KeyCode::ShiftLeft)),
+                None,
+                ModifiersState::SHIFT,
+                false,
+                false,
+                KITTY_REPORT_ALL_KEYS,
+                true,
+                false,
+            ),
+            Some(b"\x1b[57441;2u".to_vec())
+        );
+        // Without report-all the lone modifier is silent.
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Named(NamedKey::Shift),
+                Some(PhysicalKey::Code(KeyCode::ShiftLeft)),
+                None,
+                ModifiersState::SHIFT,
+                false,
+                false,
+                KITTY_DISAMBIGUATE,
+                true,
+                false,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn kitty_keypad_uses_dedicated_codes_under_report_all() {
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Character("1".into()),
+                Some(PhysicalKey::Code(KeyCode::Numpad1)),
+                Some("1"),
+                ModifiersState::empty(),
+                false,
+                false,
+                KITTY_REPORT_ALL_KEYS,
+                true,
+                false,
+            ),
+            Some(b"\x1b[57400u".to_vec())
+        );
     }
 }

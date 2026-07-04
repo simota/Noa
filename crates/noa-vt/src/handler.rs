@@ -190,6 +190,17 @@ pub trait Handler {
     /// is ignored with no reply.
     fn window_op(&mut self, _ps: u16, _p1: u16, _p2: u16) {}
 
+    // ── Kitty keyboard protocol (`CSI ... u` with a private marker) ────
+    /// `CSI ? u` — query the active progressive-enhancement flags; replies
+    /// with `CSI ? <flags> u`.
+    fn kitty_keyboard_query(&mut self) {}
+    /// `CSI > flags u` — push `flags` onto the active screen's flag stack.
+    fn kitty_keyboard_push(&mut self, _flags: u8) {}
+    /// `CSI < n u` — pop `n` entries from the active screen's flag stack.
+    fn kitty_keyboard_pop(&mut self, _n: u16) {}
+    /// `CSI = flags ; mode u` — set flags (`mode` 1 replace / 2 set / 3 clear).
+    fn kitty_keyboard_set(&mut self, _flags: u8, _mode: u16) {}
+
     // ── parsed but inc-1 no-ops ────────────────────────────────────
     /// OSC payload (`ESC ] … ST`). Inc-1: parse title (`0`/`2`), drop the rest.
     fn osc_dispatch(&mut self, _data: &[u8]) {}

@@ -117,7 +117,15 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
         b'r' if csi.private == 0 => h.set_scroll_region(csi.param(0, 1), csi.param(1, 0)),
         b's' if csi.private == 0 && csi.params.is_empty() => h.save_cursor(),
         b's' if csi.private == 0 => h.set_horizontal_margins(csi.param(0, 1), csi.param(1, 0)),
-        b'u' if csi.private == 0 => h.restore_cursor(),
+        // Plain `CSI u` is SCORC (restore cursor). The private markers select
+        // the Kitty keyboard protocol progressive-enhancement operations.
+        b'u' if csi.private == 0 && csi.intermediates.is_empty() => h.restore_cursor(),
+        b'u' if csi.private == b'?' => h.kitty_keyboard_query(),
+        b'u' if csi.private == b'>' => h.kitty_keyboard_push(csi.param(0, 0) as u8),
+        b'u' if csi.private == b'<' => h.kitty_keyboard_pop(csi.param(0, 1)),
+        b'u' if csi.private == b'=' => {
+            h.kitty_keyboard_set(csi.param(0, 0) as u8, csi.param(1, 1));
+        }
         b'g' if plain => match csi.param(0, 0) {
             0 => h.clear_tab_stop(),
             3 => h.clear_all_tab_stops(),

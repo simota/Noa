@@ -539,6 +539,20 @@ impl App {
             .unwrap_or(false)
     }
 
+    fn kitty_keyboard_flags(&self, window_id: WindowId) -> u8 {
+        self.windows
+            .get(&window_id)
+            .and_then(WindowState::focused_surface)
+            .map(|surface| {
+                surface
+                    .terminal
+                    .lock()
+                    .expect("terminal mutex poisoned")
+                    .kitty_keyboard_flags()
+            })
+            .unwrap_or(0)
+    }
+
     fn focus_reporting(&self, window_id: WindowId) -> bool {
         self.windows
             .get(&window_id)
@@ -2794,15 +2808,20 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(window_id, delta),
             WindowEvent::Ime(event) => self.on_ime_event(window_id, event),
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state != ElementState::Pressed {
-                    return;
+                let pressed = event.state == ElementState::Pressed;
+                if pressed {
+                    // Any keypress snaps the focused cursor back to its visible
+                    // blink phase and restarts the interval, matching common
+                    // terminal behavior (typing shouldn't leave the cursor
+                    // stuck invisible mid-blink).
+                    self.cursor_blink_visible = true;
+                    self.cursor_blink_deadline = None;
                 }
-                // Any keypress snaps the focused cursor back to its visible
-                // blink phase and restarts the interval, matching common
-                // terminal behavior (typing shouldn't leave the cursor
-                // stuck invisible mid-blink).
-                self.cursor_blink_visible = true;
-                self.cursor_blink_deadline = None;
+                // IME composition and the modal UI layers (confirm dialog,
+                // search prompt, command palette) fully own the keyboard while
+                // active — they act on presses and swallow releases so nothing
+                // leaks to keybinds or the pty. Only the Kitty keyboard
+                // protocol (below) ever emits release events.
                 if self
                     .windows
                     .get(&window_id)
@@ -2819,7 +2838,9 @@ impl ApplicationHandler<UserEvent> for App {
                     .as_ref()
                     .is_some_and(|session| session.window_id == window_id)
                 {
-                    self.handle_confirm_dialog_key(window_id, &event);
+                    if pressed {
+                        self.handle_confirm_dialog_key(window_id, &event);
+                    }
                     return;
                 }
                 if self
@@ -2827,7 +2848,9 @@ impl ApplicationHandler<UserEvent> for App {
                     .as_ref()
                     .is_some_and(|session| session.window_id == window_id)
                 {
-                    self.handle_search_prompt_key(event_loop, window_id, &event);
+                    if pressed {
+                        self.handle_search_prompt_key(event_loop, window_id, &event);
+                    }
                     return;
                 }
                 // C2 (FM2): the palette branch sits exactly between the
@@ -2843,10 +2866,14 @@ impl ApplicationHandler<UserEvent> for App {
                     .as_ref()
                     .is_some_and(|session| session.window_id == window_id)
                 {
-                    self.handle_command_palette_key(event_loop, window_id, &event);
+                    if pressed {
+                        self.handle_command_palette_key(event_loop, window_id, &event);
+                    }
                     return;
                 }
-                if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
+                if pressed
+                    && let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers)
+                {
                     self.handle_app_command(event_loop, command);
                     return;
                 }
@@ -2860,6 +2887,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 let app_cursor_keys = self.app_cursor_keys(window_id);
                 let app_keypad = self.app_keypad(window_id);
+                let kitty_flags = self.kitty_keyboard_flags(window_id);
                 let bytes = input::encode_key_with_modes(
                     &event.logical_key,
                     Some(event.physical_key),
@@ -2867,6 +2895,9 @@ impl ApplicationHandler<UserEvent> for App {
                     self.modifiers,
                     app_cursor_keys,
                     app_keypad,
+                    kitty_flags,
+                    pressed,
+                    event.repeat,
                 );
                 if let Some(bytes) = bytes {
                     self.write_pty_bytes(window_id, &bytes);

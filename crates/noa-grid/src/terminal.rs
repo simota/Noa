@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use crate::cell::Hyperlink;
 use crate::charset::CharsetState;
 use crate::cursor::{Cursor, CursorStyle, ScrollRegion};
+use crate::kitty_keyboard::{KittyKeyboard, SetMode};
 use crate::modes::ModeState;
 use crate::osc::{
     CwdOsc, HyperlinkOsc, Osc52Policy, ShellIntegrationOsc, ShellIntegrationOscKind,
@@ -73,6 +74,8 @@ pub struct Terminal {
     /// Cursor style DECSCUSR 0 (`Default`) resets to. Seeded from
     /// `CursorStyle::default()`; `noa-app` overrides it from `cursor-style`.
     default_cursor_style: CursorStyle,
+    /// Kitty keyboard protocol progressive-enhancement flag stacks (per screen).
+    kitty_keyboard: KittyKeyboard,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,7 +127,15 @@ impl Terminal {
             text_area_height_px: 0,
             title_stack: VecDeque::new(),
             default_cursor_style: CursorStyle::default(),
+            kitty_keyboard: KittyKeyboard::default(),
         }
+    }
+
+    /// The active Kitty keyboard progressive-enhancement flags for the current
+    /// screen (main vs alternate). `0` means the legacy encoding is in effect.
+    /// `noa-app` reads this to select its key-encoding path.
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        self.kitty_keyboard.flags(self.active_is_alt)
     }
 
     /// Set the cursor style DECSCUSR 0 resets to, and apply it immediately as
@@ -904,6 +915,7 @@ impl Handler for Terminal {
         self.pending_clipboard_writes.clear();
         self.pending_clipboard_reads.clear();
         self.pending_bell = false;
+        self.kitty_keyboard.reset();
         self.clear_selection();
         self.clear_search();
     }
@@ -1007,6 +1019,25 @@ impl Handler for Terminal {
             23 if matches!(p1, 0 | 2) => self.pop_title(),
             _ => {} // 4/8/9/10/19/20, icon-only push/pop, unknown Ps — ignore (Ghostty parity).
         }
+    }
+
+    fn kitty_keyboard_query(&mut self) {
+        let flags = self.kitty_keyboard.flags(self.active_is_alt);
+        self.pending_writes
+            .extend_from_slice(format!("\x1b[?{flags}u").as_bytes());
+    }
+
+    fn kitty_keyboard_push(&mut self, flags: u8) {
+        self.kitty_keyboard.push(self.active_is_alt, flags);
+    }
+
+    fn kitty_keyboard_pop(&mut self, n: u16) {
+        self.kitty_keyboard.pop(self.active_is_alt, n);
+    }
+
+    fn kitty_keyboard_set(&mut self, flags: u8, mode: u16) {
+        self.kitty_keyboard
+            .set(self.active_is_alt, flags, SetMode::from_param(mode));
     }
 
     fn osc_dispatch(&mut self, data: &[u8]) {

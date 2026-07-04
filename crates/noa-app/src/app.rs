@@ -427,6 +427,17 @@ enum ConfirmAction {
         pane_id: PaneId,
         target: String,
     },
+    /// Close one split pane, discarding its PTY.
+    ClosePane {
+        window_id: WindowId,
+        pane_id: PaneId,
+    },
+    /// Close one native tab/session, discarding every pane in it.
+    CloseTab { window_id: WindowId },
+    /// Close every tab in one logical window group.
+    CloseWindow { group: WindowGroupId },
+    /// Quit the app, discarding every live session.
+    Quit,
 }
 
 /// Terminal-owned state for one split leaf. `split_tree` leaves store the
@@ -1044,7 +1055,7 @@ impl App {
             AppCommand::ToggleTabOverview => self.toggle_tab_overview(event_loop),
             AppCommand::CloseTab => {
                 if let Some(window_id) = self.focused {
-                    self.close_focused_pane_or_tab(event_loop, window_id);
+                    self.request_close_focused_pane_or_tab(event_loop, window_id);
                 }
             }
             AppCommand::SelectTab(index) => self.select_tab(index),
@@ -1059,8 +1070,8 @@ impl App {
             AppCommand::ToggleCommandPalette => self.toggle_command_palette(),
             AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             AppCommand::ToggleSecureKeyboardEntry => self.toggle_secure_keyboard_entry(),
-            AppCommand::CloseWindow => self.close_window(event_loop),
-            AppCommand::Quit => event_loop.exit(),
+            AppCommand::CloseWindow => self.request_close_window(event_loop),
+            AppCommand::Quit => self.request_quit(event_loop),
         }
     }
 
@@ -1464,6 +1475,49 @@ impl App {
         })
     }
 
+    fn pane_has_running_program(&self, window_id: WindowId, pane_id: PaneId) -> bool {
+        self.windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .is_some_and(surface_has_running_program)
+    }
+
+    fn tab_running_program_count(&self, window_id: WindowId) -> usize {
+        self.windows
+            .get(&window_id)
+            .map(|state| running_program_count(state.surfaces.values()))
+            .unwrap_or(0)
+    }
+
+    fn group_running_program_count(&self, group: WindowGroupId) -> usize {
+        self.window_order
+            .iter()
+            .filter_map(|window_id| self.windows.get(window_id))
+            .filter(|state| state.group == group)
+            .map(|state| running_program_count(state.surfaces.values()))
+            .sum()
+    }
+
+    fn app_running_program_count(&self) -> usize {
+        self.windows
+            .values()
+            .map(|state| running_program_count(state.surfaces.values()))
+            .sum()
+    }
+
+    fn request_close_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
+        let count = self.tab_running_program_count(window_id);
+        if count > 0 {
+            self.open_confirm_dialog(
+                window_id,
+                close_confirm_message(CloseConfirmTarget::Session, count),
+                ConfirmAction::CloseTab { window_id },
+            );
+            return;
+        }
+        self.close_tab(event_loop, window_id);
+    }
+
     fn close_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
         let outcome = close_tab_outcome(
             &self.window_order,
@@ -1540,14 +1594,26 @@ impl App {
     /// modal/search/palette de-leak, focus repoint) runs, and closing the last
     /// remaining window's last tab still quits the app through
     /// [`TabCloseOutcome::Quit`]. A no-op when nothing is focused.
-    fn close_window(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(group) = self
-            .focused
-            .and_then(|id| self.windows.get(&id))
-            .map(|state| state.group)
-        else {
+    fn request_close_window(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(window_id) = self.focused else {
             return;
         };
+        let Some(group) = self.windows.get(&window_id).map(|state| state.group) else {
+            return;
+        };
+        let count = self.group_running_program_count(group);
+        if count > 0 {
+            self.open_confirm_dialog(
+                window_id,
+                close_confirm_message(CloseConfirmTarget::Window, count),
+                ConfirmAction::CloseWindow { group },
+            );
+            return;
+        }
+        self.close_group(event_loop, group);
+    }
+
+    fn close_group(&mut self, event_loop: &ActiveEventLoop, group: WindowGroupId) {
         // Snapshot the group's tabs first — `close_tab` mutates `window_order`
         // and `focused` on each call, so iterating it live would be unsound.
         let tabs = ids_in_group(
@@ -1560,16 +1626,20 @@ impl App {
         }
     }
 
-    fn close_focused_pane_or_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
+    fn request_close_focused_pane_or_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+    ) {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
         if state.pane_count() <= 1 {
-            self.close_tab(event_loop, window_id);
+            self.request_close_tab(event_loop, window_id);
             return;
         }
         let pane_id = state.focused_pane;
-        self.close_pane(event_loop, window_id, pane_id);
+        self.request_close_pane(event_loop, window_id, pane_id);
     }
 
     fn close_pane_after_pty_exit(
@@ -1586,6 +1656,23 @@ impl App {
         }
         if state.pane_count() <= 1 {
             self.close_tab(event_loop, window_id);
+            return;
+        }
+        self.close_pane(event_loop, window_id, pane_id);
+    }
+
+    fn request_close_pane(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) {
+        if self.pane_has_running_program(window_id, pane_id) {
+            self.open_confirm_dialog(
+                window_id,
+                close_confirm_message(CloseConfirmTarget::Pane, 1),
+                ConfirmAction::ClosePane { window_id, pane_id },
+            );
             return;
         }
         self.close_pane(event_loop, window_id, pane_id);
@@ -1651,6 +1738,28 @@ impl App {
         window.request_redraw();
         self.request_overview_redraw();
         self.persist_session();
+    }
+
+    fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
+        let count = self.app_running_program_count();
+        if count == 0 {
+            event_loop.exit();
+            return;
+        }
+        let Some(window_id) = self
+            .focused
+            .filter(|id| self.windows.contains_key(id))
+            .or_else(|| self.window_order.last().copied())
+            .or_else(|| self.windows.keys().copied().next())
+        else {
+            event_loop.exit();
+            return;
+        };
+        self.open_confirm_dialog(
+            window_id,
+            close_confirm_message(CloseConfirmTarget::App, count),
+            ConfirmAction::Quit,
+        );
     }
 
     fn new_split(&mut self, window_id: WindowId, orientation: SplitOrientation) {
@@ -3030,7 +3139,12 @@ impl App {
                     // Close the targeted pane; `close_pane` falls back to
                     // closing the tab when it was the last pane.
                     if let Some(target) = self.overview_close_target_at_last_cursor() {
-                        self.close_pane(event_loop, target.window_id, target.pane_id);
+                        self.hide_tab_overview();
+                        if let Some(state) = self.windows.get(&target.window_id) {
+                            state.window.focus_window();
+                        }
+                        self.focused = Some(target.window_id);
+                        self.request_close_pane(event_loop, target.window_id, target.pane_id);
                     } else {
                         self.focus_overview_tile_at_last_cursor();
                     }
@@ -3888,7 +4002,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // Closing the drop-down just hides it; it isn't a real tab.
                 self.start_quick_terminal_hide();
             }
-            WindowEvent::CloseRequested => self.close_tab(event_loop, window_id),
+            WindowEvent::CloseRequested => self.request_close_tab(event_loop, window_id),
             WindowEvent::RedrawRequested => self.redraw(window_id),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.on_scale_factor_changed(window_id, scale_factor)
@@ -3973,7 +4087,7 @@ impl ApplicationHandler<UserEvent> for App {
                     .is_some_and(|session| session.window_id == window_id)
                 {
                     if pressed {
-                        self.handle_confirm_dialog_key(window_id, &event);
+                        self.handle_confirm_dialog_key(event_loop, window_id, &event);
                     }
                     return;
                 }
@@ -5024,7 +5138,12 @@ impl App {
     /// Keystroke routing for the modal confirmation dialog. Enter (or `y`)
     /// confirms and runs the deferred action; Escape (or `n`) cancels; every
     /// other key is swallowed.
-    fn handle_confirm_dialog_key(&mut self, window_id: WindowId, event: &KeyEvent) {
+    fn handle_confirm_dialog_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: &KeyEvent,
+    ) {
         let confirm = match &event.logical_key {
             Key::Named(NamedKey::Enter) => true,
             Key::Named(NamedKey::Escape) => false,
@@ -5036,12 +5155,12 @@ impl App {
             return;
         };
         if confirm {
-            self.run_confirm_action(session.action);
+            self.run_confirm_action(event_loop, session.action);
         }
         self.request_window_redraw(window_id);
     }
 
-    fn run_confirm_action(&mut self, action: ConfirmAction) {
+    fn run_confirm_action(&mut self, event_loop: &ActiveEventLoop, action: ConfirmAction) {
         match action {
             ConfirmAction::Paste {
                 window_id,
@@ -5053,6 +5172,12 @@ impl App {
                 pane_id,
                 target,
             } => self.fulfill_clipboard_read(window_id, pane_id, &target),
+            ConfirmAction::ClosePane { window_id, pane_id } => {
+                self.close_pane(event_loop, window_id, pane_id)
+            }
+            ConfirmAction::CloseTab { window_id } => self.close_tab(event_loop, window_id),
+            ConfirmAction::CloseWindow { group } => self.close_group(event_loop, group),
+            ConfirmAction::Quit => event_loop.exit(),
         }
     }
 
@@ -5470,6 +5595,52 @@ fn apply_pane_resize_batch(
 fn shutdown_pane_io_threads<'a>(surfaces: impl IntoIterator<Item = &'a mut Surface>) {
     for surface in surfaces {
         surface.shutdown();
+    }
+}
+
+fn surface_has_running_program(surface: &Surface) -> bool {
+    surface
+        .terminal
+        .lock()
+        .expect("terminal mutex poisoned")
+        .has_running_program()
+}
+
+fn running_program_count<'a>(surfaces: impl IntoIterator<Item = &'a Surface>) -> usize {
+    surfaces
+        .into_iter()
+        .filter(|surface| surface_has_running_program(surface))
+        .count()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseConfirmTarget {
+    Pane,
+    Session,
+    Window,
+    App,
+}
+
+fn close_confirm_message(target: CloseConfirmTarget, running_programs: usize) -> String {
+    match target {
+        CloseConfirmTarget::Pane => {
+            "A program is still running in this pane. Close it?".to_string()
+        }
+        CloseConfirmTarget::Session => {
+            close_confirm_plural(running_programs, "this session", "Close this session?")
+        }
+        CloseConfirmTarget::Window => {
+            close_confirm_plural(running_programs, "this window", "Close this window?")
+        }
+        CloseConfirmTarget::App => close_confirm_plural(running_programs, "noa", "Quit noa?"),
+    }
+}
+
+fn close_confirm_plural(running_programs: usize, scope: &str, question: &str) -> String {
+    if running_programs == 1 {
+        format!("A program is still running in {scope}. {question}")
+    } else {
+        format!("{running_programs} programs are still running in {scope}. {question}")
     }
 }
 
@@ -6666,6 +6837,22 @@ mod tests {
         assert_eq!(
             close_tab_outcome(&[1, 2, 3], Some(1), 2, false),
             TabCloseOutcome::Continue { focused: Some(1) }
+        );
+    }
+
+    #[test]
+    fn close_confirm_message_names_scope_and_count() {
+        assert_eq!(
+            close_confirm_message(CloseConfirmTarget::Pane, 1),
+            "A program is still running in this pane. Close it?"
+        );
+        assert_eq!(
+            close_confirm_message(CloseConfirmTarget::Window, 2),
+            "2 programs are still running in this window. Close this window?"
+        );
+        assert_eq!(
+            close_confirm_message(CloseConfirmTarget::App, 1),
+            "A program is still running in noa. Quit noa?"
         );
     }
 

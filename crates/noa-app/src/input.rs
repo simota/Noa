@@ -424,6 +424,16 @@ fn encode_kitty(
                 shifted: None,
             }
         }
+        Key::Named(NamedKey::Space) => {
+            if !report_all && !has_non_shift {
+                return legacy_or_ignore(event);
+            }
+            KittyKey {
+                number: 32,
+                suffix: b'u',
+                shifted: None,
+            }
+        }
         Key::Named(named) => match functional_key(*named) {
             // Functional keys (arrows, F-keys, Home/End/…) always escape-encode.
             Some((number, suffix)) => KittyKey {
@@ -1160,6 +1170,37 @@ mod tests {
     }
 
     #[test]
+    fn kitty_disambiguate_named_space_stays_text() {
+        // winit can report Space as a named key rather than a character key.
+        // A bare printable still takes the legacy text path when report-all is
+        // disabled.
+        assert_eq!(
+            kitty_press(
+                &Key::Named(NamedKey::Space),
+                Some(" "),
+                ModifiersState::empty(),
+                KITTY_DISAMBIGUATE
+            ),
+            Some(b" ".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_disambiguate_modified_named_space_is_csi_u() {
+        // Ctrl+Space has no printable legacy byte that preserves the modifier,
+        // so Kitty disambiguation reports it as CSI 32;5u.
+        assert_eq!(
+            kitty_press(
+                &Key::Named(NamedKey::Space),
+                Some(" "),
+                ModifiersState::CONTROL,
+                KITTY_DISAMBIGUATE
+            ),
+            Some(b"\x1b[32;5u".to_vec())
+        );
+    }
+
+    #[test]
     fn kitty_disambiguate_modified_arrow() {
         // Ctrl+Shift+Up: modifier value = 1 + shift(1) + ctrl(4) = 6.
         assert_eq!(
@@ -1207,6 +1248,21 @@ mod tests {
                 8
             ),
             Some(b"\x1b[97u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kitty_report_all_keys_encodes_named_space() {
+        // winit reports Space as a named key on some platforms. Under Kitty
+        // report-all it must still emit a CSI-u space instead of being ignored.
+        assert_eq!(
+            kitty_press(
+                &Key::Named(NamedKey::Space),
+                Some(" "),
+                ModifiersState::empty(),
+                KITTY_REPORT_ALL_KEYS
+            ),
+            Some(b"\x1b[32u".to_vec())
         );
     }
 

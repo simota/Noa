@@ -696,6 +696,7 @@ fn rebuild_cell_instances(
     flatten_row_segments(instances, &bg_rows, &glyph_rows, &deco_rows);
     append_search_prompt_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
     append_command_palette_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
+    append_confirm_dialog_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
 
     (clear_color, (metrics.cell_w, metrics.cell_h))
 }
@@ -1001,6 +1002,7 @@ fn rebuild_pane_cached(
     flatten_row_segments(instances, &cache.bg, &cache.glyph, &cache.deco);
     append_search_prompt_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
     append_command_palette_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
+    append_confirm_dialog_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
 
     cache.key = Some(new_key);
     cache.prev_cursor = Some(new_cursor);
@@ -1172,6 +1174,75 @@ fn append_command_palette_instances(
             colors,
         );
     }
+}
+
+/// Append the open confirmation dialog (paste protection / clipboard-read),
+/// if any, to `instances`. A centered two-row modal — a message line and a
+/// key-hint line — reusing the command-palette block helpers. Recomputed
+/// fresh every call and drawn on top of everything else.
+fn append_confirm_dialog_instances(
+    instances: &mut Vec<CellInstance>,
+    snap: &FrameSnapshot,
+    font: &mut FontGrid,
+    theme: &Theme,
+    target_format_is_srgb: bool,
+    metrics: Metrics,
+) {
+    let Some(dialog) = snap.confirm_dialog.as_ref() else {
+        return;
+    };
+    let cols = snap.cols as usize;
+    let grid_rows = snap.rows_n as usize;
+    if cols < 3 || grid_rows < 2 {
+        return;
+    }
+
+    let inner = dialog
+        .message
+        .chars()
+        .count()
+        .max(dialog.hint.chars().count())
+        .min(cols - 2);
+    let block_w = inner + 2;
+    let height = 2;
+    let x0 = ((cols - block_w) / 2) as u16;
+    let y0 = (grid_rows.saturating_sub(height) / 2) as u16;
+
+    let msg_bg = to_u8_color(surface_output_rgba(
+        theme.selection_bg(),
+        target_format_is_srgb,
+    ));
+    let msg_fg = to_u8_color(surface_output_rgba(
+        theme.selection_fg(),
+        target_format_is_srgb,
+    ));
+    let hint_bg = to_u8_color(surface_output_rgba(
+        theme.active_search_bg(),
+        target_format_is_srgb,
+    ));
+    let hint_fg = to_u8_color(surface_output_rgba(
+        theme.active_search_fg(),
+        target_format_is_srgb,
+    ));
+
+    append_palette_row(
+        instances,
+        font,
+        metrics,
+        x0,
+        y0,
+        &palette_line(&dialog.message, None, inner),
+        (msg_bg, msg_fg),
+    );
+    append_palette_row(
+        instances,
+        font,
+        metrics,
+        x0,
+        y0 + 1,
+        &palette_line(&dialog.hint, None, inner),
+        (hint_bg, hint_fg),
+    );
 }
 
 /// Which `count`-length list slice to render given `selected` and a row
@@ -2732,6 +2803,63 @@ mod tests {
     }
 
     #[test]
+    fn confirm_dialog_overlay_emits_bg_and_glyph_instances_and_clears_on_close() {
+        let Some(mut font) = font_with_rasterized_m() else {
+            return;
+        };
+
+        let mut terminal = Terminal::new(GridSize::new(40, 10));
+        let theme = Theme::new();
+
+        let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+        assert_eq!(
+            snap.confirm_dialog, None,
+            "from_terminal defaults to no dialog"
+        );
+
+        let mut closed = Vec::new();
+        rebuild_cell_instances(&mut closed, &snap, &mut font, &theme, false);
+        let bg_before = closed.iter().filter(|i| i.flags == 0).count();
+
+        snap.confirm_dialog = Some(crate::ConfirmDialogSnapshot {
+            message: "Paste 3 line(s) of text?".to_string(),
+            hint: "Enter: confirm    Esc: cancel".to_string(),
+        });
+        let mut with_dialog = Vec::new();
+        rebuild_cell_instances(&mut with_dialog, &snap, &mut font, &theme, false);
+
+        assert!(
+            with_dialog.iter().filter(|i| i.flags == 0).count() > bg_before,
+            "opening the dialog must add background quads"
+        );
+        // A message row and a hint row.
+        let rows_touched: std::collections::BTreeSet<u16> = with_dialog
+            .iter()
+            .filter(|i| i.flags == 0)
+            .map(|i| i.grid_pos[1])
+            .collect();
+        assert!(
+            rows_touched.len() >= 2,
+            "message and hint rows must both draw: {rows_touched:?}"
+        );
+        assert!(
+            with_dialog
+                .iter()
+                .any(|i| i.flags & CellInstance::FLAG_GLYPH != 0),
+            "the dialog text must emit glyph instances"
+        );
+
+        snap.confirm_dialog = None;
+        let mut reclosed = Vec::new();
+        rebuild_cell_instances(&mut reclosed, &snap, &mut font, &theme, false);
+        assert_eq!(
+            reclosed.iter().filter(|i| i.flags == 0).count(),
+            bg_before,
+            "closing the dialog removes its overlay instances"
+        );
+    }
+
+    #[test]
     fn srgb_surface_output_converts_theme_colors_to_linear() {
         let srgb = [30.0 / 255.0, 30.0 / 255.0, 30.0 / 255.0, 1.0];
 
@@ -2985,6 +3113,7 @@ mod tests {
             hover_link: None,
             search_prompt: None,
             command_palette: None,
+            confirm_dialog: None,
         }
     }
 

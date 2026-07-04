@@ -75,6 +75,7 @@ fn snapshot_for_text(text: &str) -> FrameSnapshot {
         hover_link: None,
         search_prompt: None,
         command_palette: None,
+        confirm_dialog: None,
     }
 }
 
@@ -292,6 +293,7 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         hover_link: None,
         search_prompt: None,
         command_palette: None,
+        confirm_dialog: None,
     };
     let theme = Theme::new();
 
@@ -378,6 +380,7 @@ fn command_palette_overlay_draws_one_frame_without_validation_error() {
             ],
             selected: 1,
         }),
+        confirm_dialog: None,
     };
 
     renderer.rebuild_cells(&snap, &mut font, &Theme::new());
@@ -592,6 +595,7 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
             hover_link: None,
             search_prompt: None,
             command_palette: None,
+            confirm_dialog: None,
         }
     }
 
@@ -985,6 +989,7 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
         hover_link: None,
         search_prompt: None,
         command_palette: None,
+        confirm_dialog: None,
     };
     let theme = Theme::new();
 

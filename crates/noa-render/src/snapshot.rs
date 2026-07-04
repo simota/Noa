@@ -39,6 +39,17 @@ pub struct CommandPaletteSnapshot {
     pub selected: usize,
 }
 
+/// The open confirmation dialog's render payload (paste protection / OSC 52
+/// clipboard-read prompt), built by `noa-app`. A centered modal box with a
+/// message line and a key-hint line; the renderer stays action-agnostic.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConfirmDialogSnapshot {
+    /// The prompt message (e.g. "Paste 3 lines?").
+    pub message: String,
+    /// The key-hint line (e.g. "Enter: Paste   Esc: Cancel").
+    pub hint: String,
+}
+
 /// A snapshot of the active screen taken under the `Terminal` lock.
 ///
 /// WP4 (REQ-PERF-1/2): `row_dirty` is parallel to `rows` (same length, same
@@ -79,6 +90,10 @@ pub struct FrameSnapshot {
     /// focused pane so it draws once, not once per split; `from_terminal`
     /// defaults to `None`.
     pub command_palette: Option<CommandPaletteSnapshot>,
+    /// The open confirmation dialog (paste protection / clipboard-read), if
+    /// any. `None` draws no dialog. Set by the caller only on its bound
+    /// window's focused pane; `from_terminal` defaults to `None`.
+    pub confirm_dialog: Option<ConfirmDialogSnapshot>,
 }
 
 /// The screen `Terminal` is currently rendering, borrowed mutably so its
@@ -127,6 +142,7 @@ impl FrameSnapshot {
             hover_link: None,
             search_prompt: None,
             command_palette: None,
+            confirm_dialog: None,
         }
     }
 

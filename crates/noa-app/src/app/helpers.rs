@@ -754,6 +754,15 @@ pub(super) fn focus_report_bytes(focused: bool, focus_reporting: bool) -> Option
     }
 }
 
+pub(super) fn pane_owns_keyboard_focus<Window: PartialEq, Pane: PartialEq>(
+    window_id: Window,
+    pane_id: Pane,
+    os_focused: Option<Window>,
+    focused_pane: Pane,
+) -> bool {
+    pane_id == focused_pane && os_focused.as_ref() == Some(&window_id)
+}
+
 pub(super) fn font_pixel_size(point_size: f32, scale_factor: f64) -> f32 {
     (point_size * scale_factor.max(f64::EPSILON) as f32).max(1.0)
 }
@@ -1662,6 +1671,17 @@ mod tests {
         assert_eq!(focus_report_bytes(false, true), Some(b"\x1b[O".as_slice()));
         assert_eq!(focus_report_bytes(true, false), None);
         assert_eq!(focus_report_bytes(false, false), None);
+    }
+
+    #[test]
+    fn pane_keyboard_focus_uses_os_focus_not_sticky_last_focus() {
+        assert!(pane_owns_keyboard_focus(1_u8, 10_u8, Some(1_u8), 10_u8));
+        assert!(!pane_owns_keyboard_focus(1_u8, 11_u8, Some(1_u8), 10_u8));
+        assert!(!pane_owns_keyboard_focus(1_u8, 10_u8, Some(2_u8), 10_u8));
+        assert!(
+            !pane_owns_keyboard_focus(1_u8, 10_u8, None, 10_u8),
+            "a backgrounded app keeps sticky focus for commands, but not for cursor rendering"
+        );
     }
 
     #[test]

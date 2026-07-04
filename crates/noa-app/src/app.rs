@@ -597,7 +597,8 @@ impl App {
             // focused pane AND its window has OS focus; otherwise (an
             // inactive split pane, or any pane in an unfocused window) it
             // draws the hollow outline instead of hiding the cursor outright.
-            snapshot.focused = pane_id == state.focused_pane && self.focused == Some(window_id);
+            snapshot.focused =
+                pane_owns_keyboard_focus(window_id, pane_id, self.os_focused, state.focused_pane);
             snapshot.cursor_blink_visible = self.cursor_blink_visible;
             snapshot.hover_link = surface.hover_link;
             snapshot.search_prompt = self
@@ -3108,6 +3109,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.report_focus_event(window_id, true);
                 self.secure_input
                     .on_focus_change(true, &mut crate::secure_input::CarbonSecureInput);
+                if let Some(state) = self.windows.get(&window_id) {
+                    state.window.request_redraw();
+                }
             }
             WindowEvent::Focused(false) => {
                 // Only clear if this window is the one we recorded as focused —
@@ -3125,6 +3129,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // restores it.
                 self.secure_input
                     .on_focus_change(false, &mut crate::secure_input::CarbonSecureInput);
+                if let Some(state) = self.windows.get(&window_id) {
+                    state.window.request_redraw();
+                }
                 if self.is_quick_terminal_window(window_id) {
                     self.maybe_autohide_quick_terminal();
                 }

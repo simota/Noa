@@ -45,9 +45,11 @@ use crate::split_tree::{
     split_pane, split_resize_drag_target_at_point, zoom_resize_targets, zoom_toggle,
 };
 use crate::tab_overview::{
-    OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_TILE_MIN_RENDER_INTERVAL,
-    OverviewLayout, OverviewRenderCandidate, compute_overview_grid, hit_test_overview_grid,
-    overview_backlog_decision, overview_placeholder_source_ids, overview_tile_labels,
+    OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_OUTER_MARGIN,
+    OVERVIEW_TILE_GUTTER, OVERVIEW_TILE_MIN_RENDER_INTERVAL, OverviewAction, OverviewLayout,
+    OverviewRenderCandidate, compute_overview_grid, hit_test_overview_grid,
+    move_overview_selection, overview_backlog_decision, overview_initial_selection,
+    overview_key_action, overview_placeholder_source_ids, overview_tile_labels,
     sanitize_placeholder_label, select_due_overview_tile_ids,
 };
 use crate::{AppCommand, ViewportScroll};
@@ -179,6 +181,13 @@ struct OverviewWindowState {
     /// text (REQ-OV-10). Reused across every placeholder tile and frame —
     /// this is not a per-tab renderer, so it doesn't violate REQ-NF-1.
     label_renderer: Option<Renderer>,
+    /// The currently selected tile (REQ-OV-14): an index directly into the
+    /// row-major source-tab order (`App::overview_source_window_ids`) —
+    /// live tiles first, then any overflow placeholder tiles — so one index
+    /// serves both without translation (REQ-OV-15b: placeholders are
+    /// selectable too). Reset on every `show_tab_overview` and clamped in
+    /// `redraw_overview` as tabs come and go.
+    selected: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1362,6 +1371,7 @@ impl App {
                 surface_config,
                 thumbnails: None,
                 label_renderer: None,
+                selected: 0,
             });
         }
 
@@ -1369,7 +1379,13 @@ impl App {
         self.overview_visible_gate.store(true, Ordering::Relaxed);
         self.seed_overview_snapshots();
         self.mark_all_overview_tiles_dirty();
-        if let Some(overview) = self.overview_window.as_ref() {
+        // REQ-OV-14: the focused tab's tile if it's live, else the first.
+        let source_window_ids = self.overview_source_window_ids();
+        let live_tile_count = OVERVIEW_GRID_CAP.min(source_window_ids.len());
+        let selected =
+            overview_initial_selection(&source_window_ids, live_tile_count, self.focused.as_ref());
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.selected = selected;
             overview.window.set_visible(true);
             overview.window.focus_window();
             overview.window.request_redraw();
@@ -1806,6 +1822,23 @@ impl App {
         )
     }
 
+    /// Compute the Overview grid layout for `source_window_ids` against the
+    /// current window bounds (REQ-OV-11, gutter/margin included). Centralizes
+    /// what were three independently-computed call sites (present, click hit
+    /// test, selection nav) behind one helper so hit-testing and tile
+    /// textures can never drift out of sync with each other.
+    fn overview_layout(&self, source_window_ids: &[WindowId]) -> Option<OverviewLayout> {
+        let overview = self.overview_window.as_ref()?;
+        let bounds = pane_bounds_for_size(overview.window.inner_size());
+        Some(compute_overview_grid(
+            source_window_ids.len(),
+            bounds,
+            OVERVIEW_GRID_CAP,
+            OVERVIEW_TILE_GUTTER,
+            OVERVIEW_OUTER_MARGIN,
+        ))
+    }
+
     fn redraw_overview(&mut self) {
         let Some(overview) = self.overview_window.as_ref() else {
             return;
@@ -1814,9 +1847,16 @@ impl App {
             return;
         }
 
-        let bounds = pane_bounds_for_size(overview.window.inner_size());
         let source_window_ids = self.overview_source_window_ids();
-        let layout = compute_overview_grid(source_window_ids.len(), bounds, OVERVIEW_GRID_CAP);
+        let Some(layout) = self.overview_layout(&source_window_ids) else {
+            return;
+        };
+        // REQ-OV-14: keep the selection in range as tabs come and go.
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.selected = overview
+                .selected
+                .min(source_window_ids.len().saturating_sub(1));
+        }
         let now = Instant::now();
         let due_window_ids = self.due_overview_tile_ids(&source_window_ids, now);
 
@@ -1854,13 +1894,22 @@ impl App {
             return;
         };
 
-        let bounds = pane_bounds_for_size(overview.window.inner_size());
         let source_window_ids = self.overview_source_window_ids();
-        let layout = compute_overview_grid(source_window_ids.len(), bounds, OVERVIEW_GRID_CAP);
+        let Some(layout) = self.overview_layout(&source_window_ids) else {
+            return;
+        };
         let Some(target) = overview_tile_target_at_point(&source_window_ids, &layout.tiles, point)
         else {
             return;
         };
+        // The clicked tile becomes the selection too, not just the focus
+        // target — a click and an arrow-keyed Return should leave the
+        // Overview in the same selected state.
+        if let Some(index) = source_window_ids.iter().position(|id| *id == target)
+            && let Some(overview) = self.overview_window.as_mut()
+        {
+            overview.selected = index;
+        }
         self.focus_tab_from_overview(target);
     }
 
@@ -1874,6 +1923,77 @@ impl App {
         };
         self.focused = Some(window_id);
         window.focus_window();
+    }
+
+    /// Drives the Overview-focused keymap directly from the keypress
+    /// (REQ-OV-15), mirroring `handle_search_prompt_key`'s
+    /// keypress-interception shape: arrows/Return/Esc/Cmd+1..9 are resolved
+    /// here and never reach `handle_app_command`, so they can't be swallowed
+    /// by `overview_command_scope`'s blanket `AppCommand` no-op. Every other
+    /// key falls through to the normal keybind-resolve path, which still
+    /// classifies terminal commands as Overview no-ops (REQ-OV-7).
+    fn handle_overview_key(&mut self, event_loop: &ActiveEventLoop, event: &KeyEvent) {
+        if let Some(action) = overview_key_action(&event.logical_key, self.modifiers) {
+            match action {
+                OverviewAction::MoveSelection(direction) => self.step_overview_selection(direction),
+                OverviewAction::Activate => self.activate_overview_selection(),
+                OverviewAction::SwitchToLive(n) => self.switch_to_live_overview_tile(n),
+                OverviewAction::Dismiss => self.hide_tab_overview(),
+            }
+            return;
+        }
+        if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
+            self.handle_app_command(event_loop, command);
+        }
+    }
+
+    /// Arrow-key Overview selection move (REQ-OV-15a).
+    fn step_overview_selection(&mut self, direction: Direction) {
+        let source_window_ids = self.overview_source_window_ids();
+        let Some(layout) = self.overview_layout(&source_window_ids) else {
+            return;
+        };
+        let Some(overview) = self.overview_window.as_mut() else {
+            return;
+        };
+        overview.selected = move_overview_selection(
+            overview.selected,
+            layout.cols,
+            source_window_ids.len(),
+            direction,
+        );
+        overview.window.request_redraw();
+    }
+
+    /// Return activates the selected Overview tile (REQ-OV-15b). `selected`
+    /// indexes directly into the combined live + placeholder source order,
+    /// so a selected placeholder row resolves to its (live, mirror-less) tab
+    /// exactly the same way a selected live tile does.
+    fn activate_overview_selection(&mut self) {
+        let source_window_ids = self.overview_source_window_ids();
+        let Some(overview) = self.overview_window.as_ref() else {
+            return;
+        };
+        let Some(&target) = source_window_ids.get(overview.selected) else {
+            return;
+        };
+        self.focus_tab_from_overview(target);
+    }
+
+    /// Cmd+`n` (1-indexed) jumps straight to the `n`-th live Overview tile
+    /// (REQ-OV-15c). Out-of-range `n` (beyond the live tile count) is a
+    /// no-op rather than a panic — there is no tile to switch to.
+    fn switch_to_live_overview_tile(&mut self, n: usize) {
+        let source_window_ids = self.overview_source_window_ids();
+        let live_tile_count = OVERVIEW_GRID_CAP.min(source_window_ids.len());
+        if n == 0 || n > live_tile_count {
+            return;
+        }
+        let target = source_window_ids[n - 1];
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.selected = n - 1;
+        }
+        self.focus_tab_from_overview(target);
     }
 
     fn overview_window_event(
@@ -1914,9 +2034,7 @@ impl App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
-                    self.handle_app_command(event_loop, command);
-                }
+                self.handle_overview_key(event_loop, &event);
             }
             _ => {}
         }
@@ -4257,7 +4375,8 @@ mod tests {
     #[test]
     fn overview_click_hit_test_resolves_only_live_tiles() {
         let source_ids = [10_u8, 11, 12, 13, 14, 15, 16, 17, 18, 19];
-        let layout = compute_overview_grid(source_ids.len(), PaneRectApp::new(0, 0, 90, 120), 9);
+        let layout =
+            compute_overview_grid(source_ids.len(), PaneRectApp::new(0, 0, 90, 120), 9, 0, 0);
 
         assert_eq!(
             overview_tile_target_at_point(

@@ -231,6 +231,70 @@ pub fn overview_close_hit_test<T: Copy>(tiles: &[(T, TileRect)], point: Point) -
         .map(|(id, _)| *id)
 }
 
+/// Placeholder shown in the "Search tabs" field while the query is empty
+/// (REQ-OV-16). Compile-time constant (⚠G precedent: no config knob).
+pub const OVERVIEW_SEARCH_PLACEHOLDER: &str = "Search tabs";
+
+/// The text to render in the top search field (REQ-OV-16): the live query, or
+/// the [`OVERVIEW_SEARCH_PLACEHOLDER`] when it is empty. Kept pure so the
+/// empty-vs-typed switch is unit-testable without a GPU.
+pub fn overview_search_field_text(query: &str) -> String {
+    if query.is_empty() {
+        OVERVIEW_SEARCH_PLACEHOLDER.to_string()
+    } else {
+        query.to_string()
+    }
+}
+
+/// Two-stage Escape semantics for the Overview search field (REQ-OV-16). A
+/// non-empty query swallows the first Escape to clear itself and keeps the
+/// Overview open; an empty query dismisses the Overview. The command palette
+/// has no two-stage-Escape precedent (its Escape always closes), so this
+/// behavior is defined here per the P3 brief.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverviewEscapeAction {
+    /// Clear the (non-empty) query; leave the Overview visible.
+    ClearSearch,
+    /// Dismiss the Overview (query already empty).
+    Dismiss,
+}
+
+/// Resolve the Escape keypress against the current `query` (REQ-OV-16).
+pub fn overview_escape_action(query: &str) -> OverviewEscapeAction {
+    if query.is_empty() {
+        OverviewEscapeAction::Dismiss
+    } else {
+        OverviewEscapeAction::ClearSearch
+    }
+}
+
+/// Compose one title-bar row: the centered tab `label` with a close glyph
+/// pinned to the final column (REQ-OV-13). Uses ASCII `'x'` rather than `'✕'`
+/// to avoid font-fallback tofu (same manual-verify caveat as
+/// [`overview_hint_bar_text`]); swap to `'✕'` at this one site if the glyph
+/// renders and record the deviation. The label is centered within the columns
+/// left of the glyph and clipped if it would overrun them, so the close glyph
+/// is always visible.
+pub fn title_bar_row_with_close(label: &str, cols: u16) -> String {
+    let cols = cols as usize;
+    if cols == 0 {
+        return String::new();
+    }
+    if cols < 2 {
+        // Too narrow for both a label and the glyph — show the glyph alone.
+        return "x".to_string();
+    }
+    // Reserve the last column for the close glyph; center the label in the rest.
+    let label_field = cols - 1;
+    let centered = center_label(label, label_field as u16);
+    let mut row: Vec<char> = centered.chars().take(label_field).collect();
+    while row.len() < label_field {
+        row.push(' ');
+    }
+    row.push('x');
+    row.into_iter().collect()
+}
+
 /// Injected GPU lifecycle signal used by the resource-regeneration decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverviewResourceEvent {
@@ -1109,6 +1173,40 @@ mod tests {
             overview_close_hit_test(&tiles, Point::new(1000, 1000)),
             None
         );
+    }
+
+    #[test]
+    fn overview_search_field_text_shows_placeholder_only_when_empty() {
+        assert_eq!(overview_search_field_text(""), OVERVIEW_SEARCH_PLACEHOLDER);
+        assert_eq!(overview_search_field_text("log"), "log");
+    }
+
+    #[test]
+    fn overview_escape_action_clears_a_query_before_dismissing() {
+        // Two-stage: a non-empty query is cleared first, an empty one dismisses.
+        assert_eq!(
+            overview_escape_action("log"),
+            OverviewEscapeAction::ClearSearch
+        );
+        assert_eq!(overview_escape_action(""), OverviewEscapeAction::Dismiss);
+    }
+
+    #[test]
+    fn title_bar_row_pins_close_glyph_to_the_last_column() {
+        // 10 cols: 9-wide centered label field + the trailing 'x'.
+        let row = title_bar_row_with_close("build", 10);
+        assert_eq!(row.chars().count(), 10);
+        assert_eq!(row.chars().next_back(), Some('x'));
+        assert!(row.contains("build"));
+
+        // A label wider than the field is clipped, but the glyph still shows.
+        let clipped = title_bar_row_with_close("a-very-long-tab-title", 6);
+        assert_eq!(clipped.chars().count(), 6);
+        assert_eq!(clipped.chars().next_back(), Some('x'));
+
+        // Degenerate widths never panic.
+        assert_eq!(title_bar_row_with_close("build", 0), "");
+        assert_eq!(title_bar_row_with_close("build", 1), "x");
     }
 
     #[test]

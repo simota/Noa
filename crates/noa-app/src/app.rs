@@ -49,11 +49,13 @@ use crate::tab_overview::{
     OVERVIEW_CARD_CORNER_RADIUS, OVERVIEW_CARD_FOCUS_WIDTH, OVERVIEW_FOCUS_RING_COLOR,
     OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_OUTER_MARGIN,
     OVERVIEW_TILE_GUTTER, OVERVIEW_TILE_MIN_RENDER_INTERVAL, OVERVIEW_TITLE_BAR_COLOR,
-    OVERVIEW_TITLE_BAR_H, OverviewAction, OverviewChrome, OverviewLayout, OverviewRenderCandidate,
-    center_label, compute_overview_grid, hit_test_overview_grid, move_overview_selection,
-    overview_backlog_decision, overview_chrome_bands, overview_hint_bar_text,
+    OVERVIEW_TITLE_BAR_H, OverviewAction, OverviewChrome, OverviewEscapeAction, OverviewLayout,
+    OverviewRenderCandidate, center_label, compute_overview_grid, hit_test_overview_grid,
+    move_overview_selection, overview_backlog_decision, overview_chrome_bands,
+    overview_close_hit_test, overview_escape_action, overview_hint_bar_text,
     overview_initial_selection, overview_key_action, overview_placeholder_source_ids,
-    overview_tile_labels, sanitize_placeholder_label, select_due_overview_tile_ids,
+    overview_search_field_text, overview_tab_filter, overview_tile_labels,
+    sanitize_placeholder_label, select_due_overview_tile_ids, title_bar_row_with_close,
 };
 use crate::{AppCommand, ViewportScroll};
 
@@ -191,6 +193,12 @@ struct OverviewWindowState {
     /// selectable too). Reset on every `show_tab_overview` and clamped in
     /// `redraw_overview` as tabs come and go.
     selected: usize,
+    /// The live "Search tabs" filter query (REQ-OV-16). Printable keys append
+    /// and Backspace pops while the Overview is focused; the filtered result
+    /// set drives every downstream consumer via `App::overview_source_window_ids`
+    /// (redraw, hit-test, nav, Cmd+N, title bars, placeholders). Cleared on
+    /// every `show_tab_overview` and by the first Escape when non-empty.
+    search_query: String,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1387,6 +1395,7 @@ impl App {
                 thumbnails: None,
                 label_renderer: None,
                 selected: 0,
+                search_query: String::new(),
             });
         }
 
@@ -1394,6 +1403,11 @@ impl App {
         self.overview_visible_gate.store(true, Ordering::Relaxed);
         self.seed_overview_snapshots();
         self.mark_all_overview_tiles_dirty();
+        // Reopening the Overview always starts with an empty filter (REQ-OV-16)
+        // so the focused-tab initial selection below sees the full tab set.
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.search_query.clear();
+        }
         // REQ-OV-14: the focused tab's tile if it's live, else the first.
         let source_window_ids = self.overview_source_window_ids();
         let live_tile_count = OVERVIEW_GRID_CAP.min(source_window_ids.len());
@@ -1782,7 +1796,8 @@ impl App {
             DEFAULT_GRID_PADDING,
         );
         let sanitized = sanitize_placeholder_label(title, grid_size.cols);
-        let text = center_label(&sanitized, grid_size.cols);
+        // REQ-OV-13: the centered title plus a close glyph in the last column.
+        let text = title_bar_row_with_close(&sanitized, grid_size.cols);
 
         let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
         Stream::new().feed(text.as_bytes(), &mut term);
@@ -1801,6 +1816,66 @@ impl App {
         };
         label_renderer.draw(&gpu.device, &gpu.queue, &view);
         thumbnails.stamp_title_band(&gpu.device, &gpu.queue, tile_index);
+    }
+
+    /// Render the top "Search tabs" field (REQ-OV-16) into a fresh band-sized
+    /// texture and return it for compositing into the reserved top search band.
+    /// Shows the live query, or the placeholder while it is empty. `None` when
+    /// there is no search band (a window too short to reserve one).
+    fn render_overview_search_texture(&mut self) -> Option<wgpu::Texture> {
+        let chrome = self.overview_chrome()?;
+        if chrome.search_band.w == 0 || chrome.search_band.h == 0 {
+            return None;
+        }
+        let query = self
+            .overview_window
+            .as_ref()
+            .map_or(String::new(), |overview| overview.search_query.clone());
+        self.ensure_overview_label_renderer();
+        let gpu = self.gpu.as_mut()?;
+        let overview = self.overview_window.as_mut()?;
+        let label_renderer = overview.label_renderer.as_mut()?;
+
+        let band_size = PixelSize {
+            w: chrome.search_band.w.max(1),
+            h: chrome.search_band.h.max(1),
+        };
+        let search_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("noa-overview-search-band"),
+            size: wgpu::Extent3d {
+                width: band_size.w,
+                height: band_size.h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: overview.surface_config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = search_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let grid_size = grid_size_for_pane_rect(
+            PaneRectApp::new(0, 0, band_size.w, band_size.h),
+            gpu.font.metrics(),
+            DEFAULT_GRID_PADDING,
+        );
+        let text = center_label(&overview_search_field_text(&query), grid_size.cols);
+        let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
+        Stream::new().feed(text.as_bytes(), &mut term);
+        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+        snapshot.cursor.visible = false;
+
+        label_renderer.resize(band_size);
+        label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        // Distinct from the backdrop so the field reads as a search bar, reusing
+        // the title-bar band color (mockup parity, ⚠G: no config knob).
+        label_renderer.set_clear_color(OVERVIEW_TITLE_BAR_COLOR);
+        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        label_renderer.draw(&gpu.device, &gpu.queue, &view);
+
+        Some(search_texture)
     }
 
     /// Render the bottom hint bar (REQ-OV-17) into a fresh band-sized texture
@@ -1867,6 +1942,8 @@ impl App {
         let live_count = layout.tiles.len();
         let hint_texture = self.render_overview_hint_texture(live_count);
         let hint_band = self.overview_chrome().map(|chrome| chrome.hint_band);
+        let search_texture = self.render_overview_search_texture();
+        let search_band = self.overview_chrome().map(|chrome| chrome.search_band);
         let selected = self
             .overview_window
             .as_ref()
@@ -1969,6 +2046,39 @@ impl App {
             gpu.queue.submit(Some(encoder.finish()));
         }
 
+        // Overlay the search field into its reserved top band (REQ-OV-16).
+        if let (Some(search_texture), Some(search_band)) = (search_texture.as_ref(), search_band) {
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("noa-overview-search-copy-encoder"),
+                });
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: search_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &frame.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: search_band.x,
+                        y: search_band.y,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: search_band.w.max(1),
+                    height: search_band.h.max(1),
+                    depth_or_array_layers: 1,
+                },
+            );
+            gpu.queue.submit(Some(encoder.finish()));
+        }
+
         frame.present();
     }
 
@@ -1981,11 +2091,35 @@ impl App {
     }
 
     fn overview_source_window_ids(&self) -> Vec<WindowId> {
-        overview_tile_source_order(
+        let ordered = overview_tile_source_order(
             &self.window_order,
             |id| self.windows.contains_key(&id),
             None,
-        )
+        );
+        // REQ-OV-16: the "Search tabs" filter narrows the source set here, the
+        // single seam every downstream consumer (redraw / hit-test / nav /
+        // Cmd+N / title bars / placeholders) reads, so the whole Overview sees
+        // one filtered order. An empty query is the identity (short-circuited
+        // to skip cloning titles on the common path).
+        let query = self
+            .overview_window
+            .as_ref()
+            .map_or("", |overview| overview.search_query.as_str());
+        if query.is_empty() {
+            return ordered;
+        }
+        let titles: Vec<(WindowId, String)> = ordered
+            .iter()
+            .map(|id| {
+                let title = self
+                    .windows
+                    .get(id)
+                    .map(|state| state.title.clone())
+                    .unwrap_or_default();
+                (*id, title)
+            })
+            .collect();
+        overview_tab_filter(query, &titles)
     }
 
     /// The Overview window's search / grid / hint bands (REQ-OV-11/16/17).
@@ -2083,6 +2217,23 @@ impl App {
         self.focus_tab_from_overview(target);
     }
 
+    /// The close-button (✕) target under the last cursor point, or `None`
+    /// (REQ-OV-13). Spans live tiles and placeholder rows — both carry a title
+    /// bar with a close button, and both map back to a live tab `WindowId`.
+    fn overview_close_target_at_last_cursor(&self) -> Option<WindowId> {
+        let overview = self.overview_window.as_ref()?;
+        let point = overview.last_cursor_point?;
+        let source_window_ids = self.overview_source_window_ids();
+        let layout = self.overview_layout(&source_window_ids)?;
+        let tile_rects: Vec<PaneRectApp> = layout
+            .tiles
+            .iter()
+            .chain(layout.placeholders.iter())
+            .copied()
+            .collect();
+        overview_close_target_at_point(&source_window_ids, &tile_rects, point)
+    }
+
     fn focus_tab_from_overview(&mut self, window_id: WindowId) {
         let Some(window) = self
             .windows
@@ -2108,13 +2259,98 @@ impl App {
                 OverviewAction::MoveSelection(direction) => self.step_overview_selection(direction),
                 OverviewAction::Activate => self.activate_overview_selection(),
                 OverviewAction::SwitchToLive(n) => self.switch_to_live_overview_tile(n),
-                OverviewAction::Dismiss => self.hide_tab_overview(),
+                OverviewAction::Dismiss => self.dismiss_or_clear_overview_search(),
             }
+            return;
+        }
+        // Printable text / Backspace edits the "Search tabs" query (REQ-OV-16),
+        // slotted after the Overview action keymap (arrows/Return/Esc/Cmd+N win)
+        // and before the normal keybind fallthrough. Nothing here reaches a pty
+        // (REQ-OV-7).
+        if self.apply_overview_search_edit(event) {
             return;
         }
         if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
             self.handle_app_command(event_loop, command);
         }
+    }
+
+    /// Escape while the Overview is focused (REQ-OV-16): a non-empty search
+    /// query is cleared first and the Overview stays open, an empty query
+    /// dismisses it (two-stage Escape; no command-palette precedent, so the
+    /// semantics are defined by `overview_escape_action`).
+    fn dismiss_or_clear_overview_search(&mut self) {
+        let query = self
+            .overview_window
+            .as_ref()
+            .map_or("", |overview| overview.search_query.as_str());
+        match overview_escape_action(query) {
+            OverviewEscapeAction::ClearSearch => self.set_overview_search_query(String::new()),
+            OverviewEscapeAction::Dismiss => self.hide_tab_overview(),
+        }
+    }
+
+    /// Apply a printable-text append or Backspace pop to the "Search tabs"
+    /// query (REQ-OV-16). Returns `true` when the key was consumed as a query
+    /// edit. Cmd/Ctrl/Alt combos are not swallowed here (they fall through to
+    /// the keybind path, mirroring the command palette's Cmd-swallow), so e.g.
+    /// the Overview toggle chord still works while typing.
+    fn apply_overview_search_edit(&mut self, event: &KeyEvent) -> bool {
+        let Some(mut query) = self
+            .overview_window
+            .as_ref()
+            .map(|overview| overview.search_query.clone())
+        else {
+            return false;
+        };
+        match &event.logical_key {
+            Key::Named(NamedKey::Backspace) => {
+                if query.pop().is_none() {
+                    // Already empty: still consumed (Backspace has no other
+                    // meaning in the Overview) but no redraw is needed.
+                    return true;
+                }
+            }
+            _ => {
+                if self.modifiers.super_key()
+                    || self.modifiers.control_key()
+                    || self.modifiers.alt_key()
+                {
+                    return false;
+                }
+                let Some(text) = event.text.as_deref() else {
+                    return false;
+                };
+                let mut appended = false;
+                for c in text.chars().filter(|c| !c.is_control()) {
+                    query.push(c);
+                    appended = true;
+                }
+                if !appended {
+                    return false;
+                }
+            }
+        }
+        self.set_overview_search_query(query);
+        true
+    }
+
+    /// Replace the search query, reset the selection to the first tile (a
+    /// query change re-orders the result set, REQ-OV-16 / palette R-7 parity),
+    /// and request a redraw.
+    fn set_overview_search_query(&mut self, query: String) {
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.search_query = query;
+            overview.selected = 0;
+        } else {
+            return;
+        }
+        // Filtering remaps each window to a new tile slot, so the now-visible
+        // set must re-render into those slots instead of showing the previous
+        // ordering's stale mirrors. Re-rendering still flows through the 10Hz
+        // throttle (REQ-NF-4), so tiles refresh at the next due tick.
+        self.mark_all_overview_tiles_dirty();
+        self.request_overview_redraw();
     }
 
     /// Arrow-key Overview selection move (REQ-OV-15a).
@@ -2188,7 +2424,15 @@ impl App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Left && state == ElementState::Pressed {
-                    self.focus_overview_tile_at_last_cursor();
+                    // REQ-OV-13: the close-button corner wins over tile-focus.
+                    // Reuse the existing tab-close path (`close_tab`) so the
+                    // REQ-OV-9 degenerate cases (last tab, in-view removal +
+                    // relayout, stale-WindowId no-op) apply unchanged.
+                    if let Some(target) = self.overview_close_target_at_last_cursor() {
+                        self.close_tab(event_loop, target);
+                    } else {
+                        self.focus_overview_tile_at_last_cursor();
+                    }
                 }
             }
             WindowEvent::Occluded(occluded) => {
@@ -3861,6 +4105,25 @@ fn overview_tile_target_at_point<Id: Copy>(
     hit_test_overview_grid(&tiles, point)
 }
 
+/// The close-button (✕) target for `point` (REQ-OV-13). Deliberately a
+/// separate hit-test surface from [`overview_tile_target_at_point`]: the caller
+/// checks this one *first* so a click landing on the title bar's close-button
+/// corner closes the tab rather than focusing it, even though both rects
+/// overlap there. `tile_rects` covers both live tiles and placeholder rows —
+/// every tile has a title bar with a close button.
+fn overview_close_target_at_point<Id: Copy>(
+    source_ids: &[Id],
+    tile_rects: &[PaneRectApp],
+    point: split_tree::Point,
+) -> Option<Id> {
+    let tiles = source_ids
+        .iter()
+        .copied()
+        .zip(tile_rects.iter().copied())
+        .collect::<Vec<_>>();
+    overview_close_hit_test(&tiles, point)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TargetedRedrawDecision {
     Stale,
@@ -4568,6 +4831,37 @@ mod tests {
                 split_tree::Point::new(15, 105)
             ),
             None
+        );
+    }
+
+    #[test]
+    fn overview_close_hit_test_is_exclusive_with_tile_focus() {
+        let source_ids = [10_u8, 11, 12, 13];
+        let layout =
+            compute_overview_grid(source_ids.len(), PaneRectApp::new(0, 0, 200, 200), 9, 0, 0);
+        // Tile 0's close button sits at its top-right corner; its body center
+        // sits well inside. The two must resolve disjointly (REQ-OV-13).
+        let tile0 = layout.tiles[0];
+        let close_point = split_tree::Point::new(tile0.right() - 2, tile0.y + 2);
+        let body_point = split_tree::Point::new(tile0.x + tile0.w / 2, tile0.y + tile0.h / 2);
+
+        assert_eq!(
+            overview_close_target_at_point(&source_ids, &layout.tiles, close_point),
+            Some(10)
+        );
+        assert_eq!(
+            overview_tile_target_at_point(&source_ids, &layout.tiles, close_point),
+            Some(10),
+            "both rects overlap at the corner; the caller's close-first ordering picks the close"
+        );
+        // The body center is a focus hit but never a close hit.
+        assert_eq!(
+            overview_close_target_at_point(&source_ids, &layout.tiles, body_point),
+            None
+        );
+        assert_eq!(
+            overview_tile_target_at_point(&source_ids, &layout.tiles, body_point),
+            Some(10)
         );
     }
 

@@ -123,7 +123,8 @@ GUI 非依存 → ユニットテストで完結。
 - **Kitty keyboard protocol**: progressive enhancement 全フラグ（disambiguate / report events /
   alternate keys / report all keys as escapes / associated text)。Phase 0 の xterm 完全版が土台。
 - **Kitty graphics protocol**: APC 経路新設、画像デコード（png）、GPU テクスチャ管理、
-  placement/削除/z-index、Unicode placeholder。renderer に画像レイヤ追加。
+  placement/削除/z-index、Unicode placeholder。renderer に画像レイヤ追加。**実装済み** —
+  `docs/specs/kitty-graphics.md` 参照。
 - **シェル統合**: OSC 133 (prompt mark → prompt jump (Cmd+↑/↓)、コマンド終了通知)、OSC 7 (cwd →
   新タブ/分割の cwd 継承、タイトル表示)。zsh/bash/fish 用統合スクリプト同梱 + 自動注入
   (Ghostty の shell-integration 相当)。

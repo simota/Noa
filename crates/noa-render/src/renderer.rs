@@ -373,52 +373,83 @@ impl Renderer {
     /// blend over that row's background, which only holds if every row's bg
     /// instance precedes every row's glyph instance across the whole pane.
     pub fn rebuild_panes(&mut self, panes: &[PaneFrame<'_>], font: &mut FontGrid, theme: &Theme) {
-        self.instances.clear();
-        self.pane_instances.clear();
-        self.pane_images.clear();
-        self.pane_layout.clear();
-        self.divider_range = 0..0;
-
         let mut first_clear_color = None;
         let mut rows_rebuilt_total: u64 = 0;
-        for pane in panes {
-            let start = self.instances.len() as u32;
-            let cache = self
-                .pane_render_cache
-                .entry(pane.pane)
-                .or_insert_with(PaneRenderCache::empty);
-            let PaneRebuild {
-                clear_color,
-                cell_size,
-                rows_rebuilt,
-                bg_len,
-                text_len,
-            } = rebuild_pane_cached(
-                cache,
-                &mut self.instances,
-                pane.snapshot,
-                font,
-                theme,
-                self.target_format_is_srgb,
-            );
-            rows_rebuilt_total += rows_rebuilt;
-            first_clear_color.get_or_insert(clear_color);
-            self.cell_size = cell_size;
-            let end = self.instances.len() as u32;
-            self.pane_instances.push(PaneInstances {
-                pane: pane.pane,
-                range: start..end,
-                bg_end: start + bg_len,
-                text_end: start + text_len,
-            });
-            if !pane.snapshot.image_placements.is_empty() {
-                self.pane_images.push(PaneImages {
+        // Cross-pane eviction guard: `rebuild_pane_cached` only stabilizes each
+        // pane against evictions caused by its OWN rebuild. A later pane's
+        // rasterization can still evict atlas rectangles that an
+        // earlier-rebuilt pane's instances already reference, and nothing
+        // requests another frame — so the stale coordinates would stay on
+        // screen until the next unrelated redraw. Detect that here and redo
+        // the whole layout against the settled epoch.
+        for cross_pane_pass in 0..MAX_ATLAS_EVICTION_REBUILD_PASSES {
+            self.instances.clear();
+            self.pane_instances.clear();
+            self.pane_images.clear();
+            self.pane_layout.clear();
+            self.divider_range = 0..0;
+
+            first_clear_color = None;
+            rows_rebuilt_total = 0;
+            let eviction_before = font.atlas_eviction_generation();
+            for pane in panes {
+                let start = self.instances.len() as u32;
+                let cache = self
+                    .pane_render_cache
+                    .entry(pane.pane)
+                    .or_insert_with(PaneRenderCache::empty);
+                let PaneRebuild {
+                    clear_color,
+                    cell_size,
+                    rows_rebuilt,
+                    bg_len,
+                    text_len,
+                } = rebuild_pane_cached(
+                    cache,
+                    &mut self.instances,
+                    pane.snapshot,
+                    font,
+                    theme,
+                    self.target_format_is_srgb,
+                );
+                rows_rebuilt_total += rows_rebuilt;
+                first_clear_color.get_or_insert(clear_color);
+                self.cell_size = cell_size;
+                let end = self.instances.len() as u32;
+                self.pane_instances.push(PaneInstances {
                     pane: pane.pane,
-                    placements: pane.snapshot.image_placements.clone(),
-                    images: pane.snapshot.images.clone(),
+                    range: start..end,
+                    bg_end: start + bg_len,
+                    text_end: start + text_len,
                 });
+                if !pane.snapshot.image_placements.is_empty() {
+                    self.pane_images.push(PaneImages {
+                        pane: pane.pane,
+                        placements: pane.snapshot.image_placements.clone(),
+                        images: pane.snapshot.images.clone(),
+                    });
+                }
+                self.pane_layout.push((pane.pane, pane.rect));
             }
-            self.pane_layout.push((pane.pane, pane.rect));
+
+            // A single pane is already internally stabilized by
+            // `rebuild_pane_cached`'s own retry loop; only multi-pane layouts
+            // can leave an earlier pane stale.
+            if panes.len() <= 1 || font.atlas_eviction_generation() == eviction_before {
+                break;
+            }
+            if cross_pane_pass + 1 == MAX_ATLAS_EVICTION_REBUILD_PASSES {
+                log::warn!(
+                    "glyph atlas kept evicting across {MAX_ATLAS_EVICTION_REBUILD_PASSES} cross-pane rebuild passes; some panes may reference stale atlas rectangles for one frame"
+                );
+                break;
+            }
+            // Every pane rebuilt before the eviction may reference reclaimed
+            // atlas rectangles; drop all keys so the next pass rebuilds
+            // against the settled epoch.
+            for cache in self.pane_render_cache.values_mut() {
+                cache.key = None;
+            }
         }
 
         // Drop caches for panes that are no longer visible (split closed) so

@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use noa_core::Rgb;
 
 mod ghostty;
 mod import;
@@ -58,6 +59,15 @@ pub enum SyntheticStyleMode {
     Neither,
     NoBold,
     NoItalic,
+}
+
+/// `cursor-style` shape. Ghostty also has `block_hollow`, which noa does not
+/// render yet (the parser emits a diagnostic and ignores it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Bar,
+    Underline,
 }
 
 /// `alpha-blending` mode. `Native` is a real value; `Linear` /
@@ -157,6 +167,33 @@ pub struct StartupConfig {
     /// Whether to confirm before pasting content that could run commands
     /// (`clipboard-paste-protection`). Ghostty default is on.
     pub clipboard_paste_protection: bool,
+    /// `window-padding-x`: horizontal padding (left = right) in physical
+    /// pixels. `None` keeps the built-in default for that axis; the concrete
+    /// `GridPadding` is derived in `noa-app`.
+    pub window_padding_x: Option<f32>,
+    /// `window-padding-y`: vertical padding (top = bottom) in physical pixels.
+    pub window_padding_y: Option<f32>,
+    /// `background` / `foreground`: theme default color overrides. `None`
+    /// keeps the resolved theme's value.
+    pub background: Option<Rgb>,
+    pub foreground: Option<Rgb>,
+    /// `cursor-color`: theme cursor color override.
+    pub cursor_color: Option<Rgb>,
+    /// `selection-foreground` / `selection-background`: theme selection color
+    /// overrides.
+    pub selection_foreground: Option<Rgb>,
+    pub selection_background: Option<Rgb>,
+    /// `cursor-style` shape and `cursor-style-blink` toggle. `None` keeps the
+    /// terminal default (Ghostty: blinking block).
+    pub cursor_style: Option<CursorShape>,
+    pub cursor_style_blink: Option<bool>,
+    /// `background-opacity`: 0.0..=1.0, clamped. Consumed by the transparency
+    /// follow-up; plumbed through for now. Default is fully opaque.
+    pub background_opacity: f32,
+    /// `background-blur-radius`: native macOS window background blur radius in
+    /// points, `0..=64` (0 = no blur). Only visible with `background_opacity`
+    /// below 1.0. No-op on non-macOS.
+    pub background_blur_radius: u16,
 }
 
 impl Default for StartupConfig {
@@ -169,6 +206,17 @@ impl Default for StartupConfig {
             font: FontConfig::default(),
             clipboard_read: ClipboardAccess::default(),
             clipboard_paste_protection: true,
+            window_padding_x: None,
+            window_padding_y: None,
+            background: None,
+            foreground: None,
+            cursor_color: None,
+            selection_foreground: None,
+            selection_background: None,
+            cursor_style: None,
+            cursor_style_blink: None,
+            background_opacity: 1.0,
+            background_blur_radius: 0,
         }
     }
 }
@@ -183,6 +231,17 @@ pub struct ConfigOverrides {
     pub font: FontConfig,
     pub clipboard_read: Option<ClipboardAccess>,
     pub clipboard_paste_protection: Option<bool>,
+    pub window_padding_x: Option<f32>,
+    pub window_padding_y: Option<f32>,
+    pub background: Option<Rgb>,
+    pub foreground: Option<Rgb>,
+    pub cursor_color: Option<Rgb>,
+    pub selection_foreground: Option<Rgb>,
+    pub selection_background: Option<Rgb>,
+    pub cursor_style: Option<CursorShape>,
+    pub cursor_style_blink: Option<bool>,
+    pub background_opacity: Option<f32>,
+    pub background_blur_radius: Option<u16>,
 }
 
 impl ConfigOverrides {
@@ -197,6 +256,27 @@ impl ConfigOverrides {
             clipboard_paste_protection: higher_priority
                 .clipboard_paste_protection
                 .or(self.clipboard_paste_protection),
+            window_padding_x: higher_priority.window_padding_x.or(self.window_padding_x),
+            window_padding_y: higher_priority.window_padding_y.or(self.window_padding_y),
+            background: higher_priority.background.or(self.background),
+            foreground: higher_priority.foreground.or(self.foreground),
+            cursor_color: higher_priority.cursor_color.or(self.cursor_color),
+            selection_foreground: higher_priority
+                .selection_foreground
+                .or(self.selection_foreground),
+            selection_background: higher_priority
+                .selection_background
+                .or(self.selection_background),
+            cursor_style: higher_priority.cursor_style.or(self.cursor_style),
+            cursor_style_blink: higher_priority
+                .cursor_style_blink
+                .or(self.cursor_style_blink),
+            background_opacity: higher_priority
+                .background_opacity
+                .or(self.background_opacity),
+            background_blur_radius: higher_priority
+                .background_blur_radius
+                .or(self.background_blur_radius),
         }
     }
 
@@ -211,6 +291,19 @@ impl ConfigOverrides {
             clipboard_paste_protection: self
                 .clipboard_paste_protection
                 .unwrap_or(base.clipboard_paste_protection),
+            window_padding_x: self.window_padding_x.or(base.window_padding_x),
+            window_padding_y: self.window_padding_y.or(base.window_padding_y),
+            background: self.background.or(base.background),
+            foreground: self.foreground.or(base.foreground),
+            cursor_color: self.cursor_color.or(base.cursor_color),
+            selection_foreground: self.selection_foreground.or(base.selection_foreground),
+            selection_background: self.selection_background.or(base.selection_background),
+            cursor_style: self.cursor_style.or(base.cursor_style),
+            cursor_style_blink: self.cursor_style_blink.or(base.cursor_style_blink),
+            background_opacity: self.background_opacity.unwrap_or(base.background_opacity),
+            background_blur_radius: self
+                .background_blur_radius
+                .unwrap_or(base.background_blur_radius),
         }
     }
 }
@@ -328,6 +421,17 @@ mod tests {
                 font: FontConfig::default(),
                 clipboard_read: ClipboardAccess::Ask,
                 clipboard_paste_protection: true,
+                window_padding_x: None,
+                window_padding_y: None,
+                background: None,
+                foreground: None,
+                cursor_color: None,
+                selection_foreground: None,
+                selection_background: None,
+                cursor_style: None,
+                cursor_style_blink: None,
+                background_opacity: 1.0,
+                background_blur_radius: 0,
             }
         );
     }
@@ -389,6 +493,51 @@ font-size = 15.5
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn appearance_keys_flow_through_parse_and_apply() {
+        let (overrides, diagnostics) = parse_overrides(
+            test_path(),
+            "window-padding-x = 8\n\
+             window-padding-y = 4\n\
+             background = #101010\n\
+             cursor-style = bar\n\
+             cursor-style-blink = false\n\
+             background-opacity = 0.8",
+        );
+        assert!(diagnostics.is_empty());
+
+        let config = overrides.apply_to(StartupConfig::default());
+
+        assert_eq!(config.window_padding_x, Some(8.0));
+        assert_eq!(config.window_padding_y, Some(4.0));
+        assert_eq!(config.background, Some(Rgb::new(0x10, 0x10, 0x10)));
+        assert_eq!(config.cursor_style, Some(CursorShape::Bar));
+        assert_eq!(config.cursor_style_blink, Some(false));
+        assert_eq!(config.background_opacity, 0.8);
+    }
+
+    #[test]
+    fn cli_overrides_win_for_appearance_keys() {
+        let file = ConfigOverrides {
+            window_padding_x: Some(2.0),
+            background_opacity: Some(0.5),
+            cursor_style: Some(CursorShape::Block),
+            ..Default::default()
+        };
+        let cli = ConfigOverrides {
+            window_padding_x: Some(9.0),
+            background_opacity: Some(0.9),
+            ..Default::default()
+        };
+
+        let config = file.merge(cli).apply_to(StartupConfig::default());
+
+        assert_eq!(config.window_padding_x, Some(9.0));
+        assert_eq!(config.background_opacity, 0.9);
+        // Not overridden by CLI: the file value survives.
+        assert_eq!(config.cursor_style, Some(CursorShape::Block));
     }
 
     #[test]

@@ -3,7 +3,21 @@
 //! instance colors); this module is the app-level seam that constructs the
 //! selected theme noa-app hands to the renderer.
 
+use noa_core::Rgb;
+
 pub use noa_render::Theme;
+
+/// Per-key color overrides (`background`, `foreground`, `cursor-color`,
+/// `selection-foreground`, `selection-background`) applied on top of the
+/// resolved theme. A `None` field keeps the theme's value.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeOverrides {
+    pub background: Option<Rgb>,
+    pub foreground: Option<Rgb>,
+    pub cursor: Option<Rgb>,
+    pub selection_fg: Option<Rgb>,
+    pub selection_bg: Option<Rgb>,
+}
 
 /// Resolve a config-selected theme name into the renderer theme.
 pub fn resolve_theme(name: Option<&str>) -> Theme {
@@ -17,6 +31,27 @@ pub fn resolve_theme(name: Option<&str>) -> Theme {
     };
 
     theme_from_definition(definition)
+}
+
+/// Resolve a theme by name, then apply config color overrides.
+pub fn resolve_theme_with_overrides(name: Option<&str>, overrides: &ThemeOverrides) -> Theme {
+    let mut theme = resolve_theme(name);
+    if let Some(background) = overrides.background {
+        theme.default_bg = background;
+    }
+    if let Some(foreground) = overrides.foreground {
+        theme.default_fg = foreground;
+    }
+    if let Some(cursor) = overrides.cursor {
+        theme.cursor = cursor;
+    }
+    if let Some(selection_fg) = overrides.selection_fg {
+        theme.selection_fg = selection_fg;
+    }
+    if let Some(selection_bg) = overrides.selection_bg {
+        theme.selection_bg = selection_bg;
+    }
+    theme
 }
 
 fn theme_from_definition(definition: &noa_theme::ThemeDef) -> Theme {
@@ -121,6 +156,36 @@ mod tests {
         assert_eq!(theme.search_bg, default.search_bg);
         assert_eq!(theme.active_search_fg, default.active_search_fg);
         assert_eq!(theme.active_search_bg, default.active_search_bg);
+    }
+
+    #[test]
+    fn overrides_replace_only_specified_colors() {
+        let base = resolve_theme(Some("3024 Day"));
+        let overrides = ThemeOverrides {
+            background: Some(Rgb::new(1, 2, 3)),
+            cursor: Some(Rgb::new(4, 5, 6)),
+            selection_bg: Some(Rgb::new(7, 8, 9)),
+            ..Default::default()
+        };
+
+        let theme = resolve_theme_with_overrides(Some("3024 Day"), &overrides);
+
+        assert_eq!(theme.default_bg, Rgb::new(1, 2, 3));
+        assert_eq!(theme.cursor, Rgb::new(4, 5, 6));
+        assert_eq!(theme.selection_bg, Rgb::new(7, 8, 9));
+        // Untouched fields keep the resolved theme's value.
+        assert_eq!(theme.default_fg, base.default_fg);
+        assert_eq!(theme.selection_fg, base.selection_fg);
+        assert_eq!(theme.palette, base.palette);
+    }
+
+    #[test]
+    fn empty_overrides_are_identical_to_plain_resolution() {
+        let overrides = ThemeOverrides::default();
+        assert_theme_eq(
+            &resolve_theme_with_overrides(Some("Afterglow"), &overrides),
+            &resolve_theme(Some("Afterglow")),
+        );
     }
 
     fn assert_theme_eq(actual: &Theme, expected: &Theme) {

@@ -1,8 +1,10 @@
 use std::path::Path;
 
+use noa_core::Rgb;
+
 use crate::{
-    AlphaBlendingMode, ClipboardAccess, ConfigOverrides, FontConfig, FontFeature, FontVariation,
-    SyntheticStyleMode,
+    AlphaBlendingMode, ClipboardAccess, ConfigOverrides, CursorShape, FontConfig, FontFeature,
+    FontVariation, SyntheticStyleMode,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +44,17 @@ pub(crate) fn build_overrides(
     let mut font = FontConfig::default();
     let mut clipboard_read = None;
     let mut clipboard_paste_protection = None;
+    let mut window_padding_x = None;
+    let mut window_padding_y = None;
+    let mut background = None;
+    let mut foreground = None;
+    let mut cursor_color = None;
+    let mut selection_foreground = None;
+    let mut selection_background = None;
+    let mut cursor_style = None;
+    let mut cursor_style_blink = None;
+    let mut background_opacity = None;
+    let mut background_blur_radius = None;
     let mut diagnostics = Vec::new();
 
     for directive in directives {
@@ -120,6 +133,39 @@ pub(crate) fn build_overrides(
                 clipboard_paste_protection =
                     parse_bool_directive(path, directive, &mut diagnostics);
             }
+            "window-padding-x" => {
+                window_padding_x = parse_non_negative_f32(path, directive, &mut diagnostics);
+            }
+            "window-padding-y" => {
+                window_padding_y = parse_non_negative_f32(path, directive, &mut diagnostics);
+            }
+            "background" => {
+                background = parse_color(path, directive, &mut diagnostics);
+            }
+            "foreground" => {
+                foreground = parse_color(path, directive, &mut diagnostics);
+            }
+            "cursor-color" => {
+                cursor_color = parse_color(path, directive, &mut diagnostics);
+            }
+            "selection-foreground" => {
+                selection_foreground = parse_color(path, directive, &mut diagnostics);
+            }
+            "selection-background" => {
+                selection_background = parse_color(path, directive, &mut diagnostics);
+            }
+            "cursor-style" => {
+                cursor_style = parse_cursor_style(path, directive, &mut diagnostics);
+            }
+            "cursor-style-blink" => {
+                cursor_style_blink = parse_bool_directive(path, directive, &mut diagnostics);
+            }
+            "background-opacity" => {
+                background_opacity = parse_opacity(path, directive, &mut diagnostics);
+            }
+            "background-blur-radius" => {
+                background_blur_radius = parse_blur_radius(path, directive, &mut diagnostics);
+            }
             "keybind" | "palette" => {
                 diagnostics.push(list_key_diagnostic(path, &directive.key));
             }
@@ -150,6 +196,17 @@ pub(crate) fn build_overrides(
             font,
             clipboard_read,
             clipboard_paste_protection,
+            window_padding_x,
+            window_padding_y,
+            background,
+            foreground,
+            cursor_color,
+            selection_foreground,
+            selection_background,
+            cursor_style,
+            cursor_style_blink,
+            background_opacity,
+            background_blur_radius,
         },
         diagnostics,
     )
@@ -164,6 +221,17 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "theme"
             | "clipboard-read"
             | "clipboard-paste-protection"
+            | "window-padding-x"
+            | "window-padding-y"
+            | "background"
+            | "foreground"
+            | "cursor-color"
+            | "selection-foreground"
+            | "selection-background"
+            | "cursor-style"
+            | "cursor-style-blink"
+            | "background-opacity"
+            | "background-blur-radius"
     )
 }
 
@@ -428,6 +496,128 @@ fn parse_bool_directive(
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
             None
         }
+    }
+}
+
+fn parse_non_negative_f32(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<f32> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<f32>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if !parsed.is_finite() || parsed < 0.0 {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(parsed)
+}
+
+/// Clamp an `f32` to `0.0..=1.0`. Ghostty clamps out-of-range values without
+/// complaint, so only an unparseable value produces a diagnostic.
+fn parse_opacity(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<f32> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<f32>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if !parsed.is_finite() {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(parsed.clamp(0.0, 1.0))
+}
+
+/// Maximum `background-blur-radius`. Beyond this the CGS blur stops looking
+/// different and just costs compositor time.
+const MAX_BLUR_RADIUS: u16 = 64;
+/// Ghostty maps the boolean `true` form of `background-blur-radius` to 20.
+const DEFAULT_BLUR_RADIUS: u16 = 20;
+
+/// Parse `background-blur-radius`: a non-negative integer, or the boolean
+/// shorthand Ghostty also accepts (`true` = 20, `false` = 0). Out-of-range
+/// integers clamp to `0..=MAX_BLUR_RADIUS`; only an unparseable value produces
+/// a diagnostic.
+fn parse_blur_radius(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<u16> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "true" => Some(DEFAULT_BLUR_RADIUS),
+        "false" => Some(0),
+        _ => match value.parse::<u32>() {
+            Ok(parsed) => Some(parsed.min(u32::from(MAX_BLUR_RADIUS)) as u16),
+            Err(_) => {
+                diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+                None
+            }
+        },
+    }
+}
+
+/// Parse a `#RRGGBB` or `RRGGBB` (case-insensitive) hex color.
+fn parse_color(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Rgb> {
+    let value = directive.value.as_deref()?;
+    match rgb_from_hex(value) {
+        Some(rgb) => Some(rgb),
+        None => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+            None
+        }
+    }
+}
+
+fn rgb_from_hex(value: &str) -> Option<Rgb> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(Rgb::new(r, g, b))
+}
+
+fn parse_cursor_style(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<CursorShape> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "block" => Some(CursorShape::Block),
+        "bar" => Some(CursorShape::Bar),
+        "underline" => Some(CursorShape::Underline),
+        "block_hollow" => {
+            diagnostics.push(cursor_style_unsupported_diagnostic(path, value));
+            None
+        }
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+fn cursor_style_unsupported_diagnostic(path: &Path, value: &str) -> Diagnostic {
+    Diagnostic {
+        message: format!(
+            "config {}: `cursor-style = {value}` is not supported yet; value ignored",
+            path.display()
+        ),
     }
 }
 
@@ -878,6 +1068,158 @@ mod tests {
 
         assert_eq!(overrides.clipboard_paste_protection, Some(false));
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn window_padding_parses_non_negative_floats() {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), "window-padding-x = 8\nwindow-padding-y = 4.5");
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.window_padding_x, Some(8.0));
+        assert_eq!(overrides.window_padding_y, Some(4.5));
+    }
+
+    #[test]
+    fn window_padding_rejects_negative_and_non_numeric() {
+        for source in ["window-padding-x = -1", "window-padding-y = wide"] {
+            let (overrides, diagnostics) = parse_overrides(path(), source);
+
+            assert_eq!(overrides.window_padding_x, None);
+            assert_eq!(overrides.window_padding_y, None);
+            assert_eq!(diagnostics.len(), 1, "{source:?}: {diagnostics:?}");
+            assert!(diagnostics[0].message.contains("window-padding"));
+        }
+    }
+
+    #[test]
+    fn colors_parse_both_hex_forms_case_insensitively() {
+        let (overrides, diagnostics) = parse_overrides(
+            path(),
+            "background = #1a2B3c\n\
+             foreground = FFEEdd\n\
+             cursor-color = #00FF00\n\
+             selection-foreground = 010203\n\
+             selection-background = #abcdef",
+        );
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.background, Some(Rgb::new(0x1a, 0x2b, 0x3c)));
+        assert_eq!(overrides.foreground, Some(Rgb::new(0xff, 0xee, 0xdd)));
+        assert_eq!(overrides.cursor_color, Some(Rgb::new(0x00, 0xff, 0x00)));
+        assert_eq!(overrides.selection_foreground, Some(Rgb::new(1, 2, 3)));
+        assert_eq!(
+            overrides.selection_background,
+            Some(Rgb::new(0xab, 0xcd, 0xef))
+        );
+    }
+
+    #[test]
+    fn invalid_color_warns_and_falls_back() {
+        for source in [
+            "background = #12345",
+            "foreground = #12345g",
+            "cursor-color = ghostty",
+            "selection-background = #1234567",
+        ] {
+            let (overrides, diagnostics) = parse_overrides(path(), source);
+
+            assert_eq!(overrides.background, None);
+            assert_eq!(overrides.foreground, None);
+            assert_eq!(overrides.cursor_color, None);
+            assert_eq!(overrides.selection_background, None);
+            assert_eq!(diagnostics.len(), 1, "{source:?}: {diagnostics:?}");
+            assert!(diagnostics[0].message.contains("invalid value"));
+        }
+    }
+
+    #[test]
+    fn cursor_style_parses_each_shape() {
+        for (value, expected) in [
+            ("block", CursorShape::Block),
+            ("bar", CursorShape::Bar),
+            ("underline", CursorShape::Underline),
+        ] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("cursor-style = {value}"));
+
+            assert_eq!(overrides.cursor_style, Some(expected), "{value:?}");
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+    }
+
+    #[test]
+    fn cursor_style_block_hollow_warns_and_is_ignored() {
+        let (overrides, diagnostics) = parse_overrides(path(), "cursor-style = block_hollow");
+
+        assert_eq!(overrides.cursor_style, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("block_hollow"));
+        assert!(diagnostics[0].message.contains("not supported"));
+    }
+
+    #[test]
+    fn cursor_style_rejects_unknown_shape() {
+        let (overrides, diagnostics) = parse_overrides(path(), "cursor-style = beam");
+
+        assert_eq!(overrides.cursor_style, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("cursor-style"));
+        assert!(diagnostics[0].message.contains("beam"));
+    }
+
+    #[test]
+    fn cursor_style_blink_parses_bool() {
+        let (overrides, diagnostics) = parse_overrides(path(), "cursor-style-blink = false");
+
+        assert_eq!(overrides.cursor_style_blink, Some(false));
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn background_opacity_clamps_without_diagnostic() {
+        for (value, expected) in [("0.5", 0.5), ("-0.2", 0.0), ("1.4", 1.0)] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("background-opacity = {value}"));
+
+            assert_eq!(overrides.background_opacity, Some(expected), "{value:?}");
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+    }
+
+    #[test]
+    fn background_opacity_rejects_non_numeric() {
+        let (overrides, diagnostics) = parse_overrides(path(), "background-opacity = opaque");
+
+        assert_eq!(overrides.background_opacity, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("background-opacity"));
+    }
+
+    #[test]
+    fn background_blur_radius_parses_int_bool_and_clamps() {
+        for (value, expected) in [
+            ("0", 0),
+            ("20", 20),
+            ("true", 20),
+            ("false", 0),
+            ("999", 64),
+        ] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("background-blur-radius = {value}"));
+
+            assert_eq!(overrides.background_blur_radius, Some(expected), "{value:?}");
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+    }
+
+    #[test]
+    fn background_blur_radius_rejects_non_integer() {
+        let (overrides, diagnostics) = parse_overrides(path(), "background-blur-radius = blurry");
+
+        assert_eq!(overrides.background_blur_radius, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("background-blur-radius"));
     }
 
     #[test]

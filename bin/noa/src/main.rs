@@ -69,6 +69,17 @@ fn app_config_from_startup(config: noa_config::StartupConfig) -> noa_app::AppCon
         font: config.font,
         clipboard_read: config.clipboard_read,
         clipboard_paste_protection: config.clipboard_paste_protection,
+        window_padding_x: config.window_padding_x,
+        window_padding_y: config.window_padding_y,
+        background: config.background,
+        foreground: config.foreground,
+        cursor_color: config.cursor_color,
+        selection_foreground: config.selection_foreground,
+        selection_background: config.selection_background,
+        cursor_style: config.cursor_style,
+        cursor_style_blink: config.cursor_style_blink,
+        background_opacity: config.background_opacity,
+        background_blur_radius: config.background_blur_radius,
     }
 }
 

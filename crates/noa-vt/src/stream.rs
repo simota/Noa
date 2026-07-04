@@ -83,12 +83,16 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
         }
         b'p' if csi.intermediates.as_slice() == [b'!'] => h.soft_reset(), // DECSTR
         b'q' if csi.private == 0 && csi.intermediates.as_slice() == [b' '] => {
-            let style = match csi.param(0, 1) {
-                3 => CursorStyle::BlinkingUnderline,
-                4 => CursorStyle::SteadyUnderline,
-                5 => CursorStyle::BlinkingBar,
-                6 => CursorStyle::SteadyBar,
-                2 => CursorStyle::SteadyBlock,
+            // `param` collapses an explicit `0` to its default, but DECSCUSR 0
+            // must reset to the configured default, so match the raw param:
+            // an explicit `0` is `Default`, an absent param is blinking block.
+            let style = match csi.params.first().copied() {
+                Some(0) => CursorStyle::Default,
+                Some(3) => CursorStyle::BlinkingUnderline,
+                Some(4) => CursorStyle::SteadyUnderline,
+                Some(5) => CursorStyle::BlinkingBar,
+                Some(6) => CursorStyle::SteadyBar,
+                Some(2) => CursorStyle::SteadyBlock,
                 _ => CursorStyle::BlinkingBlock,
             };
             h.set_cursor_style(style);

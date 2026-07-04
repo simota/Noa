@@ -46,6 +46,8 @@ pub enum DsrKind {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CursorStyle {
+    /// DECSCUSR 0: reset to the configured default cursor style.
+    Default,
     BlinkingBlock,
     SteadyBlock,
     BlinkingUnderline,

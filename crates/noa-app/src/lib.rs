@@ -11,6 +11,7 @@ mod events;
 mod input;
 mod io_thread;
 mod link_open;
+mod macos_blur;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 mod mouse;

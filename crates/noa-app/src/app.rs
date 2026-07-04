@@ -67,6 +67,28 @@ pub struct AppConfig {
     pub clipboard_read: noa_config::ClipboardAccess,
     /// Whether to confirm before pasting content that could run commands.
     pub clipboard_paste_protection: bool,
+    /// `window-padding-x/y`: `None` keeps the built-in default for that axis.
+    /// Resolved to a `GridPadding` once in [`App::new`].
+    pub window_padding_x: Option<f32>,
+    pub window_padding_y: Option<f32>,
+    /// Theme color overrides (`background`, `foreground`, `cursor-color`,
+    /// `selection-foreground`, `selection-background`).
+    pub background: Option<noa_core::Rgb>,
+    pub foreground: Option<noa_core::Rgb>,
+    pub cursor_color: Option<noa_core::Rgb>,
+    pub selection_foreground: Option<noa_core::Rgb>,
+    pub selection_background: Option<noa_core::Rgb>,
+    /// `cursor-style` shape and `cursor-style-blink` toggle.
+    pub cursor_style: Option<noa_config::CursorShape>,
+    pub cursor_style_blink: Option<bool>,
+    /// `background-opacity`, clamped to `0.0..=1.0`. Drives window
+    /// transparency: below 1.0 the window is created transparent, a
+    /// non-Opaque surface alpha mode is chosen, and the renderer scales its
+    /// clear-color alpha to match.
+    pub background_opacity: f32,
+    /// `background-blur-radius` in points (`0..=64`, 0 = off). Applied as a
+    /// native macOS window background blur; a no-op on other platforms.
+    pub background_blur_radius: u16,
 }
 
 /// Maps the parsed `noa-config` font settings onto the `noa-font` runtime
@@ -128,6 +150,42 @@ fn map_font_variations(variations: &[noa_config::FontVariation]) -> Vec<noa_font
             value: variation.value,
         })
         .collect()
+}
+
+/// Derive the grid padding from `window-padding-x/y`. An unset axis keeps the
+/// corresponding edge(s) of [`DEFAULT_GRID_PADDING`]; a set axis applies its
+/// value to both edges of that axis.
+fn resolve_grid_padding(x: Option<f32>, y: Option<f32>) -> GridPadding {
+    let default = DEFAULT_GRID_PADDING;
+    GridPadding {
+        top: y.unwrap_or(default.top),
+        right: x.unwrap_or(default.right),
+        bottom: y.unwrap_or(default.bottom),
+        left: x.unwrap_or(default.left),
+    }
+}
+
+/// Map `cursor-style` + `cursor-style-blink` onto a grid [`CursorStyle`].
+/// Returns `None` when neither key is set, so the terminal keeps its own
+/// default (Ghostty's blinking block). When only the blink toggle is set the
+/// shape defaults to block; when only the shape is set it defaults to blinking.
+fn resolve_cursor_style(
+    shape: Option<noa_config::CursorShape>,
+    blink: Option<bool>,
+) -> Option<CursorStyle> {
+    if shape.is_none() && blink.is_none() {
+        return None;
+    }
+    let shape = shape.unwrap_or(noa_config::CursorShape::Block);
+    let blinking = blink.unwrap_or(true);
+    Some(match (shape, blinking) {
+        (noa_config::CursorShape::Block, true) => CursorStyle::BlinkingBlock,
+        (noa_config::CursorShape::Block, false) => CursorStyle::SteadyBlock,
+        (noa_config::CursorShape::Bar, true) => CursorStyle::BlinkingBar,
+        (noa_config::CursorShape::Bar, false) => CursorStyle::SteadyBar,
+        (noa_config::CursorShape::Underline, true) => CursorStyle::BlinkingUnderline,
+        (noa_config::CursorShape::Underline, false) => CursorStyle::SteadyUnderline,
+    })
 }
 
 /// App-wide GPU and glyph state shared by every tab/window.
@@ -298,6 +356,12 @@ const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
 pub struct App {
     config: AppConfig,
+    /// Grid padding derived once from `window-padding-x/y`, applied to every
+    /// pane's geometry.
+    padding: GridPadding,
+    /// Initial cursor style from `cursor-style` / `cursor-style-blink`, applied
+    /// to each terminal at creation. `None` keeps the terminal default.
+    initial_cursor_style: Option<CursorStyle>,
     runtime_font_size: f32,
     proxy: EventLoopProxy<UserEvent>,
     gpu: Option<GpuState>,
@@ -339,7 +403,12 @@ pub struct App {
 
 impl App {
     pub fn new(config: AppConfig, proxy: EventLoopProxy<UserEvent>) -> Self {
+        let padding = resolve_grid_padding(config.window_padding_x, config.window_padding_y);
+        let initial_cursor_style =
+            resolve_cursor_style(config.cursor_style, config.cursor_style_blink);
         App {
+            padding,
+            initial_cursor_style,
             runtime_font_size: config.font_size,
             config,
             proxy,
@@ -363,6 +432,16 @@ impl App {
             search_prompt: None,
             command_palette: None,
             confirm_dialog: None,
+        }
+    }
+
+    fn theme_overrides(&self) -> crate::theme::ThemeOverrides {
+        crate::theme::ThemeOverrides {
+            background: self.config.background,
+            foreground: self.config.foreground,
+            cursor: self.config.cursor_color,
+            selection_fg: self.config.selection_foreground,
+            selection_bg: self.config.selection_background,
         }
     }
 
@@ -488,7 +567,7 @@ impl App {
                 snapshot.cursor.x,
                 snapshot.cursor.y,
                 *rect,
-                DEFAULT_GRID_PADDING,
+                self.padding,
             );
         }
 
@@ -716,7 +795,7 @@ impl App {
             metrics,
             initial_grid_size,
             monitor_scale_factor,
-            DEFAULT_GRID_PADDING,
+            self.padding,
         );
 
         let window_attrs = self.tab_window_attributes(inner_size);
@@ -738,18 +817,23 @@ impl App {
                 font.metrics(),
                 initial_grid_size,
                 window_scale_factor,
-                DEFAULT_GRID_PADDING,
+                self.padding,
             );
             let _ = window.request_inner_size(inner_size);
         }
         window.set_ime_allowed(true);
+        crate::macos_blur::apply_background_blur(
+            &window,
+            self.config.background_blur_radius,
+            self.config.background_opacity,
+        );
         update_ime_cursor_area(
             &window,
             metrics,
             0,
             0,
             PaneRectApp::new(0, 0, 0, 0),
-            DEFAULT_GRID_PADDING,
+            self.padding,
         );
 
         let surface = if self.gpu.is_none() {
@@ -780,7 +864,10 @@ impl App {
                 device,
                 queue,
                 font: first_font.expect("first tab must initialize the font"),
-                theme: crate::theme::resolve_theme(self.config.theme.as_deref()),
+                theme: crate::theme::resolve_theme_with_overrides(
+                    self.config.theme.as_deref(),
+                    &self.theme_overrides(),
+                ),
             });
             surface
         } else {
@@ -803,7 +890,10 @@ impl App {
                 height: size.height.max(1),
                 present_mode: wgpu::PresentMode::Fifo,
                 desired_maximum_frame_latency: 2,
-                alpha_mode: preferred_surface_alpha_mode(&caps),
+                alpha_mode: preferred_surface_alpha_mode(
+                    &caps,
+                    self.config.background_opacity < 1.0,
+                ),
                 view_formats: vec![],
             };
             surface.configure(&gpu.device, &surface_config);
@@ -813,9 +903,10 @@ impl App {
                 &gpu.queue,
                 surface_format,
                 &mut gpu.font,
-                DEFAULT_GRID_PADDING,
+                self.padding,
             )
             .expect("failed to build the renderer");
+            renderer.set_background_opacity(self.config.background_opacity);
             renderer.resize(PixelSize {
                 w: surface_config.width,
                 h: surface_config.height,
@@ -867,7 +958,11 @@ impl App {
     fn tab_window_attributes(&self, inner_size: LogicalSize<f64>) -> WindowAttributes {
         let attrs = WindowAttributes::default()
             .with_title("noa")
-            .with_inner_size(inner_size);
+            .with_inner_size(inner_size)
+            // A transparent window is required for `background-opacity` to
+            // reveal anything behind it; the surface alpha mode and the
+            // renderer's clear alpha carry the actual opacity.
+            .with_transparent(self.config.background_opacity < 1.0);
         #[cfg(target_os = "macos")]
         {
             attrs.with_tabbing_identifier(&self.tab_group_identifier)
@@ -925,6 +1020,9 @@ impl App {
         };
         let pty = Pty::spawn(pty_config)?;
         let mut terminal = Terminal::new(grid_size);
+        if let Some(style) = self.initial_cursor_style {
+            terminal.set_default_cursor_style(style);
+        }
         // A read (query) request is only queued when reads aren't fully
         // denied; the finer allow-vs-ask decision is made by the app layer
         // when a request arrives.
@@ -1140,18 +1238,21 @@ impl App {
             return;
         };
 
-        let grid_size =
-            grid_size_for_pane_rect(focused_rect, gpu.font.metrics(), DEFAULT_GRID_PADDING);
+        let grid_size = grid_size_for_pane_rect(focused_rect, gpu.font.metrics(), self.padding);
         let inherited_cwd = self.pane_cwd(window_id, focused_pane);
-        let new_surface =
-            match self.spawn_pane_surface(window_id, new_pane, grid_size, focused_rect, inherited_cwd)
-            {
-                Ok(surface) => surface,
-                Err(err) => {
-                    log::warn!("failed to spawn split pty: {err}");
-                    return;
-                }
-            };
+        let new_surface = match self.spawn_pane_surface(
+            window_id,
+            new_pane,
+            grid_size,
+            focused_rect,
+            inherited_cwd,
+        ) {
+            Ok(surface) => surface,
+            Err(err) => {
+                log::warn!("failed to spawn split pty: {err}");
+                return;
+            }
+        };
 
         let window = {
             let Some(state) = self.windows.get_mut(&window_id) else {
@@ -1402,7 +1503,10 @@ impl App {
                 height: size.height.max(1),
                 present_mode: wgpu::PresentMode::Fifo,
                 desired_maximum_frame_latency: 2,
-                alpha_mode: preferred_surface_alpha_mode(&caps),
+                // The overview window stays opaque: it composites tab tiles,
+                // not live terminal background, so transparency would only
+                // bleed the desktop through the switcher.
+                alpha_mode: preferred_surface_alpha_mode(&caps, false),
                 view_formats: vec![],
             };
             surface.configure(&gpu.device, &surface_config);
@@ -1642,14 +1746,8 @@ impl App {
             .is_none_or(|renderer| renderer.target_format() != format);
         if stale {
             overview.label_renderer = Some(
-                Renderer::new(
-                    &gpu.device,
-                    &gpu.queue,
-                    format,
-                    &mut gpu.font,
-                    DEFAULT_GRID_PADDING,
-                )
-                .expect("failed to build the overview label renderer"),
+                Renderer::new(&gpu.device, &gpu.queue, format, &mut gpu.font, self.padding)
+                    .expect("failed to build the overview label renderer"),
             );
         }
     }
@@ -1700,7 +1798,7 @@ impl App {
             let grid_size = grid_size_for_pane_rect(
                 PaneRectApp::new(0, 0, rect.w, rect.h),
                 metrics,
-                DEFAULT_GRID_PADDING,
+                self.padding,
             );
 
             let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
@@ -3010,8 +3108,7 @@ impl App {
         // Paste protection: confirm before sending content that could run a
         // command on its own (a newline), or that tries to break out of
         // bracketed paste.
-        if self.config.clipboard_paste_protection
-            && input::paste_is_unsafe(&text, bracketed_paste)
+        if self.config.clipboard_paste_protection && input::paste_is_unsafe(&text, bracketed_paste)
         {
             let lines = text.lines().count().max(1);
             self.open_confirm_dialog(
@@ -3074,12 +3171,7 @@ impl App {
 
     /// Open the single app-wide confirmation dialog bound to `window_id`. Any
     /// existing dialog is replaced (the newest request wins).
-    fn open_confirm_dialog(
-        &mut self,
-        window_id: WindowId,
-        message: String,
-        action: ConfirmAction,
-    ) {
+    fn open_confirm_dialog(&mut self, window_id: WindowId, message: String, action: ConfirmAction) {
         self.confirm_dialog = Some(ConfirmDialogSession {
             window_id,
             message,
@@ -3179,6 +3271,7 @@ impl App {
         let Some(metrics) = self.gpu.as_ref().map(|gpu| gpu.font.metrics()) else {
             return;
         };
+        let padding = self.padding;
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
@@ -3189,7 +3282,7 @@ impl App {
                 (
                     pane_id,
                     rect,
-                    grid_size_for_pane_rect(rect, metrics, DEFAULT_GRID_PADDING),
+                    grid_size_for_pane_rect(rect, metrics, padding),
                 )
             })
             .collect::<Vec<_>>();
@@ -3197,7 +3290,7 @@ impl App {
         let Some(state) = self.windows.get_mut(&window_id) else {
             return;
         };
-        apply_pane_resize_batch(state, &targets, metrics);
+        apply_pane_resize_batch(state, &targets, metrics, padding);
     }
 
     fn update_focused_ime_cursor_area(&self, window_id: WindowId) {
@@ -3220,7 +3313,7 @@ impl App {
             cursor.x,
             cursor.y,
             surface.rect,
-            DEFAULT_GRID_PADDING,
+            self.padding,
         );
     }
 
@@ -3254,7 +3347,7 @@ impl App {
             metrics.cell_w,
             metrics.cell_h,
             surface.grid_size,
-            DEFAULT_GRID_PADDING,
+            self.padding,
         );
         Some((pane_id, cell))
     }
@@ -3468,6 +3561,7 @@ fn apply_pane_resize_batch(
     state: &mut WindowState,
     targets: &[(PaneId, PaneRectApp, GridSize)],
     metrics: noa_font::Metrics,
+    padding: GridPadding,
 ) {
     let plan = pane_resize_batch_plan(
         targets
@@ -3493,7 +3587,7 @@ fn apply_pane_resize_batch(
         let mut terminal = surface.terminal.lock().expect("terminal mutex poisoned");
         terminal.resize(grid_size);
         if let Some(rect) = rect {
-            let (cw, ch, taw, tah) = pixel_metrics_for_pane(rect, metrics, DEFAULT_GRID_PADDING);
+            let (cw, ch, taw, tah) = pixel_metrics_for_pane(rect, metrics, padding);
             terminal.set_pixel_metrics(cw, ch, taw, tah);
         }
     }
@@ -3918,15 +4012,30 @@ fn preferred_surface_format(available: &[wgpu::TextureFormat]) -> wgpu::TextureF
         .unwrap_or(available[0])
 }
 
-fn preferred_surface_alpha_mode(caps: &wgpu::SurfaceCapabilities) -> wgpu::CompositeAlphaMode {
-    if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
-        wgpu::CompositeAlphaMode::Opaque
+/// Pick the surface's composite-alpha mode. An opaque window keeps the
+/// existing Opaque preference (solid terminal colors). A transparent window
+/// (`background-opacity` below 1.0) instead prefers, in order, `PostMultiplied`
+/// (our colors are straight, non-premultiplied), then `PreMultiplied`, then
+/// `Inherit`, before falling back to whatever the surface offers first.
+fn preferred_surface_alpha_mode(
+    caps: &wgpu::SurfaceCapabilities,
+    transparent: bool,
+) -> wgpu::CompositeAlphaMode {
+    let preference: &[wgpu::CompositeAlphaMode] = if transparent {
+        &[
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            wgpu::CompositeAlphaMode::Inherit,
+        ]
     } else {
-        caps.alpha_modes
-            .first()
-            .copied()
-            .unwrap_or(wgpu::CompositeAlphaMode::Auto)
-    }
+        &[wgpu::CompositeAlphaMode::Opaque]
+    };
+    preference
+        .iter()
+        .copied()
+        .find(|mode| caps.alpha_modes.contains(mode))
+        .or_else(|| caps.alpha_modes.first().copied())
+        .unwrap_or(wgpu::CompositeAlphaMode::Auto)
 }
 
 fn focus_report_bytes(focused: bool, focus_reporting: bool) -> Option<&'static [u8]> {
@@ -4044,6 +4153,63 @@ mod tests {
     }
 
     #[test]
+    fn resolve_grid_padding_keeps_defaults_for_unset_axes() {
+        assert_eq!(resolve_grid_padding(None, None), DEFAULT_GRID_PADDING);
+    }
+
+    #[test]
+    fn resolve_grid_padding_applies_value_to_both_edges_of_an_axis() {
+        let padding = resolve_grid_padding(Some(8.0), Some(4.0));
+        assert_eq!(padding, GridPadding::new(4.0, 8.0, 4.0, 8.0));
+
+        // Only x set: y keeps the asymmetric default (top 0, bottom 16).
+        let x_only = resolve_grid_padding(Some(10.0), None);
+        assert_eq!(x_only, GridPadding::new(0.0, 10.0, 16.0, 10.0));
+
+        // Only y set: x keeps the default 16 on both sides.
+        let y_only = resolve_grid_padding(None, Some(2.0));
+        assert_eq!(y_only, GridPadding::new(2.0, 16.0, 2.0, 16.0));
+    }
+
+    #[test]
+    fn resolve_cursor_style_is_none_when_nothing_is_configured() {
+        assert_eq!(resolve_cursor_style(None, None), None);
+    }
+
+    #[test]
+    fn resolve_cursor_style_defaults_shape_and_blink() {
+        // Only blink toggled: shape defaults to block.
+        assert_eq!(
+            resolve_cursor_style(None, Some(false)),
+            Some(CursorStyle::SteadyBlock)
+        );
+        // Only shape set: blink defaults on.
+        assert_eq!(
+            resolve_cursor_style(Some(noa_config::CursorShape::Bar), None),
+            Some(CursorStyle::BlinkingBar)
+        );
+    }
+
+    #[test]
+    fn resolve_cursor_style_maps_every_combination() {
+        use noa_config::CursorShape;
+        let cases = [
+            (CursorShape::Block, true, CursorStyle::BlinkingBlock),
+            (CursorShape::Block, false, CursorStyle::SteadyBlock),
+            (CursorShape::Bar, true, CursorStyle::BlinkingBar),
+            (CursorShape::Bar, false, CursorStyle::SteadyBar),
+            (CursorShape::Underline, true, CursorStyle::BlinkingUnderline),
+            (CursorShape::Underline, false, CursorStyle::SteadyUnderline),
+        ];
+        for (shape, blink, expected) in cases {
+            assert_eq!(
+                resolve_cursor_style(Some(shape), Some(blink)),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn initial_window_size_converts_physical_metrics_to_logical_size() {
         let size = initial_window_logical_size(
             metrics(16.0, 32.0),
@@ -4100,7 +4266,7 @@ mod tests {
         };
 
         assert_eq!(
-            preferred_surface_alpha_mode(&caps),
+            preferred_surface_alpha_mode(&caps, false),
             wgpu::CompositeAlphaMode::Opaque
         );
     }
@@ -4113,8 +4279,57 @@ mod tests {
         };
 
         assert_eq!(
-            preferred_surface_alpha_mode(&caps),
+            preferred_surface_alpha_mode(&caps, false),
             wgpu::CompositeAlphaMode::Inherit
+        );
+    }
+
+    #[test]
+    fn surface_alpha_mode_prefers_post_multiplied_when_transparent() {
+        let caps = wgpu::SurfaceCapabilities {
+            alpha_modes: vec![
+                wgpu::CompositeAlphaMode::Opaque,
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            preferred_surface_alpha_mode(&caps, true),
+            wgpu::CompositeAlphaMode::PostMultiplied
+        );
+    }
+
+    #[test]
+    fn surface_alpha_mode_transparent_falls_back_through_preference_order() {
+        // No PostMultiplied — the next preferred transparent mode wins.
+        let caps = wgpu::SurfaceCapabilities {
+            alpha_modes: vec![
+                wgpu::CompositeAlphaMode::Opaque,
+                wgpu::CompositeAlphaMode::PreMultiplied,
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            preferred_surface_alpha_mode(&caps, true),
+            wgpu::CompositeAlphaMode::PreMultiplied
+        );
+    }
+
+    #[test]
+    fn surface_alpha_mode_transparent_falls_back_to_first_when_none_preferred() {
+        // Only Opaque is offered — a transparent window still has to pick
+        // something, so it takes the surface's first advertised mode.
+        let caps = wgpu::SurfaceCapabilities {
+            alpha_modes: vec![wgpu::CompositeAlphaMode::Opaque],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            preferred_surface_alpha_mode(&caps, true),
+            wgpu::CompositeAlphaMode::Opaque
         );
     }
 

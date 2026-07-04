@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 dirs.workspace = true
+noa-core.workspace = true

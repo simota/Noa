@@ -70,6 +70,9 @@ pub struct Terminal {
     /// `XTWINOPS` window-title stack (`CSI 22/23 t`), window-title only —
     /// icon-title variants (`Ps[1] == 1`) are unsupported and no-op.
     title_stack: VecDeque<String>,
+    /// Cursor style DECSCUSR 0 (`Default`) resets to. Seeded from
+    /// `CursorStyle::default()`; `noa-app` overrides it from `cursor-style`.
+    default_cursor_style: CursorStyle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,7 +123,16 @@ impl Terminal {
             text_area_width_px: 0,
             text_area_height_px: 0,
             title_stack: VecDeque::new(),
+            default_cursor_style: CursorStyle::default(),
         }
+    }
+
+    /// Set the cursor style DECSCUSR 0 resets to, and apply it immediately as
+    /// the active cursor style. Called by `noa-app` from the `cursor-style`
+    /// config at surface creation.
+    pub fn set_default_cursor_style(&mut self, style: CursorStyle) {
+        self.default_cursor_style = style;
+        self.active_mut().cursor.style = style;
     }
 
     /// The active screen.
@@ -398,12 +410,8 @@ impl Terminal {
             .map(|mark| mark.point.y)
             .filter(|&abs| abs >= rows_evicted)
             .fold(None, |best: Option<usize>, abs| match direction {
-                PromptJump::Prev if abs < abs_top => {
-                    Some(best.map_or(abs, |b| b.max(abs)))
-                }
-                PromptJump::Next if abs > abs_top => {
-                    Some(best.map_or(abs, |b| b.min(abs)))
-                }
+                PromptJump::Prev if abs < abs_top => Some(best.map_or(abs, |b| b.max(abs))),
+                PromptJump::Next if abs > abs_top => Some(best.map_or(abs, |b| b.min(abs))),
                 _ => best,
             });
 
@@ -730,7 +738,9 @@ impl Handler for Terminal {
     }
 
     fn set_cursor_style(&mut self, style: VtCursorStyle) {
+        let default_style = self.default_cursor_style;
         self.active_mut().cursor.style = match style {
+            VtCursorStyle::Default => default_style,
             VtCursorStyle::BlinkingBlock => CursorStyle::BlinkingBlock,
             VtCursorStyle::SteadyBlock => CursorStyle::SteadyBlock,
             VtCursorStyle::BlinkingUnderline => CursorStyle::BlinkingUnderline,

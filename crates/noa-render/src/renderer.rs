@@ -142,6 +142,12 @@ pub struct Renderer {
     /// Total rows regenerated across all panes in the most recent
     /// `rebuild_panes` call (AC-WP4-02).
     rows_rebuilt_last_frame: u64,
+    /// `background-opacity` (0.0..=1.0). Scales only the clear-color alpha,
+    /// which is what shows through wherever the terminal's DEFAULT background
+    /// is visible (default-bg cells emit no bg quad, and the window padding is
+    /// filled by the clear too). Explicit-bg / selection / cursor quads keep
+    /// their own alpha (1.0), so they stay opaque — Ghostty semantics.
+    background_opacity: f32,
 }
 
 impl Renderer {
@@ -233,7 +239,17 @@ impl Renderer {
             color_atlas_seen_generation,
             pane_render_cache: HashMap::new(),
             rows_rebuilt_last_frame: 0,
+            background_opacity: 1.0,
         })
+    }
+
+    /// Set `background-opacity` (0.0..=1.0). A startup-time setting: `noa-app`
+    /// calls this once right after construction, before the first frame, so no
+    /// per-frame cache invalidation is needed (opacity feeds only the clear
+    /// color, which `rebuild_panes` recomputes every frame anyway). Values are
+    /// clamped into range.
+    pub fn set_background_opacity(&mut self, opacity: f32) {
+        self.background_opacity = opacity.clamp(0.0, 1.0);
     }
 
     /// Update the known viewport size (called on `WindowEvent::Resized`).
@@ -336,7 +352,7 @@ impl Renderer {
             .retain(|id, _| panes.iter().any(|pane| pane.pane == *id));
 
         if let Some(clear_color) = first_clear_color {
-            self.clear_color = clear_color;
+            self.clear_color = apply_background_opacity(clear_color, self.background_opacity);
         }
         self.cell_instance_len = self.instances.len();
         self.rows_rebuilt_last_frame = rows_rebuilt_total;
@@ -1851,6 +1867,19 @@ fn push_decoration_rect(
     });
 }
 
+/// Scale a clear color's alpha by `background-opacity`, leaving rgb intact.
+/// Only the clear color carries the setting: it fills the window padding and
+/// every default-background cell (those emit no bg quad, so the clear shows
+/// through). Explicit-bg / selection / cursor quads keep alpha 1.0 and stay
+/// opaque. With the surface in `PostMultiplied` alpha mode this makes the
+/// default-bg regions translucent while inked glyphs — whose coverage pushes
+/// the framebuffer alpha back toward 1.0 through `ALPHA_BLENDING` — stay solid.
+fn apply_background_opacity(clear_color: [f32; 4], opacity: f32) -> [f32; 4] {
+    let mut out = clear_color;
+    out[3] = clear_color[3] * opacity.clamp(0.0, 1.0);
+    out
+}
+
 fn to_u8_color(c: [f32; 4]) -> [u8; 4] {
     [
         (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,
@@ -2062,6 +2091,53 @@ mod tests {
         assert!(
             srgb.target_format_is_srgb,
             "Bgra8UnormSrgb is sRGB; solid colors must still be pre-linearized on this fallback path"
+        );
+    }
+
+    #[test]
+    fn background_opacity_scales_only_clear_alpha() {
+        let base = [0.1, 0.2, 0.3, 1.0];
+        // Fully opaque leaves the clear color untouched.
+        assert_eq!(apply_background_opacity(base, 1.0), base);
+        // Partial opacity scales only alpha; rgb stays the theme background.
+        assert_eq!(apply_background_opacity(base, 0.8), [0.1, 0.2, 0.3, 0.8]);
+        // Zero is fully transparent; out-of-range values clamp.
+        assert_eq!(apply_background_opacity(base, 0.0), [0.1, 0.2, 0.3, 0.0]);
+        assert_eq!(apply_background_opacity(base, 2.0), base);
+    }
+
+    #[test]
+    fn default_bg_cell_emits_no_background_quad_so_clear_color_shows_through() {
+        // The opacity path relies on default-background cells NOT painting a
+        // bg quad: the (opacity-scaled) clear color is what fills them. A cell
+        // with an explicit bg still paints an opaque quad.
+        let Some(mut font) = skip_font() else {
+            return;
+        };
+        let mut terminal = Terminal::new(GridSize::new(2, 1));
+        terminal.primary.cursor.visible = false;
+        terminal.primary.grid[0].cells[0].ch = ' ';
+        terminal.primary.grid[0].cells[0].bg = Color::Default;
+        terminal.primary.grid[0].cells[1].ch = ' ';
+        terminal.primary.grid[0].cells[1].bg = Color::Rgb(Rgb::new(2, 3, 4));
+        let snap = FrameSnapshot::from_terminal(&mut terminal);
+
+        let mut instances = Vec::new();
+        rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
+
+        let bg_quads: Vec<_> = instances
+            .iter()
+            .filter(|instance| instance.flags == 0 && instance.glyph_size == [0, 0])
+            .collect();
+        assert_eq!(
+            bg_quads.len(),
+            1,
+            "only the explicit-bg cell should paint a background quad"
+        );
+        assert_eq!(bg_quads[0].grid_pos, [1, 0]);
+        assert_eq!(
+            bg_quads[0].color[3], 255,
+            "explicit background quads stay fully opaque regardless of background-opacity"
         );
     }
 

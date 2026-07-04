@@ -106,6 +106,22 @@ fn decscusr_updates_cursor_style() {
 }
 
 #[test]
+fn set_default_cursor_style_applies_and_decscusr_zero_resets_to_it() {
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.set_default_cursor_style(CursorStyle::SteadyBar);
+    // Applied immediately as the active cursor style.
+    assert_eq!(t.primary.cursor.style, CursorStyle::SteadyBar);
+
+    let mut s = Stream::new();
+    // A concrete DECSCUSR changes the style away from the default.
+    s.feed(b"\x1b[2 q", &mut t);
+    assert_eq!(t.primary.cursor.style, CursorStyle::SteadyBlock);
+    // DECSCUSR 0 resets to the configured default, not a hardcoded block.
+    s.feed(b"\x1b[0 q", &mut t);
+    assert_eq!(t.primary.cursor.style, CursorStyle::SteadyBar);
+}
+
+#[test]
 fn cup_is_one_based() {
     let t = run(b"\x1b[3;5H");
     assert_eq!(t.primary.cursor.y, 2);

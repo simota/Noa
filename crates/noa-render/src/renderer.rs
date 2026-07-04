@@ -21,6 +21,7 @@ use crate::theme::{OverlayStyle, Theme};
 const DEFAULT_PANE_ID: PaneId = PaneId::new(0);
 const DIVIDER_RGBA: [u8; 4] = [82, 82, 82, 255];
 const FOCUS_INDICATOR_RGBA: [u8; 4] = [95, 175, 255, 230];
+const MAX_ATLAS_EVICTION_REBUILD_PASSES: usize = 4;
 static RENDERER_CONSTRUCTION_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub fn renderer_construction_count() -> u64 {
@@ -76,11 +77,11 @@ struct PaneImages {
 /// separately (see `PaneRenderCache::prev_cursor`) since it only dirties the
 /// two affected rows, not the whole pane.
 ///
-/// Atlas realloc is deliberately NOT part of this key: `etagere`'s packing
-/// never moves an already-packed rect, so a realloc changes the atlas
-/// texture size but not any existing glyph's `atlas_pos` — retained
-/// instances referencing already-rastered glyphs stay valid, and newly
-/// rastered glyphs only appear on rows that are dirty by construction.
+/// Atlas growth is deliberately NOT part of this key: `etagere`'s packing
+/// never moves an already-packed rect, so growth changes the atlas texture
+/// size but not any existing glyph's `atlas_pos`. Atlas eviction IS part of
+/// the key: row cache entries hold concrete atlas coordinates, and eviction
+/// makes those coordinates reusable for another glyph.
 #[derive(Clone, PartialEq)]
 struct FrameInvalidationKey {
     /// Session-absolute viewport base row (`FrameSnapshot::abs_row_base`), NOT
@@ -101,6 +102,10 @@ struct FrameInvalidationKey {
     /// full-pane-invalidation bundle as the other 6 pane-wide triggers
     /// above rather than tracking affected rows individually.
     hover_link: Option<HoverLink>,
+    /// Monotonic [`FontGrid`] atlas-eviction epoch. A changed epoch means at
+    /// least one cached glyph atlas coordinate may now refer to reclaimed
+    /// space, so every row must regenerate its glyph instances.
+    atlas_eviction_generation: u64,
 }
 
 /// A pane's persisted per-row instance segments (WP4, REQ-PERF-2/3). Three
@@ -1100,7 +1105,7 @@ fn rebuild_pane_cached(
     );
     let cell_size = (metrics.cell_w, metrics.cell_h);
 
-    let new_key = FrameInvalidationKey {
+    let mut new_key = FrameInvalidationKey {
         abs_row_base: snap.abs_row_base,
         cols: snap.cols,
         rows: snap.rows_n,
@@ -1110,6 +1115,7 @@ fn rebuild_pane_cached(
         search: snap.search.clone(),
         cell_size,
         hover_link: snap.hover_link,
+        atlas_eviction_generation: font.atlas_eviction_generation(),
     };
 
     let rows = snap.rows.len();
@@ -1121,69 +1127,124 @@ fn rebuild_pane_cached(
         snap.focused,
         snap.cursor_blink_visible,
     );
-    // Any of the 6 pane-wide triggers (row_base/cols/rows/colors/theme/
-    // selection/search — bundled in `FrameInvalidationKey`) differing from
-    // the cached previous-frame key forces every row dirty. A pane's first
-    // frame (`cache.key` still `None`) is also a full rebuild.
-    let full = cache.key.as_ref() != Some(&new_key) || cache.bg.len() != rows;
-
-    let mut dirty: Vec<bool> = if full {
-        vec![true; rows]
-    } else {
-        snap.row_dirty.clone()
-    };
-
-    // 7th trigger (narrower than the 6 above): a change to the cursor's
-    // position or its rendered shape (movement, DECSCUSR style, focus, or
-    // blink phase) dirties EXACTLY the two affected rows, not the whole
-    // pane.
-    if !full
-        && let Some(prev) = cache.prev_cursor
-        && prev != new_cursor
-    {
-        if let Some(slot) = dirty.get_mut(prev.1 as usize) {
-            *slot = true;
-        }
-        if let Some(slot) = dirty.get_mut(new_cursor.1 as usize) {
-            *slot = true;
-        }
-    }
-
-    if full {
-        cache.bg = vec![Vec::new(); rows];
-        cache.glyph = vec![Vec::new(); rows];
-        cache.deco = vec![Vec::new(); rows];
-    }
-
     let mut rows_rebuilt: u64 = 0;
-    for (row_idx, row) in snap.rows.iter().enumerate() {
-        if dirty.get(row_idx).copied().unwrap_or(true) {
-            let (bg, glyph, deco) = rebuild_row_instances(
-                row_idx as u16,
-                row,
-                snap,
-                font,
-                theme,
-                target_format_is_srgb,
-                metrics,
-            );
-            cache.bg[row_idx] = bg;
-            cache.glyph[row_idx] = glyph;
-            cache.deco[row_idx] = deco;
-            rows_rebuilt += 1;
+    let mut pane_instances = Vec::new();
+    let mut bg_len = 0;
+    let mut glyph_len = 0;
+    let mut deco_len = 0;
+    let mut stable = false;
+
+    for _pass in 0..MAX_ATLAS_EVICTION_REBUILD_PASSES {
+        let eviction_before = font.atlas_eviction_generation();
+        new_key.atlas_eviction_generation = eviction_before;
+
+        // Any pane-wide trigger bundled in `FrameInvalidationKey` differing
+        // from the cached previous-frame key forces every row dirty. A pane's
+        // first frame (`cache.key` still `None`) is also a full rebuild.
+        let full = cache.key.as_ref() != Some(&new_key) || cache.bg.len() != rows;
+
+        let mut dirty: Vec<bool> = if full {
+            vec![true; rows]
+        } else {
+            snap.row_dirty.clone()
+        };
+
+        // Narrower than the pane-wide triggers: a change to the cursor's
+        // position or its rendered shape (movement, DECSCUSR style, focus, or
+        // blink phase) dirties EXACTLY the two affected rows, not the whole
+        // pane.
+        if !full
+            && let Some(prev) = cache.prev_cursor
+            && prev != new_cursor
+        {
+            if let Some(slot) = dirty.get_mut(prev.1 as usize) {
+                *slot = true;
+            }
+            if let Some(slot) = dirty.get_mut(new_cursor.1 as usize) {
+                *slot = true;
+            }
         }
+
+        if full {
+            cache.bg = vec![Vec::new(); rows];
+            cache.glyph = vec![Vec::new(); rows];
+            cache.deco = vec![Vec::new(); rows];
+        }
+
+        for (row_idx, row) in snap.rows.iter().enumerate() {
+            if dirty.get(row_idx).copied().unwrap_or(true) {
+                let (bg, glyph, deco) = rebuild_row_instances(
+                    row_idx as u16,
+                    row,
+                    snap,
+                    font,
+                    theme,
+                    target_format_is_srgb,
+                    metrics,
+                );
+                cache.bg[row_idx] = bg;
+                cache.glyph[row_idx] = glyph;
+                cache.deco[row_idx] = deco;
+                rows_rebuilt += 1;
+            }
+        }
+
+        bg_len = cache.bg.iter().map(|row| row.len() as u32).sum();
+        glyph_len = cache.glyph.iter().map(|row| row.len() as u32).sum();
+        deco_len = cache.deco.iter().map(|row| row.len() as u32).sum();
+
+        pane_instances.clear();
+        flatten_row_segments(&mut pane_instances, &cache.bg, &cache.glyph, &cache.deco);
+        append_search_prompt_instances(
+            &mut pane_instances,
+            snap,
+            font,
+            theme,
+            target_format_is_srgb,
+            metrics,
+        );
+        append_command_palette_instances(
+            &mut pane_instances,
+            snap,
+            font,
+            theme,
+            target_format_is_srgb,
+            metrics,
+        );
+        append_confirm_dialog_instances(
+            &mut pane_instances,
+            snap,
+            font,
+            theme,
+            target_format_is_srgb,
+            metrics,
+        );
+
+        let eviction_after = font.atlas_eviction_generation();
+        new_key.atlas_eviction_generation = eviction_after;
+        if eviction_after == eviction_before {
+            stable = true;
+            break;
+        }
+
+        // A glyph eviction can make any row-cache segment from before the
+        // eviction sample a now-reused atlas rectangle. Force the next pass
+        // through the full rebuild path against the updated epoch.
+        cache.key = None;
     }
 
-    let bg_len: u32 = cache.bg.iter().map(|row| row.len() as u32).sum();
-    let glyph_len: u32 = cache.glyph.iter().map(|row| row.len() as u32).sum();
-    let deco_len: u32 = cache.deco.iter().map(|row| row.len() as u32).sum();
+    if !stable {
+        log::warn!(
+            "glyph atlas kept evicting across {MAX_ATLAS_EVICTION_REBUILD_PASSES} rebuild passes; row cache may be unstable"
+        );
+        cache.key = None;
+    }
 
-    flatten_row_segments(instances, &cache.bg, &cache.glyph, &cache.deco);
-    append_search_prompt_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
-    append_command_palette_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
-    append_confirm_dialog_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
+    instances.extend_from_slice(&pane_instances);
 
-    cache.key = Some(new_key);
+    if stable {
+        cache.key = Some(new_key);
+    }
     cache.prev_cursor = Some(new_cursor);
 
     PaneRebuild {
@@ -3801,6 +3862,53 @@ mod tests {
             renderer.rows_rebuilt_last_frame(),
             0,
             "an unchanged second frame must rebuild zero rows"
+        );
+    }
+
+    #[test]
+    fn atlas_eviction_epoch_forces_full_row_cache_rebuild() {
+        // Regression: row-cache glyph instances store concrete atlas
+        // coordinates. When FontGrid evicts a glyph slot, those coordinates
+        // can later be reused by another glyph, so an otherwise-clean frame
+        // must not reuse the old row instances.
+        let mut font =
+            match FontGrid::new_with_capped_atlas_for_tests(14.0, FontConfig::default(), 48) {
+                Ok(font) => font,
+                Err(err) => {
+                    eprintln!("skipping: no system monospace font available: {err}");
+                    return;
+                }
+            };
+        let theme = Theme::new();
+        let mut cache = PaneRenderCache::empty();
+        let snap = baseline_snapshot(['A', 'B', 'C']);
+        let mut instances = Vec::new();
+
+        let first =
+            rebuild_pane_cached(&mut cache, &mut instances, &snap, &mut font, &theme, false);
+        assert_eq!(
+            first.rows_rebuilt, 3,
+            "fresh pane cache should build every visible row"
+        );
+        instances.clear();
+
+        let before_eviction = font.atlas_eviction_generation();
+        for ch in ('!'..='~').chain('\u{3041}'..='\u{3096}') {
+            font.get_or_raster(ch);
+            if font.atlas_eviction_generation() > before_eviction {
+                break;
+            }
+        }
+        assert!(
+            font.atlas_eviction_generation() > before_eviction,
+            "capped atlas must evict after flooding distinct glyphs"
+        );
+
+        let second =
+            rebuild_pane_cached(&mut cache, &mut instances, &snap, &mut font, &theme, false);
+        assert!(
+            second.rows_rebuilt >= 3,
+            "atlas eviction must force a full row-cache rebuild even when row_dirty is false"
         );
     }
 

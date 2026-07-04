@@ -106,6 +106,10 @@ pub struct FontGrid {
     next_slot_id: u32,
     /// Monotonic access clock; every cache read/insert stamps `last_used`.
     clock: u64,
+    /// Monotonic counter bumped whenever an atlas slot is evicted. Renderer
+    /// row caches hold concrete atlas coordinates, so eviction is a semantic
+    /// invalidation even if the CPU atlas dimensions did not change.
+    atlas_eviction_generation: u64,
 }
 
 impl FontGrid {
@@ -135,6 +139,40 @@ impl FontGrid {
             slots: HashMap::new(),
             next_slot_id: 0,
             clock: 0,
+            atlas_eviction_generation: 0,
+        })
+    }
+
+    /// Build a grid whose glyph atlases are pinned to a tiny, non-growing
+    /// `dim` x `dim` size. This is public only so renderer tests in this
+    /// workspace can force atlas eviction deterministically.
+    #[doc(hidden)]
+    pub fn new_with_capped_atlas_for_tests(
+        px_size: f32,
+        font_cfg: FontConfig,
+        dim: u32,
+    ) -> Result<Self, FontError> {
+        let font_stack = load_font_stack(&font_cfg)?;
+        let metrics = {
+            let font = font_stack.primary().font_ref()?;
+            Metrics::compute(font, px_size)
+        };
+        Ok(Self {
+            font_stack,
+            ctx: ScaleContext::new(),
+            metrics,
+            mask_atlas: Atlas::with_max_dim(dim, dim, MASK_BYTES_PER_PX, dim),
+            color_atlas: Atlas::with_max_dim(dim, dim, COLOR_BYTES_PER_PX, dim),
+            cache: HashMap::new(),
+            px_size,
+            font_cfg,
+            shape_cache: HashMap::new(),
+            shape_cache_hits: 0,
+            raster_shaped_cache: HashMap::new(),
+            slots: HashMap::new(),
+            next_slot_id: 0,
+            clock: 0,
+            atlas_eviction_generation: 0,
         })
     }
 
@@ -368,6 +406,11 @@ impl FontGrid {
         self.color_atlas.generation()
     }
 
+    /// Monotonic generation bumped whenever a glyph atlas slot is evicted.
+    pub fn atlas_eviction_generation(&self) -> u64 {
+        self.atlas_eviction_generation
+    }
+
     /// Advance the access clock and return the new stamp.
     fn tick(&mut self) -> u64 {
         self.clock = self.clock.wrapping_add(1);
@@ -427,6 +470,7 @@ impl FontGrid {
                 self.raster_shaped_cache.remove(&key);
             }
         }
+        self.atlas_eviction_generation = self.atlas_eviction_generation.wrapping_add(1);
         true
     }
 
@@ -515,27 +559,7 @@ impl FontGrid {
         font_cfg: FontConfig,
         dim: u32,
     ) -> Result<Self, FontError> {
-        let font_stack = load_font_stack(&font_cfg)?;
-        let metrics = {
-            let font = font_stack.primary().font_ref()?;
-            Metrics::compute(font, px_size)
-        };
-        Ok(Self {
-            font_stack,
-            ctx: ScaleContext::new(),
-            metrics,
-            mask_atlas: Atlas::with_max_dim(dim, dim, MASK_BYTES_PER_PX, dim),
-            color_atlas: Atlas::with_max_dim(dim, dim, COLOR_BYTES_PER_PX, dim),
-            cache: HashMap::new(),
-            px_size,
-            font_cfg,
-            shape_cache: HashMap::new(),
-            shape_cache_hits: 0,
-            raster_shaped_cache: HashMap::new(),
-            slots: HashMap::new(),
-            next_slot_id: 0,
-            clock: 0,
-        })
+        Self::new_with_capped_atlas_for_tests(px_size, font_cfg, dim)
     }
 
     fn slot_count(&self) -> usize {
@@ -823,6 +847,10 @@ mod tests {
         assert!(
             !grid.is_char_cached(cold),
             "an early, untouched glyph must have been evicted under atlas pressure"
+        );
+        assert!(
+            grid.atlas_eviction_generation() > 0,
+            "atlas eviction must advance the renderer-visible eviction generation"
         );
         grid.assert_slot_cache_consistent();
     }

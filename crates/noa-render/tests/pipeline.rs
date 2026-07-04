@@ -77,6 +77,7 @@ fn snapshot_for_text(text: &str) -> FrameSnapshot {
         search: SearchState::default(),
         row_base: 0,
         abs_row_base: 0,
+        active_is_alt: false,
         cols,
         rows_n: 1,
         focused: true,
@@ -298,6 +299,7 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         search: SearchState::default(),
         row_base: 0,
         abs_row_base: 0,
+        active_is_alt: false,
         cols: 4,
         rows_n: 1,
         focused: true,
@@ -380,6 +382,7 @@ fn command_palette_overlay_draws_one_frame_without_validation_error() {
         search: SearchState::default(),
         row_base: 0,
         abs_row_base: 0,
+        active_is_alt: false,
         cols,
         rows_n,
         focused: true,
@@ -657,6 +660,7 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
             search: SearchState::default(),
             row_base: 0,
             abs_row_base: 0,
+            active_is_alt: false,
             cols: 1,
             rows_n: 2,
             focused: true,
@@ -1134,6 +1138,7 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
         search: SearchState::default(),
         row_base: 0,
         abs_row_base: 0,
+        active_is_alt: false,
         cols: 1,
         rows_n: 1,
         focused: true,
@@ -1460,7 +1465,12 @@ fn image_snapshot(
         })
         .collect();
     // 4×4 solid-color image; the Linear sampler stretches it over the quad.
-    let rgba: Vec<u8> = image_color.iter().copied().cycle().take(4 * 4 * 4).collect();
+    let rgba: Vec<u8> = image_color
+        .iter()
+        .copied()
+        .cycle()
+        .take(4 * 4 * 4)
+        .collect();
     FrameSnapshot {
         row_dirty: vec![true; rows.len()],
         rows,
@@ -1470,6 +1480,7 @@ fn image_snapshot(
         search: SearchState::default(),
         row_base: 0,
         abs_row_base: 0,
+        active_is_alt: false,
         cols,
         rows_n,
         focused: true,
@@ -1519,7 +1530,14 @@ fn image_layer_draws_image_and_text_without_validation_error() {
     renderer.resize(PixelSize { w: 96, h: 64 });
 
     // A textful grid with an opaque image over it at z=0 (above text).
-    let mut snap = image_snapshot(6, 4, Color::Rgb(Rgb::new(180, 0, 0)), [0, 0, 255, 255], 0, 0);
+    let mut snap = image_snapshot(
+        6,
+        4,
+        Color::Rgb(Rgb::new(180, 0, 0)),
+        [0, 0, 255, 255],
+        0,
+        0,
+    );
     snap.rows[0].cells[0].ch = 'A';
     snap.rows[0].cells[0].fg = Color::Palette(2);
 
@@ -1555,7 +1573,10 @@ fn image_z_band_controls_whether_it_covers_the_cell_background() {
         DEFAULT_GRID_PADDING,
     )
     .expect("build renderer");
-    renderer.resize(PixelSize { w: width, h: height });
+    renderer.resize(PixelSize {
+        w: width,
+        h: height,
+    });
 
     let center = |pixels: &[u8]| -> [u8; 4] {
         let x = (width / 2) as usize;
@@ -1565,7 +1586,14 @@ fn image_z_band_controls_whether_it_covers_the_cell_background() {
     };
 
     // z=0 (above text): the opaque blue image draws over the red cell background.
-    let above = image_snapshot(40, 40, Color::Rgb(Rgb::new(200, 0, 0)), [0, 0, 255, 255], 0, 0);
+    let above = image_snapshot(
+        40,
+        40,
+        Color::Rgb(Rgb::new(200, 0, 0)),
+        [0, 0, 255, 255],
+        0,
+        0,
+    );
     renderer.rebuild_cells(&above, &mut font, &Theme::new());
     renderer.sync_atlas(&device, &queue, &mut font);
     let (target, view) = render_target(&device, width, height);
@@ -1617,7 +1645,14 @@ fn image_texture_reuploads_only_on_epoch_bump() {
     let (_target, view) = render_target(&device, 64, 48);
 
     let draw = |renderer: &mut Renderer, font: &mut FontGrid, epoch: u64| {
-        let snap = image_snapshot(4, 4, Color::Rgb(Rgb::new(0, 80, 0)), [255, 255, 0, 255], epoch, 0);
+        let snap = image_snapshot(
+            4,
+            4,
+            Color::Rgb(Rgb::new(0, 80, 0)),
+            [255, 255, 0, 255],
+            epoch,
+            0,
+        );
         renderer.rebuild_cells(&snap, font, &Theme::new());
         renderer.sync_atlas(&device, &queue, font);
         renderer.draw(&device, &queue, &view);
@@ -1663,14 +1698,22 @@ fn unicode_placeholder_resolves_and_draws_over_text() {
         DEFAULT_GRID_PADDING,
     )
     .expect("build renderer");
-    renderer.resize(PixelSize { w: width, h: height });
+    renderer.resize(PixelSize {
+        w: width,
+        h: height,
+    });
 
     // A terminal holding a solid-blue image placed as a virtual placement (U=1)
     // at z=0 (above text), referenced only through a Unicode placeholder cell.
     let mut term = Terminal::new(GridSize::new(6, 4));
     term.set_pixel_metrics(12, 16, width, height);
     let mut stream = Stream::new();
-    let blue: Vec<u8> = [0u8, 0, 255, 255].iter().copied().cycle().take(4 * 4 * 4).collect();
+    let blue: Vec<u8> = [0u8, 0, 255, 255]
+        .iter()
+        .copied()
+        .cycle()
+        .take(4 * 4 * 4)
+        .collect();
     let mut apc = b"\x1b_Ga=T,f=32,s=4,v=4,i=1,U=1,c=6,r=4,C=1;".to_vec();
     let mut b64 = Vec::new();
     noa_grid_test_base64(&blue, &mut b64);
@@ -1705,7 +1748,10 @@ fn unicode_placeholder_resolves_and_draws_over_text() {
     device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.draw(&device, &queue, &view);
     let err = pollster::block_on(device.pop_error_scope());
-    assert!(err.is_none(), "placeholder draw hit a wgpu validation error: {err:?}");
+    assert!(
+        err.is_none(),
+        "placeholder draw hit a wgpu validation error: {err:?}"
+    );
 
     // Center pixel: the opaque blue image covers the grid.
     let pixels = read_rgba_pixels(&device, &queue, &target, width, height);
@@ -1734,7 +1780,15 @@ fn noa_grid_test_base64(data: &[u8], out: &mut Vec<u8>) {
         let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
         out.push(ALPHABET[(n >> 18 & 63) as usize]);
         out.push(ALPHABET[(n >> 12 & 63) as usize]);
-        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6 & 63) as usize] } else { b'=' });
-        out.push(if chunk.len() > 2 { ALPHABET[(n & 63) as usize] } else { b'=' });
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6 & 63) as usize]
+        } else {
+            b'='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 63) as usize]
+        } else {
+            b'='
+        });
     }
 }

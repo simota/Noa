@@ -159,6 +159,11 @@ pub struct FrameSnapshot {
     /// of rows still forces a full rebuild (a stale `row_base` would falsely
     /// cache-hit and paint shifted history rows).
     pub abs_row_base: usize,
+    /// Whether this snapshot came from the alternate screen. Primary and
+    /// alternate screens can share the same visible row base and both report no
+    /// row damage, so the renderer must key on screen identity to avoid
+    /// reusing stale row instances across a DEC screen switch.
+    pub active_is_alt: bool,
     pub cols: u16,
     pub rows_n: u16,
     /// Whether this pane owns keyboard focus (both its window is OS-focused
@@ -240,6 +245,7 @@ impl FrameSnapshot {
             search,
             row_base,
             abs_row_base,
+            active_is_alt: terminal.active_is_alt,
             cols,
             rows_n,
             focused: true,
@@ -293,6 +299,7 @@ impl FrameSnapshot {
             search,
             row_base,
             abs_row_base,
+            active_is_alt: terminal.active_is_alt,
             cols,
             rows_n,
             focused: true,
@@ -599,7 +606,10 @@ mod tests {
         term.set_pixel_metrics(10, 20, 200, 480);
         let mut stream = Stream::new();
         stream.feed(
-            &apc("a=T,f=32,s=30,v=40,i=1,U=1,c=3,r=2,C=1", &vec![0u8; 30 * 40 * 4]),
+            &apc(
+                "a=T,f=32,s=30,v=40,i=1,U=1,c=3,r=2,C=1",
+                &vec![0u8; 30 * 40 * 4],
+            ),
             &mut term,
         );
         // One placeholder cell at (0,0): image id 1, image row 0, column 0.
@@ -610,7 +620,11 @@ mod tests {
         cell.combining.push('\u{0305}'); // column 0
 
         let snap = FrameSnapshot::from_terminal(&mut term);
-        assert_eq!(snap.image_placements.len(), 1, "placeholder yields a placement");
+        assert_eq!(
+            snap.image_placements.len(),
+            1,
+            "placeholder yields a placement"
+        );
         let p = snap.image_placements[0];
         assert_eq!((p.grid_x, p.grid_y), (0, 0));
         assert_eq!((p.cols, p.rows), (1, 1));

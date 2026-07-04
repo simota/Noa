@@ -91,6 +91,9 @@ struct FrameInvalidationKey {
     /// reports history rows as never-dirty and relies on this key to catch a
     /// scroll). The absolute row is monotonic, so a scroll always changes it.
     abs_row_base: usize,
+    /// Primary/alternate screen identity. DEC private modes can switch the
+    /// backing screen without dirtying the newly active screen's rows.
+    active_is_alt: bool,
     cols: u16,
     rows: u16,
     colors: TerminalColors,
@@ -1200,6 +1203,7 @@ fn rebuild_pane_cached(
 
     let mut new_key = FrameInvalidationKey {
         abs_row_base: snap.abs_row_base,
+        active_is_alt: snap.active_is_alt,
         cols: snap.cols,
         rows: snap.rows_n,
         colors: snap.colors.clone(),
@@ -4041,6 +4045,7 @@ mod tests {
             search: SearchState::default(),
             row_base: 0,
             abs_row_base: 0,
+            active_is_alt: false,
             cols: 1,
             rows_n: 3,
             focused: true,
@@ -4466,6 +4471,85 @@ mod tests {
             renderer.rows_rebuilt_last_frame(),
             3,
             "abs_row_base change must force a full pane rebuild despite an unchanged row_base"
+        );
+    }
+
+    #[test]
+    fn active_screen_switch_forces_rebuild_even_when_rows_are_clean() {
+        // Regression: switching from alt back to primary can expose a screen
+        // whose rows did not mutate while it was hidden. If the row cache key
+        // ignores the active screen identity, the clean primary frame can reuse
+        // alt-screen glyph instances.
+        let Some((device, queue)) = device_queue() else {
+            eprintln!("no wgpu adapter available — skipping active-screen switch test");
+            return;
+        };
+        let Some(mut font) = skip_font() else { return };
+        let mut renderer = Renderer::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Bgra8Unorm,
+            &mut font,
+            GridPadding::ZERO,
+        )
+        .expect("build renderer");
+        renderer.resize(PixelSize { w: 96, h: 96 });
+
+        let theme = Theme::new();
+        let pane = PaneId::new(301);
+        let rect = PaneRect::new(0, 0, 96, 96);
+        let mut terminal = Terminal::new(GridSize::new(3, 3));
+        terminal.primary.grid[0].cells[0].ch = 'P';
+        terminal.primary.grid[1].cells[0].ch = 'R';
+        terminal.primary.grid[2].cells[0].ch = 'I';
+
+        let primary = FrameSnapshot::from_terminal(&mut terminal);
+        assert!(!primary.active_is_alt);
+        renderer.rebuild_panes(
+            &[PaneFrame {
+                pane,
+                rect,
+                snapshot: &primary,
+            }],
+            &mut font,
+            &theme,
+        );
+
+        let mut stream = Stream::new();
+        stream.feed(b"\x1b[?1049hALT", &mut terminal);
+        let alt = FrameSnapshot::from_terminal(&mut terminal);
+        assert!(alt.active_is_alt);
+        renderer.rebuild_panes(
+            &[PaneFrame {
+                pane,
+                rect,
+                snapshot: &alt,
+            }],
+            &mut font,
+            &theme,
+        );
+
+        stream.feed(b"\x1b[?1049l", &mut terminal);
+        let primary_again = FrameSnapshot::from_terminal(&mut terminal);
+        assert!(!primary_again.active_is_alt);
+        assert!(
+            primary_again.row_dirty.iter().all(|dirty| !dirty),
+            "primary rows were not mutated while hidden, so only screen identity can invalidate"
+        );
+        renderer.rebuild_panes(
+            &[PaneFrame {
+                pane,
+                rect,
+                snapshot: &primary_again,
+            }],
+            &mut font,
+            &theme,
+        );
+
+        assert_eq!(
+            renderer.rows_rebuilt_last_frame(),
+            3,
+            "alt -> primary switch must rebuild every row even when row_dirty is clean"
         );
     }
 

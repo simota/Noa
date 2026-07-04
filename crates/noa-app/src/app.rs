@@ -3280,17 +3280,51 @@ impl ApplicationHandler<UserEvent> for App {
 
 impl App {
     fn on_scale_factor_changed(&mut self, window_id: WindowId, scale_factor: f64) {
-        if let Some(gpu) = self.gpu.as_mut() {
+        // #TODO(agent): the FontGrid is app-wide, so on a mixed-DPI setup
+        // every other window keeps rasterizing at this window's scale factor
+        // (correct metrics, non-crisp glyphs). The complete fix is a
+        // per-window (per-scale) FontGrid.
+        let rebuilt = if let Some(gpu) = self.gpu.as_mut() {
             match FontGrid::new(
                 font_pixel_size(self.runtime_font_size, scale_factor),
                 font_config_from_noa_config(&self.config.font),
             ) {
-                Ok(font) => gpu.font = font,
+                Ok(font) => {
+                    gpu.font = font;
+                    for state in self.windows.values_mut() {
+                        state
+                            .renderer
+                            .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+                    }
+                    true
+                }
                 Err(err) => {
                     log::warn!("failed to rebuild font for scale factor {scale_factor}: {err}");
+                    false
                 }
             }
+        } else {
+            false
+        };
+
+        if rebuilt {
+            // The rebuilt font is shared by every window: relayout + repaint
+            // them all so none keeps stale cell metrics (mirrors the runtime
+            // font-size change path).
+            let windows = self
+                .window_order
+                .iter()
+                .filter_map(|id| self.windows.get(id).map(|state| (*id, state.window.clone())))
+                .collect::<Vec<_>>();
+            for (id, _) in &windows {
+                self.relayout_and_resize_window(*id);
+            }
+            for (_, window) in windows {
+                window.request_redraw();
+            }
+            return;
         }
+
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };

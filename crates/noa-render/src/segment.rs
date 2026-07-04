@@ -67,7 +67,7 @@ struct BoundaryKey {
     cursor: bool,
 }
 
-fn boundary_key(font: &FontGrid, cell: &SegmentCell) -> (BoundaryKey, StyleKey) {
+fn boundary_key(font: &mut FontGrid, cell: &SegmentCell) -> (BoundaryKey, StyleKey) {
     let style = StyleKey {
         bold: cell.bold,
         italic: cell.italic,
@@ -88,7 +88,11 @@ fn boundary_key(font: &FontGrid, cell: &SegmentCell) -> (BoundaryKey, StyleKey) 
 /// search-match, and cursor boundaries. A row never crosses into another
 /// row (the caller passes one row's cells at a time), which keeps this
 /// ready for WP4's per-row dirty patching.
-pub fn segment_row(font: &FontGrid, cells: &[SegmentCell]) -> Vec<ShapeRun> {
+///
+/// Takes `&mut FontGrid` because resolving a codepoint the curated font stack
+/// cannot map may lazily pull a system fallback face into the stack (macOS
+/// CoreText cascade — see [`noa_font::FontGrid::resolve_face_for_style`]).
+pub fn segment_row(font: &mut FontGrid, cells: &[SegmentCell]) -> Vec<ShapeRun> {
     let mut runs: Vec<ShapeRun> = Vec::new();
     let mut current_key: Option<BoundaryKey> = None;
 
@@ -154,9 +158,9 @@ mod tests {
     /// stays one run (no spurious boundary).
     #[test]
     fn same_face_and_style_run_stays_one_run() {
-        let Some(font) = skip_font() else { return };
+        let Some(mut font) = skip_font() else { return };
         let cells = vec![plain_cell('a'), plain_cell('b'), plain_cell('c')];
-        let runs = segment_row(&font, &cells);
+        let runs = segment_row(&mut font, &cells);
         assert_eq!(runs.len(), 1, "uniform ASCII text must stay a single run");
         assert_eq!(runs[0].start_col, 0);
         assert_eq!(runs[0].cells.len(), 3);
@@ -165,10 +169,10 @@ mod tests {
     /// AC-WP2-06: a style change (bold) breaks the run.
     #[test]
     fn style_change_breaks_the_run() {
-        let Some(font) = skip_font() else { return };
+        let Some(mut font) = skip_font() else { return };
         let mut cells = vec![plain_cell('a'), plain_cell('b')];
         cells[1].bold = true;
-        let runs = segment_row(&font, &cells);
+        let runs = segment_row(&mut font, &cells);
         assert_eq!(
             runs.len(),
             2,
@@ -183,10 +187,10 @@ mod tests {
     /// shaped ligature never straddles a highlight edge.
     #[test]
     fn selection_and_cursor_boundaries_break_the_run() {
-        let Some(font) = skip_font() else { return };
+        let Some(mut font) = skip_font() else { return };
         let mut cells = vec![plain_cell('a'), plain_cell('b'), plain_cell('c')];
         cells[1].selected = true;
-        let runs = segment_row(&font, &cells);
+        let runs = segment_row(&mut font, &cells);
         assert_eq!(
             runs.len(),
             3,
@@ -195,7 +199,7 @@ mod tests {
 
         let mut cells = vec![plain_cell('a'), plain_cell('b')];
         cells[1].cursor = true;
-        let runs = segment_row(&font, &cells);
+        let runs = segment_row(&mut font, &cells);
         assert_eq!(runs.len(), 2, "the cursor cell must start a new run");
     }
 
@@ -203,7 +207,7 @@ mod tests {
     /// boundary, each shaped with its own resolved face.
     #[test]
     fn latin_and_cjk_mixed_row_segments_at_face_boundary() {
-        let Some(font) = skip_font() else { return };
+        let Some(mut font) = skip_font() else { return };
         if font.resolve_face('A') == font.resolve_face('日') {
             eprintln!(
                 "skipping: installed font stack resolves Latin and CJK to the same face \
@@ -218,7 +222,7 @@ mod tests {
             plain_cell('日'),
             plain_cell('本'),
         ];
-        let runs = segment_row(&font, &cells);
+        let runs = segment_row(&mut font, &cells);
         assert!(
             runs.len() >= 2,
             "a Latin+CJK mixed row must segment into >=2 runs at the face boundary, got {}",
@@ -239,12 +243,12 @@ mod tests {
     /// context without polluting the `ShapeCell`s themselves.
     #[test]
     fn cell_render_context_is_parallel_and_excluded_from_shape_cells() {
-        let Some(font) = skip_font() else { return };
+        let Some(mut font) = skip_font() else { return };
         let mut cells = vec![plain_cell('x'), plain_cell('y')];
         cells[1].color = [1, 2, 3, 255];
         cells[1].cursor = true;
         // Same style/face/highlight-except-cursor -> cursor still breaks it.
-        let runs = segment_row(&font, &cells);
+        let runs = segment_row(&mut font, &cells);
         let last = runs.last().unwrap();
         assert_eq!(last.cells.len(), last.cell_render.len());
         assert_eq!(last.cell_render[0].color, [1, 2, 3, 255]);

@@ -12,3 +12,10 @@ font-kit.workspace = true
 rustybuzz.workspace = true
 thiserror.workspace = true
 log.workspace = true
+
+# macOS system font cascade fallback (CTFontCreateForString) — mirrors
+# Ghostty's ultimate fallback so codepoints only a niche system font covers
+# (e.g. U+23F5 → STIX Two Math) render instead of tofu. See `face.rs`.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-text = "20"
+core-foundation = "0.9"

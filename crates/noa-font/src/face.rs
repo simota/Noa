@@ -97,6 +97,30 @@ impl FontStack {
         }
     }
 
+    /// Append a dynamically-discovered fallback face (from the macOS CoreText
+    /// cascade — see [`cascade_fallback_face`]) to the stack, making it
+    /// reachable for every style, and return its face index.
+    ///
+    /// Deduplicates against faces already loaded (via [`push_unique_face`]),
+    /// so repeated cascade hits for the same font file share one face rather
+    /// than reloading its bytes. The index is stable for the rest of this
+    /// stack's life (faces are only ever appended, never reordered), which is
+    /// what lets `FaceId` stay a plain index into `faces`.
+    pub fn push_dynamic_fallback(&mut self, face: FontData) -> usize {
+        let idx = push_unique_face(&mut self.faces, face);
+        for list in [
+            &mut self.regular_faces,
+            &mut self.bold_faces,
+            &mut self.italic_faces,
+            &mut self.bold_italic_faces,
+        ] {
+            if !list.contains(&idx) {
+                list.push(idx);
+            }
+        }
+        idx
+    }
+
     pub fn is_native_style_face(&self, face_index: usize, style: FontStyle) -> bool {
         match style {
             FontStyle::Regular => true,
@@ -439,6 +463,84 @@ fn nerd_font_family_priority(name: &str) -> u8 {
     } else {
         2
     }
+}
+
+/// Ask the macOS CoreText cascade which installed font can render `ch`, and
+/// load it as a [`FontData`].
+///
+/// This mirrors Ghostty's ultimate fallback: after the curated
+/// emoji/Nerd/CJK stack ([`load_font_stack`]) misses, defer to the system's
+/// own font-substitution machinery (`CTFontCreateForString`) so codepoints
+/// that only a niche system font covers — e.g. `⏵` U+23F5, which resolves to
+/// STIX Two Math — still render instead of showing tofu. Called lazily by
+/// `FontGrid` on a stack miss and cached, so it never runs for codepoints the
+/// curated stack already handles.
+///
+/// Returns `None` when nothing but the LastResort placeholder covers `ch`, so
+/// the caller records the miss and falls back to a genuine tofu glyph.
+#[cfg(target_os = "macos")]
+pub(crate) fn cascade_fallback_face(ch: char) -> Option<FontData> {
+    use core_foundation::base::{CFRange, TCFType};
+    use core_foundation::string::{CFString, CFStringRef};
+    use core_text::font::{CTFont, CTFontRef};
+
+    // Present in the already-linked CoreText framework but not re-exported by
+    // the `core-text` crate (commented out upstream), so declare it here.
+    unsafe extern "C" {
+        fn CTFontCreateForString(
+            current_font: CTFontRef,
+            string: CFStringRef,
+            range: CFRange,
+        ) -> CTFontRef;
+    }
+
+    // A representative monospace base for the cascade query. The substitute
+    // CoreText returns for a given codepoint is effectively system-wide, so
+    // the exact base font does not change which fallback ends up covering it.
+    let base = core_text::font::new_from_name("Menlo", 12.0).ok()?;
+    let string = CFString::new(&ch.to_string());
+    let range = CFRange {
+        location: 0,
+        length: string.char_len(),
+    };
+    let substitute = unsafe {
+        let raw = CTFontCreateForString(
+            base.as_concrete_TypeRef(),
+            string.as_concrete_TypeRef(),
+            range,
+        );
+        if raw.is_null() {
+            return None;
+        }
+        CTFont::wrap_under_create_rule(raw)
+    };
+
+    let postscript = substitute.postscript_name();
+    // CoreText returns the LastResort font (its own styled hex-box art) when
+    // nothing real covers the codepoint. Treat that as a miss so the glyph
+    // stays a genuine tofu rather than swapping one box for another.
+    if postscript.is_empty() || postscript.trim_start_matches('.').starts_with("LastResort") {
+        return None;
+    }
+
+    // Resolve the substitute to loadable bytes + face index via font-kit's
+    // PostScript-name lookup (which picks the correct `.ttc` collection index),
+    // reusing the same handle→bytes path as the curated fallbacks.
+    let source = SystemSource::new();
+    let handle = Source::select_by_postscript_name(&source, &postscript).ok()?;
+    let data = load_valid_handle(handle)?;
+
+    // Guarantee the returned face actually maps `ch`: font-kit's PostScript
+    // lookup should hand back exactly CoreText's substitute, but verifying it
+    // here lets the caller trust that a `Some` always covers the codepoint —
+    // so its retry-after-push cannot loop re-probing CoreText every frame.
+    let covers = data.font_ref().ok()?.charmap().map(ch) != 0;
+    covers.then_some(data)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn cascade_fallback_face(_ch: char) -> Option<FontData> {
+    None
 }
 
 fn cjk_fallback_postscript_names() -> &'static [&'static str] {

@@ -1,7 +1,7 @@
 //! `FontGrid`: the glyph cache tying discovery, rasterization and atlas
 //! packing together behind a per-`char` cache.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use etagere::AllocId;
@@ -10,7 +10,7 @@ use swash::scale::ScaleContext;
 
 use crate::atlas::Atlas;
 use crate::boxdraw::{self, is_builtin_glyph};
-use crate::face::{FontStack, FontStyle, Metrics, load_font_stack};
+use crate::face::{FontStack, FontStyle, Metrics, cascade_fallback_face, load_font_stack};
 use crate::raster::{GlyphSynthesis, RasterizedGlyph, rasterize_with_variations};
 use crate::shape::{self, FaceId, ShapeCell, ShapeRunKey, ShapedGlyph, StyleKey};
 use crate::{FontConfig, FontError, GlyphInfo, GlyphKey};
@@ -120,6 +120,12 @@ pub struct FontGrid {
     /// row caches hold concrete atlas coordinates, so eviction is a semantic
     /// invalidation even if the CPU atlas dimensions did not change.
     atlas_eviction_generation: u64,
+    /// Codepoints the static stack could not map and the macOS CoreText
+    /// cascade could not resolve to a real font either (see
+    /// [`cascade_fallback_face`]). Cached so a genuinely-uncovered glyph is
+    /// probed once, not on every segmentation pass, and never re-runs the
+    /// (relatively costly) `CTFontCreateForString` query.
+    cascade_misses: HashSet<char>,
 }
 
 impl FontGrid {
@@ -151,6 +157,7 @@ impl FontGrid {
             next_slot_id: 0,
             clock: 0,
             atlas_eviction_generation: 0,
+            cascade_misses: HashSet::new(),
         })
     }
 
@@ -185,6 +192,7 @@ impl FontGrid {
             next_slot_id: 0,
             clock: 0,
             atlas_eviction_generation: 0,
+            cascade_misses: HashSet::new(),
         })
     }
 
@@ -232,14 +240,18 @@ impl FontGrid {
     /// (REQ-SHAPE-6) and internally by [`FontGrid::shape_run`] to pick which
     /// face to shape a run against — a run is guaranteed single-face by the
     /// caller (segmentation breaks at face boundaries).
-    pub fn resolve_face(&self, ch: char) -> FaceId {
+    ///
+    /// Takes `&mut self` because a codepoint the curated stack cannot map may
+    /// pull a system fallback face into the stack on demand (macOS CoreText
+    /// cascade — see [`FontGrid::resolve_glyph_for_style`]).
+    pub fn resolve_face(&mut self, ch: char) -> FaceId {
         self.resolve_face_for_style(ch, StyleKey::default())
     }
 
     /// Resolve a codepoint using the style-specific face stack. Native
     /// bold/italic faces are tried first when available; otherwise the regular
     /// face stays first and synthetic style remains eligible during raster.
-    pub fn resolve_face_for_style(&self, ch: char, style: StyleKey) -> FaceId {
+    pub fn resolve_face_for_style(&mut self, ch: char, style: StyleKey) -> FaceId {
         // Builtin (procedurally-drawn) codepoints resolve to a sentinel face so
         // segmentation isolates them into their own runs — see
         // [`FaceId::BUILTIN`] and [`FontGrid::raster_shaped`]'s builtin branch.
@@ -249,26 +261,71 @@ impl FontGrid {
         FaceId(self.resolve_glyph_for_style(ch, style).0 as u16)
     }
 
-    fn resolve_glyph(&self, ch: char) -> (usize, u16) {
+    fn resolve_glyph(&mut self, ch: char) -> (usize, u16) {
         self.resolve_glyph_for_style(ch, StyleKey::default())
     }
 
-    fn resolve_glyph_for_style(&self, ch: char, style: StyleKey) -> (usize, u16) {
+    fn resolve_glyph_for_style(&mut self, ch: char, style: StyleKey) -> (usize, u16) {
         let font_style = FontStyle::from_bold_italic(style.bold, style.italic);
+        if let Some(hit) = self.lookup_glyph_in_stack(ch, font_style) {
+            return hit;
+        }
+        // The curated stack (primary + emoji/Nerd/CJK fallbacks, plus any face
+        // an earlier cascade hit already pulled in) has no glyph for `ch`.
+        // Defer to the macOS system cascade once, then retry the lookup.
+        if self.try_cascade_fallback(ch)
+            && let Some(hit) = self.lookup_glyph_in_stack(ch, font_style)
+        {
+            return hit;
+        }
+        (0, 0)
+    }
+
+    /// First face in `font_style`'s stack whose cmap contains `ch`, if any.
+    fn lookup_glyph_in_stack(&self, ch: char, font_style: FontStyle) -> Option<(usize, u16)> {
         for &font_index in self.font_stack.face_indices_for_style(font_style) {
             let font_data = &self.font_stack.faces()[font_index];
             let font = FontRef::from_index(&font_data.bytes, font_data.index)
                 .expect("font bytes validated at construction");
             let glyph_id = font.charmap().map(ch);
             if glyph_id != 0 {
-                return (font_index, glyph_id);
+                return Some((font_index, glyph_id));
             }
         }
-        (0, 0)
+        None
+    }
+
+    /// Pull a system fallback face covering `ch` into the stack via the macOS
+    /// CoreText cascade. Returns whether a new face was added (so the caller
+    /// retries the lookup). Negative results are cached in `cascade_misses` so
+    /// a genuinely uncovered codepoint probes CoreText only once, not on every
+    /// segmentation pass. No-op (always `false`) off macOS.
+    fn try_cascade_fallback(&mut self, ch: char) -> bool {
+        if self.cascade_misses.contains(&ch) {
+            return false;
+        }
+        // `FaceId` is a u16 index into the stack, with `u16::MAX` reserved for
+        // `FaceId::BUILTIN`; never let the stack grow past what it can address.
+        if self.font_stack.faces().len() >= u16::MAX as usize - 1 {
+            self.cascade_misses.insert(ch);
+            return false;
+        }
+        match cascade_fallback_face(ch) {
+            // `cascade_fallback_face` guarantees the returned face maps `ch`,
+            // so the caller's retry is guaranteed to find it.
+            Some(face) => {
+                self.font_stack.push_dynamic_fallback(face);
+                true
+            }
+            None => {
+                self.cascade_misses.insert(ch);
+                false
+            }
+        }
     }
 
     #[cfg(test)]
-    fn has_glyph(&self, ch: char) -> bool {
+    fn has_glyph(&mut self, ch: char) -> bool {
         self.resolve_glyph(ch).1 != 0
     }
 
@@ -850,6 +907,53 @@ mod tests {
         );
     }
 
+    /// U+23F5 `⏵` (BLACK MEDIUM RIGHT-POINTING TRIANGLE — the glyph Claude
+    /// Code's "auto mode" indicator uses) is absent from the primary
+    /// monospace font AND from the curated Nerd Font / CJK fallback stack, but
+    /// the macOS system cascade resolves it (to STIX Two Math). Without the
+    /// dynamic cascade fallback this rendered as tofu; the regression asserts
+    /// it now resolves to a real face + glyph and packs into the mask atlas.
+    #[test]
+    fn system_cascade_fallback_resolves_glyph_outside_curated_stack() {
+        const AUTO_MODE_ARROW: char = '\u{23F5}'; // ⏵
+
+        let mut grid = match FontGrid::new(14.0, FontConfig::default()) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+        if grid.primary_has_glyph(AUTO_MODE_ARROW) {
+            eprintln!("skipping: primary font already renders U+23F5");
+            return;
+        }
+        if !grid.has_glyph(AUTO_MODE_ARROW) {
+            // No system font (or no CoreText cascade off macOS) covers it here.
+            eprintln!("skipping: system cascade cannot resolve U+23F5 in this environment");
+            return;
+        }
+
+        let face = grid.resolve_face(AUTO_MODE_ARROW);
+        assert_ne!(
+            face,
+            FaceId(0),
+            "U+23F5 must resolve to a dynamically-added cascade face, not the primary/tofu face"
+        );
+
+        let mask_generation_before = grid.mask_atlas_generation();
+        let info = grid.get_or_raster(AUTO_MODE_ARROW);
+        assert!(
+            info.atlas_size[0] > 0 && info.atlas_size[1] > 0,
+            "cascade-resolved glyph should rasterize to a non-empty atlas region: {:?}",
+            info.atlas_size
+        );
+        assert!(
+            grid.mask_atlas_generation() > mask_generation_before,
+            "cascade-resolved glyph must pack into the mask atlas"
+        );
+    }
+
     #[test]
     fn atlas_growth_keeps_glyphs_visible_after_initial_atlas_is_exceeded() {
         let mut grid = match FontGrid::new(220.0, FontConfig::default()) {
@@ -1250,7 +1354,7 @@ mod tests {
     /// `noa-render`, which calls this same method).
     #[test]
     fn resolve_face_distinguishes_latin_and_cjk_when_fallback_available() {
-        let grid = skip_if_no_font!(FontGrid::new(24.0, FontConfig::default()));
+        let mut grid = skip_if_no_font!(FontGrid::new(24.0, FontConfig::default()));
         if !grid.has_glyph('日') {
             eprintln!("skipping: no installed font can render Japanese");
             return;

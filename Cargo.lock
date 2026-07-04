@@ -1420,6 +1420,8 @@ dependencies = [
 name = "noa-font"
 version = "0.1.0"
 dependencies = [
+ "core-foundation 0.9.4",
+ "core-text",
  "etagere",
  "font-kit",
  "log",

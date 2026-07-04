@@ -10,12 +10,50 @@ use noa_core::PixelSize;
 
 use crate::renderer::Renderer;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BlitViewport {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
 fn wgpu_color(rgba: [f32; 4]) -> wgpu::Color {
     wgpu::Color {
         r: f64::from(rgba[0]),
         g: f64::from(rgba[1]),
         b: f64::from(rgba[2]),
         a: f64::from(rgba[3]),
+    }
+}
+
+fn overview_content_viewport(
+    tile_size: PixelSize,
+    title_bar_h: u32,
+    source_size: PixelSize,
+) -> BlitViewport {
+    let content_w = tile_size.w as f32;
+    let content_h = tile_size.h.saturating_sub(title_bar_h) as f32;
+    if content_w <= 0.0 || content_h <= 0.0 {
+        return BlitViewport {
+            x: 0.0,
+            y: title_bar_h as f32,
+            w: 0.0,
+            h: 0.0,
+        };
+    }
+
+    let source_w = source_size.w.max(1) as f32;
+    let source_h = source_size.h.max(1) as f32;
+    let scale = (content_w / source_w).min(content_h / source_h);
+    let w = (source_w * scale).min(content_w);
+    let h = (source_h * scale).min(content_h);
+
+    BlitViewport {
+        x: (content_w - w) * 0.5,
+        y: title_bar_h as f32 + (content_h - h) * 0.5,
+        w,
+        h,
     }
 }
 
@@ -519,10 +557,12 @@ impl OverviewThumbnailResources {
             .get(tile_index)
             .ok_or_else(|| anyhow::anyhow!("overview tile index {tile_index} is out of range"))?;
 
-        // The mirror lands in the content region below the title band; the
-        // blit clears the whole tile to the card color first so the band area
-        // (later overwritten by `stamp_title_band`) is never left uninitialized.
-        let content_h = self.tile_size.h.saturating_sub(self.title_bar_h);
+        // Fit the mirror into the content region without non-uniform scaling.
+        // Multiple-tab grids can make tiles much taller or narrower than the
+        // source frame; filling the full content rect would visibly squeeze the
+        // terminal font in one axis.
+        let viewport =
+            overview_content_viewport(self.tile_size, self.title_bar_h, self.scratch.size);
         renderer.draw(device, queue, &self.scratch.view);
         self.blit.blit(
             device,
@@ -530,12 +570,7 @@ impl OverviewThumbnailResources {
             &self.scratch.view,
             &tile.view,
             wgpu_color(self.card_color),
-            (
-                0.0,
-                self.title_bar_h as f32,
-                self.tile_size.w as f32,
-                content_h as f32,
-            ),
+            (viewport.x, viewport.y, viewport.w, viewport.h),
         );
         Ok(())
     }
@@ -693,4 +728,85 @@ fn overview_texture(
         usage,
         view_formats: &[],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_viewport_uses_full_region_when_aspect_matches() {
+        let viewport = overview_content_viewport(
+            PixelSize { w: 400, h: 228 },
+            28,
+            PixelSize { w: 800, h: 400 },
+        );
+
+        assert_eq!(
+            viewport,
+            BlitViewport {
+                x: 0.0,
+                y: 28.0,
+                w: 400.0,
+                h: 200.0
+            }
+        );
+    }
+
+    #[test]
+    fn content_viewport_letterboxes_tall_tiles_to_preserve_font_width() {
+        let viewport = overview_content_viewport(
+            PixelSize { w: 300, h: 328 },
+            28,
+            PixelSize { w: 800, h: 400 },
+        );
+
+        assert_eq!(
+            viewport,
+            BlitViewport {
+                x: 0.0,
+                y: 103.0,
+                w: 300.0,
+                h: 150.0
+            }
+        );
+    }
+
+    #[test]
+    fn content_viewport_pillarboxes_wide_tiles_to_preserve_font_height() {
+        let viewport = overview_content_viewport(
+            PixelSize { w: 300, h: 328 },
+            28,
+            PixelSize { w: 400, h: 800 },
+        );
+
+        assert_eq!(
+            viewport,
+            BlitViewport {
+                x: 75.0,
+                y: 28.0,
+                w: 150.0,
+                h: 300.0
+            }
+        );
+    }
+
+    #[test]
+    fn content_viewport_collapses_when_title_consumes_the_tile() {
+        let viewport = overview_content_viewport(
+            PixelSize { w: 300, h: 20 },
+            28,
+            PixelSize { w: 800, h: 400 },
+        );
+
+        assert_eq!(
+            viewport,
+            BlitViewport {
+                x: 0.0,
+                y: 28.0,
+                w: 0.0,
+                h: 0.0
+            }
+        );
+    }
 }

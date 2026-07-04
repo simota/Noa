@@ -914,6 +914,114 @@ fn search_prompt_overlay_emits_top_right_bg_and_glyph_instances_and_tracks_the_b
 }
 
 #[test]
+fn preedit_overlay_emits_underlined_run_at_cursor_and_clears_on_close() {
+    let Some(mut font) = font_with_rasterized_m() else {
+        return;
+    };
+
+    let mut terminal = Terminal::new(GridSize::new(20, 4));
+    terminal.primary.cursor.x = 3;
+    terminal.primary.cursor.y = 1;
+    let theme = Theme::new();
+
+    let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+    assert_eq!(snap.preedit, None, "from_terminal defaults to no preedit");
+
+    // Baseline (no composition): count the decoration rects already on the
+    // cursor row so the underline assertion below measures only the delta.
+    let mut without = Vec::new();
+    rebuild_cell_instances(&mut without, &snap, &mut font, &theme, false);
+    let deco_row1_before = without
+        .iter()
+        .filter(|i| i.grid_pos[1] == 1 && i.flags == CellInstance::FLAG_DECORATION)
+        .count();
+
+    snap.preedit = Some(crate::Preedit {
+        text: "Mixed".to_string(),
+        cursor_byte_range: None,
+    });
+    let mut with = Vec::new();
+    rebuild_cell_instances(&mut with, &snap, &mut font, &theme, false);
+
+    // Glyphs land on the cursor row, at or right of the cursor column.
+    let glyphs: Vec<_> = with
+        .iter()
+        .filter(|i| i.grid_pos[1] == 1 && i.flags & CellInstance::FLAG_GLYPH != 0)
+        .collect();
+    assert!(
+        !glyphs.is_empty(),
+        "preedit text must emit glyph instances on the cursor row"
+    );
+    assert!(
+        glyphs.iter().all(|i| i.grid_pos[0] >= 3),
+        "the preedit run starts at the cursor column: {glyphs:?}"
+    );
+
+    // The whole run is underlined: one decoration rect per drawn column on the
+    // cursor row, on top of the baseline count.
+    let deco_row1_after = with
+        .iter()
+        .filter(|i| i.grid_pos[1] == 1 && i.flags == CellInstance::FLAG_DECORATION)
+        .count();
+    assert!(
+        deco_row1_after >= deco_row1_before + 5,
+        "the 5-column preedit run must add an underline rect per column \
+         ({deco_row1_after} vs {deco_row1_before})"
+    );
+
+    // Closing the composition removes the overlay on the very next rebuild.
+    snap.preedit = None;
+    let mut closed = Vec::new();
+    rebuild_cell_instances(&mut closed, &snap, &mut font, &theme, false);
+    let glyphs_closed = closed
+        .iter()
+        .filter(|i| i.grid_pos[1] == 1 && i.flags & CellInstance::FLAG_GLYPH != 0)
+        .count();
+    assert_eq!(
+        glyphs_closed, 0,
+        "closing the composition removes the preedit glyphs"
+    );
+}
+
+#[test]
+fn preedit_overlay_clamps_the_run_to_the_pane_right_edge() {
+    let Some(mut font) = font_with_rasterized_m() else {
+        return;
+    };
+
+    // Cursor two columns from the right edge: only two composing cells fit.
+    let mut terminal = Terminal::new(GridSize::new(6, 2));
+    terminal.primary.cursor.x = 4;
+    terminal.primary.cursor.y = 0;
+    let theme = Theme::new();
+
+    let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+    snap.preedit = Some(crate::Preedit {
+        text: "MMMMMM".to_string(),
+        cursor_byte_range: None,
+    });
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+
+    // No preedit background/underline column may spill past the last column.
+    assert!(
+        instances
+            .iter()
+            .filter(|i| i.grid_pos[1] == 0)
+            .all(|i| i.grid_pos[0] < snap.cols),
+        "the clamped preedit run must not overflow the pane's right edge"
+    );
+    let deco_cols = instances
+        .iter()
+        .filter(|i| i.grid_pos[1] == 0 && i.flags == CellInstance::FLAG_DECORATION)
+        .count();
+    assert_eq!(
+        deco_cols, 2,
+        "only the two columns between the cursor and the right edge are drawn"
+    );
+}
+
+#[test]
 fn palette_scroll_window_keeps_the_selection_visible() {
     // Fits entirely: whole list, no scroll.
     assert_eq!(palette_scroll_window(3, 2, 5), (0, 3));
@@ -1418,6 +1526,7 @@ fn baseline_snapshot(chars: [char; 3]) -> FrameSnapshot {
         search_prompt: None,
         command_palette: None,
         confirm_dialog: None,
+        preedit: None,
         image_placements: Vec::new(),
         images: Vec::new(),
     }

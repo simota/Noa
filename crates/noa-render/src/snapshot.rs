@@ -52,6 +52,21 @@ pub struct ConfirmDialogSnapshot {
     pub hint: String,
 }
 
+/// The inline IME pre-edit (composition) run for this frame, built by the
+/// caller (`noa-app`) from the focused surface's `ImeState`. `None` means no
+/// composition is in progress. The renderer draws `text` starting at the
+/// cursor cell with an underline marking it as uncommitted; the OS candidate
+/// window still appears separately. `cursor_byte_range` is winit's reported
+/// composition-caret byte range within `text` (currently informational — the
+/// run is drawn as a whole underlined span).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Preedit {
+    /// The composing string (never empty when `Some`).
+    pub text: String,
+    /// Byte range of the composition caret within `text`, if winit reported one.
+    pub cursor_byte_range: Option<(usize, usize)>,
+}
+
 /// One kitty-graphics placement projected into this frame's viewport, ready
 /// for the image layer to resolve into a destination rectangle. Cell-space
 /// like the rest of the snapshot; `grid_x`/`grid_y` may be negative when the
@@ -194,6 +209,11 @@ pub struct FrameSnapshot {
     /// any. `None` draws no dialog. Set by the caller only on its bound
     /// window's focused pane; `from_terminal` defaults to `None`.
     pub confirm_dialog: Option<ConfirmDialogSnapshot>,
+    /// The inline IME pre-edit run for this pane, if a composition is in
+    /// progress. `None` draws nothing. Set by the caller only on the focused
+    /// pane (from its surface's `ImeState`); `from_terminal` defaults to
+    /// `None`. Drawn inline at the cursor cell with an underline.
+    pub preedit: Option<Preedit>,
     /// Kitty-graphics placements visible in this frame's viewport, z-ascending
     /// (back-to-front). Empty unless a client has transmitted and placed an
     /// image. The renderer resolves each to a destination quad via
@@ -254,6 +274,7 @@ impl FrameSnapshot {
             search_prompt: None,
             command_palette: None,
             confirm_dialog: None,
+            preedit: None,
             image_placements,
             images,
         }
@@ -308,6 +329,7 @@ impl FrameSnapshot {
             search_prompt: None,
             command_palette: None,
             confirm_dialog: None,
+            preedit: None,
             image_placements,
             images,
         }
@@ -381,6 +403,15 @@ mod tests {
             row_dirty[0],
             "peek must not clear the real dirty bit meant for from_terminal to consume"
         );
+    }
+
+    #[test]
+    fn from_terminal_defaults_preedit_to_none() {
+        let mut term = Terminal::new(GridSize::new(2, 2));
+        let snap = FrameSnapshot::from_terminal(&mut term);
+        assert!(snap.preedit.is_none());
+        // The read-only peek path must default it too.
+        assert!(FrameSnapshot::peek(&term).preedit.is_none());
     }
 
     #[test]

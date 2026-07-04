@@ -13,35 +13,56 @@ use winit::event::Ime;
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 /// Tracks IME composition state and encodes committed IME text for the pty.
+/// The composing (pre-edit) string is retained so the renderer can draw it
+/// inline at the cursor, updating live as the user types; `preedit_cursor` is
+/// the byte range within `preedit` winit reports for the composition caret.
 #[derive(Debug, Default)]
 pub struct ImeState {
-    preedit_active: bool,
+    preedit: String,
+    preedit_cursor: Option<(usize, usize)>,
 }
 
 impl ImeState {
     pub fn handle_event(&mut self, event: &Ime) -> Option<Vec<u8>> {
         match event {
             Ime::Enabled | Ime::Disabled => {
-                self.preedit_active = false;
+                self.clear_preedit();
                 None
             }
-            Ime::Preedit(text, _cursor_range) => {
-                self.preedit_active = !text.is_empty();
+            Ime::Preedit(text, cursor_range) => {
+                text.clone_into(&mut self.preedit);
+                self.preedit_cursor = *cursor_range;
                 None
             }
             Ime::Commit(text) => {
-                self.preedit_active = false;
+                self.clear_preedit();
                 encode_text(text)
             }
         }
     }
 
     pub fn preedit_active(&self) -> bool {
-        self.preedit_active
+        !self.preedit.is_empty()
+    }
+
+    /// The current composing string (empty when not composing).
+    pub fn preedit_text(&self) -> &str {
+        &self.preedit
+    }
+
+    /// The composition caret's byte range within [`Self::preedit_text`], if
+    /// winit reported one.
+    pub fn preedit_cursor(&self) -> Option<(usize, usize)> {
+        self.preedit_cursor
     }
 
     pub fn commit_preedit(&mut self) {
-        self.preedit_active = false;
+        self.clear_preedit();
+    }
+
+    fn clear_preedit(&mut self) {
+        self.preedit.clear();
+        self.preedit_cursor = None;
     }
 }
 
@@ -743,16 +764,57 @@ mod tests {
             Some("日本語".as_bytes().to_vec())
         );
         assert!(!state.preedit_active());
+        assert_eq!(state.preedit_text(), "");
+    }
+
+    #[test]
+    fn ime_preedit_retains_text_and_cursor_range() {
+        let mut state = ImeState::default();
+
+        assert_eq!(
+            state.handle_event(&Ime::Preedit("にほ".into(), Some((3, 6)))),
+            None
+        );
+        assert!(state.preedit_active());
+        assert_eq!(state.preedit_text(), "にほ");
+        assert_eq!(state.preedit_cursor(), Some((3, 6)));
+
+        // A later Preedit replaces the retained text and range wholesale.
+        assert_eq!(
+            state.handle_event(&Ime::Preedit("にほん".into(), None)),
+            None
+        );
+        assert_eq!(state.preedit_text(), "にほん");
+        assert_eq!(state.preedit_cursor(), None);
+    }
+
+    #[test]
+    fn ime_commit_clears_retained_preedit_text() {
+        let mut state = ImeState::default();
+
+        state.handle_event(&Ime::Preedit("にほん".into(), Some((0, 9))));
+        assert_eq!(
+            state.handle_event(&Ime::Commit("日本".into())),
+            Some("日本".as_bytes().to_vec())
+        );
+        assert_eq!(state.preedit_text(), "");
+        assert_eq!(state.preedit_cursor(), None);
     }
 
     #[test]
     fn ime_disabled_clears_preedit_state() {
         let mut state = ImeState::default();
 
-        assert_eq!(state.handle_event(&Ime::Preedit("a".into(), None)), None);
+        assert_eq!(
+            state.handle_event(&Ime::Preedit("a".into(), Some((0, 1)))),
+            None
+        );
         assert!(state.preedit_active());
+        assert_eq!(state.preedit_cursor(), Some((0, 1)));
         assert_eq!(state.handle_event(&Ime::Disabled), None);
         assert!(!state.preedit_active());
+        assert_eq!(state.preedit_text(), "");
+        assert_eq!(state.preedit_cursor(), None);
     }
 
     #[test]

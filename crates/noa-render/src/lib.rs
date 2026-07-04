@@ -25,6 +25,6 @@ pub use instance::{CellInstance, PaneUniformParams, Uniforms, populate_pane_unif
 pub use renderer::{PaneFrame, Renderer, renderer_construction_count};
 pub use snapshot::{
     CommandPaletteSnapshot, ConfirmDialogSnapshot, FrameSnapshot, HoverLink,
-    ImagePlacementSnapshot, SnapshotImage,
+    ImagePlacementSnapshot, Preedit, SnapshotImage,
 };
 pub use theme::{OverlayStyle, Theme, blend};

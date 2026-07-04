@@ -78,6 +78,95 @@ pub(super) fn append_search_prompt_instances(
     }
 }
 
+/// Append the inline IME pre-edit (composition) run, if any, to `instances`.
+/// Ghostty-style inline composition: the composing glyphs are drawn in place
+/// starting at the cursor cell, on the terminal's default background, with an
+/// underline spanning the whole run to signal the text is uncommitted (the OS
+/// candidate/conversion window is shown separately by the platform layer).
+///
+/// Recomputed fresh every call (never per-row cached — a composition edit
+/// never touches grid content) and appended after the pane's normal content so
+/// it draws on top, but before the modal overlays (search prompt / palette /
+/// dialog) so those still win. The run is clamped to the pane's right edge:
+/// cells that would overflow `snap.cols` are dropped from the TAIL (unlike the
+/// right-aligned search prompt, which drops the front). Wide (double-width)
+/// composing glyphs consume two columns via the same segment machinery the
+/// search prompt uses.
+pub(super) fn append_preedit_instances(
+    instances: &mut Vec<CellInstance>,
+    snap: &FrameSnapshot,
+    font: &mut FontGrid,
+    theme: &Theme,
+    target_format_is_srgb: bool,
+    metrics: Metrics,
+) {
+    let Some(preedit) = snap.preedit.as_ref() else {
+        return;
+    };
+    let cols = snap.cols;
+    let y = snap.cursor.y;
+    if cols == 0 || preedit.text.is_empty() || snap.cursor.x >= cols {
+        return;
+    }
+    let x_start = snap.cursor.x;
+    let available = (cols - x_start) as usize;
+
+    let text_color = to_u8_color(surface_output_rgba(
+        theme.resolve_with_colors(Color::Default, true, &snap.colors),
+        target_format_is_srgb,
+    ));
+    let mut cells = search_prompt_segment_cells(&preedit.text, text_color);
+    // Clamp to the columns available between the cursor and the pane's right
+    // edge, dropping the overflowing tail. A truncation that strands a
+    // double-width lead (its blank spacer cut) leaves the lead occupying one
+    // drawn column, acceptable for a transient composition preview.
+    cells.truncate(available);
+    if cells.is_empty() {
+        return;
+    }
+
+    // Draw the composition on the terminal's default background so it fully
+    // masks the underlying grid cells it overlays.
+    let bg_color = to_u8_color(surface_output_rgba(
+        theme.default_bg_with_colors(&snap.colors),
+        target_format_is_srgb,
+    ));
+    for i in 0..cells.len() as u16 {
+        instances.push(CellInstance {
+            glyph_pos: [0, 0],
+            glyph_size: [0, 0],
+            bearing: [0, 0],
+            grid_pos: [x_start + i, y],
+            color: bg_color,
+            flags: 0,
+        });
+    }
+
+    for mut run in segment_row(font, &cells) {
+        run.start_col += x_start;
+        let shaped = font.shape_run(&run.cells);
+        emit_run_glyph_instances(instances, font, &run, &shaped, y, metrics);
+    }
+
+    // Underline the whole run (one full-width rect per drawn column, matching
+    // the cell UNDERLINE decoration geometry) — the visual signal that the
+    // composition is uncommitted.
+    let thickness = decoration_thickness(metrics);
+    let width = metrics.cell_w.round().max(1.0) as u16;
+    let base_y = underline_y(metrics, thickness, 0.0);
+    for i in 0..cells.len() as u16 {
+        push_decoration_rect(
+            instances,
+            DecorationCell {
+                grid_x: x_start + i,
+                grid_y: y,
+                color: text_color,
+            },
+            DecorationRect::new(0, base_y, width, thickness),
+        );
+    }
+}
+
 /// Append the open command-palette overlay (`cmd+shift+p`), if any, to
 /// `instances`. Like the search prompt this is recomputed fresh every call
 /// (never per-row cached — a query/selection change never touches grid

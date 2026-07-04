@@ -626,6 +626,15 @@ impl App {
                     message: session.message.clone(),
                     hint: session.hint.clone(),
                 });
+            // Inline IME composition: draw the focused pane's live pre-edit run
+            // at the cursor. Only the focused pane composes, so guard on it the
+            // same way the palette does.
+            snapshot.preedit = (pane_id == state.focused_pane
+                && surface.ime_state.preedit_active())
+            .then(|| noa_render::Preedit {
+                text: surface.ime_state.preedit_text().to_string(),
+                cursor_byte_range: surface.ime_state.preedit_cursor(),
+            });
             snapshots.push((pane_id, surface.rect, snapshot));
         }
         if state.title != title {

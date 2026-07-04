@@ -686,6 +686,15 @@ impl App {
         if let (Some(pane_id), Some(bytes)) = (pane_id, bytes) {
             self.write_pane_pty_bytes(window_id, pane_id, &bytes);
         }
+
+        // Pre-edit changes (Preedit/Enabled/Disabled) write no pty bytes and so
+        // would otherwise trigger no repaint; request one here so the inline
+        // composition run repaints live on every keystroke. (A Commit already
+        // pokes a redraw indirectly via the pty write above, but redrawing
+        // unconditionally is simplest and correct.)
+        if let Some(state) = self.windows.get(&window_id) {
+            state.window.request_redraw();
+        }
     }
 
     pub(super) fn scroll_viewport(&mut self, scroll: ViewportScroll) {

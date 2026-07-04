@@ -4,7 +4,7 @@ use noa_core::Rgb;
 
 use crate::{
     AlphaBlendingMode, ClipboardAccess, ConfigOverrides, CursorShape, FontConfig, FontFeature,
-    FontVariation, SyntheticStyleMode, WindowSaveState,
+    FontVariation, MacosOptionAsAlt, MacosTitlebarStyle, SyntheticStyleMode, WindowSaveState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +57,8 @@ pub(crate) fn build_overrides(
     let mut background_blur_radius = None;
     let mut scrollback_limit = None;
     let mut window_save_state = None;
+    let mut macos_option_as_alt = None;
+    let mut macos_titlebar_style = None;
     let mut quick_terminal_hotkey = None;
     let mut quick_terminal_size = None;
     let mut quick_terminal_autohide = None;
@@ -177,6 +179,13 @@ pub(crate) fn build_overrides(
             "window-save-state" => {
                 window_save_state = parse_window_save_state(path, directive, &mut diagnostics);
             }
+            "macos-option-as-alt" => {
+                macos_option_as_alt = parse_macos_option_as_alt(path, directive, &mut diagnostics);
+            }
+            "macos-titlebar-style" => {
+                macos_titlebar_style =
+                    parse_macos_titlebar_style(path, directive, &mut diagnostics);
+            }
             "quick-terminal-hotkey" => {
                 quick_terminal_hotkey = directive.value.clone();
             }
@@ -229,6 +238,8 @@ pub(crate) fn build_overrides(
             background_blur_radius,
             scrollback_limit,
             window_save_state,
+            macos_option_as_alt,
+            macos_titlebar_style,
             quick_terminal_hotkey,
             quick_terminal_size,
             quick_terminal_autohide,
@@ -259,6 +270,8 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "background-blur-radius"
             | "scrollback-limit"
             | "window-save-state"
+            | "macos-option-as-alt"
+            | "macos-titlebar-style"
             | "quick-terminal-hotkey"
             | "quick-terminal-size"
             | "quick-terminal-autohide"
@@ -698,6 +711,41 @@ fn parse_window_save_state(
         "default" => Some(WindowSaveState::Default),
         "never" => Some(WindowSaveState::Never),
         "always" => Some(WindowSaveState::Always),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+fn parse_macos_option_as_alt(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<MacosOptionAsAlt> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "false" | "none" => Some(MacosOptionAsAlt::None),
+        "true" | "both" => Some(MacosOptionAsAlt::Both),
+        "left" | "only-left" => Some(MacosOptionAsAlt::Left),
+        "right" | "only-right" => Some(MacosOptionAsAlt::Right),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+fn parse_macos_titlebar_style(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<MacosTitlebarStyle> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "native" | "tabs" => Some(MacosTitlebarStyle::Native),
+        "transparent" => Some(MacosTitlebarStyle::Transparent),
+        "hidden" => Some(MacosTitlebarStyle::Hidden),
         other => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
             None
@@ -1370,6 +1418,66 @@ mod tests {
     #[test]
     fn window_save_state_is_a_supported_scalar_key_for_import() {
         assert!(is_supported_scalar_key("window-save-state"));
+    }
+
+    #[test]
+    fn macos_option_as_alt_parses_modes() {
+        for (value, expected) in [
+            ("false", MacosOptionAsAlt::None),
+            ("none", MacosOptionAsAlt::None),
+            ("true", MacosOptionAsAlt::Both),
+            ("both", MacosOptionAsAlt::Both),
+            ("left", MacosOptionAsAlt::Left),
+            ("only-left", MacosOptionAsAlt::Left),
+            ("right", MacosOptionAsAlt::Right),
+            ("only-right", MacosOptionAsAlt::Right),
+        ] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("macos-option-as-alt = {value}"));
+            assert_eq!(overrides.macos_option_as_alt, Some(expected), "{value:?}");
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+    }
+
+    #[test]
+    fn macos_option_as_alt_rejects_unknown_value() {
+        let (overrides, diagnostics) = parse_overrides(path(), "macos-option-as-alt = maybe");
+
+        assert_eq!(overrides.macos_option_as_alt, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("macos-option-as-alt"));
+        assert!(diagnostics[0].message.contains("maybe"));
+    }
+
+    #[test]
+    fn macos_titlebar_style_parses_modes() {
+        for (value, expected) in [
+            ("native", MacosTitlebarStyle::Native),
+            ("tabs", MacosTitlebarStyle::Native),
+            ("transparent", MacosTitlebarStyle::Transparent),
+            ("hidden", MacosTitlebarStyle::Hidden),
+        ] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("macos-titlebar-style = {value}"));
+            assert_eq!(overrides.macos_titlebar_style, Some(expected), "{value:?}");
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+    }
+
+    #[test]
+    fn macos_titlebar_style_rejects_unknown_value() {
+        let (overrides, diagnostics) = parse_overrides(path(), "macos-titlebar-style = glass");
+
+        assert_eq!(overrides.macos_titlebar_style, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("macos-titlebar-style"));
+        assert!(diagnostics[0].message.contains("glass"));
+    }
+
+    #[test]
+    fn macos_native_keys_are_supported_scalar_keys_for_import() {
+        assert!(is_supported_scalar_key("macos-option-as-alt"));
+        assert!(is_supported_scalar_key("macos-titlebar-style"));
     }
 
     #[test]

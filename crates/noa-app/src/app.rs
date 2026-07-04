@@ -31,7 +31,7 @@ use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, W
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 #[cfg(target_os = "macos")]
-use winit::platform::macos::{WindowAttributesExtMacOS, WindowExtMacOS};
+use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS, WindowExtMacOS};
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
 use crate::clipboard::{self, PasteContents, SystemClipboard};
@@ -111,6 +111,12 @@ pub struct AppConfig {
     /// `window-save-state`: whether the window/tab/split session is saved on
     /// exit and restored on launch. `never` disables both.
     pub window_save_state: noa_config::WindowSaveState,
+    /// `macos-option-as-alt`: which Option key(s) the macOS window layer
+    /// rewrites as terminal Alt.
+    pub macos_option_as_alt: noa_config::MacosOptionAsAlt,
+    /// `macos-titlebar-style`: titlebar presentation for ordinary terminal
+    /// windows.
+    pub macos_titlebar_style: noa_config::MacosTitlebarStyle,
     /// Set when the user passed an explicit grid size on the CLI (`--cols` /
     /// `--rows`). Session restore is suppressed in that case so the requested
     /// dimensions win over the saved topology (Ghostty parity).
@@ -220,6 +226,33 @@ fn resolve_cursor_style(
         (noa_config::CursorShape::Underline, true) => CursorStyle::BlinkingUnderline,
         (noa_config::CursorShape::Underline, false) => CursorStyle::SteadyUnderline,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_option_as_alt(value: noa_config::MacosOptionAsAlt) -> OptionAsAlt {
+    match value {
+        noa_config::MacosOptionAsAlt::None => OptionAsAlt::None,
+        noa_config::MacosOptionAsAlt::Left => OptionAsAlt::OnlyLeft,
+        noa_config::MacosOptionAsAlt::Right => OptionAsAlt::OnlyRight,
+        noa_config::MacosOptionAsAlt::Both => OptionAsAlt::Both,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_titlebar_style(
+    attrs: WindowAttributes,
+    style: noa_config::MacosTitlebarStyle,
+) -> WindowAttributes {
+    match style {
+        noa_config::MacosTitlebarStyle::Native => attrs,
+        noa_config::MacosTitlebarStyle::Transparent => attrs
+            .with_titlebar_transparent(true)
+            .with_fullsize_content_view(true),
+        noa_config::MacosTitlebarStyle::Hidden => attrs
+            .with_title_hidden(true)
+            .with_titlebar_hidden(true)
+            .with_fullsize_content_view(true),
+    }
 }
 
 /// App-wide GPU and glyph state shared by every tab/window.
@@ -1293,7 +1326,10 @@ impl App {
             // Tabs in the same group share a `tabbingIdentifier`, so AppKit
             // tabs them into one window; a distinct group id yields a distinct
             // identifier and thus a separate native window.
-            attrs.with_tabbing_identifier(&self.tabbing_identifier(group))
+            let attrs = attrs
+                .with_option_as_alt(macos_option_as_alt(self.config.macos_option_as_alt))
+                .with_tabbing_identifier(&self.tabbing_identifier(group));
+            apply_macos_titlebar_style(attrs, self.config.macos_titlebar_style)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -3554,6 +3590,8 @@ impl App {
             .with_inner_size(PhysicalSize::new(width, height))
             .with_position(PhysicalPosition::new(origin_x, top_y - height as i32))
             .with_transparent(self.config.background_opacity < 1.0);
+        #[cfg(target_os = "macos")]
+        let attrs = attrs.with_option_as_alt(macos_option_as_alt(self.config.macos_option_as_alt));
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
         window.set_ime_allowed(true);
         crate::macos_blur::apply_background_blur(
@@ -5935,6 +5973,27 @@ fn ime_cursor_area(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_option_as_alt_maps_to_winit_modes() {
+        assert_eq!(
+            macos_option_as_alt(noa_config::MacosOptionAsAlt::None),
+            OptionAsAlt::None
+        );
+        assert_eq!(
+            macos_option_as_alt(noa_config::MacosOptionAsAlt::Left),
+            OptionAsAlt::OnlyLeft
+        );
+        assert_eq!(
+            macos_option_as_alt(noa_config::MacosOptionAsAlt::Right),
+            OptionAsAlt::OnlyRight
+        );
+        assert_eq!(
+            macos_option_as_alt(noa_config::MacosOptionAsAlt::Both),
+            OptionAsAlt::Both
+        );
+    }
 
     #[test]
     fn quick_terminal_slide_offset_spans_hidden_to_revealed() {

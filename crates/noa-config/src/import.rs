@@ -161,6 +161,20 @@ mod tests {
     }
 
     #[test]
+    fn macos_native_keys_are_preserved_uncommented_on_import() {
+        let (output, stats) = build_import_output(&[String::from(
+            "macos-option-as-alt = true\nmacos-titlebar-style = transparent\n",
+        )]);
+
+        assert!(output.contains("macos-option-as-alt = true\n"));
+        assert!(output.contains("macos-titlebar-style = transparent\n"));
+        assert!(!output.contains("# macos-option-as-alt"));
+        assert!(!output.contains("# macos-titlebar-style"));
+        assert_eq!(stats.supported, 2);
+        assert_eq!(stats.commented_out, 0);
+    }
+
+    #[test]
     fn import_errors_when_no_candidates_exist() {
         let dir = unique_temp_path("missing");
         let target = dir.join("noa/config");

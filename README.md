@@ -112,7 +112,7 @@ works via the `[package.metadata.bundle]` in `bin/noa/Cargo.toml`.
 | **3** | Paged scrollback storage, interned styles, OSC 8 hyperlinks, interactive search UI, expanded configuration | ✅ Done |
 | **4** | Tabs + split tree + multi-window, config file, ~460 themes, font fallback + ligatures + Nerd/box glyphs | ✅ Done |
 | **5** | Kitty graphics + keyboard protocols, shell integration (OSC 133/7), DCS, legacy mouse encodings | ✅ Done |
-| **6** | macOS-native polish: quick terminal, command palette, background blur, session restore, secure keyboard entry, notifications (OSC 9/777), CLI actions (`+list-themes` …) | 🔄 In Progress (remaining: titlebar styles, Option-as-Alt config) |
+| **6** | macOS-native polish: quick terminal, command palette, background blur, session restore, secure keyboard entry, notifications (OSC 9/777), CLI actions (`+list-themes` …), titlebar styles, Option-as-Alt config | ✅ Done |
 
 ## License
 

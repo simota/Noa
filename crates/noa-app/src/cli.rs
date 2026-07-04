@@ -8,7 +8,8 @@
 //! process (or a window).
 
 use noa_config::{
-    AlphaBlendingMode, ClipboardAccess, CursorShape, StartupConfig, SyntheticStyleMode,
+    AlphaBlendingMode, ClipboardAccess, CursorShape, MacosOptionAsAlt, MacosTitlebarStyle,
+    StartupConfig, SyntheticStyleMode,
 };
 use noa_core::Rgb;
 
@@ -307,6 +308,25 @@ fn show_config_output(config: &StartupConfig) -> String {
     );
     push_line(
         &mut out,
+        "macos-option-as-alt",
+        match config.macos_option_as_alt {
+            MacosOptionAsAlt::None => "false",
+            MacosOptionAsAlt::Left => "left",
+            MacosOptionAsAlt::Right => "right",
+            MacosOptionAsAlt::Both => "true",
+        },
+    );
+    push_line(
+        &mut out,
+        "macos-titlebar-style",
+        match config.macos_titlebar_style {
+            MacosTitlebarStyle::Native => "native",
+            MacosTitlebarStyle::Transparent => "transparent",
+            MacosTitlebarStyle::Hidden => "hidden",
+        },
+    );
+    push_line(
+        &mut out,
         "quick-terminal-hotkey",
         config.quick_terminal_hotkey.as_deref().unwrap_or(""),
     );
@@ -506,6 +526,8 @@ mod tests {
         assert!(output.contains("background-opacity = 1\n"));
         assert!(output.contains("background-blur-radius = 0\n"));
         assert!(output.contains("window-save-state = default\n"));
+        assert!(output.contains("macos-option-as-alt = false\n"));
+        assert!(output.contains("macos-titlebar-style = native\n"));
         assert!(
             output.lines().all(|line| line.contains(" = ")),
             "every line must be `key = value`"
@@ -518,6 +540,8 @@ mod tests {
             theme: Some("3024 Day".to_string()),
             background: Some(Rgb::new(0x10, 0x20, 0x30)),
             cursor_style: Some(CursorShape::Bar),
+            macos_option_as_alt: MacosOptionAsAlt::Right,
+            macos_titlebar_style: MacosTitlebarStyle::Hidden,
             font: noa_config::FontConfig {
                 families: vec!["JetBrains Mono".to_string(), "Menlo".to_string()],
                 features: vec![noa_config::FontFeature {
@@ -538,6 +562,8 @@ mod tests {
         assert!(output.contains("theme = 3024 Day\n"));
         assert!(output.contains("background = #102030\n"));
         assert!(output.contains("cursor-style = bar\n"));
+        assert!(output.contains("macos-option-as-alt = right\n"));
+        assert!(output.contains("macos-titlebar-style = hidden\n"));
         assert!(output.contains("font-family = JetBrains Mono\n"));
         assert!(output.contains("font-family = Menlo\n"));
         assert!(output.contains("font-feature = -liga\n"));

@@ -98,6 +98,34 @@ impl WindowSaveState {
     }
 }
 
+/// `macos-option-as-alt`: which macOS Option key(s) should be treated as
+/// terminal Alt instead of producing macOS alternate characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MacosOptionAsAlt {
+    /// Preserve the platform default: Option may produce alternate characters.
+    #[default]
+    None,
+    /// Treat only the left Option key as Alt.
+    Left,
+    /// Treat only the right Option key as Alt.
+    Right,
+    /// Treat both Option keys as Alt.
+    Both,
+}
+
+/// `macos-titlebar-style`: native macOS titlebar presentation for ordinary
+/// terminal windows. No-op outside macOS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MacosTitlebarStyle {
+    /// Standard AppKit titlebar/tabs.
+    #[default]
+    Native,
+    /// Transparent titlebar with full-size content view.
+    Transparent,
+    /// Hide the titlebar while keeping the window otherwise decorated.
+    Hidden,
+}
+
 /// `alpha-blending` mode. `Native` is a real value; `Linear` /
 /// `LinearCorrected` are parsed-but-fallback (REQ-CFG-4) — `noa-config`
 /// emits a diagnostic and the renderer falls back to `Native` (WP3).
@@ -228,6 +256,13 @@ pub struct StartupConfig {
     /// `window-save-state`: whether the window/tab/split session is persisted
     /// and restored across launches. Default restores.
     pub window_save_state: WindowSaveState,
+    /// `macos-option-as-alt`: which Option key(s) should be rewritten as
+    /// terminal Alt by the macOS window layer. Default preserves existing
+    /// platform text behavior.
+    pub macos_option_as_alt: MacosOptionAsAlt,
+    /// `macos-titlebar-style`: titlebar presentation for ordinary terminal
+    /// windows. Default is native.
+    pub macos_titlebar_style: MacosTitlebarStyle,
     /// `quick-terminal-hotkey`: the global hotkey chord that toggles the
     /// drop-down quick terminal (e.g. `cmd+grave`). `None` disables the
     /// feature (no hotkey is registered). noa-specific key; Ghostty expresses
@@ -264,6 +299,8 @@ impl Default for StartupConfig {
             background_blur_radius: 0,
             scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
             window_save_state: WindowSaveState::default(),
+            macos_option_as_alt: MacosOptionAsAlt::default(),
+            macos_titlebar_style: MacosTitlebarStyle::default(),
             quick_terminal_hotkey: None,
             quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
             quick_terminal_autohide: true,
@@ -294,6 +331,8 @@ pub struct ConfigOverrides {
     pub background_blur_radius: Option<u16>,
     pub scrollback_limit: Option<usize>,
     pub window_save_state: Option<WindowSaveState>,
+    pub macos_option_as_alt: Option<MacosOptionAsAlt>,
+    pub macos_titlebar_style: Option<MacosTitlebarStyle>,
     pub quick_terminal_hotkey: Option<String>,
     pub quick_terminal_size: Option<f32>,
     pub quick_terminal_autohide: Option<bool>,
@@ -334,6 +373,12 @@ impl ConfigOverrides {
                 .or(self.background_blur_radius),
             scrollback_limit: higher_priority.scrollback_limit.or(self.scrollback_limit),
             window_save_state: higher_priority.window_save_state.or(self.window_save_state),
+            macos_option_as_alt: higher_priority
+                .macos_option_as_alt
+                .or(self.macos_option_as_alt),
+            macos_titlebar_style: higher_priority
+                .macos_titlebar_style
+                .or(self.macos_titlebar_style),
             quick_terminal_hotkey: higher_priority
                 .quick_terminal_hotkey
                 .or(self.quick_terminal_hotkey),
@@ -372,6 +417,10 @@ impl ConfigOverrides {
                 .unwrap_or(base.background_blur_radius),
             scrollback_limit: self.scrollback_limit.unwrap_or(base.scrollback_limit),
             window_save_state: self.window_save_state.unwrap_or(base.window_save_state),
+            macos_option_as_alt: self.macos_option_as_alt.unwrap_or(base.macos_option_as_alt),
+            macos_titlebar_style: self
+                .macos_titlebar_style
+                .unwrap_or(base.macos_titlebar_style),
             quick_terminal_hotkey: self.quick_terminal_hotkey.or(base.quick_terminal_hotkey),
             quick_terminal_size: self.quick_terminal_size.unwrap_or(base.quick_terminal_size),
             quick_terminal_autohide: self
@@ -519,6 +568,8 @@ mod tests {
                 background_blur_radius: 0,
                 scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
                 window_save_state: WindowSaveState::default(),
+                macos_option_as_alt: MacosOptionAsAlt::default(),
+                macos_titlebar_style: MacosTitlebarStyle::default(),
                 quick_terminal_hotkey: None,
                 quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
                 quick_terminal_autohide: true,
@@ -659,6 +710,40 @@ font-size = 15.5
         let resolved = file.merge(cli).apply_to(StartupConfig::default());
         assert_eq!(resolved.window_save_state, WindowSaveState::Always);
         assert!(!WindowSaveState::Never.restores());
+    }
+
+    #[test]
+    fn macos_native_keys_flow_through_parse_apply_and_precedence() {
+        let (overrides, diagnostics) = parse_overrides(
+            test_path(),
+            "macos-option-as-alt = left\nmacos-titlebar-style = transparent",
+        );
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.macos_option_as_alt, Some(MacosOptionAsAlt::Left));
+        assert_eq!(
+            overrides.macos_titlebar_style,
+            Some(MacosTitlebarStyle::Transparent)
+        );
+
+        let default = ConfigOverrides::default().apply_to(StartupConfig::default());
+        assert_eq!(default.macos_option_as_alt, MacosOptionAsAlt::None);
+        assert_eq!(default.macos_titlebar_style, MacosTitlebarStyle::Native);
+
+        let file = ConfigOverrides {
+            macos_option_as_alt: Some(MacosOptionAsAlt::Left),
+            macos_titlebar_style: Some(MacosTitlebarStyle::Transparent),
+            ..Default::default()
+        };
+        let cli = ConfigOverrides {
+            macos_option_as_alt: Some(MacosOptionAsAlt::Both),
+            ..Default::default()
+        };
+        let resolved = file.merge(cli).apply_to(StartupConfig::default());
+        assert_eq!(resolved.macos_option_as_alt, MacosOptionAsAlt::Both);
+        assert_eq!(
+            resolved.macos_titlebar_style,
+            MacosTitlebarStyle::Transparent
+        );
     }
 
     #[test]

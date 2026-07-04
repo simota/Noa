@@ -102,6 +102,8 @@ fn app_config_from_startup(
         background_blur_radius: config.background_blur_radius,
         scrollback_limit: config.scrollback_limit,
         window_save_state: config.window_save_state,
+        macos_option_as_alt: config.macos_option_as_alt,
+        macos_titlebar_style: config.macos_titlebar_style,
         cli_grid_override,
         quick_terminal_hotkey: config.quick_terminal_hotkey,
         quick_terminal_size: config.quick_terminal_size,
@@ -137,6 +139,8 @@ mod tests {
             font_size: 15.0,
             theme: Some("3024 Day".to_string()),
             font: noa_config::FontConfig::default(),
+            macos_option_as_alt: noa_config::MacosOptionAsAlt::Both,
+            macos_titlebar_style: noa_config::MacosTitlebarStyle::Transparent,
             ..Default::default()
         };
 
@@ -147,6 +151,14 @@ mod tests {
         assert_eq!(app_config.font_size, 15.0);
         assert_eq!(app_config.theme.as_deref(), Some("3024 Day"));
         assert_eq!(app_config.font, noa_config::FontConfig::default());
+        assert_eq!(
+            app_config.macos_option_as_alt,
+            noa_config::MacosOptionAsAlt::Both
+        );
+        assert_eq!(
+            app_config.macos_titlebar_style,
+            noa_config::MacosTitlebarStyle::Transparent
+        );
     }
 
     #[test]

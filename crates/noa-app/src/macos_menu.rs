@@ -124,7 +124,12 @@ impl MacosMenu {
                     Some(cmd_accelerator(Code::KeyA)),
                 ),
                 &PredefinedMenuItem::separator(),
-                &disabled_item(AppCommand::SEARCH_FIND_MENU_ID, "Find"),
+                &MenuItem::with_id(
+                    AppCommand::Search(SearchAction::Find).menu_id(),
+                    "Find",
+                    true,
+                    Some(cmd_accelerator(Code::KeyF)),
+                ),
                 &MenuItem::with_id(
                     AppCommand::Search(SearchAction::FindNext).menu_id(),
                     "Find Next",

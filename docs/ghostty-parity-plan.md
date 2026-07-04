@@ -138,7 +138,8 @@ GUI 非依存 → ユニットテストで完結。
 - 背景ブラー（private API `CGSSetWindowBackgroundBlurRadius` — Ghostty 同等）。
 - セッション復元（ウィンドウ/タブ/分割トポロジ + cwd を再現。Ghostty 同様コンテンツは復元しない）。
 - Secure Keyboard Entry、タイトルバースタイル (`macos-titlebar-style`)、Option-as-Alt 設定、
-  通知 (OSC 9 / 777)。
+  通知 (OSC 9 / 777)。**実装済み**: `macos-titlebar-style` は `native`/`tabs`/`transparent`/`hidden`、
+  `macos-option-as-alt` は `false`/`true`/`left`/`right` を受け付ける。
 - `noa +list-themes` / `+list-keybinds` 等の CLI アクション。
 
 ### クイックターミナル（実装ノート）

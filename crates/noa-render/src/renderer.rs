@@ -83,7 +83,12 @@ struct PaneImages {
 /// rastered glyphs only appear on rows that are dirty by construction.
 #[derive(Clone, PartialEq)]
 struct FrameInvalidationKey {
-    row_base: usize,
+    /// Session-absolute viewport base row (`FrameSnapshot::abs_row_base`), NOT
+    /// the storage-index `row_base`: the latter repeats across equal push/evict
+    /// counts, so keying on it would cache-hit stale history rows (the renderer
+    /// reports history rows as never-dirty and relies on this key to catch a
+    /// scroll). The absolute row is monotonic, so a scroll always changes it.
+    abs_row_base: usize,
     cols: u16,
     rows: u16,
     colors: TerminalColors,
@@ -736,6 +741,11 @@ impl Renderer {
         }
     }
 
+    /// Draw a window-absolute overlay subrange (dividers / focus indicator).
+    /// Sets the cell pipeline + instance buffer each time so it is safe to call
+    /// after an image band switched the bound pipeline, and so it never relies
+    /// on a prior `DrawOp` having left the cell pipeline bound (the pane may have
+    /// emitted zero cell instances, or the last band drawn was an image band).
     fn draw_pixel_overlay_range(&self, pass: &mut wgpu::RenderPass<'_>, range: Range<u32>) {
         if range.is_empty() || self.viewport.w == 0 || self.viewport.h == 0 {
             return;
@@ -743,6 +753,8 @@ impl Renderer {
         let Some(gpu) = self.pane_gpu.first() else {
             return;
         };
+        pass.set_pipeline(&self.cell.pipeline);
+        pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
         pass.set_scissor_rect(0, 0, self.viewport.w, self.viewport.h);
         pass.set_bind_group(0, &gpu.bind_group, &[]);
         pass.draw(0..6, range);
@@ -1083,7 +1095,7 @@ fn rebuild_pane_cached(
     let cell_size = (metrics.cell_w, metrics.cell_h);
 
     let new_key = FrameInvalidationKey {
-        row_base: snap.row_base,
+        abs_row_base: snap.abs_row_base,
         cols: snap.cols,
         rows: snap.rows_n,
         colors: snap.colors.clone(),
@@ -3649,6 +3661,7 @@ mod tests {
             selection: None,
             search: SearchState::default(),
             row_base: 0,
+            abs_row_base: 0,
             cols: 1,
             rows_n: 3,
             focused: true,
@@ -3855,13 +3868,16 @@ mod tests {
             renderer.rows_rebuilt_last_frame()
         };
 
-        // 1. row_base (viewport scroll offset).
+        // 1. abs_row_base (viewport scroll offset, session-absolute).
         {
             let snap_a = baseline_snapshot(['A', 'B', 'C']);
             let mut snap_b = baseline_snapshot(['A', 'B', 'C']);
-            snap_b.row_base = 1;
+            snap_b.abs_row_base = 1;
             let rebuilt = rebuild_twice(101, &snap_a, &theme, &snap_b, &theme);
-            assert_eq!(rebuilt, 3, "row_base change must force a full pane rebuild");
+            assert_eq!(
+                rebuilt, 3,
+                "abs_row_base change must force a full pane rebuild"
+            );
         }
 
         // 2a. cols (resize).
@@ -3966,6 +3982,65 @@ mod tests {
                 "cursor movement must dirty exactly the two affected rows, not the whole pane"
             );
         }
+    }
+
+    #[test]
+    fn abs_row_base_change_forces_rebuild_even_when_row_base_collides() {
+        // Regression: the invalidation key must ride the session-absolute
+        // `abs_row_base`, not the storage-index `row_base`. A scroll that evicts
+        // and pushes an equal number of rows reproduces the same `row_base`
+        // while `abs_row_base` advances; keying on `row_base` would cache-hit and
+        // paint stale history rows. Same row_base + different abs_row_base must
+        // still force a full pane rebuild.
+        let Some((device, queue)) = device_queue() else {
+            eprintln!("no wgpu adapter available — skipping abs_row_base collision test");
+            return;
+        };
+        let Some(mut font) = skip_font() else { return };
+        let mut renderer = Renderer::new(
+            &device,
+            &queue,
+            wgpu::TextureFormat::Bgra8Unorm,
+            &mut font,
+            GridPadding::ZERO,
+        )
+        .expect("build renderer");
+        renderer.resize(PixelSize { w: 64, h: 64 });
+
+        let theme = Theme::new();
+        let rect = PaneRect::new(0, 0, 64, 64);
+        let pane = PaneId::new(201);
+
+        let snap_a = baseline_snapshot(['A', 'B', 'C']);
+        let mut snap_b = baseline_snapshot(['A', 'B', 'C']);
+        // The bug scenario: identical storage-index row_base, advanced absolute.
+        assert_eq!(snap_a.row_base, snap_b.row_base);
+        snap_b.abs_row_base = snap_a.abs_row_base + 3;
+
+        renderer.rebuild_panes(
+            &[PaneFrame {
+                pane,
+                rect,
+                snapshot: &snap_a,
+            }],
+            &mut font,
+            &theme,
+        );
+        renderer.rebuild_panes(
+            &[PaneFrame {
+                pane,
+                rect,
+                snapshot: &snap_b,
+            }],
+            &mut font,
+            &theme,
+        );
+
+        assert_eq!(
+            renderer.rows_rebuilt_last_frame(),
+            3,
+            "abs_row_base change must force a full pane rebuild despite an unchanged row_base"
+        );
     }
 
     #[test]

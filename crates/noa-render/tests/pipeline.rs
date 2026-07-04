@@ -76,6 +76,7 @@ fn snapshot_for_text(text: &str) -> FrameSnapshot {
         selection: None,
         search: SearchState::default(),
         row_base: 0,
+        abs_row_base: 0,
         cols,
         rows_n: 1,
         focused: true,
@@ -296,6 +297,7 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         )),
         search: SearchState::default(),
         row_base: 0,
+        abs_row_base: 0,
         cols: 4,
         rows_n: 1,
         focused: true,
@@ -377,6 +379,7 @@ fn command_palette_overlay_draws_one_frame_without_validation_error() {
         selection: None,
         search: SearchState::default(),
         row_base: 0,
+        abs_row_base: 0,
         cols,
         rows_n,
         focused: true,
@@ -618,6 +621,7 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
             selection: None,
             search: SearchState::default(),
             row_base: 0,
+            abs_row_base: 0,
             cols: 1,
             rows_n: 2,
             focused: true,
@@ -810,6 +814,86 @@ fn split_pipeline_draws_three_pane_plan_with_overlays_without_validation_error()
     assert!(
         err.is_none(),
         "wgpu validation error during 3-pane scissored draw with dividers: {err:?}"
+    );
+}
+
+/// Regression: the z-band interleave binds the image pipeline inside a pane's
+/// draw and only re-establishes the cell pipeline inside `draw_cell_range`.
+/// When the final pane's trailing (decoration) cell range is empty — all-blank
+/// cells emit no glyph/decoration instances — and it carries a z>=0 image, the
+/// image pipeline is the last thing bound as the pane loop ends. The following
+/// `Dividers` / `FocusIndicator` overlay draws must set the cell pipeline
+/// themselves, or wgpu aborts inside the macOS delegate on a pipeline vs
+/// bind-group mismatch. Focus the image pane so BOTH overlays draw after it.
+#[test]
+fn split_overlays_draw_after_final_pane_image_band_without_validation_error() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping overlay-after-image-band test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: 160, h: 96 });
+
+    let a = snapshot_for_text("A");
+    let b = snapshot_for_text("B");
+    // Final pane: all-blank cells plus an opaque image at z=0 (above text), so
+    // its trailing cell range is empty and the last bound pipeline before the
+    // overlays is the image pipeline.
+    let c = image_snapshot(4, 4, Color::Rgb(Rgb::new(0, 40, 0)), [0, 0, 255, 255], 0, 0);
+    let layout = [
+        (PaneId::new(1), PaneRect::new(0, 0, 80, 96)),
+        (PaneId::new(2), PaneRect::new(81, 0, 79, 47)),
+        (PaneId::new(3), PaneRect::new(81, 48, 79, 48)),
+    ];
+    let panes = [
+        PaneFrame {
+            pane: layout[0].0,
+            rect: layout[0].1,
+            snapshot: &a,
+        },
+        PaneFrame {
+            pane: layout[1].0,
+            rect: layout[1].1,
+            snapshot: &b,
+        },
+        PaneFrame {
+            pane: layout[2].0,
+            rect: layout[2].1,
+            snapshot: &c,
+        },
+    ];
+    let focused = layout[2].0;
+    let plan = build_draw_plan(&layout, Some(focused), None);
+    assert!(
+        plan.iter()
+            .any(|op| matches!(op, DrawOp::Dividers { rects } if !rects.is_empty())),
+        "3-pane split plan should include divider geometry"
+    );
+    assert!(
+        matches!(plan.last(), Some(DrawOp::FocusIndicator { pane, rects }) if *pane == focused && !rects.is_empty()),
+        "focusing the image pane should append its focus overlay after its image band"
+    );
+
+    renderer.rebuild_panes(&panes, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+
+    let (_target, view) = render_target(&device, 160, 96);
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.draw_panes(&device, &queue, &view, &layout, Some(focused), None);
+    let err = pollster::block_on(device.pop_error_scope());
+
+    assert!(
+        err.is_none(),
+        "wgpu validation error drawing split overlays after a final-pane image band: {err:?}"
     );
 }
 
@@ -1014,6 +1098,7 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
         selection: None,
         search: SearchState::default(),
         row_base: 0,
+        abs_row_base: 0,
         cols: 1,
         rows_n: 1,
         focused: true,
@@ -1342,6 +1427,7 @@ fn image_snapshot(
         selection: None,
         search: SearchState::default(),
         row_base: 0,
+        abs_row_base: 0,
         cols,
         rows_n,
         focused: true,

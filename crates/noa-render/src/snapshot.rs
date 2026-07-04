@@ -146,7 +146,19 @@ pub struct FrameSnapshot {
     pub colors: TerminalColors,
     pub selection: Option<Selection>,
     pub search: SearchState,
+    /// Storage-index base row of the viewport top (`Screen::visible_row_base`),
+    /// in the same coordinate space as `selection` — used only to map viewport
+    /// `(x, y)` to selection points ([`Self::is_selected`] and friends). This is
+    /// NOT unique across scrollback eviction (an equal number of pushes and
+    /// evicts reproduces a prior value), so it must not be used as a cache
+    /// invalidation key — see `abs_row_base`.
     pub row_base: usize,
+    /// Session-absolute row of the viewport top (`rows_evicted + row_base`),
+    /// monotonic as content scrolls. The renderer keys its per-pane frame
+    /// invalidation on this so a scroll that evicts and pushes the same number
+    /// of rows still forces a full rebuild (a stale `row_base` would falsely
+    /// cache-hit and paint shifted history rows).
+    pub abs_row_base: usize,
     pub cols: u16,
     pub rows_n: u16,
     /// Whether this pane owns keyboard focus (both its window is OS-focused
@@ -213,6 +225,7 @@ impl FrameSnapshot {
             cursor.visible = false;
         }
         let row_base = screen.visible_row_base();
+        let abs_row_base = screen.rows_evicted() + row_base;
         let cols = screen.cols;
         let rows_n = screen.rows;
         let selection = screen.selection;
@@ -226,6 +239,7 @@ impl FrameSnapshot {
             selection,
             search,
             row_base,
+            abs_row_base,
             cols,
             rows_n,
             focused: true,
@@ -263,6 +277,7 @@ impl FrameSnapshot {
         let mut cursor = screen.cursor;
         cursor.visible = false;
         let row_base = screen.visible_row_base();
+        let abs_row_base = screen.rows_evicted() + row_base;
         let cols = screen.cols;
         let rows_n = screen.rows;
         let selection = screen.selection;
@@ -277,6 +292,7 @@ impl FrameSnapshot {
             selection,
             search,
             row_base,
+            abs_row_base,
             cols,
             rows_n,
             focused: true,
@@ -418,6 +434,57 @@ mod tests {
         assert!(snap.is_search_match(0, 1));
         assert!(snap.is_active_search_match(0, 1));
         assert!(!snap.is_search_match(0, 0));
+    }
+
+    #[test]
+    fn abs_row_base_stays_unique_across_scrollback_eviction() {
+        // Regression: the renderer keyed frame invalidation on the storage-index
+        // `row_base`, which repeats when equal numbers of rows are pushed and
+        // evicted (viewport pinned to the top of retained history reads
+        // `row_base == 0` both before and after an eviction). `abs_row_base` is
+        // session-absolute (`rows_evicted + row_base`) and must differ across an
+        // eviction so the renderer never cache-hits shifted history rows.
+        let mut term = Terminal::new(GridSize::new(2, 2));
+        // Cap below one full 64 KiB scrollback page (~65.8 KB for 8192 packed
+        // cells) so that as soon as a second page opens, the first is evicted
+        // whole (eviction is page-granular, at `PAGE_CELL_CAPACITY` = 8192 cells).
+        term.set_scrollback_limit_bytes(40_000);
+
+        // Baseline: empty scrollback, viewport at the top → row_base 0, abs 0.
+        let before = FrameSnapshot::from_terminal(&mut term);
+        assert_eq!((before.row_base, before.abs_row_base), (0, 0));
+
+        // Push > 1 page of two-cell rows so the front page is evicted. Both cells
+        // are non-blank so trailing-blank trimming keeps two packed cells/row
+        // (~4096 rows/page); 4200 rows seals page 1 and starts page 2.
+        for _ in 0..4200 {
+            put(&mut term, 0, 'x');
+            term.primary.grid[0].cells[1].ch = 'y';
+            term.primary.scroll_up_region(1);
+        }
+        assert!(
+            term.primary.rows_evicted() > 0,
+            "expected the front scrollback page to have evicted"
+        );
+
+        // Pin the viewport back to the top: same storage-index row_base as the
+        // baseline, but a strictly larger session-absolute base.
+        term.scroll_viewport_to_top();
+        let after = FrameSnapshot::from_terminal(&mut term);
+
+        assert_eq!(
+            after.row_base, before.row_base,
+            "storage-index row_base collides across eviction (the original bug)"
+        );
+        assert!(
+            after.abs_row_base > before.abs_row_base,
+            "abs_row_base must strictly advance across eviction, staying unique"
+        );
+        assert_eq!(
+            after.abs_row_base,
+            term.primary.rows_evicted() + after.row_base,
+            "abs_row_base is rows_evicted + row_base"
+        );
     }
 
     // ── Kitty-graphics snapshot construction ────────────────────────────

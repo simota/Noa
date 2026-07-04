@@ -335,15 +335,15 @@ struct OverviewWindowState {
     /// when the tile pool is rebuilt.
     chrome_card: Option<OverviewChromeCardPipeline>,
     /// The currently selected tile (REQ-OV-14): an index directly into the
-    /// row-major source-tab order (`App::overview_source_window_ids`) —
+    /// row-major source-tile order (`App::overview_source_tile_ids`) —
     /// live tiles first, then any overflow placeholder tiles — so one index
     /// serves both without translation (REQ-OV-15b: placeholders are
     /// selectable too). Reset on every `show_tab_overview` and clamped in
-    /// `redraw_overview` as tabs come and go.
+    /// `redraw_overview` as source panes come and go.
     selected: usize,
     /// The live "Search tabs" filter query (REQ-OV-16). Printable keys append
     /// and Backspace pops while the Overview is focused; the filtered result
-    /// set drives every downstream consumer via `App::overview_source_window_ids`
+    /// set drives every downstream consumer via `App::overview_source_tile_ids`
     /// (redraw, hit-test, nav, Cmd+N, title bars, placeholders). Cleared on
     /// every `show_tab_overview` and by the first Escape when non-empty.
     search_query: String,
@@ -363,6 +363,18 @@ struct OverviewChromeTexture {
 struct OverviewTileRenderState {
     dirty: bool,
     last_render_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct OverviewTileId {
+    window_id: WindowId,
+    pane_id: PaneId,
+}
+
+impl OverviewTileId {
+    const fn new(window_id: WindowId, pane_id: PaneId) -> Self {
+        Self { window_id, pane_id }
+    }
 }
 
 /// An open search prompt (Cmd+F), scoped to the window/pane it was opened
@@ -577,7 +589,7 @@ pub struct App {
     windows: HashMap<WindowId, WindowState>,
     window_order: Vec<WindowId>,
     overview_window: Option<OverviewWindowState>,
-    overview_tiles: HashMap<WindowId, OverviewTileRenderState>,
+    overview_tiles: HashMap<OverviewTileId, OverviewTileRenderState>,
     /// The window the user last interacted with — drives tab/window spawning,
     /// command targets, and the quick terminal. Deliberately *sticky*: it keeps
     /// pointing at the last-focused window while the app is backgrounded so a
@@ -1301,7 +1313,7 @@ impl App {
             },
         );
         self.window_order.push(window_id);
-        self.mark_overview_tile_dirty(window_id);
+        self.mark_overview_tile_dirty(OverviewTileId::new(window_id, initial_pane));
         self.focused = Some(window_id);
         window.focus_window();
         self.request_overview_redraw();
@@ -1467,7 +1479,8 @@ impl App {
             state.shutdown();
         }
         self.window_order.retain(|id| *id != window_id);
-        self.overview_tiles.remove(&window_id);
+        self.overview_tiles
+            .retain(|tile_id, _| tile_id.window_id != window_id);
         // A prompt targeting the closed window would otherwise linger
         // forever: its window can no longer deliver keys (so not even
         // Escape reaches it) and the open-guard would block every future
@@ -1630,9 +1643,13 @@ impl App {
             self.close_tab(event_loop, window_id);
             return;
         }
+        self.overview_tiles
+            .remove(&OverviewTileId::new(window_id, pane_id));
+        self.mark_all_overview_tiles_dirty();
         self.relayout_and_resize_window(window_id);
         self.update_focused_ime_cursor_area(window_id);
         window.request_redraw();
+        self.request_overview_redraw();
         self.persist_session();
     }
 
@@ -1691,6 +1708,8 @@ impl App {
         self.relayout_and_resize_window(window_id);
         self.update_focused_ime_cursor_area(window_id);
         window.request_redraw();
+        self.mark_all_overview_tiles_dirty();
+        self.request_overview_redraw();
         self.persist_session();
     }
 
@@ -1949,11 +1968,15 @@ impl App {
         if let Some(overview) = self.overview_window.as_mut() {
             overview.search_query.clear();
         }
-        // REQ-OV-14: the focused tab's tile if it's live, else the first.
-        let source_window_ids = self.overview_source_window_ids();
-        let live_tile_count = OVERVIEW_GRID_CAP.min(source_window_ids.len());
+        // REQ-OV-14: the focused pane's tile if it's live, else the first.
+        let source_tile_ids = self.overview_source_tile_ids();
+        let live_tile_count = OVERVIEW_GRID_CAP.min(source_tile_ids.len());
+        let focused_tile = self.focused.and_then(|window_id| {
+            let state = self.windows.get(&window_id)?;
+            Some(OverviewTileId::new(window_id, state.focused_pane))
+        });
         let selected =
-            overview_initial_selection(&source_window_ids, live_tile_count, self.focused.as_ref());
+            overview_initial_selection(&source_tile_ids, live_tile_count, focused_tile.as_ref());
         if let Some(overview) = self.overview_window.as_mut() {
             overview.selected = selected;
             overview.window.set_visible(true);
@@ -1962,7 +1985,7 @@ impl App {
         }
     }
 
-    /// One-time re-peek for each open tab's overview mirror on every
+    /// One-time re-peek for each open pane's overview mirror on every
     /// `show_tab_overview` call (Fix B). Once `overview_visible_gate` is
     /// set, each pane's io thread publishes a fresh `FrameSnapshot::peek`
     /// opportunistically on its own next pty output — but the gate was
@@ -1974,22 +1997,19 @@ impl App {
     /// current content instead of that stale frame; a tab that publishes
     /// on its own moments later just gets overwritten immediately anyway.
     /// Runs once per `show_tab_overview` call, not per frame, so
-    /// `render_due_overview_tiles` itself still never locks a tab's
-    /// `Terminal` — only each window's currently focused pane pays this
-    /// one-off lock (mirrors `render_due_overview_tiles`'s "focused pane
-    /// only" mirror).
+    /// `render_due_overview_tiles` itself still never locks a pane's
+    /// `Terminal`.
     fn seed_overview_snapshots(&self) {
         for state in self.windows.values() {
-            let Some(surface) = state.surfaces.get(&state.focused_pane) else {
-                continue;
-            };
-            let Some(snapshot) = try_peek_overview_snapshot(&surface.terminal) else {
-                continue;
-            };
-            *surface
-                .overview_snapshot
-                .lock()
-                .expect("overview snapshot mutex poisoned") = Some(snapshot);
+            for surface in state.surfaces.values() {
+                let Some(snapshot) = try_peek_overview_snapshot(&surface.terminal) else {
+                    continue;
+                };
+                *surface
+                    .overview_snapshot
+                    .lock()
+                    .expect("overview snapshot mutex poisoned") = Some(snapshot);
+            }
         }
     }
 
@@ -2028,13 +2048,13 @@ impl App {
             .is_none_or(|overview| overview.occluded)
     }
 
-    fn mark_overview_tile_dirty(&mut self, window_id: WindowId) {
-        self.overview_tiles.entry(window_id).or_default().dirty = true;
+    fn mark_overview_tile_dirty(&mut self, tile_id: OverviewTileId) {
+        self.overview_tiles.entry(tile_id).or_default().dirty = true;
     }
 
     fn mark_all_overview_tiles_dirty(&mut self) {
-        for window_id in self.overview_source_window_ids() {
-            self.mark_overview_tile_dirty(window_id);
+        for tile_id in self.overview_source_tile_ids() {
+            self.mark_overview_tile_dirty(tile_id);
         }
     }
 
@@ -2059,19 +2079,22 @@ impl App {
     /// the frame.
     fn overview_tile_candidates(
         &self,
-        source_window_ids: &[WindowId],
-    ) -> Vec<OverviewRenderCandidate<WindowId>> {
-        source_window_ids
+        source_tile_ids: &[OverviewTileId],
+    ) -> Vec<OverviewRenderCandidate<OverviewTileId>> {
+        source_tile_ids
             .iter()
-            .filter_map(|window_id| {
-                self.windows.get(window_id)?;
+            .filter_map(|tile_id| {
+                let state = self.windows.get(&tile_id.window_id)?;
+                if !state.contains_pane(tile_id.pane_id) {
+                    return None;
+                }
                 let tile = self
                     .overview_tiles
-                    .get(window_id)
+                    .get(tile_id)
                     .copied()
                     .unwrap_or_default();
                 Some(OverviewRenderCandidate {
-                    id: *window_id,
+                    id: *tile_id,
                     dirty: tile.dirty,
                     last_render_at: tile.last_render_at,
                 })
@@ -2079,8 +2102,12 @@ impl App {
             .collect()
     }
 
-    fn due_overview_tile_ids(&self, source_window_ids: &[WindowId], now: Instant) -> Vec<WindowId> {
-        let candidates = self.overview_tile_candidates(source_window_ids);
+    fn due_overview_tile_ids(
+        &self,
+        source_tile_ids: &[OverviewTileId],
+        now: Instant,
+    ) -> Vec<OverviewTileId> {
+        let candidates = self.overview_tile_candidates(source_tile_ids);
         select_due_overview_tile_ids(
             &candidates,
             now,
@@ -2139,15 +2166,15 @@ impl App {
         }
     }
 
-    /// Render each due tile's source tab into the shared scratch texture and
-    /// blit it down into that tab's tile texture (REQ-OV-4 live mirror,
+    /// Render each due tile's source pane into the shared scratch texture and
+    /// blit it down into that pane's tile texture (REQ-OV-4 live mirror,
     /// REQ-NF-1 reuse the tab's own `Renderer`, REQ-NF-3 shared-scratch
-    /// blit-downscale). `tile_index` is `source_window_ids`' position, which
+    /// blit-downscale). `tile_index` is `source_tile_ids`' position, which
     /// is index-parallel with `layout.tiles` (see `overview_tile_target_at_point`).
     fn render_due_overview_tiles(
         &mut self,
-        due_window_ids: &[WindowId],
-        source_window_ids: &[WindowId],
+        due_tile_ids: &[OverviewTileId],
+        source_tile_ids: &[OverviewTileId],
     ) {
         let Some(gpu) = self.gpu.as_mut() else {
             return;
@@ -2159,14 +2186,14 @@ impl App {
             return;
         };
 
-        for &window_id in due_window_ids {
-            let Some(tile_index) = source_window_ids.iter().position(|id| *id == window_id) else {
+        for &tile_id in due_tile_ids {
+            let Some(tile_index) = source_tile_ids.iter().position(|id| *id == tile_id) else {
                 continue;
             };
-            let Some(state) = self.windows.get_mut(&window_id) else {
+            let Some(state) = self.windows.get_mut(&tile_id.window_id) else {
                 continue;
             };
-            let Some(surface) = state.surfaces.get(&state.focused_pane) else {
+            let Some(surface) = state.surfaces.get(&tile_id.pane_id) else {
                 continue;
             };
             // Read-only publish slot (Fix B, REQ-NF-6): the io thread
@@ -2206,7 +2233,11 @@ impl App {
                 &mut state.renderer,
                 tile_index,
             ) {
-                log::warn!("overview tile render failed for {window_id:?}: {err:#}");
+                log::warn!(
+                    "overview tile render failed for {:?}/pane {}: {err:#}",
+                    tile_id.window_id,
+                    tile_id.pane_id.get()
+                );
             }
             state.renderer.resize(own_viewport);
         }
@@ -2256,28 +2287,27 @@ impl App {
         }
     }
 
-    /// Draw the tab title into the top title-bar band of every due live tile
+    /// Draw the source pane label into the top title-bar band of every due
+    /// live tile
     /// (REQ-OV-12). Runs after `render_due_overview_tiles`, whose mirror blit
-    /// re-clears the band to the card color, so the title must be re-stamped
-    /// for exactly the tiles that were re-rendered this frame. Live titles are
+    /// re-clears the band to the card color, so the label must be re-stamped
+    /// for exactly the tiles that were re-rendered this frame. Live labels are
     /// routed through the same tested `overview_tile_labels` seam as
-    /// placeholder titles (AC-OV-12).
+    /// placeholder labels (AC-OV-12).
     fn render_due_overview_title_bands(
         &mut self,
-        due_window_ids: &[WindowId],
-        source_window_ids: &[WindowId],
+        due_tile_ids: &[OverviewTileId],
+        source_tile_ids: &[OverviewTileId],
         layout: &OverviewLayout,
     ) {
-        let live_count = layout.tiles.len().min(source_window_ids.len());
-        let live_ids = &source_window_ids[..live_count];
-        let labels = overview_tile_labels(live_ids, |id| {
-            self.windows.get(&id).map(|state| state.title.clone())
-        });
+        let live_count = layout.tiles.len().min(source_tile_ids.len());
+        let live_ids = &source_tile_ids[..live_count];
+        let labels = overview_tile_labels(live_ids, |id| self.overview_tile_label(id));
 
         let jobs: Vec<(usize, String)> = labels
             .iter()
             .enumerate()
-            .filter(|(index, _)| due_window_ids.contains(&live_ids[*index]))
+            .filter(|(index, _)| due_tile_ids.contains(&live_ids[*index]))
             .map(|(index, label)| (index, label.label.clone()))
             .collect();
         for (tile_index, title) in jobs {
@@ -2286,21 +2316,19 @@ impl App {
     }
 
     /// Fill every placeholder-row tile (REQ-OV-10) with the card color and its
-    /// tab title band. Placeholders have no live mirror, so the whole tile is
+    /// source label band. Placeholders have no live mirror, so the whole tile is
     /// cleared to the card face before the title band is stamped on top.
     fn render_overview_placeholder_labels(
         &mut self,
-        source_window_ids: &[WindowId],
+        source_tile_ids: &[OverviewTileId],
         layout: &OverviewLayout,
     ) {
         if layout.placeholders.is_empty() {
             return;
         }
         let live_count = layout.tiles.len();
-        let overflow_ids = overview_placeholder_source_ids(source_window_ids, live_count);
-        let labels = overview_tile_labels(overflow_ids, |id| {
-            self.windows.get(&id).map(|state| state.title.clone())
-        });
+        let overflow_ids = overview_placeholder_source_ids(source_tile_ids, live_count);
+        let labels = overview_tile_labels(overflow_ids, |id| self.overview_tile_label(id));
 
         let jobs: Vec<(usize, String)> = labels
             .iter()
@@ -2623,20 +2651,24 @@ impl App {
         frame.present();
     }
 
-    fn finish_overview_tile_renders(&mut self, window_ids: &[WindowId], now: Instant) {
-        for window_id in window_ids {
-            let tile = self.overview_tiles.entry(*window_id).or_default();
+    fn finish_overview_tile_renders(&mut self, tile_ids: &[OverviewTileId], now: Instant) {
+        for tile_id in tile_ids {
+            let tile = self.overview_tiles.entry(*tile_id).or_default();
             tile.dirty = false;
             tile.last_render_at = Some(now);
         }
     }
 
-    fn overview_source_window_ids(&self) -> Vec<WindowId> {
+    fn overview_source_tile_ids(&self) -> Vec<OverviewTileId> {
         let ordered = overview_tile_source_order(
             &self.window_order,
             |id| self.windows.contains_key(&id),
+            |id| self.overview_pane_ids_for_window(id),
             None,
-        );
+        )
+        .into_iter()
+        .map(|(window_id, pane_id)| OverviewTileId::new(window_id, pane_id))
+        .collect::<Vec<_>>();
         // REQ-OV-16: the "Search tabs" filter narrows the source set here, the
         // single seam every downstream consumer (redraw / hit-test / nav /
         // Cmd+N / title bars / placeholders) reads, so the whole Overview sees
@@ -2649,18 +2681,42 @@ impl App {
         if query.is_empty() {
             return ordered;
         }
-        let titles: Vec<(WindowId, String)> = ordered
+        let titles: Vec<(OverviewTileId, String)> = ordered
             .iter()
             .map(|id| {
-                let title = self
-                    .windows
-                    .get(id)
-                    .map(|state| state.title.clone())
-                    .unwrap_or_default();
+                let title = self.overview_tile_label(*id).unwrap_or_default();
                 (*id, title)
             })
             .collect();
         overview_tab_filter(query, &titles)
+    }
+
+    fn overview_pane_ids_for_window(&self, window_id: WindowId) -> Vec<PaneId> {
+        let Some(state) = self.windows.get(&window_id) else {
+            return Vec::new();
+        };
+        split_tree::compute_layout(&state.split_tree, PaneRectApp::new(0, 0, 1001, 1001))
+            .into_iter()
+            .filter_map(|(pane_id, _)| state.contains_pane(pane_id).then_some(pane_id))
+            .collect()
+    }
+
+    fn overview_tile_label(&self, tile_id: OverviewTileId) -> Option<String> {
+        let state = self.windows.get(&tile_id.window_id)?;
+        if !state.contains_pane(tile_id.pane_id) {
+            return None;
+        }
+        let title = state.title.clone();
+        if state.pane_count() <= 1 {
+            return Some(title);
+        }
+        let pane_number = self
+            .overview_pane_ids_for_window(tile_id.window_id)
+            .iter()
+            .position(|pane_id| *pane_id == tile_id.pane_id)
+            .map(|index| index + 1)
+            .unwrap_or_else(|| tile_id.pane_id.get() as usize);
+        Some(format!("{title} [pane {pane_number}]"))
     }
 
     /// The Overview window's search / grid / hint bands (REQ-OV-11/16/17).
@@ -2672,10 +2728,10 @@ impl App {
         Some(overview_chrome_bands(bounds))
     }
 
-    fn overview_layout(&self, source_window_ids: &[WindowId]) -> Option<OverviewLayout> {
+    fn overview_layout(&self, source_tile_ids: &[OverviewTileId]) -> Option<OverviewLayout> {
         let chrome = self.overview_chrome()?;
         Some(compute_overview_grid(
-            source_window_ids.len(),
+            source_tile_ids.len(),
             chrome.grid_bounds,
             OVERVIEW_GRID_CAP,
             OVERVIEW_TILE_GUTTER,
@@ -2691,26 +2747,26 @@ impl App {
             return;
         }
 
-        let source_window_ids = self.overview_source_window_ids();
-        let Some(layout) = self.overview_layout(&source_window_ids) else {
+        let source_tile_ids = self.overview_source_tile_ids();
+        let Some(layout) = self.overview_layout(&source_tile_ids) else {
             return;
         };
-        // REQ-OV-14: keep the selection in range as tabs come and go.
+        // REQ-OV-14: keep the selection in range as source panes come and go.
         if let Some(overview) = self.overview_window.as_mut() {
             overview.selected = overview
                 .selected
-                .min(source_window_ids.len().saturating_sub(1));
+                .min(source_tile_ids.len().saturating_sub(1));
         }
         let now = Instant::now();
-        let due_window_ids = self.due_overview_tile_ids(&source_window_ids, now);
+        let due_tile_ids = self.due_overview_tile_ids(&source_tile_ids, now);
 
         self.ensure_overview_thumbnails(&layout);
-        self.render_due_overview_tiles(&due_window_ids, &source_window_ids);
-        self.render_due_overview_title_bands(&due_window_ids, &source_window_ids, &layout);
-        self.render_overview_placeholder_labels(&source_window_ids, &layout);
+        self.render_due_overview_tiles(&due_tile_ids, &source_tile_ids);
+        self.render_due_overview_title_bands(&due_tile_ids, &source_tile_ids, &layout);
+        self.render_overview_placeholder_labels(&source_tile_ids, &layout);
         self.present_overview_frame(&layout);
 
-        self.finish_overview_tile_renders(&due_window_ids, now);
+        self.finish_overview_tile_renders(&due_tile_ids, now);
 
         // OVERVIEW_MAX_RENDER_TILES_PER_FRAME caps how many tiles one frame
         // regenerates, and idle tabs produce no pty output to trigger the
@@ -2720,7 +2776,7 @@ impl App {
         // a tile that is merely inside its 10Hz throttle window (schedule
         // one delayed wake-up via `tick_overview_backlog` instead of
         // spinning `present_overview_frame` until it's due).
-        let candidates = self.overview_tile_candidates(&source_window_ids);
+        let candidates = self.overview_tile_candidates(&source_tile_ids);
         let decision =
             overview_backlog_decision(&candidates, now, OVERVIEW_TILE_MIN_RENDER_INTERVAL);
         if decision.request_immediate_redraw {
@@ -2739,51 +2795,52 @@ impl App {
             return;
         };
 
-        let source_window_ids = self.overview_source_window_ids();
-        let Some(layout) = self.overview_layout(&source_window_ids) else {
+        let source_tile_ids = self.overview_source_tile_ids();
+        let Some(layout) = self.overview_layout(&source_tile_ids) else {
             return;
         };
-        let Some(target) = overview_tile_target_at_point(&source_window_ids, &layout.tiles, point)
+        let Some(target) = overview_tile_target_at_point(&source_tile_ids, &layout.tiles, point)
         else {
             return;
         };
         // The clicked tile becomes the selection too, not just the focus
         // target — a click and an arrow-keyed Return should leave the
         // Overview in the same selected state.
-        if let Some(index) = source_window_ids.iter().position(|id| *id == target)
+        if let Some(index) = source_tile_ids.iter().position(|id| *id == target)
             && let Some(overview) = self.overview_window.as_mut()
         {
             overview.selected = index;
         }
-        self.focus_tab_from_overview(target);
+        self.focus_tile_from_overview(target);
     }
 
     /// The close-button (✕) target under the last cursor point, or `None`
     /// (REQ-OV-13). Spans live tiles and placeholder rows — both carry a title
-    /// bar with a close button, and both map back to a live tab `WindowId`.
-    fn overview_close_target_at_last_cursor(&self) -> Option<WindowId> {
+    /// bar with a close button, and both map back to a live source pane.
+    fn overview_close_target_at_last_cursor(&self) -> Option<OverviewTileId> {
         let overview = self.overview_window.as_ref()?;
         let point = overview.last_cursor_point?;
-        let source_window_ids = self.overview_source_window_ids();
-        let layout = self.overview_layout(&source_window_ids)?;
+        let source_tile_ids = self.overview_source_tile_ids();
+        let layout = self.overview_layout(&source_tile_ids)?;
         let tile_rects: Vec<PaneRectApp> = layout
             .tiles
             .iter()
             .chain(layout.placeholders.iter())
             .copied()
             .collect();
-        overview_close_target_at_point(&source_window_ids, &tile_rects, point)
+        overview_close_target_at_point(&source_tile_ids, &tile_rects, point)
     }
 
-    fn focus_tab_from_overview(&mut self, window_id: WindowId) {
+    fn focus_tile_from_overview(&mut self, tile_id: OverviewTileId) {
         let Some(window) = self
             .windows
-            .get(&window_id)
+            .get(&tile_id.window_id)
             .map(|state| state.window.clone())
         else {
             return;
         };
-        self.focused = Some(window_id);
+        self.focus_pane(tile_id.window_id, tile_id.pane_id);
+        self.focused = Some(tile_id.window_id);
         window.focus_window();
     }
 
@@ -2896,8 +2953,8 @@ impl App {
 
     /// Arrow-key Overview selection move (REQ-OV-15a).
     fn step_overview_selection(&mut self, direction: Direction) {
-        let source_window_ids = self.overview_source_window_ids();
-        let Some(layout) = self.overview_layout(&source_window_ids) else {
+        let source_tile_ids = self.overview_source_tile_ids();
+        let Some(layout) = self.overview_layout(&source_tile_ids) else {
             return;
         };
         let Some(overview) = self.overview_window.as_mut() else {
@@ -2906,7 +2963,7 @@ impl App {
         overview.selected = move_overview_selection(
             overview.selected,
             layout.cols,
-            source_window_ids.len(),
+            source_tile_ids.len(),
             direction,
         );
         overview.window.request_redraw();
@@ -2914,33 +2971,33 @@ impl App {
 
     /// Return activates the selected Overview tile (REQ-OV-15b). `selected`
     /// indexes directly into the combined live + placeholder source order,
-    /// so a selected placeholder row resolves to its (live, mirror-less) tab
-    /// exactly the same way a selected live tile does.
+    /// so a selected placeholder row resolves to its source pane exactly the
+    /// same way a selected live tile does.
     fn activate_overview_selection(&mut self) {
-        let source_window_ids = self.overview_source_window_ids();
+        let source_tile_ids = self.overview_source_tile_ids();
         let Some(overview) = self.overview_window.as_ref() else {
             return;
         };
-        let Some(&target) = source_window_ids.get(overview.selected) else {
+        let Some(&target) = source_tile_ids.get(overview.selected) else {
             return;
         };
-        self.focus_tab_from_overview(target);
+        self.focus_tile_from_overview(target);
     }
 
     /// Cmd+`n` (1-indexed) jumps straight to the `n`-th live Overview tile
     /// (REQ-OV-15c). Out-of-range `n` (beyond the live tile count) is a
     /// no-op rather than a panic — there is no tile to switch to.
     fn switch_to_live_overview_tile(&mut self, n: usize) {
-        let source_window_ids = self.overview_source_window_ids();
-        let live_tile_count = OVERVIEW_GRID_CAP.min(source_window_ids.len());
+        let source_tile_ids = self.overview_source_tile_ids();
+        let live_tile_count = OVERVIEW_GRID_CAP.min(source_tile_ids.len());
         if n == 0 || n > live_tile_count {
             return;
         }
-        let target = source_window_ids[n - 1];
+        let target = source_tile_ids[n - 1];
         if let Some(overview) = self.overview_window.as_mut() {
             overview.selected = n - 1;
         }
-        self.focus_tab_from_overview(target);
+        self.focus_tile_from_overview(target);
     }
 
     fn overview_window_event(
@@ -2966,11 +3023,10 @@ impl App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Left && state == ElementState::Pressed {
                     // REQ-OV-13: the close-button corner wins over tile-focus.
-                    // Reuse the existing tab-close path (`close_tab`) so the
-                    // REQ-OV-9 degenerate cases (last tab, in-view removal +
-                    // relayout, stale-WindowId no-op) apply unchanged.
+                    // Close the targeted pane; `close_pane` falls back to
+                    // closing the tab when it was the last pane.
                     if let Some(target) = self.overview_close_target_at_last_cursor() {
-                        self.close_tab(event_loop, target);
+                        self.close_pane(event_loop, target.window_id, target.pane_id);
                     } else {
                         self.focus_overview_tile_at_last_cursor();
                     }
@@ -3029,7 +3085,10 @@ impl App {
             }
         }
 
-        let focused_group = self.focused.and_then(|id| self.windows.get(&id)).map(|s| s.group);
+        let focused_group = self
+            .focused
+            .and_then(|id| self.windows.get(&id))
+            .map(|s| s.group);
         let focused_window =
             focused_group.and_then(|group| groups.iter().position(|(g, _)| *g == group));
 
@@ -3198,7 +3257,12 @@ impl App {
                 (
                     state.focused_pane,
                     state.next_pane_id,
-                    PaneRectApp::new(0, 0, state.surface_config.width, state.surface_config.height),
+                    PaneRectApp::new(
+                        0,
+                        0,
+                        state.surface_config.width,
+                        state.surface_config.height,
+                    ),
                 )
             })
         else {
@@ -3259,9 +3323,7 @@ impl App {
             return;
         };
         if let Some((x, y)) = frame.position {
-            state
-                .window
-                .set_outer_position(LogicalPosition::new(x, y));
+            state.window.set_outer_position(LogicalPosition::new(x, y));
         }
         let _ = state
             .window
@@ -3420,9 +3482,10 @@ impl App {
         &self,
         event_loop: &ActiveEventLoop,
     ) -> Option<(i32, i32, u32, u32)> {
-        let monitor = event_loop
-            .primary_monitor()
-            .or_else(|| self.focused_window().and_then(|window| window.current_monitor()))?;
+        let monitor = event_loop.primary_monitor().or_else(|| {
+            self.focused_window()
+                .and_then(|window| window.current_monitor())
+        })?;
         let position = monitor.position();
         let size = monitor.size();
         let height = quick_terminal_height(size.height, self.config.quick_terminal_size);
@@ -3775,7 +3838,7 @@ impl ApplicationHandler<UserEvent> for App {
                     .get(&window_id)
                     .map(|state| (state.contains_pane(pane_id), state.occluded));
                 if pane_state.is_some_and(|(pane_exists, _)| pane_exists) {
-                    self.mark_overview_tile_dirty(window_id);
+                    self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
                 }
                 let pane_decision = pane_user_event_redraw_decision(pane_state);
                 let overview_decision = self.overview_redraw_decision_for_pane(window_id, pane_id);
@@ -5583,15 +5646,21 @@ fn ids_in_group<Id: Copy, G: Copy + Eq>(
         .collect()
 }
 
-fn overview_tile_source_order<Id: Copy + Eq>(
-    window_order: &[Id],
-    mut live_window: impl FnMut(Id) -> bool,
-    overview_window: Option<Id>,
-) -> Vec<Id> {
+fn overview_tile_source_order<W: Copy + Eq, P: Copy>(
+    window_order: &[W],
+    mut live_window: impl FnMut(W) -> bool,
+    mut pane_ids_for_window: impl FnMut(W) -> Vec<P>,
+    overview_window: Option<W>,
+) -> Vec<(W, P)> {
     window_order
         .iter()
         .copied()
         .filter(|id| Some(*id) != overview_window && live_window(*id))
+        .flat_map(|window_id| {
+            pane_ids_for_window(window_id)
+                .into_iter()
+                .map(move |pane_id| (window_id, pane_id))
+        })
         .collect()
 }
 
@@ -6049,7 +6118,9 @@ mod tests {
         assert!(
             (quick_terminal_progress(Duration::from_millis(100), duration) - 0.5).abs() < 0.001
         );
-        assert!((quick_terminal_progress(Duration::from_millis(400), duration) - 1.0).abs() < 0.001);
+        assert!(
+            (quick_terminal_progress(Duration::from_millis(400), duration) - 1.0).abs() < 0.001
+        );
         // A zero-length slide is instantly complete (no divide-by-zero).
         assert!((quick_terminal_progress(Duration::ZERO, Duration::ZERO) - 1.0).abs() < 0.001);
     }
@@ -6562,10 +6633,28 @@ mod tests {
     fn overview_window_order_excludes_overview_and_closed_tabs() {
         let window_order = [1_u8, 2, 3, 4];
         let live_windows = |id| id != 3;
+        let panes_for_window = |id| vec![id + 10];
 
-        let sources = overview_tile_source_order(&window_order, live_windows, Some(4));
+        let sources =
+            overview_tile_source_order(&window_order, live_windows, panes_for_window, Some(4));
 
-        assert_eq!(sources, vec![1, 2]);
+        assert_eq!(sources, vec![(1, 11), (2, 12)]);
+    }
+
+    #[test]
+    fn overview_window_order_expands_each_tab_to_panes_in_leaf_order() {
+        let window_order = [1_u8, 2, 3];
+        let live_windows = |id| id != 2;
+        let panes_for_window = |id| match id {
+            1 => vec![11, 12, 13],
+            3 => vec![31],
+            _ => Vec::new(),
+        };
+
+        let sources =
+            overview_tile_source_order(&window_order, live_windows, panes_for_window, None);
+
+        assert_eq!(sources, vec![(1, 11), (1, 12), (1, 13), (3, 31)]);
     }
 
     #[test]

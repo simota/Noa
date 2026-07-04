@@ -56,11 +56,23 @@ impl MacosMenu {
             true,
             Some(cmd_accelerator(Code::KeyT)),
         );
+        let file_new_window = MenuItem::with_id(
+            AppCommand::NewWindow.menu_id(),
+            "New Window",
+            true,
+            Some(cmd_accelerator(Code::KeyN)),
+        );
         let file_close_tab = MenuItem::with_id(
             AppCommand::CloseTab.menu_id(),
             "Close Tab",
             true,
             Some(cmd_accelerator(Code::KeyW)),
+        );
+        let file_close_window = MenuItem::with_id(
+            AppCommand::CloseWindow.menu_id(),
+            "Close Window",
+            true,
+            Some(cmd_shift_accelerator(Code::KeyW)),
         );
         let file_menu = Submenu::with_id_and_items(
             "noa.menu.file",
@@ -68,8 +80,10 @@ impl MacosMenu {
             true,
             &[
                 &file_new_tab,
+                &file_new_window,
                 &PredefinedMenuItem::separator(),
                 &file_close_tab,
+                &file_close_window,
             ],
         )?;
         let edit_menu = Submenu::with_id_and_items(

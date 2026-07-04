@@ -213,10 +213,33 @@ struct GpuState {
     theme: Theme,
 }
 
+/// Identifies one logical window — i.e. one AppKit tab group. Every native
+/// tab ([`WindowState`]) carries the id of the window it belongs to; tabs
+/// sharing an id are tabbed together (macOS) and cycle/select among
+/// themselves, while a fresh id (minted by [`App::allocate_group_id`] on
+/// `New Window`) starts a separate native window. The macOS `tabbingIdentifier`
+/// string is derived from it in [`App::tabbing_identifier`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct WindowGroupId(u64);
+
+/// Whether a spawned tab joins the focused window or opens a new one — the
+/// only difference between `New Tab` (`cmd+t`) and `New Window` (`cmd+n`),
+/// which otherwise share [`App::spawn_tab`]'s whole creation path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpawnTarget {
+    /// Join the focused window's tab group (a fresh group if nothing is
+    /// focused, e.g. the very first tab at startup).
+    CurrentWindow,
+    /// Always start a fresh tab group / native window.
+    NewWindow,
+}
+
 /// State for one native tab. On macOS, each tab is an NSWindow in the same
 /// AppKit tab group; winit still reports them as distinct `WindowId`s.
 struct WindowState {
     window: Arc<Window>,
+    /// The logical window (AppKit tab group) this tab belongs to.
+    group: WindowGroupId,
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
@@ -420,8 +443,10 @@ pub struct App {
     focused: Option<WindowId>,
     #[cfg(target_os = "macos")]
     macos_menu: Option<crate::macos_menu::MacosMenu>,
-    #[cfg(target_os = "macos")]
-    tab_group_identifier: String,
+    /// Monotonic source of [`WindowGroupId`]s; bumped by
+    /// [`App::allocate_group_id`] each time a `New Window` starts a fresh tab
+    /// group so no two logical windows ever collide.
+    next_group_id: u64,
     modifiers: ModifiersState,
     clipboard: SystemClipboard,
     keybinds: KeybindEngine,
@@ -480,8 +505,7 @@ impl App {
             focused: None,
             #[cfg(target_os = "macos")]
             macos_menu: None,
-            #[cfg(target_os = "macos")]
-            tab_group_identifier: format!("noa.tabs.{}", std::process::id()),
+            next_group_id: 0,
             modifiers: ModifiersState::empty(),
             clipboard: SystemClipboard::new(),
             keybinds: KeybindEngine::default(),
@@ -786,7 +810,10 @@ impl App {
                 log::debug!("Preferences selected before settings support exists");
             }
             AppCommand::NewTab => {
-                let _ = self.spawn_tab(event_loop);
+                let _ = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow);
+            }
+            AppCommand::NewWindow => {
+                let _ = self.spawn_tab(event_loop, SpawnTarget::NewWindow);
             }
             AppCommand::NewSplitRight => {
                 if let Some(window_id) = self.focused {
@@ -834,7 +861,8 @@ impl App {
             AppCommand::Search(action) => self.handle_search_action(action),
             AppCommand::ScrollViewport(scroll) => self.scroll_viewport(scroll),
             AppCommand::ToggleCommandPalette => self.toggle_command_palette(),
-            AppCommand::CloseWindow | AppCommand::Quit => event_loop.exit(),
+            AppCommand::CloseWindow => self.close_window(event_loop),
+            AppCommand::Quit => event_loop.exit(),
         }
     }
 
@@ -858,10 +886,25 @@ impl App {
         }
     }
 
-    fn spawn_tab(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<WindowId> {
+    fn spawn_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        target: SpawnTarget,
+    ) -> anyhow::Result<WindowId> {
         // Inherit the focused shell's cwd before `self.focused` is repointed
         // at the new tab below.
         let inherited_cwd = self.focused_pane_cwd();
+        // Resolve which logical window (tab group) this tab joins before the
+        // window is created — the macOS `tabbingIdentifier` is baked into the
+        // window attributes and can't change afterward.
+        let focused_group = self
+            .focused
+            .and_then(|id| self.windows.get(&id))
+            .map(|state| state.group);
+        let group = match spawn_group_choice(target, focused_group) {
+            GroupChoice::Existing(group) => group,
+            GroupChoice::Fresh => self.allocate_group_id(),
+        };
         let initial_grid_size = GridSize::new(self.config.cols, self.config.rows);
         let monitor_scale_factor = event_loop
             .primary_monitor()
@@ -891,7 +934,7 @@ impl App {
             self.padding,
         );
 
-        let window_attrs = self.tab_window_attributes(inner_size);
+        let window_attrs = self.tab_window_attributes(inner_size, group);
         let window = Arc::new(
             event_loop
                 .create_window(window_attrs)
@@ -1024,6 +1067,7 @@ impl App {
             window_id,
             WindowState {
                 window: window.clone(),
+                group,
                 surface,
                 surface_config,
                 renderer,
@@ -1048,7 +1092,11 @@ impl App {
         Ok(window_id)
     }
 
-    fn tab_window_attributes(&self, inner_size: LogicalSize<f64>) -> WindowAttributes {
+    fn tab_window_attributes(
+        &self,
+        inner_size: LogicalSize<f64>,
+        group: WindowGroupId,
+    ) -> WindowAttributes {
         let attrs = WindowAttributes::default()
             .with_title("noa")
             .with_inner_size(inner_size)
@@ -1058,12 +1106,32 @@ impl App {
             .with_transparent(self.config.background_opacity < 1.0);
         #[cfg(target_os = "macos")]
         {
-            attrs.with_tabbing_identifier(&self.tab_group_identifier)
+            // Tabs in the same group share a `tabbingIdentifier`, so AppKit
+            // tabs them into one window; a distinct group id yields a distinct
+            // identifier and thus a separate native window.
+            attrs.with_tabbing_identifier(&self.tabbing_identifier(group))
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let _ = group;
             attrs
         }
+    }
+
+    /// Mint the next unique [`WindowGroupId`]. Each `New Window` calls this so
+    /// its tab group can never collide with an existing window's.
+    fn allocate_group_id(&mut self) -> WindowGroupId {
+        let id = WindowGroupId(self.next_group_id);
+        self.next_group_id += 1;
+        id
+    }
+
+    /// The macOS `tabbingIdentifier` for a logical window. Per-process
+    /// (`std::process::id()`) so two noa instances never merge their tabs, and
+    /// per-group so each window keeps a separate tab bar.
+    #[cfg(target_os = "macos")]
+    fn tabbing_identifier(&self, group: WindowGroupId) -> String {
+        format!("noa.tabs.{}.{}", std::process::id(), group.0)
     }
 
     fn overview_window_attributes(&self) -> WindowAttributes {
@@ -1229,6 +1297,32 @@ impl App {
                 }
                 self.request_overview_redraw();
             }
+        }
+    }
+
+    /// Close the entire focused logical window: every tab in its AppKit tab
+    /// group (`cmd+shift+w` / File → Close Window). Each tab is torn down via
+    /// [`App::close_tab`], so all its per-tab cleanup (io-thread shutdown,
+    /// modal/search/palette de-leak, focus repoint) runs, and closing the last
+    /// remaining window's last tab still quits the app through
+    /// [`TabCloseOutcome::Quit`]. A no-op when nothing is focused.
+    fn close_window(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(group) = self
+            .focused
+            .and_then(|id| self.windows.get(&id))
+            .map(|state| state.group)
+        else {
+            return;
+        };
+        // Snapshot the group's tabs first — `close_tab` mutates `window_order`
+        // and `focused` on each call, so iterating it live would be unsound.
+        let tabs = ids_in_group(
+            &self.window_order,
+            |id| self.windows.get(&id).map(|state| state.group),
+            group,
+        );
+        for window_id in tabs {
+            self.close_tab(event_loop, window_id);
         }
     }
 
@@ -2690,7 +2784,7 @@ impl Drop for App {
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.windows.is_empty() {
-            let _ = self.spawn_tab(event_loop);
+            let _ = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow);
         }
     }
 
@@ -4478,6 +4572,41 @@ fn close_tab_outcome<Id: Copy + Eq>(
     }
 }
 
+/// Which tab group a spawned tab should join, given the spawn target and the
+/// focused window's group (if any). The `Fresh` arm defers minting an id to
+/// the caller ([`App::allocate_group_id`]) so this stays a pure decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupChoice<G> {
+    Existing(G),
+    Fresh,
+}
+
+fn spawn_group_choice<G: Copy>(target: SpawnTarget, focused_group: Option<G>) -> GroupChoice<G> {
+    match target {
+        SpawnTarget::NewWindow => GroupChoice::Fresh,
+        SpawnTarget::CurrentWindow => match focused_group {
+            Some(group) => GroupChoice::Existing(group),
+            None => GroupChoice::Fresh,
+        },
+    }
+}
+
+/// The ids in `order` whose group is `group`, preserving `order`. Backs
+/// [`App::close_window`] (which closes every tab of the focused window's
+/// group) and keeps the group-membership filter unit-testable without a live
+/// window map.
+fn ids_in_group<Id: Copy, G: Copy + Eq>(
+    order: &[Id],
+    group_of: impl Fn(Id) -> Option<G>,
+    group: G,
+) -> Vec<Id> {
+    order
+        .iter()
+        .copied()
+        .filter(|id| group_of(*id) == Some(group))
+        .collect()
+}
+
 fn overview_tile_source_order<Id: Copy + Eq>(
     window_order: &[Id],
     mut live_window: impl FnMut(Id) -> bool,
@@ -4593,6 +4722,7 @@ fn command_scope(command: AppCommand) -> CommandScope {
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::NewTab
+        | AppCommand::NewWindow
         | AppCommand::ToggleCommandPalette
         | AppCommand::CloseWindow
         | AppCommand::Quit => CommandScope::App,
@@ -4637,6 +4767,7 @@ fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::Search(_)
         | AppCommand::ScrollViewport(_)
         | AppCommand::NewTab
+        | AppCommand::NewWindow
         | AppCommand::NewSplitRight
         | AppCommand::NewSplitDown
         | AppCommand::FocusDirection(_)
@@ -5317,6 +5448,45 @@ mod tests {
             close_tab_outcome(&[1, 2, 3], Some(1), 2, false),
             TabCloseOutcome::Continue { focused: Some(1) }
         );
+    }
+
+    #[test]
+    fn spawn_group_choice_routes_new_tab_and_new_window() {
+        // New Tab joins the focused window's group; with no focus (startup) it
+        // falls back to a fresh group.
+        assert_eq!(
+            spawn_group_choice(SpawnTarget::CurrentWindow, Some(7_u64)),
+            GroupChoice::Existing(7)
+        );
+        assert_eq!(
+            spawn_group_choice::<u64>(SpawnTarget::CurrentWindow, None),
+            GroupChoice::Fresh
+        );
+        // New Window always starts a fresh group, even when one is focused.
+        assert_eq!(
+            spawn_group_choice(SpawnTarget::NewWindow, Some(7_u64)),
+            GroupChoice::Fresh
+        );
+        assert_eq!(
+            spawn_group_choice::<u64>(SpawnTarget::NewWindow, None),
+            GroupChoice::Fresh
+        );
+    }
+
+    #[test]
+    fn ids_in_group_filters_focused_windows_tabs() {
+        // Two windows: tabs 1,3 in group 0; tabs 2,4 in group 1. Close Window
+        // for the group-0 window must target exactly its tabs, in order.
+        let order = [1_u8, 2, 3, 4];
+        let group_of = |id: u8| match id {
+            1 | 3 => Some(0_u8),
+            2 | 4 => Some(1_u8),
+            _ => None,
+        };
+        assert_eq!(ids_in_group(&order, group_of, 0), vec![1, 3]);
+        assert_eq!(ids_in_group(&order, group_of, 1), vec![2, 4]);
+        // A group with no live tabs yields nothing.
+        assert_eq!(ids_in_group(&order, group_of, 9), Vec::<u8>::new());
     }
 
     #[test]

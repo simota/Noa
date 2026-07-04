@@ -15,6 +15,7 @@ pub enum AppCommand {
     Search(SearchAction),
     ScrollViewport(ViewportScroll),
     NewTab,
+    NewWindow,
     NewSplitRight,
     NewSplitDown,
     FocusDirection(Direction),
@@ -95,6 +96,7 @@ impl AppCommand {
     pub(crate) const SCROLL_PREV_PROMPT_MENU_ID: &'static str = "noa.view.scroll-prev-prompt";
     pub(crate) const SCROLL_NEXT_PROMPT_MENU_ID: &'static str = "noa.view.scroll-next-prompt";
     pub(crate) const NEW_TAB_MENU_ID: &'static str = "noa.file.new-tab";
+    pub(crate) const NEW_WINDOW_MENU_ID: &'static str = "noa.file.new-window";
     pub(crate) const NEW_SPLIT_RIGHT_MENU_ID: &'static str = "noa.file.new-split-right";
     pub(crate) const NEW_SPLIT_DOWN_MENU_ID: &'static str = "noa.file.new-split-down";
     pub(crate) const FOCUS_SPLIT_LEFT_MENU_ID: &'static str = "noa.split.focus-left";
@@ -147,6 +149,7 @@ impl AppCommand {
                 Self::SCROLL_NEXT_PROMPT_MENU_ID
             }
             AppCommand::NewTab => Self::NEW_TAB_MENU_ID,
+            AppCommand::NewWindow => Self::NEW_WINDOW_MENU_ID,
             AppCommand::NewSplitRight => Self::NEW_SPLIT_RIGHT_MENU_ID,
             AppCommand::NewSplitDown => Self::NEW_SPLIT_DOWN_MENU_ID,
             AppCommand::FocusDirection(Direction::Left) => Self::FOCUS_SPLIT_LEFT_MENU_ID,
@@ -201,6 +204,7 @@ impl AppCommand {
                 Some(Self::ScrollViewport(ViewportScroll::NextPrompt))
             }
             Self::NEW_TAB_MENU_ID => Some(Self::NewTab),
+            Self::NEW_WINDOW_MENU_ID => Some(Self::NewWindow),
             Self::NEW_SPLIT_RIGHT_MENU_ID => Some(Self::NewSplitRight),
             Self::NEW_SPLIT_DOWN_MENU_ID => Some(Self::NewSplitDown),
             Self::FOCUS_SPLIT_LEFT_MENU_ID => Some(Self::FocusDirection(Direction::Left)),
@@ -262,6 +266,7 @@ impl AppCommand {
             Self::ScrollViewport(ViewportScroll::PrevPrompt) => "scroll.prev-prompt",
             Self::ScrollViewport(ViewportScroll::NextPrompt) => "scroll.next-prompt",
             Self::NewTab => "tab.new",
+            Self::NewWindow => "window.new",
             Self::NewSplitRight => "split.new-right",
             Self::NewSplitDown => "split.new-down",
             Self::FocusDirection(Direction::Left) => "split.focus-left",
@@ -321,6 +326,7 @@ impl AppCommand {
             "scroll.prev-prompt" => Some(Self::ScrollViewport(ViewportScroll::PrevPrompt)),
             "scroll.next-prompt" => Some(Self::ScrollViewport(ViewportScroll::NextPrompt)),
             "tab.new" => Some(Self::NewTab),
+            "window.new" => Some(Self::NewWindow),
             "split.new-right" => Some(Self::NewSplitRight),
             "split.new-down" => Some(Self::NewSplitDown),
             "split.focus-left" => Some(Self::FocusDirection(Direction::Left)),
@@ -379,9 +385,11 @@ impl Default for KeybindEngine {
         let specs = [
             ("cmd+q", AppCommand::Quit),
             ("cmd+t", AppCommand::NewTab),
+            ("cmd+n", AppCommand::NewWindow),
             ("cmd+d", AppCommand::NewSplitRight),
             ("cmd+shift+d", AppCommand::NewSplitDown),
             ("cmd+w", AppCommand::CloseTab),
+            ("cmd+shift+w", AppCommand::CloseWindow),
             ("cmd+1", AppCommand::SelectTab(1)),
             ("cmd+2", AppCommand::SelectTab(2)),
             ("cmd+3", AppCommand::SelectTab(3)),
@@ -749,6 +757,7 @@ mod tests {
             AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
             AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
             AppCommand::NewTab,
+            AppCommand::NewWindow,
             AppCommand::NewSplitRight,
             AppCommand::NewSplitDown,
             AppCommand::FocusDirection(Direction::Left),
@@ -937,6 +946,39 @@ mod tests {
     }
 
     #[test]
+    fn new_window_binds_to_cmd_n_and_round_trips() {
+        let command = AppCommand::NewWindow;
+        assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+        assert_eq!(
+            AppCommand::from_action_name(command.action_name()),
+            Some(command)
+        );
+        assert_eq!(command.action_name(), "window.new");
+        assert_eq!(
+            AppCommand::from_cmd_character("n"),
+            Some(AppCommand::NewWindow)
+        );
+        // cmd+n must not shadow cmd+t (New Tab) — they stay distinct.
+        assert_eq!(AppCommand::from_cmd_character("t"), Some(AppCommand::NewTab));
+    }
+
+    #[test]
+    fn close_window_binds_to_cmd_shift_w_distinct_from_close_tab() {
+        // cmd+w closes the tab; cmd+shift+w closes the whole window.
+        assert_eq!(
+            AppCommand::from_cmd_character("w"),
+            Some(AppCommand::CloseTab)
+        );
+        assert_eq!(
+            AppCommand::from_key(
+                &Key::Character("w".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::CloseWindow)
+        );
+    }
+
+    #[test]
     fn tab_cycle_shortcuts_use_cmd_shift_brackets() {
         assert_eq!(
             AppCommand::from_key(
@@ -1071,6 +1113,7 @@ mod tests {
             AppCommand::Search(SearchAction::Clear),
             AppCommand::ScrollViewport(ViewportScroll::PageUp),
             AppCommand::NewTab,
+            AppCommand::NewWindow,
             AppCommand::NewSplitRight,
             AppCommand::NewSplitDown,
             AppCommand::FocusDirection(Direction::Left),
@@ -1088,6 +1131,7 @@ mod tests {
             AppCommand::SelectTab(3),
             AppCommand::NextTab,
             AppCommand::PrevTab,
+            AppCommand::CloseWindow,
             AppCommand::Quit,
         ] {
             assert_eq!(

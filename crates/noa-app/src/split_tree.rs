@@ -455,6 +455,7 @@ pub fn resolve_pane_command_target(
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::NewTab
+        | AppCommand::NewWindow
         | AppCommand::ToggleTabOverview
         | AppCommand::ToggleCommandPalette
         | AppCommand::SelectTab(_)

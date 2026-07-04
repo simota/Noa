@@ -9,6 +9,7 @@ use crate::charset::CharsetState;
 use crate::cursor::{Cursor, CursorStyle, ScrollRegion};
 use crate::kitty::{ImageStore, KittyError, KittyImage, TransmitStep};
 use crate::kitty_keyboard::{KittyKeyboard, SetMode};
+use crate::kitty_placeholder::scan_row;
 use crate::modes::ModeState;
 use crate::osc::{
     CwdOsc, HyperlinkOsc, Notification, Osc52Policy, ShellIntegrationOsc, ShellIntegrationOscKind,
@@ -779,6 +780,70 @@ impl Terminal {
     /// sorted by z ascending. The renderer pairs each with [`Terminal::kitty_image`].
     pub fn kitty_visible_placements(&self) -> Vec<VisibleKittyPlacement> {
         self.active().visible_kitty_placements()
+    }
+
+    /// Placements synthesized from Unicode placeholder cells (`U+10EEEE`) that
+    /// reference a virtual placement (`U=1`) on the active screen, projected into
+    /// the current viewport. Each returned placement covers one fused run of
+    /// placeholder cells and carries the image source sub-rectangle for that run.
+    ///
+    /// Returns empty unless the active screen holds a virtual placement, so the
+    /// common no-image path pays only one `any` scan. Each run is matched to a
+    /// virtual placement by image id (and placement id when the placeholder
+    /// encodes one); the virtual placement supplies the image's cell grid
+    /// (`cols`×`rows`), any crop, and the z-index, from which the run's source
+    /// rectangle is carved.
+    pub fn kitty_placeholder_placements(&self) -> Vec<VisibleKittyPlacement> {
+        let screen = self.active();
+        if !screen.kitty_placements.iter().any(|p| p.is_virtual) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for y in 0..screen.rows {
+            let Some(row) = screen.visible_row(y) else {
+                continue;
+            };
+            for run in scan_row(&row.cells) {
+                let Some(vp) = screen.kitty_placements.iter().find(|p| {
+                    p.is_virtual
+                        && p.image_id == run.image_id
+                        && (run.placement_id == 0 || p.placement_id == run.placement_id)
+                }) else {
+                    continue;
+                };
+                let Some(img) = self.kitty_images.get(run.image_id) else {
+                    continue;
+                };
+                // The virtual placement spreads its (optionally cropped) image
+                // across a `cols`×`rows` cell grid; this run covers image row
+                // `virt_row`, columns `[virt_col_start, +cols)` of that grid.
+                let base = vp.src.unwrap_or([0, 0, img.width, img.height]);
+                let cell_w = f64::from(base[2]) / f64::from(vp.cols.max(1));
+                let cell_h = f64::from(base[3]) / f64::from(vp.rows.max(1));
+                let sx = f64::from(base[0]) + f64::from(run.virt_col_start) * cell_w;
+                let sy = f64::from(base[1]) + f64::from(run.virt_row) * cell_h;
+                let sw = f64::from(run.cols) * cell_w;
+                let src = [
+                    sx.round() as u32,
+                    sy.round() as u32,
+                    (sw.round() as u32).max(1),
+                    (cell_h.round() as u32).max(1),
+                ];
+                out.push(VisibleKittyPlacement {
+                    image_id: run.image_id,
+                    placement_id: run.placement_id,
+                    grid_x: i32::from(run.screen_x),
+                    grid_y: i32::from(y),
+                    cell_x_off: 0,
+                    cell_y_off: 0,
+                    cols: run.cols,
+                    rows: 1,
+                    src: Some(src),
+                    z: vp.z,
+                });
+            }
+        }
+        out
     }
 
     /// A stored image by id (for the renderer to upload/sample).

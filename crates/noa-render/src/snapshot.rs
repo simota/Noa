@@ -92,10 +92,14 @@ pub struct SnapshotImage {
 /// [`FrameSnapshot::peek`]; both take `&Terminal` here (the projection is a
 /// read), so it runs before either path's mutable row extraction.
 fn kitty_snapshot(terminal: &Terminal) -> (Vec<ImagePlacementSnapshot>, Vec<SnapshotImage>) {
-    let placements = terminal.kitty_visible_placements();
+    let mut placements = terminal.kitty_visible_placements();
+    placements.extend(terminal.kitty_placeholder_placements());
     if placements.is_empty() {
         return (Vec::new(), Vec::new());
     }
+    // Direct and placeholder placements were each z-sorted in isolation; the
+    // renderer's band split needs the combined list z-ascending too.
+    placements.sort_by_key(|p| p.z);
     let mut out_placements = Vec::with_capacity(placements.len());
     let mut images: Vec<SnapshotImage> = Vec::new();
     for placement in &placements {
@@ -515,6 +519,36 @@ mod tests {
         let snap = FrameSnapshot::peek(&term);
         assert_eq!(snap.image_placements.len(), 1);
         assert_eq!(snap.images.len(), 1);
+        assert_eq!(snap.images[0].id, 1);
+    }
+
+    #[test]
+    fn snapshot_resolves_unicode_placeholder_into_a_placement() {
+        use noa_core::{Color, Rgb};
+        use noa_vt::Stream;
+        // A 30×40 image placed as a virtual 3×2 cell grid (U=1), drawn nowhere
+        // directly — only via placeholder cells.
+        let mut term = Terminal::new(GridSize::new(20, 24));
+        term.set_pixel_metrics(10, 20, 200, 480);
+        let mut stream = Stream::new();
+        stream.feed(
+            &apc("a=T,f=32,s=30,v=40,i=1,U=1,c=3,r=2,C=1", &vec![0u8; 30 * 40 * 4]),
+            &mut term,
+        );
+        // One placeholder cell at (0,0): image id 1, image row 0, column 0.
+        let cell = &mut term.primary.grid[0].cells[0];
+        cell.ch = noa_grid::PLACEHOLDER;
+        cell.fg = Color::Rgb(Rgb::new(0, 0, 1));
+        cell.combining.push('\u{0305}'); // row 0
+        cell.combining.push('\u{0305}'); // column 0
+
+        let snap = FrameSnapshot::from_terminal(&mut term);
+        assert_eq!(snap.image_placements.len(), 1, "placeholder yields a placement");
+        let p = snap.image_placements[0];
+        assert_eq!((p.grid_x, p.grid_y), (0, 0));
+        assert_eq!((p.cols, p.rows), (1, 1));
+        assert_eq!(p.src, Some([0, 0, 10, 20]), "top-left image tile");
+        assert_eq!(snap.images.len(), 1, "the referenced image is carried");
         assert_eq!(snap.images[0].id, 1);
     }
 }

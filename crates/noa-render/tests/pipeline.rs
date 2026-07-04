@@ -1512,3 +1512,101 @@ fn image_texture_reuploads_only_on_epoch_bump() {
         "an epoch bump must force a texture re-upload"
     );
 }
+
+#[test]
+fn unicode_placeholder_resolves_and_draws_over_text() {
+    use noa_core::GridSize;
+    use noa_grid::Terminal;
+    use noa_vt::Stream;
+
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping placeholder draw test");
+        return;
+    };
+    let width = 96u32;
+    let height = 64u32;
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: width, h: height });
+
+    // A terminal holding a solid-blue image placed as a virtual placement (U=1)
+    // at z=0 (above text), referenced only through a Unicode placeholder cell.
+    let mut term = Terminal::new(GridSize::new(6, 4));
+    term.set_pixel_metrics(12, 16, width, height);
+    let mut stream = Stream::new();
+    let blue: Vec<u8> = [0u8, 0, 255, 255].iter().copied().cycle().take(4 * 4 * 4).collect();
+    let mut apc = b"\x1b_Ga=T,f=32,s=4,v=4,i=1,U=1,c=6,r=4,C=1;".to_vec();
+    let mut b64 = Vec::new();
+    noa_grid_test_base64(&blue, &mut b64);
+    apc.extend_from_slice(&b64);
+    apc.extend_from_slice(b"\x1b\\");
+    stream.feed(&apc, &mut term);
+    // Fill the whole grid with placeholder cells (image id 1). The first cell of
+    // each grid row anchors row/column 0; the rest infer.
+    for y in 0..4usize {
+        for x in 0..6usize {
+            let cell = &mut term.primary.grid[y].cells[x];
+            cell.ch = noa_grid::PLACEHOLDER;
+            cell.fg = Color::Rgb(Rgb::new(0, 0, 1));
+            cell.combining.clear();
+            if x == 0 {
+                // Row index = y (diacritics table values 0..3).
+                cell.combining.push(placeholder_diacritic(y as u32));
+                cell.combining.push(placeholder_diacritic(0));
+            }
+        }
+    }
+
+    let snap = FrameSnapshot::from_terminal(&mut term);
+    assert!(
+        !snap.image_placements.is_empty(),
+        "the placeholder cells must resolve to at least one image placement"
+    );
+
+    renderer.rebuild_cells(&snap, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+    let (target, view) = render_target(&device, width, height);
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.draw(&device, &queue, &view);
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(err.is_none(), "placeholder draw hit a wgpu validation error: {err:?}");
+
+    // Center pixel: the opaque blue image covers the grid.
+    let pixels = read_rgba_pixels(&device, &queue, &target, width, height);
+    let i = ((height / 2) as usize * width as usize + (width / 2) as usize) * 4;
+    let px = [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]];
+    assert!(
+        px[2] > px[0],
+        "placeholder image (blue) must be visible over the cells, got {px:?}"
+    );
+}
+
+/// The row/column diacritic encoding `value` (Kitty's table; values 0..=3 are
+/// the first four entries). Kept in the test to avoid exposing the table.
+fn placeholder_diacritic(value: u32) -> char {
+    const FIRST_FOUR: [char; 4] = ['\u{0305}', '\u{030D}', '\u{030E}', '\u{0310}'];
+    FIRST_FOUR[value as usize]
+}
+
+/// Minimal base64 encoder for the placeholder test's image payload.
+fn noa_grid_test_base64(data: &[u8], out: &mut Vec<u8>) {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(ALPHABET[(n >> 18 & 63) as usize]);
+        out.push(ALPHABET[(n >> 12 & 63) as usize]);
+        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6 & 63) as usize] } else { b'=' });
+        out.push(if chunk.len() > 2 { ALPHABET[(n & 63) as usize] } else { b'=' });
+    }
+}

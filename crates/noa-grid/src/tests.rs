@@ -2761,3 +2761,105 @@ fn kitty_alt_screen_placement_is_separated() {
     // Image data survives (only placements are per-screen).
     assert!(t.kitty_images.get(1).is_some());
 }
+
+// ── Kitty Unicode placeholders (U+10EEEE) ───────────────────────────
+
+/// Row/column/most-significant-byte diacritics for values 0, 1, 2 (the first
+/// three entries of Kitty's table).
+const DIA: [char; 3] = ['\u{0305}', '\u{030D}', '\u{030E}'];
+
+/// Write a placeholder cell (`U+10EEEE`) at grid `(x, y)`, encoding image id in
+/// the fg, placement id in the underline color, and the given diacritics.
+fn put_placeholder(t: &mut Terminal, x: usize, y: usize, id: u32, diacritics: &[char]) {
+    let cell = &mut t.primary.grid[y].cells[x];
+    cell.ch = crate::PLACEHOLDER;
+    cell.fg = Color::Rgb(Rgb::new(
+        ((id >> 16) & 0xff) as u8,
+        ((id >> 8) & 0xff) as u8,
+        (id & 0xff) as u8,
+    ));
+    cell.combining.clear();
+    for &d in diacritics {
+        cell.combining.push(d);
+    }
+}
+
+/// A 20×24 terminal holding image id 1 (30×40 px) placed as a virtual 3×2 cell
+/// grid, so each virtual cell maps to a clean 10×20 px image tile.
+fn kitty_virtual_terminal() -> Terminal {
+    let mut t = kitty_terminal();
+    feed(
+        &mut t,
+        &kitty_apc("a=T,f=32,s=30,v=40,i=1,U=1,c=3,r=2,C=1", &vec![0u8; 30 * 40 * 4]),
+    );
+    // The virtual placement is stored but excluded from direct rendering.
+    assert_eq!(t.primary.kitty_placements.len(), 1);
+    assert!(t.primary.kitty_placements[0].is_virtual);
+    assert!(t.kitty_visible_placements().is_empty());
+    t
+}
+
+#[test]
+fn placeholder_run_resolves_source_tile() {
+    let mut t = kitty_virtual_terminal();
+    // Row 0 of the image across all three columns: first cell fully specified,
+    // the next two infer column +1.
+    put_placeholder(&mut t, 0, 0, 1, &[DIA[0], DIA[0]]);
+    put_placeholder(&mut t, 1, 0, 1, &[]);
+    put_placeholder(&mut t, 2, 0, 1, &[]);
+
+    let placements = t.kitty_placeholder_placements();
+    assert_eq!(placements.len(), 1, "three cells fuse into one run");
+    let p = &placements[0];
+    assert_eq!((p.grid_x, p.grid_y), (0, 0));
+    assert_eq!((p.cols, p.rows), (3, 1));
+    assert_eq!(p.image_id, 1);
+    // Whole first image row: x=0, y=0, w=30 (3×10), h=20 (40/2).
+    assert_eq!(p.src, Some([0, 0, 30, 20]));
+    assert_eq!(p.z, 0);
+}
+
+#[test]
+fn placeholder_second_row_offsets_source_y() {
+    let mut t = kitty_virtual_terminal();
+    // Image row 1, single column 0 → lower tile of the image.
+    put_placeholder(&mut t, 4, 2, 1, &[DIA[1], DIA[0]]);
+    let placements = t.kitty_placeholder_placements();
+    assert_eq!(placements.len(), 1);
+    let p = &placements[0];
+    assert_eq!((p.grid_x, p.grid_y), (4, 2));
+    assert_eq!((p.cols, p.rows), (1, 1));
+    assert_eq!(p.src, Some([0, 20, 10, 20]), "image row 1 starts at y=20");
+}
+
+#[test]
+fn placeholder_without_virtual_placement_draws_nothing() {
+    let mut t = kitty_terminal();
+    // A placeholder referencing image 7, which has no virtual placement.
+    put_placeholder(&mut t, 0, 0, 7, &[DIA[0], DIA[0]]);
+    assert!(
+        t.kitty_placeholder_placements().is_empty(),
+        "no virtual placement ⇒ nothing to resolve"
+    );
+}
+
+#[test]
+fn placeholder_id_mismatch_is_skipped() {
+    let mut t = kitty_virtual_terminal();
+    // Virtual placement is for image 1; a placeholder for image 2 resolves to
+    // nothing even though a virtual placement exists.
+    put_placeholder(&mut t, 0, 0, 2, &[DIA[0], DIA[0]]);
+    assert!(t.kitty_placeholder_placements().is_empty());
+}
+
+#[test]
+fn placeholder_column_jump_splits_run() {
+    let mut t = kitty_virtual_terminal();
+    // Column 0 then an explicit jump to column 2 (skipping 1) ⇒ two runs.
+    put_placeholder(&mut t, 0, 0, 1, &[DIA[0], DIA[0]]);
+    put_placeholder(&mut t, 1, 0, 1, &[DIA[0], DIA[2]]);
+    let placements = t.kitty_placeholder_placements();
+    assert_eq!(placements.len(), 2, "non-contiguous image columns don't fuse");
+    assert_eq!(placements[0].src, Some([0, 0, 10, 20]));
+    assert_eq!(placements[1].src, Some([20, 0, 10, 20]), "column 2 tile");
+}

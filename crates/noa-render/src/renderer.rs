@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use noa_core::{CellAttrs, CellSize, Color, GridPadding, PixelSize};
 use noa_font::{FontGrid, Metrics, ShapedGlyph};
-use noa_grid::{Cell, CursorStyle, Row, SearchState, Selection, TerminalColors};
+use noa_grid::{Cell, CursorStyle, PLACEHOLDER, Row, SearchState, Selection, TerminalColors};
 use unicode_width::UnicodeWidthChar;
 
 use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
@@ -986,8 +986,12 @@ fn rebuild_row_instances(
         // ink for them (mirrors the old `!invisible` glyph-skip check);
         // a plain blank/wide-spacer cell needs no special-casing here
         // because it naturally rasterizes to an empty glyph, filtered
-        // out in `emit_run_glyph_instances`.
-        let (shape_ch, shape_combining) = if invisible {
+        // out in `emit_run_glyph_instances`. A Kitty Unicode placeholder
+        // cell (`U+10EEEE` + row/column diacritics) is likewise blanked:
+        // the image layer draws its image piece, so the placeholder scalar
+        // and its diacritics must never rasterize as text.
+        let placeholder = cell.ch == PLACEHOLDER;
+        let (shape_ch, shape_combining) = if invisible || placeholder {
             (' ', Vec::new())
         } else {
             (cell.ch, cell.combining.chars().collect())

@@ -1,0 +1,399 @@
+//! `Screen` methods for scrollback queries, viewport scrolling,
+//! selection, search, and visible-row extraction.
+
+use super::*;
+
+impl Screen {
+
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    pub fn viewport_offset(&self) -> usize {
+        self.viewport_offset
+    }
+
+    /// Set the scrollback byte limit at runtime (`0` disables scrollback and
+    /// drops all history), evicting immediately. No-op on the alternate screen,
+    /// which keeps no history. Evicted rows advance `rows_evicted` and shift the
+    /// selection up so session-absolute coordinates stay valid.
+    pub fn set_scrollback_limit_bytes(&mut self, bytes: usize) {
+        if !self.scrollback_enabled {
+            return;
+        }
+        let evicted = self.scrollback.set_limit_bytes(bytes);
+        if evicted > 0 {
+            self.rows_evicted += evicted;
+            self.selection = self
+                .selection
+                .and_then(|selection| selection.shift_rows_up(evicted));
+            self.prune_evicted_placements();
+        }
+        self.clamp_viewport();
+    }
+
+    pub(super) fn has_selectable_text(&self) -> bool {
+        self.scrollback_has_text()
+            || self
+                .grid
+                .iter()
+                .any(|row| row.cells.iter().any(|cell| !cell.is_blank()))
+    }
+
+    pub(super) fn scrollback_has_text(&self) -> bool {
+        self.scrollback.has_text()
+    }
+
+    pub fn scroll_viewport_up(&mut self, rows: usize) {
+        self.viewport_offset = self
+            .viewport_offset
+            .saturating_add(rows)
+            .min(self.max_viewport_offset());
+    }
+
+    pub fn scroll_viewport_down(&mut self, rows: usize) {
+        self.viewport_offset = self.viewport_offset.saturating_sub(rows);
+    }
+
+    pub fn scroll_viewport_to_top(&mut self) {
+        self.viewport_offset = self.max_viewport_offset();
+    }
+
+    pub fn scroll_viewport_to_bottom(&mut self) {
+        self.viewport_offset = 0;
+    }
+
+    /// Rows evicted from the front of the scrollback over this screen's whole
+    /// lifetime (see the field docs).
+    pub fn rows_evicted(&self) -> usize {
+        self.rows_evicted
+    }
+
+    /// Scroll so the history row at `index` (into the current
+    /// `scrollback + grid`, `0` = oldest retained row) becomes the top visible
+    /// row, clamped to the scrollable range. Used by prompt-jump.
+    pub fn scroll_viewport_to_history_index(&mut self, index: usize) {
+        let rows = self.rows as usize;
+        let total = self.scrollback.len() + self.grid.len();
+        let live_start = total.saturating_sub(rows);
+        self.viewport_offset = live_start
+            .saturating_sub(index)
+            .min(self.max_viewport_offset());
+    }
+
+    pub fn set_selection(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
+        self.selection = Some(Selection::new(anchor, focus));
+    }
+
+    pub fn set_viewport_selection(&mut self, anchor: Point, focus: Point) {
+        let row_base = self.visible_row_base();
+        let anchor = self.clamped_viewport_point(anchor);
+        let focus = self.clamped_viewport_point(focus);
+
+        self.selection = Some(Selection::from_viewport_points(row_base, anchor, focus));
+    }
+
+    pub fn select_word_at_viewport_point(&mut self, point: Point) {
+        let point = self.clamped_viewport_point(point);
+        let storage_y = self.visible_row_base() + point.y as usize;
+        let Some(row) = self.storage_row(storage_y) else {
+            self.selection = None;
+            return;
+        };
+        let row: &Row = &row;
+        if row.cells.is_empty() {
+            self.selection = None;
+            return;
+        }
+
+        let x = Self::word_cell_x(row, (point.x as usize).min(row.cells.len() - 1));
+        let (start, end) = if Self::is_word_cell(&row.cells[x]) {
+            Self::word_bounds(row, x)
+        } else {
+            (x, x)
+        };
+
+        self.selection = Some(Selection::new(
+            SelectionPoint::new(start as u16, storage_y),
+            SelectionPoint::new(end as u16, storage_y),
+        ));
+    }
+
+    pub fn select_line_at_viewport_point(&mut self, point: Point) {
+        let point = self.clamped_viewport_point(point);
+        let storage_y = self.visible_row_base() + point.y as usize;
+
+        self.selection = Some(Selection::new(
+            SelectionPoint::new(0, storage_y),
+            SelectionPoint::new(self.cols.saturating_sub(1), storage_y),
+        ));
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    pub fn set_search_query(&mut self, query: impl Into<String>) {
+        let query = query.into();
+        let matches = self.compute_search_matches(&query);
+        self.search.set_query(query, matches);
+        if let Some(active) = self.search.active_match() {
+            self.reveal_search_match(active);
+        }
+    }
+
+    pub fn clear_search(&mut self) {
+        self.search.clear();
+    }
+
+    pub fn search_next(&mut self) -> Option<SearchMatch> {
+        let m = self.search.next_match()?;
+        self.reveal_search_match(m);
+        Some(m)
+    }
+
+    pub fn search_previous(&mut self) -> Option<SearchMatch> {
+        let m = self.search.previous_match()?;
+        self.reveal_search_match(m);
+        Some(m)
+    }
+
+    pub(super) fn compute_search_matches(&mut self, query: &str) -> Vec<SearchMatch> {
+        let Some(needle_chars) = needle_len(query) else {
+            return Vec::new();
+        };
+        let scrollback_len = self.scrollback_len();
+        let mut matches = Vec::new();
+        self.for_each_scrollback_row(0..scrollback_len, |y, row| {
+            append_row_matches(query, needle_chars, y, row, &mut matches);
+        });
+        for (idx, row) in self.grid.iter().enumerate() {
+            append_row_matches(query, needle_chars, scrollback_len + idx, row, &mut matches);
+        }
+        matches
+    }
+
+    pub(super) fn reveal_search_match(&mut self, search_match: SearchMatch) {
+        let rows = self.rows as usize;
+        let scrollback_len = self.scrollback.len();
+        let total = scrollback_len + self.grid.len();
+        let live_start = total.saturating_sub(rows);
+        let y = search_match.start.y.min(total.saturating_sub(1));
+        let current_base = self.visible_row_base();
+        let min_base = y.saturating_add(1).saturating_sub(rows);
+        let max_base = y;
+
+        let target_base = if current_base < min_base {
+            min_base
+        } else if current_base > max_base {
+            max_base
+        } else {
+            current_base
+        };
+        self.viewport_offset = live_start
+            .saturating_sub(target_base)
+            .min(self.max_viewport_offset());
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        let (start, end) = selection.normalized();
+        let mut text = String::new();
+
+        let mut previous_wrapped = false;
+        for y in start.y..=end.y {
+            let row = self.storage_row(y)?;
+            let Some(row_end) = row.cells.len().checked_sub(1) else {
+                continue;
+            };
+            let start_x = if y == start.y { start.x as usize } else { 0 }.min(row_end);
+            let end_x = if y == end.y { end.x as usize } else { row_end }.min(row_end);
+
+            if y > start.y && !previous_wrapped {
+                text.push('\n');
+            }
+            Self::push_selected_row_text(&row, start_x, end_x, &mut text);
+            previous_wrapped = row.wrapped;
+        }
+
+        if text.is_empty() { None } else { Some(text) }
+    }
+
+    pub(super) fn push_selected_row_text(row: &Row, start_x: usize, end_x: usize, text: &mut String) {
+        let before_len = text.len();
+        for cell in &row.cells[start_x..=end_x] {
+            if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
+                continue;
+            }
+            cell.push_text_to(text);
+        }
+
+        if end_x + 1 == row.cells.len() {
+            while text.len() > before_len && text.ends_with(' ') {
+                text.pop();
+            }
+        }
+    }
+
+    pub(super) fn clamped_viewport_point(&self, point: Point) -> Point {
+        Point {
+            x: point.x.min(self.cols.saturating_sub(1)),
+            y: point.y.min(self.rows.saturating_sub(1)),
+        }
+    }
+
+    /// A row from the combined `scrollback + live grid` storage: borrowed for a
+    /// live row, cloned for a history row (materialized straight from packed
+    /// storage once scrollback is paged). Random-access; callers that walk a
+    /// contiguous history range should prefer [`Self::for_each_scrollback_row`]
+    /// to avoid per-row allocation.
+    pub(super) fn storage_row(&self, y: usize) -> Option<Cow<'_, Row>> {
+        let scrollback_len = self.scrollback.len();
+        if y < scrollback_len {
+            self.scrollback.row(y).map(Cow::Owned)
+        } else {
+            self.grid.get(y - scrollback_len).map(Cow::Borrowed)
+        }
+    }
+
+    /// Visit scrollback rows `range` (`0` = oldest) in order. The single seam
+    /// history consumers (search, selection) go through, so paged storage can
+    /// hand back a reused buffer instead of cloning each row.
+    pub(super) fn for_each_scrollback_row(&mut self, range: Range<usize>, f: impl FnMut(usize, &Row)) {
+        self.scrollback.for_each_row(range, f);
+    }
+
+    pub(super) fn word_cell_x(row: &Row, x: usize) -> usize {
+        if x > 0
+            && row.cells[x].attrs.contains(CellAttrs::WIDE_SPACER)
+            && row.cells[x - 1].attrs.contains(CellAttrs::WIDE)
+        {
+            x - 1
+        } else {
+            x
+        }
+    }
+
+    pub(super) fn word_bounds(row: &Row, x: usize) -> (usize, usize) {
+        let mut start = x;
+        while start > 0 {
+            let prev = Self::word_cell_x(row, start - 1);
+            if prev == start || !Self::is_word_cell(&row.cells[prev]) {
+                break;
+            }
+            start = prev;
+        }
+
+        let mut end = Self::visual_cell_end(row, x);
+        while end + 1 < row.cells.len() {
+            let next = Self::word_cell_x(row, end + 1);
+            if next <= end || !Self::is_word_cell(&row.cells[next]) {
+                break;
+            }
+            end = Self::visual_cell_end(row, next);
+        }
+
+        (start, end)
+    }
+
+    pub(super) fn visual_cell_end(row: &Row, x: usize) -> usize {
+        if row.cells[x].attrs.contains(CellAttrs::WIDE)
+            && x + 1 < row.cells.len()
+            && row.cells[x + 1].attrs.contains(CellAttrs::WIDE_SPACER)
+        {
+            x + 1
+        } else {
+            x
+        }
+    }
+
+    pub(super) fn is_word_cell(cell: &Cell) -> bool {
+        !cell.attrs.contains(CellAttrs::WIDE_SPACER)
+            && cell.text_chars().any(|ch| !ch.is_whitespace())
+    }
+
+    pub fn visible_row_base(&self) -> usize {
+        let rows = self.rows as usize;
+        let scrollback_len = self.scrollback.len();
+        let total = scrollback_len + self.grid.len();
+        let live_start = total.saturating_sub(rows);
+
+        live_start.saturating_sub(self.viewport_offset)
+    }
+
+    /// A read-only reference to one visible row (`0..rows`), without
+    /// cloning the whole screen like [`Screen::visible_rows`] does. Used by
+    /// mouse-hover paths (hyperlink/URL detection) that run on every
+    /// `CursorMoved`/`ModifiersChanged` event and only need to inspect the
+    /// single row under the pointer.
+    pub fn visible_row(&self, viewport_y: u16) -> Option<Cow<'_, Row>> {
+        if viewport_y >= self.rows {
+            return None;
+        }
+        let idx = self.visible_row_base() + viewport_y as usize;
+        self.storage_row(idx)
+    }
+
+    pub fn visible_rows(&self) -> Vec<Row> {
+        let rows = self.rows as usize;
+        if self.viewport_offset == 0 {
+            return self.grid.clone();
+        }
+
+        let scrollback_len = self.scrollback.len();
+        let start = self.visible_row_base();
+
+        (start..start + rows)
+            .map(|idx| {
+                if idx < scrollback_len {
+                    self.scrollback
+                        .row(idx)
+                        .unwrap_or_else(|| Row::new(self.cols))
+                } else {
+                    self.grid[idx - scrollback_len].clone()
+                }
+            })
+            .collect()
+    }
+
+    /// Clone the visible rows AND report which were dirty, clearing the
+    /// source dirty bits in the same locked pass (WP4, REQ-PERF-1).
+    ///
+    /// Atomicity: a concurrent io-thread write landing after the clear
+    /// correctly re-dirties the row for the *next* frame; a write between
+    /// clone-and-clear cannot happen because both steps run under the one
+    /// `&mut self` call. The returned `Vec<bool>` is parallel to the
+    /// returned `Vec<Row>` (same length, same index order) and reports each
+    /// row's dirty state *before* this call cleared it.
+    ///
+    /// Scrollback rows never mutate after being pushed (they are immutable
+    /// packed history) and always report `dirty = false`; the renderer's
+    /// `row_base`-keyed invalidation forces a full pane rebuild whenever the
+    /// viewport scrolls into history, so no per-history-row damage is needed.
+    pub fn take_visible_rows_with_damage(&mut self) -> (Vec<Row>, Vec<bool>) {
+        let rows = self.rows as usize;
+        let scrollback_len = self.scrollback.len();
+        let start = self.visible_row_base();
+
+        let mut out_rows = Vec::with_capacity(rows);
+        let mut out_dirty = Vec::with_capacity(rows);
+
+        for idx in start..start + rows {
+            if idx < scrollback_len {
+                out_dirty.push(false);
+                out_rows.push(
+                    self.scrollback
+                        .row(idx)
+                        .unwrap_or_else(|| Row::new(self.cols)),
+                );
+            } else {
+                let row = &mut self.grid[idx - scrollback_len];
+                out_dirty.push(row.dirty);
+                out_rows.push(row.clone());
+                row.dirty = false;
+            }
+        }
+
+        (out_rows, out_dirty)
+    }
+}

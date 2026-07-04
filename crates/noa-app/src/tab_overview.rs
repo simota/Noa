@@ -21,25 +21,25 @@ pub const OVERVIEW_MAX_RENDER_TILES_PER_FRAME: usize = 2;
 /// Spec-locked gap between adjacent tiles (REQ-OV-11, mockup parity v2) —
 /// roughly 4% of a typical tile width. Compile-time constant, no config knob
 /// (⚠G precedent: v1's throttle is likewise fixed rather than tunable).
-pub const OVERVIEW_TILE_GUTTER: u32 = 16;
+pub const OVERVIEW_TILE_GUTTER: u32 = 18;
 
 /// Spec-locked margin between the tile grid and the Overview window bounds
 /// (REQ-OV-11).
-pub const OVERVIEW_OUTER_MARGIN: u32 = 24;
+pub const OVERVIEW_OUTER_MARGIN: u32 = 26;
 
 /// Title-bar band height rendered at the top of every overview tile, live or
 /// placeholder (REQ-OV-12/REQ-OV-13). Compile-time constant.
-pub const OVERVIEW_TITLE_BAR_H: u32 = 28;
+pub const OVERVIEW_TITLE_BAR_H: u32 = 30;
 
 /// Height reserved at the *top* of the Overview window for the "Search tabs"
 /// field (REQ-OV-16). v2/P2 only *reserves* this band in the grid-bounds math
 /// so P3's search-field draw doesn't reflow the grid; P2 draws nothing here.
 /// Compile-time constant (⚠G precedent: no config knob).
-pub const OVERVIEW_SEARCH_BAND_H: u32 = 48;
+pub const OVERVIEW_SEARCH_BAND_H: u32 = 64;
 
 /// Height reserved at the *bottom* of the Overview window for the hint bar
 /// (REQ-OV-17). Compile-time constant.
-pub const OVERVIEW_HINT_BAND_H: u32 = 34;
+pub const OVERVIEW_HINT_BAND_H: u32 = 54;
 
 /// Mockup-parity chrome palette (REQ-OV-12/14, v2). All compile-time
 /// constants — no config knob (⚠G precedent). Stored as straight display-space
@@ -48,23 +48,36 @@ pub const OVERVIEW_HINT_BAND_H: u32 = 34;
 /// target unchanged (no gamma re-encode).
 ///
 /// Near-black navy backdrop behind every card (mockup: "暗色の背景").
-pub const OVERVIEW_BG_COLOR: [f32; 4] = [0.043, 0.055, 0.086, 1.0];
+pub const OVERVIEW_BG_COLOR: [f32; 4] = [0.034, 0.046, 0.084, 1.0];
 /// Card face — one step lighter than [`OVERVIEW_BG_COLOR`] (mockup: "一段明るいカード面").
-pub const OVERVIEW_CARD_COLOR: [f32; 4] = [0.102, 0.118, 0.157, 1.0];
+pub const OVERVIEW_CARD_COLOR: [f32; 4] = [0.078, 0.091, 0.127, 1.0];
 /// Title-bar band — distinguishable from the card face (mockup: "区別可能な帯").
-pub const OVERVIEW_TITLE_BAR_COLOR: [f32; 4] = [0.145, 0.165, 0.216, 1.0];
+pub const OVERVIEW_TITLE_BAR_COLOR: [f32; 4] = [0.118, 0.129, 0.176, 1.0];
 /// Thin resting card border.
-pub const OVERVIEW_BORDER_COLOR: [f32; 4] = [0.235, 0.259, 0.325, 1.0];
+pub const OVERVIEW_BORDER_COLOR: [f32; 4] = [0.298, 0.318, 0.380, 1.0];
 /// Blue accent focus ring for the selected tile (REQ-OV-14).
-pub const OVERVIEW_FOCUS_RING_COLOR: [f32; 4] = [0.259, 0.545, 0.961, 1.0];
+pub const OVERVIEW_FOCUS_RING_COLOR: [f32; 4] = [0.078, 0.635, 1.0, 1.0];
+/// Search / hint pill face in the overview chrome.
+pub const OVERVIEW_CHROME_PILL_COLOR: [f32; 4] = [0.128, 0.138, 0.213, 1.0];
+/// Thin border around search and hint pills.
+pub const OVERVIEW_CHROME_BORDER_COLOR: [f32; 4] = [0.252, 0.274, 0.392, 1.0];
 /// Corner radius (px) of every card.
-pub const OVERVIEW_CARD_CORNER_RADIUS: f32 = 10.0;
+pub const OVERVIEW_CARD_CORNER_RADIUS: f32 = 8.0;
 /// Resting border thickness (px).
-pub const OVERVIEW_CARD_BORDER_WIDTH: f32 = 1.5;
+pub const OVERVIEW_CARD_BORDER_WIDTH: f32 = 1.0;
 /// Focus-ring thickness (px) — thicker than the resting border so the
-/// selection reads as a single bright ring (the glow is approximated by a
-/// solid thicker stroke, per the P2 brief).
-pub const OVERVIEW_CARD_FOCUS_WIDTH: f32 = 3.0;
+/// selection reads as a single bright ring inside the separate outer glow.
+pub const OVERVIEW_CARD_FOCUS_WIDTH: f32 = 2.0;
+/// Selected-card glow radius outside the card edge.
+pub const OVERVIEW_CARD_FOCUS_GLOW_WIDTH: f32 = 8.0;
+/// Rounded search-field size within [`OverviewChrome::search_band`].
+pub const OVERVIEW_SEARCH_FIELD_H: u32 = 34;
+pub const OVERVIEW_SEARCH_FIELD_MIN_W: u32 = 180;
+pub const OVERVIEW_SEARCH_FIELD_MAX_W: u32 = 320;
+/// Rounded bottom hint-bar size within [`OverviewChrome::hint_band`].
+pub const OVERVIEW_HINT_BAR_H: u32 = 32;
+pub const OVERVIEW_HINT_BAR_MIN_W: u32 = 320;
+pub const OVERVIEW_HINT_BAR_MAX_W: u32 = 460;
 
 /// Width of the close (✕) button's clickable region at the title bar's right
 /// edge (REQ-OV-13). Square with the title bar.
@@ -244,6 +257,19 @@ pub fn overview_search_field_text(query: &str) -> String {
     } else {
         query.to_string()
     }
+}
+
+/// Compose the single terminal row rendered into the rounded search field.
+/// The leading search glyph is a visual affordance only; if the font cannot
+/// render it, the row still degrades to readable placeholder/query text.
+pub fn overview_search_field_row(query: &str, cols: u16) -> String {
+    let cols = cols as usize;
+    if cols == 0 {
+        return String::new();
+    }
+    let text = overview_search_field_text(query);
+    let row = format!("  ⌕  {text}");
+    row.chars().take(cols).collect()
 }
 
 /// Two-stage Escape semantics for the Overview search field (REQ-OV-16). A
@@ -566,6 +592,28 @@ pub fn overview_chrome_bands(bounds: TileRect) -> OverviewChrome {
     }
 }
 
+/// Centered rounded search-field rect inside the top chrome band.
+pub fn overview_search_field_rect(search_band: TileRect) -> TileRect {
+    centered_pill_rect(
+        search_band,
+        0.36,
+        OVERVIEW_SEARCH_FIELD_MIN_W,
+        OVERVIEW_SEARCH_FIELD_MAX_W,
+        OVERVIEW_SEARCH_FIELD_H,
+    )
+}
+
+/// Centered rounded hint-bar rect inside the bottom chrome band.
+pub fn overview_hint_bar_rect(hint_band: TileRect) -> TileRect {
+    centered_pill_rect(
+        hint_band,
+        0.48,
+        OVERVIEW_HINT_BAR_MIN_W,
+        OVERVIEW_HINT_BAR_MAX_W,
+        OVERVIEW_HINT_BAR_H,
+    )
+}
+
 /// Build the bottom hint-bar text (REQ-OV-17). `live_tile_count` is the number
 /// of live thumbnail tiles (`min(tab_count, cap)`); the `⌘1-N` range tracks it
 /// dynamically rather than hard-coding the mockup's "1-6".
@@ -627,6 +675,24 @@ fn rect_at(
         tile_w,
         tile_h,
     )
+}
+
+fn centered_pill_rect(
+    band: TileRect,
+    width_fraction: f32,
+    min_width: u32,
+    max_width: u32,
+    preferred_height: u32,
+) -> TileRect {
+    if band.w == 0 || band.h == 0 {
+        return TileRect::new(band.x, band.y, 0, 0);
+    }
+    let desired_w = (band.w as f32 * width_fraction).round() as u32;
+    let w = desired_w
+        .clamp(min_width.min(max_width), max_width)
+        .min(band.w);
+    let h = preferred_height.min(band.h);
+    TileRect::new(band.x + (band.w - w) / 2, band.y + (band.h - h) / 2, w, h)
 }
 
 #[cfg(test)]
@@ -1182,6 +1248,14 @@ mod tests {
     }
 
     #[test]
+    fn overview_search_field_row_adds_search_affordance_and_clips() {
+        assert_eq!(overview_search_field_row("", 20), "  ⌕  Search tabs");
+        assert_eq!(overview_search_field_row("build", 20), "  ⌕  build");
+        assert_eq!(overview_search_field_row("abcdef", 6), "  ⌕  a");
+        assert_eq!(overview_search_field_row("build", 0), "");
+    }
+
+    #[test]
     fn overview_escape_action_clears_a_query_before_dismissing() {
         // Two-stage: a non-empty query is cleared first, an empty one dismisses.
         assert_eq!(
@@ -1235,6 +1309,21 @@ mod tests {
         assert_eq!(
             chrome.search_band.h + chrome.grid_bounds.h + chrome.hint_band.h,
             600
+        );
+    }
+
+    #[test]
+    fn chrome_pill_rects_center_inside_reserved_bands() {
+        let bounds = TileRect::new(0, 0, 800, 600);
+        let chrome = overview_chrome_bands(bounds);
+
+        assert_eq!(
+            overview_search_field_rect(chrome.search_band),
+            TileRect::new(256, 15, 288, 34)
+        );
+        assert_eq!(
+            overview_hint_bar_rect(chrome.hint_band),
+            TileRect::new(208, 557, 384, 32)
         );
     }
 

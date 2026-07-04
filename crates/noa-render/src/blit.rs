@@ -221,6 +221,7 @@ pub struct CardStyle {
     pub corner_radius: f32,
     pub border_width: f32,
     pub focus_width: f32,
+    pub focus_glow_width: f32,
 }
 
 /// One tile's placement + selection state for the card composite.
@@ -234,14 +235,29 @@ pub struct CardTilePlacement {
     pub selected: bool,
 }
 
+/// One arbitrary texture's placement + selection state for the same rounded
+/// card shader used by overview tiles.
+#[derive(Clone, Copy, Debug)]
+pub struct CardTexturePlacement<'a> {
+    pub texture_view: &'a wgpu::TextureView,
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub selected: bool,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CardUniformsRaw {
     rect: [f32; 4],
     border_color: [f32; 4],
+    glow_color: [f32; 4],
     surface_size: [f32; 2],
     corner_radius: f32,
     border_width: f32,
+    glow_width: f32,
+    _padding: [f32; 3],
 }
 
 pub struct CardPipeline {
@@ -350,6 +366,118 @@ impl CardPipeline {
             bind_group_layout,
             sampler,
         }
+    }
+
+    /// Overlay already-rendered textures as rounded cards without clearing the
+    /// target. The Tab Overview uses this for the centered search and hint
+    /// pills after the tile grid has been composited.
+    pub fn overlay_texture_cards(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        surface_size: PixelSize,
+        style: &CardStyle,
+        placements: &[CardTexturePlacement<'_>],
+    ) {
+        self.draw_texture_cards(device, queue, target, surface_size, style, placements, None);
+    }
+
+    fn draw_texture_cards(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        surface_size: PixelSize,
+        style: &CardStyle,
+        placements: &[CardTexturePlacement<'_>],
+        clear: Option<[f32; 4]>,
+    ) {
+        let surface = [surface_size.w.max(1) as f32, surface_size.h.max(1) as f32];
+
+        // Each card needs its own uniform buffer + bind group live for the
+        // whole pass, so build them up front and hold them until submit.
+        let mut resources = Vec::with_capacity(placements.len());
+        for placement in placements {
+            let (border_color, border_width, glow_width) = if placement.selected {
+                (style.focus_color, style.focus_width, style.focus_glow_width)
+            } else {
+                (style.border_color, style.border_width, 0.0)
+            };
+            let mut glow_color = style.focus_color;
+            glow_color[3] = if placement.selected { 0.45 } else { 0.0 };
+            let uniforms = CardUniformsRaw {
+                rect: [
+                    placement.x as f32,
+                    placement.y as f32,
+                    placement.w as f32,
+                    placement.h as f32,
+                ],
+                border_color,
+                glow_color,
+                surface_size: surface,
+                corner_radius: style.corner_radius,
+                border_width,
+                glow_width,
+                _padding: [0.0; 3],
+            };
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("noa-overview-card-uniform"),
+                size: std::mem::size_of::<CardUniformsRaw>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniforms));
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("noa-overview-card-bind-group"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(placement.texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: buffer.as_entire_binding(),
+                    },
+                ],
+            });
+            resources.push((buffer, bind_group));
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("noa-overview-card-encoder"),
+        });
+        {
+            let load = clear.map_or(wgpu::LoadOp::Load, |color| {
+                wgpu::LoadOp::Clear(wgpu_color(color))
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("noa-overview-card-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            for (_buffer, bind_group) in &resources {
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.draw(0..6, 0..1);
+            }
+        }
+        queue.submit(Some(encoder.finish()));
     }
 }
 
@@ -587,86 +715,30 @@ impl OverviewThumbnailResources {
         style: &CardStyle,
         placements: &[CardTilePlacement],
     ) {
-        let surface = [surface_size.w.max(1) as f32, surface_size.h.max(1) as f32];
-
-        // Each card needs its own uniform buffer + bind group live for the
-        // whole pass, so build them up front and hold them until submit.
-        let mut resources = Vec::with_capacity(placements.len());
-        for placement in placements {
-            let Some(tile) = self.tiles.get(placement.tile_index) else {
-                continue;
-            };
-            let (border_color, border_width) = if placement.selected {
-                (style.focus_color, style.focus_width)
-            } else {
-                (style.border_color, style.border_width)
-            };
-            let uniforms = CardUniformsRaw {
-                rect: [
-                    placement.x as f32,
-                    placement.y as f32,
-                    placement.w as f32,
-                    placement.h as f32,
-                ],
-                border_color,
-                surface_size: surface,
-                corner_radius: style.corner_radius,
-                border_width,
-            };
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("noa-overview-card-uniform"),
-                size: std::mem::size_of::<CardUniformsRaw>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniforms));
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("noa-overview-card-bind-group"),
-                layout: &self.card.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&tile.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.card.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: buffer.as_entire_binding(),
-                    },
-                ],
-            });
-            resources.push((buffer, bind_group));
-        }
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("noa-overview-card-encoder"),
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("noa-overview-card-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu_color(style.background)),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.card.pipeline);
-            for (_buffer, bind_group) in &resources {
-                pass.set_bind_group(0, bind_group, &[]);
-                pass.draw(0..6, 0..1);
-            }
-        }
-        queue.submit(Some(encoder.finish()));
+        let texture_placements: Vec<_> = placements
+            .iter()
+            .filter_map(|placement| {
+                self.tiles
+                    .get(placement.tile_index)
+                    .map(|tile| CardTexturePlacement {
+                        texture_view: &tile.view,
+                        x: placement.x,
+                        y: placement.y,
+                        w: placement.w,
+                        h: placement.h,
+                        selected: placement.selected,
+                    })
+            })
+            .collect();
+        self.card.draw_texture_cards(
+            device,
+            queue,
+            target,
+            surface_size,
+            style,
+            &texture_placements,
+            Some(style.background),
+        );
     }
 }
 

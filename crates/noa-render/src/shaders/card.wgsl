@@ -8,9 +8,11 @@ struct CardUniforms {
     // Vec4-first std140 order (see CLAUDE.md GPU gotcha): x, y, w, h in px.
     rect: vec4<f32>,
     border_color: vec4<f32>,
+    glow_color: vec4<f32>,
     surface_size: vec2<f32>,
     corner_radius: f32,
     border_width: f32,
+    glow_width: f32,
 };
 
 @group(0) @binding(0) var tile_tex: texture_2d<f32>;
@@ -20,6 +22,7 @@ struct CardUniforms {
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) local_px: vec2<f32>,
 };
 
 @vertex
@@ -33,7 +36,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
         vec2<f32>(1.0, 1.0),
     );
     let corner = corners[vertex_index];
-    let px = u.rect.xy + corner * u.rect.zw;
+    let outset = max(u.glow_width, 0.0);
+    let draw_origin = u.rect.xy - vec2<f32>(outset);
+    let draw_size = u.rect.zw + vec2<f32>(outset * 2.0);
+    let px = draw_origin + corner * draw_size;
     // Pixel -> NDC (y points down in pixel space, up in NDC).
     let ndc = vec2<f32>(
         px.x / u.surface_size.x * 2.0 - 1.0,
@@ -42,7 +48,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
 
     var out: VertexOut;
     out.position = vec4<f32>(ndc, 0.0, 1.0);
-    out.uv = corner;
+    out.local_px = corner * draw_size - vec2<f32>(outset);
+    out.uv = out.local_px / u.rect.zw;
     return out;
 }
 
@@ -55,16 +62,24 @@ fn sd_round_box(p: vec2<f32>, half: vec2<f32>, radius: f32) -> f32 {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let half = u.rect.zw * 0.5;
-    let p = in.uv * u.rect.zw - half;
+    let p = in.local_px - half;
     let d = sd_round_box(p, half, u.corner_radius);
+    let glow_width = max(u.glow_width, 0.0);
 
     // Card coverage: 1 inside, fading to 0 over ~1px at the rounded edge.
     let coverage = 1.0 - smoothstep(0.0, 1.0, d);
     if coverage <= 0.0 {
-        discard;
+        if glow_width <= 0.0 {
+            discard;
+        }
+        let glow_alpha = (1.0 - smoothstep(0.0, glow_width, d)) * u.glow_color.a;
+        if glow_alpha <= 0.0 {
+            discard;
+        }
+        return vec4<f32>(u.glow_color.rgb, glow_alpha);
     }
 
-    let tex = textureSample(tile_tex, tile_sampler, in.uv);
+    let tex = textureSample(tile_tex, tile_sampler, clamp(in.uv, vec2<f32>(0.0), vec2<f32>(1.0)));
     // `inset` is the distance from the edge, growing inward. The border stroke
     // occupies the outermost `border_width` px.
     let inset = -d;

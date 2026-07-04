@@ -20,8 +20,9 @@ use noa_grid::{
 };
 use noa_pty::{Pty, PtyConfig};
 use noa_render::{
-    CardStyle, CardTilePlacement, CommandPaletteSnapshot, FrameSnapshot, HoverLink,
-    OverviewThumbnailResources, PaneFrame, PaneId as RenderPaneId, PaneRect, Renderer, Theme,
+    CardPipeline, CardStyle, CardTexturePlacement, CardTilePlacement, CommandPaletteSnapshot,
+    FrameSnapshot, HoverLink, OverviewThumbnailResources, PaneFrame, PaneId as RenderPaneId,
+    PaneRect, Renderer, Theme,
 };
 use noa_vt::Stream;
 use winit::application::ApplicationHandler;
@@ -50,16 +51,18 @@ use crate::split_tree::{
 };
 use crate::tab_overview::{
     OVERVIEW_BG_COLOR, OVERVIEW_BORDER_COLOR, OVERVIEW_CARD_BORDER_WIDTH, OVERVIEW_CARD_COLOR,
-    OVERVIEW_CARD_CORNER_RADIUS, OVERVIEW_CARD_FOCUS_WIDTH, OVERVIEW_FOCUS_RING_COLOR,
+    OVERVIEW_CARD_CORNER_RADIUS, OVERVIEW_CARD_FOCUS_GLOW_WIDTH, OVERVIEW_CARD_FOCUS_WIDTH,
+    OVERVIEW_CHROME_BORDER_COLOR, OVERVIEW_CHROME_PILL_COLOR, OVERVIEW_FOCUS_RING_COLOR,
     OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_OUTER_MARGIN,
     OVERVIEW_TILE_GUTTER, OVERVIEW_TILE_MIN_RENDER_INTERVAL, OVERVIEW_TITLE_BAR_COLOR,
     OVERVIEW_TITLE_BAR_H, OverviewAction, OverviewChrome, OverviewEscapeAction, OverviewLayout,
     OverviewRenderCandidate, center_label, compute_overview_grid, hit_test_overview_grid,
     move_overview_selection, overview_backlog_decision, overview_chrome_bands,
-    overview_close_hit_test, overview_escape_action, overview_hint_bar_text,
-    overview_initial_selection, overview_key_action, overview_placeholder_source_ids,
-    overview_search_field_text, overview_tab_filter, overview_tile_labels,
-    sanitize_placeholder_label, select_due_overview_tile_ids, title_bar_row_with_close,
+    overview_close_hit_test, overview_escape_action, overview_hint_bar_rect,
+    overview_hint_bar_text, overview_initial_selection, overview_key_action,
+    overview_placeholder_source_ids, overview_search_field_rect, overview_search_field_row,
+    overview_tab_filter, overview_tile_labels, sanitize_placeholder_label,
+    select_due_overview_tile_ids, title_bar_row_with_close,
 };
 use crate::{AppCommand, ViewportScroll};
 
@@ -294,6 +297,10 @@ struct OverviewWindowState {
     /// text (REQ-OV-10). Reused across every placeholder tile and frame —
     /// this is not a per-tab renderer, so it doesn't violate REQ-NF-1.
     label_renderer: Option<Renderer>,
+    /// Rounded-card shader reused for overview chrome overlays (search and
+    /// hint pills). Kept outside thumbnail resources so chrome can render even
+    /// when the tile pool is rebuilt.
+    chrome_card: Option<OverviewChromeCardPipeline>,
     /// The currently selected tile (REQ-OV-14): an index directly into the
     /// row-major source-tab order (`App::overview_source_window_ids`) —
     /// live tiles first, then any overflow placeholder tiles — so one index
@@ -307,6 +314,16 @@ struct OverviewWindowState {
     /// (redraw, hit-test, nav, Cmd+N, title bars, placeholders). Cleared on
     /// every `show_tab_overview` and by the first Escape when non-empty.
     search_query: String,
+}
+
+struct OverviewChromeCardPipeline {
+    format: wgpu::TextureFormat,
+    pipeline: CardPipeline,
+}
+
+struct OverviewChromeTexture {
+    texture: wgpu::Texture,
+    rect: PaneRectApp,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -499,6 +516,18 @@ const OVERVIEW_CARD_STYLE: CardStyle = CardStyle {
     corner_radius: OVERVIEW_CARD_CORNER_RADIUS,
     border_width: OVERVIEW_CARD_BORDER_WIDTH,
     focus_width: OVERVIEW_CARD_FOCUS_WIDTH,
+    focus_glow_width: OVERVIEW_CARD_FOCUS_GLOW_WIDTH,
+};
+
+/// Rounded styling for Overview chrome pills (search and shortcut hint).
+const OVERVIEW_CHROME_CARD_STYLE: CardStyle = CardStyle {
+    background: OVERVIEW_BG_COLOR,
+    border_color: OVERVIEW_CHROME_BORDER_COLOR,
+    focus_color: OVERVIEW_CHROME_BORDER_COLOR,
+    corner_radius: OVERVIEW_CARD_CORNER_RADIUS,
+    border_width: 1.0,
+    focus_width: 1.0,
+    focus_glow_width: 0.0,
 };
 
 pub struct App {
@@ -1845,11 +1874,9 @@ impl App {
             let surface_format = preferred_surface_format(&caps.formats);
             let size = window.inner_size();
             let surface_config = wgpu::SurfaceConfiguration {
-                // COPY_DST (in addition to the RENDER_ATTACHMENT every
-                // surface needs) lets `present_overview_frame` composite
-                // per-tab tile textures directly via `copy_texture_to_texture`
-                // instead of a second blit pass.
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
+                // Tile cards and chrome pills are composited through render
+                // passes; no direct copy into the surface is required.
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format: surface_format,
                 width: size.width.max(1),
                 height: size.height.max(1),
@@ -1871,6 +1898,7 @@ impl App {
                 surface_config,
                 thumbnails: None,
                 label_renderer: None,
+                chrome_card: None,
                 selected: 0,
                 search_query: String::new(),
             });
@@ -2172,6 +2200,26 @@ impl App {
         }
     }
 
+    fn ensure_overview_chrome_card_pipeline(&mut self) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(overview) = self.overview_window.as_mut() else {
+            return;
+        };
+        let format = overview.surface_config.format;
+        let stale = overview
+            .chrome_card
+            .as_ref()
+            .is_none_or(|chrome| chrome.format != format);
+        if stale {
+            overview.chrome_card = Some(OverviewChromeCardPipeline {
+                format,
+                pipeline: CardPipeline::new(&gpu.device, format),
+            });
+        }
+    }
+
     /// Draw the tab title into the top title-bar band of every due live tile
     /// (REQ-OV-12). Runs after `render_due_overview_tiles`, whose mirror blit
     /// re-clears the band to the card color, so the title must be re-stamped
@@ -2289,13 +2337,14 @@ impl App {
         thumbnails.stamp_title_band(&gpu.device, &gpu.queue, tile_index);
     }
 
-    /// Render the top "Search tabs" field (REQ-OV-16) into a fresh band-sized
+    /// Render the top "Search tabs" field (REQ-OV-16) into a fresh pill-sized
     /// texture and return it for compositing into the reserved top search band.
     /// Shows the live query, or the placeholder while it is empty. `None` when
-    /// there is no search band (a window too short to reserve one).
-    fn render_overview_search_texture(&mut self) -> Option<wgpu::Texture> {
+    /// there is no usable search band (a window too short to reserve one).
+    fn render_overview_search_texture(&mut self) -> Option<OverviewChromeTexture> {
         let chrome = self.overview_chrome()?;
-        if chrome.search_band.w == 0 || chrome.search_band.h == 0 {
+        let rect = overview_search_field_rect(chrome.search_band);
+        if rect.w == 0 || rect.h == 0 {
             return None;
         }
         let query = self
@@ -2308,11 +2357,11 @@ impl App {
         let label_renderer = overview.label_renderer.as_mut()?;
 
         let band_size = PixelSize {
-            w: chrome.search_band.w.max(1),
-            h: chrome.search_band.h.max(1),
+            w: rect.w.max(1),
+            h: rect.h.max(1),
         };
         let search_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("noa-overview-search-band"),
+            label: Some("noa-overview-search-pill"),
             size: wgpu::Extent3d {
                 width: band_size.w,
                 height: band_size.h,
@@ -2322,7 +2371,7 @@ impl App {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: overview.surface_config.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = search_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2332,7 +2381,7 @@ impl App {
             gpu.font.metrics(),
             DEFAULT_GRID_PADDING,
         );
-        let text = center_label(&overview_search_field_text(&query), grid_size.cols);
+        let text = overview_search_field_row(&query, grid_size.cols);
         let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
         Stream::new().feed(text.as_bytes(), &mut term);
         let mut snapshot = FrameSnapshot::from_terminal(&mut term);
@@ -2340,22 +2389,27 @@ impl App {
 
         label_renderer.resize(band_size);
         label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
-        // Distinct from the backdrop so the field reads as a search bar, reusing
-        // the title-bar band color (mockup parity, ⚠G: no config knob).
-        label_renderer.set_clear_color(OVERVIEW_TITLE_BAR_COLOR);
+        label_renderer.set_clear_color(OVERVIEW_CHROME_PILL_COLOR);
         label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         label_renderer.draw(&gpu.device, &gpu.queue, &view);
 
-        Some(search_texture)
+        Some(OverviewChromeTexture {
+            texture: search_texture,
+            rect,
+        })
     }
 
-    /// Render the bottom hint bar (REQ-OV-17) into a fresh band-sized texture
+    /// Render the bottom hint bar (REQ-OV-17) into a fresh pill-sized texture
     /// and return it for compositing onto the surface. `None` when there is no
-    /// hint band (a window too short to reserve one). The `⌘1-N` range tracks
-    /// the live tile count dynamically.
-    fn render_overview_hint_texture(&mut self, live_tile_count: usize) -> Option<wgpu::Texture> {
+    /// usable hint band (a window too short to reserve one). The `⌘1-N` range
+    /// tracks the live tile count dynamically.
+    fn render_overview_hint_texture(
+        &mut self,
+        live_tile_count: usize,
+    ) -> Option<OverviewChromeTexture> {
         let chrome = self.overview_chrome()?;
-        if chrome.hint_band.w == 0 || chrome.hint_band.h == 0 {
+        let rect = overview_hint_bar_rect(chrome.hint_band);
+        if rect.w == 0 || rect.h == 0 {
             return None;
         }
         self.ensure_overview_label_renderer();
@@ -2364,11 +2418,11 @@ impl App {
         let label_renderer = overview.label_renderer.as_mut()?;
 
         let band_size = PixelSize {
-            w: chrome.hint_band.w.max(1),
-            h: chrome.hint_band.h.max(1),
+            w: rect.w.max(1),
+            h: rect.h.max(1),
         };
         let hint_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("noa-overview-hint-band"),
+            label: Some("noa-overview-hint-pill"),
             size: wgpu::Extent3d {
                 width: band_size.w,
                 height: band_size.h,
@@ -2378,7 +2432,7 @@ impl App {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: overview.surface_config.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = hint_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -2396,11 +2450,14 @@ impl App {
 
         label_renderer.resize(band_size);
         label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
-        label_renderer.set_clear_color(OVERVIEW_BG_COLOR);
+        label_renderer.set_clear_color(OVERVIEW_CHROME_PILL_COLOR);
         label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         label_renderer.draw(&gpu.device, &gpu.queue, &view);
 
-        Some(hint_texture)
+        Some(OverviewChromeTexture {
+            texture: hint_texture,
+            rect,
+        })
     }
 
     /// Composite every live-mirror and placeholder tile onto the overview
@@ -2411,10 +2468,9 @@ impl App {
         // mutably); the returned texture is owned, so the borrows are released
         // before compositing.
         let live_count = layout.tiles.len();
-        let hint_texture = self.render_overview_hint_texture(live_count);
-        let hint_band = self.overview_chrome().map(|chrome| chrome.hint_band);
         let search_texture = self.render_overview_search_texture();
-        let search_band = self.overview_chrome().map(|chrome| chrome.search_band);
+        let hint_texture = self.render_overview_hint_texture(live_count);
+        self.ensure_overview_chrome_card_pipeline();
         let selected = self
             .overview_window
             .as_ref()
@@ -2484,70 +2540,48 @@ impl App {
             clear_overview_surface(&gpu.device, &gpu.queue, &view, OVERVIEW_BG_COLOR);
         }
 
-        // Overlay the hint bar into its reserved bottom band.
-        if let (Some(hint_texture), Some(hint_band)) = (hint_texture.as_ref(), hint_band) {
-            let mut encoder = gpu
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("noa-overview-hint-copy-encoder"),
+        // Overlay the search and hint pills with the same rounded-card shader
+        // as tiles, but without clearing the already-composited frame.
+        if let Some(chrome_card) = overview.chrome_card.as_ref() {
+            let search_view = search_texture.as_ref().map(|chrome| {
+                chrome
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default())
+            });
+            let hint_view = hint_texture.as_ref().map(|chrome| {
+                chrome
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default())
+            });
+            let mut placements = Vec::new();
+            if let (Some(chrome), Some(view)) = (search_texture.as_ref(), search_view.as_ref()) {
+                placements.push(CardTexturePlacement {
+                    texture_view: view,
+                    x: chrome.rect.x,
+                    y: chrome.rect.y,
+                    w: chrome.rect.w,
+                    h: chrome.rect.h,
+                    selected: false,
                 });
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: hint_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &frame.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: hint_band.x,
-                        y: hint_band.y,
-                        z: 0,
-                    },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d {
-                    width: hint_band.w.max(1),
-                    height: hint_band.h.max(1),
-                    depth_or_array_layers: 1,
-                },
-            );
-            gpu.queue.submit(Some(encoder.finish()));
-        }
-
-        // Overlay the search field into its reserved top band (REQ-OV-16).
-        if let (Some(search_texture), Some(search_band)) = (search_texture.as_ref(), search_band) {
-            let mut encoder = gpu
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("noa-overview-search-copy-encoder"),
+            }
+            if let (Some(chrome), Some(view)) = (hint_texture.as_ref(), hint_view.as_ref()) {
+                placements.push(CardTexturePlacement {
+                    texture_view: view,
+                    x: chrome.rect.x,
+                    y: chrome.rect.y,
+                    w: chrome.rect.w,
+                    h: chrome.rect.h,
+                    selected: false,
                 });
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: search_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &frame.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: search_band.x,
-                        y: search_band.y,
-                        z: 0,
-                    },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d {
-                    width: search_band.w.max(1),
-                    height: search_band.h.max(1),
-                    depth_or_array_layers: 1,
-                },
+            }
+            chrome_card.pipeline.overlay_texture_cards(
+                &gpu.device,
+                &gpu.queue,
+                &view,
+                surface_size,
+                &OVERVIEW_CHROME_CARD_STYLE,
+                &placements,
             );
-            gpu.queue.submit(Some(encoder.finish()));
         }
 
         frame.present();
@@ -5713,11 +5747,6 @@ fn tab_overview_visibility_after_dispatch(
     }
 }
 
-/// Copy one overview tile texture (live mirror or placeholder title, both
-/// already rendered at exactly `rect`'s pixel size) into its grid position on
-/// the overview surface texture. No scaling: `copy_texture_to_texture` needs
-/// matching extents, which holds because every tile texture is allocated at
-/// its `OverviewLayout` rect's size (`ensure_overview_thumbnails`).
 /// Clear the overview surface to the backdrop color when there are no tiles to
 /// composite (the card composite pass otherwise does the clear itself).
 fn clear_overview_surface(

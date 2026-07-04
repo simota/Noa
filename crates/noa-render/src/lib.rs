@@ -16,7 +16,8 @@ mod snapshot;
 mod theme;
 
 pub use blit::{
-    BlitPipeline, CardPipeline, CardStyle, CardTilePlacement, OverviewThumbnailResources,
+    BlitPipeline, CardPipeline, CardStyle, CardTexturePlacement, CardTilePlacement,
+    OverviewThumbnailResources,
 };
 pub use draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 pub use image_layer::{ImageBand, Z_BG_THRESHOLD, classify_band, resolve_image_quad};

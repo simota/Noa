@@ -25,8 +25,8 @@ use std::sync::Arc;
 /// Shared title-bar band height + card color for the overview headless tests
 /// (mirrors `noa_app::tab_overview`'s compile-time constants; noa-render can't
 /// depend on noa-app, so the tests re-state them).
-const TEST_TITLE_BAR_H: u32 = 28;
-const TEST_CARD_COLOR: [f32; 4] = [0.102, 0.118, 0.157, 1.0];
+const TEST_TITLE_BAR_H: u32 = 30;
+const TEST_CARD_COLOR: [f32; 4] = [0.078, 0.091, 0.127, 1.0];
 
 /// Acquire a real device+queue, or `None` when no adapter exists (skip).
 fn device_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
@@ -1330,12 +1330,13 @@ fn overview_card_pipeline_composites_tiles_without_validation_error() {
     let surface_size = PixelSize { w: 220, h: 160 };
     let (target_tex, target_view) = render_target(&device, surface_size.w, surface_size.h);
     let style = CardStyle {
-        background: [0.043, 0.055, 0.086, 1.0],
-        border_color: [0.235, 0.259, 0.325, 1.0],
-        focus_color: [0.259, 0.545, 0.961, 1.0],
-        corner_radius: 10.0,
-        border_width: 1.5,
-        focus_width: 3.0,
+        background: [0.034, 0.046, 0.084, 1.0],
+        border_color: [0.298, 0.318, 0.380, 1.0],
+        focus_color: [0.078, 0.635, 1.0, 1.0],
+        corner_radius: 8.0,
+        border_width: 1.0,
+        focus_width: 2.0,
+        focus_glow_width: 8.0,
     };
     let placements = [
         CardTilePlacement {

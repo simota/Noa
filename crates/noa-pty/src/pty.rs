@@ -6,6 +6,7 @@ use noa_core::GridSize;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::reader::{spawn_reader, spawn_waiter};
+use crate::shell_integration;
 use crate::writer::PtyWriter;
 use crate::{PtyError, PtyEvent, Result};
 
@@ -28,6 +29,9 @@ pub struct PtyConfig {
     pub term: String,
     /// Run the shell as a login shell (passes the `-l` flag).
     pub login: bool,
+    /// Automatically inject noa's OSC 133 / OSC 7 shell integration for
+    /// supported shells (zsh/bash/fish).
+    pub shell_integration: bool,
 }
 
 impl Default for PtyConfig {
@@ -38,6 +42,7 @@ impl Default for PtyConfig {
             cwd: None,
             term: "xterm-256color".to_string(),
             login: true,
+            shell_integration: true,
         }
     }
 }
@@ -79,7 +84,27 @@ impl Pty {
             .unwrap_or_else(|| "/bin/zsh".to_string());
 
         let mut cmd = CommandBuilder::new(&shell);
-        if config.login {
+
+        // Resolve shell integration first: it can add flags/env and, for
+        // bash, take over login-shell startup (so we skip our own `-l`).
+        let integration = if config.shell_integration {
+            shell_integration::resources_dir().and_then(|dir| {
+                shell_integration::integration_for(
+                    &shell,
+                    dir,
+                    config.login,
+                    std::env::var("ZDOTDIR").ok().as_deref(),
+                    std::env::var("XDG_DATA_DIRS").ok().as_deref(),
+                )
+            })
+        } else {
+            None
+        };
+        let suppress_login = integration
+            .as_ref()
+            .is_some_and(|i| i.suppress_login_flag);
+
+        if config.login && !suppress_login {
             // Login shell. NOTE: portable-pty's CommandBuilder does not let us
             // override argv[0], so the classic "-<shell>" argv[0] convention
             // isn't available — passing "-zsh" as an argument makes zsh treat
@@ -88,6 +113,15 @@ impl Pty {
             // being a tty (the pty slave), so no explicit `-i` is needed.
             cmd.arg("-l");
         }
+        if let Some(integration) = &integration {
+            for arg in &integration.args {
+                cmd.arg(arg);
+            }
+            for (key, value) in &integration.env {
+                cmd.env(key, value);
+            }
+        }
+
         cmd.env("TERM", &config.term);
         if let Some(cwd) = &config.cwd {
             cmd.cwd(cwd);
@@ -194,6 +228,7 @@ mod tests {
             cwd: None,
             term: "xterm-256color".to_string(),
             login: false,
+            shell_integration: false,
         };
         let pty = Pty::spawn(cfg).expect("spawn pty");
 
@@ -241,6 +276,107 @@ mod tests {
                 _ => {} // Data (a prompt) or a timeout — both mean it's alive
             }
         }
+    }
+
+    #[test]
+    fn zsh_shell_integration_emits_osc133_and_osc7() {
+        // End-to-end: spawn real zsh with integration and confirm the injected
+        // hooks emit OSC 133 prompt marks and an OSC 7 cwd report. Skips where
+        // zsh isn't installed so the suite stays portable.
+        if !std::path::Path::new("/bin/zsh").exists() {
+            return;
+        }
+        let pty = Pty::spawn(PtyConfig {
+            shell: Some("/bin/zsh".to_string()),
+            login: true,
+            shell_integration: true,
+            ..Default::default()
+        })
+        .expect("spawn");
+
+        let w = pty.writer();
+        w.write(b"print noa-marker\n").expect("write");
+        w.flush().expect("flush");
+
+        let mut collected = Vec::new();
+        let start = std::time::Instant::now();
+        // zsh's interactive init (async plugins/prompt) can pause between
+        // chunks, so keep polling until the overall deadline rather than
+        // stopping on the first idle gap.
+        while start.elapsed() < Duration::from_secs(8) {
+            match pty.event_rx().recv_timeout(Duration::from_millis(300)) {
+                Ok(PtyEvent::Data(chunk)) => {
+                    collected.extend_from_slice(&chunk);
+                    if collected.windows(7).any(|w| w == b"\x1b]133;A")
+                        && collected.windows(11).any(|w| w == b"\x1b]7;file://".as_ref())
+                    {
+                        break;
+                    }
+                }
+                Ok(PtyEvent::Exit(_)) | Ok(PtyEvent::Error(_)) => break,
+                Err(_) => {} // idle gap during shell init — keep waiting
+            }
+        }
+        w.write(b"exit\n").ok();
+
+        assert!(
+            collected.windows(7).any(|w| w == b"\x1b]133;A"),
+            "expected an OSC 133;A prompt mark in zsh output"
+        );
+        assert!(
+            collected.windows(11).any(|w| w == b"\x1b]7;file://"),
+            "expected an OSC 7 cwd report in zsh output"
+        );
+    }
+
+    #[test]
+    fn bash_shell_integration_emits_osc133_and_osc7() {
+        // End-to-end: spawn real bash with integration and confirm the hooks
+        // emit OSC 133 + OSC 7. Skips where bash isn't installed.
+        let bash = ["/bin/bash", "/opt/homebrew/bin/bash", "/usr/local/bin/bash"]
+            .into_iter()
+            .find(|p| std::path::Path::new(p).exists());
+        let Some(bash) = bash else {
+            return;
+        };
+        let pty = Pty::spawn(PtyConfig {
+            shell: Some(bash.to_string()),
+            login: true,
+            shell_integration: true,
+            ..Default::default()
+        })
+        .expect("spawn");
+
+        let w = pty.writer();
+        w.write(b"echo noa-marker\n").expect("write");
+        w.flush().expect("flush");
+
+        let mut collected = Vec::new();
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(8) {
+            match pty.event_rx().recv_timeout(Duration::from_millis(300)) {
+                Ok(PtyEvent::Data(chunk)) => {
+                    collected.extend_from_slice(&chunk);
+                    if collected.windows(7).any(|w| w == b"\x1b]133;A")
+                        && collected.windows(11).any(|w| w == b"\x1b]7;file://".as_ref())
+                    {
+                        break;
+                    }
+                }
+                Ok(PtyEvent::Exit(_)) | Ok(PtyEvent::Error(_)) => break,
+                Err(_) => {}
+            }
+        }
+        w.write(b"exit\n").ok();
+
+        assert!(
+            collected.windows(7).any(|w| w == b"\x1b]133;A"),
+            "expected an OSC 133;A prompt mark in bash output"
+        );
+        assert!(
+            collected.windows(11).any(|w| w == b"\x1b]7;file://"),
+            "expected an OSC 7 cwd report in bash output"
+        );
     }
 
     #[test]

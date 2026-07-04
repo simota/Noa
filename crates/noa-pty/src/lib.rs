@@ -7,6 +7,7 @@
 
 mod pty;
 mod reader;
+mod shell_integration;
 mod writer;
 
 pub use pty::{Pty, PtyConfig};

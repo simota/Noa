@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Sender, TrySendError};
@@ -907,8 +907,13 @@ impl App {
         None
     }
 
-    fn handle_app_command(&mut self, event_loop: &ActiveEventLoop, command: AppCommand) {
-        if self.overview_visible && overview_command_scope(command) == CommandScope::Overview {
+    fn handle_app_command(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        command: AppCommand,
+        origin: CommandOrigin,
+    ) {
+        if overview_should_intercept_command(command, self.overview_visible, origin) {
             return;
         }
         // C1 (FM1): dispatching any command means leaving the palette. Close
@@ -1914,9 +1919,9 @@ impl App {
             let Some(surface) = state.surfaces.get(&state.focused_pane) else {
                 continue;
             };
-            let term = surface.terminal.lock().expect("terminal mutex poisoned");
-            let snapshot = Arc::new(FrameSnapshot::peek(&term));
-            drop(term);
+            let Some(snapshot) = try_peek_overview_snapshot(&surface.terminal) else {
+                continue;
+            };
             *surface
                 .overview_snapshot
                 .lock()
@@ -2737,7 +2742,7 @@ impl App {
             return;
         }
         if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
-            self.handle_app_command(event_loop, command);
+            self.handle_app_command(event_loop, command, CommandOrigin::OverviewWindow);
         }
     }
 
@@ -3631,7 +3636,9 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::AppCommand(command) => self.handle_app_command(event_loop, command),
+            UserEvent::AppCommand(command) => {
+                self.handle_app_command(event_loop, command, CommandOrigin::App)
+            }
             UserEvent::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             UserEvent::ClipboardWrite {
                 window_id,
@@ -3862,12 +3869,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if pressed
                     && let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers)
                 {
-                    self.handle_app_command(event_loop, command);
+                    self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);
                     return;
                 }
-                if self.overview_visible {
-                    return;
-                }
+                // The Overview has its own window/event path. If a terminal
+                // window receives this key while the Overview is still visible,
+                // that terminal owns focus and must keep accepting shell input.
                 // Cmd-based combos are app shortcuts, not shell input. Unknown
                 // Cmd combos remain swallowed to match the previous behavior.
                 if self.modifiers.super_key() {
@@ -4475,7 +4482,7 @@ impl App {
                 command,
                 AppCommand::Search(SearchAction::FindNext | SearchAction::FindPrevious)
             ) {
-                self.handle_app_command(event_loop, command);
+                self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);
             }
             // Every other resolved command (including a repeated Find) is
             // swallowed while the modal prompt owns the keyboard.
@@ -4589,7 +4596,7 @@ impl App {
                 // palette open (R-9).
                 if let Some(command) = command {
                     self.command_palette = None;
-                    self.handle_app_command(event_loop, command);
+                    self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);
                 }
                 return;
             }
@@ -4621,7 +4628,7 @@ impl App {
             // Re-pressing cmd+shift+p toggles the palette closed; every other
             // resolved command is swallowed while the modal owns the keyboard.
             if command == AppCommand::ToggleCommandPalette {
-                self.handle_app_command(event_loop, command);
+                self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);
             }
             return;
         }
@@ -5575,6 +5582,13 @@ enum CommandScope {
     Overview,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandOrigin {
+    App,
+    TerminalWindow,
+    OverviewWindow,
+}
+
 fn command_scope(command: AppCommand) -> CommandScope {
     match command {
         AppCommand::Copy
@@ -5660,6 +5674,24 @@ fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::NextTab
         | AppCommand::PrevTab
         | AppCommand::CloseWindow => CommandScope::Overview,
+    }
+}
+
+fn overview_should_intercept_command(
+    command: AppCommand,
+    overview_visible: bool,
+    origin: CommandOrigin,
+) -> bool {
+    overview_visible
+        && origin != CommandOrigin::TerminalWindow
+        && overview_command_scope(command) == CommandScope::Overview
+}
+
+fn try_peek_overview_snapshot(terminal: &Arc<Mutex<Terminal>>) -> Option<Arc<FrameSnapshot>> {
+    match terminal.try_lock() {
+        Ok(term) => Some(Arc::new(FrameSnapshot::peek(&term))),
+        Err(TryLockError::WouldBlock) => None,
+        Err(TryLockError::Poisoned(_)) => panic!("terminal mutex poisoned"),
     }
 }
 
@@ -6686,6 +6718,52 @@ mod tests {
             overview_command_scope(AppCommand::ToggleTabOverview),
             CommandScope::NativeTabGroup
         );
+    }
+
+    #[test]
+    fn overview_intercepts_only_non_terminal_window_commands() {
+        let command = AppCommand::Paste;
+
+        assert!(overview_should_intercept_command(
+            command,
+            true,
+            CommandOrigin::OverviewWindow
+        ));
+        assert!(overview_should_intercept_command(
+            command,
+            true,
+            CommandOrigin::App
+        ));
+        assert!(!overview_should_intercept_command(
+            command,
+            true,
+            CommandOrigin::TerminalWindow
+        ));
+        assert!(!overview_should_intercept_command(
+            command,
+            false,
+            CommandOrigin::OverviewWindow
+        ));
+        assert!(!overview_should_intercept_command(
+            AppCommand::ToggleTabOverview,
+            true,
+            CommandOrigin::OverviewWindow
+        ));
+    }
+
+    #[test]
+    fn overview_snapshot_seed_skips_locked_terminal_without_waiting() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(5, 3))));
+        let _guard = terminal.lock().expect("terminal mutex poisoned");
+
+        assert!(try_peek_overview_snapshot(&terminal).is_none());
+    }
+
+    #[test]
+    fn overview_snapshot_seed_peeks_available_terminal() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(5, 3))));
+
+        assert!(try_peek_overview_snapshot(&terminal).is_some());
     }
 
     #[test]

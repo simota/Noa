@@ -7,6 +7,7 @@
 
 mod blit;
 mod draw_plan;
+mod image_layer;
 mod instance;
 mod pipeline;
 mod renderer;
@@ -18,7 +19,11 @@ pub use blit::{
     BlitPipeline, CardPipeline, CardStyle, CardTilePlacement, OverviewThumbnailResources,
 };
 pub use draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
+pub use image_layer::{ImageBand, Z_BG_THRESHOLD, classify_band, resolve_image_quad};
 pub use instance::{CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform};
 pub use renderer::{PaneFrame, Renderer, renderer_construction_count};
-pub use snapshot::{CommandPaletteSnapshot, ConfirmDialogSnapshot, FrameSnapshot, HoverLink};
+pub use snapshot::{
+    CommandPaletteSnapshot, ConfirmDialogSnapshot, FrameSnapshot, HoverLink,
+    ImagePlacementSnapshot, SnapshotImage,
+};
 pub use theme::{OverlayStyle, Theme, blend};

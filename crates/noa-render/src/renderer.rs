@@ -11,10 +11,11 @@ use noa_grid::{Cell, CursorStyle, Row, SearchState, Selection, TerminalColors};
 use unicode_width::UnicodeWidthChar;
 
 use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
+use crate::image_layer::{ImageDraw, ImageLayer};
 use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
 use crate::pipeline::CellPipeline;
 use crate::segment::{SegmentCell, ShapeRun, segment_row};
-use crate::snapshot::{FrameSnapshot, HoverLink};
+use crate::snapshot::{FrameSnapshot, HoverLink, ImagePlacementSnapshot, SnapshotImage};
 use crate::theme::{OverlayStyle, Theme};
 
 const DEFAULT_PANE_ID: PaneId = PaneId::new(0);
@@ -42,6 +43,24 @@ struct PaneGpuState {
 struct PaneInstances {
     pane: PaneId,
     range: Range<u32>,
+    /// Absolute instance index where this pane's background quads end and its
+    /// glyph+decoration quads begin — the boundary between image band 0 and
+    /// band 1 (design Step R).
+    bg_end: u32,
+    /// Absolute instance index where this pane's glyph+decoration quads end and
+    /// its UI-overlay quads (search prompt / palette / dialog) begin — the
+    /// boundary between image band 1 and band 2, and above which no image ever
+    /// draws (UI overlays stay on top).
+    text_end: u32,
+}
+
+/// One pane's kitty-graphics inputs, retained across `rebuild_panes` →
+/// `draw_panes` so the image quads can be resolved against the draw-time pane
+/// rect (the snapshot itself is not kept past rebuild).
+struct PaneImages {
+    pane: PaneId,
+    placements: Vec<ImagePlacementSnapshot>,
+    images: Vec<SnapshotImage>,
 }
 
 /// Everything that must be identical between two frames for a pane's
@@ -114,6 +133,7 @@ impl PaneRenderCache {
 /// `winit` or `wgpu::Surface`.
 pub struct Renderer {
     cell: CellPipeline,
+    image_layer: ImageLayer,
     mask_atlas_texture: wgpu::Texture,
     mask_atlas_view: wgpu::TextureView,
     color_atlas_texture: wgpu::Texture,
@@ -124,6 +144,9 @@ pub struct Renderer {
     instances: Vec<CellInstance>,
     cell_instance_len: usize,
     pane_instances: Vec<PaneInstances>,
+    /// Per-pane kitty-graphics inputs for the most recent `rebuild_panes`,
+    /// resolved into image quads at draw time (parallel to `pane_layout`).
+    pane_images: Vec<PaneImages>,
     pane_layout: Vec<(PaneId, PaneRect)>,
     divider_range: Range<u32>,
     focus_indicator_range: Range<u32>,
@@ -161,6 +184,7 @@ impl Renderer {
     ) -> anyhow::Result<Renderer> {
         RENDERER_CONSTRUCTION_COUNT.fetch_add(1, Ordering::Relaxed);
         let cell = CellPipeline::new(device, format);
+        let image_layer = ImageLayer::new(device, format);
 
         let (mask_w, mask_h) = font.mask_atlas_size();
         let mask_atlas_texture = create_atlas_texture(
@@ -216,6 +240,7 @@ impl Renderer {
 
         Ok(Renderer {
             cell,
+            image_layer,
             mask_atlas_texture,
             mask_atlas_view,
             color_atlas_texture,
@@ -226,6 +251,7 @@ impl Renderer {
             instances: Vec::new(),
             cell_instance_len: 0,
             pane_instances: Vec::new(),
+            pane_images: Vec::new(),
             pane_layout: Vec::new(),
             divider_range: 0..0,
             focus_indicator_range: 0..0,
@@ -327,6 +353,7 @@ impl Renderer {
     pub fn rebuild_panes(&mut self, panes: &[PaneFrame<'_>], font: &mut FontGrid, theme: &Theme) {
         self.instances.clear();
         self.pane_instances.clear();
+        self.pane_images.clear();
         self.pane_layout.clear();
         self.divider_range = 0..0;
 
@@ -338,7 +365,13 @@ impl Renderer {
                 .pane_render_cache
                 .entry(pane.pane)
                 .or_insert_with(PaneRenderCache::empty);
-            let (clear_color, cell_size, rows_rebuilt) = rebuild_pane_cached(
+            let PaneRebuild {
+                clear_color,
+                cell_size,
+                rows_rebuilt,
+                bg_len,
+                text_len,
+            } = rebuild_pane_cached(
                 cache,
                 &mut self.instances,
                 pane.snapshot,
@@ -353,7 +386,16 @@ impl Renderer {
             self.pane_instances.push(PaneInstances {
                 pane: pane.pane,
                 range: start..end,
+                bg_end: start + bg_len,
+                text_end: start + text_len,
             });
+            if !pane.snapshot.image_placements.is_empty() {
+                self.pane_images.push(PaneImages {
+                    pane: pane.pane,
+                    placements: pane.snapshot.image_placements.clone(),
+                    images: pane.snapshot.images.clone(),
+                });
+            }
             self.pane_layout.push((pane.pane, pane.rect));
         }
 
@@ -404,6 +446,7 @@ impl Renderer {
         self.upload_uniforms(queue, layout);
         self.prepare_overlay_instances(&plan);
         self.upload_instances(device, queue);
+        let image_draws = self.build_frame_image_draws(device, queue, layout);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("noa-frame-encoder"),
@@ -431,45 +474,115 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            if !self.instances.is_empty() {
-                pass.set_pipeline(&self.cell.pipeline);
-                pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-                for op in &plan {
-                    match op {
-                        DrawOp::Clear => {}
-                        DrawOp::PaneCells {
-                            pane,
-                            scissor,
-                            bind_group_index,
-                        } => {
-                            let Some(range) = self.instance_range_for(*pane) else {
-                                continue;
-                            };
-                            if range.is_empty() || scissor.w == 0 || scissor.h == 0 {
-                                continue;
-                            }
-                            let Some(gpu) = self.pane_gpu.get(*bind_group_index) else {
-                                continue;
-                            };
-                            pass.set_scissor_rect(scissor.x, scissor.y, scissor.w, scissor.h);
-                            pass.set_bind_group(0, &gpu.bind_group, &[]);
-                            pass.draw(0..6, range);
+            for op in &plan {
+                match op {
+                    DrawOp::Clear => {}
+                    DrawOp::PaneCells {
+                        pane,
+                        scissor,
+                        bind_group_index,
+                    } => {
+                        let Some(entry) = self.pane_instances.iter().find(|e| e.pane == *pane)
+                        else {
+                            continue;
+                        };
+                        if scissor.w == 0 || scissor.h == 0 {
+                            continue;
                         }
-                        DrawOp::Dividers { .. } => {
-                            self.draw_pixel_overlay_range(&mut pass, self.divider_range.clone());
+                        let Some(gpu) = self.pane_gpu.get(*bind_group_index) else {
+                            continue;
+                        };
+                        let range = entry.range.clone();
+                        let (bg_end, text_end) = (entry.bg_end, entry.text_end);
+                        pass.set_scissor_rect(scissor.x, scissor.y, scissor.w, scissor.h);
+
+                        // Interleave the pane's image quads with its cell passes
+                        // in three z bands (design Step R): band 0 under the
+                        // background, band 1 between background and text, band 2
+                        // over text but under the UI overlays.
+                        let bands = image_draws.iter().find(|(id, _)| id == pane).map(|(_, b)| b);
+                        if let Some(b) = bands {
+                            self.image_layer.draw_band(&mut pass, &b[0]);
                         }
-                        DrawOp::FocusIndicator { .. } => {
-                            self.draw_pixel_overlay_range(
-                                &mut pass,
-                                self.focus_indicator_range.clone(),
-                            );
+                        self.draw_cell_range(&mut pass, &gpu.bind_group, range.start..bg_end);
+                        if let Some(b) = bands {
+                            self.image_layer.draw_band(&mut pass, &b[1]);
                         }
+                        self.draw_cell_range(&mut pass, &gpu.bind_group, bg_end..text_end);
+                        if let Some(b) = bands {
+                            self.image_layer.draw_band(&mut pass, &b[2]);
+                        }
+                        self.draw_cell_range(&mut pass, &gpu.bind_group, text_end..range.end);
+                    }
+                    DrawOp::Dividers { .. } => {
+                        self.draw_pixel_overlay_range(&mut pass, self.divider_range.clone());
+                    }
+                    DrawOp::FocusIndicator { .. } => {
+                        self.draw_pixel_overlay_range(&mut pass, self.focus_indicator_range.clone());
                     }
                 }
             }
         }
 
         queue.submit(Some(encoder.finish()));
+    }
+
+    /// Draw one contiguous cell-instance subrange for a pane. A no-op for an
+    /// empty range; sets the cell pipeline + instance buffer each time so it is
+    /// safe to call after an image band switched the bound pipeline.
+    fn draw_cell_range(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        bind_group: &wgpu::BindGroup,
+        range: Range<u32>,
+    ) {
+        if range.is_empty() {
+            return;
+        }
+        pass.set_pipeline(&self.cell.pipeline);
+        pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..6, range);
+    }
+
+    /// Upload this frame's images and build every pane's per-band image draw
+    /// resources, returned paired with each pane id. Empty when no pane carries
+    /// a kitty-graphics placement, so the common (image-free) path allocates
+    /// nothing.
+    fn build_frame_image_draws(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &[(PaneId, PaneRect)],
+    ) -> Vec<(PaneId, [Vec<ImageDraw>; 3])> {
+        if self.pane_images.is_empty() {
+            return Vec::new();
+        }
+        self.image_layer.begin_frame();
+        for pane_img in &self.pane_images {
+            self.image_layer
+                .upload_pane_images(device, queue, pane_img.pane, &pane_img.images);
+        }
+        let mut out = Vec::with_capacity(self.pane_images.len());
+        for pane_img in &self.pane_images {
+            let Some((_, rect)) = layout.iter().find(|(id, _)| *id == pane_img.pane) else {
+                continue;
+            };
+            let draws = self.image_layer.build_pane_draws(
+                device,
+                queue,
+                pane_img.pane,
+                &pane_img.placements,
+                &pane_img.images,
+                *rect,
+                self.grid_padding,
+                self.cell_size,
+                self.viewport,
+            );
+            out.push((pane_img.pane, draws));
+        }
+        self.image_layer.evict();
+        out
     }
 
     /// Re-upload either/both atlas textures if `font`'s mask or color atlas
@@ -635,11 +748,10 @@ impl Renderer {
         pass.draw(0..6, range);
     }
 
-    fn instance_range_for(&self, pane: PaneId) -> Option<Range<u32>> {
-        self.pane_instances
-            .iter()
-            .find(|entry| entry.pane == pane)
-            .map(|entry| entry.range.clone())
+    /// Lifetime count of image-texture uploads, exposed for the headless test
+    /// asserting an epoch bump forces a re-upload (and a repeat frame does not).
+    pub fn image_texture_upload_count(&self) -> u64 {
+        self.image_layer.upload_count()
     }
 
     /// Test-only window into the built instance list (AC-WP4-03, FM-16):
@@ -933,10 +1045,24 @@ fn flatten_row_segments(
     }
 }
 
+/// Result of [`rebuild_pane_cached`]: the pane's clear color, cell size, how
+/// many rows were regenerated, and the two z-band boundary offsets (relative to
+/// the pane's appended instance range) the image layer interleaves at.
+struct PaneRebuild {
+    clear_color: [f32; 4],
+    cell_size: (f32, f32),
+    rows_rebuilt: u64,
+    /// Number of background instances (offset where band 0 → band 1 splits).
+    bg_len: u32,
+    /// Number of background + glyph + decoration instances, i.e. the offset
+    /// where the pane's UI-overlay instances begin (band 1 → band 2 split).
+    text_len: u32,
+}
+
 /// WP4 (REQ-PERF-2/3): rebuild `cache`'s per-row segments against `snap`,
 /// regenerating only dirty rows, then append the flattened result to
 /// `instances` (the caller owns clearing `instances` once per frame across
-/// all panes). Returns `(clear_color, cell_size, rows_rebuilt)`.
+/// all panes).
 fn rebuild_pane_cached(
     cache: &mut PaneRenderCache,
     instances: &mut Vec<CellInstance>,
@@ -944,7 +1070,7 @@ fn rebuild_pane_cached(
     font: &mut FontGrid,
     theme: &Theme,
     target_format_is_srgb: bool,
-) -> ([f32; 4], (f32, f32), u64) {
+) -> PaneRebuild {
     let metrics = font.metrics();
     let clear_color = surface_output_rgba(
         theme.default_bg_with_colors(&snap.colors),
@@ -1026,6 +1152,10 @@ fn rebuild_pane_cached(
         }
     }
 
+    let bg_len: u32 = cache.bg.iter().map(|row| row.len() as u32).sum();
+    let glyph_len: u32 = cache.glyph.iter().map(|row| row.len() as u32).sum();
+    let deco_len: u32 = cache.deco.iter().map(|row| row.len() as u32).sum();
+
     flatten_row_segments(instances, &cache.bg, &cache.glyph, &cache.deco);
     append_search_prompt_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
     append_command_palette_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
@@ -1034,7 +1164,13 @@ fn rebuild_pane_cached(
     cache.key = Some(new_key);
     cache.prev_cursor = Some(new_cursor);
 
-    (clear_color, cell_size, rows_rebuilt)
+    PaneRebuild {
+        clear_color,
+        cell_size,
+        rows_rebuilt,
+        bg_len,
+        text_len: bg_len + glyph_len + deco_len,
+    }
 }
 
 /// Append the open search-prompt overlay (Cmd+F), if any, to `instances`.
@@ -3517,6 +3653,8 @@ mod tests {
             search_prompt: None,
             command_palette: None,
             confirm_dialog: None,
+            image_placements: Vec::new(),
+            images: Vec::new(),
         }
     }
 

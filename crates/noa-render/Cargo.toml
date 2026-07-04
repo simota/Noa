@@ -16,3 +16,4 @@ unicode-width.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true
+noa-vt.workspace = true

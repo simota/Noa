@@ -2,6 +2,8 @@
 //! needed to rebuild a frame's GPU instances. `noa-app` takes this under the
 //! `Terminal` mutex and then calls into the renderer unlocked.
 
+use std::sync::Arc;
+
 use noa_grid::{
     Cursor, Row, Screen, SearchState, Selection, SelectionPoint, Terminal, TerminalColors,
 };
@@ -50,6 +52,83 @@ pub struct ConfirmDialogSnapshot {
     pub hint: String,
 }
 
+/// One kitty-graphics placement projected into this frame's viewport, ready
+/// for the image layer to resolve into a destination rectangle. Cell-space
+/// like the rest of the snapshot; `grid_x`/`grid_y` may be negative when the
+/// image spills above or left of the visible grid (the renderer draws the full
+/// quad and lets the pane scissor clip it). `epoch` is copied from the backing
+/// image so the renderer can key its texture cache on `(id, epoch)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImagePlacementSnapshot {
+    pub image_id: u32,
+    pub epoch: u64,
+    pub grid_x: i32,
+    pub grid_y: i32,
+    pub cell_x_off: u16,
+    pub cell_y_off: u16,
+    pub cols: u16,
+    pub rows: u16,
+    /// Crop rectangle in image pixels (`[x, y, w, h]`), or `None` for the whole
+    /// image.
+    pub src: Option<[u32; 4]>,
+    pub z: i32,
+}
+
+/// The pixel data behind the visible [`ImagePlacementSnapshot`]s. Only images a
+/// visible placement references are carried, deduplicated by id; `rgba` is an
+/// `Arc` clone (a refcount bump, not a pixel copy) so building this off the
+/// `Terminal` lock stays cheap.
+#[derive(Clone, Debug)]
+pub struct SnapshotImage {
+    pub id: u32,
+    pub epoch: u64,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Arc<[u8]>,
+}
+
+/// Collect the active screen's visible kitty placements plus the images they
+/// reference. Shared by [`FrameSnapshot::from_terminal`] and
+/// [`FrameSnapshot::peek`]; both take `&Terminal` here (the projection is a
+/// read), so it runs before either path's mutable row extraction.
+fn kitty_snapshot(terminal: &Terminal) -> (Vec<ImagePlacementSnapshot>, Vec<SnapshotImage>) {
+    let placements = terminal.kitty_visible_placements();
+    if placements.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut out_placements = Vec::with_capacity(placements.len());
+    let mut images: Vec<SnapshotImage> = Vec::new();
+    for placement in &placements {
+        let Some(image) = terminal.kitty_image(placement.image_id) else {
+            // A visible placement whose image is gone can't be drawn; skip it
+            // rather than carry a dangling id into the renderer.
+            continue;
+        };
+        out_placements.push(ImagePlacementSnapshot {
+            image_id: placement.image_id,
+            epoch: image.epoch,
+            grid_x: placement.grid_x,
+            grid_y: placement.grid_y,
+            cell_x_off: placement.cell_x_off,
+            cell_y_off: placement.cell_y_off,
+            cols: placement.cols,
+            rows: placement.rows,
+            src: placement.src,
+            z: placement.z,
+        });
+        if !images.iter().any(|existing| existing.id == image.id) {
+            images.push(SnapshotImage {
+                id: image.id,
+                epoch: image.epoch,
+                width: image.width,
+                height: image.height,
+                rgba: Arc::clone(&image.rgba),
+            });
+        }
+    }
+    (out_placements, images)
+}
+
 /// A snapshot of the active screen taken under the `Terminal` lock.
 ///
 /// WP4 (REQ-PERF-1/2): `row_dirty` is parallel to `rows` (same length, same
@@ -94,6 +173,13 @@ pub struct FrameSnapshot {
     /// any. `None` draws no dialog. Set by the caller only on its bound
     /// window's focused pane; `from_terminal` defaults to `None`.
     pub confirm_dialog: Option<ConfirmDialogSnapshot>,
+    /// Kitty-graphics placements visible in this frame's viewport, z-ascending
+    /// (back-to-front). Empty unless a client has transmitted and placed an
+    /// image. The renderer resolves each to a destination quad via
+    /// [`crate::image_layer`] and composites it in one of three z bands.
+    pub image_placements: Vec<ImagePlacementSnapshot>,
+    /// Pixel data for the images `image_placements` references (deduped by id).
+    pub images: Vec<SnapshotImage>,
 }
 
 /// The screen `Terminal` is currently rendering, borrowed mutably so its
@@ -116,6 +202,7 @@ impl FrameSnapshot {
     /// (and clearing) each visible row's dirty bit in the same lock.
     pub fn from_terminal(terminal: &mut Terminal) -> Self {
         let colors = terminal.colors.clone();
+        let (image_placements, images) = kitty_snapshot(terminal);
         let screen = active_screen_mut(terminal);
         let mut cursor = screen.cursor;
         if screen.viewport_offset() > 0 {
@@ -143,6 +230,8 @@ impl FrameSnapshot {
             search_prompt: None,
             command_palette: None,
             confirm_dialog: None,
+            image_placements,
+            images,
         }
     }
 
@@ -165,6 +254,7 @@ impl FrameSnapshot {
     /// overview tile is never the pane the user is typing into.
     pub fn peek(terminal: &Terminal) -> Self {
         let colors = terminal.colors.clone();
+        let (image_placements, images) = kitty_snapshot(terminal);
         let screen = terminal.active();
         let mut cursor = screen.cursor;
         cursor.visible = false;
@@ -191,6 +281,8 @@ impl FrameSnapshot {
             search_prompt: None,
             command_palette: None,
             confirm_dialog: None,
+            image_placements,
+            images,
         }
     }
 
@@ -322,5 +414,107 @@ mod tests {
         assert!(snap.is_search_match(0, 1));
         assert!(snap.is_active_search_match(0, 1));
         assert!(!snap.is_search_match(0, 0));
+    }
+
+    // ── Kitty-graphics snapshot construction ────────────────────────────
+
+    /// Minimal base64 encoder for building direct-transfer APC payloads (the
+    /// grid's own encoder is crate-private).
+    fn base64(data: &[u8]) -> Vec<u8> {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = Vec::new();
+        for chunk in data.chunks(3) {
+            let b0 = chunk[0];
+            let b1 = chunk.get(1).copied().unwrap_or(0);
+            let b2 = chunk.get(2).copied().unwrap_or(0);
+            let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+            out.push(ALPHABET[(n >> 18 & 63) as usize]);
+            out.push(ALPHABET[(n >> 12 & 63) as usize]);
+            out.push(if chunk.len() > 1 {
+                ALPHABET[(n >> 6 & 63) as usize]
+            } else {
+                b'='
+            });
+            out.push(if chunk.len() > 2 {
+                ALPHABET[(n & 63) as usize]
+            } else {
+                b'='
+            });
+        }
+        out
+    }
+
+    fn apc(ctrl: &str, data: &[u8]) -> Vec<u8> {
+        let mut out = b"\x1b_G".to_vec();
+        out.extend_from_slice(ctrl.as_bytes());
+        out.push(b';');
+        out.extend_from_slice(&base64(data));
+        out.extend_from_slice(b"\x1b\\");
+        out
+    }
+
+    /// A 20×24 terminal with 10×20 px cells carrying one placed 1×1 image (id 1).
+    fn term_with_image() -> Terminal {
+        use noa_vt::Stream;
+        let mut term = Terminal::new(GridSize::new(20, 24));
+        term.set_pixel_metrics(10, 20, 200, 480);
+        let mut stream = Stream::new();
+        stream.feed(
+            &apc("a=T,f=32,s=1,v=1,i=1,C=1", &[10, 20, 30, 40]),
+            &mut term,
+        );
+        term
+    }
+
+    #[test]
+    fn from_terminal_carries_visible_placement_and_referenced_image() {
+        let mut term = term_with_image();
+        let snap = FrameSnapshot::from_terminal(&mut term);
+
+        assert_eq!(snap.image_placements.len(), 1);
+        let placement = snap.image_placements[0];
+        assert_eq!(placement.image_id, 1);
+        assert_eq!(placement.grid_y, 0);
+        assert_eq!((placement.cols, placement.rows), (1, 1));
+
+        assert_eq!(snap.images.len(), 1);
+        assert_eq!(snap.images[0].id, 1);
+        assert_eq!(&snap.images[0].rgba[..], &[10, 20, 30, 40]);
+        // Placement epoch is copied from the backing image.
+        assert_eq!(placement.epoch, snap.images[0].epoch);
+    }
+
+    #[test]
+    fn snapshot_image_rgba_is_an_arc_clone_not_a_copy() {
+        let mut term = term_with_image();
+        let snap = FrameSnapshot::from_terminal(&mut term);
+        let store_rgba = &term.kitty_image(1).expect("image present").rgba;
+        assert!(
+            std::sync::Arc::ptr_eq(&snap.images[0].rgba, store_rgba),
+            "snapshot must share the store's Arc, not deep-copy the pixels"
+        );
+    }
+
+    #[test]
+    fn duplicate_placements_of_one_image_dedup_the_image_list() {
+        use noa_vt::Stream;
+        let mut term = term_with_image();
+        // Place the same image again at a different row (C=1 keeps the cursor).
+        let mut stream = Stream::new();
+        stream.feed(b"\x1b[3;1H", &mut term);
+        stream.feed(&apc("a=p,i=1,p=2,C=1", &[]), &mut term);
+
+        let snap = FrameSnapshot::from_terminal(&mut term);
+        assert_eq!(snap.image_placements.len(), 2, "two placements");
+        assert_eq!(snap.images.len(), 1, "one shared image, deduped by id");
+    }
+
+    #[test]
+    fn peek_builds_the_same_image_snapshot_as_from_terminal() {
+        let term = term_with_image();
+        let snap = FrameSnapshot::peek(&term);
+        assert_eq!(snap.image_placements.len(), 1);
+        assert_eq!(snap.images.len(), 1);
+        assert_eq!(snap.images[0].id, 1);
     }
 }

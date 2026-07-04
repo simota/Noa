@@ -17,9 +17,10 @@ use noa_font::FontGrid;
 use noa_grid::{Cell, Cursor, Row, SearchState, Selection, SelectionPoint, TerminalColors};
 use noa_render::{
     CardStyle, CardTilePlacement, CommandPaletteSnapshot, DrawOp, FrameSnapshot,
-    OverviewThumbnailResources, PaneFrame, PaneId, PaneRect, Renderer, Theme, build_draw_plan,
-    renderer_construction_count,
+    ImagePlacementSnapshot, OverviewThumbnailResources, PaneFrame, PaneId, PaneRect, Renderer,
+    SnapshotImage, Theme, build_draw_plan, renderer_construction_count,
 };
+use std::sync::Arc;
 
 /// Shared title-bar band height + card color for the overview headless tests
 /// (mirrors `noa_app::tab_overview`'s compile-time constants; noa-render can't
@@ -83,6 +84,8 @@ fn snapshot_for_text(text: &str) -> FrameSnapshot {
         search_prompt: None,
         command_palette: None,
         confirm_dialog: None,
+        image_placements: Vec::new(),
+        images: Vec::new(),
     }
 }
 
@@ -301,6 +304,8 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         search_prompt: None,
         command_palette: None,
         confirm_dialog: None,
+        image_placements: Vec::new(),
+        images: Vec::new(),
     };
     let theme = Theme::new();
 
@@ -388,6 +393,8 @@ fn command_palette_overlay_draws_one_frame_without_validation_error() {
             selected: 1,
         }),
         confirm_dialog: None,
+        image_placements: Vec::new(),
+        images: Vec::new(),
     };
 
     renderer.rebuild_cells(&snap, &mut font, &Theme::new());
@@ -619,6 +626,8 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
             search_prompt: None,
             command_palette: None,
             confirm_dialog: None,
+            image_placements: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -1013,6 +1022,8 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
         search_prompt: None,
         command_palette: None,
         confirm_dialog: None,
+        image_placements: Vec::new(),
+        images: Vec::new(),
     };
     let theme = Theme::new();
 
@@ -1287,5 +1298,217 @@ fn overview_card_pipeline_composites_tiles_without_validation_error() {
     assert!(
         pixels.chunks_exact(4).any(|px| px != first),
         "card composite produced a uniform frame (nothing drawn)"
+    );
+}
+
+// ── Kitty-graphics image layer (design Step R) ──────────────────────────
+
+/// A grid of `cols`×`rows` cells with an explicit background color, plus one
+/// image placement (id 1, solid `image_color`) covering the whole grid at
+/// z-index `z`.
+fn image_snapshot(
+    cols: u16,
+    rows_n: u16,
+    bg: Color,
+    image_color: [u8; 4],
+    epoch: u64,
+    z: i32,
+) -> FrameSnapshot {
+    let rows: Vec<Row> = (0..rows_n)
+        .map(|_| Row {
+            cells: vec![
+                Cell {
+                    ch: ' ',
+                    combining: String::new(),
+                    fg: Color::Default,
+                    bg,
+                    underline_color: None,
+                    hyperlink: None,
+                    attrs: CellAttrs::empty(),
+                };
+                cols as usize
+            ],
+            wrapped: false,
+            dirty: true,
+        })
+        .collect();
+    // 4×4 solid-color image; the Linear sampler stretches it over the quad.
+    let rgba: Vec<u8> = image_color.iter().copied().cycle().take(4 * 4 * 4).collect();
+    FrameSnapshot {
+        row_dirty: vec![true; rows.len()],
+        rows,
+        cursor: Cursor::default(),
+        colors: TerminalColors::default(),
+        selection: None,
+        search: SearchState::default(),
+        row_base: 0,
+        cols,
+        rows_n,
+        focused: true,
+        cursor_blink_visible: true,
+        hover_link: None,
+        search_prompt: None,
+        command_palette: None,
+        confirm_dialog: None,
+        image_placements: vec![ImagePlacementSnapshot {
+            image_id: 1,
+            epoch,
+            grid_x: 0,
+            grid_y: 0,
+            cell_x_off: 0,
+            cell_y_off: 0,
+            cols,
+            rows: rows_n,
+            src: None,
+            z,
+        }],
+        images: vec![SnapshotImage {
+            id: 1,
+            epoch,
+            width: 4,
+            height: 4,
+            rgba: Arc::from(rgba),
+        }],
+    }
+}
+
+#[test]
+fn image_layer_draws_image_and_text_without_validation_error() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping image-layer draw test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: 96, h: 64 });
+
+    // A textful grid with an opaque image over it at z=0 (above text).
+    let mut snap = image_snapshot(6, 4, Color::Rgb(Rgb::new(180, 0, 0)), [0, 0, 255, 255], 0, 0);
+    snap.rows[0].cells[0].ch = 'A';
+    snap.rows[0].cells[0].fg = Color::Palette(2);
+
+    renderer.rebuild_cells(&snap, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+
+    let (_target, view) = render_target(&device, 96, 64);
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.draw(&device, &queue, &view);
+    let err = pollster::block_on(device.pop_error_scope());
+
+    assert!(
+        err.is_none(),
+        "wgpu validation error drawing an image placement mixed with text: {err:?}"
+    );
+}
+
+#[test]
+fn image_z_band_controls_whether_it_covers_the_cell_background() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping image z-band pixel test");
+        return;
+    };
+    let width = 96u32;
+    let height = 64u32;
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: width, h: height });
+
+    let center = |pixels: &[u8]| -> [u8; 4] {
+        let x = (width / 2) as usize;
+        let y = (height / 2) as usize;
+        let i = (y * width as usize + x) * 4;
+        [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+    };
+
+    // z=0 (above text): the opaque blue image draws over the red cell background.
+    let above = image_snapshot(40, 40, Color::Rgb(Rgb::new(200, 0, 0)), [0, 0, 255, 255], 0, 0);
+    renderer.rebuild_cells(&above, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+    let (target, view) = render_target(&device, width, height);
+    renderer.draw(&device, &queue, &view);
+    let above_px = center(&read_rgba_pixels(&device, &queue, &target, width, height));
+    assert!(
+        above_px[2] > above_px[0],
+        "z>=0 image must draw OVER the cell background (blue dominant), got {above_px:?}"
+    );
+
+    // z below the background threshold: the image draws UNDER the background, so
+    // the red background covers it.
+    let below = image_snapshot(
+        40,
+        40,
+        Color::Rgb(Rgb::new(200, 0, 0)),
+        [0, 0, 255, 255],
+        0,
+        -2_000_000_000,
+    );
+    renderer.rebuild_cells(&below, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+    let (target2, view2) = render_target(&device, width, height);
+    renderer.draw(&device, &queue, &view2);
+    let below_px = center(&read_rgba_pixels(&device, &queue, &target2, width, height));
+    assert!(
+        below_px[0] > below_px[2],
+        "z<bg-threshold image must draw UNDER the cell background (red dominant), got {below_px:?}"
+    );
+}
+
+#[test]
+fn image_texture_reuploads_only_on_epoch_bump() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping image epoch-reupload test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: 64, h: 48 });
+    let (_target, view) = render_target(&device, 64, 48);
+
+    let draw = |renderer: &mut Renderer, font: &mut FontGrid, epoch: u64| {
+        let snap = image_snapshot(4, 4, Color::Rgb(Rgb::new(0, 80, 0)), [255, 255, 0, 255], epoch, 0);
+        renderer.rebuild_cells(&snap, font, &Theme::new());
+        renderer.sync_atlas(&device, &queue, font);
+        renderer.draw(&device, &queue, &view);
+    };
+
+    draw(&mut renderer, &mut font, 0);
+    let after_first = renderer.image_texture_upload_count();
+    assert!(after_first >= 1, "first frame uploads the image texture");
+
+    draw(&mut renderer, &mut font, 0);
+    assert_eq!(
+        renderer.image_texture_upload_count(),
+        after_first,
+        "same (id, epoch) must reuse the cached texture — no re-upload"
+    );
+
+    draw(&mut renderer, &mut font, 1);
+    assert!(
+        renderer.image_texture_upload_count() > after_first,
+        "an epoch bump must force a texture re-upload"
     );
 }

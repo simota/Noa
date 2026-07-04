@@ -67,10 +67,15 @@ fn thicken_mask(bitmap: &[u8], strength: u8) -> Vec<u8> {
     if strength == 0 {
         return bitmap.to_vec();
     }
-    // gamma in (0.55 ..= 1.0): full strength → 0.55 (clearly heavier), tapering
-    // to 1.0 (identity) at strength 0. Kept above ~0.5 so text darkens without
-    // turning into blobs at terminal sizes.
-    let gamma = 1.0 - 0.45 * (strength as f32 / 255.0);
+    // gamma in (0.33 ..= 1.0): full strength → 0.33, tapering to 1.0 (identity)
+    // at strength 0. The 0.33 endpoint is *measured*, not guessed: rendering a
+    // screen full of Fira Code 16 white-on-dark text and comparing mean glyph
+    // luminance against Ghostty (`native` CoreText blending) on the same
+    // display, noa's default (strength 255) landed at ~73 vs Ghostty's ~76 —
+    // visibly lighter. A gamma sweep on that harness put strength 255 → 0.33 at
+    // parity (~76, matching bright-pixel fraction too) while staying crisp with
+    // open counters down to 10 pt (no blob at terminal sizes).
+    let gamma = 1.0 - 0.67 * (strength as f32 / 255.0);
     let mut lut = [0u8; 256];
     for (c, slot) in lut.iter_mut().enumerate() {
         let norm = c as f32 / 255.0;

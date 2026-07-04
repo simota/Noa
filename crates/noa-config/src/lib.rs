@@ -20,6 +20,19 @@ pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 
+/// `clipboard-read` policy for OSC 52 clipboard *read* (query) requests.
+/// Mirrors Ghostty, whose default is `ask`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClipboardAccess {
+    /// Never honor a read request.
+    Deny,
+    /// Prompt the user before revealing clipboard contents.
+    #[default]
+    Ask,
+    /// Always honor a read request.
+    Allow,
+}
+
 /// A single OpenType feature toggle, e.g. `calt` (enabled) or `-liga`
 /// (`enabled: false`, explicitly disabled). Consumed for real in WP2; WP0
 /// only parses and stores it.
@@ -139,6 +152,11 @@ pub struct StartupConfig {
     pub font_size: f32,
     pub theme: Option<String>,
     pub font: FontConfig,
+    /// OSC 52 clipboard read (query) policy.
+    pub clipboard_read: ClipboardAccess,
+    /// Whether to confirm before pasting content that could run commands
+    /// (`clipboard-paste-protection`). Ghostty default is on.
+    pub clipboard_paste_protection: bool,
 }
 
 impl Default for StartupConfig {
@@ -149,6 +167,8 @@ impl Default for StartupConfig {
             font_size: DEFAULT_FONT_SIZE,
             theme: None,
             font: FontConfig::default(),
+            clipboard_read: ClipboardAccess::default(),
+            clipboard_paste_protection: true,
         }
     }
 }
@@ -161,6 +181,8 @@ pub struct ConfigOverrides {
     pub font_size: Option<f32>,
     pub theme: Option<String>,
     pub font: FontConfig,
+    pub clipboard_read: Option<ClipboardAccess>,
+    pub clipboard_paste_protection: Option<bool>,
 }
 
 impl ConfigOverrides {
@@ -171,6 +193,10 @@ impl ConfigOverrides {
             font_size: higher_priority.font_size.or(self.font_size),
             theme: higher_priority.theme.or(self.theme),
             font: self.font.merge(higher_priority.font),
+            clipboard_read: higher_priority.clipboard_read.or(self.clipboard_read),
+            clipboard_paste_protection: higher_priority
+                .clipboard_paste_protection
+                .or(self.clipboard_paste_protection),
         }
     }
 
@@ -181,6 +207,10 @@ impl ConfigOverrides {
             font_size: self.font_size.unwrap_or(base.font_size),
             theme: self.theme.or(base.theme),
             font: self.font.apply_to(base.font),
+            clipboard_read: self.clipboard_read.unwrap_or(base.clipboard_read),
+            clipboard_paste_protection: self
+                .clipboard_paste_protection
+                .unwrap_or(base.clipboard_paste_protection),
         }
     }
 }
@@ -296,6 +326,8 @@ mod tests {
                 font_size: 14.0,
                 theme: None,
                 font: FontConfig::default(),
+                clipboard_read: ClipboardAccess::Ask,
+                clipboard_paste_protection: true,
             }
         );
     }
@@ -320,6 +352,7 @@ font-size = 15.5
                 font_size: Some(15.5),
                 theme: None,
                 font: FontConfig::default(),
+                ..Default::default()
             }
         );
     }
@@ -332,6 +365,7 @@ font-size = 15.5
             font_size: Some(15.5),
             theme: Some("3024 Day".to_string()),
             font: FontConfig::default(),
+            ..Default::default()
         };
         let cli = ConfigOverrides {
             cols: Some(120),
@@ -339,6 +373,7 @@ font-size = 15.5
             font_size: Some(16.0),
             theme: None,
             font: FontConfig::default(),
+            ..Default::default()
         };
 
         let config = file.merge(cli).apply_to(StartupConfig::default());
@@ -351,6 +386,7 @@ font-size = 15.5
                 font_size: 16.0,
                 theme: Some("3024 Day".to_string()),
                 font: FontConfig::default(),
+                ..Default::default()
             }
         );
     }
@@ -369,6 +405,7 @@ font-size = 15.5
                     font_size: None,
                     theme: Some("3024 Day".to_string()),
                     font: FontConfig::default(),
+                    ..Default::default()
                 }
             );
         }
@@ -477,6 +514,7 @@ font-size = 15.5
             font_size: Some(18.0),
             theme: None,
             font: FontConfig::default(),
+            ..Default::default()
         };
 
         let (config, diagnostics) =
@@ -515,6 +553,7 @@ font-size = 15.5
             font_size: None,
             theme: None,
             font: FontConfig::default(),
+            ..Default::default()
         };
 
         let (config, diagnostics) = load_startup_config_from(&config_path, &legacy_path, cli)
@@ -571,6 +610,7 @@ font-size = 15.5
             font_size,
             theme,
             font,
+            ..
         } = StartupConfig::default();
         let ConfigOverrides {
             cols: override_cols,
@@ -578,6 +618,7 @@ font-size = 15.5
             font_size: override_font_size,
             theme: override_theme,
             font: override_font,
+            ..
         } = ConfigOverrides::default();
 
         assert_eq!((cols, rows, font_size, theme), (80, 24, 14.0, None));
@@ -603,6 +644,7 @@ font-size = 15.5
                 font_size: 14.0,
                 theme: None,
                 font: FontConfig::default(),
+                ..Default::default()
             },
             "resolved startup config",
         )
@@ -619,6 +661,7 @@ font-size = 15.5
             font_size: Some(f32::NAN),
             theme: None,
             font: FontConfig::default(),
+            ..Default::default()
         }
         .apply_to(StartupConfig::default());
 

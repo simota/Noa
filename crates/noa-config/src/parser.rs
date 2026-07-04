@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use crate::{
-    AlphaBlendingMode, ConfigOverrides, FontConfig, FontFeature, FontVariation, SyntheticStyleMode,
+    AlphaBlendingMode, ClipboardAccess, ConfigOverrides, FontConfig, FontFeature, FontVariation,
+    SyntheticStyleMode,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +40,8 @@ pub(crate) fn build_overrides(
     let mut font_size = None;
     let mut theme = None;
     let mut font = FontConfig::default();
+    let mut clipboard_read = None;
+    let mut clipboard_paste_protection = None;
     let mut diagnostics = Vec::new();
 
     for directive in directives {
@@ -110,6 +113,13 @@ pub(crate) fn build_overrides(
                 font.thicken_strength =
                     parse_font_thicken_strength(path, directive, &mut diagnostics);
             }
+            "clipboard-read" => {
+                clipboard_read = parse_clipboard_read(path, directive, &mut diagnostics);
+            }
+            "clipboard-paste-protection" => {
+                clipboard_paste_protection =
+                    parse_bool_directive(path, directive, &mut diagnostics);
+            }
             "keybind" | "palette" => {
                 diagnostics.push(list_key_diagnostic(path, &directive.key));
             }
@@ -138,6 +148,8 @@ pub(crate) fn build_overrides(
             font_size,
             theme,
             font,
+            clipboard_read,
+            clipboard_paste_protection,
         },
         diagnostics,
     )
@@ -146,7 +158,12 @@ pub(crate) fn build_overrides(
 pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
     matches!(
         key,
-        "window-width" | "window-height" | "font-size" | "theme"
+        "window-width"
+            | "window-height"
+            | "font-size"
+            | "theme"
+            | "clipboard-read"
+            | "clipboard-paste-protection"
     )
 }
 
@@ -379,6 +396,39 @@ fn parse_font_thicken_strength(
         return None;
     };
     Some(parsed)
+}
+
+fn parse_clipboard_read(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<ClipboardAccess> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "deny" | "false" => Some(ClipboardAccess::Deny),
+        "ask" => Some(ClipboardAccess::Ask),
+        "allow" | "true" => Some(ClipboardAccess::Allow),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+fn parse_bool_directive(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<bool> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
 }
 
 fn unknown_key_diagnostic(path: &Path, key: &str) -> Diagnostic {
@@ -796,6 +846,38 @@ mod tests {
 
         assert_eq!(overrides.font.thicken_strength, Some(128));
         assert!(diagnostics.is_empty(), "consumed key emits no diagnostic");
+    }
+
+    #[test]
+    fn clipboard_read_parses_each_mode() {
+        for (value, expected) in [
+            ("deny", ClipboardAccess::Deny),
+            ("ask", ClipboardAccess::Ask),
+            ("allow", ClipboardAccess::Allow),
+        ] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("clipboard-read = {value}"));
+            assert_eq!(overrides.clipboard_read, Some(expected), "{value:?}");
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+    }
+
+    #[test]
+    fn clipboard_read_invalid_value_warns() {
+        let (overrides, diagnostics) = parse_overrides(path(), "clipboard-read = maybe");
+
+        assert_eq!(overrides.clipboard_read, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("clipboard-read"));
+    }
+
+    #[test]
+    fn clipboard_paste_protection_parses_bool() {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), "clipboard-paste-protection = false");
+
+        assert_eq!(overrides.clipboard_paste_protection, Some(false));
+        assert!(diagnostics.is_empty());
     }
 
     #[test]

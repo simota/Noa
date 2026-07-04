@@ -464,6 +464,22 @@ impl Default for KeybindEngine {
                 AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
             ),
             (
+                "cmd+ctrl+arrowleft",
+                AppCommand::FocusDirection(Direction::Left),
+            ),
+            (
+                "cmd+ctrl+arrowright",
+                AppCommand::FocusDirection(Direction::Right),
+            ),
+            (
+                "cmd+ctrl+arrowup",
+                AppCommand::FocusDirection(Direction::Up),
+            ),
+            (
+                "cmd+ctrl+arrowdown",
+                AppCommand::FocusDirection(Direction::Down),
+            ),
+            (
                 "cmd+alt+arrowleft",
                 AppCommand::FocusDirection(Direction::Left),
             ),
@@ -477,16 +493,19 @@ impl Default for KeybindEngine {
                 AppCommand::FocusDirection(Direction::Down),
             ),
             (
-                "cmd+ctrl+arrowleft",
+                "cmd+ctrl+shift+arrowleft",
                 AppCommand::ResizeSplit(Direction::Left),
             ),
             (
-                "cmd+ctrl+arrowright",
+                "cmd+ctrl+shift+arrowright",
                 AppCommand::ResizeSplit(Direction::Right),
             ),
-            ("cmd+ctrl+arrowup", AppCommand::ResizeSplit(Direction::Up)),
             (
-                "cmd+ctrl+arrowdown",
+                "cmd+ctrl+shift+arrowup",
+                AppCommand::ResizeSplit(Direction::Up),
+            ),
+            (
+                "cmd+ctrl+shift+arrowdown",
                 AppCommand::ResizeSplit(Direction::Down),
             ),
             ("cmd+ctrl+=", AppCommand::EqualizeSplits),
@@ -921,20 +940,35 @@ mod tests {
 
     #[test]
     fn split_shortcuts_map_to_pane_commands() {
-        assert_eq!(
-            AppCommand::from_key(
-                &Key::Named(NamedKey::ArrowLeft),
-                ModifiersState::SUPER | ModifiersState::ALT
-            ),
-            Some(AppCommand::FocusDirection(Direction::Left))
-        );
-        assert_eq!(
-            AppCommand::from_key(
-                &Key::Named(NamedKey::ArrowRight),
-                ModifiersState::SUPER | ModifiersState::CONTROL
-            ),
-            Some(AppCommand::ResizeSplit(Direction::Right))
-        );
+        let directions = [
+            (NamedKey::ArrowLeft, Direction::Left),
+            (NamedKey::ArrowRight, Direction::Right),
+            (NamedKey::ArrowUp, Direction::Up),
+            (NamedKey::ArrowDown, Direction::Down),
+        ];
+        for (key, direction) in directions {
+            assert_eq!(
+                AppCommand::from_key(
+                    &Key::Named(key),
+                    ModifiersState::SUPER | ModifiersState::CONTROL
+                ),
+                Some(AppCommand::FocusDirection(direction))
+            );
+            assert_eq!(
+                AppCommand::from_key(
+                    &Key::Named(key),
+                    ModifiersState::SUPER | ModifiersState::ALT
+                ),
+                Some(AppCommand::FocusDirection(direction))
+            );
+            assert_eq!(
+                AppCommand::from_key(
+                    &Key::Named(key),
+                    ModifiersState::SUPER | ModifiersState::CONTROL | ModifiersState::SHIFT
+                ),
+                Some(AppCommand::ResizeSplit(direction))
+            );
+        }
         assert_eq!(
             AppCommand::from_key(
                 &Key::Character("=".into()),
@@ -1083,6 +1117,18 @@ mod tests {
                 .chord_for(AppCommand::ScrollViewport(ViewportScroll::LineUp))
                 .as_deref(),
             Some("shift+arrowup")
+        );
+        assert_eq!(
+            engine
+                .chord_for(AppCommand::FocusDirection(Direction::Left))
+                .as_deref(),
+            Some("cmd+ctrl+arrowleft")
+        );
+        assert_eq!(
+            engine
+                .chord_for(AppCommand::ResizeSplit(Direction::Right))
+                .as_deref(),
+            Some("cmd+ctrl+shift+arrowright")
         );
         assert_eq!(
             engine.chord_for(AppCommand::Terminal(TerminalAction::ClearScrollback)),

@@ -491,6 +491,8 @@ mod tests {
 
         assert!(!output.is_empty());
         assert!(output.contains("cmd+t = tab.new\n"));
+        assert!(output.contains("cmd+ctrl+arrowleft = split.focus-left\n"));
+        assert!(output.contains("cmd+ctrl+shift+arrowright = split.resize-right\n"));
         assert!(output.contains("cmd+shift+p = command-palette.toggle\n"));
         // Every line is `chord = action` where the action name round-trips
         // through the command registry.

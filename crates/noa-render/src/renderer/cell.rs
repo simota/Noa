@@ -67,6 +67,7 @@ pub(super) fn rebuild_cell_instances(
 
     instances.clear();
     flatten_row_segments(instances, &bg_rows, &glyph_rows, &deco_rows);
+    append_preedit_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
     append_search_prompt_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
     append_command_palette_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
     append_confirm_dialog_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
@@ -157,7 +158,17 @@ pub(super) fn rebuild_row_instances(
             });
         }
 
-        let text_rgb = theme.contrast_adjusted_fg(text_base_rgb, bg_rgb);
+        let mut text_rgb = theme.contrast_adjusted_fg(text_base_rgb, bg_rgb);
+        // SGR 2 (faint/dim): render the ink at half opacity over its own
+        // background, i.e. `(fg + bg) / 2`. This matches Ghostty's `native`
+        // dim — measured against Ghostty on the same display, a faint white
+        // glyph core resolved to `(248+33)/2 ≈ 141` (exactly a 0.5 blend
+        // toward the terminal bg). Without this, noa left faint text at full
+        // intensity, so dimmed secondary UI text (e.g. a statusline's muted
+        // labels) read brighter than Ghostty.
+        if cell.attrs.contains(CellAttrs::FAINT) {
+            text_rgb = crate::blend(text_rgb, bg_rgb, 0.5);
+        }
         let text_color = surface_output_rgb(text_rgb, target_format_is_srgb);
 
         let invisible = cell.attrs.contains(CellAttrs::INVISIBLE);
@@ -495,6 +506,7 @@ pub(super) fn rebuild_pane_cached(
 
         instances.truncate(instance_start);
         instances.extend_from_slice(&cache.flat);
+        append_preedit_instances(instances, snap, font, theme, target_format_is_srgb, metrics);
         append_search_prompt_instances(
             instances,
             snap,

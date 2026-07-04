@@ -4,7 +4,7 @@
 //! RGB via the active theme) happens at render time, not here.
 
 /// A 24-bit RGB triple.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Rgb {
     pub r: u8,
     pub g: u8,
@@ -22,7 +22,7 @@ impl Rgb {
 /// * `Default` — resolve to the theme's default fg/bg.
 /// * `Palette(n)` — index into the 256-color palette (16 ANSI + 240).
 /// * `Rgb(_)` — 24-bit truecolor.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Color {
     #[default]
     Default,

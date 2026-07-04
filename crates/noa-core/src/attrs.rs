@@ -3,7 +3,7 @@
 use bitflags::bitflags;
 
 bitflags! {
-    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
     pub struct CellAttrs: u16 {
         const BOLD          = 1 << 0;
         const FAINT         = 1 << 1;

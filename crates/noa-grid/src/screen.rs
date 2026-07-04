@@ -45,6 +45,64 @@ struct ReflowedLine {
     boundary_positions: Vec<ReflowPosition>,
 }
 
+/// A Kitty graphics placement: one on-screen display of a stored image.
+///
+/// The vertical anchor is a *session-absolute* row (the same coordinate system
+/// as shell-integration marks: `rows_evicted + scrollback_len + cursor.y` at
+/// creation). Normal scrolling that pushes rows into scrollback needs no
+/// adjustment — the absolute coordinate keeps pointing at the same content; only
+/// scrolls that discard content (alternate screen, region scrolls) shift or drop
+/// placements.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KittyPlacement {
+    pub image_id: u32,
+    /// `p=` placement id (0 = unnamed; the unnamed placement of an image is
+    /// overwritten by a later unnamed placement of the same image).
+    pub placement_id: u32,
+    /// Session-absolute row of the placement's top-left cell.
+    pub anchor_abs_row: usize,
+    pub anchor_col: u16,
+    /// Pixel offset within the starting cell (`X=`/`Y=`, clamped to the cell).
+    pub cell_x_off: u16,
+    pub cell_y_off: u16,
+    /// Source crop `[x, y, w, h]` in image pixels, if the request cropped.
+    pub src: Option<[u32; 4]>,
+    /// Effective cell span, resolved at creation from `c=`/`r=` or the image size.
+    pub cols: u16,
+    pub rows: u16,
+    pub z: i32,
+    /// `U=1` — a virtual placement referenced only by Unicode placeholders; it is
+    /// never drawn directly.
+    pub is_virtual: bool,
+}
+
+impl KittyPlacement {
+    /// Whether the placement's cell rectangle covers session-absolute `(row, col)`.
+    pub(crate) fn covers_abs(&self, abs_row: usize, col: u16) -> bool {
+        abs_row >= self.anchor_abs_row
+            && abs_row < self.anchor_abs_row + self.rows as usize
+            && col >= self.anchor_col
+            && col < self.anchor_col.saturating_add(self.cols)
+    }
+}
+
+/// A placement projected into the current viewport for the renderer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VisibleKittyPlacement {
+    pub image_id: u32,
+    pub placement_id: u32,
+    /// Viewport cell coordinates; may be negative when the image spills above or
+    /// to the left of the visible area.
+    pub grid_x: i32,
+    pub grid_y: i32,
+    pub cell_x_off: u16,
+    pub cell_y_off: u16,
+    pub cols: u16,
+    pub rows: u16,
+    pub src: Option<[u32; 4]>,
+    pub z: i32,
+}
+
 pub struct Screen {
     pub rows: u16,
     pub cols: u16,
@@ -56,6 +114,8 @@ pub struct Screen {
     pub region: ScrollRegion,
     pub horizontal_margins: Option<HorizontalMargins>,
     pub tabstops: Tabstops,
+    /// Kitty graphics placements anchored on this screen (empty on most screens).
+    pub kitty_placements: Vec<KittyPlacement>,
     scrollback: PagedScrollback,
     scrollback_enabled: bool,
     viewport_offset: usize,
@@ -92,6 +152,7 @@ impl Screen {
             },
             horizontal_margins: None,
             tabstops: Tabstops::new(cols),
+            kitty_placements: Vec::new(),
             scrollback: PagedScrollback::new(if scrollback_enabled {
                 DEFAULT_SCROLLBACK_LIMIT_BYTES
             } else {
@@ -1252,6 +1313,147 @@ impl Screen {
         false
     }
 
+    // ── Kitty graphics placements ───────────────────────────────────
+
+    /// Session-absolute row of grid row 0 (the top of the live area).
+    fn live_area_abs_top(&self) -> usize {
+        self.rows_evicted + self.scrollback.len()
+    }
+
+    /// Insert a placement, replacing any existing one with the same
+    /// `(image_id, placement_id)` — this is how an unnamed placement (`p=0`) of
+    /// an image overwrites its predecessor.
+    pub fn insert_kitty_placement(&mut self, placement: KittyPlacement) {
+        self.kitty_placements.retain(|p| {
+            !(p.image_id == placement.image_id && p.placement_id == placement.placement_id)
+        });
+        self.kitty_placements.push(placement);
+    }
+
+    /// Remove placements for which `should_delete` returns true, returning the
+    /// image ids of the removed placements (for uppercase-`d=` data freeing).
+    pub fn delete_kitty_placements<F>(&mut self, should_delete: F) -> Vec<u32>
+    where
+        F: Fn(&KittyPlacement) -> bool,
+    {
+        let mut removed = Vec::new();
+        self.kitty_placements.retain(|p| {
+            if should_delete(p) {
+                removed.push(p.image_id);
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
+    /// Drop placements whose content has scrolled entirely off the top of the
+    /// scrollback (session-absolute rows below `rows_evicted`).
+    pub fn prune_evicted_placements(&mut self) {
+        let floor = self.rows_evicted;
+        self.kitty_placements
+            .retain(|p| p.anchor_abs_row + p.rows as usize > floor);
+    }
+
+    /// Placements projected into the current viewport (non-virtual, intersecting
+    /// the visible rows), sorted by z ascending for back-to-front compositing.
+    pub fn visible_kitty_placements(&self) -> Vec<VisibleKittyPlacement> {
+        if self.kitty_placements.is_empty() {
+            return Vec::new();
+        }
+        let base_abs = (self.rows_evicted + self.visible_row_base()) as i64;
+        let mut out: Vec<VisibleKittyPlacement> = self
+            .kitty_placements
+            .iter()
+            .filter(|p| !p.is_virtual)
+            .filter_map(|p| {
+                let grid_y = p.anchor_abs_row as i64 - base_abs;
+                // Keep if the image's row span intersects [0, rows).
+                if grid_y + p.rows as i64 <= 0 || grid_y >= self.rows as i64 {
+                    return None;
+                }
+                Some(VisibleKittyPlacement {
+                    image_id: p.image_id,
+                    placement_id: p.placement_id,
+                    grid_x: p.anchor_col as i32,
+                    grid_y: grid_y as i32,
+                    cell_x_off: p.cell_x_off,
+                    cell_y_off: p.cell_y_off,
+                    cols: p.cols,
+                    rows: p.rows,
+                    src: p.src,
+                    z: p.z,
+                })
+            })
+            .collect();
+        out.sort_by_key(|p| p.z);
+        out
+    }
+
+    /// Remove placements intersecting a grid row band `[top, bottom]` (0-based
+    /// grid rows). Used for region scrolls / IL / DL where v1 does not reflow
+    /// images with the moved lines.
+    fn remove_placements_intersecting_grid_rows(&mut self, top: usize, bottom: usize) {
+        if self.kitty_placements.is_empty() {
+            return;
+        }
+        let base = self.live_area_abs_top();
+        let r_top = base + top;
+        let r_bot = base + bottom;
+        self.kitty_placements.retain(|p| {
+            let p_top = p.anchor_abs_row;
+            let p_bot = p.anchor_abs_row + p.rows as usize;
+            p_bot <= r_top || p_top > r_bot
+        });
+    }
+
+    /// Track placements across a scroll-up of grid rows `[top, bottom]` by `n`.
+    /// When the scroll recorded scrollback (primary full-screen), absolute
+    /// coordinates already follow the pushed rows. Otherwise a full-screen scroll
+    /// shifts anchors up by `n` (dropping those that fall off the top), and a
+    /// partial-region scroll drops intersecting placements (v1 approximation).
+    fn track_scroll_up(&mut self, top: usize, bottom: usize, n: usize, recorded: bool) {
+        if self.kitty_placements.is_empty() || recorded {
+            return;
+        }
+        let full = top == 0 && bottom == self.rows as usize - 1;
+        if full {
+            let base = self.live_area_abs_top();
+            self.kitty_placements.retain_mut(|p| {
+                if p.anchor_abs_row + p.rows as usize <= base + n {
+                    false
+                } else {
+                    p.anchor_abs_row = p.anchor_abs_row.saturating_sub(n);
+                    true
+                }
+            });
+        } else {
+            self.remove_placements_intersecting_grid_rows(top, bottom);
+        }
+    }
+
+    /// Track placements across a scroll-down of grid rows `[top, bottom]` by `n`
+    /// (`scroll_down_region` never records scrollback). A full-screen scroll
+    /// shifts anchors down by `n` (dropping those pushed past the bottom); a
+    /// partial-region scroll drops intersecting placements.
+    fn track_scroll_down(&mut self, top: usize, bottom: usize, n: usize) {
+        if self.kitty_placements.is_empty() {
+            return;
+        }
+        let full = top == 0 && bottom == self.rows as usize - 1;
+        if full {
+            let base = self.live_area_abs_top();
+            let floor = base + self.rows as usize;
+            self.kitty_placements.retain_mut(|p| {
+                p.anchor_abs_row += n;
+                p.anchor_abs_row < floor
+            });
+        } else {
+            self.remove_placements_intersecting_grid_rows(top, bottom);
+        }
+    }
+
     // ── vertical motion / scroll ────────────────────────────────────
 
     /// Index (IND / LF without CR): down one row, scrolling at the region bottom.
@@ -1289,7 +1491,8 @@ impl Screen {
         if n == 0 {
             return;
         }
-        let leaving = if self.records_scrollback_for_region(top, bottom) {
+        let recorded = self.records_scrollback_for_region(top, bottom);
+        let leaving = if recorded {
             self.grid[top..top + n].to_vec()
         } else {
             Vec::new()
@@ -1305,6 +1508,7 @@ impl Screen {
         for row in leaving {
             self.push_scrollback_row(row);
         }
+        self.track_scroll_up(top, bottom, n, recorded);
     }
 
     /// Scroll the scroll region down by `n` rows (bottom rows discarded).
@@ -1327,6 +1531,7 @@ impl Screen {
         for r in &mut self.grid[top..=bottom] {
             r.dirty = true;
         }
+        self.track_scroll_down(top, bottom, n);
     }
 
     // ── horizontal / absolute motion ────────────────────────────────
@@ -1499,10 +1704,26 @@ impl Screen {
                 for r in &mut self.grid {
                     r.clear(blank.clone());
                 }
+                // Ghostty parity: ED 2 removes placements intersecting the screen.
+                let last = self.rows as usize - 1;
+                self.remove_placements_intersecting_grid_rows(0, last);
             }
             EraseDisplay::Scrollback => {
+                // Clearing scrollback collapses the absolute coordinate space by
+                // its length: drop placements anchored in the cleared history and
+                // re-anchor the survivors (live area) into the shrunken space.
+                let old_len = self.scrollback.len();
+                let old_live_top = self.live_area_abs_top();
                 self.scrollback.clear();
                 self.viewport_offset = 0;
+                self.kitty_placements.retain_mut(|p| {
+                    if p.anchor_abs_row < old_live_top {
+                        false
+                    } else {
+                        p.anchor_abs_row -= old_len;
+                        true
+                    }
+                });
             }
         }
     }
@@ -1617,6 +1838,7 @@ impl Screen {
         for r in &mut self.grid[start..=bottom] {
             r.dirty = true;
         }
+        self.remove_placements_intersecting_grid_rows(start, bottom);
     }
 
     pub fn delete_lines(&mut self, n: u16) {
@@ -1637,6 +1859,7 @@ impl Screen {
         for r in &mut self.grid[start..=bottom] {
             r.dirty = true;
         }
+        self.remove_placements_intersecting_grid_rows(start, bottom);
     }
 
     pub fn repeat_preceding_char(&mut self, n: u16, autowrap: bool, grapheme_clustering: bool) {

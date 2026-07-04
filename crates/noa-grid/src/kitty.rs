@@ -131,6 +131,15 @@ impl ImageStore {
             .max_by_key(|img| img.seq)
     }
 
+    /// All stored image ids carrying image number `number` (`I=`).
+    pub fn ids_with_number(&self, number: u32) -> Vec<u32> {
+        self.images
+            .iter()
+            .filter(|img| img.number == number)
+            .map(|img| img.id)
+            .collect()
+    }
+
     /// All stored image ids (used by the quota sweep's "referenced" set).
     pub fn contains(&self, id: u32) -> bool {
         self.images.iter().any(|img| img.id == id)

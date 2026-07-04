@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use crate::cell::Hyperlink;
 use crate::charset::CharsetState;
 use crate::cursor::{Cursor, CursorStyle, ScrollRegion};
-use crate::kitty::{ImageStore, KittyError, TransmitStep};
+use crate::kitty::{ImageStore, KittyError, KittyImage, TransmitStep};
 use crate::kitty_keyboard::{KittyKeyboard, SetMode};
 use crate::modes::ModeState;
 use crate::osc::{
@@ -15,13 +15,13 @@ use crate::osc::{
     TerminalColors, handle_clipboard_osc, handle_color_osc, parse_cwd_osc, parse_hyperlink_osc,
     parse_notification_osc, parse_shell_integration_osc,
 };
-use crate::screen::Screen;
+use crate::screen::{KittyPlacement, Screen, VisibleKittyPlacement};
 use crate::search::SearchMatch;
 use crate::selection::SelectionPoint;
 use noa_core::{CellAttrs, Color, GridSize, Point};
 use noa_vt::{
     Charset, CharsetSlot, CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine,
-    Handler, KittyAction, KittyGraphicsCommand, ModeRequest, SgrAttr,
+    Handler, KittyAction, KittyDelete, KittyGraphicsCommand, ModeRequest, SgrAttr,
 };
 
 /// Cap on the `XTWINOPS` title stack (`CSI 22/23 t`), mirroring the
@@ -543,15 +543,21 @@ impl Terminal {
     }
 
     /// Feed a data-carrying Kitty graphics command (`a=t`/`a=T`/`a=q`) into the
-    /// image store, replying on completion. Placement (`a=T`) is added in the
-    /// placement step.
+    /// image store, then—for `a=T`—place it, replying on completion.
     fn kitty_transmit(&mut self, cmd: KittyGraphicsCommand) {
         match self.kitty_images.transmit(&cmd) {
             TransmitStep::NeedMore => {}
             TransmitStep::Done(done) => {
                 let ctrl = done.ctrl;
-                let assigned = *done.result.as_ref().unwrap_or(&ctrl.image_id);
-                if done.result.is_ok() {
+                let result = done.result.and_then(|id| {
+                    if ctrl.action == KittyAction::TransmitAndDisplay {
+                        self.kitty_place(&ctrl, id).map(|()| id)
+                    } else {
+                        Ok(id)
+                    }
+                });
+                let assigned = *result.as_ref().unwrap_or(&ctrl.image_id);
+                if result.is_ok() {
                     self.kitty_images.enforce_quota(&self.referenced_image_ids());
                 }
                 self.kitty_reply(
@@ -560,17 +566,224 @@ impl Terminal {
                     assigned,
                     ctrl.placement_id,
                     ctrl.quiet,
-                    done.result.map(|_| ()),
+                    result.map(|_| ()),
                 );
             }
         }
     }
 
-    /// The set of image ids referenced by a placement on any screen (the quota
-    /// sweep spares these). In the transfer step no placements exist yet, so this
-    /// is empty; the placement step overrides the gathering.
+    /// Display a stored image (`a=p`), placing it on the active screen.
+    fn kitty_put(&mut self, cmd: &KittyGraphicsCommand) {
+        let image_id = self.resolve_put_image(cmd);
+        let result = match image_id {
+            Some(id) => self.kitty_place(cmd, id),
+            None => Err(KittyError::NoEnt),
+        };
+        let assigned = image_id.unwrap_or(cmd.image_id);
+        self.kitty_reply(
+            cmd.image_id,
+            cmd.image_number,
+            assigned,
+            cmd.placement_id,
+            cmd.quiet,
+            result,
+        );
+    }
+
+    /// Resolve the image an `a=p` command targets: `i=` id, else `I=` number.
+    fn resolve_put_image(&self, cmd: &KittyGraphicsCommand) -> Option<u32> {
+        if cmd.image_id != 0 {
+            return self.kitty_images.get(cmd.image_id).map(|_| cmd.image_id);
+        }
+        if cmd.image_number != 0 {
+            return self
+                .kitty_images
+                .get_by_number(cmd.image_number)
+                .map(|img| img.id);
+        }
+        None
+    }
+
+    /// Create a placement of image `image_id` on the active screen from `ctrl`,
+    /// resolving the effective cell span and moving the cursor unless `C=1`.
+    fn kitty_place(
+        &mut self,
+        ctrl: &KittyGraphicsCommand,
+        image_id: u32,
+    ) -> Result<(), KittyError> {
+        let (img_w, img_h) = match self.kitty_images.get(image_id) {
+            Some(img) => (img.width, img.height),
+            None => return Err(KittyError::NoEnt),
+        };
+        let (cell_w, cell_h) = (self.cell_width_px, self.cell_height_px);
+        if cell_w == 0 || cell_h == 0 {
+            // Cell metrics arrive with the first resize; without them the cell
+            // span is undefined.
+            return Err(KittyError::Invalid);
+        }
+
+        let src_w = if ctrl.src_w != 0 {
+            ctrl.src_w
+        } else {
+            img_w.saturating_sub(ctrl.src_x)
+        };
+        let src_h = if ctrl.src_h != 0 {
+            ctrl.src_h
+        } else {
+            img_h.saturating_sub(ctrl.src_y)
+        };
+        if src_w == 0 || src_h == 0 {
+            return Err(KittyError::Invalid);
+        }
+        let cols = if ctrl.columns != 0 {
+            ctrl.columns
+        } else {
+            src_w.div_ceil(cell_w)
+        };
+        let rows = if ctrl.rows != 0 {
+            ctrl.rows
+        } else {
+            src_h.div_ceil(cell_h)
+        };
+        let cols = cols.clamp(1, u16::MAX as u32) as u16;
+        let rows = rows.clamp(1, u16::MAX as u32) as u16;
+        let cropped =
+            ctrl.src_x != 0 || ctrl.src_y != 0 || ctrl.src_w != 0 || ctrl.src_h != 0;
+        let src = cropped.then_some([ctrl.src_x, ctrl.src_y, src_w, src_h]);
+        let cell_x_off = ctrl.cell_x_off.min(cell_w - 1) as u16;
+        let cell_y_off = ctrl.cell_y_off.min(cell_h - 1) as u16;
+
+        let screen = self.active_mut();
+        let anchor_abs_row =
+            screen.rows_evicted() + screen.scrollback_len() + screen.cursor.y as usize;
+        let anchor_col = screen.cursor.x;
+        screen.insert_kitty_placement(KittyPlacement {
+            image_id,
+            placement_id: ctrl.placement_id,
+            anchor_abs_row,
+            anchor_col,
+            cell_x_off,
+            cell_y_off,
+            src,
+            cols,
+            rows,
+            z: ctrl.z_index,
+            is_virtual: ctrl.virtual_placement,
+        });
+
+        if !ctrl.cursor_no_move && !ctrl.virtual_placement {
+            // Move to the image's last row, one column past its right edge.
+            for _ in 1..rows {
+                screen.index();
+            }
+            let max_x = screen.cols.saturating_sub(1);
+            screen.cursor.x = (anchor_col as usize + cols as usize).min(max_x as usize) as u16;
+            screen.cursor.pending_wrap = false;
+        }
+        Ok(())
+    }
+
+    /// Delete placements (and, for uppercase specifiers, image data) per `a=d`.
+    fn kitty_delete(&mut self, cmd: &KittyGraphicsCommand) {
+        let Some(spec) = cmd.delete else {
+            return;
+        };
+        if let KittyDelete::AnimationFrames { .. } = spec {
+            self.kitty_reply(
+                cmd.image_id,
+                cmd.image_number,
+                cmd.image_id,
+                cmd.placement_id,
+                cmd.quiet,
+                Err(KittyError::Unsupported),
+            );
+            return;
+        }
+        let free = kitty_delete_frees(spec);
+        let number_ids: Vec<u32> = match spec {
+            KittyDelete::ByNumber { .. } => self.kitty_images.ids_with_number(cmd.image_number),
+            _ => Vec::new(),
+        };
+        let (cursor_abs, cursor_col) = {
+            let s = self.active();
+            (
+                s.rows_evicted() + s.scrollback_len() + s.cursor.y as usize,
+                s.cursor.x,
+            )
+        };
+        let live_top = {
+            let s = self.active();
+            s.rows_evicted() + s.scrollback_len()
+        };
+        // Cell coords in `a=d` are 1-based grid columns/rows; convert to
+        // session-absolute for intersection tests.
+        let target_col = cmd.src_x.saturating_sub(1) as u16;
+        let target_abs = live_top + cmd.src_y.saturating_sub(1) as usize;
+
+        let removed = self.active_mut().delete_kitty_placements(|p| match spec {
+            KittyDelete::All { .. } => true,
+            KittyDelete::ById { .. } => {
+                p.image_id == cmd.image_id
+                    && (cmd.placement_id == 0 || p.placement_id == cmd.placement_id)
+            }
+            KittyDelete::ByNumber { .. } => number_ids.contains(&p.image_id),
+            KittyDelete::AtCursor { .. } => p.covers_abs(cursor_abs, cursor_col),
+            KittyDelete::AtCell { .. } => p.covers_abs(target_abs, target_col),
+            KittyDelete::AtCellZ { .. } => {
+                p.covers_abs(target_abs, target_col) && p.z == cmd.z_index
+            }
+            KittyDelete::ByIdRange { .. } => {
+                p.image_id >= cmd.src_x && p.image_id <= cmd.src_y
+            }
+            KittyDelete::ByColumn { .. } => {
+                target_col >= p.anchor_col && target_col < p.anchor_col.saturating_add(p.cols)
+            }
+            KittyDelete::ByRow { .. } => {
+                target_abs >= p.anchor_abs_row
+                    && target_abs < p.anchor_abs_row + p.rows as usize
+            }
+            KittyDelete::ByZ { .. } => p.z == cmd.z_index,
+            KittyDelete::AnimationFrames { .. } => false,
+        });
+
+        if free {
+            for id in removed {
+                if !self.image_referenced(id) {
+                    self.kitty_images.remove(id);
+                }
+            }
+        }
+    }
+
+    /// Whether any placement on either screen still references image `id`.
+    fn image_referenced(&self, id: u32) -> bool {
+        self.primary
+            .kitty_placements
+            .iter()
+            .chain(self.alt.iter().flat_map(|s| s.kitty_placements.iter()))
+            .any(|p| p.image_id == id)
+    }
+
+    /// Image ids kept alive by a placement on either screen (spared by the quota
+    /// sweep).
     fn referenced_image_ids(&self) -> std::collections::HashSet<u32> {
-        std::collections::HashSet::new()
+        self.primary
+            .kitty_placements
+            .iter()
+            .chain(self.alt.iter().flat_map(|s| s.kitty_placements.iter()))
+            .map(|p| p.image_id)
+            .collect()
+    }
+
+    /// Placements on the active screen projected into the current viewport,
+    /// sorted by z ascending. The renderer pairs each with [`Terminal::kitty_image`].
+    pub fn kitty_visible_placements(&self) -> Vec<VisibleKittyPlacement> {
+        self.active().visible_kitty_placements()
+    }
+
+    /// A stored image by id (for the renderer to upload/sample).
+    pub fn kitty_image(&self, id: u32) -> Option<&KittyImage> {
+        self.kitty_images.get(id)
     }
 
     fn push_decrqss_response(&mut self, valid: bool, request: &[u8], setting: &[u8]) {
@@ -793,6 +1006,23 @@ fn push_hex_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     for &b in bytes {
         out.push(HEX[(b >> 4) as usize]);
         out.push(HEX[(b & 0x0f) as usize]);
+    }
+}
+
+/// Whether an `a=d` specifier is the uppercase form that also frees image data.
+fn kitty_delete_frees(spec: KittyDelete) -> bool {
+    match spec {
+        KittyDelete::All { free }
+        | KittyDelete::ById { free }
+        | KittyDelete::ByNumber { free }
+        | KittyDelete::AtCursor { free }
+        | KittyDelete::AnimationFrames { free }
+        | KittyDelete::AtCell { free }
+        | KittyDelete::AtCellZ { free }
+        | KittyDelete::ByIdRange { free }
+        | KittyDelete::ByColumn { free }
+        | KittyDelete::ByRow { free }
+        | KittyDelete::ByZ { free } => free,
     }
 }
 
@@ -1271,8 +1501,8 @@ impl Handler for Terminal {
             KittyAction::Transmit | KittyAction::TransmitAndDisplay | KittyAction::Query => {
                 self.kitty_transmit(cmd);
             }
-            // Placement (`a=p`) and deletion (`a=d`) land in the placement step.
-            KittyAction::Put | KittyAction::Delete => {}
+            KittyAction::Put => self.kitty_put(&cmd),
+            KittyAction::Delete => self.kitty_delete(&cmd),
         }
     }
 

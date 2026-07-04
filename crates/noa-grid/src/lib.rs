@@ -33,7 +33,7 @@ pub use kitty_keyboard::{
 };
 pub use modes::ModeState;
 pub use osc::{Notification, Osc52Policy, TerminalColors};
-pub use screen::Screen;
+pub use screen::{KittyPlacement, Screen, VisibleKittyPlacement};
 pub use search::{SearchMatch, SearchState};
 pub use selection::{Selection, SelectionPoint};
 pub use tabstops::Tabstops;

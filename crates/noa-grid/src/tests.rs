@@ -2580,3 +2580,184 @@ fn kitty_full_reset_clears_store() {
     s.feed(b"\x1bc", &mut t); // RIS
     assert!(t.kitty_images.get(1).is_none(), "RIS clears the image store");
 }
+
+// ── Kitty graphics placements ───────────────────────────────────────
+
+/// A 20×24 terminal with 10×20 px cells (metrics that `a=T`/`a=p` need).
+fn kitty_terminal() -> Terminal {
+    let mut t = Terminal::new(GridSize::new(20, 24));
+    t.set_pixel_metrics(10, 20, 200, 480);
+    t
+}
+
+fn feed(t: &mut Terminal, bytes: &[u8]) {
+    let mut s = Stream::new();
+    s.feed(bytes, t);
+}
+
+#[test]
+fn kitty_transmit_and_display_creates_placement_and_moves_cursor() {
+    let mut t = kitty_terminal();
+    // 25x40 px image → ceil(25/10)=3 cols, ceil(40/20)=2 rows.
+    feed(&mut t, &kitty_apc("a=T,f=32,s=25,v=40,i=1", &vec![0u8; 25 * 40 * 4]));
+    let placements = &t.primary.kitty_placements;
+    assert_eq!(placements.len(), 1);
+    assert_eq!((placements[0].cols, placements[0].rows), (3, 2));
+    // Cursor: last row of the image (down 1), one column past the right edge (0+3).
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (3, 1));
+}
+
+#[test]
+fn kitty_cursor_no_move_keeps_cursor() {
+    let mut t = kitty_terminal();
+    feed(
+        &mut t,
+        &kitty_apc("a=T,f=32,s=10,v=20,i=1,C=1", &vec![0u8; 10 * 20 * 4]),
+    );
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (0, 0));
+    assert_eq!(t.primary.kitty_placements.len(), 1);
+}
+
+#[test]
+fn kitty_explicit_columns_rows_override_natural_size() {
+    let mut t = kitty_terminal();
+    feed(
+        &mut t,
+        &kitty_apc("a=T,f=32,s=10,v=20,c=5,r=4,i=1", &vec![0u8; 10 * 20 * 4]),
+    );
+    let p = &t.primary.kitty_placements[0];
+    assert_eq!((p.cols, p.rows), (5, 4));
+}
+
+#[test]
+fn kitty_place_without_cell_metrics_is_einval() {
+    let mut t = Terminal::new(GridSize::new(20, 24)); // no set_pixel_metrics
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1", &vec![0u8; 10 * 20 * 4]));
+    assert!(t.primary.kitty_placements.is_empty());
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b_Gi=1;EINVAL:invalid request\x1b\\"
+    );
+}
+
+#[test]
+fn kitty_put_displays_transmitted_image() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=t,f=32,s=10,v=20,i=5", &vec![0u8; 10 * 20 * 4]));
+    assert!(t.primary.kitty_placements.is_empty(), "a=t alone doesn't place");
+    feed(&mut t, b"\x1b_Ga=p,i=5\x1b\\");
+    assert_eq!(t.primary.kitty_placements.len(), 1);
+    assert_eq!(t.primary.kitty_placements[0].image_id, 5);
+}
+
+#[test]
+fn kitty_put_missing_image_is_enoent() {
+    let mut t = kitty_terminal();
+    feed(&mut t, b"\x1b_Ga=p,i=99\x1b\\");
+    assert_eq!(t.pending_writes, b"\x1b_Gi=99;ENOENT:file not found\x1b\\");
+}
+
+#[test]
+fn kitty_unnamed_placement_overwrites() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=t,f=32,s=10,v=20,i=1", &vec![0u8; 10 * 20 * 4]));
+    feed(&mut t, b"\x1b_Ga=p,i=1\x1b\\");
+    feed(&mut t, b"\x1b_Ga=p,i=1\x1b\\");
+    assert_eq!(
+        t.primary.kitty_placements.len(),
+        1,
+        "second unnamed placement overwrites the first"
+    );
+}
+
+#[test]
+fn kitty_delete_all_placements() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1", &vec![0u8; 10 * 20 * 4]));
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=2", &vec![0u8; 10 * 20 * 4]));
+    assert_eq!(t.primary.kitty_placements.len(), 2);
+    feed(&mut t, b"\x1b_Ga=d,d=a\x1b\\");
+    assert!(t.primary.kitty_placements.is_empty());
+    // Lowercase d=a keeps image data.
+    assert!(t.kitty_images.get(1).is_some());
+    assert!(t.kitty_images.get(2).is_some());
+}
+
+#[test]
+fn kitty_delete_by_id_uppercase_frees_data() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1", &vec![0u8; 10 * 20 * 4]));
+    feed(&mut t, b"\x1b_Ga=d,d=I,i=1\x1b\\");
+    assert!(t.primary.kitty_placements.is_empty());
+    assert!(t.kitty_images.get(1).is_none(), "uppercase d frees the image");
+}
+
+#[test]
+fn kitty_delete_at_cursor() {
+    let mut t = kitty_terminal();
+    // Place at (0,0) spanning 1x1, then move cursor onto it and delete d=c.
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1,C=1", &vec![0u8; 10 * 20 * 4]));
+    feed(&mut t, b"\x1b[1;1H"); // cursor home, over the placement
+    feed(&mut t, b"\x1b_Ga=d,d=c\x1b\\");
+    assert!(t.primary.kitty_placements.is_empty());
+}
+
+#[test]
+fn kitty_delete_by_z() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1,z=5,C=1", &vec![0u8; 10 * 20 * 4]));
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=2,z=9,C=1", &vec![0u8; 10 * 20 * 4]));
+    feed(&mut t, b"\x1b_Ga=d,d=z,z=5\x1b\\");
+    assert_eq!(t.primary.kitty_placements.len(), 1);
+    assert_eq!(t.primary.kitty_placements[0].image_id, 2);
+}
+
+#[test]
+fn kitty_ed2_removes_intersecting_placements() {
+    let mut t = kitty_terminal();
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1,C=1", &vec![0u8; 10 * 20 * 4]));
+    feed(&mut t, b"\x1b[2J"); // ED 2
+    assert!(t.primary.kitty_placements.is_empty());
+}
+
+#[test]
+fn kitty_visible_placement_projects_into_viewport() {
+    let mut t = kitty_terminal();
+    // Place at row 5.
+    feed(&mut t, b"\x1b[6;1H");
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=40,i=1,C=1", &vec![0u8; 10 * 40 * 4]));
+    let vis = t.kitty_visible_placements();
+    assert_eq!(vis.len(), 1);
+    assert_eq!(vis[0].grid_y, 5);
+    assert_eq!((vis[0].cols, vis[0].rows), (1, 2));
+    assert!(t.kitty_image(1).is_some());
+}
+
+#[test]
+fn kitty_scroll_pushes_placement_up_via_absolute_anchor() {
+    let mut t = kitty_terminal();
+    feed(&mut t, b"\x1b[6;1H");
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1,C=1", &vec![0u8; 10 * 20 * 4]));
+    assert_eq!(t.kitty_visible_placements()[0].grid_y, 5);
+    // Scroll the whole screen up by 3 lines' worth of newlines from the bottom.
+    feed(&mut t, b"\x1b[24;1H"); // last row
+    feed(&mut t, b"\n\n\n");
+    let vis = t.kitty_visible_placements();
+    assert_eq!(vis.len(), 1, "placement follows content into scrollback");
+    assert_eq!(vis[0].grid_y, 2, "moved up by 3 rows");
+}
+
+#[test]
+fn kitty_alt_screen_placement_is_separated() {
+    let mut t = kitty_terminal();
+    feed(&mut t, b"\x1b[?1049h"); // enter alt screen
+    feed(&mut t, &kitty_apc("a=T,f=32,s=10,v=20,i=1,C=1", &vec![0u8; 10 * 20 * 4]));
+    assert_eq!(t.active().kitty_placements.len(), 1);
+    feed(&mut t, b"\x1b[?1049l"); // leave alt screen
+    assert!(
+        t.active().kitty_placements.is_empty(),
+        "alt-screen placement vanishes on return to primary"
+    );
+    // Image data survives (only placements are per-screen).
+    assert!(t.kitty_images.get(1).is_some());
+}

@@ -15,7 +15,7 @@ use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
 use crate::pipeline::CellPipeline;
 use crate::segment::{SegmentCell, ShapeRun, segment_row};
 use crate::snapshot::{FrameSnapshot, HoverLink};
-use crate::theme::Theme;
+use crate::theme::{OverlayStyle, Theme};
 
 const DEFAULT_PANE_ID: PaneId = PaneId::new(0);
 const DIVIDER_RGBA: [u8; 4] = [82, 82, 82, 255];
@@ -1049,12 +1049,22 @@ fn append_search_prompt_instances(
         return;
     }
 
+    let style = OverlayStyle::from_theme(theme);
     let text = search_prompt_display_text(buffer, &snap.search, cols);
     let text_color = to_u8_color(surface_output_rgba(
-        theme.active_search_fg(),
+        style.surface_fg(),
         target_format_is_srgb,
     ));
     let mut cells = search_prompt_segment_cells(&text, text_color);
+
+    // Dim the ` {i}/{n}` counter (the trailing suffix of the display text) so
+    // it reads as secondary to the query — same muted tone as palette hints.
+    // The suffix is all narrow ASCII, so its column count equals its char
+    // count, and it always sits at the very end even after the front-drop
+    // clamp below (which only removes leading cells).
+    let muted_color = to_u8_color(surface_output_rgba(style.muted_fg(), target_format_is_srgb));
+    let suffix_cols = search_prompt_counter_cols(&snap.search);
+
     // Second safety clamp: char-level truncation above can still overflow
     // the column count once double-width glyphs expand into a trailing
     // spacer cell. Drop from the front so the TAIL (the query text and the
@@ -1063,10 +1073,14 @@ fn append_search_prompt_instances(
         let excess = cells.len() - cols as usize;
         cells.drain(0..excess);
     }
+    let counter_start = cells.len().saturating_sub(suffix_cols);
+    for cell in &mut cells[counter_start..] {
+        cell.color = muted_color;
+    }
     let x_start = cols - cells.len() as u16;
 
     let bg_color = to_u8_color(surface_output_rgba(
-        theme.active_search_bg(),
+        style.surface_bg(),
         target_format_is_srgb,
     ));
     for i in 0..cells.len() as u16 {
@@ -1114,9 +1128,30 @@ fn append_command_palette_instances(
         return;
     }
 
-    // How many entry rows fit below the query row, and which slice of the
-    // (possibly longer) list to show so the selection stays visible.
-    let entry_capacity = grid_rows - 1;
+    let style = OverlayStyle::from_theme(theme);
+    let surface_bg = to_u8_color(surface_output_rgba(
+        style.surface_bg(),
+        target_format_is_srgb,
+    ));
+    let surface_fg = to_u8_color(surface_output_rgba(
+        style.surface_fg(),
+        target_format_is_srgb,
+    ));
+    let muted_fg = to_u8_color(surface_output_rgba(style.muted_fg(), target_format_is_srgb));
+    let accent_bg = to_u8_color(surface_output_rgba(
+        style.accent_bg(),
+        target_format_is_srgb,
+    ));
+    let accent_fg = to_u8_color(surface_output_rgba(
+        style.accent_fg(),
+        target_format_is_srgb,
+    ));
+    let border = to_u8_color(surface_output_rgba(style.border(), target_format_is_srgb));
+
+    // A blank row separates the query from the entries when the grid is tall
+    // enough to spare it; the entry window shrinks to make room for it.
+    let pad = usize::from(grid_rows >= 4);
+    let entry_capacity = grid_rows.saturating_sub(1 + pad);
     let (offset, shown) =
         palette_scroll_window(palette.rows.len(), palette.selected, entry_capacity);
     let entries = &palette.rows[offset..offset + shown];
@@ -1139,57 +1174,48 @@ fn append_command_palette_instances(
         .max(query_text.chars().count())
         .min(cols - 2);
     let block_w = inner + 2;
-    let height = 1 + shown;
+    let height = 1 + pad + shown;
     let x0 = ((cols - block_w) / 2) as u16;
     let y0 = (grid_rows.saturating_sub(height) / 2) as u16;
 
-    let query_bg = to_u8_color(surface_output_rgba(
-        theme.selection_bg(),
-        target_format_is_srgb,
+    let mut rows: Vec<OverlayRow> = Vec::with_capacity(height);
+    // Query row: title text in surface_fg on the surface background.
+    rows.push(OverlayRow::uniform(
+        palette_line(&query_text, None, inner),
+        surface_bg,
+        surface_fg,
     ));
-    let query_fg = to_u8_color(surface_output_rgba(
-        theme.selection_fg(),
-        target_format_is_srgb,
-    ));
-    let row_bg = query_bg;
-    let row_fg = query_fg;
-    let sel_bg = to_u8_color(surface_output_rgba(
-        theme.active_search_bg(),
-        target_format_is_srgb,
-    ));
-    let sel_fg = to_u8_color(surface_output_rgba(
-        theme.active_search_fg(),
-        target_format_is_srgb,
-    ));
+    if pad != 0 {
+        rows.push(OverlayRow::uniform(
+            palette_line("", None, inner),
+            surface_bg,
+            surface_fg,
+        ));
+    }
+    for (i, (title, hint)) in entries.iter().enumerate() {
+        let selected = offset + i == palette.selected;
+        let text = palette_line(title, hint.as_deref(), inner);
+        if selected {
+            // Selected entry: whole row on the accent background, one color.
+            rows.push(OverlayRow::uniform(text, accent_bg, accent_fg));
+        } else {
+            // Title in surface_fg, the right-aligned keybind hint dimmed.
+            let hint_cols = hint.as_deref().map_or(0, |h| h.chars().count());
+            rows.push(OverlayRow::title_hint(
+                text, surface_bg, surface_fg, muted_fg, inner, hint_cols,
+            ));
+        }
+    }
 
-    append_palette_row(
+    append_overlay_block(
         instances,
         font,
         metrics,
-        x0,
-        y0,
-        &palette_line(&query_text, None, inner),
-        (query_bg, query_fg),
+        (x0, y0),
+        block_w as u16,
+        &rows,
+        border,
     );
-
-    for (i, (title, hint)) in entries.iter().enumerate() {
-        let selected = offset + i == palette.selected;
-        let colors = if selected {
-            (sel_bg, sel_fg)
-        } else {
-            (row_bg, row_fg)
-        };
-        let text = palette_line(title, hint.as_deref(), inner);
-        append_palette_row(
-            instances,
-            font,
-            metrics,
-            x0,
-            y0 + 1 + i as u16,
-            &text,
-            colors,
-        );
-    }
 }
 
 /// Append the open confirmation dialog (paste protection / clipboard-read),
@@ -1213,6 +1239,18 @@ fn append_confirm_dialog_instances(
         return;
     }
 
+    let style = OverlayStyle::from_theme(theme);
+    let surface_bg = to_u8_color(surface_output_rgba(
+        style.surface_bg(),
+        target_format_is_srgb,
+    ));
+    let surface_fg = to_u8_color(surface_output_rgba(
+        style.surface_fg(),
+        target_format_is_srgb,
+    ));
+    let muted_fg = to_u8_color(surface_output_rgba(style.muted_fg(), target_format_is_srgb));
+    let border = to_u8_color(surface_output_rgba(style.border(), target_format_is_srgb));
+
     let inner = dialog
         .message
         .chars()
@@ -1220,45 +1258,263 @@ fn append_confirm_dialog_instances(
         .max(dialog.hint.chars().count())
         .min(cols - 2);
     let block_w = inner + 2;
-    let height = 2;
+
+    // A blank padding row above and below the two text rows when the grid is
+    // tall enough (block = 4 rows); otherwise fall back to the compact
+    // message+hint form so the dialog still fits a short pane.
+    let pad = usize::from(grid_rows >= 6);
+    let height = 2 + pad * 2;
     let x0 = ((cols - block_w) / 2) as u16;
     let y0 = (grid_rows.saturating_sub(height) / 2) as u16;
 
-    let msg_bg = to_u8_color(surface_output_rgba(
-        theme.selection_bg(),
-        target_format_is_srgb,
+    let blank = || OverlayRow::uniform(palette_line("", None, inner), surface_bg, surface_fg);
+    let mut rows: Vec<OverlayRow> = Vec::with_capacity(height);
+    if pad != 0 {
+        rows.push(blank());
+    }
+    rows.push(OverlayRow::uniform(
+        palette_line(&dialog.message, None, inner),
+        surface_bg,
+        surface_fg,
     ));
-    let msg_fg = to_u8_color(surface_output_rgba(
-        theme.selection_fg(),
-        target_format_is_srgb,
+    rows.push(OverlayRow::uniform(
+        palette_line(&dialog.hint, None, inner),
+        surface_bg,
+        muted_fg,
     ));
-    let hint_bg = to_u8_color(surface_output_rgba(
-        theme.active_search_bg(),
-        target_format_is_srgb,
-    ));
-    let hint_fg = to_u8_color(surface_output_rgba(
-        theme.active_search_fg(),
-        target_format_is_srgb,
-    ));
+    if pad != 0 {
+        rows.push(blank());
+    }
 
-    append_palette_row(
+    append_overlay_block(
         instances,
         font,
         metrics,
-        x0,
-        y0,
-        &palette_line(&dialog.message, None, inner),
-        (msg_bg, msg_fg),
+        (x0, y0),
+        block_w as u16,
+        &rows,
+        border,
     );
-    append_palette_row(
-        instances,
-        font,
-        metrics,
-        x0,
-        y0 + 1,
-        &palette_line(&dialog.hint, None, inner),
-        (hint_bg, hint_fg),
-    );
+}
+
+/// One row of a modal overlay block: a full-`block_w`-column line of text, a
+/// background color, and a per-column foreground (so a palette entry can paint
+/// its title and its dimmed keybind hint in different colors within one row).
+struct OverlayRow {
+    text: String,
+    bg: [u8; 4],
+    /// One foreground color per column of `text`.
+    fg: Vec<[u8; 4]>,
+}
+
+impl OverlayRow {
+    /// A row painted in a single foreground color.
+    fn uniform(text: String, bg: [u8; 4], fg: [u8; 4]) -> Self {
+        let cols = text.chars().count();
+        OverlayRow {
+            text,
+            bg,
+            fg: vec![fg; cols],
+        }
+    }
+
+    /// A palette entry row: `fg` for the title area, `hint_fg` for the
+    /// trailing `hint_cols` columns of the `inner`-wide content region (the
+    /// right-aligned keybind hint). `text` is `inner + 2` columns wide (a
+    /// one-space pad on each side), so the hint occupies columns
+    /// `[1 + inner - hint_cols, 1 + inner)`.
+    fn title_hint(
+        text: String,
+        bg: [u8; 4],
+        fg: [u8; 4],
+        hint_fg: [u8; 4],
+        inner: usize,
+        hint_cols: usize,
+    ) -> Self {
+        let mut row = Self::uniform(text, bg, fg);
+        if hint_cols > 0 {
+            let start = 1 + inner - hint_cols.min(inner);
+            for slot in row.fg.iter_mut().skip(start).take(hint_cols) {
+                *slot = hint_fg;
+            }
+        }
+        row
+    }
+}
+
+/// Emit a centered modal overlay block: each row's background quads and
+/// glyph run, then a 1px border in `border` color around the whole block.
+///
+/// Border mechanism: per-cell `FLAG_DECORATION` rects along the block's edge
+/// cells (a 1px inset within each perimeter cell). Chosen over the
+/// window-absolute `FLAG_DIVIDER` path because decoration quads live in the
+/// same per-pane cell pass and scissor as the block's own background and
+/// glyphs — they share the pane's coordinate space and paint order, so there
+/// is no risk of the later full-viewport divider pass drawing the outline
+/// over the wrong pane. The tradeoff is the outline snaps to cell edges
+/// rather than being a free-floating pixel rectangle.
+fn append_overlay_block(
+    instances: &mut Vec<CellInstance>,
+    font: &mut FontGrid,
+    metrics: Metrics,
+    origin: (u16, u16),
+    block_w: u16,
+    rows: &[OverlayRow],
+    border: [u8; 4],
+) {
+    let (x0, y0) = origin;
+    for (i, row) in rows.iter().enumerate() {
+        append_overlay_row(instances, font, metrics, x0, y0 + i as u16, row);
+    }
+    if !rows.is_empty() {
+        append_overlay_border(
+            instances,
+            x0,
+            y0,
+            block_w,
+            rows.len() as u16,
+            border,
+            metrics,
+        );
+    }
+}
+
+/// Emit one overlay row's background rects (`block_w` cells wide, from `row`'s
+/// text length) plus its per-column-colored shaped glyphs at grid row `y`.
+fn append_overlay_row(
+    instances: &mut Vec<CellInstance>,
+    font: &mut FontGrid,
+    metrics: Metrics,
+    x0: u16,
+    y: u16,
+    row: &OverlayRow,
+) {
+    let cells = overlay_segment_cells(&row.text, &row.fg);
+    for i in 0..cells.len() as u16 {
+        instances.push(CellInstance {
+            glyph_pos: [0, 0],
+            glyph_size: [0, 0],
+            bearing: [0, 0],
+            grid_pos: [x0 + i, y],
+            color: row.bg,
+            flags: 0,
+        });
+    }
+    for mut run in segment_row(font, &cells) {
+        run.start_col += x0;
+        let shaped = font.shape_run(&run.cells);
+        emit_run_glyph_instances(instances, font, &run, &shaped, y, metrics);
+    }
+}
+
+/// Emit the 1px border of a `block_w` x `block_h` cell block anchored at
+/// `(x0, y0)` as decoration-pass rects (see [`append_overlay_block`] for why
+/// this path rather than the pixel-overlay divider path). Top/bottom edges
+/// run along the block's first/last rows; left/right along its first/last
+/// columns, so the four strips meet at the corner cells.
+fn append_overlay_border(
+    instances: &mut Vec<CellInstance>,
+    x0: u16,
+    y0: u16,
+    block_w: u16,
+    block_h: u16,
+    color: [u8; 4],
+    metrics: Metrics,
+) {
+    let thickness: u16 = 1;
+    let width = metrics.cell_w.round().max(1.0) as u16;
+    let height = metrics.cell_h.round().max(1.0) as u16;
+    let right_x = width.saturating_sub(thickness) as i16;
+    let bottom_y = height.saturating_sub(thickness) as i16;
+    let y_last = y0 + block_h - 1;
+    let x_last = x0 + block_w - 1;
+
+    for i in 0..block_w {
+        let x = x0 + i;
+        push_decoration_rect(
+            instances,
+            DecorationCell {
+                grid_x: x,
+                grid_y: y0,
+                color,
+            },
+            DecorationRect::new(0, 0, width, thickness),
+        );
+        push_decoration_rect(
+            instances,
+            DecorationCell {
+                grid_x: x,
+                grid_y: y_last,
+                color,
+            },
+            DecorationRect::new(0, bottom_y, width, thickness),
+        );
+    }
+    for j in 0..block_h {
+        let y = y0 + j;
+        push_decoration_rect(
+            instances,
+            DecorationCell {
+                grid_x: x0,
+                grid_y: y,
+                color,
+            },
+            DecorationRect::new(0, 0, thickness, height),
+        );
+        push_decoration_rect(
+            instances,
+            DecorationCell {
+                grid_x: x_last,
+                grid_y: y,
+                color,
+            },
+            DecorationRect::new(right_x, 0, thickness, height),
+        );
+    }
+}
+
+/// Turn an overlay row's full-width text into row-local [`SegmentCell`]s (one
+/// per column), coloring each by `fg_by_col`. Mirrors
+/// [`search_prompt_segment_cells`]'s width handling (double-width lead +
+/// spacer, zero-width combining attaches to the previous cell) but assigns a
+/// possibly different color per column.
+fn overlay_segment_cells(text: &str, fg_by_col: &[[u8; 4]]) -> Vec<SegmentCell> {
+    let fallback = fg_by_col.last().copied().unwrap_or([255, 255, 255, 255]);
+    let blank = |color: [u8; 4]| SegmentCell {
+        ch: ' ',
+        combining: Vec::new(),
+        bold: false,
+        italic: false,
+        selected: false,
+        active_search: false,
+        search_match: false,
+        cursor: false,
+        color,
+    };
+
+    let mut cells = Vec::new();
+    let mut col = 0usize;
+    for ch in text.chars() {
+        let color = fg_by_col.get(col).copied().unwrap_or(fallback);
+        match UnicodeWidthChar::width(ch).unwrap_or(0) {
+            0 => {
+                if let Some(last) = cells.last_mut() {
+                    let last: &mut SegmentCell = last;
+                    last.combining.push(ch);
+                }
+            }
+            2 => {
+                cells.push(SegmentCell { ch, ..blank(color) });
+                cells.push(blank(color));
+                col += 2;
+            }
+            _ => {
+                cells.push(SegmentCell { ch, ..blank(color) });
+                col += 1;
+            }
+        }
+    }
+    cells
 }
 
 /// Which `count`-length list slice to render given `selected` and a row
@@ -1309,37 +1565,6 @@ fn palette_line(left: &str, right: Option<&str>, inner: usize) -> String {
     line
 }
 
-/// Emit one palette row's background rects + shaped glyphs at grid row `y`,
-/// starting at column `x0`. `text` already spans the full block width;
-/// `colors` is `(background, foreground)`.
-fn append_palette_row(
-    instances: &mut Vec<CellInstance>,
-    font: &mut FontGrid,
-    metrics: Metrics,
-    x0: u16,
-    y: u16,
-    text: &str,
-    colors: ([u8; 4], [u8; 4]),
-) {
-    let (bg, fg) = colors;
-    let cells = search_prompt_segment_cells(text, fg);
-    for i in 0..cells.len() as u16 {
-        instances.push(CellInstance {
-            glyph_pos: [0, 0],
-            glyph_size: [0, 0],
-            bearing: [0, 0],
-            grid_pos: [x0 + i, y],
-            color: bg,
-            flags: 0,
-        });
-    }
-    for mut run in segment_row(font, &cells) {
-        run.start_col += x0;
-        let shaped = font.shape_run(&run.cells);
-        emit_run_glyph_instances(instances, font, &run, &shaped, y, metrics);
-    }
-}
-
 /// Compose the prompt's display text: `Find: {buffer}▏ {i}/{n}`. `i`/`n`
 /// come from `search` (1-based active index / total match count, `0/0`
 /// when there is no active match). Clamps to `cols` by keeping the TAIL of
@@ -1347,9 +1572,7 @@ fn append_palette_row(
 fn search_prompt_display_text(buffer: &str, search: &SearchState, cols: u16) -> String {
     const PREFIX: &str = "Find: ";
     const CURSOR_MARK: &str = "\u{258F}"; // "▏" left one eighth block, reads as a thin caret.
-    let total = search.matches().len();
-    let current = search.active_index().map_or(0, |idx| idx + 1);
-    let suffix = format!(" {current}/{total}");
+    let suffix = search_prompt_counter(search);
 
     let fixed_chars = PREFIX.chars().count() + CURSOR_MARK.chars().count() + suffix.chars().count();
     let available = (cols as usize).saturating_sub(fixed_chars);
@@ -1363,6 +1586,22 @@ fn search_prompt_display_text(buffer: &str, search: &SearchState, cols: u16) -> 
     };
 
     format!("{PREFIX}{shown}{CURSOR_MARK}{suffix}")
+}
+
+/// The ` {i}/{n}` match counter suffix of the search prompt (1-based active
+/// index / total, `0/0` when no active match). Shared by the display-text
+/// composer and the overlay so the latter knows how many trailing columns to
+/// render in the muted counter color.
+fn search_prompt_counter(search: &SearchState) -> String {
+    let total = search.matches().len();
+    let current = search.active_index().map_or(0, |idx| idx + 1);
+    format!(" {current}/{total}")
+}
+
+/// Column count of the search prompt's match counter (all narrow ASCII, so
+/// columns == chars).
+fn search_prompt_counter_cols(search: &SearchState) -> usize {
+    search_prompt_counter(search).chars().count()
 }
 
 /// Turn the prompt's display text into row-local [`SegmentCell`]s, one per
@@ -2933,6 +3172,83 @@ mod tests {
             bg_before,
             "closing the dialog removes its overlay instances"
         );
+    }
+
+    #[test]
+    fn overlay_block_emits_border_on_all_four_edges() {
+        // A 4-wide x 3-tall block anchored at (5, 3): the border must touch
+        // every perimeter cell (top row, bottom row, left column, right
+        // column) and emit only decoration-pass rects.
+        let m = metrics(18.0); // cell_w = 10, cell_h = 24
+        let color = [10, 20, 30, 255];
+        let mut inst = Vec::new();
+        append_overlay_border(&mut inst, 5, 3, 4, 3, color, m);
+
+        assert!(
+            inst.iter()
+                .all(|i| i.flags & CellInstance::FLAG_DECORATION != 0),
+            "border rects are decoration-pass quads"
+        );
+
+        let at = |x: u16, y: u16| inst.iter().any(|i| i.grid_pos == [x, y]);
+        // Top (y=3) and bottom (y=5) edges span columns 5..=8.
+        for x in 5..=8 {
+            assert!(at(x, 3), "top edge missing at col {x}");
+            assert!(at(x, 5), "bottom edge missing at col {x}");
+        }
+        // Left (x=5) and right (x=8) edges span rows 3..=5.
+        for y in 3..=5 {
+            assert!(at(5, y), "left edge missing at row {y}");
+            assert!(at(8, y), "right edge missing at row {y}");
+        }
+        // The right edge is inset to the cell's right (bearing.x > 0), the
+        // bottom edge to the cell's bottom (bearing.y > 0).
+        assert!(
+            inst.iter()
+                .any(|i| i.grid_pos == [8, 3] && i.bearing[0] > 0),
+            "right edge sits at the cell's right pixel"
+        );
+        assert!(
+            inst.iter()
+                .any(|i| i.grid_pos == [5, 5] && i.bearing[1] > 0),
+            "bottom edge sits at the cell's bottom pixel"
+        );
+    }
+
+    #[test]
+    fn confirm_dialog_padding_rows_collapse_on_small_grids() {
+        let Some(mut font) = font_with_rasterized_m() else {
+            return;
+        };
+        let theme = Theme::new();
+
+        // A tall grid gets a blank pad row above and below the two text rows
+        // (4 distinct overlay bg rows); a short grid falls back to the compact
+        // message + hint form (2 rows).
+        let tall = confirm_dialog_bg_rows(&mut font, &theme, 40, 10);
+        assert_eq!(tall, 4, "tall grid pads the dialog to 4 rows");
+        let short = confirm_dialog_bg_rows(&mut font, &theme, 40, 4);
+        assert_eq!(short, 2, "short grid collapses to the compact 2-row form");
+    }
+
+    /// Count the distinct grid rows carrying confirm-dialog overlay background
+    /// quads (`flags == 0`) for a `cols` x `rows` grid. The default block
+    /// cursor paints a `FLAG_CURSOR` quad, not a plain bg quad, so it is not
+    /// counted here.
+    fn confirm_dialog_bg_rows(font: &mut FontGrid, theme: &Theme, cols: u16, rows: u16) -> usize {
+        let mut terminal = Terminal::new(GridSize::new(cols, rows));
+        let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+        snap.confirm_dialog = Some(crate::ConfirmDialogSnapshot {
+            message: "Paste 3 line(s)?".to_string(),
+            hint: "Enter: confirm    Esc: cancel".to_string(),
+        });
+        let mut inst = Vec::new();
+        rebuild_cell_instances(&mut inst, &snap, font, theme, false);
+        inst.iter()
+            .filter(|i| i.flags == 0)
+            .map(|i| i.grid_pos[1])
+            .collect::<std::collections::BTreeSet<u16>>()
+            .len()
     }
 
     #[test]

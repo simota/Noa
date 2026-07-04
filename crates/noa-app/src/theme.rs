@@ -55,7 +55,12 @@ pub fn resolve_theme_with_overrides(name: Option<&str>, overrides: &ThemeOverrid
 }
 
 fn theme_from_definition(definition: &noa_theme::ThemeDef) -> Theme {
-    let defaults = built_in_theme();
+    // Search-highlight colors are derived from the vendor palette (not left at
+    // the built-in yellow/blue) so highlights sit inside the theme's own color
+    // world: the theme's yellow tints the inactive matches, its blue the
+    // active one, each with a contrast-picked foreground.
+    let search_bg = derive_highlight_bg(definition, 3, 11);
+    let active_search_bg = definition.palette[4];
 
     Theme {
         default_fg: definition.default_fg,
@@ -63,12 +68,48 @@ fn theme_from_definition(definition: &noa_theme::ThemeDef) -> Theme {
         cursor: definition.cursor,
         selection_fg: definition.selection_fg,
         selection_bg: definition.selection_bg,
-        search_fg: defaults.search_fg,
-        search_bg: defaults.search_bg,
-        active_search_fg: defaults.active_search_fg,
-        active_search_bg: defaults.active_search_bg,
+        search_fg: contrast_fg(search_bg),
+        search_bg,
+        active_search_fg: contrast_fg(active_search_bg),
+        active_search_bg,
         palette: definition.palette,
     }
+}
+
+/// The vendor palette's inactive-match highlight background: the theme's
+/// yellow (`palette[idx]`), falling back to bright yellow (`palette[bright]`)
+/// when yellow is indistinguishable from the terminal background.
+fn derive_highlight_bg(def: &noa_theme::ThemeDef, idx: usize, bright: usize) -> Rgb {
+    let primary = def.palette[idx];
+    if primary == def.default_bg {
+        def.palette[bright]
+    } else {
+        primary
+    }
+}
+
+/// Pick a near-black or near-white foreground for legible text on `bg`, by
+/// relative luminance: dark text on a light background, light text on a dark
+/// one.
+fn contrast_fg(bg: Rgb) -> Rgb {
+    if relative_luminance(bg) > 0.5 {
+        Rgb::new(0x1b, 0x1b, 0x1b)
+    } else {
+        Rgb::new(0xff, 0xff, 0xff)
+    }
+}
+
+/// WCAG relative luminance (0.0 = black .. 1.0 = white) of an sRGB color.
+fn relative_luminance(c: Rgb) -> f32 {
+    let lin = |v: u8| {
+        let v = f32::from(v) / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
 }
 
 fn built_in_theme() -> Theme {
@@ -148,14 +189,36 @@ mod tests {
     }
 
     #[test]
-    fn search_colors_remain_default_when_vendor_theme_is_selected() {
-        let default = Theme::default();
+    fn search_colors_derive_from_vendor_palette() {
+        let definition = noa_theme::resolve("3024 Day").expect("vendored theme exists");
         let theme = resolve_theme(Some("3024 Day"));
 
-        assert_eq!(theme.search_fg, default.search_fg);
-        assert_eq!(theme.search_bg, default.search_bg);
-        assert_eq!(theme.active_search_fg, default.active_search_fg);
-        assert_eq!(theme.active_search_bg, default.active_search_bg);
+        let expected_search_bg = derive_highlight_bg(definition, 3, 11);
+        let expected_active_bg = definition.palette[4];
+
+        // Highlights come from the vendor palette (yellow / blue), not the
+        // built-in defaults, each with a contrast-picked foreground.
+        assert_eq!(theme.search_bg, expected_search_bg);
+        assert_eq!(theme.search_fg, contrast_fg(expected_search_bg));
+        assert_eq!(theme.active_search_bg, expected_active_bg);
+        assert_eq!(theme.active_search_fg, contrast_fg(expected_active_bg));
+    }
+
+    #[test]
+    fn contrast_fg_is_dark_on_light_and_light_on_dark() {
+        assert_eq!(
+            contrast_fg(Rgb::new(0xff, 0xff, 0xff)),
+            Rgb::new(0x1b, 0x1b, 0x1b)
+        );
+        assert_eq!(
+            contrast_fg(Rgb::new(0x00, 0x00, 0x00)),
+            Rgb::new(0xff, 0xff, 0xff)
+        );
+        // Mid gray leans light (luminance ~0.22 for #808080 < 0.5) → white fg.
+        assert_eq!(
+            contrast_fg(Rgb::new(0x80, 0x80, 0x80)),
+            Rgb::new(0xff, 0xff, 0xff)
+        );
     }
 
     #[test]

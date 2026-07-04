@@ -19,4 +19,4 @@ pub use draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 pub use instance::{CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform};
 pub use renderer::{PaneFrame, Renderer, renderer_construction_count};
 pub use snapshot::{CommandPaletteSnapshot, ConfirmDialogSnapshot, FrameSnapshot, HoverLink};
-pub use theme::Theme;
+pub use theme::{OverlayStyle, Theme, blend};

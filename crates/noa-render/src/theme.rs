@@ -131,6 +131,79 @@ fn rgba(rgb: Rgb) -> [f32; 4] {
     ]
 }
 
+/// Component-wise linear blend of two colors: `t == 0.0` returns `a`, `t ==
+/// 1.0` returns `b`, values between interpolate each 8-bit channel and round
+/// to nearest. `t` is clamped to `0.0..=1.0`. The result never leaves the
+/// `[min, max]` range of the two endpoints, so no channel clamp is needed.
+pub fn blend(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    let t = t.clamp(0.0, 1.0);
+    let lerp = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
+    Rgb::new(lerp(a.r, b.r), lerp(a.g, b.g), lerp(a.b, b.b))
+}
+
+/// A modal-overlay surface palette derived from a [`Theme`]'s own default
+/// fg/bg (plus its selection colors). The confirm dialog, command palette,
+/// and search prompt all paint from this one style so they share a single
+/// visual language. Because every color interpolates between the theme's own
+/// foreground and background, the result tracks the theme's light/dark
+/// polarity automatically — a light theme yields a light elevated surface, a
+/// dark theme a dark one, with no per-theme tuning.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlayStyle {
+    surface_bg: Rgb,
+    surface_fg: Rgb,
+    muted_fg: Rgb,
+    border: Rgb,
+    accent_bg: Rgb,
+    accent_fg: Rgb,
+}
+
+impl OverlayStyle {
+    /// Derive the overlay palette from `theme`:
+    /// - `surface_bg` = 8% of the way from the terminal bg toward its fg — an
+    ///   "elevated" surface just distinct from the terminal background;
+    /// - `surface_fg` = the theme's default foreground;
+    /// - `muted_fg` = 45% from fg toward bg — dimmed text for hints/counters;
+    /// - `border` = 70% from fg toward bg — a low-contrast (~30% fg) outline;
+    /// - `accent_bg`/`accent_fg` = the theme's selection colors (selected row).
+    pub fn from_theme(theme: &Theme) -> Self {
+        let fg = theme.default_fg;
+        let bg = theme.default_bg;
+        OverlayStyle {
+            surface_bg: blend(bg, fg, 0.08),
+            surface_fg: fg,
+            muted_fg: blend(fg, bg, 0.45),
+            border: blend(fg, bg, 0.70),
+            accent_bg: theme.selection_bg,
+            accent_fg: theme.selection_fg,
+        }
+    }
+
+    pub fn surface_bg(&self) -> [f32; 4] {
+        rgba(self.surface_bg)
+    }
+
+    pub fn surface_fg(&self) -> [f32; 4] {
+        rgba(self.surface_fg)
+    }
+
+    pub fn muted_fg(&self) -> [f32; 4] {
+        rgba(self.muted_fg)
+    }
+
+    pub fn border(&self) -> [f32; 4] {
+        rgba(self.border)
+    }
+
+    pub fn accent_bg(&self) -> [f32; 4] {
+        rgba(self.accent_bg)
+    }
+
+    pub fn accent_fg(&self) -> [f32; 4] {
+        rgba(self.accent_fg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +292,51 @@ mod tests {
 
         assert_eq!(theme.search_bg(), rgba(theme.search_bg));
         assert_eq!(theme.active_search_bg(), rgba(theme.active_search_bg));
+    }
+
+    #[test]
+    fn blend_endpoints_and_midpoint() {
+        let a = Rgb::new(0, 0, 0);
+        let b = Rgb::new(200, 100, 40);
+        // Endpoints return the inputs exactly.
+        assert_eq!(blend(a, b, 0.0), a);
+        assert_eq!(blend(a, b, 1.0), b);
+        // Midpoint is the rounded component-wise mean.
+        assert_eq!(blend(a, b, 0.5), Rgb::new(100, 50, 20));
+        // Out-of-range t clamps to the endpoints.
+        assert_eq!(blend(a, b, -1.0), a);
+        assert_eq!(blend(a, b, 2.0), b);
+    }
+
+    #[test]
+    fn overlay_style_tracks_theme_polarity() {
+        // Dark theme (default): surface is lighter than bg, border sits low
+        // contrast between fg and bg.
+        let theme = Theme::new();
+        let style = OverlayStyle::from_theme(&theme);
+        assert_eq!(
+            style.surface_bg,
+            blend(theme.default_bg, theme.default_fg, 0.08)
+        );
+        assert_eq!(style.surface_fg, theme.default_fg);
+        assert_eq!(
+            style.muted_fg,
+            blend(theme.default_fg, theme.default_bg, 0.45)
+        );
+        assert_eq!(
+            style.border,
+            blend(theme.default_fg, theme.default_bg, 0.70)
+        );
+        assert_eq!(style.accent_bg, theme.selection_bg);
+        assert_eq!(style.accent_fg, theme.selection_fg);
+
+        // A light theme (swapped fg/bg) yields a surface that is DARKER than
+        // its background — the construction adapts without special-casing.
+        let mut light = Theme::new();
+        light.default_fg = Rgb::new(0x20, 0x20, 0x20);
+        light.default_bg = Rgb::new(0xf7, 0xf7, 0xf7);
+        let light_style = OverlayStyle::from_theme(&light);
+        assert!(light_style.surface_bg.r < light.default_bg.r);
+        assert!(light_style.muted_fg.r > light.default_fg.r);
     }
 }

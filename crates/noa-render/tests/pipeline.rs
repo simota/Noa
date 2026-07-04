@@ -18,7 +18,7 @@ use noa_grid::{Cell, Cursor, Row, SearchState, Selection, SelectionPoint, Termin
 use noa_render::{
     CardStyle, CardTilePlacement, CommandPaletteSnapshot, DrawOp, FrameSnapshot,
     ImagePlacementSnapshot, OverviewThumbnailResources, PaneFrame, PaneId, PaneRect, Renderer,
-    SnapshotImage, Theme, build_draw_plan, renderer_construction_count,
+    SnapshotImage, Theme, build_draw_plan,
 };
 use std::sync::Arc;
 
@@ -444,21 +444,56 @@ fn overview_blit_pipeline_draws_tile_without_validation_error() {
     assert_eq!(overview.tile_size(), tile_size);
     assert_eq!(overview.tile_count(), 1);
 
-    let before_blit = renderer_construction_count();
     device.push_error_scope(wgpu::ErrorFilter::Validation);
     overview
-        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, 0)
+        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, scratch_size, 0)
         .expect("blit existing renderer to overview tile");
     let err = pollster::block_on(device.pop_error_scope());
 
-    assert_eq!(
-        renderer_construction_count(),
-        before_blit,
-        "overview_renderer_reuse: blitting a tile must reuse the existing Renderer"
-    );
     assert!(
         err.is_none(),
         "wgpu validation error during overview blit draw: {err:?}"
+    );
+}
+
+#[test]
+fn overview_blit_scratch_resizes_to_source_frame_without_validation_error() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping overview blit scratch resize test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let initial_scratch_size = PixelSize { w: 64, h: 32 };
+    let source_size = PixelSize { w: 160, h: 96 };
+    let tile_size = PixelSize { w: 80, h: 50 };
+    let mut font =
+        FontGrid::new(24.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(&device, &queue, format, &mut font, DEFAULT_GRID_PADDING)
+        .expect("build renderer");
+    renderer.resize(source_size);
+    rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "source");
+
+    let mut overview = OverviewThumbnailResources::for_renderer(
+        &device,
+        &renderer,
+        initial_scratch_size,
+        tile_size,
+        1,
+        TEST_TITLE_BAR_H,
+        TEST_CARD_COLOR,
+    );
+    assert_eq!(overview.scratch_size(), initial_scratch_size);
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    overview
+        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, source_size, 0)
+        .expect("blit source-sized renderer to overview tile");
+    let err = pollster::block_on(device.pop_error_scope());
+
+    assert_eq!(overview.scratch_size(), source_size);
+    assert!(
+        err.is_none(),
+        "wgpu validation error during overview scratch resize blit: {err:?}"
     );
 }
 
@@ -488,7 +523,7 @@ fn overview_blit_tile_pixel_hash_tracks_content_changes() {
 
     rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "AAA");
     overview
-        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, 0)
+        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, scratch_size, 0)
         .expect("render first tile");
     let first = hash_pixels(&read_rgba_pixels(
         &device,
@@ -500,7 +535,7 @@ fn overview_blit_tile_pixel_hash_tracks_content_changes() {
 
     rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "AAA");
     overview
-        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, 0)
+        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, scratch_size, 0)
         .expect("render unchanged tile");
     let unchanged = hash_pixels(&read_rgba_pixels(
         &device,
@@ -516,7 +551,7 @@ fn overview_blit_tile_pixel_hash_tracks_content_changes() {
 
     rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "WWW");
     overview
-        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, 0)
+        .render_existing_renderer_to_tile(&device, &queue, &mut renderer, scratch_size, 0)
         .expect("render changed tile");
     let changed = hash_pixels(&read_rgba_pixels(
         &device,
@@ -561,7 +596,7 @@ fn overview_blit_resources_drop_before_renderer_without_validation_error() {
                 TEST_CARD_COLOR,
             );
             overview
-                .render_existing_renderer_to_tile(&device, &queue, &mut renderer, 0)
+                .render_existing_renderer_to_tile(&device, &queue, &mut renderer, scratch_size, 0)
                 .expect("render before teardown");
         }
         drop(renderer);
@@ -1323,7 +1358,13 @@ fn overview_card_pipeline_composites_tiles_without_validation_error() {
     // Populate both tiles (mirror in the content region, card color in the band).
     for tile_index in 0..2 {
         overview
-            .render_existing_renderer_to_tile(&device, &queue, &mut renderer, tile_index)
+            .render_existing_renderer_to_tile(
+                &device,
+                &queue,
+                &mut renderer,
+                scratch_size,
+                tile_index,
+            )
             .expect("render tile for card composite");
     }
 

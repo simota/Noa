@@ -577,6 +577,16 @@ impl OverviewThumbnailResources {
         self.scratch.size
     }
 
+    fn ensure_scratch_size(&mut self, device: &wgpu::Device, source_size: PixelSize) {
+        let source_size = PixelSize {
+            w: source_size.w.max(1),
+            h: source_size.h.max(1),
+        };
+        if self.scratch.size != source_size {
+            self.scratch = OverviewScratchTexture::new(device, self.format, source_size);
+        }
+    }
+
     pub fn tile_size(&self) -> PixelSize {
         self.tile_size
     }
@@ -670,6 +680,7 @@ impl OverviewThumbnailResources {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         renderer: &mut Renderer,
+        source_size: PixelSize,
         tile_index: usize,
     ) -> anyhow::Result<()> {
         if renderer.target_format() != self.format {
@@ -680,10 +691,11 @@ impl OverviewThumbnailResources {
             );
         }
 
-        let tile = self
-            .tiles
-            .get(tile_index)
-            .ok_or_else(|| anyhow::anyhow!("overview tile index {tile_index} is out of range"))?;
+        if tile_index >= self.tiles.len() {
+            anyhow::bail!("overview tile index {tile_index} is out of range");
+        }
+        self.ensure_scratch_size(device, source_size);
+        let tile = &self.tiles[tile_index];
 
         // Fit the mirror into the content region without non-uniform scaling.
         // Multiple-tab grids can make tiles much taller or narrower than the

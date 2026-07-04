@@ -2149,7 +2149,6 @@ impl App {
 
         let stale = overview.thumbnails.as_ref().is_none_or(|thumbnails| {
             thumbnails.format() != format
-                || thumbnails.scratch_size() != scratch_size
                 || thumbnails.tile_size() != tile_size
                 || thumbnails.tile_count() != tile_count
         });
@@ -2196,6 +2195,10 @@ impl App {
             let Some(surface) = state.surfaces.get(&tile_id.pane_id) else {
                 continue;
             };
+            let source_viewport = PixelSize {
+                w: surface.rect.w.max(1),
+                h: surface.rect.h.max(1),
+            };
             // Read-only publish slot (Fix B, REQ-NF-6): the io thread
             // already holds `Terminal`'s lock on every pty feed and
             // opportunistically publishes a `FrameSnapshot::peek` there
@@ -2213,14 +2216,14 @@ impl App {
             };
 
             // Reuse this tab's own `Renderer` unmodified (REQ-NF-1): point it
-            // at the shared scratch resolution just long enough to draw one
-            // frame into it, then restore its real surface viewport so the
-            // tab's own next redraw is unaffected.
+            // at the source pane's real pixel size just long enough to draw
+            // one frame into the Overview scratch texture, then restore its
+            // real surface viewport so the tab's own next redraw is unaffected.
             let own_viewport = PixelSize {
                 w: state.surface_config.width,
                 h: state.surface_config.height,
             };
-            state.renderer.resize(thumbnails.scratch_size());
+            state.renderer.resize(source_viewport);
             state
                 .renderer
                 .rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
@@ -2231,6 +2234,7 @@ impl App {
                 &gpu.device,
                 &gpu.queue,
                 &mut state.renderer,
+                source_viewport,
                 tile_index,
             ) {
                 log::warn!(

@@ -277,3 +277,113 @@ Judge + Attest が FAIL を返した Run 1 の全指摘への対応(各1行)。
 - **⚠F オーバーフロー方針(>9 タブ)= ページングなし・title-only placeholder 行(暫定)**: v1 はページング(タイルナビゲーション=CUT 済み)を採らない。フルタイルは最近フォーカス上位9タブ、残りは題名のみの placeholder 行(ライブミラーなし)へ退化。REQ-OV-10/AC-OV-10 に反映。*LOCK 承認済み (2026-07-03)。*
 - **⚠G 更新スロットル = 10Hz(min_interval=100ms)、10-15Hz 許容帯、コンパイル時定数(暫定)**: 既定 10Hz を採用、10-15Hz を許容チューニング帯とし config ノブは設けない(コンパイル時定数)。REQ-NF-4/AC-NF-04/AC-NF-05 に反映。*LOCK 承認済み (2026-07-03)。*
 - **(継続)splits タブの代表表示**: フォーカス中ペインのみ vs 分割レイアウト縮小再現 — DEFER(v1 はタブ全体を1画像。Void DEFER に整合)。
+
+## v2 — Mockup Parity
+
+### Metadata (v2)
+- trigger: ユーザー提示のターゲット UI モックアップ画像(2026-07-04)。本節の要件はエージェントが画像を直接見た結果ではなく、依頼者が言語化した観察記述を正としてスペック化したもの。
+- scope mode: **Standard 追記**(REQ-OV-11..17 の 7 functional + REQ-NF-12..13 の 2 non-functional = 9 要件、AC 16 件)。
+- 継続方針: v1 の不変条件(等サイズ・行優先・非重複、REQ-OV-3)・スコープ境界(Void CUT/DEFER、L0 パリティ例外)は維持し上書きしない。本節は v1 requirement の**補完**(REQ-OV-5 の未達解消含む)であり、v1 REQ/AC 番号は再利用しない。
+- グラウンディング: 本節の現状記述はすべて `feat/tab-overview-v2` ワークツリーのコード調査(2026-07-04)に基づく。主要参照: `crates/noa-app/src/tab_overview.rs`(純関数層)、`crates/noa-app/src/app.rs`(ウィンドウ/描画/コマンド配線)、`crates/noa-app/src/command_palette.rs`(フィルタ機構の参考実装)。
+
+### L0 — Vision delta (v2)
+- v1 は「出しっぱなし監視ダッシュボード」を主目的としクリック操作のみを KEEP 、タイル間キーボードナビ・活動バッジ・並替等を CUT した(Void スコープ、90-102行)。ユーザー提示のモックアップは、その CUT 済みキーボードナビの一部(矢印移動・Cmd+1-9直接切替)と、v1 で未実装のタイトルバー表示・クローズボタン・検索フィルタ・ヒントバーを新たに要求している。これは v1 の Void CUT を撤回するものではなく、**ユーザーが明示的にスコープを復活させた** v2 追加要求として扱う。
+- 現状ギャップの棚卸し(コード裏付け、下記 REQ で個別に要件化):
+  - タイトルバーは placeholder 行にのみ描画され(`render_overview_placeholder_labels`, `app.rs:1563-1623`、呼び出しは `app.rs:1573` の `overview_tile_labels`)、ライブタイル(`render_due_overview_tiles`, `app.rs:1468-1526`)には題名描画経路が存在しない — v1 REQ-OV-5/AC-OV-05 は**実質未達**(REQ-OV-12 で解消)。
+  - キーボードは `overview_command_scope`(`app.rs:3561-3587`)がほぼ全 `AppCommand`(`SelectTab`/`CloseTab`/`NextTab`/`PrevTab`/`CloseWindow` 含む)を `CommandScope::Overview` に分類し、`handle_app_command`(`app.rs:551-552`)がこのスコープを一律 no-op にする。矢印/Enter/Esc 専用のキー処理関数(`handle_search_prompt_key`/`handle_command_palette_key` に相当するもの)は存在しない — 事実上「再トグルによる dismiss」のみが機能する(REQ-OV-14/15 で新設)。
+  - `compute_overview_grid`(`tab_overview.rs:65-107`)と `rect_at`(`tab_overview.rs:224-233`)はガター・マージンを一切加算せず、タイルは境界いっぱいに敷き詰められる(隙間ゼロ)(REQ-OV-11 で拡張)。
+  - close(✕)ボタンに相当する UI・ヒットテスト対象は存在しない(REQ-OV-13 で新設)。
+  - タブ検索フィルタは存在しないが、`command_palette.rs:139` `command_palette_filter` / `command_palette.rs:151` `is_subsequence_ci` という非連続部分列(subsequence)マッチの手書き実装が既にある。ただしモックアップの「Search tabs」はタイトルの**部分一致(substring)**であり意味論が異なるため、パターンは参考にしつつ新規関数として要件化する(REQ-OV-16)。
+  - `redraw_overview`(`app.rs:1710-1745`)は `present_overview_frame`(`app.rs:1727`)をフレーム内容の変化有無に関わらず毎回無条件に呼び、`backlog_remains`(`app.rs:1737-1741`、dirty だがスロットル未到来のタイルが残っている)なら即座に次フレームを要求する(`app.rs:1742-1744`)。スロットル待ち期間中(既定 100ms)、何も変化していないのに毎フレーム合成+present を繰り返す — これが依頼にある既知バグの実体(REQ-NF-12 で解消)。
+  - `render_due_overview_tiles`(`app.rs:1493-1496`)は対象タブの `surface.terminal` を直接ロックし `FrameSnapshot::from_terminal` を呼ぶ。これは `Screen::take_visible_rows_with_damage`(`noa-render/src/snapshot.rs:114`、"take" = 消費型)を経由するため、通常タブ自身の redraw 経路が消費すべき damage を Overview が横取りする可能性がある(REQ-NF-13 で解消)。
+
+### Non-Goals (v2)
+- 背景ブラー壁紙(タイル外周の装飾背景)。
+- ページング / タイルナビゲーション(v1 Void CUT を継続。REQ-OV-10 の title-only placeholder 行退化方式は維持)。
+- タイルのドラッグ並べ替え。
+- アニメーション遷移(開閉・選択移動・フィルタ再レイアウトはいずれも瞬時反映、トランジションなし)。
+
+### SPECIFY — v2 L1/L2/L3
+
+検証タグ・優先度タグの凡例は本ファイル 118 行の SPECIFY 節を継承する([MH]/[NH]、[unit]/[headless]/[inspection]/[visual]/[manual])。
+
+#### L1 — Requirements (v2 追加分)
+
+##### Functional (REQ-OV-11..17)
+
+- **REQ-OV-11** [MH]: `compute_overview_grid` をガター(タイル間の一定間隔)と外周マージン(グリッド全体と Overview ウィンドウ境界の間隔)を受け取るよう拡張する(例: `gutter: u32, margin: u32` 引数、または `OverviewLayoutParams` 構造体)。v1 の不変条件(REQ-OV-3: 全タイル同一サイズ・行優先・末尾行のみ不足可・重なりなし)は維持し、`gutter=0, margin=0` は v1 の敷き詰めレイアウトと**ビット単位で一致**する(回帰安全性)。
+- **REQ-OV-12** [MH]: 全タイル(ライブミラー・placeholder 行の両方)にタイトルバーを表示する。タイトルバーはタイル上部の帯で、中央にそのタブの題名(tab title)を表示する。placeholder 側は既存の `overview_tile_labels`(`tab_overview.rs:180-192`)をそのまま再利用できるが、ライブタイル側にはこの関数を呼ぶ描画経路自体が存在しないため新設が必要(`render_due_overview_tiles` への合成呼び出し追加)。本要件は **v1 REQ-OV-5 / AC-OV-05 の実質未達を、表示様式(タイトルバー)込みで充足する**。
+- **REQ-OV-13** [MH]: タイトルバー右端に ✕ クローズボタンを表示する。クリックすると当該タブを閉じ、タイル除去+グリッド再レイアウトを行う(REQ-OV-9 の「Overview 表示中に対象タブが閉じられた場合」の縮退経路をそのまま再利用する — 閉鎖トリガーの発生源が pty 外部からユーザーの ✕ クリックに変わるだけで、以後の除去/再レイアウト/stale 参照 no-op の契約は同一)。✕ のヒットテストはタイルのフォーカス用ヒットテスト(`hit_test_overview_grid`, `tab_overview.rs:113-118`)と別領域として解決し、タイル本体クリックとは異なる標的(close target)を返す。
+- **REQ-OV-14** [MH]: 選択モデルを導入する。Overview のライブグリッド(行優先、REQ-OV-3/11)上のちょうど1タイルが「選択中」状態を持つ。選択状態は青のフォーカスリング(グロー)で可視化する。Overview を開いた時点の初期選択は、フォーカス中タブがライブタイル集合に含まれればそのタイル、含まれなければ先頭(index 0)とする。
+- **REQ-OV-15** [MH]: キーボードナビゲーション。以下は本ファイル 94・158 行が示す「Overview 専用キーマップ(移動/選択/切替/閉じる)」の具体化であり、新規の Overview 専用キー処理経路(`handle_search_prompt_key`/`handle_command_palette_key` と同型に `KeyboardInput` 先取りルーティングへ挿入)を要する。現行の `overview_command_scope`(`app.rs:3561-3587`)による一律 no-op 化はこの新経路と共存させ、no-op 対象は端末系 `AppCommand` のみに限定する。
+  - (a) 矢印キー(↑↓←→)は行優先グリッド上で選択タイルを移動する。グリッド端でクランプしラップしない。placeholder 行のタイルも選択対象に含む(下記(b)参照)。
+  - (b) Return は選択中タイルのタブへフォーカスを確定する。選択がライブタイルなら既存 `focus_tab_from_overview`(`app.rs:1765-1775`)を再利用する。選択が **placeholder 行でも選択可能とし、Return で当該タブへフォーカスする**(placeholder はタイトルのみで内容ミラーがないが、対象タブ自体は実在するため到達可能でなければならない)。
+  - (c) Cmd+1..9 は現在ライブなタイル位置 N(1始まり、行優先の N 番目)へ直接切替する。既存 `AppCommand::SelectTab(n)`(`commands.rs:26`)とキーバインド(`commands.rs:363-371`)はそのまま流用するが、Overview フォーカス中はこれを **REQ-OV-15 専用経路で直接解決**し、`overview_command_scope` による no-op 対象からは除外する(v1 では `SelectTab` は `CommandScope::Overview` で no-op、`app.rs:3582`)。
+  - (d) Esc は Overview を閉じる(`hide_tab_overview`, `app.rs:1331` 相当の非表示処理)。どのタブへもフォーカスを移さない。
+- **REQ-OV-16** [MH]: 上部中央の「Search tabs」検索フィールドで、タブ題名の**部分一致(substring)・大文字小文字無視**によりライブタイル集合を絞り込み、絞り込み結果でグリッドを即座に再レイアウトする(REQ-OV-11 拡張後の `compute_overview_grid` に絞り込み後の source id 集合のみを渡す)。含有判定は新規の大文字小文字無視 substring 判定関数として実装する — `command_palette.rs:151` の `is_subsequence_ci` は**非連続部分列(subsequence)**判定であり意味論が異なるため、そのまま再利用はしない(関数を呼ぶのではなく、大文字小文字畳み込みや走査といった実装パターンの参考に留める)。フィルタ文字列変更のたびに選択インデックスは先頭(0)へリセットする(command-palette.md R-7 の `selected = 0` リセットパターンに整合)。REQ-OV-7 の「Overview フォーカス中の文字入力は PTY へ流さない」を具体化し、印字可能文字の入力先を本検索フィールドと明記する。
+- **REQ-OV-17** [MH]: 下部中央にヒントバーを静的テキストで表示する。内容は「⌘1-N to switch・↑↓←→ to navigate・Return to open・esc to close」とし、**N は現在のライブタイル数(min(タブ数, 9))**に置き換える(モックアップの「⌘1-6」はユーザー提示時点のタブ数=6 に対応する具体例であり、実システムの Cmd+1..9 対応範囲(`OVERVIEW_GRID_CAP=9`, `tab_overview.rs:11`)と整合させるため固定文言「1-6」ではなく動的な N とする — ambiguous+reversible な設計判断としてここに明記)。ヒントバー自体に入力応答はない(表示のみ)。
+
+##### Non-Functional (REQ-NF-12..13)
+
+- **REQ-NF-12** [MH]: Overview の合成/present は、タイル更新が due でないフレームで全速実行してはならない。現行 `redraw_overview`(`app.rs:1710-1745`)は `present_overview_frame`(`app.rs:1727`)をフレーム内容の変化有無に関わらず無条件に呼び、かつ dirty だがスロットル未到来のタイルが残っている(`backlog_remains`, `app.rs:1737-1741`)限り即座に次フレームを要求する(`app.rs:1742-1744`)。この結果、スロットル待ち期間(既定 100ms、⚠G)中は何も変わらない合成+present を毎フレーム(ディスプレイのリフレッシュレートで)繰り返す既知バグがある。修正契約: 当該フレームで実際に描画されたタイルが 0 件(`due_window_ids` が空)かつレイアウト/選択/検索フィルタの変更もない場合、`present_overview_frame` を呼ばない。dirty backlog が残る場合でも、次回描画要求はスロットル期限(`min_interval` 経過時点)に合わせてスケジュールし、変化のない毎フレーム即時再要求を行わない。
+- **REQ-NF-13** [MH](REQ-NF-6 の強化): Overview 描画経路は通常タブの `Terminal` Mutex をロックしてはならない。現行 `render_due_overview_tiles`(`app.rs:1493-1496`)は `surface.terminal.lock()` を直接取得し `FrameSnapshot::from_terminal` を呼ぶが、これは `Screen::take_visible_rows_with_damage`(`noa-render/src/snapshot.rs:114`、消費型の "take")を経由するため、通常タブ自身の redraw 経路が消費すべき damage を横取りしうる。修正契約: io スレッドが各タブについて read-only スナップショット(damage を**消費しない**取得経路)を publish し、Overview の描画経路はそれのみを読む。Overview はいかなるタブの `Terminal` Mutex も直接ロックしない。
+
+> Must 比率メモ: v2 追加 9 要件すべて [MH]。モックアップはユーザーが明示提示したターゲット UI であり、UI 忠実度(タイトルバー/クローズボタン/フォーカスリング/検索/ヒントバー)とキーボードナビの正しさが本節の中核目的であるため、[NH] 降格は行わない(v1 の全 [MH] 先例に整合)。
+
+#### L2 — Detail (v2)
+
+##### noa-app / tab_overview.rs(純粋層の拡張)
+
+- `compute_overview_grid` のシグネチャを `compute_overview_grid(tab_count: usize, bounds: TileRect, cap: usize, gutter: u32, margin: u32) -> OverviewLayout`(または引数をまとめた `OverviewLayoutParams`)へ拡張する。`rect_at`(`tab_overview.rs:224-233`)にガター・マージンのオフセット計算を追加し、`tile_w`/`tile_h` の算出(`tab_overview.rs:89-90`)から `(cols-1)*gutter + 2*margin` 等を差し引く形にする(REQ-OV-11)。既存呼び出し箇所は `gutter=0, margin=0` を渡すことで v1 挙動を保つ回帰テストを追加する。
+- 新規純関数 `move_overview_selection(selected: usize, cols: usize, tile_count: usize, direction: Direction) -> usize`(REQ-OV-15a、行優先グリッド上の端クランプ・非ラップ移動、Window/GPU 不要)。`Direction` は `FocusDirection`(既存、`commands.rs` 参照)を再利用するか専用 enum を新設する。
+- 新規純関数 `overview_tab_filter(query: &str, titles: &[(Id, String)]) -> Vec<Id>`(REQ-OV-16、大文字小文字無視 substring 判定、`command_palette.rs` の case-folding パターンを参考にしつつ独自実装)。
+- `overview_tile_labels`(`tab_overview.rs:180-192`)はライブタイル・placeholder 行の両方から呼ばれるよう L2 の呼び出し側(app.rs)を変更するだけで、関数自体の変更は不要(REQ-OV-12)。
+- 新規純関数 `overview_close_hit_test(&[(Id, TileRect)], point) -> Option<Id>`(REQ-OV-13、タイトルバー右端の close-button 矩形専用。`hit_test_overview_grid`(`tab_overview.rs:113-118`)とは別の入力矩形集合を取るため既存関数は変更せず並置する)。
+
+##### noa-app / app.rs(ウィンドウイベント・コマンド配線・描画)
+
+- **Overview 専用キー処理(REQ-OV-15)**: `handle_search_prompt_key`/`handle_command_palette_key` と同型の `handle_overview_key(event_loop, window_id, event)` を新設し、`overview_window_event`(`app.rs:1777-1815` 付近)の `KeyboardInput` 分岐から委譲する。矢印→`move_overview_selection` で選択更新+redraw、Return→選択タイルの Id を解決し `focus_tab_from_overview`(ライブ)または同等のフォーカス経路(placeholder)を呼ぶ、Esc→`hide_tab_overview()` 相当を呼ぶ、印字可能文字→検索クエリへ追記+`overview_tab_filter` 再計算+選択を 0 へリセット+redraw。
+- **Cmd+1..9 の直接解決(REQ-OV-15c)**: `overview_command_scope`(`app.rs:3561-3587`)の `AppCommand::SelectTab(_) => CommandScope::Overview` アームで一律 no-op にする現行分岐の前段に、`handle_overview_key` 相当の経路で `SelectTab(n)` を横取りしライブタイル N 番目へ直接フォーカスする分岐を追加する(既存 `overview_command_scope` の no-op 分類自体は他の端末系コマンドに対しては維持)。
+- **✕ クローズボタン(REQ-OV-13)**: `overview_window_event` の `MouseInput`(`app.rs:1797` 付近、`focus_overview_tile_at_last_cursor` と同じイベントを消費)に、まず `overview_close_hit_test` で close-button 領域を判定し、ヒットすれば当該タブに対して REQ-OV-9 の閉鎖経路(`close_tab` 相当)を呼び、ミスであれば従来の `focus_overview_tile_at_last_cursor` にフォールバックする。
+- **タイトルバー描画(REQ-OV-12)**: `render_due_overview_tiles`(`app.rs:1468-1526`)のループ内で、`overview_tile_labels` から得たタブ題名をタイル上部帯にオーバーレイ合成する(`render_overview_placeholder_labels` が使う `label_renderer` を共有し、ライブタイルのシンプルなラベル行合成に転用する。新規 GPU パイプラインは不要)。
+- **フォーカスリング(REQ-OV-14)**: `present_overview_frame`(`app.rs:1628-1692`)のタイル合成ループ(`app.rs:1683-1688`)で、選択中タイルの矩形に対してのみ青いリング(グロー)のオーバーレイ描画を追加する。
+- **present の due ゲート(REQ-NF-12)**: `redraw_overview`(`app.rs:1710-1745`)を、`due_window_ids.is_empty()` かつレイアウト/選択/検索の変更なしの場合に `present_overview_frame` 呼び出し(`app.rs:1727`)をスキップするよう改める。`backlog_remains` による次回redraw要求(`app.rs:1742-1744`)は、即時要求ではなく最も早いタイルのスロットル期限に合わせた要求へ変更する。
+- **damage 非消費スナップショット(REQ-NF-13)**: `render_due_overview_tiles`(`app.rs:1468-1526`)の `surface.terminal.lock()` + `FrameSnapshot::from_terminal`(`app.rs:1493-1496`)を、io スレッドが publish する read-only スナップショット読み取りへ置き換える。`Terminal` 側に damage 消費経路(`take_visible_rows_with_damage`, `noa-render/src/snapshot.rs:114`)とは別の非消費 peek 経路を追加する必要がある(具体設計は Builder が noa-grid/noa-render の実装時に確定)。
+
+##### noa-render / noa-grid
+
+- タイトルバー・フォーカスリング・ヒントバーの描画は既存セル/オーバーレイ合成パイプラインの範囲内で完結させ(search_prompt/command palette と同じくグリッド整列モーダル描画パターンの延長)、新規 bind-group/uniform レイアウトは追加しない(既存 `noa-render/tests/pipeline.rs` の検証対象を増やさない)。
+- damage 非消費 peek 経路(REQ-NF-13)は `noa-grid`(`Screen`)側に追加する。`noa-grid` は GUI 非依存のまま(winit/wgpu を導入しない、v1 REQ-NF-10 の制約を継続)。
+
+#### L3 — Acceptance Criteria (v2 追加分)
+
+- **AC-OV-11** (REQ-OV-11) [MH] [unit] — Given 拡張後の `compute_overview_grid(tab_count, bounds, cap, gutter, margin)`、When `gutter=0, margin=0`、Then 返る `OverviewLayout` は v1 の `compute_overview_grid(tab_count, bounds, cap)` と全タイル矩形が一致する(回帰);When `gutter>0` または `margin>0`、Then 全ライブタイルは同一サイズを保ち、隣接タイル間の間隔が `gutter` に一致し、グリッド全体と `bounds` 境界の間隔が `margin` に一致し、行優先・非重複の不変条件(REQ-OV-3)を維持する。
+- **AC-OV-12** (REQ-OV-12) [MH] [unit]+[visual] — Given ライブタイルと既知のタブ題名、When `render_due_overview_tiles` 相当の合成呼び出しを評価、Then タイトルバー行の合成入力に当該タブの題名が渡される(unit);Given 実 GUI で複数ライブタブを Overview 表示、Then 各ライブタイル上部に自身の題名を表示するタイトルバーが目視できる(visual)— v1 REQ-OV-5/AC-OV-05 の未達(placeholder のみ描画)を解消したことを確認する。
+- **AC-OV-13** (REQ-OV-13) [MH] [unit]+[manual] — Given タイル矩形とタイトルバー右端の close-button 領域、When `overview_close_hit_test` をタイル本体内の点/close-button 領域内の点で評価、Then タイル本体内は `None`(通常のフォーカス用 `hit_test_overview_grid` が処理)、close-button 領域内は当該タブの close target を返す(unit);Given 実 GUI、When ✕ をクリック、Then 当該タブが閉じてタイルが除去され再レイアウトされる(manual、REQ-OV-9 の縮退経路を再利用)。
+- **AC-OV-14** (REQ-OV-14) [MH] [unit] — Given フォーカス中タブがライブタイル集合に含まれる状態で Overview を開く、When 初期選択を評価、Then 選択インデックスはフォーカス中タブのタイルを指す;Given フォーカス中タブがライブタイル集合に含まれない(例: フォーカス中タブが overflow 側)、When 初期選択を評価、Then 選択インデックスは 0;いずれの場合も選択中タイルはちょうど1つ。
+- **AC-OV-15a** (REQ-OV-15a) [MH] [unit] — Given `cols`/`tile_count` と選択インデックス、When `move_overview_selection` を各方向で評価、Then グリッド端では該当方向へクランプ(ラップしない)、末尾行の欠けたセルをまたぐ移動でも範囲外インデックスを返さない。
+- **AC-OV-15b** (REQ-OV-15b) [MH] [unit]+[manual] — Given 選択中タイルがライブタイル、When Return を処理、Then `focus_tab_from_overview` 相当が選択タブの WindowId で呼ばれる(unit);Given 選択中タイルが **placeholder 行**、When Return を処理、Then 同様に当該タブへフォーカスが解決される(unit、placeholder も選択可能であることを検証);Given 実 GUI、Then Return でハイライト中タブへ実際にフォーカスが移る(manual)。
+- **AC-OV-15c** (REQ-OV-15c) [MH] [unit] — Given Overview フォーカス中で N 個のライブタイル、When `Cmd+k`(1≤k≤min(N,9))を dispatch、Then `overview_command_scope` の no-op 化を経由せず、行優先 k 番目のライブタイルのタブへ直接フォーカスが解決される;When `k>N`、Then no-op(存在しないタイルへは切り替わらない、パニックなし)。
+- **AC-OV-15d** (REQ-OV-15d) [MH] [unit]+[manual] — Given Overview 表示中、When Esc を処理、Then Overview が非表示になり、いかなるタブへのフォーカス変更も発生しない(unit: dispatch記録);Given 実 GUI、Then Esc で Overview が閉じ元のタブ表示に戻る(manual)。
+- **AC-OV-16a** (REQ-OV-16) [MH] [unit] — Given `overview_tab_filter(query, titles)`、When query `"log"` を大文字小文字混在タイトル群(例: `"Build Log"`, `"logs-worker"`, `"README"`)に適用、Then タイトルに `query` を大文字小文字無視の**連続部分文字列**として含むもの(`"Build Log"`, `"logs-worker"`)のみが順序保持で返り、`"README"` は含まれない(非連続部分列マッチとの違いを明示する回帰: `"lg"` のような非連続クエリはヒットしない)。
+- **AC-OV-16b** (REQ-OV-16) [MH] [unit] — Given 検索クエリの変更、When グリッド再レイアウトを評価、Then `compute_overview_grid` へ渡される source id が絞り込み後の集合のみになり、選択インデックスが 0 へリセットされる。
+- **AC-OV-16c** (REQ-OV-16) [MH] [unit]+[manual] — Given Overview フォーカス中で検索フィールドがアクティブ、When 印字可能文字を入力、Then クエリ末尾に追記されどの pty にも到達しない(unit: ルーティング分岐;manual: pty バイト非到達を確認)。
+- **AC-OV-17** (REQ-OV-17) [MH] [unit]+[visual] — Given ライブタイル数 N(=min(タブ数,9))、When ヒントバー文字列を構築、Then `"⌘1-N to switch・↑↓←→ to navigate・Return to open・esc to close"` の N が実際のライブタイル数に一致する;Given 実 GUI、Then ヒントバーが下部中央に表示される(visual)。
+- **AC-NF-12** (REQ-NF-12) [MH] [unit] — Given 1件のみ dirty かつスロットル未到来(`should_render_tile=false`)で他に変化なしの状態、When 当該フレームの `redraw_overview` 相当の判定ロジックを評価、Then `present_overview_frame` は呼ばれない(フレーム内容不変)、かつ次回描画要求はスロットル期限に合わせてスケジュールされ即時再要求されない(`app.rs:1710-1745` の現行無条件 present + 即時再要求バグの再発防止を回帰テストとして固定する)。
+- **AC-NF-13** (REQ-NF-13) [MH] [unit]+[inspection] — Given Overview のタイル描画経路、When 対象タブの現在内容を取得、Then io スレッドが publish する read-only・damage 非消費のスナップショット経由でのみ読み取り、対象タブの `Terminal` Mutex を直接ロックしない(unit: publish/read が独立した経路であることを検証);`render_due_overview_tiles` 相当のコードに `surface.terminal.lock()` / `FrameSnapshot::from_terminal` の直接呼び出しが残っていないことをコードレビューで確認する(inspection)。
+
+### Traceability — v2 追加分(REQ ↔ AC)
+
+| REQ | AC | 優先度 |
+|---|---|---|
+| REQ-OV-11 | AC-OV-11 | MH |
+| REQ-OV-12 | AC-OV-12 | MH |
+| REQ-OV-13 | AC-OV-13 | MH |
+| REQ-OV-14 | AC-OV-14 | MH |
+| REQ-OV-15 | AC-OV-15a, AC-OV-15b, AC-OV-15c, AC-OV-15d | MH |
+| REQ-OV-16 | AC-OV-16a, AC-OV-16b, AC-OV-16c | MH |
+| REQ-OV-17 | AC-OV-17 | MH |
+| REQ-NF-12 | AC-NF-12 | MH |
+| REQ-NF-13 | AC-NF-13 | MH |
+
+**Coverage: v2 追加 9/9 要件が ≥1 AC にトレース = 100%**(v2 追加 AC 総数 **16**、全 [MH])。v1 と合算した本ファイル全体のカバレッジ: 30/30 要件 = 100%、AC 総数 41。

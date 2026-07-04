@@ -1,0 +1,74 @@
+// Rounded-card composite for the Tab Overview (REQ-OV-12/14, v2 mockup
+// parity). Draws one tile texture as a rounded-corner card with a border /
+// focus ring, sampled over the near-black backdrop the composite pass clears
+// to. One draw call per tile; `rect`/`surface_size` place the quad, and the
+// fragment shader applies the rounded-rect SDF alpha mask + border stroke.
+
+struct CardUniforms {
+    // Vec4-first std140 order (see CLAUDE.md GPU gotcha): x, y, w, h in px.
+    rect: vec4<f32>,
+    border_color: vec4<f32>,
+    surface_size: vec2<f32>,
+    corner_radius: f32,
+    border_width: f32,
+};
+
+@group(0) @binding(0) var tile_tex: texture_2d<f32>;
+@group(0) @binding(1) var tile_sampler: sampler;
+@group(0) @binding(2) var<uniform> u: CardUniforms;
+
+struct VertexOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 1.0),
+    );
+    let corner = corners[vertex_index];
+    let px = u.rect.xy + corner * u.rect.zw;
+    // Pixel -> NDC (y points down in pixel space, up in NDC).
+    let ndc = vec2<f32>(
+        px.x / u.surface_size.x * 2.0 - 1.0,
+        1.0 - px.y / u.surface_size.y * 2.0,
+    );
+
+    var out: VertexOut;
+    out.position = vec4<f32>(ndc, 0.0, 1.0);
+    out.uv = corner;
+    return out;
+}
+
+// Signed distance to a rounded box centered at the origin; negative inside.
+fn sd_round_box(p: vec2<f32>, half: vec2<f32>, radius: f32) -> f32 {
+    let q = abs(p) - (half - vec2<f32>(radius));
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    let half = u.rect.zw * 0.5;
+    let p = in.uv * u.rect.zw - half;
+    let d = sd_round_box(p, half, u.corner_radius);
+
+    // Card coverage: 1 inside, fading to 0 over ~1px at the rounded edge.
+    let coverage = 1.0 - smoothstep(0.0, 1.0, d);
+    if coverage <= 0.0 {
+        discard;
+    }
+
+    let tex = textureSample(tile_tex, tile_sampler, in.uv);
+    // `inset` is the distance from the edge, growing inward. The border stroke
+    // occupies the outermost `border_width` px.
+    let inset = -d;
+    let border_mix = 1.0 - smoothstep(u.border_width - 1.0, u.border_width, inset);
+    let rgb = mix(tex.rgb, u.border_color.rgb, clamp(border_mix, 0.0, 1.0));
+    return vec4<f32>(rgb, coverage);
+}

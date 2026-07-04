@@ -146,6 +146,54 @@ impl FrameSnapshot {
         }
     }
 
+    /// Read-only counterpart to [`Self::from_terminal`] — takes `&Terminal`
+    /// and does not consume row damage. This is the Tab Overview mirror's
+    /// only snapshot source: the overview render path must never lock a
+    /// tab's `Terminal` itself (spec REQ-NF-6), so `noa-app`'s io thread
+    /// calls this instead while it already holds that lock feeding pty
+    /// bytes in, and publishes the result for the overview to read
+    /// lock-free (see `noa-app`'s `io_thread::feed_terminal`).
+    ///
+    /// `row_dirty` is fixed to all `true` (full re-shape every call) rather
+    /// than reporting real damage: overview tiles redraw at 10Hz at most
+    /// (`OVERVIEW_TILE_MIN_RENDER_INTERVAL` in `noa-app`), so re-shaping
+    /// every row each time is cheap, and leaving the real per-row dirty
+    /// bits untouched keeps them intact for the tab's own
+    /// damage-driven redraw (`Self::from_terminal`) to consume later. The
+    /// cursor is always hidden, mirroring the "not the focused pane"
+    /// convention background panes already use within one window — an
+    /// overview tile is never the pane the user is typing into.
+    pub fn peek(terminal: &Terminal) -> Self {
+        let colors = terminal.colors.clone();
+        let screen = terminal.active();
+        let mut cursor = screen.cursor;
+        cursor.visible = false;
+        let row_base = screen.visible_row_base();
+        let cols = screen.cols;
+        let rows_n = screen.rows;
+        let selection = screen.selection;
+        let search = screen.search.clone();
+        let rows = screen.visible_rows();
+        let row_dirty = vec![true; rows.len()];
+        FrameSnapshot {
+            rows,
+            row_dirty,
+            cursor,
+            colors,
+            selection,
+            search,
+            row_base,
+            cols,
+            rows_n,
+            focused: true,
+            cursor_blink_visible: true,
+            hover_link: None,
+            search_prompt: None,
+            command_palette: None,
+            confirm_dialog: None,
+        }
+    }
+
     pub fn is_selected(&self, x: u16, y: u16) -> bool {
         let Some(selection) = self.selection else {
             return false;
@@ -188,6 +236,32 @@ mod tests {
         assert_eq!(snap.rows[0].cells[0].ch, 'A');
         assert_eq!(snap.rows[1].cells[0].ch, 'B');
         assert!(!snap.cursor.visible);
+    }
+
+    #[test]
+    fn peek_does_not_consume_row_damage_and_hides_the_cursor() {
+        let mut term = Terminal::new(GridSize::new(2, 2));
+        // Consume the fresh terminal's initial all-dirty state first, so
+        // the assertion below exercises a row marked dirty by ordinary
+        // output, not first-frame init.
+        term.primary.take_visible_rows_with_damage();
+        put(&mut term, 0, 'A');
+        term.primary.grid[0].dirty = true;
+
+        let snap = FrameSnapshot::peek(&term);
+
+        assert_eq!(snap.rows[0].cells[0].ch, 'A');
+        assert!(
+            snap.row_dirty.iter().all(|&dirty| dirty),
+            "peek reports every row dirty (full re-shape)"
+        );
+        assert!(!snap.cursor.visible, "peek always hides the cursor");
+
+        let (_, row_dirty) = term.primary.take_visible_rows_with_damage();
+        assert!(
+            row_dirty[0],
+            "peek must not clear the real dirty bit meant for from_terminal to consume"
+        );
     }
 
     #[test]

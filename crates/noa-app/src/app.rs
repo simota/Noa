@@ -7,6 +7,7 @@
 //! events back to the main loop.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,8 +17,8 @@ use noa_font::FontGrid;
 use noa_grid::{CursorStyle, PromptJump, Terminal, modes::MouseTracking};
 use noa_pty::{Pty, PtyConfig};
 use noa_render::{
-    CommandPaletteSnapshot, FrameSnapshot, HoverLink, OverviewThumbnailResources, PaneFrame,
-    PaneId as RenderPaneId, PaneRect, Renderer, Theme,
+    CardStyle, CardTilePlacement, CommandPaletteSnapshot, FrameSnapshot, HoverLink,
+    OverviewThumbnailResources, PaneFrame, PaneId as RenderPaneId, PaneRect, Renderer, Theme,
 };
 use noa_vt::Stream;
 use winit::application::ApplicationHandler;
@@ -44,10 +45,17 @@ use crate::split_tree::{
     split_pane, split_resize_drag_target_at_point, zoom_resize_targets, zoom_toggle,
 };
 use crate::tab_overview::{
-    OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_TILE_MIN_RENDER_INTERVAL,
-    OverviewLayout, OverviewRenderCandidate, compute_overview_grid, hit_test_overview_grid,
-    overview_placeholder_source_ids, overview_tile_labels, sanitize_placeholder_label,
-    select_due_overview_tile_ids,
+    OVERVIEW_BG_COLOR, OVERVIEW_BORDER_COLOR, OVERVIEW_CARD_BORDER_WIDTH, OVERVIEW_CARD_COLOR,
+    OVERVIEW_CARD_CORNER_RADIUS, OVERVIEW_CARD_FOCUS_WIDTH, OVERVIEW_FOCUS_RING_COLOR,
+    OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_OUTER_MARGIN,
+    OVERVIEW_TILE_GUTTER, OVERVIEW_TILE_MIN_RENDER_INTERVAL, OVERVIEW_TITLE_BAR_COLOR,
+    OVERVIEW_TITLE_BAR_H, OverviewAction, OverviewChrome, OverviewEscapeAction, OverviewLayout,
+    OverviewRenderCandidate, center_label, compute_overview_grid, hit_test_overview_grid,
+    move_overview_selection, overview_backlog_decision, overview_chrome_bands,
+    overview_close_hit_test, overview_escape_action, overview_hint_bar_text,
+    overview_initial_selection, overview_key_action, overview_placeholder_source_ids,
+    overview_search_field_text, overview_tab_filter, overview_tile_labels,
+    sanitize_placeholder_label, select_due_overview_tile_ids, title_bar_row_with_close,
 };
 use crate::{AppCommand, ViewportScroll};
 
@@ -240,6 +248,19 @@ struct OverviewWindowState {
     /// text (REQ-OV-10). Reused across every placeholder tile and frame —
     /// this is not a per-tab renderer, so it doesn't violate REQ-NF-1.
     label_renderer: Option<Renderer>,
+    /// The currently selected tile (REQ-OV-14): an index directly into the
+    /// row-major source-tab order (`App::overview_source_window_ids`) —
+    /// live tiles first, then any overflow placeholder tiles — so one index
+    /// serves both without translation (REQ-OV-15b: placeholders are
+    /// selectable too). Reset on every `show_tab_overview` and clamped in
+    /// `redraw_overview` as tabs come and go.
+    selected: usize,
+    /// The live "Search tabs" filter query (REQ-OV-16). Printable keys append
+    /// and Backspace pops while the Overview is focused; the filtered result
+    /// set drives every downstream consumer via `App::overview_source_window_ids`
+    /// (redraw, hit-test, nav, Cmd+N, title bars, placeholders). Cleared on
+    /// every `show_tab_overview` and by the first Escape when non-empty.
+    search_query: String,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -317,6 +338,14 @@ struct Surface {
     /// `CursorMoved`/`ModifiersChanged` (`App::sync_hover_link`) and fed
     /// into `FrameSnapshot::hover_link` at redraw.
     hover_link: Option<HoverLink>,
+    /// The Tab Overview mirror's read-only publish slot (Fix B, REQ-NF-6):
+    /// this pane's io thread opportunistically drops a fresh
+    /// `FrameSnapshot::peek` here whenever it already holds the `Terminal`
+    /// lock feeding pty bytes in and the overview is visible (see
+    /// `io_thread::feed_terminal`), so `App::render_due_overview_tiles`
+    /// never has to lock `terminal` itself. `None` until the first publish
+    /// (or `App::seed_overview_snapshots`'s one-time fallback) lands.
+    overview_snapshot: Arc<Mutex<Option<Arc<FrameSnapshot>>>>,
 }
 
 impl WindowState {
@@ -354,6 +383,18 @@ impl Surface {
 /// (Ghostty/iTerm2 ballpark); not user-configurable yet.
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
+/// Compile-time card styling for the Tab Overview composite (REQ-OV-12/14, v2
+/// mockup parity; ⚠G: no config knob). Bundles the `tab_overview` color/metric
+/// constants into the `noa-render` [`CardStyle`] carrier.
+const OVERVIEW_CARD_STYLE: CardStyle = CardStyle {
+    background: OVERVIEW_BG_COLOR,
+    border_color: OVERVIEW_BORDER_COLOR,
+    focus_color: OVERVIEW_FOCUS_RING_COLOR,
+    corner_radius: OVERVIEW_CARD_CORNER_RADIUS,
+    border_width: OVERVIEW_CARD_BORDER_WIDTH,
+    focus_width: OVERVIEW_CARD_FOCUS_WIDTH,
+};
+
 pub struct App {
     config: AppConfig,
     /// Grid padding derived once from `window-padding-x/y`, applied to every
@@ -378,6 +419,18 @@ pub struct App {
     clipboard: SystemClipboard,
     keybinds: KeybindEngine,
     overview_visible: bool,
+    /// Shared with every pane's io thread (`io_thread::OverviewPublish`) so
+    /// it can gate its opportunistic `FrameSnapshot::peek` publish behind a
+    /// single atomic load instead of touching app state (Fix B, REQ-NF-6).
+    /// Kept in lockstep with `overview_visible` at every write site.
+    overview_visible_gate: Arc<AtomicBool>,
+    /// Next scheduled Tab Overview wake-up, set by `redraw_overview`'s
+    /// post-frame backlog check (Fix A) when every remaining dirty tile is
+    /// merely throttle-blocked rather than due right now. Consumed by
+    /// `tick_overview_backlog`, which piggybacks on the cursor-blink
+    /// `about_to_wait` + `WaitUntil` wake-up mechanism instead of adding a
+    /// second timer source.
+    overview_wake_deadline: Option<Instant>,
     /// Current blink-timer phase for the focused pane's cursor, fed into
     /// `FrameSnapshot::cursor_blink_visible` on every redraw. Toggled by
     /// `tick_cursor_blink` and snapped back to `true` on keyboard input.
@@ -426,6 +479,8 @@ impl App {
             clipboard: SystemClipboard::new(),
             keybinds: KeybindEngine::default(),
             overview_visible: false,
+            overview_visible_gate: Arc::new(AtomicBool::new(false)),
+            overview_wake_deadline: None,
             cursor_blink_visible: true,
             cursor_blink_deadline: None,
             hovered_link: None,
@@ -639,18 +694,18 @@ impl App {
             )
     }
 
-    /// Advance the cursor blink phase and keep the event loop's
-    /// `ControlFlow` in lockstep with whether a blink timer is even needed
-    /// right now — `WaitUntil` only while a blinking cursor is displayable,
-    /// `Wait` (no wake-ups) otherwise. Called from `about_to_wait` every
-    /// pass, so a style/focus/visibility change is picked up on the very
-    /// next event instead of waiting for a stale deadline.
-    fn tick_cursor_blink(&mut self, event_loop: &ActiveEventLoop) {
+    /// Advance the cursor blink phase and report the next instant it needs
+    /// another look — `Some(deadline)` only while a blinking cursor is
+    /// displayable, `None` otherwise (no busy wake-ups needed). Called from
+    /// `about_to_wait` every pass, so a style/focus/visibility change is
+    /// picked up on the very next event instead of waiting for a stale
+    /// deadline. `about_to_wait` merges this with `tick_overview_backlog`'s
+    /// deadline before setting the event loop's `ControlFlow` once.
+    fn tick_cursor_blink(&mut self) -> Option<Instant> {
         if !self.focused_cursor_wants_blink() {
             self.cursor_blink_visible = true;
             self.cursor_blink_deadline = None;
-            event_loop.set_control_flow(ControlFlow::Wait);
-            return;
+            return None;
         }
 
         let now = Instant::now();
@@ -658,8 +713,7 @@ impl App {
             .cursor_blink_deadline
             .get_or_insert(now + CURSOR_BLINK_INTERVAL);
         if now < deadline {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-            return;
+            return Some(deadline);
         }
 
         self.cursor_blink_visible = !self.cursor_blink_visible;
@@ -670,7 +724,25 @@ impl App {
         {
             state.window.request_redraw();
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+        Some(next)
+    }
+
+    /// Wake the Tab Overview once the earliest throttle-blocked dirty tile
+    /// becomes due, instead of `redraw_overview` re-requesting a redraw
+    /// every pass while `should_render_tile` keeps rejecting it until
+    /// `OVERVIEW_TILE_MIN_RENDER_INTERVAL` has elapsed (Fix A — see
+    /// `redraw_overview`'s post-frame backlog check and
+    /// `tab_overview::overview_backlog_decision`). Piggybacks on the same
+    /// `about_to_wait` + `WaitUntil` wake-up mechanism as
+    /// `tick_cursor_blink` rather than adding a second timer source.
+    fn tick_overview_backlog(&mut self) -> Option<Instant> {
+        let deadline = self.overview_wake_deadline?;
+        if Instant::now() < deadline {
+            return Some(deadline);
+        }
+        self.overview_wake_deadline = None;
+        self.request_overview_redraw();
+        None
     }
 
     fn handle_app_command(&mut self, event_loop: &ActiveEventLoop, command: AppCommand) {
@@ -1039,14 +1111,19 @@ impl App {
         let terminal = Arc::new(Mutex::new(terminal));
         let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
         let (pty_input_tx, pty_input_rx) = crate::io_thread::input_channel();
+        let overview_snapshot = Arc::new(Mutex::new(None));
+        let overview_publish = crate::io_thread::OverviewPublish {
+            slot: overview_snapshot.clone(),
+            visible: self.overview_visible_gate.clone(),
+        };
         let io_thread = crate::io_thread::spawn(
             pty,
             terminal.clone(),
             self.proxy.clone(),
-            window_id,
-            pane_id,
+            crate::io_thread::IoThreadTarget { window_id, pane_id },
             resize_rx,
             pty_input_rx,
+            overview_publish,
         );
 
         Ok(Surface {
@@ -1061,6 +1138,7 @@ impl App {
             ime_state: input::ImeState::default(),
             rect,
             hover_link: None,
+            overview_snapshot,
         })
     }
 
@@ -1519,20 +1597,67 @@ impl App {
                 surface_config,
                 thumbnails: None,
                 label_renderer: None,
+                selected: 0,
+                search_query: String::new(),
             });
         }
 
         self.overview_visible = true;
+        self.overview_visible_gate.store(true, Ordering::Relaxed);
+        self.seed_overview_snapshots();
         self.mark_all_overview_tiles_dirty();
-        if let Some(overview) = self.overview_window.as_ref() {
+        // Reopening the Overview always starts with an empty filter (REQ-OV-16)
+        // so the focused-tab initial selection below sees the full tab set.
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.search_query.clear();
+        }
+        // REQ-OV-14: the focused tab's tile if it's live, else the first.
+        let source_window_ids = self.overview_source_window_ids();
+        let live_tile_count = OVERVIEW_GRID_CAP.min(source_window_ids.len());
+        let selected =
+            overview_initial_selection(&source_window_ids, live_tile_count, self.focused.as_ref());
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.selected = selected;
             overview.window.set_visible(true);
             overview.window.focus_window();
             overview.window.request_redraw();
         }
     }
 
+    /// One-time re-peek for each open tab's overview mirror on every
+    /// `show_tab_overview` call (Fix B). Once `overview_visible_gate` is
+    /// set, each pane's io thread publishes a fresh `FrameSnapshot::peek`
+    /// opportunistically on its own next pty output — but the gate was
+    /// clear the whole time the overview was hidden, so a tab that kept
+    /// producing output while hidden published nothing during that window,
+    /// and its slot holds whatever it last published before hiding (or
+    /// `None` on first open). Re-peeking unconditionally here — rather than
+    /// only when the slot is still `None` — is what makes reopening show
+    /// current content instead of that stale frame; a tab that publishes
+    /// on its own moments later just gets overwritten immediately anyway.
+    /// Runs once per `show_tab_overview` call, not per frame, so
+    /// `render_due_overview_tiles` itself still never locks a tab's
+    /// `Terminal` — only each window's currently focused pane pays this
+    /// one-off lock (mirrors `render_due_overview_tiles`'s "focused pane
+    /// only" mirror).
+    fn seed_overview_snapshots(&self) {
+        for state in self.windows.values() {
+            let Some(surface) = state.surfaces.get(&state.focused_pane) else {
+                continue;
+            };
+            let term = surface.terminal.lock().expect("terminal mutex poisoned");
+            let snapshot = Arc::new(FrameSnapshot::peek(&term));
+            drop(term);
+            *surface
+                .overview_snapshot
+                .lock()
+                .expect("overview snapshot mutex poisoned") = Some(snapshot);
+        }
+    }
+
     fn hide_tab_overview(&mut self) {
         self.overview_visible = false;
+        self.overview_visible_gate.store(false, Ordering::Relaxed);
         if let Some(overview) = self.overview_window.as_ref() {
             overview.window.set_visible(false);
         }
@@ -1589,8 +1714,16 @@ impl App {
         )
     }
 
-    fn due_overview_tile_ids(&self, source_window_ids: &[WindowId], now: Instant) -> Vec<WindowId> {
-        let candidates = source_window_ids
+    /// Build the pure due/backlog-decision input from each live source
+    /// window's current dirty/last-render tile state. Shared by
+    /// `due_overview_tile_ids` (pre-frame selection) and `redraw_overview`
+    /// (post-frame backlog check), which read it at different points in
+    /// the frame.
+    fn overview_tile_candidates(
+        &self,
+        source_window_ids: &[WindowId],
+    ) -> Vec<OverviewRenderCandidate<WindowId>> {
+        source_window_ids
             .iter()
             .filter_map(|window_id| {
                 self.windows.get(window_id)?;
@@ -1605,8 +1738,11 @@ impl App {
                     last_render_at: tile.last_render_at,
                 })
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
 
+    fn due_overview_tile_ids(&self, source_window_ids: &[WindowId], now: Instant) -> Vec<WindowId> {
+        let candidates = self.overview_tile_candidates(source_window_ids);
         select_due_overview_tile_ids(
             &candidates,
             now,
@@ -1659,6 +1795,8 @@ impl App {
                 scratch_size,
                 tile_size,
                 tile_count,
+                OVERVIEW_TITLE_BAR_H,
+                OVERVIEW_CARD_COLOR,
             ));
         }
     }
@@ -1693,13 +1831,21 @@ impl App {
             let Some(surface) = state.surfaces.get(&state.focused_pane) else {
                 continue;
             };
-            let mut snapshot = {
-                let mut term = surface.terminal.lock().expect("terminal mutex poisoned");
-                FrameSnapshot::from_terminal(&mut term)
+            // Read-only publish slot (Fix B, REQ-NF-6): the io thread
+            // already holds `Terminal`'s lock on every pty feed and
+            // opportunistically publishes a `FrameSnapshot::peek` there
+            // (cursor already hidden by `peek`), so this render path never
+            // locks a tab's `Terminal` itself. `None` only for a tab that
+            // hasn't published since the overview opened;
+            // `seed_overview_snapshots`'s one-time fallback covers that gap.
+            let Some(snapshot) = surface
+                .overview_snapshot
+                .lock()
+                .expect("overview snapshot mutex poisoned")
+                .clone()
+            else {
+                continue;
             };
-            // Mirrors the "not the focused pane" convention `redraw()` already
-            // uses for background panes within one window.
-            snapshot.cursor.visible = false;
 
             // Reuse this tab's own `Renderer` unmodified (REQ-NF-1): point it
             // at the shared scratch resolution just long enough to draw one
@@ -1752,11 +1898,38 @@ impl App {
         }
     }
 
-    /// Render title-only text into every placeholder-row tile (REQ-OV-10):
-    /// tabs beyond the live tile cap get no live mirror, just their title.
-    /// Cheap enough to redo on every redraw — placeholders only exist once
-    /// tab count exceeds `OVERVIEW_GRID_CAP`, and each is a synthetic 1-row
-    /// `Terminal`, not a real pty-backed one.
+    /// Draw the tab title into the top title-bar band of every due live tile
+    /// (REQ-OV-12). Runs after `render_due_overview_tiles`, whose mirror blit
+    /// re-clears the band to the card color, so the title must be re-stamped
+    /// for exactly the tiles that were re-rendered this frame. Live titles are
+    /// routed through the same tested `overview_tile_labels` seam as
+    /// placeholder titles (AC-OV-12).
+    fn render_due_overview_title_bands(
+        &mut self,
+        due_window_ids: &[WindowId],
+        source_window_ids: &[WindowId],
+        layout: &OverviewLayout,
+    ) {
+        let live_count = layout.tiles.len().min(source_window_ids.len());
+        let live_ids = &source_window_ids[..live_count];
+        let labels = overview_tile_labels(live_ids, |id| {
+            self.windows.get(&id).map(|state| state.title.clone())
+        });
+
+        let jobs: Vec<(usize, String)> = labels
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| due_window_ids.contains(&live_ids[*index]))
+            .map(|(index, label)| (index, label.label.clone()))
+            .collect();
+        for (tile_index, title) in jobs {
+            self.render_tile_title_band(tile_index, &title);
+        }
+    }
+
+    /// Fill every placeholder-row tile (REQ-OV-10) with the card color and its
+    /// tab title band. Placeholders have no live mirror, so the whole tile is
+    /// cleared to the card face before the title band is stamped on top.
     fn render_overview_placeholder_labels(
         &mut self,
         source_window_ids: &[WindowId],
@@ -1771,6 +1944,27 @@ impl App {
             self.windows.get(&id).map(|state| state.title.clone())
         });
 
+        let jobs: Vec<(usize, String)> = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| (live_count + index, label.label.clone()))
+            .collect();
+        for (tile_index, title) in jobs {
+            if let (Some(gpu), Some(overview)) = (self.gpu.as_ref(), self.overview_window.as_ref())
+                && let Some(thumbnails) = overview.thumbnails.as_ref()
+            {
+                thumbnails.clear_tile(&gpu.device, &gpu.queue, tile_index);
+            }
+            self.render_tile_title_band(tile_index, &title);
+        }
+    }
+
+    /// Render `title` into `tile_index`'s dedicated title-band texture via the
+    /// shared label `Renderer`, then stamp it onto the top `OVERVIEW_TITLE_BAR_H`
+    /// rows of the tile (REQ-OV-12). The band is cleared to a distinct
+    /// title-bar color (`set_clear_color` after `rebuild_cells`) so it reads as
+    /// a band separate from the card face. Shared by live and placeholder tiles.
+    fn render_tile_title_band(&mut self, tile_index: usize, title: &str) {
         self.ensure_overview_label_renderer();
         let Some(gpu) = self.gpu.as_mut() else {
             return;
@@ -1784,45 +1978,174 @@ impl App {
         ) else {
             return;
         };
-        let metrics = gpu.font.metrics();
-
-        for (index, label) in labels.iter().enumerate() {
-            let Some(rect) = layout.placeholders.get(index) else {
-                continue;
-            };
-            let tile_index = live_count + index;
-            let tile_size = PixelSize {
-                w: rect.w.max(1),
-                h: rect.h.max(1),
-            };
-            let grid_size = grid_size_for_pane_rect(
-                PaneRectApp::new(0, 0, rect.w, rect.h),
-                metrics,
-                self.padding,
-            );
-
-            let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
-            let text = sanitize_placeholder_label(&label.label, grid_size.cols);
-            Stream::new().feed(text.as_bytes(), &mut term);
-            let mut snapshot = FrameSnapshot::from_terminal(&mut term);
-            snapshot.cursor.visible = false;
-
-            label_renderer.resize(tile_size);
-            label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
-            label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
-
-            let Some(tile_texture) = thumbnails.tile_texture_for_test(tile_index) else {
-                continue;
-            };
-            let view = tile_texture.create_view(&wgpu::TextureViewDescriptor::default());
-            label_renderer.draw(&gpu.device, &gpu.queue, &view);
+        let tile_w = thumbnails.tile_size().w;
+        let bar_h = thumbnails.title_bar_h();
+        if tile_w == 0 || bar_h == 0 {
+            return;
         }
+        let band_size = PixelSize {
+            w: tile_w.max(1),
+            h: bar_h.max(1),
+        };
+        let grid_size = grid_size_for_pane_rect(
+            PaneRectApp::new(0, 0, band_size.w, band_size.h),
+            gpu.font.metrics(),
+            DEFAULT_GRID_PADDING,
+        );
+        let sanitized = sanitize_placeholder_label(title, grid_size.cols);
+        // REQ-OV-13: the centered title plus a close glyph in the last column.
+        let text = title_bar_row_with_close(&sanitized, grid_size.cols);
+
+        let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
+        Stream::new().feed(text.as_bytes(), &mut term);
+        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+        snapshot.cursor.visible = false;
+
+        label_renderer.resize(band_size);
+        label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        // After `rebuild_cells` (which resets it from the snapshot bg) so the
+        // band gets its distinct title-bar color, not the terminal default.
+        label_renderer.set_clear_color(OVERVIEW_TITLE_BAR_COLOR);
+        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+
+        let Some(view) = thumbnails.title_texture_view(tile_index) else {
+            return;
+        };
+        label_renderer.draw(&gpu.device, &gpu.queue, &view);
+        thumbnails.stamp_title_band(&gpu.device, &gpu.queue, tile_index);
     }
 
-    /// Composite every live-mirror and placeholder-title tile texture into
-    /// the overview surface and present it. Empty grid cells are left as the
-    /// clear color.
+    /// Render the top "Search tabs" field (REQ-OV-16) into a fresh band-sized
+    /// texture and return it for compositing into the reserved top search band.
+    /// Shows the live query, or the placeholder while it is empty. `None` when
+    /// there is no search band (a window too short to reserve one).
+    fn render_overview_search_texture(&mut self) -> Option<wgpu::Texture> {
+        let chrome = self.overview_chrome()?;
+        if chrome.search_band.w == 0 || chrome.search_band.h == 0 {
+            return None;
+        }
+        let query = self
+            .overview_window
+            .as_ref()
+            .map_or(String::new(), |overview| overview.search_query.clone());
+        self.ensure_overview_label_renderer();
+        let gpu = self.gpu.as_mut()?;
+        let overview = self.overview_window.as_mut()?;
+        let label_renderer = overview.label_renderer.as_mut()?;
+
+        let band_size = PixelSize {
+            w: chrome.search_band.w.max(1),
+            h: chrome.search_band.h.max(1),
+        };
+        let search_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("noa-overview-search-band"),
+            size: wgpu::Extent3d {
+                width: band_size.w,
+                height: band_size.h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: overview.surface_config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = search_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let grid_size = grid_size_for_pane_rect(
+            PaneRectApp::new(0, 0, band_size.w, band_size.h),
+            gpu.font.metrics(),
+            DEFAULT_GRID_PADDING,
+        );
+        let text = center_label(&overview_search_field_text(&query), grid_size.cols);
+        let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
+        Stream::new().feed(text.as_bytes(), &mut term);
+        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+        snapshot.cursor.visible = false;
+
+        label_renderer.resize(band_size);
+        label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        // Distinct from the backdrop so the field reads as a search bar, reusing
+        // the title-bar band color (mockup parity, ⚠G: no config knob).
+        label_renderer.set_clear_color(OVERVIEW_TITLE_BAR_COLOR);
+        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        label_renderer.draw(&gpu.device, &gpu.queue, &view);
+
+        Some(search_texture)
+    }
+
+    /// Render the bottom hint bar (REQ-OV-17) into a fresh band-sized texture
+    /// and return it for compositing onto the surface. `None` when there is no
+    /// hint band (a window too short to reserve one). The `⌘1-N` range tracks
+    /// the live tile count dynamically.
+    fn render_overview_hint_texture(&mut self, live_tile_count: usize) -> Option<wgpu::Texture> {
+        let chrome = self.overview_chrome()?;
+        if chrome.hint_band.w == 0 || chrome.hint_band.h == 0 {
+            return None;
+        }
+        self.ensure_overview_label_renderer();
+        let gpu = self.gpu.as_mut()?;
+        let overview = self.overview_window.as_mut()?;
+        let label_renderer = overview.label_renderer.as_mut()?;
+
+        let band_size = PixelSize {
+            w: chrome.hint_band.w.max(1),
+            h: chrome.hint_band.h.max(1),
+        };
+        let hint_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("noa-overview-hint-band"),
+            size: wgpu::Extent3d {
+                width: band_size.w,
+                height: band_size.h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: overview.surface_config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = hint_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let grid_size = grid_size_for_pane_rect(
+            PaneRectApp::new(0, 0, band_size.w, band_size.h),
+            gpu.font.metrics(),
+            DEFAULT_GRID_PADDING,
+        );
+        let text = center_label(&overview_hint_bar_text(live_tile_count), grid_size.cols);
+        let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
+        Stream::new().feed(text.as_bytes(), &mut term);
+        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+        snapshot.cursor.visible = false;
+
+        label_renderer.resize(band_size);
+        label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        label_renderer.set_clear_color(OVERVIEW_BG_COLOR);
+        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        label_renderer.draw(&gpu.device, &gpu.queue, &view);
+
+        Some(hint_texture)
+    }
+
+    /// Composite every live-mirror and placeholder tile onto the overview
+    /// surface as a rounded card (REQ-OV-12/14), then overlay the bottom hint
+    /// bar (REQ-OV-17), and present. Empty grid cells stay the backdrop color.
     fn present_overview_frame(&mut self, layout: &OverviewLayout) {
+        // Render the hint band first (it borrows the label renderer / gpu
+        // mutably); the returned texture is owned, so the borrows are released
+        // before compositing.
+        let live_count = layout.tiles.len();
+        let hint_texture = self.render_overview_hint_texture(live_count);
+        let hint_band = self.overview_chrome().map(|chrome| chrome.hint_band);
+        let search_texture = self.render_overview_search_texture();
+        let search_band = self.overview_chrome().map(|chrome| chrome.search_band);
+        let selected = self
+            .overview_window
+            .as_ref()
+            .map_or(0, |overview| overview.selected);
+
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
@@ -1847,44 +2170,112 @@ impl App {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let surface_size = PixelSize {
+            w: overview.surface_config.width,
+            h: overview.surface_config.height,
+        };
 
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("noa-overview-composite-encoder"),
-            });
-        {
-            let _clear_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("noa-overview-clear-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-        }
+        // Card composite (also clears the surface to the backdrop color).
         if let Some(thumbnails) = overview.thumbnails.as_ref() {
             let live_count = layout.tiles.len();
-            let placeholder_tiles = layout
+            let placeholders = layout
                 .placeholders
                 .iter()
                 .enumerate()
                 .map(|(index, rect)| (live_count + index, rect));
-            for (tile_index, rect) in layout.tiles.iter().enumerate().chain(placeholder_tiles) {
-                let Some(tile_texture) = thumbnails.tile_texture_for_test(tile_index) else {
-                    continue;
-                };
-                composite_overview_tile(&mut encoder, tile_texture, &frame.texture, *rect);
-            }
+            let placements: Vec<CardTilePlacement> = layout
+                .tiles
+                .iter()
+                .enumerate()
+                .chain(placeholders)
+                .map(|(tile_index, rect)| CardTilePlacement {
+                    tile_index,
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                    selected: tile_index == selected,
+                })
+                .collect();
+            thumbnails.composite_cards(
+                &gpu.device,
+                &gpu.queue,
+                &view,
+                surface_size,
+                &OVERVIEW_CARD_STYLE,
+                &placements,
+            );
+        } else {
+            // No tiles: still clear the surface to the backdrop color.
+            clear_overview_surface(&gpu.device, &gpu.queue, &view, OVERVIEW_BG_COLOR);
         }
-        gpu.queue.submit(Some(encoder.finish()));
+
+        // Overlay the hint bar into its reserved bottom band.
+        if let (Some(hint_texture), Some(hint_band)) = (hint_texture.as_ref(), hint_band) {
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("noa-overview-hint-copy-encoder"),
+                });
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: hint_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &frame.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: hint_band.x,
+                        y: hint_band.y,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: hint_band.w.max(1),
+                    height: hint_band.h.max(1),
+                    depth_or_array_layers: 1,
+                },
+            );
+            gpu.queue.submit(Some(encoder.finish()));
+        }
+
+        // Overlay the search field into its reserved top band (REQ-OV-16).
+        if let (Some(search_texture), Some(search_band)) = (search_texture.as_ref(), search_band) {
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("noa-overview-search-copy-encoder"),
+                });
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: search_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &frame.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: search_band.x,
+                        y: search_band.y,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: search_band.w.max(1),
+                    height: search_band.h.max(1),
+                    depth_or_array_layers: 1,
+                },
+            );
+            gpu.queue.submit(Some(encoder.finish()));
+        }
+
         frame.present();
     }
 
@@ -1897,11 +2288,55 @@ impl App {
     }
 
     fn overview_source_window_ids(&self) -> Vec<WindowId> {
-        overview_tile_source_order(
+        let ordered = overview_tile_source_order(
             &self.window_order,
             |id| self.windows.contains_key(&id),
             None,
-        )
+        );
+        // REQ-OV-16: the "Search tabs" filter narrows the source set here, the
+        // single seam every downstream consumer (redraw / hit-test / nav /
+        // Cmd+N / title bars / placeholders) reads, so the whole Overview sees
+        // one filtered order. An empty query is the identity (short-circuited
+        // to skip cloning titles on the common path).
+        let query = self
+            .overview_window
+            .as_ref()
+            .map_or("", |overview| overview.search_query.as_str());
+        if query.is_empty() {
+            return ordered;
+        }
+        let titles: Vec<(WindowId, String)> = ordered
+            .iter()
+            .map(|id| {
+                let title = self
+                    .windows
+                    .get(id)
+                    .map(|state| state.title.clone())
+                    .unwrap_or_default();
+                (*id, title)
+            })
+            .collect();
+        overview_tab_filter(query, &titles)
+    }
+
+    /// The Overview window's search / grid / hint bands (REQ-OV-11/16/17).
+    /// The grid is laid out inside `grid_bounds`, so P3's search-field draw
+    /// won't reflow the tiles, and the hint bar draws into `hint_band`.
+    fn overview_chrome(&self) -> Option<OverviewChrome> {
+        let overview = self.overview_window.as_ref()?;
+        let bounds = pane_bounds_for_size(overview.window.inner_size());
+        Some(overview_chrome_bands(bounds))
+    }
+
+    fn overview_layout(&self, source_window_ids: &[WindowId]) -> Option<OverviewLayout> {
+        let chrome = self.overview_chrome()?;
+        Some(compute_overview_grid(
+            source_window_ids.len(),
+            chrome.grid_bounds,
+            OVERVIEW_GRID_CAP,
+            OVERVIEW_TILE_GUTTER,
+            OVERVIEW_OUTER_MARGIN,
+        ))
     }
 
     fn redraw_overview(&mut self) {
@@ -1912,14 +2347,22 @@ impl App {
             return;
         }
 
-        let bounds = pane_bounds_for_size(overview.window.inner_size());
         let source_window_ids = self.overview_source_window_ids();
-        let layout = compute_overview_grid(source_window_ids.len(), bounds, OVERVIEW_GRID_CAP);
+        let Some(layout) = self.overview_layout(&source_window_ids) else {
+            return;
+        };
+        // REQ-OV-14: keep the selection in range as tabs come and go.
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.selected = overview
+                .selected
+                .min(source_window_ids.len().saturating_sub(1));
+        }
         let now = Instant::now();
         let due_window_ids = self.due_overview_tile_ids(&source_window_ids, now);
 
         self.ensure_overview_thumbnails(&layout);
         self.render_due_overview_tiles(&due_window_ids, &source_window_ids);
+        self.render_due_overview_title_bands(&due_window_ids, &source_window_ids, &layout);
         self.render_overview_placeholder_labels(&source_window_ids, &layout);
         self.present_overview_frame(&layout);
 
@@ -1927,17 +2370,20 @@ impl App {
 
         // OVERVIEW_MAX_RENDER_TILES_PER_FRAME caps how many tiles one frame
         // regenerates, and idle tabs produce no pty output to trigger the
-        // next frame — so keep requesting redraws until the dirty backlog
-        // drains (a full 9-tile grid fills in ~5 frames). Stops as soon as
-        // every source tile is clean; a dirty-but-throttled tile may re-run
-        // this for up to OVERVIEW_TILE_MIN_RENDER_INTERVAL transiently.
-        let backlog_remains = source_window_ids.iter().any(|window_id| {
-            self.overview_tiles
-                .get(window_id)
-                .is_some_and(|tile| tile.dirty)
-        });
-        if backlog_remains {
+        // next frame — so a dirty backlog can survive this frame for two
+        // different reasons, and only one of them justifies re-requesting a
+        // redraw right away (Fix A): a due-but-capped tile (immediate), vs.
+        // a tile that is merely inside its 10Hz throttle window (schedule
+        // one delayed wake-up via `tick_overview_backlog` instead of
+        // spinning `present_overview_frame` until it's due).
+        let candidates = self.overview_tile_candidates(&source_window_ids);
+        let decision =
+            overview_backlog_decision(&candidates, now, OVERVIEW_TILE_MIN_RENDER_INTERVAL);
+        if decision.request_immediate_redraw {
+            self.overview_wake_deadline = None;
             self.request_overview_redraw();
+        } else {
+            self.overview_wake_deadline = decision.wake_at;
         }
     }
 
@@ -1949,14 +2395,40 @@ impl App {
             return;
         };
 
-        let bounds = pane_bounds_for_size(overview.window.inner_size());
         let source_window_ids = self.overview_source_window_ids();
-        let layout = compute_overview_grid(source_window_ids.len(), bounds, OVERVIEW_GRID_CAP);
+        let Some(layout) = self.overview_layout(&source_window_ids) else {
+            return;
+        };
         let Some(target) = overview_tile_target_at_point(&source_window_ids, &layout.tiles, point)
         else {
             return;
         };
+        // The clicked tile becomes the selection too, not just the focus
+        // target — a click and an arrow-keyed Return should leave the
+        // Overview in the same selected state.
+        if let Some(index) = source_window_ids.iter().position(|id| *id == target)
+            && let Some(overview) = self.overview_window.as_mut()
+        {
+            overview.selected = index;
+        }
         self.focus_tab_from_overview(target);
+    }
+
+    /// The close-button (✕) target under the last cursor point, or `None`
+    /// (REQ-OV-13). Spans live tiles and placeholder rows — both carry a title
+    /// bar with a close button, and both map back to a live tab `WindowId`.
+    fn overview_close_target_at_last_cursor(&self) -> Option<WindowId> {
+        let overview = self.overview_window.as_ref()?;
+        let point = overview.last_cursor_point?;
+        let source_window_ids = self.overview_source_window_ids();
+        let layout = self.overview_layout(&source_window_ids)?;
+        let tile_rects: Vec<PaneRectApp> = layout
+            .tiles
+            .iter()
+            .chain(layout.placeholders.iter())
+            .copied()
+            .collect();
+        overview_close_target_at_point(&source_window_ids, &tile_rects, point)
     }
 
     fn focus_tab_from_overview(&mut self, window_id: WindowId) {
@@ -1969,6 +2441,162 @@ impl App {
         };
         self.focused = Some(window_id);
         window.focus_window();
+    }
+
+    /// Drives the Overview-focused keymap directly from the keypress
+    /// (REQ-OV-15), mirroring `handle_search_prompt_key`'s
+    /// keypress-interception shape: arrows/Return/Esc/Cmd+1..9 are resolved
+    /// here and never reach `handle_app_command`, so they can't be swallowed
+    /// by `overview_command_scope`'s blanket `AppCommand` no-op. Every other
+    /// key falls through to the normal keybind-resolve path, which still
+    /// classifies terminal commands as Overview no-ops (REQ-OV-7).
+    fn handle_overview_key(&mut self, event_loop: &ActiveEventLoop, event: &KeyEvent) {
+        if let Some(action) = overview_key_action(&event.logical_key, self.modifiers) {
+            match action {
+                OverviewAction::MoveSelection(direction) => self.step_overview_selection(direction),
+                OverviewAction::Activate => self.activate_overview_selection(),
+                OverviewAction::SwitchToLive(n) => self.switch_to_live_overview_tile(n),
+                OverviewAction::Dismiss => self.dismiss_or_clear_overview_search(),
+            }
+            return;
+        }
+        // Printable text / Backspace edits the "Search tabs" query (REQ-OV-16),
+        // slotted after the Overview action keymap (arrows/Return/Esc/Cmd+N win)
+        // and before the normal keybind fallthrough. Nothing here reaches a pty
+        // (REQ-OV-7).
+        if self.apply_overview_search_edit(event) {
+            return;
+        }
+        if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
+            self.handle_app_command(event_loop, command);
+        }
+    }
+
+    /// Escape while the Overview is focused (REQ-OV-16): a non-empty search
+    /// query is cleared first and the Overview stays open, an empty query
+    /// dismisses it (two-stage Escape; no command-palette precedent, so the
+    /// semantics are defined by `overview_escape_action`).
+    fn dismiss_or_clear_overview_search(&mut self) {
+        let query = self
+            .overview_window
+            .as_ref()
+            .map_or("", |overview| overview.search_query.as_str());
+        match overview_escape_action(query) {
+            OverviewEscapeAction::ClearSearch => self.set_overview_search_query(String::new()),
+            OverviewEscapeAction::Dismiss => self.hide_tab_overview(),
+        }
+    }
+
+    /// Apply a printable-text append or Backspace pop to the "Search tabs"
+    /// query (REQ-OV-16). Returns `true` when the key was consumed as a query
+    /// edit. Cmd/Ctrl/Alt combos are not swallowed here (they fall through to
+    /// the keybind path, mirroring the command palette's Cmd-swallow), so e.g.
+    /// the Overview toggle chord still works while typing.
+    fn apply_overview_search_edit(&mut self, event: &KeyEvent) -> bool {
+        let Some(mut query) = self
+            .overview_window
+            .as_ref()
+            .map(|overview| overview.search_query.clone())
+        else {
+            return false;
+        };
+        match &event.logical_key {
+            Key::Named(NamedKey::Backspace) => {
+                if query.pop().is_none() {
+                    // Already empty: still consumed (Backspace has no other
+                    // meaning in the Overview) but no redraw is needed.
+                    return true;
+                }
+            }
+            _ => {
+                if self.modifiers.super_key()
+                    || self.modifiers.control_key()
+                    || self.modifiers.alt_key()
+                {
+                    return false;
+                }
+                let Some(text) = event.text.as_deref() else {
+                    return false;
+                };
+                let mut appended = false;
+                for c in text.chars().filter(|c| !c.is_control()) {
+                    query.push(c);
+                    appended = true;
+                }
+                if !appended {
+                    return false;
+                }
+            }
+        }
+        self.set_overview_search_query(query);
+        true
+    }
+
+    /// Replace the search query, reset the selection to the first tile (a
+    /// query change re-orders the result set, REQ-OV-16 / palette R-7 parity),
+    /// and request a redraw.
+    fn set_overview_search_query(&mut self, query: String) {
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.search_query = query;
+            overview.selected = 0;
+        } else {
+            return;
+        }
+        // Filtering remaps each window to a new tile slot, so the now-visible
+        // set must re-render into those slots instead of showing the previous
+        // ordering's stale mirrors. Re-rendering still flows through the 10Hz
+        // throttle (REQ-NF-4), so tiles refresh at the next due tick.
+        self.mark_all_overview_tiles_dirty();
+        self.request_overview_redraw();
+    }
+
+    /// Arrow-key Overview selection move (REQ-OV-15a).
+    fn step_overview_selection(&mut self, direction: Direction) {
+        let source_window_ids = self.overview_source_window_ids();
+        let Some(layout) = self.overview_layout(&source_window_ids) else {
+            return;
+        };
+        let Some(overview) = self.overview_window.as_mut() else {
+            return;
+        };
+        overview.selected = move_overview_selection(
+            overview.selected,
+            layout.cols,
+            source_window_ids.len(),
+            direction,
+        );
+        overview.window.request_redraw();
+    }
+
+    /// Return activates the selected Overview tile (REQ-OV-15b). `selected`
+    /// indexes directly into the combined live + placeholder source order,
+    /// so a selected placeholder row resolves to its (live, mirror-less) tab
+    /// exactly the same way a selected live tile does.
+    fn activate_overview_selection(&mut self) {
+        let source_window_ids = self.overview_source_window_ids();
+        let Some(overview) = self.overview_window.as_ref() else {
+            return;
+        };
+        let Some(&target) = source_window_ids.get(overview.selected) else {
+            return;
+        };
+        self.focus_tab_from_overview(target);
+    }
+
+    /// Cmd+`n` (1-indexed) jumps straight to the `n`-th live Overview tile
+    /// (REQ-OV-15c). Out-of-range `n` (beyond the live tile count) is a
+    /// no-op rather than a panic — there is no tile to switch to.
+    fn switch_to_live_overview_tile(&mut self, n: usize) {
+        let source_window_ids = self.overview_source_window_ids();
+        let live_tile_count = OVERVIEW_GRID_CAP.min(source_window_ids.len());
+        if n == 0 || n > live_tile_count {
+            return;
+        }
+        let target = source_window_ids[n - 1];
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.selected = n - 1;
+        }
+        self.focus_tab_from_overview(target);
     }
 
     fn overview_window_event(
@@ -1993,7 +2621,15 @@ impl App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Left && state == ElementState::Pressed {
-                    self.focus_overview_tile_at_last_cursor();
+                    // REQ-OV-13: the close-button corner wins over tile-focus.
+                    // Reuse the existing tab-close path (`close_tab`) so the
+                    // REQ-OV-9 degenerate cases (last tab, in-view removal +
+                    // relayout, stale-WindowId no-op) apply unchanged.
+                    if let Some(target) = self.overview_close_target_at_last_cursor() {
+                        self.close_tab(event_loop, target);
+                    } else {
+                        self.focus_overview_tile_at_last_cursor();
+                    }
                 }
             }
             WindowEvent::Occluded(occluded) => {
@@ -2009,9 +2645,7 @@ impl App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
-                    self.handle_app_command(event_loop, command);
-                }
+                self.handle_overview_key(event_loop, &event);
             }
             _ => {}
         }
@@ -2242,7 +2876,21 @@ impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
         self.install_macos_menu_if_needed();
-        self.tick_cursor_blink(event_loop);
+        // Both ticks report their own next wake-up instead of setting
+        // `ControlFlow` directly, so a `WaitUntil` from one can't clobber a
+        // more urgent one from the other — this pass sets it exactly once,
+        // at the earliest of the two.
+        let blink_deadline = self.tick_cursor_blink();
+        let overview_deadline = self.tick_overview_backlog();
+        let deadline = match (blink_deadline, overview_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+            (None, None) => None,
+        };
+        event_loop.set_control_flow(match deadline {
+            Some(deadline) => ControlFlow::WaitUntil(deadline),
+            None => ControlFlow::Wait,
+        });
     }
 }
 
@@ -3791,6 +4439,25 @@ fn overview_tile_target_at_point<Id: Copy>(
     hit_test_overview_grid(&tiles, point)
 }
 
+/// The close-button (✕) target for `point` (REQ-OV-13). Deliberately a
+/// separate hit-test surface from [`overview_tile_target_at_point`]: the caller
+/// checks this one *first* so a click landing on the title bar's close-button
+/// corner closes the tab rather than focusing it, even though both rects
+/// overlap there. `tile_rects` covers both live tiles and placeholder rows —
+/// every tile has a title bar with a close button.
+fn overview_close_target_at_point<Id: Copy>(
+    source_ids: &[Id],
+    tile_rects: &[PaneRectApp],
+    point: split_tree::Point,
+) -> Option<Id> {
+    let tiles = source_ids
+        .iter()
+        .copied()
+        .zip(tile_rects.iter().copied())
+        .collect::<Vec<_>>();
+    overview_close_hit_test(&tiles, point)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TargetedRedrawDecision {
     Stale,
@@ -3943,35 +4610,40 @@ fn tab_overview_visibility_after_dispatch(
 /// the overview surface texture. No scaling: `copy_texture_to_texture` needs
 /// matching extents, which holds because every tile texture is allocated at
 /// its `OverviewLayout` rect's size (`ensure_overview_thumbnails`).
-fn composite_overview_tile(
-    encoder: &mut wgpu::CommandEncoder,
-    tile_texture: &wgpu::Texture,
-    surface_texture: &wgpu::Texture,
-    rect: PaneRectApp,
+/// Clear the overview surface to the backdrop color when there are no tiles to
+/// composite (the card composite pass otherwise does the clear itself).
+fn clear_overview_surface(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    view: &wgpu::TextureView,
+    color: [f32; 4],
 ) {
-    encoder.copy_texture_to_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: tile_texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyTextureInfo {
-            texture: surface_texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d {
-                x: rect.x,
-                y: rect.y,
-                z: 0,
-            },
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::Extent3d {
-            width: rect.w,
-            height: rect.h,
-            depth_or_array_layers: 1,
-        },
-    );
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("noa-overview-empty-clear-encoder"),
+    });
+    {
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("noa-overview-empty-clear-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: f64::from(color[0]),
+                        g: f64::from(color[1]),
+                        b: f64::from(color[2]),
+                        a: f64::from(color[3]),
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+    }
+    queue.submit(Some(encoder.finish()));
 }
 
 /// Choose the swapchain surface format, preferring a **non-sRGB** format
@@ -4596,7 +5268,8 @@ mod tests {
     #[test]
     fn overview_click_hit_test_resolves_only_live_tiles() {
         let source_ids = [10_u8, 11, 12, 13, 14, 15, 16, 17, 18, 19];
-        let layout = compute_overview_grid(source_ids.len(), PaneRectApp::new(0, 0, 90, 120), 9);
+        let layout =
+            compute_overview_grid(source_ids.len(), PaneRectApp::new(0, 0, 90, 120), 9, 0, 0);
 
         assert_eq!(
             overview_tile_target_at_point(
@@ -4613,6 +5286,37 @@ mod tests {
                 split_tree::Point::new(15, 105)
             ),
             None
+        );
+    }
+
+    #[test]
+    fn overview_close_hit_test_is_exclusive_with_tile_focus() {
+        let source_ids = [10_u8, 11, 12, 13];
+        let layout =
+            compute_overview_grid(source_ids.len(), PaneRectApp::new(0, 0, 200, 200), 9, 0, 0);
+        // Tile 0's close button sits at its top-right corner; its body center
+        // sits well inside. The two must resolve disjointly (REQ-OV-13).
+        let tile0 = layout.tiles[0];
+        let close_point = split_tree::Point::new(tile0.right() - 2, tile0.y + 2);
+        let body_point = split_tree::Point::new(tile0.x + tile0.w / 2, tile0.y + tile0.h / 2);
+
+        assert_eq!(
+            overview_close_target_at_point(&source_ids, &layout.tiles, close_point),
+            Some(10)
+        );
+        assert_eq!(
+            overview_tile_target_at_point(&source_ids, &layout.tiles, close_point),
+            Some(10),
+            "both rects overlap at the corner; the caller's close-first ordering picks the close"
+        );
+        // The body center is a focus hit but never a close hit.
+        assert_eq!(
+            overview_close_target_at_point(&source_ids, &layout.tiles, body_point),
+            None
+        );
+        assert_eq!(
+            overview_tile_target_at_point(&source_ids, &layout.tiles, body_point),
+            Some(10)
         );
     }
 

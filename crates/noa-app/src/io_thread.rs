@@ -5,6 +5,7 @@
 //! the pty, and pokes the winit event loop to redraw. Resize and input
 //! requests come in from the main thread over crossbeam channels.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -12,10 +13,35 @@ use crossbeam_channel::{Receiver, Sender};
 use noa_core::GridSize;
 use noa_grid::Terminal;
 use noa_pty::{Pty, PtyWriter};
+use noa_render::FrameSnapshot;
 use winit::event_loop::EventLoopProxy;
 
 use crate::events::UserEvent;
 use crate::split_tree::PaneId;
+use crate::tab_overview::OVERVIEW_TILE_MIN_RENDER_INTERVAL;
+
+/// Which window/pane's `UserEvent`s this io thread posts back to the main
+/// loop. Grouped into one struct (rather than two `spawn` arguments)
+/// because they're always passed and used together, and to keep `spawn`
+/// under clippy's argument-count lint now that `overview` adds an eighth.
+pub(crate) struct IoThreadTarget {
+    pub(crate) window_id: winit::window::WindowId,
+    pub(crate) pane_id: PaneId,
+}
+
+/// Read-only publish channel from `feed_terminal` to the Tab Overview's
+/// main-thread render path (Fix B, REQ-NF-6): the overview must never lock
+/// a tab's `Arc<Mutex<Terminal>>` itself, so the io thread — which already
+/// holds that lock on every pty feed — opportunistically drops a
+/// `FrameSnapshot::peek` into `slot` here instead, at most once per
+/// `OVERVIEW_TILE_MIN_RENDER_INTERVAL`. `visible` is shared app-wide
+/// (`App::overview_visible_gate`) so an idle tab or a closed overview costs
+/// this thread only one atomic load per pty feed.
+#[derive(Clone)]
+pub(crate) struct OverviewPublish {
+    pub(crate) slot: Arc<Mutex<Option<Arc<FrameSnapshot>>>>,
+    pub(crate) visible: Arc<AtomicBool>,
+}
 
 pub(crate) type PtyInput = Box<[u8]>;
 
@@ -68,21 +94,117 @@ struct TerminalOutput {
     pending_clipboard_writes: Vec<String>,
     pending_clipboard_reads: Vec<String>,
     synchronized_output: bool,
+    /// Trailing-flush deadline owed by this feed's throttled overview
+    /// publish (Fix B defect 1: a burst's final feed can land inside the
+    /// throttle window and get silently skipped, leaving the mirror stuck
+    /// on a stale mid-burst frame — REQ-OV-4). Threaded back to `spawn`'s
+    /// loop so it can wake the thread once it elapses even with no further
+    /// pty output. `None` when nothing is owed (published now, or the
+    /// overview isn't visible).
+    overview_publish_pending: Option<Instant>,
 }
 
 fn feed_terminal(
     terminal: &Arc<Mutex<Terminal>>,
     stream: &mut noa_vt::Stream,
     bytes: &[u8],
+    overview: &OverviewPublish,
+    last_overview_publish: &mut Option<Instant>,
 ) -> TerminalOutput {
     let mut term = terminal.lock().expect("terminal mutex poisoned");
     stream.feed(bytes, &mut *term);
+    let overview_publish_pending =
+        publish_overview_snapshot(&term, overview, last_overview_publish);
     TerminalOutput {
         pending_writes: term.take_pending_writes(),
         pending_clipboard_writes: term.take_pending_clipboard_writes(),
         pending_clipboard_reads: term.take_pending_clipboard_reads(),
         synchronized_output: term.modes.synchronized_output(),
+        overview_publish_pending,
     }
+}
+
+/// Pure decision for whether an overview publish should fire now, stay
+/// silent, or fire later (Fix B defect 1). Not visible means nothing is
+/// owed at all — reopening the overview re-peeks every tab unconditionally
+/// (`App::seed_overview_snapshots`, Fix B defect 2), so a stale skip here
+/// is never left stranded. Visible-but-throttled means the tab's current
+/// state must still reach the mirror once the throttle window elapses,
+/// even with no further pty output to re-trigger this decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverviewPublishDecision {
+    Skip,
+    Publish,
+    ScheduleTrailingFlush { deadline: Instant },
+}
+
+fn decide_overview_publish(
+    visible: bool,
+    last_overview_publish: Option<Instant>,
+    now: Instant,
+) -> OverviewPublishDecision {
+    if !visible {
+        return OverviewPublishDecision::Skip;
+    }
+    let Some(last) = last_overview_publish else {
+        return OverviewPublishDecision::Publish;
+    };
+    if now.saturating_duration_since(last) >= OVERVIEW_TILE_MIN_RENDER_INTERVAL {
+        OverviewPublishDecision::Publish
+    } else {
+        OverviewPublishDecision::ScheduleTrailingFlush {
+            deadline: last + OVERVIEW_TILE_MIN_RENDER_INTERVAL,
+        }
+    }
+}
+
+/// Opportunistically publish a read-only overview mirror snapshot while
+/// `feed_terminal` already holds the `Terminal` lock (Fix B, REQ-NF-6).
+/// Returns the trailing-flush deadline when [`decide_overview_publish`]
+/// schedules one (see `spawn`'s dynamic-timeout `Select`), `None` otherwise.
+fn publish_overview_snapshot(
+    terminal: &Terminal,
+    overview: &OverviewPublish,
+    last_overview_publish: &mut Option<Instant>,
+) -> Option<Instant> {
+    let now = Instant::now();
+    let visible = overview.visible.load(Ordering::Relaxed);
+    match decide_overview_publish(visible, *last_overview_publish, now) {
+        OverviewPublishDecision::Skip => None,
+        OverviewPublishDecision::Publish => {
+            let snapshot = Arc::new(FrameSnapshot::peek(terminal));
+            *overview
+                .slot
+                .lock()
+                .expect("overview snapshot mutex poisoned") = Some(snapshot);
+            *last_overview_publish = Some(now);
+            None
+        }
+        OverviewPublishDecision::ScheduleTrailingFlush { deadline } => Some(deadline),
+    }
+}
+
+/// Effectful trailing-edge flush (Fix B defect 1 — see
+/// [`OverviewPublishDecision::ScheduleTrailingFlush`]): the throttle window
+/// for the last skipped publish elapsed with no further pty output to
+/// re-trigger `publish_overview_snapshot`, so publish the tab's *current*
+/// terminal state now instead of leaving the overview mirror stuck on a
+/// stale mid-burst frame (REQ-OV-4) until the tab's next output.
+fn flush_pending_overview_publish(
+    terminal: &Arc<Mutex<Terminal>>,
+    overview: &OverviewPublish,
+    last_overview_publish: &mut Option<Instant>,
+) {
+    let now = Instant::now();
+    let snapshot = {
+        let term = terminal.lock().expect("terminal mutex poisoned");
+        Arc::new(FrameSnapshot::peek(&term))
+    };
+    *overview
+        .slot
+        .lock()
+        .expect("overview snapshot mutex poisoned") = Some(snapshot);
+    *last_overview_publish = Some(now);
 }
 
 fn write_pty_bytes(writer: &PtyWriter, bytes: &[u8]) {
@@ -101,21 +223,69 @@ pub fn spawn(
     pty: Pty,
     terminal: Arc<Mutex<Terminal>>,
     proxy: EventLoopProxy<UserEvent>,
-    window_id: winit::window::WindowId,
-    pane_id: PaneId,
+    target: IoThreadTarget,
     resize_rx: Receiver<GridSize>,
     input_rx: Receiver<PtyInput>,
+    overview: OverviewPublish,
 ) -> IoThreadHandle {
+    let IoThreadTarget { window_id, pane_id } = target;
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
     let join = std::thread::spawn(move || {
         let writer = pty.writer();
         let mut stream = noa_vt::Stream::new();
+        let mut last_overview_publish: Option<Instant> = None;
+        // Trailing-flush deadline owed by a throttled overview publish
+        // (Fix B defect 1), if any. `None` means nothing is owed, and the
+        // select below blocks indefinitely exactly as before this fix — an
+        // idle tab, or a tab whose last feed published immediately, costs
+        // no extra wake-ups. This is why `crossbeam_channel::select!`'s
+        // fixed-arm macro was swapped for the lower-level `Select` builder:
+        // it lets the timeout arm be added only when something is owed,
+        // instead of a constant poll interval.
+        let mut publish_pending_at: Option<Instant> = None;
         loop {
-            crossbeam_channel::select! {
-                recv(shutdown_rx) -> _ => break,
-                recv(pty.event_rx()) -> msg => match msg {
+            let mut sel = crossbeam_channel::Select::new();
+            let shutdown_op = sel.recv(&shutdown_rx);
+            let pty_op = sel.recv(pty.event_rx());
+            let resize_op = sel.recv(&resize_rx);
+            let input_op = sel.recv(&input_rx);
+
+            let selected = match publish_pending_at {
+                Some(deadline) => sel
+                    .select_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .ok(),
+                None => Some(sel.select()),
+            };
+
+            let Some(oper) = selected else {
+                // The throttle window elapsed with nothing else waking the
+                // thread first — flush now (Fix B defect 1).
+                flush_pending_overview_publish(&terminal, &overview, &mut last_overview_publish);
+                publish_pending_at = None;
+                if proxy
+                    .send_event(UserEvent::Redraw(window_id, pane_id))
+                    .is_err()
+                {
+                    break; // event loop gone
+                }
+                continue;
+            };
+
+            match oper.index() {
+                i if i == shutdown_op => {
+                    let _ = oper.recv(&shutdown_rx);
+                    break;
+                }
+                i if i == pty_op => match oper.recv(pty.event_rx()) {
                     Ok(noa_pty::PtyEvent::Data(bytes)) => {
-                        let output = feed_terminal(&terminal, &mut stream, bytes.as_ref());
+                        let output = feed_terminal(
+                            &terminal,
+                            &mut stream,
+                            bytes.as_ref(),
+                            &overview,
+                            &mut last_overview_publish,
+                        );
+                        publish_pending_at = output.overview_publish_pending;
                         if !output.pending_writes.is_empty() {
                             write_pty_bytes(&writer, &output.pending_writes);
                         }
@@ -134,7 +304,11 @@ pub fn spawn(
                                 target,
                             });
                         }
-                        if should_redraw && proxy.send_event(UserEvent::Redraw(window_id, pane_id)).is_err() {
+                        if should_redraw
+                            && proxy
+                                .send_event(UserEvent::Redraw(window_id, pane_id))
+                                .is_err()
+                        {
                             break; // event loop gone
                         }
                     }
@@ -144,16 +318,17 @@ pub fn spawn(
                     }
                     Err(_) => break, // channel closed
                 },
-                recv(resize_rx) -> msg => match msg {
+                i if i == resize_op => match oper.recv(&resize_rx) {
                     Ok(size) => {
                         let _ = pty.resize(size);
                     }
                     Err(_) => break, // main thread / App dropped
                 },
-                recv(input_rx) -> msg => match msg {
+                i if i == input_op => match oper.recv(&input_rx) {
                     Ok(bytes) => write_pty_bytes(&writer, bytes.as_ref()),
                     Err(_) => break, // main thread / App dropped
                 },
+                _ => unreachable!("select only registers the four operations above"),
             }
         }
     });
@@ -167,12 +342,27 @@ pub fn spawn(
 mod tests {
     use super::*;
 
+    fn test_overview_publish() -> OverviewPublish {
+        OverviewPublish {
+            slot: Arc::new(Mutex::new(None)),
+            visible: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     #[test]
     fn feed_terminal_returns_pending_writes_after_releasing_lock() {
         let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
         let mut stream = noa_vt::Stream::new();
+        let overview = test_overview_publish();
+        let mut last_overview_publish = None;
 
-        let output = feed_terminal(&terminal, &mut stream, b"\x1b[6n");
+        let output = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"\x1b[6n",
+            &overview,
+            &mut last_overview_publish,
+        );
 
         assert_eq!(output.pending_writes, b"\x1b[1;1R");
         assert!(output.pending_clipboard_writes.is_empty());
@@ -187,16 +377,192 @@ mod tests {
     fn synchronized_output_suppresses_redraw_until_release() {
         let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
         let mut stream = noa_vt::Stream::new();
+        let overview = test_overview_publish();
+        let mut last_overview_publish = None;
 
-        let output = feed_terminal(&terminal, &mut stream, b"\x1b[?2026hhidden");
+        let output = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"\x1b[?2026hhidden",
+            &overview,
+            &mut last_overview_publish,
+        );
 
         assert!(output.synchronized_output);
         assert!(!should_request_redraw_after_terminal_output(&output));
 
-        let output = feed_terminal(&terminal, &mut stream, b"\x1b[?2026l");
+        let output = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"\x1b[?2026l",
+            &overview,
+            &mut last_overview_publish,
+        );
 
         assert!(!output.synchronized_output);
         assert!(should_request_redraw_after_terminal_output(&output));
+    }
+
+    #[test]
+    fn feed_terminal_does_not_publish_an_overview_snapshot_while_the_gate_is_off() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+        let mut stream = noa_vt::Stream::new();
+        let overview = test_overview_publish();
+        let mut last_overview_publish = None;
+
+        let output = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"hello",
+            &overview,
+            &mut last_overview_publish,
+        );
+
+        assert!(
+            overview.slot.lock().expect("slot mutex poisoned").is_none(),
+            "overview_visible=false must cost only the atomic load, no publish"
+        );
+        assert!(last_overview_publish.is_none());
+        assert!(
+            output.overview_publish_pending.is_none(),
+            "not-visible must not owe a trailing flush either"
+        );
+    }
+
+    #[test]
+    fn decide_overview_publish_skips_when_not_visible_regardless_of_timing() {
+        let now = Instant::now();
+
+        assert_eq!(
+            decide_overview_publish(false, None, now),
+            OverviewPublishDecision::Skip
+        );
+        assert_eq!(
+            decide_overview_publish(
+                false,
+                Some(now - OVERVIEW_TILE_MIN_RENDER_INTERVAL * 10),
+                now
+            ),
+            OverviewPublishDecision::Skip
+        );
+    }
+
+    #[test]
+    fn decide_overview_publish_publishes_on_first_feed_and_when_due() {
+        let now = Instant::now();
+
+        assert_eq!(
+            decide_overview_publish(true, None, now),
+            OverviewPublishDecision::Publish
+        );
+        let due = now - OVERVIEW_TILE_MIN_RENDER_INTERVAL;
+        assert_eq!(
+            decide_overview_publish(true, Some(due), now),
+            OverviewPublishDecision::Publish
+        );
+    }
+
+    #[test]
+    fn decide_overview_publish_schedules_a_trailing_flush_when_throttled() {
+        let now = Instant::now();
+        let last = now - OVERVIEW_TILE_MIN_RENDER_INTERVAL / 2;
+
+        assert_eq!(
+            decide_overview_publish(true, Some(last), now),
+            OverviewPublishDecision::ScheduleTrailingFlush {
+                deadline: last + OVERVIEW_TILE_MIN_RENDER_INTERVAL
+            }
+        );
+    }
+
+    #[test]
+    fn flush_pending_overview_publish_publishes_the_terminals_current_state() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+        let overview = test_overview_publish();
+        let mut last_overview_publish = None;
+
+        flush_pending_overview_publish(&terminal, &overview, &mut last_overview_publish);
+
+        assert!(
+            overview.slot.lock().expect("slot mutex poisoned").is_some(),
+            "the trailing flush must publish unconditionally, regardless of the gate"
+        );
+        assert!(last_overview_publish.is_some());
+    }
+
+    #[test]
+    fn feed_terminal_publishes_an_overview_snapshot_throttled_to_the_min_render_interval() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+        let mut stream = noa_vt::Stream::new();
+        let overview = test_overview_publish();
+        overview.visible.store(true, Ordering::Relaxed);
+        let mut last_overview_publish = None;
+
+        feed_terminal(
+            &terminal,
+            &mut stream,
+            b"first",
+            &overview,
+            &mut last_overview_publish,
+        );
+        let first_snapshot = overview
+            .slot
+            .lock()
+            .expect("slot mutex poisoned")
+            .clone()
+            .expect("visible=true publishes on the first feed");
+        assert!(last_overview_publish.is_some());
+
+        // Still inside the throttle window: the slot must not be replaced,
+        // but the feed must record a trailing-flush deadline (Fix B defect
+        // 1) rather than dropping the burst's final state on the floor.
+        let throttled_publish_at = last_overview_publish.expect("set by the first feed");
+        let output = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"second",
+            &overview,
+            &mut last_overview_publish,
+        );
+        let still_first = overview
+            .slot
+            .lock()
+            .expect("slot mutex poisoned")
+            .clone()
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&first_snapshot, &still_first),
+            "a feed inside the throttle window must not replace the published snapshot"
+        );
+        assert_eq!(
+            output.overview_publish_pending,
+            Some(throttled_publish_at + OVERVIEW_TILE_MIN_RENDER_INTERVAL),
+            "a throttled feed must schedule a trailing flush at the throttle deadline"
+        );
+
+        // Force the throttle window to have elapsed, then feed again.
+        last_overview_publish = Some(Instant::now() - OVERVIEW_TILE_MIN_RENDER_INTERVAL);
+        let output = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"third",
+            &overview,
+            &mut last_overview_publish,
+        );
+        let third_snapshot = overview
+            .slot
+            .lock()
+            .expect("slot mutex poisoned")
+            .clone()
+            .unwrap();
+        assert!(
+            !Arc::ptr_eq(&first_snapshot, &third_snapshot),
+            "a feed past the throttle window must publish a fresh snapshot"
+        );
+        assert!(
+            output.overview_publish_pending.is_none(),
+            "a feed that publishes immediately owes no trailing flush"
+        );
     }
 
     #[test]

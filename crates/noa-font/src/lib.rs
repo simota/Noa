@@ -15,6 +15,7 @@
 //! `noa-render` consumes.
 
 mod atlas;
+mod boxdraw;
 mod config;
 mod face;
 mod grid;

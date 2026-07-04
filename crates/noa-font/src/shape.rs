@@ -27,6 +27,16 @@ use crate::face::FontData;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FaceId(pub u16);
 
+impl FaceId {
+    /// Sentinel face for built-in procedurally-drawn glyphs (box-drawing,
+    /// block elements, Powerline separators — see the `boxdraw` module). Not a
+    /// real index into the font stack: `shape_run` emits it for builtin
+    /// codepoints and `raster_shaped` recognises it to synthesise the mask
+    /// instead of hitting a font. Chosen as `u16::MAX` so it never collides
+    /// with a real fallback-face index.
+    pub const BUILTIN: FaceId = FaceId(u16::MAX);
+}
+
 /// Render-seam style key derived from `CellAttrs` by `noa-render` (NOT
 /// `noa-grid` — see CLAUDE.md's GUI-agnostic dependency rule). Only
 /// bold/italic affect face + variation selection and therefore run

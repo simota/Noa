@@ -8,6 +8,7 @@ use swash::FontRef;
 use swash::scale::ScaleContext;
 
 use crate::atlas::Atlas;
+use crate::boxdraw::{self, is_builtin_glyph};
 use crate::face::{FontStack, Metrics, load_font_stack};
 use crate::raster::{GlyphSynthesis, RasterizedGlyph, rasterize_with_variations};
 use crate::shape::{self, FaceId, ShapeCell, ShapeRunKey, ShapedGlyph, StyleKey};
@@ -149,6 +150,14 @@ impl FontGrid {
             return cached.info;
         }
 
+        // Box-drawing / block / Powerline codepoints are drawn by noa itself at
+        // exact cell dimensions (so lines join across cells) rather than looked
+        // up in a font — see the `boxdraw` module.
+        if is_builtin_glyph(ch) {
+            let glyph = builtin_rasterized(ch, &self.metrics);
+            return self.store_and_cache(&glyph, SlotOwner::Char(key));
+        }
+
         let (font_index, glyph_id) = self.resolve_glyph(ch);
 
         // Borrow only `font_stack` data so `self.ctx` stays mutably borrowable.
@@ -174,6 +183,12 @@ impl FontGrid {
     /// face to shape a run against — a run is guaranteed single-face by the
     /// caller (segmentation breaks at face boundaries).
     pub fn resolve_face(&self, ch: char) -> FaceId {
+        // Builtin (procedurally-drawn) codepoints resolve to a sentinel face so
+        // segmentation isolates them into their own runs — see
+        // [`FaceId::BUILTIN`] and [`FontGrid::raster_shaped`]'s builtin branch.
+        if is_builtin_glyph(ch) {
+            return FaceId::BUILTIN;
+        }
         FaceId(self.resolve_glyph(ch).0 as u16)
     }
 
@@ -222,6 +237,32 @@ impl FontGrid {
             return entry.0.clone();
         }
 
+        // Builtin runs (box-drawing/block/Powerline) bypass rustybuzz entirely:
+        // one glyph per cell, anchored 1:1, its codepoint carried in `glyph_id`
+        // (all builtin codepoints fit in `u16`) for `raster_shaped` to draw.
+        // Segmentation guarantees the whole run is builtin (all cells share
+        // `FaceId::BUILTIN`).
+        if self.resolve_face(first.ch) == FaceId::BUILTIN {
+            let x_advance = self.metrics.cell_w.round() as i32;
+            let glyphs: Vec<ShapedGlyph> = cells
+                .iter()
+                .enumerate()
+                .map(|(idx, cell)| ShapedGlyph {
+                    glyph_id: cell.ch as u16,
+                    face_id: FaceId::BUILTIN,
+                    x_advance,
+                    x_offset: 0,
+                    y_offset: 0,
+                    cluster: idx as u32,
+                })
+                .collect();
+            if self.shape_cache.len() >= SHAPE_CACHE_CAP {
+                self.evict_lru_shape_run();
+            }
+            self.shape_cache.insert(key, (glyphs.clone(), now));
+            return glyphs;
+        }
+
         let face_id = self.resolve_face(first.ch);
         let variation_coords = self.variation_coords(style);
         let font_data = &self.font_stack.faces()[face_id.0 as usize];
@@ -263,6 +304,16 @@ impl FontGrid {
         if let Some(cached) = self.raster_shaped_cache.get(&key).copied() {
             self.touch(cached.slot);
             return cached.info;
+        }
+
+        // Builtin sentinel face: `glyph_id` is a codepoint, not a font glyph —
+        // synthesise the mask procedurally (see the `boxdraw` module) and pack
+        // it into the R8 mask atlas like any other coverage glyph.
+        if face_id == FaceId::BUILTIN {
+            let ch =
+                char::from_u32(glyph_id as u32).expect("builtin glyph_id is a valid codepoint");
+            let glyph = builtin_rasterized(ch, &self.metrics);
+            return self.store_and_cache(&glyph, SlotOwner::Shaped(key));
         }
 
         let font_data = &self.font_stack.faces()[face_id.0 as usize];
@@ -543,6 +594,26 @@ fn synthesis_for(font_cfg: &FontConfig, style: StyleKey) -> GlyphSynthesis {
         shear: style.italic && font_cfg.synthetic_style.italic,
         thicken: font_cfg.thicken,
         thicken_strength: font_cfg.thicken_strength,
+    }
+}
+
+/// Rasterize a built-in glyph (box-drawing/block/Powerline) into a
+/// [`RasterizedGlyph`] positioned flush to the cell origin.
+///
+/// The mask fills the whole `ceil(cell_w) x ceil(cell_h)` cell box, so it is
+/// placed with `bearing_x = 0` and `bearing_y = ascent`: the renderer's
+/// `glyph_cell_bearing` maps that to a cell-top-left offset of `[0, 0]`, and
+/// neighbouring cells' lines therefore stay collinear.
+fn builtin_rasterized(ch: char, metrics: &Metrics) -> RasterizedGlyph {
+    let g = boxdraw::draw_builtin(ch, metrics);
+    RasterizedGlyph {
+        bitmap: g.coverage,
+        width: g.width,
+        height: g.height,
+        bearing_x: 0,
+        bearing_y: metrics.ascent.round() as i32,
+        advance: metrics.cell_w,
+        color: false,
     }
 }
 

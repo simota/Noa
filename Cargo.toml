@@ -40,6 +40,10 @@ bytemuck          = { version = "1", features = ["derive"] }
 crossbeam-channel = "0.5"
 unicode-width     = "0.2"
 
+# ── image decoding (Kitty graphics: PNG + zlib) ────────────────────
+png    = "0.18"
+flate2 = "1"
+
 # ── ergonomics ─────────────────────────────────────────────────────
 bitflags   = "2"
 anyhow     = "1"

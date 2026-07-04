@@ -1434,8 +1434,10 @@ name = "noa-grid"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.0",
+ "flate2",
  "noa-core",
  "noa-vt",
+ "png",
  "thiserror 2.0.18",
  "unicode-width",
 ]

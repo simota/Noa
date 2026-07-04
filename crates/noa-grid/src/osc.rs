@@ -505,7 +505,7 @@ const BASE64_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Standard base64 (RFC 4648, with `=` padding), appended to `out`.
-fn encode_base64(input: &[u8], out: &mut Vec<u8>) {
+pub(crate) fn encode_base64(input: &[u8], out: &mut Vec<u8>) {
     for chunk in input.chunks(3) {
         let b0 = chunk[0];
         let b1 = chunk.get(1).copied();
@@ -526,7 +526,7 @@ fn encode_base64(input: &[u8], out: &mut Vec<u8>) {
     }
 }
 
-fn decode_base64_limited(input: &[u8], max_decoded_bytes: usize) -> Option<Vec<u8>> {
+pub(crate) fn decode_base64_limited(input: &[u8], max_decoded_bytes: usize) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity((input.len() / 4) * 3);
     let mut quartet = [0u8; 4];
     let mut quartet_len = 0;

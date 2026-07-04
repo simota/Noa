@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use crate::cell::Hyperlink;
 use crate::charset::CharsetState;
 use crate::cursor::{Cursor, CursorStyle, ScrollRegion};
+use crate::kitty::{ImageStore, KittyError, TransmitStep};
 use crate::kitty_keyboard::{KittyKeyboard, SetMode};
 use crate::modes::ModeState;
 use crate::osc::{
@@ -20,7 +21,7 @@ use crate::selection::SelectionPoint;
 use noa_core::{CellAttrs, Color, GridSize, Point};
 use noa_vt::{
     Charset, CharsetSlot, CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine,
-    Handler, ModeRequest, SgrAttr,
+    Handler, KittyAction, KittyGraphicsCommand, ModeRequest, SgrAttr,
 };
 
 /// Cap on the `XTWINOPS` title stack (`CSI 22/23 t`), mirroring the
@@ -85,6 +86,9 @@ pub struct Terminal {
     default_cursor_style: CursorStyle,
     /// Kitty keyboard protocol progressive-enhancement flag stacks (per screen).
     kitty_keyboard: KittyKeyboard,
+    /// Kitty graphics image store (screen-independent; placements live on the
+    /// screens). Owns decoded RGBA data and the global byte quota.
+    pub kitty_images: ImageStore,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +142,7 @@ impl Terminal {
             title_stack: VecDeque::new(),
             default_cursor_style: CursorStyle::default(),
             kitty_keyboard: KittyKeyboard::default(),
+            kitty_images: ImageStore::new(),
         }
     }
 
@@ -486,6 +491,86 @@ impl Terminal {
         self.pending_writes.extend_from_slice(b"\x1bP");
         self.pending_writes.extend_from_slice(body);
         self.pending_writes.extend_from_slice(b"\x1b\\");
+    }
+
+    /// Emit a Kitty graphics reply (`ESC _ G i=<id>[,I=..][,p=..];<body> ESC \`).
+    fn push_apc_response(&mut self, id: u32, number: u32, placement: u32, body: &[u8]) {
+        self.pending_writes.extend_from_slice(b"\x1b_G");
+        self.pending_writes.extend_from_slice(b"i=");
+        self.pending_writes
+            .extend_from_slice(id.to_string().as_bytes());
+        if number != 0 {
+            self.pending_writes.extend_from_slice(b",I=");
+            self.pending_writes
+                .extend_from_slice(number.to_string().as_bytes());
+        }
+        if placement != 0 {
+            self.pending_writes.extend_from_slice(b",p=");
+            self.pending_writes
+                .extend_from_slice(placement.to_string().as_bytes());
+        }
+        self.pending_writes.push(b';');
+        self.pending_writes.extend_from_slice(body);
+        self.pending_writes.extend_from_slice(b"\x1b\\");
+    }
+
+    /// Decide whether to emit a Kitty graphics reply, honoring the quiet level
+    /// (`q=`) and the "no reply when neither `i=` nor `I=` was given" rule, then
+    /// emit it. `assigned_id` is the id the store actually used (may differ from
+    /// `req_id` when auto-assigned).
+    fn kitty_reply(
+        &mut self,
+        req_id: u32,
+        req_number: u32,
+        assigned_id: u32,
+        placement: u32,
+        quiet: u8,
+        result: Result<(), KittyError>,
+    ) {
+        if req_id == 0 && req_number == 0 {
+            return;
+        }
+        let ok = result.is_ok();
+        if quiet >= 2 || (quiet >= 1 && ok) {
+            return;
+        }
+        let body: &[u8] = match &result {
+            Ok(()) => b"OK",
+            Err(e) => e.reply_body().as_bytes(),
+        };
+        let id = if assigned_id != 0 { assigned_id } else { req_id };
+        self.push_apc_response(id, req_number, placement, body);
+    }
+
+    /// Feed a data-carrying Kitty graphics command (`a=t`/`a=T`/`a=q`) into the
+    /// image store, replying on completion. Placement (`a=T`) is added in the
+    /// placement step.
+    fn kitty_transmit(&mut self, cmd: KittyGraphicsCommand) {
+        match self.kitty_images.transmit(&cmd) {
+            TransmitStep::NeedMore => {}
+            TransmitStep::Done(done) => {
+                let ctrl = done.ctrl;
+                let assigned = *done.result.as_ref().unwrap_or(&ctrl.image_id);
+                if done.result.is_ok() {
+                    self.kitty_images.enforce_quota(&self.referenced_image_ids());
+                }
+                self.kitty_reply(
+                    ctrl.image_id,
+                    ctrl.image_number,
+                    assigned,
+                    ctrl.placement_id,
+                    ctrl.quiet,
+                    done.result.map(|_| ()),
+                );
+            }
+        }
+    }
+
+    /// The set of image ids referenced by a placement on any screen (the quota
+    /// sweep spares these). In the transfer step no placements exist yet, so this
+    /// is empty; the placement step overrides the gathering.
+    fn referenced_image_ids(&self) -> std::collections::HashSet<u32> {
+        std::collections::HashSet::new()
     }
 
     fn push_decrqss_response(&mut self, valid: bool, request: &[u8], setting: &[u8]) {
@@ -948,6 +1033,7 @@ impl Handler for Terminal {
         self.pending_notifications.clear();
         self.pending_bell = false;
         self.kitty_keyboard.reset();
+        self.kitty_images.clear();
         self.clear_selection();
         self.clear_search();
     }
@@ -1132,6 +1218,61 @@ impl Handler for Terminal {
             self.handle_xtgettcap(payload);
         } else if data == b">q" {
             self.push_dcs_response(format!(">|noa {}", env!("CARGO_PKG_VERSION")).as_bytes());
+        }
+    }
+
+    fn kitty_graphics(&mut self, cmd: KittyGraphicsCommand) {
+        // A truncated APC still identifies itself; reply EFBIG so the client
+        // isn't left waiting on the response protocol.
+        if cmd.truncated {
+            self.kitty_images.abort();
+            self.kitty_reply(
+                cmd.image_id,
+                cmd.image_number,
+                cmd.image_id,
+                cmd.placement_id,
+                cmd.quiet,
+                Err(KittyError::TooBig),
+            );
+            return;
+        }
+        if cmd.parse_error {
+            self.kitty_reply(
+                cmd.image_id,
+                cmd.image_number,
+                cmd.image_id,
+                cmd.placement_id,
+                cmd.quiet,
+                Err(KittyError::Invalid),
+            );
+            return;
+        }
+
+        // A non-transmit command arriving mid-chunk aborts the pending transfer
+        // (continuation chunks always parse as `Transmit`).
+        if self.kitty_images.transfer_in_progress()
+            && !matches!(
+                cmd.action,
+                KittyAction::Transmit | KittyAction::TransmitAndDisplay
+            )
+        {
+            self.kitty_images.abort();
+        }
+
+        match cmd.action {
+            KittyAction::Unsupported => self.kitty_reply(
+                cmd.image_id,
+                cmd.image_number,
+                cmd.image_id,
+                cmd.placement_id,
+                cmd.quiet,
+                Err(KittyError::Unsupported),
+            ),
+            KittyAction::Transmit | KittyAction::TransmitAndDisplay | KittyAction::Query => {
+                self.kitty_transmit(cmd);
+            }
+            // Placement (`a=p`) and deletion (`a=d`) land in the placement step.
+            KittyAction::Put | KittyAction::Delete => {}
         }
     }
 

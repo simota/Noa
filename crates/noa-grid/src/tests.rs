@@ -2507,3 +2507,76 @@ fn set_scrollback_limit_bytes_shrinks_and_disables_history() {
     t.set_scrollback_limit_bytes(0);
     assert_eq!(t.scrollback_len(), 0, "limit 0 disables scrollback");
 }
+
+// ── Kitty graphics (APC → image store → replies) ────────────────────
+
+/// Build an APC Kitty graphics sequence `ESC _ G <ctrl> ; <base64(data)> ESC \`.
+fn kitty_apc(ctrl: &str, data: &[u8]) -> Vec<u8> {
+    let mut b64 = Vec::new();
+    crate::osc::encode_base64(data, &mut b64);
+    let mut out = b"\x1b_G".to_vec();
+    out.extend_from_slice(ctrl.as_bytes());
+    out.push(b';');
+    out.extend_from_slice(&b64);
+    out.extend_from_slice(b"\x1b\\");
+    out
+}
+
+#[test]
+fn kitty_transmit_stores_and_replies_ok() {
+    let t = run(&kitty_apc("a=t,f=32,s=1,v=1,i=1", &[1, 2, 3, 4]));
+    assert!(t.kitty_images.get(1).is_some());
+    assert_eq!(t.pending_writes, b"\x1b_Gi=1;OK\x1b\\");
+}
+
+#[test]
+fn kitty_quiet_one_suppresses_ok() {
+    let t = run(&kitty_apc("a=t,f=32,s=1,v=1,i=1,q=1", &[1, 2, 3, 4]));
+    assert!(t.kitty_images.get(1).is_some());
+    assert!(t.pending_writes.is_empty(), "q=1 suppresses the OK reply");
+}
+
+#[test]
+fn kitty_quiet_two_suppresses_errors() {
+    // Bad dimensions → ENODATA, but q=2 suppresses even errors.
+    let t = run(&kitty_apc("a=t,f=32,s=4,v=4,i=1,q=2", &[0; 8]));
+    assert!(t.pending_writes.is_empty(), "q=2 suppresses error replies");
+}
+
+#[test]
+fn kitty_no_reply_when_neither_i_nor_i_number_given() {
+    let t = run(&kitty_apc("a=t,f=32,s=1,v=1", &[1, 2, 3, 4]));
+    assert!(
+        t.pending_writes.is_empty(),
+        "i=0 and I=0 → no reply at all"
+    );
+}
+
+#[test]
+fn kitty_auto_id_reply_echoes_assigned_id_and_number() {
+    let t = run(&kitty_apc("a=t,f=32,s=1,v=1,I=7", &[1, 2, 3, 4]));
+    // Auto-assigned id 1, number echoed.
+    assert_eq!(t.pending_writes, b"\x1b_Gi=1,I=7;OK\x1b\\");
+}
+
+#[test]
+fn kitty_error_reply_carries_code() {
+    let t = run(&kitty_apc("a=t,f=32,s=4,v=4,i=1", &[0; 8]));
+    assert_eq!(t.pending_writes, b"\x1b_Gi=1;ENODATA:data size mismatch\x1b\\");
+}
+
+#[test]
+fn kitty_query_validates_without_storing() {
+    let t = run(&kitty_apc("a=q,f=32,s=1,v=1,i=9", &[0; 4]));
+    assert!(t.kitty_images.get(9).is_none(), "query must not store");
+    assert_eq!(t.pending_writes, b"\x1b_Gi=9;OK\x1b\\");
+}
+
+#[test]
+fn kitty_full_reset_clears_store() {
+    let mut t = run(&kitty_apc("a=t,f=32,s=1,v=1,i=1", &[1, 2, 3, 4]));
+    assert!(t.kitty_images.get(1).is_some());
+    let mut s = Stream::new();
+    s.feed(b"\x1bc", &mut t); // RIS
+    assert!(t.kitty_images.get(1).is_none(), "RIS clears the image store");
+}

@@ -245,6 +245,14 @@ impl Terminal {
         self.primary.clear_scrollback();
     }
 
+    /// Set the scrollback byte limit at runtime (`0` disables scrollback),
+    /// evicting immediately. Applies to the primary screen; the alternate
+    /// screen keeps no history. `noa-app` calls this from the `scrollback-limit`
+    /// config at surface creation.
+    pub fn set_scrollback_limit_bytes(&mut self, bytes: usize) {
+        self.primary.set_scrollback_limit_bytes(bytes);
+    }
+
     pub fn select_all(&mut self) {
         self.active_mut().select_all();
     }

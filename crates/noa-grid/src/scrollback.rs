@@ -398,8 +398,6 @@ impl PagedScrollback {
 
     /// Change the retention limit at runtime, evicting immediately. Returns the
     /// number of rows evicted. `0` disables scrollback and drops all history.
-    // Wired into `Screen::set_scrollback_limit_bytes` in the next step.
-    #[allow(dead_code)]
     pub(crate) fn set_limit_bytes(&mut self, bytes: usize) -> usize {
         self.limit_bytes = bytes;
         if bytes == 0 {

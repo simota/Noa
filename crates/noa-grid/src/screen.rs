@@ -233,6 +233,24 @@ impl Screen {
         self.clear_search();
     }
 
+    /// Set the scrollback byte limit at runtime (`0` disables scrollback and
+    /// drops all history), evicting immediately. No-op on the alternate screen,
+    /// which keeps no history. Evicted rows advance `rows_evicted` and shift the
+    /// selection up so session-absolute coordinates stay valid.
+    pub fn set_scrollback_limit_bytes(&mut self, bytes: usize) {
+        if !self.scrollback_enabled {
+            return;
+        }
+        let evicted = self.scrollback.set_limit_bytes(bytes);
+        if evicted > 0 {
+            self.rows_evicted += evicted;
+            self.selection = self
+                .selection
+                .and_then(|selection| selection.shift_rows_up(evicted));
+        }
+        self.clamp_viewport();
+    }
+
     pub(crate) fn select_all(&mut self) {
         let total_rows = self.scrollback.len() + self.grid.len();
         if total_rows == 0 || self.cols == 0 || !self.has_selectable_text() {

@@ -2317,3 +2317,193 @@ fn plain_csi_u_is_still_restore_cursor() {
     // And the DECSC/DECRC `CSI u` form leaves no pending writes (not a query).
     assert!(t.pending_writes.is_empty());
 }
+
+// ── paged scrollback: byte-limited storage across page boundaries ──────────
+//
+// These feed *full-width* rows (`R{i}` padded with dots, no trailing blanks so
+// nothing is trimmed) so history reliably spans more than one 64 KiB page,
+// exercising the page-granular eviction and cross-page read paths.
+
+fn feed_full_rows(s: &mut Stream, t: &mut Terminal, cols: usize, n: usize) {
+    for i in 0..n {
+        let mut line = format!("R{i}");
+        while line.len() < cols {
+            line.push('.');
+        }
+        line.push_str("\r\n");
+        s.feed(line.as_bytes(), t);
+    }
+}
+
+fn terminal_full_history(cols: u16, rows: u16, n: usize) -> Terminal {
+    let mut t = Terminal::new(GridSize::new(cols, rows));
+    let mut s = Stream::new();
+    feed_full_rows(&mut s, &mut t, cols as usize, n);
+    t
+}
+
+#[test]
+fn scrollback_eviction_advances_rows_evicted_and_shifts_selection() {
+    let mut t = terminal_full_history(80, 3, 400);
+    let before_len = t.scrollback_len();
+    assert!(before_len > 200, "history spans multiple pages");
+
+    // A selection on the top live row survives eviction and must shift up by
+    // exactly the evicted row count (session-absolute coordinates).
+    t.scroll_viewport_to_bottom();
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 3, y: 0 });
+    let before = t.active().selection.expect("selection set");
+    let before_evicted = t.primary.rows_evicted();
+
+    t.set_scrollback_limit_bytes(1);
+
+    let evicted = t.primary.rows_evicted() - before_evicted;
+    assert!(evicted > 0, "shrinking the limit evicts whole pages");
+    assert!(t.scrollback_len() < before_len);
+    let after = t.active().selection.expect("live selection survives eviction");
+    assert_eq!(after.anchor.y, before.anchor.y - evicted);
+    assert_eq!(after.focus.y, before.focus.y - evicted);
+}
+
+#[test]
+fn search_matches_span_scrollback_page_boundaries() {
+    let mut t = terminal_full_history(80, 3, 300);
+
+    t.set_search_query("R5.");
+    let top = t.active().search.matches().to_vec();
+    assert_eq!(top.len(), 1, "the `R5.` marker occurs once, in an early page");
+    let top_y = top[0].start.y;
+
+    t.set_search_query("R190.");
+    let bot = t.active().search.matches().to_vec();
+    assert_eq!(bot.len(), 1, "the `R190.` marker occurs once, in a later page");
+    let bot_y = bot[0].start.y;
+
+    assert!(
+        bot_y > top_y + 100,
+        "matches were found in rows far apart, i.e. across a page boundary"
+    );
+}
+
+#[test]
+fn selected_text_joins_wrapped_rows_across_page_boundary() {
+    // One giant soft-wrapped logical line: 200 rows of 'a', spanning >1 page.
+    let mut t = Terminal::new(GridSize::new(80, 3));
+    let mut s = Stream::new();
+    s.feed(&vec![b'a'; 80 * 200], &mut t);
+
+    // Select a range that crosses a page boundary (rows ~102/103); every row is
+    // soft-wrapped, so no newline is inserted between them.
+    t.set_selection(
+        crate::SelectionPoint::new(0, 50),
+        crate::SelectionPoint::new(79, 160),
+    );
+    let text = t.selected_text().expect("selection has text");
+
+    assert!(
+        !text.contains('\n'),
+        "soft-wrapped history rows join without a newline across pages"
+    );
+    assert!(text.chars().all(|c| c == 'a'));
+}
+
+#[test]
+fn history_rows_report_clean_across_page_boundary() {
+    let mut t = terminal_full_history(80, 3, 200);
+    // Scroll fully into history; all visible rows are immutable scrollback rows.
+    t.scroll_viewport_to_top();
+
+    let (rows, dirty) = t.primary.take_visible_rows_with_damage();
+    assert_eq!(rows.len(), 3);
+    assert!(
+        dirty.iter().all(|&d| !d),
+        "immutable history rows always report clean"
+    );
+    assert_eq!(rows_text(&rows, 0, 2), "R0");
+
+    // A second consume still reports clean (nothing re-dirtied history).
+    let (_, dirty_again) = t.primary.take_visible_rows_with_damage();
+    assert!(dirty_again.iter().all(|&d| !d));
+}
+
+#[test]
+fn resize_preserves_cursor_anchor_with_multi_page_scrollback() {
+    let mut t = terminal_full_history(80, 3, 200);
+    // A known short prompt line under the cursor, after >1 page of history.
+    let mut s = Stream::new();
+    s.feed(b"PROMPT", &mut t);
+    assert_eq!(t.primary.cursor.x, 6);
+
+    // Column-count resize reflows the whole (multi-page) history and re-anchors
+    // the cursor onto the same character.
+    t.resize(GridSize::new(40, 3));
+
+    assert_eq!(t.primary.cursor.x, 6, "cursor stays just past PROMPT");
+    let y = t.primary.cursor.y as usize;
+    assert_eq!(row_text(&t, y, 6), "PROMPT");
+}
+
+#[test]
+fn prompt_jump_coordinates_survive_page_eviction() {
+    let mut t = Terminal::new(GridSize::new(80, 3));
+    let mut s = Stream::new();
+
+    let feed_prompt = |s: &mut Stream, t: &mut Terminal, label: &str| {
+        let mut line = label.to_string();
+        while line.len() < 80 {
+            line.push('.');
+        }
+        line.push_str("\r\n");
+        let mut bytes = b"\x1b]133;A\x07".to_vec();
+        bytes.extend_from_slice(line.as_bytes());
+        s.feed(&bytes, t);
+    };
+
+    feed_prompt(&mut s, &mut t, "PA");
+    feed_full_rows(&mut s, &mut t, 80, 120);
+    feed_prompt(&mut s, &mut t, "PB");
+    feed_full_rows(&mut s, &mut t, 80, 120);
+    feed_prompt(&mut s, &mut t, "PC");
+    feed_full_rows(&mut s, &mut t, 80, 10);
+
+    // Evict old pages, then recompute which prompts remain in session-absolute
+    // coordinates (shell marks are not rewritten by eviction).
+    t.set_scrollback_limit_bytes(1);
+    let evicted = t.primary.rows_evicted();
+    assert!(evicted > 0, "shrinking the limit evicts whole pages");
+
+    let mut survivors: Vec<usize> = t
+        .shell_marks
+        .iter()
+        .filter(|mark| mark.kind == ShellIntegrationMarkKind::PromptStart)
+        .map(|mark| mark.point.y)
+        .filter(|&y| y >= evicted)
+        .collect();
+    assert!(!survivors.is_empty(), "at least the newest prompt survives");
+    survivors.sort_unstable();
+    survivors.reverse();
+
+    // Prev from the bottom walks the retained prompts top-ward; each lands the
+    // viewport top on that prompt's evicted-remapped row.
+    t.scroll_viewport_to_bottom();
+    let mut landed = Vec::new();
+    while t.scroll_to_prompt(PromptJump::Prev) {
+        landed.push(t.primary.rows_evicted() + t.primary.visible_row_base());
+    }
+    assert_eq!(landed, survivors, "no evicted prompt is ever jumped into");
+}
+
+#[test]
+fn set_scrollback_limit_bytes_shrinks_and_disables_history() {
+    let mut t = terminal_full_history(80, 3, 300);
+    let before = t.scrollback_len();
+    assert!(before > 100, "history spans multiple pages");
+
+    t.set_scrollback_limit_bytes(1);
+    let after = t.scrollback_len();
+    assert!(after < before, "runtime shrink trims history");
+    assert!(after > 0, "the newest page is always retained");
+
+    t.set_scrollback_limit_bytes(0);
+    assert_eq!(t.scrollback_len(), 0, "limit 0 disables scrollback");
+}

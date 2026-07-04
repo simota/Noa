@@ -159,6 +159,56 @@ pub fn select_due_overview_tile_ids<Id: Copy>(
         .collect()
 }
 
+/// Outcome of the post-frame dirty-backlog check `redraw_overview` runs
+/// after each Tab Overview frame (Fix A): either an immediate redraw is
+/// warranted right now, or — if every remaining dirty tile is merely
+/// throttle-blocked — the single instant at which the earliest one becomes
+/// due, so the caller can schedule one delayed wake-up instead of spinning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverviewBacklogDecision {
+    pub request_immediate_redraw: bool,
+    pub wake_at: Option<Instant>,
+}
+
+/// Decide the post-frame backlog action from each source tile's dirty +
+/// last-render state.
+///
+/// A tile only warrants `request_immediate_redraw` when it is dirty *and*
+/// already due (i.e. [`should_render_tile`] would render it right now) —
+/// that only happens when [`OVERVIEW_MAX_RENDER_TILES_PER_FRAME`] left it
+/// un-rendered this frame. A tile that is merely dirty-but-throttled
+/// contributes its throttle deadline (`last_render_at + min_interval`, or
+/// `now` if it has never been rendered) to `wake_at`, and the earliest one
+/// wins: one delayed wake-up covers every throttled tile, since a tile that
+/// becomes due re-triggers this same check when it fires.
+pub fn overview_backlog_decision<Id: Copy>(
+    candidates: &[OverviewRenderCandidate<Id>],
+    now: Instant,
+    min_interval: Duration,
+) -> OverviewBacklogDecision {
+    let mut wake_at: Option<Instant> = None;
+    for candidate in candidates {
+        if !candidate.dirty {
+            continue;
+        }
+        if should_render_tile(candidate.dirty, candidate.last_render_at, now, min_interval) {
+            return OverviewBacklogDecision {
+                request_immediate_redraw: true,
+                wake_at: None,
+            };
+        }
+        let due_at = candidate
+            .last_render_at
+            .map(|last_render_at| last_render_at + min_interval)
+            .unwrap_or(now);
+        wake_at = Some(wake_at.map_or(due_at, |current| current.min(due_at)));
+    }
+    OverviewBacklogDecision {
+        request_immediate_redraw: false,
+        wake_at,
+    }
+}
+
 /// Decide the tile mode from an injected VRAM budget flag.
 pub fn overview_tile_mode_for_budget(budget_exceeded: bool) -> OverviewTileMode {
     if budget_exceeded {
@@ -450,6 +500,73 @@ mod tests {
         );
 
         assert_eq!(selected, vec![7]);
+    }
+
+    #[test]
+    fn backlog_decision_schedules_a_delayed_wake_when_only_throttled_tiles_remain_dirty() {
+        let now = Instant::now();
+        let last_render_at = now - OVERVIEW_TILE_MIN_RENDER_INTERVAL / 2;
+        let candidates = [OverviewRenderCandidate {
+            id: 1,
+            dirty: true,
+            last_render_at: Some(last_render_at),
+        }];
+
+        let decision =
+            overview_backlog_decision(&candidates, now, OVERVIEW_TILE_MIN_RENDER_INTERVAL);
+
+        assert!(!decision.request_immediate_redraw);
+        assert_eq!(
+            decision.wake_at,
+            Some(last_render_at + OVERVIEW_TILE_MIN_RENDER_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn backlog_decision_requests_immediate_redraw_when_a_due_dirty_tile_survives_the_frame_cap() {
+        let now = Instant::now();
+        let due = now - OVERVIEW_TILE_MIN_RENDER_INTERVAL;
+        let candidates = [
+            OverviewRenderCandidate {
+                id: 1,
+                dirty: true,
+                last_render_at: Some(now - OVERVIEW_TILE_MIN_RENDER_INTERVAL / 2),
+            },
+            OverviewRenderCandidate {
+                id: 2,
+                dirty: true,
+                last_render_at: Some(due),
+            },
+        ];
+
+        let decision =
+            overview_backlog_decision(&candidates, now, OVERVIEW_TILE_MIN_RENDER_INTERVAL);
+
+        assert!(decision.request_immediate_redraw);
+        assert_eq!(decision.wake_at, None);
+    }
+
+    #[test]
+    fn backlog_decision_requests_nothing_when_every_tile_is_clean() {
+        let now = Instant::now();
+        let candidates = [
+            OverviewRenderCandidate {
+                id: 1,
+                dirty: false,
+                last_render_at: Some(now),
+            },
+            OverviewRenderCandidate {
+                id: 2,
+                dirty: false,
+                last_render_at: None,
+            },
+        ];
+
+        let decision =
+            overview_backlog_decision(&candidates, now, OVERVIEW_TILE_MIN_RENDER_INTERVAL);
+
+        assert!(!decision.request_immediate_redraw);
+        assert_eq!(decision.wake_at, None);
     }
 
     #[test]

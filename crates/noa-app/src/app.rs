@@ -7,6 +7,7 @@
 //! events back to the main loop.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -46,8 +47,8 @@ use crate::split_tree::{
 use crate::tab_overview::{
     OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_TILE_MIN_RENDER_INTERVAL,
     OverviewLayout, OverviewRenderCandidate, compute_overview_grid, hit_test_overview_grid,
-    overview_placeholder_source_ids, overview_tile_labels, sanitize_placeholder_label,
-    select_due_overview_tile_ids,
+    overview_backlog_decision, overview_placeholder_source_ids, overview_tile_labels,
+    sanitize_placeholder_label, select_due_overview_tile_ids,
 };
 use crate::{AppCommand, ViewportScroll};
 
@@ -226,6 +227,14 @@ struct Surface {
     /// `CursorMoved`/`ModifiersChanged` (`App::sync_hover_link`) and fed
     /// into `FrameSnapshot::hover_link` at redraw.
     hover_link: Option<HoverLink>,
+    /// The Tab Overview mirror's read-only publish slot (Fix B, REQ-NF-6):
+    /// this pane's io thread opportunistically drops a fresh
+    /// `FrameSnapshot::peek` here whenever it already holds the `Terminal`
+    /// lock feeding pty bytes in and the overview is visible (see
+    /// `io_thread::feed_terminal`), so `App::render_due_overview_tiles`
+    /// never has to lock `terminal` itself. `None` until the first publish
+    /// (or `App::seed_overview_snapshots`'s one-time fallback) lands.
+    overview_snapshot: Arc<Mutex<Option<Arc<FrameSnapshot>>>>,
 }
 
 impl WindowState {
@@ -281,6 +290,18 @@ pub struct App {
     clipboard: SystemClipboard,
     keybinds: KeybindEngine,
     overview_visible: bool,
+    /// Shared with every pane's io thread (`io_thread::OverviewPublish`) so
+    /// it can gate its opportunistic `FrameSnapshot::peek` publish behind a
+    /// single atomic load instead of touching app state (Fix B, REQ-NF-6).
+    /// Kept in lockstep with `overview_visible` at every write site.
+    overview_visible_gate: Arc<AtomicBool>,
+    /// Next scheduled Tab Overview wake-up, set by `redraw_overview`'s
+    /// post-frame backlog check (Fix A) when every remaining dirty tile is
+    /// merely throttle-blocked rather than due right now. Consumed by
+    /// `tick_overview_backlog`, which piggybacks on the cursor-blink
+    /// `about_to_wait` + `WaitUntil` wake-up mechanism instead of adding a
+    /// second timer source.
+    overview_wake_deadline: Option<Instant>,
     /// Current blink-timer phase for the focused pane's cursor, fed into
     /// `FrameSnapshot::cursor_blink_visible` on every redraw. Toggled by
     /// `tick_cursor_blink` and snapped back to `true` on keyboard input.
@@ -321,6 +342,8 @@ impl App {
             clipboard: SystemClipboard::new(),
             keybinds: KeybindEngine::default(),
             overview_visible: false,
+            overview_visible_gate: Arc::new(AtomicBool::new(false)),
+            overview_wake_deadline: None,
             cursor_blink_visible: true,
             cursor_blink_deadline: None,
             hovered_link: None,
@@ -513,18 +536,18 @@ impl App {
             )
     }
 
-    /// Advance the cursor blink phase and keep the event loop's
-    /// `ControlFlow` in lockstep with whether a blink timer is even needed
-    /// right now — `WaitUntil` only while a blinking cursor is displayable,
-    /// `Wait` (no wake-ups) otherwise. Called from `about_to_wait` every
-    /// pass, so a style/focus/visibility change is picked up on the very
-    /// next event instead of waiting for a stale deadline.
-    fn tick_cursor_blink(&mut self, event_loop: &ActiveEventLoop) {
+    /// Advance the cursor blink phase and report the next instant it needs
+    /// another look — `Some(deadline)` only while a blinking cursor is
+    /// displayable, `None` otherwise (no busy wake-ups needed). Called from
+    /// `about_to_wait` every pass, so a style/focus/visibility change is
+    /// picked up on the very next event instead of waiting for a stale
+    /// deadline. `about_to_wait` merges this with `tick_overview_backlog`'s
+    /// deadline before setting the event loop's `ControlFlow` once.
+    fn tick_cursor_blink(&mut self) -> Option<Instant> {
         if !self.focused_cursor_wants_blink() {
             self.cursor_blink_visible = true;
             self.cursor_blink_deadline = None;
-            event_loop.set_control_flow(ControlFlow::Wait);
-            return;
+            return None;
         }
 
         let now = Instant::now();
@@ -532,8 +555,7 @@ impl App {
             .cursor_blink_deadline
             .get_or_insert(now + CURSOR_BLINK_INTERVAL);
         if now < deadline {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-            return;
+            return Some(deadline);
         }
 
         self.cursor_blink_visible = !self.cursor_blink_visible;
@@ -544,7 +566,25 @@ impl App {
         {
             state.window.request_redraw();
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+        Some(next)
+    }
+
+    /// Wake the Tab Overview once the earliest throttle-blocked dirty tile
+    /// becomes due, instead of `redraw_overview` re-requesting a redraw
+    /// every pass while `should_render_tile` keeps rejecting it until
+    /// `OVERVIEW_TILE_MIN_RENDER_INTERVAL` has elapsed (Fix A — see
+    /// `redraw_overview`'s post-frame backlog check and
+    /// `tab_overview::overview_backlog_decision`). Piggybacks on the same
+    /// `about_to_wait` + `WaitUntil` wake-up mechanism as
+    /// `tick_cursor_blink` rather than adding a second timer source.
+    fn tick_overview_backlog(&mut self) -> Option<Instant> {
+        let deadline = self.overview_wake_deadline?;
+        if Instant::now() < deadline {
+            return Some(deadline);
+        }
+        self.overview_wake_deadline = None;
+        self.request_overview_redraw();
+        None
     }
 
     fn handle_app_command(&mut self, event_loop: &ActiveEventLoop, command: AppCommand) {
@@ -853,14 +893,19 @@ impl App {
         let terminal = Arc::new(Mutex::new(terminal));
         let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
         let (pty_input_tx, pty_input_rx) = crate::io_thread::input_channel();
+        let overview_snapshot = Arc::new(Mutex::new(None));
+        let overview_publish = crate::io_thread::OverviewPublish {
+            slot: overview_snapshot.clone(),
+            visible: self.overview_visible_gate.clone(),
+        };
         let io_thread = crate::io_thread::spawn(
             pty,
             terminal.clone(),
             self.proxy.clone(),
-            window_id,
-            pane_id,
+            crate::io_thread::IoThreadTarget { window_id, pane_id },
             resize_rx,
             pty_input_rx,
+            overview_publish,
         );
 
         Ok(Surface {
@@ -875,6 +920,7 @@ impl App {
             ime_state: input::ImeState::default(),
             rect,
             hover_link: None,
+            overview_snapshot,
         })
     }
 
@@ -1320,6 +1366,8 @@ impl App {
         }
 
         self.overview_visible = true;
+        self.overview_visible_gate.store(true, Ordering::Relaxed);
+        self.seed_overview_snapshots();
         self.mark_all_overview_tiles_dirty();
         if let Some(overview) = self.overview_window.as_ref() {
             overview.window.set_visible(true);
@@ -1328,8 +1376,40 @@ impl App {
         }
     }
 
+    /// One-time re-peek for each open tab's overview mirror on every
+    /// `show_tab_overview` call (Fix B). Once `overview_visible_gate` is
+    /// set, each pane's io thread publishes a fresh `FrameSnapshot::peek`
+    /// opportunistically on its own next pty output — but the gate was
+    /// clear the whole time the overview was hidden, so a tab that kept
+    /// producing output while hidden published nothing during that window,
+    /// and its slot holds whatever it last published before hiding (or
+    /// `None` on first open). Re-peeking unconditionally here — rather than
+    /// only when the slot is still `None` — is what makes reopening show
+    /// current content instead of that stale frame; a tab that publishes
+    /// on its own moments later just gets overwritten immediately anyway.
+    /// Runs once per `show_tab_overview` call, not per frame, so
+    /// `render_due_overview_tiles` itself still never locks a tab's
+    /// `Terminal` — only each window's currently focused pane pays this
+    /// one-off lock (mirrors `render_due_overview_tiles`'s "focused pane
+    /// only" mirror).
+    fn seed_overview_snapshots(&self) {
+        for state in self.windows.values() {
+            let Some(surface) = state.surfaces.get(&state.focused_pane) else {
+                continue;
+            };
+            let term = surface.terminal.lock().expect("terminal mutex poisoned");
+            let snapshot = Arc::new(FrameSnapshot::peek(&term));
+            drop(term);
+            *surface
+                .overview_snapshot
+                .lock()
+                .expect("overview snapshot mutex poisoned") = Some(snapshot);
+        }
+    }
+
     fn hide_tab_overview(&mut self) {
         self.overview_visible = false;
+        self.overview_visible_gate.store(false, Ordering::Relaxed);
         if let Some(overview) = self.overview_window.as_ref() {
             overview.window.set_visible(false);
         }
@@ -1386,8 +1466,16 @@ impl App {
         )
     }
 
-    fn due_overview_tile_ids(&self, source_window_ids: &[WindowId], now: Instant) -> Vec<WindowId> {
-        let candidates = source_window_ids
+    /// Build the pure due/backlog-decision input from each live source
+    /// window's current dirty/last-render tile state. Shared by
+    /// `due_overview_tile_ids` (pre-frame selection) and `redraw_overview`
+    /// (post-frame backlog check), which read it at different points in
+    /// the frame.
+    fn overview_tile_candidates(
+        &self,
+        source_window_ids: &[WindowId],
+    ) -> Vec<OverviewRenderCandidate<WindowId>> {
+        source_window_ids
             .iter()
             .filter_map(|window_id| {
                 self.windows.get(window_id)?;
@@ -1402,8 +1490,11 @@ impl App {
                     last_render_at: tile.last_render_at,
                 })
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
 
+    fn due_overview_tile_ids(&self, source_window_ids: &[WindowId], now: Instant) -> Vec<WindowId> {
+        let candidates = self.overview_tile_candidates(source_window_ids);
         select_due_overview_tile_ids(
             &candidates,
             now,
@@ -1490,13 +1581,21 @@ impl App {
             let Some(surface) = state.surfaces.get(&state.focused_pane) else {
                 continue;
             };
-            let mut snapshot = {
-                let mut term = surface.terminal.lock().expect("terminal mutex poisoned");
-                FrameSnapshot::from_terminal(&mut term)
+            // Read-only publish slot (Fix B, REQ-NF-6): the io thread
+            // already holds `Terminal`'s lock on every pty feed and
+            // opportunistically publishes a `FrameSnapshot::peek` there
+            // (cursor already hidden by `peek`), so this render path never
+            // locks a tab's `Terminal` itself. `None` only for a tab that
+            // hasn't published since the overview opened;
+            // `seed_overview_snapshots`'s one-time fallback covers that gap.
+            let Some(snapshot) = surface
+                .overview_snapshot
+                .lock()
+                .expect("overview snapshot mutex poisoned")
+                .clone()
+            else {
+                continue;
             };
-            // Mirrors the "not the focused pane" convention `redraw()` already
-            // uses for background panes within one window.
-            snapshot.cursor.visible = false;
 
             // Reuse this tab's own `Renderer` unmodified (REQ-NF-1): point it
             // at the shared scratch resolution just long enough to draw one
@@ -1730,17 +1829,20 @@ impl App {
 
         // OVERVIEW_MAX_RENDER_TILES_PER_FRAME caps how many tiles one frame
         // regenerates, and idle tabs produce no pty output to trigger the
-        // next frame — so keep requesting redraws until the dirty backlog
-        // drains (a full 9-tile grid fills in ~5 frames). Stops as soon as
-        // every source tile is clean; a dirty-but-throttled tile may re-run
-        // this for up to OVERVIEW_TILE_MIN_RENDER_INTERVAL transiently.
-        let backlog_remains = source_window_ids.iter().any(|window_id| {
-            self.overview_tiles
-                .get(window_id)
-                .is_some_and(|tile| tile.dirty)
-        });
-        if backlog_remains {
+        // next frame — so a dirty backlog can survive this frame for two
+        // different reasons, and only one of them justifies re-requesting a
+        // redraw right away (Fix A): a due-but-capped tile (immediate), vs.
+        // a tile that is merely inside its 10Hz throttle window (schedule
+        // one delayed wake-up via `tick_overview_backlog` instead of
+        // spinning `present_overview_frame` until it's due).
+        let candidates = self.overview_tile_candidates(&source_window_ids);
+        let decision =
+            overview_backlog_decision(&candidates, now, OVERVIEW_TILE_MIN_RENDER_INTERVAL);
+        if decision.request_immediate_redraw {
+            self.overview_wake_deadline = None;
             self.request_overview_redraw();
+        } else {
+            self.overview_wake_deadline = decision.wake_at;
         }
     }
 
@@ -2010,7 +2112,21 @@ impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
         self.install_macos_menu_if_needed();
-        self.tick_cursor_blink(event_loop);
+        // Both ticks report their own next wake-up instead of setting
+        // `ControlFlow` directly, so a `WaitUntil` from one can't clobber a
+        // more urgent one from the other — this pass sets it exactly once,
+        // at the earliest of the two.
+        let blink_deadline = self.tick_cursor_blink();
+        let overview_deadline = self.tick_overview_backlog();
+        let deadline = match (blink_deadline, overview_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+            (None, None) => None,
+        };
+        event_loop.set_control_flow(match deadline {
+            Some(deadline) => ControlFlow::WaitUntil(deadline),
+            None => ControlFlow::Wait,
+        });
     }
 }
 

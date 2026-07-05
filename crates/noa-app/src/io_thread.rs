@@ -63,7 +63,7 @@ pub(crate) struct SidebarPublish {
 }
 
 /// How many trailing terminal rows the sidebar card preview shows (FR-2).
-const SIDEBAR_PREVIEW_LINES: usize = 2;
+const SIDEBAR_PREVIEW_LINES: usize = 3;
 
 pub(crate) type PtyInput = Box<[u8]>;
 

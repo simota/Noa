@@ -34,9 +34,9 @@ pub const SIDEBAR_HEADER_H: u32 = 36;
 /// buttons below the header.
 pub const SIDEBAR_TOOLBAR_H: u32 = 30;
 
-/// Height of one session card. Six rows: name / cwd / meta (branch ·
-/// process on one line) / two last-output preview lines / updated-time.
-pub const SIDEBAR_CARD_H: u32 = 124;
+/// Height of one session card. Seven rows: name / cwd / meta (branch ·
+/// process on one line) / three last-output preview lines / updated-time.
+pub const SIDEBAR_CARD_H: u32 = 140;
 
 /// Vertical gap between adjacent cards.
 pub const SIDEBAR_CARD_GUTTER: u32 = 8;
@@ -57,7 +57,7 @@ const CARD_NAME_H: u32 = 18;
 
 // Card interior row baselines (top-relative): name, cwd, the meta row
 // (running process + branch on one line — merging the two rows the earlier
-// layout kept separate frees the space the preview rows use below), two
+// layout kept separate frees the space the preview rows use below), three
 // last-output preview lines, then the updated-time. All rows are always
 // reserved (fixed card height) and left blank when a field is absent —
 // simpler than a dynamic per-card height.
@@ -66,7 +66,8 @@ const CARD_CWD_Y: u32 = 30;
 const CARD_META_Y: u32 = 50;
 const CARD_PREVIEW1_Y: u32 = 70;
 const CARD_PREVIEW2_Y: u32 = 86;
-const CARD_UPDATED_Y: u32 = 104;
+const CARD_PREVIEW3_Y: u32 = 102;
+const CARD_UPDATED_Y: u32 = 120;
 
 // Toolbar `+` / `…` button metrics (kept as comfortable hit targets).
 const TOOLBAR_BUTTON_W: u32 = 26;
@@ -111,6 +112,8 @@ pub struct CardRects {
     pub preview1: SidebarRect,
     /// The second last-output preview row.
     pub preview2: SidebarRect,
+    /// The third last-output preview row.
+    pub preview3: SidebarRect,
     /// The updated-time row (dim), on its own bottom line.
     pub updated: SidebarRect,
     pub dot: SidebarRect,
@@ -309,7 +312,7 @@ impl SidebarMetrics {
 
     /// Build one card's clipped sub-rects from its (possibly off-viewport)
     /// window top `top` and the viewport `vp`. Every interior offset scales with
-    /// the DPR so the card's six rows (name / cwd / meta / preview×2 / updated)
+    /// the DPR so the card's seven rows (name / cwd / meta / preview×3 / updated)
     /// fit its scaled height on a Retina display.
     fn card_rects(&self, id: SessionCardId, top: i64, vp: SidebarRect) -> CardRects {
         let lx = vp.x as i64;
@@ -347,6 +350,7 @@ impl SidebarMetrics {
             meta: row(CARD_META_Y),
             preview1: row(CARD_PREVIEW1_Y),
             preview2: row(CARD_PREVIEW2_Y),
+            preview3: row(CARD_PREVIEW3_Y),
             updated: row(CARD_UPDATED_Y),
             dot: iclip(dot_x, name_y + (name_h - dot_d) / 2, dot_d, dot_d, vp),
             menu_button: iclip(menu_x, name_y, card_menu_w, name_h, vp),
@@ -802,7 +806,7 @@ mod tests {
     }
 
     // 6 ids stacked; a viewport tall enough for exactly 3 cards. bounds height =
-    // header(36) + toolbar(30) + 3*stride(132) = 462.
+    // header(36) + toolbar(30) + 3*stride(148) = 510.
     fn six_id_bounds() -> (SidebarRect, Vec<SessionCardId>) {
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
         (
@@ -1160,7 +1164,7 @@ mod tests {
     // FR-2 mockup parity: the status dot sits at the card's left edge (left of
     // the icon and name), and the updated-time rides the name row's right side,
     // just left of the invisible `…` hit region. The preview heading row falls
-    // between the meta line and the two preview rows.
+    // between the meta line and the three preview rows.
     #[test]
     fn card_rects_place_dot_left_and_updated_on_the_name_row() {
         let (bounds, ids) = six_id_bounds();
@@ -1176,12 +1180,13 @@ mod tests {
         assert!(card.name_line.right() <= card.menu_button.x);
 
         // Rows stack top to bottom: name, cwd, meta (process · branch), the
-        // two preview rows, updated.
+        // three preview rows, updated.
         assert!(card.name_line.y < card.cwd_line.y);
         assert!(card.cwd_line.y < card.meta.y);
         assert!(card.meta.y < card.preview1.y);
         assert!(card.preview1.y < card.preview2.y);
-        assert!(card.preview2.y < card.updated.y);
+        assert!(card.preview2.y < card.preview3.y);
+        assert!(card.preview3.y < card.updated.y);
     }
 
     // DPR scaling: the metrics double at scale 2.0, and a degenerate scale
@@ -1204,14 +1209,14 @@ mod tests {
     }
 
     // At scale 2.0 the bands, card height, and every interior row double, so a
-    // Retina card keeps all five rows (name / meta / heading / preview×2) inside
+    // Retina card keeps all six rows (name / meta / heading / preview×3) inside
     // its doubled height instead of clipping — and hit-test maps correctly
     // against the scaled geometry.
     #[test]
     fn layout_and_hit_test_scale_at_dpr_2() {
         let m2 = SidebarMetrics::new(2.0);
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
-        // header(72) + toolbar(60) + 3*stride(264) = 924, with a doubled width.
+        // header(72) + toolbar(60) + 3*stride(296) = 1020, with a doubled width.
         let bounds = SidebarRect::new(
             0,
             0,
@@ -1226,7 +1231,7 @@ mod tests {
         let layout = m2.layout(bounds, &ids, 0);
         assert_eq!(layout.cards.len(), 3);
 
-        // The first card is a full doubled height and its six rows stack in
+        // The first card is a full doubled height and its seven rows stack in
         // order, with the last (updated) row fitting inside the card.
         let card = &layout.cards[0];
         assert_eq!(card.bounds.h, m2.card_h);
@@ -1235,7 +1240,8 @@ mod tests {
         assert!(card.cwd_line.y < card.meta.y);
         assert!(card.meta.y < card.preview1.y);
         assert!(card.preview1.y < card.preview2.y);
-        assert!(card.preview2.y < card.updated.y);
+        assert!(card.preview2.y < card.preview3.y);
+        assert!(card.preview3.y < card.updated.y);
         assert!(card.updated.h > 0);
         assert!(card.updated.bottom() <= card.bounds.bottom());
 

@@ -1129,12 +1129,13 @@ fn emit_card_text(
         out.extend(window_run(to_cell, rects.meta, text, badge_fg, false));
     }
 
-    // Last-output preview rows (up to 2), in their original ANSI colors: each
+    // Last-output preview rows (up to 3), in their original ANSI colors: each
     // span is recolored inline via an embedded SGR prefix, so one run carries
     // the whole line. Rows the card has no preview line for stay blank.
     for (rect, line) in [
         (rects.preview1, card.preview.first()),
         (rects.preview2, card.preview.get(1)),
+        (rects.preview3, card.preview.get(2)),
     ] {
         let Some(line) = line else { continue };
         let mut text = String::new();

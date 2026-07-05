@@ -70,6 +70,22 @@ pub(crate) type PtyInput = Box<[u8]>;
 pub(crate) const PTY_INPUT_QUEUE_CAPACITY: usize = 1024;
 const PTY_DATA_DRAIN_BYTE_LIMIT: usize = 256 * 1024;
 
+/// The longest the io thread withholds a redraw while an application holds
+/// synchronized output (DECSET 2026) open. Mode 2026 has no standardized
+/// timeout — the spec leaves it to the terminal, tmux uses 1s — and Ghostty
+/// dodges the question by presenting on a vsync timer, so a frame left mid-sync
+/// simply isn't shown until the next vsync after release. noa's renderer is
+/// event-driven off pty output instead, so *suppressing the redraw request with
+/// no fallback* strands the display on a stale frame whenever an app leaves
+/// 2026 set across an input-wait, or (more often) when pty batching keeps
+/// ending a coalesced read mid-frame during rapid repaints — e.g. holding an
+/// arrow key to move through a Claude Code selection menu. Capping suppression
+/// at the render cadence keeps the screen live: a well-behaved single frame
+/// still paints atomically at its ESU (which arrives well within the cap, so
+/// the cap never fires for it), while sustained back-to-back frames refresh at
+/// ~10fps instead of freezing until output happens to stop on a frame boundary.
+const SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION: Duration = Duration::from_millis(100);
+
 /// Owned handle for stopping and joining a PTY io thread.
 pub(crate) struct IoThreadHandle {
     shutdown_tx: Sender<()>,
@@ -456,8 +472,38 @@ fn write_pty_bytes(writer: &PtyWriter, bytes: &[u8]) {
     }
 }
 
-fn should_request_redraw_after_terminal_output(output: &TerminalOutput) -> bool {
-    !output.synchronized_output
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RedrawDecision {
+    /// Ask the main thread to repaint now — synchronized output is not active,
+    /// or the suppression cap has elapsed since the last paint.
+    Now,
+    /// Withhold this feed's redraw. Wake and force one at `deadline` unless
+    /// intervening output clears synchronized output (or its own cap) first.
+    Suppress { deadline: Instant },
+}
+
+/// Decide whether a just-fed batch should trigger a redraw. `synchronized` is
+/// the terminal's DECSET 2026 state at end of batch; `last_redraw` is when the
+/// io thread last actually asked the main thread to repaint. A batch left in
+/// synchronized output withholds its redraw (that is the point of mode 2026) —
+/// but never for longer than [`SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION`] since the
+/// last paint, so a stalled or batch-straddled frame can't freeze the screen
+/// (bounds staleness to the cap even under a continuous burst of frames).
+fn decide_redraw(synchronized: bool, last_redraw: Option<Instant>, now: Instant) -> RedrawDecision {
+    if !synchronized {
+        return RedrawDecision::Now;
+    }
+    match last_redraw {
+        // Painted recently: hold this frame, but arm a deadline so the cap is
+        // enforced even if no further output arrives to release 2026.
+        Some(last) if now.saturating_duration_since(last) < SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION => {
+            RedrawDecision::Suppress {
+                deadline: last + SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION,
+            }
+        }
+        // Never painted, or the cap already elapsed: paint now to bound staleness.
+        _ => RedrawDecision::Now,
+    }
 }
 
 /// Spawn the io thread, which takes ownership of `pty`. Returns immediately;
@@ -496,6 +542,13 @@ pub fn spawn(
         // it lets the timeout arm be added only when something is owed,
         // instead of a constant poll interval.
         let mut publish_pending_at: Option<Instant> = None;
+        // When the io thread last asked the main thread to repaint, and a
+        // deadline owed by a redraw currently withheld under synchronized
+        // output (DECSET 2026). Together they cap how long a mid-sync frame
+        // can sit unpainted (see [`decide_redraw`]); `None` deadline means
+        // nothing is owed and the select below blocks exactly as before.
+        let mut last_redraw_at: Option<Instant> = None;
+        let mut sync_redraw_deadline: Option<Instant> = None;
         loop {
             let mut sel = crossbeam_channel::Select::new();
             let shutdown_op = sel.recv(&shutdown_rx);
@@ -503,7 +556,13 @@ pub fn spawn(
             let resize_op = sel.recv(&resize_rx);
             let input_op = sel.recv(&input_rx);
 
-            let selected = match publish_pending_at {
+            // Wake at whichever owed deadline comes first: an overview trailing
+            // flush (Fix B defect 1) or a withheld synchronized-output redraw.
+            let next_deadline = [publish_pending_at, sync_redraw_deadline]
+                .into_iter()
+                .flatten()
+                .min();
+            let selected = match next_deadline {
                 Some(deadline) => sel
                     .select_timeout(deadline.saturating_duration_since(Instant::now()))
                     .ok(),
@@ -511,10 +570,25 @@ pub fn spawn(
             };
 
             let Some(oper) = selected else {
-                // The throttle window elapsed with nothing else waking the
-                // thread first — flush now (Fix B defect 1).
-                flush_pending_overview_publish(&terminal, &overview, &mut last_overview_publish);
-                publish_pending_at = None;
+                // A deadline elapsed with nothing else waking the thread first.
+                let now = Instant::now();
+                if publish_pending_at.is_some_and(|deadline| now >= deadline) {
+                    // The throttle window elapsed — flush now (Fix B defect 1).
+                    flush_pending_overview_publish(
+                        &terminal,
+                        &overview,
+                        &mut last_overview_publish,
+                    );
+                    publish_pending_at = None;
+                }
+                if sync_redraw_deadline.is_some_and(|deadline| now >= deadline) {
+                    // The synchronized-output suppression cap elapsed — force
+                    // the withheld repaint so the stale frame can't persist.
+                    sync_redraw_deadline = None;
+                }
+                // Either deadline means the frame the main thread holds is
+                // stale; a single redraw covers both.
+                last_redraw_at = Some(now);
                 if proxy
                     .send_event(UserEvent::Redraw(window_id, pane_id))
                     .is_err()
@@ -576,7 +650,11 @@ pub fn spawn(
                         if !output.pending_writes.is_empty() {
                             write_pty_bytes(&writer, &output.pending_writes);
                         }
-                        let should_redraw = should_request_redraw_after_terminal_output(&output);
+                        let redraw = decide_redraw(
+                            output.synchronized_output,
+                            last_redraw_at,
+                            Instant::now(),
+                        );
                         for text in output.pending_clipboard_writes {
                             let _ = proxy.send_event(UserEvent::ClipboardWrite {
                                 window_id,
@@ -599,12 +677,22 @@ pub fn spawn(
                                 body: notification.body,
                             });
                         }
-                        if should_redraw
-                            && proxy
-                                .send_event(UserEvent::Redraw(window_id, pane_id))
-                                .is_err()
-                        {
-                            break; // event loop gone
+                        match redraw {
+                            RedrawDecision::Now => {
+                                sync_redraw_deadline = None;
+                                last_redraw_at = Some(Instant::now());
+                                if proxy
+                                    .send_event(UserEvent::Redraw(window_id, pane_id))
+                                    .is_err()
+                                {
+                                    break; // event loop gone
+                                }
+                            }
+                            // Frame withheld under synchronized output: owe a
+                            // redraw at the cap deadline so it can't get stuck.
+                            RedrawDecision::Suppress { deadline } => {
+                                sync_redraw_deadline = Some(deadline);
+                            }
                         }
                         match terminal_event {
                             Some(PtyDrainTerminalEvent::ExitOrError) => {
@@ -816,8 +904,14 @@ mod tests {
             &mut None,
         );
 
+        // A frame left mid-sync withholds its redraw while a recent paint means
+        // the suppression cap hasn't elapsed yet — but it owes one at the cap.
         assert!(output.synchronized_output);
-        assert!(!should_request_redraw_after_terminal_output(&output));
+        let just_painted = Instant::now();
+        assert!(matches!(
+            decide_redraw(output.synchronized_output, Some(just_painted), just_painted),
+            RedrawDecision::Suppress { .. }
+        ));
 
         let output = feed_terminal(
             &terminal,
@@ -829,8 +923,41 @@ mod tests {
             &mut None,
         );
 
+        // Releasing 2026 paints immediately, regardless of how recent the last
+        // paint was.
         assert!(!output.synchronized_output);
-        assert!(should_request_redraw_after_terminal_output(&output));
+        assert_eq!(
+            decide_redraw(output.synchronized_output, Some(Instant::now()), Instant::now()),
+            RedrawDecision::Now
+        );
+    }
+
+    #[test]
+    fn synchronized_output_redraw_is_capped_so_a_held_frame_cannot_freeze() {
+        // Regression: an app (e.g. a Claude Code selection menu navigated with a
+        // held arrow key) whose pty output keeps ending a coalesced batch
+        // mid-frame leaves 2026 set at every batch boundary. Without a cap the
+        // redraw is suppressed forever and the screen freezes; with the cap it
+        // must repaint once the suppression window elapses since the last paint.
+        let now = Instant::now();
+        let last_paint = now - SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION;
+        assert_eq!(
+            decide_redraw(true, Some(last_paint), now),
+            RedrawDecision::Now,
+            "a frame held past the cap must repaint"
+        );
+
+        // Never painted yet: paint now rather than start life frozen.
+        assert_eq!(decide_redraw(true, None, now), RedrawDecision::Now);
+
+        // Within the cap: hold, but arm the deadline at exactly cap-since-paint.
+        let recent = now - SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION / 2;
+        assert_eq!(
+            decide_redraw(true, Some(recent), now),
+            RedrawDecision::Suppress {
+                deadline: recent + SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION
+            }
+        );
     }
 
     #[test]

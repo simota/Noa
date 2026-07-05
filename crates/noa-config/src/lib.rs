@@ -32,6 +32,8 @@ pub const DEFAULT_QUICK_TERMINAL_SIZE: f32 = 0.4;
 /// convention. (Ghostty ships no default; noa binds one so the drop-down works
 /// out of the box. Set `quick-terminal-hotkey = none` to disable it.)
 pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "cmd+grave";
+/// `sidebar-width` default: the session sidebar's width in points when visible.
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 360.0;
 
 /// `clipboard-read` policy for OSC 52 clipboard *read* (query) requests.
 /// Mirrors Ghostty, whose default is `ask`.
@@ -287,6 +289,20 @@ pub struct StartupConfig {
     /// `quick-terminal-autohide`: hide the quick terminal when it loses focus.
     /// Ghostty default is on.
     pub quick_terminal_autohide: bool,
+    /// `sidebar-enabled`: app-wide initial visibility of the session sidebar.
+    /// Per-window visibility is toggled from this starting value at runtime.
+    /// Default off. noa-specific key (no Ghostty analog).
+    pub sidebar_enabled: bool,
+    /// `sidebar-width`: the session sidebar's width in points when visible,
+    /// converted to a grid inset during the grid-first resize. Default
+    /// [`DEFAULT_SIDEBAR_WIDTH`].
+    pub sidebar_width: f32,
+    /// `sidebar-hotkey`: the chord that toggles the session sidebar for the
+    /// focused window. Stored verbatim and parsed by the same app-layer chord
+    /// path as [`Self::quick_terminal_hotkey`]; `none`/`off`/empty normalize to
+    /// the empty-string sentinel (no hotkey). Defaults to `None` (unbound) —
+    /// the sidebar is off by default, so no chord is registered until set.
+    pub sidebar_hotkey: Option<String>,
 }
 
 impl Default for StartupConfig {
@@ -318,6 +334,9 @@ impl Default for StartupConfig {
             quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
             quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
             quick_terminal_autohide: true,
+            sidebar_enabled: false,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            sidebar_hotkey: None,
         }
     }
 }
@@ -351,6 +370,9 @@ pub struct ConfigOverrides {
     pub quick_terminal_hotkey: Option<String>,
     pub quick_terminal_size: Option<f32>,
     pub quick_terminal_autohide: Option<bool>,
+    pub sidebar_enabled: Option<bool>,
+    pub sidebar_width: Option<f32>,
+    pub sidebar_hotkey: Option<String>,
 }
 
 impl ConfigOverrides {
@@ -404,6 +426,9 @@ impl ConfigOverrides {
             quick_terminal_autohide: higher_priority
                 .quick_terminal_autohide
                 .or(self.quick_terminal_autohide),
+            sidebar_enabled: higher_priority.sidebar_enabled.or(self.sidebar_enabled),
+            sidebar_width: higher_priority.sidebar_width.or(self.sidebar_width),
+            sidebar_hotkey: higher_priority.sidebar_hotkey.or(self.sidebar_hotkey),
         }
     }
 
@@ -443,6 +468,9 @@ impl ConfigOverrides {
             quick_terminal_autohide: self
                 .quick_terminal_autohide
                 .unwrap_or(base.quick_terminal_autohide),
+            sidebar_enabled: self.sidebar_enabled.unwrap_or(base.sidebar_enabled),
+            sidebar_width: self.sidebar_width.unwrap_or(base.sidebar_width),
+            sidebar_hotkey: self.sidebar_hotkey.or(base.sidebar_hotkey),
         }
     }
 }
@@ -594,6 +622,9 @@ mod tests {
                 quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
                 quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
                 quick_terminal_autohide: true,
+                sidebar_enabled: false,
+                sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+                sidebar_hotkey: None,
             }
         );
     }

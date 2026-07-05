@@ -63,6 +63,9 @@ pub(crate) fn build_overrides(
     let mut quick_terminal_hotkey = None;
     let mut quick_terminal_size = None;
     let mut quick_terminal_autohide = None;
+    let mut sidebar_enabled = None;
+    let mut sidebar_width = None;
+    let mut sidebar_hotkey = None;
     let mut diagnostics = Vec::new();
 
     for directive in directives {
@@ -208,6 +211,24 @@ pub(crate) fn build_overrides(
             "quick-terminal-autohide" => {
                 quick_terminal_autohide = parse_bool_directive(path, directive, &mut diagnostics);
             }
+            "sidebar-enabled" => {
+                sidebar_enabled = parse_bool_directive(path, directive, &mut diagnostics);
+            }
+            "sidebar-width" => {
+                sidebar_width = parse_non_negative_f32(path, directive, &mut diagnostics);
+            }
+            "sidebar-hotkey" => {
+                // Mirror `quick-terminal-hotkey`: the chord is stored verbatim
+                // for the app-layer parser to interpret; `none`/`off`/`false`/
+                // empty normalize to the empty-string sentinel that disables it.
+                sidebar_hotkey = Some(match directive.value.as_deref() {
+                    None => String::new(),
+                    Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+                        "" | "none" | "off" | "false" => String::new(),
+                        _ => value.to_string(),
+                    },
+                });
+            }
             "keybind" | "palette" => {
                 diagnostics.push(list_key_diagnostic(path, &directive.key));
             }
@@ -257,6 +278,9 @@ pub(crate) fn build_overrides(
             quick_terminal_hotkey,
             quick_terminal_size,
             quick_terminal_autohide,
+            sidebar_enabled,
+            sidebar_width,
+            sidebar_hotkey,
         },
         diagnostics,
     )
@@ -291,6 +315,9 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "quick-terminal-hotkey"
             | "quick-terminal-size"
             | "quick-terminal-autohide"
+            | "sidebar-enabled"
+            | "sidebar-width"
+            | "sidebar-hotkey"
     )
 }
 
@@ -1618,6 +1645,73 @@ mod tests {
         assert!(is_supported_scalar_key("quick-terminal-hotkey"));
         assert!(is_supported_scalar_key("quick-terminal-size"));
         assert!(is_supported_scalar_key("quick-terminal-autohide"));
+    }
+
+    // AC-15a: `sidebar-enabled`/`sidebar-width` parse; the default width (360)
+    // is applied when the key is absent.
+    #[test]
+    fn sidebar_enabled_and_width_parse_and_default() {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), "sidebar-enabled = true\nsidebar-width = 300");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(overrides.sidebar_enabled, Some(true));
+        assert_eq!(overrides.sidebar_width, Some(300.0));
+
+        // Absent width falls back to the default via `apply_to`.
+        let resolved = ConfigOverrides::default().apply_to(crate::StartupConfig::default());
+        assert!(!resolved.sidebar_enabled);
+        assert_eq!(resolved.sidebar_width, crate::DEFAULT_SIDEBAR_WIDTH);
+        assert_eq!(resolved.sidebar_width, 360.0);
+    }
+
+    #[test]
+    fn sidebar_width_rejects_negative_and_non_numeric() {
+        for value in ["-1", "wide"] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("sidebar-width = {value}"));
+
+            assert_eq!(overrides.sidebar_width, None, "{value:?}");
+            assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+            assert!(diagnostics[0].message.contains("sidebar-width"));
+        }
+    }
+
+    // AC-15b: a valid chord is accepted verbatim through the same path as
+    // `quick-terminal-hotkey`; `none`/empty normalize to the disabled sentinel.
+    // Chord *semantics* are validated by the app-layer `parse_hotkey` at
+    // registration (noa-config cannot depend on noa-app), matching how
+    // `quick-terminal-hotkey` defers validation.
+    #[test]
+    fn sidebar_hotkey_is_retained_verbatim() {
+        let (overrides, diagnostics) = parse_overrides(path(), "sidebar-hotkey = cmd+shift+s");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(overrides.sidebar_hotkey.as_deref(), Some("cmd+shift+s"));
+    }
+
+    #[test]
+    fn sidebar_hotkey_none_disables_via_empty_sentinel() {
+        for input in [
+            "sidebar-hotkey = none",
+            "sidebar-hotkey = off",
+            "sidebar-hotkey =",
+        ] {
+            let (overrides, diagnostics) = parse_overrides(path(), input);
+            assert!(diagnostics.is_empty(), "unexpected diagnostics for {input:?}");
+            assert_eq!(
+                overrides.sidebar_hotkey.as_deref(),
+                Some(""),
+                "{input:?} should disable via empty sentinel"
+            );
+        }
+    }
+
+    #[test]
+    fn sidebar_keys_are_supported_scalar_keys_for_import() {
+        assert!(is_supported_scalar_key("sidebar-enabled"));
+        assert!(is_supported_scalar_key("sidebar-width"));
+        assert!(is_supported_scalar_key("sidebar-hotkey"));
     }
 
     #[test]

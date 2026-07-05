@@ -22,6 +22,7 @@ mod notification;
 mod search_prompt;
 mod secure_input;
 mod session;
+mod session_store;
 pub mod split_tree;
 pub mod tab_overview;
 mod theme;

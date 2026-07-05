@@ -69,7 +69,7 @@ pub(crate) fn visible_pane_ids(tree: &SplitTree, zoomed: Option<PaneId>) -> Vec<
 
 pub(crate) fn tab_title(title: &str) -> String {
     if title.is_empty() {
-        "noa".to_string()
+        "Noa".to_string()
     } else {
         title.to_string()
     }

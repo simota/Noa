@@ -680,7 +680,7 @@ impl App {
         }
 
         let mut snapshots = Vec::new();
-        let mut title = "noa".to_string();
+        let mut title = "Noa".to_string();
         let visible_panes = visible_pane_ids(&state.split_tree, state.zoomed);
         for pane_id in visible_panes {
             let Some(surface) = state.surfaces.get(&pane_id) else {
@@ -1283,7 +1283,7 @@ impl App {
                 last_mouse_point: None,
                 active_split_drag: None,
                 occluded: false,
-                title: "noa".to_string(),
+                title: "Noa".to_string(),
                 sidebar_visible: self.config.sidebar_enabled,
                 sidebar_scroll: 0,
                 sidebar_menu: None,
@@ -1308,7 +1308,7 @@ impl App {
         group: WindowGroupId,
     ) -> WindowAttributes {
         let attrs = WindowAttributes::default()
-            .with_title("noa")
+            .with_title("Noa")
             .with_inner_size(inner_size)
             // A transparent window is required for `background-opacity` to
             // reveal anything behind it; the surface alpha mode and the

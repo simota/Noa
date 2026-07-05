@@ -536,7 +536,7 @@ pub fn overview_tile_labels<Id: Copy>(
         .copied()
         .map(|id| OverviewTileLabel {
             id,
-            label: title_for_id(id).unwrap_or_else(|| "noa".to_string()),
+            label: title_for_id(id).unwrap_or_else(|| "Noa".to_string()),
         })
         .collect()
 }
@@ -1022,7 +1022,7 @@ mod tests {
                 },
                 OverviewTileLabel {
                     id: 3,
-                    label: "noa".to_string()
+                    label: "Noa".to_string()
                 }
             ]
         );

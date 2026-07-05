@@ -17,15 +17,15 @@ pub(crate) fn should_notify<Id: PartialEq>(os_focused: Option<Id>, target: Id) -
     os_focused != Some(target)
 }
 
-/// The title to display: the requested one when non-empty, else `"noa"`.
+/// The title to display: the requested one when non-empty, else `"Noa"`.
 pub(crate) fn notification_title(title: Option<&str>) -> &str {
     match title {
         Some(t) if !t.is_empty() => t,
-        _ => "noa",
+        _ => "Noa",
     }
 }
 
-/// Post `body` (with an optional `title`, defaulting to `"noa"`) to the macOS
+/// Post `body` (with an optional `title`, defaulting to `"Noa"`) to the macOS
 /// notification center and bounce the Dock. Call only from the main thread.
 pub(crate) fn post_notification(title: Option<&str>, body: &str) {
     post(notification_title(title), body);
@@ -125,8 +125,8 @@ mod tests {
 
     #[test]
     fn falls_back_to_noa_for_a_missing_or_empty_title() {
-        assert_eq!(notification_title(None), "noa");
-        assert_eq!(notification_title(Some("")), "noa");
+        assert_eq!(notification_title(None), "Noa");
+        assert_eq!(notification_title(Some("")), "Noa");
         assert_eq!(notification_title(Some("build done")), "build done");
     }
 }

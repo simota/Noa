@@ -579,7 +579,7 @@
         );
         assert_eq!(
             close_confirm_message(CloseConfirmTarget::App, 1),
-            "A program is still running in noa. Quit noa?"
+            "A program is still running in Noa. Quit Noa?"
         );
     }
 
@@ -1060,7 +1060,7 @@
 
     #[test]
     fn empty_terminal_title_falls_back_to_app_name() {
-        assert_eq!(tab_title(""), "noa");
+        assert_eq!(tab_title(""), "Noa");
         assert_eq!(tab_title("shell"), "shell");
     }
 
@@ -1093,7 +1093,7 @@
             command_palette::command_palette_entries().len()
         );
         // First entry is About (no binding); Copy carries its cmd+c hint.
-        assert_eq!(snapshot.rows[0], ("About noa".to_string(), None));
+        assert_eq!(snapshot.rows[0], ("About Noa".to_string(), None));
         assert!(
             snapshot
                 .rows

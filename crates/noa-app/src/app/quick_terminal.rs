@@ -380,7 +380,7 @@ impl App {
                 last_mouse_point: None,
                 active_split_drag: None,
                 occluded: false,
-                title: "noa".to_string(),
+                title: "Noa".to_string(),
                 // Quick-terminal windows are never sidebar-eligible (FR-14).
                 sidebar_visible: false,
                 sidebar_scroll: 0,

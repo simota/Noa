@@ -11,9 +11,9 @@ use std::path::Path;
 /// reads as "nothing happened"). Comments only — every setting stays at its
 /// built-in default until the user uncomments one.
 pub(crate) const CONFIG_TEMPLATE: &str = "\
-# noa configuration
+# Noa configuration
 #
-# noa reads Ghostty-style `key = value` lines. Lines starting with `#` are
+# Noa reads Ghostty-style `key = value` lines. Lines starting with `#` are
 # comments. Remove the `#` and set a value to override a default.
 #
 # font-size = 15
@@ -21,14 +21,14 @@ pub(crate) const CONFIG_TEMPLATE: &str = "\
 # sidebar-width = 360
 ";
 
-/// Show the standard macOS About panel for noa, seeded with the app name and
+/// Show the standard macOS About panel for Noa, seeded with the app name and
 /// the crate version (a plain `cargo run` has no Info.plist to read them
 /// from). A no-op off macOS.
 pub(crate) fn show_about() {
     #[cfg(target_os = "macos")]
     show_about_macos();
     #[cfg(not(target_os = "macos"))]
-    log::info!("About noa (v{})", env!("CARGO_PKG_VERSION"));
+    log::info!("About Noa (v{})", env!("CARGO_PKG_VERSION"));
 }
 
 #[cfg(target_os = "macos")]
@@ -57,14 +57,14 @@ fn show_about_macos() {
         if !options.is_null() {
             // The option keys are the documented NSAboutPanelOption* string
             // values ("ApplicationName" / "ApplicationVersion").
-            let name = NSString::from_str("noa");
+            let name = NSString::from_str("Noa");
             let version = NSString::from_str(env!("CARGO_PKG_VERSION"));
             let name_key = NSString::from_str("ApplicationName");
             let version_key = NSString::from_str("ApplicationVersion");
             let _: () = msg_send![options, setObject: &*name, forKey: &*name_key];
             let _: () = msg_send![options, setObject: &*version, forKey: &*version_key];
         }
-        // Bring noa forward first so the panel isn't buried behind other apps.
+        // Bring Noa forward first so the panel isn't buried behind other apps.
         let _: () = msg_send![app, activateIgnoringOtherApps: true];
         let _: () = msg_send![app, orderFrontStandardAboutPanelWithOptions: options];
     }

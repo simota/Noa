@@ -29,9 +29,9 @@ impl MacosMenu {
     pub(crate) fn install(proxy: EventLoopProxy<UserEvent>) -> anyhow::Result<Self> {
         let menu = Menu::new();
         let split_context_menu = build_split_context_menu()?;
-        let app_menu = Submenu::with_id("noa.menu.app", "noa", true);
+        let app_menu = Submenu::with_id("noa.menu.app", "Noa", true);
 
-        let about = MenuItem::with_id(AppCommand::About.menu_id(), "About noa", true, None);
+        let about = MenuItem::with_id(AppCommand::About.menu_id(), "About Noa", true, None);
         let preferences = MenuItem::with_id(
             AppCommand::Preferences.menu_id(),
             "Preferences...",
@@ -53,7 +53,7 @@ impl MacosMenu {
         );
         let quit = MenuItem::with_id(
             AppCommand::Quit.menu_id(),
-            "Quit noa",
+            "Quit Noa",
             true,
             Some(cmd_accelerator(Code::KeyQ)),
         );
@@ -284,7 +284,7 @@ impl MacosMenu {
             "noa.menu.help",
             "Help",
             true,
-            &[&disabled_item("noa.help.noa-help", "noa Help")],
+            &[&disabled_item("noa.help.noa-help", "Noa Help")],
         )?;
 
         app_menu.append_items(&[

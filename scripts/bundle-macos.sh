@@ -51,9 +51,9 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>noa</string>
+    <string>Noa</string>
     <key>CFBundleDisplayName</key>
-    <string>noa</string>
+    <string>Noa</string>
     <key>CFBundleIdentifier</key>
     <string>${BUNDLE_ID}</string>
     <key>CFBundleExecutable</key>

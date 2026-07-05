@@ -35,7 +35,7 @@ pub(crate) fn close_confirm_message(target: CloseConfirmTarget, running_programs
         CloseConfirmTarget::Window => {
             close_confirm_plural(running_programs, "this window", "Close this window?")
         }
-        CloseConfirmTarget::App => close_confirm_plural(running_programs, "noa", "Quit noa?"),
+        CloseConfirmTarget::App => close_confirm_plural(running_programs, "Noa", "Quit Noa?"),
     }
 }
 

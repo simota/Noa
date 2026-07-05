@@ -26,7 +26,7 @@ use crate::split_tree::Direction;
 /// constructed.
 pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
     match command {
-        AppCommand::About => "About noa",
+        AppCommand::About => "About Noa",
         AppCommand::Preferences => "Open Preferences",
         AppCommand::Copy => "Copy to Clipboard",
         AppCommand::Paste => "Paste from Clipboard",
@@ -79,7 +79,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::NextTab => "Next Tab",
         AppCommand::PrevTab => "Previous Tab",
         AppCommand::CloseWindow => "Close Window",
-        AppCommand::Quit => "Quit noa",
+        AppCommand::Quit => "Quit Noa",
         AppCommand::ToggleCommandPalette => "Toggle Command Palette",
         AppCommand::ToggleQuickTerminal => "Toggle Quick Terminal",
         AppCommand::ToggleSecureKeyboardEntry => "Toggle Secure Keyboard Entry",
@@ -367,7 +367,7 @@ mod tests {
     fn subsequence_match_is_case_insensitive_and_non_contiguous() {
         assert!(is_subsequence_ci("", "anything"));
         assert!(is_subsequence_ci("splt", "Split Right"));
-        assert!(is_subsequence_ci("QUIT", "Quit noa"));
+        assert!(is_subsequence_ci("QUIT", "Quit Noa"));
         assert!(!is_subsequence_ci("zzz", "Split Right"));
         assert!(!is_subsequence_ci("tips", "Split Right"), "order matters");
     }
@@ -386,7 +386,7 @@ mod tests {
         let down = matches.iter().position(|c| *c == AppCommand::NewSplitDown);
         assert!(right < down);
 
-        // Case-insensitive: "QUIT" matches "Quit noa" (and any other title
+        // Case-insensitive: "QUIT" matches "Quit Noa" (and any other title
         // carrying q..u..i..t as a subsequence).
         let quit = command_palette_filter("QUIT");
         assert!(quit.contains(&AppCommand::Quit));

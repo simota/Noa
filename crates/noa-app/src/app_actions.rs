@@ -31,6 +31,29 @@ pub(crate) fn show_about() {
     log::info!("About Noa (v{})", env!("CARGO_PKG_VERSION"));
 }
 
+/// The About panel's version string: `CARGO_PKG_VERSION` extended with the
+/// build.rs-embedded git hash and UTC build date when both are available
+/// (R-6), else the plain crate version (R-5 — a non-git build environment).
+/// This extended form is About-panel-only; `cli.rs`'s `--version` and
+/// `noa-grid`'s XTVERSION/DA report both keep using the bare
+/// `CARGO_PKG_VERSION` (NFR-2).
+fn version_string() -> String {
+    compose_version(
+        env!("CARGO_PKG_VERSION"),
+        env!("NOA_GIT_HASH"),
+        env!("NOA_BUILD_DATE"),
+    )
+}
+
+/// Pure formatting logic behind [`version_string`], split out because
+/// `env!()` is compile-time and can't be varied from a unit test.
+fn compose_version(version: &str, git_hash: &str, build_date: &str) -> String {
+    if git_hash.is_empty() || build_date.is_empty() {
+        return version.to_string();
+    }
+    format!("{version} ({git_hash}, {build_date})")
+}
+
 /// Resolve the `noa.icns` path for the About panel from an ordered list of
 /// candidates: the first one that exists on disk wins (R-1). `None` when none
 /// of them exist, so the caller can fall back to the AppKit standard icon
@@ -68,7 +91,7 @@ fn show_about_macos() {
             // The option keys are the documented NSAboutPanelOption* string
             // values ("ApplicationName" / "ApplicationVersion" / "ApplicationIcon").
             let name = NSString::from_str("Noa");
-            let version = NSString::from_str(env!("CARGO_PKG_VERSION"));
+            let version = NSString::from_str(&version_string());
             let name_key = NSString::from_str("ApplicationName");
             let version_key = NSString::from_str("ApplicationVersion");
             let _: () = msg_send![options, setObject: &*name, forKey: &*name_key];
@@ -179,6 +202,21 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "font-size = 20\n");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compose_version_appends_hash_and_date_when_both_present() {
+        assert_eq!(
+            compose_version("0.1.0", "a1b2c3d", "2026-07-05"),
+            "0.1.0 (a1b2c3d, 2026-07-05)"
+        );
+    }
+
+    #[test]
+    fn compose_version_falls_back_to_the_plain_version_when_either_field_is_empty() {
+        assert_eq!(compose_version("0.1.0", "", "2026-07-05"), "0.1.0");
+        assert_eq!(compose_version("0.1.0", "a1b2c3d", ""), "0.1.0");
+        assert_eq!(compose_version("0.1.0", "", ""), "0.1.0");
     }
 
     #[test]

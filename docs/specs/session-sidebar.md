@@ -170,7 +170,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 - **AC-13 (FR-11)**: `has_running_program`=true→青、false→緑、未読ベル→黄 のドット色マッピングを unit test で検証。
 - **AC-14 (FR-12)**: 純関数 `reconcile_sessions(&mut store, live_ids)` が live_ids に無いエントリを除去し store サイズ == live_ids 数となることを unit test で検証。5 teardown サイトが各々これを呼ぶことは実装レビュー＋[manual] 統合確認（`App` はユニットテストから構築不能のため）。
 - **AC-15a (FR-13)**: `sidebar-enabled`/`sidebar-width` がパースされ、既定値(width=360)が適用される(parser unit test、`parse_bool`/`quick-terminal-size` パターン)。
-- **AC-15b (FR-13)**: `sidebar-hotkey` チョードが `quick-terminal-hotkey` と同じパース経路で受理され、不正チョードは diagnostic になる(parser unit test)。
+- **AC-15b (FR-13)**: `sidebar-hotkey` チョードが `quick-terminal-hotkey` と同じパース経路で受理される(parser unit test)。不正チョードの diagnostic はアプリ層登録時の `parse_hotkey` で発生する — noa-config は noa-app に依存できないため parse 時ではない（quick-terminal-hotkey と同じ前例。Judge 裁定 2026-07-05）。
 - **AC-16a (FR-14)**: quick-terminal ウィンドウの `pane_bounds_for_size` にサイドバー inset が適用されない(純関数 unit test)。
 - **AC-16b (FR-14)**: サイドバー対象判定述語が quick-terminal ウィンドウに false を返し、store に登録されない(純関数 unit test)。
 - **AC-17 (NFR-1)**: `sidebar.rs`＋sidebar 描画経路のソースに `terminal.lock()` が現れないことを source-scan `#[test]` でアサート。プレビューは slot 読取のみ。

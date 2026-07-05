@@ -614,7 +614,8 @@ pub enum AgentKind {
 }
 
 /// Classify a foreground process name into a known AI agent. Case-insensitive,
-/// matched on the executable basename.
+/// matched on the executable basename's leading stem (so a target-triple suffix
+/// on a distribution binary — `codex-aarch64-apple-darwin` — still classifies).
 ///
 /// Note: `proc_name` can report a wrapper (e.g. `node`) rather than the agent
 /// for some installs, so an agent launched through a wrapper is classified
@@ -626,7 +627,12 @@ pub fn classify_agent(process: &str) -> AgentKind {
         .unwrap_or(process)
         .trim()
         .to_ascii_lowercase();
-    match base.as_str() {
+    // Distribution binaries carry a target-triple suffix (Homebrew's Codex cask
+    // installs `codex-aarch64-apple-darwin` and symlinks `codex` to it, so the
+    // tty's foreground name reports the real basename, not `codex`). Match on the
+    // leading stem before the first `-`/`.` so the suffix doesn't defeat branding.
+    let stem = base.split(['-', '.']).next().unwrap_or(&base);
+    match stem {
         "claude" => AgentKind::ClaudeCode,
         "codex" => AgentKind::Codex,
         "agy" | "gemini" => AgentKind::Agy,
@@ -886,6 +892,10 @@ mod tests {
             ("/usr/local/bin/claude", ClaudeCode),
             ("codex", Codex),
             ("Codex", Codex),
+            // Distribution binaries carry a target-triple suffix; the stem still
+            // classifies, independent of arch or version.
+            ("codex-aarch64-apple-darwin", Codex),
+            ("codex-x86_64-apple-darwin", Codex),
             ("agy", Agy),
             ("gemini", Agy),
             ("Gemini", Agy),

@@ -331,10 +331,16 @@ impl ApplicationHandler<UserEvent> for App {
         let blink_deadline = self.tick_cursor_blink();
         let overview_deadline = self.tick_overview_backlog();
         let quick_terminal_deadline = self.tick_quick_terminal();
-        let deadline = [blink_deadline, overview_deadline, quick_terminal_deadline]
-            .into_iter()
-            .flatten()
-            .min();
+        let attention_deadline = self.tick_attention_blink();
+        let deadline = [
+            blink_deadline,
+            overview_deadline,
+            quick_terminal_deadline,
+            attention_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         event_loop.set_control_flow(match deadline {
             Some(deadline) => ControlFlow::WaitUntil(deadline),
             None => ControlFlow::Wait,

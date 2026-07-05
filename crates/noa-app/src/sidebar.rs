@@ -585,6 +585,15 @@ pub fn classify_agent(process: &str) -> AgentKind {
     }
 }
 
+/// Whether a session's bell should escalate to an attention request (FR-A3):
+/// true only when the foreground process classifies as a known coding agent.
+/// A generic process — or an unresolved one (`None`, e.g. non-macOS or not yet
+/// polled) — stays a plain bell, so a generic beep is never mistaken for an
+/// interaction request (NFR-A4).
+pub fn bell_escalates_to_attention(process: Option<&str>) -> bool {
+    process.is_some_and(|p| classify_agent(p) != AgentKind::Generic)
+}
+
 /// The branded display name for a classified agent, or the raw process name for
 /// a generic process.
 pub fn agent_display_name(kind: AgentKind, process: &str) -> &str {
@@ -594,6 +603,26 @@ pub fn agent_display_name(kind: AgentKind, process: &str) -> &str {
         AgentKind::Agy => "agy",
         AgentKind::Generic => process,
     }
+}
+
+/// Whether an attention marker is in its **visible** phase (FR-A1). `elapsed`
+/// is the time since the attention onset; the marker blinks at a 50% duty cycle
+/// with a half-period of `interval` for the first `duration`, then settles to a
+/// steady on. Pure and unit-testable — the caller supplies the wall/monotonic
+/// elapsed so no clock is read here (mirrors the `now`-as-parameter rule).
+pub fn attention_blink_on(
+    elapsed: std::time::Duration,
+    duration: std::time::Duration,
+    interval: std::time::Duration,
+) -> bool {
+    if elapsed >= duration {
+        // Settled: steady visible until the window is focused (FR-16 clear).
+        return true;
+    }
+    let interval_ms = interval.as_millis().max(1);
+    let ticks = elapsed.as_millis() / interval_ms;
+    // Even half-periods are "on", odd are "off", so the marker starts visible.
+    ticks.is_multiple_of(2)
 }
 
 /// The header status label text (FR-5): `● Running` when any session is busy,
@@ -787,6 +816,20 @@ mod tests {
         assert_eq!(agent_display_name(classify_agent("codex"), "codex"), "Codex");
         assert_eq!(agent_display_name(classify_agent("gemini"), "gemini"), "agy");
         assert_eq!(agent_display_name(classify_agent("zsh"), "zsh"), "zsh");
+    }
+
+    // AC-A2 (FR-A3/NFR-A4): a known agent's bell escalates to attention; a
+    // generic process — or an unresolved one — stays a plain bell.
+    #[test]
+    fn bell_escalates_only_for_known_agents() {
+        assert!(bell_escalates_to_attention(Some("claude")));
+        assert!(bell_escalates_to_attention(Some("codex")));
+        assert!(bell_escalates_to_attention(Some("agy")));
+        assert!(bell_escalates_to_attention(Some("/usr/local/bin/gemini")));
+        assert!(!bell_escalates_to_attention(Some("zsh")));
+        assert!(!bell_escalates_to_attention(Some("cargo")));
+        assert!(!bell_escalates_to_attention(Some("node")));
+        assert!(!bell_escalates_to_attention(None));
     }
 
     #[test]
@@ -1143,6 +1186,32 @@ mod tests {
         assert_eq!(bands.header.h, 20);
         assert_eq!(bands.toolbar.h, 0);
         assert_eq!(bands.viewport.h, 0);
+    }
+
+    // AC-A1 (FR-A1): the blink is visible at onset, hidden a half-period in,
+    // and steady-visible once the blink window elapses.
+    #[test]
+    fn attention_blink_on_toggles_then_settles() {
+        use std::time::Duration;
+        let dur = Duration::from_secs(6);
+        let iv = Duration::from_millis(333);
+
+        // At onset and just after → visible.
+        assert!(attention_blink_on(Duration::ZERO, dur, iv));
+        assert!(attention_blink_on(Duration::from_millis(100), dur, iv));
+        // One half-period in → hidden.
+        assert!(!attention_blink_on(Duration::from_millis(400), dur, iv));
+        // Two half-periods in → visible again.
+        assert!(attention_blink_on(Duration::from_millis(700), dur, iv));
+        // Past the blink window → steady visible regardless of phase.
+        assert!(attention_blink_on(dur, dur, iv));
+        assert!(attention_blink_on(Duration::from_secs(60), dur, iv));
+        // Degenerate zero interval never divides by zero.
+        assert!(attention_blink_on(
+            Duration::from_millis(100),
+            dur,
+            Duration::ZERO
+        ));
     }
 
     #[test]

@@ -70,6 +70,19 @@ fn post(title: &str, body: &str) {
     }
 }
 
+/// Bounce the Dock icon once without posting an OS notification (FR-A5): used
+/// when an agent session rings the bell to request attention, where a full
+/// notification-center entry per bell would be too noisy. Call only from the
+/// main thread. A no-op off macOS.
+pub(crate) fn bounce_dock() {
+    #[cfg(target_os = "macos")]
+    // SAFETY: `request_dock_attention` sends the documented AppKit
+    // `requestUserAttention:` on the main-thread shared application.
+    unsafe {
+        request_dock_attention();
+    }
+}
+
 /// Bounce the Dock icon once (stops when the app is activated). Separate from
 /// the notification post so a missing notification center still gets attention.
 #[cfg(target_os = "macos")]

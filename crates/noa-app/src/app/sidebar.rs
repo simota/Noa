@@ -101,6 +101,24 @@ fn icon_color(icon: crate::session_store::IconKind) -> Rgb {
     }
 }
 
+/// The card's status dot with the attention blink applied (FR-A1): while an
+/// attention marker is in its hidden phase, show the underlying status (bell /
+/// busy / idle) instead of the red attention dot, so the dot blinks red↔status.
+/// A settled or visible-phase attention keeps the red dot.
+fn effective_status_dot(card: &SessionCard, attention_marker: bool) -> StatusDot {
+    if card.attention && !attention_marker {
+        if card.unread_bell {
+            StatusDot::Yellow
+        } else if card.busy {
+            StatusDot::Blue
+        } else {
+            StatusDot::Green
+        }
+    } else {
+        status_dot(card)
+    }
+}
+
 /// The dot glyph color for a card's status (FR-11), driven by the pure
 /// `status_dot` mapping in `session_store` (AC-13).
 fn status_dot_rgb(dot: StatusDot) -> Rgb {
@@ -208,8 +226,22 @@ impl App {
     /// reconcile is needed when the quick terminal is torn down.
     pub(super) fn apply_session_delta(&mut self, delta: SessionDelta) {
         let window_id = WindowId::from(delta.id().window_id.0);
+        // An agent session's bell is an interaction request, not a generic beep
+        // (FR-A3): escalate it to an attention delta before the eligibility gate
+        // so it flows through the same path as an OSC 9/777 request.
+        let delta = self.escalate_agent_bell(delta);
         if !session_delta_should_apply(&delta, self.window_sidebar_eligible(window_id)) {
             return;
+        }
+        // Record the blink onset on the false→true attention transition (FR-A1);
+        // FR-A7 keeps the existing onset if attention is already pending so a
+        // repeat request doesn't restart the blink.
+        if let SessionDelta::Attention { id } = &delta
+            && self.session_store.get(id).is_none_or(|card| !card.attention)
+        {
+            self.attention_onset.insert(*id, Instant::now());
+            // Re-arm the blink timer on the next `about_to_wait` pass.
+            self.attention_blink_deadline = None;
         }
         // A cwd change (new card or a changed cwd on an existing one) triggers a
         // branch + icon poll on the dedicated worker (FR-8/FR-9), never on the
@@ -233,6 +265,30 @@ impl App {
             self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
             self.request_overview_redraw();
         }
+    }
+
+    /// Escalate an agent session's bell to an attention request (FR-A3): a bell
+    /// from a card whose foreground process classifies as a known coding agent
+    /// (`claude`/`codex`/`agy`/…) means it wants the user, so it becomes an
+    /// `Attention` delta; a generic bell is returned unchanged. On the first
+    /// escalation of an unfocused window, bounce the Dock once (FR-A5) — no OS
+    /// notification, since bells are frequent. Any other delta passes through.
+    fn escalate_agent_bell(&self, delta: SessionDelta) -> SessionDelta {
+        let SessionDelta::Bell { id } = delta else {
+            return delta;
+        };
+        let process = self.session_store.get(&id).and_then(|card| card.process.clone());
+        if !crate::sidebar::bell_escalates_to_attention(process.as_deref()) {
+            return delta;
+        }
+        // Bounce the Dock only on the transition into attention for an unfocused
+        // window, so a burst of bells doesn't bounce repeatedly.
+        let window_id = WindowId::from(id.window_id.0);
+        let already = self.session_store.get(&id).is_some_and(|card| card.attention);
+        if !already && self.os_focused != Some(window_id) {
+            crate::notification::bounce_dock();
+        }
+        SessionDelta::Attention { id }
     }
 
     /// Queue a branch/icon poll for a card whose cwd just changed (FR-8/FR-9).
@@ -283,6 +339,9 @@ impl App {
         if let Some(worker) = self.branch_poll.as_ref() {
             worker.retain_process_probes(&live);
         }
+        // Drop attention-blink onsets for sessions that no longer exist, so the
+        // blink timer can't stay armed for a torn-down card (FR-A1).
+        self.attention_onset.retain(|id, _| live.contains(id));
     }
 
     /// Clear the unread-bell and attention flags on every card of a
@@ -292,6 +351,10 @@ impl App {
     pub(super) fn clear_session_bell_for_window(&mut self, window_id: WindowId) {
         self.session_store
             .clear_bell_for_window(SessionWindowId(u64::from(window_id)));
+        // Drop the blink onsets for this window so the timer disarms and the
+        // marker stops (FR-A6). The store already cleared the attention flags.
+        let sw = SessionWindowId(u64::from(window_id));
+        self.attention_onset.retain(|id, _| id.window_id != sw);
         self.request_sidebar_redraw();
         for pane_id in self.overview_pane_ids_for_window(window_id) {
             self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
@@ -677,19 +740,20 @@ impl App {
                 continue;
             };
             let lines: CardLines = card_lines(card, now);
+            let marker = self.attention_marker_visible(&card_rects.id);
             let full = card_rects.bounds.h == layout_metrics.card_h;
             // A fully-visible card is covered by its opaque rounded overlay, so
             // its backdrop text would never show — only emit it for partial
             // (edge-clipped) cards, which have no overlay.
             if !full {
-                emit_card_text(&mut runs, card_rects, card, &lines, &band_cell);
+                emit_card_text(&mut runs, card_rects, card, &lines, &band_cell, marker);
             }
 
             if full {
                 let selected = card_rects.id == selected_id;
                 let local = layout_metrics.card_local_rects(card_rects.id, inset);
                 let mut card_runs = Vec::new();
-                emit_card_text(&mut card_runs, &local, card, &lines, &card_cell);
+                emit_card_text(&mut card_runs, &local, card, &lines, &card_cell, marker);
                 cards.push(SidebarCardDraw {
                     rect: card_rects.bounds,
                     grid: card_grid,
@@ -803,12 +867,13 @@ fn emit_card_text(
     card: &SessionCard,
     lines: &CardLines,
     to_cell: &impl Fn(u32, u32) -> (u16, u16),
+    attention_marker: bool,
 ) {
     out.extend(window_run(
         to_cell,
         rects.dot,
         "●".to_string(),
-        status_dot_rgb(status_dot(card)),
+        status_dot_rgb(effective_status_dot(card, attention_marker)),
         false,
     ));
     out.extend(window_run(
@@ -848,7 +913,9 @@ fn emit_card_text(
     // the attention color and appends the waiting label.
     if rects.process.w > 0 && rects.process.h > 0 {
         let (text, fg) = process_badge(&lines.process, card.busy);
-        let (text, fg) = if card.attention {
+        // The attention treatment blinks (FR-A1): only apply it while the marker
+        // is in its visible phase, otherwise fall back to the plain badge.
+        let (text, fg) = if card.attention && attention_marker {
             (format!("{text} · {ATTENTION_LABEL}"), SIDEBAR_DOT_RED)
         } else {
             (text, fg)

@@ -825,12 +825,13 @@ impl App {
         }
         // A pane awaiting the user (an agent's OSC 9/777 attention request or
         // an unread bell, FR-16) is marked with a leading `●` so it stands out
-        // in the overview grid; cleared when its window gains focus.
+        // in the overview grid; cleared when its window gains focus. The
+        // attention mark blinks in phase with the sidebar (FR-A2), so gate it on
+        // the current blink visibility; an unread bell is always steady.
         let card_id = Self::session_card_id(tile_id.window_id, tile_id.pane_id);
-        let needs_user = self
-            .session_store
-            .get(&card_id)
-            .is_some_and(|card| card.attention || card.unread_bell);
+        let needs_user = self.session_store.get(&card_id).is_some_and(|card| {
+            (card.attention && self.attention_marker_visible(&card_id)) || card.unread_bell
+        });
         let title = if needs_user {
             format!("● {}", state.title)
         } else {

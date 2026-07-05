@@ -371,6 +371,13 @@ impl Surface {
 /// (Ghostty/iTerm2 ballpark); not user-configurable yet.
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
+/// How long an attention marker blinks before settling to a steady mark
+/// (FR-A1). Compile-time (⚠G — no config knob in v1).
+const ATTENTION_BLINK_DURATION: Duration = Duration::from_secs(6);
+/// The blink half-period (~1.5 Hz) — the marker toggles on/off every interval
+/// for `ATTENTION_BLINK_DURATION`.
+const ATTENTION_BLINK_INTERVAL: Duration = Duration::from_millis(333);
+
 /// Compile-time card styling for the Session Overview composite (REQ-OV-12/14, v2
 /// mockup parity; ⚠G: no config knob). Bundles the `tab_overview` color/metric
 /// constants into the `noa-render` [`CardStyle`] carrier.
@@ -450,6 +457,17 @@ pub struct App {
     /// displayable `Blinking*` cursor (the event loop then sits at
     /// `ControlFlow::Wait`, no busy wake-ups).
     cursor_blink_deadline: Option<Instant>,
+    /// Monotonic onset of each card's current attention request (FR-A1), keyed
+    /// by card id. Set on the `false→true` attention transition and removed
+    /// when the flag is cleared (window focus) or the session is torn down.
+    /// Drives the blink phase (`sidebar::attention_blink_on(onset.elapsed())`)
+    /// and whether the blink timer stays armed. FR-A7: never reset while an
+    /// attention is already pending, so a repeat request doesn't restart the
+    /// blink.
+    attention_onset: HashMap<SessionCardId, Instant>,
+    /// Next scheduled attention-blink repaint; `None` while no card is within
+    /// its blink window (the event loop then needs no wake-up for this).
+    attention_blink_deadline: Option<Instant>,
     /// The `(window, pane)` currently carrying a non-`None` `Surface::hover_link`,
     /// if any — tracked so [`App::sync_hover_link`] can clear it when the
     /// mouse moves to a different pane/window (or off any pane) without
@@ -544,6 +562,8 @@ impl App {
             overview_wake_deadline: None,
             cursor_blink_visible: true,
             cursor_blink_deadline: None,
+            attention_onset: HashMap::new(),
+            attention_blink_deadline: None,
             hovered_link: None,
             search_prompt: None,
             command_palette: None,
@@ -856,6 +876,69 @@ impl App {
     /// `tab_overview::overview_backlog_decision`). Piggybacks on the same
     /// `about_to_wait` + `WaitUntil` wake-up mechanism as
     /// `tick_cursor_blink` rather than adding a second timer source.
+    /// Whether an attention marker is currently visible for `id` (FR-A1) — the
+    /// blink phase during the first `ATTENTION_BLINK_DURATION`, then steady on.
+    /// `true` when no onset is tracked (a settled/legacy attention with no blink
+    /// state still shows). Shared by the sidebar draw and the overview label.
+    pub(super) fn attention_marker_visible(&self, id: &SessionCardId) -> bool {
+        match self.attention_onset.get(id) {
+            Some(onset) => crate::sidebar::attention_blink_on(
+                onset.elapsed(),
+                ATTENTION_BLINK_DURATION,
+                ATTENTION_BLINK_INTERVAL,
+            ),
+            None => true,
+        }
+    }
+
+    /// Whether any tracked attention is still inside its blink window, so the
+    /// blink timer must keep waking the loop. Settled attentions (past the
+    /// window) stay in the map but draw steady, so they don't arm the timer.
+    fn any_attention_blinking(&self) -> bool {
+        self.attention_onset
+            .values()
+            .any(|onset| onset.elapsed() < ATTENTION_BLINK_DURATION)
+    }
+
+    /// Advance the attention blink (FR-A1/NFR-A2): while any card is within its
+    /// blink window, repaint the sidebars and overview tiles once per interval
+    /// and report the next wake-up; once none remain, do a final settle repaint
+    /// and disarm. Piggybacks on the shared `about_to_wait` + `WaitUntil` timer
+    /// like `tick_cursor_blink`, so no second timer source is added.
+    fn tick_attention_blink(&mut self) -> Option<Instant> {
+        if !self.any_attention_blinking() {
+            if self.attention_blink_deadline.take().is_some() {
+                // The last blink just settled — repaint once so the steady mark
+                // replaces the mid-blink frame.
+                self.request_sidebar_redraw();
+                self.mark_attention_overview_tiles_dirty();
+            }
+            return None;
+        }
+        let now = Instant::now();
+        match self.attention_blink_deadline {
+            Some(deadline) if now < deadline => Some(deadline),
+            _ => {
+                let next = now + ATTENTION_BLINK_INTERVAL;
+                self.attention_blink_deadline = Some(next);
+                self.request_sidebar_redraw();
+                self.mark_attention_overview_tiles_dirty();
+                Some(next)
+            }
+        }
+    }
+
+    /// Mark every attention card's overview tile dirty and request an overview
+    /// redraw, so a blink toggle re-stamps its `●` title band (FR-A2).
+    fn mark_attention_overview_tiles_dirty(&mut self) {
+        let ids: Vec<SessionCardId> = self.attention_onset.keys().copied().collect();
+        for id in ids {
+            let window_id = WindowId::from(id.window_id.0);
+            self.mark_overview_tile_dirty(OverviewTileId::new(window_id, id.pane_id));
+        }
+        self.request_overview_redraw();
+    }
+
     fn tick_overview_backlog(&mut self) -> Option<Instant> {
         let deadline = self.overview_wake_deadline?;
         if Instant::now() < deadline {

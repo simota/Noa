@@ -278,10 +278,12 @@ fn feed_terminal_batch<'a>(
 
     // Sidebar publish (FR-1/FR-11) — extracted in this same lock section so the
     // main thread never locks a `Terminal` to build card state (NFR-1). The
-    // bell is only drained while a sidebar is visible so one rung entirely
-    // in the background survives until the user opens it.
+    // bell is drained unconditionally (FR-A4): the main thread classifies it —
+    // an agent session's bell escalates to an attention request even with the
+    // sidebar hidden, while a generic bell only renders once the sidebar is
+    // shown (its flag is otherwise invisible).
     let sidebar_visible = sidebar.visible.load(Ordering::Relaxed);
-    let sidebar_bell = sidebar_visible && term.take_pending_bell();
+    let sidebar_bell = term.take_pending_bell();
     let sidebar_upsert = decide_sidebar_publish(sidebar_visible, *last_sidebar_publish, Instant::now())
         .then(|| {
             *last_sidebar_publish = Some(Instant::now());
@@ -713,14 +715,17 @@ mod tests {
         assert!(throttled.sidebar_upsert.is_none());
     }
 
+    // FR-A4: the bell is drained regardless of sidebar visibility, so an agent
+    // session's bell can escalate to an attention request even when the sidebar
+    // is hidden (the main thread does the agent-vs-generic classification).
     #[test]
-    fn feed_drains_the_bell_only_while_the_sidebar_is_visible() {
+    fn feed_drains_the_bell_regardless_of_sidebar_visibility() {
         let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
         let mut stream = noa_vt::Stream::new();
         let overview = test_overview_publish();
         let mut last_overview_publish = None;
 
-        // Bell rung while hidden: not drained, so it persists on the terminal.
+        // Bell rung while the sidebar is hidden is still drained and reported.
         let hidden = feed_terminal(
             &terminal,
             &mut stream,
@@ -730,10 +735,10 @@ mod tests {
             &test_sidebar_publish(false),
             &mut None,
         );
-        assert!(!hidden.sidebar_bell);
+        assert!(hidden.sidebar_bell);
 
-        // Opening the sidebar and feeding again drains the still-pending bell.
-        let visible = feed_terminal(
+        // With no further bell, a subsequent feed reports none.
+        let quiet = feed_terminal(
             &terminal,
             &mut stream,
             b"x",
@@ -742,7 +747,7 @@ mod tests {
             &test_sidebar_publish(true),
             &mut None,
         );
-        assert!(visible.sidebar_bell);
+        assert!(!quiet.sidebar_bell);
     }
 
     #[test]

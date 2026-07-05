@@ -99,7 +99,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 - **状態ドット**: busy（OSC 133 `has_running_program`）=青／idle=緑／bell-attention（未読ベル）=黄。
 - **updated-time**: 相対表示（"3分前"、24h 超は "昨日 23:47" 形式）。io スレッドが最終出力時に Instant＋wall-clock スタンプ。
 - **サイドバー幅**: config `sidebar-width`（points、既定 360pt）。grid-first リサイズで換算。
-- **ヘッダーラベル（park）**: フォアグラウンドプロセス名検出は noa に存在しない（OSC 133 は busy 真偽値のみ）。v1 は "● Running"/"Idle" 固定文言に縮退。プロセス名検出（tcgetpgrp＋libproc）は Open Question。
+- **ヘッダーラベル**: 当初 park したフォアグラウンドプロセス名検出は、ユーザー要望により 2026-07-05 実装（`Pty::foreground_probe` = master fd dup → tcgetpgrp → libproc `proc_name`、session-metadata ワーカーで 1s ポーリング・サイドバー可視時のみ）。ラベルは実プロセス名（`✳ <proc>`）、未検出時は Running/Idle にフォールバック。
 
 ### Assumptions
 - A1: Nerd Font/emoji はフォント fallback カスケード（face.rs）でセル描画可。未インストール時は tofu/emoji にデグレード
@@ -116,10 +116,10 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 
 ### Functional
 - **FR-1 SessionStore**: 全ウィンドウ横断のセッションカード状態を保持する中央 `SessionStore` を真実源とし、io スレッドからの差分(delta)をメインスレッドが適用・所有する(クロススレッドロックなし)。
-- **FR-2 Card rendering**: 各カードは `[icon] name … ●dot` / `cwd … branch` / 最終出力2行プレビュー / 相対 updated-time を1枚に描画する。
+- **FR-2 Card rendering**: 各カードは `●dot [icon] name … 相対updated-time` / `cwd … branch` / 実行中プロセス行(`✳ proc`=busy / `❯ shell`=idle) の3行構成で描画する（2026-07-05 ユーザー裁定: 最終出力2行プレビューをプロセス行に置換。preview 配管は store/io_thread に温存・描画のみ停止）。
 - **FR-3 Click-to-switch**: カードクリックで該当セッションの `{window_id, pane_id}` にウィンドウフォーカスを移す(A-flavor、active-swap しない)。
 - **FR-4 Toggle + resize**: hotkey/config でサイドバー可視性を**フォーカス中ウィンドウ単位**でトグルし、トグル時に grid-first リサイズ(grid → pty winsize)を**そのウィンドウの全 pane**（quick-terminal ウィンドウは対象外）に適用する。他ウィンドウの可視性・グリッドには影響しない。
-- **FR-5 Header bar (degraded)**: サイドバー上部に実行状態ラベル(`● Running`/`Idle` 固定文言)＋中央タイトル＋右端セッション名ピルを描画する。
+- **FR-5 Header bar**: サイドバー上部に実行状態ラベル（フォーカスセッションの実プロセス名 `✳ <proc>`、未検出時 Running/Idle）＋中央タイトル＋右端セッション名ピルを描画する。
 - **FR-6 + button**: フォーカス中ウィンドウに新規タブを開き、cwd をアクティブセッションから継承する(既存 new-tab パス再利用)。
 - **FR-7 … menu**: カードごとに close アクションを提供し、rename は SessionStore の名前オーバーライドとして保持する。close は既存の close_pane/close_tab teardown パス（confirm ダイアログ・pty 終了・GC choke-point を含む）に委譲する — カードは per-pane（SessionCardId が pane_id を持つ）ため close_pane が正、最終 pane では close_tab へカスケード（Judge 裁定 2026-07-05）。rename の inline 入力 UI は v1 deferral（Open Question 5 参照。store 層 Rename は実装・テスト済 = AC-9）。
 - **FR-8 Git branch**: cwd に対する `git -C <cwd> branch --show-current` を throttled に取得し、結果を SessionStore に供給する。
@@ -141,7 +141,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 
 ## L2 — Detail
 
-- **SessionStore** (`crates/noa-app/src/session_store.rs`, 新規): `SessionCardId{window_id, pane_id}`(既存 `OverviewTileId` を踏襲)を鍵に `SessionCard`(name/cwd/branch/icon/dot/updated/preview-slot 参照)を保持。更新は `enum SessionDelta`(**Upsert / Remove / Branch / Rename / Bell の5種で閉じる**)を既存 `UserEvent` チャネル(`events.rs`)で post、メインスレッドが `apply` する。
+- **SessionStore** (`crates/noa-app/src/session_store.rs`, 新規): `SessionCardId{window_id, pane_id}`(既存 `OverviewTileId` を踏襲)を鍵に `SessionCard`(name/cwd/branch/icon/dot/updated/preview-slot 参照)を保持。更新は `enum SessionDelta`(**Upsert / Remove / Branch / Rename / Bell / Process の6種で閉じる** — Process はプロセス名検出の 2026-07-05 昇格時に追加)を既存 `UserEvent` チャネル(`events.rs`)で post、メインスレッドが `apply` する。
 - **io-thread publishing** (`crates/noa-app/src/io_thread.rs`): `publish_overview_snapshot` 近傍で `Instant`＋wall-clock を最終出力時にスタンプし SessionDelta::Upsert を送る。同じロック区間で `Terminal::take_pending_bell` を drain し、true なら SessionDelta::Bell を送る（フォーカス時にメインスレッドがクリア）。プレビューは第2スナップショット slot ではなく **SessionDelta::Upsert に同梱**する（実装時 Judge 裁定 2026-07-05: delta 同梱の方が coherence・メモリ・ロック時間で優位。専用 `SidebarPublish` gate＋`decide_sidebar_publish` throttle は `OverviewPublish` の**パターン再利用・インスタンス分離**で実装 — Omen T1）。
 - **branch-poll thread** (新規): OSC-7 由来の cwd 変化イベントでトリガ。cwd 毎に `(branch, Instant)` をキャッシュ(≥1s throttle)、非 git は negative-cache。結果は `UserEvent`(SessionDelta::Branch)で post。アイコン判定(FR-9)も同居させ cwd 変化時のみ再判定。
 - **sidebar layout** (`crates/noa-app/src/sidebar.rs`, 新規): `tab_overview.rs` を鏡像に、カード矩形の縦積みジオメトリ・スクロールオフセット・`hit_test`(→ SessionCardId)・close/… ボタン矩形を純関数で算出。winit/wgpu 非依存。
@@ -199,7 +199,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 - active-swap ウィンドウモデル(B-flavor)— 切替ポリシーの継ぎ目に温存、v2
 - pluggable 切替ポリシーのユーザー向け設定化 — 内部シーム保持のみ
 - repo-root グルーピング / 折畳 / バッジ / 20件超のスケール対応 — Open Question
-- フォアグラウンドプロセス名検出(tcgetpgrp＋libproc)による実プログラム名ラベル — Open Question
+- （2026-07-05 解消: フォアグラウンドプロセス名検出は実装済 → FR-2/FR-5 参照）
 - auto-hide、ネイティブタブとの別モード切替(可視性トグルに縮退済)
 - soft-wrap reflow(inc≥3 の既存範囲)
 
@@ -207,7 +207,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 (未着手)
 
 ## Open Questions / Deferred Decisions
-1. **フォアグラウンドプロセス名検出** — ヘッダーラベルの実プログラム名表示（モックの「✳ Claude Code」）。tcgetpgrp＋libproc 問い合わせ or OSC 133 cmdline 拡張。v1 は Running/Idle 固定文言に縮退。
+1. ~~フォアグラウンドプロセス名検出~~ — **2026-07-05 実装済**（tcgetpgrp＋libproc、session-metadata ワーカー。カード/ヘッダー双方で使用）。残: 最終出力プレビューの再有効化オプション（配管は温存、描画のみ停止）。
 2. **20件超のスケール対応** — repo-root/cwd グルーピング・折畳・未読バッジ（Slack 型 UI の生存条件、Flux 警告③）。v1 はスクロールのみ。
 3. **B-flavor active-swap** — 1ウィンドウ多重 Terminal での切替。切替ポリシーの内部シームに温存。
 4. **+ ボタンの新規ウィンドウ生成バリアント** — v1 は現ウィンドウ新規タブのみ。

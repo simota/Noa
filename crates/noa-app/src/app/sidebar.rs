@@ -8,7 +8,63 @@
 //! reads only the store and the pure layout — it never locks a `Terminal`
 //! (NFR-1/AC-17).
 
+use std::fmt::Write as _;
+
+use noa_core::Rgb;
+
 use super::*;
+use crate::session_store::{StatusDot, status_dot};
+use crate::sidebar::{
+    CardLines, HeaderRects, SidebarRect, card_lines, header_rects, header_status_label,
+    sidebar_bands, sidebar_layout,
+};
+
+// Sidebar palette (⚠G: compile-time, no config knob — matches the mockup's dark
+// chrome; the terminal panes keep their own theme).
+const SIDEBAR_BG: Rgb = Rgb::new(0x14, 0x16, 0x1b);
+const SIDEBAR_FG: Rgb = Rgb::new(0xd8, 0xdc, 0xe4);
+const SIDEBAR_DIM_FG: Rgb = Rgb::new(0x8a, 0x90, 0x9c);
+const SIDEBAR_DOT_BLUE: Rgb = Rgb::new(0x4c, 0x9a, 0xff);
+const SIDEBAR_DOT_GREEN: Rgb = Rgb::new(0x46, 0xc4, 0x66);
+const SIDEBAR_DOT_YELLOW: Rgb = Rgb::new(0xe6, 0xb4, 0x50);
+
+/// The dot glyph color for a card's status (FR-11), driven by the pure
+/// `status_dot` mapping in `session_store` (AC-13).
+fn status_dot_rgb(dot: StatusDot) -> Rgb {
+    match dot {
+        StatusDot::Blue => SIDEBAR_DOT_BLUE,
+        StatusDot::Green => SIDEBAR_DOT_GREEN,
+        StatusDot::Yellow => SIDEBAR_DOT_YELLOW,
+    }
+}
+
+fn rgb_to_rgba(color: Rgb) -> [f32; 4] {
+    [
+        color.r as f32 / 255.0,
+        color.g as f32 / 255.0,
+        color.b as f32 / 255.0,
+        1.0,
+    ]
+}
+
+/// One positioned text run in the synthetic sidebar grid (already converted
+/// from the pure layout's pixel rects to cell coordinates).
+struct SidebarTextRun {
+    col: u16,
+    row: u16,
+    text: String,
+    fg: Rgb,
+}
+
+/// The full per-frame sidebar draw model: the synthetic grid size and every
+/// positioned text run. Built with only the store + pure layout (no
+/// `Terminal` lock — AC-17), then rasterized into the band texture.
+pub(super) struct SidebarDrawModel {
+    inset: u32,
+    height: u32,
+    grid: GridSize,
+    runs: Vec<SidebarTextRun>,
+}
 
 impl App {
     /// The GUI-agnostic card key for a window/pane (NFR-6): winit's stable
@@ -205,4 +261,226 @@ impl App {
         self.focused = Some(window_id);
         window.focus_window();
     }
+
+    /// Build the per-frame sidebar draw model for `window_id` (FR-2/FR-5), or
+    /// `None` when the window has no visible sidebar. Reads only the store and
+    /// the pure layout — never a `Terminal` (AC-17). Computed before the redraw
+    /// path borrows `gpu`/`state` mutably, so the drawer can run inline.
+    pub(super) fn sidebar_draw_model(&self, window_id: WindowId) -> Option<SidebarDrawModel> {
+        let inset = self.window_sidebar_inset_px(window_id);
+        if inset == 0 {
+            return None;
+        }
+        let gpu = self.gpu.as_ref()?;
+        let state = self.windows.get(&window_id)?;
+        let metrics = gpu.font.metrics();
+        let height = state.window.inner_size().height.max(1);
+        let band = PaneRectApp::new(0, 0, inset, height);
+        let grid = grid_size_for_pane_rect(band, metrics, self.padding);
+
+        let bounds = SidebarRect::new(0, 0, inset, height);
+        let ids = self.session_store.ordered_ids();
+        let layout = sidebar_layout(bounds, &ids, state.sidebar_scroll);
+        let bands = sidebar_bands(bounds);
+
+        // Pixel → cell conversion, matching where the band `Renderer` places
+        // cell (0,0): at the padding origin.
+        let cell_w = metrics.cell_w.max(1.0);
+        let cell_h = metrics.cell_h.max(1.0);
+        let pad_left = self.padding.left;
+        let pad_top = self.padding.top;
+        let to_cell = |x: u32, y: u32| -> (u16, u16) {
+            let col = ((x as f32 - pad_left) / cell_w).round().max(0.0) as u16;
+            let row = ((y as f32 - pad_top) / cell_h).round().max(0.0) as u16;
+            (col.min(grid.cols.saturating_sub(1)), row.min(grid.rows.saturating_sub(1)))
+        };
+
+        let mut runs: Vec<SidebarTextRun> = Vec::new();
+        let push = |rect: SidebarRect, text: String, fg: Rgb, runs: &mut Vec<SidebarTextRun>| {
+            if rect.w == 0 || rect.h == 0 || text.is_empty() {
+                return;
+            }
+            let (col, row) = to_cell(rect.x, rect.y);
+            runs.push(SidebarTextRun { col, row, text, fg });
+        };
+
+        // Header (FR-5): status label, centered window title, session-name pill.
+        let header: HeaderRects = header_rects(bands.header);
+        push(
+            header.status_label,
+            header_status_label(self.session_store.busy_count()),
+            SIDEBAR_FG,
+            &mut runs,
+        );
+        push(header.title, tab_title(&state.title), SIDEBAR_FG, &mut runs);
+        if let Some(card) = self
+            .session_store
+            .get(&Self::session_card_id(window_id, state.focused_pane))
+        {
+            push(header.name_pill, card.display_name().to_string(), SIDEBAR_DIM_FG, &mut runs);
+        }
+
+        // Cards (FR-2): icon+name / cwd+branch / two preview lines / updated,
+        // plus the status dot.
+        let now = sidebar_wall_clock_now();
+        for card_rects in &layout.cards {
+            let Some(card) = self.session_store.get(&card_rects.id) else {
+                continue;
+            };
+            let lines: CardLines = card_lines(card, now);
+            push(card_rects.name_line, lines.name, SIDEBAR_FG, &mut runs);
+            push(card_rects.meta_line, lines.meta, SIDEBAR_DIM_FG, &mut runs);
+            for (slot, preview) in card_rects.preview.iter().zip(lines.preview.iter()) {
+                push(*slot, preview.clone(), SIDEBAR_DIM_FG, &mut runs);
+            }
+            push(card_rects.updated, lines.updated, SIDEBAR_DIM_FG, &mut runs);
+            push(
+                card_rects.dot,
+                "●".to_string(),
+                status_dot_rgb(status_dot(card)),
+                &mut runs,
+            );
+        }
+
+        Some(SidebarDrawModel {
+            inset,
+            height,
+            grid,
+            runs,
+        })
+    }
+}
+
+/// Wall-clock now, in the viewer's local zone, for the sidebar's relative
+/// updated-time (mirrors the io thread's stamp so both agree).
+fn sidebar_wall_clock_now() -> crate::session_store::WallClock {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    crate::session_store::civil_from_unix_secs(unix + crate::localtime::local_offset_seconds())
+}
+
+/// Rasterize the sidebar band (background + positioned text/dots) with the
+/// single reused `Renderer` and composite it onto `view` at the window's left
+/// inset via the reused rounded-card pipeline. Runs inline in `redraw` with the
+/// already-borrowed `gpu`, so the model must be prebuilt (no `self` here).
+pub(super) fn draw_sidebar_band(
+    gpu: &mut GpuState,
+    surface_format: wgpu::TextureFormat,
+    padding: GridPadding,
+    view: &wgpu::TextureView,
+    surface_size: PixelSize,
+    model: &SidebarDrawModel,
+) {
+    // Lazily (re)build the reused band renderer + card pipeline for this format.
+    if gpu
+        .sidebar_renderer
+        .as_ref()
+        .is_none_or(|renderer| renderer.target_format() != surface_format)
+    {
+        gpu.sidebar_renderer = Renderer::new(
+            &gpu.device,
+            &gpu.queue,
+            surface_format,
+            &mut gpu.font,
+            padding,
+        )
+        .ok();
+    }
+    if gpu
+        .sidebar_card
+        .as_ref()
+        .is_none_or(|card| card.format != surface_format)
+    {
+        gpu.sidebar_card = Some(OverviewChromeCardPipeline {
+            format: surface_format,
+            pipeline: CardPipeline::new(&gpu.device, surface_format),
+        });
+    }
+    let (Some(renderer), Some(card)) = (gpu.sidebar_renderer.as_mut(), gpu.sidebar_card.as_ref())
+    else {
+        return;
+    };
+
+    let band_size = PixelSize {
+        w: model.inset.max(1),
+        h: model.height.max(1),
+    };
+    let band_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("noa-sidebar-band"),
+        size: wgpu::Extent3d {
+            width: band_size.w,
+            height: band_size.h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: surface_format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let band_view = band_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Synthetic terminal carrying the whole band's text (background = the
+    // sidebar bg so empty cells match), fed positioned runs.
+    let mut term = Terminal::new(model.grid);
+    term.set_base_colors(SIDEBAR_FG, SIDEBAR_BG, SIDEBAR_FG, gpu.theme.palette);
+    let mut stream = Stream::new();
+    // Autowrap off so a long cwd/preview clips at the right margin instead of
+    // wrapping to the next row and shifting every run below it.
+    stream.feed(b"\x1b[?7l", &mut term);
+    let mut feed = String::new();
+    for run in &model.runs {
+        feed.clear();
+        // CUP is 1-based; set truecolor fg, write, reset.
+        let _ = write!(
+            feed,
+            "\x1b[{};{}H\x1b[38;2;{};{};{}m{}\x1b[0m",
+            run.row + 1,
+            run.col + 1,
+            run.fg.r,
+            run.fg.g,
+            run.fg.b,
+            run.text,
+        );
+        stream.feed(feed.as_bytes(), &mut term);
+    }
+    let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+    snapshot.cursor.visible = false;
+
+    renderer.resize(band_size);
+    renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+    renderer.set_clear_color(rgb_to_rgba(SIDEBAR_BG));
+    renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+    renderer.draw(&gpu.device, &gpu.queue, &band_view);
+
+    // Composite the band flat (no rounding/border) onto the surface's left
+    // inset. `overlay_texture_cards` loads (doesn't clear) so the panes to the
+    // right are untouched.
+    let style = CardStyle {
+        background: rgb_to_rgba(SIDEBAR_BG),
+        border_color: [0.0; 4],
+        focus_color: [0.0; 4],
+        corner_radius: 0.0,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: 0.0,
+    };
+    card.pipeline.overlay_texture_cards(
+        &gpu.device,
+        &gpu.queue,
+        view,
+        surface_size,
+        &style,
+        &[CardTexturePlacement {
+            texture_view: &band_view,
+            x: 0,
+            y: 0,
+            w: model.inset,
+            h: model.height,
+            selected: false,
+        }],
+    );
 }

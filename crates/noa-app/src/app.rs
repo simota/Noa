@@ -96,6 +96,13 @@ struct GpuState {
     queue: wgpu::Queue,
     font: FontGrid,
     theme: Theme,
+    /// Single reused `Renderer` that rasterizes the whole sidebar band as
+    /// synthetic terminal cells (Omen T3: one renderer for every card, never
+    /// per-card). Built lazily for the first window's surface format.
+    sidebar_renderer: Option<Renderer>,
+    /// Rounded-card pipeline reused to composite the rasterized sidebar band
+    /// onto each window's surface (CardStyle/overlay_texture_cards).
+    sidebar_card: Option<OverviewChromeCardPipeline>,
 }
 
 /// Identifies one logical window — i.e. one AppKit tab group. Every native
@@ -604,6 +611,11 @@ impl App {
     }
 
     fn redraw(&mut self, window_id: WindowId) {
+        // Build the sidebar's draw model up front (reads only the store + pure
+        // layout, AC-17) before borrowing `gpu`/`state` mutably, so the band can
+        // be composited inline after the panes without a second borrow.
+        let sidebar_model = self.sidebar_draw_model(window_id);
+        let padding = self.padding;
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
             return;
         };
@@ -720,6 +732,23 @@ impl App {
             Some(render_pane_id(state.focused_pane)),
             state.zoomed.map(render_pane_id),
         );
+        // Composite the session sidebar over the reserved left inset (FR-2/FR-5),
+        // after the panes so it isn't overdrawn. The pane area was already inset
+        // by `relayout_and_resize_window`, so this fills that band.
+        if let Some(model) = sidebar_model.as_ref() {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            sidebar::draw_sidebar_band(
+                gpu,
+                state.surface_config.format,
+                padding,
+                &view,
+                surface_size,
+                model,
+            );
+        }
         frame.present();
     }
 
@@ -1052,6 +1081,8 @@ impl App {
                     self.config.theme.as_deref(),
                     &self.theme_overrides(),
                 ),
+                sidebar_renderer: None,
+                sidebar_card: None,
             });
             surface
         } else {

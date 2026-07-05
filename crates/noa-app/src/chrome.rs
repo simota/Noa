@@ -17,6 +17,10 @@ pub const CHROME_CARD_SELECTED: Rgb = Rgb::new(0x1f, 0x25, 0x33);
 pub const CHROME_BAND: Rgb = Rgb::new(0x1e, 0x21, 0x2d);
 /// Thin resting card border.
 pub const CHROME_BORDER: Rgb = Rgb::new(0x4c, 0x51, 0x61);
+/// Hairline seam between a chrome surface and the terminal panes — lighter
+/// than [`CHROME_BG`] but dimmer than [`CHROME_BORDER`] so the edge reads as
+/// a crisp divider without competing with card strokes.
+pub const CHROME_DIVIDER: Rgb = Rgb::new(0x2a, 0x2f, 0x3d);
 /// Blue accent: focus ring, selection, hover.
 pub const CHROME_ACCENT: Rgb = Rgb::new(0x14, 0xa2, 0xff);
 /// Chrome pill face (overview search / hint bars, sidebar menu popup).

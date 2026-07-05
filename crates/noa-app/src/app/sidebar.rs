@@ -64,6 +64,15 @@ const SIDEBAR_CARD_BORDER: Rgb = crate::chrome::CHROME_BORDER;
 const SIDEBAR_ACCENT: Rgb = crate::chrome::CHROME_ACCENT;
 /// The rounded header session-name pill background.
 const SIDEBAR_PILL_BG: Rgb = crate::chrome::CHROME_BAND;
+/// The hairline stroked along the sidebar/pane seam.
+const SIDEBAR_DIVIDER: Rgb = crate::chrome::CHROME_DIVIDER;
+
+// Seam treatment between the sidebar band and the terminal panes (logical px,
+// scaled at draw time): a soft shadow the band casts rightward plus a crisp
+// 1px hairline, so the two independently-themed surfaces meet with depth
+// instead of a bare color boundary.
+const SEAM_SHADOW_WIDTH: f32 = 10.0;
+const SEAM_HAIRLINE_WIDTH: f32 = 1.0;
 
 // Brand accents for recognized AI agents (agent branding). Truecolor, applied
 // to the process row + header whenever the process classifies, busy or idle.
@@ -1310,7 +1319,10 @@ pub(super) fn draw_sidebar_band(
 
     // 1) Flat dark backdrop (chrome + all card text) → band texture, composited
     // over the inset with no rounding. `overlay_texture_cards` loads (doesn't
-    // clear) so the panes to the right are untouched.
+    // clear) so the panes to the right are untouched. The placement is drawn
+    // `selected` with a black focus color and zero focus stroke, which turns
+    // the card shader's outer glow into a soft shadow the band casts onto the
+    // panes — the seam's depth cue (its crisp line is the hairline below).
     {
         let band_view = &gpu.sidebar_band.as_ref().unwrap().2;
         rasterize_runs(
@@ -1329,11 +1341,11 @@ pub(super) fn draw_sidebar_band(
     let flat_style = CardStyle {
         background: rgb_to_rgba(SIDEBAR_BG),
         border_color: [0.0; 4],
-        focus_color: [0.0; 4],
+        focus_color: [0.0, 0.0, 0.0, 1.0],
         corner_radius: 0.0,
         border_width: 0.0,
         focus_width: 0.0,
-        focus_glow_width: 0.0,
+        focus_glow_width: SEAM_SHADOW_WIDTH * model.scale,
     };
     gpu.sidebar_card.as_ref().unwrap().pipeline.overlay_texture_cards(
         &gpu.device,
@@ -1347,9 +1359,68 @@ pub(super) fn draw_sidebar_band(
             y: 0,
             w: model.inset,
             h: model.height,
-            selected: false,
+            selected: true,
         }],
     );
+
+    // 1b) Hairline divider over the band's rightmost pixel(s): a solid
+    // `SIDEBAR_DIVIDER` strip that gives the seam a crisp edge against the
+    // pane background (the terminal keeps its own theme, so the two surfaces
+    // otherwise meet as unrelated colors).
+    let hairline_w = (SEAM_HAIRLINE_WIDTH * model.scale).round().max(1.0) as u32;
+    if model.inset > hairline_w {
+        ensure_scratch(
+            &mut gpu.sidebar_divider_tex,
+            &gpu.device,
+            PixelSize {
+                w: hairline_w,
+                h: model.height,
+            },
+            surface_format,
+            "noa-sidebar-divider",
+        );
+        if let Some((_, _, divider_view)) = gpu.sidebar_divider_tex.as_ref() {
+            rasterize_runs(
+                gpu.sidebar_renderer.as_mut().unwrap(),
+                &gpu.device,
+                &gpu.queue,
+                &mut gpu.sidebar_font,
+                &gpu.theme,
+                divider_view,
+                PixelSize {
+                    w: hairline_w,
+                    h: model.height,
+                },
+                GridSize { cols: 1, rows: 1 },
+                SIDEBAR_DIVIDER,
+                &[],
+            );
+            let divider_style = CardStyle {
+                background: rgb_to_rgba(SIDEBAR_DIVIDER),
+                border_color: [0.0; 4],
+                focus_color: [0.0; 4],
+                corner_radius: 0.0,
+                border_width: 0.0,
+                focus_width: 0.0,
+                focus_glow_width: 0.0,
+            };
+            gpu.sidebar_card.as_ref().unwrap().pipeline.overlay_texture_cards(
+                &gpu.device,
+                &gpu.queue,
+                view,
+                surface_size,
+                &divider_style,
+                &[CardTexturePlacement {
+                    texture_view: divider_view,
+                    x: model.inset - hairline_w,
+                    y: 0,
+                    w: hairline_w,
+                    h: model.height,
+                    selected: false,
+                }],
+            );
+        }
+    }
 
     // 2) Each fully-visible card as a rounded card. One reused scratch texture
     // serves every card in turn (render → composite), so submits serialize the

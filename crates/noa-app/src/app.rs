@@ -122,6 +122,10 @@ struct GpuState {
     /// Reused scratch texture for the open card `…` menu popup, composited above
     /// the cards so a rounded card can never hide it.
     sidebar_menu_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// Reused scratch texture for the hairline divider at the sidebar/pane
+    /// seam — a solid `CHROME_DIVIDER` strip composited over the band's right
+    /// edge (the seam's crisp line; the soft shadow comes from the band glow).
+    sidebar_divider_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
 }
 
 /// Identifies one logical window — i.e. one AppKit tab group. Every native
@@ -1273,6 +1277,7 @@ impl App {
                 sidebar_band: None,
                 sidebar_card_tex: None,
                 sidebar_menu_tex: None,
+                sidebar_divider_tex: None,
             });
             surface
         } else {

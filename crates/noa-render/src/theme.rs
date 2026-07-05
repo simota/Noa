@@ -12,6 +12,12 @@ use noa_grid::TerminalColors;
 
 pub const DEFAULT_MINIMUM_CONTRAST: f32 = 1.0;
 
+/// The one blue accent shared by every noa-owned UI surface: the chrome
+/// (sidebar / tab overview) focus rings, the overlay (palette / dialog)
+/// selection cues, and the split-pane focus indicator. A single source so the
+/// "focused / selected" hue reads identically everywhere.
+pub const UI_ACCENT: Rgb = Rgb::new(0x14, 0xa2, 0xff);
+
 /// A resolved terminal color theme: default fg/bg plus the 256-color palette.
 ///
 /// `PartialEq` (WP4): every field is an integer `Rgb`, so value equality is
@@ -56,6 +62,17 @@ impl Theme {
             minimum_contrast: DEFAULT_MINIMUM_CONTRAST,
             palette: xterm_palette(),
         }
+    }
+
+    /// Whether this theme's default background is light (perceived luminance
+    /// above mid-gray). Drives the polarity of noa's own chrome surfaces
+    /// (sidebar / tab overview) so a light terminal theme gets light chrome.
+    pub fn is_light(&self) -> bool {
+        let bg = self.default_bg;
+        // Rec. 709 luma on the raw 8-bit channels — polarity only needs a
+        // coarse split, not gamma-exact luminance.
+        let luma = 0.2126 * f32::from(bg.r) + 0.7152 * f32::from(bg.g) + 0.0722 * f32::from(bg.b);
+        luma > 127.5
     }
 
     /// Resolve a cell color to an RGBA tuple, `0..=1` per channel.
@@ -261,9 +278,9 @@ pub struct OverlayStyle {
 }
 
 /// The command palette's vivid accent (the highlighted-row bar and query-match
-/// highlight, D/C). A fixed blue matching the app chrome's accent rather than a
-/// theme-derived tint, so the selection cue reads the same across themes.
-const OVERLAY_ACCENT: Rgb = Rgb::new(0x14, 0xa2, 0xff);
+/// highlight, D/C). The shared [`UI_ACCENT`] rather than a theme-derived tint,
+/// so the selection cue reads the same across themes.
+const OVERLAY_ACCENT: Rgb = UI_ACCENT;
 
 impl OverlayStyle {
     /// Derive the overlay palette from `theme`:

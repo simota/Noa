@@ -18,14 +18,20 @@ use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
 use crate::pipeline::CellPipeline;
 use crate::segment::{SegmentCell, ShapeRun, segment_row};
 use crate::snapshot::{
-    CommandPaletteSnapshot, FrameSnapshot, HoverLink, ImagePlacementSnapshot, PaletteRow,
-    SnapshotImage,
+    CommandPaletteSnapshot, ConfirmDialogSnapshot, FrameSnapshot, HoverLink,
+    ImagePlacementSnapshot, PaletteRow, SnapshotImage,
 };
 use crate::theme::{OverlayStyle, Theme, rgba};
 
 const DEFAULT_PANE_ID: PaneId = PaneId::new(0);
+/// Pre-first-rebuild fallbacks only: both colors are re-derived from the
+/// active theme every [`Renderer::rebuild_panes`] (divider = the overlay
+/// border tone, focus = the shared [`crate::theme::UI_ACCENT`]).
 const DIVIDER_RGBA: [u8; 4] = [82, 82, 82, 255];
-const FOCUS_INDICATOR_RGBA: [u8; 4] = [95, 175, 255, 230];
+const FOCUS_INDICATOR_RGBA: [u8; 4] = [0x14, 0xa2, 0xff, FOCUS_INDICATOR_ALPHA];
+/// The focused-pane outline's opacity (~90%), kept independent of the accent
+/// color so the theme-derived recompute preserves it.
+const FOCUS_INDICATOR_ALPHA: u8 = 230;
 const MAX_ATLAS_EVICTION_REBUILD_PASSES: usize = 4;
 static RENDERER_CONSTRUCTION_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -189,6 +195,14 @@ pub struct Renderer {
     cell_size: (f32, f32),
     grid_padding: GridPadding,
     clear_color: [f32; 4],
+    /// Split-divider fill, re-derived from the active theme each
+    /// [`Renderer::rebuild_panes`] (the overlay border tone) so the hairline
+    /// tracks light/dark themes instead of staying a fixed gray.
+    divider_color: [u8; 4],
+    /// Focused-pane outline: the shared UI accent at
+    /// [`FOCUS_INDICATOR_ALPHA`], converted to the target's output space each
+    /// [`Renderer::rebuild_panes`].
+    focus_indicator_color: [u8; 4],
     target_format: wgpu::TextureFormat,
     target_format_is_srgb: bool,
     mask_atlas_seen_identity: u64,
@@ -301,6 +315,8 @@ impl Renderer {
             cell_size: (metrics.cell_w, metrics.cell_h),
             grid_padding,
             clear_color: [0.0, 0.0, 0.0, 1.0],
+            divider_color: DIVIDER_RGBA,
+            focus_indicator_color: FOCUS_INDICATOR_RGBA,
             target_format: format,
             target_format_is_srgb: format.is_srgb(),
             mask_atlas_seen_identity,
@@ -504,6 +520,19 @@ impl Renderer {
         if let Some(clear_color) = first_clear_color {
             self.clear_color = apply_background_opacity(clear_color, self.background_opacity);
         }
+        // Theme-derived overlay colors for the divider / focus-indicator
+        // instances emitted later in `prepare_overlay_instances` (which has no
+        // theme access of its own).
+        let overlay = OverlayStyle::from_theme(theme);
+        self.divider_color = to_u8_color(surface_output_rgba(
+            overlay.border(),
+            self.target_format_is_srgb,
+        ));
+        let accent = to_u8_color(surface_output_rgba(
+            rgba(crate::theme::UI_ACCENT),
+            self.target_format_is_srgb,
+        ));
+        self.focus_indicator_color = [accent[0], accent[1], accent[2], FOCUS_INDICATOR_ALPHA];
         self.cell_instance_len = self.instances.len();
         self.rows_rebuilt_last_frame = rows_rebuilt_total;
     }
@@ -869,7 +898,8 @@ impl Renderer {
                 DrawOp::Dividers { rects } => {
                     let start = self.instances.len() as u32;
                     for rect in rects {
-                        self.instances.push(divider_instance(*rect));
+                        self.instances
+                            .push(pixel_overlay_instance(*rect, self.divider_color));
                     }
                     let end = self.instances.len() as u32;
                     self.divider_range = start..end;
@@ -877,7 +907,8 @@ impl Renderer {
                 DrawOp::FocusIndicator { rects, .. } => {
                     let start = self.instances.len() as u32;
                     for rect in rects {
-                        self.instances.push(focus_indicator_instance(*rect));
+                        self.instances
+                            .push(pixel_overlay_instance(*rect, self.focus_indicator_color));
                     }
                     let end = self.instances.len() as u32;
                     self.focus_indicator_range = start..end;
@@ -940,4 +971,6 @@ use cell::*;
 use color::*;
 use cursor::*;
 use overlay::*;
-pub use overlay::{PaletteLayout, command_palette_layout};
+pub use overlay::{
+    ConfirmDialogLayout, PaletteLayout, command_palette_layout, confirm_dialog_layout,
+};

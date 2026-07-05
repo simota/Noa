@@ -567,8 +567,10 @@ fn palette_segment_cells(
 }
 
 /// Append the open confirmation dialog (paste protection / clipboard-read),
-/// if any, to `instances`. A centered two-row modal — a message line and a
-/// key-hint line — reusing the command-palette block helpers. Recomputed
+/// if any, to `instances`. The compact centered message + key-hint block —
+/// its breathing room and chrome (rounded corners, border, drop shadow,
+/// scrim) come from `noa-app`'s rounded-card composite, exactly like the
+/// command palette, so the two modals share one visual language. Recomputed
 /// fresh every call and drawn on top of everything else.
 pub(super) fn append_confirm_dialog_instances(
     instances: &mut Vec<CellInstance>,
@@ -581,11 +583,9 @@ pub(super) fn append_confirm_dialog_instances(
     let Some(dialog) = snap.confirm_dialog.as_ref() else {
         return;
     };
-    let cols = snap.cols as usize;
-    let grid_rows = snap.rows_n as usize;
-    if cols < 3 || grid_rows < 2 {
+    let Some(layout) = confirm_dialog_layout(dialog, snap.cols, snap.rows_n) else {
         return;
-    }
+    };
 
     let style = OverlayStyle::from_theme(theme);
     let surface_bg = to_u8_color(surface_output_rgba(
@@ -597,8 +597,52 @@ pub(super) fn append_confirm_dialog_instances(
         target_format_is_srgb,
     ));
     let muted_fg = to_u8_color(surface_output_rgba(style.muted_fg(), target_format_is_srgb));
-    let border = to_u8_color(surface_output_rgba(style.border(), target_format_is_srgb));
 
+    let inner = layout.inner as usize;
+    let rows = [
+        OverlayRow::uniform(
+            palette_line(&dialog.message, None, inner),
+            surface_bg,
+            surface_fg,
+        ),
+        OverlayRow::uniform(palette_line(&dialog.hint, None, inner), surface_bg, muted_fg),
+    ];
+    for (i, row) in rows.iter().enumerate() {
+        append_overlay_row(instances, font, metrics, layout.x0, layout.y0 + i as u16, row);
+    }
+}
+
+/// The resolved geometry of the confirm-dialog block for a given grid: where
+/// it sits and how big it is (grid cells). Pure — no font/GPU — and shared by
+/// the draw path ([`append_confirm_dialog_instances`]) and `noa-app`'s
+/// rounded-card composite, so both agree on the exact block rectangle. The
+/// formula is self-consistent when re-run on the app's block-sized mini grid
+/// (`cols == block_cols`, `grid_rows == block_rows`): it reproduces the same
+/// block at origin (0, 0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConfirmDialogLayout {
+    /// Block origin in grid cells (top-left), within the pane.
+    pub x0: u16,
+    pub y0: u16,
+    /// Block size in grid cells (message row + hint row).
+    pub block_cols: u16,
+    pub block_rows: u16,
+    /// Inner content width in columns (block is `inner + 2` wide).
+    pub inner: u16,
+}
+
+/// Compute the dialog block geometry for a `cols`x`grid_rows` grid, or `None`
+/// when the grid is too small to host the two text rows.
+pub fn confirm_dialog_layout(
+    dialog: &ConfirmDialogSnapshot,
+    cols: u16,
+    grid_rows: u16,
+) -> Option<ConfirmDialogLayout> {
+    let cols = cols as usize;
+    let grid_rows = grid_rows as usize;
+    if cols < 3 || grid_rows < 2 {
+        return None;
+    }
     let inner = dialog
         .message
         .chars()
@@ -606,43 +650,16 @@ pub(super) fn append_confirm_dialog_instances(
         .max(dialog.hint.chars().count())
         .min(cols - 2);
     let block_w = inner + 2;
-
-    // A blank padding row above and below the two text rows when the grid is
-    // tall enough (block = 4 rows); otherwise fall back to the compact
-    // message+hint form so the dialog still fits a short pane.
-    let pad = usize::from(grid_rows >= 6);
-    let height = 2 + pad * 2;
-    let x0 = ((cols - block_w) / 2) as u16;
-    let y0 = (grid_rows.saturating_sub(height) / 2) as u16;
-
-    let blank = || OverlayRow::uniform(palette_line("", None, inner), surface_bg, surface_fg);
-    let mut rows: Vec<OverlayRow> = Vec::with_capacity(height);
-    if pad != 0 {
-        rows.push(blank());
-    }
-    rows.push(OverlayRow::uniform(
-        palette_line(&dialog.message, None, inner),
-        surface_bg,
-        surface_fg,
-    ));
-    rows.push(OverlayRow::uniform(
-        palette_line(&dialog.hint, None, inner),
-        surface_bg,
-        muted_fg,
-    ));
-    if pad != 0 {
-        rows.push(blank());
-    }
-
-    append_overlay_block(
-        instances,
-        font,
-        metrics,
-        (x0, y0),
-        block_w as u16,
-        &rows,
-        border,
-    );
+    let height = 2usize;
+    let x0 = (cols - block_w) / 2;
+    let y0 = (grid_rows - height) / 2;
+    Some(ConfirmDialogLayout {
+        x0: x0 as u16,
+        y0: y0 as u16,
+        block_cols: block_w as u16,
+        block_rows: height as u16,
+        inner: inner as u16,
+    })
 }
 
 /// One row of a modal overlay block: a full-`block_w`-column line of text, a
@@ -666,43 +683,6 @@ impl OverlayRow {
         }
     }
 
-}
-
-/// Emit a centered modal overlay block: each row's background quads and
-/// glyph run, then a 1px border in `border` color around the whole block.
-///
-/// Border mechanism: per-cell `FLAG_DECORATION` rects along the block's edge
-/// cells (a 1px inset within each perimeter cell). Chosen over the
-/// window-absolute `FLAG_DIVIDER` path because decoration quads live in the
-/// same per-pane cell pass and scissor as the block's own background and
-/// glyphs — they share the pane's coordinate space and paint order, so there
-/// is no risk of the later full-viewport divider pass drawing the outline
-/// over the wrong pane. The tradeoff is the outline snaps to cell edges
-/// rather than being a free-floating pixel rectangle.
-pub(super) fn append_overlay_block(
-    instances: &mut Vec<CellInstance>,
-    font: &mut FontGrid,
-    metrics: Metrics,
-    origin: (u16, u16),
-    block_w: u16,
-    rows: &[OverlayRow],
-    border: [u8; 4],
-) {
-    let (x0, y0) = origin;
-    for (i, row) in rows.iter().enumerate() {
-        append_overlay_row(instances, font, metrics, x0, y0 + i as u16, row);
-    }
-    if !rows.is_empty() {
-        append_overlay_border(
-            instances,
-            x0,
-            y0,
-            block_w,
-            rows.len() as u16,
-            border,
-            metrics,
-        );
-    }
 }
 
 /// Emit one overlay row's background rects (`block_w` cells wide, from `row`'s
@@ -730,72 +710,6 @@ pub(super) fn append_overlay_row(
         run.start_col += x0;
         let shaped = font.shape_run(&run.cells);
         emit_run_glyph_instances(instances, font, &run, &shaped, y, metrics);
-    }
-}
-
-/// Emit the 1px border of a `block_w` x `block_h` cell block anchored at
-/// `(x0, y0)` as decoration-pass rects (see [`append_overlay_block`] for why
-/// this path rather than the pixel-overlay divider path). Top/bottom edges
-/// run along the block's first/last rows; left/right along its first/last
-/// columns, so the four strips meet at the corner cells.
-pub(super) fn append_overlay_border(
-    instances: &mut Vec<CellInstance>,
-    x0: u16,
-    y0: u16,
-    block_w: u16,
-    block_h: u16,
-    color: [u8; 4],
-    metrics: Metrics,
-) {
-    let thickness: u16 = 1;
-    let width = metrics.cell_w.round().max(1.0) as u16;
-    let height = metrics.cell_h.round().max(1.0) as u16;
-    let right_x = width.saturating_sub(thickness) as i16;
-    let bottom_y = height.saturating_sub(thickness) as i16;
-    let y_last = y0 + block_h - 1;
-    let x_last = x0 + block_w - 1;
-
-    for i in 0..block_w {
-        let x = x0 + i;
-        push_decoration_rect(
-            instances,
-            DecorationCell {
-                grid_x: x,
-                grid_y: y0,
-                color,
-            },
-            DecorationRect::new(0, 0, width, thickness),
-        );
-        push_decoration_rect(
-            instances,
-            DecorationCell {
-                grid_x: x,
-                grid_y: y_last,
-                color,
-            },
-            DecorationRect::new(0, bottom_y, width, thickness),
-        );
-    }
-    for j in 0..block_h {
-        let y = y0 + j;
-        push_decoration_rect(
-            instances,
-            DecorationCell {
-                grid_x: x0,
-                grid_y: y,
-                color,
-            },
-            DecorationRect::new(0, 0, thickness, height),
-        );
-        push_decoration_rect(
-            instances,
-            DecorationCell {
-                grid_x: x_last,
-                grid_y: y,
-                color,
-            },
-            DecorationRect::new(right_x, 0, thickness, height),
-        );
     }
 }
 

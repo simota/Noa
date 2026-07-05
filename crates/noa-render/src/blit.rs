@@ -257,7 +257,9 @@ struct CardUniformsRaw {
     corner_radius: f32,
     border_width: f32,
     glow_width: f32,
-    _padding: [f32; 3],
+    /// Whole-card opacity multiplier (fade-in transitions); 1.0 = opaque.
+    opacity: f32,
+    _padding: [f32; 2],
 }
 
 pub struct CardPipeline {
@@ -401,7 +403,42 @@ impl CardPipeline {
         style: &CardStyle,
         placements: &[CardTexturePlacement<'_>],
     ) {
-        self.draw_texture_cards(device, queue, target, surface_size, style, placements, None);
+        self.draw_texture_cards(
+            device,
+            queue,
+            target,
+            surface_size,
+            style,
+            placements,
+            None,
+            1.0,
+        );
+    }
+
+    /// Like [`Self::overlay_texture_cards`] but scaling the whole composite
+    /// (fill, border, glow, sampled texture) by `opacity` — the fade-in path
+    /// for modal cards.
+    #[allow(clippy::too_many_arguments)]
+    pub fn overlay_texture_cards_with_opacity(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        surface_size: PixelSize,
+        style: &CardStyle,
+        placements: &[CardTexturePlacement<'_>],
+        opacity: f32,
+    ) {
+        self.draw_texture_cards(
+            device,
+            queue,
+            target,
+            surface_size,
+            style,
+            placements,
+            None,
+            opacity,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -414,6 +451,7 @@ impl CardPipeline {
         style: &CardStyle,
         placements: &[CardTexturePlacement<'_>],
         clear: Option<[f32; 4]>,
+        opacity: f32,
     ) {
         let surface = [surface_size.w.max(1) as f32, surface_size.h.max(1) as f32];
 
@@ -441,7 +479,8 @@ impl CardPipeline {
                 corner_radius: style.corner_radius,
                 border_width,
                 glow_width,
-                _padding: [0.0; 3],
+                opacity: opacity.clamp(0.0, 1.0),
+                _padding: [0.0; 2],
             };
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("noa-overview-card-uniform"),
@@ -783,6 +822,7 @@ impl OverviewThumbnailResources {
             style,
             &texture_placements,
             Some(style.background),
+            1.0,
         );
     }
 }

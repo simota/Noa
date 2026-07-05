@@ -13,6 +13,8 @@ struct CardUniforms {
     corner_radius: f32,
     border_width: f32,
     glow_width: f32,
+    // Whole-card opacity multiplier (fade-in transitions); 1.0 = opaque.
+    opacity: f32,
 };
 
 @group(0) @binding(0) var tile_tex: texture_2d<f32>;
@@ -72,7 +74,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         if glow_width <= 0.0 {
             discard;
         }
-        let glow_alpha = (1.0 - smoothstep(0.0, glow_width, d)) * u.glow_color.a;
+        let glow_alpha = (1.0 - smoothstep(0.0, glow_width, d)) * u.glow_color.a * u.opacity;
         if glow_alpha <= 0.0 {
             discard;
         }
@@ -91,5 +93,5 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // the composite instead of being forced opaque. Every existing caller
     // renders its source texture with clear alpha 1.0, so `tex.a` is 1.0 there
     // and this is a no-op (unchanged output).
-    return vec4<f32>(rgb, coverage * tex.a);
+    return vec4<f32>(rgb, coverage * tex.a * u.opacity);
 }

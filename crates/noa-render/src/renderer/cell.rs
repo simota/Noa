@@ -3,14 +3,6 @@
 
 use super::*;
 
-pub(super) fn divider_instance(rect: PaneRect) -> CellInstance {
-    pixel_overlay_instance(rect, DIVIDER_RGBA)
-}
-
-pub(super) fn focus_indicator_instance(rect: PaneRect) -> CellInstance {
-    pixel_overlay_instance(rect, FOCUS_INDICATOR_RGBA)
-}
-
 pub(super) fn pixel_overlay_instance(rect: PaneRect, color: [u8; 4]) -> CellInstance {
     CellInstance {
         glyph_pos: [0, 0],

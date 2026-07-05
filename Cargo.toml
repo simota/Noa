@@ -34,6 +34,7 @@ rustybuzz = "0.20"
 
 # ── pty ────────────────────────────────────────────────────────────
 portable-pty = "0.9"
+libc         = "0.2"
 
 # ── gpu data / concurrency / unicode ───────────────────────────────
 bytemuck          = { version = "1", features = ["derive"] }

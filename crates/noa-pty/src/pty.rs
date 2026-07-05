@@ -168,6 +168,15 @@ impl Pty {
         self.writer.clone()
     }
 
+    /// A `Send` probe for the pty's foreground process, usable off the io
+    /// thread (FR — running-process display). It holds an independent `dup` of
+    /// the master fd so a poller can read the tty's foreground process group
+    /// without touching the `Pty` or the io read loop. `None` when the master
+    /// exposes no fd or the `dup` fails.
+    pub fn foreground_probe(&self) -> Option<ForegroundProcessProbe> {
+        ForegroundProcessProbe::from_master(self.master.as_ref())
+    }
+
     /// Resize the PTY, informing the kernel and signalling the child.
     pub fn resize(&self, size: GridSize) -> Result<()> {
         self.master
@@ -186,6 +195,88 @@ impl Drop for Pty {
         // Best-effort: terminate the child so the waiter thread unblocks.
         let _ = self.killer.kill();
     }
+}
+
+/// A `Send` handle for polling a pty's foreground process, decoupled from the
+/// [`Pty`] (which is not `Sync` and lives on the io thread). It owns a `dup` of
+/// the master fd, so it can be handed to a background poller and outlives
+/// nothing it shouldn't: closing it just drops that extra fd.
+pub struct ForegroundProcessProbe {
+    #[cfg(unix)]
+    fd: std::os::fd::OwnedFd,
+}
+
+impl ForegroundProcessProbe {
+    #[cfg(unix)]
+    fn from_master(master: &(dyn MasterPty + Send)) -> Option<Self> {
+        use std::os::fd::FromRawFd;
+        let raw = master.as_raw_fd()?;
+        // Duplicate so the probe's fd is independent of the master's lifetime.
+        // SAFETY: `raw` is a live fd owned by the master; `dup` returns a new
+        // owned fd (or -1, handled below).
+        let dup = unsafe { libc::dup(raw) };
+        if dup < 0 {
+            return None;
+        }
+        // SAFETY: `dup` is a fresh, exclusively-owned fd from `libc::dup`.
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(dup) };
+        Some(Self { fd })
+    }
+
+    #[cfg(not(unix))]
+    fn from_master(_master: &(dyn MasterPty + Send)) -> Option<Self> {
+        None
+    }
+
+    /// The name of the tty's foreground process — the leader of the current
+    /// foreground process group (e.g. `zsh`, `cargo`, `claude`). `None` when
+    /// there is no foreground group (the session ended) or on a platform
+    /// without the query (only macOS is implemented; NFR-5 graceful
+    /// degradation).
+    pub fn poll(&self) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd;
+            foreground_process_name(self.fd.as_raw_fd())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
+}
+
+impl std::fmt::Debug for ForegroundProcessProbe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForegroundProcessProbe").finish_non_exhaustive()
+    }
+}
+
+/// The foreground process name for `fd`'s tty (macOS): `tcgetpgrp` gives the
+/// foreground process-group id, then `proc_name` maps that pid to its command
+/// name. Any failure (no foreground group, dead pid) degrades to `None`.
+#[cfg(target_os = "macos")]
+fn foreground_process_name(fd: std::os::fd::RawFd) -> Option<String> {
+    // SAFETY: `fd` is a valid tty fd; `tcgetpgrp` returns -1 on error.
+    let pgid = unsafe { libc::tcgetpgrp(fd) };
+    if pgid <= 0 {
+        return None;
+    }
+    // `proc_name` copies the (NUL-terminated) accounting name; its buffer is up
+    // to 2*MAXCOMLEN. SAFETY: valid pid + writable buffer + its length.
+    let mut buf = [0u8; libc::MAXCOMLEN * 2 + 1];
+    let len = unsafe {
+        libc::proc_name(
+            pgid,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            (buf.len() - 1) as u32,
+        )
+    };
+    if len <= 0 {
+        return None;
+    }
+    let name = std::str::from_utf8(&buf[..len as usize]).ok()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 impl std::fmt::Debug for Pty {
@@ -257,6 +348,42 @@ mod tests {
             "expected 'hello' in output: {text:?}"
         );
         assert!(saw_exit, "expected an Exit event");
+    }
+
+    #[test]
+    fn foreground_probe_reports_the_shell_process() {
+        // The probe reads the tty's foreground process group leader, which for a
+        // freshly spawned interactive shell is the shell itself. macOS-only; on
+        // other platforms `poll` degrades to `None` (NFR-5).
+        let pty = Pty::spawn(PtyConfig {
+            size: GridSize::new(80, 24),
+            shell: Some("/bin/sh".to_string()),
+            cwd: None,
+            term: "xterm-256color".to_string(),
+            login: false,
+            shell_integration: false,
+        })
+        .expect("spawn");
+        let probe = pty.foreground_probe().expect("a unix master exposes an fd");
+
+        if !cfg!(target_os = "macos") {
+            return; // poll() is a documented `None` off macOS.
+        }
+
+        // Wait for the child to become the tty's foreground group leader (it
+        // sets its controlling terminal in a pre-exec step, so immediately after
+        // spawn the foreground group can still be this test's).
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut last = None;
+        while std::time::Instant::now() < deadline {
+            let name = probe.poll();
+            if name.as_deref().is_some_and(|n| n.contains("sh")) {
+                return; // saw the shell as the foreground process
+            }
+            last = name;
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("never saw the shell as the foreground process; last = {last:?}");
     }
 
     #[test]

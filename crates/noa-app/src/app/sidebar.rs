@@ -537,7 +537,9 @@ impl App {
         }
         let gpu = self.gpu.as_ref()?;
         let state = self.windows.get(&window_id)?;
-        let metrics = gpu.font.metrics();
+        // The sidebar rasterizes with its own dedicated, smaller font, so cell
+        // placement uses that font's metrics (not the terminal font's).
+        let metrics = gpu.sidebar_font.metrics();
         let theme = &gpu.theme;
         let scale = state.window.scale_factor() as f32;
         let layout_metrics = SidebarMetrics::new(scale);
@@ -950,7 +952,7 @@ pub(super) fn draw_sidebar_band(
         .is_none_or(|renderer| renderer.target_format() != surface_format)
     {
         gpu.sidebar_renderer =
-            Renderer::new(&gpu.device, &gpu.queue, surface_format, &mut gpu.font, padding).ok();
+            Renderer::new(&gpu.device, &gpu.queue, surface_format, &mut gpu.sidebar_font, padding).ok();
     }
     if gpu
         .sidebar_card
@@ -1011,7 +1013,7 @@ pub(super) fn draw_sidebar_band(
             gpu.sidebar_renderer.as_mut().unwrap(),
             &gpu.device,
             &gpu.queue,
-            &mut gpu.font,
+            &mut gpu.sidebar_font,
             &gpu.theme,
             band_view,
             band_size,
@@ -1065,7 +1067,7 @@ pub(super) fn draw_sidebar_band(
             gpu.sidebar_renderer.as_mut().unwrap(),
             &gpu.device,
             &gpu.queue,
-            &mut gpu.font,
+            &mut gpu.sidebar_font,
             &gpu.theme,
             card_view,
             PixelSize {
@@ -1101,7 +1103,7 @@ pub(super) fn draw_sidebar_band(
             gpu.sidebar_renderer.as_mut().unwrap(),
             &gpu.device,
             &gpu.queue,
-            &mut gpu.font,
+            &mut gpu.sidebar_font,
             &gpu.theme,
             menu_view,
             PixelSize {

@@ -350,6 +350,18 @@ impl App {
                             .renderer
                             .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
                     }
+                    // Rebuild the dedicated sidebar font at the new scale so its
+                    // glyphs stay crisp; the sidebar `Renderer` re-syncs its
+                    // atlas from it on the next draw.
+                    match FontGrid::new(
+                        sidebar_font_pixel_size(scale_factor),
+                        font_config_from_noa_config(&self.config.font),
+                    ) {
+                        Ok(sidebar_font) => gpu.sidebar_font = sidebar_font,
+                        Err(err) => log::warn!(
+                            "failed to rebuild sidebar font for scale factor {scale_factor}: {err}"
+                        ),
+                    }
                     true
                 }
                 Err(err) => {

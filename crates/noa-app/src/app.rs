@@ -95,6 +95,10 @@ struct GpuState {
     device: wgpu::Device,
     queue: wgpu::Queue,
     font: FontGrid,
+    /// Dedicated, smaller font for the session sidebar (mockup-dense typography,
+    /// [`SIDEBAR_FONT_POINT_SIZE`]), sized independently of the terminal font
+    /// and rebuilt on a scale change alongside `font`.
+    sidebar_font: FontGrid,
     theme: Theme,
     /// Single reused `Renderer` that rasterizes the whole sidebar band as
     /// synthetic terminal cells (Omen T3: one renderer for every card, never
@@ -1103,6 +1107,11 @@ impl App {
                 device,
                 queue,
                 font: first_font.expect("first tab must initialize the font"),
+                sidebar_font: FontGrid::new(
+                    sidebar_font_pixel_size(window_scale_factor),
+                    font_config_from_noa_config(&self.config.font),
+                )
+                .expect("failed to load the sidebar font"),
                 theme: crate::theme::resolve_theme_with_overrides(
                     self.config.theme.as_deref(),
                     &self.theme_overrides(),

@@ -20,20 +20,25 @@ use crate::session_store::{
     IconKind, PreviewLine, SessionCard, SessionCardId, WallClock, format_relative_time,
 };
 
+// All the `SIDEBAR_*`/`CARD_*` metrics below are the design values at scale
+// 1.0, tuned for the sidebar's dedicated small font (≈11.5pt), so cards read
+// compact and dense (mockup parity). `SidebarMetrics::new(scale)` multiplies
+// them by the window DPR.
+
 /// Height of the top header band (status label / center title / name pill,
 /// FR-5). Compile-time constant — no config knob (⚠G precedent, mirroring
 /// `tab_overview.rs`'s fixed chrome bands).
-pub const SIDEBAR_HEADER_H: u32 = 44;
+pub const SIDEBAR_HEADER_H: u32 = 36;
 
 /// Height of the toolbar band holding the `+` (new session) and `…` (menu)
 /// buttons below the header.
-pub const SIDEBAR_TOOLBAR_H: u32 = 36;
+pub const SIDEBAR_TOOLBAR_H: u32 = 30;
 
 /// Height of one session card.
-pub const SIDEBAR_CARD_H: u32 = 92;
+pub const SIDEBAR_CARD_H: u32 = 82;
 
 /// Vertical gap between adjacent cards.
-pub const SIDEBAR_CARD_GUTTER: u32 = 8;
+pub const SIDEBAR_CARD_GUTTER: u32 = 6;
 
 /// Vertical stride from one card's top to the next (card + gutter).
 pub const SIDEBAR_CARD_STRIDE: u32 = SIDEBAR_CARD_H + SIDEBAR_CARD_GUTTER;
@@ -42,25 +47,32 @@ pub const SIDEBAR_CARD_STRIDE: u32 = SIDEBAR_CARD_H + SIDEBAR_CARD_GUTTER;
 const CWD_MAX_CHARS: usize = 28;
 
 // Card interior metrics (all compile-time; see `card_rects`/`card_lines`).
-const CARD_PAD: u32 = 12;
-const CARD_ICON_W: u32 = 20;
+const CARD_PAD: u32 = 10;
+const CARD_ICON_W: u32 = 18;
 const CARD_DOT_D: u32 = 8;
 const CARD_MENU_W: u32 = 22;
-const CARD_UPDATED_W: u32 = 64;
-const CARD_LINE_H: u32 = 16;
-const CARD_NAME_H: u32 = 20;
+const CARD_UPDATED_W: u32 = 56;
+const CARD_LINE_H: u32 = 14;
+const CARD_NAME_H: u32 = 18;
+
+// Card interior row baselines (top-relative), sized for the dense small font.
+const CARD_NAME_Y: u32 = 6;
+const CARD_META_Y: u32 = 22;
+const CARD_LABEL_Y: u32 = 38;
+const CARD_PREVIEW0_Y: u32 = 52;
+const CARD_PREVIEW1_Y: u32 = 66;
 
 /// The dim "最終出力" heading rendered above a card's preview lines (FR-2 mockup
 /// parity). Kept here so the label and the layout row that positions it stay
 /// together.
 pub const CARD_PREVIEW_LABEL: &str = "最終出力";
 
-// Toolbar `+` / `…` button metrics.
-const TOOLBAR_BUTTON_W: u32 = 28;
-const TOOLBAR_BUTTON_H: u32 = 24;
+// Toolbar `+` / `…` button metrics (kept as comfortable hit targets).
+const TOOLBAR_BUTTON_W: u32 = 26;
+const TOOLBAR_BUTTON_H: u32 = 22;
 
 // Header line height for the status / title / pill rects.
-const HEADER_LINE_H: u32 = 20;
+const HEADER_LINE_H: u32 = 16;
 
 /// The three horizontal bands the sidebar is split into: a fixed top header, a
 /// fixed toolbar (`+` / `…`), and the scrolling card viewport below.
@@ -319,11 +331,11 @@ impl SidebarMetrics {
 
         let body_w = w - 2 * pad;
 
-        let name_y = top + gap6;
-        let meta_y = top + self.s(26) as i64;
-        let label_y = top + self.s(44) as i64;
-        let preview0_y = top + self.s(58) as i64;
-        let preview1_y = top + self.s(74) as i64;
+        let name_y = top + self.s(CARD_NAME_Y) as i64;
+        let meta_y = top + self.s(CARD_META_Y) as i64;
+        let label_y = top + self.s(CARD_LABEL_Y) as i64;
+        let preview0_y = top + self.s(CARD_PREVIEW0_Y) as i64;
+        let preview1_y = top + self.s(CARD_PREVIEW1_Y) as i64;
 
         CardRects {
             id,
@@ -464,10 +476,10 @@ fn iclip(x: i64, y: i64, w: i64, h: i64, clip: SidebarRect) -> SidebarRect {
 }
 
 /// Width of the per-card `…` menu popup at scale 1.0 (FR-7).
-pub const SIDEBAR_MENU_W: u32 = 140;
+pub const SIDEBAR_MENU_W: u32 = 128;
 
 /// Height of one popup menu item row at scale 1.0.
-pub const SIDEBAR_MENU_ITEM_H: u32 = 26;
+pub const SIDEBAR_MENU_ITEM_H: u32 = 24;
 
 /// One action in a card's `…` menu (FR-7). Only [`CardMenuItem::Close`] is wired
 /// in v1 (see [`CARD_MENU_ITEMS`]); `Rename` names the store-level override that
@@ -664,10 +676,10 @@ mod tests {
     }
 
     // 6 ids stacked; a viewport tall enough for exactly 3 cards. bounds height =
-    // header(44) + toolbar(36) + 3*stride(300) = 380.
+    // header(36) + toolbar(30) + 3*stride(88) = 330.
     fn six_id_bounds() -> (SidebarRect, Vec<SessionCardId>) {
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
-        (SidebarRect::new(0, 0, 360, 380), ids)
+        (SidebarRect::new(0, 0, 360, 330), ids)
     }
 
     // AC-3 (FR-2): the card lines carry `[icon] name`, `cwd … branch`, and the
@@ -959,8 +971,8 @@ mod tests {
     fn layout_and_hit_test_scale_at_dpr_2() {
         let m2 = SidebarMetrics::new(2.0);
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
-        // header(88) + toolbar(72) + 3*stride(600) = 760, with a doubled width.
-        let bounds = SidebarRect::new(0, 0, 720, 760);
+        // header(72) + toolbar(60) + 3*stride(176) = 660, with a doubled width.
+        let bounds = SidebarRect::new(0, 0, 720, 660);
 
         let bands = m2.bands(bounds);
         assert_eq!(bands.header.h, 2 * SIDEBAR_HEADER_H);

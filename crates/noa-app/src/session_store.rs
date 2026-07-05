@@ -16,7 +16,31 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use noa_core::Color;
+
 use crate::split_tree::PaneId;
+
+/// One color run within a card's last-output preview (FR-2): a maximal span of
+/// preview text sharing one foreground color. The io thread coalesces adjacent
+/// cells with equal fg into a span so the sidebar can show last output in its
+/// original ANSI colors rather than one flat gray. `fg` is the raw cell color
+/// (`Color::Default` resolves to the sidebar's dim fg at draw time); carrying
+/// the pure `noa_core::Color` keeps this module GUI-agnostic (no resolved RGB
+/// or theme dependency here).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewSpan {
+    pub text: String,
+    pub fg: Color,
+}
+
+/// One preview line: its color runs, left to right.
+pub type PreviewLine = Vec<PreviewSpan>;
+
+/// The plain text of a preview line — its spans concatenated. Used by tests and
+/// any consumer that only needs the characters, not the colors.
+pub fn preview_line_text(line: &[PreviewSpan]) -> String {
+    line.iter().map(|span| span.text.as_str()).collect()
+}
 
 /// FIFO cap on the tombstone map. Pane ids are monotonic and never reused, so a
 /// tombstone is only ever consulted to reject stale/reordered `Upsert`s already
@@ -99,9 +123,10 @@ pub struct SessionCard {
     pub unread_bell: bool,
     pub busy: bool,
     pub updated_at: WallClock,
-    /// Last-output preview lines (up to 2; FR-2). Placeholder in PR1; the io
-    /// thread fills it from the overview snapshot in a later PR.
-    pub preview: Vec<String>,
+    /// Last-output preview lines (up to 2; FR-2), each carrying its color runs
+    /// so the sidebar renders output in its original ANSI colors. Filled by the
+    /// io thread from the active screen's trailing rows.
+    pub preview: Vec<PreviewLine>,
     seq: u64,
 }
 
@@ -128,7 +153,7 @@ pub enum SessionDelta {
         cwd: String,
         busy: bool,
         updated_at: WallClock,
-        preview: Vec<String>,
+        preview: Vec<PreviewLine>,
     },
     /// Remove a card (session teardown). Records a tombstone so a late/queued
     /// `Upsert` for the same id cannot resurrect it.

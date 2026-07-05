@@ -105,8 +105,17 @@ struct GpuState {
     sidebar_card: Option<OverviewChromeCardPipeline>,
     /// The band texture the sidebar rasterizes into, cached with its size so it
     /// is reused frame-to-frame and only reallocated when the band dimensions
-    /// change (a window resize or sidebar-width change).
+    /// change (a window resize or sidebar-width change). This is the flat dark
+    /// backdrop (header/toolbar + card text) that per-card rounded cards overlay.
     sidebar_band: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// Reused scratch texture for one rounded session card (inset x card
+    /// height): each visible card is rendered into it then composited as a
+    /// rounded card in turn, so a single texture serves every card without a
+    /// per-card allocation (Omen T3: still one renderer, one card texture).
+    sidebar_card_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// Reused scratch texture for the open card `…` menu popup, composited above
+    /// the cards so a rounded card can never hide it.
+    sidebar_menu_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
 }
 
 /// Identifies one logical window — i.e. one AppKit tab group. Every native
@@ -1101,6 +1110,8 @@ impl App {
                 sidebar_renderer: None,
                 sidebar_card: None,
                 sidebar_band: None,
+                sidebar_card_tex: None,
+                sidebar_menu_tex: None,
             });
             surface
         } else {

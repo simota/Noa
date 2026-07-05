@@ -16,7 +16,9 @@
 
 pub use crate::split_tree::{Point, Rect as SidebarRect};
 
-use crate::session_store::{IconKind, SessionCard, SessionCardId, WallClock, format_relative_time};
+use crate::session_store::{
+    IconKind, PreviewLine, SessionCard, SessionCardId, WallClock, format_relative_time,
+};
 
 /// Height of the top header band (status label / center title / name pill,
 /// FR-5). Compile-time constant — no config knob (⚠G precedent, mirroring
@@ -41,12 +43,17 @@ const CWD_MAX_CHARS: usize = 28;
 
 // Card interior metrics (all compile-time; see `card_rects`/`card_lines`).
 const CARD_PAD: u32 = 12;
-const CARD_ICON_W: u32 = 22;
-const CARD_DOT_D: u32 = 10;
+const CARD_ICON_W: u32 = 20;
+const CARD_DOT_D: u32 = 8;
 const CARD_MENU_W: u32 = 22;
-const CARD_UPDATED_W: u32 = 72;
+const CARD_UPDATED_W: u32 = 64;
 const CARD_LINE_H: u32 = 16;
 const CARD_NAME_H: u32 = 20;
+
+/// The dim "最終出力" heading rendered above a card's preview lines (FR-2 mockup
+/// parity). Kept here so the label and the layout row that positions it stay
+/// together.
+pub const CARD_PREVIEW_LABEL: &str = "最終出力";
 
 // Toolbar `+` / `…` button metrics.
 const TOOLBAR_BUTTON_W: u32 = 28;
@@ -156,6 +163,8 @@ pub struct CardRects {
     pub icon: SidebarRect,
     pub name_line: SidebarRect,
     pub meta_line: SidebarRect,
+    /// The dim "最終出力" heading row separating meta from the preview lines.
+    pub label: SidebarRect,
     pub preview: [SidebarRect; 2],
     pub dot: SidebarRect,
     pub updated: SidebarRect,
@@ -210,6 +219,14 @@ pub fn sidebar_layout(
     }
 }
 
+/// One card's sub-rects in its own texture space (origin at the card's
+/// top-left, width `inset`), unclipped. The per-card rounded-card renderer draws
+/// each card into its own texture and positions text with these, matching the
+/// window-space rects [`sidebar_layout`] emits for the flat backdrop.
+pub fn card_local_rects(id: SessionCardId, inset: u32) -> CardRects {
+    card_rects(id, 0, SidebarRect::new(0, 0, inset, SIDEBAR_CARD_H))
+}
+
 /// Build one card's clipped sub-rects from its (possibly off-viewport) window
 /// top `top` and the viewport `vp`.
 fn card_rects(id: SessionCardId, top: i64, vp: SidebarRect) -> CardRects {
@@ -217,31 +234,41 @@ fn card_rects(id: SessionCardId, top: i64, vp: SidebarRect) -> CardRects {
     let w = vp.w as i64;
     let pad = CARD_PAD as i64;
 
+    // Name row, left to right: status dot, project icon, display name. The dot
+    // moves to the card's left edge (mockup parity) as a small color chip; the
+    // icon and name follow it.
+    let dot_x = lx + pad;
+    let icon_x = dot_x + CARD_DOT_D as i64 + 8;
+    let name_x = icon_x + CARD_ICON_W as i64 + 6;
+
+    // Top-right: the invisible `…` hit region pins the far corner, with the
+    // updated-time to its left on the same (name) row (mockup parity).
     let menu_x = lx + w - pad - CARD_MENU_W as i64;
-    let dot_x = menu_x - 6 - CARD_DOT_D as i64;
-    let name_x = lx + pad + CARD_ICON_W as i64 + 6;
-    let name_w = dot_x - name_x - 6;
-    let updated_x = lx + w - pad - CARD_UPDATED_W as i64;
-    let meta_w = updated_x - (lx + pad) - 6;
+    let updated_x = menu_x - 4 - CARD_UPDATED_W as i64;
+    let name_w = updated_x - name_x - 6;
+
+    let meta_w = w - 2 * pad;
     let body_w = w - 2 * pad;
 
-    let name_y = top + 8;
-    let meta_y = top + 32;
-    let preview0_y = top + 50;
-    let preview1_y = top + 68;
+    let name_y = top + 6;
+    let meta_y = top + 26;
+    let label_y = top + 44;
+    let preview0_y = top + 58;
+    let preview1_y = top + 74;
 
     CardRects {
         id,
         bounds: iclip(lx, top, w, SIDEBAR_CARD_H as i64, vp),
-        icon: iclip(lx + pad, name_y, CARD_ICON_W as i64, CARD_NAME_H as i64, vp),
+        icon: iclip(icon_x, name_y, CARD_ICON_W as i64, CARD_NAME_H as i64, vp),
         name_line: iclip(name_x, name_y, name_w, CARD_NAME_H as i64, vp),
         meta_line: iclip(lx + pad, meta_y, meta_w, CARD_LINE_H as i64, vp),
+        label: iclip(lx + pad, label_y, body_w, CARD_LINE_H as i64, vp),
         preview: [
             iclip(lx + pad, preview0_y, body_w, CARD_LINE_H as i64, vp),
             iclip(lx + pad, preview1_y, body_w, CARD_LINE_H as i64, vp),
         ],
-        dot: iclip(dot_x, name_y + 5, CARD_DOT_D as i64, CARD_DOT_D as i64, vp),
-        updated: iclip(updated_x, meta_y, CARD_UPDATED_W as i64, CARD_LINE_H as i64, vp),
+        dot: iclip(dot_x, name_y + (CARD_NAME_H - CARD_DOT_D) as i64 / 2, CARD_DOT_D as i64, CARD_DOT_D as i64, vp),
+        updated: iclip(updated_x, name_y, CARD_UPDATED_W as i64, CARD_LINE_H as i64, vp),
         menu_button: iclip(menu_x, top + 6, CARD_MENU_W as i64, CARD_NAME_H as i64, vp),
     }
 }
@@ -395,15 +422,17 @@ pub struct CardLines {
     pub name: String,
     /// `<cwd, tail-first truncated> <branch?>` — branch omitted when absent.
     pub meta: String,
-    /// Up to two last-output preview lines.
-    pub preview: Vec<String>,
+    /// Up to two last-output preview lines, each carrying its color runs.
+    pub preview: Vec<PreviewLine>,
     /// Relative updated-time (`3分前` / `昨日 23:47` / …).
     pub updated: String,
 }
 
 /// Build a card's display lines from its state and the current wall clock.
 pub fn card_lines(card: &SessionCard, now: WallClock) -> CardLines {
-    let name = format!("{} {}", icon_glyph(card.icon), card.display_name());
+    // The project icon is rendered from its own rect (`CardRects::icon`), so the
+    // display name here carries no glyph prefix.
+    let name = card.display_name().to_string();
     let cwd = truncate_tail(&card.cwd, CWD_MAX_CHARS);
     let meta = match card.branch.as_deref() {
         Some(branch) if !branch.is_empty() => format!("{cwd}  {branch}"),
@@ -448,7 +477,7 @@ fn truncate_tail(s: &str, max: usize) -> String {
 /// which is why the branch of the app that renders these never depends on the
 /// glyph being present. The codepoints are Nerd Font private-use area
 /// (`nf-seti-*` / `nf-dev-*`).
-fn icon_glyph(icon: IconKind) -> &'static str {
+pub fn icon_glyph(icon: IconKind) -> &'static str {
     match icon {
         IconKind::Rust => "\u{e7a8}",      // nf-dev-rust
         IconKind::Node => "\u{e718}",      // nf-dev-nodejs_small
@@ -483,8 +512,21 @@ pub fn sidebar_inset(visible: bool, eligible: bool, width_px: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_store::{SessionDelta, SessionStore, SessionWindowId};
+    use crate::session_store::{PreviewSpan, SessionDelta, SessionStore, SessionWindowId};
     use crate::split_tree::PaneId;
+    use noa_core::Color;
+
+    fn plain_preview(lines: &[&str]) -> Vec<PreviewLine> {
+        lines
+            .iter()
+            .map(|text| {
+                vec![PreviewSpan {
+                    text: (*text).to_string(),
+                    fg: Color::Default,
+                }]
+            })
+            .collect()
+    }
 
     fn card_id(window: u64, pane: u64) -> SessionCardId {
         SessionCardId::new(SessionWindowId(window), PaneId::new(pane))
@@ -513,7 +555,7 @@ mod tests {
             cwd: cwd.to_string(),
             busy: false,
             updated_at: wall(10, 0),
-            preview: vec!["line one".to_string(), "line two".to_string()],
+            preview: plain_preview(&["line one", "line two"]),
         });
         store.apply(SessionDelta::Branch {
             id,
@@ -541,9 +583,10 @@ mod tests {
         );
         let lines = card_lines(&card, wall(10, 3));
 
-        // `[icon] name`: the icon glyph prefixes the display name.
-        assert!(lines.name.starts_with(icon_glyph(IconKind::Rust)));
-        assert!(lines.name.contains("build"));
+        // The name line is the display name (the icon renders from its own
+        // rect, so no glyph prefix here); the icon glyph stays resolvable.
+        assert_eq!(lines.name, "build");
+        assert!(!icon_glyph(IconKind::Rust).is_empty());
 
         // `cwd … branch`: the long cwd is tail-truncated (ellipsis) and the
         // branch follows it.
@@ -748,6 +791,31 @@ mod tests {
         let vp = sidebar_bands(bounds).viewport;
         let max = clamp_scroll(u32::MAX, content_height(ids.len()), vp.h);
         assert_eq!(clamped.cards, sidebar_layout(bounds, &ids, max).cards);
+    }
+
+    // FR-2 mockup parity: the status dot sits at the card's left edge (left of
+    // the icon and name), and the updated-time rides the name row's right side,
+    // just left of the invisible `…` hit region. The preview heading row falls
+    // between the meta line and the two preview rows.
+    #[test]
+    fn card_rects_place_dot_left_and_updated_on_the_name_row() {
+        let (bounds, ids) = six_id_bounds();
+        let layout = sidebar_layout(bounds, &ids, 0);
+        let card = &layout.cards[0];
+
+        // Dot is the leftmost element, ahead of the icon and name.
+        assert!(card.dot.x < card.icon.x);
+        assert!(card.icon.x < card.name_line.x);
+
+        // Updated-time shares the name row (same y) and sits to its right.
+        assert_eq!(card.updated.y, card.name_line.y);
+        assert!(card.name_line.right() <= card.updated.x);
+        assert!(card.updated.right() <= card.menu_button.x);
+
+        // The preview heading falls between the meta line and the preview rows.
+        assert!(card.meta_line.y < card.label.y);
+        assert!(card.label.y < card.preview[0].y);
+        assert!(card.preview[0].y < card.preview[1].y);
     }
 
     #[test]

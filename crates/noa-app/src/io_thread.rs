@@ -17,7 +17,9 @@ use noa_render::FrameSnapshot;
 use winit::event_loop::EventLoopProxy;
 
 use crate::events::UserEvent;
-use crate::session_store::{self, SessionCardId, SessionDelta, SessionWindowId, WallClock};
+use crate::session_store::{
+    self, PreviewLine, PreviewSpan, SessionCardId, SessionDelta, SessionWindowId, WallClock,
+};
 use crate::split_tree::PaneId;
 use crate::tab_overview::OVERVIEW_TILE_MIN_RENDER_INTERVAL;
 
@@ -183,22 +185,33 @@ struct SidebarUpsert {
     name: String,
     cwd: String,
     busy: bool,
-    preview: Vec<String>,
+    preview: Vec<PreviewLine>,
 }
 
 /// The trailing non-blank rows of the active screen, for the card preview
 /// (FR-2). Read under the terminal lock; returns at most
-/// [`SIDEBAR_PREVIEW_LINES`] lines, oldest-first, each trimmed of trailing
-/// blanks.
-fn extract_preview(terminal: &Terminal) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
+/// [`SIDEBAR_PREVIEW_LINES`] lines, oldest-first, trailing blanks dropped. Each
+/// line coalesces adjacent cells sharing a foreground color into one
+/// [`PreviewSpan`] so the sidebar can render it in its original ANSI colors.
+fn extract_preview(terminal: &Terminal) -> Vec<PreviewLine> {
+    let mut lines: Vec<PreviewLine> = Vec::new();
     for row in &terminal.active().grid {
-        let text: String = row.cells.iter().map(|cell| cell.ch).collect();
-        let trimmed = text.trim_end();
-        if trimmed.is_empty() {
+        // Drop trailing blanks by rendering only up to the last non-blank cell.
+        let Some(last) = row.cells.iter().rposition(|cell| !cell.is_blank()) else {
             continue;
+        };
+        let mut spans: PreviewLine = Vec::new();
+        for cell in &row.cells[..=last] {
+            match spans.last_mut() {
+                Some(span) if span.fg == cell.fg => cell.push_text_to(&mut span.text),
+                _ => {
+                    let mut text = String::new();
+                    cell.push_text_to(&mut text);
+                    spans.push(PreviewSpan { text, fg: cell.fg });
+                }
+            }
         }
-        lines.push(trimmed.to_string());
+        lines.push(spans);
     }
     let start = lines.len().saturating_sub(SIDEBAR_PREVIEW_LINES);
     lines.split_off(start)
@@ -679,7 +692,12 @@ mod tests {
             &mut last_sidebar_publish,
         );
         let upsert = on.sidebar_upsert.expect("visible first feed publishes");
-        assert!(upsert.preview.iter().any(|line| line.contains("second line")));
+        assert!(
+            upsert
+                .preview
+                .iter()
+                .any(|line| session_store::preview_line_text(line).contains("second line"))
+        );
         assert!(last_sidebar_publish.is_some());
 
         // A second feed inside the throttle window yields no upsert.

@@ -38,7 +38,7 @@ pub const CHROME_DIM_FG: Rgb = Rgb::new(0x8a, 0x90, 0x9c);
 pub const CHROME_DOT_BLUE: Rgb = Rgb::new(0x4c, 0x9a, 0xff);
 pub const CHROME_DOT_GREEN: Rgb = Rgb::new(0x46, 0xc4, 0x66);
 pub const CHROME_DOT_YELLOW: Rgb = Rgb::new(0xe6, 0xb4, 0x50);
-pub const CHROME_DOT_RED: Rgb = Rgb::new(0xe8, 0x5d, 0x5d);
+pub const CHROME_DOT_RED: Rgb = Rgb::new(0xff, 0x4d, 0x4d);
 
 /// Convert a chrome `Rgb` to straight display-space RGBA. The overview and
 /// sidebar surfaces use non-sRGB formats (`Bgra8Unorm`), so the components

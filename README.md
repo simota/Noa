@@ -1,8 +1,8 @@
-# noa
+# Noa
 
 A faithful **Rust** clone of the [Ghostty](https://ghostty.org) terminal emulator — GPU-accelerated, macOS-first, built from scratch on `winit` + `wgpu`.
 
-> Ghostty is written in Zig (Metal on macOS, GTK4/OpenGL on Linux). `noa` reproduces its **observable behavior** — VT emulation, rendering, features — *idiomatically in Rust*, verified against Ghostty by differential parity rather than by transliterating its internals.
+> Ghostty is written in Zig (Metal on macOS, GTK4/OpenGL on Linux). Noa reproduces its **observable behavior** — VT emulation, rendering, features — *idiomatically in Rust*, verified against Ghostty by differential parity rather than by transliterating its internals.
 
 ## Status
 
@@ -43,7 +43,7 @@ Options: `cargo run -p noa -- --cols 100 --rows 30 --font-size 15`.
 
 ### Configuration
 
-At startup, `noa` reads `config` from the platform config directory
+At startup, Noa reads `config` from the platform config directory
 (`~/Library/Application Support/noa/config` on macOS). Missing config files keep
 the built-in defaults: `window-width = 80`, `window-height = 24`,
 `font-size = 14.0`, `minimum-contrast = 1.0`, and the built-in terminal theme.
@@ -66,11 +66,11 @@ floor from `1.0` through `21.0`; `1.0` preserves theme colors unchanged.
 
 ### Build the macOS app
 
-`noa` runs as a proper foreground macOS app (Dock icon, custom native menu bar,
-Cmd+Q/Cmd+W app shortcuts, native window controls). The menu bar shows `noa`,
+Noa runs as a proper foreground macOS app (Dock icon, custom native menu bar,
+Cmd+Q/Cmd+W app shortcuts, native window controls). The menu bar shows `Noa`,
 `File`, `Edit`, `View`, `Window`, and `Help`. The app menu currently includes
-`About noa`, disabled `Preferences...` (shown as `Settings…` on current macOS),
-`Close Window`, and `Quit noa`; preferences and unsupported terminal actions
+`About Noa`, disabled `Preferences...` (shown as `Settings…` on current macOS),
+`Close Window`, and `Quit Noa`; preferences and unsupported terminal actions
 stay disabled until backing features exist. The `View` menu exposes scrollback
 navigation: line, page, top, and bottom scrolling via `Shift+ArrowUp/Down`,
 `Shift+PageUp/PageDown`, and `Shift+Home/End`. To produce a double-clickable
@@ -89,7 +89,7 @@ works via the `[package.metadata.bundle]` in `bin/noa/Cargo.toml`.
 
 ## Fidelity approach
 
-`noa` follows a **fidelity-over-faith** discipline: the copy's match to Ghostty is *proven*, not asserted. The Parity Map has five dimensions:
+Noa follows a **fidelity-over-faith** discipline: the copy's match to Ghostty is *proven*, not asserted. The Parity Map has five dimensions:
 
 | Dimension | What "faithful" means | How it's checked |
 |-----------|----------------------|------------------|
@@ -119,4 +119,4 @@ works via the `[package.metadata.bundle]` in `bin/noa/Cargo.toml`.
 
 ## License
 
-MIT — matching Ghostty's license. `noa` is an independent reimplementation; it links no Ghostty code.
+MIT — matching Ghostty's license. Noa is an independent reimplementation; it links no Ghostty code.

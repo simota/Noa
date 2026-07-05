@@ -13,11 +13,28 @@ use std::fmt::Write as _;
 use noa_core::Rgb;
 
 use super::*;
-use crate::session_store::{StatusDot, status_dot};
+use crate::session_store::{SessionDelta, StatusDot, status_dot};
 use crate::sidebar::{
     CardLines, HeaderRects, SidebarRect, card_lines, header_rects, header_status_label,
     sidebar_bands, sidebar_layout,
 };
+
+/// Whether an io-thread [`SessionDelta`] targeting a window with the given
+/// sidebar eligibility should reach the store (FR-14/AC-16b). Quick-terminal
+/// windows are ineligible and must never get a card, so their io-thread-posted
+/// `Upsert`/`Bell` are dropped here at the apply boundary — a QT pane shares the
+/// app-wide publish gate, so with a sidebar open elsewhere it would otherwise
+/// leak a card into every window's sidebar. App-originated `Remove`/`Branch`/
+/// `Rename` only ever target real windows, so they pass through unconditionally
+/// (and dropping a QT `Remove` would be harmless anyway).
+fn session_delta_should_apply(delta: &SessionDelta, window_eligible: bool) -> bool {
+    match delta {
+        SessionDelta::Upsert { .. } | SessionDelta::Bell { .. } => window_eligible,
+        SessionDelta::Remove { .. } | SessionDelta::Branch { .. } | SessionDelta::Rename { .. } => {
+            true
+        }
+    }
+}
 
 // Sidebar palette (⚠G: compile-time, no config knob — matches the mockup's dark
 // chrome; the terminal panes keep their own theme).
@@ -77,7 +94,17 @@ impl App {
     /// Apply one io-thread [`SessionDelta`] to the store (FR-1) and repaint any
     /// window whose sidebar is showing, so a card's cwd/preview/bell refresh is
     /// visible. The main thread owns the store, so this is the only apply site.
-    pub(super) fn apply_session_delta(&mut self, delta: crate::session_store::SessionDelta) {
+    ///
+    /// Deltas for an ineligible (quick-terminal) window are dropped here
+    /// (FR-14/AC-16b): a QT pane shares the app-wide publish gate, so without
+    /// this guard its output would leak a card into every window's sidebar
+    /// whenever a sidebar is open elsewhere. Because the card never enters, no
+    /// reconcile is needed when the quick terminal is torn down.
+    pub(super) fn apply_session_delta(&mut self, delta: SessionDelta) {
+        let window_id = WindowId::from(delta.id().window_id.0);
+        if !session_delta_should_apply(&delta, self.window_sidebar_eligible(window_id)) {
+            return;
+        }
         self.session_store.apply(delta);
         self.request_sidebar_redraw();
     }
@@ -483,4 +510,57 @@ pub(super) fn draw_sidebar_band(
             selected: false,
         }],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session_store::WallClock;
+
+    fn upsert(window: u64) -> SessionDelta {
+        SessionDelta::Upsert {
+            id: SessionCardId::new(SessionWindowId(window), PaneId::new(1)),
+            seq: 1,
+            name: "shell".to_string(),
+            cwd: "/repo".to_string(),
+            busy: false,
+            updated_at: WallClock {
+                year: 2026,
+                month: 7,
+                day: 5,
+                hour: 10,
+                minute: 0,
+            },
+            preview: Vec::new(),
+        }
+    }
+
+    // F1 (FR-14/AC-16b): a quick-terminal window is ineligible, so its
+    // io-thread-posted Upsert/Bell are dropped at the apply boundary and never
+    // land in the store — even though the QT pane shares the app-wide publish
+    // gate. An eligible window's delta lands as normal.
+    #[test]
+    fn ineligible_window_deltas_are_dropped_at_the_apply_boundary() {
+        let mut store = SessionStore::new();
+        let delta = upsert(9);
+
+        // Ineligible (quick-terminal) window: Upsert dropped, store stays empty.
+        assert!(!session_delta_should_apply(&delta, false));
+        if session_delta_should_apply(&delta, false) {
+            store.apply(delta.clone());
+        }
+        assert_eq!(store.len(), 0);
+
+        // Eligible window: the same Upsert lands.
+        assert!(session_delta_should_apply(&delta, true));
+        if session_delta_should_apply(&delta, true) {
+            store.apply(delta);
+        }
+        assert_eq!(store.len(), 1);
+
+        // Bell is gated the same way; Remove always applies (harmless for a QT).
+        let id = SessionCardId::new(SessionWindowId(9), PaneId::new(1));
+        assert!(!session_delta_should_apply(&SessionDelta::Bell { id }, false));
+        assert!(session_delta_should_apply(&SessionDelta::Remove { id }, false));
+    }
 }

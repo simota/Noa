@@ -263,6 +263,11 @@ impl App {
 
     /// Tear down the quick terminal outright (its shell exited). Unlike hide,
     /// this drops the window and io thread so a fresh one is spawned next open.
+    ///
+    /// No session-store reconcile is needed here: a quick-terminal pane is never
+    /// sidebar-eligible, so `apply_session_delta` drops its `Upsert`/`Bell`
+    /// before they reach the store (FR-14/AC-16b) — there is never a QT card to
+    /// leave behind.
     pub(super) fn destroy_quick_terminal(&mut self) {
         let Some(qt) = self.quick_terminal.take() else {
             return;

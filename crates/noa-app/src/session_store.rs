@@ -14,9 +14,17 @@
 //! integrate the store (PR3).
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::split_tree::PaneId;
+
+/// FIFO cap on the tombstone map. Pane ids are monotonic and never reused, so a
+/// tombstone is only ever consulted to reject stale/reordered `Upsert`s already
+/// in flight for a just-removed id; once that id's queue has drained the entry
+/// is inert. Retiring [`TOMBSTONE_CAP`] newer ids is far more than enough to
+/// outlast any in-flight message, so evicting the oldest entry is safe and
+/// keeps the map bounded rather than growing for the process lifetime.
+const TOMBSTONE_CAP: usize = 64;
 
 /// GUI-agnostic window identity. The app boundary (PR3) converts the winit
 /// `WindowId` into this newtype so the store never sees a windowing type.
@@ -159,9 +167,15 @@ pub struct SessionStore {
     cards: HashMap<SessionCardId, SessionCard>,
     /// Ids that have been removed, with the `seq` seen at removal. An `Upsert`
     /// whose `seq` does not exceed the tombstone is a stale/reordered message
-    /// and is dropped (Omen T10). Bounded in practice because pane ids are
-    /// monotonic and never reused.
+    /// and is dropped (Omen T10). Bounded to [`TOMBSTONE_CAP`] entries by FIFO
+    /// eviction (see [`SessionStore::tombstone`]): because pane ids are
+    /// monotonic and never reused, an evicted entry is never revisited, so the
+    /// map would otherwise grow unbounded for the process lifetime.
     tombstones: HashMap<SessionCardId, u64>,
+    /// Insertion order of the live [`tombstones`](Self::tombstones) keys, used
+    /// to evict the oldest when the cap is exceeded. Kept exactly in sync with
+    /// the map: every key appears here once, and only keys present in the map.
+    tombstone_order: VecDeque<SessionCardId>,
 }
 
 impl SessionStore {
@@ -217,7 +231,7 @@ impl SessionStore {
                         card.seq = seq;
                     }
                     None => {
-                        self.tombstones.remove(&id);
+                        self.untombstone(id);
                         self.cards.insert(
                             id,
                             SessionCard {
@@ -237,9 +251,7 @@ impl SessionStore {
                 }
             }
             SessionDelta::Remove { id } => {
-                if let Some(card) = self.cards.remove(&id) {
-                    self.tombstones.insert(id, card.seq);
-                }
+                self.retire(id);
             }
             SessionDelta::Branch { id, branch, icon } => {
                 if let Some(card) = self.cards.get_mut(&id) {
@@ -274,9 +286,40 @@ impl SessionStore {
             .copied()
             .collect();
         for id in dead {
-            if let Some(card) = self.cards.remove(&id) {
-                self.tombstones.insert(id, card.seq);
-            }
+            self.retire(id);
+        }
+    }
+
+    /// Remove a card and, if it existed, record a tombstone for its `seq` so a
+    /// late/queued `Upsert` cannot resurrect it. The single choke point for the
+    /// remove-then-tombstone invariant, shared by [`SessionDelta::Remove`] and
+    /// [`reconcile_sessions`](Self::reconcile_sessions).
+    fn retire(&mut self, id: SessionCardId) {
+        if let Some(card) = self.cards.remove(&id) {
+            self.tombstone(id, card.seq);
+        }
+    }
+
+    /// Insert or refresh a tombstone, evicting the oldest entry when the map
+    /// exceeds [`TOMBSTONE_CAP`]. Refreshing an existing key keeps its queue
+    /// position (defensive: monotonic ids are normally retired once).
+    fn tombstone(&mut self, id: SessionCardId, seq: u64) {
+        if self.tombstones.insert(id, seq).is_some() {
+            return;
+        }
+        self.tombstone_order.push_back(id);
+        if self.tombstone_order.len() > TOMBSTONE_CAP
+            && let Some(evicted) = self.tombstone_order.pop_front()
+        {
+            self.tombstones.remove(&evicted);
+        }
+    }
+
+    /// Drop a tombstone from both the map and the order queue, keeping them in
+    /// sync. Called when an `Upsert` legitimately recreates a removed id.
+    fn untombstone(&mut self, id: SessionCardId) {
+        if self.tombstones.remove(&id).is_some() {
+            self.tombstone_order.retain(|&pending| pending != id);
         }
     }
 }
@@ -465,6 +508,46 @@ mod tests {
         // A stale upsert for the reconciled id is dropped like an explicit Remove.
         store.apply(upsert(id, 2, "ghost"));
         assert_eq!(store.len(), 0);
+    }
+
+    // The tombstone map is FIFO-bounded: retiring more than TOMBSTONE_CAP
+    // distinct (never-reused) ids evicts the oldest and keeps the map and its
+    // order queue in lockstep at the cap.
+    #[test]
+    fn tombstone_map_is_bounded_by_fifo_eviction() {
+        let mut store = SessionStore::new();
+        let total = TOMBSTONE_CAP + 8;
+
+        for i in 0..total {
+            let id = card_id(1, i as u64);
+            store.apply(upsert(id, 1, "s"));
+            store.apply(SessionDelta::Remove { id });
+        }
+
+        assert_eq!(store.tombstones.len(), TOMBSTONE_CAP);
+        assert_eq!(store.tombstone_order.len(), TOMBSTONE_CAP);
+        // The oldest-retired ids were evicted; the most recent CAP survive.
+        assert!(!store.tombstones.contains_key(&card_id(1, 0)));
+        assert!(store.tombstones.contains_key(&card_id(1, (total - 1) as u64)));
+    }
+
+    // Recreating a removed id un-tombstones it in both the map and the order
+    // queue, so the two never drift out of sync.
+    #[test]
+    fn untombstone_keeps_map_and_order_in_sync() {
+        let mut store = SessionStore::new();
+        let id = card_id(1, 1);
+
+        store.apply(upsert(id, 1, "s"));
+        store.apply(SessionDelta::Remove { id });
+        assert_eq!(store.tombstones.len(), 1);
+        assert_eq!(store.tombstone_order.len(), 1);
+
+        // A fresh-generation upsert recreates the card and clears the tombstone.
+        store.apply(upsert(id, 2, "reborn"));
+        assert_eq!(store.tombstones.len(), 0);
+        assert_eq!(store.tombstone_order.len(), 0);
+        assert_eq!(store.get(&id).unwrap().name, "reborn");
     }
 
     // AC-13 (FR-11): status-dot color mapping with bell > busy > idle.

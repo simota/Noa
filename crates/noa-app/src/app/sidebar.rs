@@ -70,7 +70,7 @@ const SIDEBAR_DIVIDER: Rgb = crate::chrome::CHROME_DIVIDER;
 // scaled at draw time): a soft shadow the band casts rightward plus a crisp
 // 1px hairline, so the two independently-themed surfaces meet with depth
 // instead of a bare color boundary.
-const SEAM_SHADOW_WIDTH: f32 = 10.0;
+const SEAM_SHADOW_WIDTH: f32 = 5.0;
 const SEAM_HAIRLINE_WIDTH: f32 = 0.0;
 
 /// Pointer travel (logical px, scaled at use) that promotes a card press to a

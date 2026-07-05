@@ -23,6 +23,7 @@ mod search_prompt;
 mod secure_input;
 mod session;
 mod session_store;
+mod sidebar;
 pub mod split_tree;
 pub mod tab_overview;
 mod theme;

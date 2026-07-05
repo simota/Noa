@@ -12,11 +12,16 @@ fn main() {
     println!("cargo:rustc-env=NOA_BUILD_DATE={}", build_date());
 
     // Only these paths affect the two env vars above; anything else in the
-    // workspace must not trigger a build.rs re-run.
+    // workspace must not trigger a build.rs re-run. `packed-refs` only
+    // exists after `git gc` packs loose refs — cargo treats a watched path
+    // that doesn't exist as always-changed, so it must be watched
+    // conditionally or every build would re-run this script (NFR-3/AC-10).
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs");
-    println!("cargo:rerun-if-changed=../../.git/packed-refs");
+    if std::path::Path::new("../../.git/packed-refs").exists() {
+        println!("cargo:rerun-if-changed=../../.git/packed-refs");
+    }
 }
 
 /// The repo's short hash, or `""` when not in a git checkout (tarball build,

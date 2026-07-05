@@ -267,7 +267,26 @@ pub struct CardPipeline {
 }
 
 impl CardPipeline {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+    /// Alpha-replace blend for sidebar composites: color is the usual
+    /// src-over, but the alpha channel is *written* (src·1 + dst·0) rather
+    /// than accumulated. Overlapping band/card composites all settle to the
+    /// same source alpha (last writer wins) instead of `ALPHA_BLENDING`'s
+    /// `src + dst·(1-src)` over, which drives alpha toward opaque and defeats
+    /// `background-opacity` on the sidebar.
+    pub const ALPHA_REPLACE: wgpu::BlendState = wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::SrcAlpha,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::Zero,
+            operation: wgpu::BlendOperation::Add,
+        },
+    };
+
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, blend: wgpu::BlendState) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("noa-overview-card-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/card.wgsl").into()),
@@ -328,9 +347,11 @@ impl CardPipeline {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    // Alpha-blend so the rounded corners (coverage -> 0) reveal
-                    // the backdrop the composite pass clears to.
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // Caller-selected blend: ALPHA_BLENDING over an opaque
+                    // backdrop (overview), or ALPHA_REPLACE for the sidebar so
+                    // rounded corners (coverage -> 0) reveal the backdrop
+                    // without accumulating alpha toward opaque.
+                    blend: Some(blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -523,7 +544,7 @@ impl OverviewThumbnailResources {
         card_color: [f32; 4],
     ) -> Self {
         let blit = BlitPipeline::new(device, format);
-        let card = CardPipeline::new(device, format);
+        let card = CardPipeline::new(device, format, wgpu::BlendState::ALPHA_BLENDING);
         let scratch = OverviewScratchTexture::new(device, format, scratch_size);
         let tiles = (0..tile_count)
             .map(|_| OverviewTileTexture::new(device, format, tile_size))

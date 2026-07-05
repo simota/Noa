@@ -14,7 +14,7 @@
 //! integrate the store (PR3).
 #![allow(dead_code)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use noa_core::Color;
 
@@ -260,6 +260,17 @@ impl SessionStore {
         ids
     }
 
+    /// [`ordered_ids`](Self::ordered_ids), filtered to cards whose `window_id`
+    /// is in `windows` (per-window sidebar, spec `sidebar-per-window-sessions`
+    /// R1/R3/R6): the relative order (attention float → window_id → pane_id) is
+    /// preserved because it's derived from the same sort, just filtered after.
+    pub fn ordered_ids_for_windows(&self, windows: &HashSet<SessionWindowId>) -> Vec<SessionCardId> {
+        self.ordered_ids()
+            .into_iter()
+            .filter(|id| windows.contains(&id.window_id))
+            .collect()
+    }
+
     /// Cards in [`ordered_ids`](Self::ordered_ids) order, paired with their id.
     pub fn ordered_cards(&self) -> Vec<(SessionCardId, &SessionCard)> {
         self.ordered_ids()
@@ -293,6 +304,21 @@ impl SessionStore {
     /// the viewport is still noticeable.
     pub fn attention_count(&self) -> usize {
         self.cards.values().filter(|card| card.attention).count()
+    }
+
+    /// The `(busy, attention)` counts among cards whose `window_id` is in
+    /// `windows` (per-window sidebar header counts, R5) — the filtered
+    /// counterpart of [`busy_count`](Self::busy_count)/[`attention_count`](Self::attention_count).
+    pub fn counts_for_windows(&self, windows: &HashSet<SessionWindowId>) -> (usize, usize) {
+        self.cards
+            .iter()
+            .filter(|(id, _)| windows.contains(&id.window_id))
+            .fold((0, 0), |(busy, attention), (_, card)| {
+                (
+                    busy + usize::from(card.busy),
+                    attention + usize::from(card.attention),
+                )
+            })
     }
 
     /// Apply one delta. This is the only mutation entry point for deltas, so
@@ -864,6 +890,77 @@ mod tests {
             store.ordered_ids(),
             vec![card_id(1, 1), card_id(1, 2), card_id(2, 1)]
         );
+    }
+
+    // AC-1: filtering to one group's windows excludes the other group's cards
+    // entirely.
+    #[test]
+    fn ordered_ids_for_windows_excludes_other_group() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(1, 1), 1, "a"));
+        store.apply(upsert(card_id(2, 1), 1, "b"));
+
+        let group_a: HashSet<SessionWindowId> = [SessionWindowId(1)].into_iter().collect();
+        assert_eq!(store.ordered_ids_for_windows(&group_a), vec![card_id(1, 1)]);
+    }
+
+    // AC-2: multiple SessionWindowIds belonging to the same logical group
+    // (native tabs) all appear in the filtered result.
+    #[test]
+    fn ordered_ids_for_windows_includes_every_window_in_the_set() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(1, 1), 1, "a"));
+        store.apply(upsert(card_id(2, 1), 1, "b"));
+        store.apply(upsert(card_id(3, 1), 1, "c"));
+
+        let windows: HashSet<SessionWindowId> =
+            [SessionWindowId(1), SessionWindowId(2)].into_iter().collect();
+        assert_eq!(
+            store.ordered_ids_for_windows(&windows),
+            vec![card_id(1, 1), card_id(2, 1)]
+        );
+    }
+
+    // AC-3: the filtered order matches ordered_ids's relative order (attention
+    // float still wins over the plain window/pane sort).
+    #[test]
+    fn ordered_ids_for_windows_preserves_ordered_ids_relative_order() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(2, 1), 1, "b"));
+        store.apply(upsert(card_id(1, 3), 1, "a3"));
+        store.apply(upsert(card_id(1, 1), 1, "a1"));
+        store.apply(SessionDelta::Attention { id: card_id(2, 1) });
+
+        let windows: HashSet<SessionWindowId> =
+            [SessionWindowId(1), SessionWindowId(2)].into_iter().collect();
+        assert_eq!(
+            store.ordered_ids_for_windows(&windows),
+            vec![card_id(2, 1), card_id(1, 1), card_id(1, 3)]
+        );
+    }
+
+    // AC-6: counts_for_windows returns (0, 0) when the busy/attention cards
+    // only exist in a different group's windows.
+    #[test]
+    fn counts_for_windows_is_zero_when_activity_is_in_another_group() {
+        let mut store = SessionStore::new();
+        store.apply(SessionDelta::Upsert {
+            id: card_id(2, 1),
+            seq: 1,
+            name: "busy".to_string(),
+            cwd: "/repo".to_string(),
+            busy: true,
+            updated_at: wall(10, 0),
+            preview: Vec::new(),
+        });
+        store.apply(SessionDelta::Attention { id: card_id(2, 1) });
+        store.apply(upsert(card_id(1, 1), 1, "idle"));
+
+        let group_a: HashSet<SessionWindowId> = [SessionWindowId(1)].into_iter().collect();
+        assert_eq!(store.counts_for_windows(&group_a), (0, 0));
+
+        let group_b: HashSet<SessionWindowId> = [SessionWindowId(2)].into_iter().collect();
+        assert_eq!(store.counts_for_windows(&group_b), (1, 1));
     }
 
     #[test]

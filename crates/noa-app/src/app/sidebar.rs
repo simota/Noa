@@ -8,6 +8,7 @@
 //! reads only the store and the pure layout — it never locks a `Terminal`
 //! (NFR-1/AC-17).
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use noa_core::Rgb;
@@ -212,12 +213,46 @@ pub(super) struct SidebarDrawModel {
     menu: Option<SidebarMenuDraw>,
 }
 
+/// The `SessionWindowId`s belonging to `target` among `pairs` (spec
+/// `sidebar-per-window-sessions` R1/R2): a pure, winit-independent derivation
+/// so the sidebar's group-scoping can be unit-tested without a window
+/// (AC-10). Native tabs share one `WindowGroupId` but have distinct winit
+/// `WindowId`s, so this is what makes sibling tabs' sessions show up
+/// together in the sidebar.
+fn windows_in_group(
+    pairs: impl IntoIterator<Item = (SessionWindowId, WindowGroupId)>,
+    target: WindowGroupId,
+) -> HashSet<SessionWindowId> {
+    pairs
+        .into_iter()
+        .filter(|(_, group)| *group == target)
+        .map(|(window_id, _)| window_id)
+        .collect()
+}
+
 impl App {
     /// The GUI-agnostic card key for a window/pane (NFR-6): winit's stable
     /// `WindowId` ↔ `u64` mapping is the single conversion point, matching what
     /// the io thread posts.
     pub(super) fn session_card_id(window_id: WindowId, pane_id: PaneId) -> SessionCardId {
         SessionCardId::new(SessionWindowId(u64::from(window_id)), pane_id)
+    }
+
+    /// The [`SessionWindowId`]s of every tab sharing `window_id`'s logical
+    /// window (`WindowGroupId`), for scoping the sidebar to one window
+    /// (R1/R2). Empty when `window_id` has no entry in `self.windows` (a
+    /// window mid-teardown), degrading to the header-only empty-store draw
+    /// path.
+    pub(super) fn session_windows_for_window(&self, window_id: WindowId) -> HashSet<SessionWindowId> {
+        let Some(target_group) = self.windows.get(&window_id).map(|state| state.group) else {
+            return HashSet::new();
+        };
+        let pairs = self.window_order.iter().filter_map(|id| {
+            self.windows
+                .get(id)
+                .map(|state| (SessionWindowId(u64::from(*id)), state.group))
+        });
+        windows_in_group(pairs, target_group)
     }
 
     /// Apply one io-thread [`SessionDelta`] to the store (FR-1) and repaint any
@@ -529,7 +564,8 @@ impl App {
                 state.sidebar_scroll,
             )
         };
-        let ids = self.session_store.ordered_ids();
+        let windows = self.session_windows_for_window(window_id);
+        let ids = self.session_store.ordered_ids_for_windows(&windows);
         match metrics.hit_test(bounds, &ids, scroll, point) {
             Some(crate::sidebar::SidebarHit::Card(card)) => {
                 self.focus_session_card(card);
@@ -690,7 +726,8 @@ impl App {
         }
         let state = self.windows.get(&window_id)?;
         let bounds = SidebarRect::new(0, 0, inset, state.window.inner_size().height);
-        let ids = self.session_store.ordered_ids();
+        let windows = self.session_windows_for_window(window_id);
+        let ids = self.session_store.ordered_ids_for_windows(&windows);
         let layout = self
             .sidebar_metrics(window_id)
             .layout(bounds, &ids, state.sidebar_scroll);
@@ -716,7 +753,8 @@ impl App {
         let bounds = crate::sidebar::SidebarRect::new(0, 0, inset, state.window.inner_size().height);
         let metrics = SidebarMetrics::new(state.window.scale_factor() as f32);
         let viewport_h = metrics.bands(bounds).viewport.h;
-        let content_h = metrics.content_height(self.session_store.len());
+        let windows = self.session_windows_for_window(window_id);
+        let content_h = metrics.content_height(self.session_store.ordered_ids_for_windows(&windows).len());
         let step = metrics.card_stride as f32;
         let delta = (-lines * step).round() as i64;
         let Some(state) = self.windows.get_mut(&window_id) else {
@@ -762,7 +800,8 @@ impl App {
         let grid = grid_size_for_pane_rect(band, metrics, self.padding);
 
         let bounds = SidebarRect::new(0, 0, inset, height);
-        let ids = self.session_store.ordered_ids();
+        let windows = self.session_windows_for_window(window_id);
+        let ids = self.session_store.ordered_ids_for_windows(&windows);
         let layout = layout_metrics.layout(bounds, &ids, state.sidebar_scroll);
         let bands = layout_metrics.bands(bounds);
 
@@ -787,7 +826,7 @@ impl App {
         // (a request whose card scrolled out of the viewport must still be
         // noticeable, FR-16); else a recognized agent / busy process on the
         // focused session shows its badge; else the Idle/Running summary.
-        let attention_count = self.session_store.attention_count();
+        let (busy_count, attention_count) = self.session_store.counts_for_windows(&windows);
         let (status_text, status_fg) = if attention_count > 0 {
             (format!("● {attention_count} {ATTENTION_LABEL}"), SIDEBAR_DOT_RED)
         } else {
@@ -802,10 +841,7 @@ impl App {
                     let process = card.process.clone().unwrap_or_else(|| "running".to_string());
                     process_badge(&process, card.busy)
                 }
-                _ => (
-                    header_status_label(self.session_store.busy_count()),
-                    SIDEBAR_FG,
-                ),
+                _ => (header_status_label(busy_count), SIDEBAR_FG),
             }
         };
         runs.extend(window_run(&band_cell, header.status_label, status_text, status_fg, false));
@@ -1475,5 +1511,26 @@ mod tests {
             false
         ));
         assert!(session_delta_should_apply(&SessionDelta::Remove { id }, false));
+    }
+
+    // AC-10 (R2): windows_in_group returns exactly the target group's
+    // SessionWindowIds from a pair list mixing multiple groups and multiple
+    // tabs (distinct WindowIds) per group.
+    #[test]
+    fn windows_in_group_returns_only_the_target_groups_windows() {
+        let group_a = WindowGroupId(1);
+        let group_b = WindowGroupId(2);
+        let pairs = [
+            (SessionWindowId(10), group_a),
+            (SessionWindowId(11), group_a), // sibling tab of window 10
+            (SessionWindowId(20), group_b),
+            (SessionWindowId(21), group_b),
+        ];
+
+        let result = windows_in_group(pairs, group_a);
+        assert_eq!(
+            result,
+            [SessionWindowId(10), SessionWindowId(11)].into_iter().collect()
+        );
     }
 }

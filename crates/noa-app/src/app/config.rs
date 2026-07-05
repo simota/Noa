@@ -46,6 +46,20 @@ pub struct AppConfig {
     /// `background-blur-radius` in points (`0..=64`, 0 = off). Applied as a
     /// native macOS window background blur; a no-op on other platforms.
     pub background_blur_radius: u16,
+    /// `background-image`: path to a PNG laid behind the terminal grid, or
+    /// `None`. Decoded once at startup ([`decode_background_image`]); a missing
+    /// or undecodable file logs a diagnostic and disables the image.
+    pub background_image: Option<std::path::PathBuf>,
+    /// `background-image-opacity`, `0.0..=1.0`. Scales the image quad's alpha,
+    /// independent of `background-opacity`.
+    pub background_image_opacity: f32,
+    /// `background-image-position`: 9-anchor placement within the surface.
+    pub background_image_position: noa_config::BackgroundImagePosition,
+    /// `background-image-fit`: how the image scales into the surface.
+    pub background_image_fit: noa_config::BackgroundImageFit,
+    /// `background-image-repeat`: tile the image when it does not fill the
+    /// surface.
+    pub background_image_repeat: bool,
     /// `scrollback-limit`: total bytes of scrollback storage retained per pane
     /// before page-granular eviction (`0` disables scrollback). Applied to each
     /// new terminal at surface creation.
@@ -181,6 +195,178 @@ pub(super) fn resolve_cursor_style(
     })
 }
 
+/// Map the parsed `background-image-fit` onto the render-side enum (the render
+/// crate keeps its own copy so it stays free of a `noa-config` dependency).
+pub(super) fn background_image_fit(
+    value: noa_config::BackgroundImageFit,
+) -> noa_render::BackgroundImageFit {
+    match value {
+        noa_config::BackgroundImageFit::None => noa_render::BackgroundImageFit::None,
+        noa_config::BackgroundImageFit::Contain => noa_render::BackgroundImageFit::Contain,
+        noa_config::BackgroundImageFit::Cover => noa_render::BackgroundImageFit::Cover,
+        noa_config::BackgroundImageFit::Stretch => noa_render::BackgroundImageFit::Stretch,
+    }
+}
+
+/// Map the parsed `background-image-position` onto the render-side enum.
+pub(super) fn background_image_position(
+    value: noa_config::BackgroundImagePosition,
+) -> noa_render::BackgroundImagePosition {
+    use noa_config::BackgroundImagePosition as C;
+    use noa_render::BackgroundImagePosition as R;
+    match value {
+        C::TopLeft => R::TopLeft,
+        C::TopCenter => R::TopCenter,
+        C::TopRight => R::TopRight,
+        C::CenterLeft => R::CenterLeft,
+        C::Center => R::Center,
+        C::CenterRight => R::CenterRight,
+        C::BottomLeft => R::BottomLeft,
+        C::BottomCenter => R::BottomCenter,
+        C::BottomRight => R::BottomRight,
+    }
+}
+
+/// Decode the configured background image once at startup into a render-ready
+/// [`noa_render::BackgroundImage`]. PNG-only (spec scope): a missing file, a
+/// non-PNG/undecodable file, or a zero-sized image logs a diagnostic and
+/// returns `None`, disabling the image while the terminal launches normally
+/// (spec FR-8 / AC-8 / AC-15). Never panics.
+pub(super) fn decode_background_image(config: &AppConfig) -> Option<noa_render::BackgroundImage> {
+    let path = config.background_image.as_ref()?;
+    decode_background_image_at(
+        path,
+        background_image_fit(config.background_image_fit),
+        background_image_position(config.background_image_position),
+        config.background_image_repeat,
+        config.background_image_opacity,
+    )
+}
+
+/// Read + PNG-decode one background image. Split out from
+/// [`decode_background_image`] so the failure paths (missing / non-PNG /
+/// empty-file) are unit-testable without constructing a whole [`AppConfig`].
+/// Every failure logs a diagnostic and returns `None` (spec FR-8/AC-8/AC-15) —
+/// never panics.
+fn decode_background_image_at(
+    path: &std::path::Path,
+    fit: noa_render::BackgroundImageFit,
+    position: noa_render::BackgroundImagePosition,
+    repeat: bool,
+    opacity: f32,
+) -> Option<noa_render::BackgroundImage> {
+    let resolved = expand_tilde(path);
+    let bytes = match std::fs::read(&resolved) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            log::warn!(
+                "background-image: cannot read {}: {error}; disabling background image",
+                resolved.display()
+            );
+            return None;
+        }
+    };
+    let (width, height, rgba) = match decode_png_rgba(&bytes) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            log::warn!(
+                "background-image: cannot decode {} as PNG: {error}; disabling background image \
+                 (only PNG is supported)",
+                resolved.display()
+            );
+            return None;
+        }
+    };
+    if width == 0 || height == 0 {
+        log::warn!(
+            "background-image: {} decoded to an empty image; disabling background image",
+            resolved.display()
+        );
+        return None;
+    }
+    Some(noa_render::BackgroundImage {
+        rgba: std::sync::Arc::from(rgba),
+        width,
+        height,
+        fit,
+        position,
+        repeat,
+        opacity: opacity.clamp(0.0, 1.0),
+    })
+}
+
+/// Expand a leading `~` / `~/` to the home directory (noa-config stores the
+/// path verbatim to stay IO-free). Any other form is left untouched.
+fn expand_tilde(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(rest) = path.strip_prefix("~")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    path.to_path_buf()
+}
+
+/// Decode a PNG byte buffer to straight RGBA8 `(width, height, rgba)`. Mirrors
+/// `noa-grid`'s Kitty-graphics PNG path (grayscale/RGB expanded, 16-bit
+/// truncated to the high byte, indexed rejected).
+fn decode_png_rgba(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder.read_info()?;
+    let info = reader.info();
+    let (width, height) = (info.width, info.height);
+    let buf_size = reader
+        .output_buffer_size()
+        .ok_or_else(|| anyhow::anyhow!("image too large"))?;
+    let mut buf = vec![0u8; buf_size];
+    let frame = reader.next_frame(&mut buf)?;
+    buf.truncate(frame.buffer_size());
+
+    let pixels = (width as usize) * (height as usize);
+    let sample_bytes = match frame.bit_depth {
+        png::BitDepth::Sixteen => 2,
+        _ => 1,
+    };
+    let sample = |i: usize| -> u8 { buf.get(i * sample_bytes).copied().unwrap_or(0) };
+    let mut rgba = Vec::with_capacity(pixels * 4);
+    match frame.color_type {
+        png::ColorType::Rgba => {
+            for i in 0..pixels {
+                let base = i * 4;
+                rgba.push(sample(base));
+                rgba.push(sample(base + 1));
+                rgba.push(sample(base + 2));
+                rgba.push(sample(base + 3));
+            }
+        }
+        png::ColorType::Rgb => {
+            for i in 0..pixels {
+                let base = i * 3;
+                rgba.push(sample(base));
+                rgba.push(sample(base + 1));
+                rgba.push(sample(base + 2));
+                rgba.push(0xff);
+            }
+        }
+        png::ColorType::GrayscaleAlpha => {
+            for i in 0..pixels {
+                let base = i * 2;
+                let g = sample(base);
+                rgba.extend_from_slice(&[g, g, g, sample(base + 1)]);
+            }
+        }
+        png::ColorType::Grayscale => {
+            for i in 0..pixels {
+                let g = sample(i);
+                rgba.extend_from_slice(&[g, g, g, 0xff]);
+            }
+        }
+        png::ColorType::Indexed => {
+            anyhow::bail!("indexed-color PNG is not supported");
+        }
+    }
+    Ok((width, height, rgba))
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn macos_option_as_alt(value: noa_config::MacosOptionAsAlt) -> OptionAsAlt {
     match value {
@@ -205,5 +391,103 @@ pub(super) fn apply_macos_titlebar_style(
             .with_title_hidden(true)
             .with_titlebar_hidden(true)
             .with_fullsize_content_view(true),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "noa-bgimg-{}-{}-{name}",
+            std::process::id(),
+            // A per-call counter avoids collisions between cases in one process.
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn write_1x1_png(path: &std::path::Path) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[10, 20, 30, 255]).unwrap();
+        writer.finish().unwrap();
+    }
+
+    // AC-8: a missing path does not panic and returns None (no image).
+    #[test]
+    fn decode_missing_path_returns_none() {
+        let path = temp_path("missing.png");
+        assert!(!path.exists());
+        let result = decode_background_image_at(
+            &path,
+            noa_render::BackgroundImageFit::Contain,
+            noa_render::BackgroundImagePosition::Center,
+            false,
+            1.0,
+        );
+        assert!(result.is_none());
+    }
+
+    // AC-8: a non-PNG (plain text) file returns None without panicking.
+    #[test]
+    fn decode_non_png_returns_none() {
+        let path = temp_path("notes.txt");
+        std::fs::write(&path, b"this is not a png, it's plain text\n").unwrap();
+        let result = decode_background_image_at(
+            &path,
+            noa_render::BackgroundImageFit::Contain,
+            noa_render::BackgroundImagePosition::Center,
+            false,
+            1.0,
+        );
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_none());
+    }
+
+    // AC-8: a zero-byte file returns None without panicking.
+    #[test]
+    fn decode_empty_file_returns_none() {
+        let path = temp_path("empty.png");
+        std::fs::write(&path, b"").unwrap();
+        let result = decode_background_image_at(
+            &path,
+            noa_render::BackgroundImageFit::Contain,
+            noa_render::BackgroundImagePosition::Center,
+            false,
+            1.0,
+        );
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_none());
+    }
+
+    // Happy path: a valid PNG decodes to a `BackgroundImage` carrying the
+    // placement params (opacity clamped).
+    #[test]
+    fn decode_valid_png_returns_image_with_params() {
+        let path = temp_path("wall.png");
+        write_1x1_png(&path);
+        let image = decode_background_image_at(
+            &path,
+            noa_render::BackgroundImageFit::Cover,
+            noa_render::BackgroundImagePosition::TopRight,
+            true,
+            2.0, // out of range -> clamps to 1.0
+        )
+        .expect("valid PNG decodes");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((image.width, image.height), (1, 1));
+        assert_eq!(&*image.rgba, &[10, 20, 30, 255]);
+        assert_eq!(image.fit, noa_render::BackgroundImageFit::Cover);
+        assert_eq!(image.position, noa_render::BackgroundImagePosition::TopRight);
+        assert!(image.repeat);
+        assert_eq!(image.opacity, 1.0);
     }
 }

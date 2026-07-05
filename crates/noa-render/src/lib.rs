@@ -5,6 +5,7 @@
 //!
 //! Ghostty analog: `renderer/generic.zig` + `Metal.zig`.
 
+mod background_image;
 mod blit;
 mod draw_plan;
 mod image_layer;
@@ -15,6 +16,10 @@ mod segment;
 mod snapshot;
 mod theme;
 
+pub use background_image::{
+    BackgroundImage, BackgroundImageFit, BackgroundImagePlacement, BackgroundImagePosition,
+    background_image_dest_rect, background_image_placement,
+};
 pub use blit::{
     BlitPipeline, CardPipeline, CardStyle, CardTexturePlacement, CardTilePlacement,
     OverviewThumbnailResources,

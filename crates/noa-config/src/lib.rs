@@ -84,6 +84,40 @@ pub enum CursorShape {
     Underline,
 }
 
+/// `background-image-position`: the 9-anchor grid used to place the image
+/// within the surface for `contain`/`none` fits (and the crop anchor for
+/// `cover`). Mirrors Ghostty's `background-image-position`. Default `center`
+/// (matches Ghostty — see spec OQ-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackgroundImagePosition {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    CenterLeft,
+    #[default]
+    Center,
+    CenterRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+/// `background-image-fit`: how the image is scaled into the surface. Mirrors
+/// Ghostty's `background-image-fit`. Default `contain` (matches Ghostty — see
+/// spec OQ-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackgroundImageFit {
+    /// Native pixel size, no scaling.
+    None,
+    /// Fit inside the surface preserving aspect (letterbox).
+    #[default]
+    Contain,
+    /// Fill the surface preserving aspect, cropping overflow.
+    Cover,
+    /// Fill the surface ignoring aspect.
+    Stretch,
+}
+
 /// `window-save-state`: whether to persist and restore the window/tab/split
 /// topology across launches. Ghostty accepts `default | never | always`; noa
 /// treats `default` as `always` (there is no OS-level "restore on relaunch"
@@ -263,6 +297,20 @@ pub struct StartupConfig {
     /// points, `0..=64` (0 = no blur). Only visible with `background_opacity`
     /// below 1.0. No-op on non-macOS.
     pub background_blur_radius: u16,
+    /// `background-image`: path to a PNG laid behind the terminal grid. `None`
+    /// leaves the background as the clear color only. The path is stored
+    /// verbatim (leading `~` expanded); decode happens in `noa-app`.
+    pub background_image: Option<PathBuf>,
+    /// `background-image-opacity`: `0.0..=1.0`, clamped, default `1.0`. Scales
+    /// the background image quad's alpha, independent of `background-opacity`.
+    pub background_image_opacity: f32,
+    /// `background-image-position`: 9-anchor placement within the surface.
+    pub background_image_position: BackgroundImagePosition,
+    /// `background-image-fit`: how the image scales into the surface.
+    pub background_image_fit: BackgroundImageFit,
+    /// `background-image-repeat`: tile the image across the surface when it
+    /// does not fill it (primarily meaningful with `fit = none`).
+    pub background_image_repeat: bool,
     /// `scrollback-limit`: total bytes of scrollback storage retained before
     /// page-granular eviction (`0` disables scrollback). Ghostty default 10 MB.
     pub scrollback_limit: usize,
@@ -327,6 +375,11 @@ impl Default for StartupConfig {
             cursor_style_blink: None,
             background_opacity: 1.0,
             background_blur_radius: 0,
+            background_image: None,
+            background_image_opacity: 1.0,
+            background_image_position: BackgroundImagePosition::default(),
+            background_image_fit: BackgroundImageFit::default(),
+            background_image_repeat: false,
             scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
             window_save_state: WindowSaveState::default(),
             macos_option_as_alt: MacosOptionAsAlt::default(),
@@ -363,6 +416,11 @@ pub struct ConfigOverrides {
     pub cursor_style_blink: Option<bool>,
     pub background_opacity: Option<f32>,
     pub background_blur_radius: Option<u16>,
+    pub background_image: Option<PathBuf>,
+    pub background_image_opacity: Option<f32>,
+    pub background_image_position: Option<BackgroundImagePosition>,
+    pub background_image_fit: Option<BackgroundImageFit>,
+    pub background_image_repeat: Option<bool>,
     pub scrollback_limit: Option<usize>,
     pub window_save_state: Option<WindowSaveState>,
     pub macos_option_as_alt: Option<MacosOptionAsAlt>,
@@ -409,6 +467,19 @@ impl ConfigOverrides {
             background_blur_radius: higher_priority
                 .background_blur_radius
                 .or(self.background_blur_radius),
+            background_image: higher_priority.background_image.or(self.background_image),
+            background_image_opacity: higher_priority
+                .background_image_opacity
+                .or(self.background_image_opacity),
+            background_image_position: higher_priority
+                .background_image_position
+                .or(self.background_image_position),
+            background_image_fit: higher_priority
+                .background_image_fit
+                .or(self.background_image_fit),
+            background_image_repeat: higher_priority
+                .background_image_repeat
+                .or(self.background_image_repeat),
             scrollback_limit: higher_priority.scrollback_limit.or(self.scrollback_limit),
             window_save_state: higher_priority.window_save_state.or(self.window_save_state),
             macos_option_as_alt: higher_priority
@@ -457,6 +528,19 @@ impl ConfigOverrides {
             background_blur_radius: self
                 .background_blur_radius
                 .unwrap_or(base.background_blur_radius),
+            background_image: self.background_image.or(base.background_image),
+            background_image_opacity: self
+                .background_image_opacity
+                .unwrap_or(base.background_image_opacity),
+            background_image_position: self
+                .background_image_position
+                .unwrap_or(base.background_image_position),
+            background_image_fit: self
+                .background_image_fit
+                .unwrap_or(base.background_image_fit),
+            background_image_repeat: self
+                .background_image_repeat
+                .unwrap_or(base.background_image_repeat),
             scrollback_limit: self.scrollback_limit.unwrap_or(base.scrollback_limit),
             window_save_state: self.window_save_state.unwrap_or(base.window_save_state),
             macos_option_as_alt: self.macos_option_as_alt.unwrap_or(base.macos_option_as_alt),
@@ -625,6 +709,11 @@ mod tests {
                 cursor_style_blink: None,
                 background_opacity: 1.0,
                 background_blur_radius: 0,
+                background_image: None,
+                background_image_opacity: 1.0,
+                background_image_position: BackgroundImagePosition::default(),
+                background_image_fit: BackgroundImageFit::default(),
+                background_image_repeat: false,
                 scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
                 window_save_state: WindowSaveState::default(),
                 macos_option_as_alt: MacosOptionAsAlt::default(),

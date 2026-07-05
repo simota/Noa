@@ -345,6 +345,11 @@ impl App {
             )
             .ok()?;
             renderer.set_background_opacity(self.config.background_opacity);
+            renderer.set_background_image(
+                &gpu.device,
+                &gpu.queue,
+                self.background_image.clone(),
+            );
             renderer.resize(PixelSize {
                 w: surface_config.width,
                 h: surface_config.height,

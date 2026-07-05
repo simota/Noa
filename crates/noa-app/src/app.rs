@@ -83,7 +83,10 @@ use quick_terminal::QuickTerminalState;
 
 #[cfg(target_os = "macos")]
 use config::{apply_macos_titlebar_style, macos_option_as_alt};
-use config::{font_config_from_noa_config, resolve_cursor_style, resolve_grid_padding};
+use config::{
+    decode_background_image, font_config_from_noa_config, resolve_cursor_style,
+    resolve_grid_padding,
+};
 use helpers::*;
 #[cfg(test)]
 use quick_terminal::{
@@ -490,6 +493,10 @@ pub struct App {
     /// Initial cursor style from `cursor-style` / `cursor-style-blink`, applied
     /// to each terminal at creation. `None` keeps the terminal default.
     initial_cursor_style: Option<CursorStyle>,
+    /// Decoded `background-image` (startup-time load, PNG-only). Shared (cheap
+    /// `Arc` clone) into every surface's renderer at creation. `None` when
+    /// unset or the file was missing/undecodable.
+    background_image: Option<noa_render::BackgroundImage>,
     runtime_font_size: f32,
     proxy: EventLoopProxy<UserEvent>,
     gpu: Option<GpuState>,
@@ -626,6 +633,9 @@ impl App {
         let padding = resolve_grid_padding(config.window_padding_x, config.window_padding_y);
         let initial_cursor_style =
             resolve_cursor_style(config.cursor_style, config.cursor_style_blink);
+        // Decode the background image once at startup; a missing/undecodable
+        // file logs a diagnostic inside and leaves this `None` (spec FR-8/NFR-1).
+        let background_image = decode_background_image(&config);
         // Clone the proxy for the session-metadata worker before `proxy` is
         // moved into the struct — it posts `SessionDelta::Branch`/`Process` back
         // over it. The worker also shares the sidebar-visible gate so its
@@ -636,6 +646,7 @@ impl App {
         App {
             padding,
             initial_cursor_style,
+            background_image,
             runtime_font_size: config.font_size,
             config,
             proxy,
@@ -1405,6 +1416,11 @@ impl App {
             )
             .unwrap_or_else(|e| gpu_init_fatal("could not build the renderer", e));
             renderer.set_background_opacity(self.config.background_opacity);
+            renderer.set_background_image(
+                &gpu.device,
+                &gpu.queue,
+                self.background_image.clone(),
+            );
             renderer.resize(PixelSize {
                 w: surface_config.width,
                 h: surface_config.height,

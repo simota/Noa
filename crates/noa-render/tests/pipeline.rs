@@ -16,9 +16,10 @@ use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, GridPadding, PixelSize, R
 use noa_font::FontGrid;
 use noa_grid::{Cell, Cursor, Row, SearchState, Selection, SelectionPoint, TerminalColors};
 use noa_render::{
-    CardPipeline, CardStyle, CardTexturePlacement, CardTilePlacement, CommandPaletteSnapshot,
-    DrawOp, FrameSnapshot, ImagePlacementSnapshot, OverviewThumbnailResources, PaneFrame, PaneId,
-    PaneRect, Renderer, SnapshotImage, Theme, build_draw_plan,
+    BackgroundImage, BackgroundImageFit, BackgroundImagePosition, CardPipeline, CardStyle,
+    CardTexturePlacement, CardTilePlacement, CommandPaletteSnapshot, DrawOp, FrameSnapshot,
+    ImagePlacementSnapshot, OverviewThumbnailResources, PaneFrame, PaneId, PaneRect, Renderer,
+    SnapshotImage, Theme, build_draw_plan,
 };
 use std::sync::Arc;
 
@@ -1499,7 +1500,7 @@ fn sidebar_band_overlay_composites_without_validation_error() {
     // Composite it flat onto a wider surface at the left inset.
     let surface_size = PixelSize { w: 400, h: 300 };
     let (target_tex, target_view) = render_target(&device, surface_size.w, surface_size.h);
-    let card = CardPipeline::new(&device, format);
+    let card = CardPipeline::new(&device, format, wgpu::BlendState::ALPHA_BLENDING);
     let style = CardStyle {
         background: [0.08, 0.086, 0.106, 1.0],
         border_color: [0.0; 4],
@@ -1641,7 +1642,7 @@ fn command_palette_card_composites_without_validation_error() {
     // Composite the two card passes over a surface.
     let surface_size = PixelSize { w: 600, h: 400 };
     let (target_tex, target_view) = render_target(&device, surface_size.w, surface_size.h);
-    let card = CardPipeline::new(&device, format);
+    let card = CardPipeline::new(&device, format, wgpu::BlendState::ALPHA_BLENDING);
     let placement = |selected| CardTexturePlacement {
         texture_view: &scratch_view,
         x: 40,
@@ -2063,4 +2064,89 @@ fn noa_grid_test_base64(data: &[u8], out: &mut Vec<u8>) {
             b'='
         });
     }
+}
+
+/// AC-9 / NFR-3 (headless GPU): a valid background image draws one frame in the
+/// lowest z band with no wgpu validation error, and its quad's alpha reflects
+/// `background-image-opacity` INDEPENDENTLY of the clear color's
+/// `background-opacity`. A 2x2 opaque image at `fit = contain` into a 64x32
+/// surface covers a centered 32-wide band (letterbox left/right); reading the
+/// rendered alpha back shows the covered band at the image-opacity-blended
+/// alpha and the letterbox at the clear (background-opacity) alpha — proving
+/// the image is not scaled by `background-opacity`.
+#[test]
+fn background_image_draws_below_cells_with_independent_opacity() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping background-image GPU draw test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    let (w, h) = (64u32, 32u32);
+    renderer.resize(PixelSize { w, h });
+
+    // Clear color alpha = background-opacity = 0.3.
+    renderer.set_background_opacity(0.3);
+    // 2x2 fully-opaque red image, drawn at background-image-opacity = 0.5.
+    let image = BackgroundImage {
+        rgba: Arc::from(vec![255u8, 0, 0, 255].repeat(4)),
+        width: 2,
+        height: 2,
+        fit: BackgroundImageFit::Contain,
+        position: BackgroundImagePosition::Center,
+        repeat: false,
+        opacity: 0.5,
+    };
+    renderer.set_background_image(&device, &queue, Some(image));
+    assert!(renderer.has_background_image());
+
+    // Blank snapshot: the single default cell emits no background quad, so the
+    // frame is just the clear color + the background image.
+    let snap = snapshot_for_text(" ");
+    renderer.rebuild_cells(&snap, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+
+    let (target, view) = render_target(&device, w, h);
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.draw(&device, &queue, &view);
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error drawing the background image: {err:?}"
+    );
+
+    let pixels = read_rgba_pixels(&device, &queue, &target, w, h);
+    let alpha_at = |x: u32, y: u32| -> u8 {
+        let idx = ((y * w + x) * 4 + 3) as usize;
+        pixels[idx]
+    };
+    // contain: 2x2 -> scale 16 -> 32x32 centered, covering x in [16, 48).
+    let covered = alpha_at(32, 16); // center of the image band
+    let letterbox = alpha_at(4, 16); // left edge, image absent
+
+    // Clear (background-opacity 0.3) -> ~0.3 * 255 = 76.
+    assert!(
+        (68..=84).contains(&letterbox),
+        "letterbox alpha should reflect background-opacity (~76): got {letterbox}"
+    );
+    // Straight-alpha blend: 0.5 (image) + 0.3 * (1 - 0.5) = 0.65 -> ~166.
+    assert!(
+        (158..=174).contains(&covered),
+        "covered alpha should reflect background-image-opacity blended over the \
+         clear color (~166), independent of background-opacity: got {covered}"
+    );
+    assert!(
+        covered > letterbox + 40,
+        "the image quad's alpha ({covered}) must clearly exceed the clear-only \
+         letterbox alpha ({letterbox}), proving the image is not scaled by \
+         background-opacity (NFR-3)"
+    );
 }

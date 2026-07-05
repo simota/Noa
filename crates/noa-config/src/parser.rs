@@ -1,10 +1,11 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use noa_core::Rgb;
 
 use crate::{
-    AlphaBlendingMode, ClipboardAccess, ConfigOverrides, CursorShape, FontConfig, FontFeature,
-    FontVariation, MacosOptionAsAlt, MacosTitlebarStyle, SyntheticStyleMode, WindowSaveState,
+    AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess,
+    ConfigOverrides, CursorShape, FontConfig, FontFeature, FontVariation, MacosOptionAsAlt,
+    MacosTitlebarStyle, SyntheticStyleMode, WindowSaveState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +57,11 @@ pub(crate) fn build_overrides(
     let mut cursor_style_blink = None;
     let mut background_opacity = None;
     let mut background_blur_radius = None;
+    let mut background_image = None;
+    let mut background_image_opacity = None;
+    let mut background_image_position = None;
+    let mut background_image_fit = None;
+    let mut background_image_repeat = None;
     let mut scrollback_limit = None;
     let mut window_save_state = None;
     let mut macos_option_as_alt = None;
@@ -180,6 +186,23 @@ pub(crate) fn build_overrides(
             "background-blur-radius" => {
                 background_blur_radius = parse_blur_radius(path, directive, &mut diagnostics);
             }
+            "background-image" => {
+                background_image = parse_background_image(directive);
+            }
+            "background-image-opacity" => {
+                background_image_opacity = parse_opacity(path, directive, &mut diagnostics);
+            }
+            "background-image-position" => {
+                background_image_position =
+                    parse_background_image_position(path, directive, &mut diagnostics);
+            }
+            "background-image-fit" => {
+                background_image_fit =
+                    parse_background_image_fit(path, directive, &mut diagnostics);
+            }
+            "background-image-repeat" => {
+                background_image_repeat = parse_bool_directive(path, directive, &mut diagnostics);
+            }
             "scrollback-limit" => {
                 scrollback_limit = parse_usize(path, directive, &mut diagnostics);
             }
@@ -271,6 +294,11 @@ pub(crate) fn build_overrides(
             cursor_style_blink,
             background_opacity,
             background_blur_radius,
+            background_image,
+            background_image_opacity,
+            background_image_position,
+            background_image_fit,
+            background_image_repeat,
             scrollback_limit,
             window_save_state,
             macos_option_as_alt,
@@ -308,6 +336,11 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "alpha-blending"
             | "background-opacity"
             | "background-blur-radius"
+            | "background-image"
+            | "background-image-opacity"
+            | "background-image-position"
+            | "background-image-fit"
+            | "background-image-repeat"
             | "scrollback-limit"
             | "window-save-state"
             | "macos-option-as-alt"
@@ -685,6 +718,57 @@ fn parse_blur_radius(
                 None
             }
         },
+    }
+}
+
+/// Parse `background-image`: a filesystem path to a PNG, stored verbatim. Path
+/// resolution (leading `~` expansion) and decode happen downstream in `noa-app`
+/// — this module stays IO-free (no `dirs`/`fs`/`env`). Missing/undecodable
+/// files surface a diagnostic there and disable the image, so an empty value is
+/// the only thing that resets the key here.
+fn parse_background_image(directive: &Directive) -> Option<PathBuf> {
+    let value = directive.value.as_deref()?;
+    Some(PathBuf::from(value))
+}
+
+fn parse_background_image_position(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<BackgroundImagePosition> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "top-left" => Some(BackgroundImagePosition::TopLeft),
+        "top-center" => Some(BackgroundImagePosition::TopCenter),
+        "top-right" => Some(BackgroundImagePosition::TopRight),
+        "center-left" => Some(BackgroundImagePosition::CenterLeft),
+        "center" => Some(BackgroundImagePosition::Center),
+        "center-right" => Some(BackgroundImagePosition::CenterRight),
+        "bottom-left" => Some(BackgroundImagePosition::BottomLeft),
+        "bottom-center" => Some(BackgroundImagePosition::BottomCenter),
+        "bottom-right" => Some(BackgroundImagePosition::BottomRight),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+fn parse_background_image_fit(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<BackgroundImageFit> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "none" => Some(BackgroundImageFit::None),
+        "contain" => Some(BackgroundImageFit::Contain),
+        "cover" => Some(BackgroundImageFit::Cover),
+        "stretch" => Some(BackgroundImageFit::Stretch),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
     }
 }
 
@@ -1452,6 +1536,147 @@ mod tests {
         assert_eq!(overrides.background_blur_radius, None);
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("background-blur-radius"));
+    }
+
+    // AC-1: `background-image` parses to a path stored verbatim (tilde
+    // expansion is deferred to noa-app to keep this module IO-free).
+    #[test]
+    fn background_image_parses_path_verbatim() {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), "background-image = /tmp/wall.png");
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            overrides.background_image,
+            Some(PathBuf::from("/tmp/wall.png"))
+        );
+
+        let (overrides, diagnostics) =
+            parse_overrides(path(), "background-image = ~/pics/wall.png");
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            overrides.background_image,
+            Some(PathBuf::from("~/pics/wall.png"))
+        );
+    }
+
+    // AC-2: `background-image-opacity` clamps like `background-opacity`.
+    #[test]
+    fn background_image_opacity_clamps_without_diagnostic() {
+        for (value, expected) in [("0.5", 0.5), ("2.0", 1.0), ("-1", 0.0)] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("background-image-opacity = {value}"));
+            assert_eq!(
+                overrides.background_image_opacity,
+                Some(expected),
+                "{value:?}"
+            );
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+        // Absent → default 1.0 through apply_to.
+        assert_eq!(
+            ConfigOverrides::default()
+                .apply_to(crate::StartupConfig::default())
+                .background_image_opacity,
+            1.0
+        );
+    }
+
+    // AC-3: each of the 9 position tokens parses; invalid → diagnostic;
+    // absent → center default.
+    #[test]
+    fn background_image_position_parses_nine_anchors() {
+        for (value, expected) in [
+            ("top-left", BackgroundImagePosition::TopLeft),
+            ("top-center", BackgroundImagePosition::TopCenter),
+            ("top-right", BackgroundImagePosition::TopRight),
+            ("center-left", BackgroundImagePosition::CenterLeft),
+            ("center", BackgroundImagePosition::Center),
+            ("center-right", BackgroundImagePosition::CenterRight),
+            ("bottom-left", BackgroundImagePosition::BottomLeft),
+            ("bottom-center", BackgroundImagePosition::BottomCenter),
+            ("bottom-right", BackgroundImagePosition::BottomRight),
+        ] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("background-image-position = {value}"));
+            assert_eq!(
+                overrides.background_image_position,
+                Some(expected),
+                "{value:?}"
+            );
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+
+        let (overrides, diagnostics) =
+            parse_overrides(path(), "background-image-position = middle");
+        assert_eq!(overrides.background_image_position, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("background-image-position"));
+
+        assert_eq!(
+            ConfigOverrides::default()
+                .apply_to(crate::StartupConfig::default())
+                .background_image_position,
+            BackgroundImagePosition::Center
+        );
+    }
+
+    // AC-4: each of none|contain|cover|stretch parses; invalid → diagnostic;
+    // absent → contain default.
+    #[test]
+    fn background_image_fit_parses_each_mode() {
+        for (value, expected) in [
+            ("none", BackgroundImageFit::None),
+            ("contain", BackgroundImageFit::Contain),
+            ("cover", BackgroundImageFit::Cover),
+            ("stretch", BackgroundImageFit::Stretch),
+        ] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("background-image-fit = {value}"));
+            assert_eq!(overrides.background_image_fit, Some(expected), "{value:?}");
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+
+        let (overrides, diagnostics) = parse_overrides(path(), "background-image-fit = fill");
+        assert_eq!(overrides.background_image_fit, None);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("background-image-fit"));
+
+        assert_eq!(
+            ConfigOverrides::default()
+                .apply_to(crate::StartupConfig::default())
+                .background_image_fit,
+            BackgroundImageFit::Contain
+        );
+    }
+
+    // AC-5: `background-image-repeat` parses bool; absent → false.
+    #[test]
+    fn background_image_repeat_parses_bool() {
+        for (value, expected) in [("true", true), ("false", false)] {
+            let (overrides, diagnostics) =
+                parse_overrides(path(), &format!("background-image-repeat = {value}"));
+            assert_eq!(overrides.background_image_repeat, Some(expected), "{value:?}");
+            assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        }
+        assert!(
+            !ConfigOverrides::default()
+                .apply_to(crate::StartupConfig::default())
+                .background_image_repeat
+        );
+    }
+
+    // AC-6: all five keys are supported scalar keys for Ghostty import.
+    #[test]
+    fn background_image_keys_are_supported_scalar_keys_for_import() {
+        for key in [
+            "background-image",
+            "background-image-opacity",
+            "background-image-position",
+            "background-image-fit",
+            "background-image-repeat",
+        ] {
+            assert!(is_supported_scalar_key(key), "{key}");
+        }
     }
 
     #[test]

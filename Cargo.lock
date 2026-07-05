@@ -1380,6 +1380,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
+ "dirs",
  "env_logger",
  "log",
  "muda",
@@ -1395,6 +1396,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "parking_lot",
+ "png",
  "pollster",
  "raw-window-handle",
  "wgpu",

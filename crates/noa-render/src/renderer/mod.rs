@@ -11,6 +11,7 @@ use noa_font::{FontGrid, Metrics, ShapedGlyph};
 use noa_grid::{Cell, CursorStyle, PLACEHOLDER, Row, SearchState, Selection, TerminalColors};
 use unicode_width::UnicodeWidthChar;
 
+use crate::background_image::{BackgroundImage, BackgroundImageLayer};
 use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 use crate::image_layer::{ImageDraw, ImageLayer};
 use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
@@ -159,6 +160,11 @@ impl PaneRenderCache {
 pub struct Renderer {
     cell: CellPipeline,
     image_layer: ImageLayer,
+    /// Terminal background image (design: `background-image*`). Drawn once per
+    /// frame in the lowest z band — below every pane's background quad, above
+    /// the `LoadOp::Clear` color — spanning the whole surface. Empty until
+    /// `noa-app` calls [`Renderer::set_background_image`].
+    background_image_layer: BackgroundImageLayer,
     mask_atlas_texture: wgpu::Texture,
     mask_atlas_view: wgpu::TextureView,
     color_atlas_texture: wgpu::Texture,
@@ -216,6 +222,7 @@ impl Renderer {
         RENDERER_CONSTRUCTION_COUNT.fetch_add(1, Ordering::Relaxed);
         let cell = CellPipeline::new(device, format);
         let image_layer = ImageLayer::new(device, format);
+        let background_image_layer = BackgroundImageLayer::new(device, format);
 
         let (mask_w, mask_h) = font.mask_atlas_size();
         let mask_atlas_texture = create_atlas_texture(
@@ -274,6 +281,7 @@ impl Renderer {
         Ok(Renderer {
             cell,
             image_layer,
+            background_image_layer,
             mask_atlas_texture,
             mask_atlas_view,
             color_atlas_texture,
@@ -312,6 +320,28 @@ impl Renderer {
     /// clamped into range.
     pub fn set_background_opacity(&mut self, opacity: f32) {
         self.background_opacity = opacity.clamp(0.0, 1.0);
+    }
+
+    /// Set (or clear) the terminal background image. A startup-time setting:
+    /// `noa-app` decodes the PNG once and calls this right after construction,
+    /// per surface. The texture is uploaded here; placement (fit/position/
+    /// repeat) is resolved against the surface size every frame in
+    /// [`Renderer::draw_panes`], so no per-frame invalidation or resize hook is
+    /// needed. `None` disables the image. The image quad's alpha is scaled only
+    /// by `background-image-opacity`, never by `background-opacity`, matching
+    /// Ghostty (spec NFR-3 / AC-9).
+    pub fn set_background_image(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: Option<BackgroundImage>,
+    ) {
+        self.background_image_layer.set_image(device, queue, image);
+    }
+
+    /// Whether a background image is currently set (test/introspection).
+    pub fn has_background_image(&self) -> bool {
+        self.background_image_layer.has_image()
     }
 
     /// Update the known viewport size (called on `WindowEvent::Resized`).
@@ -514,6 +544,12 @@ impl Renderer {
         self.prepare_overlay_instances(&plan);
         self.upload_instances(device, queue);
         let image_draws = self.build_frame_image_draws(device, queue, layout);
+        // Background image: one full-surface quad below everything, resolved
+        // against the current viewport (recomputes on resize — spec AC-13/14).
+        // A tiling `repeat` is still one quad (Repeat sampler), so this is O(1).
+        let bg_image_draw = self
+            .background_image_layer
+            .build_draw(device, queue, self.viewport);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("noa-frame-encoder"),
@@ -540,6 +576,13 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+
+            // Draw the terminal background image first, spanning the whole
+            // surface (default full-framebuffer scissor), so it sits below every
+            // pane's background quad and above the clear color. Independent of
+            // the per-pane kitty `BelowBackground` band.
+            self.background_image_layer
+                .draw(&mut pass, bg_image_draw.as_ref());
 
             for op in &plan {
                 match op {

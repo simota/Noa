@@ -101,6 +101,11 @@ fn app_config_from_startup(
         cursor_style_blink: config.cursor_style_blink,
         background_opacity: config.background_opacity,
         background_blur_radius: config.background_blur_radius,
+        background_image: config.background_image,
+        background_image_opacity: config.background_image_opacity,
+        background_image_position: config.background_image_position,
+        background_image_fit: config.background_image_fit,
+        background_image_repeat: config.background_image_repeat,
         scrollback_limit: config.scrollback_limit,
         window_save_state: config.window_save_state,
         macos_option_as_alt: config.macos_option_as_alt,
@@ -165,6 +170,69 @@ mod tests {
             app_config.macos_titlebar_style,
             noa_config::MacosTitlebarStyle::Transparent
         );
+    }
+
+    // AC-7: a config carrying all five background-image keys resolves through
+    // `app_config_from_startup` into an `AppConfig` holding the five values.
+    #[test]
+    fn background_image_keys_flow_from_startup_config_to_app_config() {
+        let config = noa_config::StartupConfig {
+            background_image: Some(std::path::PathBuf::from("/tmp/wall.png")),
+            background_image_opacity: 0.5,
+            background_image_position: noa_config::BackgroundImagePosition::TopRight,
+            background_image_fit: noa_config::BackgroundImageFit::Cover,
+            background_image_repeat: true,
+            ..Default::default()
+        };
+
+        let app_config = app_config_from_startup(config, false);
+
+        assert_eq!(
+            app_config.background_image,
+            Some(std::path::PathBuf::from("/tmp/wall.png"))
+        );
+        assert_eq!(app_config.background_image_opacity, 0.5);
+        assert_eq!(
+            app_config.background_image_position,
+            noa_config::BackgroundImagePosition::TopRight
+        );
+        assert_eq!(
+            app_config.background_image_fit,
+            noa_config::BackgroundImageFit::Cover
+        );
+        assert!(app_config.background_image_repeat);
+    }
+
+    // AC-7 (end-to-end from a config file): parsing a config source with all
+    // five keys and applying it yields the five resolved values.
+    #[test]
+    fn background_image_keys_parse_and_apply_from_config_source() {
+        let (overrides, diagnostics) = noa_config::parse_overrides(
+            std::path::Path::new("/tmp/noa-test-config"),
+            "background-image = /tmp/wall.png\n\
+             background-image-opacity = 0.25\n\
+             background-image-position = bottom-left\n\
+             background-image-fit = stretch\n\
+             background-image-repeat = true",
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let startup = overrides.apply_to(noa_config::StartupConfig::default());
+        let app_config = app_config_from_startup(startup, false);
+
+        assert_eq!(
+            app_config.background_image,
+            Some(std::path::PathBuf::from("/tmp/wall.png"))
+        );
+        assert_eq!(app_config.background_image_opacity, 0.25);
+        assert_eq!(
+            app_config.background_image_position,
+            noa_config::BackgroundImagePosition::BottomLeft
+        );
+        assert_eq!(
+            app_config.background_image_fit,
+            noa_config::BackgroundImageFit::Stretch
+        );
+        assert!(app_config.background_image_repeat);
     }
 
     #[test]

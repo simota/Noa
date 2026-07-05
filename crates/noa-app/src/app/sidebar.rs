@@ -1736,7 +1736,7 @@ pub(super) fn draw_sidebar_band(
         corner_radius: 10.0 * model.scale,
         border_width: 1.0 * model.scale,
         focus_width: 1.0 * model.scale,
-        focus_glow_width: 6.0 * model.scale,
+        focus_glow_width: 0.0,
     };
     // A card with a pending interaction request swaps the blue focus accent for
     // a red ring (FR-16) — drawn selected so the ring + glow path lights up even
@@ -1745,7 +1745,7 @@ pub(super) fn draw_sidebar_band(
     let attention_style = CardStyle {
         focus_color: rgb_to_rgba(SIDEBAR_DOT_RED),
         focus_width: 1.0 * model.scale,
-        focus_glow_width: 12.0 * model.scale,
+        focus_glow_width: 4.0 * model.scale,
         ..card_style
     };
     for card_draw in &model.cards {

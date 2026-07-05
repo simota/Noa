@@ -711,6 +711,22 @@ impl App {
         // gpu/overview borrows below.
         let zoom_bounds = self.overview_chrome().map(|chrome| chrome.grid_bounds);
 
+        // Which tiles carry a pending interaction request (FR-16), indexed by
+        // placement position (live tiles then placeholders, the same order as
+        // `tile_rects` below). Resolved before the gpu/overview borrows so the
+        // ring pass needs no `self` access. Held steady while pending (not
+        // blink-gated) so the ring is a stable marker.
+        let attention_tiles: Vec<bool> = self
+            .overview_source_tile_ids()
+            .iter()
+            .map(|id| {
+                let card_id = Self::session_card_id(id.window_id, id.pane_id);
+                self.session_store
+                    .get(&card_id)
+                    .is_some_and(|card| card.attention)
+            })
+            .collect();
+
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
@@ -881,6 +897,38 @@ impl App {
                         y: zoom.y,
                         w: zoom.w,
                         h: zoom.h,
+                        selected: true,
+                    }],
+                );
+            }
+
+            // Persistent red attention ring over every tile with a pending
+            // interaction request (FR-16), drawn last so it sits above the
+            // selection/hover rings — a request must stay visible even on the
+            // focused or hovered tile. The zoomed tile is skipped (its enlarged
+            // rect already carries the selection ring).
+            for (index, rect) in tile_rects.iter().enumerate() {
+                if !attention_tiles.get(index).copied().unwrap_or(false) {
+                    continue;
+                }
+                if zoomed && index == selected {
+                    continue;
+                }
+                let Some(tile_view) = thumbnails.tile_texture_view(index) else {
+                    continue;
+                };
+                chrome_card.pipeline.overlay_texture_cards(
+                    &gpu.device,
+                    &gpu.queue,
+                    &view,
+                    surface_size,
+                    &OVERVIEW_ATTENTION_CARD_STYLE,
+                    &[CardTexturePlacement {
+                        texture_view: &tile_view,
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
                         selected: true,
                     }],
                 );

@@ -426,6 +426,21 @@ const OVERVIEW_CARD_STYLE: CardStyle = CardStyle {
     focus_glow_width: OVERVIEW_CARD_FOCUS_GLOW_WIDTH,
 };
 
+/// Attention styling for an Overview tile with a pending interaction request
+/// (FR-16): a red ring + wide glow over the tile, mirroring the sidebar card's
+/// red ring so the same "this session needs you" marker reads on both surfaces.
+/// Held steady while pending (the title dot still blinks) so the ring is a
+/// stable marker, not a flicker.
+const OVERVIEW_ATTENTION_CARD_STYLE: CardStyle = CardStyle {
+    background: OVERVIEW_BG_COLOR,
+    border_color: OVERVIEW_BORDER_COLOR,
+    focus_color: crate::chrome::rgba(crate::chrome::CHROME_DOT_RED),
+    corner_radius: OVERVIEW_CARD_CORNER_RADIUS,
+    border_width: OVERVIEW_CARD_BORDER_WIDTH,
+    focus_width: 2.5,
+    focus_glow_width: 12.0,
+};
+
 /// Rounded styling for Overview chrome pills (search and shortcut hint).
 const OVERVIEW_CHROME_CARD_STYLE: CardStyle = CardStyle {
     background: OVERVIEW_BG_COLOR,

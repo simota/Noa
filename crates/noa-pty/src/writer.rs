@@ -1,7 +1,9 @@
 //! The writable end of a [`Pty`](crate::Pty).
 
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 /// A cloneable, sendable handle for writing input bytes to the PTY master.
 ///
@@ -21,13 +23,13 @@ impl PtyWriter {
 
     /// Write all of `data` to the PTY master.
     pub fn write(&self, data: &[u8]) -> io::Result<()> {
-        let mut w = self.inner.lock().expect("PtyWriter mutex poisoned");
+        let mut w = self.inner.lock();
         w.write_all(data)
     }
 
     /// Flush any buffered bytes to the PTY master.
     pub fn flush(&self) -> io::Result<()> {
-        let mut w = self.inner.lock().expect("PtyWriter mutex poisoned");
+        let mut w = self.inner.lock();
         w.flush()
     }
 }

@@ -12,7 +12,7 @@ use crate::atlas::Atlas;
 use crate::boxdraw::{self, is_builtin_glyph};
 use crate::face::{FontStack, FontStyle, Metrics, cascade_fallback_face, load_font_stack};
 use crate::raster::{GlyphSynthesis, RasterizedGlyph, rasterize_with_variations};
-use crate::shape::{self, FaceId, ShapeCell, ShapeRunKey, ShapedGlyph, StyleKey};
+use crate::shape::{self, FaceId, ShapeCell, ShapeRunEntry, ShapedGlyph, StyleKey};
 use crate::{FontConfig, FontError, GlyphInfo, GlyphKey};
 
 /// Default atlas dimensions. The atlas grows on demand when glyph pressure exceeds it.
@@ -28,6 +28,18 @@ static NEXT_ATLAS_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
 fn next_atlas_identity() -> u64 {
     NEXT_ATLAS_IDENTITY.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Precompute [`shape::config_digest`] for the four style combinations —
+/// see `FontGrid::cfg_digests`.
+fn cfg_digests(cfg: &FontConfig) -> [u64; 4] {
+    let digest = |bold: bool, italic: bool| shape::config_digest(cfg, StyleKey { bold, italic });
+    [
+        digest(false, false),
+        digest(true, false),
+        digest(false, true),
+        digest(true, true),
+    ]
 }
 
 /// Which of the two atlases a packed glyph lives in — so eviction only frees
@@ -103,8 +115,13 @@ pub struct FontGrid {
     /// Per-run shape cache (REQ-SHAPE-5): memoizes `shape_run` so an
     /// unchanged run doesn't re-invoke `rustybuzz` every frame. LRU-evicted
     /// at `SHAPE_CACHE_CAP` (`last_used` = access clock stamp).
-    shape_cache: HashMap<ShapeRunKey, (Vec<ShapedGlyph>, u64)>,
+    shape_cache: HashMap<u64, Vec<ShapeRunEntry>>,
+    shape_cache_len: usize,
     shape_cache_hits: u64,
+    /// [`shape::config_digest`] per style, precomputed once (the config is
+    /// immutable for this grid's lifetime) so the shape_run hot path hashes
+    /// no strings. Indexed `bold as usize | (italic as usize) << 1`.
+    cfg_digests: [u64; 4],
     /// Cache for the shaped-glyph raster path, keyed by (face, glyph id,
     /// style) rather than by `char` (`cache` above stays the char-keyed path
     /// for `get_or_raster`).
@@ -140,6 +157,7 @@ impl FontGrid {
             let font = font_stack.primary().font_ref()?;
             Metrics::compute(font, px_size)
         };
+        let style_cfg_digests = cfg_digests(&font_cfg);
         Ok(Self {
             font_stack,
             ctx: ScaleContext::new(),
@@ -151,7 +169,9 @@ impl FontGrid {
             px_size,
             font_cfg,
             shape_cache: HashMap::new(),
+            shape_cache_len: 0,
             shape_cache_hits: 0,
+            cfg_digests: style_cfg_digests,
             raster_shaped_cache: HashMap::new(),
             slots: HashMap::new(),
             next_slot_id: 0,
@@ -175,6 +195,7 @@ impl FontGrid {
             let font = font_stack.primary().font_ref()?;
             Metrics::compute(font, px_size)
         };
+        let style_cfg_digests = cfg_digests(&font_cfg);
         Ok(Self {
             font_stack,
             ctx: ScaleContext::new(),
@@ -186,7 +207,9 @@ impl FontGrid {
             px_size,
             font_cfg,
             shape_cache: HashMap::new(),
+            shape_cache_len: 0,
             shape_cache_hits: 0,
+            cfg_digests: style_cfg_digests,
             raster_shaped_cache: HashMap::new(),
             slots: HashMap::new(),
             next_slot_id: 0,
@@ -349,12 +372,19 @@ impl FontGrid {
             return Vec::new();
         };
         let style = first.style;
-        let key = shape::shape_run_key(cells, style, &self.font_cfg);
+        let cfg_digest = self.cfg_digest_for(style);
+        let hash = shape::shape_run_hash(cells, style, cfg_digest);
         let now = self.tick();
-        if let Some(entry) = self.shape_cache.get_mut(&key) {
-            entry.1 = now;
+        if let Some(bucket) = self.shape_cache.get_mut(&hash)
+            && let Some(entry) = bucket.iter_mut().find(|entry| {
+                entry.style == style
+                    && entry.cfg_digest == cfg_digest
+                    && shape::run_matches(&entry.text, cells)
+            })
+        {
+            entry.last_used = now;
             self.shape_cache_hits += 1;
-            return entry.0.clone();
+            return entry.glyphs.clone();
         }
 
         // Builtin runs (box-drawing/block/Powerline) bypass rustybuzz entirely:
@@ -376,10 +406,7 @@ impl FontGrid {
                     cluster: idx as u32,
                 })
                 .collect();
-            if self.shape_cache.len() >= SHAPE_CACHE_CAP {
-                self.evict_lru_shape_run();
-            }
-            self.shape_cache.insert(key, (glyphs.clone(), now));
+            self.insert_shape_run(hash, cells, style, cfg_digest, glyphs.clone(), now);
             return glyphs;
         }
 
@@ -395,11 +422,43 @@ impl FontGrid {
             &self.font_cfg,
         );
 
-        if self.shape_cache.len() >= SHAPE_CACHE_CAP {
+        self.insert_shape_run(hash, cells, style, cfg_digest, glyphs.clone(), now);
+        glyphs
+    }
+
+    fn cfg_digest_for(&self, style: StyleKey) -> u64 {
+        self.cfg_digests[style.bold as usize | (style.italic as usize) << 1]
+    }
+
+    /// Insert a shaped run into the memo cache (owned key text is built here,
+    /// on the miss path only), enforcing the LRU cap.
+    fn insert_shape_run(
+        &mut self,
+        hash: u64,
+        cells: &[ShapeCell],
+        style: StyleKey,
+        cfg_digest: u64,
+        glyphs: Vec<ShapedGlyph>,
+        now: u64,
+    ) {
+        if self.shape_cache_len >= SHAPE_CACHE_CAP {
             self.evict_lru_shape_run();
         }
-        self.shape_cache.insert(key, (glyphs.clone(), now));
-        glyphs
+        let text = cells
+            .iter()
+            .map(|cell| (cell.ch, cell.combining.clone()))
+            .collect();
+        self.shape_cache
+            .entry(hash)
+            .or_default()
+            .push(ShapeRunEntry {
+                text,
+                style,
+                cfg_digest,
+                glyphs,
+                last_used: now,
+            });
+        self.shape_cache_len += 1;
     }
 
     /// Number of `shape_run` calls served from the shape cache (REQ-SHAPE-5
@@ -570,13 +629,24 @@ impl FontGrid {
 
     /// Evict the least-recently-used memoized shape run (LRU cap enforcement).
     fn evict_lru_shape_run(&mut self) {
-        if let Some(key) = self
-            .shape_cache
-            .iter()
-            .min_by_key(|(_, (_, last_used))| *last_used)
-            .map(|(key, _)| key.clone())
-        {
-            self.shape_cache.remove(&key);
+        let mut oldest: Option<(u64, usize, u64)> = None;
+        for (hash, bucket) in &self.shape_cache {
+            for (idx, entry) in bucket.iter().enumerate() {
+                if oldest.is_none_or(|(_, _, last_used)| entry.last_used < last_used) {
+                    oldest = Some((*hash, idx, entry.last_used));
+                }
+            }
+        }
+        if let Some((hash, idx, _)) = oldest {
+            let bucket = self
+                .shape_cache
+                .get_mut(&hash)
+                .expect("bucket found during scan");
+            bucket.swap_remove(idx);
+            if bucket.is_empty() {
+                self.shape_cache.remove(&hash);
+            }
+            self.shape_cache_len -= 1;
         }
     }
 

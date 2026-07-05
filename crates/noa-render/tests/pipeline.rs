@@ -65,6 +65,7 @@ fn snapshot_for_text(text: &str) -> FrameSnapshot {
 
     let cols = cells.len().min(u16::MAX as usize) as u16;
     FrameSnapshot {
+        scroll_shift: 0,
         rows: vec![Row {
             cells,
             wrapped: false,
@@ -289,6 +290,7 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         dirty: true,
     };
     let snap = FrameSnapshot {
+        scroll_shift: 0,
         rows: vec![row],
         row_dirty: vec![true],
         cursor: Cursor::default(),
@@ -376,6 +378,7 @@ fn command_palette_overlay_draws_one_frame_without_validation_error() {
         })
         .collect();
     let snap = FrameSnapshot {
+        scroll_shift: 0,
         row_dirty: vec![true; rows.len()],
         rows,
         cursor: Cursor::default(),
@@ -652,6 +655,7 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
             dirty,
         };
         FrameSnapshot {
+            scroll_shift: 0,
             rows: vec![
                 make_row(first, row_dirty[0]),
                 make_row(second, row_dirty[1]),
@@ -1134,6 +1138,7 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
         dirty: true,
     };
     let snap = FrameSnapshot {
+        scroll_shift: 0,
         rows: vec![row],
         row_dirty: vec![true],
         cursor: Cursor::default(),
@@ -1564,6 +1569,7 @@ fn image_snapshot(
         .take(4 * 4 * 4)
         .collect();
     FrameSnapshot {
+        scroll_shift: 0,
         row_dirty: vec![true; rows.len()],
         rows,
         cursor: Cursor::default(),

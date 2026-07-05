@@ -39,6 +39,7 @@ libc         = "0.2"
 # ── gpu data / concurrency / unicode ───────────────────────────────
 bytemuck          = { version = "1", features = ["derive"] }
 crossbeam-channel = "0.5"
+parking_lot       = "0.12"
 unicode-width     = "0.2"
 
 # ── image decoding (Kitty graphics: PNG + zlib) ────────────────────

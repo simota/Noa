@@ -157,6 +157,13 @@ fn kitty_snapshot(terminal: &Terminal) -> (Vec<ImagePlacementSnapshot>, Vec<Snap
 pub struct FrameSnapshot {
     pub rows: Vec<Row>,
     pub row_dirty: Vec<bool>,
+    /// Rows the viewport slid down over immutable content since the previous
+    /// snapshot (scrollback-recording scrolls; `Screen::take_scroll_shift`).
+    /// When the pane's invalidation key is otherwise unchanged and
+    /// `abs_row_base` advanced by exactly this amount, the renderer
+    /// translates its cached row instances up by this many rows instead of
+    /// rebuilding the whole pane. `0` means no translation is possible.
+    pub scroll_shift: usize,
     pub cursor: Cursor,
     pub colors: TerminalColors,
     pub selection: Option<Selection>,
@@ -242,6 +249,14 @@ impl FrameSnapshot {
     /// Clone the active screen's rows + cursor out of `terminal`, consuming
     /// (and clearing) each visible row's dirty bit in the same lock.
     pub fn from_terminal(terminal: &mut Terminal) -> Self {
+        Self::from_terminal_recycled(terminal, Vec::new())
+    }
+
+    /// Like [`Self::from_terminal`], but reuses `rows_buf`'s row/cell
+    /// allocations (typically the previous frame's `FrameSnapshot::rows`,
+    /// handed back by the caller) so a steady-state frame clones the grid
+    /// without fresh heap allocation.
+    pub fn from_terminal_recycled(terminal: &mut Terminal, mut rows_buf: Vec<Row>) -> Self {
         let colors = terminal.colors.clone();
         let (image_placements, images) = kitty_snapshot(terminal);
         let screen = active_screen_mut(terminal);
@@ -255,10 +270,13 @@ impl FrameSnapshot {
         let rows_n = screen.rows;
         let selection = screen.selection;
         let search = screen.search.clone();
-        let (rows, row_dirty) = screen.take_visible_rows_with_damage();
+        let mut row_dirty = Vec::new();
+        screen.take_visible_rows_with_damage_into(&mut rows_buf, &mut row_dirty);
+        let scroll_shift = screen.take_scroll_shift();
         FrameSnapshot {
-            rows,
+            rows: rows_buf,
             row_dirty,
+            scroll_shift,
             cursor,
             colors,
             selection,
@@ -314,6 +332,7 @@ impl FrameSnapshot {
         FrameSnapshot {
             rows,
             row_dirty,
+            scroll_shift: 0,
             cursor,
             colors,
             selection,

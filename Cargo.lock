@@ -1394,6 +1394,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "parking_lot",
  "pollster",
  "raw-window-handle",
  "wgpu",
@@ -1461,6 +1462,7 @@ dependencies = [
  "libc",
  "log",
  "noa-core",
+ "parking_lot",
  "portable-pty",
  "thiserror 2.0.18",
 ]

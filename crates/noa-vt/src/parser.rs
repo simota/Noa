@@ -69,6 +69,14 @@ impl Parser {
         self.state
     }
 
+    /// True when the next byte takes the plain ground path (no UTF-8
+    /// continuation pending), i.e. a printable-ASCII byte maps 1:1 onto
+    /// `Action::Print`. Lets `Stream::feed` batch runs of plain text past
+    /// the per-byte DFA dispatch.
+    pub fn in_ground_plain(&self) -> bool {
+        self.state == State::Ground && self.utf8_rem == 0
+    }
+
     /// Feed one byte, emitting any resulting actions through `sink`.
     pub fn advance<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
         if self.state == State::DcsEscape {

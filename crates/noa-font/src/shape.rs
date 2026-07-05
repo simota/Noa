@@ -81,29 +81,42 @@ pub struct ShapedGlyph {
     pub cluster: u32,
 }
 
-/// Per-run shape cache key (REQ-SHAPE-5). Built ONLY from `&[ShapeCell]` +
-/// [`StyleKey`] + a config digest (see [`config_digest`]) — never from a
-/// `FrameSnapshot`/cursor/selection (FM-08: the function that builds this
-/// key only ever sees a `&[ShapeCell]` slice, so there is no cursor/
-/// selection field available to leak into it by accident).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ShapeRunKey {
-    text: Vec<(char, Vec<char>)>,
-    style: StyleKey,
-    cfg_digest: u64,
+/// One memoized shape run (REQ-SHAPE-5), stored in a bucket under its
+/// [`shape_run_hash`]. Identified ONLY by `&[ShapeCell]` content +
+/// [`StyleKey`] + a config digest (see [`config_digest`]) — never by a
+/// `FrameSnapshot`/cursor/selection (FM-08: the functions that build the
+/// hash and compare entries only ever see a `&[ShapeCell]` slice, so there
+/// is no cursor/selection field available to leak into them by accident).
+pub(crate) struct ShapeRunEntry {
+    pub(crate) text: Vec<(char, Vec<char>)>,
+    pub(crate) style: StyleKey,
+    pub(crate) cfg_digest: u64,
+    pub(crate) glyphs: Vec<ShapedGlyph>,
+    pub(crate) last_used: u64,
 }
 
-/// Build the shape-run cache key for `cells` (all sharing `style` by
-/// construction — segmentation breaks runs at style boundaries).
-pub(crate) fn shape_run_key(cells: &[ShapeCell], style: StyleKey, cfg: &FontConfig) -> ShapeRunKey {
-    ShapeRunKey {
-        text: cells
-            .iter()
-            .map(|cell| (cell.ch, cell.combining.clone()))
-            .collect(),
-        style,
-        cfg_digest: config_digest(cfg, style),
+/// Hash a run for shape-cache lookup without building an owned key: the
+/// lookup path allocates nothing on a cache hit (the owned `text` in
+/// [`ShapeRunEntry`] is built only on insert). Collisions are resolved by
+/// [`run_matches`] plus the entry's `style`/`cfg_digest` fields.
+pub(crate) fn shape_run_hash(cells: &[ShapeCell], style: StyleKey, cfg_digest: u64) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for cell in cells {
+        cell.ch.hash(&mut hasher);
+        cell.combining.hash(&mut hasher);
     }
+    style.hash(&mut hasher);
+    cfg_digest.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Full-equality check between a cached entry's text and a candidate run.
+pub(crate) fn run_matches(entry_text: &[(char, Vec<char>)], cells: &[ShapeCell]) -> bool {
+    entry_text.len() == cells.len()
+        && entry_text
+            .iter()
+            .zip(cells)
+            .all(|((ch, combining), cell)| *ch == cell.ch && *combining == cell.combining)
 }
 
 /// Folds the style-relevant families/features/variations into a digest for
@@ -111,7 +124,7 @@ pub(crate) fn shape_run_key(cells: &[ShapeCell], style: StyleKey, cfg: &FontConf
 /// `FontConfig` (blocked by `f32` fields anyway, per `FontConfig`'s doc
 /// comment) — every `f32` is folded via `.to_bits()` so bit-identical
 /// configs always hash equal and no float-equality footgun is introduced.
-fn config_digest(cfg: &FontConfig, style: StyleKey) -> u64 {
+pub(crate) fn config_digest(cfg: &FontConfig, style: StyleKey) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     cfg.families.hash(&mut hasher);
     cfg.families_bold.hash(&mut hasher);
@@ -330,23 +343,45 @@ mod tests {
     }
 
     #[test]
-    fn shape_run_key_differs_on_text_style_or_config() {
+    fn shape_run_hash_differs_on_text_style_or_config() {
         let cfg = FontConfig::default();
-        let a = shape_run_key(&[cell('a'), cell('b')], StyleKey::default(), &cfg);
-        let a_again = shape_run_key(&[cell('a'), cell('b')], StyleKey::default(), &cfg);
-        assert_eq!(a, a_again, "identical inputs must produce an identical key");
+        let digest = config_digest(&cfg, StyleKey::default());
+        let a = shape_run_hash(&[cell('a'), cell('b')], StyleKey::default(), digest);
+        let a_again = shape_run_hash(&[cell('a'), cell('b')], StyleKey::default(), digest);
+        assert_eq!(a, a_again, "identical inputs must hash identically");
 
-        let different_text = shape_run_key(&[cell('a'), cell('c')], StyleKey::default(), &cfg);
+        let different_text = shape_run_hash(&[cell('a'), cell('c')], StyleKey::default(), digest);
         assert_ne!(a, different_text);
 
-        let different_style = shape_run_key(
-            &[cell('a'), cell('b')],
-            StyleKey {
-                bold: true,
-                italic: false,
-            },
-            &cfg,
-        );
+        let bold = StyleKey {
+            bold: true,
+            italic: false,
+        };
+        let different_style = shape_run_hash(&[cell('a'), cell('b')], bold, digest);
         assert_ne!(a, different_style);
+
+        let mut with_feature = cfg.clone();
+        with_feature.features.push(FontFeature {
+            tag: *b"calt",
+            enabled: true,
+        });
+        let different_cfg = shape_run_hash(
+            &[cell('a'), cell('b')],
+            StyleKey::default(),
+            config_digest(&with_feature, StyleKey::default()),
+        );
+        assert_ne!(a, different_cfg);
+
+        assert!(
+            run_matches(
+                &[('a', Vec::new()), ('b', Vec::new())],
+                &[cell('a'), cell('b')]
+            ),
+            "identical runs must match"
+        );
+        assert!(
+            !run_matches(&[('a', Vec::new())], &[cell('a'), cell('b')]),
+            "length mismatch must not match"
+        );
     }
 }

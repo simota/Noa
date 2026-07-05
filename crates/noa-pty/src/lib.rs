@@ -42,6 +42,9 @@ pub enum PtyError {
     /// Resizing the PTY failed.
     #[error("failed to resize pty: {0}")]
     Resize(String),
+    /// Spawning a reader/waiter thread failed (resource exhaustion).
+    #[error("failed to spawn pty io thread: {0}")]
+    SpawnThread(String),
 }
 
 /// Convenience result alias for this crate.

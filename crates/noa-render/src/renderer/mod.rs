@@ -129,6 +129,11 @@ struct PaneRenderCache {
     /// DECSCUSR style, focus, or blink phase), which dirties exactly the
     /// two affected rows (not a full-pane invalidation trigger).
     prev_cursor: Option<(u16, u16, bool, CursorStyle, bool, bool)>,
+    /// `FrameSnapshot::row_base` as of the last rebuild. The scroll fast
+    /// path requires it to have advanced by exactly `scroll_shift` (i.e. no
+    /// scrollback eviction happened), because selection/search highlights
+    /// are anchored in this storage-index space.
+    prev_row_base: Option<usize>,
 }
 
 impl PaneRenderCache {
@@ -140,6 +145,7 @@ impl PaneRenderCache {
             flat: Vec::new(),
             key: None,
             prev_cursor: None,
+            prev_row_base: None,
         }
     }
 }
@@ -158,6 +164,10 @@ pub struct Renderer {
     instance_buffer: wgpu::Buffer,
     instance_capacity: usize,
     instances: Vec<CellInstance>,
+    /// CPU shadow of what `instance_buffer` currently holds, so
+    /// `upload_instances` can upload only the changed byte range instead of
+    /// the whole list every frame.
+    uploaded_instances: Vec<CellInstance>,
     cell_instance_len: usize,
     pane_instances: Vec<PaneInstances>,
     /// Per-pane kitty-graphics inputs for the most recent `rebuild_panes`,
@@ -269,6 +279,7 @@ impl Renderer {
             instance_buffer,
             instance_capacity,
             instances: Vec::new(),
+            uploaded_instances: Vec::new(),
             cell_instance_len: 0,
             pane_instances: Vec::new(),
             pane_images: Vec::new(),
@@ -733,6 +744,7 @@ impl Renderer {
     }
 
     fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let mut fresh_buffer = false;
         if self.instances.len() > self.instance_capacity {
             self.instance_capacity = (self.instances.len() * 2).max(self.instance_capacity * 2);
             self.instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -741,14 +753,44 @@ impl Renderer {
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            fresh_buffer = true;
         }
-        if !self.instances.is_empty() {
+        if self.instances.is_empty() {
+            self.uploaded_instances.clear();
+            return;
+        }
+        // Diff against the CPU shadow of the buffer's contents and upload
+        // only the changed range. Any length change re-uploads in full (all
+        // instances past the first changed row shift anyway).
+        if fresh_buffer || self.uploaded_instances.len() != self.instances.len() {
             queue.write_buffer(
                 &self.instance_buffer,
                 0,
                 bytemuck::cast_slice(&self.instances),
             );
+            self.uploaded_instances.clone_from(&self.instances);
+            return;
         }
+        let Some(first) = self
+            .instances
+            .iter()
+            .zip(&self.uploaded_instances)
+            .position(|(new, old)| new != old)
+        else {
+            return; // frame is byte-identical to what the GPU already holds
+        };
+        let last = self
+            .instances
+            .iter()
+            .zip(&self.uploaded_instances)
+            .rposition(|(new, old)| new != old)
+            .expect("a first diff implies a last diff");
+        queue.write_buffer(
+            &self.instance_buffer,
+            (first * std::mem::size_of::<CellInstance>()) as u64,
+            bytemuck::cast_slice(&self.instances[first..=last]),
+        );
+        self.uploaded_instances[first..=last].copy_from_slice(&self.instances[first..=last]);
     }
 
     fn upload_uniforms(&self, queue: &wgpu::Queue, layout: &[(PaneId, PaneRect)]) {

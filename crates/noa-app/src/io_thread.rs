@@ -5,8 +5,10 @@
 //! the pty, and pokes the winit event loop to redraw. Resize and input
 //! requests come in from the main thread over crossbeam channels.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError};
@@ -193,28 +195,44 @@ struct SidebarUpsert {
 /// [`SIDEBAR_PREVIEW_LINES`] lines, oldest-first, trailing blanks dropped. Each
 /// line coalesces adjacent cells sharing a foreground color into one
 /// [`PreviewSpan`] so the sidebar can render it in its original ANSI colors.
-fn extract_preview(terminal: &Terminal) -> Vec<PreviewLine> {
-    let mut lines: Vec<PreviewLine> = Vec::new();
-    for row in &terminal.active().grid {
-        // Drop trailing blanks by rendering only up to the last non-blank cell.
-        let Some(last) = row.cells.iter().rposition(|cell| !cell.is_blank()) else {
-            continue;
-        };
-        let mut spans: PreviewLine = Vec::new();
-        for cell in &row.cells[..=last] {
-            match spans.last_mut() {
-                Some(span) if span.fg == cell.fg => cell.push_text_to(&mut span.text),
-                _ => {
-                    let mut text = String::new();
-                    cell.push_text_to(&mut text);
-                    spans.push(PreviewSpan { text, fg: cell.fg });
+/// Lock-held half of the preview extraction: clone only the trailing non-blank
+/// rows the preview needs (at most [`SIDEBAR_PREVIEW_LINES`]), each truncated
+/// at its last non-blank cell. Span/string building happens lock-free in
+/// [`preview_spans`], keeping the pty-feed lock section short (NFR-1).
+fn preview_rows(terminal: &Terminal) -> Vec<Vec<noa_grid::Cell>> {
+    let grid = &terminal.active().grid;
+    let mut rows: Vec<Vec<noa_grid::Cell>> = grid
+        .iter()
+        .rev()
+        .filter_map(|row| {
+            let last = row.cells.iter().rposition(|cell| !cell.is_blank())?;
+            Some(row.cells[..=last].to_vec())
+        })
+        .take(SIDEBAR_PREVIEW_LINES)
+        .collect();
+    rows.reverse();
+    rows
+}
+
+/// Lock-free half of [`extract_preview`]: coalesce adjacent cells sharing a
+/// foreground color into [`PreviewSpan`]s.
+fn preview_spans(rows: Vec<Vec<noa_grid::Cell>>) -> Vec<PreviewLine> {
+    rows.into_iter()
+        .map(|cells| {
+            let mut spans: PreviewLine = Vec::new();
+            for cell in &cells {
+                match spans.last_mut() {
+                    Some(span) if span.fg == cell.fg => cell.push_text_to(&mut span.text),
+                    _ => {
+                        let mut text = String::new();
+                        cell.push_text_to(&mut text);
+                        spans.push(PreviewSpan { text, fg: cell.fg });
+                    }
                 }
             }
-        }
-        lines.push(spans);
-    }
-    let start = lines.len().saturating_sub(SIDEBAR_PREVIEW_LINES);
-    lines.split_off(start)
+            spans
+        })
+        .collect()
 }
 
 /// Pure throttle decision for a sidebar publish (AC-19), mirroring
@@ -268,7 +286,7 @@ fn feed_terminal_batch<'a>(
     sidebar: &SidebarPublish,
     last_sidebar_publish: &mut Option<Instant>,
 ) -> TerminalOutput {
-    let mut term = terminal.lock().expect("terminal mutex poisoned");
+    let mut term = terminal.lock();
     stream.feed(first, &mut *term);
     for bytes in rest {
         stream.feed(bytes, &mut *term);
@@ -284,27 +302,38 @@ fn feed_terminal_batch<'a>(
     // shown (its flag is otherwise invisible).
     let sidebar_visible = sidebar.visible.load(Ordering::Relaxed);
     let sidebar_bell = term.take_pending_bell();
-    let sidebar_upsert = decide_sidebar_publish(sidebar_visible, *last_sidebar_publish, Instant::now())
-        .then(|| {
+    // Under the lock, clone only the raw preview rows plus the small card
+    // scalars; the span/string building runs after the lock is released so
+    // the main thread's snapshot pass is never blocked on string formatting.
+    let sidebar_raw =
+        decide_sidebar_publish(sidebar_visible, *last_sidebar_publish, Instant::now()).then(|| {
             *last_sidebar_publish = Some(Instant::now());
-            SidebarUpsert {
-                name: term.title.clone(),
-                cwd: term.cwd.clone().unwrap_or_default(),
-                busy: term.has_running_program(),
-                preview: extract_preview(&term),
-            }
+            (
+                term.title.clone(),
+                term.cwd.clone().unwrap_or_default(),
+                term.has_running_program(),
+                preview_rows(&term),
+            )
         });
 
-    TerminalOutput {
+    let mut output = TerminalOutput {
         pending_writes: term.take_pending_writes(),
         pending_clipboard_writes: term.take_pending_clipboard_writes(),
         pending_clipboard_reads: term.take_pending_clipboard_reads(),
         pending_notifications: term.take_pending_notifications(),
         synchronized_output: term.modes.synchronized_output(),
         overview_publish_pending,
-        sidebar_upsert,
+        sidebar_upsert: None,
         sidebar_bell,
-    }
+    };
+    drop(term);
+    output.sidebar_upsert = sidebar_raw.map(|(name, cwd, busy, rows)| SidebarUpsert {
+        name,
+        cwd,
+        busy,
+        preview: preview_spans(rows),
+    });
+    output
 }
 
 /// Stamp a wall-clock timestamp for a sidebar upsert (FR-10): the current Unix
@@ -393,10 +422,7 @@ fn publish_overview_snapshot(
         OverviewPublishDecision::Skip => None,
         OverviewPublishDecision::Publish => {
             let snapshot = Arc::new(FrameSnapshot::peek(terminal));
-            *overview
-                .slot
-                .lock()
-                .expect("overview snapshot mutex poisoned") = Some(snapshot);
+            *overview.slot.lock() = Some(snapshot);
             *last_overview_publish = Some(now);
             None
         }
@@ -417,13 +443,10 @@ fn flush_pending_overview_publish(
 ) {
     let now = Instant::now();
     let snapshot = {
-        let term = terminal.lock().expect("terminal mutex poisoned");
+        let term = terminal.lock();
         Arc::new(FrameSnapshot::peek(&term))
     };
-    *overview
-        .slot
-        .lock()
-        .expect("overview snapshot mutex poisoned") = Some(snapshot);
+    *overview.slot.lock() = Some(snapshot);
     *last_overview_publish = Some(now);
 }
 
@@ -771,7 +794,7 @@ mod tests {
         assert!(output.pending_clipboard_writes.is_empty());
         assert!(!output.synchronized_output);
         assert!(
-            terminal.try_lock().is_ok(),
+            terminal.try_lock().is_some(),
             "terminal lock must be released before PTY writes"
         );
     }
@@ -828,7 +851,7 @@ mod tests {
         );
 
         assert!(
-            overview.slot.lock().expect("slot mutex poisoned").is_none(),
+            overview.slot.lock().is_none(),
             "overview_visible=false must cost only the atomic load, no publish"
         );
         assert!(last_overview_publish.is_none());
@@ -930,7 +953,7 @@ mod tests {
         flush_pending_overview_publish(&terminal, &overview, &mut last_overview_publish);
 
         assert!(
-            overview.slot.lock().expect("slot mutex poisoned").is_some(),
+            overview.slot.lock().is_some(),
             "the trailing flush must publish unconditionally, regardless of the gate"
         );
         assert!(last_overview_publish.is_some());
@@ -956,7 +979,6 @@ mod tests {
         let first_snapshot = overview
             .slot
             .lock()
-            .expect("slot mutex poisoned")
             .clone()
             .expect("visible=true publishes on the first feed");
         assert!(last_overview_publish.is_some());
@@ -974,12 +996,7 @@ mod tests {
             &test_sidebar_publish(false),
             &mut None,
         );
-        let still_first = overview
-            .slot
-            .lock()
-            .expect("slot mutex poisoned")
-            .clone()
-            .unwrap();
+        let still_first = overview.slot.lock().clone().unwrap();
         assert!(
             Arc::ptr_eq(&first_snapshot, &still_first),
             "a feed inside the throttle window must not replace the published snapshot"
@@ -1001,12 +1018,7 @@ mod tests {
             &test_sidebar_publish(false),
             &mut None,
         );
-        let third_snapshot = overview
-            .slot
-            .lock()
-            .expect("slot mutex poisoned")
-            .clone()
-            .unwrap();
+        let third_snapshot = overview.slot.lock().clone().unwrap();
         assert!(
             !Arc::ptr_eq(&first_snapshot, &third_snapshot),
             "a feed past the throttle window must publish a fresh snapshot"

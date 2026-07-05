@@ -4,7 +4,6 @@
 use super::*;
 
 impl Screen {
-
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
     }
@@ -219,7 +218,12 @@ impl Screen {
         if text.is_empty() { None } else { Some(text) }
     }
 
-    pub(super) fn push_selected_row_text(row: &Row, start_x: usize, end_x: usize, text: &mut String) {
+    pub(super) fn push_selected_row_text(
+        row: &Row,
+        start_x: usize,
+        end_x: usize,
+        text: &mut String,
+    ) {
         let before_len = text.len();
         for cell in &row.cells[start_x..=end_x] {
             if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
@@ -259,7 +263,11 @@ impl Screen {
     /// Visit scrollback rows `range` (`0` = oldest) in order. The single seam
     /// history consumers (search, selection) go through, so paged storage can
     /// hand back a reused buffer instead of cloning each row.
-    pub(super) fn for_each_scrollback_row(&mut self, range: Range<usize>, f: impl FnMut(usize, &Row)) {
+    pub(super) fn for_each_scrollback_row(
+        &mut self,
+        range: Range<usize>,
+        f: impl FnMut(usize, &Row),
+    ) {
         self.scrollback.for_each_row(range, f);
     }
 
@@ -371,29 +379,66 @@ impl Screen {
     /// `row_base`-keyed invalidation forces a full pane rebuild whenever the
     /// viewport scrolls into history, so no per-history-row damage is needed.
     pub fn take_visible_rows_with_damage(&mut self) -> (Vec<Row>, Vec<bool>) {
+        let mut out_rows = Vec::new();
+        let mut out_dirty = Vec::new();
+        self.take_visible_rows_with_damage_into(&mut out_rows, &mut out_dirty);
+        (out_rows, out_dirty)
+    }
+
+    /// In-place variant of [`Self::take_visible_rows_with_damage`]: recycles
+    /// `out_rows`' existing `Row`/cell allocations via `clone_from` (a
+    /// steady-state frame allocates nothing here), instead of cloning every
+    /// visible row into a fresh `Vec` each frame.
+    pub fn take_visible_rows_with_damage_into(
+        &mut self,
+        out_rows: &mut Vec<Row>,
+        out_dirty: &mut Vec<bool>,
+    ) {
         let rows = self.rows as usize;
         let scrollback_len = self.scrollback.len();
         let start = self.visible_row_base();
 
-        let mut out_rows = Vec::with_capacity(rows);
-        let mut out_dirty = Vec::with_capacity(rows);
+        out_rows.truncate(rows);
+        out_dirty.clear();
+        out_dirty.reserve(rows);
 
-        for idx in start..start + rows {
+        for (slot_idx, idx) in (start..start + rows).enumerate() {
             if idx < scrollback_len {
                 out_dirty.push(false);
-                out_rows.push(
-                    self.scrollback
-                        .row(idx)
-                        .unwrap_or_else(|| Row::new(self.cols)),
-                );
+                let row = self
+                    .scrollback
+                    .row(idx)
+                    .unwrap_or_else(|| Row::new(self.cols));
+                match out_rows.get_mut(slot_idx) {
+                    Some(slot) => *slot = row,
+                    None => out_rows.push(row),
+                }
             } else {
                 let row = &mut self.grid[idx - scrollback_len];
                 out_dirty.push(row.dirty);
-                out_rows.push(row.clone());
+                match out_rows.get_mut(slot_idx) {
+                    Some(slot) => {
+                        // Field-wise so the cell vec's allocation (and each
+                        // cell's combining-string buffer) is reused.
+                        slot.cells.clone_from(&row.cells);
+                        slot.wrapped = row.wrapped;
+                        slot.dirty = row.dirty;
+                    }
+                    None => out_rows.push(row.clone()),
+                }
                 row.dirty = false;
             }
         }
+    }
 
-        (out_rows, out_dirty)
+    /// Consume the rows-scrolled-off-the-top count accumulated by
+    /// scrollback-recording scrolls since the previous call (see
+    /// `Screen::scroll_shift`). Paired with
+    /// [`Self::take_visible_rows_with_damage`] in the same locked snapshot
+    /// pass; the renderer validates it against the absolute row base before
+    /// translating its cache, so a stale value degrades to a full rebuild,
+    /// never to wrong output.
+    pub fn take_scroll_shift(&mut self) -> usize {
+        std::mem::take(&mut self.scroll_shift)
     }
 }

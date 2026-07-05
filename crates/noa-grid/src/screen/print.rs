@@ -3,7 +3,6 @@
 use super::*;
 
 impl Screen {
-
     // ── printing ───────────────────────────────────────────────────
 
     /// Print a scalar at the cursor, honoring the deferred-wrap latch.
@@ -27,7 +26,9 @@ impl Screen {
         if width == 2 && self.right_margin() <= self.left_margin() {
             let blank = self.blank();
             let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
-            let row = &mut self.grid[y];
+            let Some(row) = self.grid.get_mut(y) else {
+                return;
+            };
             Self::clear_wide_at(row, x, &blank);
             row.dirty = true;
             self.cursor.pending_wrap = false;
@@ -36,7 +37,9 @@ impl Screen {
         }
 
         if self.cursor.pending_wrap && autowrap {
-            self.grid[self.cursor.y as usize].wrapped = true;
+            if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
+                row.wrapped = true;
+            }
             self.index();
             self.cursor.x = self.left_margin();
             self.cursor.pending_wrap = false;
@@ -44,14 +47,18 @@ impl Screen {
 
         if width == 2 && self.cursor.x.saturating_add(1) > self.right_margin() {
             if autowrap {
-                self.grid[self.cursor.y as usize].wrapped = true;
+                if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
+                    row.wrapped = true;
+                }
                 self.index();
                 self.cursor.x = self.left_margin();
                 self.cursor.pending_wrap = false;
             } else {
                 let blank = self.blank();
                 let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
-                let row = &mut self.grid[y];
+                let Some(row) = self.grid.get_mut(y) else {
+                    return;
+                };
                 Self::clear_wide_at(row, x, &blank);
                 row.dirty = true;
                 self.cursor.pending_wrap = false;
@@ -76,7 +83,12 @@ impl Screen {
             hyperlink,
             attrs,
         };
-        let row = &mut self.grid[y];
+        let Some(row) = self.grid.get_mut(y) else {
+            return;
+        };
+        if x + width > row.cells.len() {
+            return;
+        }
 
         if width == 1 {
             Self::clear_wide_at(row, x, &blank);

@@ -2,7 +2,6 @@
 
 use super::*;
 
-
 pub(crate) fn runtime_font_size_update(
     current: f32,
     startup: f32,
@@ -102,7 +101,7 @@ pub(crate) fn apply_pane_resize_batch(
             surface.rect = rect;
         }
         surface.grid_size = grid_size;
-        let mut terminal = surface.terminal.lock().expect("terminal mutex poisoned");
+        let mut terminal = surface.terminal.lock();
         terminal.resize(grid_size);
         if let Some(rect) = rect {
             let (cw, ch, taw, tah) = pixel_metrics_for_pane(rect, metrics, padding);

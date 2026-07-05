@@ -147,8 +147,8 @@ impl Pty {
             .map_err(|e| PtyError::TakeWriter(e.to_string()))?;
 
         let (tx, event_rx) = pty_event_channel();
-        spawn_reader(reader, tx.clone());
-        spawn_waiter(child, tx);
+        spawn_reader(reader, tx.clone()).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
+        spawn_waiter(child, tx).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
 
         Ok(Self {
             master,
@@ -248,7 +248,8 @@ impl ForegroundProcessProbe {
 
 impl std::fmt::Debug for ForegroundProcessProbe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ForegroundProcessProbe").finish_non_exhaustive()
+        f.debug_struct("ForegroundProcessProbe")
+            .finish_non_exhaustive()
     }
 }
 

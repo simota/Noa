@@ -792,13 +792,12 @@ impl App {
         };
 
         let snapshot = apply_viewport_scroll_and_snapshot(
-            &mut terminal.lock().expect("terminal mutex poisoned"),
+            &mut terminal.lock(),
             grid_size,
             scroll,
         );
         *overview_snapshot
-            .lock()
-            .expect("overview snapshot mutex poisoned") = Some(snapshot);
+            .lock() = Some(snapshot);
         self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
         self.request_overview_redraw();
 
@@ -823,12 +822,11 @@ impl App {
         };
 
         let snapshot = apply_mouse_wheel_viewport_scroll_and_snapshot(
-            &mut terminal.lock().expect("terminal mutex poisoned"),
+            &mut terminal.lock(),
             scroll,
         );
         *overview_snapshot
-            .lock()
-            .expect("overview snapshot mutex poisoned") = Some(snapshot);
+            .lock() = Some(snapshot);
         self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
         self.request_overview_redraw();
 

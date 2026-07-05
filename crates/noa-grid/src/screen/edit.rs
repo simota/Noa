@@ -4,7 +4,6 @@
 use super::*;
 
 impl Screen {
-
     pub(crate) fn clear_display(&mut self) {
         let blank = self.blank();
         for row in &mut self.grid {
@@ -215,8 +214,17 @@ impl Screen {
         for r in &mut self.grid[(bottom + 1 - n)..=bottom] {
             r.clear(blank.clone());
         }
-        for r in &mut self.grid[top..=bottom] {
-            r.dirty = true;
+        if recorded {
+            // A scrollback-recording scroll is a pure translation of the
+            // viewport: every row keeps its content (and its dirty bit,
+            // which rotated with it), so no blanket re-dirty is needed.
+            // `scroll_shift` tells the renderer to translate its per-row
+            // cache instead of rebuilding every row.
+            self.scroll_shift = self.scroll_shift.saturating_add(n);
+        } else {
+            for r in &mut self.grid[top..=bottom] {
+                r.dirty = true;
+            }
         }
         for row in leaving {
             self.push_scrollback_row(row);

@@ -407,18 +407,22 @@ pub(super) fn rebuild_pane_cached(
     );
     let cell_size = (metrics.cell_w, metrics.cell_h);
 
-    let mut new_key = FrameInvalidationKey {
-        abs_row_base: snap.abs_row_base,
-        active_is_alt: snap.active_is_alt,
-        cols: snap.cols,
-        rows: snap.rows_n,
-        colors: snap.colors.clone(),
-        theme: theme.clone(),
-        selection: snap.selection,
-        search: snap.search.clone(),
-        cell_size,
-        hover_link: snap.hover_link,
-        atlas_eviction_generation: font.atlas_eviction_generation(),
+    // Compare-then-clone: the cached key is checked field-by-field against
+    // the snapshot (cheap-to-diverge scalars first), and a fresh key — whose
+    // colors/theme/search members are real clones — is built only when
+    // something actually changed. On the steady-state frame nothing is
+    // cloned at all.
+    let key_fields_match = |k: &FrameInvalidationKey, atlas_gen: u64| {
+        k.active_is_alt == snap.active_is_alt
+            && k.cols == snap.cols
+            && k.rows == snap.rows_n
+            && k.cell_size == cell_size
+            && k.atlas_eviction_generation == atlas_gen
+            && k.selection == snap.selection
+            && k.hover_link == snap.hover_link
+            && k.colors == snap.colors
+            && k.theme == *theme
+            && k.search == snap.search
     };
 
     let rows = snap.rows.len();
@@ -437,14 +441,63 @@ pub(super) fn rebuild_pane_cached(
     let mut deco_len = 0;
     let mut stable = false;
 
+    // Scroll fast path (see `FrameSnapshot::scroll_shift`): when the only
+    // pane-wide change since the cached frame is the viewport sliding down
+    // `scroll_shift` rows over immutable content — absolute base advanced by
+    // exactly that amount, storage base too (no scrollback eviction, so
+    // selection/search highlights translate with the content), and every
+    // other invalidation trigger unchanged — translate the cached row
+    // segments up by `scroll_shift` and patch their baked y coordinate
+    // instead of rebuilding the whole pane. Rows that slid into view at the
+    // bottom, plus the cursor's old/new rows (a baked cursor overlay does
+    // not translate with content), are re-dirtied inside the pass loop.
+    let mut shifted_in = 0usize;
+    let mut cursor_rows_after_shift: [Option<usize>; 2] = [None, None];
+    if snap.scroll_shift > 0
+        && snap.scroll_shift < rows
+        && cache.bg.len() == rows
+        && cache
+            .prev_row_base
+            .is_some_and(|base| base + snap.scroll_shift == snap.row_base)
+        && cache.key.as_ref().is_some_and(|prev_key| {
+            prev_key.abs_row_base + snap.scroll_shift == snap.abs_row_base
+                && key_fields_match(prev_key, font.atlas_eviction_generation())
+        })
+    {
+        let shift = snap.scroll_shift;
+        for band in [&mut cache.bg, &mut cache.glyph, &mut cache.deco] {
+            band.rotate_left(shift);
+            for row in band[rows - shift..].iter_mut() {
+                row.clear();
+            }
+            for (row_idx, row) in band[..rows - shift].iter_mut().enumerate() {
+                for inst in row.iter_mut() {
+                    inst.grid_pos[1] = row_idx as u16;
+                }
+            }
+        }
+        if let Some(key) = cache.key.as_mut() {
+            key.abs_row_base = snap.abs_row_base;
+        }
+        shifted_in = shift;
+        cursor_rows_after_shift = [
+            cache
+                .prev_cursor
+                .map(|prev| (prev.1 as usize).saturating_sub(shift)),
+            Some(new_cursor.1 as usize),
+        ];
+    }
+
     for _pass in 0..MAX_ATLAS_EVICTION_REBUILD_PASSES {
         let eviction_before = font.atlas_eviction_generation();
-        new_key.atlas_eviction_generation = eviction_before;
 
         // Any pane-wide trigger bundled in `FrameInvalidationKey` differing
         // from the cached previous-frame key forces every row dirty. A pane's
         // first frame (`cache.key` still `None`) is also a full rebuild.
-        let full = cache.key.as_ref() != Some(&new_key) || cache.bg.len() != rows;
+        let full = cache.bg.len() != rows
+            || !cache.key.as_ref().is_some_and(|k| {
+                k.abs_row_base == snap.abs_row_base && key_fields_match(k, eviction_before)
+            });
 
         let mut dirty: Vec<bool> = if full {
             vec![true; rows]
@@ -465,6 +518,17 @@ pub(super) fn rebuild_pane_cached(
             }
             if let Some(slot) = dirty.get_mut(new_cursor.1 as usize) {
                 *slot = true;
+            }
+        }
+
+        if !full && shifted_in > 0 {
+            for slot in dirty[rows - shifted_in..].iter_mut() {
+                *slot = true;
+            }
+            for row in cursor_rows_after_shift.into_iter().flatten() {
+                if let Some(slot) = dirty.get_mut(row) {
+                    *slot = true;
+                }
             }
         }
 
@@ -533,7 +597,6 @@ pub(super) fn rebuild_pane_cached(
         );
 
         let eviction_after = font.atlas_eviction_generation();
-        new_key.atlas_eviction_generation = eviction_after;
         if eviction_after == eviction_before {
             stable = true;
             break;
@@ -553,9 +616,31 @@ pub(super) fn rebuild_pane_cached(
     }
 
     if stable {
-        cache.key = Some(new_key);
+        // `stable` guarantees the atlas generation did not move during the
+        // final pass, so this generation matches the built row segments.
+        let final_gen = font.atlas_eviction_generation();
+        let key_current = cache
+            .key
+            .as_ref()
+            .is_some_and(|k| k.abs_row_base == snap.abs_row_base && key_fields_match(k, final_gen));
+        if !key_current {
+            cache.key = Some(FrameInvalidationKey {
+                abs_row_base: snap.abs_row_base,
+                active_is_alt: snap.active_is_alt,
+                cols: snap.cols,
+                rows: snap.rows_n,
+                colors: snap.colors.clone(),
+                theme: theme.clone(),
+                selection: snap.selection,
+                search: snap.search.clone(),
+                cell_size,
+                hover_link: snap.hover_link,
+                atlas_eviction_generation: final_gen,
+            });
+        }
     }
     cache.prev_cursor = Some(new_cursor);
+    cache.prev_row_base = Some(snap.row_base);
 
     PaneRebuild {
         clear_color,

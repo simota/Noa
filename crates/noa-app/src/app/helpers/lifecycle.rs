@@ -2,7 +2,6 @@
 
 use super::*;
 
-
 pub(crate) fn shutdown_pane_io_threads<'a>(surfaces: impl IntoIterator<Item = &'a mut Surface>) {
     for surface in surfaces {
         surface.shutdown();
@@ -10,11 +9,7 @@ pub(crate) fn shutdown_pane_io_threads<'a>(surfaces: impl IntoIterator<Item = &'
 }
 
 pub(crate) fn surface_has_running_program(surface: &Surface) -> bool {
-    surface
-        .terminal
-        .lock()
-        .expect("terminal mutex poisoned")
-        .has_running_program()
+    surface.terminal.lock().has_running_program()
 }
 
 pub(crate) fn running_program_count<'a>(surfaces: impl IntoIterator<Item = &'a Surface>) -> usize {

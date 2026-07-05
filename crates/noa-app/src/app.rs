@@ -7,8 +7,10 @@
 //! events back to the main loop.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
@@ -349,6 +351,10 @@ struct Surface {
     /// never has to lock `terminal` itself. `None` until the first publish
     /// (or `App::seed_overview_snapshots`'s one-time fallback) lands.
     overview_snapshot: Arc<Mutex<Option<Arc<FrameSnapshot>>>>,
+    /// Previous frame's snapshot rows, handed back after each redraw so
+    /// `FrameSnapshot::from_terminal_recycled` can reuse the row/cell
+    /// allocations instead of cloning the grid into fresh heap every frame.
+    snapshot_recycle: Vec<noa_grid::Row>,
 }
 
 impl WindowState {
@@ -638,14 +644,7 @@ impl App {
         self.windows
             .get(&window_id)
             .and_then(WindowState::focused_surface)
-            .map(|surface| {
-                surface
-                    .terminal
-                    .lock()
-                    .expect("terminal mutex poisoned")
-                    .modes
-                    .app_cursor_keys()
-            })
+            .map(|surface| surface.terminal.lock().modes.app_cursor_keys())
             .unwrap_or(false)
     }
 
@@ -653,14 +652,7 @@ impl App {
         self.windows
             .get(&window_id)
             .and_then(WindowState::focused_surface)
-            .map(|surface| {
-                surface
-                    .terminal
-                    .lock()
-                    .expect("terminal mutex poisoned")
-                    .modes
-                    .app_keypad()
-            })
+            .map(|surface| surface.terminal.lock().modes.app_keypad())
             .unwrap_or(false)
     }
 
@@ -668,13 +660,7 @@ impl App {
         self.windows
             .get(&window_id)
             .and_then(WindowState::focused_surface)
-            .map(|surface| {
-                surface
-                    .terminal
-                    .lock()
-                    .expect("terminal mutex poisoned")
-                    .kitty_keyboard_flags()
-            })
+            .map(|surface| surface.terminal.lock().kitty_keyboard_flags())
             .unwrap_or(0)
     }
 
@@ -682,14 +668,7 @@ impl App {
         self.windows
             .get(&window_id)
             .and_then(WindowState::focused_surface)
-            .map(|surface| {
-                surface
-                    .terminal
-                    .lock()
-                    .expect("terminal mutex poisoned")
-                    .modes
-                    .focus_reporting()
-            })
+            .map(|surface| surface.terminal.lock().modes.focus_reporting())
             .unwrap_or(false)
     }
 
@@ -716,14 +695,17 @@ impl App {
         let mut title = "Noa".to_string();
         let visible_panes = visible_pane_ids(&state.split_tree, state.zoomed);
         for pane_id in visible_panes {
-            let Some(surface) = state.surfaces.get(&pane_id) else {
+            let Some(surface) = state.surfaces.get_mut(&pane_id) else {
                 continue;
             };
-            let mut term = surface.terminal.lock().expect("terminal mutex poisoned");
+            let mut term = surface.terminal.lock();
             if pane_id == state.focused_pane {
                 title = tab_title(&term.title);
             }
-            let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+            let mut snapshot = FrameSnapshot::from_terminal_recycled(
+                &mut term,
+                std::mem::take(&mut surface.snapshot_recycle),
+            );
             // A pane draws a solid cursor only when it is both the split's
             // focused pane AND its window has OS focus; otherwise (an
             // inactive split pane, or any pane in an unfocused window) it
@@ -800,13 +782,19 @@ impl App {
 
         let frame = match state.surface.get_current_texture() {
             Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                state.surface.configure(&gpu.device, &state.surface_config);
-                state.window.request_redraw();
+            // OutOfMemory is not recoverable by reconfiguring; anything else
+            // (Lost/Outdated/Timeout/Other) gets a reconfigure + retry so a
+            // transient error can't leave the window permanently frozen.
+            Err(wgpu::SurfaceError::OutOfMemory) => {
+                log::error!("surface out of memory; skipping frame");
                 return;
             }
             Err(e) => {
-                log::warn!("surface error: {e}");
+                if !matches!(e, wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) {
+                    log::warn!("surface error: {e}; reconfiguring");
+                }
+                state.surface.configure(&gpu.device, &state.surface_config);
+                state.window.request_redraw();
                 return;
             }
         };
@@ -839,6 +827,14 @@ impl App {
             );
         }
         frame.present();
+
+        // Hand each snapshot's row buffer back to its pane so the next
+        // frame's `from_terminal_recycled` reuses the allocations.
+        for (pane_id, _, snapshot) in snapshots {
+            if let Some(surface) = state.surfaces.get_mut(&pane_id) {
+                surface.snapshot_recycle = snapshot.rows;
+            }
+        }
     }
 
     /// Whether the currently OS-focused window's focused pane has a
@@ -856,7 +852,7 @@ impl App {
         else {
             return false;
         };
-        let terminal = surface.terminal.lock().expect("terminal mutex poisoned");
+        let terminal = surface.terminal.lock();
         let cursor = terminal.active().cursor;
         cursor.visible
             && terminal.viewport_offset() == 0
@@ -1229,14 +1225,14 @@ impl App {
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
             let surface = instance
                 .create_surface(window.clone())
-                .expect("failed to create wgpu surface");
+                .unwrap_or_else(|e| gpu_init_fatal("could not create the window surface", e));
             let adapter =
                 pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::default(),
                     compatible_surface: Some(&surface),
                     force_fallback_adapter: false,
                 }))
-                .expect("failed to find a compatible wgpu adapter");
+                .unwrap_or_else(|e| gpu_init_fatal("no compatible GPU adapter found", e));
             let (device, queue) =
                 pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                     label: Some("noa-device"),
@@ -1246,7 +1242,17 @@ impl App {
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::Off,
                 }))
-                .expect("failed to request a wgpu device");
+                .unwrap_or_else(|e| gpu_init_fatal("could not open a GPU device", e));
+            // Validation errors and device loss must not abort inside the
+            // macOS winit delegate (non-unwinding); log them instead. Device
+            // loss then surfaces as SurfaceError::Lost on the next frame and
+            // goes through the reconfigure path in `redraw`.
+            device.set_device_lost_callback(|reason, message| {
+                log::error!("wgpu device lost ({reason:?}): {message}");
+            });
+            device.on_uncaptured_error(Arc::new(|err| {
+                log::error!("wgpu uncaptured error: {err}");
+            }));
             self.gpu = Some(GpuState {
                 instance,
                 adapter,
@@ -1257,7 +1263,7 @@ impl App {
                     sidebar_font_pixel_size(window_scale_factor),
                     font_config_from_noa_config(&self.config.font),
                 )
-                .expect("failed to load the sidebar font"),
+                .unwrap_or_else(|e| gpu_init_fatal("could not load the sidebar font", e)),
                 theme: crate::theme::resolve_theme_with_overrides(
                     self.config.theme.as_deref(),
                     &self.theme_overrides(),
@@ -1273,7 +1279,7 @@ impl App {
             let gpu = self.gpu.as_ref().expect("gpu initialized");
             gpu.instance
                 .create_surface(window.clone())
-                .expect("failed to create wgpu surface")
+                .unwrap_or_else(|e| gpu_init_fatal("could not create the window surface", e))
         };
 
         let (surface_config, renderer) = {
@@ -1304,7 +1310,7 @@ impl App {
                 &mut gpu.font,
                 self.padding,
             )
-            .expect("failed to build the renderer");
+            .unwrap_or_else(|e| gpu_init_fatal("could not build the renderer", e));
             renderer.set_background_opacity(self.config.background_opacity);
             renderer.resize(PixelSize {
                 w: surface_config.width,
@@ -1425,7 +1431,6 @@ impl App {
             .get(&pane_id)?
             .terminal
             .lock()
-            .expect("terminal mutex poisoned")
             .cwd
             .clone()?;
         std::path::Path::new(&cwd).is_dir().then_some(cwd)
@@ -1514,6 +1519,7 @@ impl App {
             rect,
             hover_link: None,
             overview_snapshot,
+            snapshot_recycle: Vec::new(),
         })
     }
 
@@ -1953,7 +1959,9 @@ impl App {
         let bounds = self
             .windows
             .get(&window_id)
-            .map(|state| sidebar_inset_bounds(pane_bounds_for_size(state.window.inner_size()), inset))
+            .map(|state| {
+                sidebar_inset_bounds(pane_bounds_for_size(state.window.inner_size()), inset)
+            })
             .unwrap_or(PaneRectApp::new(0, 0, 0, 0));
         let window = {
             let Some(state) = self.windows.get_mut(&window_id) else {
@@ -2055,7 +2063,6 @@ impl App {
             log::debug!("failed to show macOS split context menu: {error:#}");
         }
     }
-
 }
 
 impl Drop for App {
@@ -2075,4 +2082,3 @@ impl Drop for App {
         self.gpu.take();
     }
 }
-

@@ -23,11 +23,32 @@ impl Stream {
 
     /// Feed a chunk of bytes, dispatching all resulting operations to `handler`.
     pub fn feed<H: Handler>(&mut self, bytes: &[u8], handler: &mut H) {
-        for &b in bytes {
+        let mut i = 0;
+        while i < bytes.len() {
+            // Fast path: in plain ground state a run of printable ASCII maps
+            // 1:1 onto `Handler::print`, so the dominant bulk-output case
+            // (log text) skips the per-byte DFA dispatch entirely.
+            if is_ascii_print(bytes[i]) && self.parser.in_ground_plain() {
+                let end = bytes[i..]
+                    .iter()
+                    .position(|&b| !is_ascii_print(b))
+                    .map_or(bytes.len(), |off| i + off);
+                for &b in &bytes[i..end] {
+                    handler.print(b as char);
+                }
+                i = end;
+                continue;
+            }
             self.parser
-                .advance(b, &mut |action| dispatch(action, handler));
+                .advance(bytes[i], &mut |action| dispatch(action, handler));
+            i += 1;
         }
     }
+}
+
+#[inline]
+fn is_ascii_print(b: u8) -> bool {
+    (0x20..=0x7e).contains(&b)
 }
 
 fn dispatch<H: Handler>(action: Action, h: &mut H) {

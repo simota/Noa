@@ -124,10 +124,7 @@ impl App {
                 let Some(snapshot) = try_peek_overview_snapshot(&surface.terminal) else {
                     continue;
                 };
-                *surface
-                    .overview_snapshot
-                    .lock()
-                    .expect("overview snapshot mutex poisoned") = Some(snapshot);
+                *surface.overview_snapshot.lock() = Some(snapshot);
             }
         }
     }
@@ -325,12 +322,7 @@ impl App {
             // locks a tab's `Terminal` itself. `None` only for a tab that
             // hasn't published since the overview opened;
             // `seed_overview_snapshots`'s one-time fallback covers that gap.
-            let Some(snapshot) = surface
-                .overview_snapshot
-                .lock()
-                .expect("overview snapshot mutex poisoned")
-                .clone()
-            else {
+            let Some(snapshot) = surface.overview_snapshot.lock().clone() else {
                 continue;
             };
 
@@ -898,7 +890,11 @@ impl App {
         frame.present();
     }
 
-    pub(super) fn finish_overview_tile_renders(&mut self, tile_ids: &[OverviewTileId], now: Instant) {
+    pub(super) fn finish_overview_tile_renders(
+        &mut self,
+        tile_ids: &[OverviewTileId],
+        now: Instant,
+    ) {
         for tile_id in tile_ids {
             let tile = self.overview_tiles.entry(*tile_id).or_default();
             tile.dirty = false;
@@ -984,7 +980,10 @@ impl App {
         Some(overview_chrome_bands(bounds))
     }
 
-    pub(super) fn overview_layout(&self, source_tile_ids: &[OverviewTileId]) -> Option<OverviewLayout> {
+    pub(super) fn overview_layout(
+        &self,
+        source_tile_ids: &[OverviewTileId],
+    ) -> Option<OverviewLayout> {
         let chrome = self.overview_chrome()?;
         Some(compute_overview_grid(
             source_tile_ids.len(),

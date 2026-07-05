@@ -136,6 +136,11 @@ pub struct Screen {
     /// `rows_evicted + history_index` stays valid, and a coordinate below the
     /// current `rows_evicted` denotes content that has scrolled off for good.
     rows_evicted: usize,
+    /// Rows scrolled off the top by scrollback-recording full-viewport
+    /// scrolls since the last snapshot (`take_scroll_shift`). Lets the
+    /// renderer treat such a scroll as a translation of its cached row
+    /// instances instead of a full-pane rebuild.
+    scroll_shift: usize,
     last_printed: Option<char>,
 }
 mod edit;
@@ -175,6 +180,7 @@ impl Screen {
             }),
             scrollback_enabled,
             viewport_offset: 0,
+            scroll_shift: 0,
             rows_evicted: 0,
             last_printed: None,
         }

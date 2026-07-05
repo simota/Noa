@@ -2,7 +2,6 @@
 
 use super::*;
 
-
 pub(crate) fn close_tab_outcome<Id: Copy + Eq>(
     order: &[Id],
     focused: Option<Id>,
@@ -255,11 +254,9 @@ pub(crate) fn overview_should_intercept_command(
 pub(crate) fn try_peek_overview_snapshot(
     terminal: &Arc<Mutex<Terminal>>,
 ) -> Option<Arc<FrameSnapshot>> {
-    match terminal.try_lock() {
-        Ok(term) => Some(Arc::new(FrameSnapshot::peek(&term))),
-        Err(TryLockError::WouldBlock) => None,
-        Err(TryLockError::Poisoned(_)) => panic!("terminal mutex poisoned"),
-    }
+    terminal
+        .try_lock()
+        .map(|term| Arc::new(FrameSnapshot::peek(&term)))
 }
 
 pub(crate) fn resolve_command_target<Id: Copy>(

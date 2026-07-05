@@ -19,6 +19,7 @@ wgpu.workspace = true
 pollster.workspace = true
 raw-window-handle.workspace = true
 crossbeam-channel.workspace = true
+parking_lot.workspace = true
 anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true

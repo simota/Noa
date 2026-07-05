@@ -1030,7 +1030,7 @@
     #[test]
     fn overview_snapshot_seed_skips_locked_terminal_without_waiting() {
         let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(5, 3))));
-        let _guard = terminal.lock().expect("terminal mutex poisoned");
+        let _guard = terminal.lock();
 
         assert!(try_peek_overview_snapshot(&terminal).is_none());
     }

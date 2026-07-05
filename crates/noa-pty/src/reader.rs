@@ -18,7 +18,7 @@ const READ_CHUNK: usize = 64 * 1024;
 pub(crate) fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     tx: Sender<PtyEvent>,
-) -> std::thread::JoinHandle<()> {
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("noa-pty-reader".into())
         .spawn(move || {
@@ -41,7 +41,6 @@ pub(crate) fn spawn_reader(
                 }
             }
         })
-        .expect("failed to spawn pty reader thread")
 }
 
 /// Spawn a thread that blocks on the child, then emits [`PtyEvent::Exit`]
@@ -49,7 +48,7 @@ pub(crate) fn spawn_reader(
 pub(crate) fn spawn_waiter(
     mut child: Box<dyn Child + Send + Sync>,
     tx: Sender<PtyEvent>,
-) -> std::thread::JoinHandle<()> {
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("noa-pty-waiter".into())
         .spawn(move || {
@@ -59,5 +58,4 @@ pub(crate) fn spawn_waiter(
             };
             let _ = tx.send(PtyEvent::Exit(code));
         })
-        .expect("failed to spawn pty waiter thread")
 }

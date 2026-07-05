@@ -1509,6 +1509,7 @@ fn baseline_snapshot(chars: [char; 3]) -> FrameSnapshot {
         })
         .collect();
     FrameSnapshot {
+        scroll_shift: 0,
         rows,
         row_dirty: vec![false, false, false],
         cursor: Cursor::default(),
@@ -1712,6 +1713,79 @@ fn per_row_patch_output_matches_a_full_rebuild_ac_wp4_03() {
         patched, reference,
         "the per-row-patched instance list must be byte-identical to a full \
              rebuild of the same state (bg-then-glyph-then-decoration GLOBAL order, FM-12)"
+    );
+}
+
+#[test]
+fn scroll_translation_output_matches_a_full_rebuild() {
+    // P1 scroll fast path: a scrollback-recording scroll must translate the
+    // cached row segments instead of rebuilding every row, and the result
+    // must be byte-identical to an unconditional full rebuild.
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping scroll-translation test");
+        return;
+    };
+    let Some(mut font) = skip_font() else { return };
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8Unorm,
+        &mut font,
+        GridPadding::ZERO,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: 64, h: 64 });
+
+    let theme = Theme::new();
+    let pane = PaneId::new(1);
+    let rect = PaneRect::new(0, 0, 64, 64);
+
+    let mut terminal = Terminal::new(GridSize::new(4, 3));
+    terminal.primary.grid[0].cells[0].ch = 'A';
+    terminal.primary.grid[1].cells[0].ch = 'B';
+    terminal.primary.grid[2].cells[0].ch = 'C';
+
+    let snap1 = FrameSnapshot::from_terminal(&mut terminal);
+    renderer.rebuild_panes(
+        &[PaneFrame {
+            pane,
+            rect,
+            snapshot: &snap1,
+        }],
+        &mut font,
+        &theme,
+    );
+
+    // A full-viewport scroll on the primary screen records scrollback, so
+    // it must surface as a translation, not as three dirty rows.
+    terminal.primary.scroll_up_region(1);
+    terminal.primary.grid[2].cells[0].ch = 'D';
+    terminal.primary.grid[2].dirty = true;
+
+    let snap2 = FrameSnapshot::from_terminal(&mut terminal);
+    assert_eq!(snap2.scroll_shift, 1, "recorded scroll reports its shift");
+    renderer.rebuild_panes(
+        &[PaneFrame {
+            pane,
+            rect,
+            snapshot: &snap2,
+        }],
+        &mut font,
+        &theme,
+    );
+    assert!(
+        renderer.rows_rebuilt_last_frame() < 3,
+        "translated scroll must not rebuild every row (rebuilt {})",
+        renderer.rows_rebuilt_last_frame()
+    );
+    let patched = renderer.instances_for_test().to_vec();
+
+    let mut reference = Vec::new();
+    rebuild_cell_instances(&mut reference, &snap2, &mut font, &theme, false);
+
+    assert_eq!(
+        patched, reference,
+        "scroll-translated instance list must be byte-identical to a full rebuild"
     );
 }
 

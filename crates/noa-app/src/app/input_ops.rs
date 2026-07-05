@@ -21,7 +21,7 @@ impl App {
         };
 
         apply_terminal_action(
-            &mut terminal.lock().expect("terminal mutex poisoned"),
+            &mut terminal.lock(),
             action,
         );
 
@@ -107,7 +107,7 @@ impl App {
             return;
         };
 
-        let mut terminal = terminal.lock().expect("terminal mutex poisoned");
+        let mut terminal = terminal.lock();
         match action {
             SearchAction::Find => {
                 // Only one prompt is tracked app-wide; cmd+f while one is
@@ -232,7 +232,7 @@ impl App {
             return;
         };
         {
-            let mut terminal = terminal.lock().expect("terminal mutex poisoned");
+            let mut terminal = terminal.lock();
             match effect {
                 SearchPromptEffect::UpdateQuery(query) => terminal.set_search_query(query),
                 SearchPromptEffect::ClearQuery => terminal.clear_search(),
@@ -260,7 +260,6 @@ impl App {
         {
             terminal
                 .lock()
-                .expect("terminal mutex poisoned")
                 .clear_search();
         }
         if let Some(state) = self.windows.get(&session.window_id) {
@@ -372,7 +371,7 @@ impl App {
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
         {
-            let mut terminal = surface.terminal.lock().expect("terminal mutex poisoned");
+            let mut terminal = surface.terminal.lock();
             match gesture {
                 SelectionGesture::None => {}
                 SelectionGesture::Clear => terminal.clear_selection(),
@@ -455,7 +454,6 @@ impl App {
                 surface
                     .terminal
                     .lock()
-                    .expect("terminal mutex poisoned")
                     .selected_text()
             });
         let Some(selected_text) = selected_text else {
@@ -522,7 +520,6 @@ impl App {
                 surface
                     .terminal
                     .lock()
-                    .expect("terminal mutex poisoned")
                     .modes
                     .bracketed_paste()
             })
@@ -625,7 +622,7 @@ impl App {
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
             .map(|surface| {
-                let terminal = surface.terminal.lock().expect("terminal mutex poisoned");
+                let terminal = surface.terminal.lock();
                 (
                     terminal.modes.mouse_tracking(),
                     terminal.modes.mouse_format(),
@@ -734,7 +731,7 @@ impl App {
             return;
         };
         let cursor = {
-            let terminal = surface.terminal.lock().expect("terminal mutex poisoned");
+            let terminal = surface.terminal.lock();
             terminal.active().cursor
         };
         update_ime_cursor_area(
@@ -798,7 +795,7 @@ impl App {
         let surface = state.surfaces.get(&pane_id)?;
         let cell = surface.last_mouse_cell?;
 
-        let terminal = surface.terminal.lock().expect("terminal mutex poisoned");
+        let terminal = surface.terminal.lock();
         let row = terminal.active().visible_row(cell.y)?;
         if let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink) {
             return Some((pane_id, HoverLink::Registry(link_id)));
@@ -888,7 +885,7 @@ impl App {
         surface.hover_link?;
         let cell = surface.last_mouse_cell?;
 
-        let terminal = surface.terminal.lock().expect("terminal mutex poisoned");
+        let terminal = surface.terminal.lock();
         let row = terminal.active().visible_row(cell.y)?;
         if let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink) {
             return terminal

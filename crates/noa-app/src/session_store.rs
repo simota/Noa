@@ -195,6 +195,42 @@ impl SessionStore {
         self.cards.get(id)
     }
 
+    /// Every live card id in a stable, deterministic order (by window id then
+    /// pane id). The sidebar's render and hit-test paths both read this so the
+    /// on-screen card order and the click target agree — a `HashMap` iteration
+    /// order would let them drift.
+    pub fn ordered_ids(&self) -> Vec<SessionCardId> {
+        let mut ids: Vec<SessionCardId> = self.cards.keys().copied().collect();
+        ids.sort_by_key(|id| (id.window_id.0, id.pane_id.get()));
+        ids
+    }
+
+    /// Cards in [`ordered_ids`](Self::ordered_ids) order, paired with their id.
+    pub fn ordered_cards(&self) -> Vec<(SessionCardId, &SessionCard)> {
+        self.ordered_ids()
+            .into_iter()
+            .filter_map(|id| self.cards.get(&id).map(|card| (id, card)))
+            .collect()
+    }
+
+    /// Clear the unread-bell flag on every card belonging to `window_id`
+    /// (FR-11). Called by the main thread when that window gains focus, so a
+    /// bell raised while the window was in the background stops flagging its
+    /// cards once the user is looking at them. Not a [`SessionDelta`]: the
+    /// main thread owns the store and clears directly.
+    pub fn clear_bell_for_window(&mut self, window_id: SessionWindowId) {
+        for (id, card) in self.cards.iter_mut() {
+            if id.window_id == window_id {
+                card.unread_bell = false;
+            }
+        }
+    }
+
+    /// The number of live cards whose program is running (FR-5 header status).
+    pub fn busy_count(&self) -> usize {
+        self.cards.values().filter(|card| card.busy).count()
+    }
+
     /// Apply one delta. This is the only mutation entry point for deltas, so
     /// the stale-message and rename-override rules live in exactly one place.
     pub fn apply(&mut self, delta: SessionDelta) {
@@ -304,7 +340,12 @@ impl SessionStore {
     /// exceeds [`TOMBSTONE_CAP`]. Refreshing an existing key keeps its queue
     /// position (defensive: monotonic ids are normally retired once).
     fn tombstone(&mut self, id: SessionCardId, seq: u64) {
+        // Monotonic, never-reused pane ids are retired exactly once, so an id
+        // already in the map here would be a logic error rather than a normal
+        // refresh — assert it in debug, and keep the existing queue position
+        // (no double-push) in release.
         if self.tombstones.insert(id, seq).is_some() {
+            debug_assert!(false, "tombstone refreshed for a never-reused id {id:?}");
             return;
         }
         self.tombstone_order.push_back(id);
@@ -349,6 +390,43 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
     era * 146097 + doe - 719468
+}
+
+/// Civil (proleptic Gregorian) date from a serial day number, days since the
+/// Unix epoch (Howard Hinnant's `civil_from_days`, the inverse of
+/// [`days_from_civil`]). Pure integer math.
+fn civil_from_days(z: i64) -> (i32, u32, u32) {
+    let z = z + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (
+        (if m <= 2 { y + 1 } else { y }) as i32,
+        m as u32,
+        d as u32,
+    )
+}
+
+/// Break a count of seconds-since-the-Unix-epoch into calendar [`WallClock`]
+/// fields. `secs` is expected to already carry the viewer's local UTC offset
+/// (the io thread adds it before stamping), so the fields read as local civil
+/// time. Pure and testable via known epoch anchors.
+pub fn civil_from_unix_secs(secs: i64) -> WallClock {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    WallClock {
+        year,
+        month,
+        day,
+        hour: (rem / 3600) as u32,
+        minute: ((rem % 3600) / 60) as u32,
+    }
 }
 
 /// Format a wall-clock timestamp relative to `now` (FR-10). `now` is a
@@ -618,6 +696,52 @@ mod tests {
             ..now
         };
         assert_eq!(format_relative_time(now, older), "7月1日");
+    }
+
+    #[test]
+    fn civil_from_unix_secs_round_trips_known_anchors() {
+        // Unix epoch.
+        assert_eq!(
+            civil_from_unix_secs(0),
+            WallClock { year: 1970, month: 1, day: 1, hour: 0, minute: 0 }
+        );
+        // 2026-07-05 23:47:12 UTC → 1751759232.
+        let secs = (days_from_civil(2026, 7, 5) * 86_400) + 23 * 3600 + 47 * 60 + 12;
+        assert_eq!(
+            civil_from_unix_secs(secs),
+            WallClock { year: 2026, month: 7, day: 5, hour: 23, minute: 47 }
+        );
+        // A negative offset (before the epoch) still decomposes correctly.
+        assert_eq!(
+            civil_from_unix_secs(-1),
+            WallClock { year: 1969, month: 12, day: 31, hour: 23, minute: 59 }
+        );
+    }
+
+    #[test]
+    fn ordered_ids_are_sorted_by_window_then_pane() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(2, 1), 1, "b"));
+        store.apply(upsert(card_id(1, 3), 1, "a3"));
+        store.apply(upsert(card_id(1, 1), 1, "a1"));
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 1), card_id(1, 3), card_id(2, 1)]
+        );
+    }
+
+    #[test]
+    fn clear_bell_for_window_only_clears_that_window() {
+        let mut store = SessionStore::new();
+        let (a, b) = (card_id(1, 1), card_id(2, 1));
+        store.apply(upsert(a, 1, "a"));
+        store.apply(upsert(b, 1, "b"));
+        store.apply(SessionDelta::Bell { id: a });
+        store.apply(SessionDelta::Bell { id: b });
+
+        store.clear_bell_for_window(SessionWindowId(1));
+        assert!(!store.get(&a).unwrap().unread_bell);
+        assert!(store.get(&b).unwrap().unread_bell);
     }
 
     #[test]

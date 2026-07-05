@@ -359,6 +359,8 @@ impl App {
                 active_split_drag: None,
                 occluded: false,
                 title: "noa".to_string(),
+                // Quick-terminal windows are never sidebar-eligible (FR-14).
+                sidebar_visible: false,
                 link_click_in_flight: false,
             },
         );

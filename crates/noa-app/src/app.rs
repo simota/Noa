@@ -43,6 +43,7 @@ use crate::link_open;
 use crate::mouse::{self, MouseSelectionState, SelectionGesture};
 use crate::search_prompt::{SearchPrompt, SearchPromptEffect};
 use crate::session;
+use crate::session_store::{SessionCardId, SessionStore, SessionWindowId};
 use crate::split_tree::{
     self, Direction, HitTarget, ImeOp, MIN_PANE_SIZE_PX, PaneId, Rect as PaneRectApp,
     SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitResizeDrag, SplitTree, equalize,
@@ -73,6 +74,7 @@ mod input_ops;
 mod overview;
 mod quick_terminal;
 mod session_restore;
+mod sidebar;
 
 pub use config::AppConfig;
 use quick_terminal::QuickTerminalState;
@@ -136,6 +138,11 @@ struct WindowState {
     active_split_drag: Option<SplitResizeDrag>,
     occluded: bool,
     title: String,
+    /// Whether this window currently shows the session sidebar (FR-4). Seeded
+    /// from `sidebar-enabled` at creation and flipped per-window by the sidebar
+    /// hotkey; drives the pane-area inset and the sidebar draw. Always `false`
+    /// for a quick-terminal window (FR-14).
+    sidebar_visible: bool,
     /// Set when a left press was consumed by Cmd+click-to-open, so only the
     /// matching release is swallowed. Gating the release on "is a link
     /// still hovered" instead would eat the release of an unrelated
@@ -450,6 +457,16 @@ pub struct App {
     /// Secure Keyboard Entry state. Enabled only while both the user has
     /// toggled it on and the app is frontmost, and always released on exit.
     secure_input: crate::secure_input::SecureInput,
+    /// The central session registry (FR-1), the single source of truth for the
+    /// session sidebar. Owned here on the main thread; mutated only by applying
+    /// [`crate::session_store::SessionDelta`]s posted by io threads and by
+    /// [`SessionStore::reconcile_sessions`] at teardown (FR-12).
+    session_store: SessionStore,
+    /// Shared with every pane's io thread (`io_thread::SidebarPublish`) so it
+    /// gates its per-feed card-state extraction behind one atomic load
+    /// (FR-1/AC-19). Deliberately distinct from `overview_visible_gate` (Omen
+    /// T1); flipped on while any window shows its sidebar.
+    sidebar_visible_gate: Arc<AtomicBool>,
 }
 
 impl App {
@@ -491,6 +508,8 @@ impl App {
             quick_terminal_hotkey: None,
             hotkey_install_attempted: false,
             secure_input: crate::secure_input::SecureInput::new(),
+            session_store: SessionStore::new(),
+            sidebar_visible_gate: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1102,6 +1121,7 @@ impl App {
                 active_split_drag: None,
                 occluded: false,
                 title: "noa".to_string(),
+                sidebar_visible: self.config.sidebar_enabled,
                 link_click_in_flight: false,
             },
         );
@@ -1231,6 +1251,9 @@ impl App {
             slot: overview_snapshot.clone(),
             visible: self.overview_visible_gate.clone(),
         };
+        let sidebar_publish = crate::io_thread::SidebarPublish {
+            visible: self.sidebar_visible_gate.clone(),
+        };
         let io_thread = crate::io_thread::spawn(
             pty,
             terminal.clone(),
@@ -1239,6 +1262,7 @@ impl App {
             resize_rx,
             pty_input_rx,
             overview_publish,
+            sidebar_publish,
         );
 
         Ok(Surface {
@@ -1367,6 +1391,11 @@ impl App {
                 self.request_overview_redraw();
             }
         }
+        // GC choke point (FR-12): the tab's cards (and, via window-remove, a
+        // whole group's) are gone from `windows` now, so drop them from the
+        // store too. `close_group`/`close_pane_after_pty_exit` reach this
+        // through their `close_tab` calls.
+        self.reconcile_session_store();
         self.persist_session();
     }
 
@@ -1515,6 +1544,9 @@ impl App {
         self.overview_tiles
             .remove(&OverviewTileId::new(window_id, pane_id));
         self.mark_all_overview_tiles_dirty();
+        // GC choke point (FR-12): the closed pane's card is dropped from the
+        // store. `close_pane_after_pty_exit` reaches this through `close_pane`.
+        self.reconcile_session_store();
         self.relayout_and_resize_window(window_id);
         self.update_focused_ime_cursor_area(window_id);
         window.request_redraw();

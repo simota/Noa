@@ -38,6 +38,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.handle_app_command(event_loop, command, CommandOrigin::App)
             }
             UserEvent::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
+            UserEvent::SessionDelta(delta) => self.apply_session_delta(delta),
             UserEvent::ClipboardWrite {
                 window_id,
                 pane_id,
@@ -156,6 +157,8 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(true) => {
                 self.focused = Some(window_id);
                 self.os_focused = Some(window_id);
+                // A window gaining focus clears its cards' unread bells (FR-11).
+                self.clear_session_bell_for_window(window_id);
                 self.report_focus_event(window_id, true);
                 self.secure_input
                     .on_focus_change(true, &mut crate::secure_input::CarbonSecureInput);

@@ -33,8 +33,8 @@ use crate::session_store::{
 /// structural rewrite.
 pub const SIDEBAR_HEADER_H: u32 = 0;
 
-/// Height of the toolbar band holding the `+` (new session) and `…` (menu)
-/// buttons below the header.
+/// Height of the toolbar band holding the `+` (new session) button below the
+/// header.
 pub const SIDEBAR_TOOLBAR_H: u32 = 30;
 
 /// Height of one session card. Nine rows: name / cwd / meta (branch ·
@@ -130,7 +130,6 @@ pub struct CardRects {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarLayout {
     pub new_button: SidebarRect,
-    pub menu_button: SidebarRect,
     pub viewport: SidebarRect,
     pub cards: Vec<CardRects>,
     pub content_h: u32,
@@ -215,7 +214,9 @@ impl SidebarMetrics {
         }
     }
 
-    /// The `+` (new session) button rect in the toolbar band, pinned right.
+    /// The `+` (new session) button rect in the toolbar band. Pinned to the
+    /// top-right corner as the sidebar's sole toolbar action (the dead `…`
+    /// header menu was removed), vertically centered in the toolbar band.
     pub fn new_button_rect(&self, toolbar: SidebarRect) -> SidebarRect {
         let btn_w = self.s(TOOLBAR_BUTTON_W);
         let btn_h = self.s(TOOLBAR_BUTTON_H);
@@ -226,14 +227,6 @@ impl SidebarMetrics {
             .saturating_sub(self.s(CARD_PAD))
             .saturating_sub(btn_w);
         SidebarRect::new(x, y, btn_w.min(toolbar.w), h)
-    }
-
-    /// The header-level `…` menu button rect, just left of the `+` button.
-    pub fn menu_button_rect(&self, toolbar: SidebarRect) -> SidebarRect {
-        let plus = self.new_button_rect(toolbar);
-        let btn_w = self.s(TOOLBAR_BUTTON_W);
-        let x = plus.x.saturating_sub(self.s(6)).saturating_sub(btn_w);
-        SidebarRect::new(x, plus.y, btn_w.min(toolbar.w), plus.h)
     }
 
     /// Total scrollable content height for `card_count` stacked cards.
@@ -270,7 +263,6 @@ impl SidebarMetrics {
 
         SidebarLayout {
             new_button: self.new_button_rect(bands.toolbar),
-            menu_button: self.menu_button_rect(bands.toolbar),
             viewport: vp,
             cards,
             content_h,
@@ -363,9 +355,6 @@ impl SidebarMetrics {
 
         if self.new_button_rect(bands.toolbar).contains(point) {
             return Some(SidebarHit::NewSession);
-        }
-        if self.menu_button_rect(bands.toolbar).contains(point) {
-            return Some(SidebarHit::Menu);
         }
 
         let vp = bands.viewport;
@@ -550,8 +539,6 @@ pub enum SidebarHit {
     CardMenu(SessionCardId),
     /// The toolbar `+` button: open a new session (FR-6).
     NewSession,
-    /// The toolbar `…` button: the header-level menu.
-    Menu,
 }
 
 /// The text lines rendered on a card (FR-2/AC-3). `now` is a parameter (no
@@ -1017,21 +1004,15 @@ mod tests {
             Some(SidebarHit::CardMenu(ids[0]))
         );
 
-        // Toolbar `+` and `…`.
+        // Toolbar `+` (the sole toolbar action; the dead `…` was removed).
         let plus = m1().new_button_rect(bands.toolbar);
         let plus_pt = Point::new(plus.x + 2, plus.y + 2);
         assert_eq!(
             m1().hit_test(bounds, &ids, 0, plus_pt),
             Some(SidebarHit::NewSession)
         );
-        let menu = m1().menu_button_rect(bands.toolbar);
-        let menu_pt = Point::new(menu.x + 2, menu.y + 2);
-        assert_eq!(
-            m1().hit_test(bounds, &ids, 0, menu_pt),
-            Some(SidebarHit::Menu)
-        );
 
-        // The toolbar's empty area (left of the pinned buttons, above the
+        // The toolbar's empty area (left of the pinned button, above the
         // viewport): a miss.
         assert_eq!(
             m1().hit_test(bounds, &ids, 0, Point::new(bounds.x + 100, 10)),

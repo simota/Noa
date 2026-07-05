@@ -633,9 +633,6 @@ impl App {
                 let _ = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow);
                 true
             }
-            // Header `…` has no v1 action set (Open Question 5); consume it so
-            // the terminal never sees the press.
-            Some(crate::sidebar::SidebarHit::Menu) => true,
             // Inside the band but not on any actionable target: consume it too,
             // since the band is not part of the terminal surface.
             None => true,
@@ -951,21 +948,15 @@ impl App {
         let selected_id = Self::session_card_id(window_id, state.focused_pane);
 
         // The top header band (status label / center title / name pill) was
-        // removed as redundant — the toolbar `+`/`…` now sit at the sidebar's
-        // top (SIDEBAR_HEADER_H is collapsed to 0).
+        // removed as redundant, and the dead `…` header menu (no v1 action) was
+        // dropped — the toolbar's sole `+` action now sits at the sidebar's
+        // top-right (SIDEBAR_HEADER_H is collapsed to 0).
         runs.extend(window_run(
             &band_cell,
             layout.new_button,
             "+".to_string(),
             SIDEBAR_FG,
             true,
-        ));
-        runs.extend(window_run(
-            &band_cell,
-            layout.menu_button,
-            "…".to_string(),
-            SIDEBAR_DIM_FG,
-            false,
         ));
 
         // Card text on the flat backdrop, plus a rounded overlay for every

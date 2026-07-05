@@ -1745,7 +1745,7 @@ pub(super) fn draw_sidebar_band(
     let attention_style = CardStyle {
         focus_color: rgb_to_rgba(SIDEBAR_DOT_RED),
         focus_width: 1.0 * model.scale,
-        focus_glow_width: 4.0 * model.scale,
+        focus_glow_width: 0.0,
         ..card_style
     };
     for card_draw in &model.cards {

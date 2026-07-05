@@ -15,8 +15,8 @@ use noa_core::Rgb;
 use super::*;
 use crate::session_store::{SessionDelta, StatusDot, status_dot};
 use crate::sidebar::{
-    CardLines, HeaderRects, SidebarRect, card_lines, header_rects, header_status_label,
-    sidebar_bands, sidebar_layout,
+    CARD_MENU_ITEMS, CardLines, HeaderRects, SidebarRect, card_lines, header_rects,
+    header_status_label, sidebar_bands, sidebar_layout,
 };
 
 /// Whether an io-thread [`SessionDelta`] targeting a window with the given
@@ -41,6 +41,7 @@ fn session_delta_should_apply(delta: &SessionDelta, window_eligible: bool) -> bo
 const SIDEBAR_BG: Rgb = Rgb::new(0x14, 0x16, 0x1b);
 const SIDEBAR_FG: Rgb = Rgb::new(0xd8, 0xdc, 0xe4);
 const SIDEBAR_DIM_FG: Rgb = Rgb::new(0x8a, 0x90, 0x9c);
+const SIDEBAR_MENU_BG: Rgb = Rgb::new(0x24, 0x28, 0x30);
 const SIDEBAR_DOT_BLUE: Rgb = Rgb::new(0x4c, 0x9a, 0xff);
 const SIDEBAR_DOT_GREEN: Rgb = Rgb::new(0x46, 0xc4, 0x66);
 const SIDEBAR_DOT_YELLOW: Rgb = Rgb::new(0xe6, 0xb4, 0x50);
@@ -65,12 +66,15 @@ fn rgb_to_rgba(color: Rgb) -> [f32; 4] {
 }
 
 /// One positioned text run in the synthetic sidebar grid (already converted
-/// from the pure layout's pixel rects to cell coordinates).
+/// from the pure layout's pixel rects to cell coordinates). `bg` fills the run's
+/// cells (used by the `…` menu popup so it visually sits above the cards);
+/// `None` leaves the sidebar background showing.
 struct SidebarTextRun {
     col: u16,
     row: u16,
     text: String,
     fg: Rgb,
+    bg: Option<Rgb>,
 }
 
 /// The full per-frame sidebar draw model: the synthetic grid size and every
@@ -221,6 +225,7 @@ impl App {
         };
         state.sidebar_visible = !state.sidebar_visible;
         state.sidebar_scroll = 0;
+        state.sidebar_menu = None;
         let window = state.window.clone();
 
         self.refresh_sidebar_visible_gate();
@@ -235,13 +240,35 @@ impl App {
     /// window's sidebar band. Returns `true` when the click was consumed, so
     /// the caller stops before the terminal/split handling sees it (the
     /// terminal must never see a sidebar click). Card hits switch focus to that
-    /// session's window (FR-3, A-flavor); the toolbar `+`/`…` and per-card menu
-    /// are stubbed for PR4.
-    pub(super) fn handle_sidebar_press(&mut self, window_id: WindowId, point: split_tree::Point) -> bool {
+    /// session's window (FR-3, A-flavor); the toolbar `+` opens a cwd-inherited
+    /// new tab (FR-6); a card `…` opens/closes its close-menu (FR-7).
+    pub(super) fn handle_sidebar_press(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        point: split_tree::Point,
+    ) -> bool {
         let inset = self.window_sidebar_inset_px(window_id);
         if inset == 0 || point.x >= inset {
             return false;
         }
+
+        // An open card `…` menu takes the click first: an item hit runs the
+        // action, anything else dismisses the popup (and falls through to normal
+        // routing so the same click still selects/scrolls).
+        if let Some(open) = self.windows.get(&window_id).and_then(|s| s.sidebar_menu) {
+            if let Some(anchor) = self.card_menu_anchor(window_id, open) {
+                let popup =
+                    crate::sidebar::card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), inset);
+                if let Some(item) = crate::sidebar::card_menu_hit_test(popup, point) {
+                    self.close_sidebar_menu(window_id);
+                    self.activate_card_menu_item(event_loop, open, item);
+                    return true;
+                }
+            }
+            self.close_sidebar_menu(window_id);
+        }
+
         let (bounds, scroll) = {
             let Some(state) = self.windows.get(&window_id) else {
                 return false;
@@ -258,14 +285,84 @@ impl App {
                 self.focus_session_card(card);
                 true
             }
-            // A press anywhere else in the band (toolbar buttons, per-card menu,
-            // header, gutters) is still consumed so the terminal never sees it;
-            // the +/…/CardMenu handlers land in PR4.
-            Some(_) => true,
+            Some(crate::sidebar::SidebarHit::CardMenu(card)) => {
+                self.toggle_sidebar_menu(window_id, card);
+                true
+            }
+            Some(crate::sidebar::SidebarHit::NewSession) => {
+                // `+`: new tab in the focused window, cwd inherited from the
+                // active session via the existing new-tab path (FR-6/AC-8).
+                let _ = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow);
+                true
+            }
+            // Header `…` has no v1 action set (Open Question 5); consume it so
+            // the terminal never sees the press.
+            Some(crate::sidebar::SidebarHit::Menu) => true,
             // Inside the band but not on any actionable target: consume it too,
             // since the band is not part of the terminal surface.
             None => true,
         }
+    }
+
+    /// Run a chosen card `…` menu item (FR-7). `Close` routes through the
+    /// existing pane teardown for that session (which cascades to `close_tab`
+    /// when it is the tab's last pane), so the card disappears via the normal GC
+    /// choke point (AC-9b). `Rename`'s UI is deferred (not in
+    /// [`crate::sidebar::CARD_MENU_ITEMS`]), so this only ever sees `Close`.
+    fn activate_card_menu_item(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        card: SessionCardId,
+        item: crate::sidebar::CardMenuItem,
+    ) {
+        match item {
+            crate::sidebar::CardMenuItem::Close => {
+                let window_id = WindowId::from(card.window_id.0);
+                self.request_close_pane(event_loop, window_id, card.pane_id);
+            }
+            crate::sidebar::CardMenuItem::Rename => {}
+        }
+    }
+
+    /// Toggle the `…` menu popup for `card` in `window_id` (FR-7): a click on the
+    /// already-open card's button closes it, otherwise it opens for that card.
+    fn toggle_sidebar_menu(&mut self, window_id: WindowId, card: SessionCardId) {
+        if let Some(state) = self.windows.get_mut(&window_id) {
+            state.sidebar_menu = if state.sidebar_menu == Some(card) {
+                None
+            } else {
+                Some(card)
+            };
+            state.window.request_redraw();
+        }
+    }
+
+    /// Close any open card `…` menu in `window_id`.
+    pub(super) fn close_sidebar_menu(&mut self, window_id: WindowId) {
+        if let Some(state) = self.windows.get_mut(&window_id)
+            && state.sidebar_menu.take().is_some()
+        {
+            state.window.request_redraw();
+        }
+    }
+
+    /// The on-screen anchor (the card's `menu_button` rect) for an open menu, or
+    /// `None` when that card has scrolled out of view. Recomputes the pure
+    /// layout the drawer uses so the popup tracks the card.
+    fn card_menu_anchor(&self, window_id: WindowId, card: SessionCardId) -> Option<SidebarRect> {
+        let inset = self.window_sidebar_inset_px(window_id);
+        if inset == 0 {
+            return None;
+        }
+        let state = self.windows.get(&window_id)?;
+        let bounds = SidebarRect::new(0, 0, inset, state.window.inner_size().height);
+        let ids = self.session_store.ordered_ids();
+        let layout = sidebar_layout(bounds, &ids, state.sidebar_scroll);
+        layout
+            .cards
+            .iter()
+            .find(|c| c.id == card)
+            .map(|c| c.menu_button)
     }
 
     /// Scroll the sidebar card list when the wheel turns over the band
@@ -346,7 +443,13 @@ impl App {
                 return;
             }
             let (col, row) = to_cell(rect.x, rect.y);
-            runs.push(SidebarTextRun { col, row, text, fg });
+            runs.push(SidebarTextRun {
+                col,
+                row,
+                text,
+                fg,
+                bg: None,
+            });
         };
 
         // Header (FR-5): status label, centered window title, session-name pill.
@@ -385,6 +488,35 @@ impl App {
                 status_dot_rgb(status_dot(card)),
                 &mut runs,
             );
+        }
+
+        // Card `…` menu popup (FR-7): drawn last so it sits above the cards. Each
+        // item is a full-width background-filled run. Skipped when the open
+        // card has scrolled out of the visible layout.
+        if let Some(open) = state.sidebar_menu
+            && let Some(card_rects) = layout.cards.iter().find(|c| c.id == open)
+        {
+            let popup = crate::sidebar::card_menu_popup_rect(
+                card_rects.menu_button,
+                CARD_MENU_ITEMS.len(),
+                inset,
+            );
+            let menu_cols = (popup.w as f32 / cell_w).round().max(1.0) as usize;
+            for (index, &item) in CARD_MENU_ITEMS.iter().enumerate() {
+                let item_rect = crate::sidebar::card_menu_item_rect(popup, index);
+                if item_rect.bottom() > height {
+                    continue;
+                }
+                let (col, row) = to_cell(item_rect.x, item_rect.y);
+                let label = format!(" {:<width$}", crate::sidebar::card_menu_label(item), width = menu_cols.saturating_sub(1));
+                runs.push(SidebarTextRun {
+                    col,
+                    row,
+                    text: label,
+                    fg: SIDEBAR_FG,
+                    bg: Some(SIDEBAR_MENU_BG),
+                });
+            }
         }
 
         Some(SidebarDrawModel {
@@ -491,17 +623,14 @@ pub(super) fn draw_sidebar_band(
     let mut feed = String::new();
     for run in &model.runs {
         feed.clear();
-        // CUP is 1-based; set truecolor fg, write, reset.
-        let _ = write!(
-            feed,
-            "\x1b[{};{}H\x1b[38;2;{};{};{}m{}\x1b[0m",
-            run.row + 1,
-            run.col + 1,
-            run.fg.r,
-            run.fg.g,
-            run.fg.b,
-            run.text,
-        );
+        // CUP is 1-based; position, then set truecolor fg (+bg for popup runs),
+        // write, reset.
+        let _ = write!(feed, "\x1b[{};{}H", run.row + 1, run.col + 1);
+        let _ = write!(feed, "\x1b[38;2;{};{};{}m", run.fg.r, run.fg.g, run.fg.b);
+        if let Some(bg) = run.bg {
+            let _ = write!(feed, "\x1b[48;2;{};{};{}m", bg.r, bg.g, bg.b);
+        }
+        let _ = write!(feed, "{}\x1b[0m", run.text);
         stream.feed(feed.as_bytes(), &mut term);
     }
     let mut snapshot = FrameSnapshot::from_terminal(&mut term);

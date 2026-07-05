@@ -206,7 +206,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(window_id, position),
             WindowEvent::MouseInput { state, button, .. } => {
-                self.on_mouse_input(window_id, state, button)
+                self.on_mouse_input(event_loop, window_id, state, button)
             }
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(window_id, delta),
             WindowEvent::Ime(event) => self.on_ime_event(window_id, event),
@@ -496,13 +496,20 @@ impl App {
         self.apply_selection_gesture(window_id, pane_id, gesture);
     }
 
-    pub(super) fn on_mouse_input(&mut self, window_id: WindowId, state: ElementState, button: MouseButton) {
+    pub(super) fn on_mouse_input(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        state: ElementState,
+        button: MouseButton,
+    ) {
         // A left press inside the sidebar band is consumed there (card switch,
-        // toolbar) and never reaches the terminal/split handling (FR-3).
+        // toolbar `+`/`…`, per-card menu) and never reaches the terminal/split
+        // handling (FR-3/FR-6/FR-7).
         if button == MouseButton::Left
             && state == ElementState::Pressed
             && let Some(point) = self.windows.get(&window_id).and_then(|s| s.last_mouse_point)
-            && self.handle_sidebar_press(window_id, point)
+            && self.handle_sidebar_press(event_loop, window_id, point)
         {
             return;
         }

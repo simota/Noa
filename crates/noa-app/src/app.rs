@@ -157,6 +157,10 @@ struct WindowState {
     /// Vertical scroll offset (px) of the sidebar card list (FR-15), clamped to
     /// `[0, content_h - viewport_h]` when consumed by the layout.
     sidebar_scroll: u32,
+    /// The card whose `…` menu popup is open in this window (FR-7), or `None`.
+    /// Opened by a `…` click, dismissed by the next click anywhere or by the
+    /// sidebar toggling off.
+    sidebar_menu: Option<SessionCardId>,
     /// Set when a left press was consumed by Cmd+click-to-open, so only the
     /// matching release is swallowed. Gating the release on "is a link
     /// still hovered" instead would eat the release of an unrelated
@@ -1176,6 +1180,7 @@ impl App {
                 title: "noa".to_string(),
                 sidebar_visible: self.config.sidebar_enabled,
                 sidebar_scroll: 0,
+                sidebar_menu: None,
                 link_click_in_flight: false,
             },
         );

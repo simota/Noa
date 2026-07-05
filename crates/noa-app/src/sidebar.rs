@@ -260,6 +260,68 @@ fn iclip(x: i64, y: i64, w: i64, h: i64, clip: SidebarRect) -> SidebarRect {
     }
 }
 
+/// Width of the per-card `…` menu popup (FR-7).
+pub const SIDEBAR_MENU_W: u32 = 140;
+
+/// Height of one popup menu item row.
+pub const SIDEBAR_MENU_ITEM_H: u32 = 26;
+
+/// One action in a card's `…` menu (FR-7). Only [`CardMenuItem::Close`] is wired
+/// in v1 (see [`CARD_MENU_ITEMS`]); `Rename` names the store-level override that
+/// exists and is tested (AC-9) but whose inline-text-input UI is deferred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardMenuItem {
+    Close,
+    Rename,
+}
+
+/// The card `…` menu's items, in top-to-bottom order (FR-7). v1 ships **Close
+/// only** — a rename needs an inline text-input surface the sidebar does not
+/// have, so its UI is a deliberate deferral rather than a menu entry that does
+/// nothing (the store already supports [`crate::session_store::SessionDelta::Rename`]).
+pub const CARD_MENU_ITEMS: [CardMenuItem; 1] = [CardMenuItem::Close];
+
+/// The popup rect for a card's `…` menu, anchored just below its menu button
+/// (`anchor` = the card's `menu_button` rect) and right-aligned to it, clamped
+/// so it never spills past the sidebar's right edge (`sidebar_w`).
+pub fn card_menu_popup_rect(anchor: SidebarRect, item_count: usize, sidebar_w: u32) -> SidebarRect {
+    let w = SIDEBAR_MENU_W.min(sidebar_w);
+    let h = SIDEBAR_MENU_ITEM_H.saturating_mul(item_count as u32);
+    let x = anchor
+        .right()
+        .saturating_sub(w)
+        .min(sidebar_w.saturating_sub(w));
+    SidebarRect::new(x, anchor.bottom(), w, h)
+}
+
+/// The rect of item `index` within a popup laid out by [`card_menu_popup_rect`].
+pub fn card_menu_item_rect(popup: SidebarRect, index: usize) -> SidebarRect {
+    SidebarRect::new(
+        popup.x,
+        popup.y + SIDEBAR_MENU_ITEM_H * index as u32,
+        popup.w,
+        SIDEBAR_MENU_ITEM_H,
+    )
+}
+
+/// Resolve a click at `point` against an open card menu popup, returning the
+/// item hit (or `None` for a click outside the popup — a dismiss).
+pub fn card_menu_hit_test(popup: SidebarRect, point: Point) -> Option<CardMenuItem> {
+    if !popup.contains(point) {
+        return None;
+    }
+    let index = ((point.y - popup.y) / SIDEBAR_MENU_ITEM_H) as usize;
+    CARD_MENU_ITEMS.get(index).copied()
+}
+
+/// The label rendered for a popup menu item.
+pub fn card_menu_label(item: CardMenuItem) -> &'static str {
+    match item {
+        CardMenuItem::Close => "Close",
+        CardMenuItem::Rename => "Rename",
+    }
+}
+
 /// What a click on the sidebar resolves to (FR-3/FR-6/FR-7). A miss returns
 /// `None` from [`sidebar_hit_test`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -559,6 +621,34 @@ mod tests {
             None
         );
     }
+
+    // FR-7: the card `…` menu popup lays out below its anchor, resolves an item
+    // click, clamps within the sidebar, and treats an outside click as a miss.
+    #[test]
+    fn card_menu_popup_layout_and_hit_test() {
+        let anchor = SidebarRect::new(300, 40, CARD_MENU_W_ANCHOR, 20);
+        let popup = card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), 360);
+
+        // Sits directly under the anchor and never spills past the sidebar edge.
+        assert_eq!(popup.y, anchor.bottom());
+        assert!(popup.right() <= 360);
+        assert_eq!(popup.h, SIDEBAR_MENU_ITEM_H * CARD_MENU_ITEMS.len() as u32);
+
+        // A click on the first row resolves to Close (the only v1 item).
+        let item0 = card_menu_item_rect(popup, 0);
+        let hit = card_menu_hit_test(popup, Point::new(item0.x + 4, item0.y + 4));
+        assert_eq!(hit, Some(CardMenuItem::Close));
+        assert_eq!(card_menu_label(CardMenuItem::Close), "Close");
+
+        // A click outside the popup is a dismiss (miss).
+        assert_eq!(
+            card_menu_hit_test(popup, Point::new(popup.right() + 5, popup.y + 4)),
+            None
+        );
+    }
+
+    // The anchor's own width (CARD_MENU_W) is private; alias it for the test.
+    const CARD_MENU_W_ANCHOR: u32 = CARD_MENU_W;
 
     #[test]
     fn hit_test_misses_the_gutter_between_cards() {

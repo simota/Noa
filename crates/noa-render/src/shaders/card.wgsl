@@ -85,5 +85,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let inset = -d;
     let border_mix = 1.0 - smoothstep(u.border_width - 1.0, u.border_width, inset);
     let rgb = mix(tex.rgb, u.border_color.rgb, clamp(border_mix, 0.0, 1.0));
-    return vec4<f32>(rgb, coverage);
+    // Multiply in the sampled texture's own alpha (not just the card-shape
+    // coverage) so a translucent source texture — e.g. the session sidebar's
+    // band rendered under background-opacity < 1 — stays translucent through
+    // the composite instead of being forced opaque. Every existing caller
+    // renders its source texture with clear alpha 1.0, so `tex.a` is 1.0 there
+    // and this is a no-op (unchanged output).
+    return vec4<f32>(rgb, coverage * tex.a);
 }

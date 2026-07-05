@@ -221,6 +221,11 @@ pub(super) struct SidebarDrawModel {
     runs: Vec<SidebarTextRun>,
     cards: Vec<SidebarCardDraw>,
     menu: Option<SidebarMenuDraw>,
+    /// `background-opacity` (FR: sidebar translucency), applied to the flat
+    /// band and card backdrops so they show the macOS blur the same way the
+    /// terminal panes do. The divider hairline and the `…` menu popup stay
+    /// opaque regardless (crisp seam edge / readable transient overlay).
+    background_opacity: f32,
 }
 
 /// The `SessionWindowId`s belonging to `target` among `pairs` (spec
@@ -992,6 +997,7 @@ impl App {
             runs,
             cards,
             menu,
+            background_opacity: self.config.background_opacity,
         })
     }
 }
@@ -1164,7 +1170,10 @@ fn sidebar_wall_clock_now() -> crate::session_store::WallClock {
 
 /// Rasterize one synthetic sidebar grid (background + positioned text/dots)
 /// with the reused `Renderer` into `view`. `base_bg` fills the empty cells and
-/// the clear color so a card texture reads as its own surface.
+/// the clear color so a card texture reads as its own surface. `bg_opacity`
+/// scales that clear color's alpha (1.0 keeps it fully opaque); the card
+/// composite shader now passes the sampled texture's alpha through
+/// (`card.wgsl`), so this is what makes the caller's backdrop translucent.
 #[allow(clippy::too_many_arguments)]
 fn rasterize_runs(
     renderer: &mut Renderer,
@@ -1176,6 +1185,7 @@ fn rasterize_runs(
     size: PixelSize,
     grid: GridSize,
     base_bg: Rgb,
+    bg_opacity: f32,
     runs: &[SidebarTextRun],
 ) {
     let mut term = Terminal::new(grid);
@@ -1204,7 +1214,9 @@ fn rasterize_runs(
 
     renderer.resize(size);
     renderer.rebuild_cells(&snapshot, font, theme);
-    renderer.set_clear_color(rgb_to_rgba(base_bg));
+    let mut clear_color = rgb_to_rgba(base_bg);
+    clear_color[3] *= bg_opacity.clamp(0.0, 1.0);
+    renderer.set_clear_color(clear_color);
     renderer.sync_atlas(device, queue, font);
     renderer.draw(device, queue, view);
 }
@@ -1496,6 +1508,7 @@ pub(super) fn draw_sidebar_band(
             band_size,
             model.grid,
             SIDEBAR_BG,
+            model.background_opacity,
             &model.runs,
         );
     }
@@ -1554,6 +1567,7 @@ pub(super) fn draw_sidebar_band(
                 },
                 GridSize { cols: 1, rows: 1 },
                 SIDEBAR_DIVIDER,
+                1.0,
                 &[],
             );
             let divider_style = CardStyle {
@@ -1619,6 +1633,7 @@ pub(super) fn draw_sidebar_band(
             },
             card_draw.grid,
             card_draw.bg,
+            model.background_opacity,
             &card_draw.runs,
         );
         let (style, selected) = if card_draw.attention {
@@ -1660,6 +1675,7 @@ pub(super) fn draw_sidebar_band(
             },
             menu.grid,
             SIDEBAR_MENU_BG,
+            1.0,
             &menu.runs,
         );
         let menu_style = CardStyle {

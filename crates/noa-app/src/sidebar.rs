@@ -26,9 +26,12 @@ use crate::session_store::{
 // them by the window DPR.
 
 /// Height of the top header band (status label / center title / name pill,
-/// FR-5). Compile-time constant — no config knob (⚠G precedent, mirroring
-/// `tab_overview.rs`'s fixed chrome bands).
-pub const SIDEBAR_HEADER_H: u32 = 36;
+/// FR-5). Collapsed to 0: the header duplicated the terminal title across its
+/// center title and name pill and was removed as redundant, so the toolbar and
+/// cards now sit at the sidebar's top. The band model is retained (zero height)
+/// so `bands()`/`header_rects()` degrade gracefully rather than needing a
+/// structural rewrite.
+pub const SIDEBAR_HEADER_H: u32 = 0;
 
 /// Height of the toolbar band holding the `+` (new session) and `…` (menu)
 /// buttons below the header.
@@ -90,15 +93,6 @@ pub struct SidebarBands {
     pub viewport: SidebarRect,
 }
 
-/// Header rects (FR-5): a left status label, a centered title, and a
-/// right-aligned session-name pill. Geometry only — the caller renders text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HeaderRects {
-    pub status_label: SidebarRect,
-    pub title: SidebarRect,
-    pub name_pill: SidebarRect,
-}
-
 /// Sub-rects of one laid-out session card, in window space, each clipped to the
 /// scrolling viewport (a card scrolled partly off-screen yields clipped, and
 /// possibly zero-size, sub-rects).
@@ -129,7 +123,6 @@ pub struct CardRects {
 /// visible card rects (with per-card sub-rects), and the scroll extents.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarLayout {
-    pub header: HeaderRects,
     pub new_button: SidebarRect,
     pub menu_button: SidebarRect,
     pub viewport: SidebarRect,
@@ -216,33 +209,6 @@ impl SidebarMetrics {
         }
     }
 
-    /// Lay out the header band's three rects. Widths are proportional so the
-    /// title keeps the middle regardless of sidebar width; all rects clamp to
-    /// the band.
-    pub fn header_rects(&self, header: SidebarRect) -> HeaderRects {
-        let line_h = self.s(HEADER_LINE_H).min(header.h);
-        let cy = header.y + (header.h - line_h) / 2;
-        let status_w = (header.w * 35 / 100).min(header.w);
-        let pill_w = (header.w * 30 / 100).min(header.w);
-        let pad = self.s(CARD_PAD);
-        let gap = self.s(6);
-
-        let status_x = header.x + pad.min(header.w);
-        let status_label = SidebarRect::new(status_x, cy, status_w, line_h);
-        let pill_x = header.right().saturating_sub(pad).saturating_sub(pill_w);
-        let name_pill = SidebarRect::new(pill_x, cy, pill_w, line_h);
-
-        let title_x = status_label.right() + gap;
-        let title_w = name_pill.x.saturating_sub(title_x).saturating_sub(gap);
-        let title = SidebarRect::new(title_x, cy, title_w, line_h);
-
-        HeaderRects {
-            status_label,
-            title,
-            name_pill,
-        }
-    }
-
     /// The `+` (new session) button rect in the toolbar band, pinned right.
     pub fn new_button_rect(&self, toolbar: SidebarRect) -> SidebarRect {
         let btn_w = self.s(TOOLBAR_BUTTON_W);
@@ -297,7 +263,6 @@ impl SidebarMetrics {
         }
 
         SidebarLayout {
-            header: self.header_rects(bands.header),
             new_button: self.new_button_rect(bands.toolbar),
             menu_button: self.menu_button_rect(bands.toolbar),
             viewport: vp,
@@ -653,16 +618,6 @@ pub fn attention_blink_on(
     ticks.is_multiple_of(2)
 }
 
-/// The header status label text (FR-5): `● Running` when any session is busy,
-/// else `Idle`. Degraded per SHAPE — no real process name in v1.
-pub fn header_status_label(busy_count: usize) -> String {
-    if busy_count > 0 {
-        "● Running".to_string()
-    } else {
-        "Idle".to_string()
-    }
-}
-
 /// Truncate `s` tail-first to at most `max` characters, prefixing an ellipsis
 /// so the most-specific (rightmost) path segment stays visible (FR-2).
 fn truncate_tail(s: &str, max: usize) -> String {
@@ -823,7 +778,7 @@ mod tests {
     }
 
     // 6 ids stacked; a viewport tall enough for exactly 3 cards. bounds height =
-    // header(36) + toolbar(30) + 3*stride(148) = 510.
+    // header(0, collapsed) + toolbar(30) + 3*stride(148) = 474.
     fn six_id_bounds() -> (SidebarRect, Vec<SessionCardId>) {
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
         (
@@ -1022,7 +977,8 @@ mod tests {
             Some(SidebarHit::Menu)
         );
 
-        // Header band (above the toolbar): a miss.
+        // The toolbar's empty area (left of the pinned buttons, above the
+        // viewport): a miss.
         assert_eq!(
             m1().hit_test(bounds, &ids, 0, Point::new(bounds.x + 100, 10)),
             None
@@ -1233,7 +1189,7 @@ mod tests {
     fn layout_and_hit_test_scale_at_dpr_2() {
         let m2 = SidebarMetrics::new(2.0);
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
-        // header(72) + toolbar(60) + 3*stride(296) = 1020, with a doubled width.
+        // header(0, collapsed) + toolbar(60) + 3*stride(296) = 948, doubled width.
         let bounds = SidebarRect::new(
             0,
             0,
@@ -1283,21 +1239,12 @@ mod tests {
     }
 
     #[test]
-    fn header_rects_place_status_title_and_pill_left_to_right() {
-        let header = SidebarRect::new(0, 0, 360, SIDEBAR_HEADER_H);
-        let h = m1().header_rects(header);
-        assert!(h.status_label.x < h.title.x);
-        assert!(h.title.x < h.name_pill.x);
-        // Pill is right-aligned within the header.
-        assert!(h.name_pill.right() <= header.right());
-    }
-
-    #[test]
     fn bands_clamp_without_underflow_in_a_short_sidebar() {
-        // Shorter than the header alone: toolbar and viewport collapse to zero.
+        // The header band is collapsed (0), so a 20px sidebar gives its height to
+        // the toolbar and the viewport still collapses to zero.
         let bands = m1().bands(SidebarRect::new(0, 0, 200, 20));
-        assert_eq!(bands.header.h, 20);
-        assert_eq!(bands.toolbar.h, 0);
+        assert_eq!(bands.header.h, 0);
+        assert_eq!(bands.toolbar.h, 20);
         assert_eq!(bands.viewport.h, 0);
     }
 
@@ -1325,12 +1272,6 @@ mod tests {
             dur,
             Duration::ZERO
         ));
-    }
-
-    #[test]
-    fn header_status_label_reflects_busy_count() {
-        assert_eq!(header_status_label(0), "Idle");
-        assert_eq!(header_status_label(2), "● Running");
     }
 
     // AC-16b (FR-14): the eligibility predicate excludes quick-terminal windows.

@@ -17,8 +17,8 @@ use noa_render::{OverlayStyle, command_palette_layout};
 use super::*;
 use crate::session_store::{SessionCard, SessionDelta, StatusDot, status_dot};
 use crate::sidebar::{
-    AgentKind, CARD_MENU_ITEMS, CardLines, CardRects, HeaderRects, SidebarMetrics, SidebarRect,
-    agent_display_name, card_lines, classify_agent, header_status_label, icon_glyph,
+    AgentKind, CARD_MENU_ITEMS, CardLines, CardRects, SidebarMetrics, SidebarRect,
+    agent_display_name, card_lines, classify_agent, icon_glyph,
 };
 
 /// Whether an io-thread [`SessionDelta`] targeting a window with the given
@@ -63,8 +63,6 @@ const SIDEBAR_CARD_BG_SELECTED: Rgb = crate::chrome::CHROME_CARD_SELECTED;
 const SIDEBAR_CARD_BORDER: Rgb = crate::chrome::CHROME_BORDER;
 /// The accent (focus ring + left edge bar) for the selected card.
 const SIDEBAR_ACCENT: Rgb = crate::chrome::CHROME_ACCENT;
-/// The rounded header session-name pill background.
-const SIDEBAR_PILL_BG: Rgb = crate::chrome::CHROME_BAND;
 /// The hairline stroked along the sidebar/pane seam.
 const SIDEBAR_DIVIDER: Rgb = crate::chrome::CHROME_DIVIDER;
 
@@ -820,7 +818,6 @@ impl App {
         let windows = self.session_windows_for_window(window_id);
         let ids = self.session_store.ordered_ids_for_windows(&windows);
         let layout = layout_metrics.layout(bounds, &ids, state.sidebar_scroll);
-        let bands = layout_metrics.bands(bounds);
 
         // Pixel → cell conversion, matching where a `Renderer` places cell (0,0):
         // at the padding origin. One closure per grid (band / card / menu).
@@ -836,59 +833,9 @@ impl App {
         let mut runs: Vec<SidebarTextRun> = Vec::new();
         let selected_id = Self::session_card_id(window_id, state.focused_pane);
 
-        // Header chrome (FR-5): status label, centered title, the session-name
-        // pill (a flat filled pill on the backdrop), and the toolbar +/… glyphs.
-        let header: HeaderRects = layout_metrics.header_rects(bands.header);
-        // The status label's precedence: any pending attention shows its count
-        // (a request whose card scrolled out of the viewport must still be
-        // noticeable, FR-16); else a recognized agent / busy process on the
-        // focused session shows its badge; else the Idle/Running summary.
-        let (busy_count, attention_count) = self.session_store.counts_for_windows(&windows);
-        let (status_text, status_fg) = if attention_count > 0 {
-            (format!("● {attention_count} {ATTENTION_LABEL}"), SIDEBAR_DOT_RED)
-        } else {
-            match self.session_store.get(&selected_id) {
-                Some(card)
-                    if card.busy
-                        || card
-                            .process
-                            .as_deref()
-                            .is_some_and(|p| classify_agent(p) != AgentKind::Generic) =>
-                {
-                    let process = card.process.clone().unwrap_or_else(|| "running".to_string());
-                    process_badge(&process, card.busy)
-                }
-                _ => (header_status_label(busy_count), SIDEBAR_FG),
-            }
-        };
-        runs.extend(window_run(&band_cell, header.status_label, status_text, status_fg, false));
-        runs.extend(window_run(
-            &band_cell,
-            header.title,
-            tab_title(&state.title),
-            SIDEBAR_DIM_FG,
-            false,
-        ));
-        if let Some(card) = self.session_store.get(&selected_id)
-            && header.name_pill.w > 0
-            && header.name_pill.h > 0
-        {
-            let (col, row) = band_cell(header.name_pill.x, header.name_pill.y);
-            let pill_cols = (header.name_pill.w as f32 / cell_w).round().max(1.0) as usize;
-            let text = format!(
-                " {:<width$}",
-                card.display_name(),
-                width = pill_cols.saturating_sub(1)
-            );
-            runs.push(SidebarTextRun {
-                col,
-                row,
-                text,
-                fg: SIDEBAR_FG,
-                bg: Some(SIDEBAR_PILL_BG),
-                bold: true,
-            });
-        }
+        // The top header band (status label / center title / name pill) was
+        // removed as redundant — the toolbar `+`/`…` now sit at the sidebar's
+        // top (SIDEBAR_HEADER_H is collapsed to 0).
         runs.extend(window_run(
             &band_cell,
             layout.new_button,

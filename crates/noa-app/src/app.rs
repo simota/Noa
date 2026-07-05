@@ -62,8 +62,8 @@ use crate::tab_overview::{
     overview_close_hit_test, overview_escape_action, overview_hint_bar_rect,
     overview_hint_bar_text, overview_initial_selection, overview_key_action,
     overview_placeholder_source_ids, overview_search_field_rect, overview_search_field_row,
-    overview_tab_filter, overview_tile_labels, sanitize_placeholder_label,
-    select_due_overview_tile_ids, title_bar_row_with_close,
+    overview_tab_filter, overview_tile_labels, overview_zoom_rect, sanitize_placeholder_label,
+    select_due_overview_tile_ids, title_bar_row_ansi,
 };
 use crate::{AppCommand, ViewportScroll};
 
@@ -210,6 +210,14 @@ struct OverviewWindowState {
     /// selectable too). Reset on every `show_tab_overview` and clamped in
     /// `redraw_overview` as source panes come and go.
     selected: usize,
+    /// The tile index (same source order as `selected`) currently under the
+    /// mouse cursor, for hover feedback — an accent border drawn over the
+    /// hovered card. Recomputed on `CursorMoved`, cleared when the cursor
+    /// leaves every tile.
+    hovered: Option<usize>,
+    /// Whether the selected tile is zoomed (Tab toggles): an enlarged centered
+    /// re-composite of the tile drawn above the grid, quick-look style.
+    zoomed: bool,
     /// The live "Search sessions" filter query (REQ-OV-16). Printable keys append
     /// and Backspace pops while the Overview is focused; the filtered result
     /// set drives every downstream consumer via `App::overview_source_tile_ids`
@@ -267,6 +275,18 @@ struct SearchPromptSession {
 struct CommandPaletteSession {
     window_id: WindowId,
     palette: CommandPalette,
+}
+
+/// An open inline rename on a sidebar card (FR-7 Rename). Modal for its
+/// window's keyboard while it is open — the `KeyboardInput` handler routes
+/// keystrokes in `window_id` to [`App::handle_sidebar_rename_key`]: printable
+/// text appends, Backspace pops, Enter commits a
+/// [`crate::session_store::SessionDelta::Rename`], Escape cancels. Only one
+/// exists at a time app-wide.
+struct SidebarRenameSession {
+    window_id: WindowId,
+    card: SessionCardId,
+    buffer: String,
 }
 
 /// An open confirmation dialog (paste protection or OSC 52 clipboard-read),
@@ -481,6 +501,14 @@ pub struct App {
     /// The open confirmation dialog (paste protection / clipboard-read), if
     /// any — see [`ConfirmDialogSession`].
     confirm_dialog: Option<ConfirmDialogSession>,
+    /// The open inline sidebar-card rename, if any — see
+    /// [`SidebarRenameSession`].
+    sidebar_rename: Option<SidebarRenameSession>,
+    /// Next scheduled relative-time repaint for visible sidebars, so a card's
+    /// `3分前` keeps advancing without pty output. Armed only while at least
+    /// one sidebar is visible; ticks once a minute (the formatter's finest
+    /// granularity).
+    sidebar_clock_deadline: Option<Instant>,
     /// Guards session restore to the first `resumed` only, so a later resume
     /// (e.g. after the whole app is backgrounded and restored) can't spawn a
     /// second copy of the saved topology on top of the live one.
@@ -568,6 +596,8 @@ impl App {
             search_prompt: None,
             command_palette: None,
             confirm_dialog: None,
+            sidebar_rename: None,
+            sidebar_clock_deadline: None,
             session_restore_attempted: false,
             restoring: false,
             quick_terminal: None,
@@ -937,6 +967,32 @@ impl App {
             self.mark_overview_tile_dirty(OverviewTileId::new(window_id, id.pane_id));
         }
         self.request_overview_redraw();
+    }
+
+    /// Repaint visible sidebars once a minute so the relative updated-time
+    /// (`3分前`) keeps advancing while a session produces no output. Disarmed
+    /// while no sidebar is visible, so an all-hidden app adds no wake-ups.
+    fn tick_sidebar_clock(&mut self) -> Option<Instant> {
+        let any_visible = self
+            .windows
+            .values()
+            .any(|state| state.sidebar_visible);
+        if !any_visible {
+            self.sidebar_clock_deadline = None;
+            return None;
+        }
+        let now = Instant::now();
+        match self.sidebar_clock_deadline {
+            Some(deadline) if now < deadline => Some(deadline),
+            _ => {
+                if self.sidebar_clock_deadline.take().is_some() {
+                    self.request_sidebar_redraw();
+                }
+                let next = now + Duration::from_secs(60);
+                self.sidebar_clock_deadline = Some(next);
+                Some(next)
+            }
+        }
     }
 
     fn tick_overview_backlog(&mut self) -> Option<Instant> {

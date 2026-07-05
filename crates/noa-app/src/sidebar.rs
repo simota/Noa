@@ -34,9 +34,9 @@ pub const SIDEBAR_HEADER_H: u32 = 36;
 /// buttons below the header.
 pub const SIDEBAR_TOOLBAR_H: u32 = 30;
 
-/// Height of one session card. Five rows, one field per line (name / cwd /
-/// branch / running process / updated-time) with comfortable spacing.
-pub const SIDEBAR_CARD_H: u32 = 112;
+/// Height of one session card. Six rows: name / cwd / meta (branch ·
+/// process on one line) / two last-output preview lines / updated-time.
+pub const SIDEBAR_CARD_H: u32 = 124;
 
 /// Vertical gap between adjacent cards.
 pub const SIDEBAR_CARD_GUTTER: u32 = 8;
@@ -55,15 +55,18 @@ const CARD_MENU_W: u32 = 22;
 const CARD_LINE_H: u32 = 15;
 const CARD_NAME_H: u32 = 18;
 
-// Card interior row baselines (top-relative), one field per line: name, cwd,
-// branch, running process, updated-time. The branch row is always reserved
-// (fixed card height) and left blank when the session has no branch — simpler
-// than a dynamic per-card height.
+// Card interior row baselines (top-relative): name, cwd, the meta row
+// (running process + branch on one line — merging the two rows the earlier
+// layout kept separate frees the space the preview rows use below), two
+// last-output preview lines, then the updated-time. All rows are always
+// reserved (fixed card height) and left blank when a field is absent —
+// simpler than a dynamic per-card height.
 const CARD_NAME_Y: u32 = 10;
 const CARD_CWD_Y: u32 = 30;
-const CARD_BRANCH_Y: u32 = 50;
-const CARD_PROCESS_Y: u32 = 70;
-const CARD_UPDATED_Y: u32 = 90;
+const CARD_META_Y: u32 = 50;
+const CARD_PREVIEW1_Y: u32 = 70;
+const CARD_PREVIEW2_Y: u32 = 86;
+const CARD_UPDATED_Y: u32 = 104;
 
 // Toolbar `+` / `…` button metrics (kept as comfortable hit targets).
 const TOOLBAR_BUTTON_W: u32 = 26;
@@ -99,12 +102,15 @@ pub struct CardRects {
     pub bounds: SidebarRect,
     pub icon: SidebarRect,
     pub name_line: SidebarRect,
-    /// The cwd row (dim, tail-truncated, full width).
+    /// The cwd row (dim, `~`-abbreviated and middle-truncated, full width).
     pub cwd_line: SidebarRect,
-    /// The branch row (dim); blank when the session has no branch.
-    pub branch_line: SidebarRect,
-    /// The running-process row (foreground process name / shell state).
-    pub process: SidebarRect,
+    /// The meta row: running process (branded for known agents) plus the git
+    /// branch, on one line.
+    pub meta: SidebarRect,
+    /// The first last-output preview row (original ANSI colors, dim fallback).
+    pub preview1: SidebarRect,
+    /// The second last-output preview row.
+    pub preview2: SidebarRect,
     /// The updated-time row (dim), on its own bottom line.
     pub updated: SidebarRect,
     pub dot: SidebarRect,
@@ -303,7 +309,7 @@ impl SidebarMetrics {
 
     /// Build one card's clipped sub-rects from its (possibly off-viewport)
     /// window top `top` and the viewport `vp`. Every interior offset scales with
-    /// the DPR so the card's five rows (name / cwd / branch / process / updated)
+    /// the DPR so the card's six rows (name / cwd / meta / preview×2 / updated)
     /// fit its scaled height on a Retina display.
     fn card_rects(&self, id: SessionCardId, top: i64, vp: SidebarRect) -> CardRects {
         let lx = vp.x as i64;
@@ -338,8 +344,9 @@ impl SidebarMetrics {
             icon: iclip(icon_x, name_y, icon_w, name_h, vp),
             name_line: iclip(name_x, name_y, name_w, name_h, vp),
             cwd_line: row(CARD_CWD_Y),
-            branch_line: row(CARD_BRANCH_Y),
-            process: row(CARD_PROCESS_Y),
+            meta: row(CARD_META_Y),
+            preview1: row(CARD_PREVIEW1_Y),
+            preview2: row(CARD_PREVIEW2_Y),
             updated: row(CARD_UPDATED_Y),
             dot: iclip(dot_x, name_y + (name_h - dot_d) / 2, dot_d, dot_d, vp),
             menu_button: iclip(menu_x, name_y, card_menu_w, name_h, vp),
@@ -473,20 +480,17 @@ pub const SIDEBAR_MENU_W: u32 = 128;
 /// Height of one popup menu item row at scale 1.0.
 pub const SIDEBAR_MENU_ITEM_H: u32 = 24;
 
-/// One action in a card's `…` menu (FR-7). Only [`CardMenuItem::Close`] is wired
-/// in v1 (see [`CARD_MENU_ITEMS`]); `Rename` names the store-level override that
-/// exists and is tested (AC-9) but whose inline-text-input UI is deferred.
+/// One action in a card's `…` menu (FR-7). `Rename` opens the inline
+/// name-editing session on the card (the store-level override,
+/// [`crate::session_store::SessionDelta::Rename`], has existed since v1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CardMenuItem {
     Close,
     Rename,
 }
 
-/// The card `…` menu's items, in top-to-bottom order (FR-7). v1 ships **Close
-/// only** — a rename needs an inline text-input surface the sidebar does not
-/// have, so its UI is a deliberate deferral rather than a menu entry that does
-/// nothing (the store already supports [`crate::session_store::SessionDelta::Rename`]).
-pub const CARD_MENU_ITEMS: [CardMenuItem; 1] = [CardMenuItem::Close];
+/// The card `…` menu's items, in top-to-bottom order (FR-7).
+pub const CARD_MENU_ITEMS: [CardMenuItem; 2] = [CardMenuItem::Close, CardMenuItem::Rename];
 
 /// The label rendered for a popup menu item.
 pub fn card_menu_label(item: CardMenuItem) -> &'static str {
@@ -516,25 +520,28 @@ pub enum SidebarHit {
 pub struct CardLines {
     /// `<icon glyph> <display name>` — the rename override shadows the title.
     pub name: String,
-    /// The cwd row, tail-first truncated.
+    /// The cwd row: `~`-abbreviated and middle-truncated so both the path root
+    /// and the most-specific tail segment stay visible.
     pub cwd: String,
-    /// The branch row; empty when the session has no branch.
+    /// The branch shown on the meta row after the process; empty when the
+    /// session has no branch.
     pub branch: String,
-    /// The running-process row: the tty's foreground process name, or a shell
-    /// state fallback (`running` / `idle`) where detection is unavailable. The
-    /// caller styles it by the card's `busy` flag.
+    /// The process shown on the meta row: the tty's foreground process name, or
+    /// a shell state fallback (`running` / `idle`) where detection is
+    /// unavailable. The caller styles it by the card's `busy` flag.
     pub process: String,
     /// Relative updated-time (`3分前` / `昨日 23:47` / …).
     pub updated: String,
 }
 
-/// Build a card's display lines from its state and the current wall clock. Each
-/// field is its own line (name / cwd / branch / process / updated).
-pub fn card_lines(card: &SessionCard, now: WallClock) -> CardLines {
+/// Build a card's display lines from its state and the current wall clock.
+/// `home` (the viewer's home directory, if known) drives the cwd's `~`
+/// abbreviation; a parameter — like `now` — so the formatter stays pure.
+pub fn card_lines(card: &SessionCard, now: WallClock, home: Option<&str>) -> CardLines {
     // The project icon is rendered from its own rect (`CardRects::icon`), so the
     // display name here carries no glyph prefix.
     let name = card.display_name().to_string();
-    let cwd = truncate_tail(&card.cwd, CWD_MAX_CHARS);
+    let cwd = format_cwd(&card.cwd, home, CWD_MAX_CHARS);
     let branch = card.branch.clone().unwrap_or_default();
     // The detected foreground process name; when unavailable (non-macOS, or not
     // yet polled) fall back to the shell state so the row is never blank.
@@ -647,6 +654,47 @@ fn truncate_tail(s: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
+/// Format a cwd for the card's cwd row: abbreviate `home` to `~`, then — if the
+/// result still exceeds `max` characters — drop *middle* path segments
+/// (`~/repos/…/noa`) so both the root and the identifying tail segments stay
+/// visible. A tail-first cut (`…hub.com/example/noa`) would hide the owner of
+/// the repository, which is usually the disambiguating part. A single overlong
+/// segment falls back to the plain tail-first cut.
+pub fn format_cwd(cwd: &str, home: Option<&str>, max: usize) -> String {
+    let abbreviated = match home {
+        Some(home) if !home.is_empty() && cwd == home => "~".to_string(),
+        Some(home) if !home.is_empty() && cwd.starts_with(home) && cwd[home.len()..].starts_with('/') => {
+            format!("~{}", &cwd[home.len()..])
+        }
+        _ => cwd.to_string(),
+    };
+    if abbreviated.chars().count() <= max {
+        return abbreviated;
+    }
+
+    let segments: Vec<&str> = abbreviated.split('/').collect();
+    if segments.len() >= 3 {
+        let head = segments[0];
+        // Keep the head plus as many tail segments as fit alongside `…`.
+        let head_len = head.chars().count();
+        let mut kept: Vec<&str> = Vec::new();
+        let mut used = head_len + 2; // head + "/…"
+        for segment in segments.iter().rev() {
+            let extra = segment.chars().count() + 1; // "/segment"
+            if used + extra > max || kept.len() + 2 >= segments.len() {
+                break;
+            }
+            kept.push(segment);
+            used += extra;
+        }
+        if !kept.is_empty() {
+            kept.reverse();
+            return format!("{head}/…/{}", kept.join("/"));
+        }
+    }
+    truncate_tail(&abbreviated, max)
+}
+
 /// Project-icon glyph for a card (FR-9). Nerd Font glyphs (mockup parity); an
 /// environment without a Nerd Font falls back to tofu / a replacement box for
 /// these private-use codepoints (AC-21 [manual] — graceful degradation, NFR-5),
@@ -754,10 +802,13 @@ mod tests {
     }
 
     // 6 ids stacked; a viewport tall enough for exactly 3 cards. bounds height =
-    // header(36) + toolbar(30) + 3*stride(120) = 426.
+    // header(36) + toolbar(30) + 3*stride(132) = 462.
     fn six_id_bounds() -> (SidebarRect, Vec<SessionCardId>) {
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
-        (SidebarRect::new(0, 0, 360, 426), ids)
+        (
+            SidebarRect::new(0, 0, 360, SIDEBAR_HEADER_H + SIDEBAR_TOOLBAR_H + 3 * SIDEBAR_CARD_STRIDE),
+            ids,
+        )
     }
 
     // AC-3 (FR-2): the card lines carry `[icon] name`, `cwd … branch`, and the
@@ -769,16 +820,18 @@ mod tests {
             "/Users/dev/repos/github.com/example/very-long-project",
             Some("main"),
         );
-        let lines = card_lines(&card, wall(10, 3));
+        let lines = card_lines(&card, wall(10, 3), None);
 
         // The name line is the display name (the icon renders from its own
         // rect, so no glyph prefix here); the icon glyph stays resolvable.
         assert_eq!(lines.name, "build");
         assert!(!icon_glyph(IconKind::Rust).is_empty());
 
-        // The cwd row is tail-truncated (ellipsis) and the branch is its own row.
+        // The cwd row is middle-truncated (ellipsis) so both the root and the
+        // identifying tail segments survive; the branch rides the meta row.
         assert!(lines.cwd.contains('…'));
         assert!(lines.cwd.contains("very-long-project"));
+        assert!(lines.cwd.contains("example"));
         assert_eq!(lines.branch, "main");
 
         // updated-time matches the pure PR1 formatter.
@@ -835,9 +888,39 @@ mod tests {
     #[test]
     fn card_lines_omit_branch_when_absent() {
         let card = sample_card("shell", "/repo", None);
-        let lines = card_lines(&card, wall(10, 0));
+        let lines = card_lines(&card, wall(10, 0), None);
         assert_eq!(lines.cwd, "/repo");
         assert_eq!(lines.branch, "");
+    }
+
+    // The cwd row abbreviates the home directory to `~` and middle-truncates
+    // an overlong path, keeping the head and the identifying tail segments.
+    #[test]
+    fn format_cwd_abbreviates_home_and_middle_truncates() {
+        // Home abbreviation, exact and prefix forms.
+        assert_eq!(format_cwd("/Users/dev", Some("/Users/dev"), 32), "~");
+        assert_eq!(
+            format_cwd("/Users/dev/repos/noa", Some("/Users/dev"), 32),
+            "~/repos/noa"
+        );
+        // A sibling like /Users/dev2 must NOT abbreviate.
+        assert_eq!(
+            format_cwd("/Users/dev2/repos", Some("/Users/dev"), 32),
+            "/Users/dev2/repos"
+        );
+
+        // Middle truncation keeps `~` and the tail segments.
+        let long = "/Users/dev/repos/github.com/example/very-long-project";
+        let out = format_cwd(long, Some("/Users/dev"), 32);
+        assert!(out.starts_with("~/…/"), "{out}");
+        assert!(out.ends_with("very-long-project"), "{out}");
+        assert!(out.chars().count() <= 32, "{out}");
+
+        // A single overlong segment falls back to the tail-first cut.
+        let blob = "x".repeat(64);
+        let out = format_cwd(&blob, None, 16);
+        assert!(out.starts_with('…'));
+        assert_eq!(out.chars().count(), 16);
     }
 
     // The process row falls back to a shell state when no process is detected
@@ -855,7 +938,7 @@ mod tests {
             updated_at: wall(10, 0),
             preview: Vec::new(),
         });
-        let idle = card_lines(store.get(&id).unwrap(), wall(10, 0));
+        let idle = card_lines(store.get(&id).unwrap(), wall(10, 0), None);
         assert_eq!(idle.process, "idle");
 
         store.apply(SessionDelta::Upsert {
@@ -867,7 +950,7 @@ mod tests {
             updated_at: wall(10, 0),
             preview: Vec::new(),
         });
-        let busy = card_lines(store.get(&id).unwrap(), wall(10, 0));
+        let busy = card_lines(store.get(&id).unwrap(), wall(10, 0), None);
         assert_eq!(busy.process, "running");
     }
 
@@ -1092,12 +1175,13 @@ mod tests {
         // is no longer on it).
         assert!(card.name_line.right() <= card.menu_button.x);
 
-        // One field per line, stacked top to bottom: name, cwd, branch,
-        // process, updated.
+        // Rows stack top to bottom: name, cwd, meta (process · branch), the
+        // two preview rows, updated.
         assert!(card.name_line.y < card.cwd_line.y);
-        assert!(card.cwd_line.y < card.branch_line.y);
-        assert!(card.branch_line.y < card.process.y);
-        assert!(card.process.y < card.updated.y);
+        assert!(card.cwd_line.y < card.meta.y);
+        assert!(card.meta.y < card.preview1.y);
+        assert!(card.preview1.y < card.preview2.y);
+        assert!(card.preview2.y < card.updated.y);
     }
 
     // DPR scaling: the metrics double at scale 2.0, and a degenerate scale
@@ -1127,8 +1211,13 @@ mod tests {
     fn layout_and_hit_test_scale_at_dpr_2() {
         let m2 = SidebarMetrics::new(2.0);
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
-        // header(72) + toolbar(60) + 3*stride(240) = 852, with a doubled width.
-        let bounds = SidebarRect::new(0, 0, 720, 852);
+        // header(72) + toolbar(60) + 3*stride(264) = 924, with a doubled width.
+        let bounds = SidebarRect::new(
+            0,
+            0,
+            720,
+            2 * (SIDEBAR_HEADER_H + SIDEBAR_TOOLBAR_H + 3 * SIDEBAR_CARD_STRIDE),
+        );
 
         let bands = m2.bands(bounds);
         assert_eq!(bands.header.h, 2 * SIDEBAR_HEADER_H);
@@ -1137,15 +1226,16 @@ mod tests {
         let layout = m2.layout(bounds, &ids, 0);
         assert_eq!(layout.cards.len(), 3);
 
-        // The first card is a full doubled height and its five rows stack in
+        // The first card is a full doubled height and its six rows stack in
         // order, with the last (updated) row fitting inside the card.
         let card = &layout.cards[0];
         assert_eq!(card.bounds.h, m2.card_h);
         assert!(card.dot.x < card.icon.x && card.icon.x < card.name_line.x);
         assert!(card.name_line.y < card.cwd_line.y);
-        assert!(card.cwd_line.y < card.branch_line.y);
-        assert!(card.branch_line.y < card.process.y);
-        assert!(card.process.y < card.updated.y);
+        assert!(card.cwd_line.y < card.meta.y);
+        assert!(card.meta.y < card.preview1.y);
+        assert!(card.preview1.y < card.preview2.y);
+        assert!(card.preview2.y < card.updated.y);
         assert!(card.updated.h > 0);
         assert!(card.updated.bottom() <= card.bounds.bottom());
 

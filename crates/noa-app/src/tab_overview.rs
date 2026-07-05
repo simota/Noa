@@ -42,25 +42,28 @@ pub const OVERVIEW_SEARCH_BAND_H: u32 = 64;
 pub const OVERVIEW_HINT_BAND_H: u32 = 54;
 
 /// Mockup-parity chrome palette (REQ-OV-12/14, v2). All compile-time
-/// constants — no config knob (⚠G precedent). Stored as straight display-space
-/// RGBA because the Overview surface uses a **non-sRGB** format
-/// (`Bgra8Unorm`, see `preferred_surface_format`), so these are written to the
-/// target unchanged (no gamma re-encode).
+/// constants — no config knob (⚠G precedent). Sourced from the shared
+/// [`crate::chrome`] palette so the overview and the session sidebar stay
+/// visually unified; stored as straight display-space RGBA because the
+/// Overview surface uses a **non-sRGB** format (`Bgra8Unorm`, see
+/// `preferred_surface_format`), so these are written to the target unchanged
+/// (no gamma re-encode).
 ///
 /// Near-black navy backdrop behind every card (mockup: "暗色の背景").
-pub const OVERVIEW_BG_COLOR: [f32; 4] = [0.034, 0.046, 0.084, 1.0];
+pub const OVERVIEW_BG_COLOR: [f32; 4] = crate::chrome::rgba(crate::chrome::CHROME_BG);
 /// Card face — one step lighter than [`OVERVIEW_BG_COLOR`] (mockup: "一段明るいカード面").
-pub const OVERVIEW_CARD_COLOR: [f32; 4] = [0.078, 0.091, 0.127, 1.0];
+pub const OVERVIEW_CARD_COLOR: [f32; 4] = crate::chrome::rgba(crate::chrome::CHROME_CARD);
 /// Title-bar band — distinguishable from the card face (mockup: "区別可能な帯").
-pub const OVERVIEW_TITLE_BAR_COLOR: [f32; 4] = [0.118, 0.129, 0.176, 1.0];
+pub const OVERVIEW_TITLE_BAR_COLOR: [f32; 4] = crate::chrome::rgba(crate::chrome::CHROME_BAND);
 /// Thin resting card border.
-pub const OVERVIEW_BORDER_COLOR: [f32; 4] = [0.298, 0.3176, 0.380, 1.0];
+pub const OVERVIEW_BORDER_COLOR: [f32; 4] = crate::chrome::rgba(crate::chrome::CHROME_BORDER);
 /// Blue accent focus ring for the selected tile (REQ-OV-14).
-pub const OVERVIEW_FOCUS_RING_COLOR: [f32; 4] = [0.078, 0.635, 1.0, 1.0];
+pub const OVERVIEW_FOCUS_RING_COLOR: [f32; 4] = crate::chrome::rgba(crate::chrome::CHROME_ACCENT);
 /// Search / hint pill face in the overview chrome.
-pub const OVERVIEW_CHROME_PILL_COLOR: [f32; 4] = [0.128, 0.138, 0.213, 1.0];
+pub const OVERVIEW_CHROME_PILL_COLOR: [f32; 4] = crate::chrome::rgba(crate::chrome::CHROME_PILL);
 /// Thin border around search and hint pills.
-pub const OVERVIEW_CHROME_BORDER_COLOR: [f32; 4] = [0.252, 0.274, 0.392, 1.0];
+pub const OVERVIEW_CHROME_BORDER_COLOR: [f32; 4] =
+    crate::chrome::rgba(crate::chrome::CHROME_PILL_BORDER);
 /// Corner radius (px) of every card.
 pub const OVERVIEW_CARD_CORNER_RADIUS: f32 = 8.0;
 /// Resting border thickness (px).
@@ -127,6 +130,10 @@ pub enum OverviewAction {
     Activate,
     SwitchToLive(usize),
     Dismiss,
+    /// Tab: toggle the quick-look zoom of the selected tile. Tab is the one
+    /// comfortable non-printable key left — every printable key (including
+    /// Space) types into the "Search sessions" field.
+    ToggleZoom,
 }
 
 /// Resolve an Overview-focused keypress to its [`OverviewAction`], or `None`
@@ -141,6 +148,7 @@ pub fn overview_key_action(logical_key: &Key, modifiers: ModifiersState) -> Opti
         Key::Named(NamedKey::ArrowDown) => Some(OverviewAction::MoveSelection(Direction::Down)),
         Key::Named(NamedKey::Enter) => Some(OverviewAction::Activate),
         Key::Named(NamedKey::Escape) => Some(OverviewAction::Dismiss),
+        Key::Named(NamedKey::Tab) => Some(OverviewAction::ToggleZoom),
         // Plain Cmd+<digit> only (mirrors `cmd+1`..`cmd+9`'s keybind chords,
         // which likewise require no other modifier) — a shifted/alt'd combo
         // falls through to `None` rather than misfiring a tile switch.
@@ -294,13 +302,16 @@ pub fn overview_escape_action(query: &str) -> OverviewEscapeAction {
     }
 }
 
-/// Compose one title-bar row: the centered tab `label` with a close glyph
-/// pinned to the final column (REQ-OV-13). Uses ASCII `'x'` rather than `'✕'`
-/// to avoid font-fallback tofu (same manual-verify caveat as
-/// [`overview_hint_bar_text`]); swap to `'✕'` at this one site if the glyph
-/// renders and record the deviation. The label is centered within the columns
-/// left of the glyph and clipped if it would overrun them, so the close glyph
-/// is always visible.
+/// The close glyph pinned to a title bar's final column (REQ-OV-13).
+/// `'✕'` (U+2715) for mockup parity; falls back to font-fallback rendering —
+/// if it tofus on some setup, swap back to ASCII `'x'` at this one site
+/// (manual-verify caveat, same as [`overview_hint_bar_text`]).
+pub const TITLE_BAR_CLOSE_GLYPH: char = '✕';
+
+/// Compose one title-bar row: the centered tab `label` with the close glyph
+/// pinned to the final column (REQ-OV-13). The label is centered within the
+/// columns left of the glyph and clipped if it would overrun them, so the
+/// close glyph is always visible.
 pub fn title_bar_row_with_close(label: &str, cols: u16) -> String {
     let cols = cols as usize;
     if cols == 0 {
@@ -308,7 +319,7 @@ pub fn title_bar_row_with_close(label: &str, cols: u16) -> String {
     }
     if cols < 2 {
         // Too narrow for both a label and the glyph — show the glyph alone.
-        return "x".to_string();
+        return TITLE_BAR_CLOSE_GLYPH.to_string();
     }
     // Reserve the last column for the close glyph; center the label in the rest.
     let label_field = cols - 1;
@@ -317,8 +328,117 @@ pub fn title_bar_row_with_close(label: &str, cols: u16) -> String {
     while row.len() < label_field {
         row.push(' ');
     }
-    row.push('x');
+    row.push(TITLE_BAR_CLOSE_GLYPH);
     row.into_iter().collect()
+}
+
+/// A truecolor SGR foreground prefix for the ANSI title-bar composer.
+fn ansi_fg(color: noa_core::Rgb) -> String {
+    format!("\x1b[38;2;{};{};{}m", color.r, color.g, color.b)
+}
+
+/// Compose one title-bar row with inline SGR styling, visually identical in
+/// layout to [`title_bar_row_with_close`] but adding: an optional dim `⌘n`
+/// switch badge before the label (REQ-OV-15c affordance), a colored status dot
+/// when the label carries the `● ` needs-user prefix (red attention / yellow
+/// bell / blue busy — the caller picks the color from card state), and an
+/// accent-bold highlight of the first case-insensitive `query` match inside
+/// the label (REQ-OV-16). The escapes occupy no cells, so the visible layout
+/// (centering, clipping, trailing close glyph) matches the plain composer.
+pub fn title_bar_row_ansi(
+    label: &str,
+    cols: u16,
+    badge: Option<usize>,
+    dot_color: Option<noa_core::Rgb>,
+    query: &str,
+) -> String {
+    let cols = cols as usize;
+    if cols == 0 {
+        return String::new();
+    }
+    if cols < 2 {
+        return TITLE_BAR_CLOSE_GLYPH.to_string();
+    }
+    let field = cols - 1;
+
+    let badge_text = badge.map(|n| format!("{n} ")).unwrap_or_default();
+    let badge_len = badge_text.chars().count();
+    // Clip the label to the space left of the badge so the glyph never moves.
+    let label: String = label.chars().take(field.saturating_sub(badge_len)).collect();
+    let vis_len = badge_len + label.chars().count();
+    let pad = (field.saturating_sub(vis_len)) / 2;
+
+    const RESET_FG: &str = "\x1b[39m";
+    let dim = ansi_fg(crate::chrome::CHROME_DIM_FG);
+    let accent = ansi_fg(crate::chrome::CHROME_ACCENT);
+
+    let mut out = String::new();
+    out.extend(std::iter::repeat_n(' ', pad));
+    if !badge_text.is_empty() {
+        out.push_str(&dim);
+        out.push_str(&badge_text);
+        out.push_str(RESET_FG);
+    }
+
+    // Split the label into an optional colored dot prefix and the rest.
+    let (dot_seg, rest) = match dot_color {
+        Some(_) if label.starts_with("● ") => label.split_at("● ".len()),
+        _ => ("", label.as_str()),
+    };
+    if !dot_seg.is_empty() {
+        // `dot_color` is Some by construction of `dot_seg`.
+        out.push_str(&ansi_fg(dot_color.unwrap_or(crate::chrome::CHROME_DOT_RED)));
+        out.push_str(dot_seg);
+        out.push_str(RESET_FG);
+    }
+
+    // First case-insensitive match of `query` within the rest of the label.
+    // `to_ascii_lowercase` preserves byte offsets, so the byte range found in
+    // the lowered copy slices the original safely.
+    let match_range = if query.is_empty() {
+        None
+    } else {
+        rest.to_ascii_lowercase()
+            .find(&query.to_ascii_lowercase())
+            .map(|start| (start, start + query.len()))
+    };
+    match match_range {
+        Some((start, end)) if end <= rest.len() && rest.is_char_boundary(start) && rest.is_char_boundary(end) => {
+            out.push_str(&rest[..start]);
+            out.push_str("\x1b[1m");
+            out.push_str(&accent);
+            out.push_str(&rest[start..end]);
+            out.push_str(RESET_FG);
+            out.push_str("\x1b[22m");
+            out.push_str(&rest[end..]);
+        }
+        _ => out.push_str(rest),
+    }
+
+    // Right-pad the label field, then pin the dim close glyph to the last col.
+    let visible = pad + vis_len;
+    out.extend(std::iter::repeat_n(' ', field.saturating_sub(visible)));
+    out.push_str(&dim);
+    out.push(TITLE_BAR_CLOSE_GLYPH);
+    out.push_str(RESET_FG);
+    out
+}
+
+/// The enlarged quick-look rect for a zoomed tile (Tab toggle): the tile's
+/// size scaled up, clamped to `grid_bounds`, centered within it.
+pub fn overview_zoom_rect(grid_bounds: TileRect, tile: TileRect) -> TileRect {
+    const ZOOM_SCALE: f32 = 1.6;
+    if grid_bounds.w == 0 || grid_bounds.h == 0 {
+        return grid_bounds;
+    }
+    let w = ((tile.w as f32 * ZOOM_SCALE).round() as u32).min(grid_bounds.w).max(1);
+    let h = ((tile.h as f32 * ZOOM_SCALE).round() as u32).min(grid_bounds.h).max(1);
+    TileRect::new(
+        grid_bounds.x + (grid_bounds.w - w) / 2,
+        grid_bounds.y + (grid_bounds.h - h) / 2,
+        w,
+        h,
+    )
 }
 
 /// Injected GPU lifecycle signal used by the resource-regeneration decision.
@@ -624,13 +744,15 @@ pub fn overview_hint_bar_rect(hint_band: TileRect) -> TileRect {
 /// and record the deviation.
 pub fn overview_hint_bar_text(live_tile_count: usize) -> String {
     let n = live_tile_count.max(1);
-    format!("⌘1-{n} to switch・↑↓←→ to navigate・Return to open・esc to close")
+    format!("⌘1-{n} to switch・↑↓←→ to navigate・Return to open・Tab to zoom・esc to close")
 }
 
 /// ASCII fallback for [`overview_hint_bar_text`] when the Unicode glyphs tofu.
 pub fn overview_hint_bar_text_ascii(live_tile_count: usize) -> String {
     let n = live_tile_count.max(1);
-    format!("cmd+1-{n} to switch / arrows to navigate / return to open / esc to close")
+    format!(
+        "cmd+1-{n} to switch / arrows to navigate / return to open / tab to zoom / esc to close"
+    )
 }
 
 /// Horizontally center `text` within `cols` columns by left-padding with
@@ -1267,20 +1389,101 @@ mod tests {
 
     #[test]
     fn title_bar_row_pins_close_glyph_to_the_last_column() {
-        // 10 cols: 9-wide centered label field + the trailing 'x'.
+        // 10 cols: 9-wide centered label field + the trailing close glyph.
         let row = title_bar_row_with_close("build", 10);
         assert_eq!(row.chars().count(), 10);
-        assert_eq!(row.chars().next_back(), Some('x'));
+        assert_eq!(row.chars().next_back(), Some(TITLE_BAR_CLOSE_GLYPH));
         assert!(row.contains("build"));
 
         // A label wider than the field is clipped, but the glyph still shows.
         let clipped = title_bar_row_with_close("a-very-long-tab-title", 6);
         assert_eq!(clipped.chars().count(), 6);
-        assert_eq!(clipped.chars().next_back(), Some('x'));
+        assert_eq!(clipped.chars().next_back(), Some(TITLE_BAR_CLOSE_GLYPH));
 
         // Degenerate widths never panic.
         assert_eq!(title_bar_row_with_close("build", 0), "");
-        assert_eq!(title_bar_row_with_close("build", 1), "x");
+        assert_eq!(
+            title_bar_row_with_close("build", 1),
+            TITLE_BAR_CLOSE_GLYPH.to_string()
+        );
+    }
+
+    /// Strip SGR escapes so the ANSI composer's visible layout can be compared
+    /// against the plain composer's.
+    fn strip_sgr(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for e in chars.by_ref() {
+                    if e == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    // The ANSI composer's visible cells match the plain composer (centered
+    // label + pinned glyph), and the styling segments land where expected.
+    #[test]
+    fn title_bar_row_ansi_matches_plain_layout_and_styles_segments() {
+        // No badge/dot/query: visible layout identical to the plain composer.
+        let plain = title_bar_row_with_close("build", 12);
+        let ansi = title_bar_row_ansi("build", 12, None, None, "");
+        // Both are 12 visible cells with the same centered label.
+        assert_eq!(strip_sgr(&ansi).trim_end(), plain.trim_end());
+
+        // Badge: a leading `n ` inside the visible field, dim-colored.
+        let badged = title_bar_row_ansi("build", 14, Some(3), None, "");
+        let visible = strip_sgr(&badged);
+        assert!(visible.contains("3 build"), "{visible:?}");
+        assert_eq!(visible.chars().count(), 14);
+
+        // Dot: the `● ` needs-user prefix picks up the caller's color.
+        let red = noa_core::Rgb::new(0xe8, 0x5d, 0x5d);
+        let dotted = title_bar_row_ansi("● build", 14, None, Some(red), "");
+        assert!(dotted.contains("\x1b[38;2;232;93;93m●"), "{dotted:?}");
+
+        // Query: the first case-insensitive match is bold+accented.
+        let hit = title_bar_row_ansi("Build Log", 20, None, None, "log");
+        assert!(hit.contains("\x1b[1m"), "{hit:?}");
+        assert!(strip_sgr(&hit).contains("Build Log"));
+        // A non-matching query changes nothing visible.
+        let miss = title_bar_row_ansi("Build Log", 20, None, None, "zzz");
+        assert!(!miss.contains("\x1b[1m"));
+
+        // Degenerate widths never panic.
+        assert_eq!(title_bar_row_ansi("build", 0, Some(1), None, "b"), "");
+        assert_eq!(
+            title_bar_row_ansi("build", 1, Some(1), None, "b"),
+            TITLE_BAR_CLOSE_GLYPH.to_string()
+        );
+    }
+
+    // Tab-zoom rect: scaled up from the tile, clamped to the grid bounds, and
+    // centered within them.
+    #[test]
+    fn overview_zoom_rect_scales_clamps_and_centers() {
+        let grid = TileRect::new(10, 20, 400, 300);
+        let tile = TileRect::new(10, 20, 100, 80);
+        let zoom = overview_zoom_rect(grid, tile);
+        assert_eq!((zoom.w, zoom.h), (160, 128));
+        assert_eq!(zoom.x, 10 + (400 - 160) / 2);
+        assert_eq!(zoom.y, 20 + (300 - 128) / 2);
+
+        // A tile whose zoom would overflow clamps to the grid bounds.
+        let big = TileRect::new(0, 0, 390, 290);
+        let clamped = overview_zoom_rect(grid, big);
+        assert_eq!((clamped.w, clamped.h), (400, 300));
+        assert_eq!((clamped.x, clamped.y), (10, 20));
+
+        // Degenerate bounds pass through without division by zero.
+        let empty = TileRect::new(0, 0, 0, 0);
+        assert_eq!(overview_zoom_rect(empty, tile), empty);
     }
 
     #[test]
@@ -1341,16 +1544,16 @@ mod tests {
     fn hint_bar_text_substitutes_the_live_tile_count() {
         assert_eq!(
             overview_hint_bar_text(6),
-            "⌘1-6 to switch・↑↓←→ to navigate・Return to open・esc to close"
+            "⌘1-6 to switch・↑↓←→ to navigate・Return to open・Tab to zoom・esc to close"
         );
         assert_eq!(
             overview_hint_bar_text(9),
-            "⌘1-9 to switch・↑↓←→ to navigate・Return to open・esc to close"
+            "⌘1-9 to switch・↑↓←→ to navigate・Return to open・Tab to zoom・esc to close"
         );
         // Never renders "1-0": a zero-tile overview still shows "1-1".
         assert_eq!(
             overview_hint_bar_text(0),
-            "⌘1-1 to switch・↑↓←→ to navigate・Return to open・esc to close"
+            "⌘1-1 to switch・↑↓←→ to navigate・Return to open・Tab to zoom・esc to close"
         );
     }
 
@@ -1358,7 +1561,15 @@ mod tests {
     fn hint_bar_ascii_fallback_mirrors_the_unicode_range() {
         assert_eq!(
             overview_hint_bar_text_ascii(6),
-            "cmd+1-6 to switch / arrows to navigate / return to open / esc to close"
+            "cmd+1-6 to switch / arrows to navigate / return to open / tab to zoom / esc to close"
+        );
+    }
+
+    #[test]
+    fn overview_key_action_resolves_tab_to_zoom() {
+        assert_eq!(
+            overview_key_action(&Key::Named(NamedKey::Tab), ModifiersState::empty()),
+            Some(OverviewAction::ToggleZoom)
         );
     }
 

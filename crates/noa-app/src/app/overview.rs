@@ -68,6 +68,8 @@ impl App {
                 label_renderer: None,
                 chrome_card: None,
                 selected: 0,
+                hovered: None,
+                zoomed: false,
                 search_query: String::new(),
             });
         }
@@ -77,9 +79,13 @@ impl App {
         self.seed_overview_snapshots();
         self.mark_all_overview_tiles_dirty();
         // Reopening the Overview always starts with an empty filter (REQ-OV-16)
-        // so the focused-tab initial selection below sees the full tab set.
+        // so the focused-tab initial selection below sees the full tab set —
+        // and with hover/zoom state cleared, since neither survives a reopen
+        // meaningfully.
         if let Some(overview) = self.overview_window.as_mut() {
             overview.search_query.clear();
+            overview.hovered = None;
+            overview.zoomed = false;
         }
         // REQ-OV-14: the focused pane's tile if it's live, else the first.
         let source_tile_ids = self.overview_source_tile_ids();
@@ -420,15 +426,29 @@ impl App {
         let live_count = layout.tiles.len().min(source_tile_ids.len());
         let live_ids = &source_tile_ids[..live_count];
         let labels = overview_tile_labels(live_ids, |id| self.overview_tile_label(id));
+        let query = self
+            .overview_window
+            .as_ref()
+            .map_or(String::new(), |overview| overview.search_query.clone());
 
-        let jobs: Vec<(usize, String)> = labels
+        // Each live tile band carries its `⌘n` switch badge (REQ-OV-15c, only
+        // the 1..=9 the keymap reaches), its status-dot color, and the live
+        // search query for match highlighting (REQ-OV-16).
+        let jobs: Vec<(usize, String, Option<usize>, Option<noa_core::Rgb>)> = labels
             .iter()
             .enumerate()
             .filter(|(index, _)| due_tile_ids.contains(&live_ids[*index]))
-            .map(|(index, label)| (index, label.label.clone()))
+            .map(|(index, label)| {
+                (
+                    index,
+                    label.label.clone(),
+                    (index < 9).then_some(index + 1),
+                    self.overview_tile_dot_color(live_ids[index]),
+                )
+            })
             .collect();
-        for (tile_index, title) in jobs {
-            self.render_tile_title_band(tile_index, &title);
+        for (tile_index, title, badge, dot) in jobs {
+            self.render_tile_title_band(tile_index, &title, badge, dot, &query);
         }
     }
 
@@ -446,19 +466,45 @@ impl App {
         let live_count = layout.tiles.len();
         let overflow_ids = overview_placeholder_source_ids(source_tile_ids, live_count);
         let labels = overview_tile_labels(overflow_ids, |id| self.overview_tile_label(id));
+        let query = self
+            .overview_window
+            .as_ref()
+            .map_or(String::new(), |overview| overview.search_query.clone());
+        let home = std::env::var("HOME").ok();
 
-        let jobs: Vec<(usize, String)> = labels
+        // A placeholder has no live mirror to identify it, so its single band
+        // row carries the session's cwd (and branch) after the title — pulled
+        // from the same session store the sidebar reads.
+        let jobs: Vec<(usize, String, Option<noa_core::Rgb>)> = labels
             .iter()
             .enumerate()
-            .map(|(index, label)| (live_count + index, label.label.clone()))
+            .map(|(index, label)| {
+                let tile_id = overflow_ids[index];
+                let card_id = Self::session_card_id(tile_id.window_id, tile_id.pane_id);
+                let title = match self.session_store.get(&card_id) {
+                    Some(card) if !card.cwd.is_empty() => {
+                        let cwd = crate::sidebar::format_cwd(&card.cwd, home.as_deref(), 24);
+                        match &card.branch {
+                            Some(branch) => format!("{} — {cwd} ⎇ {branch}", label.label),
+                            None => format!("{} — {cwd}", label.label),
+                        }
+                    }
+                    _ => label.label.clone(),
+                };
+                (
+                    live_count + index,
+                    title,
+                    self.overview_tile_dot_color(tile_id),
+                )
+            })
             .collect();
-        for (tile_index, title) in jobs {
+        for (tile_index, title, dot) in jobs {
             if let (Some(gpu), Some(overview)) = (self.gpu.as_ref(), self.overview_window.as_ref())
                 && let Some(thumbnails) = overview.thumbnails.as_ref()
             {
                 thumbnails.clear_tile(&gpu.device, &gpu.queue, tile_index);
             }
-            self.render_tile_title_band(tile_index, &title);
+            self.render_tile_title_band(tile_index, &title, None, dot, &query);
         }
     }
 
@@ -466,8 +512,18 @@ impl App {
     /// shared label `Renderer`, then stamp it onto the top `OVERVIEW_TITLE_BAR_H`
     /// rows of the tile (REQ-OV-12). The band is cleared to a distinct
     /// title-bar color (`set_clear_color` after `rebuild_cells`) so it reads as
-    /// a band separate from the card face. Shared by live and placeholder tiles.
-    pub(super) fn render_tile_title_band(&mut self, tile_index: usize, title: &str) {
+    /// a band separate from the card face. Shared by live and placeholder
+    /// tiles. `badge` prepends the dim `⌘n` switch number, `dot` colors the
+    /// label's `● ` needs-user prefix, and `query`'s first match inside the
+    /// label is accent-highlighted (REQ-OV-15c/16, sidebar-parity dots).
+    pub(super) fn render_tile_title_band(
+        &mut self,
+        tile_index: usize,
+        title: &str,
+        badge: Option<usize>,
+        dot: Option<noa_core::Rgb>,
+        query: &str,
+    ) {
         self.ensure_overview_label_renderer();
         let Some(gpu) = self.gpu.as_mut() else {
             return;
@@ -496,8 +552,9 @@ impl App {
             DEFAULT_GRID_PADDING,
         );
         let sanitized = sanitize_placeholder_label(title, grid_size.cols);
-        // REQ-OV-13: the centered title plus a close glyph in the last column.
-        let text = title_bar_row_with_close(&sanitized, grid_size.cols);
+        // REQ-OV-13: the centered title plus a close glyph in the last column,
+        // with inline SGR styling (badge / dot / search highlight).
+        let text = title_bar_row_ansi(&sanitized, grid_size.cols, badge, dot, query);
 
         let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
         Stream::new().feed(text.as_bytes(), &mut term);
@@ -652,10 +709,15 @@ impl App {
         let search_texture = self.render_overview_search_texture();
         let hint_texture = self.render_overview_hint_texture(live_count);
         self.ensure_overview_chrome_card_pipeline();
-        let selected = self
+        let (selected, hovered, zoomed) = self
             .overview_window
             .as_ref()
-            .map_or(0, |overview| overview.selected);
+            .map_or((0, None, false), |overview| {
+                (overview.selected, overview.hovered, overview.zoomed)
+            });
+        // The zoom overlay centers within the grid band; resolved before the
+        // gpu/overview borrows below.
+        let zoom_bounds = self.overview_chrome().map(|chrome| chrome.grid_bounds);
 
         let Some(gpu) = self.gpu.as_ref() else {
             return;
@@ -765,6 +827,74 @@ impl App {
             );
         }
 
+        // Hover accent ring + Tab quick-look zoom, composited above the grid
+        // (and above the chrome, which never overlaps the tile rects anyway).
+        if let (Some(thumbnails), Some(chrome_card)) =
+            (overview.thumbnails.as_ref(), overview.chrome_card.as_ref())
+        {
+            let tile_rects: Vec<PaneRectApp> = layout
+                .tiles
+                .iter()
+                .chain(layout.placeholders.iter())
+                .copied()
+                .collect();
+
+            // A thin accent border over the hovered tile — subtler than the
+            // selection's thick ring + glow, so the two stay distinguishable.
+            if let Some(hovered) = hovered
+                && hovered != selected
+                && !zoomed
+                && let Some(rect) = tile_rects.get(hovered)
+                && let Some(tile_view) = thumbnails.tile_texture_view(hovered)
+            {
+                let hover_style = CardStyle {
+                    focus_width: 1.5,
+                    focus_glow_width: 0.0,
+                    ..OVERVIEW_CARD_STYLE
+                };
+                chrome_card.pipeline.overlay_texture_cards(
+                    &gpu.device,
+                    &gpu.queue,
+                    &view,
+                    surface_size,
+                    &hover_style,
+                    &[CardTexturePlacement {
+                        texture_view: &tile_view,
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
+                        selected: true,
+                    }],
+                );
+            }
+
+            // The zoomed selected tile: same card texture, enlarged and
+            // centered within the grid band with the full selection ring.
+            if zoomed
+                && let Some(bounds) = zoom_bounds
+                && let Some(rect) = tile_rects.get(selected)
+                && let Some(tile_view) = thumbnails.tile_texture_view(selected)
+            {
+                let zoom = overview_zoom_rect(bounds, *rect);
+                chrome_card.pipeline.overlay_texture_cards(
+                    &gpu.device,
+                    &gpu.queue,
+                    &view,
+                    surface_size,
+                    &OVERVIEW_CARD_STYLE,
+                    &[CardTexturePlacement {
+                        texture_view: &tile_view,
+                        x: zoom.x,
+                        y: zoom.y,
+                        w: zoom.w,
+                        h: zoom.h,
+                        selected: true,
+                    }],
+                );
+            }
+        }
+
         frame.present();
     }
 
@@ -823,16 +953,12 @@ impl App {
         if !state.contains_pane(tile_id.pane_id) {
             return None;
         }
-        // A pane awaiting the user (an agent's OSC 9/777 attention request or
-        // an unread bell, FR-16) is marked with a leading `●` so it stands out
-        // in the overview grid; cleared when its window gains focus. The
-        // attention mark blinks in phase with the sidebar (FR-A2), so gate it on
-        // the current blink visibility; an unread bell is always steady.
-        let card_id = Self::session_card_id(tile_id.window_id, tile_id.pane_id);
-        let needs_user = self.session_store.get(&card_id).is_some_and(|card| {
-            (card.attention && self.attention_marker_visible(&card_id)) || card.unread_bell
-        });
-        let title = if needs_user {
+        // A pane that needs a look (attention request / unread bell, FR-16) or
+        // is running a program is marked with a leading `●` — the band renderer
+        // colors it by the same dot semantics as the sidebar (red / yellow /
+        // blue). The attention mark blinks in phase with the sidebar (FR-A2)
+        // via `overview_tile_dot_color`'s blink gating.
+        let title = if self.overview_tile_dot_color(tile_id).is_some() {
             format!("● {}", state.title)
         } else {
             state.title.clone()
@@ -988,6 +1114,7 @@ impl App {
                 OverviewAction::Activate => self.activate_overview_selection(),
                 OverviewAction::SwitchToLive(n) => self.switch_to_live_overview_tile(n),
                 OverviewAction::Dismiss => self.dismiss_or_clear_overview_search(),
+                OverviewAction::ToggleZoom => self.toggle_overview_zoom(),
             }
             return;
         }
@@ -1099,6 +1226,61 @@ impl App {
         overview.window.request_redraw();
     }
 
+    /// Tab toggles a quick-look zoom of the selected tile: the tile's card is
+    /// re-composited enlarged and centered above the grid. Purely visual — the
+    /// selection, hit-testing, and keyboard nav are unaffected.
+    pub(super) fn toggle_overview_zoom(&mut self) {
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.zoomed = !overview.zoomed;
+            overview.window.request_redraw();
+        }
+    }
+
+    /// Recompute which tile (live or placeholder, in source order) the cursor
+    /// is over, and repaint on a change so the hover accent ring tracks the
+    /// mouse. Pure math per mouse move; no GPU work unless it changed.
+    pub(super) fn update_overview_hover(&mut self) {
+        let Some(overview) = self.overview_window.as_ref() else {
+            return;
+        };
+        let point = overview.last_cursor_point;
+        let source_tile_ids = self.overview_source_tile_ids();
+        let hovered = point.and_then(|point| {
+            let layout = self.overview_layout(&source_tile_ids)?;
+            layout
+                .tiles
+                .iter()
+                .chain(layout.placeholders.iter())
+                .position(|rect| rect.contains(point))
+        });
+        if let Some(overview) = self.overview_window.as_mut()
+            && overview.hovered != hovered
+        {
+            overview.hovered = hovered;
+            overview.window.request_redraw();
+        }
+    }
+
+    /// The status-dot color for a tile's title band, mirroring the sidebar's
+    /// dot semantics (FR-11/FR-16): red while the attention marker is in its
+    /// visible blink phase, else yellow for an unread bell, blue for a busy
+    /// program, and `None` for idle (no dot). During the attention blink's
+    /// hidden phase the underlying bell/busy color shows, so the band blinks
+    /// in phase with the sidebar (FR-A2).
+    pub(super) fn overview_tile_dot_color(&self, tile_id: OverviewTileId) -> Option<noa_core::Rgb> {
+        let card_id = Self::session_card_id(tile_id.window_id, tile_id.pane_id);
+        let card = self.session_store.get(&card_id)?;
+        if card.attention && self.attention_marker_visible(&card_id) {
+            Some(crate::chrome::CHROME_DOT_RED)
+        } else if card.unread_bell {
+            Some(crate::chrome::CHROME_DOT_YELLOW)
+        } else if card.busy {
+            Some(crate::chrome::CHROME_DOT_BLUE)
+        } else {
+            None
+        }
+    }
+
     /// Return activates the selected Overview tile (REQ-OV-15b). `selected`
     /// indexes directly into the combined live + placeholder source order,
     /// so a selected placeholder row resolves to its source pane exactly the
@@ -1149,6 +1331,7 @@ impl App {
                 if let Some(overview) = self.overview_window.as_mut() {
                     overview.last_cursor_point = point;
                 }
+                self.update_overview_hover();
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Left && state == ElementState::Pressed {

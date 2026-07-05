@@ -1382,7 +1382,7 @@ fn overview_card_pipeline_composites_tiles_without_validation_error() {
     let (target_tex, target_view) = render_target(&device, surface_size.w, surface_size.h);
     let style = CardStyle {
         background: [0.034, 0.046, 0.084, 1.0],
-        border_color: [0.298, 0.318, 0.380, 1.0],
+        border_color: [0.298, 0.32, 0.380, 1.0],
         focus_color: [0.078, 0.635, 1.0, 1.0],
         corner_radius: 8.0,
         border_width: 1.0,

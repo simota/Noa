@@ -604,6 +604,17 @@ impl OverviewThumbnailResources {
         self.tiles.get(index).map(|tile| &tile.texture)
     }
 
+    /// A view of `tile_index`'s full card texture, for compositing the tile a
+    /// second time outside [`composite_cards`](Self::composite_cards) — the
+    /// overview uses this for the hover accent ring and the Tab quick-look
+    /// zoom overlay.
+    pub fn tile_texture_view(&self, tile_index: usize) -> Option<wgpu::TextureView> {
+        self.tiles.get(tile_index).map(|tile| {
+            tile.texture
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        })
+    }
+
     /// A view of the title-band texture for `tile_index`, for the app's label
     /// `Renderer` to draw the tab title into (REQ-OV-12). Stamp it onto the
     /// tile with [`stamp_title_band`] afterward.

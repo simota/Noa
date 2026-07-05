@@ -6,6 +6,7 @@
 mod app;
 mod app_actions;
 mod branch_poll;
+mod chrome;
 mod cli;
 mod clipboard;
 mod command_palette;

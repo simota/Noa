@@ -40,27 +40,29 @@ fn session_delta_should_apply(delta: &SessionDelta, window_eligible: bool) -> bo
 }
 
 // Sidebar palette (⚠G: compile-time, no config knob — matches the mockup's dark
-// chrome; the terminal panes keep their own theme).
-const SIDEBAR_BG: Rgb = Rgb::new(0x14, 0x16, 0x1b);
-const SIDEBAR_FG: Rgb = Rgb::new(0xd8, 0xdc, 0xe4);
-const SIDEBAR_DIM_FG: Rgb = Rgb::new(0x8a, 0x90, 0x9c);
-const SIDEBAR_MENU_BG: Rgb = Rgb::new(0x24, 0x28, 0x30);
-const SIDEBAR_DOT_BLUE: Rgb = Rgb::new(0x4c, 0x9a, 0xff);
-const SIDEBAR_DOT_GREEN: Rgb = Rgb::new(0x46, 0xc4, 0x66);
-const SIDEBAR_DOT_YELLOW: Rgb = Rgb::new(0xe6, 0xb4, 0x50);
+// chrome; the terminal panes keep their own theme). Sourced from the shared
+// `crate::chrome` palette so the sidebar and the tab overview stay visually
+// unified.
+const SIDEBAR_BG: Rgb = crate::chrome::CHROME_BG;
+const SIDEBAR_FG: Rgb = crate::chrome::CHROME_FG;
+const SIDEBAR_DIM_FG: Rgb = crate::chrome::CHROME_DIM_FG;
+const SIDEBAR_MENU_BG: Rgb = crate::chrome::CHROME_PILL;
+const SIDEBAR_DOT_BLUE: Rgb = crate::chrome::CHROME_DOT_BLUE;
+const SIDEBAR_DOT_GREEN: Rgb = crate::chrome::CHROME_DOT_GREEN;
+const SIDEBAR_DOT_YELLOW: Rgb = crate::chrome::CHROME_DOT_YELLOW;
 /// Attention (FR-16): a program is waiting for the user's reply.
-const SIDEBAR_DOT_RED: Rgb = Rgb::new(0xe8, 0x5d, 0x5d);
+const SIDEBAR_DOT_RED: Rgb = crate::chrome::CHROME_DOT_RED;
 /// A card's own background — slightly lighter than the band so each card reads
 /// as a distinct rounded surface (mockup parity).
-const SIDEBAR_CARD_BG: Rgb = Rgb::new(0x1c, 0x20, 0x28);
+const SIDEBAR_CARD_BG: Rgb = crate::chrome::CHROME_CARD;
 /// The selected card's background — brighter still, paired with the accent ring.
-const SIDEBAR_CARD_BG_SELECTED: Rgb = Rgb::new(0x25, 0x2c, 0x39);
+const SIDEBAR_CARD_BG_SELECTED: Rgb = crate::chrome::CHROME_CARD_SELECTED;
 /// The subtle 1px border stroked around every (unselected) card.
-const SIDEBAR_CARD_BORDER: Rgb = Rgb::new(0x2b, 0x30, 0x3b);
+const SIDEBAR_CARD_BORDER: Rgb = crate::chrome::CHROME_BORDER;
 /// The accent (focus ring + left edge bar) for the selected card.
-const SIDEBAR_ACCENT: Rgb = Rgb::new(0x4c, 0x9a, 0xff);
+const SIDEBAR_ACCENT: Rgb = crate::chrome::CHROME_ACCENT;
 /// The rounded header session-name pill background.
-const SIDEBAR_PILL_BG: Rgb = Rgb::new(0x24, 0x2a, 0x35);
+const SIDEBAR_PILL_BG: Rgb = crate::chrome::CHROME_BAND;
 
 // Brand accents for recognized AI agents (agent branding). Truecolor, applied
 // to the process row + header whenever the process classifies, busy or idle.
@@ -179,6 +181,9 @@ struct SidebarCardDraw {
     grid: GridSize,
     bg: Rgb,
     selected: bool,
+    /// A pending interaction request in its visible blink phase (FR-16/FR-A1):
+    /// the card gets a red ring instead of the blue focus ring.
+    attention: bool,
     runs: Vec<SidebarTextRun>,
 }
 
@@ -342,6 +347,14 @@ impl App {
         // Drop attention-blink onsets for sessions that no longer exist, so the
         // blink timer can't stay armed for a torn-down card (FR-A1).
         self.attention_onset.retain(|id, _| live.contains(id));
+        // An inline rename on a torn-down card has nothing to commit to.
+        if self
+            .sidebar_rename
+            .as_ref()
+            .is_some_and(|session| !live.contains(&session.card))
+        {
+            self.sidebar_rename = None;
+        }
     }
 
     /// Clear the unread-bell and attention flags on every card of a
@@ -426,6 +439,15 @@ impl App {
         state.sidebar_scroll = 0;
         state.sidebar_menu = None;
         let window = state.window.clone();
+        // A toggle invalidates this window's inline rename either way (the
+        // editor is a sidebar surface).
+        if self
+            .sidebar_rename
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.sidebar_rename = None;
+        }
 
         self.refresh_sidebar_visible_gate();
         // Grid-first: `relayout_and_resize_window` applies the inset then routes
@@ -451,6 +473,9 @@ impl App {
         if inset == 0 || point.x >= inset {
             return false;
         }
+        // Any sidebar click while an inline rename is open cancels it (mirrors
+        // the `…` popup's click-anywhere dismissal); the click still routes.
+        self.cancel_sidebar_rename();
         let metrics = self.sidebar_metrics(window_id);
 
         // An open card `…` menu takes the click first: an item hit runs the
@@ -474,7 +499,7 @@ impl App {
                     && let Some(item) = metrics.card_menu_hit_test(popup, point)
                 {
                     self.close_sidebar_menu(window_id);
-                    self.activate_card_menu_item(event_loop, open, item);
+                    self.activate_card_menu_item(event_loop, window_id, open, item);
                     return true;
                 }
             }
@@ -524,20 +549,100 @@ impl App {
     /// Run a chosen card `…` menu item (FR-7). `Close` routes through the
     /// existing pane teardown for that session (which cascades to `close_tab`
     /// when it is the tab's last pane), so the card disappears via the normal GC
-    /// choke point (AC-9b). `Rename`'s UI is deferred (not in
-    /// [`crate::sidebar::CARD_MENU_ITEMS`]), so this only ever sees `Close`.
+    /// choke point (AC-9b). `Rename` opens the inline name editor on the card,
+    /// bound to `window_id` — the window whose sidebar the menu was clicked in.
     fn activate_card_menu_item(
         &mut self,
         event_loop: &ActiveEventLoop,
+        window_id: WindowId,
         card: SessionCardId,
         item: crate::sidebar::CardMenuItem,
     ) {
         match item {
             crate::sidebar::CardMenuItem::Close => {
-                let window_id = WindowId::from(card.window_id.0);
-                self.request_close_pane(event_loop, window_id, card.pane_id);
+                let target_window = WindowId::from(card.window_id.0);
+                self.request_close_pane(event_loop, target_window, card.pane_id);
             }
-            crate::sidebar::CardMenuItem::Rename => {}
+            crate::sidebar::CardMenuItem::Rename => self.start_sidebar_rename(window_id, card),
+        }
+    }
+
+    /// Open the inline rename editor on `card` (FR-7 Rename), seeded with its
+    /// current display name so a small correction doesn't require retyping.
+    fn start_sidebar_rename(&mut self, window_id: WindowId, card: SessionCardId) {
+        let buffer = self
+            .session_store
+            .get(&card)
+            .map(|c| c.display_name().to_string())
+            .unwrap_or_default();
+        self.sidebar_rename = Some(SidebarRenameSession {
+            window_id,
+            card,
+            buffer,
+        });
+        self.request_sidebar_redraw();
+    }
+
+    /// One keystroke for the open inline rename (FR-7 Rename): printable text
+    /// appends, Backspace pops, Enter commits a non-empty trimmed name as a
+    /// [`SessionDelta::Rename`] (an all-whitespace buffer cancels instead, so a
+    /// card can't end up unnamed), Escape cancels. Everything is consumed —
+    /// the session is modal for its window's keyboard.
+    pub(super) fn handle_sidebar_rename_key(&mut self, event: &KeyEvent) {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.cancel_sidebar_rename();
+            }
+            Key::Named(NamedKey::Enter) => {
+                let Some(session) = self.sidebar_rename.take() else {
+                    return;
+                };
+                let name = session.buffer.trim().to_string();
+                if !name.is_empty() {
+                    self.session_store.apply(SessionDelta::Rename {
+                        id: session.card,
+                        name,
+                    });
+                }
+                self.request_sidebar_redraw();
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(session) = self.sidebar_rename.as_mut() {
+                    session.buffer.pop();
+                }
+                self.request_sidebar_redraw();
+            }
+            _ => {
+                // Cmd/Ctrl/Alt combos are not text; swallow them (modal) but
+                // don't edit the buffer.
+                if self.modifiers.super_key()
+                    || self.modifiers.control_key()
+                    || self.modifiers.alt_key()
+                {
+                    return;
+                }
+                let Some(text) = event.text.as_deref() else {
+                    return;
+                };
+                let mut appended = false;
+                if let Some(session) = self.sidebar_rename.as_mut() {
+                    for c in text.chars().filter(|c| !c.is_control()) {
+                        session.buffer.push(c);
+                        appended = true;
+                    }
+                }
+                if appended {
+                    self.request_sidebar_redraw();
+                }
+            }
+        }
+    }
+
+    /// Drop the open inline rename without committing, repainting so the
+    /// original name returns.
+    pub(super) fn cancel_sidebar_rename(&mut self) {
+        if self.sidebar_rename.take().is_some() {
+            self.request_sidebar_redraw();
         }
     }
 
@@ -666,24 +771,30 @@ impl App {
         // Header chrome (FR-5): status label, centered title, the session-name
         // pill (a flat filled pill on the backdrop), and the toolbar +/… glyphs.
         let header: HeaderRects = layout_metrics.header_rects(bands.header);
-        // The status label brands the focused session's process: a recognized
-        // agent shows its badge (busy or idle), a busy generic shows `✳ <proc>`,
-        // and an idle generic falls back to the Idle/Running summary.
-        let (status_text, status_fg) = match self.session_store.get(&selected_id) {
-            Some(card)
-                if card.busy
-                    || card
-                        .process
-                        .as_deref()
-                        .is_some_and(|p| classify_agent(p) != AgentKind::Generic) =>
-            {
-                let process = card.process.clone().unwrap_or_else(|| "running".to_string());
-                process_badge(&process, card.busy)
+        // The status label's precedence: any pending attention shows its count
+        // (a request whose card scrolled out of the viewport must still be
+        // noticeable, FR-16); else a recognized agent / busy process on the
+        // focused session shows its badge; else the Idle/Running summary.
+        let attention_count = self.session_store.attention_count();
+        let (status_text, status_fg) = if attention_count > 0 {
+            (format!("● {attention_count} {ATTENTION_LABEL}"), SIDEBAR_DOT_RED)
+        } else {
+            match self.session_store.get(&selected_id) {
+                Some(card)
+                    if card.busy
+                        || card
+                            .process
+                            .as_deref()
+                            .is_some_and(|p| classify_agent(p) != AgentKind::Generic) =>
+                {
+                    let process = card.process.clone().unwrap_or_else(|| "running".to_string());
+                    process_badge(&process, card.busy)
+                }
+                _ => (
+                    header_status_label(self.session_store.busy_count()),
+                    SIDEBAR_FG,
+                ),
             }
-            _ => (
-                header_status_label(self.session_store.busy_count()),
-                SIDEBAR_FG,
-            ),
         };
         runs.extend(window_run(&band_cell, header.status_label, status_text, status_fg, false));
         runs.extend(window_run(
@@ -731,6 +842,8 @@ impl App {
         // Card text on the flat backdrop, plus a rounded overlay for every
         // fully-visible card (FR-2). Partially-scrolled cards stay flat.
         let now = sidebar_wall_clock_now();
+        let home = std::env::var("HOME").ok();
+        let palette = &gpu.theme.palette;
         let mut cards: Vec<SidebarCardDraw> = Vec::new();
         let card_band = PaneRectApp::new(0, 0, inset, layout_metrics.card_h);
         let card_grid = grid_size_for_pane_rect(card_band, metrics, self.padding);
@@ -739,21 +852,30 @@ impl App {
             let Some(card) = self.session_store.get(&card_rects.id) else {
                 continue;
             };
-            let lines: CardLines = card_lines(card, now);
+            let lines: CardLines = card_lines(card, now, home.as_deref());
             let marker = self.attention_marker_visible(&card_rects.id);
+            let renaming = self
+                .sidebar_rename
+                .as_ref()
+                .filter(|session| session.window_id == window_id && session.card == card_rects.id)
+                .map(|session| session.buffer.as_str());
             let full = card_rects.bounds.h == layout_metrics.card_h;
             // A fully-visible card is covered by its opaque rounded overlay, so
             // its backdrop text would never show — only emit it for partial
             // (edge-clipped) cards, which have no overlay.
             if !full {
-                emit_card_text(&mut runs, card_rects, card, &lines, &band_cell, marker);
+                emit_card_text(
+                    &mut runs, card_rects, card, &lines, &band_cell, marker, palette, renaming,
+                );
             }
 
             if full {
                 let selected = card_rects.id == selected_id;
                 let local = layout_metrics.card_local_rects(card_rects.id, inset);
                 let mut card_runs = Vec::new();
-                emit_card_text(&mut card_runs, &local, card, &lines, &card_cell, marker);
+                emit_card_text(
+                    &mut card_runs, &local, card, &lines, &card_cell, marker, palette, renaming,
+                );
                 cards.push(SidebarCardDraw {
                     rect: card_rects.bounds,
                     grid: card_grid,
@@ -763,6 +885,7 @@ impl App {
                         SIDEBAR_CARD_BG
                     },
                     selected,
+                    attention: card.attention && marker,
                     runs: card_runs,
                 });
             }
@@ -857,10 +980,31 @@ fn window_run(
     })
 }
 
-/// Emit one card's text runs (status dot, project icon, bold name, updated-time,
-/// meta, the dim "最終出力" heading + separator, and the color-run preview)
+/// A truecolor SGR foreground prefix, embeddable inside a run's text (the run
+/// text is fed through a `Stream`, so inline escapes recolor mid-run).
+fn sgr_fg(color: Rgb) -> String {
+    format!("\x1b[38;2;{};{};{}m", color.r, color.g, color.b)
+}
+
+/// Resolve a preview span's pure `noa_core::Color` to a concrete sidebar RGB:
+/// the theme palette for indexed colors, the raw value for truecolor, and the
+/// sidebar's dim fg for the default (so uncolored output reads as secondary
+/// text on the card).
+fn resolve_preview_color(color: noa_core::Color, palette: &[Rgb; 256]) -> Rgb {
+    match color {
+        noa_core::Color::Default => SIDEBAR_DIM_FG,
+        noa_core::Color::Palette(index) => palette[index as usize],
+        noa_core::Color::Rgb(rgb) => rgb,
+    }
+}
+
+/// Emit one card's text runs (status dot, project icon, bold name, cwd, the
+/// meta row `process · ⎇ branch`, two color-run preview rows, updated-time)
 /// through `to_cell`. Shared by the flat backdrop (window coords) and each
-/// rounded overlay (card-local coords) so both agree on layout.
+/// rounded overlay (card-local coords) so both agree on layout. `renaming`
+/// carries the live rename buffer when this card's inline rename is open —
+/// it replaces the name run with the buffer + caret in the accent color.
+#[allow(clippy::too_many_arguments)]
 fn emit_card_text(
     out: &mut Vec<SidebarTextRun>,
     rects: &CardRects,
@@ -868,6 +1012,8 @@ fn emit_card_text(
     lines: &CardLines,
     to_cell: &impl Fn(u32, u32) -> (u16, u16),
     attention_marker: bool,
+    palette: &[Rgb; 256],
+    renaming: Option<&str>,
 ) {
     out.extend(window_run(
         to_cell,
@@ -883,15 +1029,12 @@ fn emit_card_text(
         icon_color(card.icon),
         false,
     ));
-    out.extend(window_run(
-        to_cell,
-        rects.name_line,
-        lines.name.clone(),
-        SIDEBAR_FG,
-        true,
-    ));
-    // One field per line: cwd, then branch (blank when absent), then process,
-    // then the updated-time — each dim except the branded process row.
+    let (name_text, name_fg) = match renaming {
+        // Inline rename (FR-7): the buffer plus a caret, in the accent color.
+        Some(buffer) => (format!("{buffer}▏"), SIDEBAR_ACCENT),
+        None => (lines.name.clone(), SIDEBAR_FG),
+    };
+    out.extend(window_run(to_cell, rects.name_line, name_text, name_fg, true));
     out.extend(window_run(
         to_cell,
         rects.cwd_line,
@@ -899,28 +1042,47 @@ fn emit_card_text(
         SIDEBAR_DIM_FG,
         false,
     ));
-    out.extend(window_run(
-        to_cell,
-        rects.branch_line,
-        lines.branch.clone(),
-        SIDEBAR_DIM_FG,
-        false,
-    ));
 
-    // Running-process row: a recognized AI agent gets its brand glyph/color/name
-    // (busy or idle); any other process shows green `✳` while running, dim `❯`
-    // while idle. A pending interaction request (FR-16) overrides the row with
-    // the attention color and appends the waiting label.
-    if rects.process.w > 0 && rects.process.h > 0 {
-        let (text, fg) = process_badge(&lines.process, card.busy);
-        // The attention treatment blinks (FR-A1): only apply it while the marker
-        // is in its visible phase, otherwise fall back to the plain badge.
-        let (text, fg) = if card.attention && attention_marker {
-            (format!("{text} · {ATTENTION_LABEL}"), SIDEBAR_DOT_RED)
+    // Meta row: a recognized AI agent gets its brand glyph/color/name (busy or
+    // idle); any other process shows green `✳` while running, dim `❯` while
+    // idle. The git branch follows on the same row, dim. A pending interaction
+    // request (FR-16) overrides the badge with the attention color and appends
+    // the waiting label; the treatment blinks (FR-A1) via `attention_marker`.
+    if rects.meta.w > 0 && rects.meta.h > 0 {
+        let (badge, badge_fg) = process_badge(&lines.process, card.busy);
+        let (badge, badge_fg) = if card.attention && attention_marker {
+            (format!("{badge} · {ATTENTION_LABEL}"), SIDEBAR_DOT_RED)
         } else {
-            (text, fg)
+            (badge, badge_fg)
         };
-        out.extend(window_run(to_cell, rects.process, text, fg, false));
+        let text = if lines.branch.is_empty() {
+            badge
+        } else {
+            // The dim branch suffix is recolored inline; the run fg colors the
+            // badge portion.
+            format!("{badge}{} · ⎇ {}", sgr_fg(SIDEBAR_DIM_FG), lines.branch)
+        };
+        out.extend(window_run(to_cell, rects.meta, text, badge_fg, false));
+    }
+
+    // Last-output preview rows (up to 2), in their original ANSI colors: each
+    // span is recolored inline via an embedded SGR prefix, so one run carries
+    // the whole line. Rows the card has no preview line for stay blank.
+    for (rect, line) in [
+        (rects.preview1, card.preview.first()),
+        (rects.preview2, card.preview.get(1)),
+    ] {
+        let Some(line) = line else { continue };
+        let mut text = String::new();
+        for span in line {
+            text.push_str(&sgr_fg(resolve_preview_color(span.fg, palette)));
+            text.push_str(&span.text);
+        }
+        let fg = line
+            .first()
+            .map(|span| resolve_preview_color(span.fg, palette))
+            .unwrap_or(SIDEBAR_DIM_FG);
+        out.extend(window_run(to_cell, rect, text, fg, false));
     }
 
     out.extend(window_run(
@@ -1153,6 +1315,13 @@ pub(super) fn draw_sidebar_band(
         focus_width: 2.0 * model.scale,
         focus_glow_width: 6.0 * model.scale,
     };
+    // A card whose attention marker is in its visible blink phase swaps the
+    // blue focus accent for a red ring (FR-16/FR-A1) — drawn selected so the
+    // ring + glow path lights up even when the card isn't the focused one.
+    let attention_style = CardStyle {
+        focus_color: rgb_to_rgba(SIDEBAR_DOT_RED),
+        ..card_style
+    };
     for card_draw in &model.cards {
         let Some((_, _, card_view)) = gpu.sidebar_card_tex.as_ref() else {
             break;
@@ -1172,19 +1341,24 @@ pub(super) fn draw_sidebar_band(
             card_draw.bg,
             &card_draw.runs,
         );
+        let (style, selected) = if card_draw.attention {
+            (&attention_style, true)
+        } else {
+            (&card_style, card_draw.selected)
+        };
         gpu.sidebar_card.as_ref().unwrap().pipeline.overlay_texture_cards(
             &gpu.device,
             &gpu.queue,
             view,
             surface_size,
-            &card_style,
+            style,
             &[CardTexturePlacement {
                 texture_view: &gpu.sidebar_card_tex.as_ref().unwrap().2,
                 x: card_draw.rect.x,
                 y: card_draw.rect.y,
                 w: card_draw.rect.w,
                 h: card_draw.rect.h,
-                selected: card_draw.selected,
+                selected,
             }],
         );
     }

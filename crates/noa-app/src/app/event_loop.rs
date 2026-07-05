@@ -284,6 +284,20 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // An open inline sidebar-card rename owns this window's
+                // keyboard (FR-7 Rename): printable text edits the buffer,
+                // Enter commits, Escape cancels — nothing leaks to keybinds or
+                // the pty while it is up.
+                if self
+                    .sidebar_rename
+                    .as_ref()
+                    .is_some_and(|session| session.window_id == window_id)
+                {
+                    if pressed {
+                        self.handle_sidebar_rename_key(&event);
+                    }
+                    return;
+                }
                 if pressed
                     && let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers)
                 {
@@ -332,11 +346,13 @@ impl ApplicationHandler<UserEvent> for App {
         let overview_deadline = self.tick_overview_backlog();
         let quick_terminal_deadline = self.tick_quick_terminal();
         let attention_deadline = self.tick_attention_blink();
+        let sidebar_clock_deadline = self.tick_sidebar_clock();
         let deadline = [
             blink_deadline,
             overview_deadline,
             quick_terminal_deadline,
             attention_deadline,
+            sidebar_clock_deadline,
         ]
         .into_iter()
         .flatten()

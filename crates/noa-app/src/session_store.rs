@@ -243,13 +243,20 @@ impl SessionStore {
         self.cards.get(id)
     }
 
-    /// Every live card id in a stable, deterministic order (by window id then
-    /// pane id). The sidebar's render and hit-test paths both read this so the
-    /// on-screen card order and the click target agree — a `HashMap` iteration
-    /// order would let them drift.
+    /// Every live card id in a stable, deterministic order: cards with a
+    /// pending attention request float to the top (so an agent waiting for the
+    /// user is never buried below the scroll fold), the rest sort by window id
+    /// then pane id. The attention flag only changes on an explicit request or
+    /// a window focus, so cards do not jump around on ordinary output ticks —
+    /// deliberately NOT a most-recently-updated sort. The sidebar's render and
+    /// hit-test paths both read this so the on-screen card order and the click
+    /// target agree — a `HashMap` iteration order would let them drift.
     pub fn ordered_ids(&self) -> Vec<SessionCardId> {
         let mut ids: Vec<SessionCardId> = self.cards.keys().copied().collect();
-        ids.sort_by_key(|id| (id.window_id.0, id.pane_id.get()));
+        ids.sort_by_key(|id| {
+            let attention = self.cards.get(id).is_some_and(|card| card.attention);
+            (!attention, id.window_id.0, id.pane_id.get())
+        });
         ids
     }
 
@@ -279,6 +286,13 @@ impl SessionStore {
     /// The number of live cards whose program is running (FR-5 header status).
     pub fn busy_count(&self) -> usize {
         self.cards.values().filter(|card| card.busy).count()
+    }
+
+    /// The number of live cards with a pending attention request (FR-16),
+    /// surfaced as a header badge so a request whose card has scrolled out of
+    /// the viewport is still noticeable.
+    pub fn attention_count(&self) -> usize {
+        self.cards.values().filter(|card| card.attention).count()
     }
 
     /// Apply one delta. This is the only mutation entry point for deltas, so
@@ -825,6 +839,30 @@ mod tests {
         assert_eq!(
             store.ordered_ids(),
             vec![card_id(1, 1), card_id(1, 3), card_id(2, 1)]
+        );
+    }
+
+    // A pending attention request floats its card to the top of the order, and
+    // clearing it (window focus) restores the plain window/pane sort.
+    #[test]
+    fn ordered_ids_float_attention_cards_to_the_top() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(1, 1), 1, "a"));
+        store.apply(upsert(card_id(1, 2), 1, "b"));
+        store.apply(upsert(card_id(2, 1), 1, "c"));
+
+        store.apply(SessionDelta::Attention { id: card_id(2, 1) });
+        assert_eq!(store.attention_count(), 1);
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(2, 1), card_id(1, 1), card_id(1, 2)]
+        );
+
+        store.clear_bell_for_window(SessionWindowId(2));
+        assert_eq!(store.attention_count(), 0);
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 1), card_id(1, 2), card_id(2, 1)]
         );
     }
 

@@ -523,8 +523,18 @@ pub fn load_file_overrides() -> anyhow::Result<(ConfigOverrides, Vec<Diagnostic>
     load_overrides_from_path(&path)
 }
 
+/// XDG-style config root: `$XDG_CONFIG_HOME`, defaulting to `~/.config`.
+/// Used instead of `dirs::config_dir()` because on macOS that resolves to
+/// `~/Library/Application Support` and noa standardizes on `~/.config/noa`.
+fn xdg_config_dir() -> Option<PathBuf> {
+    match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => dirs::home_dir().map(|home| home.join(".config")),
+    }
+}
+
 pub fn default_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|path| default_config_path_in(&path))
+    xdg_config_dir().map(|path| default_config_path_in(&path))
 }
 
 pub fn default_config_path_in(config_dir: &Path) -> PathBuf {
@@ -532,7 +542,7 @@ pub fn default_config_path_in(config_dir: &Path) -> PathBuf {
 }
 
 pub fn legacy_toml_config_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|path| legacy_toml_config_path_in(&path))
+    xdg_config_dir().map(|path| legacy_toml_config_path_in(&path))
 }
 
 pub fn legacy_toml_config_path_in(config_dir: &Path) -> PathBuf {

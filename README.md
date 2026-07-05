@@ -43,8 +43,8 @@ Options: `cargo run -p noa -- --cols 100 --rows 30 --font-size 15`.
 
 ### Configuration
 
-At startup, Noa reads `config` from the platform config directory
-(`~/Library/Application Support/noa/config` on macOS). Missing config files keep
+At startup, Noa reads `config` from `$XDG_CONFIG_HOME/noa/config`
+(`~/.config/noa/config` when `XDG_CONFIG_HOME` is unset). Missing config files keep
 the built-in defaults: `window-width = 80`, `window-height = 24`,
 `font-size = 14.0`, `minimum-contrast = 1.0`, and the built-in terminal theme.
 CLI flags override config file values.

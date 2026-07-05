@@ -126,6 +126,11 @@ struct GpuState {
     /// seam — a solid `CHROME_DIVIDER` strip composited over the band's right
     /// edge (the seam's crisp line; the soft shadow comes from the band glow).
     sidebar_divider_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// Reused scratch texture for the drag-reorder drop-indicator line — a solid
+    /// `CHROME_ACCENT` strip composited at the insertion gap during an active
+    /// card drag (the floating dragged card is drawn with the shared card
+    /// texture).
+    sidebar_drop_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// Single reused `Renderer` that rasterizes the open command palette's block
     /// (query + list) as terminal cells into `palette_scratch`, then composited
     /// as one rounded card (H). Built lazily for the first window's format.
@@ -185,12 +190,37 @@ struct WindowState {
     /// Opened by a `…` click, dismissed by the next click anywhere or by the
     /// sidebar toggling off.
     sidebar_menu: Option<SessionCardId>,
+    /// An in-flight sidebar card drag-reorder, or `None`. Set on a left-press
+    /// over a card and cleared on release; only becomes `active` once the
+    /// pointer moves past a small threshold, so a plain click still selects the
+    /// card (see `handle_sidebar_press` / `finish_active_sidebar_drag`).
+    sidebar_drag: Option<SidebarDrag>,
     /// Set when a left press was consumed by Cmd+click-to-open, so only the
     /// matching release is swallowed. Gating the release on "is a link
     /// still hovered" instead would eat the release of an unrelated
     /// selection drag or SGR-reported press whenever Cmd happens to be held
     /// over a link at mouse-up, desyncing those state machines.
     link_click_in_flight: bool,
+}
+
+/// An in-flight sidebar card drag-reorder (FR: card reordering). Recorded on a
+/// left-press over a card; the drag only becomes `active` once the pointer
+/// moves past a threshold, so a press-then-release without movement stays a
+/// plain card-select click.
+#[derive(Clone, Copy, Debug)]
+struct SidebarDrag {
+    /// The card being dragged.
+    card: SessionCardId,
+    /// Pointer y at press (physical px), to measure the drag threshold.
+    start_y: i64,
+    /// Offset (physical px) from the card's top to the grab point, so the
+    /// floating card follows the cursor without jumping.
+    grab_dy: i64,
+    /// Latest pointer y (physical px), updated on cursor-moved.
+    current_y: i64,
+    /// True once the pointer moved past the threshold — distinguishes a drag
+    /// from a click.
+    active: bool,
 }
 
 /// State for the dedicated overview window. It deliberately is not part of
@@ -1332,6 +1362,7 @@ impl App {
                 sidebar_card_tex: None,
                 sidebar_menu_tex: None,
                 sidebar_divider_tex: None,
+                sidebar_drop_tex: None,
                 palette_renderer: None,
                 palette_card: None,
                 palette_scratch: None,
@@ -1414,6 +1445,7 @@ impl App {
                 title: "Noa".to_string(),
                 sidebar_scroll: 0,
                 sidebar_menu: None,
+                sidebar_drag: None,
                 link_click_in_flight: false,
             },
         );

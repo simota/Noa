@@ -407,6 +407,52 @@ impl SidebarMetrics {
         Some(SidebarHit::Card(id))
     }
 
+    /// The insertion index a drag-reorder drop at `pointer_y` (window px) maps
+    /// to, in `[0, card_count]`: 0 drops before the first card, `card_count`
+    /// past the last. The pointer is clamped into the viewport and translated to
+    /// scroll-content space, then snapped to the nearest card *gap* (half-stride
+    /// rounding) so a drop lands where the drop indicator is drawn. The caller
+    /// turns the index into a neighbor id for
+    /// [`SessionStore::move_card_before`](crate::session_store::SessionStore::move_card_before).
+    pub fn drop_index(
+        &self,
+        viewport: SidebarRect,
+        card_count: usize,
+        scroll_offset: u32,
+        pointer_y: u32,
+    ) -> usize {
+        if self.card_stride == 0 {
+            return 0;
+        }
+        let content_h = self.content_height(card_count);
+        let scroll = clamp_scroll(scroll_offset, content_h, viewport.h);
+        let py = pointer_y.clamp(viewport.y, viewport.bottom());
+        let cy = (py - viewport.y) as u64 + scroll as u64;
+        // Round to the nearest gap: the gap before card `i` sits at `i * stride`.
+        let idx = ((cy + self.card_stride as u64 / 2) / self.card_stride as u64) as usize;
+        idx.min(card_count)
+    }
+
+    /// The y of the drop-indicator line (window px) for insertion `index`, or
+    /// `None` when it would fall outside the viewport. Mirrors
+    /// [`drop_index`](Self::drop_index)'s gap positions: index `i` sits at the
+    /// top of card `i` (`i * stride`), clamped to the viewport edges.
+    pub fn drop_indicator_y(
+        &self,
+        viewport: SidebarRect,
+        card_count: usize,
+        scroll_offset: u32,
+        index: usize,
+    ) -> Option<u32> {
+        let content_h = self.content_height(card_count);
+        let scroll = clamp_scroll(scroll_offset, content_h, viewport.h);
+        let top = index as i64 * self.card_stride as i64 - scroll as i64 + viewport.y as i64;
+        // Clamp to the viewport so a drop at the very top/bottom still shows a
+        // line flush with the edge.
+        let clamped = top.clamp(viewport.y as i64, viewport.bottom() as i64);
+        Some(clamped as u32)
+    }
+
     /// The popup rect for a card's `…` menu, anchored just below its menu button
     /// (`anchor` = the card's `menu_button` rect) and right-aligned to it,
     /// clamped so it never spills past the sidebar's right edge (`sidebar_w`).
@@ -1040,6 +1086,44 @@ mod tests {
             popup.bottom() > sidebar_h,
             "a bottom-anchored popup overflows the window and is not drawn"
         );
+    }
+
+    // Drag-reorder drop math: the pointer snaps to the nearest card gap, and
+    // the indicator y tracks that gap. 3 cards, viewport tall enough for all.
+    #[test]
+    fn drop_index_snaps_to_nearest_gap() {
+        let (bounds, ids) = six_id_bounds();
+        let vp = m1().bands(bounds).viewport;
+        let n = ids.len();
+
+        // Near the top of the first card → insert before it (index 0).
+        assert_eq!(m1().drop_index(vp, n, 0, vp.y + 2), 0);
+        // Just past the first card's midpoint → gap after it (index 1).
+        assert_eq!(m1().drop_index(vp, n, 0, vp.y + SIDEBAR_CARD_H), 1);
+        // A drop far below every card clamps to the viewport, so the index is
+        // bounded by how many cards fit on screen, never past `n`.
+        let idx = m1().drop_index(vp, n, 0, vp.bottom());
+        assert!(idx <= n);
+
+        // The indicator sits at the gap's window y: index 1 → one stride down.
+        let y0 = m1().drop_indicator_y(vp, n, 0, 0).unwrap();
+        let y1 = m1().drop_indicator_y(vp, n, 0, 1).unwrap();
+        assert_eq!(y0, vp.y);
+        assert_eq!(y1, vp.y + SIDEBAR_CARD_STRIDE);
+    }
+
+    // With the list scrolled, the drop index accounts for the scroll offset so a
+    // drop maps to the card actually under the cursor.
+    #[test]
+    fn drop_index_accounts_for_scroll() {
+        let (bounds, ids) = six_id_bounds();
+        let vp = m1().bands(bounds).viewport;
+        let n = ids.len();
+        let max = clamp_scroll(u32::MAX, m1().content_height(n), vp.h);
+        // Scrolled to the bottom, a drop at the very bottom lands at/after the
+        // last card (index near `n`).
+        let idx = m1().drop_index(vp, n, max, vp.bottom());
+        assert!(idx >= n - 1 && idx <= n);
     }
 
     #[test]

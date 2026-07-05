@@ -224,6 +224,14 @@ pub struct SessionStore {
     /// to evict the oldest when the cap is exceeded. Kept exactly in sync with
     /// the map: every key appears here once, and only keys present in the map.
     tombstone_order: VecDeque<SessionCardId>,
+    /// User-defined card sequence, set by a sidebar drag-reorder
+    /// ([`move_card_before`](Self::move_card_before)). Empty until the user first
+    /// reorders — while empty, [`ordered_ids`](Self::ordered_ids) falls back to
+    /// the natural window/pane sort so behavior is unchanged. Once set, it is the
+    /// source of truth for the base sequence; live cards missing from it (freshly
+    /// spawned after a reorder) append in natural order, and dead ids are pruned
+    /// in [`retire`](Self::retire). Not persisted across restarts (v1 scope).
+    manual_order: Vec<SessionCardId>,
 }
 
 impl SessionStore {
@@ -252,12 +260,80 @@ impl SessionStore {
     /// hit-test paths both read this so the on-screen card order and the click
     /// target agree — a `HashMap` iteration order would let them drift.
     pub fn ordered_ids(&self) -> Vec<SessionCardId> {
-        let mut ids: Vec<SessionCardId> = self.cards.keys().copied().collect();
-        ids.sort_by_key(|id| {
-            let attention = self.cards.get(id).is_some_and(|card| card.attention);
-            (!attention, id.window_id.0, id.pane_id.get())
-        });
+        let mut ids = self.base_order_ids();
+        // Stable partition: cards with a pending attention request float to the
+        // top while every card keeps its base-order position among its peers.
+        // `sort_by_key` is a stable sort, so the manual/natural sequence within
+        // each group survives.
+        ids.sort_by_key(|id| !self.cards.get(id).is_some_and(|card| card.attention));
         ids
+    }
+
+    /// The base card sequence *before* the attention float: the user's manual
+    /// order when set (dead ids filtered, freshly-spawned cards appended in
+    /// natural order), else the natural window/pane sort. Split out so
+    /// [`move_card_before`](Self::move_card_before) can materialize a full,
+    /// attention-independent sequence to edit.
+    fn base_order_ids(&self) -> Vec<SessionCardId> {
+        if self.manual_order.is_empty() {
+            return self.natural_order_ids();
+        }
+        let mut seq: Vec<SessionCardId> = self
+            .manual_order
+            .iter()
+            .copied()
+            .filter(|id| self.cards.contains_key(id))
+            .collect();
+        let placed: HashSet<SessionCardId> = seq.iter().copied().collect();
+        // Cards spawned after the last reorder aren't in `manual_order` yet;
+        // append them in natural order so they land in a deterministic spot.
+        for id in self.natural_order_ids() {
+            if !placed.contains(&id) {
+                seq.push(id);
+            }
+        }
+        seq
+    }
+
+    /// Every live card id sorted by window id then pane id — the deterministic
+    /// default order used when the user has not manually reordered.
+    fn natural_order_ids(&self) -> Vec<SessionCardId> {
+        let mut ids: Vec<SessionCardId> = self.cards.keys().copied().collect();
+        ids.sort_by_key(|id| (id.window_id.0, id.pane_id.get()));
+        ids
+    }
+
+    /// Move `moved` to sit immediately before `anchor` in the card sequence, or
+    /// to the end when `anchor` is `None` (a drop past the last card). Called by
+    /// the sidebar drag-reorder. Neighbor-relative rather than index-based so it
+    /// works regardless of the per-window filtering the sidebar applies to the
+    /// visible list. Materializes the current base order into `manual_order` on
+    /// the first reorder so unmoved cards keep their on-screen position. Returns
+    /// `true` when the sequence actually changed (a redraw is worth requesting).
+    pub fn move_card_before(
+        &mut self,
+        moved: SessionCardId,
+        anchor: Option<SessionCardId>,
+    ) -> bool {
+        if !self.cards.contains_key(&moved) || anchor == Some(moved) {
+            return false;
+        }
+        let base = self.base_order_ids();
+        let mut seq = base.clone();
+        let Some(from) = seq.iter().position(|&id| id == moved) else {
+            return false;
+        };
+        seq.remove(from);
+        let to = match anchor {
+            Some(anchor) => seq.iter().position(|&id| id == anchor).unwrap_or(seq.len()),
+            None => seq.len(),
+        };
+        seq.insert(to, moved);
+        if seq == base {
+            return false;
+        }
+        self.manual_order = seq;
+        true
     }
 
     /// [`ordered_ids`](Self::ordered_ids), filtered to cards whose `window_id`
@@ -435,6 +511,11 @@ impl SessionStore {
     fn retire(&mut self, id: SessionCardId) {
         if let Some(card) = self.cards.remove(&id) {
             self.tombstone(id, card.seq);
+            // Keep the manual order free of dead ids so it doesn't grow for the
+            // process lifetime (mirrors the tombstone cap's intent). `ordered_ids`
+            // already filters to live cards, so this is housekeeping, not
+            // correctness.
+            self.manual_order.retain(|&pending| pending != id);
         }
     }
 
@@ -890,6 +971,97 @@ mod tests {
             store.ordered_ids(),
             vec![card_id(1, 1), card_id(1, 2), card_id(2, 1)]
         );
+    }
+
+    // Drag-reorder: moving a card before another rewrites the sequence, and the
+    // manual order becomes the source of truth (overriding the window/pane sort).
+    #[test]
+    fn move_card_before_reorders_and_sticks() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(1, 1), 1, "a"));
+        store.apply(upsert(card_id(1, 2), 1, "b"));
+        store.apply(upsert(card_id(1, 3), 1, "c"));
+        // Natural order is a, b, c.
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 1), card_id(1, 2), card_id(1, 3)]
+        );
+
+        // Drag c above a: c, a, b.
+        assert!(store.move_card_before(card_id(1, 3), Some(card_id(1, 1))));
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 3), card_id(1, 1), card_id(1, 2)]
+        );
+
+        // Drop past the last card (anchor None) sends a to the end: c, b, a.
+        assert!(store.move_card_before(card_id(1, 1), None));
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 3), card_id(1, 2), card_id(1, 1)]
+        );
+    }
+
+    // A no-op move (dropping a card onto itself or into its own slot) reports no
+    // change so the caller can skip the redraw.
+    #[test]
+    fn move_card_before_noop_returns_false() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(1, 1), 1, "a"));
+        store.apply(upsert(card_id(1, 2), 1, "b"));
+        // Onto itself.
+        assert!(!store.move_card_before(card_id(1, 1), Some(card_id(1, 1))));
+        // Into its own slot (a before b is already the order).
+        assert!(!store.move_card_before(card_id(1, 1), Some(card_id(1, 2))));
+        // Unknown card.
+        assert!(!store.move_card_before(card_id(9, 9), None));
+    }
+
+    // Attention float still wins over a manual order: a reordered list keeps its
+    // relative sequence, but an attention card rises to the top.
+    #[test]
+    fn manual_order_preserved_under_attention_float() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(1, 1), 1, "a"));
+        store.apply(upsert(card_id(1, 2), 1, "b"));
+        store.apply(upsert(card_id(1, 3), 1, "c"));
+        // Manual order: c, b, a.
+        store.move_card_before(card_id(1, 3), Some(card_id(1, 1)));
+        store.move_card_before(card_id(1, 2), Some(card_id(1, 1)));
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 3), card_id(1, 2), card_id(1, 1)]
+        );
+        // a raises attention → floats above the manual sequence, which is
+        // otherwise preserved (c, b).
+        store.apply(SessionDelta::Attention { id: card_id(1, 1) });
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 1), card_id(1, 3), card_id(1, 2)]
+        );
+    }
+
+    // A card spawned after a reorder appends in natural order; a removed card is
+    // pruned from the manual sequence.
+    #[test]
+    fn manual_order_handles_spawn_and_remove() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(1, 1), 1, "a"));
+        store.apply(upsert(card_id(1, 2), 1, "b"));
+        store.move_card_before(card_id(1, 2), Some(card_id(1, 1))); // b, a
+        // A new card appends after the manual sequence.
+        store.apply(upsert(card_id(1, 3), 1, "c"));
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 2), card_id(1, 1), card_id(1, 3)]
+        );
+        // Removing the manually-placed head drops it from the sequence.
+        store.apply(SessionDelta::Remove { id: card_id(1, 2) });
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 1), card_id(1, 3)]
+        );
+        assert!(!store.manual_order.contains(&card_id(1, 2)));
     }
 
     // AC-1: filtering to one group's windows excludes the other group's cards

@@ -73,6 +73,14 @@ const SIDEBAR_DIVIDER: Rgb = crate::chrome::CHROME_DIVIDER;
 const SEAM_SHADOW_WIDTH: f32 = 10.0;
 const SEAM_HAIRLINE_WIDTH: f32 = 1.0;
 
+/// Pointer travel (logical px, scaled at use) that promotes a card press to a
+/// drag-reorder. Below it a press-then-release stays a plain card-select click.
+const SIDEBAR_DRAG_THRESHOLD: f32 = 5.0;
+
+/// Thickness (logical px, scaled) of the drop-indicator line drawn at the
+/// insertion gap during an active card drag.
+const SIDEBAR_DROP_INDICATOR_H: f32 = 2.0;
+
 // Brand accents for recognized AI agents (agent branding). Truecolor, applied
 // to the process row + header whenever the process classifies, busy or idle.
 const AGENT_CLAUDE_FG: Rgb = Rgb::new(0xd9, 0x77, 0x57); // Anthropic clay
@@ -221,6 +229,13 @@ pub(super) struct SidebarDrawModel {
     runs: Vec<SidebarTextRun>,
     cards: Vec<SidebarCardDraw>,
     menu: Option<SidebarMenuDraw>,
+    /// The floating copy of the card being drag-reordered, positioned under the
+    /// cursor and composited above every static card. `None` unless a drag is
+    /// active in this window.
+    dragging: Option<SidebarCardDraw>,
+    /// The accent drop-indicator line at the insertion gap during an active
+    /// drag, or `None`.
+    drop_indicator: Option<SidebarRect>,
     /// `background-opacity` (FR: sidebar translucency), applied to the flat
     /// band and card backdrops so they show the macOS blur the same way the
     /// terminal panes do. The divider hairline and the `…` menu popup stay
@@ -583,7 +598,25 @@ impl App {
         let ids = self.session_store.ordered_ids_for_windows(&windows);
         match metrics.hit_test(bounds, &ids, scroll, point) {
             Some(crate::sidebar::SidebarHit::Card(card)) => {
-                self.focus_session_card(card);
+                // Begin a *pending* drag-reorder rather than focusing now: a
+                // plain click (release without moving past the threshold) still
+                // selects the card in `finish_active_sidebar_drag`, while a drag
+                // reorders it. `grab_dy` anchors the floating card to the cursor.
+                let card_top = metrics
+                    .layout(bounds, &ids, scroll)
+                    .cards
+                    .iter()
+                    .find(|c| c.id == card)
+                    .map_or(point.y as i64, |c| c.bounds.y as i64);
+                if let Some(state) = self.windows.get_mut(&window_id) {
+                    state.sidebar_drag = Some(SidebarDrag {
+                        card,
+                        start_y: point.y as i64,
+                        grab_dy: point.y as i64 - card_top,
+                        current_y: point.y as i64,
+                        active: false,
+                    });
+                }
                 true
             }
             Some(crate::sidebar::SidebarHit::CardMenu(card)) => {
@@ -794,6 +827,90 @@ impl App {
         window.focus_window();
     }
 
+    /// Advance an in-flight sidebar card drag on a cursor move. Returns `true`
+    /// whenever a press-originated drag is pending for this window, so the caller
+    /// stops before the terminal's selection/mouse-report handling sees the move
+    /// (a pending drag must never start a text selection). The drag only flips to
+    /// `active` — and starts requesting redraws for the floating card / drop
+    /// indicator — once the pointer moves past a small DPR-scaled threshold.
+    pub(super) fn drag_active_sidebar(
+        &mut self,
+        window_id: WindowId,
+        point: split_tree::Point,
+    ) -> bool {
+        let scale = self
+            .windows
+            .get(&window_id)
+            .map_or(1.0, |s| s.window.scale_factor() as f32);
+        let threshold = (SIDEBAR_DRAG_THRESHOLD * scale).max(1.0) as i64;
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return false;
+        };
+        let Some(drag) = state.sidebar_drag.as_mut() else {
+            return false;
+        };
+        drag.current_y = point.y as i64;
+        if !drag.active && (drag.current_y - drag.start_y).abs() >= threshold {
+            drag.active = true;
+        }
+        if drag.active {
+            state.window.request_redraw();
+        }
+        true
+    }
+
+    /// Finish a sidebar card drag on left-release. A release that never crossed
+    /// the drag threshold is a plain click and selects the card (the focus we
+    /// deferred at press time). An active drag commits the reorder by mapping the
+    /// drop position to a neighbor anchor and calling
+    /// [`SessionStore::move_card_before`]. Returns `true` when a drag was in
+    /// flight (so the caller swallows the release).
+    pub(super) fn finish_active_sidebar_drag(&mut self, window_id: WindowId) -> bool {
+        let Some(drag) = self
+            .windows
+            .get_mut(&window_id)
+            .and_then(|s| s.sidebar_drag.take())
+        else {
+            return false;
+        };
+        if !drag.active {
+            self.focus_session_card(drag.card);
+            return true;
+        }
+        let anchor = self.sidebar_drop_anchor(window_id, drag.current_y);
+        if self.session_store.move_card_before(drag.card, anchor) {
+            self.request_sidebar_redraw();
+        } else if let Some(state) = self.windows.get(&window_id) {
+            // Order unchanged (dropped in place): repaint so the floating card
+            // snaps back to its slot.
+            state.window.request_redraw();
+        }
+        true
+    }
+
+    /// The neighbor card a drop at `pointer_y` (physical px) should insert
+    /// *before*, or `None` for a drop past the last card (append). Recomputes the
+    /// pure layout the drawer uses so the drop target matches what's on screen.
+    fn sidebar_drop_anchor(
+        &self,
+        window_id: WindowId,
+        pointer_y: i64,
+    ) -> Option<SessionCardId> {
+        let inset = self.window_sidebar_inset_px(window_id);
+        if inset == 0 {
+            return None;
+        }
+        let state = self.windows.get(&window_id)?;
+        let bounds = SidebarRect::new(0, 0, inset, state.window.inner_size().height);
+        let metrics = self.sidebar_metrics(window_id);
+        let vp = metrics.bands(bounds).viewport;
+        let windows = self.session_windows_for_window(window_id);
+        let ids = self.session_store.ordered_ids_for_windows(&windows);
+        let py = pointer_y.clamp(0, u32::MAX as i64) as u32;
+        let idx = metrics.drop_index(vp, ids.len(), state.sidebar_scroll, py);
+        ids.get(idx).copied()
+    }
+
     /// Build the per-frame sidebar draw model for `window_id` (FR-2/FR-5), or
     /// `None` when the window has no visible sidebar. Reads only the store and
     /// the pure layout — never a `Terminal` (AC-17). Computed before the redraw
@@ -860,7 +977,14 @@ impl App {
         let card_band = PaneRectApp::new(0, 0, inset, layout_metrics.card_h);
         let card_grid = grid_size_for_pane_rect(card_band, metrics, self.padding);
         let card_cell = to_cell(card_grid);
+        // The card being drag-reordered is drawn as a floating copy below (2b),
+        // so its static slot is left as a bare backdrop gap — the affordance that
+        // the card has lifted out of the list.
+        let dragging_id = state.sidebar_drag.filter(|d| d.active).map(|d| d.card);
         for card_rects in &layout.cards {
+            if Some(card_rects.id) == dragging_id {
+                continue;
+            }
             let Some(card) = self.session_store.get(&card_rects.id) else {
                 continue;
             };
@@ -937,6 +1061,50 @@ impl App {
             })
         });
 
+        // Active card drag (FR: reordering): float a copy of the dragged card
+        // under the cursor and mark the insertion gap with an accent line. The
+        // static copy stays in its slot (occluded by the float while overlapping)
+        // so the list reads continuously; the line shows where a drop lands.
+        let (dragging, drop_indicator) = state
+            .sidebar_drag
+            .filter(|drag| drag.active)
+            .and_then(|drag| {
+                let card = self.session_store.get(&drag.card)?;
+                let lines = card_lines(card, now, home.as_deref());
+                let marker = self.attention_marker_visible(&drag.card);
+                let local = layout_metrics.card_local_rects(drag.card, inset);
+                let mut card_runs = Vec::new();
+                emit_card_text(
+                    &mut card_runs, &local, card, &lines, &card_cell, marker, palette, None,
+                );
+                // Floating top follows the cursor, clamped inside the band.
+                let max_top = height.saturating_sub(layout_metrics.card_h) as i64;
+                let top = (drag.current_y - drag.grab_dy).clamp(0, max_top) as u32;
+                let float = SidebarCardDraw {
+                    rect: SidebarRect::new(0, top, inset, layout_metrics.card_h),
+                    grid: card_grid,
+                    bg: SIDEBAR_CARD_BG_SELECTED,
+                    selected: true,
+                    attention: false,
+                    runs: card_runs,
+                };
+                // Drop indicator at the target gap, spanning the card width with a
+                // small horizontal inset so it reads as a rule, not a full band.
+                let vp = layout.viewport;
+                let py = drag.current_y.clamp(0, u32::MAX as i64) as u32;
+                let idx = layout_metrics.drop_index(vp, ids.len(), state.sidebar_scroll, py);
+                let indicator = layout_metrics
+                    .drop_indicator_y(vp, ids.len(), state.sidebar_scroll, idx)
+                    .map(|y| {
+                        let line_h = (SIDEBAR_DROP_INDICATOR_H * scale).round().max(1.0) as u32;
+                        let inset_x = (12.0 * scale).round() as u32;
+                        let w = inset.saturating_sub(inset_x.saturating_mul(2)).max(1);
+                        SidebarRect::new(inset_x, y.saturating_sub(line_h / 2), w, line_h)
+                    });
+                Some((Some(float), indicator))
+            })
+            .unwrap_or((None, None));
+
         Some(SidebarDrawModel {
             inset,
             height,
@@ -946,6 +1114,8 @@ impl App {
             runs,
             cards,
             menu,
+            dragging,
+            drop_indicator,
             background_opacity: self.config.background_opacity,
         })
     }
@@ -1616,6 +1786,98 @@ pub(super) fn draw_sidebar_band(
                 w: card_draw.rect.w,
                 h: card_draw.rect.h,
                 selected,
+            }],
+        );
+    }
+
+    // 2b) Drag-reorder feedback: the accent drop-indicator line at the insertion
+    // gap, then the floating dragged card composited above every static card.
+    if let Some(line) = &model.drop_indicator {
+        ensure_scratch(
+            &mut gpu.sidebar_drop_tex,
+            &gpu.device,
+            PixelSize {
+                w: line.w.max(1),
+                h: line.h.max(1),
+            },
+            surface_format,
+            "noa-sidebar-drop",
+        );
+        if let Some((_, _, drop_view)) = gpu.sidebar_drop_tex.as_ref() {
+            rasterize_runs(
+                gpu.sidebar_renderer.as_mut().unwrap(),
+                &gpu.device,
+                &gpu.queue,
+                &mut gpu.sidebar_font,
+                &gpu.theme,
+                drop_view,
+                PixelSize {
+                    w: line.w.max(1),
+                    h: line.h.max(1),
+                },
+                GridSize { cols: 1, rows: 1 },
+                SIDEBAR_ACCENT,
+                1.0,
+                &[],
+            );
+            let drop_style = CardStyle {
+                background: rgb_to_rgba(SIDEBAR_ACCENT),
+                border_color: [0.0; 4],
+                focus_color: [0.0; 4],
+                corner_radius: (line.h as f32 / 2.0).min(3.0 * model.scale),
+                border_width: 0.0,
+                focus_width: 0.0,
+                focus_glow_width: 0.0,
+            };
+            gpu.sidebar_card.as_ref().unwrap().pipeline.overlay_texture_cards(
+                &gpu.device,
+                &gpu.queue,
+                view,
+                surface_size,
+                &drop_style,
+                &[CardTexturePlacement {
+                    texture_view: drop_view,
+                    x: line.x,
+                    y: line.y,
+                    w: line.w,
+                    h: line.h,
+                    selected: false,
+                }],
+            );
+        }
+    }
+    if let Some(drag) = &model.dragging
+        && let Some((_, _, card_view)) = gpu.sidebar_card_tex.as_ref()
+    {
+        rasterize_runs(
+            gpu.sidebar_renderer.as_mut().unwrap(),
+            &gpu.device,
+            &gpu.queue,
+            &mut gpu.sidebar_font,
+            &gpu.theme,
+            card_view,
+            PixelSize {
+                w: model.inset,
+                h: model.card_h,
+            },
+            drag.grid,
+            drag.bg,
+            model.background_opacity,
+            &drag.runs,
+        );
+        gpu.sidebar_card.as_ref().unwrap().pipeline.overlay_texture_cards(
+            &gpu.device,
+            &gpu.queue,
+            view,
+            surface_size,
+            &card_style,
+            &[CardTexturePlacement {
+                texture_view: &gpu.sidebar_card_tex.as_ref().unwrap().2,
+                x: drag.rect.x,
+                y: drag.rect.y,
+                w: drag.rect.w,
+                h: drag.rect.h,
+                selected: true,
             }],
         );
     }

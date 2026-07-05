@@ -492,6 +492,9 @@ impl App {
             self.sync_hover_link(window_id);
             return;
         };
+        if self.drag_active_sidebar(window_id, point) {
+            return;
+        }
         if self.drag_active_split(window_id, point) {
             return;
         }
@@ -576,6 +579,9 @@ impl App {
                     }
                 }
                 ElementState::Released => {
+                    if self.finish_active_sidebar_drag(window_id) {
+                        return;
+                    }
                     if self.finish_active_split_drag(window_id) {
                         return;
                     }

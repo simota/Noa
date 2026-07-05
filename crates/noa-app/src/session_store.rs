@@ -122,6 +122,10 @@ pub struct SessionCard {
     pub icon: IconKind,
     pub unread_bell: bool,
     pub busy: bool,
+    /// The tty's current foreground process name (FR — running-process display),
+    /// e.g. `zsh` / `cargo` / `claude`. `None` until the session-metadata worker
+    /// resolves it, or where detection is unavailable (non-macOS, NFR-5).
+    pub process: Option<String>,
     pub updated_at: WallClock,
     /// Last-output preview lines (up to 2; FR-2), each carrying its color runs
     /// so the sidebar renders output in its original ANSI colors. Filled by the
@@ -170,6 +174,12 @@ pub enum SessionDelta {
     /// Mark an unread bell (FR-11). Cleared by the main thread when the card's
     /// window gains focus.
     Bell { id: SessionCardId },
+    /// Update the tty's foreground process name (session-metadata worker). Posted
+    /// on a poll tick, so it carries only the process; other fields are untouched.
+    Process {
+        id: SessionCardId,
+        process: Option<String>,
+    },
 }
 
 impl SessionDelta {
@@ -180,7 +190,8 @@ impl SessionDelta {
             | SessionDelta::Remove { id }
             | SessionDelta::Branch { id, .. }
             | SessionDelta::Rename { id, .. }
-            | SessionDelta::Bell { id } => *id,
+            | SessionDelta::Bell { id }
+            | SessionDelta::Process { id, .. } => *id,
         }
     }
 }
@@ -303,6 +314,7 @@ impl SessionStore {
                                 icon: IconKind::default(),
                                 unread_bell: false,
                                 busy,
+                                process: None,
                                 updated_at,
                                 preview,
                                 seq,
@@ -328,6 +340,11 @@ impl SessionStore {
             SessionDelta::Bell { id } => {
                 if let Some(card) = self.cards.get_mut(&id) {
                     card.unread_bell = true;
+                }
+            }
+            SessionDelta::Process { id, process } => {
+                if let Some(card) = self.cards.get_mut(&id) {
+                    card.process = process;
                 }
             }
         }
@@ -664,6 +681,7 @@ mod tests {
             icon: IconKind::default(),
             unread_bell: false,
             busy: false,
+            process: None,
             updated_at: wall(10, 0),
             preview: Vec::new(),
             seq: 1,

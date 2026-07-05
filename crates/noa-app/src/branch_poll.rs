@@ -1,5 +1,11 @@
-//! Dedicated branch-poll worker (spec `docs/specs/session-sidebar.md` FR-8/FR-9,
-//! ADR 0001 constraint a; NFR-2/NFR-3). Ghostty has no analog.
+//! Dedicated session-metadata worker (spec `docs/specs/session-sidebar.md`
+//! FR-8/FR-9 + running-process display, ADR 0001 constraint a; NFR-2/NFR-3).
+//! Ghostty has no analog.
+//!
+//! Two off-the-read-loop jobs share this one thread: cwd-driven git branch /
+//! project-icon polling (below), and a ~1s tick that reads each live session's
+//! foreground process name from a [`ForegroundProcessProbe`] and posts a
+//! [`SessionDelta::Process`] on change (running-process display).
 //!
 //! git must never be spawned on the io read loop (`io_thread::feed_terminal`,
 //! AC-18): a slow `git` on a network filesystem would stall pty draining. So a
@@ -15,17 +21,37 @@
 //! or filesystem inside) so both are unit-testable without wall-clock sleeps or
 //! a real directory (AC-10/AC-11).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
+use noa_pty::ForegroundProcessProbe;
 use winit::event_loop::EventLoopProxy;
 
 use crate::events::UserEvent;
 use crate::session_store::{IconKind, SessionCardId, SessionDelta};
+
+/// Poll interval for each live session's foreground process (running-process
+/// display). Matches [`BRANCH_POLL_MIN_INTERVAL`]; the tick only fires while at
+/// least one probe is registered and a sidebar is visible (AC-18 discipline —
+/// no background work when nothing consumes it).
+pub const PROCESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// A registration change for a session's foreground-process probe. The io/main
+/// thread hands over a probe when a pane spawns and prunes dead ones on GC.
+pub(crate) enum ProbeControl {
+    Register {
+        id: SessionCardId,
+        probe: ForegroundProcessProbe,
+    },
+    /// Drop every probe whose id is not in this live set (GC choke point).
+    Retain(HashSet<SessionCardId>),
+}
 
 /// Minimum interval between two `git` spawns for the *same* cwd (NFR-3). A
 /// cwd-change request that arrives within this window of the last poll for that
@@ -97,6 +123,7 @@ pub fn decide_branch_poll(
 /// closes the request channel and joins the thread.
 pub(crate) struct BranchPollHandle {
     request_tx: Sender<BranchPollRequest>,
+    probe_tx: Sender<ProbeControl>,
     shutdown_tx: Sender<()>,
     join: Option<std::thread::JoinHandle<()>>,
 }
@@ -112,6 +139,21 @@ impl BranchPollHandle {
     /// card's cwd actually changes), so it never backs up in practice.
     pub(crate) fn request(&self, id: SessionCardId, cwd: String) {
         let _ = self.request_tx.send(BranchPollRequest { id, cwd });
+    }
+
+    /// Register a session's foreground-process probe (running-process display).
+    /// The worker polls it on [`PROCESS_POLL_INTERVAL`] while a sidebar is
+    /// visible and posts a [`SessionDelta::Process`] whenever the name changes.
+    pub(crate) fn register_process_probe(&self, id: SessionCardId, probe: ForegroundProcessProbe) {
+        let _ = self.probe_tx.send(ProbeControl::Register { id, probe });
+    }
+
+    /// Prune probes for sessions no longer live (GC choke point, mirrors
+    /// [`crate::session_store::SessionStore::reconcile_sessions`]).
+    pub(crate) fn retain_process_probes(&self, live: &[SessionCardId]) {
+        let _ = self
+            .probe_tx
+            .send(ProbeControl::Retain(live.iter().copied().collect()));
     }
 
     /// Signal shutdown and join the worker within a bounded timeout, matching
@@ -140,15 +182,22 @@ impl BranchPollHandle {
 
 /// Spawn the branch-poll worker (FR-8/FR-9). Runs until [`BranchPollHandle`] is
 /// shut down or the event loop is gone.
-pub(crate) fn spawn(proxy: EventLoopProxy<UserEvent>) -> BranchPollHandle {
+pub(crate) fn spawn(
+    proxy: EventLoopProxy<UserEvent>,
+    sidebar_visible: Arc<AtomicBool>,
+) -> BranchPollHandle {
     let (request_tx, request_rx) = crossbeam_channel::unbounded::<BranchPollRequest>();
+    let (probe_tx, probe_rx) = crossbeam_channel::unbounded::<ProbeControl>();
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
     let join = std::thread::Builder::new()
-        .name("noa-branch-poll".to_string())
-        .spawn(move || worker_loop(&proxy, &request_rx, &shutdown_rx))
-        .expect("failed to spawn branch-poll thread");
+        .name("noa-session-meta".to_string())
+        .spawn(move || {
+            worker_loop(&proxy, &request_rx, &probe_rx, &shutdown_rx, &sidebar_visible)
+        })
+        .expect("failed to spawn session-metadata thread");
     BranchPollHandle {
         request_tx,
+        probe_tx,
         shutdown_tx,
         join: Some(join),
     }
@@ -157,14 +206,37 @@ pub(crate) fn spawn(proxy: EventLoopProxy<UserEvent>) -> BranchPollHandle {
 fn worker_loop(
     proxy: &EventLoopProxy<UserEvent>,
     request_rx: &Receiver<BranchPollRequest>,
+    probe_rx: &Receiver<ProbeControl>,
     shutdown_rx: &Receiver<()>,
+    sidebar_visible: &AtomicBool,
 ) {
     let mut cache: HashMap<String, BranchCache> = HashMap::new();
+    // Per-session foreground-process probe + last-posted name (so only changes
+    // are posted).
+    let mut probes: HashMap<SessionCardId, (ForegroundProcessProbe, Option<String>)> =
+        HashMap::new();
     loop {
         let mut sel = crossbeam_channel::Select::new();
         let shutdown_op = sel.recv(shutdown_rx);
         let request_op = sel.recv(request_rx);
-        let oper = sel.select();
+        let probe_op = sel.recv(probe_rx);
+
+        // Tick to poll processes only while there is something to poll and a
+        // sidebar is showing it (AC-18: no idle background work).
+        let tick = !probes.is_empty() && sidebar_visible.load(Ordering::Relaxed);
+        let selected = if tick {
+            sel.select_timeout(PROCESS_POLL_INTERVAL).ok()
+        } else {
+            Some(sel.select())
+        };
+        let Some(oper) = selected else {
+            // The poll interval elapsed: re-read each probe and post changes.
+            if !poll_processes(&mut probes, proxy) {
+                break; // event loop gone
+            }
+            continue;
+        };
+
         match oper.index() {
             i if i == shutdown_op => {
                 let _ = oper.recv(shutdown_rx);
@@ -186,9 +258,44 @@ fn worker_loop(
                     break; // event loop gone
                 }
             }
-            _ => unreachable!("select only registers shutdown and request"),
+            i if i == probe_op => match oper.recv(probe_rx) {
+                Ok(ProbeControl::Register { id, probe }) => {
+                    probes.insert(id, (probe, None));
+                }
+                Ok(ProbeControl::Retain(live)) => {
+                    probes.retain(|id, _| live.contains(id));
+                }
+                Err(_) => break, // main thread / App dropped
+            },
+            _ => unreachable!("select only registers shutdown, request, and probe"),
         }
     }
+}
+
+/// Poll every registered probe once and post a [`SessionDelta::Process`] for any
+/// whose foreground process name changed since the last post. Returns `false`
+/// when the event loop is gone (caller should stop).
+fn poll_processes(
+    probes: &mut HashMap<SessionCardId, (ForegroundProcessProbe, Option<String>)>,
+    proxy: &EventLoopProxy<UserEvent>,
+) -> bool {
+    for (id, (probe, last)) in probes.iter_mut() {
+        let name = probe.poll();
+        if *last == name {
+            continue;
+        }
+        *last = name.clone();
+        if proxy
+            .send_event(UserEvent::SessionDelta(SessionDelta::Process {
+                id: *id,
+                process: name,
+            }))
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Resolve the branch (throttled/cached, FR-8) and icon (FR-9) for a cwd,

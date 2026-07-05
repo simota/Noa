@@ -10,13 +10,13 @@
 
 use std::fmt::Write as _;
 
-use noa_core::{Color, Rgb};
+use noa_core::Rgb;
 
 use super::*;
 use crate::session_store::{SessionCard, SessionDelta, StatusDot, status_dot};
 use crate::sidebar::{
-    CARD_MENU_ITEMS, CARD_PREVIEW_LABEL, CardLines, CardRects, HeaderRects, SidebarMetrics,
-    SidebarRect, card_lines, header_status_label, icon_glyph,
+    CARD_MENU_ITEMS, CardLines, CardRects, HeaderRects, SidebarMetrics, SidebarRect, card_lines,
+    header_status_label, icon_glyph,
 };
 
 /// Whether an io-thread [`SessionDelta`] targeting a window with the given
@@ -30,9 +30,10 @@ use crate::sidebar::{
 fn session_delta_should_apply(delta: &SessionDelta, window_eligible: bool) -> bool {
     match delta {
         SessionDelta::Upsert { .. } | SessionDelta::Bell { .. } => window_eligible,
-        SessionDelta::Remove { .. } | SessionDelta::Branch { .. } | SessionDelta::Rename { .. } => {
-            true
-        }
+        SessionDelta::Remove { .. }
+        | SessionDelta::Branch { .. }
+        | SessionDelta::Rename { .. }
+        | SessionDelta::Process { .. } => true,
     }
 }
 
@@ -41,8 +42,6 @@ fn session_delta_should_apply(delta: &SessionDelta, window_eligible: bool) -> bo
 const SIDEBAR_BG: Rgb = Rgb::new(0x14, 0x16, 0x1b);
 const SIDEBAR_FG: Rgb = Rgb::new(0xd8, 0xdc, 0xe4);
 const SIDEBAR_DIM_FG: Rgb = Rgb::new(0x8a, 0x90, 0x9c);
-/// Very dim tone for the preview heading and its separator rule.
-const SIDEBAR_FAINT_FG: Rgb = Rgb::new(0x56, 0x5c, 0x68);
 const SIDEBAR_MENU_BG: Rgb = Rgb::new(0x24, 0x28, 0x30);
 const SIDEBAR_DOT_BLUE: Rgb = Rgb::new(0x4c, 0x9a, 0xff);
 const SIDEBAR_DOT_GREEN: Rgb = Rgb::new(0x46, 0xc4, 0x66);
@@ -71,25 +70,6 @@ fn icon_color(icon: crate::session_store::IconKind) -> Rgb {
         IconKind::Python => Rgb::new(0x5a, 0x9f, 0xd4),
         IconKind::Git => Rgb::new(0xe0, 0x6c, 0x4e),
         IconKind::Folder => SIDEBAR_DIM_FG,
-    }
-}
-
-/// Resolve a preview span's cell color to an RGB for the sidebar (FR-2). The
-/// terminal default fg maps to the sidebar's dim gray (so undifferentiated
-/// output recedes); a concrete ANSI/truecolor is resolved through the theme
-/// palette and dimmed a touch so the preview sits behind the name and meta.
-fn resolve_preview_fg(theme: &Theme, color: Color) -> Rgb {
-    match color {
-        Color::Default => SIDEBAR_DIM_FG,
-        other => {
-            let [r, g, b, _] = theme.resolve(other, true);
-            let dim = 0.88;
-            Rgb::new(
-                (r * 255.0 * dim).round().clamp(0.0, 255.0) as u8,
-                (g * 255.0 * dim).round().clamp(0.0, 255.0) as u8,
-                (b * 255.0 * dim).round().clamp(0.0, 255.0) as u8,
-            )
-        }
     }
 }
 
@@ -254,6 +234,11 @@ impl App {
     pub(super) fn reconcile_session_store(&mut self) {
         let live = self.live_session_card_ids();
         self.session_store.reconcile_sessions(&live);
+        // Prune foreground-process probes for torn-down sessions at the same
+        // choke point, so a closed pane's dup'd fd is released.
+        if let Some(worker) = self.branch_poll.as_ref() {
+            worker.retain_process_probes(&live);
+        }
     }
 
     /// Clear the unread-bell flag on every card of a just-focused window
@@ -540,7 +525,6 @@ impl App {
         // The sidebar rasterizes with its own dedicated, smaller font, so cell
         // placement uses that font's metrics (not the terminal font's).
         let metrics = gpu.sidebar_font.metrics();
-        let theme = &gpu.theme;
         let scale = state.window.scale_factor() as f32;
         let layout_metrics = SidebarMetrics::new(scale);
         let height = state.window.inner_size().height.max(1);
@@ -569,13 +553,17 @@ impl App {
         // Header chrome (FR-5): status label, centered title, the session-name
         // pill (a flat filled pill on the backdrop), and the toolbar +/… glyphs.
         let header: HeaderRects = layout_metrics.header_rects(bands.header);
-        runs.extend(window_run(
-            &band_cell,
-            header.status_label,
-            header_status_label(self.session_store.busy_count()),
-            SIDEBAR_FG,
-            false,
-        ));
+        // The status label shows the focused session's running process when it
+        // is busy (e.g. `✳ claude`), else the Idle/Running summary.
+        let status_text = match self.session_store.get(&selected_id) {
+            Some(card) if card.busy => card
+                .process
+                .clone()
+                .map(|process| format!("✳ {process}"))
+                .unwrap_or_else(|| header_status_label(self.session_store.busy_count())),
+            _ => header_status_label(self.session_store.busy_count()),
+        };
+        runs.extend(window_run(&band_cell, header.status_label, status_text, SIDEBAR_FG, false));
         runs.extend(window_run(
             &band_cell,
             header.title,
@@ -635,14 +623,14 @@ impl App {
             // its backdrop text would never show — only emit it for partial
             // (edge-clipped) cards, which have no overlay.
             if !full {
-                emit_card_text(&mut runs, card_rects, card, &lines, theme, &band_cell);
+                emit_card_text(&mut runs, card_rects, card, &lines, &band_cell);
             }
 
             if full {
                 let selected = card_rects.id == selected_id;
                 let local = layout_metrics.card_local_rects(card_rects.id, inset);
                 let mut card_runs = Vec::new();
-                emit_card_text(&mut card_runs, &local, card, &lines, theme, &card_cell);
+                emit_card_text(&mut card_runs, &local, card, &lines, &card_cell);
                 cards.push(SidebarCardDraw {
                     rect: card_rects.bounds,
                     grid: card_grid,
@@ -755,7 +743,6 @@ fn emit_card_text(
     rects: &CardRects,
     card: &SessionCard,
     lines: &CardLines,
-    theme: &Theme,
     to_cell: &impl Fn(u32, u32) -> (u16, u16),
 ) {
     out.extend(window_run(
@@ -794,47 +781,21 @@ fn emit_card_text(
         false,
     ));
 
-    // Preview heading + separator rule (FR-2 mockup parity).
-    if rects.label.w > 0 && rects.label.h > 0 {
-        let (col, row) = to_cell(rects.label.x, rects.label.y);
-        out.push(SidebarTextRun::new(
-            col,
-            row,
-            CARD_PREVIEW_LABEL.to_string(),
-            SIDEBAR_FAINT_FG,
+    // Running-process row: the foreground process name, prefixed by a state
+    // glyph and colored green while a program runs, dim while idle.
+    if rects.process.w > 0 && rects.process.h > 0 {
+        let (glyph, fg) = if card.busy {
+            ("✳", SIDEBAR_DOT_GREEN)
+        } else {
+            ("❯", SIDEBAR_DIM_FG)
+        };
+        out.extend(window_run(
+            to_cell,
+            rects.process,
+            format!("{glyph} {}", lines.process),
+            fg,
+            false,
         ));
-        // A dim rule fills from just past the heading to the card's right pad.
-        let heading_cols = CARD_PREVIEW_LABEL.chars().count() as u16 * 2;
-        let sep_start = col.saturating_add(heading_cols).saturating_add(1);
-        let (end_col, _) = to_cell(rects.label.right().saturating_sub(1), rects.label.y);
-        if end_col > sep_start {
-            out.push(SidebarTextRun::new(
-                sep_start,
-                row,
-                "─".repeat((end_col - sep_start) as usize),
-                SIDEBAR_FAINT_FG,
-            ));
-        }
-    }
-
-    // Preview lines, each in its original ANSI colors (FR-2).
-    for (slot, line) in rects.preview.iter().zip(lines.preview.iter()) {
-        if slot.w == 0 || slot.h == 0 {
-            continue;
-        }
-        let (mut col, row) = to_cell(slot.x, slot.y);
-        for span in line {
-            if span.text.is_empty() {
-                continue;
-            }
-            out.push(SidebarTextRun::new(
-                col,
-                row,
-                span.text.clone(),
-                resolve_preview_fg(theme, span.fg),
-            ));
-            col = col.saturating_add(span.text.chars().count() as u16);
-        }
     }
 }
 

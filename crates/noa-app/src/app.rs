@@ -514,9 +514,12 @@ impl App {
         let padding = resolve_grid_padding(config.window_padding_x, config.window_padding_y);
         let initial_cursor_style =
             resolve_cursor_style(config.cursor_style, config.cursor_style_blink);
-        // Clone the proxy for the branch-poll worker before `proxy` is moved
-        // into the struct — the worker posts `SessionDelta::Branch` back over it.
+        // Clone the proxy for the session-metadata worker before `proxy` is
+        // moved into the struct — it posts `SessionDelta::Branch`/`Process` back
+        // over it. The worker also shares the sidebar-visible gate so its
+        // process poll only ticks while a sidebar is shown (AC-18).
         let proxy_for_branch_poll = proxy.clone();
+        let sidebar_visible_gate = Arc::new(AtomicBool::new(false));
         App {
             padding,
             initial_cursor_style,
@@ -552,9 +555,12 @@ impl App {
             hotkey_install_attempted: false,
             secure_input: crate::secure_input::SecureInput::new(),
             session_store: SessionStore::new(),
-            sidebar_visible_gate: Arc::new(AtomicBool::new(false)),
             sidebar_hotkey: None,
-            branch_poll: Some(crate::branch_poll::spawn(proxy_for_branch_poll)),
+            branch_poll: Some(crate::branch_poll::spawn(
+                proxy_for_branch_poll,
+                sidebar_visible_gate.clone(),
+            )),
+            sidebar_visible_gate,
         }
     }
 
@@ -1307,6 +1313,15 @@ impl App {
             ..Default::default()
         };
         let pty = Pty::spawn(pty_config)?;
+        // Hand the foreground-process probe to the session-metadata worker
+        // (running-process display) before the pty moves into the io thread.
+        // Quick-terminal panes never get a sidebar card, so they need no probe.
+        if self.window_sidebar_eligible(window_id)
+            && let Some(worker) = self.branch_poll.as_ref()
+            && let Some(probe) = pty.foreground_probe()
+        {
+            worker.register_process_probe(Self::session_card_id(window_id, pane_id), probe);
+        }
         let mut terminal = Terminal::new(grid_size);
         if let Some(style) = self.initial_cursor_style {
             terminal.set_default_cursor_style(style);

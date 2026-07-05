@@ -17,7 +17,7 @@
 pub use crate::split_tree::{Point, Rect as SidebarRect};
 
 use crate::session_store::{
-    IconKind, PreviewLine, SessionCard, SessionCardId, WallClock, format_relative_time,
+    IconKind, SessionCard, SessionCardId, WallClock, format_relative_time,
 };
 
 // All the `SIDEBAR_*`/`CARD_*` metrics below are the design values at scale
@@ -34,11 +34,12 @@ pub const SIDEBAR_HEADER_H: u32 = 36;
 /// buttons below the header.
 pub const SIDEBAR_TOOLBAR_H: u32 = 30;
 
-/// Height of one session card.
-pub const SIDEBAR_CARD_H: u32 = 82;
+/// Height of one session card. Three rows — name / cwd+branch / running
+/// process — with a little breathing room around them.
+pub const SIDEBAR_CARD_H: u32 = 72;
 
 /// Vertical gap between adjacent cards.
-pub const SIDEBAR_CARD_GUTTER: u32 = 6;
+pub const SIDEBAR_CARD_GUTTER: u32 = 8;
 
 /// Vertical stride from one card's top to the next (card + gutter).
 pub const SIDEBAR_CARD_STRIDE: u32 = SIDEBAR_CARD_H + SIDEBAR_CARD_GUTTER;
@@ -47,25 +48,18 @@ pub const SIDEBAR_CARD_STRIDE: u32 = SIDEBAR_CARD_H + SIDEBAR_CARD_GUTTER;
 const CWD_MAX_CHARS: usize = 28;
 
 // Card interior metrics (all compile-time; see `card_rects`/`card_lines`).
-const CARD_PAD: u32 = 10;
+const CARD_PAD: u32 = 12;
 const CARD_ICON_W: u32 = 18;
 const CARD_DOT_D: u32 = 8;
 const CARD_MENU_W: u32 = 22;
 const CARD_UPDATED_W: u32 = 56;
-const CARD_LINE_H: u32 = 14;
+const CARD_LINE_H: u32 = 15;
 const CARD_NAME_H: u32 = 18;
 
-// Card interior row baselines (top-relative), sized for the dense small font.
-const CARD_NAME_Y: u32 = 6;
-const CARD_META_Y: u32 = 22;
-const CARD_LABEL_Y: u32 = 38;
-const CARD_PREVIEW0_Y: u32 = 52;
-const CARD_PREVIEW1_Y: u32 = 66;
-
-/// The dim "最終出力" heading rendered above a card's preview lines (FR-2 mockup
-/// parity). Kept here so the label and the layout row that positions it stay
-/// together.
-pub const CARD_PREVIEW_LABEL: &str = "最終出力";
+// Card interior row baselines (top-relative): name, cwd+branch, running process.
+const CARD_NAME_Y: u32 = 10;
+const CARD_META_Y: u32 = 30;
+const CARD_PROCESS_Y: u32 = 50;
 
 // Toolbar `+` / `…` button metrics (kept as comfortable hit targets).
 const TOOLBAR_BUTTON_W: u32 = 26;
@@ -102,9 +96,8 @@ pub struct CardRects {
     pub icon: SidebarRect,
     pub name_line: SidebarRect,
     pub meta_line: SidebarRect,
-    /// The dim "最終出力" heading row separating meta from the preview lines.
-    pub label: SidebarRect,
-    pub preview: [SidebarRect; 2],
+    /// The running-process row (foreground process name / shell state).
+    pub process: SidebarRect,
     pub dot: SidebarRect,
     pub updated: SidebarRect,
     pub menu_button: SidebarRect,
@@ -333,9 +326,7 @@ impl SidebarMetrics {
 
         let name_y = top + self.s(CARD_NAME_Y) as i64;
         let meta_y = top + self.s(CARD_META_Y) as i64;
-        let label_y = top + self.s(CARD_LABEL_Y) as i64;
-        let preview0_y = top + self.s(CARD_PREVIEW0_Y) as i64;
-        let preview1_y = top + self.s(CARD_PREVIEW1_Y) as i64;
+        let process_y = top + self.s(CARD_PROCESS_Y) as i64;
 
         CardRects {
             id,
@@ -343,11 +334,7 @@ impl SidebarMetrics {
             icon: iclip(icon_x, name_y, icon_w, name_h, vp),
             name_line: iclip(name_x, name_y, name_w, name_h, vp),
             meta_line: iclip(lx + pad, meta_y, body_w, line_h, vp),
-            label: iclip(lx + pad, label_y, body_w, line_h, vp),
-            preview: [
-                iclip(lx + pad, preview0_y, body_w, line_h, vp),
-                iclip(lx + pad, preview1_y, body_w, line_h, vp),
-            ],
+            process: iclip(lx + pad, process_y, body_w, line_h, vp),
             dot: iclip(dot_x, name_y + (name_h - dot_d) / 2, dot_d, dot_d, vp),
             updated: iclip(updated_x, name_y, updated_w, line_h, vp),
             menu_button: iclip(menu_x, name_y, card_menu_w, name_h, vp),
@@ -526,8 +513,10 @@ pub struct CardLines {
     pub name: String,
     /// `<cwd, tail-first truncated> <branch?>` — branch omitted when absent.
     pub meta: String,
-    /// Up to two last-output preview lines, each carrying its color runs.
-    pub preview: Vec<PreviewLine>,
+    /// The running-process row: the tty's foreground process name, or a shell
+    /// state fallback (`running` / `idle`) where detection is unavailable. The
+    /// caller styles it by the card's `busy` flag.
+    pub process: String,
     /// Relative updated-time (`3分前` / `昨日 23:47` / …).
     pub updated: String,
 }
@@ -542,13 +531,18 @@ pub fn card_lines(card: &SessionCard, now: WallClock) -> CardLines {
         Some(branch) if !branch.is_empty() => format!("{cwd}  {branch}"),
         _ => cwd,
     };
-    let preview = card.preview.iter().take(2).cloned().collect();
+    // The detected foreground process name; when unavailable (non-macOS, or not
+    // yet polled) fall back to the shell state so the row is never blank.
+    let process = card
+        .process
+        .clone()
+        .unwrap_or_else(|| if card.busy { "running".to_string() } else { "idle".to_string() });
     let updated = format_relative_time(now, card.updated_at);
 
     CardLines {
         name,
         meta,
-        preview,
+        process,
         updated,
     }
 }
@@ -616,7 +610,9 @@ pub fn sidebar_inset(visible: bool, eligible: bool, width_px: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_store::{PreviewSpan, SessionDelta, SessionStore, SessionWindowId};
+    use crate::session_store::{
+        PreviewLine, PreviewSpan, SessionDelta, SessionStore, SessionWindowId,
+    };
     use crate::split_tree::PaneId;
     use noa_core::Color;
 
@@ -672,14 +668,18 @@ mod tests {
             branch: branch.map(str::to_string),
             icon: IconKind::Rust,
         });
+        store.apply(SessionDelta::Process {
+            id,
+            process: Some("cargo".to_string()),
+        });
         store.get(&id).unwrap().clone()
     }
 
     // 6 ids stacked; a viewport tall enough for exactly 3 cards. bounds height =
-    // header(36) + toolbar(30) + 3*stride(88) = 330.
+    // header(36) + toolbar(30) + 3*stride(80) = 306.
     fn six_id_bounds() -> (SidebarRect, Vec<SessionCardId>) {
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
-        (SidebarRect::new(0, 0, 360, 330), ids)
+        (SidebarRect::new(0, 0, 360, 306), ids)
     }
 
     // AC-3 (FR-2): the card lines carry `[icon] name`, `cwd … branch`, and the
@@ -707,6 +707,9 @@ mod tests {
         // updated-time matches the pure PR1 formatter.
         assert_eq!(lines.updated, format_relative_time(wall(10, 3), wall(10, 0)));
         assert_eq!(lines.updated, "3分前");
+
+        // The running-process row shows the detected foreground process.
+        assert_eq!(lines.process, "cargo");
     }
 
     #[test]
@@ -714,6 +717,37 @@ mod tests {
         let card = sample_card("shell", "/repo", None);
         let lines = card_lines(&card, wall(10, 0));
         assert_eq!(lines.meta, "/repo");
+    }
+
+    // The process row falls back to a shell state when no process is detected
+    // (non-macOS, or not yet polled): `running` when busy, else `idle`.
+    #[test]
+    fn card_lines_process_falls_back_to_shell_state() {
+        let mut store = SessionStore::new();
+        let id = card_id(1, 1);
+        store.apply(SessionDelta::Upsert {
+            id,
+            seq: 1,
+            name: "shell".to_string(),
+            cwd: "/repo".to_string(),
+            busy: false,
+            updated_at: wall(10, 0),
+            preview: Vec::new(),
+        });
+        let idle = card_lines(store.get(&id).unwrap(), wall(10, 0));
+        assert_eq!(idle.process, "idle");
+
+        store.apply(SessionDelta::Upsert {
+            id,
+            seq: 2,
+            name: "shell".to_string(),
+            cwd: "/repo".to_string(),
+            busy: true,
+            updated_at: wall(10, 0),
+            preview: Vec::new(),
+        });
+        let busy = card_lines(store.get(&id).unwrap(), wall(10, 0));
+        assert_eq!(busy.process, "running");
     }
 
     #[test]
@@ -938,10 +972,9 @@ mod tests {
         assert!(card.name_line.right() <= card.updated.x);
         assert!(card.updated.right() <= card.menu_button.x);
 
-        // The preview heading falls between the meta line and the preview rows.
-        assert!(card.meta_line.y < card.label.y);
-        assert!(card.label.y < card.preview[0].y);
-        assert!(card.preview[0].y < card.preview[1].y);
+        // The three rows stack: name, then cwd+branch, then the process row.
+        assert!(card.name_line.y < card.meta_line.y);
+        assert!(card.meta_line.y < card.process.y);
     }
 
     // DPR scaling: the metrics double at scale 2.0, and a degenerate scale
@@ -971,8 +1004,8 @@ mod tests {
     fn layout_and_hit_test_scale_at_dpr_2() {
         let m2 = SidebarMetrics::new(2.0);
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
-        // header(72) + toolbar(60) + 3*stride(176) = 660, with a doubled width.
-        let bounds = SidebarRect::new(0, 0, 720, 660);
+        // header(72) + toolbar(60) + 3*stride(160) = 612, with a doubled width.
+        let bounds = SidebarRect::new(0, 0, 720, 612);
 
         let bands = m2.bands(bounds);
         assert_eq!(bands.header.h, 2 * SIDEBAR_HEADER_H);
@@ -981,17 +1014,15 @@ mod tests {
         let layout = m2.layout(bounds, &ids, 0);
         assert_eq!(layout.cards.len(), 3);
 
-        // The first card is a full doubled height and its five rows stack in
-        // order, with the last preview row fitting inside the card.
+        // The first card is a full doubled height and its three rows stack in
+        // order, with the process row fitting inside the card.
         let card = &layout.cards[0];
         assert_eq!(card.bounds.h, m2.card_h);
         assert!(card.dot.x < card.icon.x && card.icon.x < card.name_line.x);
         assert!(card.name_line.y < card.meta_line.y);
-        assert!(card.meta_line.y < card.label.y);
-        assert!(card.label.y < card.preview[0].y);
-        assert!(card.preview[0].y < card.preview[1].y);
-        assert!(card.preview[1].h > 0);
-        assert!(card.preview[1].bottom() <= card.bounds.bottom());
+        assert!(card.meta_line.y < card.process.y);
+        assert!(card.process.h > 0);
+        assert!(card.process.bottom() <= card.bounds.bottom());
 
         // Hit-test resolves the first card's body and its `…` region against the
         // doubled geometry.

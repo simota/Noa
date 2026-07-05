@@ -125,6 +125,10 @@ struct GpuState {
     /// Reused scratch texture for the open card `…` menu popup, composited above
     /// the cards so a rounded card can never hide it.
     sidebar_menu_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// Reused scratch texture for the toolbar `+` button tile, composited as a
+    /// small rounded chrome card with a border (and an accent ring on hover).
+    /// Refilled with the glyph color to also composite the two `+` bars.
+    sidebar_button_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// Reused scratch texture for the hairline divider at the sidebar/pane
     /// seam — a solid `CHROME_DIVIDER` strip composited over the band's right
     /// edge (the seam's crisp line; the soft shadow comes from the band glow).
@@ -189,6 +193,10 @@ struct WindowState {
     /// Vertical scroll offset (px) of the sidebar card list (FR-15), clamped to
     /// `[0, content_h - viewport_h]` when consumed by the layout.
     sidebar_scroll: u32,
+    /// Whether the pointer is currently over the toolbar `+` button, driving its
+    /// hover style (brighter fill + accent ring) and the pointer cursor icon.
+    /// Recomputed on every `CursorMoved` via `update_sidebar_button_hover`.
+    sidebar_button_hover: bool,
     /// The card whose `…` menu popup is open in this window (FR-7), or `None`.
     /// Opened by a `…` click, dismissed by the next click anywhere or by the
     /// sidebar toggling off.
@@ -1372,6 +1380,7 @@ impl App {
                 sidebar_band: None,
                 sidebar_card_tex: None,
                 sidebar_menu_tex: None,
+                sidebar_button_tex: None,
                 sidebar_divider_tex: None,
                 sidebar_drop_tex: None,
                 palette_renderer: None,
@@ -1460,6 +1469,7 @@ impl App {
                 occluded: false,
                 title: "Noa".to_string(),
                 sidebar_scroll: 0,
+                sidebar_button_hover: false,
                 sidebar_menu: None,
                 sidebar_drag: None,
                 link_click_in_flight: false,

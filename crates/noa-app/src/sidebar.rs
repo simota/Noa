@@ -79,9 +79,19 @@ const CARD_PREVIEW4_Y: u32 = 118;
 const CARD_PREVIEW5_Y: u32 = 134;
 const CARD_UPDATED_Y: u32 = 152;
 
-// Toolbar `+` / `…` button metrics (kept as comfortable hit targets).
-const TOOLBAR_BUTTON_W: u32 = 26;
+// Toolbar `+` button metrics (kept as comfortable hit targets). Nudged a little
+// larger and toward the bottom-right corner of the toolbar band.
+const TOOLBAR_BUTTON_W: u32 = 27;
 const TOOLBAR_BUTTON_H: u32 = 22;
+/// Right margin from the toolbar's right edge (smaller than `CARD_PAD` so the
+/// button sits a touch further right than the card content below).
+const TOOLBAR_BUTTON_MARGIN_RIGHT: u32 = 8;
+/// Downward nudge (logical px) from the toolbar band's vertical center, so the
+/// button rides slightly low rather than dead-center.
+const TOOLBAR_BUTTON_OFFSET_Y: u32 = 1;
+/// Minimum gap (logical px) kept below the button so its border never kisses the
+/// card region that begins at the toolbar band's bottom edge.
+const TOOLBAR_BUTTON_GAP_BOTTOM: u32 = 3;
 
 // Header line height for the status / title / pill rects.
 const HEADER_LINE_H: u32 = 16;
@@ -221,10 +231,15 @@ impl SidebarMetrics {
         let btn_w = self.s(TOOLBAR_BUTTON_W);
         let btn_h = self.s(TOOLBAR_BUTTON_H);
         let h = btn_h.min(toolbar.h);
-        let y = toolbar.y + (toolbar.h - h) / 2;
+        // Centered in the band, then nudged down a little — but always keep a
+        // bottom gap so the button's border never touches the card region that
+        // starts at the band's bottom edge (clamped for a short toolbar).
+        let slack = toolbar.h - h;
+        let max_y_off = slack.saturating_sub(self.s(TOOLBAR_BUTTON_GAP_BOTTOM));
+        let y = toolbar.y + (slack / 2 + self.s(TOOLBAR_BUTTON_OFFSET_Y)).min(max_y_off);
         let x = toolbar
             .right()
-            .saturating_sub(self.s(CARD_PAD))
+            .saturating_sub(self.s(TOOLBAR_BUTTON_MARGIN_RIGHT))
             .saturating_sub(btn_w);
         SidebarRect::new(x, y, btn_w.min(toolbar.w), h)
     }

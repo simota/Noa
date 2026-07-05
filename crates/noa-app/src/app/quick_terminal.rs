@@ -387,6 +387,7 @@ impl App {
                 occluded: false,
                 title: "Noa".to_string(),
                 sidebar_scroll: 0,
+                sidebar_button_hover: false,
                 sidebar_menu: None,
                 sidebar_drag: None,
                 link_click_in_flight: false,

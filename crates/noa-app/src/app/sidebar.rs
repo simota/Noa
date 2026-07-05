@@ -66,6 +66,16 @@ const SIDEBAR_ACCENT: Rgb = crate::chrome::CHROME_ACCENT;
 /// The hairline stroked along the sidebar/pane seam.
 const SIDEBAR_DIVIDER: Rgb = crate::chrome::CHROME_DIVIDER;
 
+// Toolbar `+` button chrome (logical px / colors). Borderless: just the `+`
+// glyph at rest, with a subtle rounded fill + brighter glyph on hover.
+const TOOLBAR_BUTTON_RADIUS: f32 = 6.0;
+/// The `+` glyph geometry (logical px): each arm's length and the bar thickness.
+const TOOLBAR_PLUS_ARM: f32 = 12.0;
+const TOOLBAR_PLUS_THICKNESS: f32 = 2.0;
+const SIDEBAR_BUTTON_BG_HOVER: Rgb = SIDEBAR_CARD_BG;
+const SIDEBAR_BUTTON_GLYPH: Rgb = SIDEBAR_DIM_FG;
+const SIDEBAR_BUTTON_GLYPH_HOVER: Rgb = SIDEBAR_FG;
+
 // Seam treatment between the sidebar band and the terminal panes (logical px,
 // scaled at draw time): a soft shadow the band casts rightward plus a crisp
 // 1px hairline, so the two independently-themed surfaces meet with depth
@@ -227,6 +237,12 @@ pub(super) struct SidebarDrawModel {
     card_h: u32,
     grid: GridSize,
     runs: Vec<SidebarTextRun>,
+    /// The toolbar `+` button: its window-space rect and whether the pointer is
+    /// over it. Drawn as its own rounded chrome tile with a geometric `+` glyph
+    /// (two centered bars — not a font glyph, which the coarse cell grid can't
+    /// center in a small tile) so it reads as a real, hoverable button.
+    new_button: SidebarRect,
+    new_button_hover: bool,
     cards: Vec<SidebarCardDraw>,
     menu: Option<SidebarMenuDraw>,
     /// The floating copy of the card being drag-reordered, positioned under the
@@ -381,6 +397,47 @@ impl App {
                 state.window.request_redraw();
             }
         }
+    }
+
+    /// Reconcile the toolbar `+` hover state for `window_id` from the pointer at
+    /// `point` (window px, or `None` when the pointer left the surface). On a
+    /// change it repaints the sidebar (so the button lifts to its hover style)
+    /// and refreshes the cursor icon (pointer over the button). Returns whether
+    /// the pointer is currently over the button, so the caller can gate the
+    /// cursor icon without recomputing the hit-test.
+    pub(super) fn update_sidebar_button_hover(
+        &mut self,
+        window_id: WindowId,
+        point: Option<split_tree::Point>,
+    ) -> bool {
+        let inset = self.window_sidebar_inset_px(window_id);
+        let hovered = inset != 0
+            && point.is_some_and(|point| {
+                if point.x >= inset {
+                    return false;
+                }
+                let Some(state) = self.windows.get(&window_id) else {
+                    return false;
+                };
+                let metrics = self.sidebar_metrics(window_id);
+                let bounds =
+                    crate::sidebar::SidebarRect::new(0, 0, inset, state.window.inner_size().height);
+                let windows = self.session_windows_for_window(window_id);
+                let ids = self.session_store.ordered_ids_for_windows(&windows);
+                matches!(
+                    metrics.hit_test(bounds, &ids, state.sidebar_scroll, point),
+                    Some(crate::sidebar::SidebarHit::NewSession)
+                )
+            });
+        if let Some(state) = self.windows.get_mut(&window_id)
+            && state.sidebar_button_hover != hovered
+        {
+            state.sidebar_button_hover = hovered;
+            if let Some(state) = self.windows.get(&window_id) {
+                state.window.request_redraw();
+            }
+        }
+        hovered
     }
 
     /// Every live session-card id across all sidebar-eligible windows
@@ -629,8 +686,12 @@ impl App {
             }
             Some(crate::sidebar::SidebarHit::NewSession) => {
                 // `+`: new tab in the focused window, cwd inherited from the
-                // active session via the existing new-tab path (FR-6/AC-8).
-                let _ = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow);
+                // active session via the existing new-tab path (FR-6/AC-8). A
+                // spawn failure is surfaced (not silently swallowed) so a dead
+                // `+` click leaves a trace instead of looking like a no-op.
+                if let Err(err) = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow) {
+                    log::warn!("sidebar +: failed to spawn new tab: {err:#}");
+                }
                 true
             }
             // Inside the band but not on any actionable target: consume it too,
@@ -950,14 +1011,11 @@ impl App {
         // The top header band (status label / center title / name pill) was
         // removed as redundant, and the dead `…` header menu (no v1 action) was
         // dropped — the toolbar's sole `+` action now sits at the sidebar's
-        // top-right (SIDEBAR_HEADER_H is collapsed to 0).
-        runs.extend(window_run(
-            &band_cell,
-            layout.new_button,
-            "+".to_string(),
-            SIDEBAR_FG,
-            true,
-        ));
+        // top-right (SIDEBAR_HEADER_H is collapsed to 0). The `+` is drawn as its
+        // own rounded chrome tile (see `draw_sidebar_band`), not baked into the
+        // flat band, so it can carry a border + hover state like a real button.
+        let btn = layout.new_button;
+        let new_button_hover = state.sidebar_button_hover;
 
         // Card text on the flat backdrop, plus a rounded overlay for every
         // fully-visible card (FR-2). Partially-scrolled cards stay flat.
@@ -1103,6 +1161,8 @@ impl App {
             card_h: layout_metrics.card_h,
             grid,
             runs,
+            new_button: btn,
+            new_button_hover,
             cards,
             menu,
             dragging,
@@ -1715,6 +1775,133 @@ pub(super) fn draw_sidebar_band(
                 }],
             );
         }
+    }
+
+    // 1c) Toolbar `+` button: a borderless geometric `+` glyph — two centered
+    // bars, drawn as solid rounded rects (pixel-placed rather than a font glyph,
+    // which the coarse sidebar cell grid can't center in a tile this small). No
+    // persistent frame; hover just lays a subtle borderless fill behind the `+`
+    // and brightens the bars.
+    if model.new_button.w > 0 && model.new_button.h > 0 {
+        let btn = model.new_button;
+        let btn_size = PixelSize {
+            w: btn.w.max(1),
+            h: btn.h.max(1),
+        };
+        ensure_scratch(
+            &mut gpu.sidebar_button_tex,
+            &gpu.device,
+            btn_size,
+            surface_format,
+            "noa-sidebar-button",
+        );
+        let glyph = if model.new_button_hover {
+            SIDEBAR_BUTTON_GLYPH_HOVER
+        } else {
+            SIDEBAR_BUTTON_GLYPH
+        };
+
+        // Hover only: a borderless rounded fill behind the `+` (no frame at
+        // rest). Rendered into the reused button scratch, composited over the
+        // band.
+        if model.new_button_hover {
+            let button_view = &gpu.sidebar_button_tex.as_ref().unwrap().2;
+            rasterize_runs(
+                gpu.sidebar_renderer.as_mut().unwrap(),
+                &gpu.device,
+                &gpu.queue,
+                &mut gpu.sidebar_font,
+                &gpu.theme,
+                button_view,
+                btn_size,
+                GridSize { cols: 1, rows: 1 },
+                SIDEBAR_BUTTON_BG_HOVER,
+                model.background_opacity,
+                &[],
+            );
+            let button_style = CardStyle {
+                background: rgb_to_rgba(SIDEBAR_BUTTON_BG_HOVER),
+                border_color: [0.0; 4],
+                focus_color: [0.0; 4],
+                corner_radius: TOOLBAR_BUTTON_RADIUS * model.scale,
+                border_width: 0.0,
+                focus_width: 0.0,
+                focus_glow_width: 0.0,
+            };
+            gpu.sidebar_card.as_ref().unwrap().pipeline.overlay_texture_cards(
+                &gpu.device,
+                &gpu.queue,
+                view,
+                surface_size,
+                &button_style,
+                &[CardTexturePlacement {
+                    texture_view: &gpu.sidebar_button_tex.as_ref().unwrap().2,
+                    x: btn.x,
+                    y: btn.y,
+                    w: btn.w,
+                    h: btn.h,
+                    selected: false,
+                }],
+            );
+        }
+
+        // The `+` glyph: refill the same scratch with the glyph color (the hover
+        // fill composite above, if any, already submitted, so the reuse is safe)
+        // and composite two thin rounded bars centered on the tile.
+        let arm = (TOOLBAR_PLUS_ARM * model.scale).round().max(1.0) as u32;
+        let thick = (TOOLBAR_PLUS_THICKNESS * model.scale).round().max(1.0) as u32;
+        let cx = btn.x + btn.w / 2;
+        let cy = btn.y + btn.h / 2;
+        let hbar = SidebarRect::new(cx.saturating_sub(arm / 2), cy.saturating_sub(thick / 2), arm, thick);
+        let vbar = SidebarRect::new(cx.saturating_sub(thick / 2), cy.saturating_sub(arm / 2), thick, arm);
+        let glyph_view = &gpu.sidebar_button_tex.as_ref().unwrap().2;
+        rasterize_runs(
+            gpu.sidebar_renderer.as_mut().unwrap(),
+            &gpu.device,
+            &gpu.queue,
+            &mut gpu.sidebar_font,
+            &gpu.theme,
+            glyph_view,
+            btn_size,
+            GridSize { cols: 1, rows: 1 },
+            glyph,
+            model.background_opacity,
+            &[],
+        );
+        let bar_style = CardStyle {
+            background: rgb_to_rgba(glyph),
+            border_color: [0.0; 4],
+            focus_color: [0.0; 4],
+            corner_radius: (thick as f32 / 2.0).min(2.0 * model.scale),
+            border_width: 0.0,
+            focus_width: 0.0,
+            focus_glow_width: 0.0,
+        };
+        gpu.sidebar_card.as_ref().unwrap().pipeline.overlay_texture_cards(
+            &gpu.device,
+            &gpu.queue,
+            view,
+            surface_size,
+            &bar_style,
+            &[
+                CardTexturePlacement {
+                    texture_view: &gpu.sidebar_button_tex.as_ref().unwrap().2,
+                    x: hbar.x,
+                    y: hbar.y,
+                    w: hbar.w,
+                    h: hbar.h,
+                    selected: false,
+                },
+                CardTexturePlacement {
+                    texture_view: &gpu.sidebar_button_tex.as_ref().unwrap().2,
+                    x: vbar.x,
+                    y: vbar.y,
+                    w: vbar.w,
+                    h: vbar.h,
+                    selected: false,
+                },
+            ],
+        );
     }
 
     // 2) Each fully-visible card as a rounded card. One reused scratch texture

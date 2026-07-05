@@ -863,10 +863,11 @@ impl App {
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        let hovering = state
-            .last_mouse_pane
-            .and_then(|pane_id| state.surfaces.get(&pane_id))
-            .is_some_and(|surface| surface.hover_link.is_some());
+        let hovering = state.sidebar_button_hover
+            || state
+                .last_mouse_pane
+                .and_then(|pane_id| state.surfaces.get(&pane_id))
+                .is_some_and(|surface| surface.hover_link.is_some());
         state.window.set_cursor(if hovering {
             CursorIcon::Pointer
         } else {

@@ -485,6 +485,10 @@ impl App {
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.last_mouse_point = point;
         }
+        // Keep the toolbar `+` hover state (style + cursor) in sync with the
+        // pointer before any early return below; a no-op when the sidebar is
+        // hidden (inset 0).
+        self.update_sidebar_button_hover(window_id, point);
         let Some(point) = point else {
             if let Some(state) = self.windows.get_mut(&window_id) {
                 state.last_mouse_pane = None;

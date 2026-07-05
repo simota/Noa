@@ -143,6 +143,9 @@ struct WindowState {
     /// hotkey; drives the pane-area inset and the sidebar draw. Always `false`
     /// for a quick-terminal window (FR-14).
     sidebar_visible: bool,
+    /// Vertical scroll offset (px) of the sidebar card list (FR-15), clamped to
+    /// `[0, content_h - viewport_h]` when consumed by the layout.
+    sidebar_scroll: u32,
     /// Set when a left press was consumed by Cmd+click-to-open, so only the
     /// matching release is swallowed. Gating the release on "is a link
     /// still hovered" instead would eat the release of an unrelated
@@ -467,6 +470,10 @@ pub struct App {
     /// (FR-1/AC-19). Deliberately distinct from `overview_visible_gate` (Omen
     /// T1); flipped on while any window shows its sidebar.
     sidebar_visible_gate: Arc<AtomicBool>,
+    /// The registered global `sidebar-hotkey`, kept alive for the app's
+    /// lifetime (dropping it unregisters). `None` until installed, or when no
+    /// `sidebar-hotkey` is configured / registration failed.
+    sidebar_hotkey: Option<crate::macos_hotkey::GlobalHotKey>,
 }
 
 impl App {
@@ -510,6 +517,7 @@ impl App {
             secure_input: crate::secure_input::SecureInput::new(),
             session_store: SessionStore::new(),
             sidebar_visible_gate: Arc::new(AtomicBool::new(false)),
+            sidebar_hotkey: None,
         }
     }
 
@@ -1122,11 +1130,15 @@ impl App {
                 occluded: false,
                 title: "noa".to_string(),
                 sidebar_visible: self.config.sidebar_enabled,
+                sidebar_scroll: 0,
                 link_click_in_flight: false,
             },
         );
         self.window_order.push(window_id);
         self.mark_overview_tile_dirty(OverviewTileId::new(window_id, initial_pane));
+        // A window seeded with the sidebar visible (`sidebar-enabled`) must turn
+        // the io-thread gate on so its panes start publishing card state.
+        self.refresh_sidebar_visible_gate();
         self.focused = Some(window_id);
         window.focus_window();
         self.request_overview_redraw();
@@ -1396,6 +1408,8 @@ impl App {
         // store too. `close_group`/`close_pane_after_pty_exit` reach this
         // through their `close_tab` calls.
         self.reconcile_session_store();
+        // A closed window may have been the only one showing a sidebar.
+        self.refresh_sidebar_visible_gate();
         self.persist_session();
     }
 
@@ -1709,10 +1723,13 @@ impl App {
     }
 
     fn toggle_split_zoom(&mut self, window_id: WindowId) {
+        // Same sidebar inset as the pane layout so the zoom decision sees the
+        // real pane area, not the full window (Omen P1).
+        let inset = self.window_sidebar_inset_px(window_id);
         let bounds = self
             .windows
             .get(&window_id)
-            .map(|state| pane_bounds_for_size(state.window.inner_size()))
+            .map(|state| sidebar_inset_bounds(pane_bounds_for_size(state.window.inner_size()), inset))
             .unwrap_or(PaneRectApp::new(0, 0, 0, 0));
         let window = {
             let Some(state) = self.windows.get_mut(&window_id) else {

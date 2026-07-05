@@ -37,6 +37,10 @@ pub enum UserEvent {
     /// handler thread via the [`winit::event_loop::EventLoopProxy`]). Toggles
     /// the drop-down quick terminal's visibility.
     ToggleQuickTerminal,
+    /// The global session-sidebar hotkey fired (same Carbon mechanism as
+    /// [`Self::ToggleQuickTerminal`]). Toggles the sidebar on the focused
+    /// window only (FR-4).
+    ToggleSidebar,
     /// A session-sidebar state delta posted by the io thread (last-output
     /// upsert, unread bell, …). The main thread — which owns the
     /// [`crate::session_store::SessionStore`] — applies it on receipt

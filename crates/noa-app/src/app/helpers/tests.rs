@@ -794,6 +794,79 @@
         );
     }
 
+    // AC-5 (FR-4): with the sidebar inset applied to the window bounds, every
+    // pane's grid resize still precedes every pty winsize send. Mirrors the
+    // real relayout path — inset the bounds, lay panes out, derive grid sizes,
+    // then batch — so the grid-first ordering the shell relies on holds when a
+    // sidebar toggle triggers the resize.
+    #[test]
+    fn sidebar_inset_resize_batching_resizes_all_grids_before_pty_winsize_sends() {
+        let metrics = metrics(9.0, 18.0);
+        let padding = DEFAULT_GRID_PADDING;
+        let first = PaneId::new(1);
+        let second = PaneId::new(2);
+
+        // A two-pane horizontal split filling a 1000×600 window.
+        let mut tree = split_tree::SplitTree::leaf(first);
+        assert!(split_tree::split_pane(
+            &mut tree,
+            first,
+            second,
+            split_tree::SplitOrientation::Horizontal,
+        ));
+
+        let full = pane_bounds_for_size(PhysicalSize::new(1000, 600));
+        let inset_px = 360;
+        let inset_bounds = sidebar_inset_bounds(full, inset_px);
+        // The inset reserves the sidebar band on the left.
+        assert_eq!(inset_bounds, PaneRectApp::new(inset_px, 0, 1000 - inset_px, 600));
+
+        let targets: Vec<(PaneId, GridSize)> = zoom_resize_targets(&tree, None, inset_bounds)
+            .into_iter()
+            .map(|(pane_id, rect)| (pane_id, grid_size_for_pane_rect(rect, metrics, padding)))
+            .collect();
+        assert_eq!(targets.len(), 2);
+
+        let plan = pane_resize_batch_plan(targets.iter().copied());
+        // All grid resizes come before any pty winsize send (grid-first).
+        let last_grid = plan
+            .iter()
+            .rposition(|action| matches!(action, PaneResizeAction::GridResize(_, _)))
+            .expect("plan has grid resizes");
+        let first_pty = plan
+            .iter()
+            .position(|action| matches!(action, PaneResizeAction::PtyResize(_, _)))
+            .expect("plan has pty resizes");
+        assert!(last_grid < first_pty, "every GridResize must precede every PtyResize");
+
+        // The inset genuinely narrows the panes vs. the full-width layout.
+        let full_targets: Vec<(PaneId, GridSize)> = zoom_resize_targets(&tree, None, full)
+            .into_iter()
+            .map(|(pane_id, rect)| (pane_id, grid_size_for_pane_rect(rect, metrics, padding)))
+            .collect();
+        let inset_cols: u16 = targets.iter().map(|(_, g)| g.cols).sum();
+        let full_cols: u16 = full_targets.iter().map(|(_, g)| g.cols).sum();
+        assert!(inset_cols < full_cols, "the sidebar inset must shrink the pane columns");
+    }
+
+    #[test]
+    fn sidebar_inset_bounds_shifts_and_shrinks_from_the_left() {
+        let full = PaneRectApp::new(0, 0, 1000, 600);
+        // Zero inset is the identity.
+        assert_eq!(sidebar_inset_bounds(full, 0), full);
+        // A normal inset shifts x right and removes that width.
+        assert_eq!(
+            sidebar_inset_bounds(full, 360),
+            PaneRectApp::new(360, 0, 640, 600)
+        );
+        // An inset wider than the window collapses the pane area to zero width
+        // without underflowing.
+        assert_eq!(
+            sidebar_inset_bounds(full, 2000),
+            PaneRectApp::new(1000, 0, 0, 600)
+        );
+    }
+
     // FM-4 regression: text-area px must come from the same `rect`/padding
     // grid_size_for_pane_rect used, not an independent cell_w × cols
     // multiplication — which would drift whenever the pane's pixel size

@@ -38,6 +38,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.handle_app_command(event_loop, command, CommandOrigin::App)
             }
             UserEvent::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
+            UserEvent::ToggleSidebar => self.toggle_sidebar(),
             UserEvent::SessionDelta(delta) => self.apply_session_delta(delta),
             UserEvent::ClipboardWrite {
                 window_id,
@@ -496,6 +497,15 @@ impl App {
     }
 
     pub(super) fn on_mouse_input(&mut self, window_id: WindowId, state: ElementState, button: MouseButton) {
+        // A left press inside the sidebar band is consumed there (card switch,
+        // toolbar) and never reaches the terminal/split handling (FR-3).
+        if button == MouseButton::Left
+            && state == ElementState::Pressed
+            && let Some(point) = self.windows.get(&window_id).and_then(|s| s.last_mouse_point)
+            && self.handle_sidebar_press(window_id, point)
+        {
+            return;
+        }
         if button == MouseButton::Left {
             match state {
                 ElementState::Pressed => {
@@ -614,6 +624,15 @@ impl App {
     }
 
     pub(super) fn on_mouse_wheel(&mut self, window_id: WindowId, delta: MouseScrollDelta) {
+        // A wheel turn over the sidebar band scrolls its card list (FR-15),
+        // consuming the event so the terminal viewport doesn't also scroll.
+        let sidebar_lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(position) => position.y as f32 / 40.0,
+        };
+        if self.handle_sidebar_wheel(window_id, sidebar_lines) {
+            return;
+        }
         let pane_id = self
             .windows
             .get(&window_id)

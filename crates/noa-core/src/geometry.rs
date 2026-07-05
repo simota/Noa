@@ -64,8 +64,10 @@ impl GridPadding {
 /// Default grid padding in physical pixels.
 ///
 /// Keep the existing top alignment from row zero, but inset the other edges so
-/// text and the last visible row do not visually touch the window frame.
-pub const DEFAULT_GRID_PADDING: GridPadding = GridPadding::new(0.0, 16.0, 16.0, 16.0);
+/// text and the last visible row do not visually touch the window frame. The
+/// left edge carries a slightly wider inset so the first column reads a touch
+/// inboard of the frame (and of the sidebar seam when the sidebar is shown).
+pub const DEFAULT_GRID_PADDING: GridPadding = GridPadding::new(0.0, 16.0, 16.0, 24.0);
 
 /// A grid coordinate: `x` = column, `y` = row, both 0-based internally.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

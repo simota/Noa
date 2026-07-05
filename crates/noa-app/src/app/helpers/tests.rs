@@ -110,7 +110,7 @@
 
         // Only y set: x keeps the default 16 on both sides.
         let y_only = resolve_grid_padding(None, Some(2.0));
-        assert_eq!(y_only, GridPadding::new(2.0, 16.0, 2.0, 16.0));
+        assert_eq!(y_only, GridPadding::new(2.0, 16.0, 2.0, 24.0));
     }
 
     #[test]
@@ -160,7 +160,7 @@
             DEFAULT_GRID_PADDING,
         );
 
-        assert_eq!(size.width, 656.0);
+        assert_eq!(size.width, 660.0);
         assert_eq!(size.height, 392.0);
     }
 
@@ -281,7 +281,7 @@
 
         assert_eq!(
             grid_size_for_physical_size(size, metrics(12.0, 24.0), DEFAULT_GRID_PADDING),
-            GridSize::new(78, 24)
+            GridSize::new(77, 24)
         );
         assert_eq!(
             grid_size_for_physical_size(size, metrics(16.0, 30.0), DEFAULT_GRID_PADDING),
@@ -388,7 +388,7 @@
             DEFAULT_GRID_PADDING,
         );
 
-        assert_eq!(position.x, 31);
+        assert_eq!(position.x, 39);
         assert_eq!(position.y, 46);
         assert_eq!(size.width, 8);
         assert_eq!(size.height, 16);
@@ -880,9 +880,9 @@
 
         assert_eq!(cw, 9);
         assert_eq!(ch, 18);
-        // 137 - (16 left + 16 right) = 105, 245 - (0 top + 16 bottom) = 229 —
-        // NOT floor(105/9)=11 cols * 9 = 99, which cell_w × cols would give.
-        assert_eq!(taw, 105);
+        // 137 - (24 left + 16 right) = 97, 245 - (0 top + 16 bottom) = 229 —
+        // NOT floor(97/9)=10 cols * 9 = 90, which cell_w × cols would give.
+        assert_eq!(taw, 97);
         assert_eq!(tah, 229);
     }
 

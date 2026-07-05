@@ -49,6 +49,11 @@ const CWD_MAX_CHARS: usize = 32;
 
 // Card interior metrics (all compile-time; see `card_rects`/`card_lines`).
 const CARD_PAD: u32 = 12;
+/// Extra left inset for the terminal-output preview rows, on top of `CARD_PAD`.
+/// The preview echoes raw shell/agent output (a prompt, `../noa main`, …) which
+/// otherwise starts flush against the card's left pad and reads as cramped; a
+/// small indent sets it apart from the dot-anchored name/cwd/meta rows above.
+const CARD_PREVIEW_INSET: u32 = 8;
 const CARD_ICON_W: u32 = 18;
 const CARD_DOT_D: u32 = 8;
 const CARD_MENU_W: u32 = 22;
@@ -338,6 +343,18 @@ impl SidebarMetrics {
 
         let body_w = w - 2 * pad;
         let row = |y: u32| iclip(lx + pad, top + self.s(y) as i64, body_w, line_h, vp);
+        // Preview rows carry an extra left inset so raw terminal output sits a
+        // touch inboard of the dot-anchored rows above (mockup parity).
+        let preview_inset = self.s(CARD_PREVIEW_INSET) as i64;
+        let preview_row = |y: u32| {
+            iclip(
+                lx + pad + preview_inset,
+                top + self.s(y) as i64,
+                body_w - preview_inset,
+                line_h,
+                vp,
+            )
+        };
 
         let name_y = top + self.s(CARD_NAME_Y) as i64;
 
@@ -348,9 +365,9 @@ impl SidebarMetrics {
             name_line: iclip(name_x, name_y, name_w, name_h, vp),
             cwd_line: row(CARD_CWD_Y),
             meta: row(CARD_META_Y),
-            preview1: row(CARD_PREVIEW1_Y),
-            preview2: row(CARD_PREVIEW2_Y),
-            preview3: row(CARD_PREVIEW3_Y),
+            preview1: preview_row(CARD_PREVIEW1_Y),
+            preview2: preview_row(CARD_PREVIEW2_Y),
+            preview3: preview_row(CARD_PREVIEW3_Y),
             updated: row(CARD_UPDATED_Y),
             dot: iclip(dot_x, name_y + (name_h - dot_d) / 2, dot_d, dot_d, vp),
             menu_button: iclip(menu_x, name_y, card_menu_w, name_h, vp),

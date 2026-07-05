@@ -192,8 +192,10 @@ struct SidebarCardDraw {
     grid: GridSize,
     bg: Rgb,
     selected: bool,
-    /// A pending interaction request in its visible blink phase (FR-16/FR-A1):
-    /// the card gets a red ring instead of the blue focus ring.
+    /// A pending interaction request (FR-16): the card gets a red ring + glow
+    /// instead of the blue focus ring. Held steady while the request is pending
+    /// (the dot/label still blink) so the ring reads as a stable "this session
+    /// needs you" marker rather than flickering in and out.
     attention: bool,
     runs: Vec<SidebarTextRun>,
 }
@@ -948,7 +950,7 @@ impl App {
                         SIDEBAR_CARD_BG
                     },
                     selected,
-                    attention: card.attention && marker,
+                    attention: card.attention,
                     runs: card_runs,
                 });
             }
@@ -1111,10 +1113,11 @@ fn emit_card_text(
     // idle); any other process shows green `✳` while running, dim `❯` while
     // idle. The git branch follows on the same row, dim. A pending interaction
     // request (FR-16) overrides the badge with the attention color and appends
-    // the waiting label; the treatment blinks (FR-A1) via `attention_marker`.
+    // the waiting label; the label is held steady while pending (only the dot
+    // blinks, via `effective_status_dot`) so it stays legible.
     if rects.meta.w > 0 && rects.meta.h > 0 {
         let (badge, badge_fg) = process_badge(&lines.process, card.busy);
-        let (badge, badge_fg) = if card.attention && attention_marker {
+        let (badge, badge_fg) = if card.attention {
             (format!("{badge} · {ATTENTION_LABEL}"), SIDEBAR_DOT_RED)
         } else {
             (badge, badge_fg)
@@ -1610,11 +1613,14 @@ pub(super) fn draw_sidebar_band(
         focus_width: 2.0 * model.scale,
         focus_glow_width: 6.0 * model.scale,
     };
-    // A card whose attention marker is in its visible blink phase swaps the
-    // blue focus accent for a red ring (FR-16/FR-A1) — drawn selected so the
-    // ring + glow path lights up even when the card isn't the focused one.
+    // A card with a pending interaction request swaps the blue focus accent for
+    // a red ring (FR-16) — drawn selected so the ring + glow path lights up even
+    // when the card isn't the focused one. A thicker stroke + wider glow than
+    // the blue focus ring so an interaction request is unmissable.
     let attention_style = CardStyle {
         focus_color: rgb_to_rgba(SIDEBAR_DOT_RED),
+        focus_width: 2.5 * model.scale,
+        focus_glow_width: 12.0 * model.scale,
         ..card_style
     };
     for card_draw in &model.cards {

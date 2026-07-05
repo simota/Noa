@@ -71,7 +71,7 @@ const SIDEBAR_DIVIDER: Rgb = crate::chrome::CHROME_DIVIDER;
 // 1px hairline, so the two independently-themed surfaces meet with depth
 // instead of a bare color boundary.
 const SEAM_SHADOW_WIDTH: f32 = 10.0;
-const SEAM_HAIRLINE_WIDTH: f32 = 0.5;
+const SEAM_HAIRLINE_WIDTH: f32 = 0.0;
 
 /// Pointer travel (logical px, scaled at use) that promotes a card press to a
 /// drag-reorder. Below it a press-then-release stays a plain card-select click.
@@ -1671,7 +1671,7 @@ pub(super) fn draw_sidebar_band(
     // pane background (the terminal keeps its own theme, so the two surfaces
     // otherwise meet as unrelated colors).
     let hairline_w = (SEAM_HAIRLINE_WIDTH * model.scale).round().max(1.0) as u32;
-    if model.inset > hairline_w {
+    if SEAM_HAIRLINE_WIDTH > 0.0 && model.inset > hairline_w {
         ensure_scratch(
             &mut gpu.sidebar_divider_tex,
             &gpu.device,
@@ -1735,7 +1735,7 @@ pub(super) fn draw_sidebar_band(
         focus_color: rgb_to_rgba(SIDEBAR_ACCENT),
         corner_radius: 10.0 * model.scale,
         border_width: 1.0 * model.scale,
-        focus_width: 2.0 * model.scale,
+        focus_width: 1.0 * model.scale,
         focus_glow_width: 6.0 * model.scale,
     };
     // A card with a pending interaction request swaps the blue focus accent for
@@ -1744,7 +1744,7 @@ pub(super) fn draw_sidebar_band(
     // the blue focus ring so an interaction request is unmissable.
     let attention_style = CardStyle {
         focus_color: rgb_to_rgba(SIDEBAR_DOT_RED),
-        focus_width: 2.5 * model.scale,
+        focus_width: 1.0 * model.scale,
         focus_glow_width: 12.0 * model.scale,
         ..card_style
     };

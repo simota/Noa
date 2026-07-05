@@ -799,17 +799,19 @@ fn emit_card_text(
         SIDEBAR_FG,
         true,
     ));
+    // One field per line: cwd, then branch (blank when absent), then process,
+    // then the updated-time — each dim except the branded process row.
     out.extend(window_run(
         to_cell,
-        rects.updated,
-        lines.updated.clone(),
+        rects.cwd_line,
+        lines.cwd.clone(),
         SIDEBAR_DIM_FG,
         false,
     ));
     out.extend(window_run(
         to_cell,
-        rects.meta_line,
-        lines.meta.clone(),
+        rects.branch_line,
+        lines.branch.clone(),
         SIDEBAR_DIM_FG,
         false,
     ));
@@ -821,6 +823,14 @@ fn emit_card_text(
         let (text, fg) = process_badge(&lines.process, card.busy);
         out.extend(window_run(to_cell, rects.process, text, fg, false));
     }
+
+    out.extend(window_run(
+        to_cell,
+        rects.updated,
+        lines.updated.clone(),
+        SIDEBAR_DIM_FG,
+        false,
+    ));
 }
 
 /// Wall-clock now, in the viewer's local zone, for the sidebar's relative

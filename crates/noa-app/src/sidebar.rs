@@ -34,9 +34,9 @@ pub const SIDEBAR_HEADER_H: u32 = 36;
 /// buttons below the header.
 pub const SIDEBAR_TOOLBAR_H: u32 = 30;
 
-/// Height of one session card. Three rows — name / cwd+branch / running
-/// process — with a little breathing room around them.
-pub const SIDEBAR_CARD_H: u32 = 72;
+/// Height of one session card. Five rows, one field per line (name / cwd /
+/// branch / running process / updated-time) with comfortable spacing.
+pub const SIDEBAR_CARD_H: u32 = 112;
 
 /// Vertical gap between adjacent cards.
 pub const SIDEBAR_CARD_GUTTER: u32 = 8;
@@ -44,22 +44,26 @@ pub const SIDEBAR_CARD_GUTTER: u32 = 8;
 /// Vertical stride from one card's top to the next (card + gutter).
 pub const SIDEBAR_CARD_STRIDE: u32 = SIDEBAR_CARD_H + SIDEBAR_CARD_GUTTER;
 
-/// Max characters of a cwd shown in the meta line before tail-first truncation.
-const CWD_MAX_CHARS: usize = 28;
+/// Max characters of a cwd shown in the cwd line before tail-first truncation.
+const CWD_MAX_CHARS: usize = 32;
 
 // Card interior metrics (all compile-time; see `card_rects`/`card_lines`).
 const CARD_PAD: u32 = 12;
 const CARD_ICON_W: u32 = 18;
 const CARD_DOT_D: u32 = 8;
 const CARD_MENU_W: u32 = 22;
-const CARD_UPDATED_W: u32 = 56;
 const CARD_LINE_H: u32 = 15;
 const CARD_NAME_H: u32 = 18;
 
-// Card interior row baselines (top-relative): name, cwd+branch, running process.
+// Card interior row baselines (top-relative), one field per line: name, cwd,
+// branch, running process, updated-time. The branch row is always reserved
+// (fixed card height) and left blank when the session has no branch — simpler
+// than a dynamic per-card height.
 const CARD_NAME_Y: u32 = 10;
-const CARD_META_Y: u32 = 30;
-const CARD_PROCESS_Y: u32 = 50;
+const CARD_CWD_Y: u32 = 30;
+const CARD_BRANCH_Y: u32 = 50;
+const CARD_PROCESS_Y: u32 = 70;
+const CARD_UPDATED_Y: u32 = 90;
 
 // Toolbar `+` / `…` button metrics (kept as comfortable hit targets).
 const TOOLBAR_BUTTON_W: u32 = 26;
@@ -95,11 +99,15 @@ pub struct CardRects {
     pub bounds: SidebarRect,
     pub icon: SidebarRect,
     pub name_line: SidebarRect,
-    pub meta_line: SidebarRect,
+    /// The cwd row (dim, tail-truncated, full width).
+    pub cwd_line: SidebarRect,
+    /// The branch row (dim); blank when the session has no branch.
+    pub branch_line: SidebarRect,
     /// The running-process row (foreground process name / shell state).
     pub process: SidebarRect,
-    pub dot: SidebarRect,
+    /// The updated-time row (dim), on its own bottom line.
     pub updated: SidebarRect,
+    pub dot: SidebarRect,
     pub menu_button: SidebarRect,
 }
 
@@ -295,8 +303,8 @@ impl SidebarMetrics {
 
     /// Build one card's clipped sub-rects from its (possibly off-viewport)
     /// window top `top` and the viewport `vp`. Every interior offset scales with
-    /// the DPR so the card's five rows (name / meta / heading / preview×2) fit
-    /// its scaled height on a Retina display.
+    /// the DPR so the card's five rows (name / cwd / branch / process / updated)
+    /// fit its scaled height on a Retina display.
     fn card_rects(&self, id: SessionCardId, top: i64, vp: SidebarRect) -> CardRects {
         let lx = vp.x as i64;
         let w = vp.w as i64;
@@ -304,39 +312,36 @@ impl SidebarMetrics {
         let dot_d = self.s(CARD_DOT_D) as i64;
         let icon_w = self.s(CARD_ICON_W) as i64;
         let card_menu_w = self.s(CARD_MENU_W) as i64;
-        let updated_w = self.s(CARD_UPDATED_W) as i64;
         let line_h = self.s(CARD_LINE_H) as i64;
         let name_h = self.s(CARD_NAME_H) as i64;
         let gap6 = self.s(6) as i64;
 
         // Name row, left to right: status dot, project icon, display name. The
         // dot sits at the card's left edge (mockup parity) as a small color
-        // chip; the icon and name follow it.
+        // chip; the icon and name follow it. The `…` hit region pins the far
+        // corner, and the name now runs the full width up to it (the
+        // updated-time moved to its own bottom row).
         let dot_x = lx + pad;
         let icon_x = dot_x + dot_d + self.s(8) as i64;
         let name_x = icon_x + icon_w + gap6;
-
-        // Top-right: the invisible `…` hit region pins the far corner, with the
-        // updated-time to its left on the same (name) row.
         let menu_x = lx + w - pad - card_menu_w;
-        let updated_x = menu_x - self.s(4) as i64 - updated_w;
-        let name_w = updated_x - name_x - gap6;
+        let name_w = menu_x - name_x - gap6;
 
         let body_w = w - 2 * pad;
+        let row = |y: u32| iclip(lx + pad, top + self.s(y) as i64, body_w, line_h, vp);
 
         let name_y = top + self.s(CARD_NAME_Y) as i64;
-        let meta_y = top + self.s(CARD_META_Y) as i64;
-        let process_y = top + self.s(CARD_PROCESS_Y) as i64;
 
         CardRects {
             id,
             bounds: iclip(lx, top, w, self.card_h as i64, vp),
             icon: iclip(icon_x, name_y, icon_w, name_h, vp),
             name_line: iclip(name_x, name_y, name_w, name_h, vp),
-            meta_line: iclip(lx + pad, meta_y, body_w, line_h, vp),
-            process: iclip(lx + pad, process_y, body_w, line_h, vp),
+            cwd_line: row(CARD_CWD_Y),
+            branch_line: row(CARD_BRANCH_Y),
+            process: row(CARD_PROCESS_Y),
+            updated: row(CARD_UPDATED_Y),
             dot: iclip(dot_x, name_y + (name_h - dot_d) / 2, dot_d, dot_d, vp),
-            updated: iclip(updated_x, name_y, updated_w, line_h, vp),
             menu_button: iclip(menu_x, name_y, card_menu_w, name_h, vp),
         }
     }
@@ -511,8 +516,10 @@ pub enum SidebarHit {
 pub struct CardLines {
     /// `<icon glyph> <display name>` — the rename override shadows the title.
     pub name: String,
-    /// `<cwd, tail-first truncated> <branch?>` — branch omitted when absent.
-    pub meta: String,
+    /// The cwd row, tail-first truncated.
+    pub cwd: String,
+    /// The branch row; empty when the session has no branch.
+    pub branch: String,
     /// The running-process row: the tty's foreground process name, or a shell
     /// state fallback (`running` / `idle`) where detection is unavailable. The
     /// caller styles it by the card's `busy` flag.
@@ -521,16 +528,14 @@ pub struct CardLines {
     pub updated: String,
 }
 
-/// Build a card's display lines from its state and the current wall clock.
+/// Build a card's display lines from its state and the current wall clock. Each
+/// field is its own line (name / cwd / branch / process / updated).
 pub fn card_lines(card: &SessionCard, now: WallClock) -> CardLines {
     // The project icon is rendered from its own rect (`CardRects::icon`), so the
     // display name here carries no glyph prefix.
     let name = card.display_name().to_string();
     let cwd = truncate_tail(&card.cwd, CWD_MAX_CHARS);
-    let meta = match card.branch.as_deref() {
-        Some(branch) if !branch.is_empty() => format!("{cwd}  {branch}"),
-        _ => cwd,
-    };
+    let branch = card.branch.clone().unwrap_or_default();
     // The detected foreground process name; when unavailable (non-macOS, or not
     // yet polled) fall back to the shell state so the row is never blank.
     let process = card
@@ -541,7 +546,8 @@ pub fn card_lines(card: &SessionCard, now: WallClock) -> CardLines {
 
     CardLines {
         name,
-        meta,
+        cwd,
+        branch,
         process,
         updated,
     }
@@ -719,10 +725,10 @@ mod tests {
     }
 
     // 6 ids stacked; a viewport tall enough for exactly 3 cards. bounds height =
-    // header(36) + toolbar(30) + 3*stride(80) = 306.
+    // header(36) + toolbar(30) + 3*stride(120) = 426.
     fn six_id_bounds() -> (SidebarRect, Vec<SessionCardId>) {
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
-        (SidebarRect::new(0, 0, 360, 306), ids)
+        (SidebarRect::new(0, 0, 360, 426), ids)
     }
 
     // AC-3 (FR-2): the card lines carry `[icon] name`, `cwd … branch`, and the
@@ -741,11 +747,10 @@ mod tests {
         assert_eq!(lines.name, "build");
         assert!(!icon_glyph(IconKind::Rust).is_empty());
 
-        // `cwd … branch`: the long cwd is tail-truncated (ellipsis) and the
-        // branch follows it.
-        assert!(lines.meta.contains('…'));
-        assert!(lines.meta.contains("very-long-project"));
-        assert!(lines.meta.contains("main"));
+        // The cwd row is tail-truncated (ellipsis) and the branch is its own row.
+        assert!(lines.cwd.contains('…'));
+        assert!(lines.cwd.contains("very-long-project"));
+        assert_eq!(lines.branch, "main");
 
         // updated-time matches the pure PR1 formatter.
         assert_eq!(lines.updated, format_relative_time(wall(10, 3), wall(10, 0)));
@@ -788,7 +793,8 @@ mod tests {
     fn card_lines_omit_branch_when_absent() {
         let card = sample_card("shell", "/repo", None);
         let lines = card_lines(&card, wall(10, 0));
-        assert_eq!(lines.meta, "/repo");
+        assert_eq!(lines.cwd, "/repo");
+        assert_eq!(lines.branch, "");
     }
 
     // The process row falls back to a shell state when no process is detected
@@ -1039,14 +1045,16 @@ mod tests {
         assert!(card.dot.x < card.icon.x);
         assert!(card.icon.x < card.name_line.x);
 
-        // Updated-time shares the name row (same y) and sits to its right.
-        assert_eq!(card.updated.y, card.name_line.y);
-        assert!(card.name_line.right() <= card.updated.x);
-        assert!(card.updated.right() <= card.menu_button.x);
+        // The name row runs full width up to the `…` hit region (updated-time
+        // is no longer on it).
+        assert!(card.name_line.right() <= card.menu_button.x);
 
-        // The three rows stack: name, then cwd+branch, then the process row.
-        assert!(card.name_line.y < card.meta_line.y);
-        assert!(card.meta_line.y < card.process.y);
+        // One field per line, stacked top to bottom: name, cwd, branch,
+        // process, updated.
+        assert!(card.name_line.y < card.cwd_line.y);
+        assert!(card.cwd_line.y < card.branch_line.y);
+        assert!(card.branch_line.y < card.process.y);
+        assert!(card.process.y < card.updated.y);
     }
 
     // DPR scaling: the metrics double at scale 2.0, and a degenerate scale
@@ -1076,8 +1084,8 @@ mod tests {
     fn layout_and_hit_test_scale_at_dpr_2() {
         let m2 = SidebarMetrics::new(2.0);
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
-        // header(72) + toolbar(60) + 3*stride(160) = 612, with a doubled width.
-        let bounds = SidebarRect::new(0, 0, 720, 612);
+        // header(72) + toolbar(60) + 3*stride(240) = 852, with a doubled width.
+        let bounds = SidebarRect::new(0, 0, 720, 852);
 
         let bands = m2.bands(bounds);
         assert_eq!(bands.header.h, 2 * SIDEBAR_HEADER_H);
@@ -1086,15 +1094,17 @@ mod tests {
         let layout = m2.layout(bounds, &ids, 0);
         assert_eq!(layout.cards.len(), 3);
 
-        // The first card is a full doubled height and its three rows stack in
-        // order, with the process row fitting inside the card.
+        // The first card is a full doubled height and its five rows stack in
+        // order, with the last (updated) row fitting inside the card.
         let card = &layout.cards[0];
         assert_eq!(card.bounds.h, m2.card_h);
         assert!(card.dot.x < card.icon.x && card.icon.x < card.name_line.x);
-        assert!(card.name_line.y < card.meta_line.y);
-        assert!(card.meta_line.y < card.process.y);
-        assert!(card.process.h > 0);
-        assert!(card.process.bottom() <= card.bounds.bottom());
+        assert!(card.name_line.y < card.cwd_line.y);
+        assert!(card.cwd_line.y < card.branch_line.y);
+        assert!(card.branch_line.y < card.process.y);
+        assert!(card.process.y < card.updated.y);
+        assert!(card.updated.h > 0);
+        assert!(card.updated.bottom() <= card.bounds.bottom());
 
         // Hit-test resolves the first card's body and its `…` region against the
         // doubled geometry.

@@ -1,0 +1,525 @@
+use std::path::{Path, PathBuf};
+
+use noa_core::Rgb;
+
+use crate::{
+    AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, CursorShape,
+    FontFeature, FontVariation, MacosOptionAsAlt, MacosTitlebarStyle, SyntheticStyleMode,
+    WindowSaveState,
+};
+
+use super::diagnostics::*;
+use super::{Diagnostic, Directive};
+
+pub(super) fn parse_u16(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<u16> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<i64>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    let Ok(parsed) = u16::try_from(parsed) else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    Some(parsed)
+}
+
+/// Parse a non-negative integer byte count (`scrollback-limit`). `0` is valid
+/// and disables scrollback; a negative or non-numeric value diagnoses.
+pub(super) fn parse_usize(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<usize> {
+    let value = directive.value.as_deref()?;
+    match value.parse::<usize>() {
+        Ok(parsed) => Some(parsed),
+        Err(_) => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_font_size(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<f32> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<f32>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if !parsed.is_finite() || parsed <= 0.0 {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(parsed)
+}
+
+pub(super) fn parse_theme(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<String> {
+    let value = directive.value.as_deref()?;
+    if value.starts_with("light:") || value.starts_with("dark:") {
+        diagnostics.push(theme_pair_diagnostic(path));
+        return None;
+    }
+    Some(value.to_string())
+}
+
+pub(super) fn parse_family(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+    target: &mut Vec<String>,
+) {
+    match directive.value.as_deref() {
+        Some(value) if !value.is_empty() => target.push(value.to_string()),
+        _ => diagnostics.push(empty_family_diagnostic(path, &directive.key)),
+    }
+}
+
+pub(super) fn parse_font_feature(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+    target: &mut Vec<FontFeature>,
+) {
+    let Some(value) = directive.value.as_deref() else {
+        diagnostics.push(invalid_font_feature_diagnostic(path, ""));
+        return;
+    };
+    let (enabled, tag_str) = match value.strip_prefix('-') {
+        Some(rest) => (false, rest),
+        None => (true, value),
+    };
+    let Some(tag) = ascii_tag4(tag_str) else {
+        diagnostics.push(invalid_font_feature_diagnostic(path, value));
+        return;
+    };
+    target.push(FontFeature { tag, enabled });
+}
+
+pub(super) fn parse_font_variation(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+    target: &mut Vec<FontVariation>,
+) {
+    let Some(value) = directive.value.as_deref() else {
+        diagnostics.push(invalid_font_variation_diagnostic(path, &directive.key, ""));
+        return;
+    };
+    let Some((axis, value_str)) = value.split_once('=') else {
+        diagnostics.push(invalid_font_variation_diagnostic(
+            path,
+            &directive.key,
+            value,
+        ));
+        return;
+    };
+    let (Some(tag), Ok(parsed)) = (ascii_tag4(axis), value_str.parse::<f32>()) else {
+        diagnostics.push(invalid_font_variation_diagnostic(
+            path,
+            &directive.key,
+            value,
+        ));
+        return;
+    };
+    if !parsed.is_finite() {
+        diagnostics.push(invalid_font_variation_diagnostic(
+            path,
+            &directive.key,
+            value,
+        ));
+        return;
+    }
+    target.push(FontVariation { tag, value: parsed });
+}
+
+/// Parse a 4-ASCII-char OpenType tag (feature tag or variation axis).
+fn ascii_tag4(tag_str: &str) -> Option<[u8; 4]> {
+    let bytes = tag_str.as_bytes();
+    if bytes.len() != 4 || !tag_str.is_ascii() {
+        return None;
+    }
+    Some([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+pub(super) fn parse_synthetic_style(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<SyntheticStyleMode> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "true" => Some(SyntheticStyleMode::Both),
+        "false" => Some(SyntheticStyleMode::Neither),
+        "no-bold" => Some(SyntheticStyleMode::NoBold),
+        "no-italic" => Some(SyntheticStyleMode::NoItalic),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_alpha_blending(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<AlphaBlendingMode> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "native" => Some(AlphaBlendingMode::Native),
+        "linear" => {
+            diagnostics.push(alpha_blending_fallback_diagnostic(path, value));
+            Some(AlphaBlendingMode::Linear)
+        }
+        "linear-corrected" => {
+            diagnostics.push(alpha_blending_fallback_diagnostic(path, value));
+            Some(AlphaBlendingMode::LinearCorrected)
+        }
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_font_thicken(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<bool> {
+    let value = directive.value.as_deref()?;
+    let parsed = match value {
+        "true" => true,
+        "false" => false,
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            return None;
+        }
+    };
+    Some(parsed)
+}
+
+pub(super) fn parse_font_thicken_strength(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<u8> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<u8>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    Some(parsed)
+}
+
+pub(super) fn parse_clipboard_read(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<ClipboardAccess> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "deny" | "false" => Some(ClipboardAccess::Deny),
+        "ask" => Some(ClipboardAccess::Ask),
+        "allow" | "true" => Some(ClipboardAccess::Allow),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_bool_directive(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<bool> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_non_negative_f32(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<f32> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<f32>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if !parsed.is_finite() || parsed < 0.0 {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(parsed)
+}
+
+/// Clamp an `f32` to `0.0..=1.0`. Ghostty clamps out-of-range values without
+/// complaint, so only an unparseable value produces a diagnostic.
+pub(super) fn parse_opacity(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<f32> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<f32>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if !parsed.is_finite() {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(parsed.clamp(0.0, 1.0))
+}
+
+/// Parse `minimum-contrast`: a WCAG contrast ratio from 1.0 through 21.0.
+/// Unlike opacity/quick-terminal-size, Ghostty documents this as a bounded
+/// ratio rather than a clamped percentage, so invalid values diagnose and fall
+/// back to the default.
+pub(super) fn parse_minimum_contrast(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<f32> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<f32>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if !parsed.is_finite() || !(1.0..=21.0).contains(&parsed) {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(parsed)
+}
+
+/// Maximum `background-blur-radius`. Beyond this the CGS blur stops looking
+/// different and just costs compositor time.
+const MAX_BLUR_RADIUS: u16 = 64;
+/// Ghostty maps the boolean `true` form of `background-blur-radius` to 20.
+const DEFAULT_BLUR_RADIUS: u16 = 20;
+
+/// Parse `background-blur-radius`: a non-negative integer, or the boolean
+/// shorthand Ghostty also accepts (`true` = 20, `false` = 0). Out-of-range
+/// integers clamp to `0..=MAX_BLUR_RADIUS`; only an unparseable value produces
+/// a diagnostic.
+pub(super) fn parse_blur_radius(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<u16> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "true" => Some(DEFAULT_BLUR_RADIUS),
+        "false" => Some(0),
+        _ => match value.parse::<u32>() {
+            Ok(parsed) => Some(parsed.min(u32::from(MAX_BLUR_RADIUS)) as u16),
+            Err(_) => {
+                diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+                None
+            }
+        },
+    }
+}
+
+/// Parse `background-image`: a filesystem path to a PNG, stored verbatim. Path
+/// resolution (leading `~` expansion) and decode happen downstream in `noa-app`
+/// — this module stays IO-free (no `dirs`/`fs`/`env`). Missing/undecodable
+/// files surface a diagnostic there and disable the image, so an empty value is
+/// the only thing that resets the key here.
+pub(super) fn parse_background_image(directive: &Directive) -> Option<PathBuf> {
+    let value = directive.value.as_deref()?;
+    Some(PathBuf::from(value))
+}
+
+pub(super) fn parse_background_image_position(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<BackgroundImagePosition> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "top-left" => Some(BackgroundImagePosition::TopLeft),
+        "top-center" => Some(BackgroundImagePosition::TopCenter),
+        "top-right" => Some(BackgroundImagePosition::TopRight),
+        "center-left" => Some(BackgroundImagePosition::CenterLeft),
+        "center" => Some(BackgroundImagePosition::Center),
+        "center-right" => Some(BackgroundImagePosition::CenterRight),
+        "bottom-left" => Some(BackgroundImagePosition::BottomLeft),
+        "bottom-center" => Some(BackgroundImagePosition::BottomCenter),
+        "bottom-right" => Some(BackgroundImagePosition::BottomRight),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_background_image_fit(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<BackgroundImageFit> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "none" => Some(BackgroundImageFit::None),
+        "contain" => Some(BackgroundImageFit::Contain),
+        "cover" => Some(BackgroundImageFit::Cover),
+        "stretch" => Some(BackgroundImageFit::Stretch),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+/// Smallest allowed `quick-terminal-size` fraction; below this the drop-down
+/// would be too short to be usable.
+const MIN_QUICK_TERMINAL_SIZE: f32 = 0.1;
+
+/// Parse `quick-terminal-size`: the drop-down height as a fraction of the
+/// screen height. Accepts either a bare fraction (`0.4`) or a percentage
+/// (`40%`). Out-of-range values clamp to `0.1..=1.0`; only an unparseable
+/// value produces a diagnostic.
+pub(super) fn parse_quick_terminal_size(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<f32> {
+    let value = directive.value.as_deref()?;
+    let parsed = match value.strip_suffix('%') {
+        Some(percent) => percent.trim().parse::<f32>().map(|n| n / 100.0),
+        None => value.parse::<f32>(),
+    };
+    let Ok(parsed) = parsed else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if !parsed.is_finite() || parsed <= 0.0 {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(parsed.clamp(MIN_QUICK_TERMINAL_SIZE, 1.0))
+}
+
+/// Parse a `#RRGGBB` or `RRGGBB` (case-insensitive) hex color.
+pub(super) fn parse_color(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<Rgb> {
+    let value = directive.value.as_deref()?;
+    match rgb_from_hex(value) {
+        Some(rgb) => Some(rgb),
+        None => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+            None
+        }
+    }
+}
+
+fn rgb_from_hex(value: &str) -> Option<Rgb> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(Rgb::new(r, g, b))
+}
+
+pub(super) fn parse_cursor_style(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<CursorShape> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "block" => Some(CursorShape::Block),
+        "bar" => Some(CursorShape::Bar),
+        "underline" => Some(CursorShape::Underline),
+        "block_hollow" => {
+            diagnostics.push(cursor_style_unsupported_diagnostic(path, value));
+            None
+        }
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_window_save_state(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<WindowSaveState> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "default" => Some(WindowSaveState::Default),
+        "never" => Some(WindowSaveState::Never),
+        "always" => Some(WindowSaveState::Always),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_macos_option_as_alt(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<MacosOptionAsAlt> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "false" | "none" => Some(MacosOptionAsAlt::None),
+        "true" | "both" => Some(MacosOptionAsAlt::Both),
+        "left" | "only-left" => Some(MacosOptionAsAlt::Left),
+        "right" | "only-right" => Some(MacosOptionAsAlt::Right),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_macos_titlebar_style(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<MacosTitlebarStyle> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "native" | "tabs" => Some(MacosTitlebarStyle::Native),
+        "transparent" => Some(MacosTitlebarStyle::Transparent),
+        "hidden" => Some(MacosTitlebarStyle::Hidden),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}

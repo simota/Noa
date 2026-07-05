@@ -4,6 +4,7 @@
 //! `wgpu`.
 
 mod app;
+mod branch_poll;
 mod cli;
 mod clipboard;
 mod command_palette;

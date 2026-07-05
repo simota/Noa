@@ -105,8 +105,26 @@ impl App {
         if !session_delta_should_apply(&delta, self.window_sidebar_eligible(window_id)) {
             return;
         }
+        // A cwd change (new card or a changed cwd on an existing one) triggers a
+        // branch + icon poll on the dedicated worker (FR-8/FR-9), never on the
+        // io read loop (NFR-2/AC-18). Compared before `apply` moves the delta.
+        if let SessionDelta::Upsert { id, cwd, .. } = &delta
+            && !cwd.is_empty()
+            && self.session_store.get(id).is_none_or(|card| &card.cwd != cwd)
+        {
+            self.request_branch_poll(*id, cwd.clone());
+        }
         self.session_store.apply(delta);
         self.request_sidebar_redraw();
+    }
+
+    /// Queue a branch/icon poll for a card whose cwd just changed (FR-8/FR-9).
+    /// Forwarded to the dedicated worker thread so `git` never runs on the io
+    /// read loop (NFR-2). A no-op if the worker has already been torn down.
+    fn request_branch_poll(&self, id: SessionCardId, cwd: String) {
+        if let Some(worker) = self.branch_poll.as_ref() {
+            worker.request(id, cwd);
+        }
     }
 
     /// Request a redraw of every window currently showing its sidebar. Cheap:

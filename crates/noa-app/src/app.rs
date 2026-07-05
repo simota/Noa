@@ -485,6 +485,11 @@ pub struct App {
     /// lifetime (dropping it unregisters). `None` until installed, or when no
     /// `sidebar-hotkey` is configured / registration failed.
     sidebar_hotkey: Option<crate::macos_hotkey::GlobalHotKey>,
+    /// The dedicated branch-poll worker (FR-8/FR-9): receives OSC-7-driven
+    /// cwd-change requests and posts back git branch + project icon as
+    /// [`crate::session_store::SessionDelta::Branch`]. Kept off the io read loop
+    /// (NFR-2/AC-18) and joined at teardown (Omen T6, in `Drop`).
+    branch_poll: Option<crate::branch_poll::BranchPollHandle>,
 }
 
 impl App {
@@ -492,6 +497,9 @@ impl App {
         let padding = resolve_grid_padding(config.window_padding_x, config.window_padding_y);
         let initial_cursor_style =
             resolve_cursor_style(config.cursor_style, config.cursor_style_blink);
+        // Clone the proxy for the branch-poll worker before `proxy` is moved
+        // into the struct — the worker posts `SessionDelta::Branch` back over it.
+        let proxy_for_branch_poll = proxy.clone();
         App {
             padding,
             initial_cursor_style,
@@ -529,6 +537,7 @@ impl App {
             session_store: SessionStore::new(),
             sidebar_visible_gate: Arc::new(AtomicBool::new(false)),
             sidebar_hotkey: None,
+            branch_poll: Some(crate::branch_poll::spawn(proxy_for_branch_poll)),
         }
     }
 
@@ -1879,6 +1888,11 @@ impl Drop for App {
         self.windows.clear();
         self.window_order.clear();
         self.focused = None;
+        // Stop and join the branch-poll worker (Omen T6) before the proxy is
+        // dropped with the rest of `App`.
+        if let Some(mut branch_poll) = self.branch_poll.take() {
+            branch_poll.shutdown();
+        }
         self.gpu.take();
     }
 }

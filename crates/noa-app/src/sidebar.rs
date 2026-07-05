@@ -380,19 +380,21 @@ fn truncate_tail(s: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
-/// Project-icon glyph for a card (FR-9). ASCII placeholders by default to avoid
-/// font-fallback tofu (same manual-verify caveat as
-/// `tab_overview::title_bar_row_with_close`); swap to Nerd Font glyphs at this
-/// one site once they are confirmed to render, and record the deviation.
+/// Project-icon glyph for a card (FR-9). Nerd Font glyphs (mockup parity); an
+/// environment without a Nerd Font falls back to tofu / a replacement box for
+/// these private-use codepoints (AC-21 [manual] — graceful degradation, NFR-5),
+/// which is why the branch of the app that renders these never depends on the
+/// glyph being present. The codepoints are Nerd Font private-use area
+/// (`nf-seti-*` / `nf-dev-*`).
 fn icon_glyph(icon: IconKind) -> &'static str {
     match icon {
-        IconKind::Rust => "[rs]",
-        IconKind::Node => "[js]",
-        IconKind::Terraform => "[tf]",
-        IconKind::Go => "[go]",
-        IconKind::Python => "[py]",
-        IconKind::Git => "[git]",
-        IconKind::Folder => "[dir]",
+        IconKind::Rust => "\u{e7a8}",      // nf-dev-rust
+        IconKind::Node => "\u{e718}",      // nf-dev-nodejs_small
+        IconKind::Terraform => "\u{e69a}", // nf-seti-terraform
+        IconKind::Go => "\u{e627}",        // nf-seti-go
+        IconKind::Python => "\u{e606}",    // nf-seti-python
+        IconKind::Git => "\u{e702}",       // nf-dev-git
+        IconKind::Folder => "\u{e5ff}",    // nf-custom-folder
     }
 }
 

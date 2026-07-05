@@ -1040,6 +1040,24 @@ mod tests {
         );
     }
 
+    // AC-18 (NFR-2): git must never be spawned on the io read loop — it lives
+    // only in the dedicated `branch_poll` worker. Assert this module's source
+    // never spawns `git` (nor any `Command`). The needles are assembled at
+    // runtime so this test file does not trip its own scan.
+    #[test]
+    fn io_read_loop_never_spawns_git() {
+        let source = include_str!("io_thread.rs");
+        for forbidden in [
+            ["Command", "::new(\"git\")"].concat(),
+            ["Command", "::new"].concat(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "io_thread.rs must not spawn a subprocess (`{forbidden}`) — git belongs in branch_poll"
+            );
+        }
+    }
+
     #[test]
     fn io_thread_handle_shutdown_joins_within_timeout() {
         let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);

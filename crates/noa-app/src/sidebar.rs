@@ -71,22 +71,6 @@ pub struct SidebarBands {
     pub viewport: SidebarRect,
 }
 
-/// Carve `bounds` into the header / toolbar / viewport bands. Each band height
-/// clamps so a very short sidebar degrades to a zero-height viewport instead of
-/// underflowing (mirrors `overview_chrome_bands`).
-pub fn sidebar_bands(bounds: SidebarRect) -> SidebarBands {
-    let header_h = SIDEBAR_HEADER_H.min(bounds.h);
-    let after_header = bounds.h - header_h;
-    let toolbar_h = SIDEBAR_TOOLBAR_H.min(after_header);
-    let viewport_h = after_header - toolbar_h;
-
-    SidebarBands {
-        header: SidebarRect::new(bounds.x, bounds.y, bounds.w, header_h),
-        toolbar: SidebarRect::new(bounds.x, bounds.y + header_h, bounds.w, toolbar_h),
-        viewport: SidebarRect::new(bounds.x, bounds.y + header_h + toolbar_h, bounds.w, viewport_h),
-    }
-}
-
 /// Header rects (FR-5): a left status label, a centered title, and a
 /// right-aligned session-name pill. Geometry only — the caller renders text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,63 +78,6 @@ pub struct HeaderRects {
     pub status_label: SidebarRect,
     pub title: SidebarRect,
     pub name_pill: SidebarRect,
-}
-
-/// Lay out the header band's three rects. Widths are proportional so the title
-/// keeps the middle regardless of sidebar width; all rects clamp to the band.
-pub fn header_rects(header: SidebarRect) -> HeaderRects {
-    let line_h = HEADER_LINE_H.min(header.h);
-    let cy = header.y + (header.h - line_h) / 2;
-    let status_w = (header.w * 35 / 100).min(header.w);
-    let pill_w = (header.w * 30 / 100).min(header.w);
-
-    let status_x = header.x + CARD_PAD.min(header.w);
-    let status_label = SidebarRect::new(status_x, cy, status_w, line_h);
-    let pill_x = header
-        .right()
-        .saturating_sub(CARD_PAD)
-        .saturating_sub(pill_w);
-    let name_pill = SidebarRect::new(pill_x, cy, pill_w, line_h);
-
-    let title_x = status_label.right() + 6;
-    let title_w = name_pill.x.saturating_sub(title_x).saturating_sub(6);
-    let title = SidebarRect::new(title_x, cy, title_w, line_h);
-
-    HeaderRects {
-        status_label,
-        title,
-        name_pill,
-    }
-}
-
-/// The `+` (new session) button rect in the toolbar band, pinned to the right.
-pub fn new_button_rect(toolbar: SidebarRect) -> SidebarRect {
-    let h = TOOLBAR_BUTTON_H.min(toolbar.h);
-    let y = toolbar.y + (toolbar.h - h) / 2;
-    let x = toolbar
-        .right()
-        .saturating_sub(CARD_PAD)
-        .saturating_sub(TOOLBAR_BUTTON_W);
-    SidebarRect::new(x, y, TOOLBAR_BUTTON_W.min(toolbar.w), h)
-}
-
-/// The header-level `…` menu button rect, immediately left of the `+` button.
-pub fn menu_button_rect(toolbar: SidebarRect) -> SidebarRect {
-    let plus = new_button_rect(toolbar);
-    let x = plus.x.saturating_sub(6).saturating_sub(TOOLBAR_BUTTON_W);
-    SidebarRect::new(x, plus.y, TOOLBAR_BUTTON_W.min(toolbar.w), plus.h)
-}
-
-/// Total scrollable content height for `card_count` stacked cards.
-pub fn content_height(card_count: usize) -> u32 {
-    (card_count as u32).saturating_mul(SIDEBAR_CARD_STRIDE)
-}
-
-/// Clamp a scroll offset to `[0, max]`, where `max = content_h - viewport_h`
-/// (0 when the content fits, FR-15/AC-23). The `0` floor is implicit in `u32`.
-pub fn clamp_scroll(offset: u32, content_h: u32, viewport_h: u32) -> u32 {
-    let max = content_h.saturating_sub(viewport_h);
-    offset.min(max)
 }
 
 /// Sub-rects of one laid-out session card, in window space, each clipped to the
@@ -183,94 +110,343 @@ pub struct SidebarLayout {
     pub content_h: u32,
 }
 
-/// Lay out the sidebar: header/toolbar chrome plus every card that is at least
-/// partially visible after applying `scroll_offset` (clamped). Cards fully
-/// scrolled out of the viewport are omitted; partly-visible cards have their
-/// rects clipped to the viewport.
-pub fn sidebar_layout(
-    bounds: SidebarRect,
-    ids: &[SessionCardId],
-    scroll_offset: u32,
-) -> SidebarLayout {
-    let bands = sidebar_bands(bounds);
-    let content_h = content_height(ids.len());
-    let scroll = clamp_scroll(scroll_offset, content_h, bands.viewport.h);
-    let vp = bands.viewport;
+/// Every layout dimension resolved for one window's scale factor (DPR). The
+/// pure `SIDEBAR_*`/`CARD_*` constants are the design metrics at scale 1.0; the
+/// sidebar's pixel inset is already scale-multiplied (`sidebar_inset`), so the
+/// bands, card heights, and interior offsets must scale by the same factor or a
+/// Retina card would be half its intended height and clip its rows. Construct
+/// once per frame from `window.scale_factor()` — the same source the inset uses
+/// — and drive every geometry method off it. Pure and `Copy`, so layout stays
+/// unit-testable at any scale without a window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SidebarMetrics {
+    scale: f32,
+    /// Header band height (scaled).
+    pub header_h: u32,
+    /// Toolbar band height (scaled).
+    pub toolbar_h: u32,
+    /// One card's height (scaled).
+    pub card_h: u32,
+    /// Vertical gap between cards (scaled).
+    pub card_gutter: u32,
+    /// Card-to-card stride (`card_h + card_gutter`).
+    pub card_stride: u32,
+    /// `…` menu popup width (scaled).
+    pub menu_w: u32,
+    /// `…` menu item-row height (scaled).
+    pub menu_item_h: u32,
+}
 
-    let mut cards = Vec::new();
-    for (index, &id) in ids.iter().enumerate() {
-        // Window-space top of this card (may fall above/below the viewport).
-        let top = vp.y as i64 + (index as i64) * SIDEBAR_CARD_STRIDE as i64 - scroll as i64;
-        let bottom = top + SIDEBAR_CARD_H as i64;
-        // Skip cards entirely outside the viewport.
-        if bottom <= vp.y as i64 || top >= vp.bottom() as i64 {
-            continue;
+impl SidebarMetrics {
+    /// Resolve the design metrics for `scale` (a non-finite or non-positive
+    /// value falls back to 1.0). `card_stride` is derived from the scaled parts
+    /// so it always equals `card_h + card_gutter` exactly (the layout and
+    /// hit-test both rely on that identity).
+    pub fn new(scale: f32) -> Self {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        let s = |v: u32| ((v as f32) * scale).round() as u32;
+        let card_h = s(SIDEBAR_CARD_H);
+        let card_gutter = s(SIDEBAR_CARD_GUTTER);
+        Self {
+            scale,
+            header_h: s(SIDEBAR_HEADER_H),
+            toolbar_h: s(SIDEBAR_TOOLBAR_H),
+            card_h,
+            card_gutter,
+            card_stride: card_h + card_gutter,
+            menu_w: s(SIDEBAR_MENU_W),
+            menu_item_h: s(SIDEBAR_MENU_ITEM_H),
         }
-        cards.push(card_rects(id, top, vp));
     }
 
-    SidebarLayout {
-        header: header_rects(bands.header),
-        new_button: new_button_rect(bands.toolbar),
-        menu_button: menu_button_rect(bands.toolbar),
-        viewport: vp,
-        cards,
-        content_h,
+    /// Scale a design-space length to physical px for this DPR.
+    fn s(&self, v: u32) -> u32 {
+        ((v as f32) * self.scale).round() as u32
+    }
+
+    /// Carve `bounds` into the header / toolbar / viewport bands. Each band
+    /// height clamps so a very short sidebar degrades to a zero-height viewport
+    /// instead of underflowing (mirrors `overview_chrome_bands`).
+    pub fn bands(&self, bounds: SidebarRect) -> SidebarBands {
+        let header_h = self.header_h.min(bounds.h);
+        let after_header = bounds.h - header_h;
+        let toolbar_h = self.toolbar_h.min(after_header);
+        let viewport_h = after_header - toolbar_h;
+
+        SidebarBands {
+            header: SidebarRect::new(bounds.x, bounds.y, bounds.w, header_h),
+            toolbar: SidebarRect::new(bounds.x, bounds.y + header_h, bounds.w, toolbar_h),
+            viewport: SidebarRect::new(
+                bounds.x,
+                bounds.y + header_h + toolbar_h,
+                bounds.w,
+                viewport_h,
+            ),
+        }
+    }
+
+    /// Lay out the header band's three rects. Widths are proportional so the
+    /// title keeps the middle regardless of sidebar width; all rects clamp to
+    /// the band.
+    pub fn header_rects(&self, header: SidebarRect) -> HeaderRects {
+        let line_h = self.s(HEADER_LINE_H).min(header.h);
+        let cy = header.y + (header.h - line_h) / 2;
+        let status_w = (header.w * 35 / 100).min(header.w);
+        let pill_w = (header.w * 30 / 100).min(header.w);
+        let pad = self.s(CARD_PAD);
+        let gap = self.s(6);
+
+        let status_x = header.x + pad.min(header.w);
+        let status_label = SidebarRect::new(status_x, cy, status_w, line_h);
+        let pill_x = header.right().saturating_sub(pad).saturating_sub(pill_w);
+        let name_pill = SidebarRect::new(pill_x, cy, pill_w, line_h);
+
+        let title_x = status_label.right() + gap;
+        let title_w = name_pill.x.saturating_sub(title_x).saturating_sub(gap);
+        let title = SidebarRect::new(title_x, cy, title_w, line_h);
+
+        HeaderRects {
+            status_label,
+            title,
+            name_pill,
+        }
+    }
+
+    /// The `+` (new session) button rect in the toolbar band, pinned right.
+    pub fn new_button_rect(&self, toolbar: SidebarRect) -> SidebarRect {
+        let btn_w = self.s(TOOLBAR_BUTTON_W);
+        let btn_h = self.s(TOOLBAR_BUTTON_H);
+        let h = btn_h.min(toolbar.h);
+        let y = toolbar.y + (toolbar.h - h) / 2;
+        let x = toolbar
+            .right()
+            .saturating_sub(self.s(CARD_PAD))
+            .saturating_sub(btn_w);
+        SidebarRect::new(x, y, btn_w.min(toolbar.w), h)
+    }
+
+    /// The header-level `…` menu button rect, just left of the `+` button.
+    pub fn menu_button_rect(&self, toolbar: SidebarRect) -> SidebarRect {
+        let plus = self.new_button_rect(toolbar);
+        let btn_w = self.s(TOOLBAR_BUTTON_W);
+        let x = plus.x.saturating_sub(self.s(6)).saturating_sub(btn_w);
+        SidebarRect::new(x, plus.y, btn_w.min(toolbar.w), plus.h)
+    }
+
+    /// Total scrollable content height for `card_count` stacked cards.
+    pub fn content_height(&self, card_count: usize) -> u32 {
+        (card_count as u32).saturating_mul(self.card_stride)
+    }
+
+    /// Lay out the sidebar: header/toolbar chrome plus every card at least
+    /// partially visible after applying `scroll_offset` (clamped). Cards fully
+    /// scrolled out are omitted; partly-visible cards are clipped to the
+    /// viewport.
+    pub fn layout(
+        &self,
+        bounds: SidebarRect,
+        ids: &[SessionCardId],
+        scroll_offset: u32,
+    ) -> SidebarLayout {
+        let bands = self.bands(bounds);
+        let content_h = self.content_height(ids.len());
+        let scroll = clamp_scroll(scroll_offset, content_h, bands.viewport.h);
+        let vp = bands.viewport;
+
+        let mut cards = Vec::new();
+        for (index, &id) in ids.iter().enumerate() {
+            // Window-space top of this card (may fall above/below the viewport).
+            let top = vp.y as i64 + (index as i64) * self.card_stride as i64 - scroll as i64;
+            let bottom = top + self.card_h as i64;
+            // Skip cards entirely outside the viewport.
+            if bottom <= vp.y as i64 || top >= vp.bottom() as i64 {
+                continue;
+            }
+            cards.push(self.card_rects(id, top, vp));
+        }
+
+        SidebarLayout {
+            header: self.header_rects(bands.header),
+            new_button: self.new_button_rect(bands.toolbar),
+            menu_button: self.menu_button_rect(bands.toolbar),
+            viewport: vp,
+            cards,
+            content_h,
+        }
+    }
+
+    /// One card's sub-rects in its own texture space (origin at the card's
+    /// top-left, width `inset`), unclipped. The per-card rounded-card renderer
+    /// draws each card into its own texture and positions text with these,
+    /// matching the window-space rects [`layout`](Self::layout) emits for the
+    /// flat backdrop.
+    pub fn card_local_rects(&self, id: SessionCardId, inset: u32) -> CardRects {
+        self.card_rects(id, 0, SidebarRect::new(0, 0, inset, self.card_h))
+    }
+
+    /// Build one card's clipped sub-rects from its (possibly off-viewport)
+    /// window top `top` and the viewport `vp`. Every interior offset scales with
+    /// the DPR so the card's five rows (name / meta / heading / preview×2) fit
+    /// its scaled height on a Retina display.
+    fn card_rects(&self, id: SessionCardId, top: i64, vp: SidebarRect) -> CardRects {
+        let lx = vp.x as i64;
+        let w = vp.w as i64;
+        let pad = self.s(CARD_PAD) as i64;
+        let dot_d = self.s(CARD_DOT_D) as i64;
+        let icon_w = self.s(CARD_ICON_W) as i64;
+        let card_menu_w = self.s(CARD_MENU_W) as i64;
+        let updated_w = self.s(CARD_UPDATED_W) as i64;
+        let line_h = self.s(CARD_LINE_H) as i64;
+        let name_h = self.s(CARD_NAME_H) as i64;
+        let gap6 = self.s(6) as i64;
+
+        // Name row, left to right: status dot, project icon, display name. The
+        // dot sits at the card's left edge (mockup parity) as a small color
+        // chip; the icon and name follow it.
+        let dot_x = lx + pad;
+        let icon_x = dot_x + dot_d + self.s(8) as i64;
+        let name_x = icon_x + icon_w + gap6;
+
+        // Top-right: the invisible `…` hit region pins the far corner, with the
+        // updated-time to its left on the same (name) row.
+        let menu_x = lx + w - pad - card_menu_w;
+        let updated_x = menu_x - self.s(4) as i64 - updated_w;
+        let name_w = updated_x - name_x - gap6;
+
+        let body_w = w - 2 * pad;
+
+        let name_y = top + gap6;
+        let meta_y = top + self.s(26) as i64;
+        let label_y = top + self.s(44) as i64;
+        let preview0_y = top + self.s(58) as i64;
+        let preview1_y = top + self.s(74) as i64;
+
+        CardRects {
+            id,
+            bounds: iclip(lx, top, w, self.card_h as i64, vp),
+            icon: iclip(icon_x, name_y, icon_w, name_h, vp),
+            name_line: iclip(name_x, name_y, name_w, name_h, vp),
+            meta_line: iclip(lx + pad, meta_y, body_w, line_h, vp),
+            label: iclip(lx + pad, label_y, body_w, line_h, vp),
+            preview: [
+                iclip(lx + pad, preview0_y, body_w, line_h, vp),
+                iclip(lx + pad, preview1_y, body_w, line_h, vp),
+            ],
+            dot: iclip(dot_x, name_y + (name_h - dot_d) / 2, dot_d, dot_d, vp),
+            updated: iclip(updated_x, name_y, updated_w, line_h, vp),
+            menu_button: iclip(menu_x, name_y, card_menu_w, name_h, vp),
+        }
+    }
+
+    /// Resolve a click at `point` against the sidebar (FR-3/AC-4). Checks the
+    /// toolbar buttons first, then the scrolling card region: within a card, the
+    /// per-card `…` button wins over the card body (callers need not fall back
+    /// like the overview's separate close hit-test). Returns `None` for the
+    /// header, gutters between cards, or any point outside the sidebar.
+    pub fn hit_test(
+        &self,
+        bounds: SidebarRect,
+        ids: &[SessionCardId],
+        scroll_offset: u32,
+        point: Point,
+    ) -> Option<SidebarHit> {
+        let bands = self.bands(bounds);
+
+        if self.new_button_rect(bands.toolbar).contains(point) {
+            return Some(SidebarHit::NewSession);
+        }
+        if self.menu_button_rect(bands.toolbar).contains(point) {
+            return Some(SidebarHit::Menu);
+        }
+
+        let vp = bands.viewport;
+        if !vp.contains(point) {
+            return None;
+        }
+
+        let content_h = self.content_height(ids.len());
+        let scroll = clamp_scroll(scroll_offset, content_h, vp.h);
+
+        // Translate the point into scroll-content space (origin at the viewport
+        // top-left, offset by the scroll). Both terms are non-negative because
+        // the point is inside the viewport.
+        let cx = point.x - vp.x;
+        let cy = (point.y - vp.y) + scroll;
+
+        let index = (cy / self.card_stride) as usize;
+        if index >= ids.len() || cy % self.card_stride >= self.card_h {
+            // Past the last card, or in the gutter between two cards.
+            return None;
+        }
+        let id = ids[index];
+
+        // Per-card `…` button, in content space (same math as `card_rects`).
+        let card_top = index as u32 * self.card_stride;
+        let menu_x = vp
+            .w
+            .saturating_sub(self.s(CARD_PAD))
+            .saturating_sub(self.s(CARD_MENU_W));
+        let menu = SidebarRect::new(
+            menu_x,
+            card_top + self.s(6),
+            self.s(CARD_MENU_W),
+            self.s(CARD_NAME_H),
+        );
+        if menu.contains(Point::new(cx, cy)) {
+            return Some(SidebarHit::CardMenu(id));
+        }
+        Some(SidebarHit::Card(id))
+    }
+
+    /// The popup rect for a card's `…` menu, anchored just below its menu button
+    /// (`anchor` = the card's `menu_button` rect) and right-aligned to it,
+    /// clamped so it never spills past the sidebar's right edge (`sidebar_w`).
+    pub fn card_menu_popup_rect(
+        &self,
+        anchor: SidebarRect,
+        item_count: usize,
+        sidebar_w: u32,
+    ) -> SidebarRect {
+        let w = self.menu_w.min(sidebar_w);
+        let h = self.menu_item_h.saturating_mul(item_count as u32);
+        let x = anchor
+            .right()
+            .saturating_sub(w)
+            .min(sidebar_w.saturating_sub(w));
+        SidebarRect::new(x, anchor.bottom(), w, h)
+    }
+
+    /// The rect of item `index` within a popup laid out by
+    /// [`card_menu_popup_rect`](Self::card_menu_popup_rect).
+    pub fn card_menu_item_rect(&self, popup: SidebarRect, index: usize) -> SidebarRect {
+        SidebarRect::new(
+            popup.x,
+            popup.y + self.menu_item_h * index as u32,
+            popup.w,
+            self.menu_item_h,
+        )
+    }
+
+    /// Resolve a click at `point` against an open card menu popup, returning the
+    /// item hit (or `None` for a click outside the popup — a dismiss).
+    pub fn card_menu_hit_test(&self, popup: SidebarRect, point: Point) -> Option<CardMenuItem> {
+        if !popup.contains(point) {
+            return None;
+        }
+        let index = ((point.y - popup.y) / self.menu_item_h) as usize;
+        CARD_MENU_ITEMS.get(index).copied()
     }
 }
 
-/// One card's sub-rects in its own texture space (origin at the card's
-/// top-left, width `inset`), unclipped. The per-card rounded-card renderer draws
-/// each card into its own texture and positions text with these, matching the
-/// window-space rects [`sidebar_layout`] emits for the flat backdrop.
-pub fn card_local_rects(id: SessionCardId, inset: u32) -> CardRects {
-    card_rects(id, 0, SidebarRect::new(0, 0, inset, SIDEBAR_CARD_H))
-}
-
-/// Build one card's clipped sub-rects from its (possibly off-viewport) window
-/// top `top` and the viewport `vp`.
-fn card_rects(id: SessionCardId, top: i64, vp: SidebarRect) -> CardRects {
-    let lx = vp.x as i64;
-    let w = vp.w as i64;
-    let pad = CARD_PAD as i64;
-
-    // Name row, left to right: status dot, project icon, display name. The dot
-    // moves to the card's left edge (mockup parity) as a small color chip; the
-    // icon and name follow it.
-    let dot_x = lx + pad;
-    let icon_x = dot_x + CARD_DOT_D as i64 + 8;
-    let name_x = icon_x + CARD_ICON_W as i64 + 6;
-
-    // Top-right: the invisible `…` hit region pins the far corner, with the
-    // updated-time to its left on the same (name) row (mockup parity).
-    let menu_x = lx + w - pad - CARD_MENU_W as i64;
-    let updated_x = menu_x - 4 - CARD_UPDATED_W as i64;
-    let name_w = updated_x - name_x - 6;
-
-    let meta_w = w - 2 * pad;
-    let body_w = w - 2 * pad;
-
-    let name_y = top + 6;
-    let meta_y = top + 26;
-    let label_y = top + 44;
-    let preview0_y = top + 58;
-    let preview1_y = top + 74;
-
-    CardRects {
-        id,
-        bounds: iclip(lx, top, w, SIDEBAR_CARD_H as i64, vp),
-        icon: iclip(icon_x, name_y, CARD_ICON_W as i64, CARD_NAME_H as i64, vp),
-        name_line: iclip(name_x, name_y, name_w, CARD_NAME_H as i64, vp),
-        meta_line: iclip(lx + pad, meta_y, meta_w, CARD_LINE_H as i64, vp),
-        label: iclip(lx + pad, label_y, body_w, CARD_LINE_H as i64, vp),
-        preview: [
-            iclip(lx + pad, preview0_y, body_w, CARD_LINE_H as i64, vp),
-            iclip(lx + pad, preview1_y, body_w, CARD_LINE_H as i64, vp),
-        ],
-        dot: iclip(dot_x, name_y + (CARD_NAME_H - CARD_DOT_D) as i64 / 2, CARD_DOT_D as i64, CARD_DOT_D as i64, vp),
-        updated: iclip(updated_x, name_y, CARD_UPDATED_W as i64, CARD_LINE_H as i64, vp),
-        menu_button: iclip(menu_x, top + 6, CARD_MENU_W as i64, CARD_NAME_H as i64, vp),
-    }
+/// Clamp a scroll offset to `[0, max]`, where `max = content_h - viewport_h`
+/// (0 when the content fits, FR-15/AC-23). The `0` floor is implicit in `u32`.
+pub fn clamp_scroll(offset: u32, content_h: u32, viewport_h: u32) -> u32 {
+    let max = content_h.saturating_sub(viewport_h);
+    offset.min(max)
 }
 
 /// Intersect an integer-space rect with `clip`, returning a `u32` rect. A rect
@@ -287,10 +463,10 @@ fn iclip(x: i64, y: i64, w: i64, h: i64, clip: SidebarRect) -> SidebarRect {
     }
 }
 
-/// Width of the per-card `…` menu popup (FR-7).
+/// Width of the per-card `…` menu popup at scale 1.0 (FR-7).
 pub const SIDEBAR_MENU_W: u32 = 140;
 
-/// Height of one popup menu item row.
+/// Height of one popup menu item row at scale 1.0.
 pub const SIDEBAR_MENU_ITEM_H: u32 = 26;
 
 /// One action in a card's `…` menu (FR-7). Only [`CardMenuItem::Close`] is wired
@@ -308,39 +484,6 @@ pub enum CardMenuItem {
 /// nothing (the store already supports [`crate::session_store::SessionDelta::Rename`]).
 pub const CARD_MENU_ITEMS: [CardMenuItem; 1] = [CardMenuItem::Close];
 
-/// The popup rect for a card's `…` menu, anchored just below its menu button
-/// (`anchor` = the card's `menu_button` rect) and right-aligned to it, clamped
-/// so it never spills past the sidebar's right edge (`sidebar_w`).
-pub fn card_menu_popup_rect(anchor: SidebarRect, item_count: usize, sidebar_w: u32) -> SidebarRect {
-    let w = SIDEBAR_MENU_W.min(sidebar_w);
-    let h = SIDEBAR_MENU_ITEM_H.saturating_mul(item_count as u32);
-    let x = anchor
-        .right()
-        .saturating_sub(w)
-        .min(sidebar_w.saturating_sub(w));
-    SidebarRect::new(x, anchor.bottom(), w, h)
-}
-
-/// The rect of item `index` within a popup laid out by [`card_menu_popup_rect`].
-pub fn card_menu_item_rect(popup: SidebarRect, index: usize) -> SidebarRect {
-    SidebarRect::new(
-        popup.x,
-        popup.y + SIDEBAR_MENU_ITEM_H * index as u32,
-        popup.w,
-        SIDEBAR_MENU_ITEM_H,
-    )
-}
-
-/// Resolve a click at `point` against an open card menu popup, returning the
-/// item hit (or `None` for a click outside the popup — a dismiss).
-pub fn card_menu_hit_test(popup: SidebarRect, point: Point) -> Option<CardMenuItem> {
-    if !popup.contains(point) {
-        return None;
-    }
-    let index = ((point.y - popup.y) / SIDEBAR_MENU_ITEM_H) as usize;
-    CARD_MENU_ITEMS.get(index).copied()
-}
-
 /// The label rendered for a popup menu item.
 pub fn card_menu_label(item: CardMenuItem) -> &'static str {
     match item {
@@ -350,7 +493,7 @@ pub fn card_menu_label(item: CardMenuItem) -> &'static str {
 }
 
 /// What a click on the sidebar resolves to (FR-3/FR-6/FR-7). A miss returns
-/// `None` from [`sidebar_hit_test`].
+/// `None` from [`SidebarMetrics::hit_test`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarHit {
     /// A card body: switch focus to this session (FR-3).
@@ -361,57 +504,6 @@ pub enum SidebarHit {
     NewSession,
     /// The toolbar `…` button: the header-level menu.
     Menu,
-}
-
-/// Resolve a click at `point` against the sidebar (FR-3/AC-4). Checks the
-/// toolbar buttons first, then the scrolling card region: within a card, the
-/// per-card `…` button wins over the card body (callers need not fall back like
-/// the overview's separate close hit-test). Returns `None` for the header,
-/// gutters between cards, or any point outside the sidebar.
-pub fn sidebar_hit_test(
-    bounds: SidebarRect,
-    ids: &[SessionCardId],
-    scroll_offset: u32,
-    point: Point,
-) -> Option<SidebarHit> {
-    let bands = sidebar_bands(bounds);
-
-    if new_button_rect(bands.toolbar).contains(point) {
-        return Some(SidebarHit::NewSession);
-    }
-    if menu_button_rect(bands.toolbar).contains(point) {
-        return Some(SidebarHit::Menu);
-    }
-
-    let vp = bands.viewport;
-    if !vp.contains(point) {
-        return None;
-    }
-
-    let content_h = content_height(ids.len());
-    let scroll = clamp_scroll(scroll_offset, content_h, vp.h);
-
-    // Translate the point into scroll-content space (origin at the viewport
-    // top-left, offset by the scroll). Both terms are non-negative because the
-    // point is inside the viewport.
-    let cx = point.x - vp.x;
-    let cy = (point.y - vp.y) + scroll;
-
-    let index = (cy / SIDEBAR_CARD_STRIDE) as usize;
-    if index >= ids.len() || cy % SIDEBAR_CARD_STRIDE >= SIDEBAR_CARD_H {
-        // Past the last card, or in the gutter between two cards.
-        return None;
-    }
-    let id = ids[index];
-
-    // Per-card `…` button, in content space (same math as `card_rects`).
-    let card_top = index as u32 * SIDEBAR_CARD_STRIDE;
-    let menu_x = vp.w.saturating_sub(CARD_PAD).saturating_sub(CARD_MENU_W);
-    let menu = SidebarRect::new(menu_x, card_top + 6, CARD_MENU_W, CARD_NAME_H);
-    if menu.contains(Point::new(cx, cy)) {
-        return Some(SidebarHit::CardMenu(id));
-    }
-    Some(SidebarHit::Card(id))
 }
 
 /// The text lines rendered on a card (FR-2/AC-3). `now` is a parameter (no
@@ -515,6 +607,12 @@ mod tests {
     use crate::session_store::{PreviewSpan, SessionDelta, SessionStore, SessionWindowId};
     use crate::split_tree::PaneId;
     use noa_core::Color;
+
+    /// Layout metrics at scale 1.0 — the design-space basis the constants
+    /// encode, so existing assertions keep their literal expectations.
+    fn m1() -> SidebarMetrics {
+        SidebarMetrics::new(1.0)
+    }
 
     fn plain_preview(lines: &[&str]) -> Vec<PreviewLine> {
         lines
@@ -621,13 +719,13 @@ mod tests {
     #[test]
     fn hit_test_resolves_cards_buttons_and_misses() {
         let (bounds, ids) = six_id_bounds();
-        let bands = sidebar_bands(bounds);
+        let bands = m1().bands(bounds);
         let vp = bands.viewport;
 
         // First card body (name area, left of the `…` button).
         let body = Point::new(vp.x + 100, vp.y + 30);
         assert_eq!(
-            sidebar_hit_test(bounds, &ids, 0, body),
+            m1().hit_test(bounds, &ids, 0, body),
             Some(SidebarHit::Card(ids[0]))
         );
 
@@ -635,32 +733,32 @@ mod tests {
         let menu_x = vp.w - CARD_PAD - CARD_MENU_W;
         let card_menu = Point::new(vp.x + menu_x + 5, vp.y + 11);
         assert_eq!(
-            sidebar_hit_test(bounds, &ids, 0, card_menu),
+            m1().hit_test(bounds, &ids, 0, card_menu),
             Some(SidebarHit::CardMenu(ids[0]))
         );
 
         // Toolbar `+` and `…`.
-        let plus = new_button_rect(bands.toolbar);
+        let plus = m1().new_button_rect(bands.toolbar);
         let plus_pt = Point::new(plus.x + 2, plus.y + 2);
         assert_eq!(
-            sidebar_hit_test(bounds, &ids, 0, plus_pt),
+            m1().hit_test(bounds, &ids, 0, plus_pt),
             Some(SidebarHit::NewSession)
         );
-        let menu = menu_button_rect(bands.toolbar);
+        let menu = m1().menu_button_rect(bands.toolbar);
         let menu_pt = Point::new(menu.x + 2, menu.y + 2);
         assert_eq!(
-            sidebar_hit_test(bounds, &ids, 0, menu_pt),
+            m1().hit_test(bounds, &ids, 0, menu_pt),
             Some(SidebarHit::Menu)
         );
 
         // Header band (above the toolbar): a miss.
         assert_eq!(
-            sidebar_hit_test(bounds, &ids, 0, Point::new(bounds.x + 100, 10)),
+            m1().hit_test(bounds, &ids, 0, Point::new(bounds.x + 100, 10)),
             None
         );
         // Outside the sidebar entirely: a miss.
         assert_eq!(
-            sidebar_hit_test(bounds, &ids, 0, Point::new(10_000, 10_000)),
+            m1().hit_test(bounds, &ids, 0, Point::new(10_000, 10_000)),
             None
         );
     }
@@ -670,7 +768,7 @@ mod tests {
     #[test]
     fn card_menu_popup_layout_and_hit_test() {
         let anchor = SidebarRect::new(300, 40, CARD_MENU_W_ANCHOR, 20);
-        let popup = card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), 360);
+        let popup = m1().card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), 360);
 
         // Sits directly under the anchor and never spills past the sidebar edge.
         assert_eq!(popup.y, anchor.bottom());
@@ -678,14 +776,14 @@ mod tests {
         assert_eq!(popup.h, SIDEBAR_MENU_ITEM_H * CARD_MENU_ITEMS.len() as u32);
 
         // A click on the first row resolves to Close (the only v1 item).
-        let item0 = card_menu_item_rect(popup, 0);
-        let hit = card_menu_hit_test(popup, Point::new(item0.x + 4, item0.y + 4));
+        let item0 = m1().card_menu_item_rect(popup, 0);
+        let hit = m1().card_menu_hit_test(popup, Point::new(item0.x + 4, item0.y + 4));
         assert_eq!(hit, Some(CardMenuItem::Close));
         assert_eq!(card_menu_label(CardMenuItem::Close), "Close");
 
         // A click outside the popup is a dismiss (miss).
         assert_eq!(
-            card_menu_hit_test(popup, Point::new(popup.right() + 5, popup.y + 4)),
+            m1().card_menu_hit_test(popup, Point::new(popup.right() + 5, popup.y + 4)),
             None
         );
     }
@@ -696,17 +794,17 @@ mod tests {
     #[test]
     fn hit_test_misses_the_gutter_between_cards() {
         let (bounds, ids) = six_id_bounds();
-        let vp = sidebar_bands(bounds).viewport;
+        let vp = m1().bands(bounds).viewport;
         // The gutter sits just below the first card (stride 100, card height 92).
         let gutter = Point::new(vp.x + 40, vp.y + SIDEBAR_CARD_H + 3);
-        assert_eq!(sidebar_hit_test(bounds, &ids, 0, gutter), None);
+        assert_eq!(m1().hit_test(bounds, &ids, 0, gutter), None);
     }
 
     // AC-23 (FR-15): with more cards than fit, scroll clamps to [0, max] and the
     // first/last cards are each reachable at the extremes.
     #[test]
     fn scroll_clamp_bounds_and_endpoints() {
-        let content = content_height(6); // 600
+        let content = m1().content_height(6); // 600
         let viewport_h = 3 * SIDEBAR_CARD_STRIDE; // 300
         let max = content - viewport_h; // 300
 
@@ -721,26 +819,26 @@ mod tests {
     #[test]
     fn scroll_endpoints_reach_first_and_last_card() {
         let (bounds, ids) = six_id_bounds();
-        let vp = sidebar_bands(bounds).viewport;
-        let content = content_height(ids.len());
+        let vp = m1().bands(bounds).viewport;
+        let content = m1().content_height(ids.len());
         let max = clamp_scroll(u32::MAX, content, vp.h);
 
         // At the top, the first card is reachable near the viewport top.
         let top_pt = Point::new(vp.x + 60, vp.y + 20);
         assert_eq!(
-            sidebar_hit_test(bounds, &ids, 0, top_pt),
+            m1().hit_test(bounds, &ids, 0, top_pt),
             Some(SidebarHit::Card(ids[0]))
         );
 
         // At the bottom, the last card is reachable near the viewport bottom.
         let bottom_pt = Point::new(vp.x + 60, vp.bottom() - 20);
         assert_eq!(
-            sidebar_hit_test(bounds, &ids, max, bottom_pt),
+            m1().hit_test(bounds, &ids, max, bottom_pt),
             Some(SidebarHit::Card(ids[5]))
         );
 
         // The last card is NOT reachable while scrolled to the top.
-        assert_eq!(sidebar_hit_test(bounds, &ids, 0, bottom_pt), Some(SidebarHit::Card(ids[2])));
+        assert_eq!(m1().hit_test(bounds, &ids, 0, bottom_pt), Some(SidebarHit::Card(ids[2])));
     }
 
     // AC-20 (NFR-4, FR-15): the layout stacks cards, skips fully-scrolled-out
@@ -748,10 +846,10 @@ mod tests {
     #[test]
     fn layout_stacks_visible_cards_within_the_viewport() {
         let (bounds, ids) = six_id_bounds();
-        let vp = sidebar_bands(bounds).viewport;
+        let vp = m1().bands(bounds).viewport;
 
-        let layout = sidebar_layout(bounds, &ids, 0);
-        assert_eq!(layout.content_h, content_height(6));
+        let layout = m1().layout(bounds, &ids, 0);
+        assert_eq!(layout.content_h, m1().content_height(6));
         assert_eq!(layout.viewport, vp);
 
         // 3 cards fit; a 4th peeks in only if partially visible. Here the
@@ -775,10 +873,10 @@ mod tests {
     #[test]
     fn layout_shows_the_tail_cards_when_scrolled_to_max() {
         let (bounds, ids) = six_id_bounds();
-        let vp = sidebar_bands(bounds).viewport;
-        let max = clamp_scroll(u32::MAX, content_height(ids.len()), vp.h);
+        let vp = m1().bands(bounds).viewport;
+        let max = clamp_scroll(u32::MAX, m1().content_height(ids.len()), vp.h);
 
-        let layout = sidebar_layout(bounds, &ids, max);
+        let layout = m1().layout(bounds, &ids, max);
         let shown: Vec<_> = layout.cards.iter().map(|c| c.id).collect();
         assert_eq!(shown, vec![ids[3], ids[4], ids[5]]);
     }
@@ -787,10 +885,10 @@ mod tests {
     fn layout_over_scroll_is_clamped_like_clamp_scroll() {
         let (bounds, ids) = six_id_bounds();
         // An absurd offset resolves to the same layout as the clamped maximum.
-        let clamped = sidebar_layout(bounds, &ids, 1_000_000);
-        let vp = sidebar_bands(bounds).viewport;
-        let max = clamp_scroll(u32::MAX, content_height(ids.len()), vp.h);
-        assert_eq!(clamped.cards, sidebar_layout(bounds, &ids, max).cards);
+        let clamped = m1().layout(bounds, &ids, 1_000_000);
+        let vp = m1().bands(bounds).viewport;
+        let max = clamp_scroll(u32::MAX, m1().content_height(ids.len()), vp.h);
+        assert_eq!(clamped.cards, m1().layout(bounds, &ids, max).cards);
     }
 
     // FR-2 mockup parity: the status dot sits at the card's left edge (left of
@@ -800,7 +898,7 @@ mod tests {
     #[test]
     fn card_rects_place_dot_left_and_updated_on_the_name_row() {
         let (bounds, ids) = six_id_bounds();
-        let layout = sidebar_layout(bounds, &ids, 0);
+        let layout = m1().layout(bounds, &ids, 0);
         let card = &layout.cards[0];
 
         // Dot is the leftmost element, ahead of the icon and name.
@@ -818,10 +916,79 @@ mod tests {
         assert!(card.preview[0].y < card.preview[1].y);
     }
 
+    // DPR scaling: the metrics double at scale 2.0, and a degenerate scale
+    // falls back to 1.0 so a bad `scale_factor` never zeroes the layout.
+    #[test]
+    fn metrics_scale_by_dpr() {
+        let m2 = SidebarMetrics::new(2.0);
+        assert_eq!(m2.header_h, 2 * SIDEBAR_HEADER_H);
+        assert_eq!(m2.toolbar_h, 2 * SIDEBAR_TOOLBAR_H);
+        assert_eq!(m2.card_h, 2 * SIDEBAR_CARD_H);
+        assert_eq!(m2.card_gutter, 2 * SIDEBAR_CARD_GUTTER);
+        // Stride stays exactly card + gutter at any scale.
+        assert_eq!(m2.card_stride, m2.card_h + m2.card_gutter);
+        assert_eq!(m2.card_stride, 2 * SIDEBAR_CARD_STRIDE);
+        assert_eq!(m2.menu_item_h, 2 * SIDEBAR_MENU_ITEM_H);
+
+        assert_eq!(SidebarMetrics::new(0.0).card_h, SIDEBAR_CARD_H);
+        assert_eq!(SidebarMetrics::new(-2.0).card_h, SIDEBAR_CARD_H);
+        assert_eq!(SidebarMetrics::new(f32::NAN).card_h, SIDEBAR_CARD_H);
+    }
+
+    // At scale 2.0 the bands, card height, and every interior row double, so a
+    // Retina card keeps all five rows (name / meta / heading / preview×2) inside
+    // its doubled height instead of clipping — and hit-test maps correctly
+    // against the scaled geometry.
+    #[test]
+    fn layout_and_hit_test_scale_at_dpr_2() {
+        let m2 = SidebarMetrics::new(2.0);
+        let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
+        // header(88) + toolbar(72) + 3*stride(600) = 760, with a doubled width.
+        let bounds = SidebarRect::new(0, 0, 720, 760);
+
+        let bands = m2.bands(bounds);
+        assert_eq!(bands.header.h, 2 * SIDEBAR_HEADER_H);
+        assert_eq!(bands.toolbar.h, 2 * SIDEBAR_TOOLBAR_H);
+
+        let layout = m2.layout(bounds, &ids, 0);
+        assert_eq!(layout.cards.len(), 3);
+
+        // The first card is a full doubled height and its five rows stack in
+        // order, with the last preview row fitting inside the card.
+        let card = &layout.cards[0];
+        assert_eq!(card.bounds.h, m2.card_h);
+        assert!(card.dot.x < card.icon.x && card.icon.x < card.name_line.x);
+        assert!(card.name_line.y < card.meta_line.y);
+        assert!(card.meta_line.y < card.label.y);
+        assert!(card.label.y < card.preview[0].y);
+        assert!(card.preview[0].y < card.preview[1].y);
+        assert!(card.preview[1].h > 0);
+        assert!(card.preview[1].bottom() <= card.bounds.bottom());
+
+        // Hit-test resolves the first card's body and its `…` region against the
+        // doubled geometry.
+        let vp = bands.viewport;
+        let body = Point::new(vp.x + 200, vp.y + 40);
+        assert_eq!(
+            m2.hit_test(bounds, &ids, 0, body),
+            Some(SidebarHit::Card(ids[0]))
+        );
+        let menu_x = vp.w - m2.s(CARD_PAD) - m2.s(CARD_MENU_W);
+        let card_menu = Point::new(vp.x + menu_x + 5, vp.y + 20);
+        assert_eq!(
+            m2.hit_test(bounds, &ids, 0, card_menu),
+            Some(SidebarHit::CardMenu(ids[0]))
+        );
+
+        // The gutter past the doubled card height is a miss.
+        let gutter = Point::new(vp.x + 80, vp.y + m2.card_h + 3);
+        assert_eq!(m2.hit_test(bounds, &ids, 0, gutter), None);
+    }
+
     #[test]
     fn header_rects_place_status_title_and_pill_left_to_right() {
         let header = SidebarRect::new(0, 0, 360, SIDEBAR_HEADER_H);
-        let h = header_rects(header);
+        let h = m1().header_rects(header);
         assert!(h.status_label.x < h.title.x);
         assert!(h.title.x < h.name_pill.x);
         // Pill is right-aligned within the header.
@@ -831,7 +998,7 @@ mod tests {
     #[test]
     fn bands_clamp_without_underflow_in_a_short_sidebar() {
         // Shorter than the header alone: toolbar and viewport collapse to zero.
-        let bands = sidebar_bands(SidebarRect::new(0, 0, 200, 20));
+        let bands = m1().bands(SidebarRect::new(0, 0, 200, 20));
         assert_eq!(bands.header.h, 20);
         assert_eq!(bands.toolbar.h, 0);
         assert_eq!(bands.viewport.h, 0);

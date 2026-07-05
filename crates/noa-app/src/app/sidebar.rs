@@ -15,9 +15,8 @@ use noa_core::{Color, Rgb};
 use super::*;
 use crate::session_store::{SessionCard, SessionDelta, StatusDot, status_dot};
 use crate::sidebar::{
-    CARD_MENU_ITEMS, CARD_PREVIEW_LABEL, CardLines, CardRects, HeaderRects, SIDEBAR_CARD_H,
-    SidebarRect, card_lines, card_local_rects, header_rects, header_status_label, icon_glyph,
-    sidebar_bands, sidebar_layout,
+    CARD_MENU_ITEMS, CARD_PREVIEW_LABEL, CardLines, CardRects, HeaderRects, SidebarMetrics,
+    SidebarRect, card_lines, header_status_label, icon_glyph,
 };
 
 /// Whether an io-thread [`SessionDelta`] targeting a window with the given
@@ -169,6 +168,8 @@ pub(super) struct SidebarDrawModel {
     inset: u32,
     height: u32,
     scale: f32,
+    /// The scaled height of one card, sizing the per-card scratch texture.
+    card_h: u32,
     grid: GridSize,
     runs: Vec<SidebarTextRun>,
     cards: Vec<SidebarCardDraw>,
@@ -287,6 +288,18 @@ impl App {
         inset.round().max(0.0) as u32
     }
 
+    /// The DPR-scaled layout metrics for a window (FR-4): built from the live
+    /// scale factor, the same source as [`window_sidebar_inset_px`](Self::window_sidebar_inset_px),
+    /// so the card heights and interior offsets scale with the inset. Falls back
+    /// to scale 1.0 for an unknown window.
+    fn sidebar_metrics(&self, window_id: WindowId) -> SidebarMetrics {
+        let scale = self
+            .windows
+            .get(&window_id)
+            .map_or(1.0, |state| state.window.scale_factor() as f32);
+        SidebarMetrics::new(scale)
+    }
+
     /// Recompute the app-wide io-thread gate: on while any eligible window
     /// shows its sidebar (Omen T1 — a distinct flag from the overview gate).
     pub(super) fn refresh_sidebar_visible_gate(&self) {
@@ -340,6 +353,7 @@ impl App {
         if inset == 0 || point.x >= inset {
             return false;
         }
+        let metrics = self.sidebar_metrics(window_id);
 
         // An open card `…` menu takes the click first: an item hit runs the
         // action, anything else dismisses the popup (and falls through to normal
@@ -349,9 +363,8 @@ impl App {
         let mut dismissed_menu: Option<SessionCardId> = None;
         if let Some(open) = self.windows.get(&window_id).and_then(|s| s.sidebar_menu) {
             if let Some(anchor) = self.card_menu_anchor(window_id, open) {
-                let popup =
-                    crate::sidebar::card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), inset);
-                if let Some(item) = crate::sidebar::card_menu_hit_test(popup, point) {
+                let popup = metrics.card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), inset);
+                if let Some(item) = metrics.card_menu_hit_test(popup, point) {
                     self.close_sidebar_menu(window_id);
                     self.activate_card_menu_item(event_loop, open, item);
                     return true;
@@ -372,7 +385,7 @@ impl App {
             )
         };
         let ids = self.session_store.ordered_ids();
-        match crate::sidebar::sidebar_hit_test(bounds, &ids, scroll, point) {
+        match metrics.hit_test(bounds, &ids, scroll, point) {
             Some(crate::sidebar::SidebarHit::Card(card)) => {
                 self.focus_session_card(card);
                 true
@@ -453,7 +466,9 @@ impl App {
         let state = self.windows.get(&window_id)?;
         let bounds = SidebarRect::new(0, 0, inset, state.window.inner_size().height);
         let ids = self.session_store.ordered_ids();
-        let layout = sidebar_layout(bounds, &ids, state.sidebar_scroll);
+        let layout = self
+            .sidebar_metrics(window_id)
+            .layout(bounds, &ids, state.sidebar_scroll);
         layout
             .cards
             .iter()
@@ -474,9 +489,10 @@ impl App {
             return false;
         };
         let bounds = crate::sidebar::SidebarRect::new(0, 0, inset, state.window.inner_size().height);
-        let viewport_h = crate::sidebar::sidebar_bands(bounds).viewport.h;
-        let content_h = crate::sidebar::content_height(self.session_store.len());
-        let step = crate::sidebar::SIDEBAR_CARD_STRIDE as f32;
+        let metrics = SidebarMetrics::new(state.window.scale_factor() as f32);
+        let viewport_h = metrics.bands(bounds).viewport.h;
+        let content_h = metrics.content_height(self.session_store.len());
+        let step = metrics.card_stride as f32;
         let delta = (-lines * step).round() as i64;
         let Some(state) = self.windows.get_mut(&window_id) else {
             return false;
@@ -514,14 +530,15 @@ impl App {
         let metrics = gpu.font.metrics();
         let theme = &gpu.theme;
         let scale = state.window.scale_factor() as f32;
+        let layout_metrics = SidebarMetrics::new(scale);
         let height = state.window.inner_size().height.max(1);
         let band = PaneRectApp::new(0, 0, inset, height);
         let grid = grid_size_for_pane_rect(band, metrics, self.padding);
 
         let bounds = SidebarRect::new(0, 0, inset, height);
         let ids = self.session_store.ordered_ids();
-        let layout = sidebar_layout(bounds, &ids, state.sidebar_scroll);
-        let bands = sidebar_bands(bounds);
+        let layout = layout_metrics.layout(bounds, &ids, state.sidebar_scroll);
+        let bands = layout_metrics.bands(bounds);
 
         // Pixel → cell conversion, matching where a `Renderer` places cell (0,0):
         // at the padding origin. One closure per grid (band / card / menu).
@@ -539,7 +556,7 @@ impl App {
 
         // Header chrome (FR-5): status label, centered title, the session-name
         // pill (a flat filled pill on the backdrop), and the toolbar +/… glyphs.
-        let header: HeaderRects = header_rects(bands.header);
+        let header: HeaderRects = layout_metrics.header_rects(bands.header);
         runs.extend(window_run(
             &band_cell,
             header.status_label,
@@ -593,7 +610,7 @@ impl App {
         // fully-visible card (FR-2). Partially-scrolled cards stay flat.
         let now = sidebar_wall_clock_now();
         let mut cards: Vec<SidebarCardDraw> = Vec::new();
-        let card_band = PaneRectApp::new(0, 0, inset, SIDEBAR_CARD_H);
+        let card_band = PaneRectApp::new(0, 0, inset, layout_metrics.card_h);
         let card_grid = grid_size_for_pane_rect(card_band, metrics, self.padding);
         let card_cell = to_cell(card_grid);
         for card_rects in &layout.cards {
@@ -603,9 +620,9 @@ impl App {
             let lines: CardLines = card_lines(card, now);
             emit_card_text(&mut runs, card_rects, card, &lines, theme, &band_cell);
 
-            if card_rects.bounds.h == SIDEBAR_CARD_H {
+            if card_rects.bounds.h == layout_metrics.card_h {
                 let selected = card_rects.id == selected_id;
-                let local = card_local_rects(card_rects.id, inset);
+                let local = layout_metrics.card_local_rects(card_rects.id, inset);
                 let mut card_runs = Vec::new();
                 emit_card_text(&mut card_runs, &local, card, &lines, theme, &card_cell);
                 cards.push(SidebarCardDraw {
@@ -627,11 +644,8 @@ impl App {
         // scrolled out of view or the popup would spill past the window bottom.
         let menu = state.sidebar_menu.and_then(|open| {
             let card_rects = layout.cards.iter().find(|c| c.id == open)?;
-            let popup = crate::sidebar::card_menu_popup_rect(
-                card_rects.menu_button,
-                CARD_MENU_ITEMS.len(),
-                inset,
-            );
+            let popup =
+                layout_metrics.card_menu_popup_rect(card_rects.menu_button, CARD_MENU_ITEMS.len(), inset);
             if popup.w == 0 || popup.h == 0 || popup.bottom() > height {
                 return None;
             }
@@ -640,7 +654,7 @@ impl App {
             let menu_cell = to_cell(menu_grid);
             let mut menu_runs = Vec::new();
             for (index, &item) in CARD_MENU_ITEMS.iter().enumerate() {
-                let item_rect = crate::sidebar::card_menu_item_rect(popup, index);
+                let item_rect = layout_metrics.card_menu_item_rect(popup, index);
                 let (col, row) = menu_cell(
                     item_rect.x.saturating_sub(popup.x),
                     item_rect.y.saturating_sub(popup.y),
@@ -663,6 +677,7 @@ impl App {
             inset,
             height,
             scale,
+            card_h: layout_metrics.card_h,
             grid,
             runs,
             cards,
@@ -948,7 +963,7 @@ pub(super) fn draw_sidebar_band(
             &gpu.device,
             PixelSize {
                 w: model.inset,
-                h: SIDEBAR_CARD_H,
+                h: model.card_h,
             },
             surface_format,
             "noa-sidebar-card",
@@ -1039,7 +1054,7 @@ pub(super) fn draw_sidebar_band(
             card_view,
             PixelSize {
                 w: model.inset,
-                h: SIDEBAR_CARD_H,
+                h: model.card_h,
             },
             card_draw.grid,
             card_draw.bg,

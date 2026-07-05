@@ -364,7 +364,17 @@ impl App {
         if let Some(open) = self.windows.get(&window_id).and_then(|s| s.sidebar_menu) {
             if let Some(anchor) = self.card_menu_anchor(window_id, open) {
                 let popup = metrics.card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), inset);
-                if let Some(item) = metrics.card_menu_hit_test(popup, point) {
+                // Mirror the draw-side guard (`sidebar_draw_model` skips a popup
+                // whose `bottom() > height`): a popup that would spill past the
+                // window bottom is never rendered, so a click in its invisible
+                // region must not fire an item — fall through to dismiss instead.
+                let height = self
+                    .windows
+                    .get(&window_id)
+                    .map_or(0, |s| s.window.inner_size().height);
+                if popup.bottom() <= height
+                    && let Some(item) = metrics.card_menu_hit_test(popup, point)
+                {
                     self.close_sidebar_menu(window_id);
                     self.activate_card_menu_item(event_loop, open, item);
                     return true;
@@ -618,9 +628,15 @@ impl App {
                 continue;
             };
             let lines: CardLines = card_lines(card, now);
-            emit_card_text(&mut runs, card_rects, card, &lines, theme, &band_cell);
+            let full = card_rects.bounds.h == layout_metrics.card_h;
+            // A fully-visible card is covered by its opaque rounded overlay, so
+            // its backdrop text would never show — only emit it for partial
+            // (edge-clipped) cards, which have no overlay.
+            if !full {
+                emit_card_text(&mut runs, card_rects, card, &lines, theme, &band_cell);
+            }
 
-            if card_rects.bounds.h == layout_metrics.card_h {
+            if full {
                 let selected = card_rects.id == selected_id;
                 let local = layout_metrics.card_local_rects(card_rects.id, inset);
                 let mut card_runs = Vec::new();

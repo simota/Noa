@@ -791,6 +791,22 @@ mod tests {
     // The anchor's own width (CARD_MENU_W) is private; alias it for the test.
     const CARD_MENU_W_ANCHOR: u32 = CARD_MENU_W;
 
+    // FR-7 clip guard: a `…` anchored near the sidebar's bottom edge produces a
+    // popup that spills past the window bottom. The draw path skips rendering it
+    // (`popup.bottom() > height`), and `handle_sidebar_press` mirrors that guard
+    // so a click in the invisible region can't fire an item.
+    #[test]
+    fn card_menu_popup_can_overflow_the_sidebar_bottom() {
+        let sidebar_h = 380;
+        // Anchor flush with the bottom edge (as a bottom-most card's `…` would).
+        let anchor = SidebarRect::new(300, sidebar_h, CARD_MENU_W_ANCHOR, CARD_NAME_H);
+        let popup = m1().card_menu_popup_rect(anchor, CARD_MENU_ITEMS.len(), 360);
+        assert!(
+            popup.bottom() > sidebar_h,
+            "a bottom-anchored popup overflows the window and is not drawn"
+        );
+    }
+
     #[test]
     fn hit_test_misses_the_gutter_between_cards() {
         let (bounds, ids) = six_id_bounds();

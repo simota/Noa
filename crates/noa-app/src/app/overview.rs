@@ -397,7 +397,7 @@ impl App {
         if stale {
             overview.chrome_card = Some(OverviewChromeCardPipeline {
                 format,
-                pipeline: CardPipeline::new(&gpu.device, format),
+                pipeline: CardPipeline::new(&gpu.device, format, wgpu::BlendState::ALPHA_BLENDING),
             });
         }
     }

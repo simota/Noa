@@ -1322,7 +1322,11 @@ pub(super) fn draw_command_palette_card(
     {
         gpu.palette_card = Some(OverviewChromeCardPipeline {
             format: surface_format,
-            pipeline: CardPipeline::new(&gpu.device, surface_format),
+            pipeline: CardPipeline::new(
+                &gpu.device,
+                surface_format,
+                wgpu::BlendState::ALPHA_BLENDING,
+            ),
         });
     }
     ensure_scratch(
@@ -1451,7 +1455,9 @@ pub(super) fn draw_sidebar_band(
     {
         gpu.sidebar_card = Some(OverviewChromeCardPipeline {
             format: surface_format,
-            pipeline: CardPipeline::new(&gpu.device, surface_format),
+            // Alpha-replace so band + card composites settle to a uniform
+            // background-opacity alpha instead of accumulating toward opaque.
+            pipeline: CardPipeline::new(&gpu.device, surface_format, CardPipeline::ALPHA_REPLACE),
         });
     }
     let band_size = PixelSize {

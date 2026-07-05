@@ -32,6 +32,7 @@ pub enum AppCommand {
     ToggleCommandPalette,
     ToggleQuickTerminal,
     ToggleSecureKeyboardEntry,
+    ToggleSidebar,
 }
 
 /// Terminal-state commands handled by noa instead of sending escape bytes.
@@ -124,6 +125,7 @@ impl AppCommand {
     pub(crate) const TOGGLE_QUICK_TERMINAL_MENU_ID: &'static str = "noa.view.toggle-quick-terminal";
     pub(crate) const TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID: &'static str =
         "noa.app.toggle-secure-keyboard-entry";
+    pub(crate) const TOGGLE_SIDEBAR_MENU_ID: &'static str = "noa.view.toggle-sidebar";
 
     pub(crate) fn menu_id(self) -> &'static str {
         match self {
@@ -179,6 +181,7 @@ impl AppCommand {
             AppCommand::ToggleCommandPalette => Self::TOGGLE_COMMAND_PALETTE_MENU_ID,
             AppCommand::ToggleQuickTerminal => Self::TOGGLE_QUICK_TERMINAL_MENU_ID,
             AppCommand::ToggleSecureKeyboardEntry => Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID,
+            AppCommand::ToggleSidebar => Self::TOGGLE_SIDEBAR_MENU_ID,
         }
     }
 
@@ -237,6 +240,7 @@ impl AppCommand {
             Self::TOGGLE_COMMAND_PALETTE_MENU_ID => Some(Self::ToggleCommandPalette),
             Self::TOGGLE_QUICK_TERMINAL_MENU_ID => Some(Self::ToggleQuickTerminal),
             Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID => Some(Self::ToggleSecureKeyboardEntry),
+            Self::TOGGLE_SIDEBAR_MENU_ID => Some(Self::ToggleSidebar),
             _ => None,
         }
     }
@@ -313,6 +317,7 @@ impl AppCommand {
             Self::ToggleCommandPalette => "command-palette.toggle",
             Self::ToggleQuickTerminal => "quick-terminal.toggle",
             Self::ToggleSecureKeyboardEntry => "secure-keyboard-entry.toggle",
+            Self::ToggleSidebar => "sidebar.toggle",
         }
     }
 
@@ -372,6 +377,7 @@ impl AppCommand {
             "command-palette.toggle" => Some(Self::ToggleCommandPalette),
             "quick-terminal.toggle" => Some(Self::ToggleQuickTerminal),
             "secure-keyboard-entry.toggle" => Some(Self::ToggleSecureKeyboardEntry),
+            "sidebar.toggle" => Some(Self::ToggleSidebar),
             _ => None,
         }
     }

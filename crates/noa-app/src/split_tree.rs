@@ -460,6 +460,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::ToggleCommandPalette
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleSecureKeyboardEntry
+        | AppCommand::ToggleSidebar
         | AppCommand::SelectTab(_)
         | AppCommand::NextTab
         | AppCommand::PrevTab

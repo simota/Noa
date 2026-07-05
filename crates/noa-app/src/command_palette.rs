@@ -83,6 +83,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ToggleCommandPalette => "Toggle Command Palette",
         AppCommand::ToggleQuickTerminal => "Toggle Quick Terminal",
         AppCommand::ToggleSecureKeyboardEntry => "Toggle Secure Keyboard Entry",
+        AppCommand::ToggleSidebar => "Toggle Sidebar",
     }
 }
 
@@ -134,6 +135,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ToggleTabOverview,
         AppCommand::ToggleQuickTerminal,
         AppCommand::ToggleSecureKeyboardEntry,
+        AppCommand::ToggleSidebar,
         AppCommand::CloseTab,
         AppCommand::NextTab,
         AppCommand::PrevTab,
@@ -309,6 +311,8 @@ mod tests {
             AppCommand::Quit,
             AppCommand::ToggleCommandPalette,
             AppCommand::ToggleQuickTerminal,
+            AppCommand::ToggleSecureKeyboardEntry,
+            AppCommand::ToggleSidebar,
         ];
         commands.extend((1..=9).map(AppCommand::SelectTab));
         commands

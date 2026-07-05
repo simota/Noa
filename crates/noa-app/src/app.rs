@@ -884,12 +884,8 @@ impl App {
             self.command_palette = None;
         }
         match command {
-            AppCommand::About => {
-                log::info!("About noa selected");
-            }
-            AppCommand::Preferences => {
-                log::debug!("Preferences selected before settings support exists");
-            }
+            AppCommand::About => crate::app_actions::show_about(),
+            AppCommand::Preferences => crate::app_actions::open_config_file(),
             AppCommand::NewTab => {
                 let _ = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow);
             }
@@ -944,6 +940,7 @@ impl App {
             AppCommand::ToggleCommandPalette => self.toggle_command_palette(),
             AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             AppCommand::ToggleSecureKeyboardEntry => self.toggle_secure_keyboard_entry(),
+            AppCommand::ToggleSidebar => self.toggle_sidebar(),
             AppCommand::CloseWindow => self.request_close_window(event_loop),
             AppCommand::Quit => self.request_quit(event_loop),
         }

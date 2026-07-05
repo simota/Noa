@@ -425,30 +425,42 @@ pub(super) fn draw_sidebar_band(
             pipeline: CardPipeline::new(&gpu.device, surface_format),
         });
     }
-    let (Some(renderer), Some(card)) = (gpu.sidebar_renderer.as_mut(), gpu.sidebar_card.as_ref())
-    else {
-        return;
-    };
-
+    // Reuse the band texture across frames, reallocating only when the band
+    // size changes (window / sidebar-width resize) — F2.
     let band_size = PixelSize {
         w: model.inset.max(1),
         h: model.height.max(1),
     };
-    let band_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("noa-sidebar-band"),
-        size: wgpu::Extent3d {
-            width: band_size.w,
-            height: band_size.h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: surface_format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let band_view = band_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    if gpu
+        .sidebar_band
+        .as_ref()
+        .is_none_or(|(size, texture, _)| *size != band_size || texture.format() != surface_format)
+    {
+        let band_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("noa-sidebar-band"),
+            size: wgpu::Extent3d {
+                width: band_size.w,
+                height: band_size.h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let band_view = band_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        gpu.sidebar_band = Some((band_size, band_texture, band_view));
+    }
+
+    let (Some(renderer), Some(card), Some((_, _, band_view))) = (
+        gpu.sidebar_renderer.as_mut(),
+        gpu.sidebar_card.as_ref(),
+        gpu.sidebar_band.as_ref(),
+    ) else {
+        return;
+    };
 
     // Synthetic terminal carrying the whole band's text (background = the
     // sidebar bg so empty cells match), fed positioned runs.
@@ -481,7 +493,7 @@ pub(super) fn draw_sidebar_band(
     renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
     renderer.set_clear_color(rgb_to_rgba(SIDEBAR_BG));
     renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
-    renderer.draw(&gpu.device, &gpu.queue, &band_view);
+    renderer.draw(&gpu.device, &gpu.queue, band_view);
 
     // Composite the band flat (no rounding/border) onto the surface's left
     // inset. `overlay_texture_cards` loads (doesn't clear) so the panes to the
@@ -502,7 +514,7 @@ pub(super) fn draw_sidebar_band(
         surface_size,
         &style,
         &[CardTexturePlacement {
-            texture_view: &band_view,
+            texture_view: band_view,
             x: 0,
             y: 0,
             w: model.inset,

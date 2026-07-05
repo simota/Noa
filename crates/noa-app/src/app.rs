@@ -103,6 +103,10 @@ struct GpuState {
     /// Rounded-card pipeline reused to composite the rasterized sidebar band
     /// onto each window's surface (CardStyle/overlay_texture_cards).
     sidebar_card: Option<OverviewChromeCardPipeline>,
+    /// The band texture the sidebar rasterizes into, cached with its size so it
+    /// is reused frame-to-frame and only reallocated when the band dimensions
+    /// change (a window resize or sidebar-width change).
+    sidebar_band: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
 }
 
 /// Identifies one logical window — i.e. one AppKit tab group. Every native
@@ -1083,6 +1087,7 @@ impl App {
                 ),
                 sidebar_renderer: None,
                 sidebar_card: None,
+                sidebar_band: None,
             });
             surface
         } else {

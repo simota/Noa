@@ -255,7 +255,10 @@ impl App {
 
         // An open card `…` menu takes the click first: an item hit runs the
         // action, anything else dismisses the popup (and falls through to normal
-        // routing so the same click still selects/scrolls).
+        // routing so the same click still selects/scrolls). Remember which card
+        // was dismissed so a click on its own `…` button doesn't immediately
+        // reopen the menu it just closed (a toggle-then-retoggle).
+        let mut dismissed_menu: Option<SessionCardId> = None;
         if let Some(open) = self.windows.get(&window_id).and_then(|s| s.sidebar_menu) {
             if let Some(anchor) = self.card_menu_anchor(window_id, open) {
                 let popup =
@@ -267,6 +270,7 @@ impl App {
                 }
             }
             self.close_sidebar_menu(window_id);
+            dismissed_menu = Some(open);
         }
 
         let (bounds, scroll) = {
@@ -286,7 +290,11 @@ impl App {
                 true
             }
             Some(crate::sidebar::SidebarHit::CardMenu(card)) => {
-                self.toggle_sidebar_menu(window_id, card);
+                // If this same click just dismissed this card's open menu, leave
+                // it closed instead of reopening it (toggle-then-retoggle).
+                if dismissed_menu != Some(card) {
+                    self.toggle_sidebar_menu(window_id, card);
+                }
                 true
             }
             Some(crate::sidebar::SidebarHit::NewSession) => {

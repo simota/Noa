@@ -102,7 +102,10 @@ pub(crate) struct BranchPollHandle {
 }
 
 impl BranchPollHandle {
-    const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+    /// Join budget at teardown. Kept above [`GIT_TIMEOUT`] with margin so a
+    /// `git` finishing near its own ceiling still lets the worker return and
+    /// join cleanly rather than being reported as hung.
+    const JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
     /// Queue a cwd-change poll request. Non-blocking: the channel is unbounded
     /// and requests are already deduplicated at the source (only sent when a

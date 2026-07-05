@@ -308,8 +308,11 @@ impl App {
     /// Request a redraw of every window currently showing its sidebar. Cheap:
     /// the sidebar is off by default and rarely on more than one window.
     pub(super) fn request_sidebar_redraw(&self) {
-        for state in self.windows.values() {
-            if state.sidebar_visible {
+        if !self.sidebar_visible {
+            return;
+        }
+        for (window_id, state) in self.windows.iter() {
+            if self.window_sidebar_eligible(*window_id) {
                 state.window.request_redraw();
             }
         }
@@ -392,7 +395,7 @@ impl App {
         };
         let scale = state.window.scale_factor() as f32;
         let inset = crate::sidebar::sidebar_inset(
-            state.sidebar_visible,
+            self.sidebar_visible,
             self.window_sidebar_eligible(window_id),
             self.config.sidebar_width * scale,
         );
@@ -414,47 +417,56 @@ impl App {
     /// Recompute the app-wide io-thread gate: on while any eligible window
     /// shows its sidebar (Omen T1 — a distinct flag from the overview gate).
     pub(super) fn refresh_sidebar_visible_gate(&self) {
-        let any_visible = self.windows.iter().any(|(window_id, state)| {
-            state.sidebar_visible && self.window_sidebar_eligible(*window_id)
-        });
+        let any_visible = self.sidebar_visible
+            && self
+                .windows
+                .keys()
+                .any(|window_id| self.window_sidebar_eligible(*window_id));
         self.sidebar_visible_gate
             .store(any_visible, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Toggle the sidebar on the focused window only (FR-4), then grid-first
-    /// resize that window's panes to the new pane area (Omen P3/AC-5) — no
-    /// other window's visibility or grid is touched. A no-op for an ineligible
-    /// (quick-terminal) focused window.
+    /// Toggle the session sidebar app-wide (FR-4): the sidebar's shown state is
+    /// shared across every tab, so one toggle flips all eligible windows at once
+    /// and each is grid-first resized to its new pane area (Omen P3/AC-5). A
+    /// no-op when the app has no sidebar-eligible window (only a quick terminal).
     pub(super) fn toggle_sidebar(&mut self) {
-        let Some(window_id) = self.focused else {
-            return;
-        };
-        if !self.window_sidebar_eligible(window_id) {
+        // Require at least one eligible window so an all-quick-terminal app can't
+        // flip a flag with no visible effect.
+        let eligible: Vec<WindowId> = self
+            .windows
+            .keys()
+            .copied()
+            .filter(|window_id| self.window_sidebar_eligible(*window_id))
+            .collect();
+        if eligible.is_empty() {
             return;
         }
-        let Some(state) = self.windows.get_mut(&window_id) else {
-            return;
-        };
-        state.sidebar_visible = !state.sidebar_visible;
-        state.sidebar_scroll = 0;
-        state.sidebar_menu = None;
-        let window = state.window.clone();
-        // A toggle invalidates this window's inline rename either way (the
-        // editor is a sidebar surface).
-        if self
-            .sidebar_rename
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            self.sidebar_rename = None;
+        self.sidebar_visible = !self.sidebar_visible;
+        // Per-window sidebar UI state resets on any visibility change: scroll
+        // returns to the top and any open card menu closes.
+        for window_id in &eligible {
+            if let Some(state) = self.windows.get_mut(window_id) {
+                state.sidebar_scroll = 0;
+                state.sidebar_menu = None;
+            }
         }
+        // A toggle invalidates any inline rename (the editor is a sidebar surface).
+        self.sidebar_rename = None;
 
         self.refresh_sidebar_visible_gate();
-        // Grid-first: `relayout_and_resize_window` applies the inset then routes
-        // through `pane_resize_batch_plan` (grid resize before pty winsize).
-        self.relayout_and_resize_window(window_id);
-        self.update_focused_ime_cursor_area(window_id);
-        window.request_redraw();
+        // Grid-first for every eligible tab: `relayout_and_resize_window` applies
+        // the inset then routes through `pane_resize_batch_plan` (grid resize
+        // before pty winsize).
+        for window_id in &eligible {
+            self.relayout_and_resize_window(*window_id);
+            if let Some(state) = self.windows.get(window_id) {
+                state.window.request_redraw();
+            }
+        }
+        if let Some(focused) = self.focused {
+            self.update_focused_ime_cursor_area(focused);
+        }
     }
 
     /// Route a left-press at `point` (physical px) that lands in the focused

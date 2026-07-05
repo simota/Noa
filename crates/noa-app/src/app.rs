@@ -162,11 +162,6 @@ struct WindowState {
     active_split_drag: Option<SplitResizeDrag>,
     occluded: bool,
     title: String,
-    /// Whether this window currently shows the session sidebar (FR-4). Seeded
-    /// from `sidebar-enabled` at creation and flipped per-window by the sidebar
-    /// hotkey; drives the pane-area inset and the sidebar draw. Always `false`
-    /// for a quick-terminal window (FR-14).
-    sidebar_visible: bool,
     /// Vertical scroll offset (px) of the sidebar card list (FR-15), clamped to
     /// `[0, content_h - viewport_h]` when consumed by the layout.
     sidebar_scroll: u32,
@@ -544,6 +539,12 @@ pub struct App {
     /// (FR-1/AC-19). Deliberately distinct from `overview_visible_gate` (Omen
     /// T1); flipped on while any window shows its sidebar.
     sidebar_visible_gate: Arc<AtomicBool>,
+    /// Whether the session sidebar is currently shown (FR-4). App-wide, not
+    /// per-window: toggling it flips every eligible tab at once and new tabs
+    /// inherit it, so the sidebar stays consistent across all tabs. Seeded from
+    /// `sidebar-enabled`. A quick-terminal window never shows it regardless
+    /// (`window_sidebar_eligible`, FR-14).
+    sidebar_visible: bool,
     /// The registered global `sidebar-hotkey`, kept alive for the app's
     /// lifetime (dropping it unregisters). `None` until installed, or when no
     /// `sidebar-hotkey` is configured / registration failed.
@@ -566,6 +567,7 @@ impl App {
         // process poll only ticks while a sidebar is shown (AC-18).
         let proxy_for_branch_poll = proxy.clone();
         let sidebar_visible_gate = Arc::new(AtomicBool::new(false));
+        let sidebar_visible = config.sidebar_enabled;
         App {
             padding,
             initial_cursor_style,
@@ -611,6 +613,7 @@ impl App {
                 sidebar_visible_gate.clone(),
             )),
             sidebar_visible_gate,
+            sidebar_visible,
         }
     }
 
@@ -973,10 +976,11 @@ impl App {
     /// (`3分前`) keeps advancing while a session produces no output. Disarmed
     /// while no sidebar is visible, so an all-hidden app adds no wake-ups.
     fn tick_sidebar_clock(&mut self) -> Option<Instant> {
-        let any_visible = self
-            .windows
-            .values()
-            .any(|state| state.sidebar_visible);
+        let any_visible = self.sidebar_visible
+            && self
+                .windows
+                .keys()
+                .any(|window_id| self.window_sidebar_eligible(*window_id));
         if !any_visible {
             self.sidebar_clock_deadline = None;
             return None;
@@ -1340,7 +1344,6 @@ impl App {
                 active_split_drag: None,
                 occluded: false,
                 title: "Noa".to_string(),
-                sidebar_visible: self.config.sidebar_enabled,
                 sidebar_scroll: 0,
                 sidebar_menu: None,
                 link_click_in_flight: false,

@@ -1,5 +1,6 @@
 //! The custom winit user event this app drives its event loop with.
 
+use crate::session_store::SessionDelta;
 use crate::{AppCommand, split_tree::PaneId};
 use winit::window::WindowId;
 
@@ -36,6 +37,16 @@ pub enum UserEvent {
     /// handler thread via the [`winit::event_loop::EventLoopProxy`]). Toggles
     /// the drop-down quick terminal's visibility.
     ToggleQuickTerminal,
+    /// The global session-sidebar hotkey fired (same Carbon mechanism as
+    /// [`Self::ToggleQuickTerminal`]). Toggles the sidebar on the focused
+    /// window only (FR-4).
+    ToggleSidebar,
+    /// A session-sidebar state delta posted by the io thread (last-output
+    /// upsert, unread bell, …). The main thread — which owns the
+    /// [`crate::session_store::SessionStore`] — applies it on receipt
+    /// (FR-1). Carries only GUI-agnostic ids, so it never leaks a windowing
+    /// type into the store.
+    SessionDelta(SessionDelta),
     /// New terminal output is available; request a redraw.
     Redraw(WindowId, PaneId),
     /// The pty's child process exited (or errored) — the app should close.

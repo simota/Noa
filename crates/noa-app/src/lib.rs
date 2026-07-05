@@ -4,6 +4,7 @@
 //! `wgpu`.
 
 mod app;
+mod branch_poll;
 mod cli;
 mod clipboard;
 mod command_palette;
@@ -12,6 +13,7 @@ mod events;
 mod input;
 mod io_thread;
 mod link_open;
+mod localtime;
 mod macos_blur;
 mod macos_hotkey;
 #[cfg(target_os = "macos")]
@@ -22,6 +24,8 @@ mod notification;
 mod search_prompt;
 mod secure_input;
 mod session;
+mod session_store;
+mod sidebar;
 pub mod split_tree;
 pub mod tab_overview;
 mod theme;

@@ -109,6 +109,9 @@ fn app_config_from_startup(
         quick_terminal_hotkey: config.quick_terminal_hotkey,
         quick_terminal_size: config.quick_terminal_size,
         quick_terminal_autohide: config.quick_terminal_autohide,
+        sidebar_enabled: config.sidebar_enabled,
+        sidebar_width: config.sidebar_width,
+        sidebar_hotkey: config.sidebar_hotkey,
     }
 }
 

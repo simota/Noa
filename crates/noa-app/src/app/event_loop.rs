@@ -38,6 +38,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.handle_app_command(event_loop, command, CommandOrigin::App)
             }
             UserEvent::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
+            UserEvent::ToggleSidebar => self.toggle_sidebar(),
+            UserEvent::SessionDelta(delta) => self.apply_session_delta(delta),
             UserEvent::ClipboardWrite {
                 window_id,
                 pane_id,
@@ -156,6 +158,8 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(true) => {
                 self.focused = Some(window_id);
                 self.os_focused = Some(window_id);
+                // A window gaining focus clears its cards' unread bells (FR-11).
+                self.clear_session_bell_for_window(window_id);
                 self.report_focus_event(window_id, true);
                 self.secure_input
                     .on_focus_change(true, &mut crate::secure_input::CarbonSecureInput);
@@ -202,7 +206,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(window_id, position),
             WindowEvent::MouseInput { state, button, .. } => {
-                self.on_mouse_input(window_id, state, button)
+                self.on_mouse_input(event_loop, window_id, state, button)
             }
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(window_id, delta),
             WindowEvent::Ime(event) => self.on_ime_event(window_id, event),
@@ -345,6 +349,18 @@ impl App {
                         state
                             .renderer
                             .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+                    }
+                    // Rebuild the dedicated sidebar font at the new scale so its
+                    // glyphs stay crisp; the sidebar `Renderer` re-syncs its
+                    // atlas from it on the next draw.
+                    match FontGrid::new(
+                        sidebar_font_pixel_size(scale_factor),
+                        font_config_from_noa_config(&self.config.font),
+                    ) {
+                        Ok(sidebar_font) => gpu.sidebar_font = sidebar_font,
+                        Err(err) => log::warn!(
+                            "failed to rebuild sidebar font for scale factor {scale_factor}: {err}"
+                        ),
                     }
                     true
                 }
@@ -492,7 +508,23 @@ impl App {
         self.apply_selection_gesture(window_id, pane_id, gesture);
     }
 
-    pub(super) fn on_mouse_input(&mut self, window_id: WindowId, state: ElementState, button: MouseButton) {
+    pub(super) fn on_mouse_input(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        state: ElementState,
+        button: MouseButton,
+    ) {
+        // A left press inside the sidebar band is consumed there (card switch,
+        // toolbar `+`/`…`, per-card menu) and never reaches the terminal/split
+        // handling (FR-3/FR-6/FR-7).
+        if button == MouseButton::Left
+            && state == ElementState::Pressed
+            && let Some(point) = self.windows.get(&window_id).and_then(|s| s.last_mouse_point)
+            && self.handle_sidebar_press(event_loop, window_id, point)
+        {
+            return;
+        }
         if button == MouseButton::Left {
             match state {
                 ElementState::Pressed => {
@@ -611,6 +643,15 @@ impl App {
     }
 
     pub(super) fn on_mouse_wheel(&mut self, window_id: WindowId, delta: MouseScrollDelta) {
+        // A wheel turn over the sidebar band scrolls its card list (FR-15),
+        // consuming the event so the terminal viewport doesn't also scroll.
+        let sidebar_lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(position) => position.y as f32 / 40.0,
+        };
+        if self.handle_sidebar_wheel(window_id, sidebar_lines) {
+            return;
+        }
         let pane_id = self
             .windows
             .get(&window_id)

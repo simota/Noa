@@ -91,6 +91,17 @@ pub(crate) fn font_pixel_size(point_size: f32, scale_factor: f64) -> f32 {
     (point_size * scale_factor.max(f64::EPSILON) as f32).max(1.0)
 }
 
+/// The session sidebar renders its synthetic cells at a fixed, dedicated point
+/// size — deliberately smaller and denser than the terminal font (mockup
+/// parity) and independent of the user's terminal font size. Scaled by DPR like
+/// the terminal font so glyphs stay crisp.
+pub(crate) const SIDEBAR_FONT_POINT_SIZE: f32 = 11.5;
+
+/// Physical pixel size for the sidebar font at `scale_factor`.
+pub(crate) fn sidebar_font_pixel_size(scale_factor: f64) -> f32 {
+    font_pixel_size(SIDEBAR_FONT_POINT_SIZE, scale_factor)
+}
+
 pub(crate) fn initial_window_logical_size(
     metrics: noa_font::Metrics,
     grid_size: GridSize,

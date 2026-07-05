@@ -697,10 +697,15 @@ impl App {
             return;
         };
         let padding = self.padding;
+        // Inset the pane area by the sidebar width before laying panes out
+        // (Omen P1: `pane_bounds_for_size` itself is untouched — the inset is
+        // applied only here at the layout call site). 0 when the sidebar is
+        // hidden or the window is ineligible.
+        let inset = self.window_sidebar_inset_px(window_id);
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        let bounds = pane_bounds_for_size(state.window.inner_size());
+        let bounds = sidebar_inset_bounds(pane_bounds_for_size(state.window.inner_size()), inset);
         let targets = zoom_resize_targets(&state.split_tree, state.zoomed, bounds)
             .into_iter()
             .map(|(pane_id, rect)| {

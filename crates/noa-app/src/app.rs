@@ -43,6 +43,7 @@ use crate::link_open;
 use crate::mouse::{self, MouseSelectionState, SelectionGesture};
 use crate::search_prompt::{SearchPrompt, SearchPromptEffect};
 use crate::session;
+use crate::session_store::{SessionCardId, SessionStore, SessionWindowId};
 use crate::split_tree::{
     self, Direction, HitTarget, ImeOp, MIN_PANE_SIZE_PX, PaneId, Rect as PaneRectApp,
     SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitResizeDrag, SplitTree, equalize,
@@ -73,6 +74,7 @@ mod input_ops;
 mod overview;
 mod quick_terminal;
 mod session_restore;
+mod sidebar;
 
 pub use config::AppConfig;
 use quick_terminal::QuickTerminalState;
@@ -93,7 +95,31 @@ struct GpuState {
     device: wgpu::Device,
     queue: wgpu::Queue,
     font: FontGrid,
+    /// Dedicated, smaller font for the session sidebar (mockup-dense typography,
+    /// [`SIDEBAR_FONT_POINT_SIZE`]), sized independently of the terminal font
+    /// and rebuilt on a scale change alongside `font`.
+    sidebar_font: FontGrid,
     theme: Theme,
+    /// Single reused `Renderer` that rasterizes the whole sidebar band as
+    /// synthetic terminal cells (Omen T3: one renderer for every card, never
+    /// per-card). Built lazily for the first window's surface format.
+    sidebar_renderer: Option<Renderer>,
+    /// Rounded-card pipeline reused to composite the rasterized sidebar band
+    /// onto each window's surface (CardStyle/overlay_texture_cards).
+    sidebar_card: Option<OverviewChromeCardPipeline>,
+    /// The band texture the sidebar rasterizes into, cached with its size so it
+    /// is reused frame-to-frame and only reallocated when the band dimensions
+    /// change (a window resize or sidebar-width change). This is the flat dark
+    /// backdrop (header/toolbar + card text) that per-card rounded cards overlay.
+    sidebar_band: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// Reused scratch texture for one rounded session card (inset x card
+    /// height): each visible card is rendered into it then composited as a
+    /// rounded card in turn, so a single texture serves every card without a
+    /// per-card allocation (Omen T3: still one renderer, one card texture).
+    sidebar_card_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// Reused scratch texture for the open card `…` menu popup, composited above
+    /// the cards so a rounded card can never hide it.
+    sidebar_menu_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
 }
 
 /// Identifies one logical window — i.e. one AppKit tab group. Every native
@@ -136,6 +162,18 @@ struct WindowState {
     active_split_drag: Option<SplitResizeDrag>,
     occluded: bool,
     title: String,
+    /// Whether this window currently shows the session sidebar (FR-4). Seeded
+    /// from `sidebar-enabled` at creation and flipped per-window by the sidebar
+    /// hotkey; drives the pane-area inset and the sidebar draw. Always `false`
+    /// for a quick-terminal window (FR-14).
+    sidebar_visible: bool,
+    /// Vertical scroll offset (px) of the sidebar card list (FR-15), clamped to
+    /// `[0, content_h - viewport_h]` when consumed by the layout.
+    sidebar_scroll: u32,
+    /// The card whose `…` menu popup is open in this window (FR-7), or `None`.
+    /// Opened by a `…` click, dismissed by the next click anywhere or by the
+    /// sidebar toggling off.
+    sidebar_menu: Option<SessionCardId>,
     /// Set when a left press was consumed by Cmd+click-to-open, so only the
     /// matching release is swallowed. Gating the release on "is a link
     /// still hovered" instead would eat the release of an unrelated
@@ -450,6 +488,25 @@ pub struct App {
     /// Secure Keyboard Entry state. Enabled only while both the user has
     /// toggled it on and the app is frontmost, and always released on exit.
     secure_input: crate::secure_input::SecureInput,
+    /// The central session registry (FR-1), the single source of truth for the
+    /// session sidebar. Owned here on the main thread; mutated only by applying
+    /// [`crate::session_store::SessionDelta`]s posted by io threads and by
+    /// [`SessionStore::reconcile_sessions`] at teardown (FR-12).
+    session_store: SessionStore,
+    /// Shared with every pane's io thread (`io_thread::SidebarPublish`) so it
+    /// gates its per-feed card-state extraction behind one atomic load
+    /// (FR-1/AC-19). Deliberately distinct from `overview_visible_gate` (Omen
+    /// T1); flipped on while any window shows its sidebar.
+    sidebar_visible_gate: Arc<AtomicBool>,
+    /// The registered global `sidebar-hotkey`, kept alive for the app's
+    /// lifetime (dropping it unregisters). `None` until installed, or when no
+    /// `sidebar-hotkey` is configured / registration failed.
+    sidebar_hotkey: Option<crate::macos_hotkey::GlobalHotKey>,
+    /// The dedicated branch-poll worker (FR-8/FR-9): receives OSC-7-driven
+    /// cwd-change requests and posts back git branch + project icon as
+    /// [`crate::session_store::SessionDelta::Branch`]. Kept off the io read loop
+    /// (NFR-2/AC-18) and joined at teardown (Omen T6, in `Drop`).
+    branch_poll: Option<crate::branch_poll::BranchPollHandle>,
 }
 
 impl App {
@@ -457,6 +514,12 @@ impl App {
         let padding = resolve_grid_padding(config.window_padding_x, config.window_padding_y);
         let initial_cursor_style =
             resolve_cursor_style(config.cursor_style, config.cursor_style_blink);
+        // Clone the proxy for the session-metadata worker before `proxy` is
+        // moved into the struct — it posts `SessionDelta::Branch`/`Process` back
+        // over it. The worker also shares the sidebar-visible gate so its
+        // process poll only ticks while a sidebar is shown (AC-18).
+        let proxy_for_branch_poll = proxy.clone();
+        let sidebar_visible_gate = Arc::new(AtomicBool::new(false));
         App {
             padding,
             initial_cursor_style,
@@ -491,6 +554,13 @@ impl App {
             quick_terminal_hotkey: None,
             hotkey_install_attempted: false,
             secure_input: crate::secure_input::SecureInput::new(),
+            session_store: SessionStore::new(),
+            sidebar_hotkey: None,
+            branch_poll: Some(crate::branch_poll::spawn(
+                proxy_for_branch_poll,
+                sidebar_visible_gate.clone(),
+            )),
+            sidebar_visible_gate,
         }
     }
 
@@ -577,6 +647,11 @@ impl App {
     }
 
     fn redraw(&mut self, window_id: WindowId) {
+        // Build the sidebar's draw model up front (reads only the store + pure
+        // layout, AC-17) before borrowing `gpu`/`state` mutably, so the band can
+        // be composited inline after the panes without a second borrow.
+        let sidebar_model = self.sidebar_draw_model(window_id);
+        let padding = self.padding;
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
             return;
         };
@@ -693,6 +768,23 @@ impl App {
             Some(render_pane_id(state.focused_pane)),
             state.zoomed.map(render_pane_id),
         );
+        // Composite the session sidebar over the reserved left inset (FR-2/FR-5),
+        // after the panes so it isn't overdrawn. The pane area was already inset
+        // by `relayout_and_resize_window`, so this fills that band.
+        if let Some(model) = sidebar_model.as_ref() {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            sidebar::draw_sidebar_band(
+                gpu,
+                state.surface_config.format,
+                padding,
+                &view,
+                surface_size,
+                model,
+            );
+        }
         frame.present();
     }
 
@@ -1021,10 +1113,20 @@ impl App {
                 device,
                 queue,
                 font: first_font.expect("first tab must initialize the font"),
+                sidebar_font: FontGrid::new(
+                    sidebar_font_pixel_size(window_scale_factor),
+                    font_config_from_noa_config(&self.config.font),
+                )
+                .expect("failed to load the sidebar font"),
                 theme: crate::theme::resolve_theme_with_overrides(
                     self.config.theme.as_deref(),
                     &self.theme_overrides(),
                 ),
+                sidebar_renderer: None,
+                sidebar_card: None,
+                sidebar_band: None,
+                sidebar_card_tex: None,
+                sidebar_menu_tex: None,
             });
             surface
         } else {
@@ -1102,11 +1204,17 @@ impl App {
                 active_split_drag: None,
                 occluded: false,
                 title: "noa".to_string(),
+                sidebar_visible: self.config.sidebar_enabled,
+                sidebar_scroll: 0,
+                sidebar_menu: None,
                 link_click_in_flight: false,
             },
         );
         self.window_order.push(window_id);
         self.mark_overview_tile_dirty(OverviewTileId::new(window_id, initial_pane));
+        // A window seeded with the sidebar visible (`sidebar-enabled`) must turn
+        // the io-thread gate on so its panes start publishing card state.
+        self.refresh_sidebar_visible_gate();
         self.focused = Some(window_id);
         window.focus_window();
         self.request_overview_redraw();
@@ -1205,6 +1313,15 @@ impl App {
             ..Default::default()
         };
         let pty = Pty::spawn(pty_config)?;
+        // Hand the foreground-process probe to the session-metadata worker
+        // (running-process display) before the pty moves into the io thread.
+        // Quick-terminal panes never get a sidebar card, so they need no probe.
+        if self.window_sidebar_eligible(window_id)
+            && let Some(worker) = self.branch_poll.as_ref()
+            && let Some(probe) = pty.foreground_probe()
+        {
+            worker.register_process_probe(Self::session_card_id(window_id, pane_id), probe);
+        }
         let mut terminal = Terminal::new(grid_size);
         if let Some(style) = self.initial_cursor_style {
             terminal.set_default_cursor_style(style);
@@ -1231,6 +1348,9 @@ impl App {
             slot: overview_snapshot.clone(),
             visible: self.overview_visible_gate.clone(),
         };
+        let sidebar_publish = crate::io_thread::SidebarPublish {
+            visible: self.sidebar_visible_gate.clone(),
+        };
         let io_thread = crate::io_thread::spawn(
             pty,
             terminal.clone(),
@@ -1239,6 +1359,7 @@ impl App {
             resize_rx,
             pty_input_rx,
             overview_publish,
+            sidebar_publish,
         );
 
         Ok(Surface {
@@ -1367,6 +1488,13 @@ impl App {
                 self.request_overview_redraw();
             }
         }
+        // GC choke point (FR-12): the tab's cards (and, via window-remove, a
+        // whole group's) are gone from `windows` now, so drop them from the
+        // store too. `close_group`/`close_pane_after_pty_exit` reach this
+        // through their `close_tab` calls.
+        self.reconcile_session_store();
+        // A closed window may have been the only one showing a sidebar.
+        self.refresh_sidebar_visible_gate();
         self.persist_session();
     }
 
@@ -1515,6 +1643,9 @@ impl App {
         self.overview_tiles
             .remove(&OverviewTileId::new(window_id, pane_id));
         self.mark_all_overview_tiles_dirty();
+        // GC choke point (FR-12): the closed pane's card is dropped from the
+        // store. `close_pane_after_pty_exit` reaches this through `close_pane`.
+        self.reconcile_session_store();
         self.relayout_and_resize_window(window_id);
         self.update_focused_ime_cursor_area(window_id);
         window.request_redraw();
@@ -1677,10 +1808,13 @@ impl App {
     }
 
     fn toggle_split_zoom(&mut self, window_id: WindowId) {
+        // Same sidebar inset as the pane layout so the zoom decision sees the
+        // real pane area, not the full window (Omen P1).
+        let inset = self.window_sidebar_inset_px(window_id);
         let bounds = self
             .windows
             .get(&window_id)
-            .map(|state| pane_bounds_for_size(state.window.inner_size()))
+            .map(|state| sidebar_inset_bounds(pane_bounds_for_size(state.window.inner_size()), inset))
             .unwrap_or(PaneRectApp::new(0, 0, 0, 0));
         let window = {
             let Some(state) = self.windows.get_mut(&window_id) else {
@@ -1794,6 +1928,11 @@ impl Drop for App {
         self.windows.clear();
         self.window_order.clear();
         self.focused = None;
+        // Stop and join the branch-poll worker (Omen T6) before the proxy is
+        // dropped with the rest of `App`.
+        if let Some(mut branch_poll) = self.branch_poll.take() {
+            branch_poll.shutdown();
+        }
         self.gpu.take();
     }
 }

@@ -68,24 +68,41 @@ impl App {
             .is_some_and(|qt| qt.window_id == window_id)
     }
 
-    /// Register the global `quick-terminal-hotkey` once, after the app is
-    /// running. A no-op when unset, already attempted, or registration failed
-    /// (the failure is logged, not fatal).
+    /// Register the global `quick-terminal-hotkey` and `sidebar-hotkey` once,
+    /// after the app is running. A no-op per chord when unset or explicitly
+    /// disabled; a registration failure is logged, not fatal. Both go through
+    /// the same `parse_hotkey` path (FR-13).
     pub(super) fn install_global_hotkey_if_needed(&mut self) {
         if self.hotkey_install_attempted {
             return;
         }
         self.hotkey_install_attempted = true;
-        let Some(spec) = self.config.quick_terminal_hotkey.clone() else {
-            return;
-        };
+
         // Empty spec is the "explicitly disabled" sentinel (config `none`).
-        if spec.trim().is_empty() {
-            return;
+        if let Some(spec) = self.config.quick_terminal_hotkey.clone()
+            && !spec.trim().is_empty()
+        {
+            match crate::macos_hotkey::GlobalHotKey::register(
+                &spec,
+                self.proxy.clone(),
+                crate::macos_hotkey::HotkeyAction::QuickTerminal,
+            ) {
+                Some(hotkey) => self.quick_terminal_hotkey = Some(hotkey),
+                None => log::warn!("failed to register quick-terminal-hotkey `{spec}`"),
+            }
         }
-        match crate::macos_hotkey::GlobalHotKey::register(&spec, self.proxy.clone()) {
-            Some(hotkey) => self.quick_terminal_hotkey = Some(hotkey),
-            None => log::warn!("failed to register quick-terminal-hotkey `{spec}`"),
+
+        if let Some(spec) = self.config.sidebar_hotkey.clone()
+            && !spec.trim().is_empty()
+        {
+            match crate::macos_hotkey::GlobalHotKey::register(
+                &spec,
+                self.proxy.clone(),
+                crate::macos_hotkey::HotkeyAction::Sidebar,
+            ) {
+                Some(hotkey) => self.sidebar_hotkey = Some(hotkey),
+                None => log::warn!("failed to register sidebar-hotkey `{spec}`"),
+            }
         }
     }
 
@@ -246,6 +263,11 @@ impl App {
 
     /// Tear down the quick terminal outright (its shell exited). Unlike hide,
     /// this drops the window and io thread so a fresh one is spawned next open.
+    ///
+    /// No session-store reconcile is needed here: a quick-terminal pane is never
+    /// sidebar-eligible, so `apply_session_delta` drops its `Upsert`/`Bell`
+    /// before they reach the store (FR-14/AC-16b) — there is never a QT card to
+    /// leave behind.
     pub(super) fn destroy_quick_terminal(&mut self) {
         let Some(qt) = self.quick_terminal.take() else {
             return;
@@ -359,6 +381,10 @@ impl App {
                 active_split_drag: None,
                 occluded: false,
                 title: "noa".to_string(),
+                // Quick-terminal windows are never sidebar-eligible (FR-14).
+                sidebar_visible: false,
+                sidebar_scroll: 0,
+                sidebar_menu: None,
                 link_click_in_flight: false,
             },
         );

@@ -10,7 +10,7 @@ mod reader;
 mod shell_integration;
 mod writer;
 
-pub use pty::{Pty, PtyConfig};
+pub use pty::{ForegroundProcessProbe, Pty, PtyConfig};
 pub use writer::PtyWriter;
 
 /// An event emitted by the PTY reader thread.

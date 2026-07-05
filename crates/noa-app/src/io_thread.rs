@@ -7,7 +7,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError};
 use noa_core::GridSize;
@@ -17,6 +17,9 @@ use noa_render::FrameSnapshot;
 use winit::event_loop::EventLoopProxy;
 
 use crate::events::UserEvent;
+use crate::session_store::{
+    self, PreviewLine, PreviewSpan, SessionCardId, SessionDelta, SessionWindowId, WallClock,
+};
 use crate::split_tree::PaneId;
 use crate::tab_overview::OVERVIEW_TILE_MIN_RENDER_INTERVAL;
 
@@ -42,6 +45,23 @@ pub(crate) struct OverviewPublish {
     pub(crate) slot: Arc<Mutex<Option<Arc<FrameSnapshot>>>>,
     pub(crate) visible: Arc<AtomicBool>,
 }
+
+/// Read-only gate for the session sidebar's publish path (FR-1/AC-19),
+/// deliberately **parallel to — never aliased with — [`OverviewPublish`]**
+/// (Omen T1). `visible` is app-wide (`App::sidebar_visible_gate`), flipped on
+/// while any window shows its sidebar; when it's off the io thread skips the
+/// extra work of extracting a card upsert on every pty feed for a single
+/// atomic load. Unlike the overview there is no `FrameSnapshot` slot here: the
+/// `SessionStore` itself is the lock-free published surface (ADR 0001 —
+/// "SessionStore は overview_snapshot と同型の publish-slot 読取モデル"), fed by
+/// the [`SessionDelta`]s this gate lets through.
+#[derive(Clone)]
+pub(crate) struct SidebarPublish {
+    pub(crate) visible: Arc<AtomicBool>,
+}
+
+/// How many trailing terminal rows the sidebar card preview shows (FR-2).
+const SIDEBAR_PREVIEW_LINES: usize = 2;
 
 pub(crate) type PtyInput = Box<[u8]>;
 
@@ -147,15 +167,83 @@ struct TerminalOutput {
     /// pty output. `None` when nothing is owed (published now, or the
     /// overview isn't visible).
     overview_publish_pending: Option<Instant>,
+    /// A sidebar card upsert extracted this feed (name/cwd/busy/preview), or
+    /// `None` when the sidebar gate is off or the throttle window has not
+    /// elapsed. The spawn loop stamps it with the current wall-clock + card
+    /// generation and posts it as a [`SessionDelta::Upsert`].
+    sidebar_upsert: Option<SidebarUpsert>,
+    /// An unread bell was drained this feed (FR-11); the spawn loop posts a
+    /// [`SessionDelta::Bell`]. Only drained while the sidebar is visible, so a
+    /// bell rung with every sidebar hidden persists on the terminal until the
+    /// user opens one.
+    sidebar_bell: bool,
+}
+
+/// Per-feed sidebar card state extracted under the terminal lock (FR-2). Time
+/// and generation are added by the spawn loop after the lock is released.
+struct SidebarUpsert {
+    name: String,
+    cwd: String,
+    busy: bool,
+    preview: Vec<PreviewLine>,
+}
+
+/// The trailing non-blank rows of the active screen, for the card preview
+/// (FR-2). Read under the terminal lock; returns at most
+/// [`SIDEBAR_PREVIEW_LINES`] lines, oldest-first, trailing blanks dropped. Each
+/// line coalesces adjacent cells sharing a foreground color into one
+/// [`PreviewSpan`] so the sidebar can render it in its original ANSI colors.
+fn extract_preview(terminal: &Terminal) -> Vec<PreviewLine> {
+    let mut lines: Vec<PreviewLine> = Vec::new();
+    for row in &terminal.active().grid {
+        // Drop trailing blanks by rendering only up to the last non-blank cell.
+        let Some(last) = row.cells.iter().rposition(|cell| !cell.is_blank()) else {
+            continue;
+        };
+        let mut spans: PreviewLine = Vec::new();
+        for cell in &row.cells[..=last] {
+            match spans.last_mut() {
+                Some(span) if span.fg == cell.fg => cell.push_text_to(&mut span.text),
+                _ => {
+                    let mut text = String::new();
+                    cell.push_text_to(&mut text);
+                    spans.push(PreviewSpan { text, fg: cell.fg });
+                }
+            }
+        }
+        lines.push(spans);
+    }
+    let start = lines.len().saturating_sub(SIDEBAR_PREVIEW_LINES);
+    lines.split_off(start)
+}
+
+/// Pure throttle decision for a sidebar publish (AC-19), mirroring
+/// [`decide_overview_publish`]'s now-as-param shape so it is testable without a
+/// wall-clock sleep. `true` means extract and post an upsert this feed; the
+/// gate-off and within-throttle cases both return `false`. No trailing-flush
+/// variant: a skipped upsert leaves slightly stale card state until the next
+/// output, which the store tolerates (unlike the overview mirror there is no
+/// frame to get visually stuck).
+fn decide_sidebar_publish(visible: bool, last_publish: Option<Instant>, now: Instant) -> bool {
+    if !visible {
+        return false;
+    }
+    match last_publish {
+        None => true,
+        Some(last) => now.saturating_duration_since(last) >= OVERVIEW_TILE_MIN_RENDER_INTERVAL,
+    }
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 fn feed_terminal(
     terminal: &Arc<Mutex<Terminal>>,
     stream: &mut noa_vt::Stream,
     bytes: &[u8],
     overview: &OverviewPublish,
     last_overview_publish: &mut Option<Instant>,
+    sidebar: &SidebarPublish,
+    last_sidebar_publish: &mut Option<Instant>,
 ) -> TerminalOutput {
     feed_terminal_batch(
         terminal,
@@ -164,9 +252,12 @@ fn feed_terminal(
         std::iter::empty::<&[u8]>(),
         overview,
         last_overview_publish,
+        sidebar,
+        last_sidebar_publish,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn feed_terminal_batch<'a>(
     terminal: &Arc<Mutex<Terminal>>,
     stream: &mut noa_vt::Stream,
@@ -174,6 +265,8 @@ fn feed_terminal_batch<'a>(
     rest: impl IntoIterator<Item = &'a [u8]>,
     overview: &OverviewPublish,
     last_overview_publish: &mut Option<Instant>,
+    sidebar: &SidebarPublish,
+    last_sidebar_publish: &mut Option<Instant>,
 ) -> TerminalOutput {
     let mut term = terminal.lock().expect("terminal mutex poisoned");
     stream.feed(first, &mut *term);
@@ -182,6 +275,24 @@ fn feed_terminal_batch<'a>(
     }
     let overview_publish_pending =
         publish_overview_snapshot(&term, overview, last_overview_publish);
+
+    // Sidebar publish (FR-1/FR-11) — extracted in this same lock section so the
+    // main thread never locks a `Terminal` to build card state (NFR-1). The
+    // bell is only drained while a sidebar is visible so one rung entirely
+    // in the background survives until the user opens it.
+    let sidebar_visible = sidebar.visible.load(Ordering::Relaxed);
+    let sidebar_bell = sidebar_visible && term.take_pending_bell();
+    let sidebar_upsert = decide_sidebar_publish(sidebar_visible, *last_sidebar_publish, Instant::now())
+        .then(|| {
+            *last_sidebar_publish = Some(Instant::now());
+            SidebarUpsert {
+                name: term.title.clone(),
+                cwd: term.cwd.clone().unwrap_or_default(),
+                busy: term.has_running_program(),
+                preview: extract_preview(&term),
+            }
+        });
+
     TerminalOutput {
         pending_writes: term.take_pending_writes(),
         pending_clipboard_writes: term.take_pending_clipboard_writes(),
@@ -189,7 +300,19 @@ fn feed_terminal_batch<'a>(
         pending_notifications: term.take_pending_notifications(),
         synchronized_output: term.modes.synchronized_output(),
         overview_publish_pending,
+        sidebar_upsert,
+        sidebar_bell,
     }
+}
+
+/// Stamp a wall-clock timestamp for a sidebar upsert (FR-10): the current Unix
+/// time shifted into the viewer's local zone, decomposed into calendar fields.
+fn sidebar_wall_clock_now() -> WallClock {
+    let unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    session_store::civil_from_unix_secs(unix_secs + crate::localtime::local_offset_seconds())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -314,6 +437,7 @@ fn should_request_redraw_after_terminal_output(output: &TerminalOutput) -> bool 
 
 /// Spawn the io thread, which takes ownership of `pty`. Returns immediately;
 /// the thread runs until the pty exits or errors, or the event loop is gone.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     pty: Pty,
     terminal: Arc<Mutex<Terminal>>,
@@ -322,13 +446,22 @@ pub fn spawn(
     resize_rx: Receiver<GridSize>,
     input_rx: Receiver<PtyInput>,
     overview: OverviewPublish,
+    sidebar: SidebarPublish,
 ) -> IoThreadHandle {
     let IoThreadTarget { window_id, pane_id } = target;
+    // The GUI-agnostic card key for every sidebar delta this thread posts. The
+    // store never sees a winit `WindowId` (NFR-6); the app boundary converts it
+    // here via winit's stable `WindowId` ↔ `u64` mapping.
+    let card_id = SessionCardId::new(SessionWindowId(u64::from(window_id)), pane_id);
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
     let join = std::thread::spawn(move || {
         let writer = pty.writer();
         let mut stream = noa_vt::Stream::new();
         let mut last_overview_publish: Option<Instant> = None;
+        let mut last_sidebar_publish: Option<Instant> = None;
+        // Per-card generation for [`SessionDelta::Upsert`], monotonic so the
+        // store can drop a reordered/stale upsert (`SessionStore::apply`).
+        let mut sidebar_seq: u64 = 0;
         // Trailing-flush deadline owed by a throttled overview publish
         // (Fix B defect 1), if any. `None` means nothing is owed, and the
         // select below blocks indefinitely exactly as before this fix — an
@@ -376,15 +509,45 @@ pub fn spawn(
                         let mut drained = Vec::new();
                         let terminal_event =
                             drain_queued_pty_data(pty.event_rx(), &mut drained, bytes.len());
-                        let output = feed_terminal_batch(
+                        let mut output = feed_terminal_batch(
                             &terminal,
                             &mut stream,
                             bytes.as_ref(),
                             drained.iter().map(|chunk| chunk.as_ref()),
                             &overview,
                             &mut last_overview_publish,
+                            &sidebar,
+                            &mut last_sidebar_publish,
                         );
                         publish_pending_at = output.overview_publish_pending;
+                        let sidebar_bell = output.sidebar_bell;
+                        let sidebar_upsert = output.sidebar_upsert.take();
+                        if sidebar_bell
+                            && proxy
+                                .send_event(UserEvent::SessionDelta(SessionDelta::Bell {
+                                    id: card_id,
+                                }))
+                                .is_err()
+                        {
+                            break; // event loop gone
+                        }
+                        if let Some(upsert) = sidebar_upsert {
+                            sidebar_seq += 1;
+                            if proxy
+                                .send_event(UserEvent::SessionDelta(SessionDelta::Upsert {
+                                    id: card_id,
+                                    seq: sidebar_seq,
+                                    name: upsert.name,
+                                    cwd: upsert.cwd,
+                                    busy: upsert.busy,
+                                    updated_at: sidebar_wall_clock_now(),
+                                    preview: upsert.preview,
+                                }))
+                                .is_err()
+                            {
+                                break; // event loop gone
+                            }
+                        }
                         if !output.pending_writes.is_empty() {
                             write_pty_bytes(&writer, &output.pending_writes);
                         }
@@ -464,6 +627,124 @@ mod tests {
         }
     }
 
+    fn test_sidebar_publish(visible: bool) -> SidebarPublish {
+        SidebarPublish {
+            visible: Arc::new(AtomicBool::new(visible)),
+        }
+    }
+
+    #[test]
+    fn decide_sidebar_publish_skips_when_gate_off_and_throttles_when_visible() {
+        let now = Instant::now();
+        // Gate off: never publishes, regardless of timing.
+        assert!(!decide_sidebar_publish(false, None, now));
+        assert!(!decide_sidebar_publish(
+            false,
+            Some(now - OVERVIEW_TILE_MIN_RENDER_INTERVAL * 10),
+            now
+        ));
+        // Visible + first feed publishes.
+        assert!(decide_sidebar_publish(true, None, now));
+        // Visible but inside the throttle window: skip.
+        assert!(!decide_sidebar_publish(
+            true,
+            Some(now - OVERVIEW_TILE_MIN_RENDER_INTERVAL / 2),
+            now
+        ));
+        // Visible and past the throttle window: publish.
+        assert!(decide_sidebar_publish(
+            true,
+            Some(now - OVERVIEW_TILE_MIN_RENDER_INTERVAL),
+            now
+        ));
+    }
+
+    #[test]
+    fn feed_extracts_a_sidebar_upsert_only_while_visible_and_throttled() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+        let mut stream = noa_vt::Stream::new();
+        let overview = test_overview_publish();
+        let mut last_overview_publish = None;
+
+        // Gate off: no upsert, no bell.
+        let off = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"hello",
+            &overview,
+            &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut None,
+        );
+        assert!(off.sidebar_upsert.is_none());
+        assert!(!off.sidebar_bell);
+
+        // Gate on, first feed: an upsert carrying the trailing preview line.
+        let sidebar = test_sidebar_publish(true);
+        let mut last_sidebar_publish = None;
+        let on = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"\r\nsecond line",
+            &overview,
+            &mut last_overview_publish,
+            &sidebar,
+            &mut last_sidebar_publish,
+        );
+        let upsert = on.sidebar_upsert.expect("visible first feed publishes");
+        assert!(
+            upsert
+                .preview
+                .iter()
+                .any(|line| session_store::preview_line_text(line).contains("second line"))
+        );
+        assert!(last_sidebar_publish.is_some());
+
+        // A second feed inside the throttle window yields no upsert.
+        let throttled = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"more",
+            &overview,
+            &mut last_overview_publish,
+            &sidebar,
+            &mut last_sidebar_publish,
+        );
+        assert!(throttled.sidebar_upsert.is_none());
+    }
+
+    #[test]
+    fn feed_drains_the_bell_only_while_the_sidebar_is_visible() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+        let mut stream = noa_vt::Stream::new();
+        let overview = test_overview_publish();
+        let mut last_overview_publish = None;
+
+        // Bell rung while hidden: not drained, so it persists on the terminal.
+        let hidden = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"\x07",
+            &overview,
+            &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut None,
+        );
+        assert!(!hidden.sidebar_bell);
+
+        // Opening the sidebar and feeding again drains the still-pending bell.
+        let visible = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"x",
+            &overview,
+            &mut last_overview_publish,
+            &test_sidebar_publish(true),
+            &mut None,
+        );
+        assert!(visible.sidebar_bell);
+    }
+
     #[test]
     fn feed_terminal_returns_pending_writes_after_releasing_lock() {
         let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
@@ -477,6 +758,8 @@ mod tests {
             b"\x1b[6n",
             &overview,
             &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut None,
         );
 
         assert_eq!(output.pending_writes, b"\x1b[1;1R");
@@ -501,6 +784,8 @@ mod tests {
             b"\x1b[?2026hhidden",
             &overview,
             &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut None,
         );
 
         assert!(output.synchronized_output);
@@ -512,6 +797,8 @@ mod tests {
             b"\x1b[?2026l",
             &overview,
             &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut None,
         );
 
         assert!(!output.synchronized_output);
@@ -531,6 +818,8 @@ mod tests {
             b"hello",
             &overview,
             &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut None,
         );
 
         assert!(
@@ -656,6 +945,8 @@ mod tests {
             b"first",
             &overview,
             &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut None,
         );
         let first_snapshot = overview
             .slot
@@ -675,6 +966,8 @@ mod tests {
             b"second",
             &overview,
             &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut None,
         );
         let still_first = overview
             .slot
@@ -700,6 +993,8 @@ mod tests {
             b"third",
             &overview,
             &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut None,
         );
         let third_snapshot = overview
             .slot
@@ -761,6 +1056,24 @@ mod tests {
                 .as_ref(),
             b"paste"
         );
+    }
+
+    // AC-18 (NFR-2): git must never be spawned on the io read loop — it lives
+    // only in the dedicated `branch_poll` worker. Assert this module's source
+    // never spawns `git` (nor any `Command`). The needles are assembled at
+    // runtime so this test file does not trip its own scan.
+    #[test]
+    fn io_read_loop_never_spawns_git() {
+        let source = include_str!("io_thread.rs");
+        for forbidden in [
+            ["Command", "::new(\"git\")"].concat(),
+            ["Command", "::new"].concat(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "io_thread.rs must not spawn a subprocess (`{forbidden}`) — git belongs in branch_poll"
+            );
+        }
     }
 
     #[test]

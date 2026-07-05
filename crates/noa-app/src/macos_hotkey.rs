@@ -130,22 +130,54 @@ pub(crate) struct GlobalHotKey {
     _unused: (),
 }
 
+/// Distinguishes coexisting global hotkeys so one shared Carbon hotkey-pressed
+/// handler can dispatch each to its own event. Every live [`GlobalHotKey`]
+/// installs a handler for the same event class, so each must filter on the
+/// fired hotkey's id and only forward its own (see `macos::hotkey_handler`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HotkeyAction {
+    QuickTerminal,
+    Sidebar,
+}
+
+impl HotkeyAction {
+    /// The Carbon hotkey id and the `UserEvent` this action forwards.
+    fn id(self) -> u32 {
+        match self {
+            HotkeyAction::QuickTerminal => 1,
+            HotkeyAction::Sidebar => 2,
+        }
+    }
+
+    fn event(self) -> UserEvent {
+        match self {
+            HotkeyAction::QuickTerminal => UserEvent::ToggleQuickTerminal,
+            HotkeyAction::Sidebar => UserEvent::ToggleSidebar,
+        }
+    }
+}
+
 impl GlobalHotKey {
-    /// Register `spec` as a system-wide hotkey that posts
-    /// [`UserEvent::ToggleQuickTerminal`] through `proxy` when pressed. Returns
-    /// `None` when the chord is unparseable, registration fails, or the
-    /// platform has no global-hotkey support.
-    pub(crate) fn register(spec: &str, proxy: EventLoopProxy<UserEvent>) -> Option<Self> {
+    /// Register `spec` as a system-wide hotkey that posts `action`'s event
+    /// through `proxy` when pressed. Returns `None` when the chord is
+    /// unparseable, registration fails, or the platform has no global-hotkey
+    /// support. Multiple actions can be registered at once; each filters on its
+    /// own hotkey id so a press only fires its matching event.
+    pub(crate) fn register(
+        spec: &str,
+        proxy: EventLoopProxy<UserEvent>,
+        action: HotkeyAction,
+    ) -> Option<Self> {
         let chord = parse_hotkey(spec)?;
         #[cfg(target_os = "macos")]
         {
-            macos::Registration::install(chord, proxy).map(|registration| Self {
+            macos::Registration::install(chord, proxy, action).map(|registration| Self {
                 _registration: registration,
             })
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (chord, proxy);
+            let _ = (chord, proxy, action);
             None
         }
     }
@@ -157,7 +189,7 @@ mod macos {
 
     use winit::event_loop::EventLoopProxy;
 
-    use super::HotkeyChord;
+    use super::{HotkeyAction, HotkeyChord};
     use crate::UserEvent;
 
     type OsStatus = i32;
@@ -184,6 +216,10 @@ mod macos {
     const K_EVENT_HOTKEY_PRESSED: u32 = 6;
     // FourCharCode signature identifying this app's hotkeys.
     const HOTKEY_SIGNATURE: u32 = u32::from_be_bytes(*b"noaq");
+    // `kEventParamDirectObject` / `typeEventHotKeyID` — the event parameter
+    // carrying the fired hotkey's `EventHotKeyID`, read to dispatch by id.
+    const K_EVENT_PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
+    const TYPE_EVENT_HOTKEY_ID: u32 = u32::from_be_bytes(*b"hkid");
 
     #[link(name = "Carbon", kind = "framework")]
     unsafe extern "C" {
@@ -206,35 +242,80 @@ mod macos {
             out_ref: *mut EventHandlerRef,
         ) -> OsStatus;
         fn RemoveEventHandler(handler: EventHandlerRef) -> OsStatus;
+        fn GetEventParameter(
+            event: EventRef,
+            name: u32,
+            param_type: u32,
+            out_actual_type: *mut u32,
+            buffer_size: usize,
+            out_actual_size: *mut usize,
+            out_data: *mut c_void,
+        ) -> OsStatus;
     }
 
-    /// The hotkey callback fires on the main thread (same run loop as winit),
-    /// so it just forwards a toggle event through the proxy it was handed.
+    /// The boxed state each installed handler borrows: the proxy to post
+    /// through, the event this action forwards, and the hotkey id to match.
+    struct HandlerData {
+        proxy: EventLoopProxy<UserEvent>,
+        event: UserEvent,
+        id: u32,
+    }
+
+    /// The hotkey callback fires on the main thread (same run loop as winit).
+    /// Because every [`Registration`] installs a handler for the same
+    /// hotkey-pressed event class, each handler runs for *every* app hotkey, so
+    /// it must read the fired hotkey's id and forward its event only on a match.
     extern "C" fn hotkey_handler(
         _call: EventHandlerCallRef,
-        _event: EventRef,
+        event: EventRef,
         user_data: *mut c_void,
     ) -> OsStatus {
-        // SAFETY: `user_data` is the `Box<EventLoopProxy>` leaked in `install`
-        // and kept alive by the owning `Registration`, so the pointer is valid
-        // for the whole time the handler is installed.
-        let proxy = unsafe { &*(user_data as *const EventLoopProxy<UserEvent>) };
-        let _ = proxy.send_event(UserEvent::ToggleQuickTerminal);
+        // SAFETY: `user_data` is the `Box<HandlerData>` leaked in `install` and
+        // kept alive by the owning `Registration`, so the pointer is valid for
+        // the whole time the handler is installed.
+        let data = unsafe { &*(user_data as *const HandlerData) };
+        let mut fired = EventHotKeyId {
+            signature: 0,
+            id: 0,
+        };
+        let mut actual_size: usize = 0;
+        // SAFETY: `event` is the live Carbon event for this callback; `fired`
+        // is a correctly-sized `EventHotKeyID` output buffer.
+        let status = unsafe {
+            GetEventParameter(
+                event,
+                K_EVENT_PARAM_DIRECT_OBJECT,
+                TYPE_EVENT_HOTKEY_ID,
+                std::ptr::null_mut(),
+                std::mem::size_of::<EventHotKeyId>(),
+                &mut actual_size,
+                &mut fired as *mut EventHotKeyId as *mut c_void,
+            )
+        };
+        if status == 0 && fired.signature == HOTKEY_SIGNATURE && fired.id == data.id {
+            let _ = data.proxy.send_event(data.event.clone());
+        }
         0
     }
 
     pub(super) struct Registration {
         hotkey_ref: EventHotKeyRef,
         handler_ref: EventHandlerRef,
-        proxy: *mut EventLoopProxy<UserEvent>,
+        data: *mut HandlerData,
     }
 
     impl Registration {
         pub(super) fn install(
             chord: HotkeyChord,
             proxy: EventLoopProxy<UserEvent>,
+            action: HotkeyAction,
         ) -> Option<Self> {
-            let proxy = Box::into_raw(Box::new(proxy));
+            let hotkey_id = action.id();
+            let data = Box::into_raw(Box::new(HandlerData {
+                proxy,
+                event: action.event(),
+                id: hotkey_id,
+            }));
             let spec = EventTypeSpec {
                 event_class: K_EVENT_CLASS_KEYBOARD,
                 event_kind: K_EVENT_HOTKEY_PRESSED,
@@ -253,17 +334,17 @@ mod macos {
                     hotkey_handler,
                     1,
                     &spec,
-                    proxy as *mut c_void,
+                    data as *mut c_void,
                     &mut handler_ref,
                 );
                 if status != 0 {
-                    drop(Box::from_raw(proxy));
-                    log::warn!("InstallEventHandler failed for quick-terminal hotkey: {status}");
+                    drop(Box::from_raw(data));
+                    log::warn!("InstallEventHandler failed for global hotkey: {status}");
                     return None;
                 }
                 let hot_key_id = EventHotKeyId {
                     signature: HOTKEY_SIGNATURE,
-                    id: 1,
+                    id: hotkey_id,
                 };
                 let status = RegisterEventHotKey(
                     chord.keycode,
@@ -275,8 +356,8 @@ mod macos {
                 );
                 if status != 0 {
                     RemoveEventHandler(handler_ref);
-                    drop(Box::from_raw(proxy));
-                    log::warn!("RegisterEventHotKey failed for quick-terminal hotkey: {status}");
+                    drop(Box::from_raw(data));
+                    log::warn!("RegisterEventHotKey failed for global hotkey: {status}");
                     return None;
                 }
             }
@@ -284,7 +365,7 @@ mod macos {
             Some(Self {
                 hotkey_ref,
                 handler_ref,
-                proxy,
+                data,
             })
         }
     }
@@ -292,12 +373,12 @@ mod macos {
     impl Drop for Registration {
         fn drop(&mut self) {
             // SAFETY: both refs were produced by the matching register/install
-            // calls and are unregistered exactly once here; the boxed proxy is
-            // freed only after the handler that reads it is removed.
+            // calls and are unregistered exactly once here; the boxed handler
+            // data is freed only after the handler that reads it is removed.
             unsafe {
                 UnregisterEventHotKey(self.hotkey_ref);
                 RemoveEventHandler(self.handler_ref);
-                drop(Box::from_raw(self.proxy));
+                drop(Box::from_raw(self.data));
             }
         }
     }

@@ -71,6 +71,17 @@ pub struct AppConfig {
     pub quick_terminal_size: f32,
     /// `quick-terminal-autohide`: hide the quick terminal when it loses focus.
     pub quick_terminal_autohide: bool,
+    /// `sidebar-enabled`: app-wide initial visibility of the session sidebar,
+    /// seeded into each window's per-window toggle at creation (FR-4/FR-13).
+    pub sidebar_enabled: bool,
+    /// `sidebar-width`: the session sidebar's width in points when visible
+    /// (FR-13). Multiplied by the window scale factor at the resize call site
+    /// to get the pixel inset.
+    pub sidebar_width: f32,
+    /// `sidebar-hotkey`: the global chord that toggles the sidebar for the
+    /// focused window (FR-13). `None` (or the empty-string "disabled" sentinel)
+    /// registers no chord.
+    pub sidebar_hotkey: Option<String>,
 }
 
 /// Maps the parsed `noa-config` font settings onto the `noa-font` runtime

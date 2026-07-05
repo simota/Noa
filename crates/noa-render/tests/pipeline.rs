@@ -16,9 +16,9 @@ use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, PixelSize, Rgb};
 use noa_font::FontGrid;
 use noa_grid::{Cell, Cursor, Row, SearchState, Selection, SelectionPoint, TerminalColors};
 use noa_render::{
-    CardStyle, CardTilePlacement, CommandPaletteSnapshot, DrawOp, FrameSnapshot,
-    ImagePlacementSnapshot, OverviewThumbnailResources, PaneFrame, PaneId, PaneRect, Renderer,
-    SnapshotImage, Theme, build_draw_plan,
+    CardPipeline, CardStyle, CardTexturePlacement, CardTilePlacement, CommandPaletteSnapshot,
+    DrawOp, FrameSnapshot, ImagePlacementSnapshot, OverviewThumbnailResources, PaneFrame, PaneId,
+    PaneRect, Renderer, SnapshotImage, Theme, build_draw_plan,
 };
 use std::sync::Arc;
 
@@ -1435,6 +1435,93 @@ fn overview_card_pipeline_composites_tiles_without_validation_error() {
     assert!(
         pixels.chunks_exact(4).any(|px| px != first),
         "card composite produced a uniform frame (nothing drawn)"
+    );
+}
+
+/// The session sidebar composites its rasterized band texture onto a window
+/// surface with `CardPipeline::overlay_texture_cards` (flat: corner_radius 0,
+/// border_width 0) — the same shader/uniform path as overview cards but the
+/// non-clearing `Load` overlay. Draw that path headlessly and assert no wgpu
+/// validation error and a non-uniform result (something was actually drawn).
+#[test]
+fn sidebar_band_overlay_composites_without_validation_error() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping sidebar band overlay test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+    // Rasterize a "band" texture (RENDER_ATTACHMENT + TEXTURE_BINDING) the way
+    // the sidebar does: a reused Renderer drawing text into it.
+    let band_size = PixelSize { w: 120, h: 300 };
+    let band = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("noa-test-sidebar-band"),
+        size: wgpu::Extent3d {
+            width: band_size.w,
+            height: band_size.h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let band_view = band.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut font =
+        FontGrid::new(24.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(&device, &queue, format, &mut font, DEFAULT_GRID_PADDING)
+        .expect("build sidebar band renderer");
+    renderer.resize(band_size);
+    rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "session");
+    renderer.set_clear_color([0.08, 0.086, 0.106, 1.0]);
+    renderer.draw(&device, &queue, &band_view);
+
+    // Composite it flat onto a wider surface at the left inset.
+    let surface_size = PixelSize { w: 400, h: 300 };
+    let (target_tex, target_view) = render_target(&device, surface_size.w, surface_size.h);
+    let card = CardPipeline::new(&device, format);
+    let style = CardStyle {
+        background: [0.08, 0.086, 0.106, 1.0],
+        border_color: [0.0; 4],
+        focus_color: [0.0; 4],
+        corner_radius: 0.0,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: 0.0,
+    };
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    card.overlay_texture_cards(
+        &device,
+        &queue,
+        &target_view,
+        surface_size,
+        &style,
+        &[CardTexturePlacement {
+            texture_view: &band_view,
+            x: 0,
+            y: 0,
+            w: band_size.w,
+            h: band_size.h,
+            selected: false,
+        }],
+    );
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll device after sidebar band overlay");
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error during sidebar band overlay: {err:?}"
+    );
+
+    let pixels = read_rgba_pixels(&device, &queue, &target_tex, surface_size.w, surface_size.h);
+    let first = &pixels[0..4];
+    assert!(
+        pixels.chunks_exact(4).any(|px| px != first),
+        "sidebar band overlay produced a uniform frame (nothing drawn)"
     );
 }
 

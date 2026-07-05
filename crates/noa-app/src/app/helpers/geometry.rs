@@ -7,6 +7,24 @@ pub(crate) fn pane_bounds_for_size(size: PhysicalSize<u32>) -> PaneRectApp {
     PaneRectApp::new(0, 0, size.width, size.height)
 }
 
+/// Shrink a window's pane bounds by a left-edge sidebar inset (FR-4). The
+/// panes shift right by `inset` and lose that width, leaving the band free for
+/// the sidebar; a zero inset returns `bounds` unchanged. Kept separate from
+/// `pane_bounds_for_size` so that function's signature stays untouched
+/// (Omen P1) and this stays a pure, testable transform.
+pub(crate) fn sidebar_inset_bounds(bounds: PaneRectApp, inset: u32) -> PaneRectApp {
+    if inset == 0 {
+        return bounds;
+    }
+    let inset = inset.min(bounds.w);
+    PaneRectApp::new(
+        bounds.x + inset,
+        bounds.y,
+        bounds.w - inset,
+        bounds.h,
+    )
+}
+
 pub(crate) fn can_split_rect(rect: PaneRectApp, orientation: SplitOrientation) -> bool {
     let required = MIN_PANE_SIZE_PX
         .saturating_mul(2)

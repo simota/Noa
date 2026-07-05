@@ -383,6 +383,7 @@ impl CardPipeline {
         self.draw_texture_cards(device, queue, target, surface_size, style, placements, None);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_texture_cards(
         &self,
         device: &wgpu::Device,

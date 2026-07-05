@@ -1,0 +1,143 @@
+//! Timer-driven `App` operations: cursor blink, attention blink, sidebar clock,
+//! and delayed overview redraw wake-ups.
+
+use super::*;
+
+impl App {
+    /// Whether the focused pane has a displayable `Blinking*` cursor.
+    fn focused_cursor_wants_blink(&self) -> bool {
+        let Some(window_id) = self.focused else {
+            return false;
+        };
+        let Some(surface) = self
+            .windows
+            .get(&window_id)
+            .and_then(WindowState::focused_surface)
+        else {
+            return false;
+        };
+        let terminal = surface.terminal.lock();
+        let cursor = terminal.active().cursor;
+        cursor.visible
+            && terminal.viewport_offset() == 0
+            && matches!(
+                cursor.style,
+                CursorStyle::BlinkingBlock
+                    | CursorStyle::BlinkingUnderline
+                    | CursorStyle::BlinkingBar
+            )
+    }
+
+    /// Advance the cursor blink phase and return the next wake-up deadline.
+    pub(super) fn tick_cursor_blink(&mut self) -> Option<Instant> {
+        if !self.focused_cursor_wants_blink() {
+            self.cursor_blink_visible = true;
+            self.cursor_blink_deadline = None;
+            return None;
+        }
+
+        let now = Instant::now();
+        let deadline = *self
+            .cursor_blink_deadline
+            .get_or_insert(now + CURSOR_BLINK_INTERVAL);
+        if now < deadline {
+            return Some(deadline);
+        }
+
+        self.cursor_blink_visible = !self.cursor_blink_visible;
+        let next = now + CURSOR_BLINK_INTERVAL;
+        self.cursor_blink_deadline = Some(next);
+        if let Some(window_id) = self.focused
+            && let Some(state) = self.windows.get(&window_id)
+        {
+            state.window.request_redraw();
+        }
+        Some(next)
+    }
+
+    /// Whether an attention marker is currently visible for `id` (FR-A1).
+    pub(super) fn attention_marker_visible(&self, id: &SessionCardId) -> bool {
+        match self.attention_onset.get(id) {
+            Some(onset) => crate::sidebar::attention_blink_on(
+                onset.elapsed(),
+                ATTENTION_BLINK_DURATION,
+                ATTENTION_BLINK_INTERVAL,
+            ),
+            None => true,
+        }
+    }
+
+    fn any_attention_blinking(&self) -> bool {
+        self.attention_onset
+            .values()
+            .any(|onset| onset.elapsed() < ATTENTION_BLINK_DURATION)
+    }
+
+    /// Advance the attention blink and return the next wake-up deadline.
+    pub(super) fn tick_attention_blink(&mut self) -> Option<Instant> {
+        if !self.any_attention_blinking() {
+            if self.attention_blink_deadline.take().is_some() {
+                self.request_sidebar_redraw();
+                self.mark_attention_overview_tiles_dirty();
+            }
+            return None;
+        }
+        let now = Instant::now();
+        match self.attention_blink_deadline {
+            Some(deadline) if now < deadline => Some(deadline),
+            _ => {
+                let next = now + ATTENTION_BLINK_INTERVAL;
+                self.attention_blink_deadline = Some(next);
+                self.request_sidebar_redraw();
+                self.mark_attention_overview_tiles_dirty();
+                Some(next)
+            }
+        }
+    }
+
+    fn mark_attention_overview_tiles_dirty(&mut self) {
+        let ids: Vec<SessionCardId> = self.attention_onset.keys().copied().collect();
+        for id in ids {
+            let window_id = WindowId::from(id.window_id.0);
+            self.mark_overview_tile_dirty(OverviewTileId::new(window_id, id.pane_id));
+        }
+        self.request_overview_redraw();
+    }
+
+    /// Repaint visible sidebars once a minute so relative timestamps advance.
+    pub(super) fn tick_sidebar_clock(&mut self) -> Option<Instant> {
+        let any_visible = self.sidebar_visible
+            && self
+                .windows
+                .keys()
+                .any(|window_id| self.window_sidebar_eligible(*window_id));
+        if !any_visible {
+            self.sidebar_clock_deadline = None;
+            return None;
+        }
+        let now = Instant::now();
+        match self.sidebar_clock_deadline {
+            Some(deadline) if now < deadline => Some(deadline),
+            _ => {
+                if self.sidebar_clock_deadline.take().is_some() {
+                    self.request_sidebar_redraw();
+                }
+                let next = now + Duration::from_secs(60);
+                self.sidebar_clock_deadline = Some(next);
+                Some(next)
+            }
+        }
+    }
+
+    /// Wake the Session Overview once the earliest throttle-blocked dirty tile
+    /// becomes due.
+    pub(super) fn tick_overview_backlog(&mut self) -> Option<Instant> {
+        let deadline = self.overview_wake_deadline?;
+        if Instant::now() < deadline {
+            return Some(deadline);
+        }
+        self.overview_wake_deadline = None;
+        self.request_overview_redraw();
+        None
+    }
+}

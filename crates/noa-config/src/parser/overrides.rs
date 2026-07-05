@@ -52,6 +52,8 @@ pub(crate) fn build_overrides(
     let mut sidebar_enabled = None;
     let mut sidebar_width = None;
     let mut sidebar_hotkey = None;
+    let mut resize_overlay = None;
+    let mut visual_bell = None;
     let mut diagnostics = Vec::new();
 
     for directive in directives {
@@ -232,6 +234,12 @@ pub(crate) fn build_overrides(
                     },
                 });
             }
+            "resize-overlay" => {
+                resize_overlay = parse_resize_overlay(path, directive, &mut diagnostics);
+            }
+            "visual-bell" => {
+                visual_bell = parse_bool_directive(path, directive, &mut diagnostics);
+            }
             "keybind" | "palette" => {
                 diagnostics.push(list_key_diagnostic(path, &directive.key));
             }
@@ -289,6 +297,8 @@ pub(crate) fn build_overrides(
             sidebar_enabled,
             sidebar_width,
             sidebar_hotkey,
+            resize_overlay,
+            visual_bell,
         },
         diagnostics,
     )
@@ -331,5 +341,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "sidebar-enabled"
             | "sidebar-width"
             | "sidebar-hotkey"
+            | "resize-overlay"
+            | "visual-bell"
     )
 }

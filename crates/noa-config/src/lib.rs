@@ -170,6 +170,20 @@ pub enum MacosTitlebarStyle {
     Hidden,
 }
 
+/// `resize-overlay`: whether the `cols × rows` grid-size toast shows during a
+/// live resize. Mirrors Ghostty's `resize-overlay`. Default `after-first`
+/// (every resize except the window's initial layout).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResizeOverlay {
+    /// Show on every grid-size change except the window's very first layout.
+    #[default]
+    AfterFirst,
+    /// Show on every grid-size change, including the initial layout.
+    Always,
+    /// Never show the overlay.
+    Never,
+}
+
 /// `alpha-blending` mode. `Native` is a real value; `Linear` /
 /// `LinearCorrected` are parsed-but-fallback (REQ-CFG-4) — `noa-config`
 /// emits a diagnostic and the renderer falls back to `Native` (WP3).
@@ -352,6 +366,13 @@ pub struct StartupConfig {
     /// the empty-string sentinel (no hotkey). Defaults to `None` (unbound) —
     /// the sidebar is off by default, so no chord is registered until set.
     pub sidebar_hotkey: Option<String>,
+    /// `resize-overlay`: whether the `cols × rows` toast shows during a live
+    /// resize. Ghostty-parity key; default `after-first`.
+    pub resize_overlay: ResizeOverlay,
+    /// `visual-bell`: flash the focused window briefly when its terminal
+    /// rings BEL (the desktop notification is suppressed there). Default off.
+    /// noa-specific key (no Ghostty analog).
+    pub visual_bell: bool,
 }
 
 impl Default for StartupConfig {
@@ -391,6 +412,8 @@ impl Default for StartupConfig {
             sidebar_enabled: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_hotkey: None,
+            resize_overlay: ResizeOverlay::default(),
+            visual_bell: false,
         }
     }
 }
@@ -432,6 +455,8 @@ pub struct ConfigOverrides {
     pub sidebar_enabled: Option<bool>,
     pub sidebar_width: Option<f32>,
     pub sidebar_hotkey: Option<String>,
+    pub resize_overlay: Option<ResizeOverlay>,
+    pub visual_bell: Option<bool>,
 }
 
 impl ConfigOverrides {
@@ -501,6 +526,8 @@ impl ConfigOverrides {
             sidebar_enabled: higher_priority.sidebar_enabled.or(self.sidebar_enabled),
             sidebar_width: higher_priority.sidebar_width.or(self.sidebar_width),
             sidebar_hotkey: higher_priority.sidebar_hotkey.or(self.sidebar_hotkey),
+            resize_overlay: higher_priority.resize_overlay.or(self.resize_overlay),
+            visual_bell: higher_priority.visual_bell.or(self.visual_bell),
         }
     }
 
@@ -556,6 +583,8 @@ impl ConfigOverrides {
             sidebar_enabled: self.sidebar_enabled.unwrap_or(base.sidebar_enabled),
             sidebar_width: self.sidebar_width.unwrap_or(base.sidebar_width),
             sidebar_hotkey: self.sidebar_hotkey.or(base.sidebar_hotkey),
+            resize_overlay: self.resize_overlay.unwrap_or(base.resize_overlay),
+            visual_bell: self.visual_bell.unwrap_or(base.visual_bell),
         }
     }
 }
@@ -725,6 +754,8 @@ mod tests {
                 sidebar_enabled: false,
                 sidebar_width: DEFAULT_SIDEBAR_WIDTH,
                 sidebar_hotkey: None,
+                resize_overlay: ResizeOverlay::AfterFirst,
+                visual_bell: false,
             }
         );
     }

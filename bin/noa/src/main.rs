@@ -117,6 +117,8 @@ fn app_config_from_startup(
         sidebar_enabled: config.sidebar_enabled,
         sidebar_width: config.sidebar_width,
         sidebar_hotkey: config.sidebar_hotkey,
+        resize_overlay: config.resize_overlay,
+        visual_bell: config.visual_bell,
     }
 }
 

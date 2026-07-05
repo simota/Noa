@@ -4,8 +4,8 @@ use noa_core::Rgb;
 
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, CursorShape,
-    FontFeature, FontVariation, MacosOptionAsAlt, MacosTitlebarStyle, SyntheticStyleMode,
-    WindowSaveState,
+    FontFeature, FontVariation, MacosOptionAsAlt, MacosTitlebarStyle, ResizeOverlay,
+    SyntheticStyleMode, WindowSaveState,
 };
 
 use super::diagnostics::*;
@@ -482,6 +482,23 @@ pub(super) fn parse_window_save_state(
         "default" => Some(WindowSaveState::Default),
         "never" => Some(WindowSaveState::Never),
         "always" => Some(WindowSaveState::Always),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_resize_overlay(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<ResizeOverlay> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "after-first" => Some(ResizeOverlay::AfterFirst),
+        "always" => Some(ResizeOverlay::Always),
+        "never" => Some(ResizeOverlay::Never),
         other => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
             None

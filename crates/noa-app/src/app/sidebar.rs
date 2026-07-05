@@ -29,7 +29,9 @@ use crate::sidebar::{
 /// (and dropping a QT `Remove` would be harmless anyway).
 fn session_delta_should_apply(delta: &SessionDelta, window_eligible: bool) -> bool {
     match delta {
-        SessionDelta::Upsert { .. } | SessionDelta::Bell { .. } => window_eligible,
+        SessionDelta::Upsert { .. }
+        | SessionDelta::Bell { .. }
+        | SessionDelta::Attention { .. } => window_eligible,
         SessionDelta::Remove { .. }
         | SessionDelta::Branch { .. }
         | SessionDelta::Rename { .. }
@@ -46,6 +48,8 @@ const SIDEBAR_MENU_BG: Rgb = Rgb::new(0x24, 0x28, 0x30);
 const SIDEBAR_DOT_BLUE: Rgb = Rgb::new(0x4c, 0x9a, 0xff);
 const SIDEBAR_DOT_GREEN: Rgb = Rgb::new(0x46, 0xc4, 0x66);
 const SIDEBAR_DOT_YELLOW: Rgb = Rgb::new(0xe6, 0xb4, 0x50);
+/// Attention (FR-16): a program is waiting for the user's reply.
+const SIDEBAR_DOT_RED: Rgb = Rgb::new(0xe8, 0x5d, 0x5d);
 /// A card's own background — slightly lighter than the band so each card reads
 /// as a distinct rounded surface (mockup parity).
 const SIDEBAR_CARD_BG: Rgb = Rgb::new(0x1c, 0x20, 0x28);
@@ -104,8 +108,13 @@ fn status_dot_rgb(dot: StatusDot) -> Rgb {
         StatusDot::Blue => SIDEBAR_DOT_BLUE,
         StatusDot::Green => SIDEBAR_DOT_GREEN,
         StatusDot::Yellow => SIDEBAR_DOT_YELLOW,
+        StatusDot::Red => SIDEBAR_DOT_RED,
     }
 }
+
+/// The label appended to a card's process row while it awaits the user's reply
+/// (FR-16), e.g. `✳ Claude Code · 応答待ち`.
+const ATTENTION_LABEL: &str = "応答待ち";
 
 fn rgb_to_rgba(color: Rgb) -> [f32; 4] {
     [
@@ -211,8 +220,19 @@ impl App {
         {
             self.request_branch_poll(*id, cwd.clone());
         }
+        // Bell/attention flags also surface on the tab overview's title band
+        // (FR-16), so the flagged pane's tile must re-stamp its label.
+        let flags_overview_tile = matches!(
+            &delta,
+            SessionDelta::Bell { .. } | SessionDelta::Attention { .. }
+        );
+        let pane_id = delta.id().pane_id;
         self.session_store.apply(delta);
         self.request_sidebar_redraw();
+        if flags_overview_tile {
+            self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
+            self.request_overview_redraw();
+        }
     }
 
     /// Queue a branch/icon poll for a card whose cwd just changed (FR-8/FR-9).
@@ -265,12 +285,18 @@ impl App {
         }
     }
 
-    /// Clear the unread-bell flag on every card of a just-focused window
-    /// (FR-11). Called from the `Focused(true)` handler.
+    /// Clear the unread-bell and attention flags on every card of a
+    /// just-focused window (FR-11/FR-16). Called from the `Focused(true)`
+    /// handler. The window's overview tiles re-stamp their labels so a cleared
+    /// attention marker disappears from the overview too.
     pub(super) fn clear_session_bell_for_window(&mut self, window_id: WindowId) {
         self.session_store
             .clear_bell_for_window(SessionWindowId(u64::from(window_id)));
         self.request_sidebar_redraw();
+        for pane_id in self.overview_pane_ids_for_window(window_id) {
+            self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
+        }
+        self.request_overview_redraw();
     }
 
     /// Whether a window may host a sidebar (FR-14): everything but the
@@ -818,9 +844,15 @@ fn emit_card_text(
 
     // Running-process row: a recognized AI agent gets its brand glyph/color/name
     // (busy or idle); any other process shows green `✳` while running, dim `❯`
-    // while idle.
+    // while idle. A pending interaction request (FR-16) overrides the row with
+    // the attention color and appends the waiting label.
     if rects.process.w > 0 && rects.process.h > 0 {
         let (text, fg) = process_badge(&lines.process, card.busy);
+        let (text, fg) = if card.attention {
+            (format!("{text} · {ATTENTION_LABEL}"), SIDEBAR_DOT_RED)
+        } else {
+            (text, fg)
+        };
         out.extend(window_run(to_cell, rects.process, text, fg, false));
     }
 
@@ -1185,6 +1217,10 @@ mod tests {
         // Bell is gated the same way; Remove always applies (harmless for a QT).
         let id = SessionCardId::new(SessionWindowId(9), PaneId::new(1));
         assert!(!session_delta_should_apply(&SessionDelta::Bell { id }, false));
+        assert!(!session_delta_should_apply(
+            &SessionDelta::Attention { id },
+            false
+        ));
         assert!(session_delta_should_apply(&SessionDelta::Remove { id }, false));
     }
 }

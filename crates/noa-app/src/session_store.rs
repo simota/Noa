@@ -99,13 +99,15 @@ pub struct WallClock {
 }
 
 /// The status dot color for a card (FR-11). Semantics: `Blue` = busy (a
-/// program is running), `Green` = idle, `Yellow` = an unread bell is pending.
-/// Precedence is bell > busy > idle (see [`status_dot`]).
+/// program is running), `Green` = idle, `Yellow` = an unread bell is pending,
+/// `Red` = the program requested user interaction (OSC 9/777) and is waiting.
+/// Precedence is attention > bell > busy > idle (see [`status_dot`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusDot {
     Blue,
     Green,
     Yellow,
+    Red,
 }
 
 /// One session's card state. `name` is the title reported by the shell (OSC
@@ -121,6 +123,11 @@ pub struct SessionCard {
     pub branch: Option<String>,
     pub icon: IconKind,
     pub unread_bell: bool,
+    /// The running program posted a desktop notification (OSC 9/777) while the
+    /// window was unfocused — typically an AI agent (Claude Code / Codex / agy)
+    /// waiting for the user's reply. Cleared, like `unread_bell`, when the
+    /// card's window gains focus.
+    pub attention: bool,
     pub busy: bool,
     /// The tty's current foreground process name (FR — running-process display),
     /// e.g. `zsh` / `cargo` / `claude`. `None` until the session-metadata worker
@@ -141,10 +148,10 @@ impl SessionCard {
     }
 }
 
-/// A single mutation to the [`SessionStore`]. This enum is **closed at five
-/// variants** by design (ADR 0001): a closed set lets [`SessionStore::apply`]
-/// match exhaustively, and any future state becomes an explicit new variant
-/// rather than an implicit field mutation.
+/// A single mutation to the [`SessionStore`]. This enum is a **closed set** by
+/// design (ADR 0001): a closed set lets [`SessionStore::apply`] match
+/// exhaustively, and any future state becomes an explicit new variant rather
+/// than an implicit field mutation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionDelta {
     /// Create or refresh a card's per-tick state. `seq` is the card generation
@@ -174,6 +181,10 @@ pub enum SessionDelta {
     /// Mark an unread bell (FR-11). Cleared by the main thread when the card's
     /// window gains focus.
     Bell { id: SessionCardId },
+    /// Mark a pending interaction request (FR-16): the running program posted a
+    /// desktop notification (OSC 9/777) while its window was unfocused. Cleared
+    /// alongside bells when the card's window gains focus.
+    Attention { id: SessionCardId },
     /// Update the tty's foreground process name (session-metadata worker). Posted
     /// on a poll tick, so it carries only the process; other fields are untouched.
     Process {
@@ -191,6 +202,7 @@ impl SessionDelta {
             | SessionDelta::Branch { id, .. }
             | SessionDelta::Rename { id, .. }
             | SessionDelta::Bell { id }
+            | SessionDelta::Attention { id }
             | SessionDelta::Process { id, .. } => *id,
         }
     }
@@ -249,15 +261,17 @@ impl SessionStore {
             .collect()
     }
 
-    /// Clear the unread-bell flag on every card belonging to `window_id`
-    /// (FR-11). Called by the main thread when that window gains focus, so a
-    /// bell raised while the window was in the background stops flagging its
-    /// cards once the user is looking at them. Not a [`SessionDelta`]: the
-    /// main thread owns the store and clears directly.
+    /// Clear the unread-bell and pending-attention flags on every card
+    /// belonging to `window_id` (FR-11/FR-16). Called by the main thread when
+    /// that window gains focus, so a bell or interaction request raised while
+    /// the window was in the background stops flagging its cards once the user
+    /// is looking at them. Not a [`SessionDelta`]: the main thread owns the
+    /// store and clears directly.
     pub fn clear_bell_for_window(&mut self, window_id: SessionWindowId) {
         for (id, card) in self.cards.iter_mut() {
             if id.window_id == window_id {
                 card.unread_bell = false;
+                card.attention = false;
             }
         }
     }
@@ -294,7 +308,7 @@ impl SessionStore {
                         }
                         // Refresh per-tick fields; preserve the rename override,
                         // branch/icon (owned by the branch-poll thread), and the
-                        // unread-bell flag (cleared only on focus).
+                        // unread-bell/attention flags (cleared only on focus).
                         card.name = name;
                         card.cwd = cwd;
                         card.busy = busy;
@@ -313,6 +327,7 @@ impl SessionStore {
                                 branch: None,
                                 icon: IconKind::default(),
                                 unread_bell: false,
+                                attention: false,
                                 busy,
                                 process: None,
                                 updated_at,
@@ -340,6 +355,11 @@ impl SessionStore {
             SessionDelta::Bell { id } => {
                 if let Some(card) = self.cards.get_mut(&id) {
                     card.unread_bell = true;
+                }
+            }
+            SessionDelta::Attention { id } => {
+                if let Some(card) = self.cards.get_mut(&id) {
+                    card.attention = true;
                 }
             }
             SessionDelta::Process { id, process } => {
@@ -407,11 +427,13 @@ impl SessionStore {
     }
 }
 
-/// Map a card's state to its status dot color (FR-11). Precedence is
-/// bell > busy > idle: an unread bell wins over a running program, which wins
-/// over idle.
+/// Map a card's state to its status dot color (FR-11/FR-16). Precedence is
+/// attention > bell > busy > idle: a pending interaction request wins over an
+/// unread bell, which wins over a running program, which wins over idle.
 pub fn status_dot(card: &SessionCard) -> StatusDot {
-    if card.unread_bell {
+    if card.attention {
+        StatusDot::Red
+    } else if card.unread_bell {
         StatusDot::Yellow
     } else if card.busy {
         StatusDot::Blue
@@ -680,6 +702,7 @@ mod tests {
             branch: None,
             icon: IconKind::default(),
             unread_bell: false,
+            attention: false,
             busy: false,
             process: None,
             updated_at: wall(10, 0),
@@ -705,9 +728,41 @@ mod tests {
         let bell_and_busy = SessionCard {
             unread_bell: true,
             busy: true,
-            ..base
+            ..base.clone()
         };
         assert_eq!(status_dot(&bell_and_busy), StatusDot::Yellow);
+
+        // Attention (FR-16) wins over everything.
+        let attention = SessionCard {
+            attention: true,
+            unread_bell: true,
+            busy: true,
+            ..base
+        };
+        assert_eq!(status_dot(&attention), StatusDot::Red);
+    }
+
+    // FR-16: `Attention` sets the flag, an `Upsert` preserves it, and a window
+    // focus clears it together with the bell.
+    #[test]
+    fn attention_is_set_preserved_and_cleared_on_focus() {
+        let mut store = SessionStore::new();
+        let id = card_id(1, 1);
+        store.apply(upsert(id, 1, "s"));
+        assert!(!store.get(&id).unwrap().attention);
+
+        store.apply(SessionDelta::Attention { id });
+        assert!(store.get(&id).unwrap().attention);
+
+        // A later per-tick upsert keeps the flag (like the unread bell).
+        store.apply(upsert(id, 2, "s"));
+        assert!(store.get(&id).unwrap().attention);
+
+        store.apply(SessionDelta::Bell { id });
+        store.clear_bell_for_window(id.window_id);
+        let card = store.get(&id).unwrap();
+        assert!(!card.attention);
+        assert!(!card.unread_bell);
     }
 
     // AC-12 (FR-10): relative-time formatting at each boundary.

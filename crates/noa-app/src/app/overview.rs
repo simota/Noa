@@ -823,7 +823,19 @@ impl App {
         if !state.contains_pane(tile_id.pane_id) {
             return None;
         }
-        let title = state.title.clone();
+        // A pane awaiting the user (an agent's OSC 9/777 attention request or
+        // an unread bell, FR-16) is marked with a leading `●` so it stands out
+        // in the overview grid; cleared when its window gains focus.
+        let card_id = Self::session_card_id(tile_id.window_id, tile_id.pane_id);
+        let needs_user = self
+            .session_store
+            .get(&card_id)
+            .is_some_and(|card| card.attention || card.unread_bell);
+        let title = if needs_user {
+            format!("● {}", state.title)
+        } else {
+            state.title.clone()
+        };
         if state.pane_count() <= 1 {
             return Some(title);
         }

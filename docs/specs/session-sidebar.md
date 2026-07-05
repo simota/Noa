@@ -130,6 +130,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 - **FR-13 Config keys**: `sidebar-enabled`(bool 初期値)・`sidebar-width`(points、既定 360)・`sidebar-hotkey`(トグル用チョード、`quick-terminal-hotkey` の既存パース/ディスパッチパターンを踏襲)を noa-config に追加する。汎用 keybind→action システムは導入しない。
 - **FR-14 Quick-terminal exclusion**: quick-terminal ウィンドウはサイドバー対象外とし、inset も掛けない。
 - **FR-15 Scroll**: カード数がサイドバーの表示領域を超える場合、縦スクロール（スクロールオフセットのクランプ付き）で全カードに到達できる。グルーピング/折畳は行わない。
+- **FR-16 Attention（応答待ち表示）**: 非フォーカスウィンドウの pane が OSC 9/777 デスクトップ通知を発行した場合（典型例: Claude Code / Codex / agy が対話入力待ちで通知する）、そのセッションカードに `attention` フラグを立てる。表示は (a) 状態ドット=赤（優先度: attention > bell > busy > idle）、(b) プロセス行に `· 応答待ち` を attention 色で付記、(c) タブオーバービューのタイトルバンドに `● ` プレフィックス（未読ベルも同様にマーク）。ウィンドウのフォーカス取得で未読ベルと同時にクリアする。フォーカス中ウィンドウの通知は、デスクトップ通知が抑止されるのと同じ理由（ユーザーが既に見ている）で attention を立てない。
 
 ### Non-Functional
 - **NFR-1 No render-path lock**: 描画パスは Terminal をロックせず、`overview_snapshot` と同型の publish-slot 経由でのみセッション状態を読む。

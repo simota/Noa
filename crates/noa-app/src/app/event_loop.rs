@@ -95,6 +95,16 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if crate::notification::should_notify(self.os_focused, window_id) {
                     crate::notification::post_notification(title.as_deref(), &body);
+                    // The notifying pane (typically an AI agent awaiting the
+                    // user's reply) flags its session card so the sidebar and
+                    // tab overview surface it until the window regains focus
+                    // (FR-16). The OS-focused window is exempt for the same
+                    // reason its desktop notification is suppressed — the user
+                    // is already looking at it, and focus is what clears the
+                    // flag.
+                    self.apply_session_delta(crate::session_store::SessionDelta::Attention {
+                        id: Self::session_card_id(window_id, pane_id),
+                    });
                 }
             }
             UserEvent::Redraw(window_id, pane_id) => {

@@ -37,47 +37,27 @@ fn session_delta_should_apply(delta: &SessionDelta, window_eligible: bool) -> bo
     }
 }
 
-// Sidebar palette (⚠G: compile-time, no config knob — matches the mockup's dark
-// chrome; the terminal panes keep their own theme). Sourced from the shared
-// `crate::chrome` palette so the sidebar and the tab overview stay visually
-// unified.
-const SIDEBAR_BG: Rgb = crate::chrome::CHROME_BG;
-const SIDEBAR_FG: Rgb = crate::chrome::CHROME_FG;
-const SIDEBAR_DIM_FG: Rgb = crate::chrome::CHROME_DIM_FG;
-const SIDEBAR_MENU_BG: Rgb = crate::chrome::CHROME_PILL;
-const SIDEBAR_DOT_BLUE: Rgb = crate::chrome::CHROME_DOT_BLUE;
-const SIDEBAR_DOT_GREEN: Rgb = crate::chrome::CHROME_DOT_GREEN;
-const SIDEBAR_DOT_YELLOW: Rgb = crate::chrome::CHROME_DOT_YELLOW;
-/// Attention (FR-16): a program is waiting for the user's reply.
-const SIDEBAR_DOT_RED: Rgb = crate::chrome::CHROME_DOT_RED;
-/// A card's own background — slightly lighter than the band so each card reads
-/// as a distinct rounded surface (mockup parity).
-const SIDEBAR_CARD_BG: Rgb = crate::chrome::CHROME_CARD;
-/// The selected card's background — brighter still, paired with the accent ring.
-const SIDEBAR_CARD_BG_SELECTED: Rgb = crate::chrome::CHROME_CARD_SELECTED;
-/// The subtle 1px border stroked around every (unselected) card.
-const SIDEBAR_CARD_BORDER: Rgb = crate::chrome::CHROME_BORDER;
-/// The accent (focus ring + left edge bar) for the selected card.
-const SIDEBAR_ACCENT: Rgb = crate::chrome::CHROME_ACCENT;
-/// The hairline stroked along the sidebar/pane seam.
-const SIDEBAR_DIVIDER: Rgb = crate::chrome::CHROME_DIVIDER;
+/// Sidebar palette: the shared `crate::chrome` palette (polarity chosen from
+/// the terminal theme at startup) so the sidebar and the tab overview stay
+/// visually unified. The card faces double as the toolbar `+` button's hover
+/// fill, and `fg`/`dim_fg` as its glyph rest/hover tones.
+fn chrome() -> &'static crate::chrome::ChromePalette {
+    crate::chrome::palette()
+}
 
-// Toolbar `+` button chrome (logical px / colors). Borderless: just the `+`
-// glyph at rest, with a subtle rounded fill + brighter glyph on hover.
-const TOOLBAR_BUTTON_RADIUS: f32 = 6.0;
+// Toolbar `+` button chrome (logical px). Borderless: just the `+` glyph at
+// rest, with a subtle rounded fill + brighter glyph on hover.
+const TOOLBAR_BUTTON_RADIUS: f32 = crate::chrome::RADIUS_SM;
 /// The `+` glyph geometry (logical px): each arm's length and the bar thickness.
 const TOOLBAR_PLUS_ARM: f32 = 12.0;
 const TOOLBAR_PLUS_THICKNESS: f32 = 2.0;
-const SIDEBAR_BUTTON_BG_HOVER: Rgb = SIDEBAR_CARD_BG;
-const SIDEBAR_BUTTON_GLYPH: Rgb = SIDEBAR_DIM_FG;
-const SIDEBAR_BUTTON_GLYPH_HOVER: Rgb = SIDEBAR_FG;
 
 // Seam treatment between the sidebar band and the terminal panes (logical px,
 // scaled at draw time): a soft shadow the band casts rightward plus a crisp
 // 1px hairline, so the two independently-themed surfaces meet with depth
 // instead of a bare color boundary.
 const SEAM_SHADOW_WIDTH: f32 = 5.0;
-const SEAM_HAIRLINE_WIDTH: f32 = 0.0;
+const SEAM_HAIRLINE_WIDTH: f32 = 1.0;
 
 /// Pointer travel (logical px, scaled at use) that promotes a card press to a
 /// drag-reorder. Below it a press-then-release stays a plain card-select click.
@@ -115,9 +95,9 @@ fn process_badge(process: &str, busy: bool) -> (String, Rgb) {
         AgentKind::Generic => {
             let glyph = if busy { "✳" } else { "❯" };
             let fg = if busy {
-                SIDEBAR_DOT_GREEN
+                chrome().dot_green
             } else {
-                SIDEBAR_DIM_FG
+                chrome().dim_fg
             };
             (format!("{glyph} {process}"), fg)
         }
@@ -135,7 +115,7 @@ fn icon_color(icon: crate::session_store::IconKind) -> Rgb {
         IconKind::Go => Rgb::new(0x4c, 0xb9, 0xd4),
         IconKind::Python => Rgb::new(0x5a, 0x9f, 0xd4),
         IconKind::Git => Rgb::new(0xe0, 0x6c, 0x4e),
-        IconKind::Folder => SIDEBAR_DIM_FG,
+        IconKind::Folder => chrome().dim_fg,
     }
 }
 
@@ -161,10 +141,10 @@ fn effective_status_dot(card: &SessionCard, attention_marker: bool) -> StatusDot
 /// `status_dot` mapping in `session_store` (AC-13).
 fn status_dot_rgb(dot: StatusDot) -> Rgb {
     match dot {
-        StatusDot::Blue => SIDEBAR_DOT_BLUE,
-        StatusDot::Green => SIDEBAR_DOT_GREEN,
-        StatusDot::Yellow => SIDEBAR_DOT_YELLOW,
-        StatusDot::Red => SIDEBAR_DOT_RED,
+        StatusDot::Blue => chrome().dot_blue,
+        StatusDot::Green => chrome().dot_green,
+        StatusDot::Yellow => chrome().dot_yellow,
+        StatusDot::Red => chrome().dot_red,
     }
 }
 
@@ -291,7 +271,10 @@ mod palette;
 mod render;
 mod state;
 
-pub(super) use palette::draw_command_palette_card;
+pub(super) use palette::{
+    ScrollThumb, draw_bell_flash, draw_command_palette_card, draw_confirm_dialog_card,
+    draw_scrollbar_thumbs, draw_toast_card,
+};
 pub(super) use render::draw_sidebar_band;
 
 #[cfg(test)]

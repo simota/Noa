@@ -23,7 +23,7 @@ fn rasterize_runs(
     runs: &[SidebarTextRun],
 ) {
     let mut term = Terminal::new(grid);
-    term.set_base_colors(SIDEBAR_FG, base_bg, SIDEBAR_FG, theme.palette);
+    term.set_base_colors(chrome().fg, base_bg, chrome().fg, theme.palette);
     let mut stream = Stream::new();
     // Autowrap off so a long cwd/preview clips at the right margin instead of
     // wrapping to the next row and shifting every run below it.
@@ -189,13 +189,13 @@ pub(in crate::app) fn draw_sidebar_band(
             band_view,
             band_size,
             model.grid,
-            SIDEBAR_BG,
+            chrome().bg,
             model.background_opacity,
             &model.runs,
         );
     }
     let flat_style = CardStyle {
-        background: rgb_to_rgba(SIDEBAR_BG),
+        background: rgb_to_rgba(chrome().bg),
         border_color: [0.0; 4],
         focus_color: [0.0, 0.0, 0.0, 1.0],
         corner_radius: 0.0,
@@ -224,7 +224,7 @@ pub(in crate::app) fn draw_sidebar_band(
         );
 
     // 1b) Hairline divider over the band's rightmost pixel(s): a solid
-    // `SIDEBAR_DIVIDER` strip that gives the seam a crisp edge against the
+    // `chrome().divider` strip that gives the seam a crisp edge against the
     // pane background (the terminal keeps its own theme, so the two surfaces
     // otherwise meet as unrelated colors).
     let hairline_w = (SEAM_HAIRLINE_WIDTH * model.scale).round().max(1.0) as u32;
@@ -252,12 +252,12 @@ pub(in crate::app) fn draw_sidebar_band(
                     h: model.height,
                 },
                 GridSize { cols: 1, rows: 1 },
-                SIDEBAR_DIVIDER,
+                chrome().divider,
                 1.0,
                 &[],
             );
             let divider_style = CardStyle {
-                background: rgb_to_rgba(SIDEBAR_DIVIDER),
+                background: rgb_to_rgba(chrome().divider),
                 border_color: [0.0; 4],
                 focus_color: [0.0; 4],
                 corner_radius: 0.0,
@@ -306,9 +306,9 @@ pub(in crate::app) fn draw_sidebar_band(
             "noa-sidebar-button",
         );
         let glyph = if model.new_button_hover {
-            SIDEBAR_BUTTON_GLYPH_HOVER
+            chrome().fg
         } else {
-            SIDEBAR_BUTTON_GLYPH
+            chrome().dim_fg
         };
 
         // Hover only: a borderless rounded fill behind the `+` (no frame at
@@ -325,12 +325,12 @@ pub(in crate::app) fn draw_sidebar_band(
                 button_view,
                 btn_size,
                 GridSize { cols: 1, rows: 1 },
-                SIDEBAR_BUTTON_BG_HOVER,
+                chrome().card,
                 model.background_opacity,
                 &[],
             );
             let button_style = CardStyle {
-                background: rgb_to_rgba(SIDEBAR_BUTTON_BG_HOVER),
+                background: rgb_to_rgba(chrome().card),
                 border_color: [0.0; 4],
                 focus_color: [0.0; 4],
                 corner_radius: TOOLBAR_BUTTON_RADIUS * model.scale,
@@ -436,12 +436,12 @@ pub(in crate::app) fn draw_sidebar_band(
     // serves every card in turn (render → composite), so submits serialize the
     // reuse safely.
     let card_style = CardStyle {
-        background: rgb_to_rgba(SIDEBAR_CARD_BG),
-        border_color: rgb_to_rgba(SIDEBAR_CARD_BORDER),
-        focus_color: rgb_to_rgba(SIDEBAR_ACCENT),
-        corner_radius: 10.0 * model.scale,
+        background: rgb_to_rgba(chrome().card),
+        border_color: rgb_to_rgba(chrome().border),
+        focus_color: rgb_to_rgba(chrome().accent),
+        corner_radius: crate::chrome::RADIUS_LG * model.scale,
         border_width: 1.0 * model.scale,
-        focus_width: 1.0 * model.scale,
+        focus_width: crate::chrome::RING_SELECTED * model.scale,
         focus_glow_width: 0.0,
     };
     // A card with a pending interaction request swaps the blue focus accent for
@@ -449,9 +449,9 @@ pub(in crate::app) fn draw_sidebar_band(
     // when the card isn't the focused one. A thicker stroke + wider glow than
     // the blue focus ring so an interaction request is unmissable.
     let attention_style = CardStyle {
-        focus_color: rgb_to_rgba(SIDEBAR_DOT_RED),
-        focus_width: 1.0 * model.scale,
-        focus_glow_width: 0.0,
+        focus_color: rgb_to_rgba(chrome().dot_red),
+        focus_width: crate::chrome::RING_ATTENTION * model.scale,
+        focus_glow_width: crate::chrome::GLOW_ATTENTION * model.scale,
         ..card_style
     };
     for card_draw in &model.cards {
@@ -526,12 +526,12 @@ pub(in crate::app) fn draw_sidebar_band(
                     h: line.h.max(1),
                 },
                 GridSize { cols: 1, rows: 1 },
-                SIDEBAR_ACCENT,
+                chrome().accent,
                 1.0,
                 &[],
             );
             let drop_style = CardStyle {
-                background: rgb_to_rgba(SIDEBAR_ACCENT),
+                background: rgb_to_rgba(chrome().accent),
                 border_color: [0.0; 4],
                 focus_color: [0.0; 4],
                 corner_radius: (line.h as f32 / 2.0).min(3.0 * model.scale),
@@ -616,15 +616,15 @@ pub(in crate::app) fn draw_sidebar_band(
                 h: menu.rect.h,
             },
             menu.grid,
-            SIDEBAR_MENU_BG,
+            chrome().pill,
             1.0,
             &menu.runs,
         );
         let menu_style = CardStyle {
-            background: rgb_to_rgba(SIDEBAR_MENU_BG),
-            border_color: rgb_to_rgba(SIDEBAR_CARD_BORDER),
+            background: rgb_to_rgba(chrome().pill),
+            border_color: rgb_to_rgba(chrome().border),
             focus_color: [0.0; 4],
-            corner_radius: 6.0 * model.scale,
+            corner_radius: crate::chrome::RADIUS_SM * model.scale,
             border_width: 1.0 * model.scale,
             focus_width: 0.0,
             focus_glow_width: 0.0,

@@ -107,9 +107,9 @@ impl App {
                     rect: card_rects.bounds,
                     grid: card_grid,
                     bg: if selected {
-                        SIDEBAR_CARD_BG_SELECTED
+                        chrome().card_selected
                     } else {
-                        SIDEBAR_CARD_BG
+                        chrome().card
                     },
                     selected,
                     attention: card.attention,
@@ -145,7 +145,7 @@ impl App {
                     col,
                     row,
                     format!(" {}", crate::sidebar::card_menu_label(item)),
-                    SIDEBAR_FG,
+                    chrome().fg,
                 ));
             }
             Some(SidebarMenuDraw {
@@ -184,7 +184,7 @@ impl App {
                 let float = SidebarCardDraw {
                     rect: SidebarRect::new(0, top, inset, layout_metrics.card_h),
                     grid: card_grid,
-                    bg: SIDEBAR_CARD_BG_SELECTED,
+                    bg: chrome().card_selected,
                     selected: true,
                     attention: false,
                     runs: card_runs,
@@ -278,7 +278,7 @@ fn sgr_fg(color: Rgb) -> String {
 /// text on the card).
 fn resolve_preview_color(color: noa_core::Color, palette: &[Rgb; 256]) -> Rgb {
     match color {
-        noa_core::Color::Default => SIDEBAR_DIM_FG,
+        noa_core::Color::Default => chrome().dim_fg,
         noa_core::Color::Palette(index) => palette[index as usize],
         noa_core::Color::Rgb(rgb) => rgb,
     }
@@ -317,8 +317,8 @@ fn emit_card_text(
     ));
     let (name_text, name_fg) = match renaming {
         // Inline rename (FR-7): the buffer plus a caret, in the accent color.
-        Some(buffer) => (format!("{buffer}▏"), SIDEBAR_ACCENT),
-        None => (lines.name.clone(), SIDEBAR_FG),
+        Some(buffer) => (format!("{buffer}▏"), chrome().accent),
+        None => (lines.name.clone(), chrome().fg),
     };
     out.extend(window_run(
         to_cell,
@@ -331,7 +331,7 @@ fn emit_card_text(
         to_cell,
         rects.cwd_line,
         lines.cwd.clone(),
-        SIDEBAR_DIM_FG,
+        chrome().dim_fg,
         false,
     ));
 
@@ -344,7 +344,7 @@ fn emit_card_text(
     if rects.meta.w > 0 && rects.meta.h > 0 {
         let (badge, badge_fg) = process_badge(&lines.process, card.busy);
         let (badge, badge_fg) = if card.attention {
-            (format!("{badge} · {ATTENTION_LABEL}"), SIDEBAR_DOT_RED)
+            (format!("{badge} · {ATTENTION_LABEL}"), chrome().dot_red)
         } else {
             (badge, badge_fg)
         };
@@ -353,7 +353,7 @@ fn emit_card_text(
         } else {
             // The dim branch suffix is recolored inline; the run fg colors the
             // badge portion.
-            format!("{badge}{} · ⎇ {}", sgr_fg(SIDEBAR_DIM_FG), lines.branch)
+            format!("{badge}{} · ⎇ {}", sgr_fg(chrome().dim_fg), lines.branch)
         };
         out.extend(window_run(to_cell, rects.meta, text, badge_fg, false));
     }
@@ -377,7 +377,7 @@ fn emit_card_text(
         let fg = line
             .first()
             .map(|span| resolve_preview_color(span.fg, palette))
-            .unwrap_or(SIDEBAR_DIM_FG);
+            .unwrap_or(chrome().dim_fg);
         out.extend(window_run(to_cell, rect, text, fg, false));
     }
 
@@ -385,7 +385,7 @@ fn emit_card_text(
         to_cell,
         rects.updated,
         lines.updated.clone(),
-        SIDEBAR_DIM_FG,
+        chrome().dim_fg,
         false,
     ));
 }

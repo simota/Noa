@@ -547,6 +547,49 @@ pub fn card_lines(card: &SessionCard, now: WallClock) -> CardLines {
     }
 }
 
+/// A recognized AI coding agent, inferred from the tty's foreground process
+/// name so the sidebar can brand it distinctly (FR — agent branding).
+/// `Generic` is every other process (its raw name is shown as-is).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentKind {
+    ClaudeCode,
+    Codex,
+    Agy,
+    Generic,
+}
+
+/// Classify a foreground process name into a known AI agent. Case-insensitive,
+/// matched on the executable basename.
+///
+/// Note: `proc_name` can report a wrapper (e.g. `node`) rather than the agent
+/// for some installs, so an agent launched through a wrapper is classified
+/// `Generic` — we match direct basenames only, an accepted limitation.
+pub fn classify_agent(process: &str) -> AgentKind {
+    let base = process
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(process)
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "claude" => AgentKind::ClaudeCode,
+        "codex" => AgentKind::Codex,
+        "agy" | "gemini" => AgentKind::Agy,
+        _ => AgentKind::Generic,
+    }
+}
+
+/// The branded display name for a classified agent, or the raw process name for
+/// a generic process.
+pub fn agent_display_name(kind: AgentKind, process: &str) -> &str {
+    match kind {
+        AgentKind::ClaudeCode => "Claude Code",
+        AgentKind::Codex => "Codex",
+        AgentKind::Agy => "agy",
+        AgentKind::Generic => process,
+    }
+}
+
 /// The header status label text (FR-5): `● Running` when any session is busy,
 /// else `Idle`. Degraded per SHAPE — no real process name in v1.
 pub fn header_status_label(busy_count: usize) -> String {
@@ -710,6 +753,35 @@ mod tests {
 
         // The running-process row shows the detected foreground process.
         assert_eq!(lines.process, "cargo");
+    }
+
+    // Agent branding: known AI agents classify (case-insensitively, on the
+    // basename); everything else is generic and keeps its raw name.
+    #[test]
+    fn classify_agent_maps_known_agents() {
+        use AgentKind::*;
+        for (input, expect) in [
+            ("claude", ClaudeCode),
+            ("Claude", ClaudeCode),
+            ("CLAUDE", ClaudeCode),
+            ("/usr/local/bin/claude", ClaudeCode),
+            ("codex", Codex),
+            ("Codex", Codex),
+            ("agy", Agy),
+            ("gemini", Agy),
+            ("Gemini", Agy),
+            ("zsh", Generic),
+            ("cargo", Generic),
+            ("node", Generic),
+        ] {
+            assert_eq!(classify_agent(input), expect, "input {input:?}");
+        }
+
+        // The display name replaces the raw process for known agents.
+        assert_eq!(agent_display_name(classify_agent("claude"), "claude"), "Claude Code");
+        assert_eq!(agent_display_name(classify_agent("codex"), "codex"), "Codex");
+        assert_eq!(agent_display_name(classify_agent("gemini"), "gemini"), "agy");
+        assert_eq!(agent_display_name(classify_agent("zsh"), "zsh"), "zsh");
     }
 
     #[test]

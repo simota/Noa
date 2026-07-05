@@ -15,8 +15,8 @@ use noa_core::Rgb;
 use super::*;
 use crate::session_store::{SessionCard, SessionDelta, StatusDot, status_dot};
 use crate::sidebar::{
-    CARD_MENU_ITEMS, CardLines, CardRects, HeaderRects, SidebarMetrics, SidebarRect, card_lines,
-    header_status_label, icon_glyph,
+    AgentKind, CARD_MENU_ITEMS, CardLines, CardRects, HeaderRects, SidebarMetrics, SidebarRect,
+    agent_display_name, card_lines, classify_agent, header_status_label, icon_glyph,
 };
 
 /// Whether an io-thread [`SessionDelta`] targeting a window with the given
@@ -57,6 +57,30 @@ const SIDEBAR_CARD_BORDER: Rgb = Rgb::new(0x2b, 0x30, 0x3b);
 const SIDEBAR_ACCENT: Rgb = Rgb::new(0x4c, 0x9a, 0xff);
 /// The rounded header session-name pill background.
 const SIDEBAR_PILL_BG: Rgb = Rgb::new(0x24, 0x2a, 0x35);
+
+// Brand accents for recognized AI agents (agent branding). Truecolor, applied
+// to the process row + header whenever the process classifies, busy or idle.
+const AGENT_CLAUDE_FG: Rgb = Rgb::new(0xd9, 0x77, 0x57); // Anthropic clay
+const AGENT_CODEX_FG: Rgb = Rgb::new(0x10, 0xa3, 0x7f); // OpenAI teal
+const AGENT_AGY_FG: Rgb = Rgb::new(0x42, 0x85, 0xf4); // Google blue
+
+/// The glyph + accent color + display label for a card's running process. A
+/// recognized agent gets its brand glyph/color/name regardless of busy; a
+/// generic process keeps the busy/idle dot semantics (green `✳` while running,
+/// dim `❯` while idle). Glyphs: `✳` (proven), `◆` for Codex (a hexagon risks
+/// tofu), `✦` for agy (a distinct four-point star; `★` is the safe fallback).
+fn process_badge(process: &str, busy: bool) -> (String, Rgb) {
+    match classify_agent(process) {
+        AgentKind::ClaudeCode => (format!("✳ {}", agent_display_name(AgentKind::ClaudeCode, process)), AGENT_CLAUDE_FG),
+        AgentKind::Codex => (format!("◆ {}", agent_display_name(AgentKind::Codex, process)), AGENT_CODEX_FG),
+        AgentKind::Agy => (format!("✦ {}", agent_display_name(AgentKind::Agy, process)), AGENT_AGY_FG),
+        AgentKind::Generic => {
+            let glyph = if busy { "✳" } else { "❯" };
+            let fg = if busy { SIDEBAR_DOT_GREEN } else { SIDEBAR_DIM_FG };
+            (format!("{glyph} {process}"), fg)
+        }
+    }
+}
 
 /// A project icon's tint (FR-9 mockup parity), so the icon column carries a
 /// little color rather than flat gray.
@@ -553,17 +577,26 @@ impl App {
         // Header chrome (FR-5): status label, centered title, the session-name
         // pill (a flat filled pill on the backdrop), and the toolbar +/… glyphs.
         let header: HeaderRects = layout_metrics.header_rects(bands.header);
-        // The status label shows the focused session's running process when it
-        // is busy (e.g. `✳ claude`), else the Idle/Running summary.
-        let status_text = match self.session_store.get(&selected_id) {
-            Some(card) if card.busy => card
-                .process
-                .clone()
-                .map(|process| format!("✳ {process}"))
-                .unwrap_or_else(|| header_status_label(self.session_store.busy_count())),
-            _ => header_status_label(self.session_store.busy_count()),
+        // The status label brands the focused session's process: a recognized
+        // agent shows its badge (busy or idle), a busy generic shows `✳ <proc>`,
+        // and an idle generic falls back to the Idle/Running summary.
+        let (status_text, status_fg) = match self.session_store.get(&selected_id) {
+            Some(card)
+                if card.busy
+                    || card
+                        .process
+                        .as_deref()
+                        .is_some_and(|p| classify_agent(p) != AgentKind::Generic) =>
+            {
+                let process = card.process.clone().unwrap_or_else(|| "running".to_string());
+                process_badge(&process, card.busy)
+            }
+            _ => (
+                header_status_label(self.session_store.busy_count()),
+                SIDEBAR_FG,
+            ),
         };
-        runs.extend(window_run(&band_cell, header.status_label, status_text, SIDEBAR_FG, false));
+        runs.extend(window_run(&band_cell, header.status_label, status_text, status_fg, false));
         runs.extend(window_run(
             &band_cell,
             header.title,
@@ -781,21 +814,12 @@ fn emit_card_text(
         false,
     ));
 
-    // Running-process row: the foreground process name, prefixed by a state
-    // glyph and colored green while a program runs, dim while idle.
+    // Running-process row: a recognized AI agent gets its brand glyph/color/name
+    // (busy or idle); any other process shows green `✳` while running, dim `❯`
+    // while idle.
     if rects.process.w > 0 && rects.process.h > 0 {
-        let (glyph, fg) = if card.busy {
-            ("✳", SIDEBAR_DOT_GREEN)
-        } else {
-            ("❯", SIDEBAR_DIM_FG)
-        };
-        out.extend(window_run(
-            to_cell,
-            rects.process,
-            format!("{glyph} {}", lines.process),
-            fg,
-            false,
-        ));
+        let (text, fg) = process_badge(&lines.process, card.busy);
+        out.extend(window_run(to_cell, rects.process, text, fg, false));
     }
 }
 

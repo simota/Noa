@@ -41,38 +41,51 @@ pub const OVERVIEW_SEARCH_BAND_H: u32 = 64;
 /// (REQ-OV-17). Compile-time constant.
 pub const OVERVIEW_HINT_BAND_H: u32 = 54;
 
-/// Mockup-parity chrome palette (REQ-OV-12/14, v2). All compile-time
-/// constants — no config knob (⚠G precedent). Sourced from the shared
-/// [`crate::chrome`] palette so the overview and the session sidebar stay
-/// visually unified; stored as straight display-space RGBA because the
-/// Overview surface uses a **non-sRGB** format (`Bgra8Unorm`, see
-/// `preferred_surface_format`), so these are written to the target unchanged
-/// (no gamma re-encode).
+/// Mockup-parity chrome palette (REQ-OV-12/14, v2) — no config knob (⚠G
+/// precedent), but the light/dark polarity follows the terminal theme via the
+/// shared [`crate::chrome`] palette (selected once at startup), so the
+/// overview and the session sidebar stay visually unified. Returned as
+/// straight display-space RGBA because the Overview surface uses a
+/// **non-sRGB** format (`Bgra8Unorm`, see `preferred_surface_format`), so
+/// these are written to the target unchanged (no gamma re-encode).
 ///
-/// Near-black navy backdrop behind every card (mockup: "暗色の背景").
-pub const OVERVIEW_BG_COLOR: [f32; 4] = crate::chrome::rgba(crate::chrome::CHROME_BG);
-/// Card face — one step lighter than [`OVERVIEW_BG_COLOR`] (mockup: "一段明るいカード面").
-pub const OVERVIEW_CARD_COLOR: [f32; 4] = crate::chrome::rgba(crate::chrome::CHROME_CARD);
+/// Backdrop behind every card (mockup: "暗色の背景").
+pub fn overview_bg_color() -> [f32; 4] {
+    crate::chrome::rgba(crate::chrome::palette().bg)
+}
+/// Card face — one step lighter than [`overview_bg_color`] (mockup: "一段明るいカード面").
+pub fn overview_card_color() -> [f32; 4] {
+    crate::chrome::rgba(crate::chrome::palette().card)
+}
 /// Title-bar band — distinguishable from the card face (mockup: "区別可能な帯").
-pub const OVERVIEW_TITLE_BAR_COLOR: [f32; 4] = crate::chrome::rgba(crate::chrome::CHROME_BAND);
+pub fn overview_title_bar_color() -> [f32; 4] {
+    crate::chrome::rgba(crate::chrome::palette().band)
+}
 /// Thin resting card border.
-pub const OVERVIEW_BORDER_COLOR: [f32; 4] = crate::chrome::rgba(crate::chrome::CHROME_BORDER);
+pub fn overview_border_color() -> [f32; 4] {
+    crate::chrome::rgba(crate::chrome::palette().border)
+}
 /// Blue accent focus ring for the selected tile (REQ-OV-14).
-pub const OVERVIEW_FOCUS_RING_COLOR: [f32; 4] = crate::chrome::rgba(crate::chrome::CHROME_ACCENT);
+pub fn overview_focus_ring_color() -> [f32; 4] {
+    crate::chrome::rgba(crate::chrome::palette().accent)
+}
 /// Search / hint pill face in the overview chrome.
-pub const OVERVIEW_CHROME_PILL_COLOR: [f32; 4] = crate::chrome::rgba(crate::chrome::CHROME_PILL);
+pub fn overview_chrome_pill_color() -> [f32; 4] {
+    crate::chrome::rgba(crate::chrome::palette().pill)
+}
 /// Thin border around search and hint pills.
-pub const OVERVIEW_CHROME_BORDER_COLOR: [f32; 4] =
-    crate::chrome::rgba(crate::chrome::CHROME_PILL_BORDER);
-/// Corner radius (px) of every card.
-pub const OVERVIEW_CARD_CORNER_RADIUS: f32 = 8.0;
+pub fn overview_chrome_border_color() -> [f32; 4] {
+    crate::chrome::rgba(crate::chrome::palette().pill_border)
+}
+/// Corner radius (px) of every card — the shared mid-size chrome radius.
+pub const OVERVIEW_CARD_CORNER_RADIUS: f32 = crate::chrome::RADIUS_MD;
 /// Resting border thickness (px).
 pub const OVERVIEW_CARD_BORDER_WIDTH: f32 = 1.0;
 /// Focus-ring thickness (px) — thicker than the resting border so the
 /// selection reads as a single bright ring inside the separate outer glow.
-pub const OVERVIEW_CARD_FOCUS_WIDTH: f32 = 2.0;
+pub const OVERVIEW_CARD_FOCUS_WIDTH: f32 = crate::chrome::RING_SELECTED;
 /// Selected-card glow radius outside the card edge.
-pub const OVERVIEW_CARD_FOCUS_GLOW_WIDTH: f32 = 8.0;
+pub const OVERVIEW_CARD_FOCUS_GLOW_WIDTH: f32 = crate::chrome::GLOW_SELECTED;
 /// Rounded search-field size within [`OverviewChrome::search_band`].
 pub const OVERVIEW_SEARCH_FIELD_H: u32 = 34;
 pub const OVERVIEW_SEARCH_FIELD_MIN_W: u32 = 180;
@@ -368,8 +381,8 @@ pub fn title_bar_row_ansi(
     let pad = (field.saturating_sub(vis_len)) / 2;
 
     const RESET_FG: &str = "\x1b[39m";
-    let dim = ansi_fg(crate::chrome::CHROME_DIM_FG);
-    let accent = ansi_fg(crate::chrome::CHROME_ACCENT);
+    let dim = ansi_fg(crate::chrome::palette().dim_fg);
+    let accent = ansi_fg(crate::chrome::palette().accent);
 
     let mut out = String::new();
     out.extend(std::iter::repeat_n(' ', pad));
@@ -386,7 +399,7 @@ pub fn title_bar_row_ansi(
     };
     if !dot_seg.is_empty() {
         // `dot_color` is Some by construction of `dot_seg`.
-        out.push_str(&ansi_fg(dot_color.unwrap_or(crate::chrome::CHROME_DOT_RED)));
+        out.push_str(&ansi_fg(dot_color.unwrap_or(crate::chrome::palette().dot_red)));
         out.push_str(dot_seg);
         out.push_str(RESET_FG);
     }

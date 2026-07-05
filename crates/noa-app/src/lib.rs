@@ -3,6 +3,7 @@
 //! (besides `noa-render`, which stays surface-less) that touches `winit` or
 //! `wgpu`.
 
+mod anim;
 mod app;
 mod app_actions;
 mod branch_poll;

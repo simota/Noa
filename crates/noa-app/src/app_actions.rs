@@ -19,6 +19,16 @@ pub(crate) const CONFIG_TEMPLATE: &str = "\
 # font-size = 15
 # sidebar-enabled = true
 # sidebar-width = 360
+#
+# Raise unreadably low-contrast text toward this WCAG contrast ratio
+# (1.0 = leave theme colors untouched; 1.1-3.0 are reasonable floors).
+# minimum-contrast = 1.1
+#
+# Show a `cols × rows` toast during a live resize: after-first | always | never
+# resize-overlay = after-first
+#
+# Flash the window briefly when its terminal rings the bell.
+# visual-bell = true
 ";
 
 /// Show the standard macOS About panel for Noa, seeded with the app name and

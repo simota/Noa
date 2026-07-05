@@ -65,6 +65,11 @@ pub(super) struct GpuState {
     /// 1x1 translucent-black texture drawn as a full-pane card behind the
     /// palette; the modal scrim dimming the pane underneath.
     pub(super) palette_scrim: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// 1x1 theme-tinted texture for the scrollback thumb drawn along a
+    /// scrolled pane's right edge (its alpha carries the thumb opacity).
+    pub(super) scrollbar_tex: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// 1x1 translucent-white texture for the `visual-bell` full-window flash.
+    pub(super) bell_flash_tex: Option<(wgpu::Texture, wgpu::TextureView)>,
 }
 
 /// Identifies one logical window, i.e. one AppKit tab group. Every native tab
@@ -117,7 +122,21 @@ pub(super) struct WindowState {
     /// Set when a left press was consumed by Cmd+click-to-open, so only the
     /// matching release is swallowed.
     pub(super) link_click_in_flight: bool,
+    /// The focused pane's last laid-out grid size, for the resize-overlay
+    /// change check (`resize-overlay = after-first` skips the first layout).
+    pub(super) last_grid: Option<(u16, u16)>,
+    /// The live `cols × rows` resize toast: its text and hide deadline.
+    pub(super) resize_overlay: Option<(String, Instant)>,
+    /// `visual-bell`: the full-window flash stays up until this instant.
+    pub(super) bell_flash_until: Option<Instant>,
 }
+
+/// How long the `cols × rows` resize toast stays up after the last grid
+/// change (Ghostty's `resize-overlay-duration` default).
+pub(super) const RESIZE_OVERLAY_DURATION: Duration = Duration::from_millis(750);
+
+/// How long the `visual-bell` flash stays up.
+pub(super) const BELL_FLASH_DURATION: Duration = Duration::from_millis(150);
 
 /// An in-flight sidebar card drag-reorder (FR: card reordering). Recorded on a
 /// left-press over a card; the drag only becomes `active` once the pointer
@@ -161,8 +180,18 @@ pub(super) struct OverviewWindowState {
     pub(super) hovered: Option<usize>,
     /// Whether the selected tile is zoomed (Tab toggles).
     pub(super) zoomed: bool,
+    /// The in-flight zoom transition, if any (`zoomed` is the target state).
+    pub(super) zoom_anim: Option<OverviewZoomAnim>,
     /// The live "Search sessions" filter query (REQ-OV-16).
     pub(super) search_query: String,
+}
+
+/// One in-flight quick-look zoom transition on the overview's selected tile.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct OverviewZoomAnim {
+    pub(super) tween: crate::anim::Tween,
+    /// `true` while expanding toward the zoomed rect, `false` collapsing back.
+    pub(super) expanding: bool,
 }
 
 pub(super) struct OverviewChromeCardPipeline {
@@ -205,6 +234,9 @@ pub(super) struct SearchPromptSession {
 pub(super) struct CommandPaletteSession {
     pub(super) window_id: WindowId,
     pub(super) palette: CommandPalette,
+    /// When the palette opened, driving its brief fade-in
+    /// ([`crate::anim::DUR_FAST`]).
+    pub(super) opened_at: Instant,
 }
 
 /// An open inline rename on a sidebar card (FR-7 Rename). Modal for its
@@ -318,35 +350,40 @@ pub(super) const ATTENTION_BLINK_DURATION: Duration = Duration::from_secs(6);
 /// The blink half-period (~1.5 Hz).
 pub(super) const ATTENTION_BLINK_INTERVAL: Duration = Duration::from_millis(333);
 
-/// Compile-time card styling for the Session Overview composite (REQ-OV-12/14).
-pub(super) const OVERVIEW_CARD_STYLE: CardStyle = CardStyle {
-    background: OVERVIEW_BG_COLOR,
-    border_color: OVERVIEW_BORDER_COLOR,
-    focus_color: OVERVIEW_FOCUS_RING_COLOR,
-    corner_radius: OVERVIEW_CARD_CORNER_RADIUS,
-    border_width: OVERVIEW_CARD_BORDER_WIDTH,
-    focus_width: OVERVIEW_CARD_FOCUS_WIDTH,
-    focus_glow_width: OVERVIEW_CARD_FOCUS_GLOW_WIDTH,
-};
+/// Card styling for the Session Overview composite (REQ-OV-12/14). A function
+/// (not a const) because the chrome colors follow the terminal theme's
+/// polarity, selected at startup.
+pub(super) fn overview_card_style() -> CardStyle {
+    CardStyle {
+        background: overview_bg_color(),
+        border_color: overview_border_color(),
+        focus_color: overview_focus_ring_color(),
+        corner_radius: OVERVIEW_CARD_CORNER_RADIUS,
+        border_width: OVERVIEW_CARD_BORDER_WIDTH,
+        focus_width: OVERVIEW_CARD_FOCUS_WIDTH,
+        focus_glow_width: OVERVIEW_CARD_FOCUS_GLOW_WIDTH,
+    }
+}
 
 /// Attention styling for an Overview tile with a pending interaction request.
-pub(super) const OVERVIEW_ATTENTION_CARD_STYLE: CardStyle = CardStyle {
-    background: OVERVIEW_BG_COLOR,
-    border_color: OVERVIEW_BORDER_COLOR,
-    focus_color: crate::chrome::rgba(crate::chrome::CHROME_DOT_RED),
-    corner_radius: OVERVIEW_CARD_CORNER_RADIUS,
-    border_width: OVERVIEW_CARD_BORDER_WIDTH,
-    focus_width: 2.5,
-    focus_glow_width: 12.0,
-};
+pub(super) fn overview_attention_card_style() -> CardStyle {
+    CardStyle {
+        focus_color: crate::chrome::rgba(crate::chrome::palette().dot_red),
+        focus_width: crate::chrome::RING_ATTENTION,
+        focus_glow_width: crate::chrome::GLOW_ATTENTION,
+        ..overview_card_style()
+    }
+}
 
 /// Rounded styling for Overview chrome pills (search and shortcut hint).
-pub(super) const OVERVIEW_CHROME_CARD_STYLE: CardStyle = CardStyle {
-    background: OVERVIEW_BG_COLOR,
-    border_color: OVERVIEW_CHROME_BORDER_COLOR,
-    focus_color: OVERVIEW_CHROME_BORDER_COLOR,
-    corner_radius: OVERVIEW_CARD_CORNER_RADIUS,
-    border_width: 1.0,
-    focus_width: 1.0,
-    focus_glow_width: 0.0,
-};
+pub(super) fn overview_chrome_card_style() -> CardStyle {
+    CardStyle {
+        background: overview_bg_color(),
+        border_color: overview_chrome_border_color(),
+        focus_color: overview_chrome_border_color(),
+        corner_radius: OVERVIEW_CARD_CORNER_RADIUS,
+        border_width: 1.0,
+        focus_width: 1.0,
+        focus_glow_width: 0.0,
+    }
+}

@@ -129,6 +129,33 @@ impl App {
         }
     }
 
+    /// Expire transient per-window overlays (the `cols × rows` resize toast
+    /// and the `visual-bell` flash), repainting a window whose overlay just
+    /// ended, and report the earliest pending expiry.
+    pub(super) fn tick_transient_overlays(&mut self) -> Option<Instant> {
+        let now = Instant::now();
+        let mut next: Option<Instant> = None;
+        for state in self.windows.values_mut() {
+            if let Some((_, until)) = state.resize_overlay {
+                if now >= until {
+                    state.resize_overlay = None;
+                    state.window.request_redraw();
+                } else {
+                    next = Some(next.map_or(until, |n| n.min(until)));
+                }
+            }
+            if let Some(until) = state.bell_flash_until {
+                if now >= until {
+                    state.bell_flash_until = None;
+                    state.window.request_redraw();
+                } else {
+                    next = Some(next.map_or(until, |n| n.min(until)));
+                }
+            }
+        }
+        next
+    }
+
     /// Wake the Session Overview once the earliest throttle-blocked dirty tile
     /// becomes due.
     pub(super) fn tick_overview_backlog(&mut self) -> Option<Instant> {

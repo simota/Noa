@@ -39,7 +39,19 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             UserEvent::ToggleSidebar => self.toggle_sidebar(),
-            UserEvent::SessionDelta(delta) => self.apply_session_delta(delta),
+            UserEvent::SessionDelta(delta) => {
+                // `visual-bell`: BEL flashes its window briefly (the desktop
+                // notification is suppressed for the focused window, so this
+                // is the visible cue there).
+                if self.config.visual_bell
+                    && let crate::session_store::SessionDelta::Bell { id } = &delta
+                    && let Some(state) = self.windows.get_mut(&WindowId::from(id.window_id.0))
+                {
+                    state.bell_flash_until = Some(Instant::now() + BELL_FLASH_DURATION);
+                    state.window.request_redraw();
+                }
+                self.apply_session_delta(delta)
+            }
             UserEvent::ClipboardWrite {
                 window_id,
                 pane_id,
@@ -347,12 +359,14 @@ impl ApplicationHandler<UserEvent> for App {
         let quick_terminal_deadline = self.tick_quick_terminal();
         let attention_deadline = self.tick_attention_blink();
         let sidebar_clock_deadline = self.tick_sidebar_clock();
+        let transient_overlay_deadline = self.tick_transient_overlays();
         let deadline = [
             blink_deadline,
             overview_deadline,
             quick_terminal_deadline,
             attention_deadline,
             sidebar_clock_deadline,
+            transient_overlay_deadline,
         ]
         .into_iter()
         .flatten()

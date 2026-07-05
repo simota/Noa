@@ -53,19 +53,19 @@ use crate::split_tree::{
     split_pane, split_resize_drag_target_at_point, zoom_resize_targets, zoom_toggle,
 };
 use crate::tab_overview::{
-    OVERVIEW_BG_COLOR, OVERVIEW_BORDER_COLOR, OVERVIEW_CARD_BORDER_WIDTH, OVERVIEW_CARD_COLOR,
-    OVERVIEW_CARD_CORNER_RADIUS, OVERVIEW_CARD_FOCUS_GLOW_WIDTH, OVERVIEW_CARD_FOCUS_WIDTH,
-    OVERVIEW_CHROME_BORDER_COLOR, OVERVIEW_CHROME_PILL_COLOR, OVERVIEW_FOCUS_RING_COLOR,
-    OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_OUTER_MARGIN,
-    OVERVIEW_TILE_GUTTER, OVERVIEW_TILE_MIN_RENDER_INTERVAL, OVERVIEW_TITLE_BAR_COLOR,
+    OVERVIEW_CARD_BORDER_WIDTH, OVERVIEW_CARD_CORNER_RADIUS, OVERVIEW_CARD_FOCUS_GLOW_WIDTH,
+    OVERVIEW_CARD_FOCUS_WIDTH, OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME,
+    OVERVIEW_OUTER_MARGIN, OVERVIEW_TILE_GUTTER, OVERVIEW_TILE_MIN_RENDER_INTERVAL,
     OVERVIEW_TITLE_BAR_H, OverviewAction, OverviewChrome, OverviewEscapeAction, OverviewLayout,
     OverviewRenderCandidate, center_label, compute_overview_grid, hit_test_overview_grid,
-    move_overview_selection, overview_backlog_decision, overview_chrome_bands,
-    overview_close_hit_test, overview_escape_action, overview_hint_bar_rect,
-    overview_hint_bar_text, overview_initial_selection, overview_key_action,
-    overview_placeholder_source_ids, overview_search_field_rect, overview_search_field_row,
-    overview_tab_filter, overview_tile_labels, overview_zoom_rect, sanitize_placeholder_label,
-    select_due_overview_tile_ids, title_bar_row_ansi,
+    move_overview_selection, overview_backlog_decision, overview_bg_color, overview_border_color,
+    overview_card_color, overview_chrome_bands, overview_chrome_border_color,
+    overview_chrome_pill_color, overview_close_hit_test, overview_escape_action,
+    overview_focus_ring_color, overview_hint_bar_rect, overview_hint_bar_text,
+    overview_initial_selection, overview_key_action, overview_placeholder_source_ids,
+    overview_search_field_rect, overview_search_field_row, overview_tab_filter,
+    overview_tile_labels, overview_title_bar_color, overview_zoom_rect,
+    sanitize_placeholder_label, select_due_overview_tile_ids, title_bar_row_ansi,
 };
 use crate::{AppCommand, ViewportScroll};
 
@@ -374,7 +374,23 @@ impl App {
             .command_palette
             .as_ref()
             .filter(|session| session.window_id == window_id)
-            .map(|session| command_palette_snapshot(&self.keybinds, &session.palette));
+            .map(|session| {
+                (
+                    command_palette_snapshot(&self.keybinds, &session.palette),
+                    session.opened_at,
+                )
+            });
+        // Same for the confirm dialog: composited as its own modal card after
+        // the panes (and above the palette — it blocks input), not inline in
+        // the pane cell pass.
+        let dialog_card = self
+            .confirm_dialog
+            .as_ref()
+            .filter(|session| session.window_id == window_id)
+            .map(|session| noa_render::ConfirmDialogSnapshot {
+                message: session.message.clone(),
+                hint: session.hint.clone(),
+            });
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
             return;
         };
@@ -384,6 +400,9 @@ impl App {
 
         let mut snapshots = Vec::new();
         let mut title = "Noa".to_string();
+        // Scrolled panes' scrollbar-thumb state, captured under the same
+        // terminal lock the snapshot takes (no extra lock later).
+        let mut scroll_thumbs: Vec<sidebar::ScrollThumb> = Vec::new();
         let visible_panes = visible_pane_ids(&state.split_tree, state.zoomed);
         for pane_id in visible_panes {
             let Some(surface) = state.surfaces.get_mut(&pane_id) else {
@@ -392,6 +411,14 @@ impl App {
             let mut term = surface.terminal.lock();
             if pane_id == state.focused_pane {
                 title = tab_title(&term.title);
+            }
+            if term.viewport_offset() > 0 {
+                scroll_thumbs.push(sidebar::ScrollThumb {
+                    rect: render_pane_rect(surface.rect),
+                    offset: term.viewport_offset(),
+                    scrollback: term.scrollback_len(),
+                    viewport_rows: term.active().rows,
+                });
             }
             let mut snapshot = FrameSnapshot::from_terminal_recycled(
                 &mut term,
@@ -410,19 +437,10 @@ impl App {
                 .as_ref()
                 .filter(|session| session.window_id == window_id && session.pane_id == pane_id)
                 .map(|session| session.prompt.buffer().to_string());
-            // The palette is no longer drawn in the pane cell pass — it is
-            // composited as a rounded card after the panes (H). Leave
-            // `snapshot.command_palette` at its `None` default here.
-            // Like the palette: draw the window-bound confirm dialog once,
-            // over the focused pane.
-            snapshot.confirm_dialog = self
-                .confirm_dialog
-                .as_ref()
-                .filter(|session| session.window_id == window_id && pane_id == state.focused_pane)
-                .map(|session| noa_render::ConfirmDialogSnapshot {
-                    message: session.message.clone(),
-                    hint: session.hint.clone(),
-                });
+            // Neither the palette nor the confirm dialog draws in the pane
+            // cell pass — both are composited as rounded modal cards after
+            // the panes (H). Leave `snapshot.command_palette` and
+            // `snapshot.confirm_dialog` at their `None` defaults here.
             // Inline IME composition: draw the focused pane's live pre-edit run
             // at the cursor. Only the focused pane composes, so guard on it the
             // same way the palette does.
@@ -496,6 +514,22 @@ impl App {
             Some(render_pane_id(state.focused_pane)),
             state.zoomed.map(render_pane_id),
         );
+        // Scrollback thumbs along scrolled panes' right edges (state-driven:
+        // only panes with `viewport_offset > 0` collected one).
+        if !scroll_thumbs.is_empty() {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            sidebar::draw_scrollbar_thumbs(
+                gpu,
+                state.surface_config.format,
+                &view,
+                surface_size,
+                &scroll_thumbs,
+                state.window.scale_factor() as f32,
+            );
+        }
         // Composite the session sidebar over the reserved left inset (FR-2/FR-5),
         // after the panes so it isn't overdrawn. The pane area was already inset
         // by `relayout_and_resize_window`, so this fills that band.
@@ -515,7 +549,9 @@ impl App {
         }
         // Composite the open command palette as a rounded card over the focused
         // pane, on top of the panes and sidebar so the modal always wins (H).
-        if let Some(palette) = palette_card.as_ref()
+        // A brief eased fade-in on open; repaints ride request_redraw until
+        // the fade settles.
+        if let Some((palette, opened_at)) = palette_card.as_ref()
             && let Some((_, rect, snapshot)) = snapshots
                 .iter()
                 .find(|(pane_id, _, _)| *pane_id == state.focused_pane)
@@ -524,6 +560,8 @@ impl App {
                 w: state.surface_config.width,
                 h: state.surface_config.height,
             };
+            let fade = crate::anim::Tween::new(*opened_at, crate::anim::DUR_FAST);
+            let now = Instant::now();
             sidebar::draw_command_palette_card(
                 gpu,
                 state.surface_config.format,
@@ -535,7 +573,62 @@ impl App {
                 snapshot.rows_n,
                 padding,
                 state.window.scale_factor() as f32,
+                fade.progress(now),
             );
+            if !fade.done(now) {
+                state.window.request_redraw();
+            }
+        }
+        // The confirm dialog composites last: it blocks input, so it must win
+        // over the palette card too.
+        if let Some(dialog) = dialog_card.as_ref()
+            && let Some((_, rect, snapshot)) = snapshots
+                .iter()
+                .find(|(pane_id, _, _)| *pane_id == state.focused_pane)
+        {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            sidebar::draw_confirm_dialog_card(
+                gpu,
+                state.surface_config.format,
+                &view,
+                surface_size,
+                dialog,
+                render_pane_rect(*rect),
+                snapshot.cols,
+                snapshot.rows_n,
+                padding,
+                state.window.scale_factor() as f32,
+            );
+        }
+        // Transient overlays last, above every modal: the `cols × rows`
+        // resize toast and the visual-bell flash (both expire via
+        // `tick_transient_overlays`).
+        let now = Instant::now();
+        if let Some((text, until)) = state.resize_overlay.clone()
+            && now < until
+        {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            sidebar::draw_toast_card(
+                gpu,
+                state.surface_config.format,
+                &view,
+                surface_size,
+                &text,
+                state.window.scale_factor() as f32,
+            );
+        }
+        if state.bell_flash_until.is_some_and(|until| now < until) {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            sidebar::draw_bell_flash(gpu, state.surface_config.format, &view, surface_size);
         }
         frame.present();
 
@@ -639,6 +732,7 @@ impl App {
             self.command_palette = Some(CommandPaletteSession {
                 window_id,
                 palette: CommandPalette::open(),
+                opened_at: Instant::now(),
             });
         }
         if let Some(window_id) = self.focused
@@ -807,10 +901,16 @@ impl App {
                     font_config_from_noa_config(&self.config.font),
                 )
                 .unwrap_or_else(|e| gpu_init_fatal("could not load the sidebar font", e)),
-                theme: crate::theme::resolve_theme_with_overrides(
-                    self.config.theme.as_deref(),
-                    &self.theme_overrides(),
-                ),
+                theme: {
+                    let theme = crate::theme::resolve_theme_with_overrides(
+                        self.config.theme.as_deref(),
+                        &self.theme_overrides(),
+                    );
+                    // Chrome (sidebar/overview) polarity follows the terminal
+                    // theme: a light theme gets light chrome.
+                    crate::chrome::select_palette(theme.is_light());
+                    theme
+                },
                 sidebar_renderer: None,
                 sidebar_card: None,
                 sidebar_band: None,
@@ -824,6 +924,8 @@ impl App {
                 palette_scratch: None,
                 palette_padding: noa_core::GridPadding::ZERO,
                 palette_scrim: None,
+                scrollbar_tex: None,
+                bell_flash_tex: None,
             });
             surface
         } else {
@@ -907,6 +1009,9 @@ impl App {
                 sidebar_menu: None,
                 sidebar_drag: None,
                 link_click_in_flight: false,
+                last_grid: None,
+                resize_overlay: None,
+                bell_flash_until: None,
             },
         );
         self.window_order.push(window_id);

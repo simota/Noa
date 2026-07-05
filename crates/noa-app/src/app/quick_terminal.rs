@@ -1,7 +1,8 @@
 use super::*;
 
-/// How long the quick terminal takes to slide fully in or out.
-const QUICK_TERMINAL_SLIDE_DURATION: Duration = Duration::from_millis(200);
+/// How long the quick terminal takes to slide fully in or out — the shared
+/// screen-scale duration.
+const QUICK_TERMINAL_SLIDE_DURATION: Duration = crate::anim::DUR_SLOW;
 /// The quick terminal repaints/repositions at roughly this cadence while
 /// sliding (approx. 60 fps), driven off the `about_to_wait` `WaitUntil` timer.
 const QUICK_TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -32,25 +33,17 @@ struct QuickTerminalAnim {
     revealing: bool,
 }
 
-/// Cubic ease-out (fast start, gentle stop) for the quick-terminal slide.
-pub(super) fn ease_out_cubic(t: f32) -> f32 {
-    let inv = 1.0 - t.clamp(0.0, 1.0);
-    1.0 - inv * inv * inv
-}
+/// The shared house easing curve (see [`crate::anim`]), re-exported for the
+/// slide math and its tests.
+pub(super) use crate::anim::ease_out_cubic;
+/// Linear slide progress (`0.0..=1.0`) for `elapsed` of `duration`.
+pub(super) use crate::anim::linear_progress as quick_terminal_progress;
 
 /// The panel's top edge in physical px relative to the monitor top, for a
 /// slide `progress` in `0.0..=1.0` (0 = fully hidden above the screen, 1 =
 /// fully revealed). `height` is the panel height in px.
 pub(super) fn quick_terminal_top_offset(height: f32, progress: f32) -> f32 {
     -height * (1.0 - ease_out_cubic(progress))
-}
-
-/// Linear slide progress (`0.0..=1.0`) for `elapsed` of `duration`.
-pub(super) fn quick_terminal_progress(elapsed: Duration, duration: Duration) -> f32 {
-    if duration.is_zero() {
-        return 1.0;
-    }
-    (elapsed.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
 }
 
 /// The panel height in physical px for a screen `screen_height` px tall and a
@@ -391,6 +384,9 @@ impl App {
                 sidebar_menu: None,
                 sidebar_drag: None,
                 link_click_in_flight: false,
+                last_grid: None,
+                resize_overlay: None,
+                bell_flash_until: None,
             },
         );
         self.relayout_and_resize_window(window_id);

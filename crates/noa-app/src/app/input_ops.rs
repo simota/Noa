@@ -718,6 +718,32 @@ impl App {
             return;
         };
         apply_pane_resize_batch(state, &targets, metrics, padding);
+
+        // Resize overlay (Ghostty `resize-overlay`): surface the focused
+        // pane's new `cols × rows` as a transient toast when the grid
+        // actually changed. Under `after-first` the window's initial layout
+        // (no previous grid) stays silent.
+        if let Some(grid) = targets
+            .iter()
+            .find(|(pane_id, _, _)| *pane_id == state.focused_pane)
+            .map(|(_, _, grid)| (grid.cols, grid.rows))
+        {
+            let changed = state.last_grid.is_some_and(|prev| prev != grid);
+            let first = state.last_grid.is_none();
+            state.last_grid = Some(grid);
+            let show = match self.config.resize_overlay {
+                noa_config::ResizeOverlay::Never => false,
+                noa_config::ResizeOverlay::Always => changed || first,
+                noa_config::ResizeOverlay::AfterFirst => changed,
+            };
+            if show {
+                state.resize_overlay = Some((
+                    format!("{} × {}", grid.0, grid.1),
+                    Instant::now() + RESIZE_OVERLAY_DURATION,
+                ));
+                state.window.request_redraw();
+            }
+        }
     }
 
     pub(super) fn update_focused_ime_cursor_area(&self, window_id: WindowId) {

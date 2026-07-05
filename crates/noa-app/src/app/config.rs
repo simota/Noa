@@ -96,6 +96,12 @@ pub struct AppConfig {
     /// focused window (FR-13). `None` (or the empty-string "disabled" sentinel)
     /// registers no chord.
     pub sidebar_hotkey: Option<String>,
+    /// `resize-overlay`: whether the `cols × rows` toast shows during a live
+    /// resize (Ghostty parity).
+    pub resize_overlay: noa_config::ResizeOverlay,
+    /// `visual-bell`: flash the window briefly when its terminal rings BEL
+    /// while OS-focused (where the desktop notification is suppressed).
+    pub visual_bell: bool,
 }
 
 /// Maps the parsed `noa-config` font settings onto the `noa-font` runtime

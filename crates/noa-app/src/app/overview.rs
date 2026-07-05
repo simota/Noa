@@ -70,6 +70,7 @@ impl App {
                 selected: 0,
                 hovered: None,
                 zoomed: false,
+                zoom_anim: None,
                 search_query: String::new(),
             });
         }
@@ -86,6 +87,7 @@ impl App {
             overview.search_query.clear();
             overview.hovered = None;
             overview.zoomed = false;
+            overview.zoom_anim = None;
         }
         // REQ-OV-14: the focused pane's tile if it's live, else the first.
         let source_tile_ids = self.overview_source_tile_ids();
@@ -276,7 +278,7 @@ impl App {
                 tile_size,
                 tile_count,
                 OVERVIEW_TITLE_BAR_H,
-                OVERVIEW_CARD_COLOR,
+                overview_card_color(),
             ));
         }
     }
@@ -557,7 +559,7 @@ impl App {
         label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
         // After `rebuild_cells` (which resets it from the snapshot bg) so the
         // band gets its distinct title-bar color, not the terminal default.
-        label_renderer.set_clear_color(OVERVIEW_TITLE_BAR_COLOR);
+        label_renderer.set_clear_color(overview_title_bar_color());
         label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
 
         let Some(view) = thumbnails.title_texture_view(tile_index) else {
@@ -619,7 +621,7 @@ impl App {
 
         label_renderer.resize(band_size);
         label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
-        label_renderer.set_clear_color(OVERVIEW_CHROME_PILL_COLOR);
+        label_renderer.set_clear_color(overview_chrome_pill_color());
         label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         label_renderer.draw(&gpu.device, &gpu.queue, &view);
 
@@ -680,7 +682,7 @@ impl App {
 
         label_renderer.resize(band_size);
         label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
-        label_renderer.set_clear_color(OVERVIEW_CHROME_PILL_COLOR);
+        label_renderer.set_clear_color(overview_chrome_pill_color());
         label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         label_renderer.draw(&gpu.device, &gpu.queue, &view);
 
@@ -701,12 +703,29 @@ impl App {
         let search_texture = self.render_overview_search_texture();
         let hint_texture = self.render_overview_hint_texture(live_count);
         self.ensure_overview_chrome_card_pipeline();
-        let (selected, hovered, zoomed) = self
+        let (selected, hovered, zoomed, zoom_anim) = self
             .overview_window
             .as_ref()
-            .map_or((0, None, false), |overview| {
-                (overview.selected, overview.hovered, overview.zoomed)
+            .map_or((0, None, false, None), |overview| {
+                (
+                    overview.selected,
+                    overview.hovered,
+                    overview.zoomed,
+                    overview.zoom_anim,
+                )
             });
+        // The quick-look zoom eases between the tile's grid rect (factor 0)
+        // and its enlarged centered rect (factor 1); a finished expand holds
+        // at 1, a finished collapse at 0.
+        let now = Instant::now();
+        let zoom_factor = match zoom_anim {
+            Some(anim) => {
+                let p = anim.tween.progress(now);
+                if anim.expanding { p } else { 1.0 - p }
+            }
+            None if zoomed => 1.0,
+            None => 0.0,
+        };
         // The zoom overlay centers within the grid band; resolved before the
         // gpu/overview borrows below.
         let zoom_bounds = self.overview_chrome().map(|chrome| chrome.grid_bounds);
@@ -783,12 +802,12 @@ impl App {
                 &gpu.queue,
                 &view,
                 surface_size,
-                &OVERVIEW_CARD_STYLE,
+                &overview_card_style(),
                 &placements,
             );
         } else {
             // No tiles: still clear the surface to the backdrop color.
-            clear_overview_surface(&gpu.device, &gpu.queue, &view, OVERVIEW_BG_COLOR);
+            clear_overview_surface(&gpu.device, &gpu.queue, &view, overview_bg_color());
         }
 
         // Overlay the search and hint pills with the same rounded-card shader
@@ -830,7 +849,7 @@ impl App {
                 &gpu.queue,
                 &view,
                 surface_size,
-                &OVERVIEW_CHROME_CARD_STYLE,
+                &overview_chrome_card_style(),
                 &placements,
             );
         }
@@ -856,9 +875,9 @@ impl App {
                 && let Some(tile_view) = thumbnails.tile_texture_view(hovered)
             {
                 let hover_style = CardStyle {
-                    focus_width: 1.5,
+                    focus_width: crate::chrome::RING_HOVER,
                     focus_glow_width: 0.0,
-                    ..OVERVIEW_CARD_STYLE
+                    ..overview_card_style()
                 };
                 chrome_card.pipeline.overlay_texture_cards(
                     &gpu.device,
@@ -878,25 +897,31 @@ impl App {
             }
 
             // The zoomed selected tile: same card texture, enlarged and
-            // centered within the grid band with the full selection ring.
-            if zoomed
+            // centered within the grid band with the full selection ring —
+            // eased between the grid rect and the zoom rect while the
+            // quick-look transition runs.
+            if zoom_factor > 0.0
                 && let Some(bounds) = zoom_bounds
                 && let Some(rect) = tile_rects.get(selected)
                 && let Some(tile_view) = thumbnails.tile_texture_view(selected)
             {
-                let zoom = overview_zoom_rect(bounds, *rect);
+                let target = overview_zoom_rect(bounds, *rect);
+                let lerp_dim =
+                    |a: u32, b: u32| crate::anim::lerp(a as f32, b as f32, zoom_factor)
+                        .round()
+                        .max(0.0) as u32;
                 chrome_card.pipeline.overlay_texture_cards(
                     &gpu.device,
                     &gpu.queue,
                     &view,
                     surface_size,
-                    &OVERVIEW_CARD_STYLE,
+                    &overview_card_style(),
                     &[CardTexturePlacement {
                         texture_view: &tile_view,
-                        x: zoom.x,
-                        y: zoom.y,
-                        w: zoom.w,
-                        h: zoom.h,
+                        x: lerp_dim(rect.x, target.x),
+                        y: lerp_dim(rect.y, target.y),
+                        w: lerp_dim(rect.w, target.w),
+                        h: lerp_dim(rect.h, target.h),
                         selected: true,
                     }],
                 );
@@ -922,7 +947,7 @@ impl App {
                     &gpu.queue,
                     &view,
                     surface_size,
-                    &OVERVIEW_ATTENTION_CARD_STYLE,
+                    &overview_attention_card_style(),
                     &[CardTexturePlacement {
                         texture_view: &tile_view,
                         x: rect.x,
@@ -936,6 +961,16 @@ impl App {
         }
 
         frame.present();
+
+        // Drive the quick-look zoom transition: repaint until it settles,
+        // then drop the tween so the steady state draws without it.
+        if let Some(anim) = overview.zoom_anim {
+            if anim.tween.done(now) {
+                overview.zoom_anim = None;
+            } else {
+                overview.window.request_redraw();
+            }
+        }
     }
 
     pub(super) fn finish_overview_tile_renders(
@@ -1274,11 +1309,16 @@ impl App {
     }
 
     /// Tab toggles a quick-look zoom of the selected tile: the tile's card is
-    /// re-composited enlarged and centered above the grid. Purely visual — the
-    /// selection, hit-testing, and keyboard nav are unaffected.
+    /// re-composited enlarged and centered above the grid, easing between the
+    /// two rects. Purely visual — the selection, hit-testing, and keyboard
+    /// nav are unaffected.
     pub(super) fn toggle_overview_zoom(&mut self) {
         if let Some(overview) = self.overview_window.as_mut() {
             overview.zoomed = !overview.zoomed;
+            overview.zoom_anim = Some(OverviewZoomAnim {
+                tween: crate::anim::Tween::new(Instant::now(), crate::anim::DUR_BASE),
+                expanding: overview.zoomed,
+            });
             overview.window.request_redraw();
         }
     }
@@ -1318,11 +1358,11 @@ impl App {
         let card_id = Self::session_card_id(tile_id.window_id, tile_id.pane_id);
         let card = self.session_store.get(&card_id)?;
         if card.attention && self.attention_marker_visible(&card_id) {
-            Some(crate::chrome::CHROME_DOT_RED)
+            Some(crate::chrome::palette().dot_red)
         } else if card.unread_bell {
-            Some(crate::chrome::CHROME_DOT_YELLOW)
+            Some(crate::chrome::palette().dot_yellow)
         } else if card.busy {
-            Some(crate::chrome::CHROME_DOT_BLUE)
+            Some(crate::chrome::palette().dot_blue)
         } else {
             None
         }

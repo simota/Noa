@@ -12,7 +12,7 @@
 //! Both skip gracefully where no GPU adapter is available (headless CI without
 //! a Metal/Vulkan device).
 
-use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, PixelSize, Rgb};
+use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, GridPadding, PixelSize, Rgb};
 use noa_font::FontGrid;
 use noa_grid::{Cell, Cursor, Row, SearchState, Selection, SelectionPoint, TerminalColors};
 use noa_render::{
@@ -397,11 +397,24 @@ fn command_palette_overlay_draws_one_frame_without_validation_error() {
         command_palette: Some(CommandPaletteSnapshot {
             query: "sp".to_string(),
             rows: vec![
-                ("Split Right".to_string(), Some("cmd+d".to_string())),
-                ("Split Down".to_string(), Some("cmd+shift+d".to_string())),
-                ("Toggle Split Zoom".to_string(), None),
+                noa_render::PaletteRow::Entry {
+                    title: "Split Right".to_string(),
+                    hint: Some("\u{2318}D".to_string()),
+                    match_positions: vec![0, 1],
+                },
+                noa_render::PaletteRow::Entry {
+                    title: "Split Down".to_string(),
+                    hint: Some("\u{21e7}\u{2318}D".to_string()),
+                    match_positions: vec![0, 1],
+                },
+                noa_render::PaletteRow::Entry {
+                    title: "Toggle Split Zoom".to_string(),
+                    hint: None,
+                    match_positions: vec![7, 8],
+                },
             ],
             selected: 1,
+            total_entries: 3,
         }),
         confirm_dialog: None,
         preedit: None,
@@ -1527,6 +1540,166 @@ fn sidebar_band_overlay_composites_without_validation_error() {
     assert!(
         pixels.chunks_exact(4).any(|px| px != first),
         "sidebar band overlay produced a uniform frame (nothing drawn)"
+    );
+}
+
+/// Item H: exercise the command-palette rounded-card composite exactly as
+/// `noa-app` does it — rasterize the block into a scratch texture with a
+/// zero-padding `Renderer`, then composite two `overlay_texture_cards` passes
+/// (soft shadow, then themed border) over a surface. Assert no wgpu validation
+/// error and that something was drawn.
+#[test]
+fn command_palette_card_composites_without_validation_error() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping command-palette card test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+    let palette = CommandPaletteSnapshot {
+        query: "sp".to_string(),
+        rows: vec![
+            noa_render::PaletteRow::Header {
+                label: "Splits".to_string(),
+            },
+            noa_render::PaletteRow::Entry {
+                title: "Split Right".to_string(),
+                hint: Some("\u{2318}D".to_string()),
+                match_positions: vec![0, 1],
+            },
+            noa_render::PaletteRow::Entry {
+                title: "Split Down".to_string(),
+                hint: None,
+                match_positions: vec![0, 1],
+            },
+        ],
+        selected: 1,
+        total_entries: 2,
+    };
+
+    // Size the scratch to the block, exactly as the app does.
+    let (pane_cols, pane_rows) = (40u16, 20u16);
+    let layout = noa_render::command_palette_layout(&palette, pane_cols, pane_rows)
+        .expect("palette layout for a roomy grid");
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let (cell_w, cell_h) = {
+        let m = font.metrics();
+        (m.cell_w, m.cell_h)
+    };
+    let block_px = PixelSize {
+        w: ((layout.block_cols as f32) * cell_w).ceil().max(1.0) as u32,
+        h: ((layout.block_rows as f32) * cell_h).ceil().max(1.0) as u32,
+    };
+    let (scratch_tex, scratch_view) = render_target(&device, block_px.w, block_px.h);
+    let _ = &scratch_tex;
+
+    // Zero-padding renderer draws the block-sized mini snapshot into the scratch.
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        format,
+        &mut font,
+        GridPadding::new(0.0, 0.0, 0.0, 0.0),
+    )
+    .expect("build palette block renderer");
+    renderer.resize(block_px);
+    let rows: Vec<Row> = (0..layout.block_rows)
+        .map(|_| Row {
+            cells: vec![Cell::default(); layout.block_cols as usize],
+            wrapped: false,
+            dirty: true,
+        })
+        .collect();
+    let snap = FrameSnapshot {
+        scroll_shift: 0,
+        row_dirty: vec![true; rows.len()],
+        rows,
+        cursor: Cursor::default(),
+        colors: TerminalColors::default(),
+        selection: None,
+        search: SearchState::default(),
+        row_base: 0,
+        abs_row_base: 0,
+        active_is_alt: false,
+        cols: layout.block_cols,
+        rows_n: layout.block_rows,
+        focused: true,
+        cursor_blink_visible: false,
+        hover_link: None,
+        search_prompt: None,
+        command_palette: Some(palette.clone()),
+        confirm_dialog: None,
+        preedit: None,
+        image_placements: Vec::new(),
+        images: Vec::new(),
+    };
+    renderer.rebuild_cells(&snap, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+    renderer.draw(&device, &queue, &scratch_view);
+
+    // Composite the two card passes over a surface.
+    let surface_size = PixelSize { w: 600, h: 400 };
+    let (target_tex, target_view) = render_target(&device, surface_size.w, surface_size.h);
+    let card = CardPipeline::new(&device, format);
+    let placement = |selected| CardTexturePlacement {
+        texture_view: &scratch_view,
+        x: 40,
+        y: 40,
+        w: block_px.w,
+        h: block_px.h,
+        selected,
+    };
+    let shadow_style = CardStyle {
+        background: [0.0; 4],
+        border_color: [0.0; 4],
+        focus_color: [0.0, 0.0, 0.0, 1.0],
+        corner_radius: 10.0,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: 12.0,
+    };
+    let border_style = CardStyle {
+        background: [0.0; 4],
+        border_color: [0.3, 0.32, 0.38, 1.0],
+        focus_color: [0.3, 0.32, 0.38, 1.0],
+        corner_radius: 10.0,
+        border_width: 1.0,
+        focus_width: 1.0,
+        focus_glow_width: 0.0,
+    };
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    card.overlay_texture_cards(
+        &device,
+        &queue,
+        &target_view,
+        surface_size,
+        &shadow_style,
+        &[placement(true)],
+    );
+    card.overlay_texture_cards(
+        &device,
+        &queue,
+        &target_view,
+        surface_size,
+        &border_style,
+        &[placement(false)],
+    );
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll device after palette card composite");
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error during command-palette card composite: {err:?}"
+    );
+
+    let pixels = read_rgba_pixels(&device, &queue, &target_tex, surface_size.w, surface_size.h);
+    let first = &pixels[0..4];
+    assert!(
+        pixels.chunks_exact(4).any(|px| px != first),
+        "command-palette card produced a uniform frame (nothing drawn)"
     );
 }
 

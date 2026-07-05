@@ -145,32 +145,82 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
     ENTRIES
 }
 
-/// The palette entries whose title matches `query` as a case-insensitive
-/// subsequence, in declaration order (R-7). An empty query matches every
-/// entry. O(N) over the registry — one pass, hand-written match (NFR-1).
-pub(crate) fn command_palette_filter(query: &str) -> Vec<AppCommand> {
-    command_palette_entries()
-        .iter()
-        .copied()
-        .filter(|&command| is_subsequence_ci(query, command_palette_title(command)))
-        .collect()
+/// One scored fuzzy match of the query against an entry's title: the matched
+/// command, its rank `score` (higher sorts first), and the char indices in the
+/// title that the query matched (`positions`, used to highlight them, C).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaletteMatch {
+    pub command: AppCommand,
+    pub score: i32,
+    pub positions: Vec<usize>,
 }
 
-/// Whether `needle` appears in `haystack` as a subsequence (its characters in
-/// order, not necessarily contiguous), comparing ASCII case-insensitively.
-/// An empty needle is a subsequence of anything. Hand-written to avoid a
-/// `fuzzy-matcher`/`nucleo` dependency (NFR-1).
-pub(crate) fn is_subsequence_ci(needle: &str, haystack: &str) -> bool {
-    let mut haystack_chars = haystack.chars();
-    'needle: for n in needle.chars() {
-        for h in haystack_chars.by_ref() {
-            if n.eq_ignore_ascii_case(&h) {
-                continue 'needle;
+/// Rank every entry whose title matches `query` as a case-insensitive
+/// subsequence, best-first (B). An empty query keeps every entry in
+/// declaration order (score 0, no highlight). Ties keep declaration order via
+/// a *stable* sort (R-7), so e.g. `Find\u{2026}` stays above `Find Next`.
+/// O(N) over the registry — one pass, hand-written scoring (NFR-1).
+pub(crate) fn command_palette_matches(query: &str) -> Vec<PaletteMatch> {
+    let mut matches: Vec<PaletteMatch> = command_palette_entries()
+        .iter()
+        .copied()
+        .filter_map(|command| {
+            fuzzy_match(query, command_palette_title(command)).map(|(score, positions)| {
+                PaletteMatch {
+                    command,
+                    score,
+                    positions,
+                }
+            })
+        })
+        .collect();
+    // Stable: equal scores preserve the registry declaration order they were
+    // collected in.
+    matches.sort_by(|a, b| b.score.cmp(&a.score));
+    matches
+}
+
+/// Score `query` against `title` as a case-insensitive subsequence, returning
+/// `(score, matched-char-positions)` or `None` when `query` is not a
+/// subsequence of `title`. An empty query yields `(0, [])`. Ranking favors, in
+/// descending weight: a prefix match, matches at word starts (after a space),
+/// and contiguous runs — hand-rolled to avoid a `fuzzy-matcher`/`nucleo`
+/// dependency (NFR-1). Greedy leftmost matching keeps it a single O(len) pass.
+pub(crate) fn fuzzy_match(query: &str, title: &str) -> Option<(i32, Vec<usize>)> {
+    let title_chars: Vec<char> = title.chars().collect();
+    let mut positions = Vec::new();
+    let mut ti = 0usize;
+    for q in query.chars() {
+        loop {
+            let t = *title_chars.get(ti)?;
+            ti += 1;
+            if q.eq_ignore_ascii_case(&t) {
+                positions.push(ti - 1);
+                break;
             }
         }
-        return false;
     }
-    true
+    if positions.is_empty() {
+        // Empty query: every entry matches with no highlight, no ranking.
+        return Some((0, positions));
+    }
+
+    let mut score = 0i32;
+    for (k, &pos) in positions.iter().enumerate() {
+        score += 1; // base weight per matched char
+        let word_start = pos == 0 || title_chars[pos - 1] == ' ';
+        if word_start {
+            score += 8;
+        }
+        if k > 0 && positions[k - 1] + 1 == pos {
+            score += 4; // contiguous with the previous match
+        }
+    }
+    if positions[0] == 0 {
+        score += 16; // whole query anchored at the title's front
+    }
+    score -= positions[0] as i32; // prefer an earlier first match
+    Some((score, positions))
 }
 
 /// The keybind hint shown for `command`, reverse-looked-up from the current
@@ -183,43 +233,220 @@ pub(crate) fn command_palette_keybind(
     keybinds.chord_for(command)
 }
 
+/// The section a command belongs to (F). Only used to group the empty-query
+/// view under muted headings; a non-empty query renders a flat ranked list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommandCategory {
+    Application,
+    Clipboard,
+    View,
+    Search,
+    Scroll,
+    Splits,
+    Tabs,
+    Window,
+    Toggles,
+}
+
+impl CommandCategory {
+    /// The heading text shown above the category's entries.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            CommandCategory::Application => "Application",
+            CommandCategory::Clipboard => "Clipboard",
+            CommandCategory::View => "View",
+            CommandCategory::Search => "Search",
+            CommandCategory::Scroll => "Scroll",
+            CommandCategory::Splits => "Splits",
+            CommandCategory::Tabs => "Tabs",
+            CommandCategory::Window => "Window",
+            CommandCategory::Toggles => "Toggles",
+        }
+    }
+
+    /// Category display order for the grouped (empty-query) view.
+    pub(crate) const ORDER: [CommandCategory; 9] = [
+        CommandCategory::Application,
+        CommandCategory::Clipboard,
+        CommandCategory::View,
+        CommandCategory::Search,
+        CommandCategory::Scroll,
+        CommandCategory::Splits,
+        CommandCategory::Tabs,
+        CommandCategory::Window,
+        CommandCategory::Toggles,
+    ];
+}
+
+/// The category a command groups under (F). Exhaustive with no `_` arm (like
+/// [`command_palette_title`], NFR-4): a new `AppCommand` variant fails to
+/// compile here until it is filed under a section.
+pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
+    match command {
+        AppCommand::About | AppCommand::Preferences | AppCommand::Quit => {
+            CommandCategory::Application
+        }
+        AppCommand::Copy
+        | AppCommand::Paste
+        | AppCommand::Terminal(TerminalAction::SelectAll) => CommandCategory::Clipboard,
+        AppCommand::Terminal(TerminalAction::Clear)
+        | AppCommand::Terminal(TerminalAction::ClearScrollback)
+        | AppCommand::FontSize(_) => CommandCategory::View,
+        AppCommand::Search(_) => CommandCategory::Search,
+        AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
+        AppCommand::NewSplitRight
+        | AppCommand::NewSplitDown
+        | AppCommand::FocusDirection(_)
+        | AppCommand::ResizeSplit(_)
+        | AppCommand::EqualizeSplits
+        | AppCommand::ToggleSplitZoom => CommandCategory::Splits,
+        AppCommand::NewTab
+        | AppCommand::CloseTab
+        | AppCommand::NextTab
+        | AppCommand::PrevTab
+        | AppCommand::SelectTab(_)
+        | AppCommand::ToggleTabOverview => CommandCategory::Tabs,
+        AppCommand::NewWindow | AppCommand::CloseWindow => CommandCategory::Window,
+        AppCommand::ToggleCommandPalette
+        | AppCommand::ToggleQuickTerminal
+        | AppCommand::ToggleSecureKeyboardEntry
+        | AppCommand::ToggleSidebar => CommandCategory::Toggles,
+    }
+}
+
+/// Render a config-format chord (e.g. `"cmd+shift+]"`) as macOS-style key
+/// symbols (e.g. `"\u{21e7}\u{2318}]"`, ⇧⌘]) for display only (E). Modifiers
+/// are emitted in the macOS-standard order ⌃⌥⇧⌘ regardless of their order in
+/// the chord, with no separators, followed by the key. Purely a display
+/// transform — the config/parse round-trip (`KeyTrigger::Display`) is
+/// untouched.
+pub(crate) fn keybind_symbols(chord: &str) -> String {
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut cmd = false;
+    let mut key = String::new();
+    for token in chord.split('+').map(str::trim).filter(|t| !t.is_empty()) {
+        match token.to_ascii_lowercase().as_str() {
+            "cmd" | "command" | "super" | "meta" => cmd = true,
+            "ctrl" | "control" => ctrl = true,
+            "alt" | "option" => alt = true,
+            "shift" => shift = true,
+            other => key = keybind_key_symbol(other),
+        }
+    }
+    let mut out = String::new();
+    if ctrl {
+        out.push('\u{2303}'); // ⌃
+    }
+    if alt {
+        out.push('\u{2325}'); // ⌥
+    }
+    if shift {
+        out.push('\u{21e7}'); // ⇧
+    }
+    if cmd {
+        out.push('\u{2318}'); // ⌘
+    }
+    out.push_str(&key);
+    out
+}
+
+/// The display glyph/label for a chord's key token (E). A single character is
+/// upper-cased; named tokens map to their macOS glyph or short label.
+fn keybind_key_symbol(token: &str) -> String {
+    match token {
+        "arrowup" | "up" => "\u{2191}".to_string(),    // ↑
+        "arrowdown" | "down" => "\u{2193}".to_string(), // ↓
+        "arrowleft" | "left" => "\u{2190}".to_string(), // ←
+        "arrowright" | "right" => "\u{2192}".to_string(), // →
+        "pageup" => "PgUp".to_string(),
+        "pagedown" => "PgDn".to_string(),
+        "home" => "Home".to_string(),
+        "end" => "End".to_string(),
+        "enter" | "return" => "\u{23ce}".to_string(), // ⏎
+        "plus" => "+".to_string(),
+        other => {
+            let mut chars = other.chars();
+            match (chars.next(), chars.next()) {
+                (Some(ch), None) => ch.to_ascii_uppercase().to_string(),
+                _ => other.to_string(),
+            }
+        }
+    }
+}
+
+/// One row of the palette's display list (F): either a non-selectable category
+/// heading (empty-query grouped view) or a selectable command entry carrying
+/// the char positions in its title that the current query matched (C).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PaletteItem {
+    Header(CommandCategory),
+    Entry {
+        command: AppCommand,
+        positions: Vec<usize>,
+    },
+}
+
+impl PaletteItem {
+    fn is_entry(&self) -> bool {
+        matches!(self, PaletteItem::Entry { .. })
+    }
+}
+
 /// The pure editable state behind an open palette: the query buffer, the
-/// current filtered result set, and the highlighted index. Holds no
-/// window/pane binding of its own (that lives in the `App`-side session), so
-/// its editing/navigation logic is unit-testable without a display —
-/// mirroring [`crate::search_prompt::SearchPrompt`].
+/// current display list (`items`: headers + ranked entries), and the
+/// highlighted row. Holds no window/pane binding of its own (that lives in the
+/// `App`-side session), so its editing/navigation logic is unit-testable
+/// without a display — mirroring [`crate::search_prompt::SearchPrompt`].
 pub(crate) struct CommandPalette {
     query: String,
-    filtered: Vec<AppCommand>,
+    items: Vec<PaletteItem>,
+    /// Index into `items`, always pointing at an [`PaletteItem::Entry`] (never
+    /// a header) while any entry exists.
     selected: usize,
 }
 
 impl CommandPalette {
-    /// Open with an empty query, every entry shown, first row highlighted.
+    /// Open with an empty query, every entry shown grouped by category, and the
+    /// first entry highlighted.
     pub(crate) fn open() -> Self {
-        CommandPalette {
+        let mut palette = CommandPalette {
             query: String::new(),
-            filtered: command_palette_entries().to_vec(),
+            items: Vec::new(),
             selected: 0,
-        }
+        };
+        palette.refilter();
+        palette
     }
 
     pub(crate) fn query(&self) -> &str {
         &self.query
     }
 
-    pub(crate) fn filtered(&self) -> &[AppCommand] {
-        &self.filtered
+    /// The display list (headers + entries) for the current query.
+    pub(crate) fn items(&self) -> &[PaletteItem] {
+        &self.items
     }
 
+    /// The highlighted row's index into [`Self::items`].
     pub(crate) fn selected(&self) -> usize {
         self.selected
     }
 
-    /// The highlighted command, or `None` when the filtered list is empty
-    /// (so Enter on no results is a no-op rather than an invalid index).
+    /// The number of selectable entries (excludes headers) — backs the palette's
+    /// `shown/total` counter (A).
+    pub(crate) fn entry_count(&self) -> usize {
+        self.items.iter().filter(|item| item.is_entry()).count()
+    }
+
+    /// The highlighted command, or `None` when no entry is highlighted (an
+    /// empty result set), so Enter is a no-op rather than an invalid index.
     pub(crate) fn selected_command(&self) -> Option<AppCommand> {
-        self.filtered.get(self.selected).copied()
+        match self.items.get(self.selected) {
+            Some(PaletteItem::Entry { command, .. }) => Some(*command),
+            _ => None,
+        }
     }
 
     /// Append a keypress's resolved text (control characters dropped, as in
@@ -240,23 +467,76 @@ impl CommandPalette {
         self.refilter();
     }
 
-    /// Move the highlight up one row, clamped at the top (no wrap, R-8).
+    /// Move the highlight to the previous entry, skipping headers, clamped at
+    /// the first entry (no wrap, R-8).
     pub(crate) fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    /// Move the highlight down one row, clamped at the last row (no wrap,
-    /// R-8). A no-op on an empty list.
-    pub(crate) fn move_down(&mut self) {
-        if let Some(last) = self.filtered.len().checked_sub(1) {
-            self.selected = (self.selected + 1).min(last);
+        if let Some(prev) = self.items[..self.selected.min(self.items.len())]
+            .iter()
+            .rposition(PaletteItem::is_entry)
+        {
+            self.selected = prev;
         }
     }
 
-    fn refilter(&mut self) {
-        self.filtered = command_palette_filter(&self.query);
-        self.selected = 0;
+    /// Move the highlight to the next entry, skipping headers, clamped at the
+    /// last entry (no wrap, R-8). A no-op on an empty list.
+    pub(crate) fn move_down(&mut self) {
+        let from = self.selected + 1;
+        if let Some(rel) = self
+            .items
+            .get(from..)
+            .and_then(|rest| rest.iter().position(PaletteItem::is_entry))
+        {
+            self.selected = from + rel;
+        }
     }
+
+    /// Rebuild `items` from the query and point `selected` at the first entry.
+    /// An empty query groups every entry under category headings (F); a
+    /// non-empty query renders a flat, ranked, header-less list (B).
+    fn refilter(&mut self) {
+        self.items = if self.query.is_empty() {
+            build_grouped_items()
+        } else {
+            command_palette_matches(&self.query)
+                .into_iter()
+                .map(|m| PaletteItem::Entry {
+                    command: m.command,
+                    positions: m.positions,
+                })
+                .collect()
+        };
+        self.selected = self
+            .items
+            .iter()
+            .position(PaletteItem::is_entry)
+            .unwrap_or(0);
+    }
+}
+
+/// Build the grouped empty-query display list: each non-empty category's
+/// heading (in [`CommandCategory::ORDER`]) followed by its entries in registry
+/// declaration order (F).
+fn build_grouped_items() -> Vec<PaletteItem> {
+    let entries = command_palette_entries();
+    let mut items = Vec::new();
+    for category in CommandCategory::ORDER {
+        let mut pushed_header = false;
+        for &command in entries {
+            if command_category(command) != category {
+                continue;
+            }
+            if !pushed_header {
+                items.push(PaletteItem::Header(category));
+                pushed_header = true;
+            }
+            items.push(PaletteItem::Entry {
+                command,
+                positions: Vec::new(),
+            });
+        }
+    }
+    items
 }
 
 #[cfg(test)]
@@ -364,31 +644,30 @@ mod tests {
     }
 
     #[test]
-    fn subsequence_match_is_case_insensitive_and_non_contiguous() {
-        assert!(is_subsequence_ci("", "anything"));
-        assert!(is_subsequence_ci("splt", "Split Right"));
-        assert!(is_subsequence_ci("QUIT", "Quit Noa"));
-        assert!(!is_subsequence_ci("zzz", "Split Right"));
-        assert!(!is_subsequence_ci("tips", "Split Right"), "order matters");
-    }
+    fn matches_are_case_insensitive_non_contiguous_subsequences() {
+        let commands: Vec<AppCommand> = command_palette_matches("splt")
+            .into_iter()
+            .map(|m| m.command)
+            .collect();
+        // "splt" keeps only titles carrying s..p..l..t in order.
+        assert!(commands.contains(&AppCommand::NewSplitRight));
+        assert!(commands.contains(&AppCommand::NewSplitDown));
+        assert!(commands.contains(&AppCommand::ToggleSplitZoom));
+        assert!(!commands.contains(&AppCommand::Copy));
 
-    #[test]
-    fn filter_keeps_declaration_order_and_resets_are_subsequence_only() {
-        // AC-8: "splt" keeps only titles containing s..p..l..t in order.
-        let matches = command_palette_filter("splt");
-        assert!(matches.contains(&AppCommand::NewSplitRight));
-        assert!(matches.contains(&AppCommand::NewSplitDown));
-        assert!(matches.contains(&AppCommand::ToggleSplitZoom));
-        assert!(!matches.contains(&AppCommand::Copy));
-
-        // Declaration order is preserved (Split Right precedes Split Down).
-        let right = matches.iter().position(|c| *c == AppCommand::NewSplitRight);
-        let down = matches.iter().position(|c| *c == AppCommand::NewSplitDown);
+        // Equal-scoring prefix matches keep registry order (Split Right before
+        // Split Down); the scattered "Toggle Split Zoom" ranks below both.
+        let right = commands.iter().position(|c| *c == AppCommand::NewSplitRight);
+        let down = commands.iter().position(|c| *c == AppCommand::NewSplitDown);
+        let zoom = commands.iter().position(|c| *c == AppCommand::ToggleSplitZoom);
         assert!(right < down);
+        assert!(down < zoom);
 
-        // Case-insensitive: "QUIT" matches "Quit Noa" (and any other title
-        // carrying q..u..i..t as a subsequence).
-        let quit = command_palette_filter("QUIT");
+        // Case-insensitive: "QUIT" matches "Quit Noa".
+        let quit: Vec<AppCommand> = command_palette_matches("QUIT")
+            .into_iter()
+            .map(|m| m.command)
+            .collect();
         assert!(quit.contains(&AppCommand::Quit));
         assert!(!quit.contains(&AppCommand::Copy));
     }
@@ -397,27 +676,49 @@ mod tests {
     fn typing_refilters_and_resets_the_highlight() {
         // AC-8 / AC-9.
         let mut palette = CommandPalette::open();
-        assert_eq!(palette.selected(), 0);
-        assert_eq!(palette.filtered().len(), command_palette_entries().len());
+        // Empty query is the grouped view: every entry is shown plus one
+        // heading per non-empty category.
+        assert_eq!(palette.entry_count(), command_palette_entries().len());
+        // The highlight lands on the first *entry*, which sits just after the
+        // first category heading (never on a header).
+        assert!(matches!(
+            palette.items()[palette.selected()],
+            PaletteItem::Entry { .. }
+        ));
 
         palette.push_text("new");
         assert_eq!(palette.query(), "new");
-        assert!(palette.filtered().contains(&AppCommand::NewTab));
-        assert_eq!(palette.selected(), 0);
+        assert!(palette.selected_command().is_some());
+        assert!(
+            palette
+                .items()
+                .iter()
+                .all(|item| matches!(item, PaletteItem::Entry { .. })),
+            "a non-empty query renders a flat, header-less list"
+        );
 
         palette.backspace();
         assert_eq!(palette.query(), "ne");
-        assert_eq!(palette.selected(), 0);
     }
 
     #[test]
     fn navigation_clamps_without_wrapping() {
         // AC-10: drive a small, known three-entry list.
         let mut palette = CommandPalette::open();
-        palette.filtered = vec![
-            AppCommand::NewTab,
-            AppCommand::NewSplitRight,
-            AppCommand::NewSplitDown,
+        palette.query = "x".to_string();
+        palette.items = vec![
+            PaletteItem::Entry {
+                command: AppCommand::NewTab,
+                positions: Vec::new(),
+            },
+            PaletteItem::Entry {
+                command: AppCommand::NewSplitRight,
+                positions: Vec::new(),
+            },
+            PaletteItem::Entry {
+                command: AppCommand::NewSplitDown,
+                positions: Vec::new(),
+            },
         ];
         palette.selected = 0;
         palette.move_down();
@@ -431,11 +732,97 @@ mod tests {
     }
 
     #[test]
+    fn navigation_skips_category_headers() {
+        // F: up/down land only on entries, never on the muted headings.
+        let mut palette = CommandPalette::open();
+        assert!(palette.query().is_empty(), "grouped view under test");
+        // Walk the whole list top-to-bottom; the highlight must always sit on
+        // an entry after each move.
+        for _ in 0..palette.items().len() {
+            assert!(
+                matches!(palette.items()[palette.selected()], PaletteItem::Entry { .. }),
+                "selection never rests on a header"
+            );
+            palette.move_down();
+        }
+        // And back up.
+        for _ in 0..palette.items().len() {
+            assert!(matches!(
+                palette.items()[palette.selected()],
+                PaletteItem::Entry { .. }
+            ));
+            palette.move_up();
+        }
+    }
+
+    #[test]
+    fn find_ranks_the_exact_command_above_its_neighbors() {
+        // B: typing "find" puts `Find…` above `Find Next`.
+        let matches = command_palette_matches("find");
+        let find = matches
+            .iter()
+            .position(|m| m.command == AppCommand::Search(SearchAction::Find));
+        let find_next = matches
+            .iter()
+            .position(|m| m.command == AppCommand::Search(SearchAction::FindNext));
+        assert!(find < find_next, "Find… ranks above Find Next");
+        assert_eq!(matches.first().map(|m| m.command), find.map(|_| AppCommand::Search(SearchAction::Find)));
+    }
+
+    #[test]
+    fn fuzzy_match_reports_positions_and_prefix_beats_scatter() {
+        // B/C: a prefix, contiguous match outranks a scattered subsequence, and
+        // the reported positions are the matched char indices.
+        let (prefix_score, positions) = fuzzy_match("split", "Split Right").unwrap();
+        assert_eq!(positions, vec![0, 1, 2, 3, 4]);
+        let (scatter_score, _) = fuzzy_match("split", "Toggle Split Zoom").unwrap();
+        assert!(prefix_score > scatter_score);
+        assert!(fuzzy_match("zzz", "Split Right").is_none());
+        // Empty query: matches with no highlight.
+        assert_eq!(fuzzy_match("", "anything"), Some((0, vec![])));
+    }
+
+    #[test]
+    fn category_assignment_is_stable_for_representative_commands() {
+        // F: a handful of representative bindings land in the expected section.
+        assert_eq!(command_category(AppCommand::About), CommandCategory::Application);
+        assert_eq!(command_category(AppCommand::Copy), CommandCategory::Clipboard);
+        assert_eq!(
+            command_category(AppCommand::FontSize(FontSizeAction::Increase)),
+            CommandCategory::View
+        );
+        assert_eq!(
+            command_category(AppCommand::NewSplitRight),
+            CommandCategory::Splits
+        );
+        assert_eq!(command_category(AppCommand::NewTab), CommandCategory::Tabs);
+        assert_eq!(
+            command_category(AppCommand::NewWindow),
+            CommandCategory::Window
+        );
+        // Grouped view: headers appear in ORDER and precede their entries.
+        let items = build_grouped_items();
+        assert!(matches!(items.first(), Some(PaletteItem::Header(CommandCategory::Application))));
+    }
+
+    #[test]
+    fn keybind_symbols_render_macos_glyphs_in_canonical_order() {
+        // E: modifiers reorder to ⌃⌥⇧⌘ and keys map to their symbols.
+        assert_eq!(keybind_symbols("cmd+shift+]"), "\u{21e7}\u{2318}]");
+        assert_eq!(keybind_symbols("cmd+c"), "\u{2318}C");
+        assert_eq!(keybind_symbols("cmd+plus"), "\u{2318}+");
+        assert_eq!(keybind_symbols("cmd+arrowup"), "\u{2318}\u{2191}");
+        assert_eq!(keybind_symbols("shift+cmd+ctrl+alt+k"), "\u{2303}\u{2325}\u{21e7}\u{2318}K");
+        assert_eq!(keybind_symbols("pageup"), "PgUp");
+        assert_eq!(keybind_symbols("cmd+enter"), "\u{2318}\u{23ce}");
+    }
+
+    #[test]
     fn enter_on_an_empty_result_set_has_no_command() {
         // AC-13: no valid index, so no dispatch and no panic.
         let mut palette = CommandPalette::open();
         palette.push_text("zzzzzz");
-        assert!(palette.filtered().is_empty());
+        assert_eq!(palette.entry_count(), 0);
         assert_eq!(palette.selected_command(), None);
     }
 

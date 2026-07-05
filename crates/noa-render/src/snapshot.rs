@@ -24,21 +24,41 @@ pub enum HoverLink {
     Range { y: u16, x_start: u16, x_end: u16 },
 }
 
+/// One display row of the command palette: either a non-selectable category
+/// heading (shown only for the empty query) or a command entry. Built by
+/// `noa-app`; the renderer never sees `AppCommand`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaletteRow {
+    /// A muted category heading (F). Not selectable; skipped by navigation.
+    Header { label: String },
+    /// A command entry: its `title`, an optional resolved keybind `hint`
+    /// (`None` when unbound), and the char indices in `title` the current query
+    /// matched (`match_positions`, highlighted by the renderer — C).
+    Entry {
+        title: String,
+        hint: Option<String>,
+        match_positions: Vec<usize>,
+    },
+}
+
 /// The open command palette's render payload (`cmd+shift+p`), built by the
 /// caller (`noa-app`) from its own palette session — the renderer never sees
-/// `AppCommand`. Titles and keybind hints are already resolved to strings in
-/// the app layer, keeping noa-render terminal- and command-agnostic. `rows`
-/// is the filtered entry list in display order; `selected` indexes into it.
+/// `AppCommand`. Titles, keybind hints, categories, and match positions are all
+/// resolved in the app layer, keeping noa-render terminal- and
+/// command-agnostic. `rows` is the full display list (headers + entries) in
+/// order; the renderer windows it to fit and highlights `selected`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommandPaletteSnapshot {
     /// The live query text (may be empty).
     pub query: String,
-    /// One `(title, keybind hint)` pair per filtered entry, in display order.
-    /// The hint is `None` for an unbound command.
-    pub rows: Vec<(String, Option<String>)>,
-    /// The highlighted row's index into `rows`. Out of range only when
-    /// `rows` is empty (nothing highlighted), which the renderer tolerates.
+    /// The full display list in order (headers interleaved with entries).
+    pub rows: Vec<PaletteRow>,
+    /// The highlighted row's index into `rows` (always an `Entry`). Out of
+    /// range only when there are no entries, which the renderer tolerates.
     pub selected: usize,
+    /// Total selectable entries (excludes headers) — the denominator of the
+    /// `shown/total` counter when the list is windowed (A).
+    pub total_entries: usize,
 }
 
 /// The open confirmation dialog's render payload (paste protection / OSC 52

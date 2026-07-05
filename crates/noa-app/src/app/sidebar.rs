@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use noa_core::Rgb;
+use noa_render::{OverlayStyle, command_palette_layout};
 
 use super::*;
 use crate::session_store::{SessionCard, SessionDelta, StatusDot, status_dot};
@@ -1242,6 +1243,166 @@ fn ensure_scratch(
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         *slot = Some((size, texture, view));
     }
+}
+
+/// Corner radius (logical px) of the command-palette card (H).
+const PALETTE_CARD_CORNER_RADIUS: f32 = 10.0;
+/// Outer soft drop-shadow width (logical px) of the palette card (H).
+const PALETTE_CARD_GLOW_WIDTH: f32 = 12.0;
+
+/// Composite the open command palette as a single rounded card over the focused
+/// pane (H). The block (query row + windowed list) is rasterized into a scratch
+/// texture by the reused `palette_renderer`, then drawn as one rounded card:
+/// a soft black drop shadow, the elevated surface, and a themed 1px border —
+/// two card-pipeline passes (shadow+fill, then fill+border) over the same
+/// texture. Runs inline in `redraw` after the panes and sidebar so the modal
+/// always draws on top. The overlay's own square outline is dropped (the card
+/// supplies the chrome); the hairline rule and accent bar ride inside the
+/// texture.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_command_palette_card(
+    gpu: &mut GpuState,
+    surface_format: wgpu::TextureFormat,
+    view: &wgpu::TextureView,
+    surface_size: PixelSize,
+    palette: &CommandPaletteSnapshot,
+    pane_rect: PaneRect,
+    pane_cols: u16,
+    pane_rows: u16,
+    padding: GridPadding,
+    scale: f32,
+) {
+    let Some(layout) = command_palette_layout(palette, pane_cols, pane_rows) else {
+        return;
+    };
+    let metrics = gpu.font.metrics();
+    let (cell_w, cell_h) = (metrics.cell_w, metrics.cell_h);
+    let block_px = PixelSize {
+        w: ((layout.block_cols as f32) * cell_w).ceil().max(1.0) as u32,
+        h: ((layout.block_rows as f32) * cell_h).ceil().max(1.0) as u32,
+    };
+
+    // Lazily (re)build the reused block renderer + card pipeline for this format.
+    // The block renderer uses zero padding so grid cell (c,r) maps to texture
+    // pixel (c*cell_w, r*cell_h), making the scratch exactly the block size.
+    if gpu
+        .palette_renderer
+        .as_ref()
+        .is_none_or(|renderer| renderer.target_format() != surface_format)
+    {
+        gpu.palette_renderer = Renderer::new(
+            &gpu.device,
+            &gpu.queue,
+            surface_format,
+            &mut gpu.font,
+            GridPadding::new(0.0, 0.0, 0.0, 0.0),
+        )
+        .ok();
+    }
+    if gpu
+        .palette_card
+        .as_ref()
+        .is_none_or(|card| card.format != surface_format)
+    {
+        gpu.palette_card = Some(OverviewChromeCardPipeline {
+            format: surface_format,
+            pipeline: CardPipeline::new(&gpu.device, surface_format),
+        });
+    }
+    ensure_scratch(
+        &mut gpu.palette_scratch,
+        &gpu.device,
+        block_px,
+        surface_format,
+        "noa-command-palette",
+    );
+    if gpu.palette_renderer.is_none()
+        || gpu.palette_card.is_none()
+        || gpu.palette_scratch.is_none()
+    {
+        return;
+    }
+
+    // Rasterize the windowed block (rows sliced to the visible window, selection
+    // rebased) into the scratch texture. The block fills the mini grid exactly,
+    // so the overlay draws at the mini grid's origin.
+    let visible = &palette.rows[layout.offset..layout.offset + layout.shown];
+    let mini = CommandPaletteSnapshot {
+        query: palette.query.clone(),
+        rows: visible.to_vec(),
+        selected: palette.selected.saturating_sub(layout.offset),
+        total_entries: palette.total_entries,
+    };
+    let style = OverlayStyle::from_theme(&gpu.theme);
+    {
+        let mut term = Terminal::new(GridSize::new(layout.block_cols, layout.block_rows));
+        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+        snapshot.cursor.visible = false;
+        snapshot.command_palette = Some(mini);
+        let scratch_view = &gpu.palette_scratch.as_ref().unwrap().2;
+        let renderer = gpu.palette_renderer.as_mut().unwrap();
+        renderer.resize(block_px);
+        renderer.set_clear_color(style.surface_bg());
+        renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        renderer.draw(&gpu.device, &gpu.queue, scratch_view);
+    }
+
+    // Card placement in window pixels: the block's grid origin within the pane,
+    // offset by the pane's screen origin and the grid padding.
+    let x = (pane_rect.x as f32 + padding.left + (layout.x0 as f32) * cell_w)
+        .round()
+        .max(0.0) as u32;
+    let y = (pane_rect.y as f32 + padding.top + (layout.y0 as f32) * cell_h)
+        .round()
+        .max(0.0) as u32;
+    let placement = |selected| CardTexturePlacement {
+        texture_view: &gpu.palette_scratch.as_ref().unwrap().2,
+        x,
+        y,
+        w: block_px.w,
+        h: block_px.h,
+        selected,
+    };
+
+    // Pass 1: fill + soft black drop shadow (selected → the shader's glow path).
+    let shadow_style = CardStyle {
+        background: [0.0; 4],
+        border_color: [0.0; 4],
+        focus_color: [0.0, 0.0, 0.0, 1.0],
+        corner_radius: PALETTE_CARD_CORNER_RADIUS * scale,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: PALETTE_CARD_GLOW_WIDTH * scale,
+    };
+    // Pass 2: fill + themed 1px border, no glow (unselected → the border path).
+    let border = style.border();
+    let border_style = CardStyle {
+        background: [0.0; 4],
+        border_color: border,
+        focus_color: border,
+        corner_radius: PALETTE_CARD_CORNER_RADIUS * scale,
+        border_width: 1.0 * scale,
+        focus_width: 1.0 * scale,
+        focus_glow_width: 0.0,
+    };
+    let card = &gpu.palette_card.as_ref().unwrap().pipeline;
+    card.overlay_texture_cards(
+        &gpu.device,
+        &gpu.queue,
+        view,
+        surface_size,
+        &shadow_style,
+        &[placement(true)],
+    );
+    card.overlay_texture_cards(
+        &gpu.device,
+        &gpu.queue,
+        view,
+        surface_size,
+        &border_style,
+        &[placement(false)],
+    );
 }
 
 /// Rasterize the sidebar and composite it onto `view` at the window's left

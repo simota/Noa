@@ -256,7 +256,14 @@ pub struct OverlayStyle {
     border: Rgb,
     accent_bg: Rgb,
     accent_fg: Rgb,
+    accent: Rgb,
+    selected_bg: Rgb,
 }
+
+/// The command palette's vivid accent (the highlighted-row bar and query-match
+/// highlight, D/C). A fixed blue matching the app chrome's accent rather than a
+/// theme-derived tint, so the selection cue reads the same across themes.
+const OVERLAY_ACCENT: Rgb = Rgb::new(0x14, 0xa2, 0xff);
 
 impl OverlayStyle {
     /// Derive the overlay palette from `theme`:
@@ -269,13 +276,19 @@ impl OverlayStyle {
     pub fn from_theme(theme: &Theme) -> Self {
         let fg = theme.default_fg;
         let bg = theme.default_bg;
+        let surface_bg = blend(bg, fg, 0.08);
         OverlayStyle {
-            surface_bg: blend(bg, fg, 0.08),
+            surface_bg,
             surface_fg: fg,
             muted_fg: blend(fg, bg, 0.45),
             border: blend(fg, bg, 0.70),
             accent_bg: theme.selection_bg,
             accent_fg: theme.selection_fg,
+            accent: OVERLAY_ACCENT,
+            // The highlighted row: the elevated surface nudged one step further
+            // toward the foreground so it reads as raised without the heavy
+            // full-accent fill (D).
+            selected_bg: blend(surface_bg, fg, 0.12),
         }
     }
 
@@ -301,6 +314,18 @@ impl OverlayStyle {
 
     pub fn accent_fg(&self) -> [f32; 4] {
         rgba(self.accent_fg)
+    }
+
+    /// The vivid accent for the palette's selected-row bar and query-match
+    /// highlight (C/D).
+    pub fn accent(&self) -> [f32; 4] {
+        rgba(self.accent)
+    }
+
+    /// The highlighted palette row's background — a step brighter than
+    /// `surface_bg` (D).
+    pub fn selected_bg(&self) -> [f32; 4] {
+        rgba(self.selected_bg)
     }
 }
 

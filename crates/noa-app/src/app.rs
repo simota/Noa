@@ -23,8 +23,8 @@ use noa_grid::{
 use noa_pty::{Pty, PtyConfig};
 use noa_render::{
     CardPipeline, CardStyle, CardTexturePlacement, CardTilePlacement, CommandPaletteSnapshot,
-    FrameSnapshot, HoverLink, OverviewThumbnailResources, PaneFrame, PaneId as RenderPaneId,
-    PaneRect, Renderer, Theme,
+    FrameSnapshot, HoverLink, OverviewThumbnailResources, PaletteRow, PaneFrame,
+    PaneId as RenderPaneId, PaneRect, Renderer, Theme,
 };
 use noa_vt::Stream;
 use winit::application::ApplicationHandler;
@@ -126,6 +126,16 @@ struct GpuState {
     /// seam — a solid `CHROME_DIVIDER` strip composited over the band's right
     /// edge (the seam's crisp line; the soft shadow comes from the band glow).
     sidebar_divider_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// Single reused `Renderer` that rasterizes the open command palette's block
+    /// (query + list) as terminal cells into `palette_scratch`, then composited
+    /// as one rounded card (H). Built lazily for the first window's format.
+    palette_renderer: Option<Renderer>,
+    /// Rounded-card pipeline reused to composite the rasterized palette block as
+    /// a single rounded card (rounded corners + border + drop shadow, H).
+    palette_card: Option<OverviewChromeCardPipeline>,
+    /// The palette block texture, cached with its size so it is reused
+    /// frame-to-frame and only reallocated when the block dimensions change.
+    palette_scratch: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
 }
 
 /// Identifies one logical window — i.e. one AppKit tab group. Every native
@@ -688,6 +698,15 @@ impl App {
         // be composited inline after the panes without a second borrow.
         let sidebar_model = self.sidebar_draw_model(window_id);
         let padding = self.padding;
+        // Resolve the open palette's render payload up front (like the sidebar
+        // model) so the rounded card can be composited after the panes without
+        // re-borrowing `self` — the palette is drawn as its own card (H), not
+        // inline in the pane cell pass.
+        let palette_card = self
+            .command_palette
+            .as_ref()
+            .filter(|session| session.window_id == window_id)
+            .map(|session| command_palette_snapshot(&self.keybinds, &session.palette));
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
             return;
         };
@@ -723,13 +742,9 @@ impl App {
                 .as_ref()
                 .filter(|session| session.window_id == window_id && session.pane_id == pane_id)
                 .map(|session| session.prompt.buffer().to_string());
-            // C3: draw the window-bound palette exactly once — over the
-            // focused pane — rather than once per visible split.
-            snapshot.command_palette = self
-                .command_palette
-                .as_ref()
-                .filter(|session| session.window_id == window_id && pane_id == state.focused_pane)
-                .map(|session| command_palette_snapshot(&self.keybinds, &session.palette));
+            // The palette is no longer drawn in the pane cell pass — it is
+            // composited as a rounded card after the panes (H). Leave
+            // `snapshot.command_palette` at its `None` default here.
             // Like the palette: draw the window-bound confirm dialog once,
             // over the focused pane.
             snapshot.confirm_dialog = self
@@ -828,6 +843,30 @@ impl App {
                 &view,
                 surface_size,
                 model,
+            );
+        }
+        // Composite the open command palette as a rounded card over the focused
+        // pane, on top of the panes and sidebar so the modal always wins (H).
+        if let Some(palette) = palette_card.as_ref()
+            && let Some((_, rect, snapshot)) = snapshots
+                .iter()
+                .find(|(pane_id, _, _)| *pane_id == state.focused_pane)
+        {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            sidebar::draw_command_palette_card(
+                gpu,
+                state.surface_config.format,
+                &view,
+                surface_size,
+                palette,
+                render_pane_rect(*rect),
+                snapshot.cols,
+                snapshot.rows_n,
+                padding,
+                state.window.scale_factor() as f32,
             );
         }
         frame.present();
@@ -1278,6 +1317,9 @@ impl App {
                 sidebar_card_tex: None,
                 sidebar_menu_tex: None,
                 sidebar_divider_tex: None,
+                palette_renderer: None,
+                palette_card: None,
+                palette_scratch: None,
             });
             surface
         } else {

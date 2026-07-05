@@ -190,20 +190,28 @@ pub(crate) fn command_palette_snapshot(
     keybinds: &KeybindEngine,
     palette: &CommandPalette,
 ) -> CommandPaletteSnapshot {
+    use command_palette::PaletteItem;
     let rows = palette
-        .filtered()
+        .items()
         .iter()
-        .map(|&command| {
-            (
-                command_palette::command_palette_title(command).to_string(),
-                command_palette::command_palette_keybind(keybinds, command),
-            )
+        .map(|item| match item {
+            PaletteItem::Header(category) => PaletteRow::Header {
+                label: category.label().to_string(),
+            },
+            PaletteItem::Entry { command, positions } => PaletteRow::Entry {
+                title: command_palette::command_palette_title(*command).to_string(),
+                // Resolve the chord to macOS key symbols for display (E).
+                hint: command_palette::command_palette_keybind(keybinds, *command)
+                    .map(|chord| command_palette::keybind_symbols(&chord)),
+                match_positions: positions.clone(),
+            },
         })
         .collect();
     CommandPaletteSnapshot {
         query: palette.query().to_string(),
         rows,
         selected: palette.selected(),
+        total_entries: palette.entry_count(),
     }
 }
 

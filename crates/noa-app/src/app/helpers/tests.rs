@@ -1080,24 +1080,42 @@
 
     #[test]
     fn command_palette_snapshot_reflects_query_selection_and_keybinds() {
-        // AC-18: the render payload mirrors the session (query / filtered
-        // titles + keybind hints / selected) with no terminal involved.
+        // AC-18: the render payload mirrors the session (query / grouped rows /
+        // symbol keybind hints / selected) with no terminal involved.
+        use noa_render::PaletteRow;
         let keybinds = KeybindEngine::default();
         let palette = CommandPalette::open();
 
         let snapshot = command_palette_snapshot(&keybinds, &palette);
         assert_eq!(snapshot.query, "");
-        assert_eq!(snapshot.selected, 0);
         assert_eq!(
-            snapshot.rows.len(),
+            snapshot.total_entries,
             command_palette::command_palette_entries().len()
         );
-        // First entry is About (no binding); Copy carries its cmd+c hint.
-        assert_eq!(snapshot.rows[0], ("About Noa".to_string(), None));
+        // The empty-query view is grouped: the first row is the Application
+        // heading, and the highlight lands on the first entry just below it.
+        assert_eq!(
+            snapshot.rows[0],
+            PaletteRow::Header {
+                label: "Application".to_string()
+            }
+        );
+        assert!(matches!(
+            &snapshot.rows[snapshot.selected],
+            PaletteRow::Entry { .. }
+        ));
+        // About has no binding; Copy carries its ⌘C hint (rendered as symbols).
+        assert!(snapshot.rows.contains(&PaletteRow::Entry {
+            title: "About Noa".to_string(),
+            hint: None,
+            match_positions: Vec::new(),
+        }));
         assert!(
-            snapshot
-                .rows
-                .contains(&("Copy to Clipboard".to_string(), Some("cmd+c".to_string()))),
-            "keybind hints are resolved from the engine"
+            snapshot.rows.contains(&PaletteRow::Entry {
+                title: "Copy to Clipboard".to_string(),
+                hint: Some("\u{2318}C".to_string()),
+                match_positions: Vec::new(),
+            }),
+            "keybind hints are resolved from the engine and rendered as symbols"
         );
     }

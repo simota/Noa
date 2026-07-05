@@ -1058,11 +1058,24 @@ fn command_palette_overlay_emits_bg_and_glyph_instances_and_clears_on_close() {
     snap.command_palette = Some(crate::CommandPaletteSnapshot {
         query: "sp".to_string(),
         rows: vec![
-            ("Split Right".to_string(), Some("cmd+d".to_string())),
-            ("Split Down".to_string(), Some("cmd+shift+d".to_string())),
-            ("Toggle Split Zoom".to_string(), None),
+            crate::PaletteRow::Entry {
+                title: "Split Right".to_string(),
+                hint: Some("\u{2318}D".to_string()),
+                match_positions: vec![0, 1],
+            },
+            crate::PaletteRow::Entry {
+                title: "Split Down".to_string(),
+                hint: Some("\u{21e7}\u{2318}D".to_string()),
+                match_positions: vec![0, 1],
+            },
+            crate::PaletteRow::Entry {
+                title: "Toggle Split Zoom".to_string(),
+                hint: None,
+                match_positions: vec![7, 8],
+            },
         ],
         selected: 1,
+        total_entries: 3,
     });
     let mut with_palette = Vec::new();
     rebuild_cell_instances(&mut with_palette, &snap, &mut font, &theme, false);
@@ -1113,6 +1126,7 @@ fn command_palette_overlay_shows_empty_state_for_zero_results() {
         query: "zzzzzz".to_string(),
         rows: Vec::new(),
         selected: 0,
+        total_entries: 0,
     });
 
     let mut with_empty_palette = Vec::new();
@@ -1124,8 +1138,8 @@ fn command_palette_overlay_shows_empty_state_for_zero_results() {
         .map(|i| i.grid_pos[1])
         .collect();
     assert!(
-        rows_touched.len() >= 3,
-        "query row, spacer, and empty-state row must all draw: {rows_touched:?}"
+        rows_touched.len() >= 2,
+        "query row and empty-state row must both draw: {rows_touched:?}"
     );
     assert!(
         with_empty_palette

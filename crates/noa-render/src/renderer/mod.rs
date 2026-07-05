@@ -16,7 +16,10 @@ use crate::image_layer::{ImageDraw, ImageLayer};
 use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
 use crate::pipeline::CellPipeline;
 use crate::segment::{SegmentCell, ShapeRun, segment_row};
-use crate::snapshot::{FrameSnapshot, HoverLink, ImagePlacementSnapshot, SnapshotImage};
+use crate::snapshot::{
+    CommandPaletteSnapshot, FrameSnapshot, HoverLink, ImagePlacementSnapshot, PaletteRow,
+    SnapshotImage,
+};
 use crate::theme::{OverlayStyle, Theme, rgba};
 
 const DEFAULT_PANE_ID: PaneId = PaneId::new(0);
@@ -894,3 +897,4 @@ use cell::*;
 use color::*;
 use cursor::*;
 use overlay::*;
+pub use overlay::{PaletteLayout, command_palette_layout};

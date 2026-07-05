@@ -172,10 +172,12 @@ pub(super) fn append_preedit_instances(
 /// (never per-row cached — a query/selection change never touches grid
 /// content), and appended after every other pane instance so it draws on
 /// top. Extends the search-prompt pattern to a multi-row block: a query row
-/// plus one row per filtered entry (title left, keybind hint right-aligned),
-/// centered in the pane, with the selected row drawn on an accent
-/// background. Pure `CellInstance` bg-rects + shaped glyph runs — no new
-/// pipeline or bind-group/std140 surface.
+/// plus a 12-row window over the ranked entries (title left, keybind-symbol
+/// hint right-aligned), anchored near the pane's top, with the selected row
+/// raised on a brighter surface behind a 2px accent bar. Emits only row
+/// highlights, decorations, and glyph runs — the rounded card backdrop
+/// (surface, border, glow) is composited separately by the app via the card
+/// pipeline before these instances draw.
 pub(super) fn append_command_palette_instances(
     instances: &mut Vec<CellInstance>,
     snap: &FrameSnapshot,
@@ -187,116 +189,354 @@ pub(super) fn append_command_palette_instances(
     let Some(palette) = snap.command_palette.as_ref() else {
         return;
     };
-    let cols = snap.cols as usize;
-    let grid_rows = snap.rows_n as usize;
-    // Need at least the query row plus one padding column each side.
-    if cols < 3 || grid_rows < 1 {
+    let Some(layout) = command_palette_layout(palette, snap.cols, snap.rows_n) else {
         return;
-    }
+    };
+    let PaletteLayout {
+        x0,
+        y0,
+        inner,
+        offset,
+        shown,
+        show_empty,
+        block_cols: block_w,
+        ..
+    } = layout;
+    let (inner, x0, y0) = (inner as usize, x0, y0);
+    let visible = &palette.rows[offset..offset + shown];
 
     let style = OverlayStyle::from_theme(theme);
-    let surface_bg = to_u8_color(surface_output_rgba(
-        style.surface_bg(),
-        target_format_is_srgb,
-    ));
-    let surface_fg = to_u8_color(surface_output_rgba(
-        style.surface_fg(),
-        target_format_is_srgb,
-    ));
-    let muted_fg = to_u8_color(surface_output_rgba(style.muted_fg(), target_format_is_srgb));
-    let accent_bg = to_u8_color(surface_output_rgba(
-        style.accent_bg(),
-        target_format_is_srgb,
-    ));
-    let accent_fg = to_u8_color(surface_output_rgba(
-        style.accent_fg(),
-        target_format_is_srgb,
-    ));
-    let border = to_u8_color(surface_output_rgba(style.border(), target_format_is_srgb));
+    let color = |c: [f32; 4]| to_u8_color(surface_output_rgba(c, target_format_is_srgb));
+    let surface_bg = color(style.surface_bg());
+    let surface_fg = color(style.surface_fg());
+    let muted_fg = color(style.muted_fg());
+    let border = color(style.border());
+    let accent = color(style.accent());
+    let selected_bg = color(style.selected_bg());
 
-    // A blank row separates the query from the entries/empty state when the
-    // grid is tall enough to spare it; the entry window shrinks to make room.
-    let pad = usize::from(grid_rows >= 4);
-    let entry_capacity = grid_rows.saturating_sub(1 + pad);
-    let (offset, shown) =
-        palette_scroll_window(palette.rows.len(), palette.selected, entry_capacity);
-    let entries = &palette.rows[offset..offset + shown];
-    let show_empty = palette.rows.is_empty() && entry_capacity > 0;
-    const EMPTY_PALETTE_LABEL: &str = "No commands found";
-
-    // Inner content width: the widest of the query line and every shown
-    // entry/empty-state line, clamped to leave one padding column on each side.
-    let query_text = format!("> {}", palette.query);
-    let title_w = entries
+    // `shown/total` counter (A): how many entries are on screen vs the total
+    // matched, shown only when the list is windowed short.
+    let shown_entries = visible
         .iter()
-        .map(|(t, _)| t.chars().count())
-        .max()
-        .unwrap_or(0)
-        .max(if show_empty {
-            EMPTY_PALETTE_LABEL.chars().count()
-        } else {
-            0
-        });
-    let hint_w = entries
-        .iter()
-        .map(|(_, hint)| hint.as_deref().map_or(0, |h| h.chars().count()))
-        .max()
-        .unwrap_or(0);
-    let gap = if hint_w > 0 { 2 } else { 0 };
-    let inner = (title_w + gap + hint_w)
-        .max(query_text.chars().count())
-        .min(cols - 2);
-    let block_w = inner + 2;
-    let height = 1 + pad + shown + usize::from(show_empty);
-    let x0 = ((cols - block_w) / 2) as u16;
-    let y0 = (grid_rows.saturating_sub(height) / 2) as u16;
+        .filter(|row| matches!(row, PaletteRow::Entry { .. }))
+        .count();
+    let counter = (shown_entries < palette.total_entries)
+        .then(|| format!("{shown_entries}/{}", palette.total_entries));
 
-    let mut rows: Vec<OverlayRow> = Vec::with_capacity(height);
-    // Query row: title text in surface_fg on the surface background.
-    rows.push(OverlayRow::uniform(
-        palette_line(&query_text, None, inner),
-        surface_bg,
-        surface_fg,
-    ));
-    if pad != 0 {
-        rows.push(OverlayRow::uniform(
-            palette_line("", None, inner),
-            surface_bg,
-            surface_fg,
-        ));
-    }
-    if show_empty {
-        rows.push(OverlayRow::uniform(
-            palette_line(EMPTY_PALETTE_LABEL, None, inner),
-            surface_bg,
-            muted_fg,
-        ));
+    // Query row content: `> query`, or the muted placeholder when empty (G).
+    let query_is_empty = palette.query.is_empty();
+    let query_left = if query_is_empty {
+        format!("> {PALETTE_PLACEHOLDER}")
     } else {
-        for (i, (title, hint)) in entries.iter().enumerate() {
-            let selected = offset + i == palette.selected;
-            let text = palette_line(title, hint.as_deref(), inner);
-            if selected {
-                // Selected entry: whole row on the accent background, one color.
-                rows.push(OverlayRow::uniform(text, accent_bg, accent_fg));
-            } else {
-                // Title in surface_fg, the right-aligned keybind hint dimmed.
-                let hint_cols = hint.as_deref().map_or(0, |h| h.chars().count());
-                rows.push(OverlayRow::title_hint(
-                    text, surface_bg, surface_fg, muted_fg, inner, hint_cols,
-                ));
-            }
+        format!("> {}", palette.query)
+    };
+
+    let has_list = shown > 0 || show_empty;
+
+    // Query row (row 0 of the block).
+    let query_text = palette_line(&query_left, counter.as_deref(), inner);
+    let query_cols = query_text.chars().count();
+    let mut query_fg = vec![surface_fg; query_cols];
+    let query_bold = vec![false; query_cols];
+    if query_is_empty {
+        // "> " stays in surface_fg; the placeholder that follows is muted.
+        let start = 1 + 2; // leading pad + "> "
+        for slot in query_fg
+            .iter_mut()
+            .skip(start)
+            .take(PALETTE_PLACEHOLDER.chars().count())
+        {
+            *slot = muted_fg;
+        }
+    }
+    if let Some(counter) = counter.as_deref() {
+        let clen = counter.chars().count();
+        let start = 1 + inner - clen.min(inner);
+        for slot in query_fg.iter_mut().skip(start).take(clen) {
+            *slot = muted_fg;
+        }
+    }
+    emit_palette_row(
+        instances, font, metrics, x0, y0, surface_bg, &query_text, &query_fg, &query_bold,
+    );
+
+    // Hairline rule under the query row, separating it from the list (G).
+    if has_list {
+        let cell_w = metrics.cell_w.round().max(1.0) as u16;
+        let cell_h = metrics.cell_h.round().max(1.0) as u16;
+        let rule_y = cell_h.saturating_sub(1) as i16;
+        for i in 0..block_w {
+            push_decoration_rect(
+                instances,
+                DecorationCell {
+                    grid_x: x0 + i,
+                    grid_y: y0,
+                    color: border,
+                },
+                DecorationRect::new(0, rule_y, cell_w, 1),
+            );
         }
     }
 
-    append_overlay_block(
-        instances,
-        font,
-        metrics,
-        (x0, y0),
-        block_w as u16,
-        &rows,
-        border,
-    );
+    // List rows begin immediately below the query row.
+    let list_y0 = y0 + 1;
+    if show_empty {
+        let text = palette_line(PALETTE_EMPTY_LABEL, None, inner);
+        let fg = vec![muted_fg; text.chars().count()];
+        let bold = vec![false; text.chars().count()];
+        emit_palette_row(
+            instances, font, metrics, x0, list_y0, surface_bg, &text, &fg, &bold,
+        );
+    } else {
+        for (i, row) in visible.iter().enumerate() {
+            let y = list_y0 + i as u16;
+            match row {
+                PaletteRow::Header { label } => {
+                    // Muted, non-selectable section heading (F).
+                    let text = palette_line(label, None, inner);
+                    let fg = vec![muted_fg; text.chars().count()];
+                    let bold = vec![false; text.chars().count()];
+                    emit_palette_row(
+                        instances, font, metrics, x0, y, surface_bg, &text, &fg, &bold,
+                    );
+                }
+                PaletteRow::Entry {
+                    title,
+                    hint,
+                    match_positions,
+                } => {
+                    let selected = offset + i == palette.selected;
+                    let row_bg = if selected { selected_bg } else { surface_bg };
+                    let text = palette_line(title, hint.as_deref(), inner);
+                    let ncols = text.chars().count();
+                    let mut fg = vec![surface_fg; ncols];
+                    let mut bold = vec![false; ncols];
+                    // Dim the right-aligned keybind hint.
+                    let hint_cols = hint.as_deref().map_or(0, |h| h.chars().count());
+                    if hint_cols > 0 {
+                        let start = 1 + inner - hint_cols.min(inner);
+                        for slot in fg.iter_mut().skip(start).take(hint_cols) {
+                            *slot = muted_fg;
+                        }
+                    }
+                    // Highlight the query-matched title chars: bold, plus the
+                    // accent color on non-selected rows (on the selected row the
+                    // accent bar already marks it, so keep the fg readable — C).
+                    for &pos in match_positions {
+                        let col = pos + 1; // +1 for the leading pad column
+                        if col < ncols {
+                            bold[col] = true;
+                            if !selected {
+                                fg[col] = accent;
+                            }
+                        }
+                    }
+                    emit_palette_row(
+                        instances, font, metrics, x0, y, row_bg, &text, &fg, &bold,
+                    );
+                    if selected {
+                        // A 2px accent bar at the row's left edge (D).
+                        let cell_h = metrics.cell_h.round().max(1.0) as u16;
+                        push_decoration_rect(
+                            instances,
+                            DecorationCell {
+                                grid_x: x0,
+                                grid_y: y,
+                                color: accent,
+                            },
+                            DecorationRect::new(0, 0, 2, cell_h),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // No rectangular outline here: the palette's chrome (rounded corners,
+    // border, drop shadow) is drawn by the rounded-card composite in `noa-app`
+    // (H), which samples this block as a texture. The hairline rule and accent
+    // bar above are interior cues that ride along inside the card.
+}
+
+/// The palette's placeholder query text (G) and empty-result label. Module
+/// constants so [`command_palette_layout`] and the draw path measure and render
+/// exactly the same strings.
+const PALETTE_PLACEHOLDER: &str = "Type a command\u{2026}";
+const PALETTE_EMPTY_LABEL: &str = "No matching commands";
+
+/// The resolved geometry of the palette block for a given grid: where it sits,
+/// how big it is (in grid cells), and which slice of `rows` is visible. Shared
+/// by the draw path ([`append_command_palette_instances`]) and `noa-app`'s
+/// rounded-card composite (H), so both agree on the exact block rectangle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaletteLayout {
+    /// Block origin in grid cells (top-left), within the pane.
+    pub x0: u16,
+    pub y0: u16,
+    /// Block size in grid cells.
+    pub block_cols: u16,
+    pub block_rows: u16,
+    /// The visible `rows` slice is `rows[offset..offset + shown]`.
+    pub offset: usize,
+    pub shown: usize,
+    /// Inner content width in columns (block is `inner + 2` wide).
+    pub inner: u16,
+    /// Whether the empty-result label occupies the single list row.
+    pub show_empty: bool,
+}
+
+/// Compute the palette block geometry for a `cols`x`grid_rows` grid, or `None`
+/// when the grid is too small to host even the query row. Pure — no font/GPU —
+/// so `noa-app` can call it to size and place the rounded card (H).
+pub fn command_palette_layout(
+    palette: &CommandPaletteSnapshot,
+    cols: u16,
+    grid_rows: u16,
+) -> Option<PaletteLayout> {
+    let cols = cols as usize;
+    let grid_rows = grid_rows as usize;
+    // Need at least the query row plus one padding column each side.
+    if cols < 3 || grid_rows < 1 {
+        return None;
+    }
+
+    // Window the list to at most 12 rows (A), further clamped to the grid.
+    let capacity = grid_rows.saturating_sub(1).min(12);
+    let (offset, shown) = palette_scroll_window(palette.rows.len(), palette.selected, capacity);
+    let visible = &palette.rows[offset..offset + shown];
+    let show_empty = palette.rows.is_empty() && capacity > 0;
+
+    let shown_entries = visible
+        .iter()
+        .filter(|row| matches!(row, PaletteRow::Entry { .. }))
+        .count();
+    let counter_cols = if shown_entries < palette.total_entries {
+        format!("{shown_entries}/{}", palette.total_entries).chars().count()
+    } else {
+        0
+    };
+    let query_left_cols = 2 + if palette.query.is_empty() {
+        PALETTE_PLACEHOLDER.chars().count()
+    } else {
+        palette.query.chars().count()
+    };
+    let query_w = query_left_cols + if counter_cols > 0 { 2 + counter_cols } else { 0 };
+
+    let row_width = |row: &PaletteRow| match row {
+        PaletteRow::Header { label } => label.chars().count(),
+        PaletteRow::Entry { title, hint, .. } => {
+            let hint_w = hint.as_deref().map_or(0, |h| h.chars().count());
+            title.chars().count() + if hint_w > 0 { 2 + hint_w } else { 0 }
+        }
+    };
+    let content_w = visible
+        .iter()
+        .map(row_width)
+        .max()
+        .unwrap_or(0)
+        .max(if show_empty {
+            PALETTE_EMPTY_LABEL.chars().count()
+        } else {
+            0
+        });
+
+    let inner = content_w.max(query_w).min(cols - 2);
+    let block_w = inner + 2;
+    let height = 1 + shown + usize::from(show_empty);
+    let x0 = (cols - block_w) / 2;
+    // Anchor near the top (~20% down), clamped so the block fits the grid (A).
+    let y0 = (grid_rows / 5).min(grid_rows.saturating_sub(height));
+
+    Some(PaletteLayout {
+        x0: x0 as u16,
+        y0: y0 as u16,
+        block_cols: block_w as u16,
+        block_rows: height as u16,
+        offset,
+        shown,
+        inner: inner as u16,
+        show_empty,
+    })
+}
+
+/// Emit one palette row: its `block_w` background cells then its shaped glyph
+/// run, with a per-column foreground and per-column bold flag (so match
+/// highlights and dimmed hints paint within a single row). `text` is
+/// `inner + 2` columns of ASCII/width-1 glyphs, so column index equals char
+/// index.
+#[allow(clippy::too_many_arguments)]
+fn emit_palette_row(
+    instances: &mut Vec<CellInstance>,
+    font: &mut FontGrid,
+    metrics: Metrics,
+    x0: u16,
+    y: u16,
+    bg: [u8; 4],
+    text: &str,
+    fg_by_col: &[[u8; 4]],
+    bold_by_col: &[bool],
+) {
+    let cells = palette_segment_cells(text, fg_by_col, bold_by_col);
+    for i in 0..cells.len() as u16 {
+        instances.push(CellInstance {
+            glyph_pos: [0, 0],
+            glyph_size: [0, 0],
+            bearing: [0, 0],
+            grid_pos: [x0 + i, y],
+            color: bg,
+            flags: 0,
+        });
+    }
+    for mut run in segment_row(font, &cells) {
+        run.start_col += x0;
+        let shaped = font.shape_run(&run.cells);
+        emit_run_glyph_instances(instances, font, &run, &shaped, y, metrics);
+    }
+}
+
+/// Like [`overlay_segment_cells`] but also carries a per-column bold flag, used
+/// by the palette to embolden query-matched title chars (C).
+fn palette_segment_cells(
+    text: &str,
+    fg_by_col: &[[u8; 4]],
+    bold_by_col: &[bool],
+) -> Vec<SegmentCell> {
+    let fallback = fg_by_col.last().copied().unwrap_or([255, 255, 255, 255]);
+    let blank = |color: [u8; 4], bold: bool| SegmentCell {
+        ch: ' ',
+        combining: Vec::new(),
+        bold,
+        italic: false,
+        selected: false,
+        active_search: false,
+        search_match: false,
+        cursor: false,
+        color,
+    };
+
+    let mut cells = Vec::new();
+    let mut col = 0usize;
+    for ch in text.chars() {
+        let color = fg_by_col.get(col).copied().unwrap_or(fallback);
+        let bold = bold_by_col.get(col).copied().unwrap_or(false);
+        match UnicodeWidthChar::width(ch).unwrap_or(0) {
+            0 => {
+                if let Some(last) = cells.last_mut() {
+                    let last: &mut SegmentCell = last;
+                    last.combining.push(ch);
+                }
+            }
+            2 => {
+                cells.push(SegmentCell { ch, ..blank(color, bold) });
+                cells.push(blank(color, bold));
+                col += 2;
+            }
+            _ => {
+                cells.push(SegmentCell { ch, ..blank(color, bold) });
+                col += 1;
+            }
+        }
+    }
+    cells
 }
 
 /// Append the open confirmation dialog (paste protection / clipboard-read),
@@ -399,28 +639,6 @@ impl OverlayRow {
         }
     }
 
-    /// A palette entry row: `fg` for the title area, `hint_fg` for the
-    /// trailing `hint_cols` columns of the `inner`-wide content region (the
-    /// right-aligned keybind hint). `text` is `inner + 2` columns wide (a
-    /// one-space pad on each side), so the hint occupies columns
-    /// `[1 + inner - hint_cols, 1 + inner)`.
-    fn title_hint(
-        text: String,
-        bg: [u8; 4],
-        fg: [u8; 4],
-        hint_fg: [u8; 4],
-        inner: usize,
-        hint_cols: usize,
-    ) -> Self {
-        let mut row = Self::uniform(text, bg, fg);
-        if hint_cols > 0 {
-            let start = 1 + inner - hint_cols.min(inner);
-            for slot in row.fg.iter_mut().skip(start).take(hint_cols) {
-                *slot = hint_fg;
-            }
-        }
-        row
-    }
 }
 
 /// Emit a centered modal overlay block: each row's background quads and

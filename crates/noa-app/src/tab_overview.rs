@@ -218,10 +218,9 @@ pub fn overview_initial_selection<Id: PartialEq>(
 }
 
 /// Case-insensitive **contiguous substring** filter over tab titles
-/// (REQ-OV-16) — deliberately distinct from
-/// `command_palette::is_subsequence_ci`'s non-contiguous subsequence
-/// semantics; "Search sessions" is a plain substring search, not fuzzy matching.
-/// An empty query matches every title.
+/// (REQ-OV-16) — deliberately distinct from `command_palette::fuzzy_match`'s
+/// non-contiguous subsequence semantics; "Search sessions" is a plain substring
+/// search, not fuzzy matching. An empty query matches every title.
 pub fn overview_tab_filter<Id: Copy>(query: &str, titles: &[(Id, String)]) -> Vec<Id> {
     let query = query.to_ascii_lowercase();
     titles
@@ -1340,7 +1339,7 @@ mod tests {
         assert_eq!(overview_tab_filter("log", &titles), vec![1, 2]);
         assert_eq!(overview_tab_filter("LOG", &titles), vec![1, 2]);
         // Non-contiguous query does not match (distinct from subsequence
-        // search, e.g. `command_palette::is_subsequence_ci`).
+        // search, e.g. `command_palette::fuzzy_match`).
         assert!(overview_tab_filter("lg", &titles).is_empty());
         // Empty query matches everything, source order preserved.
         assert_eq!(overview_tab_filter("", &titles), vec![1, 2, 3]);

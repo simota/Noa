@@ -223,12 +223,14 @@ pub(super) fn append_command_palette_instances(
     let counter = (shown_entries < palette.total_entries)
         .then(|| format!("{shown_entries}/{}", palette.total_entries));
 
-    // Query row content: `> query`, or the muted placeholder when empty (G).
+    // Query row content: `> query▏`, or `> ▏placeholder` when empty (G). The
+    // thin left-eighth-block caret marks the insertion point (input is
+    // append/pop only, so it always sits at the end of the query).
     let query_is_empty = palette.query.is_empty();
     let query_left = if query_is_empty {
-        format!("> {PALETTE_PLACEHOLDER}")
+        format!("> {PALETTE_CARET}{PALETTE_PLACEHOLDER}")
     } else {
-        format!("> {}", palette.query)
+        format!("> {}{PALETTE_CARET}", palette.query)
     };
 
     let has_list = shown > 0 || show_empty;
@@ -238,9 +240,18 @@ pub(super) fn append_command_palette_instances(
     let query_cols = query_text.chars().count();
     let mut query_fg = vec![surface_fg; query_cols];
     let query_bold = vec![false; query_cols];
+    // The ">" prompt and the caret pick up the accent so the input row reads
+    // as the palette's focused field.
+    if let Some(slot) = query_fg.get_mut(1) {
+        *slot = accent;
+    }
+    let caret_col = 1 + 2 + if query_is_empty { 0 } else { palette.query.chars().count() };
+    if let Some(slot) = query_fg.get_mut(caret_col) {
+        *slot = accent;
+    }
     if query_is_empty {
-        // "> " stays in surface_fg; the placeholder that follows is muted.
-        let start = 1 + 2; // leading pad + "> "
+        // The placeholder after the caret is muted.
+        let start = 1 + 2 + 1; // leading pad + "> " + caret
         for slot in query_fg
             .iter_mut()
             .skip(start)
@@ -362,6 +373,14 @@ pub(super) fn append_command_palette_instances(
 /// exactly the same strings.
 const PALETTE_PLACEHOLDER: &str = "Type a command\u{2026}";
 const PALETTE_EMPTY_LABEL: &str = "No matching commands";
+/// "▏" left one-eighth block: the query row's thin caret (same glyph as the
+/// search prompt's).
+const PALETTE_CARET: char = '\u{258F}';
+/// Minimum inner content width in columns. Fixing a generous floor keeps the
+/// card from re-sizing on every keystroke as the match list narrows — the
+/// width only ever exceeds this for unusually long titles/queries, and only
+/// shrinks below it when the pane itself is narrower.
+const PALETTE_MIN_INNER: usize = 56;
 
 /// The resolved geometry of the palette block for a given grid: where it sits,
 /// how big it is (in grid cells), and which slice of `rows` is visible. Shared
@@ -414,7 +433,8 @@ pub fn command_palette_layout(
     } else {
         0
     };
-    let query_left_cols = 2 + if palette.query.is_empty() {
+    // "> " + caret + query/placeholder.
+    let query_left_cols = 3 + if palette.query.is_empty() {
         PALETTE_PLACEHOLDER.chars().count()
     } else {
         palette.query.chars().count()
@@ -439,7 +459,14 @@ pub fn command_palette_layout(
             0
         });
 
-    let inner = content_w.max(query_w).min(cols - 2);
+    // A fixed generous floor (see [`PALETTE_MIN_INNER`]) keeps the width
+    // stable while typing. The same formula is self-consistent when re-run on
+    // the app's block-sized mini grid (`cols == block_w`): the `cols - 2`
+    // clamp reproduces exactly the outer `inner`.
+    let inner = content_w
+        .max(query_w)
+        .max(PALETTE_MIN_INNER)
+        .min(cols - 2);
     let block_w = inner + 2;
     let height = 1 + shown + usize::from(show_empty);
     let x0 = (cols - block_w) / 2;

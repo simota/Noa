@@ -285,10 +285,10 @@ impl OverlayStyle {
             accent_bg: theme.selection_bg,
             accent_fg: theme.selection_fg,
             accent: OVERLAY_ACCENT,
-            // The highlighted row: the elevated surface nudged one step further
-            // toward the foreground so it reads as raised without the heavy
-            // full-accent fill (D).
-            selected_bg: blend(surface_bg, fg, 0.12),
+            // The highlighted row: the elevated surface tinted toward the
+            // accent so the selection reads as an accent-family highlight
+            // (with the 2px bar) without the heavy full-accent fill (D).
+            selected_bg: blend(surface_bg, OVERLAY_ACCENT, 0.20),
         }
     }
 

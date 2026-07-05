@@ -148,6 +148,12 @@ struct GpuState {
     /// The palette block texture, cached with its size so it is reused
     /// frame-to-frame and only reallocated when the block dimensions change.
     palette_scratch: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// The interior pixel padding the current `palette_renderer` was built
+    /// with; the renderer is rebuilt when this drifts (font size change).
+    palette_padding: noa_core::GridPadding,
+    /// 1x1 translucent-black texture drawn as a full-pane card behind the
+    /// palette — the modal scrim dimming the pane underneath.
+    palette_scrim: Option<(wgpu::Texture, wgpu::TextureView)>,
 }
 
 /// Identifies one logical window — i.e. one AppKit tab group. Every native
@@ -1386,6 +1392,8 @@ impl App {
                 palette_renderer: None,
                 palette_card: None,
                 palette_scratch: None,
+                palette_padding: noa_core::GridPadding::ZERO,
+                palette_scrim: None,
             });
             surface
         } else {

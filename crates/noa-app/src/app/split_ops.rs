@@ -149,14 +149,7 @@ impl App {
     }
 
     pub(super) fn toggle_split_zoom(&mut self, window_id: WindowId) {
-        let inset = self.window_sidebar_inset_px(window_id);
-        let bounds = self
-            .windows
-            .get(&window_id)
-            .map(|state| {
-                sidebar_inset_bounds(pane_bounds_for_size(state.window.inner_size()), inset)
-            })
-            .unwrap_or(PaneRectApp::new(0, 0, 0, 0));
+        let bounds = self.window_pane_bounds(window_id);
         let window = {
             let Some(state) = self.windows.get_mut(&window_id) else {
                 return;

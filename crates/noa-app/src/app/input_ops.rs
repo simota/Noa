@@ -992,7 +992,9 @@ impl App {
             return None;
         }
         let point = state.last_mouse_point?;
-        let bounds = pane_bounds_for_size(state.window.inner_size());
+        // Same bounds as `relayout_and_resize_window`, so divider hit-testing
+        // lines up with where the panes were actually laid out.
+        let bounds = self.window_pane_bounds(window_id);
         split_resize_drag_target_at_point(&state.split_tree, bounds, point)
     }
 
@@ -1289,20 +1291,58 @@ impl App {
         state.contains_pane(pane_id).then_some((window_id, pane_id))
     }
 
+    /// Physical px the pane area is pushed down from the window top so the
+    /// grid clears the macOS titlebar under the `transparent` style (whose
+    /// full-size content view would otherwise start the grid underneath the
+    /// titlebar). 0 for `native` and `hidden`.
+    pub(super) fn window_titlebar_inset_px(&self, window_id: WindowId) -> u32 {
+        let scale = self
+            .windows
+            .get(&window_id)
+            .map_or(1.0, |state| state.window.scale_factor());
+        titlebar_top_inset_px(self.config.macos_titlebar_style, scale)
+    }
+
+    /// Physical left/right/bottom margin around the pane area — non-zero only
+    /// under the `transparent` titlebar style (see [`content_margin_px`]).
+    pub(super) fn window_content_margin_px(&self, window_id: WindowId) -> u32 {
+        let scale = self
+            .windows
+            .get(&window_id)
+            .map_or(1.0, |state| state.window.scale_factor());
+        content_margin_px(self.config.macos_titlebar_style, scale)
+    }
+
+    /// The pane-area bounds for `window_id`: the full window minus the
+    /// sidebar band and the transparent-titlebar chrome insets. The single
+    /// source of truth shared by layout, zoom, and divider hit-testing so
+    /// they can never disagree.
+    pub(super) fn window_pane_bounds(&self, window_id: WindowId) -> PaneRectApp {
+        let Some(state) = self.windows.get(&window_id) else {
+            return PaneRectApp::new(0, 0, 0, 0);
+        };
+        content_inset_bounds(
+            sidebar_inset_bounds(
+                pane_bounds_for_size(state.window.inner_size()),
+                self.window_sidebar_inset_px(window_id),
+            ),
+            self.window_titlebar_inset_px(window_id),
+            self.window_content_margin_px(window_id),
+        )
+    }
+
     pub(super) fn relayout_and_resize_window(&mut self, window_id: WindowId) {
         let Some(metrics) = self.gpu.as_ref().map(|gpu| gpu.font.metrics()) else {
             return;
         };
         let padding = self.padding;
-        // Inset the pane area by the sidebar width before laying panes out
-        // (Omen P1: `pane_bounds_for_size` itself is untouched — the inset is
-        // applied only here at the layout call site). 0 when the sidebar is
-        // hidden or the window is ineligible.
-        let inset = self.window_sidebar_inset_px(window_id);
+        // The pane area is the window minus the sidebar band and the
+        // transparent-titlebar chrome (Omen P1: `pane_bounds_for_size` itself
+        // is untouched — the insets live in `window_pane_bounds`).
+        let bounds = self.window_pane_bounds(window_id);
         let Some(state) = self.windows.get(&window_id) else {
             return;
         };
-        let bounds = sidebar_inset_bounds(pane_bounds_for_size(state.window.inner_size()), inset);
         let targets = zoom_resize_targets(&state.split_tree, state.zoomed, bounds)
             .into_iter()
             .map(|(pane_id, rect)| {

@@ -2,11 +2,9 @@ use super::*;
 #[cfg(all(test, target_os = "macos"))]
 use winit::platform::macos::OptionAsAlt;
 
-
 pub(super) const MIN_RUNTIME_FONT_SIZE: f32 = 6.0;
 
 pub(super) const MAX_RUNTIME_FONT_SIZE: f32 = 96.0;
-
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct RuntimeFontSizeUpdate {
@@ -14,13 +12,11 @@ pub(super) struct RuntimeFontSizeUpdate {
     pub(super) changed: bool,
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PaneResizeAction<Id> {
     GridResize(Id, GridSize),
     PtyResize(Id, GridSize),
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CloseConfirmTarget {
@@ -30,13 +26,11 @@ pub(super) enum CloseConfirmTarget {
     App,
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MouseWheelViewportScroll {
     Up(usize),
     Down(usize),
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TabCloseOutcome<Id> {
@@ -44,7 +38,6 @@ pub(super) enum TabCloseOutcome<Id> {
     Quit,
     Continue { focused: Option<Id> },
 }
-
 
 /// Which tab group a spawned tab should join, given the spawn target and the
 /// focused window's group (if any). The `Fresh` arm defers minting an id to
@@ -55,14 +48,12 @@ pub(super) enum GroupChoice<G> {
     Fresh,
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TargetedRedrawDecision {
     Stale,
     Suppress,
     Request,
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CommandScope {
@@ -72,7 +63,6 @@ pub(super) enum CommandScope {
     Overview,
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CommandOrigin {
     App,
@@ -80,18 +70,18 @@ pub(super) enum CommandOrigin {
     OverviewWindow,
 }
 
-mod resize;
-mod lifecycle;
-mod geometry;
-mod scroll;
 mod dispatch;
+mod geometry;
+mod lifecycle;
+mod resize;
+mod scroll;
 mod surface;
 
-pub(super) use resize::*;
-pub(super) use lifecycle::*;
-pub(super) use geometry::*;
-pub(super) use scroll::*;
 pub(super) use dispatch::*;
+pub(super) use geometry::*;
+pub(super) use lifecycle::*;
+pub(super) use resize::*;
+pub(super) use scroll::*;
 pub(super) use surface::*;
 
 #[cfg(test)]

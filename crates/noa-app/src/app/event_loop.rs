@@ -325,7 +325,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.modifiers.super_key() {
                     return;
                 }
-                                let app_cursor_keys = self.app_cursor_keys(window_id);
+                let app_cursor_keys = self.app_cursor_keys(window_id);
                 let app_keypad = self.app_keypad(window_id);
                 let kitty_flags = self.kitty_keyboard_flags(window_id);
                 let unmodified_key = event.key_without_modifiers();
@@ -441,7 +441,11 @@ impl App {
             let windows = self
                 .window_order
                 .iter()
-                .filter_map(|id| self.windows.get(id).map(|state| (*id, state.window.clone())))
+                .filter_map(|id| {
+                    self.windows
+                        .get(id)
+                        .map(|state| (*id, state.window.clone()))
+                })
                 .collect::<Vec<_>>();
             for (id, _) in &windows {
                 self.relayout_and_resize_window(*id);
@@ -588,7 +592,10 @@ impl App {
         // handling (FR-3/FR-6/FR-7).
         if button == MouseButton::Left
             && state == ElementState::Pressed
-            && let Some(point) = self.windows.get(&window_id).and_then(|s| s.last_mouse_point)
+            && let Some(point) = self
+                .windows
+                .get(&window_id)
+                .and_then(|s| s.last_mouse_point)
             && self.handle_sidebar_press(event_loop, window_id, point)
         {
             return;
@@ -873,13 +880,8 @@ impl App {
             return;
         };
 
-        let snapshot = apply_viewport_scroll_and_snapshot(
-            &mut terminal.lock(),
-            grid_size,
-            scroll,
-        );
-        *overview_snapshot
-            .lock() = Some(snapshot);
+        let snapshot = apply_viewport_scroll_and_snapshot(&mut terminal.lock(), grid_size, scroll);
+        *overview_snapshot.lock() = Some(snapshot);
         self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
         self.request_overview_redraw();
 
@@ -903,12 +905,8 @@ impl App {
             return;
         };
 
-        let snapshot = apply_mouse_wheel_viewport_scroll_and_snapshot(
-            &mut terminal.lock(),
-            scroll,
-        );
-        *overview_snapshot
-            .lock() = Some(snapshot);
+        let snapshot = apply_mouse_wheel_viewport_scroll_and_snapshot(&mut terminal.lock(), scroll);
+        *overview_snapshot.lock() = Some(snapshot);
         self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
         self.request_overview_redraw();
 
@@ -916,5 +914,4 @@ impl App {
             state.window.request_redraw();
         }
     }
-
 }

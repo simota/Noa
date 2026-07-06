@@ -286,9 +286,9 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         AppCommand::About | AppCommand::Preferences | AppCommand::Quit => {
             CommandCategory::Application
         }
-        AppCommand::Copy
-        | AppCommand::Paste
-        | AppCommand::Terminal(TerminalAction::SelectAll) => CommandCategory::Clipboard,
+        AppCommand::Copy | AppCommand::Paste | AppCommand::Terminal(TerminalAction::SelectAll) => {
+            CommandCategory::Clipboard
+        }
         AppCommand::Terminal(TerminalAction::Clear)
         | AppCommand::Terminal(TerminalAction::ClearScrollback)
         | AppCommand::FontSize(_) => CommandCategory::View,
@@ -356,9 +356,9 @@ pub(crate) fn keybind_symbols(chord: &str) -> String {
 /// upper-cased; named tokens map to their macOS glyph or short label.
 fn keybind_key_symbol(token: &str) -> String {
     match token {
-        "arrowup" | "up" => "\u{2191}".to_string(),    // ↑
-        "arrowdown" | "down" => "\u{2193}".to_string(), // ↓
-        "arrowleft" | "left" => "\u{2190}".to_string(), // ←
+        "arrowup" | "up" => "\u{2191}".to_string(),       // ↑
+        "arrowdown" | "down" => "\u{2193}".to_string(),   // ↓
+        "arrowleft" | "left" => "\u{2190}".to_string(),   // ←
         "arrowright" | "right" => "\u{2192}".to_string(), // →
         "pageup" => "PgUp".to_string(),
         "pagedown" => "PgDn".to_string(),
@@ -657,9 +657,13 @@ mod tests {
 
         // Equal-scoring prefix matches keep registry order (Split Right before
         // Split Down); the scattered "Toggle Split Zoom" ranks below both.
-        let right = commands.iter().position(|c| *c == AppCommand::NewSplitRight);
+        let right = commands
+            .iter()
+            .position(|c| *c == AppCommand::NewSplitRight);
         let down = commands.iter().position(|c| *c == AppCommand::NewSplitDown);
-        let zoom = commands.iter().position(|c| *c == AppCommand::ToggleSplitZoom);
+        let zoom = commands
+            .iter()
+            .position(|c| *c == AppCommand::ToggleSplitZoom);
         assert!(right < down);
         assert!(down < zoom);
 
@@ -740,7 +744,10 @@ mod tests {
         // an entry after each move.
         for _ in 0..palette.items().len() {
             assert!(
-                matches!(palette.items()[palette.selected()], PaletteItem::Entry { .. }),
+                matches!(
+                    palette.items()[palette.selected()],
+                    PaletteItem::Entry { .. }
+                ),
                 "selection never rests on a header"
             );
             palette.move_down();
@@ -766,7 +773,10 @@ mod tests {
             .iter()
             .position(|m| m.command == AppCommand::Search(SearchAction::FindNext));
         assert!(find < find_next, "Find… ranks above Find Next");
-        assert_eq!(matches.first().map(|m| m.command), find.map(|_| AppCommand::Search(SearchAction::Find)));
+        assert_eq!(
+            matches.first().map(|m| m.command),
+            find.map(|_| AppCommand::Search(SearchAction::Find))
+        );
     }
 
     #[test]
@@ -785,8 +795,14 @@ mod tests {
     #[test]
     fn category_assignment_is_stable_for_representative_commands() {
         // F: a handful of representative bindings land in the expected section.
-        assert_eq!(command_category(AppCommand::About), CommandCategory::Application);
-        assert_eq!(command_category(AppCommand::Copy), CommandCategory::Clipboard);
+        assert_eq!(
+            command_category(AppCommand::About),
+            CommandCategory::Application
+        );
+        assert_eq!(
+            command_category(AppCommand::Copy),
+            CommandCategory::Clipboard
+        );
         assert_eq!(
             command_category(AppCommand::FontSize(FontSizeAction::Increase)),
             CommandCategory::View
@@ -802,7 +818,10 @@ mod tests {
         );
         // Grouped view: headers appear in ORDER and precede their entries.
         let items = build_grouped_items();
-        assert!(matches!(items.first(), Some(PaletteItem::Header(CommandCategory::Application))));
+        assert!(matches!(
+            items.first(),
+            Some(PaletteItem::Header(CommandCategory::Application))
+        ));
     }
 
     #[test]
@@ -812,7 +831,10 @@ mod tests {
         assert_eq!(keybind_symbols("cmd+c"), "\u{2318}C");
         assert_eq!(keybind_symbols("cmd+plus"), "\u{2318}+");
         assert_eq!(keybind_symbols("cmd+arrowup"), "\u{2318}\u{2191}");
-        assert_eq!(keybind_symbols("shift+cmd+ctrl+alt+k"), "\u{2303}\u{2325}\u{21e7}\u{2318}K");
+        assert_eq!(
+            keybind_symbols("shift+cmd+ctrl+alt+k"),
+            "\u{2303}\u{2325}\u{21e7}\u{2318}K"
+        );
         assert_eq!(keybind_symbols("pageup"), "PgUp");
         assert_eq!(keybind_symbols("cmd+enter"), "\u{2318}\u{23ce}");
     }

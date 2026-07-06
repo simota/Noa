@@ -287,4 +287,3 @@ pub(super) use palette::{
     draw_scrollbar_thumbs, draw_toast_card,
 };
 pub(super) use render::draw_sidebar_band;
-

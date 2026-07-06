@@ -492,7 +492,10 @@ mod tests {
         assert_eq!((image.width, image.height), (1, 1));
         assert_eq!(&*image.rgba, &[10, 20, 30, 255]);
         assert_eq!(image.fit, noa_render::BackgroundImageFit::Cover);
-        assert_eq!(image.position, noa_render::BackgroundImagePosition::TopRight);
+        assert_eq!(
+            image.position,
+            noa_render::BackgroundImagePosition::TopRight
+        );
         assert!(image.repeat);
         assert_eq!(image.opacity, 1.0);
     }

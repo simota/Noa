@@ -16,9 +16,7 @@
 
 pub use crate::split_tree::{Point, Rect as SidebarRect};
 
-use crate::session_store::{
-    IconKind, SessionCard, SessionCardId, WallClock, format_relative_time,
-};
+use crate::session_store::{IconKind, SessionCard, SessionCardId, WallClock, format_relative_time};
 
 // All the `SIDEBAR_*`/`CARD_*` metrics below are the design values at scale
 // 1.0, tuned for the sidebar's dedicated small font (≈11.5pt), so cards read
@@ -395,10 +393,9 @@ impl SidebarMetrics {
 
         // Per-card `…` button, in content space (same math as `card_rects`).
         let card_top = index as u32 * self.card_stride;
-        let menu_x = vp
-            .w
-            .saturating_sub(self.s(CARD_PAD))
-            .saturating_sub(self.s(CARD_MENU_W));
+        let menu_x =
+            vp.w.saturating_sub(self.s(CARD_PAD))
+                .saturating_sub(self.s(CARD_MENU_W));
         let menu = SidebarRect::new(
             menu_x,
             card_top + self.s(6),
@@ -587,10 +584,13 @@ pub fn card_lines(card: &SessionCard, now: WallClock, home: Option<&str>) -> Car
     let branch = card.branch.clone().unwrap_or_default();
     // The detected foreground process name; when unavailable (non-macOS, or not
     // yet polled) fall back to the shell state so the row is never blank.
-    let process = card
-        .process
-        .clone()
-        .unwrap_or_else(|| if card.busy { "running".to_string() } else { "idle".to_string() });
+    let process = card.process.clone().unwrap_or_else(|| {
+        if card.busy {
+            "running".to_string()
+        } else {
+            "idle".to_string()
+        }
+    });
     let updated = format_relative_time(now, card.updated_at);
 
     CardLines {
@@ -721,7 +721,9 @@ fn truncate_tail(s: &str, max: usize) -> String {
 pub fn format_cwd(cwd: &str, home: Option<&str>, max: usize) -> String {
     let abbreviated = match home {
         Some(home) if !home.is_empty() && cwd == home => "~".to_string(),
-        Some(home) if !home.is_empty() && cwd.starts_with(home) && cwd[home.len()..].starts_with('/') => {
+        Some(home)
+            if !home.is_empty() && cwd.starts_with(home) && cwd[home.len()..].starts_with('/') =>
+        {
             format!("~{}", &cwd[home.len()..])
         }
         _ => cwd.to_string(),
@@ -784,11 +786,7 @@ pub fn is_sidebar_eligible(is_quick_terminal: bool) -> bool {
 /// regardless of visibility (AC-16a). PR3 applies this at the resize call site
 /// only; `pane_bounds_for_size` itself stays untouched (Omen P1).
 pub fn sidebar_inset(visible: bool, eligible: bool, width_px: f32) -> f32 {
-    if visible && eligible {
-        width_px
-    } else {
-        0.0
-    }
+    if visible && eligible { width_px } else { 0.0 }
 }
 
 #[cfg(test)]
@@ -864,7 +862,12 @@ mod tests {
     fn six_id_bounds() -> (SidebarRect, Vec<SessionCardId>) {
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
         (
-            SidebarRect::new(0, 0, 360, SIDEBAR_HEADER_H + SIDEBAR_TOOLBAR_H + 3 * SIDEBAR_CARD_STRIDE),
+            SidebarRect::new(
+                0,
+                0,
+                360,
+                SIDEBAR_HEADER_H + SIDEBAR_TOOLBAR_H + 3 * SIDEBAR_CARD_STRIDE,
+            ),
             ids,
         )
     }
@@ -893,7 +896,10 @@ mod tests {
         assert_eq!(lines.branch, "main");
 
         // updated-time matches the pure PR1 formatter.
-        assert_eq!(lines.updated, format_relative_time(wall(10, 3), wall(10, 0)));
+        assert_eq!(
+            lines.updated,
+            format_relative_time(wall(10, 3), wall(10, 0))
+        );
         assert_eq!(lines.updated, "3分前");
 
         // The running-process row shows the detected foreground process.
@@ -927,9 +933,18 @@ mod tests {
         }
 
         // The display name replaces the raw process for known agents.
-        assert_eq!(agent_display_name(classify_agent("claude"), "claude"), "Claude Code");
-        assert_eq!(agent_display_name(classify_agent("codex"), "codex"), "Codex");
-        assert_eq!(agent_display_name(classify_agent("gemini"), "gemini"), "agy");
+        assert_eq!(
+            agent_display_name(classify_agent("claude"), "claude"),
+            "Claude Code"
+        );
+        assert_eq!(
+            agent_display_name(classify_agent("codex"), "codex"),
+            "Codex"
+        );
+        assert_eq!(
+            agent_display_name(classify_agent("gemini"), "gemini"),
+            "agy"
+        );
         assert_eq!(agent_display_name(classify_agent("zsh"), "zsh"), "zsh");
     }
 
@@ -1199,7 +1214,10 @@ mod tests {
         );
 
         // The last card is NOT reachable while scrolled to the top.
-        assert_eq!(m1().hit_test(bounds, &ids, 0, bottom_pt), Some(SidebarHit::Card(ids[2])));
+        assert_eq!(
+            m1().hit_test(bounds, &ids, 0, bottom_pt),
+            Some(SidebarHit::Card(ids[2]))
+        );
     }
 
     // AC-20 (NFR-4, FR-15): the layout stacks cards, skips fully-scrolled-out
@@ -1449,7 +1467,10 @@ mod tests {
         assert_eq!(sidebar_inset(true, is_sidebar_eligible(true), width), 0.0);
         assert_eq!(sidebar_inset(false, is_sidebar_eligible(true), width), 0.0);
         // Eligible window: inset only when visible.
-        assert_eq!(sidebar_inset(true, is_sidebar_eligible(false), width), width);
+        assert_eq!(
+            sidebar_inset(true, is_sidebar_eligible(false), width),
+            width
+        );
         assert_eq!(sidebar_inset(false, is_sidebar_eligible(false), width), 0.0);
     }
 

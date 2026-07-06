@@ -376,7 +376,10 @@ pub fn title_bar_row_ansi(
     let badge_text = badge.map(|n| format!("{n} ")).unwrap_or_default();
     let badge_len = badge_text.chars().count();
     // Clip the label to the space left of the badge so the glyph never moves.
-    let label: String = label.chars().take(field.saturating_sub(badge_len)).collect();
+    let label: String = label
+        .chars()
+        .take(field.saturating_sub(badge_len))
+        .collect();
     let vis_len = badge_len + label.chars().count();
     let pad = (field.saturating_sub(vis_len)) / 2;
 
@@ -399,7 +402,9 @@ pub fn title_bar_row_ansi(
     };
     if !dot_seg.is_empty() {
         // `dot_color` is Some by construction of `dot_seg`.
-        out.push_str(&ansi_fg(dot_color.unwrap_or(crate::chrome::palette().dot_red)));
+        out.push_str(&ansi_fg(
+            dot_color.unwrap_or(crate::chrome::palette().dot_red),
+        ));
         out.push_str(dot_seg);
         out.push_str(RESET_FG);
     }
@@ -415,7 +420,9 @@ pub fn title_bar_row_ansi(
             .map(|start| (start, start + query.len()))
     };
     match match_range {
-        Some((start, end)) if end <= rest.len() && rest.is_char_boundary(start) && rest.is_char_boundary(end) => {
+        Some((start, end))
+            if end <= rest.len() && rest.is_char_boundary(start) && rest.is_char_boundary(end) =>
+        {
             out.push_str(&rest[..start]);
             out.push_str("\x1b[1m");
             out.push_str(&accent);
@@ -443,8 +450,12 @@ pub fn overview_zoom_rect(grid_bounds: TileRect, tile: TileRect) -> TileRect {
     if grid_bounds.w == 0 || grid_bounds.h == 0 {
         return grid_bounds;
     }
-    let w = ((tile.w as f32 * ZOOM_SCALE).round() as u32).min(grid_bounds.w).max(1);
-    let h = ((tile.h as f32 * ZOOM_SCALE).round() as u32).min(grid_bounds.h).max(1);
+    let w = ((tile.w as f32 * ZOOM_SCALE).round() as u32)
+        .min(grid_bounds.w)
+        .max(1);
+    let h = ((tile.h as f32 * ZOOM_SCALE).round() as u32)
+        .min(grid_bounds.h)
+        .max(1);
     TileRect::new(
         grid_bounds.x + (grid_bounds.w - w) / 2,
         grid_bounds.y + (grid_bounds.h - h) / 2,

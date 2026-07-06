@@ -20,10 +20,7 @@ impl App {
             return;
         };
 
-        apply_terminal_action(
-            &mut terminal.lock(),
-            action,
-        );
+        apply_terminal_action(&mut terminal.lock(), action);
 
         if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();
@@ -214,7 +211,11 @@ impl App {
     /// Apply a [`SearchPromptEffect`] to the prompt's target terminal and
     /// redraw. No-op if `window_id` no longer matches the open prompt (the
     /// prompt closed between the keypress and this call).
-    pub(super) fn apply_search_prompt_effect(&mut self, window_id: WindowId, effect: SearchPromptEffect) {
+    pub(super) fn apply_search_prompt_effect(
+        &mut self,
+        window_id: WindowId,
+        effect: SearchPromptEffect,
+    ) {
         let Some(pane_id) = self
             .search_prompt
             .as_ref()
@@ -258,9 +259,7 @@ impl App {
                 .and_then(|state| state.surfaces.get(&session.pane_id))
                 .map(|surface| surface.terminal.clone())
         {
-            terminal
-                .lock()
-                .clear_search();
+            terminal.lock().clear_search();
         }
         if let Some(state) = self.windows.get(&session.window_id) {
             state.window.request_redraw();
@@ -446,7 +445,11 @@ impl App {
         split_resize_drag_target_at_point(&state.split_tree, bounds, point)
     }
 
-    pub(super) fn drag_active_split(&mut self, window_id: WindowId, point: split_tree::Point) -> bool {
+    pub(super) fn drag_active_split(
+        &mut self,
+        window_id: WindowId,
+        point: split_tree::Point,
+    ) -> bool {
         let window = {
             let Some(state) = self.windows.get_mut(&window_id) else {
                 return false;
@@ -478,12 +481,7 @@ impl App {
             .windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
-            .and_then(|surface| {
-                surface
-                    .terminal
-                    .lock()
-                    .selected_text()
-            });
+            .and_then(|surface| surface.terminal.lock().selected_text());
         let Some(selected_text) = selected_text else {
             return;
         };
@@ -545,20 +543,19 @@ impl App {
         self.windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
-            .map(|surface| {
-                surface
-                    .terminal
-                    .lock()
-                    .modes
-                    .bracketed_paste()
-            })
+            .map(|surface| surface.terminal.lock().modes.bracketed_paste())
             .unwrap_or(false)
     }
 
     /// Read the system clipboard and write its OSC 52 base64 reply to the
     /// pane's pty. The reply travels the same route as DA/DSR reports — into
     /// the pty so the requesting program reads it on its input.
-    pub(super) fn fulfill_clipboard_read(&mut self, window_id: WindowId, pane_id: PaneId, target: &str) {
+    pub(super) fn fulfill_clipboard_read(
+        &mut self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        target: &str,
+    ) {
         let text = match self.clipboard.get_text() {
             Ok(text) => text,
             Err(err) => {
@@ -572,7 +569,12 @@ impl App {
 
     /// Raise a confirmation dialog before revealing the clipboard to a program
     /// over OSC 52 (`clipboard-read = ask`).
-    pub(super) fn prompt_clipboard_read(&mut self, window_id: WindowId, pane_id: PaneId, target: String) {
+    pub(super) fn prompt_clipboard_read(
+        &mut self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        target: String,
+    ) {
         self.open_confirm_dialog(
             window_id,
             "Send clipboard contents to the terminal?".to_string(),
@@ -586,7 +588,12 @@ impl App {
 
     /// Open the single app-wide confirmation dialog bound to `window_id`. Any
     /// existing dialog is replaced (the newest request wins).
-    pub(super) fn open_confirm_dialog(&mut self, window_id: WindowId, message: String, action: ConfirmAction) {
+    pub(super) fn open_confirm_dialog(
+        &mut self,
+        window_id: WindowId,
+        message: String,
+        action: ConfirmAction,
+    ) {
         self.confirm_dialog = Some(ConfirmDialogSession {
             window_id,
             message,
@@ -621,7 +628,11 @@ impl App {
         self.request_window_redraw(window_id);
     }
 
-    pub(super) fn run_confirm_action(&mut self, event_loop: &ActiveEventLoop, action: ConfirmAction) {
+    pub(super) fn run_confirm_action(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        action: ConfirmAction,
+    ) {
         match action {
             ConfirmAction::Paste {
                 window_id,
@@ -717,7 +728,12 @@ impl App {
         }
     }
 
-    pub(super) fn write_pane_pty_bytes_lossless(&self, window_id: WindowId, pane_id: PaneId, bytes: &[u8]) {
+    pub(super) fn write_pane_pty_bytes_lossless(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        bytes: &[u8],
+    ) {
         let Some(surface) = self
             .windows
             .get(&window_id)
@@ -739,7 +755,10 @@ impl App {
         }
     }
 
-    pub(super) fn resolve_pane_command_target(&self, command: AppCommand) -> Option<(WindowId, PaneId)> {
+    pub(super) fn resolve_pane_command_target(
+        &self,
+        command: AppCommand,
+    ) -> Option<(WindowId, PaneId)> {
         let window_id = resolve_command_target(command, self.focused)?;
         let state = self.windows.get(&window_id)?;
         let pane_id = split_tree::resolve_pane_command_target(command, Some(state.focused_pane))?;

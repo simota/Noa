@@ -288,7 +288,11 @@ impl CardPipeline {
         },
     };
 
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, blend: wgpu::BlendState) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        blend: wgpu::BlendState,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("noa-overview-card-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/card.wgsl").into()),

@@ -3,7 +3,6 @@
 use super::*;
 
 impl Screen {
-
     /// Resize the grid to `cols`×`rows`, reflowing soft-wrapped logical lines,
     /// clamping the cursor, and resetting the scroll region to full-screen. On
     /// row-shrink, rows below the cursor are dropped first; if the cursor would

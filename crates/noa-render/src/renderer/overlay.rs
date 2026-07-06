@@ -245,7 +245,13 @@ pub(super) fn append_command_palette_instances(
     if let Some(slot) = query_fg.get_mut(1) {
         *slot = accent;
     }
-    let caret_col = 1 + 2 + if query_is_empty { 0 } else { palette.query.chars().count() };
+    let caret_col = 1
+        + 2
+        + if query_is_empty {
+            0
+        } else {
+            palette.query.chars().count()
+        };
     if let Some(slot) = query_fg.get_mut(caret_col) {
         *slot = accent;
     }
@@ -268,7 +274,15 @@ pub(super) fn append_command_palette_instances(
         }
     }
     emit_palette_row(
-        instances, font, metrics, x0, y0, surface_bg, &query_text, &query_fg, &query_bold,
+        instances,
+        font,
+        metrics,
+        x0,
+        y0,
+        surface_bg,
+        &query_text,
+        &query_fg,
+        &query_bold,
     );
 
     // Hairline rule under the query row, separating it from the list (G).
@@ -342,9 +356,7 @@ pub(super) fn append_command_palette_instances(
                             }
                         }
                     }
-                    emit_palette_row(
-                        instances, font, metrics, x0, y, row_bg, &text, &fg, &bold,
-                    );
+                    emit_palette_row(instances, font, metrics, x0, y, row_bg, &text, &fg, &bold);
                     if selected {
                         // A 2px accent bar at the row's left edge (D).
                         let cell_h = metrics.cell_h.round().max(1.0) as u16;
@@ -429,7 +441,9 @@ pub fn command_palette_layout(
         .filter(|row| matches!(row, PaletteRow::Entry { .. }))
         .count();
     let counter_cols = if shown_entries < palette.total_entries {
-        format!("{shown_entries}/{}", palette.total_entries).chars().count()
+        format!("{shown_entries}/{}", palette.total_entries)
+            .chars()
+            .count()
     } else {
         0
     };
@@ -439,7 +453,12 @@ pub fn command_palette_layout(
     } else {
         palette.query.chars().count()
     };
-    let query_w = query_left_cols + if counter_cols > 0 { 2 + counter_cols } else { 0 };
+    let query_w = query_left_cols
+        + if counter_cols > 0 {
+            2 + counter_cols
+        } else {
+            0
+        };
 
     let row_width = |row: &PaletteRow| match row {
         PaletteRow::Header { label } => label.chars().count(),
@@ -463,10 +482,7 @@ pub fn command_palette_layout(
     // stable while typing. The same formula is self-consistent when re-run on
     // the app's block-sized mini grid (`cols == block_w`): the `cols - 2`
     // clamp reproduces exactly the outer `inner`.
-    let inner = content_w
-        .max(query_w)
-        .max(PALETTE_MIN_INNER)
-        .min(cols - 2);
+    let inner = content_w.max(query_w).max(PALETTE_MIN_INNER).min(cols - 2);
     let block_w = inner + 2;
     let height = 1 + shown + usize::from(show_empty);
     let x0 = (cols - block_w) / 2;
@@ -553,12 +569,18 @@ fn palette_segment_cells(
                 }
             }
             2 => {
-                cells.push(SegmentCell { ch, ..blank(color, bold) });
+                cells.push(SegmentCell {
+                    ch,
+                    ..blank(color, bold)
+                });
                 cells.push(blank(color, bold));
                 col += 2;
             }
             _ => {
-                cells.push(SegmentCell { ch, ..blank(color, bold) });
+                cells.push(SegmentCell {
+                    ch,
+                    ..blank(color, bold)
+                });
                 col += 1;
             }
         }
@@ -605,10 +627,21 @@ pub(super) fn append_confirm_dialog_instances(
             surface_bg,
             surface_fg,
         ),
-        OverlayRow::uniform(palette_line(&dialog.hint, None, inner), surface_bg, muted_fg),
+        OverlayRow::uniform(
+            palette_line(&dialog.hint, None, inner),
+            surface_bg,
+            muted_fg,
+        ),
     ];
     for (i, row) in rows.iter().enumerate() {
-        append_overlay_row(instances, font, metrics, layout.x0, layout.y0 + i as u16, row);
+        append_overlay_row(
+            instances,
+            font,
+            metrics,
+            layout.x0,
+            layout.y0 + i as u16,
+            row,
+        );
     }
 }
 
@@ -682,7 +715,6 @@ impl OverlayRow {
             fg: vec![fg; cols],
         }
     }
-
 }
 
 /// Emit one overlay row's background rects (`block_w` cells wide, from `row`'s

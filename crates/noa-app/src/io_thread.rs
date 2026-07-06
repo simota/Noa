@@ -793,7 +793,9 @@ mod tests {
             &test_sidebar_publish(false),
             &mut last_sidebar_publish,
         );
-        let light = off.sidebar_upsert.expect("hidden first feed still publishes");
+        let light = off
+            .sidebar_upsert
+            .expect("hidden first feed still publishes");
         assert!(light.preview.is_none());
         assert!(!off.sidebar_bell);
         assert!(last_sidebar_publish.is_some());
@@ -935,7 +937,11 @@ mod tests {
         // paint was.
         assert!(!output.synchronized_output);
         assert_eq!(
-            decide_redraw(output.synchronized_output, Some(Instant::now()), Instant::now()),
+            decide_redraw(
+                output.synchronized_output,
+                Some(Instant::now()),
+                Instant::now()
+            ),
             RedrawDecision::Now
         );
     }

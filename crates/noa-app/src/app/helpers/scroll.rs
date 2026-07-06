@@ -2,7 +2,6 @@
 
 use super::*;
 
-
 pub(crate) fn apply_terminal_action(terminal: &mut Terminal, action: TerminalAction) {
     match action {
         TerminalAction::Clear => terminal.clear_active_display_and_scrollback(),

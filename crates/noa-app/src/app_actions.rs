@@ -133,8 +133,7 @@ fn show_about_macos() {
         if let Some(bundle_class) = AnyClass::get(c"NSBundle") {
             let bundle: *mut AnyObject = msg_send![bundle_class, mainBundle];
             if !bundle.is_null() {
-                let resource_path: Option<Retained<NSString>> =
-                    msg_send![bundle, resourcePath];
+                let resource_path: Option<Retained<NSString>> = msg_send![bundle, resourcePath];
                 if let Some(resource_path) = resource_path {
                     candidates.push(PathBuf::from(resource_path.to_string()).join("noa.icns"));
                 }
@@ -174,7 +173,10 @@ fn ensure_config_file(path: &Path) {
     if let Some(parent) = path.parent()
         && let Err(err) = std::fs::create_dir_all(parent)
     {
-        log::warn!("failed to create config directory {}: {err}", parent.display());
+        log::warn!(
+            "failed to create config directory {}: {err}",
+            parent.display()
+        );
         return;
     }
     if let Err(err) = std::fs::write(path, CONFIG_TEMPLATE) {

@@ -21,8 +21,13 @@ pub enum SelectionGesture {
     None,
     /// A fresh left press: clear the selection and pin the drag anchor at
     /// `anchor` (viewport cell at press time).
-    Clear { anchor: Point },
-    Extend { anchor: Point, focus: Point },
+    Clear {
+        anchor: Point,
+    },
+    Extend {
+        anchor: Point,
+        focus: Point,
+    },
     SelectWord(Point),
     SelectLine(Point),
 }

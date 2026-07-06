@@ -2,7 +2,6 @@
 
 use super::*;
 
-
 pub(crate) fn pane_bounds_for_size(size: PhysicalSize<u32>) -> PaneRectApp {
     PaneRectApp::new(0, 0, size.width, size.height)
 }
@@ -17,12 +16,7 @@ pub(crate) fn sidebar_inset_bounds(bounds: PaneRectApp, inset: u32) -> PaneRectA
         return bounds;
     }
     let inset = inset.min(bounds.w);
-    PaneRectApp::new(
-        bounds.x + inset,
-        bounds.y,
-        bounds.w - inset,
-        bounds.h,
-    )
+    PaneRectApp::new(bounds.x + inset, bounds.y, bounds.w - inset, bounds.h)
 }
 
 pub(crate) fn can_split_rect(rect: PaneRectApp, orientation: SplitOrientation) -> bool {

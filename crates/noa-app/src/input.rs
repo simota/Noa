@@ -1387,7 +1387,9 @@ mod tests {
         mods: ModifiersState,
         flags: u8,
     ) -> Option<Vec<u8>> {
-        encode_key_with_modes(logical, None, None, text, mods, true, false, false, flags, true, false)
+        encode_key_with_modes(
+            logical, None, None, text, mods, true, false, false, flags, true, false,
+        )
     }
 
     #[test]
@@ -1721,12 +1723,16 @@ mod tests {
         ];
         for (logical, text, mods) in cases {
             assert!(
-                encode_key_with_modes(&logical, None, None, text, mods, true, false, false, 0, true, false)
-                    .is_some(),
+                encode_key_with_modes(
+                    &logical, None, None, text, mods, true, false, false, 0, true, false
+                )
+                .is_some(),
                 "press {logical:?} should still send"
             );
             assert_eq!(
-                encode_key_with_modes(&logical, None, None, text, mods, true, false, false, 0, false, false),
+                encode_key_with_modes(
+                    &logical, None, None, text, mods, true, false, false, 0, false, false
+                ),
                 None,
                 "release {logical:?} should send nothing"
             );

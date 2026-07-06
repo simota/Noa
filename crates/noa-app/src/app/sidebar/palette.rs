@@ -239,7 +239,11 @@ fn composite_modal_card(
 
 /// The interior padding (px) and padded block size (px) for a
 /// `block_cols`x`block_rows` cell block under the current font metrics.
-fn modal_block_geometry(metrics: noa_font::Metrics, cols: u16, rows: u16) -> (GridPadding, PixelSize) {
+fn modal_block_geometry(
+    metrics: noa_font::Metrics,
+    cols: u16,
+    rows: u16,
+) -> (GridPadding, PixelSize) {
     let (cell_w, cell_h) = (metrics.cell_w, metrics.cell_h);
     let pad_x = (PALETTE_CARD_PAD_X_CELLS * cell_w).round();
     let pad_y = (PALETTE_CARD_PAD_Y_CELLS * cell_h).round();

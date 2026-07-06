@@ -173,7 +173,10 @@ impl BranchPollHandle {
         };
         if !join.is_finished() {
             self.join = Some(join);
-            log::warn!("branch-poll thread did not stop within {:?}", Self::JOIN_TIMEOUT);
+            log::warn!(
+                "branch-poll thread did not stop within {:?}",
+                Self::JOIN_TIMEOUT
+            );
             return;
         }
         if let Err(err) = join.join() {

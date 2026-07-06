@@ -703,17 +703,17 @@ impl App {
         let search_texture = self.render_overview_search_texture();
         let hint_texture = self.render_overview_hint_texture(live_count);
         self.ensure_overview_chrome_card_pipeline();
-        let (selected, hovered, zoomed, zoom_anim) = self
-            .overview_window
-            .as_ref()
-            .map_or((0, None, false, None), |overview| {
-                (
-                    overview.selected,
-                    overview.hovered,
-                    overview.zoomed,
-                    overview.zoom_anim,
-                )
-            });
+        let (selected, hovered, zoomed, zoom_anim) =
+            self.overview_window
+                .as_ref()
+                .map_or((0, None, false, None), |overview| {
+                    (
+                        overview.selected,
+                        overview.hovered,
+                        overview.zoomed,
+                        overview.zoom_anim,
+                    )
+                });
         // The quick-look zoom eases between the tile's grid rect (factor 0)
         // and its enlarged centered rect (factor 1); a finished expand holds
         // at 1, a finished collapse at 0.
@@ -906,10 +906,11 @@ impl App {
                 && let Some(tile_view) = thumbnails.tile_texture_view(selected)
             {
                 let target = overview_zoom_rect(bounds, *rect);
-                let lerp_dim =
-                    |a: u32, b: u32| crate::anim::lerp(a as f32, b as f32, zoom_factor)
+                let lerp_dim = |a: u32, b: u32| {
+                    crate::anim::lerp(a as f32, b as f32, zoom_factor)
                         .round()
-                        .max(0.0) as u32;
+                        .max(0.0) as u32
+                };
                 chrome_card.pipeline.overlay_texture_cards(
                     &gpu.device,
                     &gpu.queue,

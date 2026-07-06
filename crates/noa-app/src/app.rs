@@ -64,8 +64,8 @@ use crate::tab_overview::{
     overview_focus_ring_color, overview_hint_bar_rect, overview_hint_bar_text,
     overview_initial_selection, overview_key_action, overview_placeholder_source_ids,
     overview_search_field_rect, overview_search_field_row, overview_tab_filter,
-    overview_tile_labels, overview_title_bar_color, overview_zoom_rect,
-    sanitize_placeholder_label, select_due_overview_tile_ids, title_bar_row_ansi,
+    overview_tile_labels, overview_title_bar_color, overview_zoom_rect, sanitize_placeholder_label,
+    select_due_overview_tile_ids, title_bar_row_ansi,
 };
 use crate::{AppCommand, ViewportScroll};
 

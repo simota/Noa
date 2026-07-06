@@ -43,7 +43,10 @@ impl Tween {
 
     /// Eased (`ease_out_cubic`) progress in `0.0..=1.0` at `now`.
     pub fn progress(&self, now: Instant) -> f32 {
-        ease_out_cubic(linear_progress(now.duration_since(self.start), self.duration))
+        ease_out_cubic(linear_progress(
+            now.duration_since(self.start),
+            self.duration,
+        ))
     }
 
     /// Whether the tween has run its full duration at `now`.

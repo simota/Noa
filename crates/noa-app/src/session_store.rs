@@ -343,7 +343,10 @@ impl SessionStore {
     /// is in `windows` (per-window sidebar, spec `sidebar-per-window-sessions`
     /// R1/R3/R6): the relative order (attention float → window_id → pane_id) is
     /// preserved because it's derived from the same sort, just filtered after.
-    pub fn ordered_ids_for_windows(&self, windows: &HashSet<SessionWindowId>) -> Vec<SessionCardId> {
+    pub fn ordered_ids_for_windows(
+        &self,
+        windows: &HashSet<SessionWindowId>,
+    ) -> Vec<SessionCardId> {
         self.ordered_ids()
             .into_iter()
             .filter(|id| windows.contains(&id.window_id))
@@ -596,11 +599,7 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let mp = (5 * doy + 2) / 153; // [0, 11]
     let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    (
-        (if m <= 2 { y + 1 } else { y }) as i32,
-        m as u32,
-        d as u32,
-    )
+    ((if m <= 2 { y + 1 } else { y }) as i32, m as u32, d as u32)
 }
 
 /// Break a count of seconds-since-the-Unix-epoch into calendar [`WallClock`]
@@ -627,8 +626,8 @@ pub fn civil_from_unix_secs(secs: i64) -> WallClock {
 /// - yesterday: `昨日 HH:MM`
 /// - older: `M月D日`
 pub fn format_relative_time(now: WallClock, updated: WallClock) -> String {
-    let day_diff =
-        days_from_civil(now.year, now.month, now.day) - days_from_civil(updated.year, updated.month, updated.day);
+    let day_diff = days_from_civil(now.year, now.month, now.day)
+        - days_from_civil(updated.year, updated.month, updated.day);
 
     if day_diff <= 0 {
         // Same day (day_diff < 0 would be clock skew; treat as "just now").
@@ -797,7 +796,11 @@ mod tests {
         assert_eq!(store.tombstone_order.len(), TOMBSTONE_CAP);
         // The oldest-retired ids were evicted; the most recent CAP survive.
         assert!(!store.tombstones.contains_key(&card_id(1, 0)));
-        assert!(store.tombstones.contains_key(&card_id(1, (total - 1) as u64)));
+        assert!(
+            store
+                .tombstones
+                .contains_key(&card_id(1, (total - 1) as u64))
+        );
     }
 
     // Recreating a removed id un-tombstones it in both the map and the order
@@ -928,18 +931,36 @@ mod tests {
         // Unix epoch.
         assert_eq!(
             civil_from_unix_secs(0),
-            WallClock { year: 1970, month: 1, day: 1, hour: 0, minute: 0 }
+            WallClock {
+                year: 1970,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0
+            }
         );
         // 2026-07-05 23:47:12 UTC → 1751759232.
         let secs = (days_from_civil(2026, 7, 5) * 86_400) + 23 * 3600 + 47 * 60 + 12;
         assert_eq!(
             civil_from_unix_secs(secs),
-            WallClock { year: 2026, month: 7, day: 5, hour: 23, minute: 47 }
+            WallClock {
+                year: 2026,
+                month: 7,
+                day: 5,
+                hour: 23,
+                minute: 47
+            }
         );
         // A negative offset (before the epoch) still decomposes correctly.
         assert_eq!(
             civil_from_unix_secs(-1),
-            WallClock { year: 1969, month: 12, day: 31, hour: 23, minute: 59 }
+            WallClock {
+                year: 1969,
+                month: 12,
+                day: 31,
+                hour: 23,
+                minute: 59
+            }
         );
     }
 
@@ -1063,10 +1084,7 @@ mod tests {
         );
         // Removing the manually-placed head drops it from the sequence.
         store.apply(SessionDelta::Remove { id: card_id(1, 2) });
-        assert_eq!(
-            store.ordered_ids(),
-            vec![card_id(1, 1), card_id(1, 3)]
-        );
+        assert_eq!(store.ordered_ids(), vec![card_id(1, 1), card_id(1, 3)]);
         assert!(!store.manual_order.contains(&card_id(1, 2)));
     }
 
@@ -1091,8 +1109,9 @@ mod tests {
         store.apply(upsert(card_id(2, 1), 1, "b"));
         store.apply(upsert(card_id(3, 1), 1, "c"));
 
-        let windows: HashSet<SessionWindowId> =
-            [SessionWindowId(1), SessionWindowId(2)].into_iter().collect();
+        let windows: HashSet<SessionWindowId> = [SessionWindowId(1), SessionWindowId(2)]
+            .into_iter()
+            .collect();
         assert_eq!(
             store.ordered_ids_for_windows(&windows),
             vec![card_id(1, 1), card_id(2, 1)]
@@ -1109,8 +1128,9 @@ mod tests {
         store.apply(upsert(card_id(1, 1), 1, "a1"));
         store.apply(SessionDelta::Attention { id: card_id(2, 1) });
 
-        let windows: HashSet<SessionWindowId> =
-            [SessionWindowId(1), SessionWindowId(2)].into_iter().collect();
+        let windows: HashSet<SessionWindowId> = [SessionWindowId(1), SessionWindowId(2)]
+            .into_iter()
+            .collect();
         assert_eq!(
             store.ordered_ids_for_windows(&windows),
             vec![card_id(2, 1), card_id(1, 1), card_id(1, 3)]

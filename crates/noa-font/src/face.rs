@@ -202,10 +202,12 @@ pub fn list_families() -> Result<Vec<String>, FontError> {
     Ok(families)
 }
 
-/// Discover a monospace system font and load its raw bytes.
+/// Discover the default coding font and load its raw bytes.
 ///
-/// Tries `select_best_match(Monospace)` first, then falls back to `Menlo`
-/// (the macOS default terminal face).
+/// On macOS, prefer `Menlo` first: it is the standard terminal/coding face and
+/// the rest of `load_font_stack` still adds emoji, Nerd Font, CJK, and CoreText
+/// cascade fallbacks for multibyte coverage. Other platforms keep the generic
+/// monospace lookup, with `Menlo` retained as a compatibility fallback.
 pub fn load_monospace() -> Result<FontData, FontError> {
     let source = SystemSource::new();
     load_monospace_from_source(&source)
@@ -213,16 +215,16 @@ pub fn load_monospace() -> Result<FontData, FontError> {
 
 fn load_monospace_from_source(source: &SystemSource) -> Result<FontData, FontError> {
     let properties = properties_for_style(FontStyle::Regular);
-    let handle = source
-        .select_best_match(&[FamilyName::Monospace], &properties)
-        .or_else(|_| select_title_best_match(source, "Menlo", &properties))
-        .map_err(|_| FontError::NoFont)?;
-
-    handle_to_data(handle)
+    load_default_monospace_family(source, &properties, Some(FontStyle::Regular))
+        .or_else(|| load_generic_monospace_family(source, &properties, Some(FontStyle::Regular)))
+        .or_else(|| {
+            load_menlo_compatibility_fallback(source, &properties, Some(FontStyle::Regular))
+        })
+        .ok_or(FontError::NoFont)
 }
 
 /// Discover the font stack described by `font_cfg`, falling back to the
-/// system monospace / Menlo discovery (see [`load_monospace`]) when
+/// platform default coding font (see [`load_monospace`]) when
 /// `font_cfg.families` is empty or none of the configured families resolve.
 ///
 /// Configured regular/bold/italic families are resolved with font-kit's CSS
@@ -322,17 +324,71 @@ fn load_system_style_primary(
     properties: &Properties,
     style: FontStyle,
 ) -> Option<FontData> {
-    source
+    load_default_monospace_family(source, properties, Some(style))
+        .or_else(|| load_generic_monospace_family(source, properties, Some(style)))
+        .or_else(|| load_menlo_compatibility_fallback(source, properties, Some(style)))
+}
+
+#[cfg(target_os = "macos")]
+fn default_monospace_family_names() -> &'static [&'static str] {
+    &["Menlo"]
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_monospace_family_names() -> &'static [&'static str] {
+    &[]
+}
+
+fn load_default_monospace_family(
+    source: &SystemSource,
+    properties: &Properties,
+    required_style: Option<FontStyle>,
+) -> Option<FontData> {
+    default_monospace_family_names()
+        .iter()
+        .find_map(|family_name| load_title_family(source, family_name, properties, required_style))
+}
+
+fn load_generic_monospace_family(
+    source: &SystemSource,
+    properties: &Properties,
+    required_style: Option<FontStyle>,
+) -> Option<FontData> {
+    let handle = source
         .select_best_match(&[FamilyName::Monospace], properties)
-        .ok()
-        .filter(|handle| handle_supports_style(handle, style))
-        .and_then(load_valid_handle)
-        .or_else(|| {
-            select_title_best_match(source, "Menlo", properties)
-                .ok()
-                .filter(|handle| handle_supports_style(handle, style))
-                .and_then(load_valid_handle)
-        })
+        .ok()?;
+    if let Some(style) = required_style
+        && !handle_supports_style(&handle, style)
+    {
+        return None;
+    }
+    load_valid_handle(handle)
+}
+
+fn load_menlo_compatibility_fallback(
+    source: &SystemSource,
+    properties: &Properties,
+    required_style: Option<FontStyle>,
+) -> Option<FontData> {
+    if default_monospace_family_names().contains(&"Menlo") {
+        return None;
+    }
+    load_title_family(source, "Menlo", properties, required_style)
+}
+
+fn load_title_family(
+    source: &SystemSource,
+    family_name: &str,
+    properties: &Properties,
+    required_style: Option<FontStyle>,
+) -> Option<FontData> {
+    let handle = select_title_best_match(source, family_name, properties).ok()?;
+    if let Some(style) = required_style
+        && !handle_supports_style(&handle, style)
+    {
+        return None;
+    }
+    load_valid_handle(handle)
 }
 
 fn load_first_matching_family(
@@ -761,6 +817,46 @@ mod tests {
         assert!(
             nerd_font_family_priority("Hack Nerd Font Mono")
                 < nerd_font_family_priority("Hack Nerd Font Propo")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_default_monospace_candidate_is_menlo() {
+        assert_eq!(default_monospace_family_names(), &["Menlo"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn load_monospace_prefers_menlo_on_macos_when_available() {
+        let source = SystemSource::new();
+        let Ok(menlo_family) = source.select_family_by_name("Menlo") else {
+            eprintln!("skipping: Menlo is not available in this environment");
+            return;
+        };
+        let menlo_faces = menlo_family
+            .fonts()
+            .iter()
+            .filter_map(|handle| load_valid_handle(handle.clone()))
+            .collect::<Vec<_>>();
+        if menlo_faces.is_empty() {
+            eprintln!("skipping: Menlo has no loadable faces in this environment");
+            return;
+        }
+
+        let actual = match load_monospace_from_source(&source) {
+            Ok(actual) => actual,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+
+        assert!(
+            menlo_faces
+                .iter()
+                .any(|candidate| font_data_matches(&actual, candidate)),
+            "empty font config should prefer macOS' standard coding font, Menlo"
         );
     }
 

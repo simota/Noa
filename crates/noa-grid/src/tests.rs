@@ -1453,6 +1453,56 @@ fn osc52_read_reply_base64_encodes_the_clipboard_text() {
 }
 
 #[test]
+fn osc52_primary_and_secondary_targets_map_to_the_clipboard() {
+    // macOS has one system clipboard; `p`/`s` writes land there instead of
+    // being silently dropped (Ghostty's fallback behavior).
+    let mut t = run(b"\x1b]52;p;aGVsbG8=\x07");
+    assert_eq!(t.take_pending_clipboard_writes(), vec!["hello".to_string()]);
+
+    // A `p` query queues a read echoing the requested target.
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.osc52_policy.allow_read = true;
+    let mut s = Stream::new();
+    s.feed(b"\x1b]52;p;?\x07", &mut t);
+    assert_eq!(t.take_pending_clipboard_reads(), vec!["p".to_string()]);
+
+    // A target without any known selection char is still ignored.
+    let mut t = run(b"\x1b]52;q;aGVsbG8=\x07");
+    assert!(t.take_pending_clipboard_writes().is_empty());
+}
+
+#[test]
+fn osc52_write_accepts_unpadded_base64() {
+    // "hi" -> "aGk" without the trailing `=`.
+    let mut t = run(b"\x1b]52;c;aGk\x07");
+    assert_eq!(t.take_pending_clipboard_writes(), vec!["hi".to_string()]);
+
+    // "hello" -> "aGVsbG8" without padding.
+    let mut t = run(b"\x1b]52;c;aGVsbG8\x07");
+    assert_eq!(t.take_pending_clipboard_writes(), vec!["hello".to_string()]);
+
+    // A single leftover symbol can never encode a byte: still rejected.
+    let mut t = run(b"\x1b]52;c;aGkA1\x07");
+    assert!(t.take_pending_clipboard_writes().is_empty());
+}
+
+#[test]
+fn osc52_default_limit_accepts_multi_kilobyte_payloads() {
+    // A 64 KiB payload (well past the old 3 KiB cap) decodes and queues.
+    let raw = vec![b'x'; 64 * 1024];
+    let mut encoded = Vec::new();
+    crate::osc::encode_base64(&raw, &mut encoded);
+    let mut seq = b"\x1b]52;c;".to_vec();
+    seq.extend_from_slice(&encoded);
+    seq.push(0x07);
+
+    let mut t = run(&seq);
+    let writes = t.take_pending_clipboard_writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].len(), 64 * 1024);
+}
+
+#[test]
 fn osc52_policy_can_disable_writes_and_limit_payloads() {
     let mut t = Terminal::new(GridSize::new(80, 24));
     t.osc52_policy.allow_write = false;

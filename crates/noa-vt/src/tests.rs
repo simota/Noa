@@ -302,8 +302,9 @@ fn osc133_prompt_mark_payload_captured() {
 
 #[test]
 fn osc_payload_over_limit_is_dropped() {
+    // One byte past the 12 MiB cap (sized for OSC 52 clipboard payloads).
     let mut bytes = b"\x1b]0;".to_vec();
-    bytes.extend(std::iter::repeat_n(b'a', 4097));
+    bytes.extend(std::iter::repeat_n(b'a', 12 * (1 << 20) + 1));
     bytes.push(0x07);
 
     let acts = actions(&bytes);

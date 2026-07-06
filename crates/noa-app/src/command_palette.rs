@@ -84,6 +84,11 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ToggleQuickTerminal => "Toggle Quick Terminal",
         AppCommand::ToggleSecureKeyboardEntry => "Toggle Secure Keyboard Entry",
         AppCommand::ToggleSidebar => "Toggle Sidebar",
+        // Deviation: the locked spec's literal label is Japanese
+        // ("テーマ・設定を開く"), but every existing palette title is English
+        // (this whole `match`) — following that established convention
+        // instead of the spec's literal text.
+        AppCommand::OpenThemeSettings => "Open Theme & Settings\u{2026}",
     }
 }
 
@@ -98,6 +103,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
     const ENTRIES: &[AppCommand] = &[
         AppCommand::About,
         AppCommand::Preferences,
+        AppCommand::OpenThemeSettings,
         AppCommand::Copy,
         AppCommand::Paste,
         AppCommand::Terminal(TerminalAction::Clear),
@@ -283,9 +289,10 @@ impl CommandCategory {
 /// compile here until it is filed under a section.
 pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
     match command {
-        AppCommand::About | AppCommand::Preferences | AppCommand::Quit => {
-            CommandCategory::Application
-        }
+        AppCommand::About
+        | AppCommand::Preferences
+        | AppCommand::OpenThemeSettings
+        | AppCommand::Quit => CommandCategory::Application,
         AppCommand::Copy | AppCommand::Paste | AppCommand::Terminal(TerminalAction::SelectAll) => {
             CommandCategory::Clipboard
         }
@@ -550,6 +557,7 @@ mod tests {
         let mut commands = vec![
             AppCommand::About,
             AppCommand::Preferences,
+            AppCommand::OpenThemeSettings,
             AppCommand::Copy,
             AppCommand::Paste,
             AppCommand::Terminal(TerminalAction::Clear),

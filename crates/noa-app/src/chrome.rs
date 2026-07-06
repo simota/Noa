@@ -126,24 +126,47 @@ pub const CHROME_LIGHT: ChromePalette = ChromePalette {
     dot_red: Rgb::new(0xe0, 0x31, 0x31),
 };
 
-/// The chrome polarity chosen from the resolved terminal theme, set once at
-/// GPU/theme init (before any chrome surface draws). The theme itself is
-/// startup-fixed, so a `OnceLock` matches its lifetime; a second call (a
-/// second window reusing the shared GPU) is a no-op.
-static ACTIVE_PALETTE: std::sync::OnceLock<ChromePalette> = std::sync::OnceLock::new();
+/// The chrome polarity chosen from the resolved terminal theme, set at
+/// GPU/theme init (before any chrome surface draws) and swappable afterward
+/// so a runtime theme change (theme-settings-ui R-13) can replace it in
+/// place. `parking_lot::RwLock` (not `std::sync::RwLock`) so callers never
+/// have to reason about lock poisoning, matching the rest of the crate.
+static ACTIVE_PALETTE: parking_lot::RwLock<Option<ChromePalette>> = parking_lot::RwLock::new(None);
 
-/// Select light or dark chrome from the terminal theme's polarity.
+/// Select light or dark chrome from the terminal theme's polarity. The first
+/// call initializes the active palette; every later call (a theme-settings
+/// confirm swapping in a newly resolved theme, or a second window reusing
+/// the shared GPU) now replaces it rather than no-op'ing — see
+/// [`swap_palette`] to install an already-built [`ChromePalette`] directly.
 pub fn select_palette(theme_is_light: bool) {
-    let _ = ACTIVE_PALETTE.set(if theme_is_light {
+    swap_palette(if theme_is_light {
         CHROME_LIGHT
     } else {
         CHROME_DARK
     });
 }
 
-/// The active chrome palette (dark until [`select_palette`] runs).
-pub fn palette() -> &'static ChromePalette {
-    ACTIVE_PALETTE.get().unwrap_or(&CHROME_DARK)
+/// Replace the active chrome palette in place (theme-settings-ui R-13's
+/// chrome swap). Every reader observes the new value on its next [`palette`]
+/// call; no GPU/renderer state lives here, so this alone never needs a
+/// texture rebuild (that is [`super::state::ChromeTextures::reset`]'s job).
+pub fn swap_palette(new: ChromePalette) {
+    *ACTIVE_PALETTE.write() = Some(new);
+}
+
+/// The active chrome palette (dark until [`select_palette`]/[`swap_palette`]
+/// runs), returned by value.
+///
+/// **Deadlock hazard**: this copies the palette out and drops the read guard
+/// before returning specifically so no caller can be tempted to hold onto a
+/// `&ChromePalette` across another call into this module — `ChromePalette`
+/// is `Copy`, so there is never a reason to borrow it instead of copying it.
+/// A caller that held the old `&'static` reference across a nested
+/// `palette()` call would have deadlocked the instant `palette()` started
+/// taking a lock; returning an owned copy makes that class of bug
+/// unrepresentable.
+pub fn palette() -> ChromePalette {
+    ACTIVE_PALETTE.read().unwrap_or(CHROME_DARK)
 }
 
 /// Convert a chrome `Rgb` to straight display-space RGBA. The overview and
@@ -187,5 +210,47 @@ mod tests {
                 "chrome.rs must not reference `{forbidden}`"
             );
         }
+    }
+
+    // `ACTIVE_PALETTE` is a shared process-wide static; cargo runs tests in
+    // parallel by default, so any test that swaps it must serialize against
+    // every other such test or their swap+assert sequences interleave and
+    // become flaky.
+    static PALETTE_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    // AC-9: swapping the active palette is visible to the next read, with no
+    // `GpuState`/GPU involved at all.
+    #[test]
+    fn swap_palette_is_visible_to_next_read() {
+        let _guard = PALETTE_TEST_LOCK.lock();
+        swap_palette(CHROME_DARK);
+        assert_eq!(palette(), CHROME_DARK);
+        swap_palette(CHROME_LIGHT);
+        assert_eq!(palette(), CHROME_LIGHT);
+        // Leave the shared static in its default polarity for any other test
+        // in this process that reads it via `palette()`.
+        swap_palette(CHROME_DARK);
+    }
+
+    // Deadlock regression: `palette()` must copy the value out and drop its
+    // read guard before returning, so a caller can safely call `palette()`
+    // again from inside a closure that already "holds" a previous read
+    // (i.e. holds the copied value, not a guard). Before this change,
+    // `palette()` returned `&'static ChromePalette` borrowed from the lock;
+    // a swappable lock behind that same signature would have deadlocked here
+    // the moment `swap_palette` needed exclusive access while a read guard
+    // was still alive across the nested call.
+    #[test]
+    fn nested_read_does_not_deadlock() {
+        let _guard = PALETTE_TEST_LOCK.lock();
+        swap_palette(CHROME_DARK);
+        let outer = palette();
+        // `outer` is an owned copy, not a guard, so this nested read (and a
+        // concurrent write, if one raced in) cannot block on `outer`.
+        let inner = palette();
+        assert_eq!(outer, inner);
+        swap_palette(CHROME_LIGHT);
+        assert_eq!(palette(), CHROME_LIGHT);
+        swap_palette(CHROME_DARK);
     }
 }

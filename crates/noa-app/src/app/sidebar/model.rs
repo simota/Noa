@@ -56,7 +56,7 @@ impl App {
         // fully-visible card (FR-2). Partially-scrolled cards stay flat.
         let now = sidebar_wall_clock_now();
         let home = std::env::var("HOME").ok();
-        let palette = &gpu.theme.palette;
+        let palette = &active_theme(&gpu.theme, &gpu.preview_theme).palette;
         let mut cards: Vec<SidebarCardDraw> = Vec::new();
         // Cards are inset from the sidebar edges, so their texture (and cell
         // grid) is the margin-narrowed card width, not the full sidebar inset.

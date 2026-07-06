@@ -52,7 +52,7 @@ fn session_delta_should_apply(
 /// the terminal theme at startup) so the sidebar and the tab overview stay
 /// visually unified. The card faces double as the toolbar `+` button's hover
 /// fill, and `fg`/`dim_fg` as its glyph rest/hover tones.
-fn chrome() -> &'static crate::chrome::ChromePalette {
+fn chrome() -> crate::chrome::ChromePalette {
     crate::chrome::palette()
 }
 
@@ -287,6 +287,6 @@ mod state;
 
 pub(super) use palette::{
     ScrollThumb, draw_bell_flash, draw_command_palette_card, draw_confirm_dialog_card,
-    draw_scrollbar_thumbs, draw_toast_card,
+    draw_scrollbar_thumbs, draw_theme_settings_card, draw_toast_card,
 };
 pub(super) use render::draw_sidebar_band;

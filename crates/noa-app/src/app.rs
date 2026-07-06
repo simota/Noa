@@ -90,6 +90,7 @@ use config::{
     resolve_grid_padding,
 };
 use helpers::*;
+use input_ops::ActiveOverlay;
 #[cfg(test)]
 use quick_terminal::{
     ease_out_cubic, quick_terminal_height, quick_terminal_progress,
@@ -176,6 +177,10 @@ pub struct App {
     /// The open command palette (`cmd+shift+p`), if any — see
     /// [`CommandPaletteSession`].
     command_palette: Option<CommandPaletteSession>,
+    /// The open theme-settings overlay (theme-settings-ui R-1), if any — see
+    /// [`ThemeSettingsSession`]. Mutually exclusive with `command_palette`
+    /// and `search_prompt` (R-3, `App::active_overlay`).
+    theme_settings: Option<ThemeSettingsSession>,
     /// The open confirmation dialog (paste protection / clipboard-read), if
     /// any — see [`ConfirmDialogSession`].
     confirm_dialog: Option<ConfirmDialogSession>,
@@ -295,6 +300,7 @@ impl App {
             hovered_link: None,
             search_prompt: None,
             command_palette: None,
+            theme_settings: None,
             confirm_dialog: None,
             sidebar_rename: None,
             modal_preedit: None,
@@ -392,6 +398,14 @@ impl App {
                     .push_str(self.modal_preedit_for(window_id, ModalImeTarget::CommandPalette));
                 (snapshot, session.opened_at)
             });
+        // Same for the theme-settings overlay: its own modal card, mutually
+        // exclusive with the palette (R-3) so only one of the two is ever
+        // `Some` here.
+        let theme_settings_card = self
+            .theme_settings
+            .as_ref()
+            .filter(|session| session.window_id == window_id)
+            .map(|session| (session.state.clone(), session.opened_at));
         // Same for the confirm dialog: composited as its own modal card after
         // the panes (and above the palette — it blocks input), not inline in
         // the pane cell pass.
@@ -503,9 +517,11 @@ impl App {
                 snapshot,
             })
             .collect::<Vec<_>>();
-        state
-            .renderer
-            .rebuild_panes(&panes, &mut gpu.font, &gpu.theme);
+        state.renderer.rebuild_panes(
+            &panes,
+            &mut gpu.font,
+            active_theme(&gpu.theme, &gpu.preview_theme),
+        );
         state
             .renderer
             .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
@@ -593,6 +609,36 @@ impl App {
                 &view,
                 surface_size,
                 palette,
+                render_pane_rect(*rect),
+                snapshot.cols,
+                snapshot.rows_n,
+                padding,
+                state.window.scale_factor() as f32,
+                fade.progress(now),
+            );
+            if !fade.done(now) {
+                state.window.request_redraw();
+            }
+        }
+        // The theme-settings overlay composites at the same tier as the
+        // palette (mutually exclusive with it, R-3) — same fade-in.
+        if let Some((theme_settings, opened_at)) = theme_settings_card.as_ref()
+            && let Some((_, rect, snapshot)) = snapshots
+                .iter()
+                .find(|(pane_id, _, _)| *pane_id == state.focused_pane)
+        {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            let fade = crate::anim::Tween::new(*opened_at, crate::anim::DUR_FAST);
+            let now = Instant::now();
+            sidebar::draw_theme_settings_card(
+                gpu,
+                state.surface_config.format,
+                &view,
+                surface_size,
+                theme_settings,
                 render_pane_rect(*rect),
                 snapshot.cols,
                 snapshot.rows_n,
@@ -745,6 +791,7 @@ impl App {
             AppCommand::Search(action) => self.handle_search_action(action),
             AppCommand::ScrollViewport(scroll) => self.scroll_viewport(scroll),
             AppCommand::ToggleCommandPalette => self.toggle_command_palette(),
+            AppCommand::OpenThemeSettings => self.open_theme_settings(),
             AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             AppCommand::ToggleSecureKeyboardEntry => self.toggle_secure_keyboard_entry(),
             AppCommand::ToggleSidebar => self.toggle_sidebar(),
@@ -760,7 +807,9 @@ impl App {
     fn toggle_command_palette(&mut self) {
         if self.command_palette.is_some() {
             self.command_palette = None;
-        } else if let Some(window_id) = self.focused {
+        } else if let Some(window_id) = self.focused
+            && self.active_overlay(window_id) == ActiveOverlay::None
+        {
             self.command_palette = Some(CommandPaletteSession {
                 window_id,
                 palette: CommandPalette::open(),
@@ -952,22 +1001,12 @@ impl App {
                     crate::chrome::select_palette(theme.is_light());
                     theme
                 },
-                sidebar_renderer: None,
-                sidebar_card: None,
-                sidebar_band_card: None,
-                sidebar_band: None,
-                sidebar_card_tex: None,
-                sidebar_menu_tex: None,
-                sidebar_button_tex: None,
-                sidebar_divider_tex: None,
-                sidebar_drop_tex: None,
+                preview_theme: None,
+                chrome_textures: ChromeTextures::default(),
                 palette_renderer: None,
                 palette_card: None,
-                palette_scratch: None,
                 palette_padding: noa_core::GridPadding::ZERO,
                 palette_scrim: None,
-                scrollbar_tex: None,
-                bell_flash_tex: None,
             });
             surface
         } else {
@@ -1172,6 +1211,9 @@ impl App {
             self.config.clipboard_read != noa_config::ClipboardAccess::Deny;
         terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
         if let Some(gpu) = self.gpu.as_ref() {
+            // Deliberately `gpu.theme` directly, not the `active_theme()`
+            // resolver: a live theme preview must never reach a `Terminal`'s
+            // `TerminalColors` (AC-2, spec L2 "Terminal生成箇所には手を入れない").
             terminal.set_base_colors(
                 gpu.theme.default_fg,
                 gpu.theme.default_bg,
@@ -1310,6 +1352,20 @@ impl App {
             .is_some_and(|session| session.window_id == window_id)
         {
             self.command_palette = None;
+        }
+        // Same leak shape as the palette: a theme-settings overlay bound to
+        // the closed window would strand a dead-window reference. Drop the
+        // preview along with it — nothing else can clear it once its owning
+        // window is gone.
+        if self
+            .theme_settings
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.theme_settings = None;
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.preview_theme = None;
+            }
         }
         // Same leak shape as the palette: a confirm dialog bound to the closed
         // window could deliver no keys (not even Escape), stranding a modal.

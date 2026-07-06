@@ -33,6 +33,11 @@ pub enum AppCommand {
     ToggleQuickTerminal,
     ToggleSecureKeyboardEntry,
     ToggleSidebar,
+    /// Open the theme-settings overlay (theme-settings-ui R-1). Reachable
+    /// only from the command palette — deliberately unbound in
+    /// [`KeybindEngine::default`], so it carries no menu id either (mirrors
+    /// `SelectTab`'s `menu_id() -> ""`).
+    OpenThemeSettings,
 }
 
 /// Terminal-state commands handled by noa instead of sending escape bytes.
@@ -174,6 +179,7 @@ impl AppCommand {
             AppCommand::ToggleTabOverview => Self::TOGGLE_TAB_OVERVIEW_MENU_ID,
             AppCommand::CloseTab => Self::CLOSE_TAB_MENU_ID,
             AppCommand::SelectTab(_) => "",
+            AppCommand::OpenThemeSettings => "",
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
             AppCommand::CloseWindow => Self::CLOSE_WINDOW_MENU_ID,
@@ -318,6 +324,7 @@ impl AppCommand {
             Self::ToggleQuickTerminal => "quick-terminal.toggle",
             Self::ToggleSecureKeyboardEntry => "secure-keyboard-entry.toggle",
             Self::ToggleSidebar => "sidebar.toggle",
+            Self::OpenThemeSettings => "theme-settings.open",
         }
     }
 
@@ -378,6 +385,7 @@ impl AppCommand {
             "quick-terminal.toggle" => Some(Self::ToggleQuickTerminal),
             "secure-keyboard-entry.toggle" => Some(Self::ToggleSecureKeyboardEntry),
             "sidebar.toggle" => Some(Self::ToggleSidebar),
+            "theme-settings.open" => Some(Self::OpenThemeSettings),
             _ => None,
         }
     }
@@ -1215,6 +1223,7 @@ mod tests {
             AppCommand::PrevTab,
             AppCommand::CloseWindow,
             AppCommand::Quit,
+            AppCommand::OpenThemeSettings,
         ] {
             assert_eq!(
                 AppCommand::from_action_name(command.action_name()),

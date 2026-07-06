@@ -205,6 +205,26 @@ impl App {
         next
     }
 
+    /// Poll the open theme-settings overlay's font-size debouncer (R-9): if
+    /// a burst has settled, apply it via the real runtime-font-size path and
+    /// report the next wake-up only while something is still pending — an
+    /// idle overlay (no font-size edits) never re-arms this tick at all
+    /// (NFR-2: no busy-polling).
+    pub(super) fn tick_theme_settings_debounce(&mut self) -> Option<Instant> {
+        let session = self.theme_settings.as_mut()?;
+        let now = Instant::now();
+        if let Some(value) = session.state.poll_font_size(now) {
+            let window_id = session.window_id;
+            self.apply_runtime_font_size(window_id, value);
+        }
+        self.theme_settings.as_ref().and_then(|session| {
+            session
+                .state
+                .font_size_debounce_pending()
+                .then_some(now + Duration::from_millis(30))
+        })
+    }
+
     /// Wake the Session Overview once the earliest throttle-blocked dirty tile
     /// becomes due.
     pub(super) fn tick_overview_backlog(&mut self) -> Option<Instant> {

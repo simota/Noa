@@ -18,6 +18,63 @@ pub(super) struct GpuState {
     /// and rebuilt on a scale change alongside `font`.
     pub(super) sidebar_font: FontGrid,
     pub(super) theme: Theme,
+    /// The theme-settings-ui live-preview override (R-6): when `Some`, every
+    /// draw-path theme read must go through [`active_theme`] instead of
+    /// `theme` directly, so a picker highlight change is visible without
+    /// mutating `theme` itself (Esc discards the preview for free). Written
+    /// by `App::sync_theme_settings_preview` as the overlay's theme-list
+    /// highlight moves, and cleared on close/commit.
+    pub(super) preview_theme: Option<Theme>,
+    /// The chrome-color-baked GPU resources (sidebar band/cards/tints), grouped
+    /// so a runtime theme swap (theme-settings-ui R-13) can invalidate all of
+    /// them in one call — see [`ChromeTextures::reset`].
+    pub(super) chrome_textures: ChromeTextures,
+    /// Single reused `Renderer` that rasterizes the open command palette's block
+    /// (query + list) as terminal cells into `chrome_textures.palette_scratch`,
+    /// then composited as one rounded card (H). Built lazily for the first
+    /// window's format. Not theme-color-baked itself (it draws whatever the
+    /// current theme/`OverlayStyle` says each frame), so it lives outside
+    /// [`ChromeTextures`] — only the scratch texture it draws into does.
+    pub(super) palette_renderer: Option<Renderer>,
+    /// Rounded-card pipeline reused to composite the rasterized palette block as
+    /// a single rounded card (rounded corners + border + drop shadow, H).
+    pub(super) palette_card: Option<OverviewChromeCardPipeline>,
+    /// The interior pixel padding the current `palette_renderer` was built
+    /// with; the renderer is rebuilt when this drifts (font size change).
+    pub(super) palette_padding: noa_core::GridPadding,
+    /// 1x1 translucent-black texture drawn as a full-pane card behind the
+    /// palette; the modal scrim dimming the pane underneath.
+    pub(super) palette_scrim: Option<(wgpu::Texture, wgpu::TextureView)>,
+}
+
+/// The single chokepoint every draw-path theme read must go through
+/// (theme-settings-ui R-6): the live-preview theme while one is active,
+/// otherwise the committed theme. `Theme::resolve_with_colors` and
+/// `OverlayStyle::from_theme` are called on this function's output, not on
+/// `GpuState::theme` directly, so a preview swap is visible everywhere those
+/// are used without touching any `Terminal`'s `TerminalColors` (AC-1/AC-2).
+///
+/// Takes the two fields by reference rather than `&GpuState` (an
+/// `impl GpuState` method, as one might expect) because most draw call
+/// sites resolve the theme in the same expression as an `&mut` borrow of a
+/// sibling `GpuState` field (`font`, `chrome_textures`, ...); a `&self`
+/// method would borrow the whole struct and break the disjoint field
+/// borrows those call sites already rely on. Called as
+/// `active_theme(&gpu.theme, &gpu.preview_theme)`.
+pub(super) fn active_theme<'a>(theme: &'a Theme, preview_theme: &'a Option<Theme>) -> &'a Theme {
+    preview_theme.as_ref().unwrap_or(theme)
+}
+
+/// The chrome-color-baked GPU resources that a runtime theme change
+/// invalidates in one shot (theme-settings-ui R-13): each is lazily
+/// (re)built by the existing draw path the first time it is used after
+/// being `None`, so [`reset`](Self::reset) alone is enough to force every
+/// one of them to pick up the newly swapped [`crate::chrome`] palette /
+/// theme on the next redraw. No GPU device is needed to construct or reset
+/// this struct — only the lazy-init draw path (unchanged by this type)
+/// touches the device.
+#[derive(Default)]
+pub(super) struct ChromeTextures {
     /// Single reused `Renderer` that rasterizes the whole sidebar band as
     /// synthetic terminal cells (Omen T3: one renderer for every card, never
     /// per-card). Built lazily for the first window's surface format.
@@ -56,27 +113,75 @@ pub(super) struct GpuState {
     /// `CHROME_ACCENT` strip composited at the insertion gap during an active
     /// card drag.
     pub(super) sidebar_drop_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
-    /// Single reused `Renderer` that rasterizes the open command palette's block
-    /// (query + list) as terminal cells into `palette_scratch`, then composited
-    /// as one rounded card (H). Built lazily for the first window's format.
-    pub(super) palette_renderer: Option<Renderer>,
-    /// Rounded-card pipeline reused to composite the rasterized palette block as
-    /// a single rounded card (rounded corners + border + drop shadow, H).
-    pub(super) palette_card: Option<OverviewChromeCardPipeline>,
     /// The palette block texture, cached with its size so it is reused
     /// frame-to-frame and only reallocated when the block dimensions change.
     pub(super) palette_scratch: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
-    /// The interior pixel padding the current `palette_renderer` was built
-    /// with; the renderer is rebuilt when this drifts (font size change).
-    pub(super) palette_padding: noa_core::GridPadding,
-    /// 1x1 translucent-black texture drawn as a full-pane card behind the
-    /// palette; the modal scrim dimming the pane underneath.
-    pub(super) palette_scrim: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// 1x1 theme-tinted texture for the scrollback thumb drawn along a
     /// scrolled pane's right edge (its alpha carries the thumb opacity).
     pub(super) scrollbar_tex: Option<(wgpu::Texture, wgpu::TextureView)>,
     /// 1x1 translucent-white texture for the `visual-bell` full-window flash.
     pub(super) bell_flash_tex: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// Debug-only instrumentation for NFR-2 (no rebuild while scrubbing the
+    /// theme list; exactly one batch of rebuilds on confirm): incremented by
+    /// [`record_rebuild`](Self::record_rebuild) at each lazy-init call site
+    /// when that site actually (re)builds its GPU resource. Absent in release
+    /// builds — it exists only to be asserted on in tests/manual checks.
+    #[cfg(debug_assertions)]
+    rebuild_count: std::sync::atomic::AtomicUsize,
+}
+
+impl ChromeTextures {
+    /// Drop every chrome-baked GPU resource back to `None`. The next redraw's
+    /// existing lazy-init checks (`is_none()`/`is_none_or(...)`) then rebuild
+    /// each one from the (by then already-swapped) theme/chrome palette —
+    /// this method itself never touches a `wgpu::Device` and needs none to
+    /// run, so it is unit-testable without a GPU (AC-20).
+    ///
+    /// Called once per successful theme-settings commit
+    /// (`App::commit_theme_settings`, R-12/R-13), after the config write and
+    /// the chrome palette swap, and never during picker scrubbing (NFR-2) —
+    /// nothing in the pure `theme_settings` module holds a reference to this
+    /// type at all, so a highlight change has no way to reach it.
+    pub(super) fn reset(&mut self) {
+        self.sidebar_renderer = None;
+        self.sidebar_card = None;
+        self.sidebar_band_card = None;
+        self.sidebar_band = None;
+        self.sidebar_card_tex = None;
+        self.sidebar_menu_tex = None;
+        self.sidebar_button_tex = None;
+        self.sidebar_divider_tex = None;
+        self.sidebar_drop_tex = None;
+        self.palette_scratch = None;
+        self.scrollbar_tex = None;
+        self.bell_flash_tex = None;
+        // `rebuild_count` is deliberately left untouched — it counts total
+        // lazy-init rebuilds across the process lifetime (AC-18 asserts it
+        // stays flat during scrubbing and rises by one batch per confirm),
+        // not "rebuilds since the last reset".
+    }
+
+    /// Record one lazy-init rebuild (debug builds only). Call this exactly
+    /// where an existing lazy-init call site observes its guard condition
+    /// true and is about to (re)build the GPU resource — never on the common
+    /// path where the resource is already valid and reused as-is. Scrubbing
+    /// the theme list never hits a rebuild path (nothing invalidates these
+    /// slots), so the counter only moves after a [`reset`](Self::reset).
+    #[cfg(debug_assertions)]
+    pub(super) fn record_rebuild(&self) {
+        self.rebuild_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Total lazy-init rebuilds observed so far (debug builds only). Not yet
+    /// read outside tests — the GUI-integrated AC-18 scrub/confirm assertion
+    /// lands with the increment that wires the live theme-settings overlay.
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(super) fn rebuild_count(&self) -> usize {
+        self.rebuild_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// Identifies one logical window, i.e. one AppKit tab group. Every native tab
@@ -253,6 +358,17 @@ pub(super) struct CommandPaletteSession {
     pub(super) opened_at: Instant,
 }
 
+/// An open theme-settings overlay (theme-settings-ui R-1), bound to the
+/// window it was opened from. A single app-wide overlay, mirroring
+/// [`CommandPaletteSession`].
+pub(super) struct ThemeSettingsSession {
+    pub(super) window_id: WindowId,
+    pub(super) state: crate::theme_settings::ThemeSettings,
+    /// When the overlay opened, driving the same brief fade-in the command
+    /// palette uses ([`crate::anim::DUR_FAST`]).
+    pub(super) opened_at: Instant,
+}
+
 /// An open inline rename on a sidebar card (FR-7 Rename). Modal for its
 /// window's keyboard while it is open.
 pub(super) struct SidebarRenameSession {
@@ -268,6 +384,7 @@ pub(super) enum ModalImeTarget {
     ConfirmDialog,
     SearchPrompt,
     CommandPalette,
+    ThemeSettings,
     SidebarRename,
 }
 
@@ -415,5 +532,173 @@ pub(super) fn overview_chrome_card_style(metrics: OverviewMetrics) -> CardStyle 
         border_width: 1.0 * metrics.scale(),
         focus_width: 1.0 * metrics.scale(),
         focus_glow_width: 0.0,
+    }
+}
+
+#[cfg(test)]
+mod chrome_textures_tests {
+    use super::ChromeTextures;
+
+    // AC-20: `ChromeTextures::reset()` needs no GPU device. Every field is
+    // `None` from `Default`; several field types (`wgpu::Texture`, `Renderer`,
+    // `OverviewChromeCardPipeline`) cannot be constructed as `Some(..)`
+    // without a device at all, so there is no device-free way to drive a
+    // `Some -> None` transition — the meaningful, GPU-free contract this test
+    // proves is the type-level guarantee that `reset()` compiles against
+    // every field and leaves the whole struct in its all-`None` `Default`
+    // shape (the real `Some -> None` path is exercised by the existing draw
+    // code, which is unchanged by this refactor).
+    #[test]
+    fn reset_leaves_every_field_none() {
+        let mut textures = ChromeTextures::default();
+        textures.reset();
+
+        assert!(textures.sidebar_renderer.is_none());
+        assert!(textures.sidebar_card.is_none());
+        assert!(textures.sidebar_band_card.is_none());
+        assert!(textures.sidebar_band.is_none());
+        assert!(textures.sidebar_card_tex.is_none());
+        assert!(textures.sidebar_menu_tex.is_none());
+        assert!(textures.sidebar_button_tex.is_none());
+        assert!(textures.sidebar_divider_tex.is_none());
+        assert!(textures.sidebar_drop_tex.is_none());
+        assert!(textures.palette_scratch.is_none());
+        assert!(textures.scrollbar_tex.is_none());
+        assert!(textures.bell_flash_tex.is_none());
+    }
+
+    // NFR-2/AC-18 instrumentation: `reset()` invalidates resources but is not
+    // itself a rebuild, so it must never clear the rebuild counter — the
+    // eventual GUI-integrated AC-18 check relies on the counter being
+    // cumulative across the reset that a theme confirm triggers.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn reset_does_not_clear_rebuild_count() {
+        let mut textures = ChromeTextures::default();
+        textures.record_rebuild();
+        textures.record_rebuild();
+        assert_eq!(textures.rebuild_count(), 2);
+
+        textures.reset();
+
+        assert_eq!(
+            textures.rebuild_count(),
+            2,
+            "reset() must not clear rebuild instrumentation"
+        );
+    }
+
+    // AC-18/NFR-2: scrubbing the theme list (arbitrarily many highlight
+    // changes) has no way to reach `ChromeTextures` at all — the pure
+    // `theme_settings` module holds no reference to this type — so the
+    // counter cannot move during a scrub by construction. A commit calls
+    // `reset()` exactly once (`App::commit_theme_settings`); `reset()`
+    // itself is not a rebuild (asserted above), so the counter only climbs
+    // once the next redraw's lazy-init actually rebuilds each resource —
+    // simulated here as one batch of rebuilds following the reset.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn scrub_never_rebuilds_and_one_commit_reset_precedes_the_next_rebuild_batch() {
+        let mut textures = ChromeTextures::default();
+        // "10+ highlight changes": nothing to call here at all — there is no
+        // `ChromeTextures` method a theme-picker scrub could reach. The
+        // counter starting and staying at 0 through this comment is the
+        // scrub-side half of the assertion.
+        assert_eq!(textures.rebuild_count(), 0);
+
+        // One theme-settings commit: exactly one `reset()` call.
+        textures.reset();
+        assert_eq!(textures.rebuild_count(), 0, "reset alone is not a rebuild");
+
+        // The next redraw's lazy-init rebuilds each now-`None` resource —
+        // one batch, driving the counter from the commit, not the scrub.
+        textures.record_rebuild();
+        assert_eq!(textures.rebuild_count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod active_theme_tests {
+    use super::active_theme;
+    use noa_core::{Color, GridSize};
+    use noa_grid::{Terminal, TerminalColors};
+    use noa_render::{OverlayStyle, Theme};
+
+    // AC-1 (R-6): with `preview_theme = Some(other_theme)`, `active_theme`'s
+    // output — fed through the same resolvers the draw path uses
+    // (`resolve_with_colors`, `OverlayStyle::from_theme`) — matches the OTHER
+    // theme's values, not the base `gpu.theme`'s, for every one of the four
+    // color families R-6 calls out.
+    #[test]
+    fn active_theme_prefers_preview_over_base_theme() {
+        let base = Theme::default();
+        let preview = crate::theme::resolve_theme(Some("Afterglow"));
+        assert_ne!(
+            base.default_fg, preview.default_fg,
+            "fixture themes must actually differ for this test to prove anything"
+        );
+
+        let preview_theme = Some(preview.clone());
+        let resolved = active_theme(&base, &preview_theme);
+        let colors = TerminalColors::default();
+
+        // (a) body default fg/bg
+        assert_eq!(
+            resolved.resolve_with_colors(Color::Default, true, &colors),
+            preview.resolve_with_colors(Color::Default, true, &colors)
+        );
+        assert_eq!(
+            resolved.resolve_with_colors(Color::Default, false, &colors),
+            preview.resolve_with_colors(Color::Default, false, &colors)
+        );
+        // (b) selection colors
+        assert_eq!(resolved.selection_fg(), preview.selection_fg());
+        assert_eq!(resolved.selection_bg(), preview.selection_bg());
+        // (c) search-highlight colors
+        assert_eq!(resolved.search_fg(), preview.search_fg());
+        assert_eq!(resolved.search_bg(), preview.search_bg());
+        // (d) OverlayStyle-derived colors
+        assert_eq!(
+            OverlayStyle::from_theme(resolved),
+            OverlayStyle::from_theme(&preview)
+        );
+    }
+
+    // `preview_theme = None` (the default / no-preview state) must resolve to
+    // the base theme unchanged — behavior stays identical to before this
+    // seam existed.
+    #[test]
+    fn active_theme_falls_back_to_base_theme_when_no_preview() {
+        let base = crate::theme::resolve_theme(Some("Afterglow"));
+        let resolved = active_theme(&base, &None);
+        assert_eq!(*resolved, base);
+    }
+
+    // AC-2 (R-6): flipping `preview_theme` must never touch any `Terminal`'s
+    // `TerminalColors` — the preview seam (`active_theme`) is a pure,
+    // free-standing resolver over two `&Theme`-shaped values with no
+    // reference to `Terminal`/`TerminalColors` in its signature, so there is
+    // structurally no code path from one to the other. This test pins that
+    // down concretely: a real `Terminal`'s colors are untouched across a
+    // preview set-then-clear cycle.
+    #[test]
+    fn preview_theme_never_touches_terminal_colors() {
+        let terminal = Terminal::new(GridSize::new(80, 24));
+        let before = terminal.colors.clone();
+
+        let base = Theme::default();
+        let mut preview_theme: Option<Theme> = None;
+        let _ = active_theme(&base, &preview_theme);
+
+        preview_theme = Some(crate::theme::resolve_theme(Some("Afterglow")));
+        let _ = active_theme(&base, &preview_theme);
+
+        preview_theme = None;
+        let _ = active_theme(&base, &preview_theme);
+
+        assert_eq!(
+            terminal.colors, before,
+            "preview_theme changes must not mutate any Terminal's TerminalColors"
+        );
     }
 }

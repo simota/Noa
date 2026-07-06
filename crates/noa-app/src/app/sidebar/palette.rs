@@ -1,7 +1,11 @@
 use noa_render::{OverlayStyle, command_palette_layout, confirm_dialog_layout};
+use std::fmt::Write as _;
 
 use super::render::ensure_scratch;
 use super::*;
+use crate::theme_settings::{
+    RowDraft, Section, SettingsRowKind, Swatch, ThemeSettings, sample_swatches,
+};
 
 /// Corner radius (logical px) of a modal overlay card (H) — the shared
 /// large-card chrome radius.
@@ -67,15 +71,19 @@ fn ensure_card_pipeline(gpu: &mut GpuState, surface_format: wgpu::TextureFormat)
 
 /// Ensure `slot` holds a 1x1 texture of exactly `rgba` (straight, the alpha
 /// carries the overlay's opacity), creating it on first use.
+/// Returns whether it actually built the texture (`false` if `slot` was
+/// already `Some`), so `ChromeTextures` call sites can feed
+/// [`ChromeTextures::record_rebuild`] (NFR-2/AC-18).
+#[must_use]
 fn ensure_tint_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     slot: &mut Option<(wgpu::Texture, wgpu::TextureView)>,
     label: &'static str,
     rgba: [u8; 4],
-) {
+) -> bool {
     if slot.is_some() {
-        return;
+        return false;
     }
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
@@ -112,6 +120,7 @@ fn ensure_tint_texture(
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     *slot = Some((texture, view));
+    true
 }
 
 /// Straight display-space `[f32; 4]` (an [`OverlayStyle`] getter) back to the
@@ -133,7 +142,9 @@ fn ensure_scrim(gpu: &mut GpuState) {
         palette_scrim,
         ..
     } = gpu;
-    ensure_tint_texture(
+    // Not `ChromeTextures`-tracked: the scrim is a flat translucent black at
+    // every theme, so it never needs invalidating on a theme swap.
+    let _ = ensure_tint_texture(
         device,
         queue,
         palette_scrim,
@@ -163,7 +174,7 @@ fn composite_modal_card(
     opacity: f32,
 ) {
     let placement = |selected| CardTexturePlacement {
-        texture_view: &gpu.palette_scratch.as_ref().unwrap().2,
+        texture_view: &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2,
         x,
         y,
         w: block_px.w,
@@ -303,15 +314,20 @@ pub(in crate::app) fn draw_command_palette_card(
     let metrics = gpu.font.metrics();
     let (interior, block_px) = modal_block_geometry(metrics, layout.block_cols, layout.block_rows);
     ensure_overlay_card_gpu(gpu, surface_format, interior);
-    ensure_scratch(
-        &mut gpu.palette_scratch,
+    if ensure_scratch(
+        &mut gpu.chrome_textures.palette_scratch,
         &gpu.device,
         block_px,
         surface_format,
         "noa-command-palette",
-    );
+    ) {
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
+    }
     ensure_scrim(gpu);
-    if gpu.palette_renderer.is_none() || gpu.palette_card.is_none() || gpu.palette_scratch.is_none()
+    if gpu.palette_renderer.is_none()
+        || gpu.palette_card.is_none()
+        || gpu.chrome_textures.palette_scratch.is_none()
     {
         return;
     }
@@ -326,17 +342,21 @@ pub(in crate::app) fn draw_command_palette_card(
         selected: palette.selected.saturating_sub(layout.offset),
         total_entries: palette.total_entries,
     };
-    let style = OverlayStyle::from_theme(&gpu.theme);
+    let style = OverlayStyle::from_theme(active_theme(&gpu.theme, &gpu.preview_theme));
     {
         let mut term = Terminal::new(GridSize::new(layout.block_cols, layout.block_rows));
         let mut snapshot = FrameSnapshot::from_terminal(&mut term);
         snapshot.cursor.visible = false;
         snapshot.command_palette = Some(mini);
-        let scratch_view = &gpu.palette_scratch.as_ref().unwrap().2;
+        let scratch_view = &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2;
         let renderer = gpu.palette_renderer.as_mut().unwrap();
         renderer.resize(block_px);
         renderer.set_clear_color(style.surface_bg());
-        renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        renderer.rebuild_cells(
+            &snapshot,
+            &mut gpu.font,
+            active_theme(&gpu.theme, &gpu.preview_theme),
+        );
         renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
@@ -381,30 +401,39 @@ pub(in crate::app) fn draw_confirm_dialog_card(
     let metrics = gpu.font.metrics();
     let (interior, block_px) = modal_block_geometry(metrics, layout.block_cols, layout.block_rows);
     ensure_overlay_card_gpu(gpu, surface_format, interior);
-    ensure_scratch(
-        &mut gpu.palette_scratch,
+    if ensure_scratch(
+        &mut gpu.chrome_textures.palette_scratch,
         &gpu.device,
         block_px,
         surface_format,
         "noa-command-palette",
-    );
+    ) {
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
+    }
     ensure_scrim(gpu);
-    if gpu.palette_renderer.is_none() || gpu.palette_card.is_none() || gpu.palette_scratch.is_none()
+    if gpu.palette_renderer.is_none()
+        || gpu.palette_card.is_none()
+        || gpu.chrome_textures.palette_scratch.is_none()
     {
         return;
     }
 
-    let style = OverlayStyle::from_theme(&gpu.theme);
+    let style = OverlayStyle::from_theme(active_theme(&gpu.theme, &gpu.preview_theme));
     {
         let mut term = Terminal::new(GridSize::new(layout.block_cols, layout.block_rows));
         let mut snapshot = FrameSnapshot::from_terminal(&mut term);
         snapshot.cursor.visible = false;
         snapshot.confirm_dialog = Some(dialog.clone());
-        let scratch_view = &gpu.palette_scratch.as_ref().unwrap().2;
+        let scratch_view = &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2;
         let renderer = gpu.palette_renderer.as_mut().unwrap();
         renderer.resize(block_px);
         renderer.set_clear_color(style.surface_bg());
-        renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        renderer.rebuild_cells(
+            &snapshot,
+            &mut gpu.font,
+            active_theme(&gpu.theme, &gpu.preview_theme),
+        );
         renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
@@ -444,34 +473,48 @@ pub(in crate::app) fn draw_toast_card(
     let metrics = gpu.font.metrics();
     let (interior, block_px) = modal_block_geometry(metrics, cols, 1);
     ensure_overlay_card_gpu(gpu, surface_format, interior);
-    ensure_scratch(
-        &mut gpu.palette_scratch,
+    if ensure_scratch(
+        &mut gpu.chrome_textures.palette_scratch,
         &gpu.device,
         block_px,
         surface_format,
         "noa-command-palette",
-    );
-    if gpu.palette_renderer.is_none() || gpu.palette_card.is_none() || gpu.palette_scratch.is_none()
+    ) {
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
+    }
+    if gpu.palette_renderer.is_none()
+        || gpu.palette_card.is_none()
+        || gpu.chrome_textures.palette_scratch.is_none()
     {
         return;
     }
 
-    let style = OverlayStyle::from_theme(&gpu.theme);
+    let style = OverlayStyle::from_theme(active_theme(&gpu.theme, &gpu.preview_theme));
     {
         let fg = rgb_from_rgba(style.surface_fg());
         let bg = rgb_from_rgba(style.surface_bg());
         let mut term = Terminal::new(GridSize::new(cols, 1));
-        term.set_base_colors(fg, bg, fg, gpu.theme.palette);
+        term.set_base_colors(
+            fg,
+            bg,
+            fg,
+            active_theme(&gpu.theme, &gpu.preview_theme).palette,
+        );
         let mut stream = Stream::new();
         stream.feed(b"\x1b[?7l", &mut term);
         stream.feed(text.as_bytes(), &mut term);
         let mut snapshot = FrameSnapshot::from_terminal(&mut term);
         snapshot.cursor.visible = false;
-        let scratch_view = &gpu.palette_scratch.as_ref().unwrap().2;
+        let scratch_view = &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2;
         let renderer = gpu.palette_renderer.as_mut().unwrap();
         renderer.resize(block_px);
         renderer.set_clear_color(style.surface_bg());
-        renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        renderer.rebuild_cells(
+            &snapshot,
+            &mut gpu.font,
+            active_theme(&gpu.theme, &gpu.preview_theme),
+        );
         renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
@@ -498,7 +541,7 @@ pub(in crate::app) fn draw_toast_card(
         focus_glow_width: 0.0,
     };
     let placement = |selected| CardTexturePlacement {
-        texture_view: &gpu.palette_scratch.as_ref().unwrap().2,
+        texture_view: &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2,
         x,
         y,
         w: block_px.w,
@@ -522,6 +565,313 @@ pub(in crate::app) fn draw_toast_card(
         &border_style,
         &[placement(false)],
     );
+}
+
+/// Fixed logical size (cols x rows) of the theme-settings overlay's content
+/// grid, clamped down for a small pane. Unlike the command palette (whose
+/// [`command_palette_layout`] sizes to the query/entry count), this overlay's
+/// two-section layout is simplest as a fixed canvas — GUI-visual polish is a
+/// deferred follow-up per the spec's own [GUI目視] acceptance markers on the
+/// rendering-heavy ACs.
+const THEME_SETTINGS_COLS: u16 = 56;
+const THEME_SETTINGS_ROWS: u16 = 24;
+/// Row/column of the left theme-list column and its width, and the sample
+/// pane's starting column, all in the overlay's own logical grid.
+const LIST_COL: u16 = 0;
+const LIST_WIDTH: u16 = 28;
+const SAMPLE_COL: u16 = LIST_WIDTH + 3;
+const LIST_TOP_ROW: u16 = 4;
+const LIST_ROWS: u16 = 8;
+const SETTINGS_TOP_ROW: u16 = LIST_TOP_ROW + LIST_ROWS + 2;
+
+/// Composite the open theme-settings overlay as a rounded modal card
+/// (theme-settings-ui R-2/R-5/R-7), mirroring
+/// [`draw_command_palette_card`]'s texture-raster-then-composite structure.
+/// Unlike the palette, the content is plain ANSI text/colored cells fed
+/// through a synthetic [`Terminal`] (the same technique [`draw_toast_card`]
+/// uses) rather than the palette's specialized `CommandPaletteSnapshot`
+/// path — the two-section layout and the sample pane's color swatches don't
+/// fit that path's shape, and this way needs **no noa-render changes at
+/// all**: cell backgrounds/foregrounds are the renderer's ordinary per-cell
+/// colors, not a new pipeline (pre-mortem CRITICAL constraint).
+#[allow(clippy::too_many_arguments)]
+pub(in crate::app) fn draw_theme_settings_card(
+    gpu: &mut GpuState,
+    surface_format: wgpu::TextureFormat,
+    view: &wgpu::TextureView,
+    surface_size: PixelSize,
+    state: &ThemeSettings,
+    pane_rect: PaneRect,
+    pane_cols: u16,
+    pane_rows: u16,
+    padding: GridPadding,
+    scale: f32,
+    opacity: f32,
+) {
+    let cols = THEME_SETTINGS_COLS.min(pane_cols.saturating_sub(4)).max(20);
+    let rows = THEME_SETTINGS_ROWS.min(pane_rows.saturating_sub(4)).max(10);
+    let metrics = gpu.font.metrics();
+    let (interior, block_px) = modal_block_geometry(metrics, cols, rows);
+    ensure_overlay_card_gpu(gpu, surface_format, interior);
+    if ensure_scratch(
+        &mut gpu.chrome_textures.palette_scratch,
+        &gpu.device,
+        block_px,
+        surface_format,
+        "noa-theme-settings",
+    ) {
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
+    }
+    ensure_scrim(gpu);
+    if gpu.palette_renderer.is_none()
+        || gpu.palette_card.is_none()
+        || gpu.chrome_textures.palette_scratch.is_none()
+    {
+        return;
+    }
+
+    let theme = active_theme(&gpu.theme, &gpu.preview_theme);
+    let style = OverlayStyle::from_theme(theme);
+    {
+        let text = theme_settings_overlay_text(
+            state,
+            cols,
+            rows,
+            rgb_from_rgba(style.muted_fg()),
+            rgb_from_rgba(style.accent()),
+            crate::chrome::palette().dot_red,
+        );
+        let fg = rgb_from_rgba(style.surface_fg());
+        let bg = rgb_from_rgba(style.surface_bg());
+        let mut term = Terminal::new(GridSize::new(cols, rows));
+        term.set_base_colors(fg, bg, fg, theme.palette);
+        let mut stream = Stream::new();
+        stream.feed(text.as_bytes(), &mut term);
+        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+        snapshot.cursor.visible = false;
+        let scratch_view = &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2;
+        let renderer = gpu.palette_renderer.as_mut().unwrap();
+        renderer.resize(block_px);
+        renderer.set_clear_color(style.surface_bg());
+        renderer.rebuild_cells(&snapshot, &mut gpu.font, theme);
+        renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        renderer.draw(&gpu.device, &gpu.queue, scratch_view);
+    }
+
+    let (x, y) = modal_block_origin(pane_rect, padding, metrics, 0, 0, interior);
+    composite_modal_card(
+        gpu,
+        view,
+        surface_size,
+        pane_rect,
+        x,
+        y,
+        block_px,
+        style.border(),
+        scale,
+        opacity,
+    );
+}
+
+fn cup(out: &mut String, row: u16, col: u16) {
+    let _ = write!(out, "\x1b[{};{}H", row + 1, col + 1);
+}
+
+fn sgr_fg(out: &mut String, rgb: Rgb) {
+    let _ = write!(out, "\x1b[38;2;{};{};{}m", rgb.r, rgb.g, rgb.b);
+}
+
+fn sgr_bg(out: &mut String, rgb: Rgb) {
+    let _ = write!(out, "\x1b[48;2;{};{};{}m", rgb.r, rgb.g, rgb.b);
+}
+
+fn sgr_reset(out: &mut String) {
+    out.push_str("\x1b[0m");
+}
+
+/// Render `draft`'s current value as a short display string (E).
+fn format_row_value(draft: &RowDraft) -> String {
+    match draft {
+        RowDraft::FontSize(v) => format!("{v:.1}"),
+        RowDraft::BackgroundOpacity(v) => format!("{v:.2}"),
+        RowDraft::BackgroundBlurRadius(v) => v.to_string(),
+        RowDraft::CursorStyle(shape) => format!("{shape:?}"),
+        RowDraft::FontFamily(name) => name.clone(),
+        RowDraft::WindowPadding(x, y) => format!("{x:.1} x {y:.1}"),
+        RowDraft::MacosTitlebarStyle(style) => format!("{style:?}"),
+    }
+}
+
+/// Build the overlay's whole content as one ANSI-escaped string, fed through
+/// [`Stream::feed`] into a fresh synthetic [`Terminal`] by the caller.
+/// `\x1b[?7l` disables autowrap first (matches [`draw_toast_card`]) so a
+/// too-long value never bleeds onto the next logical row.
+fn theme_settings_overlay_text(
+    state: &ThemeSettings,
+    cols: u16,
+    rows: u16,
+    muted: Rgb,
+    accent: Rgb,
+    danger: Rgb,
+) -> String {
+    let mut out = String::new();
+    out.push_str("\x1b[?7l");
+
+    cup(&mut out, 0, 0);
+    out.push_str("Theme & Settings");
+    if state.badge_visible() {
+        let badge = "Chrome/tabs update on Save";
+        let col = cols.saturating_sub(badge.len() as u16 + 1);
+        cup(&mut out, 0, col);
+        sgr_fg(&mut out, accent);
+        out.push_str(badge);
+        sgr_reset(&mut out);
+    }
+
+    cup(&mut out, LIST_TOP_ROW - 2, LIST_COL);
+    sgr_fg(&mut out, muted);
+    out.push_str(if state.section() == Section::ThemePicker {
+        "Theme (focused)"
+    } else {
+        "Theme"
+    });
+    sgr_reset(&mut out);
+    cup(&mut out, LIST_TOP_ROW - 2, SAMPLE_COL);
+    sgr_fg(&mut out, muted);
+    out.push_str("Sample");
+    sgr_reset(&mut out);
+
+    cup(&mut out, LIST_TOP_ROW - 1, LIST_COL);
+    sgr_fg(&mut out, muted);
+    let _ = write!(out, "/{}", state.filter());
+    sgr_reset(&mut out);
+
+    let list_rows = LIST_ROWS.min(rows.saturating_sub(LIST_TOP_ROW + 1));
+    let total = state.filtered_len();
+    let highlighted = state.highlighted_index();
+    let offset = highlighted
+        .saturating_sub(list_rows as usize / 2)
+        .min(total.saturating_sub(list_rows as usize).max(0));
+    for i in 0..list_rows {
+        let idx = offset + i as usize;
+        let Some((name, _positions)) = state.filtered_entry(idx) else {
+            break;
+        };
+        cup(&mut out, LIST_TOP_ROW + i, LIST_COL);
+        if idx == highlighted && state.section() == Section::ThemePicker {
+            sgr_fg(&mut out, accent);
+            out.push('>');
+        } else {
+            out.push(' ');
+        }
+        out.push(' ');
+        let truncated: String = name
+            .chars()
+            .take(LIST_WIDTH.saturating_sub(2) as usize)
+            .collect();
+        out.push_str(&truncated);
+        sgr_reset(&mut out);
+    }
+
+    if let Some(theme_def) = state.highlighted_theme_name().and_then(noa_theme::resolve) {
+        // `sample_swatches` always pushes in the same fixed order (16 ANSI,
+        // then fg/bg/cursor/selection, then one truecolor sample) — a
+        // semantic swatch's position among just the non-ANSI entries (0..4)
+        // gives its column slot directly, no separate counter needed.
+        let mut semantic_slot = 0u16;
+        for swatch in sample_swatches(theme_def) {
+            match swatch {
+                Swatch::Ansi(index, color) => {
+                    let row = LIST_TOP_ROW + u16::from(index) / 8;
+                    let col = SAMPLE_COL + (u16::from(index) % 8) * 2;
+                    cup(&mut out, row, col);
+                    sgr_bg(&mut out, color);
+                    out.push_str("  ");
+                    sgr_reset(&mut out);
+                }
+                Swatch::Foreground(color)
+                | Swatch::Background(color)
+                | Swatch::Cursor(color)
+                | Swatch::Selection(color) => {
+                    let col = SAMPLE_COL + semantic_slot * 4;
+                    semantic_slot += 1;
+                    cup(&mut out, LIST_TOP_ROW + 2, col);
+                    sgr_bg(&mut out, color);
+                    out.push_str("   ");
+                    sgr_reset(&mut out);
+                }
+                Swatch::Truecolor(_) => {
+                    cup(&mut out, LIST_TOP_ROW + 3, SAMPLE_COL);
+                    for step in 0..16u16 {
+                        let t = f32::from(step) / 15.0;
+                        let span = f32::from(0xe0_u8 - 0x20_u8);
+                        let r = (0x20_u8 as f32 + t * span) as u8;
+                        let b = (0xe0_u8 as f32 - t * span) as u8;
+                        sgr_bg(&mut out, Rgb::new(r, 0x60, b));
+                        out.push(' ');
+                    }
+                    sgr_reset(&mut out);
+                }
+            }
+        }
+    }
+
+    cup(&mut out, SETTINGS_TOP_ROW - 1, LIST_COL);
+    sgr_fg(&mut out, muted);
+    out.push_str(if state.section() == Section::SettingsRows {
+        "Settings (focused)"
+    } else {
+        "Settings"
+    });
+    sgr_reset(&mut out);
+
+    for (i, kind) in SettingsRowKind::ALL.into_iter().enumerate() {
+        let row_y = SETTINGS_TOP_ROW + i as u16;
+        if row_y >= rows {
+            break;
+        }
+        cup(&mut out, row_y, LIST_COL);
+        if i == state.selected_row() && state.section() == Section::SettingsRows {
+            sgr_fg(&mut out, accent);
+            out.push('>');
+        } else {
+            out.push(' ');
+        }
+        out.push(' ');
+        sgr_reset(&mut out);
+        let value = format_row_value(&state.rows()[i].draft);
+        let note = if state.restart_note(kind) {
+            " (restart to apply)"
+        } else {
+            ""
+        };
+        let _ = write!(out, "{:<20}{value}{note}", kind.label());
+    }
+
+    let hint_row = SETTINGS_TOP_ROW + SettingsRowKind::ALL.len() as u16 + 1;
+    if hint_row < rows {
+        cup(&mut out, hint_row, LIST_COL);
+        // A commit error (AC-23) takes over the hint line until the user
+        // either retries (Enter) or backs out (Esc) — the overlay stays
+        // open specifically so this is visible.
+        if let Some(error) = state.commit_error() {
+            sgr_fg(&mut out, danger);
+            let truncated: String = error
+                .chars()
+                .take(cols.saturating_sub(LIST_COL) as usize)
+                .collect();
+            out.push_str(&truncated);
+        } else {
+            sgr_fg(&mut out, muted);
+            out.push_str(
+                "Tab switch section   \u{2191}\u{2193} navigate   \u{2190}\u{2192} adjust   Esc cancel   Enter save",
+            );
+        }
+        sgr_reset(&mut out);
+    }
+
+    out
 }
 
 /// One scrolled pane's scrollbar-thumb input: its screen rect and scroll
@@ -552,26 +902,30 @@ pub(in crate::app) fn draw_scrollbar_thumbs(
         return;
     }
     ensure_card_pipeline(gpu, surface_format);
-    let style = OverlayStyle::from_theme(&gpu.theme);
+    let style = OverlayStyle::from_theme(active_theme(&gpu.theme, &gpu.preview_theme));
     {
         let tint = rgb_from_rgba(style.muted_fg());
         let GpuState {
             device,
             queue,
-            scrollbar_tex,
+            chrome_textures,
             ..
         } = gpu;
-        ensure_tint_texture(
+        if ensure_tint_texture(
             device,
             queue,
-            scrollbar_tex,
+            &mut chrome_textures.scrollbar_tex,
             "noa-scrollbar-thumb",
             [tint.r, tint.g, tint.b, 153], // ~60% opacity
-        );
+        ) {
+            #[cfg(debug_assertions)]
+            chrome_textures.record_rebuild();
+        }
     }
-    let (Some(card), Some((_, thumb_view))) =
-        (gpu.palette_card.as_ref(), gpu.scrollbar_tex.as_ref())
-    else {
+    let (Some(card), Some((_, thumb_view))) = (
+        gpu.palette_card.as_ref(),
+        gpu.chrome_textures.scrollbar_tex.as_ref(),
+    ) else {
         return;
     };
 
@@ -631,20 +985,24 @@ pub(in crate::app) fn draw_bell_flash(
         let GpuState {
             device,
             queue,
-            bell_flash_tex,
+            chrome_textures,
             ..
         } = gpu;
-        ensure_tint_texture(
+        if ensure_tint_texture(
             device,
             queue,
-            bell_flash_tex,
+            &mut chrome_textures.bell_flash_tex,
             "noa-bell-flash",
             [255, 255, 255, 56], // ~22% white wash
-        );
+        ) {
+            #[cfg(debug_assertions)]
+            chrome_textures.record_rebuild();
+        }
     }
-    let (Some(card), Some((_, flash_view))) =
-        (gpu.palette_card.as_ref(), gpu.bell_flash_tex.as_ref())
-    else {
+    let (Some(card), Some((_, flash_view))) = (
+        gpu.palette_card.as_ref(),
+        gpu.chrome_textures.bell_flash_tex.as_ref(),
+    ) else {
         return;
     };
     let flash_style = CardStyle {

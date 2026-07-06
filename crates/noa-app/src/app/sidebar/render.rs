@@ -57,21 +57,24 @@ fn rasterize_runs(
 
 /// Ensure `slot` holds a scratch render texture of exactly `size`/`format`,
 /// reallocating only when either changes (reused frame-to-frame — F2).
+/// Returns whether it actually (re)built the texture, so `ChromeTextures`
+/// call sites can feed [`ChromeTextures::record_rebuild`] (NFR-2/AC-18).
+#[must_use]
 pub(super) fn ensure_scratch(
     slot: &mut Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     device: &wgpu::Device,
     size: PixelSize,
     format: wgpu::TextureFormat,
     label: &'static str,
-) {
+) -> bool {
     let size = PixelSize {
         w: size.w.max(1),
         h: size.h.max(1),
     };
-    if slot
+    let rebuilt = slot
         .as_ref()
-        .is_none_or(|(s, t, _)| *s != size || t.format() != format)
-    {
+        .is_none_or(|(s, t, _)| *s != size || t.format() != format);
+    if rebuilt {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d {
@@ -89,6 +92,7 @@ pub(super) fn ensure_scratch(
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         *slot = Some((size, texture, view));
     }
+    rebuilt
 }
 
 /// Rasterize the sidebar and composite it onto `view` at the window's left
@@ -108,11 +112,12 @@ pub(in crate::app) fn draw_sidebar_band(
 ) {
     // Lazily (re)build the reused band renderer + card pipeline for this format.
     if gpu
+        .chrome_textures
         .sidebar_renderer
         .as_ref()
         .is_none_or(|renderer| renderer.target_format() != surface_format)
     {
-        gpu.sidebar_renderer = Renderer::new(
+        gpu.chrome_textures.sidebar_renderer = Renderer::new(
             &gpu.device,
             &gpu.queue,
             surface_format,
@@ -120,25 +125,31 @@ pub(in crate::app) fn draw_sidebar_band(
             padding,
         )
         .ok();
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
     }
     if gpu
+        .chrome_textures
         .sidebar_card
         .as_ref()
         .is_none_or(|card| card.format != surface_format)
     {
-        gpu.sidebar_card = Some(OverviewChromeCardPipeline {
+        gpu.chrome_textures.sidebar_card = Some(OverviewChromeCardPipeline {
             format: surface_format,
             // Alpha-replace so card/menu/divider composites settle to a uniform
             // background-opacity alpha instead of accumulating toward opaque.
             pipeline: CardPipeline::new(&gpu.device, surface_format, CardPipeline::ALPHA_REPLACE),
         });
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
     }
     if gpu
+        .chrome_textures
         .sidebar_band_card
         .as_ref()
         .is_none_or(|card| card.format != surface_format)
     {
-        gpu.sidebar_band_card = Some(OverviewChromeCardPipeline {
+        gpu.chrome_textures.sidebar_band_card = Some(OverviewChromeCardPipeline {
             format: surface_format,
             // The band backdrop is transparent outside its text runs; plain
             // alpha blending leaves the pane pass's clear color + background
@@ -150,21 +161,26 @@ pub(in crate::app) fn draw_sidebar_band(
                 wgpu::BlendState::ALPHA_BLENDING,
             ),
         });
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
     }
     let band_size = PixelSize {
         w: model.inset.max(1),
         h: model.height.max(1),
     };
-    ensure_scratch(
-        &mut gpu.sidebar_band,
+    if ensure_scratch(
+        &mut gpu.chrome_textures.sidebar_band,
         &gpu.device,
         band_size,
         surface_format,
         "noa-sidebar-band",
-    );
-    if !model.cards.is_empty() {
-        ensure_scratch(
-            &mut gpu.sidebar_card_tex,
+    ) {
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
+    }
+    if !model.cards.is_empty()
+        && ensure_scratch(
+            &mut gpu.chrome_textures.sidebar_card_tex,
             &gpu.device,
             PixelSize {
                 w: model.card_w,
@@ -172,11 +188,14 @@ pub(in crate::app) fn draw_sidebar_band(
             },
             surface_format,
             "noa-sidebar-card",
-        );
+        )
+    {
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
     }
-    if let Some(menu) = &model.menu {
-        ensure_scratch(
-            &mut gpu.sidebar_menu_tex,
+    if let Some(menu) = &model.menu
+        && ensure_scratch(
+            &mut gpu.chrome_textures.sidebar_menu_tex,
             &gpu.device,
             PixelSize {
                 w: menu.rect.w,
@@ -184,13 +203,16 @@ pub(in crate::app) fn draw_sidebar_band(
             },
             surface_format,
             "noa-sidebar-menu",
-        );
+        )
+    {
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
     }
 
-    if gpu.sidebar_renderer.is_none()
-        || gpu.sidebar_card.is_none()
-        || gpu.sidebar_band_card.is_none()
-        || gpu.sidebar_band.is_none()
+    if gpu.chrome_textures.sidebar_renderer.is_none()
+        || gpu.chrome_textures.sidebar_card.is_none()
+        || gpu.chrome_textures.sidebar_band_card.is_none()
+        || gpu.chrome_textures.sidebar_band.is_none()
     {
         return;
     }
@@ -203,23 +225,23 @@ pub(in crate::app) fn draw_sidebar_band(
     // the card shader's outer glow into a soft shadow the band casts onto the
     // panes — the seam's depth cue (its crisp line is the hairline below).
     {
-        let band_view = &gpu.sidebar_band.as_ref().unwrap().2;
+        let band_view = &gpu.chrome_textures.sidebar_band.as_ref().unwrap().2;
         rasterize_runs(
-            gpu.sidebar_renderer.as_mut().unwrap(),
+            gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
             &gpu.device,
             &gpu.queue,
             &mut gpu.sidebar_font,
-            &gpu.theme,
+            active_theme(&gpu.theme, &gpu.preview_theme),
             band_view,
             band_size,
             model.grid,
-            gpu.theme.default_bg,
+            active_theme(&gpu.theme, &gpu.preview_theme).default_bg,
             0.0,
             &model.runs,
         );
     }
     let flat_style = CardStyle {
-        background: rgb_to_rgba(gpu.theme.default_bg),
+        background: rgb_to_rgba(active_theme(&gpu.theme, &gpu.preview_theme).default_bg),
         border_color: [0.0; 4],
         focus_color: [0.0, 0.0, 0.0, 1.0],
         corner_radius: 0.0,
@@ -227,7 +249,8 @@ pub(in crate::app) fn draw_sidebar_band(
         focus_width: 0.0,
         focus_glow_width: SEAM_SHADOW_WIDTH * model.scale,
     };
-    gpu.sidebar_band_card
+    gpu.chrome_textures
+        .sidebar_band_card
         .as_ref()
         .unwrap()
         .pipeline
@@ -238,7 +261,7 @@ pub(in crate::app) fn draw_sidebar_band(
             surface_size,
             &flat_style,
             &[CardTexturePlacement {
-                texture_view: &gpu.sidebar_band.as_ref().unwrap().2,
+                texture_view: &gpu.chrome_textures.sidebar_band.as_ref().unwrap().2,
                 x: 0,
                 y: 0,
                 w: model.inset,
@@ -253,8 +276,8 @@ pub(in crate::app) fn draw_sidebar_band(
     // otherwise meet as unrelated colors).
     let hairline_w = (SEAM_HAIRLINE_WIDTH * model.scale).round().max(1.0) as u32;
     if SEAM_HAIRLINE_WIDTH > 0.0 && model.inset > hairline_w {
-        ensure_scratch(
-            &mut gpu.sidebar_divider_tex,
+        if ensure_scratch(
+            &mut gpu.chrome_textures.sidebar_divider_tex,
             &gpu.device,
             PixelSize {
                 w: hairline_w,
@@ -262,14 +285,17 @@ pub(in crate::app) fn draw_sidebar_band(
             },
             surface_format,
             "noa-sidebar-divider",
-        );
-        if let Some((_, _, divider_view)) = gpu.sidebar_divider_tex.as_ref() {
+        ) {
+            #[cfg(debug_assertions)]
+            gpu.chrome_textures.record_rebuild();
+        }
+        if let Some((_, _, divider_view)) = gpu.chrome_textures.sidebar_divider_tex.as_ref() {
             rasterize_runs(
-                gpu.sidebar_renderer.as_mut().unwrap(),
+                gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
                 &gpu.device,
                 &gpu.queue,
                 &mut gpu.sidebar_font,
-                &gpu.theme,
+                active_theme(&gpu.theme, &gpu.preview_theme),
                 divider_view,
                 PixelSize {
                     w: hairline_w,
@@ -289,7 +315,8 @@ pub(in crate::app) fn draw_sidebar_band(
                 focus_width: 0.0,
                 focus_glow_width: 0.0,
             };
-            gpu.sidebar_card
+            gpu.chrome_textures
+                .sidebar_card
                 .as_ref()
                 .unwrap()
                 .pipeline
@@ -322,13 +349,16 @@ pub(in crate::app) fn draw_sidebar_band(
             w: btn.w.max(1),
             h: btn.h.max(1),
         };
-        ensure_scratch(
-            &mut gpu.sidebar_button_tex,
+        if ensure_scratch(
+            &mut gpu.chrome_textures.sidebar_button_tex,
             &gpu.device,
             btn_size,
             surface_format,
             "noa-sidebar-button",
-        );
+        ) {
+            #[cfg(debug_assertions)]
+            gpu.chrome_textures.record_rebuild();
+        }
         let glyph = if model.new_button_hover {
             chrome().fg
         } else {
@@ -339,13 +369,13 @@ pub(in crate::app) fn draw_sidebar_band(
         // rest). Rendered into the reused button scratch, composited over the
         // band.
         if model.new_button_hover {
-            let button_view = &gpu.sidebar_button_tex.as_ref().unwrap().2;
+            let button_view = &gpu.chrome_textures.sidebar_button_tex.as_ref().unwrap().2;
             rasterize_runs(
-                gpu.sidebar_renderer.as_mut().unwrap(),
+                gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
                 &gpu.device,
                 &gpu.queue,
                 &mut gpu.sidebar_font,
-                &gpu.theme,
+                active_theme(&gpu.theme, &gpu.preview_theme),
                 button_view,
                 btn_size,
                 GridSize { cols: 1, rows: 1 },
@@ -362,7 +392,8 @@ pub(in crate::app) fn draw_sidebar_band(
                 focus_width: 0.0,
                 focus_glow_width: 0.0,
             };
-            gpu.sidebar_card
+            gpu.chrome_textures
+                .sidebar_card
                 .as_ref()
                 .unwrap()
                 .pipeline
@@ -373,7 +404,7 @@ pub(in crate::app) fn draw_sidebar_band(
                     surface_size,
                     &button_style,
                     &[CardTexturePlacement {
-                        texture_view: &gpu.sidebar_button_tex.as_ref().unwrap().2,
+                        texture_view: &gpu.chrome_textures.sidebar_button_tex.as_ref().unwrap().2,
                         x: btn.x,
                         y: btn.y,
                         w: btn.w,
@@ -402,13 +433,13 @@ pub(in crate::app) fn draw_sidebar_band(
             thick,
             arm,
         );
-        let glyph_view = &gpu.sidebar_button_tex.as_ref().unwrap().2;
+        let glyph_view = &gpu.chrome_textures.sidebar_button_tex.as_ref().unwrap().2;
         rasterize_runs(
-            gpu.sidebar_renderer.as_mut().unwrap(),
+            gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
             &gpu.device,
             &gpu.queue,
             &mut gpu.sidebar_font,
-            &gpu.theme,
+            active_theme(&gpu.theme, &gpu.preview_theme),
             glyph_view,
             btn_size,
             GridSize { cols: 1, rows: 1 },
@@ -425,7 +456,8 @@ pub(in crate::app) fn draw_sidebar_band(
             focus_width: 0.0,
             focus_glow_width: 0.0,
         };
-        gpu.sidebar_card
+        gpu.chrome_textures
+            .sidebar_card
             .as_ref()
             .unwrap()
             .pipeline
@@ -437,7 +469,7 @@ pub(in crate::app) fn draw_sidebar_band(
                 &bar_style,
                 &[
                     CardTexturePlacement {
-                        texture_view: &gpu.sidebar_button_tex.as_ref().unwrap().2,
+                        texture_view: &gpu.chrome_textures.sidebar_button_tex.as_ref().unwrap().2,
                         x: hbar.x,
                         y: hbar.y,
                         w: hbar.w,
@@ -445,7 +477,7 @@ pub(in crate::app) fn draw_sidebar_band(
                         selected: false,
                     },
                     CardTexturePlacement {
-                        texture_view: &gpu.sidebar_button_tex.as_ref().unwrap().2,
+                        texture_view: &gpu.chrome_textures.sidebar_button_tex.as_ref().unwrap().2,
                         x: vbar.x,
                         y: vbar.y,
                         w: vbar.w,
@@ -479,15 +511,15 @@ pub(in crate::app) fn draw_sidebar_band(
         ..card_style
     };
     for card_draw in &model.cards {
-        let Some((_, _, card_view)) = gpu.sidebar_card_tex.as_ref() else {
+        let Some((_, _, card_view)) = gpu.chrome_textures.sidebar_card_tex.as_ref() else {
             break;
         };
         rasterize_runs(
-            gpu.sidebar_renderer.as_mut().unwrap(),
+            gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
             &gpu.device,
             &gpu.queue,
             &mut gpu.sidebar_font,
-            &gpu.theme,
+            active_theme(&gpu.theme, &gpu.preview_theme),
             card_view,
             PixelSize {
                 w: model.card_w,
@@ -503,7 +535,8 @@ pub(in crate::app) fn draw_sidebar_band(
         } else {
             (&card_style, card_draw.selected)
         };
-        gpu.sidebar_card
+        gpu.chrome_textures
+            .sidebar_card
             .as_ref()
             .unwrap()
             .pipeline
@@ -514,7 +547,7 @@ pub(in crate::app) fn draw_sidebar_band(
                 surface_size,
                 style,
                 &[CardTexturePlacement {
-                    texture_view: &gpu.sidebar_card_tex.as_ref().unwrap().2,
+                    texture_view: &gpu.chrome_textures.sidebar_card_tex.as_ref().unwrap().2,
                     x: card_draw.rect.x,
                     y: card_draw.rect.y,
                     w: card_draw.rect.w,
@@ -527,8 +560,8 @@ pub(in crate::app) fn draw_sidebar_band(
     // 2b) Drag-reorder feedback: the accent drop-indicator line at the insertion
     // gap, then the floating dragged card composited above every static card.
     if let Some(line) = &model.drop_indicator {
-        ensure_scratch(
-            &mut gpu.sidebar_drop_tex,
+        if ensure_scratch(
+            &mut gpu.chrome_textures.sidebar_drop_tex,
             &gpu.device,
             PixelSize {
                 w: line.w.max(1),
@@ -536,14 +569,17 @@ pub(in crate::app) fn draw_sidebar_band(
             },
             surface_format,
             "noa-sidebar-drop",
-        );
-        if let Some((_, _, drop_view)) = gpu.sidebar_drop_tex.as_ref() {
+        ) {
+            #[cfg(debug_assertions)]
+            gpu.chrome_textures.record_rebuild();
+        }
+        if let Some((_, _, drop_view)) = gpu.chrome_textures.sidebar_drop_tex.as_ref() {
             rasterize_runs(
-                gpu.sidebar_renderer.as_mut().unwrap(),
+                gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
                 &gpu.device,
                 &gpu.queue,
                 &mut gpu.sidebar_font,
-                &gpu.theme,
+                active_theme(&gpu.theme, &gpu.preview_theme),
                 drop_view,
                 PixelSize {
                     w: line.w.max(1),
@@ -563,7 +599,8 @@ pub(in crate::app) fn draw_sidebar_band(
                 focus_width: 0.0,
                 focus_glow_width: 0.0,
             };
-            gpu.sidebar_card
+            gpu.chrome_textures
+                .sidebar_card
                 .as_ref()
                 .unwrap()
                 .pipeline
@@ -585,14 +622,14 @@ pub(in crate::app) fn draw_sidebar_band(
         }
     }
     if let Some(drag) = &model.dragging
-        && let Some((_, _, card_view)) = gpu.sidebar_card_tex.as_ref()
+        && let Some((_, _, card_view)) = gpu.chrome_textures.sidebar_card_tex.as_ref()
     {
         rasterize_runs(
-            gpu.sidebar_renderer.as_mut().unwrap(),
+            gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
             &gpu.device,
             &gpu.queue,
             &mut gpu.sidebar_font,
-            &gpu.theme,
+            active_theme(&gpu.theme, &gpu.preview_theme),
             card_view,
             PixelSize {
                 w: model.card_w,
@@ -603,7 +640,8 @@ pub(in crate::app) fn draw_sidebar_band(
             model.background_opacity,
             &drag.runs,
         );
-        gpu.sidebar_card
+        gpu.chrome_textures
+            .sidebar_card
             .as_ref()
             .unwrap()
             .pipeline
@@ -614,7 +652,7 @@ pub(in crate::app) fn draw_sidebar_band(
                 surface_size,
                 &card_style,
                 &[CardTexturePlacement {
-                    texture_view: &gpu.sidebar_card_tex.as_ref().unwrap().2,
+                    texture_view: &gpu.chrome_textures.sidebar_card_tex.as_ref().unwrap().2,
                     x: drag.rect.x,
                     y: drag.rect.y,
                     w: drag.rect.w,
@@ -626,14 +664,14 @@ pub(in crate::app) fn draw_sidebar_band(
 
     // 3) The `…` menu popup, composited above the cards.
     if let Some(menu) = &model.menu
-        && let Some((_, _, menu_view)) = gpu.sidebar_menu_tex.as_ref()
+        && let Some((_, _, menu_view)) = gpu.chrome_textures.sidebar_menu_tex.as_ref()
     {
         rasterize_runs(
-            gpu.sidebar_renderer.as_mut().unwrap(),
+            gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
             &gpu.device,
             &gpu.queue,
             &mut gpu.sidebar_font,
-            &gpu.theme,
+            active_theme(&gpu.theme, &gpu.preview_theme),
             menu_view,
             PixelSize {
                 w: menu.rect.w,
@@ -653,7 +691,8 @@ pub(in crate::app) fn draw_sidebar_band(
             focus_width: 0.0,
             focus_glow_width: 0.0,
         };
-        gpu.sidebar_card
+        gpu.chrome_textures
+            .sidebar_card
             .as_ref()
             .unwrap()
             .pipeline
@@ -664,7 +703,7 @@ pub(in crate::app) fn draw_sidebar_band(
                 surface_size,
                 &menu_style,
                 &[CardTexturePlacement {
-                    texture_view: &gpu.sidebar_menu_tex.as_ref().unwrap().2,
+                    texture_view: &gpu.chrome_textures.sidebar_menu_tex.as_ref().unwrap().2,
                     x: menu.rect.x,
                     y: menu.rect.y,
                     w: menu.rect.w,

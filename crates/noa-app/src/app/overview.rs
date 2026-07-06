@@ -353,9 +353,11 @@ impl App {
                 h: state.surface_config.height,
             };
             state.renderer.resize(source_viewport);
-            state
-                .renderer
-                .rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+            state.renderer.rebuild_cells(
+                &snapshot,
+                &mut gpu.font,
+                active_theme(&gpu.theme, &gpu.preview_theme),
+            );
             state
                 .renderer
                 .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
@@ -603,7 +605,11 @@ impl App {
 
         label_renderer.resize(band_size);
         label_renderer.set_grid_padding(padding);
-        label_renderer.rebuild_cells(&snapshot, &mut gpu.sidebar_font, &gpu.theme);
+        label_renderer.rebuild_cells(
+            &snapshot,
+            &mut gpu.sidebar_font,
+            active_theme(&gpu.theme, &gpu.preview_theme),
+        );
         // After `rebuild_cells` (which resets it from the snapshot bg) so the
         // band gets its distinct title-bar color, not the terminal default.
         label_renderer.set_clear_color(overview_title_bar_color());
@@ -675,7 +681,11 @@ impl App {
 
         label_renderer.resize(band_size);
         label_renderer.set_grid_padding(padding);
-        label_renderer.rebuild_cells(&snapshot, &mut gpu.sidebar_font, &gpu.theme);
+        label_renderer.rebuild_cells(
+            &snapshot,
+            &mut gpu.sidebar_font,
+            active_theme(&gpu.theme, &gpu.preview_theme),
+        );
         label_renderer.set_clear_color(overview_chrome_pill_color());
         label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.sidebar_font);
         label_renderer.draw(&gpu.device, &gpu.queue, &view);
@@ -744,7 +754,11 @@ impl App {
 
         label_renderer.resize(band_size);
         label_renderer.set_grid_padding(padding);
-        label_renderer.rebuild_cells(&snapshot, &mut gpu.sidebar_font, &gpu.theme);
+        label_renderer.rebuild_cells(
+            &snapshot,
+            &mut gpu.sidebar_font,
+            active_theme(&gpu.theme, &gpu.preview_theme),
+        );
         label_renderer.set_clear_color(overview_chrome_pill_color());
         label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.sidebar_font);
         label_renderer.draw(&gpu.device, &gpu.queue, &view);

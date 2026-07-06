@@ -303,6 +303,22 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // The theme-settings overlay (theme-settings-ui R-3) sits at
+                // the same priority tier as the palette: mutually exclusive
+                // with both it and the search prompt (checked above), so at
+                // most one of these three branches is ever live at once.
+                // Every key is consumed while it's open — nothing leaks to
+                // keybind-resolve or the pty.
+                if self
+                    .theme_settings
+                    .as_ref()
+                    .is_some_and(|session| session.window_id == window_id)
+                {
+                    if pressed {
+                        self.handle_theme_settings_key(window_id, &event);
+                    }
+                    return;
+                }
                 // An open inline sidebar-card rename owns this window's
                 // keyboard (FR-7 Rename): printable text edits the buffer,
                 // Enter commits, Escape cancels — nothing leaks to keybinds or
@@ -382,6 +398,7 @@ impl ApplicationHandler<UserEvent> for App {
         let sidebar_clock_deadline = self.tick_sidebar_clock();
         let sidebar_autosort_deadline = self.tick_sidebar_autosort();
         let transient_overlay_deadline = self.tick_transient_overlays();
+        let theme_settings_deadline = self.tick_theme_settings_debounce();
         let deadline = [
             blink_deadline,
             overview_deadline,
@@ -390,6 +407,7 @@ impl ApplicationHandler<UserEvent> for App {
             sidebar_clock_deadline,
             sidebar_autosort_deadline,
             transient_overlay_deadline,
+            theme_settings_deadline,
         ]
         .into_iter()
         .flatten()

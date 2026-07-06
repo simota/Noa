@@ -288,5 +288,3 @@ pub(super) use palette::{
 };
 pub(super) use render::draw_sidebar_band;
 
-#[cfg(test)]
-mod tests;

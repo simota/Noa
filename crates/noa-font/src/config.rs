@@ -12,8 +12,8 @@
 /// instead of deriving it directly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontConfig {
-    /// Primary family stack, in preference order. Empty means "system
-    /// monospace / Menlo fallback" (the current `load_font_stack` behavior).
+    /// Primary family stack, in preference order. Empty means "platform
+    /// default coding font" (`Menlo` first on macOS, then system fallbacks).
     pub families: Vec<String>,
     pub families_bold: Vec<String>,
     pub families_italic: Vec<String>,

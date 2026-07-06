@@ -110,9 +110,9 @@ fn render_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Bgra8UnormSrgb,
-        // COPY_SRC so tests that need pixel readback (color-glyph passthrough
-        // assertion) can reuse this same target instead of a bespoke one.
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = target.create_view(&wgpu::TextureViewDescriptor::default());

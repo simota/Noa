@@ -164,7 +164,7 @@ list-key-diagnostic branch for `font-family`) with `StartupConfig` /
 
 | Key | Syntax (example) | Repeatable | Default | Kind | WP |
 |---|---|---|---|---|---|
-| `font-family` | `font-family = JetBrains Mono` | yes (stack) | system monospace (`Menlo` fallback) | real | WP0 |
+| `font-family` | `font-family = JetBrains Mono` | yes (stack) | macOS `Menlo` first, then system monospace/fallbacks | real | WP0 |
 | `font-family-bold` | `font-family-bold = JetBrains Mono Bold` | yes | derived from `font-family` | real | WP0 |
 | `font-family-italic` | `font-family-italic = JetBrains Mono Italic` | yes | derived from `font-family` | real | WP0 |
 | `font-family-bold-italic` | `font-family-bold-italic = …` | yes | derived from `font-family` | real | WP0 |

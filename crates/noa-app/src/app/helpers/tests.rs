@@ -57,6 +57,65 @@ fn quick_terminal_progress_is_linear_and_clamped() {
 }
 
 #[test]
+fn quick_terminal_slide_reveal_moves_from_current_state_to_target() {
+    let duration = Duration::from_millis(200);
+
+    assert!(
+        (quick_terminal_slide_reveal(0.35, 1.0, Duration::ZERO, duration) - 0.35).abs() < 0.001
+    );
+    assert!((quick_terminal_slide_reveal(0.35, 1.0, duration, duration) - 1.0).abs() < 0.001);
+    let showing_mid = quick_terminal_slide_reveal(0.35, 1.0, Duration::from_millis(100), duration);
+    assert!(showing_mid > 0.35);
+    assert!(showing_mid < 1.0);
+    assert!(showing_mid > 0.35 + (1.0 - 0.35) * 0.5);
+
+    assert!(
+        (quick_terminal_slide_reveal(0.65, 0.0, Duration::ZERO, duration) - 0.65).abs() < 0.001
+    );
+    assert!((quick_terminal_slide_reveal(0.65, 0.0, duration, duration)).abs() < 0.001);
+    let hiding_mid = quick_terminal_slide_reveal(0.65, 0.0, Duration::from_millis(100), duration);
+    assert!(hiding_mid < 0.65);
+    assert!(hiding_mid > 0.0);
+    assert!(hiding_mid < 0.65 * 0.5);
+}
+
+#[test]
+fn quick_terminal_slide_reveal_keeps_pixel_position_continuous_when_reversed() {
+    let height = 400.0;
+    let duration = Duration::from_millis(200);
+    let reveal_before_reverse =
+        quick_terminal_slide_reveal(0.0, 1.0, Duration::from_millis(80), duration);
+    let top_before_reverse = quick_terminal_reveal_top_offset(height, reveal_before_reverse);
+
+    let reveal_after_reverse =
+        quick_terminal_slide_reveal(reveal_before_reverse, 0.0, Duration::ZERO, duration);
+    let top_after_reverse = quick_terminal_reveal_top_offset(height, reveal_after_reverse);
+
+    assert!((top_after_reverse - top_before_reverse).abs() < 0.001);
+}
+
+#[test]
+fn quick_terminal_slide_reveal_is_monotone_at_frame_interval_samples() {
+    let duration = Duration::from_millis(200);
+    let mut previous_show = 0.0;
+    let mut previous_hide = 1.0;
+
+    for frame in 1..=13 {
+        let elapsed = Duration::from_millis((frame * 16).min(200));
+        let showing = quick_terminal_slide_reveal(0.0, 1.0, elapsed, duration);
+        let hiding = quick_terminal_slide_reveal(1.0, 0.0, elapsed, duration);
+
+        assert!((0.0..=1.0).contains(&showing));
+        assert!((0.0..=1.0).contains(&hiding));
+        assert!(showing >= previous_show);
+        assert!(hiding <= previous_hide);
+
+        previous_show = showing;
+        previous_hide = hiding;
+    }
+}
+
+#[test]
 fn quick_terminal_height_is_a_clamped_screen_fraction() {
     assert_eq!(quick_terminal_height(1000, 0.4), 400);
     assert_eq!(quick_terminal_height(1000, 1.0), 1000);

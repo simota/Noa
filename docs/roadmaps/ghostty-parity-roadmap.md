@@ -197,7 +197,7 @@ Goal: reach Ghostty-like daily workflow integration on macOS-first targets.
 | `REQ-SHELL-001` | Shell integration | Missing | Add bash, fish, zsh, nushell, and elvish integration scripts or injection plan |
 | `REQ-SHELL-002` | Prompt marks | Missing | Add prompt boundary tracking for jump-to-prompt, prompt selection, and resize behavior |
 | `REQ-SHELL-003` | SSH helper | Missing | Add terminfo/environment strategy for remote hosts |
-| `REQ-MACOS-001` | Quick Terminal | Planned | Add toggle, positioning, sizing, animation, autohide, and global keybind integration |
+| `REQ-MACOS-001` | Quick Terminal | Done | Toggle, top-edge positioning, sizing, animation, autohide, and global keybind integration are implemented |
 | `REQ-MACOS-002` | Command palette | Missing | Add action registry UI and searchable execution surface |
 | `REQ-MACOS-003` | AppleScript | Missing | Expose windows, tabs, terminals, input, focus, split, and action commands |
 | `REQ-MACOS-004` | Secure input | Missing | Add secure keyboard entry policy and indication |
@@ -306,7 +306,7 @@ Exit criteria:
   References `REQ-SHELL-002`.
 - [ ] `IMPL-SHELL-003`: Define remote terminfo and environment forwarding
   strategy. References `REQ-SHELL-003`.
-- [ ] `IMPL-MACOS-001`: Add Quick Terminal window mode and toggle action.
+- [x] `IMPL-MACOS-001`: Add Quick Terminal window mode and toggle action.
   References `REQ-MACOS-001`.
 - [ ] `IMPL-MACOS-002`: Add command palette backed by the action registry.
   References `REQ-MACOS-002`.

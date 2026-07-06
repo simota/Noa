@@ -27,10 +27,52 @@ pub(super) struct QuickTerminalState {
 }
 
 /// One in-flight quick-terminal slide.
+#[derive(Clone, Copy)]
 struct QuickTerminalAnim {
     start: Instant,
-    /// `true` while sliding in (revealing), `false` while sliding out (hiding).
-    revealing: bool,
+    /// Current reveal fraction at `start` (0 = hidden, 1 = fully shown).
+    from_reveal: f32,
+    /// Target reveal fraction for this slide.
+    to_reveal: f32,
+}
+
+impl QuickTerminalAnim {
+    fn new(start: Instant, from_reveal: f32, to_reveal: f32) -> Self {
+        Self {
+            start,
+            from_reveal: from_reveal.clamp(0.0, 1.0),
+            to_reveal: to_reveal.clamp(0.0, 1.0),
+        }
+    }
+
+    fn reveal_at(self, now: Instant) -> f32 {
+        quick_terminal_slide_reveal(
+            self.from_reveal,
+            self.to_reveal,
+            now.duration_since(self.start),
+            QUICK_TERMINAL_SLIDE_DURATION,
+        )
+    }
+
+    fn done(self, now: Instant) -> bool {
+        quick_terminal_progress(
+            now.duration_since(self.start),
+            QUICK_TERMINAL_SLIDE_DURATION,
+        ) >= 1.0
+    }
+
+    fn hides(self) -> bool {
+        self.to_reveal <= 0.0
+    }
+}
+
+impl QuickTerminalState {
+    fn current_reveal(&self, now: Instant) -> f32 {
+        if let Some(anim) = self.anim {
+            return anim.reveal_at(now);
+        }
+        if self.visible { 1.0 } else { 0.0 }
+    }
 }
 
 /// The shared house easing curve (see [`crate::anim`]), re-exported for the
@@ -42,8 +84,30 @@ pub(super) use crate::anim::linear_progress as quick_terminal_progress;
 /// The panel's top edge in physical px relative to the monitor top, for a
 /// slide `progress` in `0.0..=1.0` (0 = fully hidden above the screen, 1 =
 /// fully revealed). `height` is the panel height in px.
+#[cfg(test)]
 pub(super) fn quick_terminal_top_offset(height: f32, progress: f32) -> f32 {
-    -height * (1.0 - ease_out_cubic(progress))
+    quick_terminal_reveal_top_offset(height, ease_out_cubic(progress))
+}
+
+/// The panel's top edge offset for an already-eased reveal fraction.
+pub(super) fn quick_terminal_reveal_top_offset(height: f32, reveal: f32) -> f32 {
+    -height * (1.0 - reveal.clamp(0.0, 1.0))
+}
+
+/// Eased reveal fraction between the current and target reveal states. This
+/// keeps interrupted show/hide transitions moving from their current position
+/// instead of snapping back to an endpoint.
+pub(super) fn quick_terminal_slide_reveal(
+    from_reveal: f32,
+    to_reveal: f32,
+    elapsed: Duration,
+    duration: Duration,
+) -> f32 {
+    crate::anim::lerp(
+        from_reveal.clamp(0.0, 1.0),
+        to_reveal.clamp(0.0, 1.0),
+        ease_out_cubic(quick_terminal_progress(elapsed, duration)),
+    )
 }
 
 /// The panel height in physical px for a screen `screen_height` px tall and a
@@ -166,17 +230,17 @@ impl App {
         let Some(qt) = self.quick_terminal.as_mut() else {
             return;
         };
+        let now = Instant::now();
+        let from_reveal = qt.current_reveal(now);
         qt.visible = true;
-        qt.anim = Some(QuickTerminalAnim {
-            start: Instant::now(),
-            revealing: true,
-        });
+        qt.anim = Some(QuickTerminalAnim::new(now, from_reveal, 1.0));
         let window_id = qt.window_id;
-        let hidden_top = top_y + quick_terminal_top_offset(height as f32, 0.0).round() as i32;
+        let current_top =
+            top_y + quick_terminal_reveal_top_offset(height as f32, from_reveal).round() as i32;
         if let Some(state) = self.windows.get(&window_id) {
             state
                 .window
-                .set_outer_position(PhysicalPosition::new(origin_x, hidden_top));
+                .set_outer_position(PhysicalPosition::new(origin_x, current_top));
             state.window.set_visible(true);
             state.window.focus_window();
             state.window.request_redraw();
@@ -188,15 +252,14 @@ impl App {
         let Some(qt) = self.quick_terminal.as_mut() else {
             return;
         };
-        let already_hiding = !qt.visible && qt.anim.as_ref().is_some_and(|anim| !anim.revealing);
+        let already_hiding = !qt.visible && qt.anim.as_ref().is_some_and(|anim| anim.hides());
         if already_hiding {
             return;
         }
+        let now = Instant::now();
+        let from_reveal = qt.current_reveal(now);
         qt.visible = false;
-        qt.anim = Some(QuickTerminalAnim {
-            start: Instant::now(),
-            revealing: false,
-        });
+        qt.anim = Some(QuickTerminalAnim::new(now, from_reveal, 0.0));
         let window_id = qt.window_id;
         if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();
@@ -219,34 +282,27 @@ impl App {
     /// and `None` once the slide settles — hiding the window on a completed
     /// slide-out.
     pub(super) fn tick_quick_terminal(&mut self) -> Option<Instant> {
-        let (window_id, origin_x, top_y, height, start, revealing) = {
+        let (window_id, origin_x, top_y, height, anim) = {
             let qt = self.quick_terminal.as_ref()?;
-            let anim = qt.anim.as_ref()?;
-            (
-                qt.window_id,
-                qt.origin_x,
-                qt.top_y,
-                qt.height,
-                anim.start,
-                anim.revealing,
-            )
+            let anim = *qt.anim.as_ref()?;
+            (qt.window_id, qt.origin_x, qt.top_y, qt.height, anim)
         };
         let now = Instant::now();
-        let progress =
-            quick_terminal_progress(now.duration_since(start), QUICK_TERMINAL_SLIDE_DURATION);
-        let reveal = if revealing { progress } else { 1.0 - progress };
-        let top = top_y + quick_terminal_top_offset(height as f32, reveal).round() as i32;
+        let reveal = anim.reveal_at(now);
+        let top = top_y + quick_terminal_reveal_top_offset(height as f32, reveal).round() as i32;
         if let Some(state) = self.windows.get(&window_id) {
             state
                 .window
                 .set_outer_position(PhysicalPosition::new(origin_x, top));
             state.window.request_redraw();
         }
-        if progress >= 1.0 {
+        if anim.done(now) {
             if let Some(qt) = self.quick_terminal.as_mut() {
                 qt.anim = None;
             }
-            if !revealing && let Some(state) = self.windows.get(&window_id) {
+            if anim.hides()
+                && let Some(state) = self.windows.get(&window_id)
+            {
                 state.window.set_visible(false);
             }
             return None;

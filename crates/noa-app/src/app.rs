@@ -94,7 +94,8 @@ use config::{
 use helpers::*;
 #[cfg(test)]
 use quick_terminal::{
-    ease_out_cubic, quick_terminal_height, quick_terminal_progress, quick_terminal_top_offset,
+    ease_out_cubic, quick_terminal_height, quick_terminal_progress,
+    quick_terminal_reveal_top_offset, quick_terminal_slide_reveal, quick_terminal_top_offset,
 };
 
 pub struct App {

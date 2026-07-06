@@ -82,6 +82,10 @@ impl App {
             return;
         }
         let losing = state.focused_pane;
+        let losing_preedit = state
+            .surfaces
+            .get(&losing)
+            .is_some_and(|surface| surface.ime_state.preedit_active());
         let plan = focus_switch_plan(losing, pane_id);
 
         if let Some(state) = self.windows.get_mut(&window_id) {
@@ -99,6 +103,14 @@ impl App {
                         }
                     }
                 }
+            }
+            // The OS-level composition session survives our local clear —
+            // without this, the IME keeps composing and its next Preedit
+            // lands on the newly focused pane. Toggling IME off/on discards
+            // the marked text so the new pane starts clean.
+            if losing_preedit {
+                state.window.set_ime_allowed(false);
+                state.window.set_ime_allowed(true);
             }
         }
         self.update_focused_ime_cursor_area(window_id);

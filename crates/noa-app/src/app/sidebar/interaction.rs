@@ -188,17 +188,23 @@ impl App {
                 let Some(text) = event.text.as_deref() else {
                     return;
                 };
-                let mut appended = false;
-                if let Some(session) = self.sidebar_rename.as_mut() {
-                    for c in text.chars().filter(|c| !c.is_control()) {
-                        session.buffer.push(c);
-                        appended = true;
-                    }
-                }
-                if appended {
-                    self.request_sidebar_redraw();
-                }
+                self.push_sidebar_rename_text(text);
             }
+        }
+    }
+
+    /// Append printable text to the open rename buffer (typed keys and
+    /// committed IME compositions share this path).
+    pub(in crate::app) fn push_sidebar_rename_text(&mut self, text: &str) {
+        let mut appended = false;
+        if let Some(session) = self.sidebar_rename.as_mut() {
+            for c in text.chars().filter(|c| !c.is_control()) {
+                session.buffer.push(c);
+                appended = true;
+            }
+        }
+        if appended {
+            self.request_sidebar_redraw();
         }
     }
 

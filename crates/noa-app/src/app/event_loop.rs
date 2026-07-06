@@ -781,15 +781,24 @@ impl App {
             .and_then(|state| state.focused_surface_mut())
             .and_then(|surface| surface.ime_state.handle_event(&event));
 
+        // The modal layers own the keyboard in the same order as
+        // `KeyboardInput`: confirm dialog → search prompt → palette → rename.
+        // A committed IME composition edits the modal's buffer (or is
+        // swallowed) instead of being written to the pty behind it.
+        // `ime_state` above already observed the event either way.
+        if self
+            .confirm_dialog
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            return;
+        }
+
         if self
             .search_prompt
             .as_ref()
             .is_some_and(|session| session.window_id == window_id)
         {
-            // The prompt is modal: a committed IME composition edits its
-            // buffer instead of being written to the pty. `ime_state` above
-            // already observed the event (clearing its preedit flag); the
-            // pty-encoded `bytes` above are simply discarded here.
             if let Ime::Commit(text) = &event {
                 let effect = self
                     .search_prompt
@@ -798,6 +807,31 @@ impl App {
                 if let Some(effect) = effect {
                     self.apply_search_prompt_effect(window_id, effect);
                 }
+            }
+            return;
+        }
+
+        if self
+            .command_palette
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            if let Ime::Commit(text) = &event
+                && let Some(session) = self.command_palette.as_mut()
+            {
+                session.palette.push_text(text);
+                self.request_window_redraw(window_id);
+            }
+            return;
+        }
+
+        if self
+            .sidebar_rename
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            if let Ime::Commit(text) = &event {
+                self.push_sidebar_rename_text(text);
             }
             return;
         }

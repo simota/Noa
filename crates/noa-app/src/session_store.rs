@@ -139,6 +139,12 @@ pub struct SessionCard {
     /// io thread from the active screen's trailing rows.
     pub preview: Vec<PreviewLine>,
     seq: u64,
+    /// Store-global monotonic stamp of the last applied `Upsert` (an upsert
+    /// only fires on pty output, so this is "last output" order). Drives the
+    /// recency auto-sort ([`refresh_auto_order`](SessionStore::refresh_auto_order));
+    /// finer than `updated_at`, whose minute granularity would tie cards that
+    /// updated within the same minute.
+    activity: u64,
 }
 
 impl SessionCard {
@@ -235,6 +241,18 @@ pub struct SessionStore {
     /// spawned after a reorder) append in natural order, and dead ids are pruned
     /// in [`retire`](Self::retire). Not persisted across restarts (v1 scope).
     manual_order: Vec<SessionCardId>,
+    /// The recency auto-sort sequence (most recently updated first) — the base
+    /// order while the user has not manually reordered. A snapshot rather than
+    /// a live sort: it only changes when the app calls
+    /// [`refresh_auto_order`](Self::refresh_auto_order) (a fixed ~5s cadence),
+    /// so cards don't shuffle under the pointer on every output tick. Kept in
+    /// lockstep with the live card set: a freshly created card is inserted at
+    /// the front (its `activity` is the global max, so the front *is* its
+    /// sorted position), and [`retire`](Self::retire) prunes dead ids.
+    auto_order: Vec<SessionCardId>,
+    /// Monotonic counter behind [`SessionCard::activity`], bumped on every
+    /// applied `Upsert`.
+    activity_counter: u64,
 }
 
 impl SessionStore {
@@ -256,10 +274,11 @@ impl SessionStore {
 
     /// Every live card id in a stable, deterministic order: cards with a
     /// pending attention request float to the top (so an agent waiting for the
-    /// user is never buried below the scroll fold), the rest sort by window id
-    /// then pane id. The attention flag only changes on an explicit request or
-    /// a window focus, so cards do not jump around on ordinary output ticks —
-    /// deliberately NOT a most-recently-updated sort. The sidebar's render and
+    /// user is never buried below the scroll fold), the rest follow the base
+    /// order — the user's manual drag order when set, else the recency
+    /// auto-sort snapshot (most recently updated first, re-sorted only on the
+    /// app's [`refresh_auto_order`](Self::refresh_auto_order) cadence so cards
+    /// do not jump around on ordinary output ticks). The sidebar's render and
     /// hit-test paths both read this so the on-screen card order and the click
     /// target agree — a `HashMap` iteration order would let them drift.
     pub fn ordered_ids(&self) -> Vec<SessionCardId> {
@@ -274,12 +293,13 @@ impl SessionStore {
 
     /// The base card sequence *before* the attention float: the user's manual
     /// order when set (dead ids filtered, freshly-spawned cards appended in
-    /// natural order), else the natural window/pane sort. Split out so
+    /// natural order), else the recency auto-sort snapshot (which `apply`/
+    /// `retire` keep exactly in lockstep with the live card set). Split out so
     /// [`move_card_before`](Self::move_card_before) can materialize a full,
     /// attention-independent sequence to edit.
     fn base_order_ids(&self) -> Vec<SessionCardId> {
         if self.manual_order.is_empty() {
-            return self.natural_order_ids();
+            return self.auto_order.clone();
         }
         let mut seq: Vec<SessionCardId> = self
             .manual_order
@@ -299,11 +319,34 @@ impl SessionStore {
     }
 
     /// Every live card id sorted by window id then pane id — the deterministic
-    /// default order used when the user has not manually reordered.
+    /// tie-break sequence used to append freshly-spawned cards to a manual
+    /// order and to break `activity` ties in the recency sort.
     fn natural_order_ids(&self) -> Vec<SessionCardId> {
         let mut ids: Vec<SessionCardId> = self.cards.keys().copied().collect();
         ids.sort_by_key(|id| (id.window_id.0, id.pane_id.get()));
         ids
+    }
+
+    /// Re-sort the auto-order snapshot by update recency (most recently
+    /// updated first; window/pane order breaks the — in practice impossible —
+    /// `activity` tie). Returns `true` when the sequence actually changed (a
+    /// redraw is worth requesting). Called by the app on a fixed cadence
+    /// (`SIDEBAR_AUTOSORT_INTERVAL`) rather than from `apply`, so the visible
+    /// order is stable between ticks no matter how often cards update.
+    pub fn refresh_auto_order(&mut self) -> bool {
+        let mut seq: Vec<SessionCardId> = self.cards.keys().copied().collect();
+        seq.sort_by_key(|id| {
+            (
+                std::cmp::Reverse(self.cards[id].activity),
+                id.window_id.0,
+                id.pane_id.get(),
+            )
+        });
+        if seq == self.auto_order {
+            return false;
+        }
+        self.auto_order = seq;
+        true
     }
 
     /// Move `moved` to sit immediately before `anchor` in the card sequence, or
@@ -440,9 +483,14 @@ impl SessionStore {
                             card.preview = preview;
                         }
                         card.seq = seq;
+                        // Stamp recency, but leave `auto_order` alone: the
+                        // visible order only re-sorts on `refresh_auto_order`.
+                        self.activity_counter += 1;
+                        card.activity = self.activity_counter;
                     }
                     None => {
                         self.untombstone(id);
+                        self.activity_counter += 1;
                         self.cards.insert(
                             id,
                             SessionCard {
@@ -458,8 +506,14 @@ impl SessionStore {
                                 updated_at,
                                 preview: preview.unwrap_or_default(),
                                 seq,
+                                activity: self.activity_counter,
                             },
                         );
+                        // A brand-new card carries the global-max activity, so
+                        // the front of the recency snapshot is exactly its
+                        // sorted position — insert now rather than leaving it
+                        // invisible until the next refresh tick.
+                        self.auto_order.insert(0, id);
                     }
                 }
             }
@@ -525,6 +579,9 @@ impl SessionStore {
             // already filters to live cards, so this is housekeeping, not
             // correctness.
             self.manual_order.retain(|&pending| pending != id);
+            // The auto order, by contrast, is consumed unfiltered — it must
+            // mirror the live card set exactly.
+            self.auto_order.retain(|&pending| pending != id);
         }
     }
 
@@ -838,6 +895,7 @@ mod tests {
             updated_at: wall(10, 0),
             preview: Vec::new(),
             seq: 1,
+            activity: 0,
         };
 
         assert_eq!(status_dot(&base), StatusDot::Green);
@@ -964,8 +1022,10 @@ mod tests {
         );
     }
 
+    // The default order is update recency, newest first: a freshly created
+    // card enters at the top (its activity is the global max).
     #[test]
-    fn ordered_ids_are_sorted_by_window_then_pane() {
+    fn ordered_ids_default_to_update_recency() {
         let mut store = SessionStore::new();
         store.apply(upsert(card_id(2, 1), 1, "b"));
         store.apply(upsert(card_id(1, 3), 1, "a3"));
@@ -976,27 +1036,72 @@ mod tests {
         );
     }
 
+    // The recency auto-sort is throttled: an upsert to an existing card stamps
+    // its activity but does not move it until `refresh_auto_order`, which
+    // re-sorts newest-first and reports whether anything changed.
+    #[test]
+    fn refresh_auto_order_resorts_by_recency_and_reports_change() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(1, 1), 1, "a"));
+        store.apply(upsert(card_id(1, 2), 1, "b"));
+        store.apply(upsert(card_id(1, 3), 1, "c"));
+        // Creation order, newest first.
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 3), card_id(1, 2), card_id(1, 1)]
+        );
+
+        // `a` produces output: its stamp advances, the visible order does not.
+        store.apply(upsert(card_id(1, 1), 2, "a"));
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 3), card_id(1, 2), card_id(1, 1)]
+        );
+
+        // The throttle tick re-sorts: a floats to the top.
+        assert!(store.refresh_auto_order());
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 1), card_id(1, 3), card_id(1, 2)]
+        );
+        // Nothing changed since → no redraw owed.
+        assert!(!store.refresh_auto_order());
+    }
+
+    // A removed card is pruned from the auto order (which is consumed
+    // unfiltered), so the sequence always mirrors the live card set.
+    #[test]
+    fn auto_order_prunes_removed_cards() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(1, 1), 1, "a"));
+        store.apply(upsert(card_id(1, 2), 1, "b"));
+        store.apply(SessionDelta::Remove { id: card_id(1, 2) });
+        assert_eq!(store.ordered_ids(), vec![card_id(1, 1)]);
+        assert!(!store.auto_order.contains(&card_id(1, 2)));
+    }
+
     // A pending attention request floats its card to the top of the order, and
-    // clearing it (window focus) restores the plain window/pane sort.
+    // clearing it (window focus) restores the recency base order.
     #[test]
     fn ordered_ids_float_attention_cards_to_the_top() {
         let mut store = SessionStore::new();
         store.apply(upsert(card_id(1, 1), 1, "a"));
         store.apply(upsert(card_id(1, 2), 1, "b"));
         store.apply(upsert(card_id(2, 1), 1, "c"));
+        // Base (recency) order: c, b, a.
 
-        store.apply(SessionDelta::Attention { id: card_id(2, 1) });
+        store.apply(SessionDelta::Attention { id: card_id(1, 1) });
         assert_eq!(store.attention_count(), 1);
         assert_eq!(
             store.ordered_ids(),
-            vec![card_id(2, 1), card_id(1, 1), card_id(1, 2)]
+            vec![card_id(1, 1), card_id(2, 1), card_id(1, 2)]
         );
 
-        store.clear_bell_for_window(SessionWindowId(2));
+        store.clear_bell_for_window(SessionWindowId(1));
         assert_eq!(store.attention_count(), 0);
         assert_eq!(
             store.ordered_ids(),
-            vec![card_id(1, 1), card_id(1, 2), card_id(2, 1)]
+            vec![card_id(2, 1), card_id(1, 2), card_id(1, 1)]
         );
     }
 
@@ -1008,24 +1113,24 @@ mod tests {
         store.apply(upsert(card_id(1, 1), 1, "a"));
         store.apply(upsert(card_id(1, 2), 1, "b"));
         store.apply(upsert(card_id(1, 3), 1, "c"));
-        // Natural order is a, b, c.
-        assert_eq!(
-            store.ordered_ids(),
-            vec![card_id(1, 1), card_id(1, 2), card_id(1, 3)]
-        );
-
-        // Drag c above a: c, a, b.
-        assert!(store.move_card_before(card_id(1, 3), Some(card_id(1, 1))));
-        assert_eq!(
-            store.ordered_ids(),
-            vec![card_id(1, 3), card_id(1, 1), card_id(1, 2)]
-        );
-
-        // Drop past the last card (anchor None) sends a to the end: c, b, a.
-        assert!(store.move_card_before(card_id(1, 1), None));
+        // Base (recency) order is c, b, a.
         assert_eq!(
             store.ordered_ids(),
             vec![card_id(1, 3), card_id(1, 2), card_id(1, 1)]
+        );
+
+        // Drag a above c: a, c, b.
+        assert!(store.move_card_before(card_id(1, 1), Some(card_id(1, 3))));
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 1), card_id(1, 3), card_id(1, 2)]
+        );
+
+        // Drop past the last card (anchor None) sends c to the end: a, b, c.
+        assert!(store.move_card_before(card_id(1, 3), None));
+        assert_eq!(
+            store.ordered_ids(),
+            vec![card_id(1, 1), card_id(1, 2), card_id(1, 3)]
         );
     }
 
@@ -1038,8 +1143,8 @@ mod tests {
         store.apply(upsert(card_id(1, 2), 1, "b"));
         // Onto itself.
         assert!(!store.move_card_before(card_id(1, 1), Some(card_id(1, 1))));
-        // Into its own slot (a before b is already the order).
-        assert!(!store.move_card_before(card_id(1, 1), Some(card_id(1, 2))));
+        // Into its own slot (b before a is already the recency order).
+        assert!(!store.move_card_before(card_id(1, 2), Some(card_id(1, 1))));
         // Unknown card.
         assert!(!store.move_card_before(card_id(9, 9), None));
     }
@@ -1075,17 +1180,17 @@ mod tests {
         let mut store = SessionStore::new();
         store.apply(upsert(card_id(1, 1), 1, "a"));
         store.apply(upsert(card_id(1, 2), 1, "b"));
-        store.move_card_before(card_id(1, 2), Some(card_id(1, 1))); // b, a
+        store.move_card_before(card_id(1, 1), Some(card_id(1, 2))); // a, b (recency was b, a)
         // A new card appends after the manual sequence.
         store.apply(upsert(card_id(1, 3), 1, "c"));
         assert_eq!(
             store.ordered_ids(),
-            vec![card_id(1, 2), card_id(1, 1), card_id(1, 3)]
+            vec![card_id(1, 1), card_id(1, 2), card_id(1, 3)]
         );
         // Removing the manually-placed head drops it from the sequence.
-        store.apply(SessionDelta::Remove { id: card_id(1, 2) });
-        assert_eq!(store.ordered_ids(), vec![card_id(1, 1), card_id(1, 3)]);
-        assert!(!store.manual_order.contains(&card_id(1, 2)));
+        store.apply(SessionDelta::Remove { id: card_id(1, 1) });
+        assert_eq!(store.ordered_ids(), vec![card_id(1, 2), card_id(1, 3)]);
+        assert!(!store.manual_order.contains(&card_id(1, 1)));
     }
 
     // AC-1: filtering to one group's windows excludes the other group's cards
@@ -1114,7 +1219,7 @@ mod tests {
             .collect();
         assert_eq!(
             store.ordered_ids_for_windows(&windows),
-            vec![card_id(1, 1), card_id(2, 1)]
+            vec![card_id(2, 1), card_id(1, 1)]
         );
     }
 

@@ -101,6 +101,9 @@ impl App {
         if let Some(overview) = self.overview_window.as_mut() {
             overview.selected = selected;
             overview.window.set_visible(true);
+            // Re-assert the screen-filling exposé size on every show; a
+            // manual resize while open doesn't survive a reopen.
+            overview.window.set_maximized(true);
             overview.window.focus_window();
             overview.window.request_redraw();
         }

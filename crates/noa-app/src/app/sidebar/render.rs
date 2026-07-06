@@ -128,9 +128,27 @@ pub(in crate::app) fn draw_sidebar_band(
     {
         gpu.sidebar_card = Some(OverviewChromeCardPipeline {
             format: surface_format,
-            // Alpha-replace so band + card composites settle to a uniform
+            // Alpha-replace so card/menu/divider composites settle to a uniform
             // background-opacity alpha instead of accumulating toward opaque.
             pipeline: CardPipeline::new(&gpu.device, surface_format, CardPipeline::ALPHA_REPLACE),
+        });
+    }
+    if gpu
+        .sidebar_band_card
+        .as_ref()
+        .is_none_or(|card| card.format != surface_format)
+    {
+        gpu.sidebar_band_card = Some(OverviewChromeCardPipeline {
+            format: surface_format,
+            // The band backdrop is transparent outside its text runs; plain
+            // alpha blending leaves the pane pass's clear color + background
+            // image untouched there, so the band background is pixel-identical
+            // to the panes'.
+            pipeline: CardPipeline::new(
+                &gpu.device,
+                surface_format,
+                wgpu::BlendState::ALPHA_BLENDING,
+            ),
         });
     }
     let band_size = PixelSize {
@@ -169,13 +187,18 @@ pub(in crate::app) fn draw_sidebar_band(
         );
     }
 
-    if gpu.sidebar_renderer.is_none() || gpu.sidebar_card.is_none() || gpu.sidebar_band.is_none() {
+    if gpu.sidebar_renderer.is_none()
+        || gpu.sidebar_card.is_none()
+        || gpu.sidebar_band_card.is_none()
+        || gpu.sidebar_band.is_none()
+    {
         return;
     }
 
-    // 1) Flat theme-background backdrop (+ all card text) → band texture, composited
-    // over the inset with no rounding. `overlay_texture_cards` loads (doesn't
-    // clear) so the panes to the right are untouched. The placement is drawn
+    // 1) Band text runs over a fully transparent base → band texture,
+    // alpha-blended over the inset with no rounding, so the pane pass's clear
+    // color + background image underneath stay untouched and the band's
+    // background is pixel-identical to the panes'. The placement is drawn
     // `selected` with a black focus color and zero focus stroke, which turns
     // the card shader's outer glow into a soft shadow the band casts onto the
     // panes — the seam's depth cue (its crisp line is the hairline below).
@@ -191,7 +214,7 @@ pub(in crate::app) fn draw_sidebar_band(
             band_size,
             model.grid,
             gpu.theme.default_bg,
-            model.background_opacity,
+            0.0,
             &model.runs,
         );
     }
@@ -204,7 +227,7 @@ pub(in crate::app) fn draw_sidebar_band(
         focus_width: 0.0,
         focus_glow_width: SEAM_SHADOW_WIDTH * model.scale,
     };
-    gpu.sidebar_card
+    gpu.sidebar_band_card
         .as_ref()
         .unwrap()
         .pipeline

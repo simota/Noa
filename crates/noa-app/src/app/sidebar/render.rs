@@ -518,13 +518,13 @@ pub(in crate::app) fn draw_sidebar_band(
         focus_glow_width: 0.0,
     };
     // A non-focused card with a pending interaction request swaps the blue
-    // focus accent for a red ring (FR-16), drawn through the selected branch
-    // so the ring + glow path lights up. The focused card keeps its blue ring;
-    // the red dot/label carries the request state there.
+    // focus accent for a red ring (FR-16), drawn through the selected branch.
+    // Sidebar cards do not use an outer selected glow, so attention follows
+    // that treatment and leaves the red dot/label to carry the extra urgency.
     let attention_style = CardStyle {
         focus_color: rgb_to_rgba(chrome().dot_red),
         focus_width: crate::chrome::RING_ATTENTION * model.scale,
-        focus_glow_width: crate::chrome::GLOW_ATTENTION * model.scale,
+        focus_glow_width: 0.0,
         ..card_style
     };
     for card_draw in &model.cards {

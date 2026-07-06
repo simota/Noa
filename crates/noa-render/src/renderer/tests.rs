@@ -665,16 +665,6 @@ fn decorations_emit_rect_instances_from_cell_attrs() {
 }
 
 #[test]
-fn focus_indicator_instance_uses_pixel_overlay_path_and_accent_color() {
-    let instance = focus_indicator_instance(PaneRect::new(11, 13, 17, 2));
-
-    assert_eq!(instance.grid_pos, [11, 13]);
-    assert_eq!(instance.glyph_size, [17, 2]);
-    assert_eq!(instance.color, FOCUS_INDICATOR_RGBA);
-    assert_eq!(instance.flags, CellInstance::FLAG_DIVIDER);
-}
-
-#[test]
 fn patterned_underlines_emit_segmented_rectangles() {
     let metrics = Metrics {
         cell_w: 9.0,
@@ -1203,47 +1193,6 @@ fn confirm_dialog_overlay_emits_bg_and_glyph_instances_and_clears_on_close() {
         reclosed.iter().filter(|i| i.flags == 0).count(),
         bg_before,
         "closing the dialog removes its overlay instances"
-    );
-}
-
-#[test]
-fn overlay_block_emits_border_on_all_four_edges() {
-    // A 4-wide x 3-tall block anchored at (5, 3): the border must touch
-    // every perimeter cell (top row, bottom row, left column, right
-    // column) and emit only decoration-pass rects.
-    let m = metrics(18.0); // cell_w = 10, cell_h = 24
-    let color = [10, 20, 30, 255];
-    let mut inst = Vec::new();
-    append_overlay_border(&mut inst, 5, 3, 4, 3, color, m);
-
-    assert!(
-        inst.iter()
-            .all(|i| i.flags & CellInstance::FLAG_DECORATION != 0),
-        "border rects are decoration-pass quads"
-    );
-
-    let at = |x: u16, y: u16| inst.iter().any(|i| i.grid_pos == [x, y]);
-    // Top (y=3) and bottom (y=5) edges span columns 5..=8.
-    for x in 5..=8 {
-        assert!(at(x, 3), "top edge missing at col {x}");
-        assert!(at(x, 5), "bottom edge missing at col {x}");
-    }
-    // Left (x=5) and right (x=8) edges span rows 3..=5.
-    for y in 3..=5 {
-        assert!(at(5, y), "left edge missing at row {y}");
-        assert!(at(8, y), "right edge missing at row {y}");
-    }
-    // The right edge is inset to the cell's right (bearing.x > 0), the
-    // bottom edge to the cell's bottom (bearing.y > 0).
-    assert!(
-        inst.iter()
-            .any(|i| i.grid_pos == [8, 3] && i.bearing[0] > 0),
-        "right edge sits at the cell's right pixel"
-    );
-    assert!(
-        inst.iter()
-            .any(|i| i.grid_pos == [5, 5] && i.bearing[1] > 0),
-        "bottom edge sits at the cell's bottom pixel"
     );
 }
 

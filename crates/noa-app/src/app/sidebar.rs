@@ -208,10 +208,9 @@ struct SidebarCardDraw {
     grid: GridSize,
     bg: Rgb,
     selected: bool,
-    /// A pending interaction request (FR-16): the card gets a red ring + glow
-    /// instead of the blue focus ring. Held steady while the request is pending
-    /// (the dot/label still blink) so the ring reads as a stable "this session
-    /// needs you" marker rather than flickering in and out.
+    /// A pending interaction request (FR-16): non-focused cards get a red ring
+    /// + glow, while the focused card keeps its blue focus ring and uses the
+    /// red dot/label for the request state.
     attention: bool,
     runs: Vec<SidebarTextRun>,
 }

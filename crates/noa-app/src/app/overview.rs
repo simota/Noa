@@ -813,8 +813,7 @@ impl App {
         // Which tiles carry a pending interaction request (FR-16), indexed by
         // placement position (live tiles then placeholders, the same order as
         // `tile_rects` below). Resolved before the gpu/overview borrows so the
-        // ring pass needs no `self` access. Held steady while pending (not
-        // blink-gated) so the ring is a stable marker.
+        // ring pass needs no `self` access.
         let attention_tiles: Vec<bool> = self
             .overview_source_tile_ids()
             .iter()
@@ -1016,16 +1015,18 @@ impl App {
                 );
             }
 
-            // Persistent red attention ring over every tile with a pending
-            // interaction request (FR-16), drawn last so it sits above the
-            // selection/hover rings — a request must stay visible even on the
-            // focused or hovered tile. The zoomed tile is skipped (its enlarged
-            // rect already carries the selection ring).
+            // Persistent red attention ring over non-focused/non-hovered tiles
+            // with a pending interaction request (FR-16). Focus and hover keep
+            // the blue accent ring; the title-band dot still marks attention,
+            // so hovering an attention tile never turns the hover affordance
+            // pink/red.
             for (index, rect) in tile_rects.iter().enumerate() {
-                if !attention_tiles.get(index).copied().unwrap_or(false) {
-                    continue;
-                }
-                if zoomed && index == selected {
+                if !overview_attention_ring_visible(
+                    attention_tiles.get(index).copied().unwrap_or(false),
+                    index,
+                    selected,
+                    hovered,
+                ) {
                     continue;
                 }
                 let Some(tile_view) = thumbnails.tile_texture_view(index) else {
@@ -1573,5 +1574,27 @@ impl App {
             }
             _ => false,
         }
+    }
+}
+
+fn overview_attention_ring_visible(
+    attention: bool,
+    index: usize,
+    selected: usize,
+    hovered: Option<usize>,
+) -> bool {
+    attention && index != selected && hovered != Some(index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overview_attention_ring_does_not_override_selected_or_hovered_tiles() {
+        assert!(overview_attention_ring_visible(true, 2, 0, None));
+        assert!(!overview_attention_ring_visible(true, 2, 2, None));
+        assert!(!overview_attention_ring_visible(true, 2, 0, Some(2)));
+        assert!(!overview_attention_ring_visible(false, 2, 0, None));
     }
 }

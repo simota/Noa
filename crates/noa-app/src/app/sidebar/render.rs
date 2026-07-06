@@ -95,6 +95,23 @@ pub(super) fn ensure_scratch(
     rebuilt
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SidebarCardFrame {
+    Resting,
+    Selected,
+    Attention,
+}
+
+fn sidebar_card_frame(selected: bool, attention: bool) -> SidebarCardFrame {
+    if selected {
+        SidebarCardFrame::Selected
+    } else if attention {
+        SidebarCardFrame::Attention
+    } else {
+        SidebarCardFrame::Resting
+    }
+}
+
 /// Rasterize the sidebar and composite it onto `view` at the window's left
 /// inset via the reused rounded-card pipeline: a flat backdrop matching the
 /// terminal theme's background (so the band reads as one surface with the
@@ -500,10 +517,10 @@ pub(in crate::app) fn draw_sidebar_band(
         focus_width: crate::chrome::RING_SELECTED * model.scale,
         focus_glow_width: 0.0,
     };
-    // A card with a pending interaction request swaps the blue focus accent for
-    // a red ring (FR-16) — drawn selected so the ring + glow path lights up even
-    // when the card isn't the focused one. A thicker stroke + wider glow than
-    // the blue focus ring so an interaction request is unmissable.
+    // A non-focused card with a pending interaction request swaps the blue
+    // focus accent for a red ring (FR-16), drawn through the selected branch
+    // so the ring + glow path lights up. The focused card keeps its blue ring;
+    // the red dot/label carries the request state there.
     let attention_style = CardStyle {
         focus_color: rgb_to_rgba(chrome().dot_red),
         focus_width: crate::chrome::RING_ATTENTION * model.scale,
@@ -530,10 +547,10 @@ pub(in crate::app) fn draw_sidebar_band(
             model.background_opacity,
             &card_draw.runs,
         );
-        let (style, selected) = if card_draw.attention {
-            (&attention_style, true)
-        } else {
-            (&card_style, card_draw.selected)
+        let (style, selected) = match sidebar_card_frame(card_draw.selected, card_draw.attention) {
+            SidebarCardFrame::Resting => (&card_style, false),
+            SidebarCardFrame::Selected => (&card_style, true),
+            SidebarCardFrame::Attention => (&attention_style, true),
         };
         gpu.chrome_textures
             .sidebar_card
@@ -711,5 +728,18 @@ pub(in crate::app) fn draw_sidebar_band(
                     selected: false,
                 }],
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attention_frame_does_not_override_selected_sidebar_card() {
+        assert_eq!(sidebar_card_frame(false, false), SidebarCardFrame::Resting);
+        assert_eq!(sidebar_card_frame(false, true), SidebarCardFrame::Attention);
+        assert_eq!(sidebar_card_frame(true, false), SidebarCardFrame::Selected);
+        assert_eq!(sidebar_card_frame(true, true), SidebarCardFrame::Selected);
     }
 }

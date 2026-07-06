@@ -12,6 +12,7 @@ mod cli;
 mod clipboard;
 mod command_palette;
 mod commands;
+pub mod debounce;
 mod events;
 mod input;
 mod io_thread;
@@ -32,6 +33,7 @@ mod sidebar;
 pub mod split_tree;
 pub mod tab_overview;
 mod theme;
+mod theme_settings;
 
 pub use app::AppConfig;
 pub use cli::{CliAction, Invocation, parse_invocation, run_action, unknown_action_message};

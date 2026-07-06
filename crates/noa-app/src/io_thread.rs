@@ -529,6 +529,9 @@ fn flush_pending_overview_publish(
 }
 
 fn write_pty_bytes(writer: &PtyWriter, bytes: &[u8]) {
+    if std::env::var_os("NOA_IME_TRACE").is_some() {
+        eprintln!("[ime-trace] io write: {:?}", String::from_utf8_lossy(bytes));
+    }
     if let Err(err) = writer.write(bytes).and_then(|_| writer.flush()) {
         log::warn!("failed to write bytes to pty: {err}");
     }

@@ -172,6 +172,17 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
+        if std::env::var_os("NOA_IME_TRACE").is_some() {
+            match &event {
+                WindowEvent::Ime(ime) => eprintln!("[ime-trace] Ime: {ime:?}"),
+                WindowEvent::KeyboardInput { event, .. } => eprintln!(
+                    "[ime-trace] Key: state={:?} logical={:?} text={:?} repeat={}",
+                    event.state, event.logical_key, event.text, event.repeat
+                ),
+                _ => {}
+            }
+        }
+
         match event {
             WindowEvent::CloseRequested if self.is_quick_terminal_window(window_id) => {
                 // Closing the drop-down just hides it; it isn't a real tab.

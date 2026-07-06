@@ -1283,6 +1283,9 @@ impl App {
     }
 
     pub(super) fn write_pane_pty_bytes(&self, window_id: WindowId, pane_id: PaneId, bytes: &[u8]) {
+        if std::env::var_os("NOA_IME_TRACE").is_some() {
+            eprintln!("[ime-trace] pty write: {:?}", String::from_utf8_lossy(bytes));
+        }
         let Some(surface) = self
             .windows
             .get(&window_id)

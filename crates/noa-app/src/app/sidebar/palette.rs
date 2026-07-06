@@ -604,7 +604,7 @@ pub(in crate::app) fn draw_theme_settings_card(
     pane_rect: PaneRect,
     pane_cols: u16,
     pane_rows: u16,
-    padding: GridPadding,
+    _padding: GridPadding,
     scale: f32,
     opacity: f32,
 ) {
@@ -659,7 +659,10 @@ pub(in crate::app) fn draw_theme_settings_card(
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
 
-    let (x, y) = modal_block_origin(pane_rect, padding, metrics, 0, 0, interior);
+    // Center the card in the pane (pixel-centered; the text grid lives inside
+    // the pre-rasterized scratch texture, so no cell alignment is needed).
+    let x = pane_rect.x + pane_rect.w.saturating_sub(block_px.w) / 2;
+    let y = pane_rect.y + pane_rect.h.saturating_sub(block_px.h) / 2;
     composite_modal_card(
         gpu,
         view,

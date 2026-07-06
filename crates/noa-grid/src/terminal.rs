@@ -2,7 +2,7 @@
 //! dispatching parsed operations onto the active [`Screen`] and queuing report
 //! replies (DA/DSR) for the pty writer.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::cell::Hyperlink;
 use crate::charset::CharsetState;
@@ -35,6 +35,17 @@ const TITLE_STACK_CAP: usize = 64;
 /// consumes them; the oldest entry is evicted first, same as the title stack.
 const NOTIFICATION_QUEUE_CAP: usize = 32;
 
+/// Cap on distinct OSC 8 hyperlinks. Cells (including scrollback rows) store
+/// indices into the registry, so entries can never be evicted safely; once the
+/// cap is hit, further *new* links print as plain text instead. This bounds
+/// memory against a program streaming unique URIs forever.
+pub(crate) const HYPERLINK_REGISTRY_CAP: usize = 8192;
+
+/// Cap on recorded OSC 133 shell marks. Marks whose rows scrolled out of
+/// trimmed history are useless (`scroll_to_prompt` skips them), so those are
+/// pruned first; if every mark is still reachable, the oldest is evicted.
+pub(crate) const SHELL_MARK_CAP: usize = 4096;
+
 pub struct Terminal {
     pub primary: Screen,
     /// Alternate screen — populated in inc≥2.
@@ -49,6 +60,9 @@ pub struct Terminal {
     pub cwd: Option<String>,
     /// OSC 8 hyperlink registry. Cells store indices into this table.
     pub hyperlinks: Vec<Hyperlink>,
+    /// Reverse lookup for [`Self::hyperlinks`] so repeated OSC 8 sequences
+    /// with the same target dedupe in O(1) instead of a linear registry scan.
+    hyperlink_index: HashMap<Hyperlink, usize>,
     /// OSC 133 shell integration marks recorded at cursor positions.
     pub shell_marks: Vec<ShellIntegrationMark>,
     /// Dynamic colors set through safe OSC 4/10/11/12 sequences.
@@ -127,6 +141,7 @@ impl Terminal {
             title: String::new(),
             cwd: None,
             hyperlinks: Vec::new(),
+            hyperlink_index: HashMap::new(),
             shell_marks: Vec::new(),
             colors: TerminalColors::default(),
             osc52_policy: Osc52Policy::default(),
@@ -424,14 +439,19 @@ impl Terminal {
     }
 
     fn set_current_hyperlink(&mut self, hyperlink: Hyperlink) {
-        let id = self
-            .hyperlinks
-            .iter()
-            .position(|existing| existing == &hyperlink)
-            .unwrap_or_else(|| {
-                self.hyperlinks.push(hyperlink);
-                self.hyperlinks.len() - 1
-            });
+        let id = match self.hyperlink_index.get(&hyperlink) {
+            Some(&id) => id,
+            None if self.hyperlinks.len() >= HYPERLINK_REGISTRY_CAP => {
+                self.active_mut().cursor.hyperlink = None;
+                return;
+            }
+            None => {
+                let id = self.hyperlinks.len();
+                self.hyperlinks.push(hyperlink.clone());
+                self.hyperlink_index.insert(hyperlink, id);
+                id
+            }
+        };
         self.active_mut().cursor.hyperlink = Some(id);
     }
 
@@ -444,10 +464,17 @@ impl Terminal {
         // Session-absolute row: stays valid across scrollback trimming, so a
         // recorded mark keeps pointing at the same line as history scrolls off
         // (see `Screen::rows_evicted`).
+        let rows_evicted = screen.rows_evicted();
         let point = SelectionPoint::new(
             screen.cursor.x,
-            screen.rows_evicted() + screen.scrollback_len() + screen.cursor.y as usize,
+            rows_evicted + screen.scrollback_len() + screen.cursor.y as usize,
         );
+        if self.shell_marks.len() >= SHELL_MARK_CAP {
+            self.shell_marks.retain(|mark| mark.point.y >= rows_evicted);
+            if self.shell_marks.len() >= SHELL_MARK_CAP {
+                self.shell_marks.remove(0);
+            }
+        }
         self.shell_marks.push(ShellIntegrationMark {
             kind,
             point,
@@ -1344,6 +1371,7 @@ impl Handler for Terminal {
         self.title.clear();
         self.cwd = None;
         self.hyperlinks.clear();
+        self.hyperlink_index.clear();
         self.shell_marks.clear();
         self.colors.reset_dynamic_overrides();
         self.pending_clipboard_writes.clear();

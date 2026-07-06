@@ -2,7 +2,7 @@
 
 use noa_core::{CellAttrs, Color};
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Hyperlink {
     pub uri: String,
     pub id: Option<String>,

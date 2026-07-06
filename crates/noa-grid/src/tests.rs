@@ -1190,6 +1190,35 @@ fn osc8_hyperlink_state_is_stored_on_printed_cells() {
 }
 
 #[test]
+fn osc8_repeated_link_dedupes_and_registry_growth_is_capped() {
+    // The same target sent twice reuses one registry slot.
+    let t = run(b"\x1b]8;;https://example.test\x07A\x1b]8;;\x07\
+          \x1b]8;;https://example.test\x07B");
+    assert_eq!(t.hyperlinks.len(), 1);
+    assert_eq!(cell(&t, 0, 0).hyperlink, cell(&t, 1, 0).hyperlink);
+
+    // Streaming unique URIs stops growing the registry at the cap; cells
+    // printed past it carry no link instead of a bogus index.
+    let mut t = Terminal::new(GridSize::new(20, 4));
+    let mut s = Stream::new();
+    for i in 0..(crate::terminal::HYPERLINK_REGISTRY_CAP + 10) {
+        s.feed(format!("\x1b]8;;https://u{i}.test\x07x").as_bytes(), &mut t);
+    }
+    assert_eq!(t.hyperlinks.len(), crate::terminal::HYPERLINK_REGISTRY_CAP);
+    assert_eq!(t.active().cursor.hyperlink, None);
+}
+
+#[test]
+fn shell_mark_recording_is_capped() {
+    let mut t = Terminal::new(GridSize::new(20, 4));
+    let mut s = Stream::new();
+    for _ in 0..(crate::terminal::SHELL_MARK_CAP + 50) {
+        s.feed(b"\x1b]133;A\x07", &mut t);
+    }
+    assert_eq!(t.shell_marks.len(), crate::terminal::SHELL_MARK_CAP);
+}
+
+#[test]
 fn osc8_malformed_payload_is_ignored_without_mutating_active_link() {
     let t = run(b"\x1b]8;;https://example.test\x07A\x1b]8;missing-separator\x07B");
 

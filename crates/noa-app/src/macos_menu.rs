@@ -245,10 +245,12 @@ impl MacosMenu {
                     true,
                     None,
                 ),
-                // No accelerator: the sidebar is driven by the global
-                // `sidebar-hotkey` (a system-wide Carbon hotkey), which muda's
-                // app-local accelerators can't represent.
-                &MenuItem::with_id(AppCommand::ToggleSidebar.menu_id(), "Sidebar", true, None),
+                &MenuItem::with_id(
+                    AppCommand::ToggleSidebar.menu_id(),
+                    "Sidebar",
+                    true,
+                    Some(cmd_shift_accelerator(Code::KeyS)),
+                ),
                 &PredefinedMenuItem::separator(),
                 &disabled_item("noa.view.toggle-full-screen", "Toggle Full Screen"),
             ],

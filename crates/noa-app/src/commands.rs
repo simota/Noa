@@ -522,6 +522,7 @@ impl Default for KeybindEngine {
             ("cmd+shift+enter", AppCommand::ToggleSplitZoom),
             ("cmd+shift+o", AppCommand::ToggleTabOverview),
             ("cmd+shift+p", AppCommand::ToggleCommandPalette),
+            ("cmd+shift+s", AppCommand::ToggleSidebar),
         ];
         let bindings = specs
             .into_iter()
@@ -1105,6 +1106,7 @@ mod tests {
             ("g", AppCommand::Search(SearchAction::FindPrevious)),
             ("]", AppCommand::NextTab),
             ("[", AppCommand::PrevTab),
+            ("s", AppCommand::ToggleSidebar),
         ] {
             assert_eq!(
                 engine.resolve(&Key::Character(key.into()), cmd_shift),
@@ -1128,6 +1130,10 @@ mod tests {
                 .chord_for(AppCommand::ToggleCommandPalette)
                 .as_deref(),
             Some("cmd+shift+p")
+        );
+        assert_eq!(
+            engine.chord_for(AppCommand::ToggleSidebar).as_deref(),
+            Some("cmd+shift+s")
         );
         assert_eq!(
             engine

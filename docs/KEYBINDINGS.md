@@ -77,8 +77,9 @@ Shift 単独スクロールは他の修飾キーが付くと発動しない。
 |---|---|
 | ⌘⇧O | セッションオーバービュー(タブ俯瞰)のトグル |
 | ⌘⇧P | コマンドパレットのトグル |
+| ⌘⇧S | サイドバーのトグル |
 
-キーバインドはないがコマンドパレット / メニューから実行できるアクション: Clear Scrollback、Toggle Quick Terminal、Toggle Sidebar、Secure Keyboard Entry、About。
+キーバインドはないがコマンドパレット / メニューから実行できるアクション: Clear Scrollback、Toggle Quick Terminal、Secure Keyboard Entry、About。
 
 > 未バインドの ⌘ 併用キーは pty へ漏らさず握り潰される。
 

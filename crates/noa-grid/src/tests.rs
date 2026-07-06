@@ -75,6 +75,26 @@ fn deferred_wrap_latch() {
 }
 
 #[test]
+fn cjk_utf8_split_across_feeds_decodes_without_replacement() {
+    let mut t = Terminal::new(GridSize::new(10, 2));
+    let mut s = Stream::new();
+
+    for byte in "無効化".as_bytes() {
+        s.feed(&[*byte], &mut t);
+    }
+
+    assert_eq!(cell(&t, 0, 0).ch, '無');
+    assert_eq!(cell(&t, 2, 0).ch, '効');
+    assert_eq!(cell(&t, 4, 0).ch, '化');
+    assert!(cell(&t, 0, 0).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 1, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert!(cell(&t, 2, 0).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 3, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert!(cell(&t, 4, 0).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 5, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+}
+
+#[test]
 fn absolute_move_clears_latch_no_wrap() {
     // 80 x's (latched) then CHA to column 1 must NOT wrap.
     let mut bytes = vec![b'x'; 80];

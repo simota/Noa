@@ -203,6 +203,17 @@ impl Terminal {
         self.active_mut().set_viewport_selection(anchor, focus);
     }
 
+    pub fn viewport_point_to_selection_point(&self, point: Point) -> SelectionPoint {
+        self.active().viewport_point_to_selection_point(point)
+    }
+
+    /// Rows evicted from the active screen's scrollback over its lifetime.
+    /// Selection coordinates shift down by the same amount, so a caller
+    /// holding a `SelectionPoint` across events can re-align it.
+    pub fn selection_rows_evicted(&self) -> usize {
+        self.active().rows_evicted()
+    }
+
     pub fn select_word_at_viewport_point(&mut self, point: Point) {
         self.active_mut().select_word_at_viewport_point(point);
     }

@@ -92,6 +92,14 @@ impl Screen {
         self.selection = Some(Selection::from_viewport_points(row_base, anchor, focus));
     }
 
+    /// Convert a viewport cell to its storage coordinate at this instant.
+    /// Lets a caller pin a drag anchor to content, so scrolling output can't
+    /// re-anchor an in-progress selection.
+    pub fn viewport_point_to_selection_point(&self, point: Point) -> SelectionPoint {
+        let point = self.clamped_viewport_point(point);
+        SelectionPoint::new(point.x, self.visible_row_base() + point.y as usize)
+    }
+
     pub fn select_word_at_viewport_point(&mut self, point: Point) {
         let point = self.clamped_viewport_point(point);
         let storage_y = self.visible_row_base() + point.y as usize;
@@ -118,14 +126,46 @@ impl Screen {
         ));
     }
 
+    /// Select the whole logical line at `point`: the soft-wrap chain the row
+    /// belongs to, not just the single visual row (Ghostty's triple-click).
     pub fn select_line_at_viewport_point(&mut self, point: Point) {
         let point = self.clamped_viewport_point(point);
         let storage_y = self.visible_row_base() + point.y as usize;
+        let (first, last) = self.logical_line_bounds(storage_y);
 
         self.selection = Some(Selection::new(
-            SelectionPoint::new(0, storage_y),
-            SelectionPoint::new(self.cols.saturating_sub(1), storage_y),
+            SelectionPoint::new(0, first),
+            SelectionPoint::new(self.cols.saturating_sub(1), last),
         ));
+    }
+
+    /// The `[first, last]` storage-row span of the logical line containing
+    /// `storage_y`, following `Row::wrapped` continuation flags both ways.
+    fn logical_line_bounds(&self, storage_y: usize) -> (usize, usize) {
+        let mut first = storage_y;
+        while first > 0 {
+            let Some(prev) = self.storage_row(first - 1) else {
+                break;
+            };
+            if !prev.wrapped {
+                break;
+            }
+            first -= 1;
+        }
+
+        let total = self.scrollback.len() + self.grid.len();
+        let mut last = storage_y;
+        while last + 1 < total {
+            let Some(row) = self.storage_row(last) else {
+                break;
+            };
+            if !row.wrapped {
+                break;
+            }
+            last += 1;
+        }
+
+        (first, last)
     }
 
     pub fn clear_selection(&mut self) {
@@ -201,7 +241,11 @@ impl Screen {
 
         let mut previous_wrapped = false;
         for y in start.y..=end.y {
-            let row = self.storage_row(y)?;
+            // A row that fell out of storage (stale selection edge) skips,
+            // rather than discarding the rest of the copy.
+            let Some(row) = self.storage_row(y) else {
+                continue;
+            };
             let Some(row_end) = row.cells.len().checked_sub(1) else {
                 continue;
             };
@@ -232,7 +276,10 @@ impl Screen {
             cell.push_text_to(text);
         }
 
-        if end_x + 1 == row.cells.len() {
+        // Trim the blank tail of an unwrapped row; a soft-wrapped row is full
+        // width, so its trailing spaces are real content continued on the
+        // next row and must survive the join.
+        if end_x + 1 == row.cells.len() && !row.wrapped {
             while text.len() > before_len && text.ends_with(' ') {
                 text.pop();
             }
@@ -316,8 +363,19 @@ impl Screen {
     }
 
     pub(super) fn is_word_cell(cell: &Cell) -> bool {
-        !cell.attrs.contains(CellAttrs::WIDE_SPACER)
-            && cell.text_chars().any(|ch| !ch.is_whitespace())
+        // Double-click word characters stop at whitespace and Ghostty's
+        // boundary punctuation set, not just whitespace.
+        const WORD_BOUNDARY: &[char] = &[
+            '\'', '"', '`', '│', '|', ':', ',', '(', ')', '[', ']', '{', '}', '<', '>',
+        ];
+
+        if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
+            return false;
+        }
+        let Some(first) = cell.text_chars().next() else {
+            return false;
+        };
+        !first.is_whitespace() && !WORD_BOUNDARY.contains(&first)
     }
 
     pub fn visible_row_base(&self) -> usize {

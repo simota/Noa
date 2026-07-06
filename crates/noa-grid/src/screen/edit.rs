@@ -10,6 +10,9 @@ impl Screen {
             row.clear(blank.clone());
         }
         self.viewport_offset = 0;
+        // The cleared cells may sit inside the selection; don't let a later
+        // copy pick up whatever gets written there next.
+        self.clear_selection();
     }
 
     pub(crate) fn clear_scrollback(&mut self) {
@@ -398,6 +401,17 @@ impl Screen {
 
     pub fn erase_display(&mut self, mode: EraseDisplay) {
         self.follow_live_output();
+        // Erasing rewrites cells under the selection; drop a selection
+        // touching the live area rather than letting a later copy pick up
+        // whatever is written there next. (ED 3 handles its own shift below.)
+        if mode != EraseDisplay::Scrollback
+            && let Some(selection) = self.selection
+        {
+            let (_, end) = selection.normalized();
+            if end.y >= self.scrollback.len() {
+                self.selection = None;
+            }
+        }
         let blank = self.blank();
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
         match mode {
@@ -445,6 +459,11 @@ impl Screen {
                         true
                     }
                 });
+                // Same collapse for the selection: a live-area selection
+                // shifts with its rows, one touching cleared history is gone.
+                self.selection = self
+                    .selection
+                    .and_then(|selection| selection.shift_rows_up(old_len));
             }
         }
     }

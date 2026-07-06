@@ -34,7 +34,13 @@ impl ImeState {
             Ime::Preedit(text, cursor_range) => {
                 text.clone_into(&mut self.preedit);
                 self.preedit_cursor = *cursor_range;
-                self.pending_commit_echo = None;
+                // macOS sends an empty `Preedit` right after `Commit` to clear
+                // the marked text; the commit's `KeyboardInput.text` echo
+                // arrives after it, so only a new composition may drop the
+                // pending echo guard.
+                if !text.is_empty() {
+                    self.pending_commit_echo = None;
+                }
                 None
             }
             Ime::Commit(text) => {
@@ -919,6 +925,30 @@ mod tests {
         );
         assert!(state.consume_commit_echo(Some("無")));
         assert!(!state.consume_commit_echo(Some("無")));
+    }
+
+    #[test]
+    fn ime_commit_echo_survives_empty_preedit_clear() {
+        // macOS emits `Commit` → `Preedit("")` (marked-text clear) → the
+        // commit's `KeyboardInput.text` echo; the guard must outlive the
+        // empty preedit or the committed text is sent twice.
+        let mut state = ImeState::default();
+
+        assert_eq!(
+            state.handle_event(&Ime::Commit("出".into())),
+            Some("出".as_bytes().to_vec())
+        );
+        assert_eq!(state.handle_event(&Ime::Preedit(String::new(), None)), None);
+        assert!(state.consume_commit_echo(Some("出")));
+    }
+
+    #[test]
+    fn ime_new_composition_drops_stale_commit_echo_guard() {
+        let mut state = ImeState::default();
+
+        state.handle_event(&Ime::Commit("出".into()));
+        state.handle_event(&Ime::Preedit("に".into(), Some((0, 3))));
+        assert!(!state.consume_commit_echo(Some("出")));
     }
 
     #[test]

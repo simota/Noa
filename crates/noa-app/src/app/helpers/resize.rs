@@ -86,6 +86,22 @@ pub(crate) fn apply_pane_resize_batch(
             .map(|(pane_id, _, grid_size)| (*pane_id, *grid_size)),
     );
 
+    // Panes whose grid actually changes, captured before any mutation. A
+    // same-size `Terminal::resize` is NOT a no-op (it resets the scroll
+    // region and dirties every row), and relayouts also run on events that
+    // usually change nothing (window focus), so unchanged panes must be
+    // left completely untouched.
+    let changed: std::collections::HashSet<PaneId> = targets
+        .iter()
+        .filter(|(pane_id, _, grid_size)| {
+            state
+                .surfaces
+                .get(pane_id)
+                .is_some_and(|surface| surface.grid_size != *grid_size)
+        })
+        .map(|(pane_id, _, _)| *pane_id)
+        .collect();
+
     for action in &plan {
         let PaneResizeAction::GridResize(pane_id, grid_size) = *action else {
             continue;
@@ -102,7 +118,9 @@ pub(crate) fn apply_pane_resize_batch(
         }
         surface.grid_size = grid_size;
         let mut terminal = surface.terminal.lock();
-        terminal.resize(grid_size);
+        if changed.contains(&pane_id) {
+            terminal.resize(grid_size);
+        }
         if let Some(rect) = rect {
             let (cw, ch, taw, tah) = pixel_metrics_for_pane(rect, metrics, padding);
             terminal.set_pixel_metrics(cw, ch, taw, tah);
@@ -113,6 +131,9 @@ pub(crate) fn apply_pane_resize_batch(
         let PaneResizeAction::PtyResize(pane_id, grid_size) = action else {
             continue;
         };
+        if !changed.contains(&pane_id) {
+            continue;
+        }
         if let Some(surface) = state.surfaces.get(&pane_id) {
             let _ = surface.resize_tx.send(grid_size);
         }

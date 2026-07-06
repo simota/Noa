@@ -259,14 +259,12 @@ impl Renderer {
         let mask_atlas_seen_identity = font.atlas_identity();
         let mask_atlas_seen_generation = font.mask_atlas_generation();
 
-        // RGBA8Unorm (not sRGB) — the color bitmap is sampled verbatim as
-        // passthrough, no re-encode (WP1, REQ-EMOJI-2).
         let (color_w, color_h) = font.color_atlas_size();
         let color_atlas_texture = create_atlas_texture(
             device,
             color_w,
             color_h,
-            wgpu::TextureFormat::Rgba8Unorm,
+            color_atlas_format(format.is_srgb()),
             "noa-glyph-color-atlas",
         );
         let color_atlas_view =
@@ -771,7 +769,7 @@ impl Renderer {
                 size: font.color_atlas_size(),
                 identity: font.atlas_identity(),
                 generation: font.color_atlas_generation(),
-                format: wgpu::TextureFormat::Rgba8Unorm,
+                format: color_atlas_format(self.target_format_is_srgb),
                 bytes_per_px: COLOR_BYTES_PER_PX,
                 label: "noa-glyph-color-atlas",
             },

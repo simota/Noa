@@ -5,6 +5,20 @@ pub(super) const MASK_BYTES_PER_PX: u32 = 1;
 /// RGBA8 color atlas: 4 bytes per pixel.
 pub(super) const COLOR_BYTES_PER_PX: u32 = 4;
 
+/// The color (emoji) atlas holds sRGB-encoded bytes as rasterized. The shader
+/// passes samples through untinted, so the texture format must match the
+/// target's transfer function: on an sRGB target the sampler must decode
+/// sRGB→linear (the surface re-encodes on write; a plain `Rgba8Unorm` there
+/// double-encodes and washes emoji out), while on a non-sRGB target the bytes
+/// pass through verbatim.
+pub(super) fn color_atlas_format(target_is_srgb: bool) -> wgpu::TextureFormat {
+    if target_is_srgb {
+        wgpu::TextureFormat::Rgba8UnormSrgb
+    } else {
+        wgpu::TextureFormat::Rgba8Unorm
+    }
+}
+
 pub(super) fn upload_atlas(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,

@@ -579,6 +579,7 @@ impl OverviewThumbnailResources {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         format: wgpu::TextureFormat,
         scratch_size: PixelSize,
         tile_size: PixelSize,
@@ -600,7 +601,7 @@ impl OverviewThumbnailResources {
             .map(|_| OverviewTileTexture::new(device, format, title_size))
             .collect();
 
-        Self {
+        let resources = Self {
             blit,
             card,
             scratch,
@@ -610,12 +611,19 @@ impl OverviewThumbnailResources {
             tile_size,
             title_bar_h,
             card_color,
-        }
+        };
+        // Freshly allocated tile textures hold uninitialized memory; a tile
+        // that never receives its first mirror would otherwise be composited
+        // as garbage. Clear the whole pool to the card color up front so an
+        // unwritten tile always reads as an empty card.
+        resources.clear_all_tiles(device, queue);
+        resources
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn for_renderer(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         renderer: &Renderer,
         scratch_size: PixelSize,
         tile_size: PixelSize,
@@ -625,6 +633,7 @@ impl OverviewThumbnailResources {
     ) -> Self {
         Self::new(
             device,
+            queue,
             renderer.target_format(),
             scratch_size,
             tile_size,
@@ -719,6 +728,33 @@ impl OverviewThumbnailResources {
                 depth_or_array_layers: 1,
             },
         );
+        queue.submit(Some(encoder.finish()));
+    }
+
+    /// Clear every tile texture in the pool to the card color in a single
+    /// submit — used at allocation time so a tile that never receives its
+    /// first live mirror is never composited from uninitialized memory.
+    fn clear_all_tiles(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("noa-overview-tile-clear-all-encoder"),
+        });
+        for tile in &self.tiles {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("noa-overview-tile-clear-all-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &tile.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu_color(self.card_color)),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
         queue.submit(Some(encoder.finish()));
     }
 

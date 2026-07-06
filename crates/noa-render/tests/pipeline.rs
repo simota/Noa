@@ -455,6 +455,7 @@ fn overview_blit_pipeline_draws_tile_without_validation_error() {
 
     let mut overview = OverviewThumbnailResources::for_renderer(
         &device,
+        &queue,
         &renderer,
         scratch_size,
         tile_size,
@@ -498,6 +499,7 @@ fn overview_blit_scratch_resizes_to_source_frame_without_validation_error() {
 
     let mut overview = OverviewThumbnailResources::for_renderer(
         &device,
+        &queue,
         &renderer,
         initial_scratch_size,
         tile_size,
@@ -536,6 +538,7 @@ fn overview_blit_tile_pixel_hash_tracks_content_changes() {
     renderer.resize(scratch_size);
     let mut overview = OverviewThumbnailResources::for_renderer(
         &device,
+        &queue,
         &renderer,
         scratch_size,
         tile_size,
@@ -590,6 +593,57 @@ fn overview_blit_tile_pixel_hash_tracks_content_changes() {
 }
 
 #[test]
+fn overview_freshly_allocated_tiles_are_cleared_not_uninitialized() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping overview fresh-tile clear test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let scratch_size = PixelSize { w: 64, h: 32 };
+    let tile_size = PixelSize { w: 64, h: 32 };
+    let overview = OverviewThumbnailResources::new(
+        &device,
+        &queue,
+        format,
+        scratch_size,
+        tile_size,
+        2,
+        TEST_TITLE_BAR_H,
+        TEST_CARD_COLOR,
+    );
+
+    // Tile 0 is never rendered — it must still read back as a uniform card
+    // fill rather than uninitialized GPU memory (the magenta-garbage bug).
+    let fresh = read_rgba_pixels(
+        &device,
+        &queue,
+        overview.tile_texture_for_test(0).expect("tile exists"),
+        tile_size.w,
+        tile_size.h,
+    );
+    let first = &fresh[..4];
+    assert!(
+        fresh.chunks_exact(4).all(|px| px == first),
+        "freshly allocated overview tile must be a uniform clear, not uninitialized garbage"
+    );
+
+    // And that uniform fill must be the same card color the explicit
+    // `clear_tile` placeholder path produces.
+    overview.clear_tile(&device, &queue, 1);
+    let cleared = read_rgba_pixels(
+        &device,
+        &queue,
+        overview.tile_texture_for_test(1).expect("tile exists"),
+        tile_size.w,
+        tile_size.h,
+    );
+    assert_eq!(
+        fresh, cleared,
+        "freshly allocated tile must match the card-color clear"
+    );
+}
+
+#[test]
 fn overview_blit_resources_drop_before_renderer_without_validation_error() {
     let Some((device, queue)) = device_queue() else {
         eprintln!("no wgpu adapter available — skipping overview blit teardown test");
@@ -611,6 +665,7 @@ fn overview_blit_resources_drop_before_renderer_without_validation_error() {
         {
             let mut overview = OverviewThumbnailResources::for_renderer(
                 &device,
+                &queue,
                 &renderer,
                 scratch_size,
                 tile_size,
@@ -1377,6 +1432,7 @@ fn overview_card_pipeline_composites_tiles_without_validation_error() {
 
     let mut overview = OverviewThumbnailResources::for_renderer(
         &device,
+        &queue,
         &renderer,
         scratch_size,
         tile_size,

@@ -289,6 +289,7 @@ impl App {
         if stale {
             overview.thumbnails = Some(OverviewThumbnailResources::new(
                 &gpu.device,
+                &gpu.queue,
                 format,
                 scratch_size,
                 tile_size,

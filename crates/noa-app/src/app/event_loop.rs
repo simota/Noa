@@ -653,6 +653,13 @@ impl App {
                         if surface.pressed_mouse_button == Some(button) {
                             surface.pressed_mouse_button = None;
                         }
+                        // A selection drag whose press predates the program
+                        // enabling mouse tracking still needs its mouse-up,
+                        // or the drag state sticks and keeps extending the
+                        // selection after tracking turns back off.
+                        if button == MouseButton::Left {
+                            let _ = surface.mouse_selection.left_released();
+                        }
                     }
                 }
             }

@@ -368,20 +368,48 @@ impl App {
 
         if let Some(surface) = self
             .windows
-            .get(&window_id)
-            .and_then(|state| state.surfaces.get(&pane_id))
+            .get_mut(&window_id)
+            .and_then(|state| state.surfaces.get_mut(&pane_id))
         {
             let mut terminal = surface.terminal.lock();
             match gesture {
                 SelectionGesture::None => {}
-                SelectionGesture::Clear => terminal.clear_selection(),
+                SelectionGesture::Clear { anchor } => {
+                    terminal.clear_selection();
+                    // Pin the drag anchor to content at press time; extending
+                    // against this storage coordinate keeps the selection on
+                    // the same text even if output scrolls mid-drag.
+                    surface.selection_anchor = Some((
+                        terminal.viewport_point_to_selection_point(anchor),
+                        terminal.selection_rows_evicted(),
+                    ));
+                }
                 SelectionGesture::Extend { anchor, focus } => {
-                    terminal.set_viewport_selection(anchor, focus);
+                    let anchor = match surface.selection_anchor {
+                        Some((point, evicted_then)) => {
+                            // Rows evicted since capture shifted every storage
+                            // coordinate up; re-align (a fully evicted anchor
+                            // clamps to the oldest retained row).
+                            let shift = terminal.selection_rows_evicted() - evicted_then;
+                            if shift > point.y {
+                                noa_grid::SelectionPoint::new(0, 0)
+                            } else {
+                                noa_grid::SelectionPoint::new(point.x, point.y - shift)
+                            }
+                        }
+                        // No pinned anchor (e.g. tracking-mode handoff):
+                        // fall back to the gesture's viewport anchor.
+                        None => terminal.viewport_point_to_selection_point(anchor),
+                    };
+                    let focus = terminal.viewport_point_to_selection_point(focus);
+                    terminal.set_selection(anchor, focus);
                 }
                 SelectionGesture::SelectWord(point) => {
+                    surface.selection_anchor = None;
                     terminal.select_word_at_viewport_point(point)
                 }
                 SelectionGesture::SelectLine(point) => {
+                    surface.selection_anchor = None;
                     terminal.select_line_at_viewport_point(point)
                 }
             }

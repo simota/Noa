@@ -19,7 +19,9 @@ pub enum ClickKind {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SelectionGesture {
     None,
-    Clear,
+    /// A fresh left press: clear the selection and pin the drag anchor at
+    /// `anchor` (viewport cell at press time).
+    Clear { anchor: Point },
     Extend { anchor: Point, focus: Point },
     SelectWord(Point),
     SelectLine(Point),
@@ -79,7 +81,7 @@ impl MouseSelectionState {
         self.drag_started = false;
 
         match self.click_tracker.record_press(cell, now) {
-            ClickKind::Single => SelectionGesture::Clear,
+            ClickKind::Single => SelectionGesture::Clear { anchor: cell },
             ClickKind::Double => {
                 self.cancel_drag();
                 SelectionGesture::SelectWord(cell)
@@ -415,7 +417,12 @@ mod tests {
         let start = Instant::now();
 
         assert_eq!(state.cursor_moved(point(1, 1)), SelectionGesture::None);
-        assert_eq!(state.left_pressed(start), SelectionGesture::Clear);
+        assert_eq!(
+            state.left_pressed(start),
+            SelectionGesture::Clear {
+                anchor: point(1, 1)
+            }
+        );
         assert_eq!(state.cursor_moved(point(1, 1)), SelectionGesture::None);
         assert_eq!(
             state.cursor_moved(point(3, 2)),
@@ -433,7 +440,12 @@ mod tests {
         let start = Instant::now();
 
         state.cursor_moved(point(2, 0));
-        assert_eq!(state.left_pressed(start), SelectionGesture::Clear);
+        assert_eq!(
+            state.left_pressed(start),
+            SelectionGesture::Clear {
+                anchor: point(2, 0)
+            }
+        );
         state.left_released();
         assert_eq!(
             state.left_pressed(start + Duration::from_millis(100)),

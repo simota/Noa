@@ -1169,6 +1169,7 @@ impl App {
             io_thread: Some(io_thread),
             grid_size,
             mouse_selection: MouseSelectionState::default(),
+            selection_anchor: None,
             last_mouse_cell: None,
             pressed_mouse_button: None,
             ime_state: input::ImeState::default(),

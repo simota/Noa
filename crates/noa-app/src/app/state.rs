@@ -293,6 +293,11 @@ pub(super) struct Surface {
     pub(super) io_thread: Option<crate::io_thread::IoThreadHandle>,
     pub(super) grid_size: GridSize,
     pub(super) mouse_selection: MouseSelectionState,
+    /// The in-progress drag's anchor pinned to content: its storage
+    /// coordinate plus the eviction count when captured, so scrolling output
+    /// (or scrollback eviction) during the drag can't re-anchor the
+    /// selection. `None` outside a single-click drag.
+    pub(super) selection_anchor: Option<(noa_grid::SelectionPoint, usize)>,
     pub(super) last_mouse_cell: Option<Point>,
     pub(super) pressed_mouse_button: Option<MouseButton>,
     pub(super) ime_state: input::ImeState,

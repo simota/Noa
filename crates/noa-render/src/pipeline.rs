@@ -7,7 +7,8 @@ use crate::instance::{CellInstance, Uniforms};
 pub struct CellPipeline {
     pub pipeline: wgpu::RenderPipeline,
     pub bind_group_layout: wgpu::BindGroupLayout,
-    pub sampler: wgpu::Sampler,
+    pub mask_sampler: wgpu::Sampler,
+    pub color_sampler: wgpu::Sampler,
 }
 
 impl CellPipeline {
@@ -67,6 +68,12 @@ impl CellPipeline {
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -149,8 +156,18 @@ impl CellPipeline {
             cache: None,
         });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("noa-atlas-sampler"),
+        let mask_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("noa-mask-atlas-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let color_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("noa-color-atlas-sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -163,7 +180,8 @@ impl CellPipeline {
         Self {
             pipeline,
             bind_group_layout,
-            sampler,
+            mask_sampler,
+            color_sampler,
         }
     }
 
@@ -197,11 +215,15 @@ impl CellPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.mask_sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(color_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.color_sampler),
                 },
             ],
         })

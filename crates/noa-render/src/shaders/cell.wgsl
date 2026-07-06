@@ -28,7 +28,7 @@ var<uniform> uniforms: Uniforms;
 var atlas_tex: texture_2d<f32>;
 
 @group(0) @binding(2)
-var atlas_sampler: sampler;
+var mask_atlas_sampler: sampler;
 
 // RGBA8 color-glyph atlas (emoji, WP1). FRAGMENT-only visibility — unlike
 // `atlas_tex`, the vertex stage must NOT call `textureDimensions` on this
@@ -38,6 +38,9 @@ var atlas_sampler: sampler;
 // validation abort.
 @group(0) @binding(3)
 var color_atlas_tex: texture_2d<f32>;
+
+@group(0) @binding(4)
+var color_atlas_sampler: sampler;
 
 struct InstanceInput {
     @location(0) glyph_pos: vec2<u32>,
@@ -133,9 +136,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             // (REQ-EMOJI-2). Only place color_atlas_tex's textureDimensions
             // is called — normalizing the texel-space uv from vs_main.
             let cuv = in.uv / vec2<f32>(textureDimensions(color_atlas_tex));
-            return textureSample(color_atlas_tex, atlas_sampler, cuv);
+            return textureSample(color_atlas_tex, color_atlas_sampler, cuv);
         }
-        let coverage = textureSample(atlas_tex, atlas_sampler, in.uv).r;
+        let coverage = textureSample(atlas_tex, mask_atlas_sampler, in.uv).r;
         return vec4<f32>(in.color.rgb, in.color.a * coverage);
     }
     return in.color;

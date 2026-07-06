@@ -116,14 +116,14 @@ const TITLEBAR_BACKDROP_ID: &str = "noa.titlebar.opaque-backdrop";
 /// Install (or refresh) an opaque, `bg`-colored view filling the native
 /// titlebar + tab-bar strip.
 ///
-/// Only meaningful for the `transparent` titlebar style: there the window is
-/// non-opaque (`with_transparent(true)`) with a full-size content view, so
-/// AppKit composites its tab chrome — the lazily-allocated hover highlight
-/// `NSVisualEffectView` especially — against undefined semi-transparent
-/// underlay pixels, which surfaces as magenta diagonal-stripe garbage on some
-/// machines. Backing the strip with an opaque layer (the iTerm2/Ghostty
-/// approach) gives that chrome defined content to composite over. No-op off
-/// macOS or when the AppKit hierarchy can't be reached.
+/// Meaningful for translucent normal windows (`background-opacity < 1.0`) with
+/// visible AppKit titlebar/tab chrome: AppKit composites its tab chrome — the
+/// lazily-allocated hover highlight `NSVisualEffectView` especially — against
+/// undefined semi-transparent underlay pixels, which surfaces as magenta
+/// diagonal-stripe garbage on some machines. Backing the strip with an opaque
+/// layer (the iTerm2/Ghostty approach) gives that chrome defined content to
+/// composite over. No-op off macOS or when the AppKit hierarchy can't be
+/// reached.
 ///
 /// Idempotent via [`TITLEBAR_BACKDROP_ID`]; a repeat call (e.g. a theme
 /// reload) updates the existing view's color rather than adding another.
@@ -177,18 +177,13 @@ fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
         if theme_frame.is_null() {
             return;
         }
-        let subviews: *mut AnyObject = msg_send![theme_frame, subviews];
-        if subviews.is_null() {
-            return;
-        }
-        let count: usize = msg_send![subviews, count];
+        let mut queue = vec![theme_frame];
         let mut container: *mut AnyObject = std::ptr::null_mut();
-        for i in 0..count {
-            let view: *mut AnyObject = msg_send![subviews, objectAtIndex: i];
-            if view.is_null() {
+        while let Some(current_view) = queue.pop() {
+            if current_view.is_null() {
                 continue;
             }
-            let class: *const AnyClass = msg_send![view, class];
+            let class: *const AnyClass = msg_send![current_view, class];
             if let Some(class) = class.as_ref()
                 && class
                     .name()
@@ -196,8 +191,18 @@ fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
                     .windows(CONTAINER_CLASS.len())
                     .any(|w| w == CONTAINER_CLASS)
             {
-                container = view;
+                container = current_view;
                 break;
+            }
+            let subviews: *mut AnyObject = msg_send![current_view, subviews];
+            if !subviews.is_null() {
+                let count: usize = msg_send![subviews, count];
+                for i in 0..count {
+                    let subview: *mut AnyObject = msg_send![subviews, objectAtIndex: i];
+                    if !subview.is_null() {
+                        queue.push(subview);
+                    }
+                }
             }
         }
         if container.is_null() {
@@ -255,7 +260,8 @@ fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
         }
         let _: () = msg_send![view, setIdentifier: &*identifier];
         let _: () = msg_send![view, setWantsLayer: true];
-        let _: () = msg_send![view, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE];
+        let _: () =
+            msg_send![view, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE];
         let layer: *mut AnyObject = msg_send![view, layer];
         if !layer.is_null() {
             let _: () = msg_send![layer, setBackgroundColor: cg_color];
@@ -273,3 +279,48 @@ fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
 
 #[cfg(not(target_os = "macos"))]
 fn install_titlebar_backdrop_impl(_window: &Window, _bg: noa_core::Rgb) {}
+
+pub(crate) fn set_window_background_color(window: &Window, bg: noa_core::Rgb, alpha: f32) {
+    set_window_background_color_impl(window, bg, alpha);
+}
+
+#[cfg(target_os = "macos")]
+fn set_window_background_color_impl(window: &Window, bg: noa_core::Rgb, alpha: f32) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyClass;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = appkit.ns_view.as_ptr().cast::<objc2::runtime::AnyObject>();
+
+    unsafe {
+        let ns_window: *mut objc2::runtime::AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+
+        let Some(color_class) = AnyClass::get(c"NSColor") else {
+            return;
+        };
+        let color: *mut objc2::runtime::AnyObject = msg_send![
+            color_class,
+            colorWithSRGBRed: bg.r as f64 / 255.0,
+            green: bg.g as f64 / 255.0,
+            blue: bg.b as f64 / 255.0,
+            alpha: alpha as f64,
+        ];
+        if color.is_null() {
+            return;
+        }
+
+        let _: () = msg_send![ns_window, setBackgroundColor: color];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_window_background_color_impl(_window: &Window, _bg: noa_core::Rgb, _alpha: f32) {}

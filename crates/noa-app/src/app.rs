@@ -84,7 +84,7 @@ use quick_terminal::QuickTerminalState;
 use state::*;
 
 #[cfg(target_os = "macos")]
-use config::{apply_macos_titlebar_style, macos_option_as_alt};
+use config::{apply_macos_titlebar_style, macos_option_as_alt, needs_macos_titlebar_backdrop};
 use config::{
     decode_background_image, font_config_from_noa_config, resolve_cursor_style,
     resolve_grid_padding,
@@ -425,6 +425,20 @@ impl App {
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
             return;
         };
+        #[cfg(target_os = "macos")]
+        {
+            crate::macos_window::set_window_background_color(
+                &state.window,
+                gpu.theme.default_bg,
+                self.config.background_opacity,
+            );
+            if needs_macos_titlebar_backdrop(
+                self.config.background_opacity,
+                self.config.macos_titlebar_style,
+            ) {
+                crate::macos_window::install_titlebar_backdrop(&state.window, gpu.theme.default_bg);
+            }
+        }
         if state.occluded {
             return;
         }
@@ -1054,13 +1068,22 @@ impl App {
             (surface_config, renderer)
         };
 
-        // The `transparent` titlebar style leaves a non-opaque window whose
-        // native tab chrome would otherwise composite against undefined
-        // pixels; back the titlebar strip with an opaque theme-colored view.
+        // A translucent window leaves native titlebar/tab chrome compositing
+        // against undefined pixels; back the strip with an opaque theme view.
         #[cfg(target_os = "macos")]
-        if self.config.macos_titlebar_style == noa_config::MacosTitlebarStyle::Transparent {
+        {
             let bg = self.gpu.as_ref().expect("gpu initialized").theme.default_bg;
-            crate::macos_window::install_titlebar_backdrop(&window, bg);
+            crate::macos_window::set_window_background_color(
+                &window,
+                bg,
+                self.config.background_opacity,
+            );
+            if needs_macos_titlebar_backdrop(
+                self.config.background_opacity,
+                self.config.macos_titlebar_style,
+            ) {
+                crate::macos_window::install_titlebar_backdrop(&window, bg);
+            }
         }
 
         let window_id = window.id();

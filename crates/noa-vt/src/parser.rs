@@ -119,7 +119,14 @@ impl Parser {
             sink(Action::Print('\u{FFFD}'));
         }
 
-        // (2) "Anywhere" transitions.
+        // (2) Recognized C1 controls. Some programs still emit 8-bit
+        // CSI/OSC/DCS/APC forms; treating those bytes as malformed UTF-8
+        // leaves the rest of the control sequence printed as garbage.
+        if self.c1_control(b, sink) {
+            return;
+        }
+
+        // (3) "Anywhere" transitions.
         match b {
             0x18 | 0x1a => {
                 sink(Action::Execute(b));
@@ -133,7 +140,7 @@ impl Parser {
             _ => {}
         }
 
-        // (3) Per-state handling.
+        // (4) Per-state handling.
         match self.state {
             State::Ground => self.st_ground(b, sink),
             State::Escape => self.st_escape(b, sink),
@@ -286,6 +293,7 @@ impl Parser {
     fn st_osc<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
         match b {
             0x07 => self.goto(State::Ground, sink), // BEL terminates OSC
+            0x9c => self.goto(State::Ground, sink), // 8-bit ST
             0x20..=0x7e | 0x80..=0xff => {
                 if self.osc_overflow {
                     return;
@@ -361,6 +369,40 @@ impl Parser {
     }
 
     // ── primitive actions ──────────────────────────────────────────
+
+    fn c1_control<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) -> bool {
+        if !(0x80..=0x9f).contains(&b) {
+            return false;
+        }
+        match self.state {
+            State::DcsPassthrough | State::ApcString => return false,
+            State::OscString if b != 0x9c => return false,
+            State::SosPmApcString => {
+                if b == 0x9c {
+                    self.state = State::Ground;
+                }
+                return true;
+            }
+            _ => {}
+        }
+
+        match b {
+            0x90 => self.goto(State::DcsPassthrough, sink), // DCS
+            0x98 | 0x9e => self.state = State::SosPmApcString, // SOS / PM
+            0x9b => self.goto(State::CsiEntry, sink),       // CSI
+            0x9c => {
+                if self.state == State::OscString {
+                    self.goto(State::Ground, sink);
+                } else {
+                    self.state = State::Ground; // ST outside a string: ignore.
+                }
+            }
+            0x9d => self.goto(State::OscString, sink), // OSC
+            0x9f => self.goto(State::ApcString, sink), // APC
+            _ => return false,
+        }
+        true
+    }
 
     fn collect(&mut self, b: u8) {
         if self.intermediates.len() < MAX_INTERMEDIATES {

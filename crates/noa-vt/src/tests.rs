@@ -358,6 +358,42 @@ fn c0_in_the_middle_of_csi_executes() {
     );
 }
 
+#[test]
+fn c1_csi_dispatches_like_escape_bracket() {
+    let acts = actions(&[0x9b, b'3', b'1', b'm', b'X']);
+    assert_eq!(
+        acts,
+        vec![
+            Action::CsiDispatch(Csi {
+                params: vec![31],
+                sep_colon: vec![],
+                intermediates: vec![],
+                private: 0,
+                final_byte: b'm',
+            }),
+            Action::Print('X'),
+        ]
+    );
+}
+
+#[test]
+fn c1_string_controls_dispatch_and_st_terminates() {
+    assert_eq!(
+        actions(&[0x9d, b'2', b';', b't', 0x9c]),
+        vec![Action::OscDispatch(b"2;t".to_vec())]
+    );
+    assert_eq!(
+        actions(&[0x90, b'+', b'q', b'5', b'4', b'4', b'e', 0x9c]),
+        vec![Action::DcsDispatch(crate::DcsPayload {
+            data: b"+q544e".to_vec(),
+        })]
+    );
+
+    let (data, truncated) = only_apc(&[0x9f, b'G', b'i', b'=', b'1', 0x9c]);
+    assert_eq!(data, b"Gi=1");
+    assert!(!truncated);
+}
+
 // ── APC bounded capture (Kitty graphics transport) ─────────────────
 
 /// Extract the single APC dispatch in `bytes` (panics otherwise).
@@ -397,6 +433,15 @@ fn apc_sos_pm_still_discarded() {
                 .into_iter()
                 .all(|a| !matches!(a, Action::ApcDispatch { .. })),
             "lead {lead:?} should not dispatch"
+        );
+    }
+
+    for lead in [0x98, 0x9e] {
+        let mut bytes = vec![lead];
+        bytes.extend_from_slice(&[b'w', b'h', b'a', b't', 0x9b, b'3', b'1', b'm', 0x9c]);
+        assert!(
+            actions(&bytes).is_empty(),
+            "C1 SOS/PM payload must be discarded through 8-bit ST"
         );
     }
 }

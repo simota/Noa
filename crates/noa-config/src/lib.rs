@@ -9,6 +9,7 @@ use noa_core::Rgb;
 mod ghostty;
 mod import;
 mod parser;
+mod writer;
 
 pub use ghostty::{ghostty_config_candidates, ghostty_config_candidates_from};
 pub use import::{
@@ -16,6 +17,7 @@ pub use import::{
     import_ghostty_config_at,
 };
 pub use parser::{Diagnostic, Directive, parse_directives, parse_overrides};
+pub use writer::{apply_updates, write_config_updates};
 
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;

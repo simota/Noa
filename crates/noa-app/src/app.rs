@@ -1104,7 +1104,10 @@ impl App {
     fn overview_window_attributes(&self) -> WindowAttributes {
         WindowAttributes::default()
             .with_title("Session Overview")
+            // Exposé-style: the overview fills the screen's work area; the
+            // inner size is only the pre-maximize fallback.
             .with_inner_size(LogicalSize::new(900.0, 600.0))
+            .with_maximized(true)
     }
 
     /// The working directory reported by a pane's shell over OSC 7, if it

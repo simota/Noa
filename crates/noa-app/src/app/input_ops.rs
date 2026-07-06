@@ -537,6 +537,7 @@ impl App {
             );
             return;
         }
+        self.snap_focused_viewport_to_bottom(window_id);
         self.write_pane_pty_bytes_lossless(window_id, pane_id, &bytes);
     }
 
@@ -626,7 +627,10 @@ impl App {
                 window_id,
                 pane_id,
                 bytes,
-            } => self.write_pane_pty_bytes_lossless(window_id, pane_id, &bytes),
+            } => {
+                self.snap_focused_viewport_to_bottom(window_id);
+                self.write_pane_pty_bytes_lossless(window_id, pane_id, &bytes);
+            }
             ConfirmAction::ClipboardRead {
                 window_id,
                 pane_id,
@@ -657,6 +661,31 @@ impl App {
                 )
             })
             .unwrap_or((MouseTracking::Off, MouseFormat::Legacy))
+    }
+
+    /// Snap `window_id`'s focused pane viewport back to the live bottom, if it
+    /// is scrolled into scrollback. Called on user input destined for the pty
+    /// (keys, IME commits, pastes) so typing always follows the prompt;
+    /// program-initiated writes (DA/DSR replies, mouse reports) do not snap.
+    pub(super) fn snap_focused_viewport_to_bottom(&self, window_id: WindowId) {
+        let Some(surface) = self
+            .windows
+            .get(&window_id)
+            .and_then(WindowState::focused_surface)
+        else {
+            return;
+        };
+        let snapped = {
+            let mut terminal = surface.terminal.lock();
+            let scrolled = terminal.viewport_offset() != 0;
+            if scrolled {
+                terminal.scroll_viewport_to_bottom();
+            }
+            scrolled
+        };
+        if snapped {
+            self.request_window_redraw(window_id);
+        }
     }
 
     pub(super) fn write_pty_bytes(&self, window_id: WindowId, bytes: &[u8]) {

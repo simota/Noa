@@ -350,6 +350,10 @@ impl ApplicationHandler<UserEvent> for App {
                     event.repeat,
                 );
                 if let Some(bytes) = bytes {
+                    // Typing follows the prompt: writing keyboard input snaps
+                    // a scrolled-back viewport to the live bottom (Ghostty
+                    // behavior).
+                    self.snap_focused_viewport_to_bottom(window_id);
                     self.write_pty_bytes(window_id, &bytes);
                 }
             }
@@ -799,6 +803,8 @@ impl App {
         }
 
         if let (Some(pane_id), Some(bytes)) = (pane_id, bytes) {
+            // Committed IME text follows the prompt like typed keys do.
+            self.snap_focused_viewport_to_bottom(window_id);
             self.write_pane_pty_bytes(window_id, pane_id, &bytes);
         }
 

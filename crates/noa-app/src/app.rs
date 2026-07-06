@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
-use noa_core::{DEFAULT_GRID_PADDING, GridPadding, GridSize, PixelSize, Point};
+use noa_core::{GridPadding, GridSize, PixelSize, Point};
 use noa_font::FontGrid;
 use noa_grid::{
     CursorStyle, PromptJump, Terminal,
@@ -53,19 +53,17 @@ use crate::split_tree::{
     split_pane, split_resize_drag_target_at_point, zoom_resize_targets, zoom_toggle,
 };
 use crate::tab_overview::{
-    OVERVIEW_CARD_BORDER_WIDTH, OVERVIEW_CARD_CORNER_RADIUS, OVERVIEW_CARD_FOCUS_GLOW_WIDTH,
-    OVERVIEW_CARD_FOCUS_WIDTH, OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME,
-    OVERVIEW_OUTER_MARGIN, OVERVIEW_TILE_GUTTER, OVERVIEW_TILE_MIN_RENDER_INTERVAL,
-    OVERVIEW_TITLE_BAR_H, OverviewAction, OverviewChrome, OverviewEscapeAction, OverviewLayout,
-    OverviewRenderCandidate, center_label, compute_overview_grid, hit_test_overview_grid,
+    OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_TILE_MIN_RENDER_INTERVAL,
+    OverviewAction, OverviewChrome, OverviewEscapeAction, OverviewLayout, OverviewMetrics,
+    OverviewRenderCandidate, compute_overview_grid, hit_test_overview_grid,
     move_overview_selection, overview_backlog_decision, overview_bg_color, overview_border_color,
     overview_card_color, overview_chrome_bands, overview_chrome_border_color,
     overview_chrome_pill_color, overview_close_hit_test, overview_escape_action,
-    overview_focus_ring_color, overview_hint_bar_rect, overview_hint_bar_text,
-    overview_initial_selection, overview_key_action, overview_placeholder_source_ids,
-    overview_search_field_rect, overview_search_field_row, overview_tab_filter,
-    overview_tile_labels, overview_title_bar_color, overview_zoom_rect, sanitize_placeholder_label,
-    select_due_overview_tile_ids, title_bar_row_ansi,
+    overview_focus_ring_color, overview_hint_bar_rect, overview_hint_bar_row,
+    overview_initial_selection, overview_key_action, overview_label_padding,
+    overview_placeholder_source_ids, overview_search_field_rect, overview_search_field_row,
+    overview_tab_filter, overview_tile_labels, overview_title_bar_color, overview_zoom_rect,
+    sanitize_placeholder_label, select_due_overview_tile_ids, title_bar_row_ansi,
 };
 use crate::{AppCommand, ViewportScroll};
 

@@ -5,7 +5,9 @@
 //! runtime objects.
 
 pub use crate::split_tree::{Direction, Point, Rect as TileRect};
+use noa_core::GridPadding;
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthChar;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 /// Spec-locked maximum number of live thumbnail tiles in the overview grid.
@@ -21,6 +23,10 @@ pub const OVERVIEW_MAX_RENDER_TILES_PER_FRAME: usize = 2;
 /// Spec-locked gap between adjacent tiles (REQ-OV-11, mockup parity v2) —
 /// roughly 4% of a typical tile width. Compile-time constant, no config knob
 /// (⚠G precedent: v1's throttle is likewise fixed rather than tunable).
+///
+/// This and every `OVERVIEW_*` dimension below are **design metrics at scale
+/// 1.0**; the overlay lays out in physical pixels, so production reads them
+/// through [`OverviewMetrics`] (DPR-multiplied), mirroring `SidebarMetrics`.
 pub const OVERVIEW_TILE_GUTTER: u32 = 18;
 
 /// Spec-locked margin between the tile grid and the Overview window bounds
@@ -98,6 +104,102 @@ pub const OVERVIEW_HINT_BAR_MAX_W: u32 = 460;
 /// Width of the close (✕) button's clickable region at the title bar's right
 /// edge (REQ-OV-13). Square with the title bar.
 const OVERVIEW_CLOSE_BUTTON_W: u32 = OVERVIEW_TITLE_BAR_H;
+
+/// Every Overview chrome dimension resolved for one window's scale factor
+/// (DPR). The `OVERVIEW_*` constants are the design metrics at scale 1.0
+/// (mockup parity); the overlay lays out in *physical* pixels
+/// (`window.inner_size()`) while its fonts are DPR-scaled
+/// (`font_pixel_size`), so every band, pill, and ring must scale by the same
+/// factor or a Retina band is half its intended size and clips its text
+/// (sidebar precedent: `SidebarMetrics`). Construct once per frame from
+/// `window.scale_factor()`. Pure and `Copy`, so layout and hit-tests stay
+/// unit-testable at any scale without a window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverviewMetrics {
+    scale: f32,
+    /// Title-bar band height at the top of every tile (scaled).
+    pub title_bar_h: u32,
+    /// Reserved top search band height (scaled).
+    pub search_band_h: u32,
+    /// Reserved bottom hint band height (scaled).
+    pub hint_band_h: u32,
+    /// Gap between adjacent tiles (scaled).
+    pub tile_gutter: u32,
+    /// Margin between the tile grid and the window bounds (scaled).
+    pub outer_margin: u32,
+    /// Rounded search-field size within the search band (scaled).
+    pub search_field_h: u32,
+    pub search_field_min_w: u32,
+    pub search_field_max_w: u32,
+    /// Rounded hint-bar size within the hint band (scaled).
+    pub hint_bar_h: u32,
+    pub hint_bar_min_w: u32,
+    pub hint_bar_max_w: u32,
+    /// Close (✕) button clickable width (scaled; square with the title bar).
+    pub close_button_w: u32,
+    /// Card corner radius / border / focus-ring widths (scaled).
+    pub card_corner_radius: f32,
+    pub card_border_width: f32,
+    pub card_focus_width: f32,
+    pub card_focus_glow_width: f32,
+}
+
+impl OverviewMetrics {
+    /// Resolve the design metrics for `scale` (a non-finite or non-positive
+    /// value falls back to 1.0).
+    pub fn new(scale: f32) -> Self {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        let s = |v: u32| ((v as f32) * scale).round() as u32;
+        Self {
+            scale,
+            title_bar_h: s(OVERVIEW_TITLE_BAR_H),
+            search_band_h: s(OVERVIEW_SEARCH_BAND_H),
+            hint_band_h: s(OVERVIEW_HINT_BAND_H),
+            tile_gutter: s(OVERVIEW_TILE_GUTTER),
+            outer_margin: s(OVERVIEW_OUTER_MARGIN),
+            search_field_h: s(OVERVIEW_SEARCH_FIELD_H),
+            search_field_min_w: s(OVERVIEW_SEARCH_FIELD_MIN_W),
+            search_field_max_w: s(OVERVIEW_SEARCH_FIELD_MAX_W),
+            hint_bar_h: s(OVERVIEW_HINT_BAR_H),
+            hint_bar_min_w: s(OVERVIEW_HINT_BAR_MIN_W),
+            hint_bar_max_w: s(OVERVIEW_HINT_BAR_MAX_W),
+            close_button_w: s(OVERVIEW_CLOSE_BUTTON_W),
+            card_corner_radius: OVERVIEW_CARD_CORNER_RADIUS * scale,
+            card_border_width: OVERVIEW_CARD_BORDER_WIDTH * scale,
+            card_focus_width: OVERVIEW_CARD_FOCUS_WIDTH * scale,
+            card_focus_glow_width: OVERVIEW_CARD_FOCUS_GLOW_WIDTH * scale,
+        }
+    }
+
+    /// The DPR this metrics set was resolved for — for scaling the few ring
+    /// widths that live at their `crate::chrome` call sites (hover/attention).
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+}
+
+/// Fixed horizontal inset (design px at scale 1.0) between a chrome band's
+/// edge and its label row.
+const OVERVIEW_LABEL_PAD_X: f32 = 10.0;
+
+/// Interior padding for a chrome-band label row: the fixed horizontal inset
+/// plus a top inset that vertically centers the single cell row within the
+/// band (`cell_h` is the label font's physical cell height; `band_h` the
+/// band's physical height).
+pub fn overview_label_padding(band_h: u32, cell_h: f32, scale: f32) -> GridPadding {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let pad_x = OVERVIEW_LABEL_PAD_X * scale;
+    let top = ((band_h as f32 - cell_h) / 2.0).max(0.0);
+    GridPadding::new(top, pad_x, 0.0, pad_x)
+}
 
 /// Pure layout result for the Session Overview grid.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,9 +347,9 @@ pub fn overview_tab_filter<Id: Copy>(query: &str, titles: &[(Id, String)]) -> Ve
 
 /// The close (✕) button hit-rect for `tile`: a square at the title bar's
 /// top-right corner (REQ-OV-13).
-pub fn overview_close_button_rect(tile: TileRect) -> TileRect {
-    let w = OVERVIEW_CLOSE_BUTTON_W.min(tile.w);
-    let h = OVERVIEW_TITLE_BAR_H.min(tile.h);
+pub fn overview_close_button_rect(tile: TileRect, metrics: OverviewMetrics) -> TileRect {
+    let w = metrics.close_button_w.min(tile.w);
+    let h = metrics.title_bar_h.min(tile.h);
     TileRect::new(tile.right().saturating_sub(w), tile.y, w, h)
 }
 
@@ -257,10 +359,14 @@ pub fn overview_close_button_rect(tile: TileRect) -> TileRect {
 /// callers check this one first and only fall back to the tile-body
 /// hit-test on a miss, so a close-button click is never mistaken for a
 /// tile-focus click even though both rects overlap at that corner.
-pub fn overview_close_hit_test<T: Copy>(tiles: &[(T, TileRect)], point: Point) -> Option<T> {
+pub fn overview_close_hit_test<T: Copy>(
+    tiles: &[(T, TileRect)],
+    point: Point,
+    metrics: OverviewMetrics,
+) -> Option<T> {
     tiles
         .iter()
-        .find(|(_, rect)| overview_close_button_rect(*rect).contains(point))
+        .find(|(_, rect)| overview_close_button_rect(*rect, metrics).contains(point))
         .map(|(id, _)| *id)
 }
 
@@ -289,7 +395,9 @@ pub fn overview_search_field_row(query: &str, cols: u16) -> String {
     }
     let text = overview_search_field_text(query);
     let row = format!("  ⌕  {text}");
-    row.chars().take(cols).collect()
+    // Cell-width clip (not char count): a wide char in the typed query must
+    // not push the row past `cols`, or the single-row `Terminal` wraps.
+    clip_to_cols(&row, cols)
 }
 
 /// Two-stage Escape semantics for the Overview search field (REQ-OV-16). A
@@ -722,10 +830,10 @@ pub struct OverviewChrome {
 /// routes hit-testing + selection nav through the same `grid_bounds` the tiles
 /// are laid out in. Both band heights clamp so a very short window degrades to
 /// an empty grid instead of underflowing.
-pub fn overview_chrome_bands(bounds: TileRect) -> OverviewChrome {
-    let search_h = OVERVIEW_SEARCH_BAND_H.min(bounds.h);
+pub fn overview_chrome_bands(bounds: TileRect, metrics: OverviewMetrics) -> OverviewChrome {
+    let search_h = metrics.search_band_h.min(bounds.h);
     let after_search = bounds.h - search_h;
-    let hint_h = OVERVIEW_HINT_BAND_H.min(after_search);
+    let hint_h = metrics.hint_band_h.min(after_search);
     let grid_h = after_search - hint_h;
 
     OverviewChrome {
@@ -736,24 +844,24 @@ pub fn overview_chrome_bands(bounds: TileRect) -> OverviewChrome {
 }
 
 /// Centered rounded search-field rect inside the top chrome band.
-pub fn overview_search_field_rect(search_band: TileRect) -> TileRect {
+pub fn overview_search_field_rect(search_band: TileRect, metrics: OverviewMetrics) -> TileRect {
     centered_pill_rect(
         search_band,
         0.36,
-        OVERVIEW_SEARCH_FIELD_MIN_W,
-        OVERVIEW_SEARCH_FIELD_MAX_W,
-        OVERVIEW_SEARCH_FIELD_H,
+        metrics.search_field_min_w,
+        metrics.search_field_max_w,
+        metrics.search_field_h,
     )
 }
 
 /// Centered rounded hint-bar rect inside the bottom chrome band.
-pub fn overview_hint_bar_rect(hint_band: TileRect) -> TileRect {
+pub fn overview_hint_bar_rect(hint_band: TileRect, metrics: OverviewMetrics) -> TileRect {
     centered_pill_rect(
         hint_band,
         0.48,
-        OVERVIEW_HINT_BAR_MIN_W,
-        OVERVIEW_HINT_BAR_MAX_W,
-        OVERVIEW_HINT_BAR_H,
+        metrics.hint_bar_min_w,
+        metrics.hint_bar_max_w,
+        metrics.hint_bar_h,
     )
 }
 
@@ -776,6 +884,52 @@ pub fn overview_hint_bar_text_ascii(live_tile_count: usize) -> String {
     format!(
         "cmd+1-{n} to switch / arrows to navigate / return to open / tab to zoom / esc to close"
     )
+}
+
+/// Compact fallback for [`overview_hint_bar_text`] when the hint bar is too
+/// narrow for the full sentence: same key hints, connective words dropped.
+pub fn overview_hint_bar_text_compact(live_tile_count: usize) -> String {
+    let n = live_tile_count.max(1);
+    format!("⌘1-{n} switch・↑↓←→ navigate・Return open・Tab zoom・esc close")
+}
+
+/// Grid-cell width of `text` (the same `unicode-width` semantics `noa-grid`
+/// lays cells out with — `・` is 2 cells, the arrows and `⌘` are 1).
+fn text_cell_width(text: &str) -> usize {
+    text.chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+        .sum()
+}
+
+/// Clip `text` to at most `cols` grid cells (never splitting a wide char).
+fn clip_to_cols(text: &str, cols: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > cols {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    out
+}
+
+/// Compose the single terminal row rendered into the hint bar: the full hint
+/// if it fits `cols`, otherwise the compact variant, centered and
+/// hard-clipped. The clip matters — the row is fed to a synthetic single-row
+/// `Terminal`, where overflow wraps-and-scrolls and would leave only the tail
+/// of the sentence visible.
+pub fn overview_hint_bar_row(live_tile_count: usize, cols: u16) -> String {
+    let cols = cols as usize;
+    let full = overview_hint_bar_text(live_tile_count);
+    let text = if text_cell_width(&full) <= cols {
+        full
+    } else {
+        overview_hint_bar_text_compact(live_tile_count)
+    };
+    clip_to_cols(&center_label(&text, cols as u16), cols)
 }
 
 /// Horizontally center `text` within `cols` columns by left-padding with
@@ -1373,15 +1527,19 @@ mod tests {
     fn overview_close_hit_test_only_matches_the_title_bar_corner() {
         let tile = TileRect::new(0, 0, 100, 80);
         let tiles = [(1_u8, tile)];
-        let close_rect = overview_close_button_rect(tile);
+        let metrics = OverviewMetrics::new(1.0);
+        let close_rect = overview_close_button_rect(tile, metrics);
 
         let inside_close = Point::new(close_rect.x + 1, close_rect.y + 1);
         let inside_body = Point::new(10, 50);
 
-        assert_eq!(overview_close_hit_test(&tiles, inside_close), Some(1));
-        assert_eq!(overview_close_hit_test(&tiles, inside_body), None);
         assert_eq!(
-            overview_close_hit_test(&tiles, Point::new(1000, 1000)),
+            overview_close_hit_test(&tiles, inside_close, metrics),
+            Some(1)
+        );
+        assert_eq!(overview_close_hit_test(&tiles, inside_body, metrics), None);
+        assert_eq!(
+            overview_close_hit_test(&tiles, Point::new(1000, 1000), metrics),
             None
         );
     }
@@ -1512,7 +1670,7 @@ mod tests {
     #[test]
     fn chrome_bands_reserve_search_and_hint_and_keep_grid_in_between() {
         let bounds = TileRect::new(0, 0, 800, 600);
-        let chrome = overview_chrome_bands(bounds);
+        let chrome = overview_chrome_bands(bounds, OverviewMetrics::new(1.0));
 
         // Search band pinned to the top, hint band to the bottom.
         assert_eq!(
@@ -1541,14 +1699,14 @@ mod tests {
     #[test]
     fn chrome_pill_rects_center_inside_reserved_bands() {
         let bounds = TileRect::new(0, 0, 800, 600);
-        let chrome = overview_chrome_bands(bounds);
+        let chrome = overview_chrome_bands(bounds, OverviewMetrics::new(1.0));
 
         assert_eq!(
-            overview_search_field_rect(chrome.search_band),
+            overview_search_field_rect(chrome.search_band, OverviewMetrics::new(1.0)),
             TileRect::new(256, 15, 288, 34)
         );
         assert_eq!(
-            overview_hint_bar_rect(chrome.hint_band),
+            overview_hint_bar_rect(chrome.hint_band, OverviewMetrics::new(1.0)),
             TileRect::new(208, 557, 384, 32)
         );
     }
@@ -1557,7 +1715,7 @@ mod tests {
     fn chrome_bands_clamp_without_underflow_in_a_short_window() {
         // Window shorter than the search band alone: grid + hint collapse to
         // zero height, nothing underflows.
-        let chrome = overview_chrome_bands(TileRect::new(0, 0, 100, 20));
+        let chrome = overview_chrome_bands(TileRect::new(0, 0, 100, 20), OverviewMetrics::new(1.0));
         assert_eq!(chrome.search_band.h, 20);
         assert_eq!(chrome.grid_bounds.h, 0);
         assert_eq!(chrome.hint_band.h, 0);
@@ -1586,6 +1744,64 @@ mod tests {
             overview_hint_bar_text_ascii(6),
             "cmd+1-6 to switch / arrows to navigate / return to open / tab to zoom / esc to close"
         );
+    }
+
+    #[test]
+    fn overview_metrics_scale_design_values_by_dpr() {
+        let m1 = OverviewMetrics::new(1.0);
+        assert_eq!(m1.title_bar_h, OVERVIEW_TITLE_BAR_H);
+        assert_eq!(m1.search_band_h, OVERVIEW_SEARCH_BAND_H);
+        assert_eq!(m1.card_focus_width, OVERVIEW_CARD_FOCUS_WIDTH);
+
+        let m2 = OverviewMetrics::new(2.0);
+        assert_eq!(m2.title_bar_h, OVERVIEW_TITLE_BAR_H * 2);
+        assert_eq!(m2.tile_gutter, OVERVIEW_TILE_GUTTER * 2);
+        assert_eq!(m2.search_field_max_w, OVERVIEW_SEARCH_FIELD_MAX_W * 2);
+        assert_eq!(m2.hint_bar_max_w, OVERVIEW_HINT_BAR_MAX_W * 2);
+        assert_eq!(m2.card_focus_width, OVERVIEW_CARD_FOCUS_WIDTH * 2.0);
+
+        // Degenerate scales fall back to 1.0 rather than collapsing layout.
+        assert_eq!(OverviewMetrics::new(0.0), m1);
+        assert_eq!(OverviewMetrics::new(f32::NAN), m1);
+    }
+
+    #[test]
+    fn label_padding_centers_the_row_and_scales_the_inset() {
+        let pad = overview_label_padding(60, 24.0, 2.0);
+        assert_eq!(pad.top, 18.0);
+        assert_eq!(pad.left, 20.0);
+        assert_eq!(pad.right, 20.0);
+        assert_eq!(pad.bottom, 0.0);
+        // A band shorter than the cell clamps to 0 instead of going negative.
+        assert_eq!(overview_label_padding(10, 24.0, 1.0).top, 0.0);
+    }
+
+    #[test]
+    fn hint_bar_row_prefers_full_text_then_compact_and_never_overflows() {
+        // Wide enough: the full sentence, centered.
+        let full = overview_hint_bar_row(6, 120);
+        assert!(full.contains("to switch"));
+        assert!(text_cell_width(&full) <= 120);
+
+        // Too narrow for the full sentence (75 cells): the compact variant.
+        let compact = overview_hint_bar_row(6, 65);
+        assert!(compact.contains("⌘1-6 switch"));
+        assert!(!compact.contains("to switch"));
+        assert!(text_cell_width(&compact) <= 65);
+
+        // Narrower than even the compact variant: hard head-anchored clip —
+        // the row feeds a single-row `Terminal`, where overflow wraps and
+        // scrolls, leaving only the sentence's tail visible.
+        let clipped = overview_hint_bar_row(6, 10);
+        assert!(clipped.starts_with("⌘1-6"));
+        assert!(text_cell_width(&clipped) <= 10);
+    }
+
+    #[test]
+    fn overview_search_field_row_clips_by_cell_width_not_chars() {
+        // The "  ⌕  " affordance is 5 cells; each CJK char is 2 cells, so 8
+        // columns hold exactly one query char without wrapping the row.
+        assert_eq!(overview_search_field_row("日本語", 8), "  ⌕  日");
     }
 
     #[test]

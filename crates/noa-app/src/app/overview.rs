@@ -252,6 +252,9 @@ impl App {
         let Some(host_config) = self.overview_host_surface_config() else {
             return;
         };
+        let Some(metrics) = self.overview_metrics() else {
+            return;
+        };
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
@@ -290,7 +293,7 @@ impl App {
                 scratch_size,
                 tile_size,
                 tile_count,
-                OVERVIEW_TITLE_BAR_H,
+                metrics.title_bar_h,
                 overview_card_color(),
             ));
         }
@@ -377,6 +380,12 @@ impl App {
     /// A single instance is reused across every placeholder tile and frame —
     /// this does not create a per-tab renderer, so it doesn't conflict with
     /// REQ-NF-1's "reuse the tab's own `Renderer`" rule for live mirrors.
+    ///
+    /// Labels render in the dedicated `sidebar_font` (smaller, denser, DPR-
+    /// scaled) rather than the user's terminal font — the bands are UI chrome
+    /// sized in design px, sidebar parity. The construction padding is a
+    /// placeholder: every band draw sets its own centering padding via
+    /// `set_grid_padding` before drawing.
     pub(super) fn ensure_overview_label_renderer(&mut self) {
         let Some(format) = self
             .overview_host_surface_config()
@@ -396,8 +405,14 @@ impl App {
             .is_none_or(|renderer| renderer.target_format() != format);
         if stale {
             overview.label_renderer = Some(
-                Renderer::new(&gpu.device, &gpu.queue, format, &mut gpu.font, self.padding)
-                    .expect("failed to build the overview label renderer"),
+                Renderer::new(
+                    &gpu.device,
+                    &gpu.queue,
+                    format,
+                    &mut gpu.sidebar_font,
+                    GridPadding::ZERO,
+                )
+                .expect("failed to build the overview label renderer"),
             );
         }
     }
@@ -542,6 +557,9 @@ impl App {
         query: &str,
     ) {
         self.ensure_overview_label_renderer();
+        let Some(metrics) = self.overview_metrics() else {
+            return;
+        };
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
@@ -563,10 +581,15 @@ impl App {
             w: tile_w.max(1),
             h: bar_h.max(1),
         };
+        let padding = overview_label_padding(
+            band_size.h,
+            gpu.sidebar_font.metrics().cell_h,
+            metrics.scale(),
+        );
         let grid_size = grid_size_for_pane_rect(
             PaneRectApp::new(0, 0, band_size.w, band_size.h),
-            gpu.font.metrics(),
-            DEFAULT_GRID_PADDING,
+            gpu.sidebar_font.metrics(),
+            padding,
         );
         let sanitized = sanitize_placeholder_label(title, grid_size.cols);
         // REQ-OV-13: the centered title plus a close glyph in the last column,
@@ -579,11 +602,12 @@ impl App {
         snapshot.cursor.visible = false;
 
         label_renderer.resize(band_size);
-        label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        label_renderer.set_grid_padding(padding);
+        label_renderer.rebuild_cells(&snapshot, &mut gpu.sidebar_font, &gpu.theme);
         // After `rebuild_cells` (which resets it from the snapshot bg) so the
         // band gets its distinct title-bar color, not the terminal default.
         label_renderer.set_clear_color(overview_title_bar_color());
-        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.sidebar_font);
 
         let Some(view) = thumbnails.title_texture_view(tile_index) else {
             return;
@@ -598,8 +622,9 @@ impl App {
     /// there is no usable search band (a window too short to reserve one).
     pub(super) fn render_overview_search_texture(&mut self) -> Option<OverviewChromeTexture> {
         let format = self.overview_host_surface_config()?.format;
+        let metrics = self.overview_metrics()?;
         let chrome = self.overview_chrome()?;
-        let rect = overview_search_field_rect(chrome.search_band);
+        let rect = overview_search_field_rect(chrome.search_band, metrics);
         if rect.w == 0 || rect.h == 0 {
             return None;
         }
@@ -632,10 +657,15 @@ impl App {
         });
         let view = search_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let padding = overview_label_padding(
+            band_size.h,
+            gpu.sidebar_font.metrics().cell_h,
+            metrics.scale(),
+        );
         let grid_size = grid_size_for_pane_rect(
             PaneRectApp::new(0, 0, band_size.w, band_size.h),
-            gpu.font.metrics(),
-            DEFAULT_GRID_PADDING,
+            gpu.sidebar_font.metrics(),
+            padding,
         );
         let text = overview_search_field_row(&query, grid_size.cols);
         let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
@@ -644,9 +674,10 @@ impl App {
         snapshot.cursor.visible = false;
 
         label_renderer.resize(band_size);
-        label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        label_renderer.set_grid_padding(padding);
+        label_renderer.rebuild_cells(&snapshot, &mut gpu.sidebar_font, &gpu.theme);
         label_renderer.set_clear_color(overview_chrome_pill_color());
-        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.sidebar_font);
         label_renderer.draw(&gpu.device, &gpu.queue, &view);
 
         Some(OverviewChromeTexture {
@@ -664,8 +695,9 @@ impl App {
         live_tile_count: usize,
     ) -> Option<OverviewChromeTexture> {
         let format = self.overview_host_surface_config()?.format;
+        let metrics = self.overview_metrics()?;
         let chrome = self.overview_chrome()?;
-        let rect = overview_hint_bar_rect(chrome.hint_band);
+        let rect = overview_hint_bar_rect(chrome.hint_band, metrics);
         if rect.w == 0 || rect.h == 0 {
             return None;
         }
@@ -694,21 +726,27 @@ impl App {
         });
         let view = hint_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        let padding = overview_label_padding(
+            band_size.h,
+            gpu.sidebar_font.metrics().cell_h,
+            metrics.scale(),
+        );
         let grid_size = grid_size_for_pane_rect(
             PaneRectApp::new(0, 0, band_size.w, band_size.h),
-            gpu.font.metrics(),
-            DEFAULT_GRID_PADDING,
+            gpu.sidebar_font.metrics(),
+            padding,
         );
-        let text = center_label(&overview_hint_bar_text(live_tile_count), grid_size.cols);
+        let text = overview_hint_bar_row(live_tile_count, grid_size.cols);
         let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
         Stream::new().feed(text.as_bytes(), &mut term);
         let mut snapshot = FrameSnapshot::from_terminal(&mut term);
         snapshot.cursor.visible = false;
 
         label_renderer.resize(band_size);
-        label_renderer.rebuild_cells(&snapshot, &mut gpu.font, &gpu.theme);
+        label_renderer.set_grid_padding(padding);
+        label_renderer.rebuild_cells(&snapshot, &mut gpu.sidebar_font, &gpu.theme);
         label_renderer.set_clear_color(overview_chrome_pill_color());
-        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.sidebar_font);
         label_renderer.draw(&gpu.device, &gpu.queue, &view);
 
         Some(OverviewChromeTexture {
@@ -728,6 +766,9 @@ impl App {
         let search_texture = self.render_overview_search_texture();
         let hint_texture = self.render_overview_hint_texture(live_count);
         self.ensure_overview_chrome_card_pipeline();
+        let Some(metrics) = self.overview_metrics() else {
+            return;
+        };
         let (selected, hovered, zoomed, zoom_anim) =
             self.overview_window
                 .as_ref()
@@ -835,7 +876,7 @@ impl App {
                 &gpu.queue,
                 &view,
                 surface_size,
-                &overview_card_style(),
+                &overview_card_style(metrics),
                 &placements,
             );
         } else {
@@ -882,7 +923,7 @@ impl App {
                 &gpu.queue,
                 &view,
                 surface_size,
-                &overview_chrome_card_style(),
+                &overview_chrome_card_style(metrics),
                 &placements,
             );
         }
@@ -908,9 +949,9 @@ impl App {
                 && let Some(tile_view) = thumbnails.tile_texture_view(hovered)
             {
                 let hover_style = CardStyle {
-                    focus_width: crate::chrome::RING_HOVER,
+                    focus_width: crate::chrome::RING_HOVER * metrics.scale(),
                     focus_glow_width: 0.0,
-                    ..overview_card_style()
+                    ..overview_card_style(metrics)
                 };
                 chrome_card.pipeline.overlay_texture_cards(
                     &gpu.device,
@@ -949,7 +990,7 @@ impl App {
                     &gpu.queue,
                     &view,
                     surface_size,
-                    &overview_card_style(),
+                    &overview_card_style(metrics),
                     &[CardTexturePlacement {
                         texture_view: &tile_view,
                         x: lerp_dim(rect.x, target.x),
@@ -981,7 +1022,7 @@ impl App {
                     &gpu.queue,
                     &view,
                     surface_size,
-                    &overview_attention_card_style(),
+                    &overview_attention_card_style(metrics),
                     &[CardTexturePlacement {
                         texture_view: &tile_view,
                         x: rect.x,
@@ -1091,24 +1132,35 @@ impl App {
     /// The Overview window's search / grid / hint bands (REQ-OV-11/16/17).
     /// The grid is laid out inside `grid_bounds`, so P3's search-field draw
     /// won't reflow the tiles, and the hint bar draws into `hint_band`.
+    /// The chrome design metrics resolved for the host window's scale factor
+    /// (DPR) — the overlay lays out in physical pixels, so every band/pill
+    /// dimension must scale with the fonts or a Retina band clips its text.
+    pub(super) fn overview_metrics(&self) -> Option<OverviewMetrics> {
+        let host = self.overview_host()?;
+        let state = self.windows.get(&host)?;
+        Some(OverviewMetrics::new(state.window.scale_factor() as f32))
+    }
+
     pub(super) fn overview_chrome(&self) -> Option<OverviewChrome> {
         let host = self.overview_host()?;
         let state = self.windows.get(&host)?;
+        let metrics = OverviewMetrics::new(state.window.scale_factor() as f32);
         let bounds = pane_bounds_for_size(state.window.inner_size());
-        Some(overview_chrome_bands(bounds))
+        Some(overview_chrome_bands(bounds, metrics))
     }
 
     pub(super) fn overview_layout(
         &self,
         source_tile_ids: &[OverviewTileId],
     ) -> Option<OverviewLayout> {
+        let metrics = self.overview_metrics()?;
         let chrome = self.overview_chrome()?;
         Some(compute_overview_grid(
             source_tile_ids.len(),
             chrome.grid_bounds,
             OVERVIEW_GRID_CAP,
-            OVERVIEW_TILE_GUTTER,
-            OVERVIEW_OUTER_MARGIN,
+            metrics.tile_gutter,
+            metrics.outer_margin,
         ))
     }
 
@@ -1193,6 +1245,7 @@ impl App {
     pub(super) fn overview_close_target_at_last_cursor(&self) -> Option<OverviewTileId> {
         let overview = self.overview_window.as_ref()?;
         let point = overview.last_cursor_point?;
+        let metrics = self.overview_metrics()?;
         let source_tile_ids = self.overview_source_tile_ids();
         let layout = self.overview_layout(&source_tile_ids)?;
         let tile_rects: Vec<PaneRectApp> = layout
@@ -1201,7 +1254,7 @@ impl App {
             .chain(layout.placeholders.iter())
             .copied()
             .collect();
-        overview_close_target_at_point(&source_tile_ids, &tile_rects, point)
+        overview_close_target_at_point(&source_tile_ids, &tile_rects, point, metrics)
     }
 
     pub(super) fn focus_tile_from_overview(&mut self, tile_id: OverviewTileId) {

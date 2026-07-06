@@ -381,38 +381,39 @@ pub(super) const ATTENTION_BLINK_INTERVAL: Duration = Duration::from_millis(333)
 
 /// Card styling for the Session Overview composite (REQ-OV-12/14). A function
 /// (not a const) because the chrome colors follow the terminal theme's
-/// polarity, selected at startup.
-pub(super) fn overview_card_style() -> CardStyle {
+/// polarity, selected at startup, and the radius/ring widths follow the host
+/// window's scale factor via `metrics`.
+pub(super) fn overview_card_style(metrics: OverviewMetrics) -> CardStyle {
     CardStyle {
         background: overview_bg_color(),
         border_color: overview_border_color(),
         focus_color: overview_focus_ring_color(),
-        corner_radius: OVERVIEW_CARD_CORNER_RADIUS,
-        border_width: OVERVIEW_CARD_BORDER_WIDTH,
-        focus_width: OVERVIEW_CARD_FOCUS_WIDTH,
-        focus_glow_width: OVERVIEW_CARD_FOCUS_GLOW_WIDTH,
+        corner_radius: metrics.card_corner_radius,
+        border_width: metrics.card_border_width,
+        focus_width: metrics.card_focus_width,
+        focus_glow_width: metrics.card_focus_glow_width,
     }
 }
 
 /// Attention styling for an Overview tile with a pending interaction request.
-pub(super) fn overview_attention_card_style() -> CardStyle {
+pub(super) fn overview_attention_card_style(metrics: OverviewMetrics) -> CardStyle {
     CardStyle {
         focus_color: crate::chrome::rgba(crate::chrome::palette().dot_red),
-        focus_width: crate::chrome::RING_ATTENTION,
-        focus_glow_width: crate::chrome::GLOW_ATTENTION,
-        ..overview_card_style()
+        focus_width: crate::chrome::RING_ATTENTION * metrics.scale(),
+        focus_glow_width: crate::chrome::GLOW_ATTENTION * metrics.scale(),
+        ..overview_card_style(metrics)
     }
 }
 
 /// Rounded styling for Overview chrome pills (search and shortcut hint).
-pub(super) fn overview_chrome_card_style() -> CardStyle {
+pub(super) fn overview_chrome_card_style(metrics: OverviewMetrics) -> CardStyle {
     CardStyle {
         background: overview_bg_color(),
         border_color: overview_chrome_border_color(),
         focus_color: overview_chrome_border_color(),
-        corner_radius: OVERVIEW_CARD_CORNER_RADIUS,
-        border_width: 1.0,
-        focus_width: 1.0,
+        corner_radius: metrics.card_corner_radius,
+        border_width: 1.0 * metrics.scale(),
+        focus_width: 1.0 * metrics.scale(),
         focus_glow_width: 0.0,
     }
 }

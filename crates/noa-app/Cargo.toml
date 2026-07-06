@@ -25,6 +25,7 @@ log.workspace = true
 env_logger.workspace = true
 png.workspace = true
 dirs.workspace = true
+unicode-width.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.19", default-features = false }

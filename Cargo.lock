@@ -1399,6 +1399,7 @@ dependencies = [
  "png",
  "pollster",
  "raw-window-handle",
+ "unicode-width",
  "wgpu",
  "winit",
 ]

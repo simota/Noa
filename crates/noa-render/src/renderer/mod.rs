@@ -370,6 +370,14 @@ impl Renderer {
         self.viewport = px;
     }
 
+    /// Replace the grid padding (grid origin inset) used by subsequent draws.
+    /// The Session Overview reuses one label `Renderer` across chrome bands of
+    /// different heights and re-centers its single text row per band this way,
+    /// instead of rebuilding the renderer per band.
+    pub fn set_grid_padding(&mut self, padding: GridPadding) {
+        self.grid_padding = padding;
+    }
+
     /// Force the background clear color used by the next [`Renderer::draw`],
     /// overriding the value [`Renderer::rebuild_cells`] derives from the
     /// snapshot's default background. Call this **after** `rebuild_cells`

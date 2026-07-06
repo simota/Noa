@@ -106,13 +106,14 @@ pub(crate) fn overview_close_target_at_point<Id: Copy>(
     source_ids: &[Id],
     tile_rects: &[PaneRectApp],
     point: split_tree::Point,
+    metrics: OverviewMetrics,
 ) -> Option<Id> {
     let tiles = source_ids
         .iter()
         .copied()
         .zip(tile_rects.iter().copied())
         .collect::<Vec<_>>();
-    overview_close_hit_test(&tiles, point)
+    overview_close_hit_test(&tiles, point, metrics)
 }
 
 pub(crate) fn targeted_redraw_decision(exists: bool, occluded: bool) -> TargetedRedrawDecision {

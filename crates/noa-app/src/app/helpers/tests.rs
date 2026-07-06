@@ -1,4 +1,5 @@
 use super::*;
+use noa_core::DEFAULT_GRID_PADDING;
 
 #[cfg(target_os = "macos")]
 #[test]
@@ -730,7 +731,12 @@ fn overview_close_hit_test_is_exclusive_with_tile_focus() {
     let body_point = split_tree::Point::new(tile0.x + tile0.w / 2, tile0.y + tile0.h / 2);
 
     assert_eq!(
-        overview_close_target_at_point(&source_ids, &layout.tiles, close_point),
+        overview_close_target_at_point(
+            &source_ids,
+            &layout.tiles,
+            close_point,
+            OverviewMetrics::new(1.0)
+        ),
         Some(10)
     );
     assert_eq!(
@@ -740,7 +746,12 @@ fn overview_close_hit_test_is_exclusive_with_tile_focus() {
     );
     // The body center is a focus hit but never a close hit.
     assert_eq!(
-        overview_close_target_at_point(&source_ids, &layout.tiles, body_point),
+        overview_close_target_at_point(
+            &source_ids,
+            &layout.tiles,
+            body_point,
+            OverviewMetrics::new(1.0)
+        ),
         None
     );
     assert_eq!(

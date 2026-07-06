@@ -645,6 +645,23 @@ fn mouse_format_modes_are_exclusive_and_last_set_wins() {
 }
 
 #[test]
+fn alternate_scroll_mode_defaults_on_and_toggles_and_resets() {
+    // DECSET 1007 defaults on (matching Ghostty) so alt-screen TUIs scroll
+    // via wheel→arrow conversion without opting in.
+    let t = run(b"");
+    assert!(t.modes.alternate_scroll());
+
+    let t = run(b"\x1b[?1007l");
+    assert!(!t.modes.alternate_scroll());
+    let t = run(b"\x1b[?1007l\x1b[?1007h");
+    assert!(t.modes.alternate_scroll());
+
+    // RIS restores the power-on default (on), unlike plain-default modes.
+    let t = run(b"\x1b[?1007l\x1bc");
+    assert!(t.modes.alternate_scroll());
+}
+
+#[test]
 fn decrqm_reports_mouse_tracking_and_format_modes() {
     let t = run(b"\x1b[?9h\x1b[?9$p\x1b[?1005$p\x1b[?1015$p");
     assert_eq!(t.pending_writes, b"\x1b[?9;1$y\x1b[?1005;2$y\x1b[?1015;2$y");

@@ -41,11 +41,13 @@ pub struct ModeState {
 }
 
 impl ModeState {
-    /// The power-on defaults: autowrap (DECAWM 7) and cursor-visible (DECTCEM 25) on.
+    /// The power-on defaults: autowrap (DECAWM 7), cursor-visible (DECTCEM 25)
+    /// and alternate scroll (1007) on — 1007 defaults on to match Ghostty.
     pub fn defaults() -> Self {
         let mut m = ModeState::default();
         m.set(7, false, true); // DECAWM
         m.set(25, false, true); // DECTCEM
+        m.set(1007, false, true); // alternate scroll
         m
     }
 
@@ -107,6 +109,11 @@ impl ModeState {
         } else {
             MouseFormat::Legacy
         }
+    }
+    /// DECSET 1007 — alternate scroll: on the alternate screen with mouse
+    /// tracking off, wheel events become cursor up/down key presses.
+    pub fn alternate_scroll(&self) -> bool {
+        self.get(1007, false)
     }
     /// DECSET 1004 — focus event reporting.
     pub fn focus_reporting(&self) -> bool {

@@ -249,6 +249,20 @@ pub fn route_mouse_wheel(
     encode_mouse_wheel(format, tracking, delta_y, cell?, mods)
 }
 
+/// DECSET 1007 alternate scroll: on the alternate screen with mouse tracking
+/// off, a wheel tick is delivered as cursor up/down key presses instead of a
+/// (no-op) viewport scroll — SS3 A/B under DECCKM application cursor keys,
+/// CSI A/B otherwise, one press per scrolled row.
+pub fn alternate_scroll_bytes(up: bool, rows: usize, app_cursor_keys: bool) -> Vec<u8> {
+    let seq: &[u8] = match (app_cursor_keys, up) {
+        (true, true) => b"\x1bOA",
+        (true, false) => b"\x1bOB",
+        (false, true) => b"\x1b[A",
+        (false, false) => b"\x1b[B",
+    };
+    seq.repeat(rows)
+}
+
 /// Serialize one mouse report in the active format. `code` is the final
 /// button value (button + modifier + motion bits) *without* the +32 bias;
 /// `release` only matters for SGR, whose final byte distinguishes it.
@@ -822,6 +836,16 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn alternate_scroll_encodes_cursor_keys_per_row() {
+        // Normal cursor keys → CSI A/B, one press per scrolled row.
+        assert_eq!(alternate_scroll_bytes(true, 1, false), b"\x1b[A");
+        assert_eq!(alternate_scroll_bytes(false, 3, false), b"\x1b[B\x1b[B\x1b[B");
+        // DECCKM application cursor keys → SS3 A/B.
+        assert_eq!(alternate_scroll_bytes(true, 2, true), b"\x1bOA\x1bOA");
+        assert_eq!(alternate_scroll_bytes(false, 1, true), b"\x1bOB");
     }
 
     #[test]

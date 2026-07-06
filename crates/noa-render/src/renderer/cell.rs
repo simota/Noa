@@ -393,6 +393,11 @@ pub(super) struct PaneRebuild {
     /// Number of background + glyph + decoration instances, i.e. the offset
     /// where the pane's UI-overlay instances begin (band 1 → band 2 split).
     pub(super) text_len: u32,
+    /// `false` when the eviction-retry loop gave up: some instances may
+    /// reference reclaimed atlas rectangles, so this frame must not be the
+    /// last one drawn (the renderer surfaces it via
+    /// [`super::Renderer::needs_follow_up_frame`]).
+    pub(super) stable: bool,
 }
 
 /// WP4 (REQ-PERF-2/3): rebuild `cache`'s per-row segments against `snap`,
@@ -655,6 +660,7 @@ pub(super) fn rebuild_pane_cached(
         rows_rebuilt,
         bg_len,
         text_len: bg_len + glyph_len + deco_len,
+        stable,
     }
 }
 

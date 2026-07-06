@@ -1265,19 +1265,21 @@ fn confirm_dialog_overlay_emits_bg_and_glyph_instances_and_clears_on_close() {
 }
 
 #[test]
-fn confirm_dialog_padding_rows_collapse_on_small_grids() {
+fn confirm_dialog_is_two_rows_regardless_of_grid_height() {
     let Some(mut font) = font_with_rasterized_m() else {
         return;
     };
     let theme = Theme::new();
 
-    // A tall grid gets a blank pad row above and below the two text rows
-    // (4 distinct overlay bg rows); a short grid falls back to the compact
-    // message + hint form (2 rows).
+    // The dialog block itself is always the compact message + hint pair;
+    // its breathing room comes from noa-app's rounded-card composite, not
+    // from padding rows in the instance stream.
     let tall = confirm_dialog_bg_rows(&mut font, &theme, 40, 10);
-    assert_eq!(tall, 4, "tall grid pads the dialog to 4 rows");
+    assert_eq!(tall, 2, "tall grid draws the compact 2-row form");
     let short = confirm_dialog_bg_rows(&mut font, &theme, 40, 4);
-    assert_eq!(short, 2, "short grid collapses to the compact 2-row form");
+    assert_eq!(short, 2, "short grid draws the compact 2-row form");
+    let tiny = confirm_dialog_bg_rows(&mut font, &theme, 40, 1);
+    assert_eq!(tiny, 0, "a one-row grid cannot host the dialog");
 }
 
 /// Count the distinct grid rows carrying confirm-dialog overlay background

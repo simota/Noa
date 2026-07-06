@@ -216,6 +216,12 @@ pub struct Renderer {
     /// Total rows regenerated across all panes in the most recent
     /// `rebuild_panes` call (AC-WP4-02).
     rows_rebuilt_last_frame: u64,
+    /// The most recent `rebuild_panes` gave up stabilizing against atlas
+    /// evictions (per-pane or cross-pane retry limit), so some drawn glyphs
+    /// may show another glyph's pixels. The caller should schedule one more
+    /// frame ([`Renderer::needs_follow_up_frame`]) instead of letting the
+    /// corrupt frame sit until the next unrelated redraw.
+    frame_unstable: bool,
     /// `background-opacity` (0.0..=1.0). Scales only the clear-color alpha,
     /// which is what shows through wherever the terminal's DEFAULT background
     /// is visible (default-bg cells emit no bg quad, and the window padding is
@@ -323,6 +329,7 @@ impl Renderer {
             color_atlas_seen_generation,
             pane_render_cache: HashMap::new(),
             rows_rebuilt_last_frame: 0,
+            frame_unstable: false,
             background_opacity: 1.0,
         })
     }
@@ -404,6 +411,15 @@ impl Renderer {
         self.rows_rebuilt_last_frame
     }
 
+    /// `true` when the most recent `rebuild_panes` could not stabilize
+    /// against glyph-atlas evictions, so the frame just built may draw some
+    /// glyphs with another glyph's pixels. The caller should request one
+    /// more redraw so the display converges instead of sticking on the
+    /// corrupt frame until the next unrelated repaint.
+    pub fn needs_follow_up_frame(&self) -> bool {
+        self.frame_unstable
+    }
+
     /// Rebuild the CPU instance list from a snapshot, re-rastering any glyphs
     /// not yet in the atlas and re-uploading the atlas texture if it grew.
     pub fn rebuild_cells(&mut self, snap: &FrameSnapshot, font: &mut FontGrid, theme: &Theme) {
@@ -433,6 +449,7 @@ impl Renderer {
     pub fn rebuild_panes(&mut self, panes: &[PaneFrame<'_>], font: &mut FontGrid, theme: &Theme) {
         let mut first_clear_color = None;
         let mut rows_rebuilt_total: u64 = 0;
+        self.frame_unstable = false;
         // Cross-pane eviction guard: `rebuild_pane_cached` only stabilizes each
         // pane against evictions caused by its OWN rebuild. A later pane's
         // rasterization can still evict atlas rectangles that an
@@ -446,6 +463,9 @@ impl Renderer {
             self.pane_images.clear();
             self.pane_layout.clear();
             self.divider_range = 0..0;
+            // A later pass rebuilds everything, so only the final pass's
+            // stability matters.
+            self.frame_unstable = false;
 
             first_clear_color = None;
             rows_rebuilt_total = 0;
@@ -462,6 +482,7 @@ impl Renderer {
                     rows_rebuilt,
                     bg_len,
                     text_len,
+                    stable,
                 } = rebuild_pane_cached(
                     cache,
                     &mut self.instances,
@@ -471,6 +492,9 @@ impl Renderer {
                     self.target_format_is_srgb,
                 );
                 rows_rebuilt_total += rows_rebuilt;
+                if !stable {
+                    self.frame_unstable = true;
+                }
                 first_clear_color.get_or_insert(clear_color);
                 self.cell_size = cell_size;
                 let end = self.instances.len() as u32;
@@ -500,6 +524,7 @@ impl Renderer {
                 log::warn!(
                     "glyph atlas kept evicting across {MAX_ATLAS_EVICTION_REBUILD_PASSES} cross-pane rebuild passes; some panes may reference stale atlas rectangles for one frame"
                 );
+                self.frame_unstable = true;
                 break;
             }
             // Every pane rebuilt before the eviction may reference reclaimed

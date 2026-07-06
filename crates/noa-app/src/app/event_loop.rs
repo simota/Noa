@@ -616,9 +616,7 @@ impl App {
             .as_mut()
             .filter(|overview| overview.host == window_id)
             .is_some_and(|overview| {
-                let changed = overview.last_cursor_point.take().is_some()
-                    || overview.hovered.take().is_some();
-                changed
+                overview.last_cursor_point.take().is_some() || overview.hovered.take().is_some()
             });
         if overview_changed {
             self.request_overview_redraw();

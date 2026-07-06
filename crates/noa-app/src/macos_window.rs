@@ -107,3 +107,169 @@ fn top_chrome_inset_px_impl(window: &Window) -> Option<u32> {
 fn top_chrome_inset_px_impl(_window: &Window) -> Option<u32> {
     None
 }
+
+/// Marker `NSView.identifier` for our opaque titlebar backdrop, so a repeat
+/// call finds and refreshes the existing view instead of stacking a second.
+#[cfg(target_os = "macos")]
+const TITLEBAR_BACKDROP_ID: &str = "noa.titlebar.opaque-backdrop";
+
+/// Install (or refresh) an opaque, `bg`-colored view filling the native
+/// titlebar + tab-bar strip.
+///
+/// Only meaningful for the `transparent` titlebar style: there the window is
+/// non-opaque (`with_transparent(true)`) with a full-size content view, so
+/// AppKit composites its tab chrome — the lazily-allocated hover highlight
+/// `NSVisualEffectView` especially — against undefined semi-transparent
+/// underlay pixels, which surfaces as magenta diagonal-stripe garbage on some
+/// machines. Backing the strip with an opaque layer (the iTerm2/Ghostty
+/// approach) gives that chrome defined content to composite over. No-op off
+/// macOS or when the AppKit hierarchy can't be reached.
+///
+/// Idempotent via [`TITLEBAR_BACKDROP_ID`]; a repeat call (e.g. a theme
+/// reload) updates the existing view's color rather than adding another.
+pub(crate) fn install_titlebar_backdrop(window: &Window, bg: noa_core::Rgb) {
+    install_titlebar_backdrop_impl(window, bg);
+}
+
+#[cfg(target_os = "macos")]
+fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::{NSRect, NSString};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    // NSWindowOrderingMode::Below — order the backdrop behind its siblings so
+    // the tab bar and title controls keep drawing on top of it.
+    const NS_WINDOW_BELOW: isize = -1;
+    // NSAutoresizingMaskOptions: width- + height-sizable, so the backdrop
+    // tracks the strip as the tab bar appears/disappears.
+    const NS_VIEW_WIDTH_SIZABLE: usize = 1 << 1;
+    const NS_VIEW_HEIGHT_SIZABLE: usize = 1 << 4;
+    // The titlebar container's Objective-C class name (private but stable).
+    const CONTAINER_CLASS: &[u8] = b"NSTitlebarContainerView";
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+    let identifier = NSString::from_str(TITLEBAR_BACKDROP_ID);
+
+    // SAFETY: `ns_view` is winit's live AppKit `NSView` for this window and we
+    // are on the main (window-owning) thread. Every selector below is
+    // documented AppKit API on the object it is sent to; each object pointer
+    // is nil-checked before use. `NSView`/`NSColor` are looked up at runtime
+    // (matching `app_actions.rs`) so no extra objc2-app-kit feature is needed.
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let content_view: *mut AnyObject = msg_send![ns_window, contentView];
+        if content_view.is_null() {
+            return;
+        }
+        // contentView.superview is the NSThemeFrame; the titlebar container is
+        // one of its direct subviews.
+        let theme_frame: *mut AnyObject = msg_send![content_view, superview];
+        if theme_frame.is_null() {
+            return;
+        }
+        let subviews: *mut AnyObject = msg_send![theme_frame, subviews];
+        if subviews.is_null() {
+            return;
+        }
+        let count: usize = msg_send![subviews, count];
+        let mut container: *mut AnyObject = std::ptr::null_mut();
+        for i in 0..count {
+            let view: *mut AnyObject = msg_send![subviews, objectAtIndex: i];
+            if view.is_null() {
+                continue;
+            }
+            let class: *const AnyClass = msg_send![view, class];
+            if let Some(class) = class.as_ref()
+                && class
+                    .name()
+                    .to_bytes()
+                    .windows(CONTAINER_CLASS.len())
+                    .any(|w| w == CONTAINER_CLASS)
+            {
+                container = view;
+                break;
+            }
+        }
+        if container.is_null() {
+            return;
+        }
+
+        // The opaque theme background as a CGColor for the layer.
+        let Some(color_class) = AnyClass::get(c"NSColor") else {
+            return;
+        };
+        let color: *mut AnyObject = msg_send![
+            color_class,
+            colorWithSRGBRed: bg.r as f64 / 255.0,
+            green: bg.g as f64 / 255.0,
+            blue: bg.b as f64 / 255.0,
+            alpha: 1.0_f64,
+        ];
+        if color.is_null() {
+            return;
+        }
+        let cg_color: *mut AnyObject = msg_send![color, CGColor];
+
+        // Idempotency: reuse an existing backdrop, just refreshing its color.
+        let container_subviews: *mut AnyObject = msg_send![container, subviews];
+        if !container_subviews.is_null() {
+            let n: usize = msg_send![container_subviews, count];
+            for i in 0..n {
+                let view: *mut AnyObject = msg_send![container_subviews, objectAtIndex: i];
+                if view.is_null() {
+                    continue;
+                }
+                let ident: *mut AnyObject = msg_send![view, identifier];
+                if !ident.is_null() {
+                    let same: bool = msg_send![ident, isEqualToString: &*identifier];
+                    if same {
+                        let layer: *mut AnyObject = msg_send![view, layer];
+                        if !layer.is_null() {
+                            let _: () = msg_send![layer, setBackgroundColor: cg_color];
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Create the opaque, layer-backed backdrop sized to the container.
+        let Some(view_class) = AnyClass::get(c"NSView") else {
+            return;
+        };
+        let bounds: NSRect = msg_send![container, bounds];
+        let alloc: *mut AnyObject = msg_send![view_class, alloc];
+        let view: *mut AnyObject = msg_send![alloc, initWithFrame: bounds];
+        if view.is_null() {
+            return;
+        }
+        let _: () = msg_send![view, setIdentifier: &*identifier];
+        let _: () = msg_send![view, setWantsLayer: true];
+        let _: () = msg_send![view, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE];
+        let layer: *mut AnyObject = msg_send![view, layer];
+        if !layer.is_null() {
+            let _: () = msg_send![layer, setBackgroundColor: cg_color];
+            let _: () = msg_send![layer, setOpaque: true];
+        }
+        // Positioned below all existing subviews so tab-bar chrome stays on top.
+        let _: () = msg_send![
+            container,
+            addSubview: view,
+            positioned: NS_WINDOW_BELOW,
+            relativeTo: std::ptr::null_mut::<AnyObject>(),
+        ];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn install_titlebar_backdrop_impl(_window: &Window, _bg: noa_core::Rgb) {}

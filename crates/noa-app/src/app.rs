@@ -1054,6 +1054,15 @@ impl App {
             (surface_config, renderer)
         };
 
+        // The `transparent` titlebar style leaves a non-opaque window whose
+        // native tab chrome would otherwise composite against undefined
+        // pixels; back the titlebar strip with an opaque theme-colored view.
+        #[cfg(target_os = "macos")]
+        if self.config.macos_titlebar_style == noa_config::MacosTitlebarStyle::Transparent {
+            let bg = self.gpu.as_ref().expect("gpu initialized").theme.default_bg;
+            crate::macos_window::install_titlebar_backdrop(&window, bg);
+        }
+
         let window_id = window.id();
         let initial_pane = PaneId::new(1);
         let initial_rect = content_inset_bounds(

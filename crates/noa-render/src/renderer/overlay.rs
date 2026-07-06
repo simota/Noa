@@ -79,7 +79,11 @@ pub(super) fn append_search_prompt_instances(
     // stays visible even when the eye is on the grid below.
     let accent_color = to_u8_color(surface_output_rgba(style.accent(), target_format_is_srgb));
     let bar_thickness = decoration_thickness(metrics).max(2);
-    let bar_y = clamp_decoration_y(metrics.cell_h - bar_thickness as f32, bar_thickness, metrics);
+    let bar_y = clamp_decoration_y(
+        metrics.cell_h - bar_thickness as f32,
+        bar_thickness,
+        metrics,
+    );
     let bar_width = metrics.cell_w.round().max(1.0) as u16;
     for i in 0..cells.len() as u16 {
         instances.push(CellInstance {

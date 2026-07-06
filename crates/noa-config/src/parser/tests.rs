@@ -781,7 +781,6 @@ fn macos_titlebar_style_parses_modes() {
         ("native", MacosTitlebarStyle::Native),
         ("tabs", MacosTitlebarStyle::Native),
         ("transparent", MacosTitlebarStyle::Transparent),
-        ("hidden", MacosTitlebarStyle::Hidden),
     ] {
         let (overrides, diagnostics) =
             parse_overrides(path(), &format!("macos-titlebar-style = {value}"));

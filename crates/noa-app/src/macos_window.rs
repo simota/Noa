@@ -59,8 +59,8 @@ fn apply(_window: &Window) {}
 /// The height (physical px) of the window chrome overlapping the top of the
 /// content view — titlebar plus native tab bar when the content view is
 /// full-size (`transparent` style), 0 when the chrome sits *above* the
-/// content (`native`, where `inner_size` already excludes it) or is absent
-/// (`hidden`). Queried live from `NSWindow.contentLayoutRect` so the tab bar
+/// content (`native`, where `inner_size` already excludes it).
+/// Queried live from `NSWindow.contentLayoutRect` so the tab bar
 /// appearing/disappearing is picked up on the next relayout. `None` when the
 /// AppKit window can't be reached (caller falls back to a constant).
 pub(crate) fn top_chrome_inset_px(window: &Window) -> Option<u32> {

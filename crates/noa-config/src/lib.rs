@@ -168,8 +168,6 @@ pub enum MacosTitlebarStyle {
     Native,
     /// Transparent titlebar with full-size content view.
     Transparent,
-    /// Hide the titlebar while keeping the window otherwise decorated.
-    Hidden,
 }
 
 /// `resize-overlay`: whether the `cols × rows` grid-size toast shows during a

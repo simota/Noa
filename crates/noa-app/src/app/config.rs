@@ -393,18 +393,11 @@ pub(super) fn apply_macos_titlebar_style(
         noa_config::MacosTitlebarStyle::Transparent => attrs
             .with_titlebar_transparent(true)
             .with_fullsize_content_view(true),
-        noa_config::MacosTitlebarStyle::Hidden => attrs
-            .with_title_hidden(true)
-            .with_titlebar_hidden(true)
-            .with_fullsize_content_view(true),
     }
 }
 
-pub(super) fn needs_macos_titlebar_backdrop(
-    background_opacity: f32,
-    style: noa_config::MacosTitlebarStyle,
-) -> bool {
-    background_opacity < 1.0 && style != noa_config::MacosTitlebarStyle::Hidden
+pub(super) fn needs_macos_titlebar_backdrop(background_opacity: f32) -> bool {
+    background_opacity < 1.0
 }
 
 #[cfg(test)]
@@ -436,22 +429,8 @@ mod tests {
 
     #[test]
     fn translucent_macos_titlebar_chrome_needs_backdrop() {
-        assert!(needs_macos_titlebar_backdrop(
-            0.85,
-            noa_config::MacosTitlebarStyle::Native
-        ));
-        assert!(needs_macos_titlebar_backdrop(
-            0.85,
-            noa_config::MacosTitlebarStyle::Transparent
-        ));
-        assert!(!needs_macos_titlebar_backdrop(
-            0.85,
-            noa_config::MacosTitlebarStyle::Hidden
-        ));
-        assert!(!needs_macos_titlebar_backdrop(
-            1.0,
-            noa_config::MacosTitlebarStyle::Native
-        ));
+        assert!(needs_macos_titlebar_backdrop(0.85));
+        assert!(!needs_macos_titlebar_backdrop(1.0));
     }
 
     // AC-8: a missing path does not panic and returns None (no image).

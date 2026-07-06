@@ -334,7 +334,6 @@ fn show_config_output(config: &StartupConfig) -> String {
         match config.macos_titlebar_style {
             MacosTitlebarStyle::Native => "native",
             MacosTitlebarStyle::Transparent => "transparent",
-            MacosTitlebarStyle::Hidden => "hidden",
         },
     );
     push_line(
@@ -560,7 +559,7 @@ mod tests {
             minimum_contrast: 3.0,
             cursor_style: Some(CursorShape::Bar),
             macos_option_as_alt: MacosOptionAsAlt::Right,
-            macos_titlebar_style: MacosTitlebarStyle::Hidden,
+            macos_titlebar_style: MacosTitlebarStyle::Transparent,
             font: noa_config::FontConfig {
                 families: vec!["JetBrains Mono".to_string(), "Menlo".to_string()],
                 features: vec![noa_config::FontFeature {
@@ -583,7 +582,7 @@ mod tests {
         assert!(output.contains("minimum-contrast = 3\n"));
         assert!(output.contains("cursor-style = bar\n"));
         assert!(output.contains("macos-option-as-alt = right\n"));
-        assert!(output.contains("macos-titlebar-style = hidden\n"));
+        assert!(output.contains("macos-titlebar-style = transparent\n"));
         assert!(output.contains("font-family = JetBrains Mono\n"));
         assert!(output.contains("font-family = Menlo\n"));
         assert!(output.contains("font-feature = -liga\n"));

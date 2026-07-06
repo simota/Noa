@@ -533,7 +533,6 @@ pub(super) fn parse_macos_titlebar_style(
     match value {
         "native" | "tabs" => Some(MacosTitlebarStyle::Native),
         "transparent" => Some(MacosTitlebarStyle::Transparent),
-        "hidden" => Some(MacosTitlebarStyle::Hidden),
         other => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
             None

@@ -26,8 +26,8 @@ pub(crate) const MACOS_TITLEBAR_LOGICAL_HEIGHT: f64 = 28.0;
 
 /// Physical top inset the pane area must reserve for the titlebar. Only the
 /// `transparent` style needs one: `native` gets the space from AppKit (the
-/// content area already starts below the real titlebar), and `hidden` is
-/// deliberately frameless. Keeps `transparent`'s grid aligned with `native`.
+/// content area already starts below the real titlebar). Keeps
+/// `transparent`'s grid aligned with `native`.
 pub(crate) fn titlebar_top_inset_px(style: noa_config::MacosTitlebarStyle, scale: f64) -> u32 {
     if !cfg!(target_os = "macos") || style != noa_config::MacosTitlebarStyle::Transparent {
         return 0;
@@ -39,7 +39,7 @@ pub(crate) fn titlebar_top_inset_px(style: noa_config::MacosTitlebarStyle, scale
 /// the `transparent` titlebar style, so the panes read as an inset surface
 /// consistent with the reserved titlebar band. Equal to the sidebar cards'
 /// [`crate::sidebar::SIDEBAR_CARD_MARGIN_X`] so pane edges line up with the
-/// card edges. 0 for `native`/`hidden` (edge-to-edge, current behavior).
+/// card edges. 0 for `native` (edge-to-edge, current behavior).
 pub(crate) fn content_margin_px(style: noa_config::MacosTitlebarStyle, scale: f64) -> u32 {
     if !cfg!(target_os = "macos") || style != noa_config::MacosTitlebarStyle::Transparent {
         return 0;

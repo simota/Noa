@@ -643,11 +643,7 @@ impl ThemeSettings {
                     return RowEffect::None;
                 };
                 let new = cycle(
-                    &[
-                        MacosTitlebarStyle::Native,
-                        MacosTitlebarStyle::Transparent,
-                        MacosTitlebarStyle::Hidden,
-                    ],
+                    &[MacosTitlebarStyle::Native, MacosTitlebarStyle::Transparent],
                     current,
                     delta,
                 );
@@ -839,7 +835,6 @@ fn macos_titlebar_style_config_value(style: MacosTitlebarStyle) -> &'static str 
     match style {
         MacosTitlebarStyle::Native => "native",
         MacosTitlebarStyle::Transparent => "transparent",
-        MacosTitlebarStyle::Hidden => "hidden",
     }
 }
 

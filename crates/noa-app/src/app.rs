@@ -432,10 +432,7 @@ impl App {
                 gpu.theme.default_bg,
                 self.config.background_opacity,
             );
-            if needs_macos_titlebar_backdrop(
-                self.config.background_opacity,
-                self.config.macos_titlebar_style,
-            ) {
+            if needs_macos_titlebar_backdrop(self.config.background_opacity) {
                 crate::macos_window::install_titlebar_backdrop(&state.window, gpu.theme.default_bg);
             }
         }
@@ -1078,10 +1075,7 @@ impl App {
                 bg,
                 self.config.background_opacity,
             );
-            if needs_macos_titlebar_backdrop(
-                self.config.background_opacity,
-                self.config.macos_titlebar_style,
-            ) {
+            if needs_macos_titlebar_backdrop(self.config.background_opacity) {
                 crate::macos_window::install_titlebar_backdrop(&window, bg);
             }
         }

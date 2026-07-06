@@ -55,9 +55,8 @@ impl App {
             let Some(state) = self.windows.get(&window_id) else {
                 return false;
             };
-            let size = state.window.inner_size();
             (
-                crate::sidebar::SidebarRect::new(0, 0, inset, size.height),
+                self.sidebar_layout_bounds(window_id, inset),
                 state.sidebar_scroll,
             )
         };
@@ -247,7 +246,7 @@ impl App {
             return None;
         }
         let state = self.windows.get(&window_id)?;
-        let bounds = SidebarRect::new(0, 0, inset, state.window.inner_size().height);
+        let bounds = self.sidebar_layout_bounds(window_id, inset);
         let windows = self.session_windows_for_window(window_id);
         let ids = self.session_store.ordered_ids_for_windows(&windows);
         let layout = self
@@ -275,8 +274,7 @@ impl App {
         let Some(state) = self.windows.get(&window_id) else {
             return false;
         };
-        let bounds =
-            crate::sidebar::SidebarRect::new(0, 0, inset, state.window.inner_size().height);
+        let bounds = self.sidebar_layout_bounds(window_id, inset);
         let metrics = SidebarMetrics::new(state.window.scale_factor() as f32);
         let viewport_h = metrics.bands(bounds).viewport.h;
         let windows = self.session_windows_for_window(window_id);
@@ -380,7 +378,7 @@ impl App {
             return None;
         }
         let state = self.windows.get(&window_id)?;
-        let bounds = SidebarRect::new(0, 0, inset, state.window.inner_size().height);
+        let bounds = self.sidebar_layout_bounds(window_id, inset);
         let metrics = self.sidebar_metrics(window_id);
         let vp = metrics.bands(bounds).viewport;
         let windows = self.session_windows_for_window(window_id);

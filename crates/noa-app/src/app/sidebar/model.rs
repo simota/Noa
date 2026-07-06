@@ -24,7 +24,7 @@ impl App {
         let band = PaneRectApp::new(0, 0, inset, height);
         let grid = grid_size_for_pane_rect(band, metrics, self.padding);
 
-        let bounds = SidebarRect::new(0, 0, inset, height);
+        let bounds = self.sidebar_layout_bounds(window_id, inset);
         let windows = self.session_windows_for_window(window_id);
         let ids = self.session_store.ordered_ids_for_windows(&windows);
         let layout = layout_metrics.layout(bounds, &ids, state.sidebar_scroll);

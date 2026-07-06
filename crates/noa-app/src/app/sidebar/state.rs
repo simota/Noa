@@ -181,8 +181,7 @@ impl App {
                     return false;
                 };
                 let metrics = self.sidebar_metrics(window_id);
-                let bounds =
-                    crate::sidebar::SidebarRect::new(0, 0, inset, state.window.inner_size().height);
+                let bounds = self.sidebar_layout_bounds(window_id, inset);
                 let windows = self.session_windows_for_window(window_id);
                 let ids = self.session_store.ordered_ids_for_windows(&windows);
                 matches!(
@@ -284,6 +283,25 @@ impl App {
             self.config.sidebar_width * scale,
         );
         inset.round().max(0.0) as u32
+    }
+
+    /// The sidebar's card-layout bounds for `window_id`: the full band minus
+    /// the transparent-titlebar top inset, so the toolbar `+` and the cards
+    /// start below the titlebar (and its traffic lights) exactly like the
+    /// panes do. The band *background* still paints full-height — only the
+    /// layout/hit-test bounds shift. Shared by the draw model and every
+    /// hit-test site so they can never disagree.
+    pub(in crate::app) fn sidebar_layout_bounds(
+        &self,
+        window_id: WindowId,
+        inset: u32,
+    ) -> crate::sidebar::SidebarRect {
+        let height = self
+            .windows
+            .get(&window_id)
+            .map_or(0, |state| state.window.inner_size().height.max(1));
+        let top = self.window_titlebar_inset_px(window_id).min(height);
+        crate::sidebar::SidebarRect::new(0, top, inset, height - top)
     }
 
     /// The DPR-scaled layout metrics for a window (FR-4): built from the live

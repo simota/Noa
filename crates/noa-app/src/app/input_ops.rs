@@ -714,7 +714,10 @@ impl App {
         else {
             return;
         };
-        match surface.pty_input_tx.queue(bytes.to_vec().into_boxed_slice()) {
+        match surface
+            .pty_input_tx
+            .queue(bytes.to_vec().into_boxed_slice())
+        {
             crate::io_thread::QueueInputResult::Queued => {}
             crate::io_thread::QueueInputResult::Deferred => {
                 log::debug!("deferred pty input until the io thread queue has capacity");

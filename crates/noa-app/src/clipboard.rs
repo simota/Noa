@@ -198,10 +198,8 @@ mod platform {
         // on the clipboard mojibake'd.
         let pasteboard = NSPasteboard::generalPasteboard();
         pasteboard.clearContents();
-        let ok =
-            pasteboard.setString_forType(&NSString::from_str(text), unsafe {
-                NSPasteboardTypeString
-            });
+        let ok = pasteboard
+            .setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString });
         ensure!(ok, "failed to write text to macOS clipboard");
         Ok(())
     }

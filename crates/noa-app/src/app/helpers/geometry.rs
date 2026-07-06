@@ -19,6 +19,49 @@ pub(crate) fn sidebar_inset_bounds(bounds: PaneRectApp, inset: u32) -> PaneRectA
     PaneRectApp::new(bounds.x + inset, bounds.y, bounds.w - inset, bounds.h)
 }
 
+/// Logical (pt) height of the standard macOS titlebar. Used to reserve the
+/// titlebar band when the content view is full-size but a (transparent)
+/// titlebar is still drawn over it.
+pub(crate) const MACOS_TITLEBAR_LOGICAL_HEIGHT: f64 = 28.0;
+
+/// Physical top inset the pane area must reserve for the titlebar. Only the
+/// `transparent` style needs one: `native` gets the space from AppKit (the
+/// content area already starts below the real titlebar), and `hidden` is
+/// deliberately frameless. Keeps `transparent`'s grid aligned with `native`.
+pub(crate) fn titlebar_top_inset_px(style: noa_config::MacosTitlebarStyle, scale: f64) -> u32 {
+    if !cfg!(target_os = "macos") || style != noa_config::MacosTitlebarStyle::Transparent {
+        return 0;
+    }
+    (MACOS_TITLEBAR_LOGICAL_HEIGHT * scale).round() as u32
+}
+
+/// Physical left/right/bottom margin kept clear around the pane area under
+/// the `transparent` titlebar style, so the panes read as an inset surface
+/// consistent with the reserved titlebar band. Equal to the sidebar cards'
+/// [`crate::sidebar::SIDEBAR_CARD_MARGIN_X`] so pane edges line up with the
+/// card edges. 0 for `native`/`hidden` (edge-to-edge, current behavior).
+pub(crate) fn content_margin_px(style: noa_config::MacosTitlebarStyle, scale: f64) -> u32 {
+    if !cfg!(target_os = "macos") || style != noa_config::MacosTitlebarStyle::Transparent {
+        return 0;
+    }
+    ((crate::sidebar::SIDEBAR_CARD_MARGIN_X as f64) * scale).round() as u32
+}
+
+/// Shrink a window's pane bounds by the transparent-titlebar chrome: `top`
+/// px reserved for the titlebar band, `margin` px kept clear on the left,
+/// right, and bottom edges. Zero insets return `bounds` unchanged.
+pub(crate) fn content_inset_bounds(bounds: PaneRectApp, top: u32, margin: u32) -> PaneRectApp {
+    let top = top.min(bounds.h);
+    let bottom = margin.min(bounds.h - top);
+    let side = margin.min(bounds.w / 2);
+    PaneRectApp::new(
+        bounds.x + side,
+        bounds.y + top,
+        bounds.w - 2 * side,
+        bounds.h - top - bottom,
+    )
+}
+
 pub(crate) fn can_split_rect(rect: PaneRectApp, orientation: SplitOrientation) -> bool {
     let required = MIN_PANE_SIZE_PX
         .saturating_mul(2)

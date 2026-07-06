@@ -13,7 +13,10 @@ use crate::action::Action;
 use crate::csi::{Csi, DcsPayload, Esc, MAX_INTERMEDIATES, MAX_PARAMS};
 use crate::state::State;
 
-const MAX_OSC_BYTES: usize = 4096;
+/// OSC payloads include OSC 52 clipboard writes, whose base64 must carry the
+/// grid's 8 MiB decoded clipboard cap (~10.7 MiB encoded) plus target/params.
+/// The buffer grows on demand; the cap only bounds a runaway unterminated OSC.
+const MAX_OSC_BYTES: usize = 12 * (1 << 20); // 12 MiB
 const MAX_DCS_BYTES: usize = 4096;
 /// APC payloads carry whole Kitty-graphics transfers, so the cap is generous
 /// (spec-compliant clients chunk at ≤4096B, but non-conforming tools send in

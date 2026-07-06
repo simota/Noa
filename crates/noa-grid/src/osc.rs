@@ -4,7 +4,7 @@ use crate::cell::Hyperlink;
 use noa_core::{DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, Rgb, xterm_palette};
 
 const MAX_COLOR_OSC_BYTES: usize = 4096;
-const DEFAULT_OSC52_MAX_DECODED_BYTES: usize = 3 * 1024;
+const DEFAULT_OSC52_MAX_DECODED_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Osc52Policy {
@@ -275,15 +275,15 @@ pub(crate) fn handle_clipboard_osc(
     };
     let target = &rest[..separator];
     let payload = &rest[separator + 1..];
-    if !osc52_targets_clipboard(target) {
+    let Some(kind) = osc52_clipboard_kind(target) else {
         return true;
-    }
+    };
 
     if payload == b"?" {
         // The grid can't read the system clipboard synchronously; queue a
         // request for the app layer to fulfill (and possibly prompt for).
         if policy.allow_read {
-            pending_clipboard_reads.push("c".to_string());
+            pending_clipboard_reads.push((kind as char).to_string());
         }
         return true;
     }
@@ -493,8 +493,19 @@ fn utf8_no_controls(bytes: &[u8]) -> Option<String> {
     }
 }
 
-fn osc52_targets_clipboard(target: &[u8]) -> bool {
-    target.is_empty() || target.contains(&b'c')
+/// The selection kind an OSC 52 target list addresses, to echo in a read
+/// reply. There is only one system clipboard on macOS, so the primary (`p`)
+/// and secondary (`s`) selections map onto it rather than being ignored
+/// (matching Ghostty's fallback). An empty target defaults to `c` (xterm's
+/// `s0` default collapses to the same clipboard here).
+fn osc52_clipboard_kind(target: &[u8]) -> Option<u8> {
+    if target.is_empty() {
+        return Some(b'c');
+    }
+    target
+        .iter()
+        .copied()
+        .find(|b| matches!(b, b'c' | b'p' | b's'))
 }
 
 /// Build a full `OSC 52` reply (`ESC ] 52 ; <target> ; <base64(raw)> ST`)
@@ -570,8 +581,18 @@ pub(crate) fn decode_base64_limited(input: &[u8], max_decoded_bytes: usize) -> O
         }
     }
 
-    if quartet_len != 0 {
-        return None;
+    // Accept an unpadded final group (some OSC 52 emitters omit `=` padding)
+    // by treating the missing symbols as padding.
+    match quartet_len {
+        0 => {}
+        1 => return None,
+        n => {
+            quartet[n..].fill(64);
+            push_decoded_quartet(&quartet, &mut out)?;
+            if out.len() > max_decoded_bytes {
+                return None;
+            }
+        }
     }
     Some(out)
 }

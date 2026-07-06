@@ -443,14 +443,6 @@ impl App {
                 &mut term,
                 std::mem::take(&mut surface.snapshot_recycle),
             );
-            // A pane draws a solid cursor only when it is both the split's
-            // focused pane AND its window has OS focus; otherwise (an
-            // inactive split pane, or any pane in an unfocused window) it
-            // draws the hollow outline instead of hiding the cursor outright.
-            snapshot.focused =
-                pane_owns_keyboard_focus(window_id, pane_id, self.os_focused, state.focused_pane);
-            snapshot.cursor_blink_visible = self.cursor_blink_visible;
-            snapshot.hover_link = surface.hover_link;
             snapshot.search_prompt = self
                 .search_prompt
                 .as_ref()
@@ -460,6 +452,21 @@ impl App {
                     // (display only — it joins the real buffer on commit).
                     format!("{}{search_preedit}", session.prompt.buffer())
                 });
+            // A pane draws a solid cursor only when it is both the split's
+            // focused pane AND its window has OS focus; otherwise (an
+            // inactive split pane, or any pane in an unfocused window) it
+            // draws the hollow outline instead of hiding the cursor outright.
+            // An open search prompt also hollows the cursor: keystrokes go to
+            // the prompt, not the shell, so the pane must not read as
+            // type-able while the prompt has the keyboard.
+            snapshot.focused = pane_owns_keyboard_focus(
+                window_id,
+                pane_id,
+                self.os_focused,
+                state.focused_pane,
+            ) && snapshot.search_prompt.is_none();
+            snapshot.cursor_blink_visible = self.cursor_blink_visible;
+            snapshot.hover_link = surface.hover_link;
             // Neither the palette nor the confirm dialog draws in the pane
             // cell pass — both are composited as rounded modal cards after
             // the panes (H). Leave `snapshot.command_palette` and

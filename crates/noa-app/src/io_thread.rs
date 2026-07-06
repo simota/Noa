@@ -126,50 +126,103 @@ impl IoThreadHandle {
     }
 }
 
-pub(crate) fn input_channel() -> (Sender<PtyInput>, Receiver<PtyInput>) {
-    crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY)
-}
-
-#[derive(Debug)]
-pub(crate) enum QueuePtyInputError {
-    Full(PtyInput),
-    Disconnected,
+pub(crate) fn input_channel() -> (PtyInputQueue, Receiver<PtyInput>) {
+    let (tx, rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY);
+    (PtyInputQueue::new(tx), rx)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LosslessQueueResult {
+pub(crate) enum QueueInputResult {
     Queued,
     Deferred,
     Disconnected,
 }
 
-pub(crate) fn try_queue_input(
-    tx: &Sender<PtyInput>,
-    input: PtyInput,
-) -> Result<(), QueuePtyInputError> {
-    tx.try_send(input).map_err(|err| match err {
-        TrySendError::Full(input) => QueuePtyInputError::Full(input),
-        TrySendError::Disconnected(_) => QueuePtyInputError::Disconnected,
-    })
+/// Main-thread handle for queueing input bytes to a pane's io thread.
+///
+/// Wraps the bounded channel with an ordered overflow buffer: when the
+/// channel is full (a huge paste against a program that isn't reading), the
+/// excess parks in `overflow`, one spillover thread drains it with blocking
+/// sends, and every later write joins the back of the buffer until it is
+/// empty — so input bytes can never overtake each other. (A detached
+/// blocking `send` per overflowing write, racing later `try_send`s, could
+/// land typed keys in the middle of a deferred paste.)
+#[derive(Clone)]
+pub(crate) struct PtyInputQueue {
+    tx: Sender<PtyInput>,
+    overflow: Arc<Mutex<InputOverflow>>,
 }
 
-pub(crate) fn queue_input_lossless(tx: Sender<PtyInput>, input: PtyInput) -> LosslessQueueResult {
-    match try_queue_input(&tx, input) {
-        Ok(()) => LosslessQueueResult::Queued,
-        Err(QueuePtyInputError::Full(input)) => {
-            match std::thread::Builder::new()
-                .name("noa-pty-input-send".to_string())
-                .spawn(move || {
-                    let _ = tx.send(input);
-                }) {
-                Ok(_) => LosslessQueueResult::Deferred,
-                Err(err) => {
-                    log::warn!("failed to defer pty input onto a sender thread: {err}");
-                    LosslessQueueResult::Disconnected
+#[derive(Default)]
+struct InputOverflow {
+    queue: std::collections::VecDeque<PtyInput>,
+    drainer_active: bool,
+}
+
+impl PtyInputQueue {
+    pub(crate) fn new(tx: Sender<PtyInput>) -> Self {
+        PtyInputQueue {
+            tx,
+            overflow: Arc::new(Mutex::new(InputOverflow::default())),
+        }
+    }
+
+    /// Queue `input` behind every byte accepted before it, blocking never.
+    pub(crate) fn queue(&self, input: PtyInput) -> QueueInputResult {
+        let mut overflow = self.overflow.lock();
+        if overflow.drainer_active {
+            overflow.queue.push_back(input);
+            return QueueInputResult::Deferred;
+        }
+        match self.tx.try_send(input) {
+            Ok(()) => QueueInputResult::Queued,
+            Err(TrySendError::Full(input)) => {
+                overflow.queue.push_back(input);
+                overflow.drainer_active = true;
+                drop(overflow);
+                let drainer = self.clone();
+                match std::thread::Builder::new()
+                    .name("noa-pty-input-send".to_string())
+                    .spawn(move || drainer.drain_overflow())
+                {
+                    Ok(_) => QueueInputResult::Deferred,
+                    Err(err) => {
+                        log::warn!("failed to spawn the pty input spillover thread: {err}");
+                        let mut overflow = self.overflow.lock();
+                        overflow.queue.clear();
+                        overflow.drainer_active = false;
+                        QueueInputResult::Disconnected
+                    }
                 }
             }
+            Err(TrySendError::Disconnected(_)) => QueueInputResult::Disconnected,
         }
-        Err(QueuePtyInputError::Disconnected) => LosslessQueueResult::Disconnected,
+    }
+
+    /// Spillover-thread body: forward parked inputs to the channel in order,
+    /// blocking on capacity, until the buffer drains (or the io thread hangs
+    /// up). `drainer_active` flips off under the same lock that observed the
+    /// empty buffer, so a concurrent `queue` either sees the flag and parks
+    /// behind us or sees the buffer already empty and sends directly.
+    fn drain_overflow(&self) {
+        loop {
+            let input = {
+                let mut overflow = self.overflow.lock();
+                match overflow.queue.pop_front() {
+                    Some(input) => input,
+                    None => {
+                        overflow.drainer_active = false;
+                        return;
+                    }
+                }
+            };
+            if self.tx.send(input).is_err() {
+                let mut overflow = self.overflow.lock();
+                overflow.queue.clear();
+                overflow.drainer_active = false;
+                return;
+            }
+        }
     }
 }
 
@@ -1171,40 +1224,39 @@ mod tests {
     }
 
     #[test]
-    fn input_channel_is_bounded_and_nonblocking_for_ui_thread() {
+    fn input_queue_is_bounded_and_nonblocking_for_ui_thread() {
         fn input(bytes: &[u8]) -> PtyInput {
             bytes.to_vec().into_boxed_slice()
         }
 
-        let (tx, rx) = input_channel();
+        let (queue, rx) = input_channel();
         for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
-            tx.try_send(input(b"x")).expect("queue has capacity");
+            assert_eq!(queue.queue(input(b"x")), QueueInputResult::Queued);
         }
 
-        match tx.try_send(input(b"y")) {
-            Err(crossbeam_channel::TrySendError::Full(bytes)) => {
-                assert_eq!(bytes.as_ref(), b"y");
-            }
-            other => panic!("expected a full input queue, got {other:?}"),
-        }
+        // The overflowing write must return immediately (deferred to the
+        // spillover thread), never block the ui thread.
+        assert_eq!(queue.queue(input(b"y")), QueueInputResult::Deferred);
         assert_eq!(rx.len(), PTY_INPUT_QUEUE_CAPACITY);
     }
 
     #[test]
-    fn lossless_input_defers_instead_of_dropping_when_queue_is_full() {
+    fn overflowing_input_defers_and_preserves_order_across_later_writes() {
         fn input(bytes: &[u8]) -> PtyInput {
             bytes.to_vec().into_boxed_slice()
         }
 
-        let (tx, rx) = input_channel();
+        let (queue, rx) = input_channel();
         for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
-            try_queue_input(&tx, input(b"x")).expect("queue has capacity");
+            assert_eq!(queue.queue(input(b"x")), QueueInputResult::Queued);
         }
 
-        assert_eq!(
-            queue_input_lossless(tx, input(b"paste")),
-            LosslessQueueResult::Deferred
-        );
+        // The overflowing paste defers — and a key typed right after it must
+        // park *behind* it, not race the spillover thread for the next free
+        // slot (the regression this queue exists to prevent).
+        assert_eq!(queue.queue(input(b"paste")), QueueInputResult::Deferred);
+        assert_eq!(queue.queue(input(b"key")), QueueInputResult::Deferred);
+
         for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
             assert_eq!(rx.recv().expect("queued input").as_ref(), b"x");
         }
@@ -1213,6 +1265,12 @@ mod tests {
                 .expect("deferred paste should be delivered")
                 .as_ref(),
             b"paste"
+        );
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("deferred key should follow the paste")
+                .as_ref(),
+            b"key"
         );
     }
 

@@ -253,6 +253,16 @@ pub(super) struct SidebarRenameSession {
     pub(super) buffer: String,
 }
 
+/// The modal layer owning a window's IME composition (see
+/// `App::modal_ime_target`), in `KeyboardInput` routing priority order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ModalImeTarget {
+    ConfirmDialog,
+    SearchPrompt,
+    CommandPalette,
+    SidebarRename,
+}
+
 /// An open confirmation dialog (paste protection or OSC 52 clipboard-read),
 /// bound to the window it was raised from.
 pub(super) struct ConfirmDialogSession {
@@ -294,7 +304,7 @@ pub(super) enum ConfirmAction {
 /// `PaneId`; this map owns the corresponding live surface payload.
 pub(super) struct Surface {
     pub(super) terminal: Arc<Mutex<Terminal>>,
-    pub(super) pty_input_tx: Sender<crate::io_thread::PtyInput>,
+    pub(super) pty_input_tx: crate::io_thread::PtyInputQueue,
     pub(super) resize_tx: Sender<GridSize>,
     pub(super) io_thread: Option<crate::io_thread::IoThreadHandle>,
     pub(super) grid_size: GridSize,

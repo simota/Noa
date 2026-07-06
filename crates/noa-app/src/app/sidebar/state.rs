@@ -219,12 +219,13 @@ impl App {
         // Drop attention-blink onsets for sessions that no longer exist, so the
         // blink timer can't stay armed for a torn-down card (FR-A1).
         self.attention_onset.retain(|id, _| live.contains(id));
-        // An inline rename on a torn-down card has nothing to commit to.
-        if self
-            .sidebar_rename
-            .as_ref()
-            .is_some_and(|session| !live.contains(&session.card))
-        {
+        // An inline rename on a torn-down card has nothing to commit to — and
+        // one whose *editing* window closed is just as stranded: the card can
+        // belong to another window in the group and stay live, but key routing
+        // requires the session's own window, so not even Escape would reach it.
+        if self.sidebar_rename.as_ref().is_some_and(|session| {
+            !live.contains(&session.card) || !self.windows.contains_key(&session.window_id)
+        }) {
             self.sidebar_rename = None;
         }
     }

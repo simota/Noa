@@ -248,11 +248,12 @@ impl ApplicationHandler<UserEvent> for App {
                 // active — they act on presses and swallow releases so nothing
                 // leaks to keybinds or the pty. Only the Kitty keyboard
                 // protocol (below) ever emits release events.
-                if self
-                    .windows
-                    .get(&window_id)
-                    .and_then(WindowState::focused_surface)
-                    .is_some_and(|surface| surface.ime_state.preedit_active())
+                if self.modal_preedit.is_some()
+                    || self
+                        .windows
+                        .get(&window_id)
+                        .and_then(WindowState::focused_surface)
+                        .is_some_and(|surface| surface.ime_state.preedit_active())
                 {
                     return;
                 }
@@ -783,67 +784,39 @@ impl App {
     }
 
     pub(super) fn on_ime_event(&mut self, window_id: WindowId, event: Ime) {
+        // The modal layers own the keyboard in the same order as
+        // `KeyboardInput`: confirm dialog → search prompt → palette → rename.
+        // While one is up the composition belongs to *it*: the pane's
+        // `ime_state` must not observe the event (its preedit run would draw
+        // at the terminal cursor, behind the modal). Preedit text mirrors
+        // into `modal_preedit` so the owning modal's input row renders it
+        // live, and a commit edits that modal's buffer (or is swallowed by
+        // the confirm dialog) instead of being written to the pty.
+        if let Some(target) = self.modal_ime_target(window_id) {
+            match &event {
+                Ime::Preedit(text, _) => {
+                    self.modal_preedit = (!text.is_empty()).then(|| text.clone());
+                }
+                Ime::Commit(text) => {
+                    self.modal_preedit = None;
+                    self.commit_modal_ime_text(window_id, target, text);
+                }
+                Ime::Enabled | Ime::Disabled => self.modal_preedit = None,
+            }
+            self.request_window_redraw(window_id);
+            return;
+        }
+        // No modal owns the composition (anymore): a leftover modal preedit
+        // (e.g. the modal closed mid-composition) must not ghost into the
+        // next modal's input row.
+        self.modal_preedit = None;
+
         let pane_id = self.windows.get(&window_id).map(|state| state.focused_pane);
         let bytes = self
             .windows
             .get_mut(&window_id)
             .and_then(|state| state.focused_surface_mut())
             .and_then(|surface| surface.ime_state.handle_event(&event));
-
-        // The modal layers own the keyboard in the same order as
-        // `KeyboardInput`: confirm dialog → search prompt → palette → rename.
-        // A committed IME composition edits the modal's buffer (or is
-        // swallowed) instead of being written to the pty behind it.
-        // `ime_state` above already observed the event either way.
-        if self
-            .confirm_dialog
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            return;
-        }
-
-        if self
-            .search_prompt
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            if let Ime::Commit(text) = &event {
-                let effect = self
-                    .search_prompt
-                    .as_mut()
-                    .and_then(|session| session.prompt.push_text(text));
-                if let Some(effect) = effect {
-                    self.apply_search_prompt_effect(window_id, effect);
-                }
-            }
-            return;
-        }
-
-        if self
-            .command_palette
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            if let Ime::Commit(text) = &event
-                && let Some(session) = self.command_palette.as_mut()
-            {
-                session.palette.push_text(text);
-                self.request_window_redraw(window_id);
-            }
-            return;
-        }
-
-        if self
-            .sidebar_rename
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            if let Ime::Commit(text) = &event {
-                self.push_sidebar_rename_text(text);
-            }
-            return;
-        }
 
         if let (Some(pane_id), Some(bytes)) = (pane_id, bytes) {
             // Committed IME text follows the prompt like typed keys do.

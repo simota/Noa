@@ -183,6 +183,12 @@ pub struct App {
     /// The open inline sidebar-card rename, if any — see
     /// [`SidebarRenameSession`].
     sidebar_rename: Option<SidebarRenameSession>,
+    /// Live IME composition text owned by whichever modal currently holds the
+    /// keyboard (see `App::modal_ime_target`). Mirrored into that modal's
+    /// input-row display and committed into its buffer, instead of being fed
+    /// to the focused pane's `ime_state` (which would draw the composition at
+    /// the terminal cursor, behind the modal).
+    modal_preedit: Option<String>,
     /// Next scheduled relative-time repaint for visible sidebars, so a card's
     /// `3分前` keeps advancing without pty output. Armed only while at least
     /// one sidebar is visible; ticks once a minute (the formatter's finest
@@ -292,6 +298,7 @@ impl App {
             command_palette: None,
             confirm_dialog: None,
             sidebar_rename: None,
+            modal_preedit: None,
             sidebar_clock_deadline: None,
             sidebar_autosort_deadline: None,
             session_restore_attempted: false,
@@ -378,10 +385,13 @@ impl App {
             .as_ref()
             .filter(|session| session.window_id == window_id)
             .map(|session| {
-                (
-                    command_palette_snapshot(&self.keybinds, &session.palette),
-                    session.opened_at,
-                )
+                let mut snapshot = command_palette_snapshot(&self.keybinds, &session.palette);
+                // Live IME composition appends to the displayed query
+                // (display only — it filters entries once committed).
+                snapshot
+                    .query
+                    .push_str(self.modal_preedit_for(window_id, ModalImeTarget::CommandPalette));
+                (snapshot, session.opened_at)
             });
         // Same for the confirm dialog: composited as its own modal card after
         // the panes (and above the palette — it blocks input), not inline in
@@ -394,6 +404,11 @@ impl App {
                 message: session.message.clone(),
                 hint: session.hint.clone(),
             });
+        // Resolved before the `gpu`/`state` borrows below (the snapshot loop
+        // holds them mutably).
+        let search_preedit = self
+            .modal_preedit_for(window_id, ModalImeTarget::SearchPrompt)
+            .to_string();
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
             return;
         };
@@ -439,7 +454,11 @@ impl App {
                 .search_prompt
                 .as_ref()
                 .filter(|session| session.window_id == window_id && session.pane_id == pane_id)
-                .map(|session| session.prompt.buffer().to_string());
+                .map(|session| {
+                    // Live IME composition appends to the displayed query
+                    // (display only — it joins the real buffer on commit).
+                    format!("{}{search_preedit}", session.prompt.buffer())
+                });
             // Neither the palette nor the confirm dialog draws in the pane
             // cell pass — both are composited as rounded modal cards after
             // the panes (H). Leave `snapshot.command_palette` and
@@ -634,6 +653,13 @@ impl App {
             sidebar::draw_bell_flash(gpu, state.surface_config.format, &view, surface_size);
         }
         frame.present();
+
+        // An atlas-eviction-unstable frame may have drawn some glyphs with
+        // another glyph's pixels; ask for one more frame so the display
+        // converges instead of sticking on the corrupt one.
+        if state.renderer.needs_follow_up_frame() {
+            state.window.request_redraw();
+        }
 
         // Hand each snapshot's row buffer back to its pane so the next
         // frame's `from_terminal_recycled` reuses the allocations.

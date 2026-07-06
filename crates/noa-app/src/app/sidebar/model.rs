@@ -81,7 +81,16 @@ impl App {
                 .sidebar_rename
                 .as_ref()
                 .filter(|session| session.window_id == window_id && session.card == card_rects.id)
-                .map(|session| session.buffer.as_str());
+                .map(|session| {
+                    // Live IME composition appends to the displayed buffer
+                    // (display only — it joins the real buffer on commit).
+                    format!(
+                        "{}{}",
+                        session.buffer,
+                        self.modal_preedit_for(window_id, ModalImeTarget::SidebarRename)
+                    )
+                });
+            let renaming = renaming.as_deref();
             let full = card_rects.bounds.h == layout_metrics.card_h;
             // A fully-visible card is covered by its opaque rounded overlay, so
             // its backdrop text would never show — only emit it for partial

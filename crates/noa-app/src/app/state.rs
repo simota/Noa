@@ -25,10 +25,17 @@ pub(super) struct GpuState {
     /// Rounded-card pipeline reused to composite the rasterized sidebar band
     /// onto each window's surface (CardStyle/overlay_texture_cards).
     pub(super) sidebar_card: Option<OverviewChromeCardPipeline>,
+    /// Alpha-blending variant used only for the band backdrop composite: the
+    /// band texture is transparent outside its text runs, so blending lets the
+    /// pane pass's clear color + background image show through untouched (the
+    /// band background is literally the panes' background), while the replace
+    /// pipeline above stays in charge of cards/menu/divider whose translucency
+    /// must settle to `background-opacity` exactly.
+    pub(super) sidebar_band_card: Option<OverviewChromeCardPipeline>,
     /// The band texture the sidebar rasterizes into, cached with its size so it
     /// is reused frame-to-frame and only reallocated when the band dimensions
-    /// change (a window resize or sidebar-width change). This is the flat dark
-    /// backdrop (header/toolbar + card text) that per-card rounded cards overlay.
+    /// change (a window resize or sidebar-width change). This holds the band's
+    /// text runs over a transparent base that per-card rounded cards overlay.
     pub(super) sidebar_band: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// Reused scratch texture for one rounded session card (inset x card
     /// height): each visible card is rendered into it then composited as a

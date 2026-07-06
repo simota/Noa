@@ -942,6 +942,7 @@ impl App {
                 },
                 sidebar_renderer: None,
                 sidebar_card: None,
+                sidebar_band_card: None,
                 sidebar_band: None,
                 sidebar_card_tex: None,
                 sidebar_menu_tex: None,

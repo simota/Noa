@@ -238,6 +238,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // toggle the hover underline + pointer cursor.
                 self.sync_hover_link(window_id);
             }
+            WindowEvent::CursorLeft { .. } => self.on_cursor_left(window_id),
             WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(window_id, position),
             WindowEvent::MouseInput { state, button, .. } => {
                 self.on_mouse_input(event_loop, window_id, state, button)
@@ -596,6 +597,32 @@ impl App {
             .map(|surface| surface.mouse_selection.cursor_moved(cell))
             .unwrap_or(SelectionGesture::None);
         self.apply_selection_gesture(window_id, pane_id, gesture);
+    }
+
+    pub(super) fn on_cursor_left(&mut self, window_id: WindowId) {
+        if let Some(state) = self.windows.get_mut(&window_id) {
+            state.last_mouse_point = None;
+            state.last_mouse_pane = None;
+            for surface in state.surfaces.values_mut() {
+                surface.last_mouse_cell = None;
+            }
+        }
+
+        self.update_sidebar_button_hover(window_id, None);
+        self.sync_hover_link(window_id);
+
+        let overview_changed = self
+            .overview_window
+            .as_mut()
+            .filter(|overview| overview.host == window_id)
+            .is_some_and(|overview| {
+                let changed = overview.last_cursor_point.take().is_some()
+                    || overview.hovered.take().is_some();
+                changed
+            });
+        if overview_changed {
+            self.request_overview_redraw();
+        }
     }
 
     pub(super) fn on_mouse_input(

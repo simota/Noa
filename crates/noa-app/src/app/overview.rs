@@ -1528,6 +1528,12 @@ impl App {
                 self.update_overview_hover();
                 true
             }
+            WindowEvent::CursorLeft { .. } => {
+                if let Some(host) = self.overview_host() {
+                    self.on_cursor_left(host);
+                }
+                true
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 if *button == MouseButton::Left && *state == ElementState::Pressed {
                     // REQ-OV-13: the close-button corner wins over tile-focus.

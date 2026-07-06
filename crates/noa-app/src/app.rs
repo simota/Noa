@@ -188,6 +188,11 @@ pub struct App {
     /// one sidebar is visible; ticks once a minute (the formatter's finest
     /// granularity).
     sidebar_clock_deadline: Option<Instant>,
+    /// Next scheduled recency re-sort for visible sidebars
+    /// (`SIDEBAR_AUTOSORT_INTERVAL`), so the card order tracks each session's
+    /// last output without re-sorting on every upsert. Armed only while at
+    /// least one sidebar is visible.
+    sidebar_autosort_deadline: Option<Instant>,
     /// Guards session restore to the first `resumed` only, so a later resume
     /// (e.g. after the whole app is backgrounded and restored) can't spawn a
     /// second copy of the saved topology on top of the live one.
@@ -288,6 +293,7 @@ impl App {
             confirm_dialog: None,
             sidebar_rename: None,
             sidebar_clock_deadline: None,
+            sidebar_autosort_deadline: None,
             session_restore_attempted: false,
             restoring: false,
             quick_terminal: None,

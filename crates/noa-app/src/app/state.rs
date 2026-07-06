@@ -138,6 +138,12 @@ pub(super) const RESIZE_OVERLAY_DURATION: Duration = Duration::from_millis(750);
 /// How long the `visual-bell` flash stays up.
 pub(super) const BELL_FLASH_DURATION: Duration = Duration::from_millis(150);
 
+/// How often visible sidebars re-sort their cards by update recency
+/// (`SessionStore::refresh_auto_order`). Coarse on purpose: the order snapshot
+/// only moves on this cadence, so cards never shuffle under the pointer on
+/// every output tick.
+pub(super) const SIDEBAR_AUTOSORT_INTERVAL: Duration = Duration::from_secs(5);
+
 /// An in-flight sidebar card drag-reorder (FR: card reordering). Recorded on a
 /// left-press over a card; the drag only becomes `active` once the pointer
 /// moves past a threshold, so a press-then-release without movement stays a

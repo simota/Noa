@@ -374,6 +374,7 @@ impl ApplicationHandler<UserEvent> for App {
         let quick_terminal_deadline = self.tick_quick_terminal();
         let attention_deadline = self.tick_attention_blink();
         let sidebar_clock_deadline = self.tick_sidebar_clock();
+        let sidebar_autosort_deadline = self.tick_sidebar_autosort();
         let transient_overlay_deadline = self.tick_transient_overlays();
         let deadline = [
             blink_deadline,
@@ -381,6 +382,7 @@ impl ApplicationHandler<UserEvent> for App {
             quick_terminal_deadline,
             attention_deadline,
             sidebar_clock_deadline,
+            sidebar_autosort_deadline,
             transient_overlay_deadline,
         ]
         .into_iter()

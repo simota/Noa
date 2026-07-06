@@ -154,6 +154,42 @@ impl App {
         }
     }
 
+    /// Re-sort visible sidebars' cards by update recency every
+    /// `SIDEBAR_AUTOSORT_INTERVAL`, repainting only when the order actually
+    /// changed. The refresh also fires on the arming tick (sidebar just became
+    /// visible), so a stale order never shows for a full interval. A tick that
+    /// lands mid-drag skips the refresh — re-sorting would shuffle the list
+    /// under the pointer and retarget the drop — and retries next interval.
+    pub(super) fn tick_sidebar_autosort(&mut self) -> Option<Instant> {
+        let any_visible = self.sidebar_visible
+            && self
+                .windows
+                .keys()
+                .any(|window_id| self.window_sidebar_eligible(*window_id));
+        if !any_visible {
+            self.sidebar_autosort_deadline = None;
+            return None;
+        }
+        let now = Instant::now();
+        match self.sidebar_autosort_deadline {
+            Some(deadline) if now < deadline => Some(deadline),
+            _ => {
+                let drag_active = self.windows.values().any(|state| {
+                    state
+                        .sidebar_drag
+                        .as_ref()
+                        .is_some_and(|drag| drag.active)
+                });
+                if !drag_active && self.session_store.refresh_auto_order() {
+                    self.request_sidebar_redraw();
+                }
+                let next = now + SIDEBAR_AUTOSORT_INTERVAL;
+                self.sidebar_autosort_deadline = Some(next);
+                Some(next)
+            }
+        }
+    }
+
     /// Expire transient per-window overlays (the `cols × rows` resize toast
     /// and the `visual-bell` flash), repainting a window whose overlay just
     /// ended, and report the earliest pending expiry.

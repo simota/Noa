@@ -585,16 +585,24 @@ impl App {
             return;
         };
 
+        let mut prev_cell = None;
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.last_mouse_pane = Some(pane_id);
             if let Some(surface) = state.surfaces.get_mut(&pane_id) {
-                surface.last_mouse_cell = Some(cell);
+                prev_cell = surface.last_mouse_cell.replace(cell);
             }
         }
         self.sync_hover_link(window_id);
 
         let (tracking, format) = self.mouse_report_modes(window_id, pane_id);
         if tracking != MouseTracking::Off && !self.modifiers.shift_key() {
+            // Motion is reported per cell, not per pixel (xterm/Ghostty):
+            // sub-cell jitter must not flood the application with duplicate
+            // reports — bursts of identical SGR motion sequences can break
+            // TUI input parsers mid-paste.
+            if prev_cell == Some(cell) {
+                return;
+            }
             let pressed_mouse_button = self
                 .windows
                 .get(&window_id)

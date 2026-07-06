@@ -92,8 +92,9 @@ pub(super) fn ensure_scratch(
 }
 
 /// Rasterize the sidebar and composite it onto `view` at the window's left
-/// inset via the reused rounded-card pipeline: a flat dark backdrop (chrome +
-/// card text), then each fully-visible card as a rounded card with a subtle
+/// inset via the reused rounded-card pipeline: a flat backdrop matching the
+/// terminal theme's background (so the band reads as one surface with the
+/// panes), then each fully-visible card as a rounded card with a subtle
 /// border and a focus ring on the selected one, then the optional `…` menu
 /// popup above them all. Runs inline in `redraw` with the already-borrowed
 /// `gpu`, so the model must be prebuilt (no `self` here).
@@ -172,7 +173,7 @@ pub(in crate::app) fn draw_sidebar_band(
         return;
     }
 
-    // 1) Flat dark backdrop (chrome + all card text) → band texture, composited
+    // 1) Flat theme-background backdrop (+ all card text) → band texture, composited
     // over the inset with no rounding. `overlay_texture_cards` loads (doesn't
     // clear) so the panes to the right are untouched. The placement is drawn
     // `selected` with a black focus color and zero focus stroke, which turns
@@ -189,13 +190,13 @@ pub(in crate::app) fn draw_sidebar_band(
             band_view,
             band_size,
             model.grid,
-            chrome().bg,
+            gpu.theme.default_bg,
             model.background_opacity,
             &model.runs,
         );
     }
     let flat_style = CardStyle {
-        background: rgb_to_rgba(chrome().bg),
+        background: rgb_to_rgba(gpu.theme.default_bg),
         border_color: [0.0; 4],
         focus_color: [0.0, 0.0, 0.0, 1.0],
         corner_radius: 0.0,

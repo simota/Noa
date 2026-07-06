@@ -407,6 +407,67 @@ fn bar_and_underline_cursors_do_not_fill_or_recolor_the_cell() {
 }
 
 #[test]
+fn block_cursor_on_wide_lead_also_fills_the_spacer_cell() {
+    let Some(mut font) = font_with_rasterized_m() else {
+        return;
+    };
+
+    let mut terminal = Terminal::new(GridSize::new(3, 1));
+    terminal.primary.cursor.x = 0;
+    terminal.primary.cursor.y = 0;
+    terminal.primary.grid[0].cells[0].ch = 'あ';
+    terminal.primary.grid[0].cells[0].attrs = CellAttrs::WIDE;
+    terminal.primary.grid[0].cells[1].attrs = CellAttrs::WIDE_SPACER;
+    let snap = FrameSnapshot::from_terminal(&mut terminal);
+
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
+
+    let cursor_fills: Vec<_> = instances
+        .iter()
+        .filter(|i| i.flags == CellInstance::FLAG_CURSOR && i.glyph_size == [0, 0])
+        .map(|i| i.grid_pos)
+        .collect();
+    assert!(
+        cursor_fills.contains(&[0, 0]) && cursor_fills.contains(&[1, 0]),
+        "block fill must cover both the wide lead and its spacer, got {cursor_fills:?}"
+    );
+}
+
+#[test]
+fn wide_cell_decorations_span_both_cells_and_spacer_emits_none() {
+    let Some(mut font) = font_with_rasterized_m() else {
+        return;
+    };
+
+    let mut terminal = Terminal::new(GridSize::new(3, 1));
+    terminal.primary.cursor.visible = false;
+    terminal.primary.grid[0].cells[0].ch = 'あ';
+    terminal.primary.grid[0].cells[0].attrs = CellAttrs::WIDE | CellAttrs::UNDERLINE;
+    terminal.primary.grid[0].cells[1].attrs = CellAttrs::WIDE_SPACER | CellAttrs::UNDERLINE;
+    let snap = FrameSnapshot::from_terminal(&mut terminal);
+
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
+
+    let underlines: Vec<_> = instances
+        .iter()
+        .filter(|i| i.flags == CellInstance::FLAG_DECORATION)
+        .collect();
+    assert_eq!(
+        underlines.len(),
+        1,
+        "one underline rect from the lead; the spacer must not double-draw"
+    );
+    assert_eq!(underlines[0].grid_pos, [0, 0]);
+    assert_eq!(
+        underlines[0].glyph_size[0],
+        decoration_width(font.metrics(), 2),
+        "the underline spans the glyph's full two-cell footprint"
+    );
+}
+
+#[test]
 fn unfocused_pane_draws_a_hollow_outline_not_a_block_fill() {
     let Some(mut font) = font_with_rasterized_m() else {
         return;
@@ -529,6 +590,7 @@ fn cursor_bar_decoration_is_a_full_height_left_edge_rect() {
         CursorVisual::Bar,
         [9, 8, 7, 255],
         metrics(18.0),
+        1,
     );
 
     assert_eq!(instances.len(), 1);
@@ -562,6 +624,7 @@ fn cursor_underline_decoration_reuses_the_text_underline_geometry() {
         CursorVisual::Underline,
         [1, 2, 3, 255],
         m,
+        1,
     );
 
     assert_eq!(instances.len(), 1);
@@ -592,6 +655,7 @@ fn cursor_hollow_decoration_emits_four_edge_rects() {
         CursorVisual::Hollow,
         [4, 5, 6, 255],
         metrics(18.0),
+        1,
     );
 
     assert_eq!(
@@ -635,6 +699,7 @@ fn decorations_emit_rect_instances_from_cell_attrs() {
         CellAttrs::DOUBLE_UNDERLINE | CellAttrs::STRIKETHROUGH | CellAttrs::OVERLINE,
         [1, 2, 3, 255],
         metrics,
+        1,
     );
 
     assert_eq!(instances.len(), 4);
@@ -684,6 +749,7 @@ fn patterned_underlines_emit_segmented_rectangles() {
         CellAttrs::DOTTED_UNDERLINE,
         [9, 9, 9, 255],
         metrics,
+        1,
     );
     assert!(
         dotted.len() > 1,
@@ -699,6 +765,7 @@ fn patterned_underlines_emit_segmented_rectangles() {
         CellAttrs::DASHED_UNDERLINE,
         [9, 9, 9, 255],
         metrics,
+        1,
     );
     assert!(dashed.iter().any(|instance| instance.glyph_size[0] > 1));
 
@@ -710,6 +777,7 @@ fn patterned_underlines_emit_segmented_rectangles() {
         CellAttrs::CURLY_UNDERLINE,
         [9, 9, 9, 255],
         metrics,
+        1,
     );
     assert!(
         curly

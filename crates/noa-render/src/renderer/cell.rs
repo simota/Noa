@@ -98,13 +98,23 @@ pub(super) fn rebuild_row_instances(
         let selected = highlight.selected;
         let active_search = highlight.active_search;
         let search_match = highlight.search_match;
+        let wide = cell.attrs.contains(CellAttrs::WIDE);
+        let wide_spacer = cell.attrs.contains(CellAttrs::WIDE_SPACER);
         let cursor_here =
             cursor_visual != CursorVisual::None && snap.cursor.x == x && snap.cursor.y == y;
+        // A wide glyph's spacer joins the block fill when the cursor sits on
+        // its lead, so the inverted glyph's right half lands on cursor-colored
+        // background instead of splitting visually at the cell boundary.
+        let cursor_on_lead = cursor_visual != CursorVisual::None
+            && wide_spacer
+            && snap.cursor.y == y
+            && snap.cursor.x.saturating_add(1) == x;
         // Only the block styles fill the cell and invert the glyph — bar,
         // underline, and the unfocused hollow outline are separate
         // decoration-pass overlays that leave the glyph's own colors alone
         // (REQ-CURSOR-2/3/4).
-        let cursor_block_fill = cursor_here && cursor_visual == CursorVisual::Block;
+        let cursor_block_fill =
+            (cursor_here || cursor_on_lead) && cursor_visual == CursorVisual::Block;
 
         let inverse = cell.attrs.contains(CellAttrs::INVERSE);
         let (fg_color, bg_color) = if inverse {
@@ -164,7 +174,9 @@ pub(super) fn rebuild_row_instances(
         let text_color = surface_output_rgb(text_rgb, target_format_is_srgb);
 
         let invisible = cell.attrs.contains(CellAttrs::INVISIBLE);
-        let wide_spacer = cell.attrs.contains(CellAttrs::WIDE_SPACER);
+        // Decorations span the glyph's full footprint: a wide lead emits
+        // 2-cell-wide rects and its spacer emits none.
+        let deco_span: u16 = if wide { 2 } else { 1 };
         if !invisible && !wide_spacer {
             let decoration_color = if let Some(color) = cell.underline_color {
                 let underline = theme.resolve_rgb_with_colors(color, true, &snap.colors);
@@ -182,6 +194,7 @@ pub(super) fn rebuild_row_instances(
                 cell.attrs,
                 to_u8_color(decoration_color),
                 metrics,
+                deco_span,
             );
             if is_hover_link_cell(snap, cell, x, y) {
                 push_hover_link_underline(
@@ -190,6 +203,7 @@ pub(super) fn rebuild_row_instances(
                     y,
                     to_u8_color(text_color),
                     metrics,
+                    deco_span,
                 );
             }
         }
@@ -210,6 +224,7 @@ pub(super) fn rebuild_row_instances(
                 cursor_visual,
                 to_u8_color(cursor_rgba),
                 metrics,
+                deco_span,
             );
         }
 

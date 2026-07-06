@@ -75,6 +75,7 @@ pub(super) fn push_cursor_decorations(
     visual: CursorVisual,
     color: [u8; 4],
     metrics: Metrics,
+    span: u16,
 ) {
     let cell = DecorationCell {
         grid_x: x,
@@ -82,7 +83,7 @@ pub(super) fn push_cursor_decorations(
         color,
     };
     let thickness = decoration_thickness(metrics);
-    let width = metrics.cell_w.round().max(1.0) as u16;
+    let width = decoration_width(metrics, span);
     let height = metrics.cell_h.round().max(1.0) as u16;
 
     match visual {
@@ -156,9 +157,10 @@ pub(super) fn push_cell_decorations(
     attrs: CellAttrs,
     color: [u8; 4],
     metrics: Metrics,
+    span: u16,
 ) {
     let thickness = decoration_thickness(metrics);
-    let width = metrics.cell_w.round().max(1.0) as u16;
+    let width = decoration_width(metrics, span);
     let cell = DecorationCell {
         grid_x: x,
         grid_y: y,
@@ -234,9 +236,10 @@ pub(super) fn push_hover_link_underline(
     y: u16,
     color: [u8; 4],
     metrics: Metrics,
+    span: u16,
 ) {
     let thickness = decoration_thickness(metrics);
-    let width = metrics.cell_w.round().max(1.0) as u16;
+    let width = decoration_width(metrics, span);
     let base_y = underline_y(metrics, thickness, 0.0);
     push_decoration_rect(
         instances,
@@ -247,6 +250,13 @@ pub(super) fn push_hover_link_underline(
         },
         DecorationRect::new(0, base_y, width, thickness),
     );
+}
+
+/// Pixel width of a decoration rect spanning `span` grid columns (2 for a
+/// wide lead, else 1), so underline/strike/cursor overlays cover a wide
+/// glyph's full footprint instead of its left half.
+pub(super) fn decoration_width(metrics: Metrics, span: u16) -> u16 {
+    (metrics.cell_w * span.max(1) as f32).round().max(1.0) as u16
 }
 
 pub(super) fn decoration_thickness(metrics: Metrics) -> u16 {

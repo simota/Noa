@@ -42,6 +42,11 @@ pub const SIDEBAR_CARD_H: u32 = 172;
 /// Vertical gap between adjacent cards.
 pub const SIDEBAR_CARD_GUTTER: u32 = 8;
 
+/// Horizontal margin between a card and the sidebar's left/right edges, so the
+/// rounded card reads as a floating tile instead of touching the band edges
+/// (matches `SIDEBAR_CARD_GUTTER` so the gap reads uniform on all sides).
+pub const SIDEBAR_CARD_MARGIN_X: u32 = 8;
+
 /// Vertical stride from one card's top to the next (card + gutter).
 pub const SIDEBAR_CARD_STRIDE: u32 = SIDEBAR_CARD_H + SIDEBAR_CARD_GUTTER;
 
@@ -162,6 +167,8 @@ pub struct SidebarMetrics {
     pub card_h: u32,
     /// Vertical gap between cards (scaled).
     pub card_gutter: u32,
+    /// Horizontal card margin from the sidebar edges (scaled).
+    pub card_margin_x: u32,
     /// Card-to-card stride (`card_h + card_gutter`).
     pub card_stride: u32,
     /// `…` menu popup width (scaled).
@@ -191,6 +198,7 @@ impl SidebarMetrics {
             card_h,
             card_gutter,
             card_stride: card_h + card_gutter,
+            card_margin_x: s(SIDEBAR_CARD_MARGIN_X),
             menu_w: s(SIDEBAR_MENU_W),
             menu_item_h: s(SIDEBAR_MENU_ITEM_H),
         }
@@ -287,17 +295,39 @@ impl SidebarMetrics {
     /// draws each card into its own texture and positions text with these,
     /// matching the window-space rects [`layout`](Self::layout) emits for the
     /// flat backdrop.
-    pub fn card_local_rects(&self, id: SessionCardId, inset: u32) -> CardRects {
-        self.card_rects(id, 0, SidebarRect::new(0, 0, inset, self.card_h))
+    pub fn card_local_rects(&self, id: SessionCardId, card_w: u32) -> CardRects {
+        let vp = SidebarRect::new(0, 0, card_w, self.card_h);
+        self.card_rects_at(id, 0, card_w as i64, 0, vp)
+    }
+
+    /// The width of one card for a sidebar `sidebar_w` wide: the full width
+    /// minus the horizontal margin on both sides.
+    pub fn card_w(&self, sidebar_w: u32) -> u32 {
+        sidebar_w.saturating_sub(2 * self.card_margin_x)
     }
 
     /// Build one card's clipped sub-rects from its (possibly off-viewport)
-    /// window top `top` and the viewport `vp`. Every interior offset scales with
-    /// the DPR so the card's nine rows (name / cwd / meta / preview×5 / updated)
-    /// fit its scaled height on a Retina display.
+    /// window top `top` and the viewport `vp`, inset from the viewport edges by
+    /// the horizontal card margin.
     fn card_rects(&self, id: SessionCardId, top: i64, vp: SidebarRect) -> CardRects {
-        let lx = vp.x as i64;
-        let w = vp.w as i64;
+        let margin = self.card_margin_x as i64;
+        let lx = vp.x as i64 + margin;
+        let w = (vp.w as i64 - 2 * margin).max(0);
+        self.card_rects_at(id, lx, w, top, vp)
+    }
+
+    /// The interior of one card whose left edge is `lx` and width `w` (window
+    /// space), clipped to `vp`. Every interior offset scales with the DPR so
+    /// the card's nine rows (name / cwd / meta / preview×5 / updated) fit its
+    /// scaled height on a Retina display.
+    fn card_rects_at(
+        &self,
+        id: SessionCardId,
+        lx: i64,
+        w: i64,
+        top: i64,
+        vp: SidebarRect,
+    ) -> CardRects {
         let pad = self.s(CARD_PAD) as i64;
         let dot_d = self.s(CARD_DOT_D) as i64;
         let icon_w = self.s(CARD_ICON_W) as i64;
@@ -394,7 +424,8 @@ impl SidebarMetrics {
         // Per-card `…` button, in content space (same math as `card_rects`).
         let card_top = index as u32 * self.card_stride;
         let menu_x =
-            vp.w.saturating_sub(self.s(CARD_PAD))
+            vp.w.saturating_sub(self.card_margin_x)
+                .saturating_sub(self.s(CARD_PAD))
                 .saturating_sub(self.s(CARD_MENU_W));
         let menu = SidebarRect::new(
             menu_x,
@@ -1309,6 +1340,7 @@ mod tests {
         assert_eq!(m2.toolbar_h, 2 * SIDEBAR_TOOLBAR_H);
         assert_eq!(m2.card_h, 2 * SIDEBAR_CARD_H);
         assert_eq!(m2.card_gutter, 2 * SIDEBAR_CARD_GUTTER);
+        assert_eq!(m2.card_margin_x, 2 * SIDEBAR_CARD_MARGIN_X);
         // Stride stays exactly card + gutter at any scale.
         assert_eq!(m2.card_stride, m2.card_h + m2.card_gutter);
         assert_eq!(m2.card_stride, 2 * SIDEBAR_CARD_STRIDE);
@@ -1366,7 +1398,7 @@ mod tests {
             m2.hit_test(bounds, &ids, 0, body),
             Some(SidebarHit::Card(ids[0]))
         );
-        let menu_x = vp.w - m2.s(CARD_PAD) - m2.s(CARD_MENU_W);
+        let menu_x = vp.w - m2.card_margin_x - m2.s(CARD_PAD) - m2.s(CARD_MENU_W);
         let card_menu = Point::new(vp.x + menu_x + 5, vp.y + 20);
         assert_eq!(
             m2.hit_test(bounds, &ids, 0, card_menu),

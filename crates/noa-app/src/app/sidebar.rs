@@ -235,6 +235,9 @@ pub(super) struct SidebarDrawModel {
     scale: f32,
     /// The scaled height of one card, sizing the per-card scratch texture.
     card_h: u32,
+    /// The scaled width of one card (the inset minus the horizontal card
+    /// margin on both sides), sizing the per-card scratch texture.
+    card_w: u32,
     grid: GridSize,
     runs: Vec<SidebarTextRun>,
     /// The toolbar `+` button: its window-space rect and whether the pointer is

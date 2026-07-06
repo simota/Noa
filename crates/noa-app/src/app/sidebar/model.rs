@@ -58,7 +58,10 @@ impl App {
         let home = std::env::var("HOME").ok();
         let palette = &gpu.theme.palette;
         let mut cards: Vec<SidebarCardDraw> = Vec::new();
-        let card_band = PaneRectApp::new(0, 0, inset, layout_metrics.card_h);
+        // Cards are inset from the sidebar edges, so their texture (and cell
+        // grid) is the margin-narrowed card width, not the full sidebar inset.
+        let card_w = layout_metrics.card_w(inset).max(1);
+        let card_band = PaneRectApp::new(0, 0, card_w, layout_metrics.card_h);
         let card_grid = grid_size_for_pane_rect(card_band, metrics, self.padding);
         let card_cell = to_cell(card_grid);
         // The card being drag-reordered is drawn as a floating copy below (2b),
@@ -91,7 +94,7 @@ impl App {
 
             if full {
                 let selected = card_rects.id == selected_id;
-                let local = layout_metrics.card_local_rects(card_rects.id, inset);
+                let local = layout_metrics.card_local_rects(card_rects.id, card_w);
                 let mut card_runs = Vec::new();
                 emit_card_text(
                     &mut card_runs,
@@ -166,7 +169,7 @@ impl App {
                 let card = self.session_store.get(&drag.card)?;
                 let lines = card_lines(card, now, home.as_deref());
                 let marker = self.attention_marker_visible(&drag.card);
-                let local = layout_metrics.card_local_rects(drag.card, inset);
+                let local = layout_metrics.card_local_rects(drag.card, card_w);
                 let mut card_runs = Vec::new();
                 emit_card_text(
                     &mut card_runs,
@@ -182,7 +185,12 @@ impl App {
                 let max_top = height.saturating_sub(layout_metrics.card_h) as i64;
                 let top = (drag.current_y - drag.grab_dy).clamp(0, max_top) as u32;
                 let float = SidebarCardDraw {
-                    rect: SidebarRect::new(0, top, inset, layout_metrics.card_h),
+                    rect: SidebarRect::new(
+                        layout_metrics.card_margin_x,
+                        top,
+                        card_w,
+                        layout_metrics.card_h,
+                    ),
                     grid: card_grid,
                     bg: chrome().card_selected,
                     selected: true,
@@ -211,6 +219,7 @@ impl App {
             height,
             scale,
             card_h: layout_metrics.card_h,
+            card_w,
             grid,
             runs,
             new_button: btn,

@@ -148,7 +148,7 @@ pub(in crate::app) fn draw_sidebar_band(
             &mut gpu.sidebar_card_tex,
             &gpu.device,
             PixelSize {
-                w: model.inset,
+                w: model.card_w,
                 h: model.card_h,
             },
             surface_format,
@@ -466,7 +466,7 @@ pub(in crate::app) fn draw_sidebar_band(
             &gpu.theme,
             card_view,
             PixelSize {
-                w: model.inset,
+                w: model.card_w,
                 h: model.card_h,
             },
             card_draw.grid,
@@ -571,7 +571,7 @@ pub(in crate::app) fn draw_sidebar_band(
             &gpu.theme,
             card_view,
             PixelSize {
-                w: model.inset,
+                w: model.card_w,
                 h: model.card_h,
             },
             drag.grid,

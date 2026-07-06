@@ -994,6 +994,75 @@ fn selected_text_joins_soft_wrapped_rows() {
 }
 
 #[test]
+fn selected_text_keeps_trailing_spaces_on_wrapped_rows() {
+    // "ab  " fills the 4-col row and wraps into "cd": the two spaces are real
+    // content at the wrap boundary and must survive the join.
+    let mut t = run_size(4, 2, b"ab  cd");
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 1, y: 1 });
+
+    assert_eq!(t.selected_text().as_deref(), Some("ab  cd"));
+}
+
+#[test]
+fn word_selection_stops_at_boundary_punctuation() {
+    let mut t = run_size(12, 1, b"foo(bar)");
+    t.select_word_at_viewport_point(Point { x: 5, y: 0 });
+
+    let selection = t.active().selection.expect("selection should be stored");
+    let (start, end) = selection.normalized();
+    assert_eq!(start, crate::SelectionPoint::new(4, 0));
+    assert_eq!(end, crate::SelectionPoint::new(6, 0));
+}
+
+#[test]
+fn line_selection_spans_soft_wrapped_logical_line() {
+    // "abcdZ" wraps across rows 0-1; row 2 is a separate line. Triple-click
+    // on either wrapped row selects the whole logical line.
+    let mut t = run_size(4, 3, b"abcdZ\r\nnext");
+    t.select_line_at_viewport_point(Point { x: 0, y: 0 });
+
+    let selection = t.active().selection.expect("selection should be stored");
+    let (start, end) = selection.normalized();
+    assert_eq!(start, crate::SelectionPoint::new(0, 0));
+    assert_eq!(end, crate::SelectionPoint::new(3, 1));
+    assert_eq!(t.selected_text().as_deref(), Some("abcdZ"));
+
+    t.select_line_at_viewport_point(Point { x: 2, y: 1 });
+    let selection = t.active().selection.expect("selection should be stored");
+    let (start, end) = selection.normalized();
+    assert_eq!(start, crate::SelectionPoint::new(0, 0));
+    assert_eq!(end, crate::SelectionPoint::new(3, 1));
+}
+
+#[test]
+fn erase_display_clears_selection() {
+    let mut t = run_size(8, 2, b"hello");
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 4, y: 0 });
+    assert!(t.active().selection.is_some());
+
+    let mut s = Stream::new();
+    s.feed(b"\x1b[2J", &mut t);
+    assert!(t.active().selection.is_none());
+}
+
+#[test]
+fn viewport_point_converts_to_storage_coordinate() {
+    // Two rows scrolled into scrollback: viewport row 0 maps to storage row 2
+    // at the bottom, and back to storage row 1 after scrolling up one row.
+    let mut t = run_size(4, 2, b"a\r\nb\r\nc\r\nd");
+    assert_eq!(
+        t.viewport_point_to_selection_point(Point { x: 1, y: 0 }),
+        crate::SelectionPoint::new(1, 2)
+    );
+
+    t.scroll_viewport_up(1);
+    assert_eq!(
+        t.viewport_point_to_selection_point(Point { x: 1, y: 0 }),
+        crate::SelectionPoint::new(1, 1)
+    );
+}
+
+#[test]
 fn selection_clears_on_full_reset_and_screen_switch() {
     let mut t = run(b"\x1b[?1049h");
     t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 1, y: 0 });

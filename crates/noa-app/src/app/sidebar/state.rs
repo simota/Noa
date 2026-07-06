@@ -36,28 +36,36 @@ impl App {
     /// (FR-14/AC-16b): a QT pane shares the app-wide publish gate, so without
     /// this guard its output would leak a card into every window's sidebar
     /// whenever a sidebar is open elsewhere. Because the card never enters, no
-    /// reconcile is needed when the quick terminal is torn down.
+    /// reconcile is needed when the quick terminal is torn down. A bell or
+    /// attention request for the OS-focused window is dropped by the same gate
+    /// (FR-16 parity with the OSC 9/777 path — focus is what clears the flags).
     pub(in crate::app) fn apply_session_delta(&mut self, delta: SessionDelta) {
         let window_id = WindowId::from(delta.id().window_id.0);
         // An agent session's bell is an interaction request, not a generic beep
         // (FR-A3): escalate it to an attention delta before the eligibility gate
         // so it flows through the same path as an OSC 9/777 request.
         let delta = self.escalate_agent_bell(delta);
-        if !session_delta_should_apply(&delta, self.window_sidebar_eligible(window_id)) {
+        if !session_delta_should_apply(
+            &delta,
+            self.window_sidebar_eligible(window_id),
+            self.os_focused == Some(window_id),
+        ) {
             return;
         }
         // Record the blink onset on the false→true attention transition (FR-A1);
         // FR-A7 keeps the existing onset if attention is already pending so a
-        // repeat request doesn't restart the blink.
+        // repeat request doesn't restart the blink. A card the store doesn't
+        // hold gets no onset either — `apply` drops the flag for it, and an
+        // onset without the flag would just tick the blink timer for nothing.
+        // No timer re-arm is needed here: `about_to_wait` runs after this event
+        // and extends the deadline chain to this onset's next phase boundary.
         if let SessionDelta::Attention { id } = &delta
             && self
                 .session_store
                 .get(id)
-                .is_none_or(|card| !card.attention)
+                .is_some_and(|card| !card.attention)
         {
             self.attention_onset.insert(*id, Instant::now());
-            // Re-arm the blink timer on the next `about_to_wait` pass.
-            self.attention_blink_deadline = None;
         }
         // A cwd change (new card or a changed cwd on an existing one) triggers a
         // branch + icon poll on the dedicated worker (FR-8/FR-9), never on the

@@ -680,6 +680,26 @@ pub fn attention_blink_on(
     ticks.is_multiple_of(2)
 }
 
+/// The elapsed time (since onset) of the next [`attention_blink_on`] phase
+/// boundary strictly after `elapsed`, clamped to `duration` (the settle
+/// instant, so the final partial half-period still gets a wake-up), or `None`
+/// once settled. Blink repaints must be scheduled at these boundaries — not at
+/// `now + interval` — because the visible phase is computed from the onset: an
+/// unaligned deadline paints every flip late and the duty cycle jitters.
+pub fn next_attention_blink_boundary(
+    elapsed: std::time::Duration,
+    duration: std::time::Duration,
+    interval: std::time::Duration,
+) -> Option<std::time::Duration> {
+    if elapsed >= duration {
+        return None;
+    }
+    let interval_ms = interval.as_millis().max(1);
+    let next_ms = (elapsed.as_millis() / interval_ms + 1) * interval_ms;
+    let boundary = std::time::Duration::from_millis(next_ms.min(u128::from(u64::MAX)) as u64);
+    Some(boundary.min(duration))
+}
+
 /// Truncate `s` tail-first to at most `max` characters, prefixing an ellipsis
 /// so the most-specific (rightmost) path segment stays visible (FR-2).
 fn truncate_tail(s: &str, max: usize) -> String {
@@ -825,7 +845,7 @@ mod tests {
             cwd: cwd.to_string(),
             busy: false,
             updated_at: wall(10, 0),
-            preview: plain_preview(&["line one", "line two"]),
+            preview: Some(plain_preview(&["line one", "line two"])),
         });
         store.apply(SessionDelta::Branch {
             id,
@@ -978,7 +998,7 @@ mod tests {
             cwd: "/repo".to_string(),
             busy: false,
             updated_at: wall(10, 0),
-            preview: Vec::new(),
+            preview: None,
         });
         let idle = card_lines(store.get(&id).unwrap(), wall(10, 0), None);
         assert_eq!(idle.process, "idle");
@@ -990,7 +1010,7 @@ mod tests {
             cwd: "/repo".to_string(),
             busy: true,
             updated_at: wall(10, 0),
-            preview: Vec::new(),
+            preview: None,
         });
         let busy = card_lines(store.get(&id).unwrap(), wall(10, 0), None);
         assert_eq!(busy.process, "running");
@@ -1374,6 +1394,43 @@ mod tests {
             dur,
             Duration::ZERO
         ));
+    }
+
+    // FR-A1: the next blink wake-up lands exactly on the onset-relative phase
+    // boundary (not `now + interval`), is clamped to the settle instant, and
+    // stops once settled.
+    #[test]
+    fn next_attention_blink_boundary_is_phase_aligned_and_clamped() {
+        use std::time::Duration;
+        let dur = Duration::from_secs(6);
+        let iv = Duration::from_millis(333);
+        // Mid-phase: the next boundary is the end of the current half-period.
+        assert_eq!(
+            next_attention_blink_boundary(Duration::from_millis(100), dur, iv),
+            Some(Duration::from_millis(333))
+        );
+        // Exactly on a boundary: the *next* one, never the same instant.
+        assert_eq!(
+            next_attention_blink_boundary(Duration::from_millis(333), dur, iv),
+            Some(Duration::from_millis(666))
+        );
+        // The last partial half-period clamps to the settle instant so the
+        // final repaint still gets a wake-up.
+        assert_eq!(
+            next_attention_blink_boundary(Duration::from_millis(5994), dur, iv),
+            Some(dur)
+        );
+        // Settled: no further boundaries.
+        assert_eq!(next_attention_blink_boundary(dur, dur, iv), None);
+        assert_eq!(
+            next_attention_blink_boundary(Duration::from_secs(60), dur, iv),
+            None
+        );
+        // Degenerate zero interval never divides by zero.
+        assert_eq!(
+            next_attention_blink_boundary(Duration::from_millis(1), dur, Duration::ZERO),
+            Some(Duration::from_millis(2))
+        );
     }
 
     // AC-16b (FR-14): the eligibility predicate excludes quick-terminal windows.

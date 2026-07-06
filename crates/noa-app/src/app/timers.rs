@@ -76,6 +76,7 @@ impl App {
     /// Advance the attention blink and return the next wake-up deadline.
     pub(super) fn tick_attention_blink(&mut self) -> Option<Instant> {
         if !self.any_attention_blinking() {
+            // Final repaint on disarm so the settled steady-on marker is drawn.
             if self.attention_blink_deadline.take().is_some() {
                 self.request_sidebar_redraw();
                 self.mark_attention_overview_tiles_dirty();
@@ -83,16 +84,40 @@ impl App {
             return None;
         }
         let now = Instant::now();
-        match self.attention_blink_deadline {
-            Some(deadline) if now < deadline => Some(deadline),
-            _ => {
-                let next = now + ATTENTION_BLINK_INTERVAL;
-                self.attention_blink_deadline = Some(next);
-                self.request_sidebar_redraw();
-                self.mark_attention_overview_tiles_dirty();
-                Some(next)
-            }
+        if let Some(deadline) = self.attention_blink_deadline
+            && now < deadline
+        {
+            return Some(deadline);
         }
+        // An elapsed deadline means a marker crossed a phase boundary: repaint.
+        // A fresh arm (`None`) skips it — the apply site already repainted the
+        // onset frame.
+        if self.attention_blink_deadline.is_some() {
+            self.request_sidebar_redraw();
+            self.mark_attention_overview_tiles_dirty();
+        }
+        // Wake at the earliest onset-relative phase boundary across every
+        // blinking marker, not `now + interval`: the visible phase is computed
+        // from each onset, so an unaligned deadline would paint every flip
+        // late and jitter the duty cycle (worst with staggered onsets).
+        self.attention_blink_deadline = self.next_attention_blink_deadline(now);
+        self.attention_blink_deadline
+    }
+
+    /// The earliest next blink phase boundary across all attention onsets, or
+    /// `None` when every marker has settled.
+    fn next_attention_blink_deadline(&self, now: Instant) -> Option<Instant> {
+        self.attention_onset
+            .values()
+            .filter_map(|onset| {
+                crate::sidebar::next_attention_blink_boundary(
+                    now.saturating_duration_since(*onset),
+                    ATTENTION_BLINK_DURATION,
+                    ATTENTION_BLINK_INTERVAL,
+                )
+                .map(|boundary| *onset + boundary)
+            })
+            .min()
     }
 
     fn mark_attention_overview_tiles_dirty(&mut self) {

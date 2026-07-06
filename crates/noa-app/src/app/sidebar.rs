@@ -25,11 +25,22 @@ use std::collections::HashSet;
 /// leak a card into every window's sidebar. App-originated `Remove`/`Branch`/
 /// `Rename` only ever target real windows, so they pass through unconditionally
 /// (and dropping a QT `Remove` would be harmless anyway).
-fn session_delta_should_apply(delta: &SessionDelta, window_eligible: bool) -> bool {
+///
+/// A `Bell`/`Attention` for the window that holds OS focus is also dropped
+/// (`window_os_focused`), mirroring the OSC 9/777 suppression (FR-16): the
+/// user is looking at that window, and focus is the only thing that clears the
+/// flags, so applying them would leave a marker nothing clears until the
+/// window loses and regains focus.
+fn session_delta_should_apply(
+    delta: &SessionDelta,
+    window_eligible: bool,
+    window_os_focused: bool,
+) -> bool {
     match delta {
-        SessionDelta::Upsert { .. }
-        | SessionDelta::Bell { .. }
-        | SessionDelta::Attention { .. } => window_eligible,
+        SessionDelta::Upsert { .. } => window_eligible,
+        SessionDelta::Bell { .. } | SessionDelta::Attention { .. } => {
+            window_eligible && !window_os_focused
+        }
         SessionDelta::Remove { .. }
         | SessionDelta::Branch { .. }
         | SessionDelta::Rename { .. }

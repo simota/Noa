@@ -188,6 +188,12 @@ impl ApplicationHandler<UserEvent> for App {
                 self.os_focused = Some(window_id);
                 // A window gaining focus clears its cards' unread bells (FR-11).
                 self.clear_session_bell_for_window(window_id);
+                // The native tab bar appears/disappears without a `Resized`
+                // event (a full-size content view keeps `inner_size` fixed),
+                // and every tab add/switch/close focuses the surviving
+                // window — so re-derive the top chrome inset here. A no-op
+                // when the layout is unchanged (same grid ⇒ no SIGWINCH).
+                self.relayout_and_resize_window(window_id);
                 self.report_focus_event(window_id, true);
                 self.secure_input
                     .on_focus_change(true, &mut crate::secure_input::CarbonSecureInput);

@@ -1292,15 +1292,22 @@ impl App {
     }
 
     /// Physical px the pane area is pushed down from the window top so the
-    /// grid clears the macOS titlebar under the `transparent` style (whose
-    /// full-size content view would otherwise start the grid underneath the
-    /// titlebar). 0 for `native` and `hidden`.
+    /// grid clears the macOS titlebar — and the native tab bar when present —
+    /// under the `transparent` style (whose full-size content view would
+    /// otherwise start the grid underneath them). Queried live from AppKit's
+    /// `contentLayoutRect` (0 for `native`/`hidden`, where the chrome doesn't
+    /// overlap the content view); falls back to the bare-titlebar constant
+    /// when the NSWindow can't be reached.
     pub(super) fn window_titlebar_inset_px(&self, window_id: WindowId) -> u32 {
-        let scale = self
-            .windows
-            .get(&window_id)
-            .map_or(1.0, |state| state.window.scale_factor());
-        titlebar_top_inset_px(self.config.macos_titlebar_style, scale)
+        let Some(state) = self.windows.get(&window_id) else {
+            return 0;
+        };
+        crate::macos_window::top_chrome_inset_px(&state.window).unwrap_or_else(|| {
+            titlebar_top_inset_px(
+                self.config.macos_titlebar_style,
+                state.window.scale_factor(),
+            )
+        })
     }
 
     /// Physical left/right/bottom margin around the pane area — non-zero only

@@ -1058,7 +1058,9 @@ impl App {
         let initial_pane = PaneId::new(1);
         let initial_rect = content_inset_bounds(
             PaneRectApp::new(0, 0, surface_config.width, surface_config.height),
-            titlebar_top_inset_px(self.config.macos_titlebar_style, window.scale_factor()),
+            crate::macos_window::top_chrome_inset_px(&window).unwrap_or_else(|| {
+                titlebar_top_inset_px(self.config.macos_titlebar_style, window.scale_factor())
+            }),
             content_margin_px(self.config.macos_titlebar_style, window.scale_factor()),
         );
         let initial_surface = self.spawn_pane_surface(

@@ -209,7 +209,7 @@ struct SidebarCardDraw {
     bg: Rgb,
     selected: bool,
     /// A pending interaction request (FR-16): non-focused cards get a red ring
-    /// + glow, while the focused card keeps its blue focus ring and uses the
+    /// and glow, while the focused card keeps its blue focus ring and uses the
     /// red dot/label for the request state.
     attention: bool,
     runs: Vec<SidebarTextRun>,

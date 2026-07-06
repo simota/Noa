@@ -180,7 +180,19 @@ pub fn encode_key_with_modes(
     }
 
     match logical_key {
-        Key::Named(NamedKey::Enter) => Some(alt_prefixed(vec![0x0d], mods)),
+        Key::Named(NamedKey::Enter) => {
+            // Shift+Enter sends ESC CR so legacy-protocol line editors
+            // (Claude Code and friends) can tell it apart from Enter and
+            // insert a newline. Ghostty's stock encoder emits CSI 27;2;13~
+            // here, which those apps print as garbage; the upstream-blessed
+            // fix is `keybind = shift+enter=text:\x1b\r`, adopted as our
+            // default. Kitty-protocol apps still get CSI 13;2u above.
+            if mods.shift_key() && !mods.control_key() && !mods.alt_key() {
+                Some(b"\x1b\r".to_vec())
+            } else {
+                Some(alt_prefixed(vec![0x0d], mods))
+            }
+        }
         Key::Named(NamedKey::Backspace) => {
             // Ctrl+Backspace sends BS (0x08); Alt prefixes ESC so readline
             // deletes a word (Ghostty/Terminal.app behavior).
@@ -901,6 +913,34 @@ mod tests {
         assert_eq!(
             encode_key(&key, Some("\r"), ModifiersState::empty(), false),
             Some(vec![0x0d])
+        );
+    }
+
+    #[test]
+    fn shift_enter_is_esc_cr() {
+        let key = Key::Named(NamedKey::Enter);
+        assert_eq!(
+            encode_key(&key, Some("\r"), ModifiersState::SHIFT, false),
+            Some(b"\x1b\r".to_vec())
+        );
+        // Ctrl/Alt combos keep the plain-CR (alt: ESC-prefixed CR) encoding.
+        assert_eq!(
+            encode_key(
+                &key,
+                Some("\r"),
+                ModifiersState::SHIFT | ModifiersState::CONTROL,
+                false
+            ),
+            Some(vec![0x0d])
+        );
+        assert_eq!(
+            encode_key(
+                &key,
+                Some("\r"),
+                ModifiersState::SHIFT | ModifiersState::ALT,
+                true
+            ),
+            Some(vec![0x1b, 0x0d])
         );
     }
 

@@ -85,7 +85,14 @@ impl Atlas {
             let src = (row as usize) * row_bytes;
             let dst = (((y + row) as usize) * (self.width as usize) + x as usize) * bpp;
             self.data[dst..dst + row_bytes].copy_from_slice(&bitmap[src..src + row_bytes]);
+            // Zero the 1px right pad: an evicted-and-reused region may hold a
+            // stale glyph's ink there, which bilinear sampling at the glyph
+            // edge would bleed back in.
+            self.data[dst + row_bytes..dst + row_bytes + bpp].fill(0);
         }
+        // Same for the 1px bottom pad row (w+1 wide, covering the corner).
+        let pad_dst = (((y + h) as usize) * (self.width as usize) + x as usize) * bpp;
+        self.data[pad_dst..pad_dst + row_bytes + bpp].fill(0);
         self.bump_generation();
         Some(Reservation {
             x: x as u16,

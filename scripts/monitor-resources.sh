@@ -221,7 +221,7 @@ join_targets() {
   done
 }
 
-read_process_table() {
+read_process_table_comm() {
   local output
 
   if output="$(ps -axo comm=,pcpu=,rss= 2>/dev/null)"; then
@@ -247,6 +247,49 @@ read_process_table() {
   return 1
 }
 
+read_process_table_ucomm() {
+  local output
+
+  if output="$(ps -axo ucomm=,pcpu=,rss= 2>/dev/null)"; then
+    printf '%s\n' "$output"
+    return 0
+  fi
+
+  if output="$(ps -axo ucomm=,%cpu=,rss= 2>/dev/null)"; then
+    printf '%s\n' "$output"
+    return 0
+  fi
+
+  if output="$(ps -eo ucomm=,pcpu=,rss= 2>/dev/null)"; then
+    printf '%s\n' "$output"
+    return 0
+  fi
+
+  if output="$(ps -eo ucomm=,%cpu=,rss= 2>/dev/null)"; then
+    printf '%s\n' "$output"
+    return 0
+  fi
+
+  return 1
+}
+
+read_process_table() {
+  local comm_output ucomm_output
+
+  if comm_output="$(read_process_table_comm)"; then
+    printf '%s\n' "$comm_output"
+
+    if ucomm_output="$(read_process_table_ucomm)"; then
+      printf '__NOA_MONITOR_UCOMM_FALLBACK__\n'
+      printf '%s\n' "$ucomm_output"
+    fi
+
+    return 0
+  fi
+
+  read_process_table_ucomm
+}
+
 collect_rows() {
   local targets
   targets="$(join_targets)"
@@ -254,11 +297,17 @@ collect_rows() {
   read_process_table | awk -v targets="$targets" '
     BEGIN {
       n = split(targets, target, "\t")
+      source = "primary"
       for (i = 1; i <= n; i++) {
         cpu[i] = 0
         rss[i] = 0
         count[i] = 0
+        fallback_counting[i] = 0
       }
+    }
+    /^__NOA_MONITOR_UCOMM_FALLBACK__$/ {
+      source = "fallback"
+      next
     }
     {
       if (NF < 3) {
@@ -286,6 +335,12 @@ collect_rows() {
       for (i = 1; i <= n; i++) {
         lower_target = tolower(target[i])
         if (lower_command == lower_target || lower_base == lower_target) {
+          if (source == "fallback" && count[i] > 0 && fallback_counting[i] == 0) {
+            continue
+          }
+          if (source == "fallback") {
+            fallback_counting[i] = 1
+          }
           cpu[i] += cpu_value
           rss[i] += rss_value
           count[i] += 1

@@ -190,7 +190,76 @@ impl Screen {
         }
         row.cells[x].push_combining(c);
         row.dirty = true;
+        if !row.cells[x].attrs.contains(CellAttrs::WIDE) && Self::cluster_wants_wide(&row.cells[x])
+        {
+            self.promote_cluster_to_wide(x);
+        }
         true
+    }
+
+    /// Whether an attached scalar changed a narrow cluster's rendered width
+    /// to two cells: an emoji-presentation selector (VS16) on the cluster, or
+    /// a completed regional-indicator pair (a flag). A text-presentation
+    /// selector (VS15) pins the cluster narrow; the *last* selector wins.
+    pub(super) fn cluster_wants_wide(cell: &Cell) -> bool {
+        for scalar in cell.combining.chars().rev() {
+            match scalar {
+                '\u{FE0F}' => return true,
+                '\u{FE0E}' => return false,
+                _ => {}
+            }
+        }
+        let regional_indicators = cell
+            .text_chars()
+            .filter(|scalar| matches!(scalar, '\u{1F1E6}'..='\u{1F1FF}'))
+            .count();
+        regional_indicators == 2
+    }
+
+    /// A cluster at `x` on the cursor row grew from one rendered cell to two
+    /// (see [`Self::cluster_wants_wide`]): claim the next cell as its
+    /// `WIDE_SPACER` and step the cursor past it. If the spacer would fall
+    /// outside the right margin or the row, the cluster stays narrow — the
+    /// glyph may overdraw its neighbor, but the grid never desyncs.
+    fn promote_cluster_to_wide(&mut self, x: usize) {
+        let spacer_x = x + 1;
+        if spacer_x > self.right_margin() as usize {
+            return;
+        }
+        let blank = self.blank();
+        let y = self.cursor.y as usize;
+        let Some(row) = self.grid.get_mut(y) else {
+            return;
+        };
+        if spacer_x >= row.cells.len() {
+            return;
+        }
+        Self::clear_wide_at(row, spacer_x, &blank);
+        let lead = &mut row.cells[x];
+        lead.attrs.insert(CellAttrs::WIDE);
+        let (fg, bg, underline_color, hyperlink) =
+            (lead.fg, lead.bg, lead.underline_color, lead.hyperlink);
+        let mut spacer_attrs = lead.attrs;
+        spacer_attrs.remove(CellAttrs::WIDE);
+        spacer_attrs.insert(CellAttrs::WIDE_SPACER);
+        row.cells[spacer_x] = Cell {
+            ch: ' ',
+            combining: String::new(),
+            fg,
+            bg,
+            underline_color,
+            hyperlink,
+            attrs: spacer_attrs,
+        };
+        row.dirty = true;
+        if self.cursor.x as usize == spacer_x {
+            if self.cursor.x.saturating_add(1) > self.right_margin() {
+                self.cursor.x = self.right_margin();
+                self.cursor.pending_wrap = true;
+            } else {
+                self.cursor.x += 1;
+            }
+        }
     }
 
     /// The mode 2027 cluster-extension judgment (candidate-1 scope: ZWJ,
@@ -205,6 +274,12 @@ impl Screen {
             return true;
         }
         if matches!(next, '\u{1F3FB}'..='\u{1F3FF}') {
+            return true;
+        }
+        // Variation selectors bind to the preceding scalar; VS16 may widen
+        // the cluster (see `cluster_wants_wide`), so under mode 2027 it must
+        // route through the cluster path rather than plain combining attach.
+        if matches!(next, '\u{FE0E}' | '\u{FE0F}') {
             return true;
         }
         if matches!(next, '\u{1F1E6}'..='\u{1F1FF}') {

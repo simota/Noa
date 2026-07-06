@@ -54,7 +54,15 @@ impl Cell {
         self.ch == ' ' && self.combining.is_empty()
     }
 
+    /// Longest legitimate cluster tails (subdivision flags: 6 tag scalars,
+    /// family ZWJ sequences: 7 scalars) fit well under this; anything past it
+    /// is a hostile or corrupt stream trying to grow one cell unboundedly.
+    pub const MAX_COMBINING_BYTES: usize = 64;
+
     pub fn push_combining(&mut self, c: char) {
+        if self.combining.len() + c.len_utf8() > Self::MAX_COMBINING_BYTES {
+            return;
+        }
         self.combining.push(c);
     }
 

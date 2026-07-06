@@ -2211,12 +2211,80 @@ fn ac_2027_002_fitzpatrick_modifier_attaches_to_wide_lead_not_spacer() {
 fn ac_2027_003_regional_indicator_pair_clusters_into_one_flag_cell() {
     // 🇯🇵 = REGIONAL INDICATOR J + REGIONAL INDICATOR P, each width-1
     // standalone; the second attaches to the first instead of printing
-    // into its own cell.
+    // into its own cell, and the completed flag renders two cells wide.
     let t = run_size(10, 1, "\x1b[?2027h\u{1F1EF}\u{1F1F5}X".as_bytes());
 
     assert_eq!(cell(&t, 0, 0).text(), "\u{1F1EF}\u{1F1F5}");
-    assert_eq!(t.primary.cursor.x, 2);
+    assert!(cell(&t, 0, 0).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 1, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert_eq!(t.primary.cursor.x, 3);
+    assert_eq!(cell(&t, 2, 0).ch, 'X');
+}
+
+#[test]
+fn ac_2027_006_vs16_promotes_narrow_symbol_to_wide() {
+    // ☀ (U+2600, width 1) + VS16 requests emoji presentation, which renders
+    // two cells wide; the cell must widen and the cursor step past the
+    // claimed spacer so following text does not collide with the glyph.
+    let t = run_size(10, 1, "\x1b[?2027h\u{2600}\u{FE0F}X".as_bytes());
+
+    assert_eq!(cell(&t, 0, 0).text(), "\u{2600}\u{FE0F}");
+    assert!(cell(&t, 0, 0).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 1, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert_eq!(t.primary.cursor.x, 3);
+    assert_eq!(cell(&t, 2, 0).ch, 'X');
+}
+
+#[test]
+fn ac_2027_007_vs15_keeps_cluster_narrow() {
+    // ☀ + VS15 (text presentation) stays one cell wide.
+    let t = run_size(10, 1, "\x1b[?2027h\u{2600}\u{FE0E}X".as_bytes());
+
+    assert_eq!(cell(&t, 0, 0).text(), "\u{2600}\u{FE0E}");
+    assert!(!cell(&t, 0, 0).attrs.contains(CellAttrs::WIDE));
     assert_eq!(cell(&t, 1, 0).ch, 'X');
+}
+
+#[test]
+fn ac_2027_008_vs16_at_last_column_skips_promotion() {
+    // The narrow base sits in the last column; there is no room for a
+    // spacer, so the cluster keeps its narrow footprint rather than
+    // spilling past the margin.
+    let t = run_size(3, 2, "\x1b[?2027hAB\u{2600}\u{FE0F}".as_bytes());
+
+    assert_eq!(cell(&t, 2, 0).text(), "\u{2600}\u{FE0F}");
+    assert!(!cell(&t, 2, 0).attrs.contains(CellAttrs::WIDE));
+    assert_eq!(t.primary.cursor.x, 2);
+}
+
+#[test]
+fn ac_2027_009_promotion_overwrites_following_wide_lead_cleanly() {
+    // Layout before promotion: ☀ at 0, あ wide at 1..=2. Moving back to
+    // column 2 and sending VS16 attaches to the ☀ at 0 and widens it; the
+    // あ's lead/spacer pair must be destroyed with no orphaned spacer.
+    let t = run_size(
+        10,
+        1,
+        "\x1b[?2027h\u{2600}\u{3042}\x1b[1;2H\u{FE0F}".as_bytes(),
+    );
+
+    assert_eq!(cell(&t, 0, 0).text(), "\u{2600}\u{FE0F}");
+    assert!(cell(&t, 0, 0).attrs.contains(CellAttrs::WIDE));
+    assert!(cell(&t, 1, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert!(!cell(&t, 2, 0).attrs.contains(CellAttrs::WIDE_SPACER));
+    assert!(cell(&t, 2, 0).is_blank());
+}
+
+#[test]
+fn combining_marks_are_capped_per_cell() {
+    // A hostile stream repeating a combining mark must not grow one cell's
+    // storage without bound; the tail past the cap is dropped.
+    let mut input = String::from("a");
+    for _ in 0..1000 {
+        input.push('\u{0301}');
+    }
+    let t = run_size(10, 1, input.as_bytes());
+    assert!(cell(&t, 0, 0).combining.len() <= crate::cell::Cell::MAX_COMBINING_BYTES);
 }
 
 #[test]

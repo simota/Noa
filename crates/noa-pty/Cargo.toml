@@ -8,7 +8,6 @@ license.workspace = true
 noa-core.workspace = true
 portable-pty.workspace = true
 crossbeam-channel.workspace = true
-parking_lot.workspace = true
 thiserror.workspace = true
 log.workspace = true
 

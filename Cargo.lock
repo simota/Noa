@@ -1465,7 +1465,6 @@ dependencies = [
  "libc",
  "log",
  "noa-core",
- "parking_lot",
  "portable-pty",
  "thiserror 2.0.18",
 ]

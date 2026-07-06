@@ -150,9 +150,11 @@ impl Pty {
         spawn_reader(reader, tx.clone()).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
         spawn_waiter(child, tx).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
 
+        let writer = PtyWriter::spawn(writer).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
+
         Ok(Self {
             master,
-            writer: PtyWriter::new(writer),
+            writer,
             event_rx,
             killer,
         })
@@ -506,6 +508,38 @@ mod tests {
         assert!(
             collected.windows(11).any(|w| w == b"\x1b]7;file://"),
             "expected an OSC 7 cwd report in bash output"
+        );
+    }
+
+    #[test]
+    fn write_never_blocks_on_a_raw_mode_child_that_stops_reading() {
+        // Regression: pty writes used to run as a blocking `write_all` on the
+        // caller's thread (the io read loop). macOS caps the raw-mode tty
+        // input queue at ~1KB, so >1KB of input (a paste) against a child not
+        // reading stdin blocked the write — freezing the pane's reads and
+        // redraws, and deadlocking permanently once the child also blocked
+        // writing output. Writes must queue to the writer thread and return
+        // immediately instead.
+        let pty = Pty::spawn(PtyConfig {
+            shell: Some("/bin/sh".to_string()),
+            login: false,
+            shell_integration: false,
+            ..Default::default()
+        })
+        .expect("spawn");
+        let w = pty.writer();
+
+        // Put the slave tty in raw mode and stop reading stdin, like a busy
+        // full-screen app (vim/fzf/an AI CLI) mid-computation.
+        w.write(b"stty raw -echo; sleep 5\n")
+            .expect("write command");
+        std::thread::sleep(Duration::from_millis(500));
+
+        let start = std::time::Instant::now();
+        w.write(&vec![b'x'; 4096]).expect("write 4KB");
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "a 4KB write against a non-reading raw-mode child must not block the caller"
         );
     }
 

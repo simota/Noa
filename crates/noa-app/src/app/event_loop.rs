@@ -159,11 +159,16 @@ impl ApplicationHandler<UserEvent> for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        if self.is_overview_window(window_id) {
-            self.overview_window_event(event_loop, window_id, event);
+        if !self.windows.contains_key(&window_id) {
             return;
         }
-        if !self.windows.contains_key(&window_id) {
+        // While the Session Overview overlay is visible, its host window's
+        // redraws and input belong to the Overview; structural events
+        // (resize, focus, occlusion, close) fall through to the normal
+        // handling below.
+        if self.overview_active_for(window_id)
+            && self.overview_intercept_window_event(event_loop, &event)
+        {
             return;
         }
 
@@ -486,29 +491,15 @@ impl App {
         });
         let window = state.window.clone();
         self.relayout_and_resize_window(window_id);
-        window.request_redraw();
-    }
-
-    pub(super) fn on_overview_resize(&mut self, size: PhysicalSize<u32>) {
-        if size.width == 0 || size.height == 0 {
-            return;
+        // A host resize invalidates the Overview's shared scratch (sized to
+        // the host surface); the next overview frame rebuilds it and
+        // re-renders every tile into the new grid.
+        if self.overview_host() == Some(window_id) {
+            if let Some(overview) = self.overview_window.as_mut() {
+                overview.thumbnails = None;
+            }
+            self.mark_all_overview_tiles_dirty();
         }
-        let Some(gpu) = self.gpu.as_ref() else {
-            return;
-        };
-        let Some(overview) = self.overview_window.as_mut() else {
-            return;
-        };
-        overview.surface_config.width = size.width;
-        overview.surface_config.height = size.height;
-        overview
-            .surface
-            .configure(&gpu.device, &overview.surface_config);
-        // Stale relative to the new surface size; `ensure_overview_thumbnails`
-        // rebuilds it from the next recomputed grid layout.
-        overview.thumbnails = None;
-        let window = overview.window.clone();
-        self.mark_all_overview_tiles_dirty();
         window.request_redraw();
     }
 

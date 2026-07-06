@@ -1,78 +1,77 @@
 //! Tab-overview subsystem — `App` methods for the exposé-style tab
-//! grid: showing/hiding the overview window, thumbnail rendering,
-//! chrome/label textures, selection, and search.
+//! grid: showing/hiding the in-window overview overlay, thumbnail
+//! rendering, chrome/label textures, selection, and search.
 
 use super::*;
 
 impl App {
-    pub(super) fn toggle_tab_overview(&mut self, event_loop: &ActiveEventLoop) {
+    pub(super) fn toggle_tab_overview(&mut self) {
         if let Some(next_visible) = tab_overview_visibility_after_dispatch(
             AppCommand::ToggleTabOverview,
             self.overview_visible,
         ) {
             if next_visible {
-                self.show_tab_overview(event_loop);
+                self.show_tab_overview();
             } else {
                 self.hide_tab_overview();
             }
         }
     }
 
-    pub(super) fn show_tab_overview(&mut self, event_loop: &ActiveEventLoop) {
-        if self.overview_window.is_none() {
-            let window = Arc::new(
-                event_loop
-                    .create_window(self.overview_window_attributes())
-                    .expect("failed to create Session Overview window"),
-            );
-            window.set_ime_allowed(false);
+    /// The window currently hosting the overlay, if any.
+    pub(super) fn overview_host(&self) -> Option<WindowId> {
+        self.overview_window.as_ref().map(|overview| overview.host)
+    }
 
-            // The overview window only ever opens once a tab already exists
-            // (it is reachable only via a keybind/menu/command dispatched to
-            // a live tab), so GPU state is always initialized here.
-            let gpu = self
-                .gpu
-                .as_ref()
-                .expect("gpu initialized before overview window opens");
-            let surface = gpu
-                .instance
-                .create_surface(window.clone())
-                .expect("failed to create wgpu overview surface");
-            let caps = surface.get_capabilities(&gpu.adapter);
-            let surface_format = preferred_surface_format(&caps.formats);
-            let size = window.inner_size();
-            let surface_config = wgpu::SurfaceConfiguration {
-                // Tile cards and chrome pills are composited through render
-                // passes; no direct copy into the surface is required.
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: surface_format,
-                width: size.width.max(1),
-                height: size.height.max(1),
-                present_mode: wgpu::PresentMode::Fifo,
-                desired_maximum_frame_latency: 2,
-                // The overview window stays opaque: it composites tab tiles,
-                // not live terminal background, so transparency would only
-                // bleed the desktop through the switcher.
-                alpha_mode: preferred_surface_alpha_mode(&caps, false),
-                view_formats: vec![],
-            };
-            surface.configure(&gpu.device, &surface_config);
+    /// Whether `window_id` is the visible overlay's host — i.e. its redraws
+    /// and input are owned by the Overview right now.
+    pub(super) fn overview_active_for(&self, window_id: WindowId) -> bool {
+        self.overview_visible && self.overview_host() == Some(window_id)
+    }
 
-            self.overview_window = Some(OverviewWindowState {
-                window,
-                occluded: false,
-                last_cursor_point: None,
-                surface,
-                surface_config,
-                thumbnails: None,
-                label_renderer: None,
-                chrome_card: None,
-                selected: 0,
-                hovered: None,
-                zoomed: false,
-                zoom_anim: None,
-                search_query: String::new(),
-            });
+    /// A copy of the host window's surface configuration — the overlay renders
+    /// into the host surface, so its format and size drive every overview
+    /// texture.
+    fn overview_host_surface_config(&self) -> Option<wgpu::SurfaceConfiguration> {
+        self.overview_host()
+            .and_then(|host| self.windows.get(&host))
+            .map(|state| state.surface_config.clone())
+    }
+
+    pub(super) fn show_tab_overview(&mut self) {
+        // Host the overlay in the currently focused terminal window (the
+        // quick terminal drop-down is not a durable host — it auto-hides),
+        // falling back to the frontmost tab.
+        let Some(host) = self
+            .focused
+            .filter(|id| self.windows.contains_key(id) && !self.is_quick_terminal_window(*id))
+            .or_else(|| self.window_order.first().copied())
+        else {
+            return;
+        };
+
+        match self.overview_window.as_mut() {
+            // Re-host on every show: the GPU resources (thumbnails, label
+            // renderer, chrome pipeline) are format/size-checked lazily, so
+            // they rebuild themselves if the new host's surface differs.
+            Some(overview) => {
+                overview.host = host;
+                overview.last_cursor_point = None;
+            }
+            None => {
+                self.overview_window = Some(OverviewWindowState {
+                    host,
+                    last_cursor_point: None,
+                    thumbnails: None,
+                    label_renderer: None,
+                    chrome_card: None,
+                    selected: 0,
+                    hovered: None,
+                    zoomed: false,
+                    zoom_anim: None,
+                    search_query: String::new(),
+                });
+            }
         }
 
         self.overview_visible = true;
@@ -100,13 +99,15 @@ impl App {
             overview_initial_selection(&source_tile_ids, live_tile_count, focused_tile.as_ref());
         if let Some(overview) = self.overview_window.as_mut() {
             overview.selected = selected;
-            overview.window.set_visible(true);
-            // Re-assert the screen-filling exposé size on every show; a
-            // manual resize while open doesn't survive a reopen.
-            overview.window.set_maximized(true);
-            overview.window.focus_window();
-            overview.window.request_redraw();
         }
+        if let Some(state) = self.windows.get(&host) {
+            // The Overview keymap reads the host window's input, so the host
+            // must hold focus — a no-op in the common case (toggled from the
+            // focused window), load-bearing for the frontmost-tab fallback.
+            state.window.focus_window();
+            state.window.request_redraw();
+        }
+        self.focused = Some(host);
     }
 
     /// One-time re-peek for each open pane's overview mirror on every
@@ -137,36 +138,42 @@ impl App {
     pub(super) fn hide_tab_overview(&mut self) {
         self.overview_visible = false;
         self.overview_visible_gate.store(false, Ordering::Relaxed);
-        if let Some(overview) = self.overview_window.as_ref() {
-            overview.window.set_visible(false);
+        // The host window keeps existing under the overlay; repaint it so the
+        // terminal content replaces the overview frame.
+        if let Some(state) = self
+            .overview_host()
+            .and_then(|host| self.windows.get(&host))
+        {
+            state.window.request_redraw();
         }
     }
 
     pub(super) fn focus_overview_window(&self) {
-        if let Some(overview) = self.overview_window.as_ref() {
-            overview.window.focus_window();
+        if let Some(state) = self
+            .overview_host()
+            .and_then(|host| self.windows.get(&host))
+        {
+            state.window.focus_window();
         }
     }
 
-    pub(super) fn is_overview_window(&self, window_id: WindowId) -> bool {
-        self.overview_window
-            .as_ref()
-            .is_some_and(|overview| overview.window.id() == window_id)
-    }
-
     pub(super) fn request_overview_redraw(&self) {
-        let Some(overview) = self.overview_window.as_ref() else {
+        if !self.overview_visible {
             return;
-        };
-        if self.overview_visible && !overview.occluded {
-            overview.window.request_redraw();
+        }
+        if let Some(state) = self
+            .overview_host()
+            .and_then(|host| self.windows.get(&host))
+            && !state.occluded
+        {
+            state.window.request_redraw();
         }
     }
 
     pub(super) fn overview_window_occluded(&self) -> bool {
-        self.overview_window
-            .as_ref()
-            .is_none_or(|overview| overview.occluded)
+        self.overview_host()
+            .and_then(|host| self.windows.get(&host))
+            .is_none_or(|state| state.occluded)
     }
 
     pub(super) fn mark_overview_tile_dirty(&mut self, tile_id: OverviewTileId) {
@@ -242,6 +249,9 @@ impl App {
     /// drifted from what they were built for. Cheap to call every frame: the
     /// common case (nothing changed) is a handful of field comparisons.
     pub(super) fn ensure_overview_thumbnails(&mut self, layout: &OverviewLayout) {
+        let Some(host_config) = self.overview_host_surface_config() else {
+            return;
+        };
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
@@ -263,10 +273,10 @@ impl App {
             h: layout.tiles[0].h.max(1),
         };
         let scratch_size = PixelSize {
-            w: overview.surface_config.width,
-            h: overview.surface_config.height,
+            w: host_config.width,
+            h: host_config.height,
         };
-        let format = overview.surface_config.format;
+        let format = host_config.format;
 
         let stale = overview.thumbnails.as_ref().is_none_or(|thumbnails| {
             thumbnails.format() != format
@@ -368,13 +378,18 @@ impl App {
     /// this does not create a per-tab renderer, so it doesn't conflict with
     /// REQ-NF-1's "reuse the tab's own `Renderer`" rule for live mirrors.
     pub(super) fn ensure_overview_label_renderer(&mut self) {
+        let Some(format) = self
+            .overview_host_surface_config()
+            .map(|config| config.format)
+        else {
+            return;
+        };
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
         let Some(overview) = self.overview_window.as_mut() else {
             return;
         };
-        let format = overview.surface_config.format;
         let stale = overview
             .label_renderer
             .as_ref()
@@ -388,13 +403,18 @@ impl App {
     }
 
     pub(super) fn ensure_overview_chrome_card_pipeline(&mut self) {
+        let Some(format) = self
+            .overview_host_surface_config()
+            .map(|config| config.format)
+        else {
+            return;
+        };
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
         let Some(overview) = self.overview_window.as_mut() else {
             return;
         };
-        let format = overview.surface_config.format;
         let stale = overview
             .chrome_card
             .as_ref()
@@ -577,6 +597,7 @@ impl App {
     /// Shows the live query, or the placeholder while it is empty. `None` when
     /// there is no usable search band (a window too short to reserve one).
     pub(super) fn render_overview_search_texture(&mut self) -> Option<OverviewChromeTexture> {
+        let format = self.overview_host_surface_config()?.format;
         let chrome = self.overview_chrome()?;
         let rect = overview_search_field_rect(chrome.search_band);
         if rect.w == 0 || rect.h == 0 {
@@ -605,7 +626,7 @@ impl App {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: overview.surface_config.format,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -642,6 +663,7 @@ impl App {
         &mut self,
         live_tile_count: usize,
     ) -> Option<OverviewChromeTexture> {
+        let format = self.overview_host_surface_config()?.format;
         let chrome = self.overview_chrome()?;
         let rect = overview_hint_bar_rect(chrome.hint_band);
         if rect.w == 0 || rect.h == 0 {
@@ -666,7 +688,7 @@ impl App {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: overview.surface_config.format,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -749,20 +771,28 @@ impl App {
             })
             .collect();
 
+        let Some(host) = self.overview_host() else {
+            return;
+        };
         let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(host_state) = self.windows.get(&host) else {
             return;
         };
         let Some(overview) = self.overview_window.as_mut() else {
             return;
         };
 
-        let frame = match overview.surface.get_current_texture() {
+        // The overlay presents into the host window's own surface — the same
+        // one the terminal frame uses when the Overview is hidden.
+        let frame = match host_state.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                overview
+                host_state
                     .surface
-                    .configure(&gpu.device, &overview.surface_config);
-                overview.window.request_redraw();
+                    .configure(&gpu.device, &host_state.surface_config);
+                host_state.window.request_redraw();
                 return;
             }
             Err(e) => {
@@ -774,8 +804,8 @@ impl App {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let surface_size = PixelSize {
-            w: overview.surface_config.width,
-            h: overview.surface_config.height,
+            w: host_state.surface_config.width,
+            h: host_state.surface_config.height,
         };
 
         // Card composite (also clears the surface to the backdrop color).
@@ -972,7 +1002,7 @@ impl App {
             if anim.tween.done(now) {
                 overview.zoom_anim = None;
             } else {
-                overview.window.request_redraw();
+                host_state.window.request_redraw();
             }
         }
     }
@@ -1062,8 +1092,9 @@ impl App {
     /// The grid is laid out inside `grid_bounds`, so P3's search-field draw
     /// won't reflow the tiles, and the hint bar draws into `hint_band`.
     pub(super) fn overview_chrome(&self) -> Option<OverviewChrome> {
-        let overview = self.overview_window.as_ref()?;
-        let bounds = pane_bounds_for_size(overview.window.inner_size());
+        let host = self.overview_host()?;
+        let state = self.windows.get(&host)?;
+        let bounds = pane_bounds_for_size(state.window.inner_size());
         Some(overview_chrome_bands(bounds))
     }
 
@@ -1082,10 +1113,10 @@ impl App {
     }
 
     pub(super) fn redraw_overview(&mut self) {
-        let Some(overview) = self.overview_window.as_ref() else {
+        if self.overview_window.is_none() {
             return;
-        };
-        if !self.overview_visible || overview.occluded {
+        }
+        if !self.overview_visible || self.overview_window_occluded() {
             return;
         }
 
@@ -1181,6 +1212,10 @@ impl App {
         else {
             return;
         };
+        // Exposé semantics: activating a tile dismisses the overlay so the
+        // host window's terminal is usable again (the host may itself be the
+        // activation target).
+        self.hide_tab_overview();
         self.focus_pane(tile_id.window_id, tile_id.pane_id);
         self.focused = Some(tile_id.window_id);
         window.focus_window();
@@ -1309,7 +1344,7 @@ impl App {
             source_tile_ids.len(),
             direction,
         );
-        overview.window.request_redraw();
+        self.request_overview_redraw();
     }
 
     /// Tab toggles a quick-look zoom of the selected tile: the tile's card is
@@ -1323,7 +1358,7 @@ impl App {
                 tween: crate::anim::Tween::new(Instant::now(), crate::anim::DUR_BASE),
                 expanding: overview.zoomed,
             });
-            overview.window.request_redraw();
+            self.request_overview_redraw();
         }
     }
 
@@ -1348,7 +1383,7 @@ impl App {
             && overview.hovered != hovered
         {
             overview.hovered = hovered;
-            overview.window.request_redraw();
+            self.request_overview_redraw();
         }
     }
 
@@ -1403,36 +1438,38 @@ impl App {
         self.focus_tile_from_overview(target);
     }
 
-    pub(super) fn overview_window_event(
+    /// Route a host-window event to the Overview while the overlay is
+    /// visible. Returns `true` when the event was consumed by the Overview;
+    /// `false` lets the normal terminal-window handling run (surface
+    /// reconfigure, occlusion flag, and focus bookkeeping stay with the host
+    /// window).
+    pub(super) fn overview_intercept_window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        window_id: WindowId,
-        event: WindowEvent,
-    ) {
-        if !self.is_overview_window(window_id) {
-            return;
-        }
-
+        event: &WindowEvent,
+    ) -> bool {
         match event {
-            WindowEvent::CloseRequested => self.hide_tab_overview(),
-            WindowEvent::RedrawRequested => self.redraw_overview(),
-            WindowEvent::Resized(size) => self.on_overview_resize(size),
+            WindowEvent::RedrawRequested => {
+                self.redraw_overview();
+                true
+            }
             WindowEvent::CursorMoved { position, .. } => {
-                let point = split_point_from_physical_position(position);
+                let point = split_point_from_physical_position(*position);
                 if let Some(overview) = self.overview_window.as_mut() {
                     overview.last_cursor_point = point;
                 }
                 self.update_overview_hover();
+                true
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if button == MouseButton::Left && state == ElementState::Pressed {
+                if *button == MouseButton::Left && *state == ElementState::Pressed {
                     // REQ-OV-13: the close-button corner wins over tile-focus.
                     // Close the targeted pane; `close_pane` falls back to
                     // closing the tab when it was the last pane.
                     if let Some(target) = self.overview_close_target_at_last_cursor() {
                         self.hide_tab_overview();
-                        if let Some(state) = self.windows.get(&target.window_id) {
-                            state.window.focus_window();
+                        if let Some(window_state) = self.windows.get(&target.window_id) {
+                            window_state.window.focus_window();
                         }
                         self.focused = Some(target.window_id);
                         self.request_close_pane(event_loop, target.window_id, target.pane_id);
@@ -1440,23 +1477,28 @@ impl App {
                         self.focus_overview_tile_at_last_cursor();
                     }
                 }
+                true
             }
-            WindowEvent::Occluded(occluded) => {
-                if let Some(overview) = self.overview_window.as_mut() {
-                    overview.occluded = occluded;
-                    if !occluded && self.overview_visible {
-                        overview.window.request_redraw();
-                    }
-                }
+            // No pty passthrough while the overlay owns the window
+            // (REQ-OV-7): scroll and IME events die here.
+            WindowEvent::MouseWheel { .. } | WindowEvent::Ime(_) => true,
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+                true
             }
-            WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state != ElementState::Pressed {
-                    return;
+                if event.state == ElementState::Pressed {
+                    self.handle_overview_key(event_loop, event);
                 }
-                self.handle_overview_key(event_loop, &event);
+                true
             }
-            _ => {}
+            // Closing the host closes the tab itself; drop the overlay first
+            // so the close-confirm flow (if any) is visible and reachable.
+            WindowEvent::CloseRequested => {
+                self.hide_tab_overview();
+                false
+            }
+            _ => false,
         }
     }
 }

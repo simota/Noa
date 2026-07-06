@@ -6,7 +6,7 @@
 //! PTY, touches only its tab's `Terminal` mutex, and posts targeted user
 //! events back to the main loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -235,12 +235,13 @@ pub struct App {
     /// (FR-1/AC-19). Deliberately distinct from `overview_visible_gate` (Omen
     /// T1); flipped on while any window shows its sidebar.
     sidebar_visible_gate: Arc<AtomicBool>,
-    /// Whether the session sidebar is currently shown (FR-4). App-wide, not
-    /// per-window: toggling it flips every eligible tab at once and new tabs
-    /// inherit it, so the sidebar stays consistent across all tabs. Seeded from
-    /// `sidebar-enabled`. A quick-terminal window never shows it regardless
-    /// (`window_sidebar_eligible`, FR-14).
-    sidebar_visible: bool,
+    /// The tab groups (logical windows) whose session sidebar is currently
+    /// shown (FR-4). Per-window, not app-wide: toggling flips every tab of the
+    /// focused window's group at once (tabs of one native window stay
+    /// consistent) while other windows keep their own state. Fresh groups are
+    /// seeded from `sidebar-enabled`. A quick-terminal window never shows it
+    /// regardless (`window_sidebar_eligible`, FR-14).
+    sidebar_visible_groups: HashSet<WindowGroupId>,
     /// The registered global `sidebar-hotkey`, kept alive for the app's
     /// lifetime (dropping it unregisters). `None` until installed, or when no
     /// `sidebar-hotkey` is configured / registration failed.
@@ -266,7 +267,6 @@ impl App {
         // process poll only ticks while a sidebar is shown (AC-18).
         let proxy_for_branch_poll = proxy.clone();
         let sidebar_visible_gate = Arc::new(AtomicBool::new(false));
-        let sidebar_visible = config.sidebar_enabled;
         App {
             padding,
             initial_cursor_style,
@@ -312,7 +312,7 @@ impl App {
             sidebar_hotkey: None,
             branch_poll: Some(crate::branch_poll::spawn(proxy_for_branch_poll)),
             sidebar_visible_gate,
-            sidebar_visible,
+            sidebar_visible_groups: HashSet::new(),
         }
     }
 
@@ -459,12 +459,9 @@ impl App {
             // An open search prompt also hollows the cursor: keystrokes go to
             // the prompt, not the shell, so the pane must not read as
             // type-able while the prompt has the keyboard.
-            snapshot.focused = pane_owns_keyboard_focus(
-                window_id,
-                pane_id,
-                self.os_focused,
-                state.focused_pane,
-            ) && snapshot.search_prompt.is_none();
+            snapshot.focused =
+                pane_owns_keyboard_focus(window_id, pane_id, self.os_focused, state.focused_pane)
+                    && snapshot.search_prompt.is_none();
             snapshot.cursor_blink_visible = self.cursor_blink_visible;
             snapshot.hover_link = surface.hover_link;
             // Neither the palette nor the confirm dialog draws in the pane
@@ -826,7 +823,16 @@ impl App {
             .map(|state| state.group);
         let group = match spawn_group_choice(target, focused_group) {
             GroupChoice::Existing(group) => group,
-            GroupChoice::Fresh => self.allocate_group_id(),
+            GroupChoice::Fresh => {
+                let group = self.allocate_group_id();
+                // A fresh logical window starts with the configured sidebar
+                // default; a tab joining an existing group inherits that
+                // group's current state by construction.
+                if self.config.sidebar_enabled {
+                    self.sidebar_visible_groups.insert(group);
+                }
+                group
+            }
         };
         let initial_grid_size = GridSize::new(self.config.cols, self.config.rows);
         let monitor_scale_factor = event_loop
@@ -1338,6 +1344,12 @@ impl App {
         // store too. `close_group`/`close_pane_after_pty_exit` reach this
         // through their `close_tab` calls.
         self.reconcile_session_store();
+        // Drop sidebar visibility for a group whose last tab just closed, so
+        // the set only ever holds live logical windows.
+        let live_groups: HashSet<WindowGroupId> =
+            self.windows.values().map(|state| state.group).collect();
+        self.sidebar_visible_groups
+            .retain(|group| live_groups.contains(group));
         // A closed window may have been the only one showing a sidebar.
         self.refresh_sidebar_visible_gate();
         self.persist_session();

@@ -131,12 +131,7 @@ impl App {
 
     /// Repaint visible sidebars once a minute so relative timestamps advance.
     pub(super) fn tick_sidebar_clock(&mut self) -> Option<Instant> {
-        let any_visible = self.sidebar_visible
-            && self
-                .windows
-                .keys()
-                .any(|window_id| self.window_sidebar_eligible(*window_id));
-        if !any_visible {
+        if !self.any_sidebar_visible() {
             self.sidebar_clock_deadline = None;
             return None;
         }
@@ -161,12 +156,7 @@ impl App {
     /// lands mid-drag skips the refresh — re-sorting would shuffle the list
     /// under the pointer and retarget the drop — and retries next interval.
     pub(super) fn tick_sidebar_autosort(&mut self) -> Option<Instant> {
-        let any_visible = self.sidebar_visible
-            && self
-                .windows
-                .keys()
-                .any(|window_id| self.window_sidebar_eligible(*window_id));
-        if !any_visible {
+        if !self.any_sidebar_visible() {
             self.sidebar_autosort_deadline = None;
             return None;
         }
@@ -174,12 +164,10 @@ impl App {
         match self.sidebar_autosort_deadline {
             Some(deadline) if now < deadline => Some(deadline),
             _ => {
-                let drag_active = self.windows.values().any(|state| {
-                    state
-                        .sidebar_drag
-                        .as_ref()
-                        .is_some_and(|drag| drag.active)
-                });
+                let drag_active = self
+                    .windows
+                    .values()
+                    .any(|state| state.sidebar_drag.as_ref().is_some_and(|drag| drag.active));
                 if !drag_active && self.session_store.refresh_auto_order() {
                     self.request_sidebar_redraw();
                 }

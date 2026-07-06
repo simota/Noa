@@ -133,14 +133,28 @@ impl App {
         }
     }
 
+    /// Whether `window_id`'s logical window (tab group) currently shows its
+    /// sidebar (FR-4). Visibility is tracked per group so every tab of one
+    /// native window agrees, while other windows keep their own state.
+    pub(in crate::app) fn window_sidebar_visible(&self, window_id: WindowId) -> bool {
+        self.windows
+            .get(&window_id)
+            .is_some_and(|state| self.sidebar_visible_groups.contains(&state.group))
+    }
+
+    /// Whether any eligible window is currently showing its sidebar: the
+    /// io-thread publish gate and the sidebar timers key off this.
+    pub(in crate::app) fn any_sidebar_visible(&self) -> bool {
+        self.windows.keys().any(|window_id| {
+            self.window_sidebar_visible(*window_id) && self.window_sidebar_eligible(*window_id)
+        })
+    }
+
     /// Request a redraw of every window currently showing its sidebar. Cheap:
     /// the sidebar is off by default and rarely on more than one window.
     pub(in crate::app) fn request_sidebar_redraw(&self) {
-        if !self.sidebar_visible {
-            return;
-        }
         for (window_id, state) in self.windows.iter() {
-            if self.window_sidebar_eligible(*window_id) {
+            if self.window_sidebar_visible(*window_id) && self.window_sidebar_eligible(*window_id) {
                 state.window.request_redraw();
             }
         }
@@ -265,7 +279,7 @@ impl App {
         };
         let scale = state.window.scale_factor() as f32;
         let inset = crate::sidebar::sidebar_inset(
-            self.sidebar_visible,
+            self.window_sidebar_visible(window_id),
             self.window_sidebar_eligible(window_id),
             self.config.sidebar_width * scale,
         );
@@ -287,48 +301,74 @@ impl App {
     /// Recompute the app-wide io-thread gate: on while any eligible window
     /// shows its sidebar (Omen T1 — a distinct flag from the overview gate).
     pub(in crate::app) fn refresh_sidebar_visible_gate(&self) {
-        let any_visible = self.sidebar_visible
-            && self
-                .windows
-                .keys()
-                .any(|window_id| self.window_sidebar_eligible(*window_id));
-        self.sidebar_visible_gate
-            .store(any_visible, std::sync::atomic::Ordering::Relaxed);
+        self.sidebar_visible_gate.store(
+            self.any_sidebar_visible(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
-    /// Toggle the session sidebar app-wide (FR-4): the sidebar's shown state is
-    /// shared across every tab, so one toggle flips all eligible windows at once
-    /// and each is grid-first resized to its new pane area (Omen P3/AC-5). A
-    /// no-op when the app has no sidebar-eligible window (only a quick terminal).
+    /// Toggle the session sidebar for the focused logical window (FR-4): the
+    /// shown state is shared by every tab of that window's group, so one toggle
+    /// flips all of its tabs at once and each is grid-first resized to its new
+    /// pane area (Omen P3/AC-5) — other windows keep their own state. A no-op
+    /// when no eligible window can be resolved (only a quick terminal).
     pub(in crate::app) fn toggle_sidebar(&mut self) {
-        // Require at least one eligible window so an all-quick-terminal app can't
-        // flip a flag with no visible effect.
-        let eligible: Vec<WindowId> = self
-            .windows
-            .keys()
-            .copied()
-            .filter(|window_id| self.window_sidebar_eligible(*window_id))
-            .collect();
-        if eligible.is_empty() {
+        // Resolve the target group: the focused window's, falling back to the
+        // OS-focused window (a global-hotkey toggle can fire without winit
+        // focus), then to the most recently opened eligible window.
+        let target = [self.focused, self.os_focused]
+            .into_iter()
+            .flatten()
+            .find(|window_id| self.window_sidebar_eligible(*window_id))
+            .or_else(|| {
+                self.window_order
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|window_id| self.window_sidebar_eligible(*window_id))
+            });
+        let Some(group) =
+            target.and_then(|window_id| self.windows.get(&window_id).map(|state| state.group))
+        else {
             return;
+        };
+        let tabs: Vec<WindowId> = self
+            .window_order
+            .iter()
+            .copied()
+            .filter(|window_id| {
+                self.windows
+                    .get(window_id)
+                    .is_some_and(|state| state.group == group)
+            })
+            .collect();
+        if !self.sidebar_visible_groups.remove(&group) {
+            self.sidebar_visible_groups.insert(group);
         }
-        self.sidebar_visible = !self.sidebar_visible;
         // Per-window sidebar UI state resets on any visibility change: scroll
         // returns to the top and any open card menu closes.
-        for window_id in &eligible {
+        for window_id in &tabs {
             if let Some(state) = self.windows.get_mut(window_id) {
                 state.sidebar_scroll = 0;
                 state.sidebar_menu = None;
             }
         }
-        // A toggle invalidates any inline rename (the editor is a sidebar surface).
-        self.sidebar_rename = None;
+        // A toggle invalidates an inline rename hosted by this group (the
+        // editor is a sidebar surface); a rename in another window survives,
+        // since its sidebar didn't change.
+        if self.sidebar_rename.as_ref().is_some_and(|session| {
+            self.windows
+                .get(&session.window_id)
+                .is_none_or(|state| state.group == group)
+        }) {
+            self.sidebar_rename = None;
+        }
 
         self.refresh_sidebar_visible_gate();
-        // Grid-first for every eligible tab: `relayout_and_resize_window` applies
-        // the inset then routes through `pane_resize_batch_plan` (grid resize
-        // before pty winsize).
-        for window_id in &eligible {
+        // Grid-first for every tab of the group: `relayout_and_resize_window`
+        // applies the inset then routes through `pane_resize_batch_plan` (grid
+        // resize before pty winsize).
+        for window_id in &tabs {
             self.relayout_and_resize_window(*window_id);
             if let Some(state) = self.windows.get(window_id) {
                 state.window.request_redraw();

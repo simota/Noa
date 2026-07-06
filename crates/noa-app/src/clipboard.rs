@@ -114,16 +114,15 @@ pub(crate) fn write_temp_png(png_bytes: &[u8]) -> anyhow::Result<PathBuf> {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use std::io::Write;
     use std::path::PathBuf;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     use anyhow::{Context, ensure};
     use objc2_app_kit::{
         NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypeFileURL,
         NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
     };
-    use objc2_foundation::{NSDictionary, NSURL};
+    use objc2_foundation::{NSDictionary, NSString, NSURL};
 
     use super::PasteContents;
 
@@ -137,9 +136,13 @@ mod platform {
     }
 
     fn pbpaste_text() -> anyhow::Result<String> {
+        // pbpaste converts through the locale encoding; without LC_CTYPE
+        // (e.g. launched from Finder, where LANG is unset) UTF-8 output is
+        // mojibake'd, so pin it.
         let output = Command::new("/usr/bin/pbpaste")
             .arg("-Prefer")
             .arg("txt")
+            .env("LC_CTYPE", "UTF-8")
             .output()
             .context("failed to read macOS clipboard")?;
         ensure!(
@@ -152,18 +155,17 @@ mod platform {
     }
 
     pub(super) fn set_text(text: &str) -> anyhow::Result<()> {
-        let mut child = Command::new("/usr/bin/pbcopy")
-            .stdin(Stdio::piped())
-            .spawn()
-            .context("failed to open macOS clipboard for writing")?;
-        let mut stdin = child.stdin.take().context("failed to open pbcopy stdin")?;
-        stdin
-            .write_all(text.as_bytes())
-            .context("failed to write text to macOS clipboard")?;
-        drop(stdin);
-
-        let status = child.wait().context("failed to finish pbcopy")?;
-        ensure!(status.success(), "pbcopy exited with status {status}");
+        // Write through NSPasteboard directly rather than pbcopy: pbcopy
+        // decodes stdin via the locale encoding, so without LC_CTYPE (e.g.
+        // launched from Finder, where LANG is unset) multibyte UTF-8 lands
+        // on the clipboard mojibake'd.
+        let pasteboard = NSPasteboard::generalPasteboard();
+        pasteboard.clearContents();
+        let ok =
+            pasteboard.setString_forType(&NSString::from_str(text), unsafe {
+                NSPasteboardTypeString
+            });
+        ensure!(ok, "failed to write text to macOS clipboard");
         Ok(())
     }
 

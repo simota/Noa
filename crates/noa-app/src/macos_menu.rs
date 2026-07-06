@@ -32,11 +32,13 @@ impl MacosMenu {
         let app_menu = Submenu::with_id("noa.menu.app", "Noa", true);
 
         let about = MenuItem::with_id(AppCommand::About.menu_id(), "About Noa", true, None);
+        let (preferences_command, preferences_label, preferences_enabled, preferences_accelerator) =
+            preferences_menu_item_spec();
         let preferences = MenuItem::with_id(
-            AppCommand::Preferences.menu_id(),
-            "Preferences...",
-            false,
-            None,
+            preferences_command.menu_id(),
+            preferences_label,
+            preferences_enabled,
+            Some(preferences_accelerator),
         );
         let secure_keyboard_entry = CheckMenuItem::with_id(
             AppCommand::ToggleSecureKeyboardEntry.menu_id(),
@@ -383,6 +385,15 @@ fn context_menu_item((command, label): (AppCommand, &'static str)) -> MenuItem {
     MenuItem::with_id(command.menu_id(), label, true, None)
 }
 
+fn preferences_menu_item_spec() -> (AppCommand, &'static str, bool, Accelerator) {
+    (
+        AppCommand::Preferences,
+        "Settings...",
+        true,
+        cmd_accelerator(Code::Comma),
+    )
+}
+
 fn disabled_item(id: &'static str, text: &'static str) -> MenuItem {
     MenuItem::with_id(id, text, false, None)
 }
@@ -417,5 +428,16 @@ mod tests {
         for (command, _) in SPLIT_CONTEXT_MENU_ITEMS {
             assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(*command));
         }
+    }
+
+    #[test]
+    fn preferences_menu_item_is_enabled_and_routes_to_preferences() {
+        let (command, label, enabled, accelerator) = preferences_menu_item_spec();
+
+        assert_eq!(command, AppCommand::Preferences);
+        assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+        assert_eq!(label, "Settings...");
+        assert!(enabled);
+        assert_eq!(accelerator, cmd_accelerator(Code::Comma));
     }
 }

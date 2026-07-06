@@ -6,7 +6,7 @@
 //! are all scaled by `bytes_per_px` so the same packing/growth logic serves
 //! both without duplicating it (WP1, REQ-EMOJI-2/3).
 
-use etagere::{AllocId, BucketedAtlasAllocator, size2};
+use etagere::{size2, AllocId, BucketedAtlasAllocator};
 
 const MAX_ATLAS_DIM: u32 = 8192;
 
@@ -62,9 +62,12 @@ impl Atlas {
         }
     }
 
-    /// Reserve a `w` x `h` region and blit `bitmap` (`w*h*bytes_per_px`
-    /// bytes) into it. Callers must pass a non-empty glyph (`w > 0 && h > 0`);
-    /// zero-sized glyphs are filtered upstream in `store_rasterized`.
+    /// Reserve a `w` x `h` inner region and blit `bitmap`
+    /// (`w*h*bytes_per_px` bytes) into it. The returned reservation points at
+    /// that inner region; the allocation itself keeps a 1px zero pad on every
+    /// side so filtered samples never see neighbouring or stale glyph pixels.
+    /// Callers must pass a non-empty glyph (`w > 0 && h > 0`); zero-sized
+    /// glyphs are filtered upstream in `store_rasterized`.
     ///
     /// Returns the packed [`Reservation`] on success, or `None` if the atlas
     /// is full.
@@ -73,26 +76,29 @@ impl Atlas {
             w > 0 && h > 0,
             "reserve_and_blit requires a non-empty glyph"
         );
-        // Pad by 1px on each side to avoid bilinear bleed between neighbours.
-        let alloc = self.allocator.allocate(size2(w as i32 + 1, h as i32 + 1))?;
+        let alloc = self.allocator.allocate(size2(w as i32 + 2, h as i32 + 2))?;
         let min = alloc.rectangle.min;
-        let x = min.x as u32;
-        let y = min.y as u32;
+        let alloc_x = min.x as u32;
+        let alloc_y = min.y as u32;
+        let x = alloc_x + 1;
+        let y = alloc_y + 1;
         let bpp = self.bytes_per_px as usize;
         let row_bytes = w as usize * bpp;
+        let padded_row_bytes = (w as usize + 2) * bpp;
+
+        // Zero the full padded region first. Reused allocations can contain
+        // old ink; clearing all four sides prevents linear sampling from
+        // bleeding stale pixels into the live inner glyph rect.
+        for row in 0..(h + 2) {
+            let dst = (((alloc_y + row) as usize) * (self.width as usize) + alloc_x as usize) * bpp;
+            self.data[dst..dst + padded_row_bytes].fill(0);
+        }
 
         for row in 0..h {
             let src = (row as usize) * row_bytes;
             let dst = (((y + row) as usize) * (self.width as usize) + x as usize) * bpp;
             self.data[dst..dst + row_bytes].copy_from_slice(&bitmap[src..src + row_bytes]);
-            // Zero the 1px right pad: an evicted-and-reused region may hold a
-            // stale glyph's ink there, which bilinear sampling at the glyph
-            // edge would bleed back in.
-            self.data[dst + row_bytes..dst + row_bytes + bpp].fill(0);
         }
-        // Same for the 1px bottom pad row (w+1 wide, covering the corner).
-        let pad_dst = (((y + h) as usize) * (self.width as usize) + x as usize) * bpp;
-        self.data[pad_dst..pad_dst + row_bytes + bpp].fill(0);
         self.bump_generation();
         Some(Reservation {
             x: x as u16,
@@ -137,8 +143,8 @@ impl Atlas {
     }
 
     fn grow_for(&mut self, w: u32, h: u32) -> bool {
-        let required_width = w.saturating_add(1).max(self.width);
-        let required_height = h.saturating_add(1).max(self.height);
+        let required_width = w.saturating_add(2).max(self.width);
+        let required_height = h.saturating_add(2).max(self.height);
         let next_width = next_grown_dim(self.width, required_width, self.max_dim);
         let next_height = next_grown_dim(self.height, required_height, self.max_dim);
 
@@ -215,6 +221,23 @@ mod tests {
         let idx = (r.y as usize) * 64 + r.x as usize;
         assert_eq!(atlas.data()[idx], 0xFF);
         assert_eq!(atlas.size(), (64, 64));
+    }
+
+    #[test]
+    fn blit_returns_inner_rect_and_keeps_all_four_padding_edges_clear() {
+        let mut atlas = Atlas::new(16, 16, 1);
+        let bitmap = vec![0x80u8; 3 * 2];
+        let r = atlas.reserve_and_blit(3, 2, &bitmap).unwrap();
+
+        assert!(r.x > 0 && r.y > 0, "reservation must point past the pad");
+        let width = atlas.size().0 as usize;
+        let x = r.x as usize;
+        let y = r.y as usize;
+        assert_eq!(atlas.data()[y * width + x], 0x80, "inner glyph pixel");
+        assert_eq!(atlas.data()[y * width + x - 1], 0, "left pad");
+        assert_eq!(atlas.data()[(y - 1) * width + x], 0, "top pad");
+        assert_eq!(atlas.data()[y * width + x + 3], 0, "right pad");
+        assert_eq!(atlas.data()[(y + 2) * width + x], 0, "bottom pad");
     }
 
     #[test]

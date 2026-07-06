@@ -789,7 +789,8 @@ impl App {
             return;
         };
 
-        let (tracking, format) = self.mouse_report_modes(window_id, pane_id);
+        let (tracking, format, alternate_scroll, app_cursor_keys) =
+            self.mouse_wheel_modes(window_id, pane_id);
         let cell = self
             .windows
             .get(&window_id)
@@ -819,6 +820,18 @@ impl App {
             .map(|gpu| gpu.font.metrics().cell_h)
             .unwrap_or(1.0);
         if let Some(scroll) = mouse_wheel_viewport_scroll(delta, cell_h) {
+            // DECSET 1007 alternate scroll: the alternate screen has no
+            // scrollback, so an untracked wheel becomes cursor key presses
+            // (how TUIs like less/codex scroll their own content).
+            if tracking == MouseTracking::Off && alternate_scroll {
+                let (up, rows) = match scroll {
+                    MouseWheelViewportScroll::Up(rows) => (true, rows),
+                    MouseWheelViewportScroll::Down(rows) => (false, rows),
+                };
+                let bytes = mouse::alternate_scroll_bytes(up, rows, app_cursor_keys);
+                self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+                return;
+            }
             self.scroll_mouse_wheel_viewport(window_id, pane_id, scroll);
         }
     }

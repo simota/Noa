@@ -1227,6 +1227,29 @@ impl App {
             .unwrap_or((MouseTracking::Off, MouseFormat::Legacy))
     }
 
+    /// Wheel-routing state read under one terminal lock: mouse tracking mode,
+    /// report format, whether DECSET 1007 alternate scroll applies (alternate
+    /// screen active + mode set), and DECCKM application cursor keys.
+    pub(super) fn mouse_wheel_modes(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) -> (MouseTracking, MouseFormat, bool, bool) {
+        self.windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .map(|surface| {
+                let terminal = surface.terminal.lock();
+                (
+                    terminal.modes.mouse_tracking(),
+                    terminal.modes.mouse_format(),
+                    terminal.active_is_alt && terminal.modes.alternate_scroll(),
+                    terminal.modes.app_cursor_keys(),
+                )
+            })
+            .unwrap_or((MouseTracking::Off, MouseFormat::Legacy, false, false))
+    }
+
     /// Snap `window_id`'s focused pane viewport back to the live bottom, if it
     /// is scrolled into scrollback. Called on user input destined for the pty
     /// (keys, IME commits, pastes) so typing always follows the prompt;

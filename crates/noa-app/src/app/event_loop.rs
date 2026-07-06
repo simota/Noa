@@ -341,6 +341,17 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 if pressed
+                    && self
+                        .windows
+                        .get_mut(&window_id)
+                        .and_then(WindowState::focused_surface_mut)
+                        .is_some_and(|surface| {
+                            surface.ime_state.consume_commit_echo(event.text.as_deref())
+                        })
+                {
+                    return;
+                }
+                if pressed
                     && let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers)
                 {
                     self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);

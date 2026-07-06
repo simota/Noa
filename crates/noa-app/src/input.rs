@@ -20,6 +20,7 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 pub struct ImeState {
     preedit: String,
     preedit_cursor: Option<(usize, usize)>,
+    pending_commit_echo: Option<String>,
 }
 
 impl ImeState {
@@ -27,15 +28,18 @@ impl ImeState {
         match event {
             Ime::Enabled | Ime::Disabled => {
                 self.clear_preedit();
+                self.pending_commit_echo = None;
                 None
             }
             Ime::Preedit(text, cursor_range) => {
                 text.clone_into(&mut self.preedit);
                 self.preedit_cursor = *cursor_range;
+                self.pending_commit_echo = None;
                 None
             }
             Ime::Commit(text) => {
                 self.clear_preedit();
+                self.pending_commit_echo = (!text.is_empty()).then(|| text.clone());
                 encode_text(text)
             }
         }
@@ -58,6 +62,20 @@ impl ImeState {
 
     pub fn commit_preedit(&mut self) {
         self.clear_preedit();
+    }
+
+    /// Consume a `KeyboardInput.text` echo that some platform IME paths emit
+    /// immediately after `Ime::Commit`. `Ime::Commit` is already the source of
+    /// truth for committed composition text; sending the matching key text as
+    /// well would double-insert it into the pty.
+    pub fn consume_commit_echo(&mut self, text: Option<&str>) -> bool {
+        let Some(text) = text else {
+            return false;
+        };
+        let Some(expected) = self.pending_commit_echo.take() else {
+            return false;
+        };
+        text == expected
     }
 
     fn clear_preedit(&mut self) {
@@ -889,6 +907,27 @@ mod tests {
         );
         assert_eq!(state.preedit_text(), "");
         assert_eq!(state.preedit_cursor(), None);
+    }
+
+    #[test]
+    fn ime_commit_suppresses_matching_keyboard_text_echo_once() {
+        let mut state = ImeState::default();
+
+        assert_eq!(
+            state.handle_event(&Ime::Commit("無".into())),
+            Some("無".as_bytes().to_vec())
+        );
+        assert!(state.consume_commit_echo(Some("無")));
+        assert!(!state.consume_commit_echo(Some("無")));
+    }
+
+    #[test]
+    fn ime_commit_echo_mismatch_does_not_suppress_text() {
+        let mut state = ImeState::default();
+
+        state.handle_event(&Ime::Commit("無".into()));
+        assert!(!state.consume_commit_echo(Some("効")));
+        assert!(!state.consume_commit_echo(Some("無")));
     }
 
     #[test]

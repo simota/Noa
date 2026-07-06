@@ -202,8 +202,7 @@ pub fn encode_mouse_motion(
 ) -> Option<Vec<u8>> {
     let button_code = match tracking {
         MouseTracking::Off | MouseTracking::X10 | MouseTracking::Press => return None,
-        MouseTracking::ButtonMotion => button_code(pressed_button?)?,
-        MouseTracking::AnyMotion => pressed_button.and_then(button_code).unwrap_or(3),
+        MouseTracking::ButtonMotion | MouseTracking::AnyMotion => button_code(pressed_button?)?,
     };
 
     encode_mouse_report(format, button_code + 32 + modifier_bits(mods), false, cell)
@@ -533,7 +532,17 @@ mod tests {
                 point(0, 0),
                 ModifiersState::ALT
             ),
-            Some(b"\x1b[<43;1;1M".to_vec())
+            None
+        );
+        assert_eq!(
+            encode_mouse_motion(
+                MouseFormat::Sgr,
+                MouseTracking::AnyMotion,
+                Some(MouseButton::Left),
+                point(0, 0),
+                ModifiersState::ALT
+            ),
+            Some(b"\x1b[<40;1;1M".to_vec())
         );
     }
 
@@ -760,7 +769,17 @@ mod tests {
                 point(0, 0),
                 ModifiersState::empty()
             ),
-            Some(b"\x1b[67;1;1M".to_vec())
+            None
+        );
+        assert_eq!(
+            encode_mouse_motion(
+                MouseFormat::Urxvt,
+                MouseTracking::AnyMotion,
+                Some(MouseButton::Left),
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[64;1;1M".to_vec())
         );
         assert_eq!(
             encode_mouse_wheel(
@@ -842,7 +861,10 @@ mod tests {
     fn alternate_scroll_encodes_cursor_keys_per_row() {
         // Normal cursor keys → CSI A/B, one press per scrolled row.
         assert_eq!(alternate_scroll_bytes(true, 1, false), b"\x1b[A");
-        assert_eq!(alternate_scroll_bytes(false, 3, false), b"\x1b[B\x1b[B\x1b[B");
+        assert_eq!(
+            alternate_scroll_bytes(false, 3, false),
+            b"\x1b[B\x1b[B\x1b[B"
+        );
         // DECCKM application cursor keys → SS3 A/B.
         assert_eq!(alternate_scroll_bytes(true, 2, true), b"\x1bOA\x1bOA");
         assert_eq!(alternate_scroll_bytes(false, 1, true), b"\x1bOB");

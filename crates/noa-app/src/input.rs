@@ -80,8 +80,10 @@ pub fn encode_key(
     encode_key_with_modes(
         logical_key,
         None,
+        None,
         text,
         mods,
+        true,
         app_cursor_keys,
         false,
         0,
@@ -95,12 +97,23 @@ pub fn encode_key(
 /// selects the legacy encoding and every existing behavior is preserved
 /// unchanged. `pressed`/`repeat` come from the winit `KeyEvent` and only affect
 /// the Kitty path.
+///
+/// `unmodified_key` is winit's `key_without_modifiers()` — the key the same
+/// physical press produces with no modifiers held — used by the Kitty encoder
+/// to report the unshifted base key code (Shift+1 must report `1`, not `!`).
+///
+/// `alt_sends_esc` says whether Alt held with this press should ESC-prefix the
+/// produced text. On macOS the Option key composes characters unless
+/// `macos-option-as-alt` claims it, so the caller decides per event; on other
+/// platforms it is simply `true`.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_key_with_modes(
     logical_key: &Key,
+    unmodified_key: Option<&Key>,
     physical_key: Option<PhysicalKey>,
     text: Option<&str>,
     mods: ModifiersState,
+    alt_sends_esc: bool,
     app_cursor_keys: bool,
     app_keypad: bool,
     kitty_flags: u8,
@@ -114,6 +127,7 @@ pub fn encode_key_with_modes(
     if kitty_flags != 0 {
         match encode_kitty(
             logical_key,
+            unmodified_key,
             physical_key,
             text,
             mods,
@@ -136,19 +150,25 @@ pub fn encode_key_with_modes(
         return None;
     }
 
-    // Ctrl+letter -> the corresponding C0 control byte. Checked before the
-    // general text path since terminals expect Ctrl+A..Z to send 0x01..0x1a
-    // regardless of what `text` the platform layer produced.
-    if mods.control_key()
-        && let Key::Character(s) = logical_key
-    {
-        let mut chars = s.chars();
-        if let (Some(c), None) = (chars.next(), chars.next()) {
-            let lower = c.to_ascii_lowercase();
-            if lower.is_ascii_lowercase() {
-                let byte = (lower as u8) - b'a' + 1; // Ctrl+A=0x01 .. Ctrl+Z=0x1a
-                return Some(vec![byte]);
+    // Ctrl+key -> the corresponding C0 control byte. Checked before the
+    // general text path since terminals expect Ctrl+A..Z (and the classic
+    // xterm symbol/digit mappings, e.g. Ctrl+Space=NUL, Ctrl+[=ESC) to send
+    // their control byte regardless of what `text` the platform layer
+    // produced.
+    if mods.control_key() {
+        match logical_key {
+            Key::Character(s) => {
+                let mut chars = s.chars();
+                if let (Some(c), None) = (chars.next(), chars.next())
+                    && let Some(byte) = ctrl_c0_byte(c)
+                {
+                    return Some(vec![byte]);
+                }
             }
+            // winit can report Space as a named key; Ctrl+Space is NUL
+            // (emacs set-mark and friends).
+            Key::Named(NamedKey::Space) => return Some(vec![0x00]),
+            _ => {}
         }
     }
 
@@ -160,15 +180,50 @@ pub fn encode_key_with_modes(
     }
 
     match logical_key {
-        Key::Named(NamedKey::Enter) => Some(vec![0x0d]),
-        Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
-        Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
-        Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
-        Key::Named(named) => {
-            special_key_bytes(*named, mods, app_cursor_keys).or_else(|| encode_key_text(text, mods))
+        Key::Named(NamedKey::Enter) => Some(alt_prefixed(vec![0x0d], mods)),
+        Key::Named(NamedKey::Backspace) => {
+            // Ctrl+Backspace sends BS (0x08); Alt prefixes ESC so readline
+            // deletes a word (Ghostty/Terminal.app behavior).
+            let byte = if mods.control_key() { 0x08 } else { 0x7f };
+            Some(alt_prefixed(vec![byte], mods))
         }
-        _ => encode_key_text(text, mods),
+        Key::Named(NamedKey::Tab) => {
+            if mods.shift_key() {
+                Some(b"\x1b[Z".to_vec()) // backtab
+            } else {
+                Some(vec![b'\t'])
+            }
+        }
+        Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
+        Key::Named(named) => special_key_bytes(*named, mods, app_cursor_keys)
+            .or_else(|| encode_key_text(text, mods, alt_sends_esc)),
+        _ => encode_key_text(text, mods, alt_sends_esc),
     }
+}
+
+/// The C0 byte for Ctrl+`c` under the legacy encoding: letters map to
+/// 0x01..0x1a, plus the classic xterm symbol and digit mappings.
+fn ctrl_c0_byte(c: char) -> Option<u8> {
+    let c = c.to_ascii_lowercase();
+    let byte = match c {
+        'a'..='z' => (c as u8) - b'a' + 1,
+        ' ' | '@' | '2' => 0x00,
+        '[' | '3' => 0x1b,
+        '\\' | '4' => 0x1c,
+        ']' | '5' => 0x1d,
+        '^' | '6' => 0x1e,
+        '_' | '7' | '/' | '-' => 0x1f,
+        '8' | '?' => 0x7f,
+        _ => return None,
+    };
+    Some(byte)
+}
+
+fn alt_prefixed(mut bytes: Vec<u8>, mods: ModifiersState) -> Vec<u8> {
+    if mods.alt_key() {
+        bytes.insert(0, 0x1b);
+    }
+    bytes
 }
 
 fn application_keypad_bytes(physical_key: Option<PhysicalKey>) -> Option<Vec<u8>> {
@@ -255,9 +310,16 @@ fn sanitize_paste_payload(bytes: &[u8]) -> Vec<u8> {
     sanitized
 }
 
-fn encode_key_text(text: Option<&str>, mods: ModifiersState) -> Option<Vec<u8>> {
+fn encode_key_text(
+    text: Option<&str>,
+    mods: ModifiersState,
+    alt_sends_esc: bool,
+) -> Option<Vec<u8>> {
     let mut bytes = encode_text(text?)?;
-    if mods.alt_key() {
+    // On macOS, Option that composed a character (macos-option-as-alt off for
+    // that side) already put the composed text in `text`; it must pass through
+    // without an ESC prefix. `alt_sends_esc` is the caller's per-event verdict.
+    if mods.alt_key() && alt_sends_esc {
         bytes.insert(0, 0x1b);
     }
     Some(bytes)
@@ -378,8 +440,10 @@ fn kitty_modifier_value(mods: ModifiersState) -> u32 {
     value
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_kitty(
     logical_key: &Key,
+    unmodified_key: Option<&Key>,
     physical_key: Option<PhysicalKey>,
     text: Option<&str>,
     mods: ModifiersState,
@@ -481,7 +545,7 @@ fn encode_kitty(
                     shifted: None,
                 }
             } else {
-                let Some((base, shifted)) = character_key_codes(s, mods) else {
+                let Some((base, shifted)) = character_key_codes(s, unmodified_key, mods) else {
                     return legacy_or_ignore(event);
                 };
                 // A bare (or shift-only) printable stays legacy text unless
@@ -571,18 +635,32 @@ fn assemble_kitty(
 }
 
 /// Base (unshifted) and shifted key codes for a character key. The base is the
-/// lowercased code point; the shifted alternate is set only when shift changed
-/// the produced character.
-fn character_key_codes(s: &str, mods: ModifiersState) -> Option<(u32, Option<u32>)> {
-    let mut chars = s.chars();
-    let c = chars.next()?;
-    if chars.next().is_some() {
-        return None; // multi-char logical keys are out of scope
+/// key the press produces with no modifiers (winit's `key_without_modifiers`,
+/// lowercased) — Shift+1 reports base `1`, not `!`. Falls back to lowercasing
+/// the produced character when the caller has no unmodified key (tests). The
+/// shifted alternate is set only when shift changed the produced character.
+fn character_key_codes(
+    s: &str,
+    unmodified_key: Option<&Key>,
+    mods: ModifiersState,
+) -> Option<(u32, Option<u32>)> {
+    let c = single_char(s)?;
+    let base_char = match unmodified_key {
+        Some(Key::Character(u)) => single_char(u),
+        _ => None,
     }
-    let base_char = c.to_lowercase().next().unwrap_or(c);
+    .unwrap_or(c);
+    let base_char = base_char.to_lowercase().next().unwrap_or(base_char);
     let base = base_char as u32;
     let shifted = (mods.shift_key() && c as u32 != base).then_some(c as u32);
     Some((base, shifted))
+}
+
+fn single_char(s: &str) -> Option<char> {
+    let mut chars = s.chars();
+    let c = chars.next()?;
+    // Multi-char logical keys are out of scope.
+    chars.next().is_none().then_some(c)
 }
 
 /// Associated-text code points (`c1:c2:…`) for genuinely printable text.
@@ -858,6 +936,130 @@ mod tests {
     }
 
     #[test]
+    fn shift_tab_is_backtab() {
+        assert_eq!(
+            encode_key(
+                &Key::Named(NamedKey::Tab),
+                None,
+                ModifiersState::SHIFT,
+                false
+            ),
+            Some(b"\x1b[Z".to_vec())
+        );
+    }
+
+    #[test]
+    fn ctrl_space_is_nul() {
+        // winit may report Space as a named key or a character key.
+        assert_eq!(
+            encode_key(
+                &Key::Named(NamedKey::Space),
+                Some(" "),
+                ModifiersState::CONTROL,
+                false
+            ),
+            Some(vec![0x00])
+        );
+        assert_eq!(
+            encode_key(
+                &Key::Character(" ".into()),
+                Some(" "),
+                ModifiersState::CONTROL,
+                false
+            ),
+            Some(vec![0x00])
+        );
+    }
+
+    #[test]
+    fn ctrl_symbols_and_digits_send_c0_bytes() {
+        // Classic xterm mappings: Ctrl+[ = ESC, Ctrl+\ = FS, … Ctrl+2..8
+        // mirror the symbol column.
+        let cases: [(&str, u8); 13] = [
+            ("@", 0x00),
+            ("2", 0x00),
+            ("[", 0x1b),
+            ("3", 0x1b),
+            ("\\", 0x1c),
+            ("4", 0x1c),
+            ("]", 0x1d),
+            ("5", 0x1d),
+            ("^", 0x1e),
+            ("6", 0x1e),
+            ("_", 0x1f),
+            ("/", 0x1f),
+            ("?", 0x7f),
+        ];
+        for (s, byte) in cases {
+            assert_eq!(
+                encode_key(
+                    &Key::Character(s.into()),
+                    Some(s),
+                    ModifiersState::CONTROL,
+                    false
+                ),
+                Some(vec![byte]),
+                "ctrl+{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn modified_backspace_and_enter() {
+        // Alt+Backspace = ESC DEL (readline word delete), Ctrl+Backspace = BS.
+        assert_eq!(
+            encode_key(
+                &Key::Named(NamedKey::Backspace),
+                None,
+                ModifiersState::ALT,
+                false
+            ),
+            Some(vec![0x1b, 0x7f])
+        );
+        assert_eq!(
+            encode_key(
+                &Key::Named(NamedKey::Backspace),
+                None,
+                ModifiersState::CONTROL,
+                false
+            ),
+            Some(vec![0x08])
+        );
+        assert_eq!(
+            encode_key(
+                &Key::Named(NamedKey::Enter),
+                Some("\r"),
+                ModifiersState::ALT,
+                false
+            ),
+            Some(vec![0x1b, 0x0d])
+        );
+    }
+
+    #[test]
+    fn composed_option_text_passes_through_without_esc() {
+        // macOS Option composed a character (macos-option-as-alt off): the
+        // caller passes alt_sends_esc = false and the composed text must not
+        // gain an ESC prefix.
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Character("å".into()),
+                Some(&Key::Character("a".into())),
+                None,
+                Some("å"),
+                ModifiersState::ALT,
+                false,
+                false,
+                false,
+                0,
+                true,
+                false,
+            ),
+            Some("å".as_bytes().to_vec())
+        );
+    }
+
+    #[test]
     fn ctrl_c_is_0x03() {
         let key = Key::Character("c".into());
         assert_eq!(
@@ -898,9 +1100,11 @@ mod tests {
         assert_eq!(
             encode_key_with_modes(
                 &Key::Character("1".into()),
+                None,
                 Some(PhysicalKey::Code(KeyCode::Numpad1)),
                 Some("1"),
                 ModifiersState::empty(),
+                true,
                 false,
                 true,
                 0,
@@ -912,9 +1116,11 @@ mod tests {
         assert_eq!(
             encode_key_with_modes(
                 &Key::Named(NamedKey::Enter),
+                None,
                 Some(PhysicalKey::Code(KeyCode::NumpadEnter)),
                 Some("\r"),
                 ModifiersState::empty(),
+                true,
                 false,
                 true,
                 0,
@@ -930,9 +1136,11 @@ mod tests {
         assert_eq!(
             encode_key_with_modes(
                 &Key::Character("1".into()),
+                None,
                 Some(PhysicalKey::Code(KeyCode::Numpad1)),
                 Some("1"),
                 ModifiersState::empty(),
+                true,
                 false,
                 false,
                 0,
@@ -944,9 +1152,11 @@ mod tests {
         assert_eq!(
             encode_key_with_modes(
                 &Key::Named(NamedKey::Enter),
+                None,
                 Some(PhysicalKey::Code(KeyCode::NumpadEnter)),
                 Some("\r"),
                 ModifiersState::empty(),
+                true,
                 false,
                 false,
                 0,
@@ -1177,7 +1387,7 @@ mod tests {
         mods: ModifiersState,
         flags: u8,
     ) -> Option<Vec<u8>> {
-        encode_key_with_modes(logical, None, text, mods, false, false, flags, true, false)
+        encode_key_with_modes(logical, None, None, text, mods, true, false, false, flags, true, false)
     }
 
     #[test]
@@ -1343,6 +1553,29 @@ mod tests {
     }
 
     #[test]
+    fn kitty_shifted_symbol_reports_unshifted_base_key() {
+        // Ctrl+Shift+1 produces '!' but the Kitty base key code must be the
+        // unshifted layout key '1' (49), with '!' (33) as the shifted
+        // alternate under the alternate-keys flag.
+        assert_eq!(
+            encode_key_with_modes(
+                &Key::Character("!".into()),
+                Some(&Key::Character("1".into())),
+                None,
+                Some("!"),
+                ModifiersState::SHIFT | ModifiersState::CONTROL,
+                true,
+                false,
+                false,
+                KITTY_REPORT_ALTERNATE_KEYS,
+                true,
+                false,
+            ),
+            Some(b"\x1b[49:33;6u".to_vec())
+        );
+    }
+
+    #[test]
     fn kitty_associated_text_appended_for_shifted_char() {
         // Report-all + associated-text: shift+a -> CSI 97 ; 2 ; 65 u.
         assert_eq!(
@@ -1374,11 +1607,14 @@ mod tests {
                 &Key::Named(NamedKey::ArrowUp),
                 None,
                 None,
+                None,
                 ModifiersState::empty(),
+                true,
                 false,
                 false,
                 KITTY_REPORT_EVENT_TYPES,
-                false, // released
+                false,
+                // released
                 false,
             ),
             Some(b"\x1b[1;1:3A".to_vec())
@@ -1389,7 +1625,9 @@ mod tests {
                 &Key::Named(NamedKey::ArrowUp),
                 None,
                 None,
+                None,
                 ModifiersState::empty(),
+                true,
                 false,
                 false,
                 KITTY_REPORT_EVENT_TYPES,
@@ -1407,8 +1645,10 @@ mod tests {
             encode_key_with_modes(
                 &Key::Character("a".into()),
                 None,
+                None,
                 Some("a"),
                 ModifiersState::empty(),
+                true,
                 false,
                 false,
                 KITTY_REPORT_EVENT_TYPES,
@@ -1426,9 +1666,11 @@ mod tests {
         assert_eq!(
             encode_key_with_modes(
                 &Key::Named(NamedKey::Shift),
+                None,
                 Some(PhysicalKey::Code(KeyCode::ShiftLeft)),
                 None,
                 ModifiersState::SHIFT,
+                true,
                 false,
                 false,
                 KITTY_REPORT_ALL_KEYS,
@@ -1441,9 +1683,11 @@ mod tests {
         assert_eq!(
             encode_key_with_modes(
                 &Key::Named(NamedKey::Shift),
+                None,
                 Some(PhysicalKey::Code(KeyCode::ShiftLeft)),
                 None,
                 ModifiersState::SHIFT,
+                true,
                 false,
                 false,
                 KITTY_DISAMBIGUATE,
@@ -1477,12 +1721,12 @@ mod tests {
         ];
         for (logical, text, mods) in cases {
             assert!(
-                encode_key_with_modes(&logical, None, text, mods, false, false, 0, true, false)
+                encode_key_with_modes(&logical, None, None, text, mods, true, false, false, 0, true, false)
                     .is_some(),
                 "press {logical:?} should still send"
             );
             assert_eq!(
-                encode_key_with_modes(&logical, None, text, mods, false, false, 0, false, false),
+                encode_key_with_modes(&logical, None, None, text, mods, true, false, false, 0, false, false),
                 None,
                 "release {logical:?} should send nothing"
             );
@@ -1498,8 +1742,10 @@ mod tests {
             encode_key_with_modes(
                 &Key::Character("a".into()),
                 None,
+                None,
                 Some("a"),
                 ModifiersState::empty(),
+                true,
                 false,
                 false,
                 flags,
@@ -1513,7 +1759,9 @@ mod tests {
                 &Key::Named(NamedKey::Backspace),
                 None,
                 None,
+                None,
                 ModifiersState::empty(),
+                true,
                 false,
                 false,
                 flags,
@@ -1527,8 +1775,10 @@ mod tests {
             encode_key_with_modes(
                 &Key::Character("a".into()),
                 None,
+                None,
                 Some("a"),
                 ModifiersState::empty(),
+                true,
                 false,
                 false,
                 flags,
@@ -1542,7 +1792,9 @@ mod tests {
                 &Key::Named(NamedKey::Backspace),
                 None,
                 None,
+                None,
                 ModifiersState::empty(),
+                true,
                 false,
                 false,
                 flags,
@@ -1556,8 +1808,10 @@ mod tests {
             encode_key_with_modes(
                 &Key::Character("a".into()),
                 None,
+                None,
                 Some("a"),
                 ModifiersState::CONTROL,
+                true,
                 false,
                 false,
                 flags,
@@ -1573,9 +1827,11 @@ mod tests {
         assert_eq!(
             encode_key_with_modes(
                 &Key::Character("1".into()),
+                None,
                 Some(PhysicalKey::Code(KeyCode::Numpad1)),
                 Some("1"),
                 ModifiersState::empty(),
+                true,
                 false,
                 false,
                 KITTY_REPORT_ALL_KEYS,

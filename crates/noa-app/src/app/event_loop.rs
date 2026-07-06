@@ -2,6 +2,7 @@
 //! `on_*` window/mouse/IME handlers it dispatches to.
 
 use super::*;
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -324,14 +325,24 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.modifiers.super_key() {
                     return;
                 }
-                let app_cursor_keys = self.app_cursor_keys(window_id);
+                                let app_cursor_keys = self.app_cursor_keys(window_id);
                 let app_keypad = self.app_keypad(window_id);
                 let kitty_flags = self.kitty_keyboard_flags(window_id);
+                let unmodified_key = event.key_without_modifiers();
+                // On macOS, Option only acts as Alt when winit stripped its
+                // composition per `macos-option-as-alt` — i.e. the delivered
+                // text differs from the text with every modifier applied.
+                // Otherwise the composed character must pass through with no
+                // ESC prefix.
+                let alt_sends_esc = !cfg!(target_os = "macos")
+                    || event.text.as_deref() != event.text_with_all_modifiers();
                 let bytes = input::encode_key_with_modes(
                     &event.logical_key,
+                    Some(&unmodified_key),
                     Some(event.physical_key),
                     event.text.as_deref(),
                     self.modifiers,
+                    alt_sends_esc,
                     app_cursor_keys,
                     app_keypad,
                     kitty_flags,

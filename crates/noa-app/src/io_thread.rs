@@ -889,6 +889,53 @@ mod tests {
         assert!(throttled.sidebar_upsert.is_none());
     }
 
+    #[test]
+    fn feed_terminal_preserves_utf8_split_across_pty_reads() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(4, 1))));
+        let mut stream = noa_vt::Stream::new();
+        let overview = test_overview_publish();
+        let mut last_overview_publish = None;
+        let mut last_sidebar_publish = None;
+        let bytes = "日".as_bytes();
+
+        feed_terminal(
+            &terminal,
+            &mut stream,
+            &bytes[..1],
+            &overview,
+            &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut last_sidebar_publish,
+        );
+        assert_eq!(
+            terminal.lock().primary.grid[0].cells[0].ch,
+            ' ',
+            "an incomplete UTF-8 scalar must not print a replacement cell"
+        );
+
+        feed_terminal(
+            &terminal,
+            &mut stream,
+            &bytes[1..],
+            &overview,
+            &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut last_sidebar_publish,
+        );
+        let term = terminal.lock();
+        assert_eq!(term.primary.grid[0].cells[0].ch, '日');
+        assert!(
+            term.primary.grid[0].cells[0]
+                .attrs
+                .contains(noa_core::CellAttrs::WIDE)
+        );
+        assert!(
+            term.primary.grid[0].cells[1]
+                .attrs
+                .contains(noa_core::CellAttrs::WIDE_SPACER)
+        );
+    }
+
     // FR-A4: the bell is drained regardless of sidebar visibility, so an agent
     // session's bell can escalate to an attention request even when the sidebar
     // is hidden (the main thread does the agent-vs-generic classification).

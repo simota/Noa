@@ -56,8 +56,11 @@ pub(super) fn append_search_prompt_instances(
     }
     let x_start = cols - cells.len() as u16;
 
+    // Accent-tinted surface (the palette's selected-row tone) rather than the
+    // plain elevated surface: while the prompt is open it owns the keyboard,
+    // so it must read as "active input field", not passive chrome.
     let bg_color = to_u8_color(surface_output_rgba(
-        style.surface_bg(),
+        style.selected_bg(),
         target_format_is_srgb,
     ));
     for i in 0..cells.len() as u16 {
@@ -68,6 +71,24 @@ pub(super) fn append_search_prompt_instances(
             grid_pos: [x_start + i, 0],
             color: bg_color,
             flags: 0,
+        });
+    }
+
+    // A vivid accent bar along the prompt's bottom edge — the same accent
+    // language as the palette's selected-row bar — so the open-search state
+    // stays visible even when the eye is on the grid below.
+    let accent_color = to_u8_color(surface_output_rgba(style.accent(), target_format_is_srgb));
+    let bar_thickness = decoration_thickness(metrics).max(2);
+    let bar_y = clamp_decoration_y(metrics.cell_h - bar_thickness as f32, bar_thickness, metrics);
+    let bar_width = metrics.cell_w.round().max(1.0) as u16;
+    for i in 0..cells.len() as u16 {
+        instances.push(CellInstance {
+            glyph_pos: [0, 0],
+            glyph_size: [bar_width, bar_thickness],
+            bearing: [0, bar_y],
+            grid_pos: [x_start + i, 0],
+            color: accent_color,
+            flags: CellInstance::FLAG_DECORATION,
         });
     }
 

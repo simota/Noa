@@ -940,6 +940,22 @@ fn search_prompt_overlay_emits_top_right_bg_and_glyph_instances_and_tracks_the_b
         "the prompt text must emit glyph instances"
     );
 
+    // The open prompt draws a vivid accent bar (plain decoration quads, not
+    // cursor-tagged) along its bottom edge, one per prompt column.
+    let accent_bar: Vec<_> = with_prompt
+        .iter()
+        .filter(|i| {
+            i.grid_pos[1] == 0
+                && i.flags & CellInstance::FLAG_DECORATION != 0
+                && i.flags & CellInstance::FLAG_CURSOR == 0
+        })
+        .collect();
+    assert_eq!(
+        accent_bar.len(),
+        prompt_bg.len(),
+        "the accent bar spans exactly the prompt's columns"
+    );
+
     // A buffer edit must always repaint — this overlay is deliberately
     // NOT part of the per-row cache, so a longer buffer widens it on
     // the very next rebuild.
@@ -968,6 +984,12 @@ fn search_prompt_overlay_emits_top_right_bg_and_glyph_instances_and_tracks_the_b
     assert_eq!(
         closed_bg, row0_bg_before,
         "closing the prompt removes the overlay"
+    );
+    assert!(
+        !closed.iter().any(|i| i.grid_pos[1] == 0
+            && i.flags & CellInstance::FLAG_DECORATION != 0
+            && i.flags & CellInstance::FLAG_CURSOR == 0),
+        "closing the prompt removes the accent bar too"
     );
 }
 

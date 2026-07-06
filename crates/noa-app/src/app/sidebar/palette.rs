@@ -582,7 +582,6 @@ const LIST_WIDTH: u16 = 28;
 const SAMPLE_COL: u16 = LIST_WIDTH + 3;
 const LIST_TOP_ROW: u16 = 4;
 const LIST_ROWS: u16 = 8;
-const SETTINGS_TOP_ROW: u16 = LIST_TOP_ROW + LIST_ROWS + 2;
 
 /// Composite the open theme-settings overlay as a rounded modal card
 /// (theme-settings-ui R-2/R-5/R-7), mirroring
@@ -750,7 +749,15 @@ fn theme_settings_overlay_text(
     let _ = write!(out, "/{}", state.filter());
     sgr_reset(&mut out);
 
-    let list_rows = LIST_ROWS.min(rows.saturating_sub(LIST_TOP_ROW + 1));
+    // On short cards, shrink the scrollable theme list before cutting into
+    // the settings section: prefer keeping every settings row visible with
+    // the list at ≥3 rows, and below that keep ≥3 settings rows visible and
+    // scroll the rest around the selection.
+    let settings_len = SettingsRowKind::ALL.len() as u16;
+    let list_full = rows.saturating_sub(LIST_TOP_ROW + 2 + settings_len);
+    let list_cap = rows.saturating_sub(LIST_TOP_ROW + 2 + settings_len.min(3));
+    let list_rows = LIST_ROWS.min(list_full).max(3).min(list_cap).max(1);
+    let settings_top = LIST_TOP_ROW + list_rows + 2;
     let total = state.filtered_len();
     let highlighted = state.highlighted_index();
     let offset = highlighted
@@ -783,10 +790,16 @@ fn theme_settings_overlay_text(
         // semantic swatch's position among just the non-ANSI entries (0..4)
         // gives its column slot directly, no separate counter needed.
         let mut semantic_slot = 0u16;
+        // On short cards the settings section climbs up into the sample
+        // area; drop any swatch row that would land on its gap/header.
+        let swatch_row_limit = settings_top.saturating_sub(2);
         for swatch in sample_swatches(theme_def) {
             match swatch {
                 Swatch::Ansi(index, color) => {
                     let row = LIST_TOP_ROW + u16::from(index) / 8;
+                    if row >= swatch_row_limit {
+                        continue;
+                    }
                     let col = SAMPLE_COL + (u16::from(index) % 8) * 2;
                     cup(&mut out, row, col);
                     sgr_bg(&mut out, color);
@@ -799,12 +812,18 @@ fn theme_settings_overlay_text(
                 | Swatch::Selection(color) => {
                     let col = SAMPLE_COL + semantic_slot * 4;
                     semantic_slot += 1;
+                    if LIST_TOP_ROW + 2 >= swatch_row_limit {
+                        continue;
+                    }
                     cup(&mut out, LIST_TOP_ROW + 2, col);
                     sgr_bg(&mut out, color);
                     out.push_str("   ");
                     sgr_reset(&mut out);
                 }
                 Swatch::Truecolor(_) => {
+                    if LIST_TOP_ROW + 3 >= swatch_row_limit {
+                        continue;
+                    }
                     cup(&mut out, LIST_TOP_ROW + 3, SAMPLE_COL);
                     for step in 0..16u16 {
                         let t = f32::from(step) / 15.0;
@@ -820,7 +839,7 @@ fn theme_settings_overlay_text(
         }
     }
 
-    cup(&mut out, SETTINGS_TOP_ROW - 1, LIST_COL);
+    cup(&mut out, settings_top - 1, LIST_COL);
     sgr_fg(&mut out, muted);
     out.push_str(if state.section() == Section::SettingsRows {
         "Settings (focused)"
@@ -829,13 +848,18 @@ fn theme_settings_overlay_text(
     });
     sgr_reset(&mut out);
 
-    for (i, kind) in SettingsRowKind::ALL.into_iter().enumerate() {
-        let row_y = SETTINGS_TOP_ROW + i as u16;
-        if row_y >= rows {
-            break;
-        }
-        cup(&mut out, row_y, LIST_COL);
-        if i == state.selected_row() && state.section() == Section::SettingsRows {
+    // When even the shrunken layout can't fit every row, scroll the window
+    // around the selection (same policy as the theme list above).
+    let visible = settings_len.min(rows.saturating_sub(settings_top));
+    let settings_offset = state
+        .selected_row()
+        .saturating_sub(visible as usize / 2)
+        .min((settings_len - visible) as usize);
+    for i in 0..visible {
+        let idx = settings_offset + i as usize;
+        let kind = SettingsRowKind::ALL[idx];
+        cup(&mut out, settings_top + i, LIST_COL);
+        if idx == state.selected_row() && state.section() == Section::SettingsRows {
             sgr_fg(&mut out, accent);
             out.push('>');
         } else {
@@ -843,7 +867,7 @@ fn theme_settings_overlay_text(
         }
         out.push(' ');
         sgr_reset(&mut out);
-        let value = format_row_value(&state.rows()[i].draft);
+        let value = format_row_value(&state.rows()[idx].draft);
         let note = if state.restart_note(kind) {
             " (restart to apply)"
         } else {
@@ -852,7 +876,7 @@ fn theme_settings_overlay_text(
         let _ = write!(out, "{:<20}{value}{note}", kind.label());
     }
 
-    let hint_row = SETTINGS_TOP_ROW + SettingsRowKind::ALL.len() as u16 + 1;
+    let hint_row = settings_top + visible + 1;
     if hint_row < rows {
         cup(&mut out, hint_row, LIST_COL);
         // A commit error (AC-23) takes over the hint line until the user

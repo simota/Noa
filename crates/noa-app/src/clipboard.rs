@@ -97,11 +97,21 @@ pub(crate) fn file_urls_to_paste_string(paths: &[PathBuf]) -> String {
         .join(" ")
 }
 
+/// How long a pasted-image temp file survives before [`write_temp_png`]'s
+/// once-per-process sweep reclaims it. Generous because the pasted *path* may
+/// still be referenced by a long-running program; without any sweep the files
+/// accumulate forever on platforms whose temp dir is never cleaned.
+const TEMP_PNG_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(48 * 60 * 60);
+
 /// Saves `png_bytes` to a fresh file in the system temp dir and returns its
 /// path. Used to give pasted clipboard images a real path to paste, matching
-/// Ghostty's paste-image-as-path behavior.
+/// Ghostty's paste-image-as-path behavior. The first write of the process
+/// also sweeps stale `noa-paste-*` files left behind by earlier runs.
 pub(crate) fn write_temp_png(png_bytes: &[u8]) -> anyhow::Result<PathBuf> {
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static PRUNE_ONCE: std::sync::Once = std::sync::Once::new();
+    PRUNE_ONCE.call_once(|| prune_stale_temp_pngs(&std::env::temp_dir(), SystemTime::now()));
 
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -110,6 +120,33 @@ pub(crate) fn write_temp_png(png_bytes: &[u8]) -> anyhow::Result<PathBuf> {
     let path = std::env::temp_dir().join(format!("noa-paste-{}-{nanos}.png", std::process::id()));
     std::fs::write(&path, png_bytes)?;
     Ok(path)
+}
+
+/// Remove `noa-paste-*.png` files in `dir` older than [`TEMP_PNG_MAX_AGE`].
+/// Best-effort: an unreadable dir or a losing race with another noa process
+/// deleting the same file is silently ignored.
+fn prune_stale_temp_pngs(dir: &std::path::Path, now: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("noa-paste-") || !name.ends_with(".png") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > TEMP_PNG_MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -336,5 +373,38 @@ mod tests {
         let contents = std::fs::read(&path).expect("temp file should be readable");
         assert_eq!(contents, bytes);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn prune_removes_only_stale_noa_paste_pngs() {
+        let dir = std::env::temp_dir().join(format!("noa-prune-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale = dir.join("noa-paste-1-1.png");
+        let fresh = dir.join("noa-paste-1-2.png");
+        let unrelated = dir.join("keep-me.png");
+        for path in [&stale, &fresh, &unrelated] {
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        let future = std::time::SystemTime::now() + TEMP_PNG_MAX_AGE * 2;
+        filetime_backdate(&stale, TEMP_PNG_MAX_AGE * 3);
+        prune_stale_temp_pngs(&dir, std::time::SystemTime::now());
+        assert!(!stale.exists(), "stale paste file should be removed");
+        assert!(fresh.exists(), "fresh paste file must survive");
+        assert!(unrelated.exists(), "non-noa-paste files must survive");
+
+        // Everything ages out against a far-future now.
+        prune_stale_temp_pngs(&dir, future);
+        assert!(!fresh.exists());
+        assert!(unrelated.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Shift a file's mtime `age` into the past (test helper).
+    fn filetime_backdate(path: &std::path::Path, age: std::time::Duration) {
+        let past = std::time::SystemTime::now() - age;
+        let file = std::fs::File::open(path).unwrap();
+        file.set_modified(past).unwrap();
     }
 }

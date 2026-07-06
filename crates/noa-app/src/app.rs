@@ -296,10 +296,7 @@ impl App {
             secure_input: crate::secure_input::SecureInput::new(),
             session_store: SessionStore::new(),
             sidebar_hotkey: None,
-            branch_poll: Some(crate::branch_poll::spawn(
-                proxy_for_branch_poll,
-                sidebar_visible_gate.clone(),
-            )),
+            branch_poll: Some(crate::branch_poll::spawn(proxy_for_branch_poll)),
             sidebar_visible_gate,
             sidebar_visible,
         }

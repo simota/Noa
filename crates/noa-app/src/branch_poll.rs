@@ -25,8 +25,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -37,9 +35,12 @@ use crate::events::UserEvent;
 use crate::session_store::{IconKind, SessionCardId, SessionDelta};
 
 /// Poll interval for each live session's foreground process (running-process
-/// display). Matches [`BRANCH_POLL_MIN_INTERVAL`]; the tick only fires while at
-/// least one probe is registered and a sidebar is visible (AC-18 discipline —
-/// no background work when nothing consumes it).
+/// display + agent-bell classification). Matches [`BRANCH_POLL_MIN_INTERVAL`];
+/// the tick only fires while at least one probe is registered. It is *not*
+/// gated on sidebar visibility: the store's `process` field feeds the
+/// agent-bell → attention escalation (FR-A3), which must work with every
+/// sidebar hidden — the poll itself is one cheap proc lookup per pane per
+/// second, posted only on change.
 pub const PROCESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A registration change for a session's foreground-process probe. The io/main
@@ -141,9 +142,10 @@ impl BranchPollHandle {
         let _ = self.request_tx.send(BranchPollRequest { id, cwd });
     }
 
-    /// Register a session's foreground-process probe (running-process display).
-    /// The worker polls it on [`PROCESS_POLL_INTERVAL`] while a sidebar is
-    /// visible and posts a [`SessionDelta::Process`] whenever the name changes.
+    /// Register a session's foreground-process probe (running-process display
+    /// and agent-bell classification). The worker polls it on
+    /// [`PROCESS_POLL_INTERVAL`] and posts a [`SessionDelta::Process`] whenever
+    /// the name changes.
     pub(crate) fn register_process_probe(&self, id: SessionCardId, probe: ForegroundProcessProbe) {
         let _ = self.probe_tx.send(ProbeControl::Register { id, probe });
     }
@@ -182,18 +184,13 @@ impl BranchPollHandle {
 
 /// Spawn the branch-poll worker (FR-8/FR-9). Runs until [`BranchPollHandle`] is
 /// shut down or the event loop is gone.
-pub(crate) fn spawn(
-    proxy: EventLoopProxy<UserEvent>,
-    sidebar_visible: Arc<AtomicBool>,
-) -> BranchPollHandle {
+pub(crate) fn spawn(proxy: EventLoopProxy<UserEvent>) -> BranchPollHandle {
     let (request_tx, request_rx) = crossbeam_channel::unbounded::<BranchPollRequest>();
     let (probe_tx, probe_rx) = crossbeam_channel::unbounded::<ProbeControl>();
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
     let join = std::thread::Builder::new()
         .name("noa-session-meta".to_string())
-        .spawn(move || {
-            worker_loop(&proxy, &request_rx, &probe_rx, &shutdown_rx, &sidebar_visible)
-        })
+        .spawn(move || worker_loop(&proxy, &request_rx, &probe_rx, &shutdown_rx))
         .expect("failed to spawn session-metadata thread");
     BranchPollHandle {
         request_tx,
@@ -208,7 +205,6 @@ fn worker_loop(
     request_rx: &Receiver<BranchPollRequest>,
     probe_rx: &Receiver<ProbeControl>,
     shutdown_rx: &Receiver<()>,
-    sidebar_visible: &AtomicBool,
 ) {
     let mut cache: HashMap<String, BranchCache> = HashMap::new();
     // Per-session foreground-process probe + last-posted name (so only changes
@@ -221,9 +217,9 @@ fn worker_loop(
         let request_op = sel.recv(request_rx);
         let probe_op = sel.recv(probe_rx);
 
-        // Tick to poll processes only while there is something to poll and a
-        // sidebar is showing it (AC-18: no idle background work).
-        let tick = !probes.is_empty() && sidebar_visible.load(Ordering::Relaxed);
+        // Tick to poll processes only while there is something to poll. Not
+        // gated on sidebar visibility — see [`PROCESS_POLL_INTERVAL`].
+        let tick = !probes.is_empty();
         let selected = if tick {
             sel.select_timeout(PROCESS_POLL_INTERVAL).ok()
         } else {

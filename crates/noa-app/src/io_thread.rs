@@ -51,9 +51,11 @@ pub(crate) struct OverviewPublish {
 /// Read-only gate for the session sidebar's publish path (FR-1/AC-19),
 /// deliberately **parallel to — never aliased with — [`OverviewPublish`]**
 /// (Omen T1). `visible` is app-wide (`App::sidebar_visible_gate`), flipped on
-/// while any window shows its sidebar; when it's off the io thread skips the
-/// extra work of extracting a card upsert on every pty feed for a single
-/// atomic load. Unlike the overview there is no `FrameSnapshot` slot here: the
+/// while any window shows its sidebar; when it's off the io thread skips only
+/// the preview-row extraction — the expensive part of an upsert — for a single
+/// atomic load. The lightweight card metadata (name/cwd/busy) still publishes
+/// so the attention pipeline works with every sidebar hidden (FR-A3/FR-A4).
+/// Unlike the overview there is no `FrameSnapshot` slot here: the
 /// `SessionStore` itself is the lock-free published surface (ADR 0001 —
 /// "SessionStore は overview_snapshot と同型の publish-slot 読取モデル"), fed by
 /// the [`SessionDelta`]s this gate lets through.
@@ -186,24 +188,27 @@ struct TerminalOutput {
     /// overview isn't visible).
     overview_publish_pending: Option<Instant>,
     /// A sidebar card upsert extracted this feed (name/cwd/busy/preview), or
-    /// `None` when the sidebar gate is off or the throttle window has not
-    /// elapsed. The spawn loop stamps it with the current wall-clock + card
-    /// generation and posts it as a [`SessionDelta::Upsert`].
+    /// `None` when the throttle window has not elapsed. The spawn loop stamps
+    /// it with the current wall-clock + card generation and posts it as a
+    /// [`SessionDelta::Upsert`].
     sidebar_upsert: Option<SidebarUpsert>,
     /// An unread bell was drained this feed (FR-11); the spawn loop posts a
-    /// [`SessionDelta::Bell`]. Only drained while the sidebar is visible, so a
-    /// bell rung with every sidebar hidden persists on the terminal until the
-    /// user opens one.
+    /// [`SessionDelta::Bell`]. Drained unconditionally (FR-A4): the main
+    /// thread classifies it, so an agent session's bell can escalate to an
+    /// attention request even with every sidebar hidden.
     sidebar_bell: bool,
 }
 
 /// Per-feed sidebar card state extracted under the terminal lock (FR-2). Time
 /// and generation are added by the spawn loop after the lock is released.
+/// `preview` is `None` when every sidebar is hidden (the extraction is the
+/// expensive part of the upsert, so only it is gated on visibility — the store
+/// keeps the card's previous preview).
 struct SidebarUpsert {
     name: String,
     cwd: String,
     busy: bool,
-    preview: Vec<PreviewLine>,
+    preview: Option<Vec<PreviewLine>>,
 }
 
 /// The trailing non-blank rows of the active screen, for the card preview
@@ -254,14 +259,17 @@ fn preview_spans(rows: Vec<Vec<noa_grid::Cell>>) -> Vec<PreviewLine> {
 /// Pure throttle decision for a sidebar publish (AC-19), mirroring
 /// [`decide_overview_publish`]'s now-as-param shape so it is testable without a
 /// wall-clock sleep. `true` means extract and post an upsert this feed; the
-/// gate-off and within-throttle cases both return `false`. No trailing-flush
-/// variant: a skipped upsert leaves slightly stale card state until the next
-/// output, which the store tolerates (unlike the overview mirror there is no
-/// frame to get visually stuck).
-fn decide_sidebar_publish(visible: bool, last_publish: Option<Instant>, now: Instant) -> bool {
-    if !visible {
-        return false;
-    }
+/// within-throttle case returns `false`. Not gated on sidebar visibility
+/// (FR-A3/FR-A4): the store must know every pane's name/cwd — and, via the
+/// cwd-driven metadata worker, its foreground process — even with every
+/// sidebar hidden, or an agent bell could never classify and escalate to an
+/// attention request, and an OSC 9/777 attention flag would land on a missing
+/// card. Only the preview extraction is visibility-gated (in
+/// [`feed_terminal_batch`]). No trailing-flush variant: a skipped upsert
+/// leaves slightly stale card state until the next output, which the store
+/// tolerates (unlike the overview mirror there is no frame to get visually
+/// stuck).
+fn decide_sidebar_publish(last_publish: Option<Instant>, now: Instant) -> bool {
     match last_publish {
         None => true,
         Some(last) => now.saturating_duration_since(last) >= OVERVIEW_TILE_MIN_RENDER_INTERVAL,
@@ -321,16 +329,17 @@ fn feed_terminal_batch<'a>(
     // Under the lock, clone only the raw preview rows plus the small card
     // scalars; the span/string building runs after the lock is released so
     // the main thread's snapshot pass is never blocked on string formatting.
-    let sidebar_raw =
-        decide_sidebar_publish(sidebar_visible, *last_sidebar_publish, Instant::now()).then(|| {
-            *last_sidebar_publish = Some(Instant::now());
-            (
-                term.title.clone(),
-                term.cwd.clone().unwrap_or_default(),
-                term.has_running_program(),
-                preview_rows(&term),
-            )
-        });
+    // The upsert itself is not visibility-gated (see `decide_sidebar_publish`);
+    // only the preview-row clone — the expensive part — is.
+    let sidebar_raw = decide_sidebar_publish(*last_sidebar_publish, Instant::now()).then(|| {
+        *last_sidebar_publish = Some(Instant::now());
+        (
+            term.title.clone(),
+            term.cwd.clone().unwrap_or_default(),
+            term.has_running_program(),
+            sidebar_visible.then(|| preview_rows(&term)),
+        )
+    });
 
     let mut output = TerminalOutput {
         pending_writes: term.take_pending_writes(),
@@ -347,7 +356,7 @@ fn feed_terminal_batch<'a>(
         name,
         cwd,
         busy,
-        preview: preview_spans(rows),
+        preview: rows.map(preview_spans),
     });
     output
 }
@@ -747,39 +756,34 @@ mod tests {
     }
 
     #[test]
-    fn decide_sidebar_publish_skips_when_gate_off_and_throttles_when_visible() {
+    fn decide_sidebar_publish_throttles() {
         let now = Instant::now();
-        // Gate off: never publishes, regardless of timing.
-        assert!(!decide_sidebar_publish(false, None, now));
+        // First feed publishes.
+        assert!(decide_sidebar_publish(None, now));
+        // Inside the throttle window: skip.
         assert!(!decide_sidebar_publish(
-            false,
-            Some(now - OVERVIEW_TILE_MIN_RENDER_INTERVAL * 10),
-            now
-        ));
-        // Visible + first feed publishes.
-        assert!(decide_sidebar_publish(true, None, now));
-        // Visible but inside the throttle window: skip.
-        assert!(!decide_sidebar_publish(
-            true,
             Some(now - OVERVIEW_TILE_MIN_RENDER_INTERVAL / 2),
             now
         ));
-        // Visible and past the throttle window: publish.
+        // Past the throttle window: publish.
         assert!(decide_sidebar_publish(
-            true,
             Some(now - OVERVIEW_TILE_MIN_RENDER_INTERVAL),
             now
         ));
     }
 
+    // FR-A3/FR-A4: the upsert is not visibility-gated — with every sidebar
+    // hidden the card metadata still publishes (so an agent bell can classify
+    // and escalate), but the expensive preview extraction is skipped.
     #[test]
-    fn feed_extracts_a_sidebar_upsert_only_while_visible_and_throttled() {
+    fn feed_extracts_a_lightweight_upsert_while_hidden_and_a_full_one_while_visible() {
         let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
         let mut stream = noa_vt::Stream::new();
         let overview = test_overview_publish();
         let mut last_overview_publish = None;
 
-        // Gate off: no upsert, no bell.
+        // Gate off: a lightweight upsert (no preview), no bell.
+        let mut last_sidebar_publish = None;
         let off = feed_terminal(
             &terminal,
             &mut stream,
@@ -787,12 +791,15 @@ mod tests {
             &overview,
             &mut last_overview_publish,
             &test_sidebar_publish(false),
-            &mut None,
+            &mut last_sidebar_publish,
         );
-        assert!(off.sidebar_upsert.is_none());
+        let light = off.sidebar_upsert.expect("hidden first feed still publishes");
+        assert!(light.preview.is_none());
         assert!(!off.sidebar_bell);
+        assert!(last_sidebar_publish.is_some());
 
-        // Gate on, first feed: an upsert carrying the trailing preview line.
+        // Gate on, past the throttle: an upsert carrying the trailing preview
+        // line.
         let sidebar = test_sidebar_publish(true);
         let mut last_sidebar_publish = None;
         let on = feed_terminal(
@@ -808,6 +815,7 @@ mod tests {
         assert!(
             upsert
                 .preview
+                .expect("visible feed extracts the preview")
                 .iter()
                 .any(|line| session_store::preview_line_text(line).contains("second line"))
         );

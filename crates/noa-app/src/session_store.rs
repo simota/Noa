@@ -156,7 +156,10 @@ impl SessionCard {
 pub enum SessionDelta {
     /// Create or refresh a card's per-tick state. `seq` is the card generation
     /// (monotonic per card); an `Upsert` older than what the store last saw for
-    /// that card — or one for a card already removed — is dropped.
+    /// that card — or one for a card already removed — is dropped. `preview` is
+    /// `None` when the io thread skipped the extraction (sidebar hidden —
+    /// FR-A4's lightweight upsert): the card's existing preview is kept rather
+    /// than cleared.
     Upsert {
         id: SessionCardId,
         seq: u64,
@@ -164,7 +167,7 @@ pub enum SessionDelta {
         cwd: String,
         busy: bool,
         updated_at: WallClock,
-        preview: Vec<PreviewLine>,
+        preview: Option<Vec<PreviewLine>>,
     },
     /// Remove a card (session teardown). Records a tombstone so a late/queued
     /// `Upsert` for the same id cannot resurrect it.
@@ -423,13 +426,16 @@ impl SessionStore {
                             return;
                         }
                         // Refresh per-tick fields; preserve the rename override,
-                        // branch/icon (owned by the branch-poll thread), and the
-                        // unread-bell/attention flags (cleared only on focus).
+                        // branch/icon (owned by the branch-poll thread), the
+                        // unread-bell/attention flags (cleared only on focus),
+                        // and — on a lightweight upsert — the preview.
                         card.name = name;
                         card.cwd = cwd;
                         card.busy = busy;
                         card.updated_at = updated_at;
-                        card.preview = preview;
+                        if let Some(preview) = preview {
+                            card.preview = preview;
+                        }
                         card.seq = seq;
                     }
                     None => {
@@ -447,7 +453,7 @@ impl SessionStore {
                                 busy,
                                 process: None,
                                 updated_at,
-                                preview,
+                                preview: preview.unwrap_or_default(),
                                 seq,
                             },
                         );
@@ -669,7 +675,7 @@ mod tests {
             cwd: "/repo".to_string(),
             busy: false,
             updated_at: wall(10, 0),
-            preview: Vec::new(),
+            preview: None,
         }
     }
 
@@ -1123,7 +1129,7 @@ mod tests {
             cwd: "/repo".to_string(),
             busy: true,
             updated_at: wall(10, 0),
-            preview: Vec::new(),
+            preview: None,
         });
         store.apply(SessionDelta::Attention { id: card_id(2, 1) });
         store.apply(upsert(card_id(1, 1), 1, "idle"));

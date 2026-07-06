@@ -734,7 +734,7 @@ impl App {
                     self.toggle_split_zoom(window_id);
                 }
             }
-            AppCommand::ToggleTabOverview => self.toggle_tab_overview(event_loop),
+            AppCommand::ToggleTabOverview => self.toggle_tab_overview(),
             AppCommand::CloseTab => {
                 if let Some(window_id) = self.focused {
                     self.request_close_focused_pane_or_tab(event_loop, window_id);
@@ -1109,15 +1109,6 @@ impl App {
         format!("noa.tabs.{}.{}", std::process::id(), group.0)
     }
 
-    fn overview_window_attributes(&self) -> WindowAttributes {
-        WindowAttributes::default()
-            .with_title("Session Overview")
-            // Exposé-style: the overview fills the screen's work area; the
-            // inner size is only the pre-maximize fallback.
-            .with_inner_size(LogicalSize::new(900.0, 600.0))
-            .with_maximized(true)
-    }
-
     /// The working directory reported by a pane's shell over OSC 7, if it
     /// points at a directory that still exists locally. A new tab or split
     /// inherits it so it opens where the focused shell is (Ghostty parity).
@@ -1268,6 +1259,14 @@ impl App {
     }
 
     fn close_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
+        // The Overview overlay lives inside its host window; closing the host
+        // tears the overlay down with it (before `close_tab_outcome`, so the
+        // last-window case quits instead of keeping a ghost overlay alive).
+        if self.overview_host() == Some(window_id) {
+            self.overview_window = None;
+            self.overview_visible = false;
+            self.overview_visible_gate.store(false, Ordering::Relaxed);
+        }
         let outcome = close_tab_outcome(
             &self.window_order,
             self.focused,

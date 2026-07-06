@@ -171,14 +171,15 @@ pub(super) struct SidebarDrag {
     pub(super) active: bool,
 }
 
-/// State for the dedicated overview window. It deliberately is not part of
-/// `windows`/`window_order`, which are terminal-tab collections.
+/// State for the in-window Session Overview overlay. The Overview no longer
+/// owns a dedicated window: it renders into the hosting terminal window's
+/// surface (the window that was focused when it was toggled on), and that
+/// window's input is routed to the Overview keymap while it is visible.
 pub(super) struct OverviewWindowState {
-    pub(super) window: Arc<Window>,
-    pub(super) occluded: bool,
+    /// The terminal window hosting the overlay. Must be a key of
+    /// `App::windows`; closing the host tears the overlay down with it.
+    pub(super) host: WindowId,
     pub(super) last_cursor_point: Option<split_tree::Point>,
-    pub(super) surface: wgpu::Surface<'static>,
-    pub(super) surface_config: wgpu::SurfaceConfiguration,
     /// Shared scratch + per-tile textures (REQ-NF-3), sized for every live
     /// mirror tile and every title-only placeholder tile (REQ-OV-10).
     pub(super) thumbnails: Option<OverviewThumbnailResources>,

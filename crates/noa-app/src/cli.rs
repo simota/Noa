@@ -263,6 +263,7 @@ fn show_config_output(config: &StartupConfig) -> String {
         "clipboard-paste-protection",
         &config.clipboard_paste_protection.to_string(),
     );
+    push_line(&mut out, "title-report", &config.title_report.to_string());
     push_optional_line(&mut out, "window-padding-x", config.window_padding_x);
     push_optional_line(&mut out, "window-padding-y", config.window_padding_y);
     push_color_line(&mut out, "background", config.background);
@@ -539,6 +540,7 @@ mod tests {
         assert!(output.contains("font-family = \n"));
         assert!(output.contains("clipboard-read = ask\n"));
         assert!(output.contains("clipboard-paste-protection = true\n"));
+        assert!(output.contains("title-report = false\n"));
         assert!(output.contains("minimum-contrast = 1\n"));
         assert!(output.contains("background-opacity = 1\n"));
         assert!(output.contains("background-blur-radius = 0\n"));

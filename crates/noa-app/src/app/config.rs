@@ -21,6 +21,9 @@ pub struct AppConfig {
     pub clipboard_read: noa_config::ClipboardAccess,
     /// Whether to confirm before pasting content that could run commands.
     pub clipboard_paste_protection: bool,
+    /// Whether `CSI 21 t` may report the window title back to the program
+    /// (`title-report`, default off — see `Terminal::title_report`).
+    pub title_report: bool,
     /// `window-padding-x/y`: `None` keeps the built-in default for that axis.
     /// Resolved to a `GridPadding` once in [`App::new`].
     pub window_padding_x: Option<f32>,

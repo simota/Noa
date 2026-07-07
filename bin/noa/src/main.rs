@@ -89,6 +89,7 @@ fn app_config_from_startup(
         font: config.font,
         clipboard_read: config.clipboard_read,
         clipboard_paste_protection: config.clipboard_paste_protection,
+        title_report: config.title_report,
         window_padding_x: config.window_padding_x,
         window_padding_y: config.window_padding_y,
         background: config.background,

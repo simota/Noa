@@ -1241,6 +1241,7 @@ impl App {
         // when a request arrives.
         terminal.osc52_policy.allow_read =
             self.config.clipboard_read != noa_config::ClipboardAccess::Deny;
+        terminal.title_report = self.config.title_report;
         terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
         if let Some(gpu) = self.gpu.as_ref() {
             // Deliberately `gpu.theme` directly, not the `active_theme()`

@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
@@ -238,6 +238,9 @@ pub struct App {
     /// (FR-1/AC-19). Deliberately distinct from `overview_visible_gate` (Omen
     /// T1); flipped on while any window shows its sidebar.
     sidebar_visible_gate: Arc<AtomicBool>,
+    /// Shared with every pane's io thread so `sidebar-preview-lines` can be
+    /// changed by Theme & Settings without respawning PTYs.
+    sidebar_preview_lines_gate: Arc<AtomicUsize>,
     /// The tab groups (logical windows) whose session sidebar is currently
     /// shown (FR-4). Per-window, not app-wide: toggling flips every tab of the
     /// focused window's group at once (tabs of one native window stay
@@ -270,6 +273,7 @@ impl App {
         // process poll only ticks while a sidebar is shown (AC-18).
         let proxy_for_branch_poll = proxy.clone();
         let sidebar_visible_gate = Arc::new(AtomicBool::new(false));
+        let sidebar_preview_lines_gate = Arc::new(AtomicUsize::new(config.sidebar_preview_lines));
         App {
             padding,
             initial_cursor_style,
@@ -316,6 +320,7 @@ impl App {
             sidebar_hotkey: None,
             branch_poll: Some(crate::branch_poll::spawn(proxy_for_branch_poll)),
             sidebar_visible_gate,
+            sidebar_preview_lines_gate,
             sidebar_visible_groups: HashSet::new(),
         }
     }
@@ -1264,6 +1269,7 @@ impl App {
         };
         let sidebar_publish = crate::io_thread::SidebarPublish {
             visible: self.sidebar_visible_gate.clone(),
+            preview_lines: self.sidebar_preview_lines_gate.clone(),
         };
         let io_thread = crate::io_thread::spawn(
             pty,

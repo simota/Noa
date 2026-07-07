@@ -6,7 +6,7 @@
 //! are all scaled by `bytes_per_px` so the same packing/growth logic serves
 //! both without duplicating it (WP1, REQ-EMOJI-2/3).
 
-use etagere::{size2, AllocId, BucketedAtlasAllocator};
+use etagere::{AllocId, BucketedAtlasAllocator, size2};
 
 const MAX_ATLAS_DIM: u32 = 8192;
 

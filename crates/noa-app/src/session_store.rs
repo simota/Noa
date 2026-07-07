@@ -134,9 +134,10 @@ pub struct SessionCard {
     /// resolves it, or where detection is unavailable (non-macOS, NFR-5).
     pub process: Option<String>,
     pub updated_at: WallClock,
-    /// Last-output preview lines (up to 5; FR-2), each carrying its color runs
-    /// so the sidebar renders output in its original ANSI colors. Filled by the
-    /// io thread from the active screen's trailing rows.
+    /// Last-output preview lines (capped by `sidebar-preview-lines`; FR-2),
+    /// each carrying its color runs so the sidebar renders output in its
+    /// original ANSI colors. Filled by the io thread from the active screen's
+    /// trailing rows.
     pub preview: Vec<PreviewLine>,
     seq: u64,
     /// Store-global monotonic stamp of the last applied `Upsert` (an upsert

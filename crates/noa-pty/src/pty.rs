@@ -376,7 +376,8 @@ mod tests {
         let pty = Pty::spawn(cfg).expect("spawn pty");
 
         let w = pty.writer();
-        w.write(b"echo \"$TERM $COLORTERM\"\nexit\n").expect("write");
+        w.write(b"echo \"$TERM $COLORTERM\"\nexit\n")
+            .expect("write");
         w.flush().expect("flush");
 
         let mut collected = Vec::new();

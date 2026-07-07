@@ -99,6 +99,9 @@ pub struct AppConfig {
     /// focused window (FR-13). `None` (or the empty-string "disabled" sentinel)
     /// registers no chord.
     pub sidebar_hotkey: Option<String>,
+    /// `sidebar-preview-lines`: number of trailing output rows shown in each
+    /// sidebar card. `0` disables the preview rows.
+    pub sidebar_preview_lines: usize,
     /// `resize-overlay`: whether the `cols × rows` toast shows during a live
     /// resize (Ghostty parity).
     pub resize_overlay: noa_config::ResizeOverlay,

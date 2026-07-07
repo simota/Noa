@@ -4,8 +4,8 @@ use noa_core::Rgb;
 
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, CursorShape,
-    FontFeature, FontVariation, MacosOptionAsAlt, MacosTitlebarStyle, ResizeOverlay,
-    SyntheticStyleMode, WindowSaveState,
+    FontFeature, FontVariation, MAX_SIDEBAR_PREVIEW_LINES, MacosOptionAsAlt, MacosTitlebarStyle,
+    ResizeOverlay, SyntheticStyleMode, WindowSaveState,
 };
 
 use super::diagnostics::*;
@@ -422,6 +422,26 @@ pub(super) fn parse_quick_terminal_size(
         return None;
     }
     Some(parsed.clamp(MIN_QUICK_TERMINAL_SIZE, 1.0))
+}
+
+/// Parse `sidebar-preview-lines`: the number of trailing output rows shown on
+/// each sidebar card. `0` disables preview rows; larger values are bounded so a
+/// config typo cannot create enormous cards.
+pub(super) fn parse_sidebar_preview_lines(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<usize> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<usize>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if parsed > MAX_SIDEBAR_PREVIEW_LINES {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(parsed)
 }
 
 /// Parse a `#RRGGBB` or `RRGGBB` (case-insensitive) hex color.

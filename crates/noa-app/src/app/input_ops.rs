@@ -497,6 +497,7 @@ impl App {
             window_padding_x: self.config.window_padding_x.unwrap_or(0.0),
             window_padding_y: self.config.window_padding_y.unwrap_or(0.0),
             macos_titlebar_style: self.config.macos_titlebar_style,
+            sidebar_preview_lines: self.config.sidebar_preview_lines,
             font_family,
             available_font_families,
         };
@@ -609,6 +610,7 @@ impl App {
                     .map_or(1.0, |session| session.state.live_background_opacity());
                 self.apply_live_background_blur(radius, opacity);
             }
+            RowEffect::SidebarPreviewLines(lines) => self.apply_live_sidebar_preview_lines(lines),
         }
         self.request_window_redraw(window_id);
     }
@@ -670,6 +672,7 @@ impl App {
                 values.background_opacity,
             );
             self.apply_runtime_font_size(session.window_id, values.font_size);
+            self.apply_live_sidebar_preview_lines(values.sidebar_preview_lines);
         }
         self.request_window_redraw(session.window_id);
     }
@@ -744,13 +747,11 @@ impl App {
             self.apply_runtime_font_size(window_id, size);
         }
         // font-family / window-padding / macos-titlebar-style have no
-        // existing runtime-apply path (rebuilding the font-kit family stack,
-        // relayout padding, or swapping the AppKit titlebar mid-session)
-        // cheap enough to add in this increment — they are persist-only
-        // here (the write above already landed) and take effect on the next
-        // launch, the same deferred pattern R-11 already uses for
-        // opaque-startup opacity/blur. Deliberate deviation, recorded for
-        // the acceptance check rather than silently dropped.
+        // existing runtime-apply path cheap enough to add in this increment
+        // — they are persist-only here (the write above already landed) and
+        // take effect on the next launch, the same deferred pattern R-11
+        // already uses for opaque-startup opacity/blur. Deliberate deviation,
+        // recorded for the acceptance check rather than silently dropped.
 
         for id in commit_redraw_targets(&self.windows) {
             self.request_window_redraw(id);
@@ -760,14 +761,18 @@ impl App {
     }
 
     /// Mirror the just-committed *live* rows (font-size, background-opacity,
-    /// background-blur-radius, cursor-style) into `self.config` so a future
-    /// reopen of the overlay shows them as the new "current" values. The
-    /// three commit-only rows are deliberately excluded: nothing on screen
+    /// background-blur-radius, cursor-style, sidebar-preview-lines) into
+    /// `self.config` so a future reopen of the overlay shows them as the new
+    /// "current" values. The
+    /// commit-only rows are deliberately excluded: nothing on screen
     /// actually changes for them until a restart, so leaving `self.config`
     /// at its pre-commit value keeps it truthful to what the user still
     /// sees, even though the file on disk has already moved (the same
     /// config-vs-runtime divergence an external edit would produce).
-    fn sync_config_from_committed_live_rows(&mut self, rows: &[SettingsRow; 7]) {
+    fn sync_config_from_committed_live_rows(
+        &mut self,
+        rows: &[SettingsRow; SettingsRowKind::COUNT],
+    ) {
         for (kind, row) in SettingsRowKind::ALL.iter().zip(rows.iter()) {
             if !row.touched {
                 continue;
@@ -783,6 +788,9 @@ impl App {
                 (SettingsRowKind::CursorStyle, RowDraft::CursorStyle(v)) => {
                     self.config.cursor_style = Some(*v);
                 }
+                (SettingsRowKind::SidebarPreviewLines, RowDraft::SidebarPreviewLines(v)) => {
+                    self.apply_live_sidebar_preview_lines(*v);
+                }
                 // Commit-only rows: intentionally not mirrored (see the doc
                 // comment above).
                 (SettingsRowKind::FontFamily, RowDraft::FontFamily(_))
@@ -795,6 +803,12 @@ impl App {
                 }
             }
         }
+    }
+
+    fn apply_live_sidebar_preview_lines(&mut self, lines: usize) {
+        self.config.sidebar_preview_lines = lines;
+        self.sidebar_preview_lines_gate
+            .store(lines, Ordering::Relaxed);
     }
 
     /// Apply a cursor-shape change to every live terminal now (R-10:
@@ -1290,7 +1304,10 @@ impl App {
 
     pub(super) fn write_pane_pty_bytes(&self, window_id: WindowId, pane_id: PaneId, bytes: &[u8]) {
         if std::env::var_os("NOA_IME_TRACE").is_some() {
-            eprintln!("[ime-trace] pty write: {:?}", String::from_utf8_lossy(bytes));
+            eprintln!(
+                "[ime-trace] pty write: {:?}",
+                String::from_utf8_lossy(bytes)
+            );
         }
         let Some(surface) = self
             .windows

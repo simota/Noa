@@ -53,6 +53,7 @@ pub(crate) fn build_overrides(
     let mut sidebar_enabled = None;
     let mut sidebar_width = None;
     let mut sidebar_hotkey = None;
+    let mut sidebar_preview_lines = None;
     let mut resize_overlay = None;
     let mut visual_bell = None;
     let mut diagnostics = Vec::new();
@@ -238,6 +239,10 @@ pub(crate) fn build_overrides(
                     },
                 });
             }
+            "sidebar-preview-lines" => {
+                sidebar_preview_lines =
+                    parse_sidebar_preview_lines(path, directive, &mut diagnostics);
+            }
             "resize-overlay" => {
                 resize_overlay = parse_resize_overlay(path, directive, &mut diagnostics);
             }
@@ -302,6 +307,7 @@ pub(crate) fn build_overrides(
             sidebar_enabled,
             sidebar_width,
             sidebar_hotkey,
+            sidebar_preview_lines,
             resize_overlay,
             visual_bell,
         },
@@ -347,6 +353,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "sidebar-enabled"
             | "sidebar-width"
             | "sidebar-hotkey"
+            | "sidebar-preview-lines"
             | "resize-overlay"
             | "visual-bell"
     )

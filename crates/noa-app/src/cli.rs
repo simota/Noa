@@ -352,6 +352,22 @@ fn show_config_output(config: &StartupConfig) -> String {
         "quick-terminal-autohide",
         &config.quick_terminal_autohide.to_string(),
     );
+    push_line(
+        &mut out,
+        "sidebar-enabled",
+        &config.sidebar_enabled.to_string(),
+    );
+    push_line(&mut out, "sidebar-width", &config.sidebar_width.to_string());
+    push_line(
+        &mut out,
+        "sidebar-hotkey",
+        config.sidebar_hotkey.as_deref().unwrap_or(""),
+    );
+    push_line(
+        &mut out,
+        "sidebar-preview-lines",
+        &config.sidebar_preview_lines.to_string(),
+    );
     out
 }
 
@@ -547,6 +563,10 @@ mod tests {
         assert!(output.contains("window-save-state = default\n"));
         assert!(output.contains("macos-option-as-alt = false\n"));
         assert!(output.contains("macos-titlebar-style = native\n"));
+        assert!(output.contains("sidebar-enabled = false\n"));
+        assert!(output.contains("sidebar-width = 360\n"));
+        assert!(output.contains("sidebar-hotkey = \n"));
+        assert!(output.contains("sidebar-preview-lines = 3\n"));
         assert!(
             output.lines().all(|line| line.contains(" = ")),
             "every line must be `key = value`"
@@ -562,6 +582,10 @@ mod tests {
             cursor_style: Some(CursorShape::Bar),
             macos_option_as_alt: MacosOptionAsAlt::Right,
             macos_titlebar_style: MacosTitlebarStyle::Transparent,
+            sidebar_enabled: true,
+            sidebar_width: 280.0,
+            sidebar_hotkey: Some("cmd+shift+s".to_string()),
+            sidebar_preview_lines: 4,
             font: noa_config::FontConfig {
                 families: vec!["JetBrains Mono".to_string(), "Menlo".to_string()],
                 features: vec![noa_config::FontFeature {
@@ -585,6 +609,10 @@ mod tests {
         assert!(output.contains("cursor-style = bar\n"));
         assert!(output.contains("macos-option-as-alt = right\n"));
         assert!(output.contains("macos-titlebar-style = transparent\n"));
+        assert!(output.contains("sidebar-enabled = true\n"));
+        assert!(output.contains("sidebar-width = 280\n"));
+        assert!(output.contains("sidebar-hotkey = cmd+shift+s\n"));
+        assert!(output.contains("sidebar-preview-lines = 4\n"));
         assert!(output.contains("font-family = JetBrains Mono\n"));
         assert!(output.contains("font-family = Menlo\n"));
         assert!(output.contains("font-feature = -liga\n"));

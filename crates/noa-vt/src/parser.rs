@@ -226,9 +226,9 @@ impl Parser {
                 self.state = State::SosPmApcString;
                 self.string_utf8_rem = 0;
             }
-            0x5f => self.goto(State::ApcString, sink),      // '_' APC (captured)
-            0x5b => self.goto(State::CsiEntry, sink),       // '[' CSI
-            0x5d => self.goto(State::OscString, sink),      // ']' OSC
+            0x5f => self.goto(State::ApcString, sink), // '_' APC (captured)
+            0x5b => self.goto(State::CsiEntry, sink),  // '[' CSI
+            0x5d => self.goto(State::OscString, sink), // ']' OSC
             0x30..=0x4f | 0x51..=0x57 | 0x59 | 0x5a | 0x5c | 0x60..=0x7e => {
                 self.esc_dispatch(b, sink);
                 self.state = State::Ground;
@@ -433,7 +433,7 @@ impl Parser {
                 self.state = State::SosPmApcString;
                 self.string_utf8_rem = 0;
             }
-            0x9b => self.goto(State::CsiEntry, sink),       // CSI
+            0x9b => self.goto(State::CsiEntry, sink), // CSI
             0x9c => {
                 if self.state == State::OscString {
                     self.goto(State::Ground, sink);

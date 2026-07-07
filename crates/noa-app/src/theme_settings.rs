@@ -58,6 +58,8 @@ const BLUR_MAX: u16 = 64;
 /// Window-padding step per ←→ press (both x and y move together — a single
 /// row adjusts uniform padding; see [`ThemeSettings::adjust`]'s doc for why).
 const WINDOW_PADDING_STEP: f32 = 1.0;
+/// Sidebar preview line count step per ←→ press.
+const SIDEBAR_PREVIEW_LINES_STEP: i32 = 1;
 
 /// Which half of the overlay currently owns ↑↓/←→ navigation (R-2). Tab
 /// toggles between the two.
@@ -67,7 +69,7 @@ pub(crate) enum Section {
     SettingsRows,
 }
 
-/// The 7 fixed v1 settings rows (SHAPE table), in display/array order.
+/// The fixed settings rows (SHAPE table), in display/array order.
 /// `SettingsRow` storage in [`ThemeSettings::rows`] uses this same order, so
 /// `ALL[i]` always names the kind stored at `rows[i]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,10 +81,12 @@ pub(crate) enum SettingsRowKind {
     FontFamily,
     WindowPadding,
     MacosTitlebarStyle,
+    SidebarPreviewLines,
 }
 
 impl SettingsRowKind {
-    pub(crate) const ALL: [SettingsRowKind; 7] = [
+    pub(crate) const COUNT: usize = 8;
+    pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
         Self::BackgroundBlurRadius,
@@ -90,6 +94,7 @@ impl SettingsRowKind {
         Self::FontFamily,
         Self::WindowPadding,
         Self::MacosTitlebarStyle,
+        Self::SidebarPreviewLines,
     ];
 
     /// R-8: the fixed live/commit-only classification, one row's kind at a
@@ -101,6 +106,7 @@ impl SettingsRowKind {
                 | Self::BackgroundOpacity
                 | Self::BackgroundBlurRadius
                 | Self::CursorStyle
+                | Self::SidebarPreviewLines
         )
     }
 
@@ -118,6 +124,7 @@ impl SettingsRowKind {
             Self::FontFamily => "Font Family",
             Self::WindowPadding => "Window Padding",
             Self::MacosTitlebarStyle => "Titlebar Style",
+            Self::SidebarPreviewLines => "Sidebar Preview Lines",
         }
     }
 }
@@ -133,6 +140,7 @@ pub(crate) enum RowDraft {
     FontFamily(String),
     WindowPadding(f32, f32),
     MacosTitlebarStyle(MacosTitlebarStyle),
+    SidebarPreviewLines(usize),
 }
 
 /// One settings row: its draft value and whether the user has actually
@@ -162,6 +170,8 @@ pub(crate) enum RowEffect {
     /// Background blur radius changed; same opaque-at-startup gating as
     /// `Opacity`.
     Blur(u16),
+    /// Sidebar card preview line count changed and should apply immediately.
+    SidebarPreviewLines(usize),
 }
 
 /// The pre-open snapshot every value reverts to on Esc (R-16). Also doubles
@@ -174,6 +184,7 @@ pub(crate) struct RevertValues {
     pub(crate) cursor_style: CursorShape,
     pub(crate) background_opacity: f32,
     pub(crate) background_blur_radius: u16,
+    pub(crate) sidebar_preview_lines: usize,
 }
 
 /// Everything `App` must supply to open the overlay — the session's live
@@ -190,6 +201,7 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) window_padding_x: f32,
     pub(crate) window_padding_y: f32,
     pub(crate) macos_titlebar_style: MacosTitlebarStyle,
+    pub(crate) sidebar_preview_lines: usize,
     pub(crate) font_family: String,
     pub(crate) available_font_families: Vec<String>,
 }
@@ -259,7 +271,7 @@ pub(crate) struct ThemeSettings {
     /// previews nothing until then. Also feeds [`Self::badge_visible`].
     highlight_moved: bool,
     selected_row: usize,
-    rows: [SettingsRow; 7],
+    rows: [SettingsRow; SettingsRowKind::COUNT],
     snapshot: RevertValues,
     font_size_debounce: Debouncer<f32>,
     /// Accumulates digit keystrokes typed directly into the focused
@@ -290,6 +302,7 @@ impl ThemeSettings {
             cursor_style: init.cursor_style,
             background_opacity: init.background_opacity,
             background_blur_radius: init.background_blur_radius,
+            sidebar_preview_lines: init.sidebar_preview_lines,
         };
         let rows = [
             SettingsRow {
@@ -318,6 +331,10 @@ impl ThemeSettings {
             },
             SettingsRow {
                 draft: RowDraft::MacosTitlebarStyle(init.macos_titlebar_style),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::SidebarPreviewLines(init.sidebar_preview_lines),
                 touched: false,
             },
         ];
@@ -397,7 +414,7 @@ impl ThemeSettings {
         self.selected_row
     }
 
-    pub(crate) fn rows(&self) -> &[SettingsRow; 7] {
+    pub(crate) fn rows(&self) -> &[SettingsRow; SettingsRowKind::COUNT] {
         &self.rows
     }
 
@@ -415,7 +432,7 @@ impl ThemeSettings {
     /// opacity/blur row whose session started opaque (R-11's original
     /// case — `FontSize`/`CursorStyle` always apply live regardless), or
     /// any *commit-only* row (`FontFamily`/`WindowPadding`/
-    /// `MacosTitlebarStyle`) the user has actually edited — those three have
+    /// `MacosTitlebarStyle`) the user has actually edited — those have
     /// no runtime-apply path at all (`App::commit_theme_settings`), so a
     /// touched edit persists to config but only takes effect on the next
     /// launch.
@@ -653,6 +670,20 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
+            SettingsRowKind::SidebarPreviewLines => {
+                let RowDraft::SidebarPreviewLines(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = (current as i32 + delta * SIDEBAR_PREVIEW_LINES_STEP)
+                    .clamp(0, noa_config::MAX_SIDEBAR_PREVIEW_LINES as i32)
+                    as usize;
+                if new != current {
+                    self.rows[idx].draft = RowDraft::SidebarPreviewLines(new);
+                    self.rows[idx].touched = true;
+                    return RowEffect::SidebarPreviewLines(new);
+                }
+                RowEffect::None
+            }
         }
     }
 
@@ -781,6 +812,9 @@ impl ThemeSettings {
                         macos_titlebar_style_config_value(*style).to_string(),
                     ));
                 }
+                RowDraft::SidebarPreviewLines(lines) => {
+                    updates.push(("sidebar-preview-lines".to_string(), lines.to_string()));
+                }
             }
         }
         updates
@@ -882,6 +916,7 @@ mod tests {
             window_padding_x: 2.0,
             window_padding_y: 2.0,
             macos_titlebar_style: MacosTitlebarStyle::Native,
+            sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
             font_family: "Menlo".to_string(),
             available_font_families: vec![
                 "Menlo".to_string(),
@@ -1032,18 +1067,19 @@ mod tests {
         assert_eq!(effect, RowEffect::Opacity(0.95));
     }
 
-    // Amended spec (UX consistency): the three commit-only rows persist to
+    // Amended spec (UX consistency): the commit-only rows persist to
     // config on commit but only take effect on the next launch, same as
     // opaque-startup opacity/blur — so a touched edit shows the same
     // "applies after restart" note. Untouched, no note; and the note is
     // independent of `opaque_at_startup` (a transparent-started session
-    // still shows it for these three).
+    // still shows it for these rows).
     #[test]
     fn touched_commit_only_rows_show_restart_note() {
         let mut settings = ThemeSettings::open(transparent_init());
         assert!(!settings.restart_note(SettingsRowKind::FontFamily));
         assert!(!settings.restart_note(SettingsRowKind::WindowPadding));
         assert!(!settings.restart_note(SettingsRowKind::MacosTitlebarStyle));
+        assert!(!settings.restart_note(SettingsRowKind::SidebarPreviewLines));
 
         settings.toggle_section();
         for _ in 0..4 {
@@ -1057,6 +1093,7 @@ mod tests {
         assert!(settings.restart_note(SettingsRowKind::FontFamily));
         assert!(!settings.restart_note(SettingsRowKind::WindowPadding));
         assert!(!settings.restart_note(SettingsRowKind::MacosTitlebarStyle));
+        assert!(!settings.restart_note(SettingsRowKind::SidebarPreviewLines));
     }
 
     // AC-4a: the badge is invisible until either the theme highlight moves
@@ -1181,6 +1218,10 @@ mod tests {
         assert_eq!(values.cursor_style, CursorShape::Block);
         assert_eq!(values.background_opacity, 1.0);
         assert_eq!(values.background_blur_radius, 0);
+        assert_eq!(
+            values.sidebar_preview_lines,
+            noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES
+        );
 
         // The pending font-size value must never fire after revert.
         assert_eq!(
@@ -1245,6 +1286,42 @@ mod tests {
         );
         settings.adjust(1, Instant::now());
         assert_eq!(settings.rows()[5].draft, RowDraft::WindowPadding(3.0, 3.0));
+    }
+
+    #[test]
+    fn sidebar_preview_lines_row_adjusts_clamps_and_commits() {
+        let mut settings = ThemeSettings::open(init());
+        settings.toggle_section();
+        for _ in 0..7 {
+            settings.move_down();
+        }
+        assert_eq!(
+            SettingsRowKind::ALL[settings.selected_row()],
+            SettingsRowKind::SidebarPreviewLines
+        );
+
+        let effect = settings.adjust(1, Instant::now());
+        assert_eq!(effect, RowEffect::SidebarPreviewLines(4));
+        assert_eq!(settings.rows()[7].draft, RowDraft::SidebarPreviewLines(4));
+        assert!(!settings.restart_note(SettingsRowKind::SidebarPreviewLines));
+
+        for _ in 0..20 {
+            settings.adjust(1, Instant::now());
+        }
+        assert_eq!(
+            settings.rows()[7].draft,
+            RowDraft::SidebarPreviewLines(noa_config::MAX_SIDEBAR_PREVIEW_LINES)
+        );
+        for _ in 0..20 {
+            settings.adjust(-1, Instant::now());
+        }
+        assert_eq!(settings.rows()[7].draft, RowDraft::SidebarPreviewLines(0));
+
+        let updates = settings.commit_updates();
+        assert_eq!(
+            updates.iter().find(|(k, _)| k == "sidebar-preview-lines"),
+            Some(&("sidebar-preview-lines".to_string(), "0".to_string()))
+        );
     }
 
     // R-17/NFR-6 (commit_updates half of AC-14): an untouched row's draft can

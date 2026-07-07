@@ -6,7 +6,7 @@
 //! requests come in from the main thread over crossbeam channels.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -55,6 +55,8 @@ pub(crate) struct OverviewPublish {
 /// the preview-row extraction — the expensive part of an upsert — for a single
 /// atomic load. The lightweight card metadata (name/cwd/busy) still publishes
 /// so the attention pipeline works with every sidebar hidden (FR-A3/FR-A4).
+/// `preview_lines` is also shared because Theme & Settings can change the card
+/// preview size while the pane's io thread is already running.
 /// Unlike the overview there is no `FrameSnapshot` slot here: the
 /// `SessionStore` itself is the lock-free published surface (ADR 0001 —
 /// "SessionStore は overview_snapshot と同型の publish-slot 読取モデル"), fed by
@@ -62,10 +64,8 @@ pub(crate) struct OverviewPublish {
 #[derive(Clone)]
 pub(crate) struct SidebarPublish {
     pub(crate) visible: Arc<AtomicBool>,
+    pub(crate) preview_lines: Arc<AtomicUsize>,
 }
-
-/// How many trailing terminal rows the sidebar card preview shows (FR-2).
-const SIDEBAR_PREVIEW_LINES: usize = 5;
 
 pub(crate) type PtyInput = Box<[u8]>;
 
@@ -266,14 +266,14 @@ struct SidebarUpsert {
 
 /// The trailing non-blank rows of the active screen, for the card preview
 /// (FR-2). Read under the terminal lock; returns at most
-/// [`SIDEBAR_PREVIEW_LINES`] lines, oldest-first, trailing blanks dropped. Each
+/// `limit` lines, oldest-first, trailing blanks dropped. Each
 /// line coalesces adjacent cells sharing a foreground color into one
 /// [`PreviewSpan`] so the sidebar can render it in its original ANSI colors.
 /// Lock-held half of the preview extraction: clone only the trailing non-blank
-/// rows the preview needs (at most [`SIDEBAR_PREVIEW_LINES`]), each truncated
+/// rows the preview needs (at most `limit`), each truncated
 /// at its last non-blank cell. Span/string building happens lock-free in
 /// [`preview_spans`], keeping the pty-feed lock section short (NFR-1).
-fn preview_rows(terminal: &Terminal) -> Vec<Vec<noa_grid::Cell>> {
+fn preview_rows(terminal: &Terminal, limit: usize) -> Vec<Vec<noa_grid::Cell>> {
     let grid = &terminal.active().grid;
     let mut rows: Vec<Vec<noa_grid::Cell>> = grid
         .iter()
@@ -282,7 +282,7 @@ fn preview_rows(terminal: &Terminal) -> Vec<Vec<noa_grid::Cell>> {
             let last = row.cells.iter().rposition(|cell| !cell.is_blank())?;
             Some(row.cells[..=last].to_vec())
         })
-        .take(SIDEBAR_PREVIEW_LINES)
+        .take(limit)
         .collect();
     rows.reverse();
     rows
@@ -390,7 +390,8 @@ fn feed_terminal_batch<'a>(
             term.title.clone(),
             term.cwd.clone().unwrap_or_default(),
             term.has_running_program(),
-            sidebar_visible.then(|| preview_rows(&term)),
+            sidebar_visible
+                .then(|| preview_rows(&term, sidebar.preview_lines.load(Ordering::Relaxed))),
         )
     });
 
@@ -808,6 +809,7 @@ mod tests {
     fn test_sidebar_publish(visible: bool) -> SidebarPublish {
         SidebarPublish {
             visible: Arc::new(AtomicBool::new(visible)),
+            preview_lines: Arc::new(AtomicUsize::new(noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES)),
         }
     }
 
@@ -890,6 +892,40 @@ mod tests {
             &mut last_sidebar_publish,
         );
         assert!(throttled.sidebar_upsert.is_none());
+    }
+
+    #[test]
+    fn visible_sidebar_preview_respects_configured_line_count() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 8))));
+        let mut stream = noa_vt::Stream::new();
+        let overview = test_overview_publish();
+        let mut last_overview_publish = None;
+        let mut last_sidebar_publish = None;
+        let sidebar = SidebarPublish {
+            visible: Arc::new(AtomicBool::new(true)),
+            preview_lines: Arc::new(AtomicUsize::new(3)),
+        };
+
+        let output = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"one\r\ntwo\r\nthree\r\nfour\r\nfive",
+            &overview,
+            &mut last_overview_publish,
+            &sidebar,
+            &mut last_sidebar_publish,
+        );
+
+        let preview = output
+            .sidebar_upsert
+            .expect("visible feed publishes")
+            .preview
+            .expect("visible feed extracts preview");
+        let lines: Vec<_> = preview
+            .iter()
+            .map(|line| session_store::preview_line_text(line))
+            .collect();
+        assert_eq!(lines, vec!["three", "four", "five"]);
     }
 
     #[test]

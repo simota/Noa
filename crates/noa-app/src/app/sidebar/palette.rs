@@ -702,6 +702,7 @@ fn format_row_value(draft: &RowDraft) -> String {
         RowDraft::FontFamily(name) => name.clone(),
         RowDraft::WindowPadding(x, y) => format!("{x:.1} x {y:.1}"),
         RowDraft::MacosTitlebarStyle(style) => format!("{style:?}"),
+        RowDraft::SidebarPreviewLines(lines) => lines.to_string(),
     }
 }
 
@@ -873,7 +874,7 @@ fn theme_settings_overlay_text(
         } else {
             ""
         };
-        let _ = write!(out, "{:<20}{value}{note}", kind.label());
+        let _ = write!(out, "{:<24}{value}{note}", kind.label());
     }
 
     let hint_row = settings_top + visible + 1;

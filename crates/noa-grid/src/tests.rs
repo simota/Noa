@@ -2543,7 +2543,8 @@ fn ac_win_009_unsupported_ps_values_produce_no_reply() {
 
 #[test]
 fn ac_win_010_third_param_stack_index_round_trips() {
-    let t = run_title_report(b"\x1b]2;first\x1b\\\x1b[22;2;5t\x1b]2;second\x1b\\\x1b[23;2;5t\x1b[21t");
+    let t =
+        run_title_report(b"\x1b]2;first\x1b\\\x1b[22;2;5t\x1b]2;second\x1b\\\x1b[23;2;5t\x1b[21t");
     assert_eq!(t.pending_writes, b"\x1b]lfirst\x1b\\");
 }
 
@@ -3499,7 +3500,8 @@ fn bulk_print_row_dirty_marks_every_touched_row() {
 fn bulk_print_throughput_probe() {
     let line = "the quick brown fox jumps over the lazy dog 0123456789 ";
     let ascii: Vec<u8> = format!("{}\r\n", line.repeat(3)).into_bytes();
-    let jp: Vec<u8> = format!("{}\r\n", "日本語のテキスト出力を含む行です。".repeat(6)).into_bytes();
+    let jp: Vec<u8> =
+        format!("{}\r\n", "日本語のテキスト出力を含む行です。".repeat(6)).into_bytes();
     for (name, chunk) in [("ascii", &ascii), ("utf8", &jp)] {
         let mut t = Terminal::new(GridSize::new(120, 40));
         let mut s = Stream::new();

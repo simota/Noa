@@ -271,11 +271,8 @@ impl App {
         if inset == 0 || point.is_none_or(|p| p.x >= inset) {
             return false;
         }
-        let Some(state) = self.windows.get(&window_id) else {
-            return false;
-        };
         let bounds = self.sidebar_layout_bounds(window_id, inset);
-        let metrics = SidebarMetrics::new(state.window.scale_factor() as f32);
+        let metrics = self.sidebar_metrics(window_id);
         let viewport_h = metrics.bands(bounds).viewport.h;
         let windows = self.session_windows_for_window(window_id);
         let content_h =

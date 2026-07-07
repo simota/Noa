@@ -19,7 +19,7 @@ impl App {
         // placement uses that font's metrics (not the terminal font's).
         let metrics = gpu.sidebar_font.metrics();
         let scale = state.window.scale_factor() as f32;
-        let layout_metrics = SidebarMetrics::new(scale);
+        let layout_metrics = self.sidebar_metrics(window_id);
         let height = state.window.inner_size().height.max(1);
         let band = PaneRectApp::new(0, 0, inset, height);
         let grid = grid_size_for_pane_rect(band, metrics, self.padding);
@@ -303,7 +303,7 @@ fn resolve_preview_color(color: noa_core::Color, palette: &[Rgb; 256]) -> Rgb {
 }
 
 /// Emit one card's text runs (status dot, project icon, bold name, cwd, the
-/// meta row `process · ⎇ branch`, two color-run preview rows, updated-time)
+/// meta row `process · ⎇ branch`, configured preview rows, updated-time)
 /// through `to_cell`. Shared by the flat backdrop (window coords) and each
 /// rounded overlay (card-local coords) so both agree on layout. `renaming`
 /// carries the live rename buffer when this card's inline rename is open —
@@ -376,17 +376,10 @@ fn emit_card_text(
         out.extend(window_run(to_cell, rects.meta, text, badge_fg, false));
     }
 
-    // Last-output preview rows (up to 5), in their original ANSI colors: each
+    // Last-output preview rows, in their original ANSI colors: each
     // span is recolored inline via an embedded SGR prefix, so one run carries
     // the whole line. Rows the card has no preview line for stay blank.
-    for (rect, line) in [
-        (rects.preview1, card.preview.first()),
-        (rects.preview2, card.preview.get(1)),
-        (rects.preview3, card.preview.get(2)),
-        (rects.preview4, card.preview.get(3)),
-        (rects.preview5, card.preview.get(4)),
-    ] {
-        let Some(line) = line else { continue };
+    for (rect, line) in rects.preview.iter().zip(card.preview.iter()) {
         let mut text = String::new();
         for span in line {
             text.push_str(&sgr_fg(resolve_preview_color(span.fg, palette)));
@@ -396,7 +389,7 @@ fn emit_card_text(
             .first()
             .map(|span| resolve_preview_color(span.fg, palette))
             .unwrap_or(chrome().dim_fg);
-        out.extend(window_run(to_cell, rect, text, fg, false));
+        out.extend(window_run(to_cell, *rect, text, fg, false));
     }
 
     out.extend(window_run(

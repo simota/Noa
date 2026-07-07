@@ -37,6 +37,11 @@ pub const DEFAULT_QUICK_TERMINAL_SIZE: f32 = 0.4;
 pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "ctrl+grave";
 /// `sidebar-width` default: the session sidebar's width in points when visible.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 360.0;
+/// `sidebar-preview-lines` default: card last-output preview rows.
+pub const DEFAULT_SIDEBAR_PREVIEW_LINES: usize = 3;
+/// Largest supported `sidebar-preview-lines` value. Higher values make each
+/// card too tall for the sidebar's dense session-list use case.
+pub const MAX_SIDEBAR_PREVIEW_LINES: usize = 10;
 
 /// `clipboard-read` policy for OSC 52 clipboard *read* (query) requests.
 /// Mirrors Ghostty, whose default is `ask`.
@@ -370,6 +375,9 @@ pub struct StartupConfig {
     /// the empty-string sentinel (no hotkey). Defaults to `None` (unbound) —
     /// the sidebar is off by default, so no chord is registered until set.
     pub sidebar_hotkey: Option<String>,
+    /// `sidebar-preview-lines`: how many trailing output rows each sidebar card
+    /// extracts and renders. `0` disables last-output preview rows.
+    pub sidebar_preview_lines: usize,
     /// `resize-overlay`: whether the `cols × rows` toast shows during a live
     /// resize. Ghostty-parity key; default `after-first`.
     pub resize_overlay: ResizeOverlay,
@@ -417,6 +425,7 @@ impl Default for StartupConfig {
             sidebar_enabled: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_hotkey: None,
+            sidebar_preview_lines: DEFAULT_SIDEBAR_PREVIEW_LINES,
             resize_overlay: ResizeOverlay::default(),
             visual_bell: false,
         }
@@ -461,6 +470,7 @@ pub struct ConfigOverrides {
     pub sidebar_enabled: Option<bool>,
     pub sidebar_width: Option<f32>,
     pub sidebar_hotkey: Option<String>,
+    pub sidebar_preview_lines: Option<usize>,
     pub resize_overlay: Option<ResizeOverlay>,
     pub visual_bell: Option<bool>,
 }
@@ -533,6 +543,9 @@ impl ConfigOverrides {
             sidebar_enabled: higher_priority.sidebar_enabled.or(self.sidebar_enabled),
             sidebar_width: higher_priority.sidebar_width.or(self.sidebar_width),
             sidebar_hotkey: higher_priority.sidebar_hotkey.or(self.sidebar_hotkey),
+            sidebar_preview_lines: higher_priority
+                .sidebar_preview_lines
+                .or(self.sidebar_preview_lines),
             resize_overlay: higher_priority.resize_overlay.or(self.resize_overlay),
             visual_bell: higher_priority.visual_bell.or(self.visual_bell),
         }
@@ -591,6 +604,9 @@ impl ConfigOverrides {
             sidebar_enabled: self.sidebar_enabled.unwrap_or(base.sidebar_enabled),
             sidebar_width: self.sidebar_width.unwrap_or(base.sidebar_width),
             sidebar_hotkey: self.sidebar_hotkey.or(base.sidebar_hotkey),
+            sidebar_preview_lines: self
+                .sidebar_preview_lines
+                .unwrap_or(base.sidebar_preview_lines),
             resize_overlay: self.resize_overlay.unwrap_or(base.resize_overlay),
             visual_bell: self.visual_bell.unwrap_or(base.visual_bell),
         }
@@ -698,6 +714,12 @@ pub fn validate_startup_config(config: &StartupConfig, context: &str) -> anyhow:
     if !config.minimum_contrast.is_finite() || !(1.0..=21.0).contains(&config.minimum_contrast) {
         bail!("invalid {context}: `minimum_contrast` must be between 1 and 21");
     }
+    if config.sidebar_preview_lines > MAX_SIDEBAR_PREVIEW_LINES {
+        bail!(
+            "invalid {context}: `sidebar-preview-lines` must be between 0 and {}",
+            MAX_SIDEBAR_PREVIEW_LINES
+        );
+    }
     Ok(())
 }
 
@@ -763,6 +785,7 @@ mod tests {
                 sidebar_enabled: false,
                 sidebar_width: DEFAULT_SIDEBAR_WIDTH,
                 sidebar_hotkey: None,
+                sidebar_preview_lines: DEFAULT_SIDEBAR_PREVIEW_LINES,
                 resize_overlay: ResizeOverlay::AfterFirst,
                 visual_bell: false,
             }

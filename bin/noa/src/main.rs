@@ -118,6 +118,7 @@ fn app_config_from_startup(
         sidebar_enabled: config.sidebar_enabled,
         sidebar_width: config.sidebar_width,
         sidebar_hotkey: config.sidebar_hotkey,
+        sidebar_preview_lines: config.sidebar_preview_lines,
         resize_overlay: config.resize_overlay,
         visual_bell: config.visual_bell,
     }
@@ -154,6 +155,7 @@ mod tests {
             minimum_contrast: 3.0,
             macos_option_as_alt: noa_config::MacosOptionAsAlt::Both,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Transparent,
+            sidebar_preview_lines: 4,
             ..Default::default()
         };
 
@@ -173,6 +175,7 @@ mod tests {
             app_config.macos_titlebar_style,
             noa_config::MacosTitlebarStyle::Transparent
         );
+        assert_eq!(app_config.sidebar_preview_lines, 4);
     }
 
     // AC-7: a config carrying all five background-image keys resolves through

@@ -313,7 +313,7 @@ impl App {
             .windows
             .get(&window_id)
             .map_or(1.0, |state| state.window.scale_factor() as f32);
-        SidebarMetrics::new(scale)
+        SidebarMetrics::new_with_preview_lines(scale, self.config.sidebar_preview_lines)
     }
 
     /// Recompute the app-wide io-thread gate: on while any eligible window

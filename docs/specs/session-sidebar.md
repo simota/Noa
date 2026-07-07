@@ -98,7 +98,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 - **+ ボタン**: フォーカス中ウィンドウに新規タブ、cwd はアクティブセッションから継承（既存 new-tab パス再利用）。
 - **状態ドット**: busy（OSC 133 `has_running_program`）=青／idle=緑／bell-attention（未読ベル）=黄。
 - **updated-time**: 相対表示（"3分前"、24h 超は "昨日 23:47" 形式）。io スレッドが最終出力時に Instant＋wall-clock スタンプ。
-- **サイドバー幅**: config `sidebar-width`（points、既定 360pt）。grid-first リサイズで換算。
+- **サイドバー幅/プレビュー行数**: config `sidebar-width`（points、既定 360pt）。grid-first リサイズで換算。`sidebar-preview-lines` はカードの最終出力プレビュー行数（既定 3、`0` で非表示）。
 - **ヘッダーラベル**: 当初 park したフォアグラウンドプロセス名検出は、ユーザー要望により 2026-07-05 実装（`Pty::foreground_probe` = master fd dup → tcgetpgrp → libproc `proc_name`、session-metadata ワーカーで 1s ポーリング・サイドバー可視時のみ）。ラベルは実プロセス名（`✳ <proc>`）、未検出時は Running/Idle にフォールバック。
 
 ### Assumptions
@@ -127,7 +127,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 - **FR-10 Updated-time**: 最終出力時刻を相対表示する("3分前"、24h 超は "昨日 23:47" 形式)。
 - **FR-11 Status dots**: busy(OSC 133 `has_running_program`)=青 / idle=緑 / 未読ベル=黄 を状態ドットで表す。未読ベルは `Terminal::take_pending_bell`(terminal.rs:305、BEL 由来)を io スレッドが drain して SessionDelta で送り、該当セッションのウィンドウがフォーカスされた時点でクリアする。
 - **FR-12 GC/teardown**: セッション終了時に全5 teardown サイトで SessionStore から該当エントリを除去する。
-- **FR-13 Config keys**: `sidebar-enabled`(bool 初期値)・`sidebar-width`(points、既定 360)・`sidebar-hotkey`(トグル用チョード、`quick-terminal-hotkey` の既存パース/ディスパッチパターンを踏襲)を noa-config に追加する。汎用 keybind→action システムは導入しない。
+- **FR-13 Config keys**: `sidebar-enabled`(bool 初期値)・`sidebar-width`(points、既定 360)・`sidebar-hotkey`(トグル用チョード、`quick-terminal-hotkey` の既存パース/ディスパッチパターンを踏襲)・`sidebar-preview-lines`(カードの最終出力プレビュー行数、既定 3)を noa-config に追加する。汎用 keybind→action システムは導入しない。
 - **FR-14 Quick-terminal exclusion**: quick-terminal ウィンドウはサイドバー対象外とし、inset も掛けない。
 - **FR-15 Scroll**: カード数がサイドバーの表示領域を超える場合、縦スクロール（スクロールオフセットのクランプ付き）で全カードに到達できる。グルーピング/折畳は行わない。
 - **FR-16 Attention（応答待ち表示）**: 非フォーカスウィンドウの pane が OSC 9/777 デスクトップ通知を発行した場合（典型例: Claude Code / Codex / agy が対話入力待ちで通知する）、そのセッションカードに `attention` フラグを立てる。表示は (a) 状態ドット=赤（優先度: attention > bell > busy > idle）、(b) プロセス行に `· 応答待ち` を attention 色で付記、(c) タブオーバービューのタイトルバンドに `● ` プレフィックス（未読ベルも同様にマーク）。ウィンドウのフォーカス取得で未読ベルと同時にクリアする。フォーカス中ウィンドウの通知は、デスクトップ通知が抑止されるのと同じ理由（ユーザーが既に見ている）で attention を立てない。
@@ -148,7 +148,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 - **sidebar layout** (`crates/noa-app/src/sidebar.rs`, 新規): `tab_overview.rs` を鏡像に、カード矩形の縦積みジオメトリ・スクロールオフセット・`hit_test`(→ SessionCardId)・close/… ボタン矩形を純関数で算出。winit/wgpu 非依存。
 - **rendering** (`crates/noa-render/src/blit.rs` 再利用): カード枠は `CardStyle`＋`overlay_texture_cards`。テキスト(name/cwd/branch/preview)は overview 方式の専用小 `Renderer`(1枚を全カード再利用、per-card renderer にしない)。状態ドットは小さな塗りつぶし quad。
 - **resize path** (`crates/noa-app/src/app.rs`): トグル時、対象 `WindowState` 群について `pane_bounds_for_size` にサイドバー幅 inset を適用 → `relayout_and_resize_window`(grid → pty winsize)→ `request_redraw` の順(quick-terminal は除外)。
-- **config** (`crates/noa-config/src/lib.rs` `StartupConfig`, `parser.rs`): `quick_terminal_hotkey` パターンを踏襲し `sidebar-enabled`/`sidebar-width`/`sidebar-hotkey` を追加。汎用 keybind→action システムは導入しない（parser.rs の keybind は現状 diagnostic のみのため）。
+- **config** (`crates/noa-config/src/lib.rs` `StartupConfig`, `parser.rs`): `quick_terminal_hotkey` パターンを踏襲し `sidebar-enabled`/`sidebar-width`/`sidebar-hotkey`/`sidebar-preview-lines` を追加。汎用 keybind→action システムは導入しない（parser.rs の keybind は現状 diagnostic のみのため）。
 - **header bar** (`sidebar.rs` + rendering): 実行状態は `group_running_program_count` を真偽に縮退。中央タイトルは `WindowState.title`、ピルは SessionCard.name。
 - **teardown GC sites** (`crates/noa-app/src/app.rs`): `close_tab`・`close_pane_after_pty_exit`・`close_pane`・ウィンドウ remove・`request_quit` の5箇所で SessionDelta::Remove を送る。
 
@@ -170,7 +170,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 - **AC-12 (FR-10)**: updated-time フォーマッタが 3分前 / 昨日 23:47 / 同日時刻の各境界で正しい文字列を返す(unit test)。
 - **AC-13 (FR-11)**: `has_running_program`=true→青、false→緑、未読ベル→黄 のドット色マッピングを unit test で検証。
 - **AC-14 (FR-12)**: 純関数 `reconcile_sessions(&mut store, live_ids)` が live_ids に無いエントリを除去し store サイズ == live_ids 数となることを unit test で検証。5 teardown サイトが各々これを呼ぶことは実装レビュー＋[manual] 統合確認（`App` はユニットテストから構築不能のため）。
-- **AC-15a (FR-13)**: `sidebar-enabled`/`sidebar-width` がパースされ、既定値(width=360)が適用される(parser unit test、`parse_bool`/`quick-terminal-size` パターン)。
+- **AC-15a (FR-13)**: `sidebar-enabled`/`sidebar-width`/`sidebar-preview-lines` がパースされ、既定値(width=360、preview-lines=3)が適用される(parser unit test、`parse_bool`/`quick-terminal-size` パターン)。
 - **AC-15b (FR-13)**: `sidebar-hotkey` チョードが `quick-terminal-hotkey` と同じパース経路で受理される(parser unit test)。不正チョードの diagnostic はアプリ層登録時の `parse_hotkey` で発生する — noa-config は noa-app に依存できないため parse 時ではない（quick-terminal-hotkey と同じ前例。Judge 裁定 2026-07-05）。
 - **AC-16a (FR-14)**: quick-terminal ウィンドウの `pane_bounds_for_size` にサイドバー inset が適用されない(純関数 unit test)。
 - **AC-16b (FR-14)**: サイドバー対象判定述語が quick-terminal ウィンドウに false を返し、store に登録されない(純関数 unit test)。
@@ -192,7 +192,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 - ヘッダーバー(`Running`/`Idle` 縮退ラベル＋タイトル＋セッション名ピル)
 - + ボタン(cwd 継承 new-tab)・… メニュー(close/rename)
 - git ブランチ検出(専用 branch-poll スレッド、cache/negative-cache)・プロジェクトアイコン検出
-- config キー(`sidebar-enabled`/`sidebar-width`/`sidebar-hotkey`)
+- config キー(`sidebar-enabled`/`sidebar-width`/`sidebar-hotkey`/`sidebar-preview-lines`)
 - 縦スクロール（オフセットクランプ、FR-15）
 - quick-terminal ウィンドウの対象外化
 

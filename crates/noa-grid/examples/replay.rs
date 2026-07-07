@@ -43,10 +43,7 @@ fn main() {
         };
         let mut line = String::new();
         for cell in &row.cells {
-            if cell
-                .attrs
-                .contains(noa_core::CellAttrs::WIDE_SPACER)
-            {
+            if cell.attrs.contains(noa_core::CellAttrs::WIDE_SPACER) {
                 continue;
             }
             line.push(cell.ch);

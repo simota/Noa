@@ -56,6 +56,7 @@ window-height = 30
 font-size = 15.0
 theme = "Catppuccin Mocha"
 minimum-contrast = 3.0
+sidebar-preview-lines = 3
 ```
 
 Theme names match the vendored Ghostty-compatible catalog in

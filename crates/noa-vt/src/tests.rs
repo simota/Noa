@@ -296,7 +296,10 @@ fn sos_pm_utf8_payload_with_9c_continuation_is_not_terminated() {
     bytes.extend_from_slice("作成".as_bytes());
     bytes.push(0x9c); // real ST at a scalar boundary ends the string
     bytes.extend_from_slice(b"ok");
-    assert_eq!(actions(&bytes), vec![Action::Print('o'), Action::Print('k')]);
+    assert_eq!(
+        actions(&bytes),
+        vec![Action::Print('o'), Action::Print('k')]
+    );
 }
 
 #[test]
@@ -726,10 +729,7 @@ fn stream_utf8_split_across_feeds_falls_back_to_the_dfa() {
     let mixed = "ab日".as_bytes();
     assert_eq!(
         text_events(&[&mixed[..3], &mixed[3..]]),
-        vec![
-            TextEvent::Run("ab".to_string()),
-            TextEvent::Scalar('日'),
-        ]
+        vec![TextEvent::Run("ab".to_string()), TextEvent::Scalar('日'),]
     );
 }
 

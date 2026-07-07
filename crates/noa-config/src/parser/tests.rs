@@ -888,21 +888,29 @@ fn quick_terminal_keys_are_supported_scalar_keys_for_import() {
 }
 
 // AC-15a: `sidebar-enabled`/`sidebar-width` parse; the default width (360)
-// is applied when the key is absent.
+// and preview line count (3) are applied when the keys are absent.
 #[test]
 fn sidebar_enabled_and_width_parse_and_default() {
-    let (overrides, diagnostics) =
-        parse_overrides(path(), "sidebar-enabled = true\nsidebar-width = 300");
+    let (overrides, diagnostics) = parse_overrides(
+        path(),
+        "sidebar-enabled = true\nsidebar-width = 300\nsidebar-preview-lines = 4",
+    );
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert_eq!(overrides.sidebar_enabled, Some(true));
     assert_eq!(overrides.sidebar_width, Some(300.0));
+    assert_eq!(overrides.sidebar_preview_lines, Some(4));
 
     // Absent width falls back to the default via `apply_to`.
     let resolved = ConfigOverrides::default().apply_to(crate::StartupConfig::default());
     assert!(!resolved.sidebar_enabled);
     assert_eq!(resolved.sidebar_width, crate::DEFAULT_SIDEBAR_WIDTH);
     assert_eq!(resolved.sidebar_width, 360.0);
+    assert_eq!(
+        resolved.sidebar_preview_lines,
+        crate::DEFAULT_SIDEBAR_PREVIEW_LINES
+    );
+    assert_eq!(resolved.sidebar_preview_lines, 3);
 }
 
 #[test]
@@ -913,6 +921,18 @@ fn sidebar_width_rejects_negative_and_non_numeric() {
         assert_eq!(overrides.sidebar_width, None, "{value:?}");
         assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
         assert!(diagnostics[0].message.contains("sidebar-width"));
+    }
+}
+
+#[test]
+fn sidebar_preview_lines_rejects_negative_non_numeric_and_too_large() {
+    for value in ["-1", "many", "11"] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("sidebar-preview-lines = {value}"));
+
+        assert_eq!(overrides.sidebar_preview_lines, None, "{value:?}");
+        assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+        assert!(diagnostics[0].message.contains("sidebar-preview-lines"));
     }
 }
 
@@ -954,6 +974,7 @@ fn sidebar_keys_are_supported_scalar_keys_for_import() {
     assert!(is_supported_scalar_key("sidebar-enabled"));
     assert!(is_supported_scalar_key("sidebar-width"));
     assert!(is_supported_scalar_key("sidebar-hotkey"));
+    assert!(is_supported_scalar_key("sidebar-preview-lines"));
 }
 
 #[test]

@@ -147,6 +147,30 @@ pub(crate) enum RowDraft {
     ConfirmQuit(bool),
 }
 
+impl RowDraft {
+    /// The row's value as a short display string (E) — shared by the wgpu
+    /// overlay text and the native macOS card so the two renderings agree.
+    pub(crate) fn display_value(&self) -> String {
+        match self {
+            RowDraft::FontSize(v) => format!("{v:.1}"),
+            RowDraft::BackgroundOpacity(v) => format!("{v:.2}"),
+            RowDraft::BackgroundBlurRadius(v) => v.to_string(),
+            RowDraft::CursorStyle(shape) => format!("{shape:?}"),
+            RowDraft::FontFamily(name) => name.clone(),
+            RowDraft::WindowPadding(x, y) => format!("{x:.1} x {y:.1}"),
+            RowDraft::MacosTitlebarStyle(style) => format!("{style:?}"),
+            RowDraft::SidebarPreviewLines(lines) => lines.to_string(),
+            RowDraft::ConfirmQuit(confirm) => {
+                if *confirm {
+                    "On".to_string()
+                } else {
+                    "Off".to_string()
+                }
+            }
+        }
+    }
+}
+
 /// One settings row: its draft value and whether the user has actually
 /// edited it (pre-mortem RPN 252 — only `touched` rows may ever reach the
 /// Increment E writer; navigation/rendering must never flip this).

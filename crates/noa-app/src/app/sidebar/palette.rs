@@ -1,3 +1,10 @@
+// On macOS the modal overlays render as native AppKit cards
+// (`crate::macos_overlay`), so this file's wgpu modal-card slice (the four
+// `draw_*_card` composites and their helpers) is the non-macOS fallback and
+// compiles as dead code there. The scrollbar thumbs / bell flash / sidebar
+// helpers below stay live on every platform.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
+
 use noa_render::{OverlayStyle, command_palette_layout, confirm_dialog_layout};
 use std::fmt::Write as _;
 
@@ -694,23 +701,7 @@ fn sgr_reset(out: &mut String) {
 
 /// Render `draft`'s current value as a short display string (E).
 fn format_row_value(draft: &RowDraft) -> String {
-    match draft {
-        RowDraft::FontSize(v) => format!("{v:.1}"),
-        RowDraft::BackgroundOpacity(v) => format!("{v:.2}"),
-        RowDraft::BackgroundBlurRadius(v) => v.to_string(),
-        RowDraft::CursorStyle(shape) => format!("{shape:?}"),
-        RowDraft::FontFamily(name) => name.clone(),
-        RowDraft::WindowPadding(x, y) => format!("{x:.1} x {y:.1}"),
-        RowDraft::MacosTitlebarStyle(style) => format!("{style:?}"),
-        RowDraft::SidebarPreviewLines(lines) => lines.to_string(),
-        RowDraft::ConfirmQuit(confirm) => {
-            if *confirm {
-                "On".to_string()
-            } else {
-                "Off".to_string()
-            }
-        }
-    }
+    draft.display_value()
 }
 
 /// Build the overlay's whole content as one ANSI-escaped string, fed through

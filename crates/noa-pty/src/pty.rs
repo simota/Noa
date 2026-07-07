@@ -121,6 +121,7 @@ impl Pty {
         }
 
         cmd.env("TERM", &config.term);
+        cmd.env("COLORTERM", "truecolor");
         if let Some(cwd) = &config.cwd {
             cmd.cwd(cwd);
         }
@@ -351,6 +352,43 @@ mod tests {
             "expected 'hello' in output: {text:?}"
         );
         assert!(saw_exit, "expected an Exit event");
+    }
+
+    #[test]
+    fn colorterm_and_term_are_exported_to_the_child() {
+        // noa-vt fully supports 24-bit truecolor SGR, so the child should see
+        // COLORTERM=truecolor alongside TERM (needed by tools that gate
+        // truecolor support on COLORTERM rather than the terminfo entry).
+        let cfg = PtyConfig {
+            size: GridSize::new(80, 24),
+            shell: Some("/bin/sh".to_string()),
+            cwd: None,
+            term: "xterm-256color".to_string(),
+            login: false,
+            shell_integration: false,
+        };
+        let pty = Pty::spawn(cfg).expect("spawn pty");
+
+        let w = pty.writer();
+        w.write(b"echo \"$TERM $COLORTERM\"\nexit\n").expect("write");
+        w.flush().expect("flush");
+
+        let mut collected = Vec::new();
+        let deadline = Duration::from_secs(5);
+        loop {
+            match pty.event_rx().recv_timeout(deadline) {
+                Ok(PtyEvent::Data(chunk)) => collected.extend_from_slice(&chunk),
+                Ok(PtyEvent::Exit(_)) => break,
+                Ok(PtyEvent::Error(e)) => panic!("pty error: {e}"),
+                Err(_) => break, // timeout guard so we never hang
+            }
+        }
+
+        let text = String::from_utf8_lossy(&collected);
+        assert!(
+            text.contains("xterm-256color truecolor"),
+            "expected TERM and COLORTERM in child env: {text:?}"
+        );
     }
 
     #[test]

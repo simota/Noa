@@ -24,20 +24,44 @@ impl Stream {
     /// Feed a chunk of bytes, dispatching all resulting operations to `handler`.
     pub fn feed<H: Handler>(&mut self, bytes: &[u8], handler: &mut H) {
         let mut i = 0;
+        // Cached exclusive end of the printable run containing `i` (bytes in
+        // `i..run_end` are all `is_run_byte`). Caching it across DFA detours
+        // for invalid UTF-8 keeps the run scan linear even on hostile input.
+        let mut run_end = 0;
         while i < bytes.len() {
-            // Fast path: in plain ground state a run of printable ASCII maps
-            // 1:1 onto `Handler::print`, so the dominant bulk-output case
-            // (log text) skips the per-byte DFA dispatch entirely.
-            if is_ascii_print(bytes[i]) && self.parser.in_ground_plain() {
-                let end = bytes[i..]
-                    .iter()
-                    .position(|&b| !is_ascii_print(b))
-                    .map_or(bytes.len(), |off| i + off);
-                for &b in &bytes[i..end] {
-                    handler.print(b as char);
+            // Fast path: in plain ground state every byte until the next C0
+            // control (ESC included) is print data, so the dominant
+            // bulk-output case hands whole decoded runs to
+            // `Handler::print_str` and skips the per-byte DFA dispatch
+            // entirely (Ghostty analog: `stream.zig`'s ground scan).
+            if is_run_byte(bytes[i]) && self.parser.in_ground_plain() {
+                if run_end <= i {
+                    run_end = bytes[i..]
+                        .iter()
+                        .position(|&b| !is_run_byte(b))
+                        .map_or(bytes.len(), |off| i + off);
                 }
-                i = end;
-                continue;
+                match core::str::from_utf8(&bytes[i..run_end]) {
+                    Ok(text) => {
+                        handler.print_str(text);
+                        i = run_end;
+                        continue;
+                    }
+                    Err(err) => {
+                        // Bulk-print the valid prefix, then let the DFA own
+                        // the invalid/incomplete sequence byte-by-byte below
+                        // (it carries the replacement + cross-chunk resume
+                        // semantics), re-entering this fast path once it
+                        // returns to plain ground.
+                        let valid = err.valid_up_to();
+                        if valid > 0 {
+                            let text = core::str::from_utf8(&bytes[i..i + valid])
+                                .expect("valid_up_to marks a valid UTF-8 prefix");
+                            handler.print_str(text);
+                            i += valid;
+                        }
+                    }
+                }
             }
             self.parser
                 .advance(bytes[i], &mut |action| dispatch(action, handler));
@@ -46,9 +70,12 @@ impl Stream {
     }
 }
 
+/// A byte that stays on the ground-state print path: anything but a C0
+/// control or DEL. `0x80..=0xff` are UTF-8 sequence bytes (the parser never
+/// treats raw C1 bytes as controls in ground).
 #[inline]
-fn is_ascii_print(b: u8) -> bool {
-    (0x20..=0x7e).contains(&b)
+fn is_run_byte(b: u8) -> bool {
+    b >= 0x20 && b != 0x7f
 }
 
 fn dispatch<H: Handler>(action: Action, h: &mut H) {

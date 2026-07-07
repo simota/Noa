@@ -578,3 +578,130 @@ fn apc_truncated_still_dispatches() {
     assert_eq!(cmds.len(), 1);
     assert!(cmds[0].truncated);
 }
+
+// ── Stream ground-state text-run fast path ──────────────────────────
+
+/// What a `Stream`-driven handler received, in order: bulk runs
+/// (`print_str`), per-scalar prints (the DFA path), and C0 executes.
+#[derive(Debug, PartialEq)]
+enum TextEvent {
+    Run(String),
+    Scalar(char),
+    C0(u8),
+    Csi(u8),
+}
+
+fn text_events(chunks: &[&[u8]]) -> Vec<TextEvent> {
+    use crate::handler::{DaKind, DsrKind, EraseDisplay, EraseLine, Handler};
+    use crate::sgr::SgrAttr;
+
+    #[derive(Default)]
+    struct Capture {
+        events: Vec<TextEvent>,
+    }
+    impl Handler for Capture {
+        fn print(&mut self, c: char) {
+            self.events.push(TextEvent::Scalar(c));
+        }
+        fn print_str(&mut self, s: &str) {
+            self.events.push(TextEvent::Run(s.to_string()));
+        }
+        fn execute_c0(&mut self, byte: u8) {
+            self.events.push(TextEvent::C0(byte));
+        }
+        fn set_attributes(&mut self, _attrs: &[SgrAttr]) {
+            self.events.push(TextEvent::Csi(b'm'));
+        }
+        fn cursor_up(&mut self, _n: u16) {}
+        fn cursor_down(&mut self, _n: u16) {}
+        fn cursor_forward(&mut self, _n: u16) {}
+        fn cursor_backward(&mut self, _n: u16) {}
+        fn cursor_position(&mut self, _row: u16, _col: u16) {}
+        fn cursor_col_abs(&mut self, _col: u16) {}
+        fn cursor_row_abs(&mut self, _row: u16) {}
+        fn erase_display(&mut self, _mode: EraseDisplay) {}
+        fn erase_line(&mut self, _mode: EraseLine) {}
+        fn set_mode(&mut self, _value: u16, _ansi: bool, _on: bool) {}
+        fn carriage_return(&mut self) {}
+        fn linefeed(&mut self) {}
+        fn tab(&mut self, _n: u16) {}
+        fn reverse_index(&mut self) {}
+        fn save_cursor(&mut self) {}
+        fn restore_cursor(&mut self) {}
+        fn full_reset(&mut self) {}
+        fn device_attributes(&mut self, _kind: DaKind) {}
+        fn device_status_report(&mut self, _kind: DsrKind) {}
+    }
+
+    let mut stream = crate::Stream::new();
+    let mut cap = Capture::default();
+    for chunk in chunks {
+        stream.feed(chunk, &mut cap);
+    }
+    cap.events
+}
+
+#[test]
+fn stream_bulk_prints_ground_runs_including_utf8() {
+    assert_eq!(
+        text_events(&["hello 日本\x1b[31mworld".as_bytes()]),
+        vec![
+            TextEvent::Run("hello 日本".to_string()),
+            TextEvent::Csi(b'm'),
+            TextEvent::Run("world".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn stream_bulk_run_splits_at_c0_and_del() {
+    assert_eq!(
+        text_events(&[b"ab\rcd\x7fef"]),
+        vec![
+            TextEvent::Run("ab".to_string()),
+            TextEvent::C0(0x0d),
+            TextEvent::Run("cd".to_string()),
+            // DEL is ignored in ground, but must still split the run.
+            TextEvent::Run("ef".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn stream_utf8_split_across_feeds_falls_back_to_the_dfa() {
+    let bytes = "日".as_bytes();
+    assert_eq!(
+        text_events(&[&bytes[..1], &bytes[1..]]),
+        vec![TextEvent::Scalar('日')]
+    );
+    // A multibyte scalar split *within* one chunk's run tail behaves the same.
+    let mixed = "ab日".as_bytes();
+    assert_eq!(
+        text_events(&[&mixed[..3], &mixed[3..]]),
+        vec![
+            TextEvent::Run("ab".to_string()),
+            TextEvent::Scalar('日'),
+        ]
+    );
+}
+
+#[test]
+fn stream_invalid_utf8_yields_replacement_between_bulk_runs() {
+    assert_eq!(
+        text_events(&[b"ab\xffcd"]),
+        vec![
+            TextEvent::Run("ab".to_string()),
+            TextEvent::Scalar('\u{FFFD}'),
+            TextEvent::Run("cd".to_string()),
+        ]
+    );
+    // A truncated sequence interrupted by a control: replacement, then C0.
+    assert_eq!(
+        text_events(&[b"\xe6\x97\rx"]),
+        vec![
+            TextEvent::Scalar('\u{FFFD}'),
+            TextEvent::C0(0x0d),
+            TextEvent::Run("x".to_string()),
+        ]
+    );
+}

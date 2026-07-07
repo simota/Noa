@@ -86,6 +86,16 @@ pub struct ModeRequest {
 pub trait Handler {
     // ── text ───────────────────────────────────────────────────────
     fn print(&mut self, c: char);
+    /// A run of printable scalars (no C0/C1 controls), semantically identical
+    /// to calling [`Handler::print`] once per scalar. `Stream` emits whole
+    /// ground-state text runs through this so a state model can take a bulk
+    /// fast path (Ghostty analog: `printString`); the default body preserves
+    /// per-scalar behavior for implementations that don't.
+    fn print_str(&mut self, s: &str) {
+        for c in s.chars() {
+            self.print(c);
+        }
+    }
     /// A C0 control byte (`BEL`/`BS`/`HT`/`LF`/`VT`/`FF`/`CR`/…).
     fn execute_c0(&mut self, byte: u8);
 

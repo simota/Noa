@@ -1149,6 +1149,43 @@ impl Handler for Terminal {
         self.active_mut().print(c, autowrap, grapheme_clustering);
     }
 
+    /// Bulk fast path for ground-state text runs (Ghostty analog:
+    /// `printString`): mode and charset lookups are hoisted out of the
+    /// per-scalar loop, and ASCII sub-runs go through
+    /// [`Screen::print_ascii_run`]'s chunked cell writes. Semantically
+    /// identical to per-scalar [`Handler::print`].
+    fn print_str(&mut self, s: &str) {
+        let autowrap = self.modes.autowrap();
+        let grapheme_clustering = self.modes.grapheme_clustering();
+        if !self.charset.active_is_ascii() {
+            // DEC Special Graphics (or any future set) rewrites scalars —
+            // stay on the per-scalar path.
+            for c in s.chars() {
+                let c = self.charset.translate(c);
+                self.active_mut().print(c, autowrap, grapheme_clustering);
+            }
+            return;
+        }
+        let screen = self.active_mut();
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i].is_ascii() {
+                let end = bytes[i..]
+                    .iter()
+                    .position(|&b| !b.is_ascii())
+                    .map_or(bytes.len(), |off| i + off);
+                screen.print_ascii_run(&bytes[i..end], autowrap, grapheme_clustering);
+                i = end;
+            } else {
+                // Wide/combining/cluster handling lives in the per-scalar path.
+                let c = s[i..].chars().next().expect("s is valid UTF-8");
+                screen.print(c, autowrap, grapheme_clustering);
+                i += c.len_utf8();
+            }
+        }
+    }
+
     fn execute_c0(&mut self, byte: u8) {
         match byte {
             0x0e => return self.locking_shift(CharsetSlot::G1), // SO

@@ -37,6 +37,16 @@ impl CharsetState {
         self.active = slot;
     }
 
+    /// Whether the active (GL) charset is plain ASCII — i.e. [`Self::translate`]
+    /// is the identity, so a bulk print path may skip it entirely.
+    pub fn active_is_ascii(&self) -> bool {
+        let active = match self.active {
+            CharsetSlot::G0 => self.g0,
+            CharsetSlot::G1 => self.g1,
+        };
+        active == Charset::Ascii
+    }
+
     /// Translate a printed scalar through the active (GL) charset.
     pub fn translate(&self, c: char) -> char {
         let active = match self.active {

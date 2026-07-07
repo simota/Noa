@@ -123,6 +123,99 @@ impl Screen {
         self.last_printed = Some(c);
     }
 
+    /// Bulk print a run of printable ASCII (`0x20..=0x7e`), semantically
+    /// identical to calling [`Self::print`] once per byte. The per-scalar
+    /// invariants — pen template, blank cell, margins — are hoisted out of
+    /// the loop and cells are written row-segment at a time, so the dominant
+    /// bulk-output case (streamed log/text lines) touches each cell once
+    /// (Ghostty analog: `Terminal.printString`'s ground fast path).
+    pub fn print_ascii_run(&mut self, bytes: &[u8], autowrap: bool, grapheme_clustering: bool) {
+        debug_assert!(
+            bytes.iter().all(|&b| (0x20..=0x7e).contains(&b)),
+            "print_ascii_run only takes printable ASCII"
+        );
+        self.follow_live_output();
+        let mut bytes = bytes;
+        if grapheme_clustering {
+            // Only a run prefix can extend a pre-existing cluster (an ASCII
+            // scalar extends only across a trailing ZWJ, and once one
+            // attaches, the cluster's last scalar is ASCII — so this loop
+            // exits after at most one iteration in practice).
+            while let Some((&first, rest)) = bytes.split_first() {
+                if !self.extend_cluster_at_cursor(first as char) {
+                    break;
+                }
+                bytes = rest;
+            }
+        }
+        if bytes.is_empty() {
+            return;
+        }
+        let blank = self.blank();
+        let template = Cell {
+            ch: ' ',
+            combining: String::new(),
+            fg: self.cursor.fg,
+            bg: self.cursor.bg,
+            underline_color: self.cursor.underline_color,
+            hyperlink: self.cursor.hyperlink,
+            attrs: self.pen_attrs(),
+        };
+        let left = self.left_margin();
+        let right = self.right_margin();
+        let mut i = 0;
+        while i < bytes.len() {
+            if self.cursor.pending_wrap && autowrap {
+                if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
+                    row.wrapped = true;
+                }
+                self.index();
+                self.cursor.x = left;
+                self.cursor.pending_wrap = false;
+            }
+            let x = self.cursor.x as usize;
+            let Some(row) = self.grid.get_mut(self.cursor.y as usize) else {
+                return;
+            };
+            if x + 1 > row.cells.len() {
+                // Off the row entirely: per-scalar `print` drops every such
+                // scalar without moving the cursor, so the whole rest drops.
+                return;
+            }
+            // Cells available on this row segment: through the right margin
+            // (inclusive) and within the row; a cursor already past the
+            // margin still writes one cell before snapping back (as the
+            // per-scalar path does).
+            let seg_end = (right as usize + 1).min(row.cells.len());
+            let n = if x >= seg_end {
+                1
+            } else {
+                (seg_end - x).min(bytes.len() - i)
+            };
+            for (k, &b) in bytes[i..i + n].iter().enumerate() {
+                if row.cells[x + k]
+                    .attrs
+                    .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+                {
+                    Self::clear_wide_at(row, x + k, &blank);
+                }
+                let cell = &mut row.cells[x + k];
+                *cell = template.clone();
+                cell.ch = b as char;
+            }
+            row.dirty = true;
+            self.last_printed = Some(bytes[i + n - 1] as char);
+            i += n;
+            let new_x = self.cursor.x.saturating_add(n as u16);
+            if new_x > right {
+                self.cursor.x = right;
+                self.cursor.pending_wrap = true; // latch; stay in the last column
+            } else {
+                self.cursor.x = new_x;
+            }
+        }
+    }
+
     pub(super) fn attach_combining_mark(&mut self, c: char) {
         let y = self.cursor.y as usize;
         let Some(row) = self.grid.get_mut(y) else {

@@ -28,10 +28,10 @@ mod notification;
 mod search_prompt;
 mod secure_input;
 mod session;
+pub mod session_overview;
 mod session_store;
 mod sidebar;
 pub mod split_tree;
-pub mod tab_overview;
 mod theme;
 mod theme_settings;
 

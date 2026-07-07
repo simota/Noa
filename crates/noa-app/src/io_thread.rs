@@ -19,11 +19,11 @@ use noa_render::FrameSnapshot;
 use winit::event_loop::EventLoopProxy;
 
 use crate::events::UserEvent;
+use crate::session_overview::OVERVIEW_TILE_MIN_RENDER_INTERVAL;
 use crate::session_store::{
     self, PreviewLine, PreviewSpan, SessionCardId, SessionDelta, SessionWindowId, WallClock,
 };
 use crate::split_tree::PaneId;
-use crate::tab_overview::OVERVIEW_TILE_MIN_RENDER_INTERVAL;
 
 /// Which window/pane's `UserEvent`s this io thread posts back to the main
 /// loop. Grouped into one struct (rather than two `spawn` arguments)

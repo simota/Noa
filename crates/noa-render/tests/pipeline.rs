@@ -24,7 +24,7 @@ use noa_render::{
 use std::sync::Arc;
 
 /// Shared title-bar band height + card color for the overview headless tests
-/// (mirrors `noa_app::tab_overview`'s compile-time constants; noa-render can't
+/// (mirrors `noa_app::session_overview`'s compile-time constants; noa-render can't
 /// depend on noa-app, so the tests re-state them).
 const TEST_TITLE_BAR_H: u32 = 30;
 const TEST_CARD_COLOR: [f32; 4] = [0.078, 0.091, 0.127, 1.0];

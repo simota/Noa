@@ -45,14 +45,7 @@ use crate::link_open;
 use crate::mouse::{self, MouseSelectionState, SelectionGesture};
 use crate::search_prompt::{SearchPrompt, SearchPromptEffect};
 use crate::session;
-use crate::session_store::{SessionCardId, SessionStore, SessionWindowId};
-use crate::split_tree::{
-    self, Direction, HitTarget, ImeOp, MIN_PANE_SIZE_PX, PaneId, Rect as PaneRectApp,
-    SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitResizeDrag, SplitTree, equalize,
-    focus_in_direction, focus_switch_plan, hit_test, resize_split, resize_split_to_drag_point,
-    split_pane, split_resize_drag_target_at_point, zoom_resize_targets, zoom_toggle,
-};
-use crate::tab_overview::{
+use crate::session_overview::{
     OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_TILE_MIN_RENDER_INTERVAL,
     OverviewAction, OverviewChrome, OverviewEscapeAction, OverviewLayout, OverviewMetrics,
     OverviewRenderCandidate, compute_overview_grid, hit_test_overview_grid,
@@ -64,6 +57,13 @@ use crate::tab_overview::{
     overview_placeholder_source_ids, overview_search_field_rect, overview_search_field_row,
     overview_tab_filter, overview_tile_labels, overview_title_bar_color, overview_zoom_rect,
     sanitize_placeholder_label, select_due_overview_tile_ids, title_bar_row_ansi,
+};
+use crate::session_store::{SessionCardId, SessionStore, SessionWindowId};
+use crate::split_tree::{
+    self, Direction, HitTarget, ImeOp, MIN_PANE_SIZE_PX, PaneId, Rect as PaneRectApp,
+    SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitResizeDrag, SplitTree, equalize,
+    focus_in_direction, focus_switch_plan, hit_test, resize_split, resize_split_to_drag_point,
+    split_pane, split_resize_drag_target_at_point, zoom_resize_targets, zoom_toggle,
 };
 use crate::{AppCommand, ViewportScroll};
 

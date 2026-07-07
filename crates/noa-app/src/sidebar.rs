@@ -2,7 +2,7 @@
 //! `docs/specs/session-sidebar.md`, ADR 0001). Ghostty has no analog; this is a
 //! noa addition.
 //!
-//! Mirrors [`crate::tab_overview`]'s conventions: every function here is pure
+//! Mirrors [`crate::session_overview`]'s conventions: every function here is pure
 //! geometry over crate-local [`SidebarRect`]/[`Point`] plus the GUI-agnostic
 //! [`SessionCard`] state, so the sidebar's layout can be unit-tested without a
 //! window or GPU. The module must not import `winit` or `wgpu` (NFR-6/AC-2,

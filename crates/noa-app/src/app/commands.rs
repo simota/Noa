@@ -1,0 +1,123 @@
+//! App command dispatch and app-scoped toggles.
+
+use super::*;
+
+impl App {
+    pub(super) fn handle_app_command(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        command: AppCommand,
+        origin: CommandOrigin,
+    ) {
+        if overview_should_intercept_command(command, self.overview_visible, origin) {
+            return;
+        }
+        // C1 (FM1): dispatching any command means leaving the palette. Close
+        // it here so a command routed around the palette's own Enter path —
+        // notably a menu-bar click while the palette is open — can't leave
+        // two modals owning the keyboard. Idempotent with the Enter-path
+        // close; skipped for the toggle itself so re-pressing still works.
+        if command != AppCommand::ToggleCommandPalette {
+            self.command_palette = None;
+        }
+        match command {
+            AppCommand::About => crate::app_actions::show_about(),
+            AppCommand::Preferences => crate::app_actions::open_config_file(),
+            AppCommand::NewTab => {
+                let _ = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow);
+            }
+            AppCommand::NewWindow => {
+                let _ = self.spawn_tab(event_loop, SpawnTarget::NewWindow);
+            }
+            AppCommand::NewSplitRight => {
+                if let Some(window_id) = self.focused {
+                    self.new_split(window_id, SplitOrientation::Horizontal);
+                }
+            }
+            AppCommand::NewSplitDown => {
+                if let Some(window_id) = self.focused {
+                    self.new_split(window_id, SplitOrientation::Vertical);
+                }
+            }
+            AppCommand::FocusDirection(direction) => {
+                if let Some(window_id) = self.focused {
+                    self.focus_split_direction(window_id, direction);
+                }
+            }
+            AppCommand::ResizeSplit(direction) => {
+                if let Some(window_id) = self.focused {
+                    self.resize_focused_split(window_id, direction);
+                }
+            }
+            AppCommand::EqualizeSplits => {
+                if let Some(window_id) = self.focused {
+                    self.equalize_splits(window_id);
+                }
+            }
+            AppCommand::ToggleSplitZoom => {
+                if let Some(window_id) = self.focused {
+                    self.toggle_split_zoom(window_id);
+                }
+            }
+            AppCommand::ToggleTabOverview => self.toggle_tab_overview(),
+            AppCommand::CloseTab => {
+                if let Some(window_id) = self.focused {
+                    self.request_close_focused_pane_or_tab(event_loop, window_id);
+                }
+            }
+            AppCommand::SelectTab(index) => self.select_tab(index),
+            AppCommand::NextTab => self.select_next_tab(),
+            AppCommand::PrevTab => self.select_previous_tab(),
+            AppCommand::Copy => self.copy_selection_to_clipboard(),
+            AppCommand::Paste => self.paste_clipboard_to_pty(),
+            AppCommand::Terminal(action) => self.handle_terminal_action(action),
+            AppCommand::FontSize(action) => self.handle_font_size_action(action),
+            AppCommand::Search(action) => self.handle_search_action(action),
+            AppCommand::ScrollViewport(scroll) => self.scroll_viewport(scroll),
+            AppCommand::ToggleCommandPalette => self.toggle_command_palette(),
+            AppCommand::OpenThemeSettings => self.open_theme_settings(),
+            AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
+            AppCommand::ToggleSecureKeyboardEntry => self.toggle_secure_keyboard_entry(),
+            AppCommand::ToggleSidebar => self.toggle_sidebar(),
+            AppCommand::CloseWindow => self.request_close_window(event_loop),
+            AppCommand::Quit => self.request_quit(event_loop),
+        }
+    }
+
+    /// Toggle the single app-wide command palette (R-5). Opening binds it to
+    /// the focused window with an empty query and every entry shown;
+    /// re-firing while open closes it. A no-op when there is no focused
+    /// window to bind to.
+    fn toggle_command_palette(&mut self) {
+        if self.command_palette.is_some() {
+            self.command_palette = None;
+        } else if let Some(window_id) = self.focused
+            && self.active_overlay(window_id) == ActiveOverlay::None
+        {
+            self.command_palette = Some(CommandPaletteSession {
+                window_id,
+                palette: CommandPalette::open(),
+                opened_at: Instant::now(),
+            });
+        }
+        if let Some(window_id) = self.focused
+            && let Some(state) = self.windows.get(&window_id)
+        {
+            state.window.request_redraw();
+        }
+    }
+
+    /// Toggle Secure Keyboard Entry. A toggle only reaches us while the app is
+    /// frontmost, so the switch takes effect immediately; focus changes and app
+    /// exit reconcile it afterwards. The menu checkmark tracks the user intent.
+    fn toggle_secure_keyboard_entry(&mut self) {
+        let desired = self
+            .secure_input
+            .toggle(true, &mut crate::secure_input::CarbonSecureInput);
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = self.macos_menu.as_ref() {
+            menu.set_secure_keyboard_entry_checked(desired);
+        }
+        let _ = desired;
+    }
+}

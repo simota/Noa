@@ -14,6 +14,7 @@ const SPLIT_CONTEXT_MENU_ITEMS: &[(AppCommand, &str)] = &[
     (AppCommand::NewSplitDown, "Split Down"),
     (AppCommand::EqualizeSplits, "Equalize Splits"),
     (AppCommand::ToggleSplitZoom, "Toggle Split Zoom"),
+    (AppCommand::SetTabTitle, "Set Tab Title\u{2026}"),
 ];
 
 /// Holds the native menu alive for the lifetime of the winit event loop.
@@ -277,6 +278,15 @@ impl MacosMenu {
                     true,
                     Some(cmd_shift_accelerator(Code::BracketRight)),
                 ),
+                &PredefinedMenuItem::separator(),
+                // No accelerator: unbound by default, matching Ghostty's
+                // `prompt_surface_title`.
+                &MenuItem::with_id(
+                    AppCommand::SetTabTitle.menu_id(),
+                    "Set Tab Title\u{2026}",
+                    true,
+                    None,
+                ),
             ],
         )?;
         let help_menu = Submenu::with_id_and_items(
@@ -368,6 +378,9 @@ fn build_split_context_menu() -> anyhow::Result<Menu> {
     let separator = PredefinedMenuItem::separator();
     let equalize = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[2]);
     let toggle_zoom = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[3]);
+    // Ghostty parity: "Change Title" lives on the surface context menu too.
+    let title_separator = PredefinedMenuItem::separator();
+    let set_tab_title = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[4]);
 
     Ok(Menu::with_id_and_items(
         "noa.menu.split-context",
@@ -377,6 +390,8 @@ fn build_split_context_menu() -> anyhow::Result<Menu> {
             &separator,
             &equalize,
             &toggle_zoom,
+            &title_separator,
+            &set_tab_title,
         ],
     )?)
 }
@@ -423,6 +438,7 @@ mod tests {
                 (AppCommand::NewSplitDown, "Split Down"),
                 (AppCommand::EqualizeSplits, "Equalize Splits"),
                 (AppCommand::ToggleSplitZoom, "Toggle Split Zoom"),
+                (AppCommand::SetTabTitle, "Set Tab Title\u{2026}"),
             ]
         );
         for (command, _) in SPLIT_CONTEXT_MENU_ITEMS {

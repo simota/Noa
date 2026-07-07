@@ -166,6 +166,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ResizeSplit(_)
         | AppCommand::EqualizeSplits
         | AppCommand::ToggleSplitZoom
+        | AppCommand::SetTabTitle
         | AppCommand::CloseTab => CommandScope::FocusedTab,
         AppCommand::ToggleTabOverview
         | AppCommand::SelectTab(_)
@@ -244,6 +245,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ResizeSplit(_)
         | AppCommand::EqualizeSplits
         | AppCommand::ToggleSplitZoom
+        | AppCommand::SetTabTitle
         | AppCommand::CloseTab
         | AppCommand::SelectTab(_)
         | AppCommand::NextTab

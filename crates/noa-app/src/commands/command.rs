@@ -28,6 +28,10 @@ pub enum AppCommand {
     SelectTab(usize),
     NextTab,
     PrevTab,
+    /// Open the "Set Tab Title" prompt for the focused tab (tab-title
+    /// REQ-TTL-1). No default chord — Ghostty ships `prompt_surface_title`
+    /// unbound too — so it is reached via the palette and the Window menu.
+    SetTabTitle,
     CloseWindow,
     Quit,
     ToggleCommandPalette,
@@ -124,6 +128,7 @@ impl AppCommand {
     pub(crate) const CLOSE_TAB_MENU_ID: &'static str = "noa.file.close-tab";
     pub(crate) const NEXT_TAB_MENU_ID: &'static str = "noa.window.next-tab";
     pub(crate) const PREV_TAB_MENU_ID: &'static str = "noa.window.previous-tab";
+    pub(crate) const SET_TAB_TITLE_MENU_ID: &'static str = "noa.window.set-tab-title";
     pub(crate) const CLOSE_WINDOW_MENU_ID: &'static str = "noa.app.close-window";
     pub(crate) const QUIT_MENU_ID: &'static str = "noa.app.quit";
     pub(crate) const TOGGLE_COMMAND_PALETTE_MENU_ID: &'static str =
@@ -183,6 +188,7 @@ impl AppCommand {
             AppCommand::OpenThemeSettings => "",
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
+            AppCommand::SetTabTitle => Self::SET_TAB_TITLE_MENU_ID,
             AppCommand::CloseWindow => Self::CLOSE_WINDOW_MENU_ID,
             AppCommand::Quit => Self::QUIT_MENU_ID,
             AppCommand::ToggleCommandPalette => Self::TOGGLE_COMMAND_PALETTE_MENU_ID,
@@ -242,6 +248,7 @@ impl AppCommand {
             Self::CLOSE_TAB_MENU_ID => Some(Self::CloseTab),
             Self::NEXT_TAB_MENU_ID => Some(Self::NextTab),
             Self::PREV_TAB_MENU_ID => Some(Self::PrevTab),
+            Self::SET_TAB_TITLE_MENU_ID => Some(Self::SetTabTitle),
             Self::CLOSE_WINDOW_MENU_ID => Some(Self::CloseWindow),
             Self::QUIT_MENU_ID => Some(Self::Quit),
             Self::TOGGLE_COMMAND_PALETTE_MENU_ID => Some(Self::ToggleCommandPalette),
@@ -319,6 +326,7 @@ impl AppCommand {
             },
             Self::NextTab => "tab.next",
             Self::PrevTab => "tab.previous",
+            Self::SetTabTitle => "tab.set-title",
             Self::CloseWindow => "window.close",
             Self::Quit => "app.quit",
             Self::ToggleCommandPalette => "command-palette.toggle",
@@ -380,6 +388,7 @@ impl AppCommand {
             "tab.select-9" => Some(Self::SelectTab(9)),
             "tab.next" => Some(Self::NextTab),
             "tab.previous" => Some(Self::PrevTab),
+            "tab.set-title" => Some(Self::SetTabTitle),
             "window.close" => Some(Self::CloseWindow),
             "app.quit" => Some(Self::Quit),
             "command-palette.toggle" => Some(Self::ToggleCommandPalette),

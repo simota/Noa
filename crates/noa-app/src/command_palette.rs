@@ -78,6 +78,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         },
         AppCommand::NextTab => "Next Tab",
         AppCommand::PrevTab => "Previous Tab",
+        AppCommand::SetTabTitle => "Set Tab Title\u{2026}",
         AppCommand::CloseWindow => "Close Window",
         AppCommand::Quit => "Quit Noa",
         AppCommand::ToggleCommandPalette => "Toggle Command Palette",
@@ -142,6 +143,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ToggleQuickTerminal,
         AppCommand::ToggleSecureKeyboardEntry,
         AppCommand::ToggleSidebar,
+        AppCommand::SetTabTitle,
         AppCommand::CloseTab,
         AppCommand::NextTab,
         AppCommand::PrevTab,
@@ -308,6 +310,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::EqualizeSplits
         | AppCommand::ToggleSplitZoom => CommandCategory::Splits,
         AppCommand::NewTab
+        | AppCommand::SetTabTitle
         | AppCommand::CloseTab
         | AppCommand::NextTab
         | AppCommand::PrevTab

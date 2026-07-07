@@ -684,6 +684,10 @@ fn close_confirm_message_names_scope_and_count() {
         close_confirm_message(CloseConfirmTarget::App, 1),
         "A program is still running in Noa. Quit Noa?"
     );
+    assert_eq!(
+        close_confirm_message(CloseConfirmTarget::App, 0),
+        "Quit Noa?"
+    );
 }
 
 #[test]

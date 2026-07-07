@@ -1604,11 +1604,11 @@ impl App {
     }
 
     fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
-        let count = self.app_running_program_count();
-        if count == 0 {
+        if !self.config.confirm_quit {
             event_loop.exit();
             return;
         }
+        let count = self.app_running_program_count();
         let Some(window_id) = self
             .focused
             .filter(|id| self.windows.contains_key(id))

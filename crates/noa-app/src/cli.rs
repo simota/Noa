@@ -263,6 +263,7 @@ fn show_config_output(config: &StartupConfig) -> String {
         "clipboard-paste-protection",
         &config.clipboard_paste_protection.to_string(),
     );
+    push_line(&mut out, "confirm-quit", &config.confirm_quit.to_string());
     push_line(&mut out, "title-report", &config.title_report.to_string());
     push_optional_line(&mut out, "window-padding-x", config.window_padding_x);
     push_optional_line(&mut out, "window-padding-y", config.window_padding_y);
@@ -556,6 +557,7 @@ mod tests {
         assert!(output.contains("font-family = \n"));
         assert!(output.contains("clipboard-read = ask\n"));
         assert!(output.contains("clipboard-paste-protection = true\n"));
+        assert!(output.contains("confirm-quit = true\n"));
         assert!(output.contains("title-report = false\n"));
         assert!(output.contains("minimum-contrast = 1\n"));
         assert!(output.contains("background-opacity = 1\n"));
@@ -580,6 +582,7 @@ mod tests {
             background: Some(Rgb::new(0x10, 0x20, 0x30)),
             minimum_contrast: 3.0,
             cursor_style: Some(CursorShape::Bar),
+            confirm_quit: false,
             macos_option_as_alt: MacosOptionAsAlt::Right,
             macos_titlebar_style: MacosTitlebarStyle::Transparent,
             sidebar_enabled: true,
@@ -607,6 +610,7 @@ mod tests {
         assert!(output.contains("background = #102030\n"));
         assert!(output.contains("minimum-contrast = 3\n"));
         assert!(output.contains("cursor-style = bar\n"));
+        assert!(output.contains("confirm-quit = false\n"));
         assert!(output.contains("macos-option-as-alt = right\n"));
         assert!(output.contains("macos-titlebar-style = transparent\n"));
         assert!(output.contains("sidebar-enabled = true\n"));

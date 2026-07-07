@@ -89,6 +89,7 @@ fn app_config_from_startup(
         font: config.font,
         clipboard_read: config.clipboard_read,
         clipboard_paste_protection: config.clipboard_paste_protection,
+        confirm_quit: config.confirm_quit,
         title_report: config.title_report,
         window_padding_x: config.window_padding_x,
         window_padding_y: config.window_padding_y,
@@ -153,6 +154,7 @@ mod tests {
             theme: Some("3024 Day".to_string()),
             font: noa_config::FontConfig::default(),
             minimum_contrast: 3.0,
+            confirm_quit: false,
             macos_option_as_alt: noa_config::MacosOptionAsAlt::Both,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Transparent,
             sidebar_preview_lines: 4,
@@ -167,6 +169,7 @@ mod tests {
         assert_eq!(app_config.theme.as_deref(), Some("3024 Day"));
         assert_eq!(app_config.font, noa_config::FontConfig::default());
         assert_eq!(app_config.minimum_contrast, 3.0);
+        assert!(!app_config.confirm_quit);
         assert_eq!(
             app_config.macos_option_as_alt,
             noa_config::MacosOptionAsAlt::Both

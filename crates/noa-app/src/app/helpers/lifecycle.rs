@@ -35,6 +35,9 @@ pub(crate) fn close_confirm_message(target: CloseConfirmTarget, running_programs
 }
 
 pub(crate) fn close_confirm_plural(running_programs: usize, scope: &str, question: &str) -> String {
+    if running_programs == 0 {
+        return question.to_string();
+    }
     if running_programs == 1 {
         format!("A program is still running in {scope}. {question}")
     } else {

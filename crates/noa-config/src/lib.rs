@@ -286,6 +286,9 @@ pub struct StartupConfig {
     /// Whether to confirm before pasting content that could run commands
     /// (`clipboard-paste-protection`). Ghostty default is on.
     pub clipboard_paste_protection: bool,
+    /// `confirm-quit`: whether app quit (`cmd+q`, menu, command palette)
+    /// prompts before exiting. Default is on.
+    pub confirm_quit: bool,
     /// `title-report`: whether `CSI 21 t` (XTWINOPS) may report the window
     /// title back to the running program. Ghostty default is off — the reply
     /// echoes attacker-controllable text (OSC 0/2) into the pty as input.
@@ -397,6 +400,7 @@ impl Default for StartupConfig {
             font: FontConfig::default(),
             clipboard_read: ClipboardAccess::default(),
             clipboard_paste_protection: true,
+            confirm_quit: true,
             title_report: false,
             window_padding_x: None,
             window_padding_y: None,
@@ -442,6 +446,7 @@ pub struct ConfigOverrides {
     pub font: FontConfig,
     pub clipboard_read: Option<ClipboardAccess>,
     pub clipboard_paste_protection: Option<bool>,
+    pub confirm_quit: Option<bool>,
     pub title_report: Option<bool>,
     pub window_padding_x: Option<f32>,
     pub window_padding_y: Option<f32>,
@@ -487,6 +492,7 @@ impl ConfigOverrides {
             clipboard_paste_protection: higher_priority
                 .clipboard_paste_protection
                 .or(self.clipboard_paste_protection),
+            confirm_quit: higher_priority.confirm_quit.or(self.confirm_quit),
             title_report: higher_priority.title_report.or(self.title_report),
             window_padding_x: higher_priority.window_padding_x.or(self.window_padding_x),
             window_padding_y: higher_priority.window_padding_y.or(self.window_padding_y),
@@ -562,6 +568,7 @@ impl ConfigOverrides {
             clipboard_paste_protection: self
                 .clipboard_paste_protection
                 .unwrap_or(base.clipboard_paste_protection),
+            confirm_quit: self.confirm_quit.unwrap_or(base.confirm_quit),
             title_report: self.title_report.unwrap_or(base.title_report),
             window_padding_x: self.window_padding_x.or(base.window_padding_x),
             window_padding_y: self.window_padding_y.or(base.window_padding_y),
@@ -757,6 +764,7 @@ mod tests {
                 font: FontConfig::default(),
                 clipboard_read: ClipboardAccess::Ask,
                 clipboard_paste_protection: true,
+                confirm_quit: true,
                 title_report: false,
                 window_padding_x: None,
                 window_padding_y: None,
@@ -848,6 +856,30 @@ font-size = 15.5
                 font: FontConfig::default(),
                 ..Default::default()
             }
+        );
+    }
+
+    #[test]
+    fn confirm_quit_flows_through_parse_apply_and_precedence() {
+        let (overrides, diagnostics) = parse_overrides(test_path(), "confirm-quit = false");
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.confirm_quit, Some(false));
+
+        let default = ConfigOverrides::default().apply_to(StartupConfig::default());
+        assert!(default.confirm_quit);
+
+        let file = ConfigOverrides {
+            confirm_quit: Some(false),
+            ..Default::default()
+        };
+        let cli = ConfigOverrides {
+            confirm_quit: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            file.merge(cli)
+                .apply_to(StartupConfig::default())
+                .confirm_quit
         );
     }
 

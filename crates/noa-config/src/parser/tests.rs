@@ -365,6 +365,14 @@ fn clipboard_paste_protection_parses_bool() {
 }
 
 #[test]
+fn confirm_quit_parses_bool() {
+    let (overrides, diagnostics) = parse_overrides(path(), "confirm-quit = false");
+
+    assert_eq!(overrides.confirm_quit, Some(false));
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
 fn title_report_parses_bool() {
     let (overrides, diagnostics) = parse_overrides(path(), "title-report = true");
 
@@ -975,6 +983,7 @@ fn sidebar_keys_are_supported_scalar_keys_for_import() {
     assert!(is_supported_scalar_key("sidebar-width"));
     assert!(is_supported_scalar_key("sidebar-hotkey"));
     assert!(is_supported_scalar_key("sidebar-preview-lines"));
+    assert!(is_supported_scalar_key("confirm-quit"));
 }
 
 #[test]

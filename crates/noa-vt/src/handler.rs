@@ -213,6 +213,10 @@ pub trait Handler {
     /// `CSI = flags ; mode u` — set flags (`mode` 1 replace / 2 set / 3 clear).
     fn kitty_keyboard_set(&mut self, _flags: u8, _mode: u16) {}
 
+    /// XTMODKEYS `CSI > 4 ; Pv m` — xterm modifyOtherKeys level (0/1/2);
+    /// the reset forms (`CSI > 4 m` / `CSI > m`) arrive as level 0.
+    fn set_modify_other_keys(&mut self, _level: u16) {}
+
     // ── parsed but inc-1 no-ops ────────────────────────────────────
     /// OSC payload (`ESC ] … ST`). Inc-1: parse title (`0`/`2`), drop the rest.
     fn osc_dispatch(&mut self, _data: &[u8]) {}

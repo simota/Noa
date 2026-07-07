@@ -128,7 +128,17 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
             2 => EraseLine::Complete,
             _ => EraseLine::Right,
         }),
-        b'm' => h.set_attributes(&parse_sgr(csi)),
+        b'm' if plain => h.set_attributes(&parse_sgr(csi)),
+        // XTMODKEYS `CSI > Pp ; Pv m` sets an xterm key-modifier resource;
+        // `CSI > Pp m` (and bare `CSI > m`) resets it. Only modifyOtherKeys
+        // (Pp=4) is tracked. Must not fall through to SGR: `CSI > 4;2 m`
+        // read as SGR is underline-on + faint, sticking underline on every
+        // cell printed afterwards.
+        b'm' if csi.private == b'>' => {
+            if csi.params.is_empty() || csi.param(0, 0) == 4 {
+                h.set_modify_other_keys(csi.param(1, 0));
+            }
+        }
         b'p' if csi.intermediates.as_slice() == [b'$'] => {
             h.request_mode(ModeRequest {
                 value: csi.param(0, 0),

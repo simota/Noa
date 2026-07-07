@@ -415,6 +415,25 @@ fn sgr_reset_clears_underline_color() {
     assert!(!reset.attrs.intersects(CellAttrs::underline_styles()));
 }
 
+// XTMODKEYS `CSI > 4 ; 2 m` is not SGR — misreading it as `4;2m` sticks
+// underline+faint on every cell printed afterwards (seen with Claude Code
+// enabling modifyOtherKeys when it detects a capable terminal).
+#[test]
+fn xtmodkeys_is_not_sgr_and_tracks_modify_other_keys() {
+    let mut t = run(b"\x1b[>4;2mA");
+
+    let printed = cell(&t, 0, 0);
+    assert!(printed.attrs.is_empty(), "attrs: {:?}", printed.attrs);
+    assert!(t.modify_other_keys_2);
+
+    let mut s = Stream::new();
+    s.feed(b"\x1b[>4m", &mut t);
+    assert!(!t.modify_other_keys_2);
+
+    s.feed(b"\x1b[>4;1m\x1b[>4;2m\x1b[>m", &mut t);
+    assert!(!t.modify_other_keys_2, "bare CSI > m resets");
+}
+
 #[test]
 fn newline_and_carriage_return() {
     // "ab\r\ncd" → row0 "ab", row1 "cd"

@@ -73,6 +73,9 @@ pub struct Terminal {
     /// Off by default, matching Ghostty: the reply echoes program-settable
     /// text (OSC 0/2) back into the pty as input — an injection vector.
     pub title_report: bool,
+    /// XTMODKEYS modifyOtherKeys is at level 2 (`CSI > 4 ; 2 m`), matching
+    /// Ghostty's `modify_other_keys_2` flag. Levels 0/1 clear it.
+    pub modify_other_keys_2: bool,
     pub size: GridSize,
     /// Bytes the terminal must write back to the pty (query replies).
     pub pending_writes: Vec<u8>,
@@ -150,6 +153,7 @@ impl Terminal {
             colors: TerminalColors::default(),
             osc52_policy: Osc52Policy::default(),
             title_report: false,
+            modify_other_keys_2: false,
             size,
             pending_writes: Vec::new(),
             pending_clipboard_writes: Vec::new(),
@@ -1623,6 +1627,10 @@ impl Handler for Terminal {
 
     fn xtversion_query(&mut self) {
         self.push_dcs_response(format!(">|noa {}", env!("CARGO_PKG_VERSION")).as_bytes());
+    }
+
+    fn set_modify_other_keys(&mut self, level: u16) {
+        self.modify_other_keys_2 = level == 2;
     }
 
     fn kitty_graphics(&mut self, cmd: KittyGraphicsCommand) {

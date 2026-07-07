@@ -251,6 +251,54 @@ fn osc_terminated_by_st() {
     assert!(acts.contains(&Action::OscDispatch(b"2;t".to_vec())));
 }
 
+// Regression: UTF-8 payload bytes equal to 0x9c (continuation byte of e.g.
+// 作 E4 BD 9C, 検 E6 A4 9C) must not be taken as 8-bit ST. Claude Code sets
+// Japanese task summaries as the title every frame; the truncated remainder
+// used to print into the grid at the cursor ("勝手に入力").
+#[test]
+fn osc_utf8_payload_with_9c_continuation_is_not_terminated() {
+    // ESC ] 0 ; ⠐ 俳句を2つ作成する BEL — the exact shape Claude Code emits.
+    let payload = "0;⠐ 俳句を2つ作成する".as_bytes().to_vec();
+    let bytes = [b"\x1b]".as_slice(), &payload, b"\x07"].concat();
+    assert_eq!(actions(&bytes), vec![Action::OscDispatch(payload)]);
+}
+
+#[test]
+fn osc_8bit_st_still_terminates_between_utf8_scalars() {
+    let mut bytes = b"\x1b]2;".to_vec();
+    bytes.extend_from_slice("作".as_bytes()); // complete scalar
+    bytes.push(0x9c); // real 8-bit ST at a scalar boundary
+    let acts = actions(&bytes);
+    assert!(acts.contains(&Action::OscDispatch("2;作".as_bytes().to_vec())));
+}
+
+#[test]
+fn dcs_and_apc_utf8_payloads_with_9c_continuation_are_not_terminated() {
+    let dcs = ["\x1bP".as_bytes(), "検".as_bytes(), b"\x1b\\"].concat();
+    assert_eq!(
+        actions(&dcs),
+        vec![Action::DcsDispatch(crate::DcsPayload {
+            data: "検".as_bytes().to_vec(),
+        })]
+    );
+    let apc = ["\x1b_".as_bytes(), "作".as_bytes(), b"\x1b\\"].concat();
+    assert!(actions(&apc).contains(&Action::ApcDispatch {
+        data: "作".as_bytes().to_vec(),
+        truncated: false,
+    }));
+}
+
+#[test]
+fn sos_pm_utf8_payload_with_9c_continuation_is_not_terminated() {
+    // SOS payload is discarded, but a continuation 0x9c inside it must not
+    // end the string early — the tail would print as text.
+    let mut bytes = b"\x1bX".to_vec();
+    bytes.extend_from_slice("作成".as_bytes());
+    bytes.push(0x9c); // real ST at a scalar boundary ends the string
+    bytes.extend_from_slice(b"ok");
+    assert_eq!(actions(&bytes), vec![Action::Print('o'), Action::Print('k')]);
+}
+
 #[test]
 fn osc8_hyperlink_payload_captured() {
     let acts = actions(b"\x1b]8;id=docs;https://example.test\x1b\\");

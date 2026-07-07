@@ -39,6 +39,12 @@ pub struct Parser {
     utf8_acc: u32,
     utf8_rem: u8,
     utf8_min: u32,
+    /// UTF-8 continuation bytes still expected inside a string payload
+    /// (OSC/DCS/APC/SOS/PM). While nonzero, byte `0x9c` is payload data —
+    /// a continuation byte (e.g. the third byte of `作`/`検`) — not 8-bit ST.
+    /// Without this, a Japanese OSC title terminates mid-scalar and its tail
+    /// prints into the grid at the cursor.
+    string_utf8_rem: u8,
 }
 
 impl Default for Parser {
@@ -64,6 +70,7 @@ impl Parser {
             utf8_acc: 0,
             utf8_rem: 0,
             utf8_min: 0,
+            string_utf8_rem: 0,
         }
     }
 
@@ -154,9 +161,28 @@ impl Parser {
             State::OscString => self.st_osc(b, sink),
             State::ApcString => self.st_apc(b, sink),
             State::ApcEscape => unreachable!("handled before anywhere transitions"),
-            // SOS / PM string payloads are ignored by the state model.
-            State::SosPmApcString => {}
+            // SOS / PM string payloads are ignored by the state model, but
+            // UTF-8 tracking must still run so a payload continuation 0x9c
+            // is not mistaken for the terminating 8-bit ST.
+            State::SosPmApcString => self.track_string_utf8(b),
         }
+    }
+
+    /// Track UTF-8 sequence progress within a string payload (OSC/DCS/APC/
+    /// SOS/PM): while `string_utf8_rem > 0` the next 0x80..=0xbf bytes are
+    /// continuations of an in-flight scalar, so 0x9c among them is data, not
+    /// 8-bit ST. Payloads are accumulated as raw bytes; this only counts.
+    fn track_string_utf8(&mut self, b: u8) {
+        if self.string_utf8_rem > 0 && (0x80..=0xbf).contains(&b) {
+            self.string_utf8_rem -= 1;
+            return;
+        }
+        self.string_utf8_rem = match b {
+            0xc2..=0xdf => 1,
+            0xe0..=0xef => 2,
+            0xf0..=0xf4 => 3,
+            _ => 0,
+        };
     }
 
     // ── state handlers ─────────────────────────────────────────────
@@ -195,7 +221,11 @@ impl Parser {
                 self.state = State::EscapeIntermediate;
             }
             0x50 => self.goto(State::DcsPassthrough, sink), // 'P' DCS
-            0x58 | 0x5e => self.state = State::SosPmApcString, // 'X' SOS / '^' PM (discarded)
+            0x58 | 0x5e => {
+                // 'X' SOS / '^' PM (discarded)
+                self.state = State::SosPmApcString;
+                self.string_utf8_rem = 0;
+            }
             0x5f => self.goto(State::ApcString, sink),      // '_' APC (captured)
             0x5b => self.goto(State::CsiEntry, sink),       // '[' CSI
             0x5d => self.goto(State::OscString, sink),      // ']' OSC
@@ -293,8 +323,11 @@ impl Parser {
     fn st_osc<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
         match b {
             0x07 => self.goto(State::Ground, sink), // BEL terminates OSC
-            0x9c => self.goto(State::Ground, sink), // 8-bit ST
+            // 8-bit ST — only outside a payload UTF-8 sequence, where 0x9c
+            // is a continuation byte.
+            0x9c if self.string_utf8_rem == 0 => self.goto(State::Ground, sink),
             0x20..=0x7e | 0x80..=0xff => {
+                self.track_string_utf8(b);
                 if self.osc_overflow {
                     return;
                 }
@@ -311,8 +344,9 @@ impl Parser {
 
     fn st_dcs<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
         match b {
-            0x9c => self.finish_dcs(sink),
+            0x9c if self.string_utf8_rem == 0 => self.finish_dcs(sink),
             0x20..=0x7e | 0x80..=0xff => {
+                self.track_string_utf8(b);
                 if self.dcs_overflow {
                     return;
                 }
@@ -340,8 +374,9 @@ impl Parser {
 
     fn st_apc<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
         match b {
-            0x9c => self.finish_apc(sink), // 8-bit ST
+            0x9c if self.string_utf8_rem == 0 => self.finish_apc(sink), // 8-bit ST
             0x20..=0x7e | 0x80..=0xff => {
+                self.track_string_utf8(b);
                 // Unlike OSC/DCS, overflow keeps the captured prefix and marks
                 // it truncated so the dispatch still fires (Kitty must reply).
                 if !self.apc_overflow {
@@ -376,8 +411,13 @@ impl Parser {
         }
         match self.state {
             State::DcsPassthrough | State::ApcString => return false,
-            State::OscString if b != 0x9c => return false,
+            // 0x9c inside a payload UTF-8 sequence is a continuation byte,
+            // not 8-bit ST — fall through to the string accumulator.
+            State::OscString if b != 0x9c || self.string_utf8_rem > 0 => return false,
             State::SosPmApcString => {
+                if self.string_utf8_rem > 0 {
+                    return false; // payload UTF-8 continuation, not a C1
+                }
                 if b == 0x9c {
                     self.state = State::Ground;
                 }
@@ -388,7 +428,11 @@ impl Parser {
 
         match b {
             0x90 => self.goto(State::DcsPassthrough, sink), // DCS
-            0x98 | 0x9e => self.state = State::SosPmApcString, // SOS / PM
+            0x98 | 0x9e => {
+                // SOS / PM
+                self.state = State::SosPmApcString;
+                self.string_utf8_rem = 0;
+            }
             0x9b => self.goto(State::CsiEntry, sink),       // CSI
             0x9c => {
                 if self.state == State::OscString {
@@ -486,6 +530,8 @@ impl Parser {
             }
         }
         self.state = new;
+        // Payload UTF-8 tracking never survives a state change.
+        self.string_utf8_rem = 0;
         match new {
             State::Escape | State::CsiEntry => self.clear(),
             State::OscString => {

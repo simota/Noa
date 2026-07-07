@@ -281,6 +281,10 @@ pub struct StartupConfig {
     /// Whether to confirm before pasting content that could run commands
     /// (`clipboard-paste-protection`). Ghostty default is on.
     pub clipboard_paste_protection: bool,
+    /// `title-report`: whether `CSI 21 t` (XTWINOPS) may report the window
+    /// title back to the running program. Ghostty default is off — the reply
+    /// echoes attacker-controllable text (OSC 0/2) into the pty as input.
+    pub title_report: bool,
     /// `window-padding-x`: horizontal padding (left = right) in physical
     /// pixels. `None` keeps the built-in default for that axis; the concrete
     /// `GridPadding` is derived in `noa-app`.
@@ -385,6 +389,7 @@ impl Default for StartupConfig {
             font: FontConfig::default(),
             clipboard_read: ClipboardAccess::default(),
             clipboard_paste_protection: true,
+            title_report: false,
             window_padding_x: None,
             window_padding_y: None,
             background: None,
@@ -428,6 +433,7 @@ pub struct ConfigOverrides {
     pub font: FontConfig,
     pub clipboard_read: Option<ClipboardAccess>,
     pub clipboard_paste_protection: Option<bool>,
+    pub title_report: Option<bool>,
     pub window_padding_x: Option<f32>,
     pub window_padding_y: Option<f32>,
     pub background: Option<Rgb>,
@@ -471,6 +477,7 @@ impl ConfigOverrides {
             clipboard_paste_protection: higher_priority
                 .clipboard_paste_protection
                 .or(self.clipboard_paste_protection),
+            title_report: higher_priority.title_report.or(self.title_report),
             window_padding_x: higher_priority.window_padding_x.or(self.window_padding_x),
             window_padding_y: higher_priority.window_padding_y.or(self.window_padding_y),
             background: higher_priority.background.or(self.background),
@@ -542,6 +549,7 @@ impl ConfigOverrides {
             clipboard_paste_protection: self
                 .clipboard_paste_protection
                 .unwrap_or(base.clipboard_paste_protection),
+            title_report: self.title_report.unwrap_or(base.title_report),
             window_padding_x: self.window_padding_x.or(base.window_padding_x),
             window_padding_y: self.window_padding_y.or(base.window_padding_y),
             background: self.background.or(base.background),
@@ -727,6 +735,7 @@ mod tests {
                 font: FontConfig::default(),
                 clipboard_read: ClipboardAccess::Ask,
                 clipboard_paste_protection: true,
+                title_report: false,
                 window_padding_x: None,
                 window_padding_y: None,
                 background: None,

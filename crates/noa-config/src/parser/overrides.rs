@@ -25,6 +25,7 @@ pub(crate) fn build_overrides(
     let mut font = FontConfig::default();
     let mut clipboard_read = None;
     let mut clipboard_paste_protection = None;
+    let mut title_report = None;
     let mut window_padding_x = None;
     let mut window_padding_y = None;
     let mut background = None;
@@ -131,6 +132,9 @@ pub(crate) fn build_overrides(
             "clipboard-paste-protection" => {
                 clipboard_paste_protection =
                     parse_bool_directive(path, directive, &mut diagnostics);
+            }
+            "title-report" => {
+                title_report = parse_bool_directive(path, directive, &mut diagnostics);
             }
             "window-padding-x" => {
                 window_padding_x = parse_non_negative_f32(path, directive, &mut diagnostics);
@@ -270,6 +274,7 @@ pub(crate) fn build_overrides(
             font,
             clipboard_read,
             clipboard_paste_protection,
+            title_report,
             window_padding_x,
             window_padding_y,
             background,
@@ -313,6 +318,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "theme"
             | "clipboard-read"
             | "clipboard-paste-protection"
+            | "title-report"
             | "window-padding-x"
             | "window-padding-y"
             | "background"

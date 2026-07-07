@@ -365,6 +365,14 @@ fn clipboard_paste_protection_parses_bool() {
 }
 
 #[test]
+fn title_report_parses_bool() {
+    let (overrides, diagnostics) = parse_overrides(path(), "title-report = true");
+
+    assert_eq!(overrides.title_report, Some(true));
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
 fn window_padding_parses_non_negative_floats() {
     let (overrides, diagnostics) =
         parse_overrides(path(), "window-padding-x = 8\nwindow-padding-y = 4.5");

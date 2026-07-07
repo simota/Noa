@@ -20,6 +20,7 @@ pub(crate) const CONFIG_TEMPLATE: &str = "\
 # sidebar-enabled = true
 # sidebar-width = 360
 # sidebar-preview-lines = 3
+# confirm-quit = true
 #
 # Raise unreadably low-contrast text toward this WCAG contrast ratio
 # (1.0 = leave theme colors untouched; 1.1-3.0 are reasonable floors).

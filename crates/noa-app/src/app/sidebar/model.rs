@@ -1,6 +1,19 @@
 use super::*;
 
 impl App {
+    /// The manual title of the tab hosting `card`, if one is set (tab-title
+    /// REQ-TTL-11). Cards are per pane; the override is per tab, so every
+    /// card of a split tab reflects the same title.
+    pub(in crate::app) fn tab_title_override_for_card(
+        &self,
+        card: &SessionCardId,
+    ) -> Option<String> {
+        self.windows
+            .get(&WindowId::from(card.window_id.0))?
+            .title_override
+            .clone()
+    }
+
     /// Build the per-frame sidebar draw model for `window_id` (FR-2/FR-5), or
     /// `None` when the window has no visible sidebar. Reads only the store and
     /// the pure layout — never a `Terminal` (AC-17). Computed before the redraw
@@ -75,7 +88,8 @@ impl App {
             let Some(card) = self.session_store.get(&card_rects.id) else {
                 continue;
             };
-            let lines: CardLines = card_lines(card, now, home.as_deref());
+            let tab_title = self.tab_title_override_for_card(&card_rects.id);
+            let lines: CardLines = card_lines(card, now, home.as_deref(), tab_title.as_deref());
             let marker = self.attention_marker_visible(&card_rects.id);
             let renaming = self
                 .sidebar_rename
@@ -176,7 +190,8 @@ impl App {
             .filter(|drag| drag.active)
             .and_then(|drag| {
                 let card = self.session_store.get(&drag.card)?;
-                let lines = card_lines(card, now, home.as_deref());
+                let tab_title = self.tab_title_override_for_card(&drag.card);
+                let lines = card_lines(card, now, home.as_deref(), tab_title.as_deref());
                 let marker = self.attention_marker_visible(&drag.card);
                 let local = layout_metrics.card_local_rects(drag.card, card_w);
                 let mut card_runs = Vec::new();

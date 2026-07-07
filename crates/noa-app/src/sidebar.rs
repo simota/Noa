@@ -612,7 +612,8 @@ pub enum SidebarHit {
 /// `Instant::now()`) so the relative-time line is pure and testable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CardLines {
-    /// `<icon glyph> <display name>` — the rename override shadows the title.
+    /// `<icon glyph> <display name>` — the per-card rename override shadows
+    /// everything; a manual tab title shadows the shell-driven name.
     pub name: String,
     /// The cwd row: `~`-abbreviated and middle-truncated so both the path root
     /// and the most-specific tail segment stay visible.
@@ -631,10 +632,22 @@ pub struct CardLines {
 /// Build a card's display lines from its state and the current wall clock.
 /// `home` (the viewer's home directory, if known) drives the cwd's `~`
 /// abbreviation; a parameter — like `now` — so the formatter stays pure.
-pub fn card_lines(card: &SessionCard, now: WallClock, home: Option<&str>) -> CardLines {
+/// `tab_title` carries the card's tab's manual title override (tab-title
+/// REQ-TTL-11), if any — also a parameter so the formatter stays store-pure.
+pub fn card_lines(
+    card: &SessionCard,
+    now: WallClock,
+    home: Option<&str>,
+    tab_title: Option<&str>,
+) -> CardLines {
     // The project icon is rendered from its own rect (`CardRects::icon`), so the
-    // display name here carries no glyph prefix.
-    let name = card.display_name().to_string();
+    // display name here carries no glyph prefix. Name precedence: an explicit
+    // per-card rename (FR-7) wins, then the tab's manual title, then the
+    // shell-driven session name.
+    let name = match (&card.name_override, tab_title) {
+        (None, Some(title)) => title.to_string(),
+        _ => card.display_name().to_string(),
+    };
     let cwd = format_cwd(&card.cwd, home, CWD_MAX_CHARS);
     let branch = card.branch.clone().unwrap_or_default();
     // The detected foreground process name; when unavailable (non-macOS, or not
@@ -936,7 +949,7 @@ mod tests {
             "/Users/dev/repos/github.com/example/very-long-project",
             Some("main"),
         );
-        let lines = card_lines(&card, wall(10, 3), None);
+        let lines = card_lines(&card, wall(10, 3), None, None);
 
         // The name line is the display name (the icon renders from its own
         // rect, so no glyph prefix here); the icon glyph stays resolvable.
@@ -1020,9 +1033,27 @@ mod tests {
     #[test]
     fn card_lines_omit_branch_when_absent() {
         let card = sample_card("shell", "/repo", None);
-        let lines = card_lines(&card, wall(10, 0), None);
+        let lines = card_lines(&card, wall(10, 0), None, None);
         assert_eq!(lines.cwd, "/repo");
         assert_eq!(lines.branch, "");
+    }
+
+    // tab-title REQ-TTL-11: a manual tab title shadows the shell-driven name
+    // on the card, but an explicit per-card rename (FR-7) still wins.
+    #[test]
+    fn card_name_precedence_is_rename_then_tab_title_then_shell() {
+        let mut card = sample_card("shell", "/repo", None);
+        assert_eq!(
+            card_lines(&card, wall(10, 0), None, Some("api server")).name,
+            "api server"
+        );
+        card.name_override = Some("my session".to_string());
+        assert_eq!(
+            card_lines(&card, wall(10, 0), None, Some("api server")).name,
+            "my session"
+        );
+        card.name_override = None;
+        assert_eq!(card_lines(&card, wall(10, 0), None, None).name, "shell");
     }
 
     // The cwd row abbreviates the home directory to `~` and middle-truncates
@@ -1070,7 +1101,7 @@ mod tests {
             updated_at: wall(10, 0),
             preview: None,
         });
-        let idle = card_lines(store.get(&id).unwrap(), wall(10, 0), None);
+        let idle = card_lines(store.get(&id).unwrap(), wall(10, 0), None, None);
         assert_eq!(idle.process, "idle");
 
         store.apply(SessionDelta::Upsert {
@@ -1082,7 +1113,7 @@ mod tests {
             updated_at: wall(10, 0),
             preview: None,
         });
-        let busy = card_lines(store.get(&id).unwrap(), wall(10, 0), None);
+        let busy = card_lines(store.get(&id).unwrap(), wall(10, 0), None, None);
         assert_eq!(busy.process, "running");
     }
 

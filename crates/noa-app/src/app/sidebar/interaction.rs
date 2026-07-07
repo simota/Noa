@@ -130,13 +130,19 @@ impl App {
         }
     }
 
-    /// Open the inline rename editor on `card` (FR-7 Rename), seeded with its
-    /// current display name so a small correction doesn't require retyping.
+    /// Open the inline rename editor on `card` (FR-7 Rename), seeded with the
+    /// name the card currently displays — including a shadowing tab title
+    /// (tab-title REQ-TTL-11) — so a small correction doesn't require
+    /// retyping.
     fn start_sidebar_rename(&mut self, window_id: WindowId, card: SessionCardId) {
+        let tab_title = self.tab_title_override_for_card(&card);
         let buffer = self
             .session_store
             .get(&card)
-            .map(|c| c.display_name().to_string())
+            .map(|c| match (&c.name_override, tab_title) {
+                (None, Some(title)) => title,
+                _ => c.display_name().to_string(),
+            })
             .unwrap_or_default();
         self.sidebar_rename = Some(SidebarRenameSession {
             window_id,

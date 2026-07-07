@@ -1249,6 +1249,7 @@ impl Handler for Terminal {
             | (1003, false)
             | (1005, false)
             | (1006, false)
+            | (1007, false)
             | (1015, false)
             | (1047, false)
             | (1048, false)
@@ -1562,9 +1563,11 @@ impl Handler for Terminal {
             self.handle_decrqss(request);
         } else if let Some(payload) = data.strip_prefix(b"+q") {
             self.handle_xtgettcap(payload);
-        } else if data == b">q" {
-            self.push_dcs_response(format!(">|noa {}", env!("CARGO_PKG_VERSION")).as_bytes());
         }
+    }
+
+    fn xtversion_query(&mut self) {
+        self.push_dcs_response(format!(">|noa {}", env!("CARGO_PKG_VERSION")).as_bytes());
     }
 
     fn kitty_graphics(&mut self, cmd: KittyGraphicsCommand) {

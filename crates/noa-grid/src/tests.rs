@@ -298,9 +298,8 @@ fn decrqss_reports_sgr_cursor_and_margins() {
 }
 
 #[test]
-fn xtgettcap_and_xtversion_report_selected_capabilities() {
-    let t = run(b"\x1bP+q544e;524742;7878\x1b\\\
-          \x1bP>q\x1b\\");
+fn xtgettcap_reports_selected_capabilities() {
+    let t = run(b"\x1bP+q544e;524742;7878\x1b\\");
 
     assert_eq!(
         t.pending_writes,
@@ -308,12 +307,21 @@ fn xtgettcap_and_xtversion_report_selected_capabilities() {
             "\x1bP1+r544e=6e6f61\x1b\\",
             "\x1bP1+r524742=383a383a38\x1b\\",
             "\x1bP0+r7878\x1b\\",
-            "\x1bP>|noa ",
-            env!("CARGO_PKG_VERSION"),
-            "\x1b\\"
         )
         .as_bytes()
     );
+}
+
+#[test]
+fn xtversion_query_reports_name_and_version() {
+    // `CSI > 0 q` and the bare `CSI > q` are both valid XTVERSION queries.
+    let t = run(b"\x1b[>0q\x1b[>q");
+
+    let expected = format!(
+        "\x1bP>|noa {v}\x1b\\\x1bP>|noa {v}\x1b\\",
+        v = env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(t.pending_writes, expected.as_bytes());
 }
 
 #[test]
@@ -324,6 +332,14 @@ fn decrqm_reports_known_mode_state() {
         t.pending_writes,
         b"\x1b[?25;1$y\x1b[?25;2$y\x1b[20;2$y\x1b[?9999;0$y"
     );
+}
+
+#[test]
+fn decrqm_reports_alternate_scroll_mode_1007_state() {
+    // 1007 defaults on (matches Ghostty), so an un-set query reports 1
+    // (set); after `CSI ?1007l` it reports 2 (reset).
+    let t = run(b"\x1b[?1007$p\x1b[?1007l\x1b[?1007$p");
+    assert_eq!(t.pending_writes, b"\x1b[?1007;1$y\x1b[?1007;2$y");
 }
 
 #[test]

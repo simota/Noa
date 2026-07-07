@@ -184,6 +184,8 @@ pub trait Handler {
     // ── reports (terminal writes back to the pty) ──────────────────
     fn device_attributes(&mut self, kind: DaKind);
     fn device_status_report(&mut self, kind: DsrKind);
+    /// `XTVERSION` (`CSI > 0 q` / `CSI > q`) — report the terminal name/version.
+    fn xtversion_query(&mut self) {}
     /// `XTWINOPS` (`CSI Ps ; Ps1 ; Ps2 t`) — window operation / report
     /// request. Ghostty-parity subset only: `Ps` 14/16/18/21 report; 22/23
     /// push/pop the window-title stack; every other `Ps` (4/8/9/10/19/20/…)

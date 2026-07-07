@@ -124,6 +124,7 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
             };
             h.set_cursor_style(style);
         }
+        b'q' if csi.private == b'>' => h.xtversion_query(),
         b'h' | b'l' => {
             let on = csi.final_byte == b'h';
             let ansi = csi.private != b'?';

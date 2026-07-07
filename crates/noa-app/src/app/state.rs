@@ -399,11 +399,14 @@ pub(super) struct ConfirmDialogSession {
 
 /// The deferred side effect a [`ConfirmDialogSession`] runs on confirmation.
 pub(super) enum ConfirmAction {
-    /// Send already-encoded paste bytes to the pane's pty.
+    /// Paste raw (unencoded) text to the pane's pty. Encoding (bracketed or
+    /// raw) happens at confirm time, not dialog-open time, so a bracketed-
+    /// paste mode change while the dialog is open can't produce a stale
+    /// encoding.
     Paste {
         window_id: WindowId,
         pane_id: PaneId,
-        bytes: Vec<u8>,
+        text: String,
     },
     /// Fulfill an OSC 52 clipboard read: read the clipboard now and write the
     /// base64 reply to the pane's pty.

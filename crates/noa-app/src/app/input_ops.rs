@@ -1068,12 +1068,11 @@ impl App {
             PasteContents::Empty => String::new(),
         };
         let bracketed_paste = self.bracketed_paste(window_id, pane_id);
-        let Some(bytes) = input::encode_paste(&text, bracketed_paste) else {
-            return;
-        };
         // Paste protection: confirm before sending content that could run a
         // command on its own (a newline), or that tries to break out of
-        // bracketed paste.
+        // bracketed paste. The raw text (not the encoding) is stored on the
+        // dialog: encoding is re-derived at confirm time so a mode change
+        // while the dialog is open can't produce a stale encoding.
         if self.config.clipboard_paste_protection && input::paste_is_unsafe(&text, bracketed_paste)
         {
             let lines = text.lines().count().max(1);
@@ -1083,11 +1082,14 @@ impl App {
                 ConfirmAction::Paste {
                     window_id,
                     pane_id,
-                    bytes,
+                    text,
                 },
             );
             return;
         }
+        let Some(bytes) = input::encode_paste(&text, bracketed_paste) else {
+            return;
+        };
         self.snap_focused_viewport_to_bottom(window_id);
         self.write_pane_pty_bytes(window_id, pane_id, &bytes);
     }
@@ -1190,8 +1192,12 @@ impl App {
             ConfirmAction::Paste {
                 window_id,
                 pane_id,
-                bytes,
+                text,
             } => {
+                let bracketed_paste = self.bracketed_paste(window_id, pane_id);
+                let Some(bytes) = input::encode_paste(&text, bracketed_paste) else {
+                    return;
+                };
                 self.snap_focused_viewport_to_bottom(window_id);
                 self.write_pane_pty_bytes(window_id, pane_id, &bytes);
             }

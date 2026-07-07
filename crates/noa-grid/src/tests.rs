@@ -768,7 +768,30 @@ fn scrollback_records_full_screen_scrolls() {
 }
 
 #[test]
-fn partial_scroll_region_does_not_record_scrollback() {
+fn top_anchored_scroll_region_records_scrollback() {
+    let mut t = run_size(
+        5,
+        5,
+        b"AA\x1b[2;1HBB\x1b[3;1HCC\x1b[4;1HDD\x1b[5;1HEE\x1b[1;3r\x1b[3;1H\r\n",
+    );
+
+    assert_eq!(t.scrollback_len(), 1);
+    assert_eq!(t.primary.take_scroll_shift(), 0);
+    assert_eq!(row_text(&t, 0, 2), "BB");
+    assert_eq!(row_text(&t, 1, 2), "CC");
+    assert_eq!(row_text(&t, 2, 2), "  ");
+    assert_eq!(row_text(&t, 3, 2), "DD");
+    assert_eq!(row_text(&t, 4, 2), "EE");
+
+    t.scroll_viewport_up(1);
+    let rows = t.active().visible_rows();
+    assert_eq!(rows_text(&rows, 0, 2), "AA");
+    assert_eq!(rows_text(&rows, 1, 2), "BB");
+    assert_eq!(rows_text(&rows, 2, 2), "CC");
+}
+
+#[test]
+fn non_top_scroll_region_does_not_record_scrollback() {
     let t = run_size(5, 4, b"\x1b[2;4r\x1b[4;1HA\r\n");
 
     assert_eq!(t.scrollback_len(), 0);

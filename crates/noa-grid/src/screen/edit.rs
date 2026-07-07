@@ -207,6 +207,7 @@ impl Screen {
             return;
         }
         let recorded = self.records_scrollback_for_region(top, bottom);
+        let full_height = top == 0 && bottom + 1 == self.rows as usize;
         if recorded {
             // Pack the leaving rows straight into scrollback *before* the
             // rotation, borrowing them in place — cloning them out first
@@ -223,7 +224,7 @@ impl Screen {
         for r in &mut self.grid[(bottom + 1 - n)..=bottom] {
             r.clear(&blank);
         }
-        if recorded {
+        if recorded && full_height {
             // A scrollback-recording scroll is a pure translation of the
             // viewport: every row keeps its content (and its dirty bit,
             // which rotated with it), so no blanket re-dirty is needed.
@@ -231,6 +232,10 @@ impl Screen {
             // cache instead of rebuilding every row.
             self.scroll_shift = self.scroll_shift.saturating_add(n);
         } else {
+            // Top-anchored partial regions (common for primary-screen TUIs
+            // with a fixed prompt/status area) still contribute to scrollback,
+            // but only the region moves. Rebuild those rows instead of using
+            // the full-screen row-cache translation fast path.
             for r in &mut self.grid[top..=bottom] {
                 r.dirty = true;
             }

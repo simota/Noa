@@ -262,8 +262,8 @@ impl Screen {
         self.viewport_offset = self.viewport_offset.min(self.max_viewport_offset());
     }
 
-    fn records_scrollback_for_region(&self, top: usize, bottom: usize) -> bool {
-        self.scrollback_enabled && top == 0 && bottom + 1 == self.rows as usize
+    fn records_scrollback_for_region(&self, top: usize, _bottom: usize) -> bool {
+        self.scrollback_enabled && top == 0
     }
 
     fn push_scrollback_row(&mut self, row: Row) {

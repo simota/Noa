@@ -439,6 +439,7 @@ impl App {
                 last_grid: None,
                 resize_overlay: None,
                 bell_flash_until: None,
+                native_overlays: Default::default(),
             },
         );
         self.relayout_and_resize_window(window_id);

@@ -5,7 +5,9 @@
 
 use std::time::{Duration, Instant};
 
-/// Fast micro-transition (fades, selection cues).
+/// Fast micro-transition (fades, selection cues). On macOS the modal cards
+/// are native AppKit views and don't ride this — the wgpu fallback still does.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub const DUR_FAST: Duration = Duration::from_millis(120);
 /// Base transition (spatial movement: zoom, slide-adjacent moves).
 pub const DUR_BASE: Duration = Duration::from_millis(150);

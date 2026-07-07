@@ -223,7 +223,9 @@ fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
         if color.is_null() {
             return;
         }
-        let cg_color: *mut AnyObject = msg_send![color, CGColor];
+        // `-CGColor` returns `^{CGColor=}`, not an object — the opaque type
+        // keeps objc2's debug-mode encoding verification satisfied.
+        let cg_color: *mut crate::macos_overlay::cg::CGColor = msg_send![color, CGColor];
 
         // Idempotency: reuse an existing backdrop, just refreshing its color.
         let container_subviews: *mut AnyObject = msg_send![container, subviews];

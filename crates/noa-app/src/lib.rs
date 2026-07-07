@@ -22,6 +22,7 @@ mod macos_blur;
 mod macos_hotkey;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+mod macos_overlay;
 mod macos_window;
 mod mouse;
 mod notification;

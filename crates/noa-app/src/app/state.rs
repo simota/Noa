@@ -241,6 +241,10 @@ pub(super) struct WindowState {
     pub(super) resize_overlay: Option<(String, Instant)>,
     /// `visual-bell`: the full-window flash stays up until this instant.
     pub(super) bell_flash_until: Option<Instant>,
+    /// Last-synced native (AppKit) overlay model hashes — palette, theme
+    /// settings, confirm dialog, toast. Plain data on every platform; only
+    /// the macOS redraw path feeds it.
+    pub(super) native_overlays: crate::macos_overlay::NativeOverlayCache,
 }
 
 /// How long the `cols × rows` resize toast stays up after the last grid

@@ -284,8 +284,11 @@ mod palette;
 mod render;
 mod state;
 
+pub(super) use palette::{ScrollThumb, draw_bell_flash, draw_scrollbar_thumbs};
+// The wgpu modal cards are the non-macOS fallback; macOS composites native
+// AppKit cards instead (`crate::macos_overlay`).
+#[cfg(not(target_os = "macos"))]
 pub(super) use palette::{
-    ScrollThumb, draw_bell_flash, draw_command_palette_card, draw_confirm_dialog_card,
-    draw_scrollbar_thumbs, draw_theme_settings_card, draw_toast_card,
+    draw_command_palette_card, draw_confirm_dialog_card, draw_theme_settings_card, draw_toast_card,
 };
 pub(super) use render::draw_sidebar_band;

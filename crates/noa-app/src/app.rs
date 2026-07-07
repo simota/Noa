@@ -604,10 +604,70 @@ impl App {
                 model,
             );
         }
+        // On macOS the four modal overlays (palette, theme settings, confirm
+        // dialog, resize toast) render as native AppKit cards — blur
+        // material, system font — instead of wgpu-composited cards. Display
+        // only: input/IME stays on the winit path. Off macOS the wgpu card
+        // path below keeps drawing.
+        #[cfg(target_os = "macos")]
+        {
+            let colors = crate::macos_overlay::OverlayColors::from_style(
+                &noa_render::OverlayStyle::from_theme(active_theme(
+                    &gpu.theme,
+                    &gpu.preview_theme,
+                )),
+                crate::chrome::palette().dot_red,
+            );
+            let scale = state.window.scale_factor();
+            let focused_rect = snapshots
+                .iter()
+                .find(|(pane_id, _, _)| *pane_id == state.focused_pane)
+                .map(|(_, rect, _)| {
+                    let r = render_pane_rect(*rect);
+                    crate::macos_overlay::PaneRectPt::from_px(r.x, r.y, r.w, r.h, scale)
+                });
+            crate::macos_overlay::sync_command_palette(
+                &state.window,
+                &mut state.native_overlays,
+                palette_card
+                    .as_ref()
+                    .and_then(|(snap, _)| focused_rect.map(|r| (snap, r))),
+                &colors,
+            );
+            crate::macos_overlay::sync_theme_settings(
+                &state.window,
+                &mut state.native_overlays,
+                theme_settings_card
+                    .as_ref()
+                    .and_then(|(ts, _)| focused_rect.map(|r| (ts, r))),
+                &colors,
+            );
+            crate::macos_overlay::sync_confirm_dialog(
+                &state.window,
+                &mut state.native_overlays,
+                dialog_card
+                    .as_ref()
+                    .and_then(|d| focused_rect.map(|r| (d, r))),
+                &colors,
+            );
+            let toast_now = Instant::now();
+            let toast_text = state
+                .resize_overlay
+                .as_ref()
+                .filter(|(_, until)| toast_now < *until)
+                .map(|(text, _)| text.clone());
+            crate::macos_overlay::sync_toast(
+                &state.window,
+                &mut state.native_overlays,
+                toast_text.as_deref(),
+                &colors,
+            );
+        }
         // Composite the open command palette as a rounded card over the focused
         // pane, on top of the panes and sidebar so the modal always wins (H).
         // A brief eased fade-in on open; repaints ride request_redraw until
         // the fade settles.
+        #[cfg(not(target_os = "macos"))]
         if let Some((palette, opened_at)) = palette_card.as_ref()
             && let Some((_, rect, snapshot)) = snapshots
                 .iter()
@@ -638,6 +698,7 @@ impl App {
         }
         // The theme-settings overlay composites at the same tier as the
         // palette (mutually exclusive with it, R-3) — same fade-in.
+        #[cfg(not(target_os = "macos"))]
         if let Some((theme_settings, opened_at)) = theme_settings_card.as_ref()
             && let Some((_, rect, snapshot)) = snapshots
                 .iter()
@@ -668,6 +729,7 @@ impl App {
         }
         // The confirm dialog composites last: it blocks input, so it must win
         // over the palette card too.
+        #[cfg(not(target_os = "macos"))]
         if let Some(dialog) = dialog_card.as_ref()
             && let Some((_, rect, snapshot)) = snapshots
                 .iter()
@@ -694,6 +756,7 @@ impl App {
         // resize toast and the visual-bell flash (both expire via
         // `tick_transient_overlays`).
         let now = Instant::now();
+        #[cfg(not(target_os = "macos"))]
         if let Some((text, until)) = state.resize_overlay.clone()
             && now < until
         {
@@ -1130,6 +1193,7 @@ impl App {
                 last_grid: None,
                 resize_overlay: None,
                 bell_flash_until: None,
+                native_overlays: Default::default(),
             },
         );
         self.window_order.push(window_id);

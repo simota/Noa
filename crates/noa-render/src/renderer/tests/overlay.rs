@@ -20,7 +20,11 @@ fn search_prompt_display_text_keeps_the_tail_of_a_buffer_too_long_to_fit() {
 #[test]
 fn search_prompt_display_text_reports_no_matches_for_non_empty_query() {
     let mut search = SearchState::default();
-    search.set_query("needle".to_string(), Vec::new());
+    search.set_query(
+        "needle".to_string(),
+        Vec::new(),
+        noa_grid::SearchAnchor::Backward(SelectionPoint::new(0, 0)),
+    );
 
     let text = search_prompt_display_text("needle", &search, 30);
 

@@ -12,6 +12,25 @@ pub struct SearchMatch {
     pub end: SelectionPoint,
 }
 
+/// Which match to activate when a (re)query lands ([`SearchState::set_query`]).
+/// Matches are ordered by storage position, so "nearest" is resolved with a
+/// directional preference and falls through to the other side only when no
+/// match exists on the preferred one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SearchAnchor {
+    /// Activate the nearest match starting at or before the point — a fresh
+    /// query anchors here at the viewport bottom, so the bottom-most visible
+    /// match wins rather than the oldest scrollback row. Falls through to the
+    /// first match when every match lies after the point.
+    Backward(SelectionPoint),
+    /// Activate the nearest match starting at or after the point — an
+    /// incremental query edit anchors here at the previous active match, so
+    /// extending the query keeps the active match in place instead of
+    /// resetting to the top. Falls through to the last match when every match
+    /// lies before the point.
+    Forward(SelectionPoint),
+}
+
 impl SearchMatch {
     pub fn contains(&self, point: SelectionPoint) -> bool {
         self.start.y == point.y
@@ -48,10 +67,27 @@ impl SearchState {
         self.active
     }
 
-    pub fn set_query(&mut self, query: String, matches: Vec<SearchMatch>) {
+    pub fn set_query(&mut self, query: String, matches: Vec<SearchMatch>, anchor: SearchAnchor) {
         self.query = query;
         self.matches = Arc::from(matches.into_boxed_slice());
-        self.active = (!self.matches.is_empty()).then_some(0);
+        self.active = self.anchored_index(anchor);
+    }
+
+    fn anchored_index(&self, anchor: SearchAnchor) -> Option<usize> {
+        if self.matches.is_empty() {
+            return None;
+        }
+        let key = |m: &SearchMatch| (m.start.y, m.start.x);
+        Some(match anchor {
+            SearchAnchor::Backward(point) => self
+                .matches
+                .partition_point(|m| key(m) <= (point.y, point.x))
+                .saturating_sub(1),
+            SearchAnchor::Forward(point) => self
+                .matches
+                .partition_point(|m| key(m) < (point.y, point.x))
+                .min(self.matches.len() - 1),
+        })
     }
 
     pub fn clear(&mut self) {
@@ -154,12 +190,18 @@ mod tests {
             .collect()
     }
 
+    /// Anchor at the very top of storage — activates the first match, i.e.
+    /// the pre-anchor behavior, for tests that only exercise navigation.
+    fn top_anchor() -> SearchAnchor {
+        SearchAnchor::Backward(SelectionPoint::new(0, 0))
+    }
+
     #[test]
     fn active_index_tracks_the_active_match_through_navigation() {
         let mut state = SearchState::default();
         assert_eq!(state.active_index(), None, "no query yet");
 
-        state.set_query("x".to_string(), matches_at(&[0, 3, 7]));
+        state.set_query("x".to_string(), matches_at(&[0, 3, 7]), top_anchor());
         assert_eq!(state.active_index(), Some(0), "first match auto-activates");
 
         state.next_match();
@@ -185,7 +227,108 @@ mod tests {
     #[test]
     fn active_index_is_none_when_query_has_no_matches() {
         let mut state = SearchState::default();
-        state.set_query("x".to_string(), Vec::new());
+        state.set_query("x".to_string(), Vec::new(), top_anchor());
         assert_eq!(state.active_index(), None);
+    }
+
+    #[test]
+    fn backward_anchor_activates_the_nearest_match_at_or_before_the_point() {
+        let mut state = SearchState::default();
+
+        state.set_query(
+            "x".to_string(),
+            matches_at(&[2, 5, 9]),
+            SearchAnchor::Backward(SelectionPoint::new(0, 6)),
+        );
+        assert_eq!(
+            state.active_index(),
+            Some(1),
+            "y=5 is the nearest at-or-before y=6"
+        );
+
+        state.set_query(
+            "x".to_string(),
+            matches_at(&[2, 5, 9]),
+            SearchAnchor::Backward(SelectionPoint::new(0, 5)),
+        );
+        assert_eq!(
+            state.active_index(),
+            Some(1),
+            "an exact hit counts as at-or-before"
+        );
+
+        state.set_query(
+            "x".to_string(),
+            matches_at(&[2, 5, 9]),
+            SearchAnchor::Backward(SelectionPoint::new(0, 1)),
+        );
+        assert_eq!(
+            state.active_index(),
+            Some(0),
+            "every match after the anchor falls through to the first"
+        );
+    }
+
+    #[test]
+    fn forward_anchor_activates_the_nearest_match_at_or_after_the_point() {
+        let mut state = SearchState::default();
+
+        state.set_query(
+            "x".to_string(),
+            matches_at(&[2, 5, 9]),
+            SearchAnchor::Forward(SelectionPoint::new(0, 5)),
+        );
+        assert_eq!(state.active_index(), Some(1), "an exact hit stays put");
+
+        state.set_query(
+            "x".to_string(),
+            matches_at(&[2, 5, 9]),
+            SearchAnchor::Forward(SelectionPoint::new(0, 6)),
+        );
+        assert_eq!(
+            state.active_index(),
+            Some(2),
+            "y=9 is the nearest at-or-after y=6"
+        );
+
+        state.set_query(
+            "x".to_string(),
+            matches_at(&[2, 5, 9]),
+            SearchAnchor::Forward(SelectionPoint::new(0, 10)),
+        );
+        assert_eq!(
+            state.active_index(),
+            Some(2),
+            "every match before the anchor falls through to the last"
+        );
+    }
+
+    #[test]
+    fn anchors_break_same_row_ties_on_the_column() {
+        let mut state = SearchState::default();
+        let matches = vec![
+            SearchMatch {
+                start: SelectionPoint::new(2, 4),
+                end: SelectionPoint::new(3, 4),
+            },
+            SearchMatch {
+                start: SelectionPoint::new(8, 4),
+                end: SelectionPoint::new(9, 4),
+            },
+        ];
+
+        state.set_query(
+            "x".to_string(),
+            matches.clone(),
+            SearchAnchor::Backward(SelectionPoint::new(5, 4)),
+        );
+        assert_eq!(state.active_index(), Some(0));
+
+        state.set_query(
+            "x".to_string(),
+            matches,
+            SearchAnchor::Forward(SelectionPoint::new(5, 4)),
+        );
+        assert_eq!(state.active_index(), Some(1));
     }
 }

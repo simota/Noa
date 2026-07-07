@@ -260,14 +260,52 @@ fn search_matches_live_rows_and_navigates() {
     assert_eq!(t.active().search.matches().len(), 2);
     assert!(t.active().search.contains(crate::SelectionPoint::new(0, 0)));
     assert!(t.active().search.contains(crate::SelectionPoint::new(8, 0)));
+    // A fresh query anchors at the viewport bottom, so the later (nearest)
+    // match is active, not the first one.
+    let active = t.active().search.active_match().expect("match is active");
+    assert_eq!(active.start, crate::SelectionPoint::new(8, 0));
 
-    let next = t.search_next().expect("second match should be active");
-    assert_eq!(next.start, crate::SelectionPoint::new(8, 0));
+    let next = t.search_next().expect("wraps to the first match");
+    assert_eq!(next.start, crate::SelectionPoint::new(0, 0));
 
     let previous = t
         .search_previous()
-        .expect("first match should be active again");
-    assert_eq!(previous.start, crate::SelectionPoint::new(0, 0));
+        .expect("second match should be active again");
+    assert_eq!(previous.start, crate::SelectionPoint::new(8, 0));
+}
+
+#[test]
+fn fresh_search_activates_the_match_nearest_the_viewport_not_the_oldest() {
+    // 6 rows of content in a 3-row grid: rows A..C scroll back, D..F live.
+    let mut t = run_size(5, 3, b"A\r\nX\r\nC\r\nX\r\nE\r\nF");
+
+    t.set_search_query("X");
+
+    assert_eq!(t.active().search.matches().len(), 2);
+    let active = t.active().search.active_match().expect("match is active");
+    assert_eq!(
+        active.start.y, 3,
+        "the match nearest the (bottom) viewport wins over the scrollback one"
+    );
+}
+
+#[test]
+fn extending_the_query_keeps_the_active_match_in_place() {
+    let mut t = run_size(8, 4, b"ab\r\nax\r\nab\r\nay");
+    t.set_search_query("a");
+    assert_eq!(t.active().search.matches().len(), 4);
+    // Navigate up to the second match (y=1).
+    t.search_previous();
+    t.search_previous();
+    let active = t.active().search.active_match().expect("match is active");
+    assert_eq!(active.start.y, 1);
+
+    // "a" -> "ab": y=1 no longer matches; the nearest match at-or-after it
+    // (y=2) becomes active instead of resetting to the first match.
+    t.set_search_query("ab");
+    assert_eq!(t.active().search.matches().len(), 2);
+    let active = t.active().search.active_match().expect("match is active");
+    assert_eq!(active.start.y, 2);
 }
 
 #[test]

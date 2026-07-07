@@ -5,7 +5,7 @@
 use crate::cell::{Cell, Row};
 use crate::cursor::{Cursor, HorizontalMargins, SavedCursor, ScrollRegion};
 use crate::scrollback::PagedScrollback;
-use crate::search::{SearchMatch, SearchState, append_row_matches, needle_len};
+use crate::search::{SearchAnchor, SearchMatch, SearchState, append_row_matches, needle_len};
 use crate::selection::{Selection, SelectionPoint};
 use crate::tabstops::Tabstops;
 use noa_core::{CellAttrs, Point};

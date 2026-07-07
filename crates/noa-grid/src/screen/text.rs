@@ -175,7 +175,18 @@ impl Screen {
     pub fn set_search_query(&mut self, query: impl Into<String>) {
         let query = query.into();
         let matches = self.compute_search_matches(&query);
-        self.search.set_query(query, matches);
+        // A fresh query anchors backward at the viewport bottom (activating
+        // the bottom-most visible match rather than the oldest scrollback
+        // row); an incremental edit anchors forward at the previous active
+        // match so extending the query doesn't yank the viewport away.
+        let anchor = match self.search.active_match() {
+            Some(active) => SearchAnchor::Forward(active.start),
+            None => SearchAnchor::Backward(SelectionPoint::new(
+                self.cols.saturating_sub(1),
+                self.visible_row_base() + (self.rows as usize).saturating_sub(1),
+            )),
+        };
+        self.search.set_query(query, matches, anchor);
         if let Some(active) = self.search.active_match() {
             self.reveal_search_match(active);
         }

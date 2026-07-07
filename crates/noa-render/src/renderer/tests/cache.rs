@@ -345,6 +345,7 @@ fn pane_wide_invalidation_triggers_are_covered_fm11() {
                 start: SelectionPoint::new(0, 0),
                 end: SelectionPoint::new(0, 0),
             }],
+            noa_grid::SearchAnchor::Backward(SelectionPoint::new(0, 0)),
         );
         snap_b.search = search;
         let rebuilt = rebuild_twice(107, &snap_a, &theme, &snap_b, &theme);

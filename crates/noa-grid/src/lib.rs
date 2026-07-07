@@ -36,7 +36,7 @@ pub use kitty_placeholder::{PLACEHOLDER, PlaceholderRun, scan_row};
 pub use modes::ModeState;
 pub use osc::{Notification, Osc52Policy, TerminalColors};
 pub use screen::{KittyPlacement, Screen, VisibleKittyPlacement};
-pub use search::{SearchMatch, SearchState};
+pub use search::{SearchAnchor, SearchMatch, SearchState};
 pub use selection::{Selection, SelectionPoint};
 pub use tabstops::Tabstops;
 pub use terminal::{PromptJump, ShellIntegrationMark, ShellIntegrationMarkKind, Terminal};

@@ -612,10 +612,7 @@ impl App {
         #[cfg(target_os = "macos")]
         {
             let colors = crate::macos_overlay::OverlayColors::from_style(
-                &noa_render::OverlayStyle::from_theme(active_theme(
-                    &gpu.theme,
-                    &gpu.preview_theme,
-                )),
+                &noa_render::OverlayStyle::from_theme(active_theme(&gpu.theme, &gpu.preview_theme)),
                 crate::chrome::palette().dot_red,
             );
             let scale = state.window.scale_factor();

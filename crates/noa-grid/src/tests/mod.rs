@@ -4,8 +4,8 @@
 use crate::cursor::{CursorStyle, HorizontalMargins};
 use crate::terminal::{PromptJump, ShellIntegrationMarkKind, Terminal};
 use noa_core::{
-    xterm_palette, xterm_palette_color, CellAttrs, Color, GridSize, Point, Rgb, DEFAULT_BG,
-    DEFAULT_CURSOR, DEFAULT_FG,
+    CellAttrs, Color, DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, GridSize, Point, Rgb, xterm_palette,
+    xterm_palette_color,
 };
 use noa_vt::Stream;
 

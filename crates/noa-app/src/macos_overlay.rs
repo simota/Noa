@@ -137,13 +137,15 @@ impl OverlayColors {
 /// Windowing shared with the wgpu path's policy: show up to `capacity` rows,
 /// keeping `selected` centered once the list overflows. Returns
 /// `(offset, shown)`.
-pub(crate) fn overlay_scroll_window(len: usize, selected: usize, capacity: usize) -> (usize, usize) {
+pub(crate) fn overlay_scroll_window(
+    len: usize,
+    selected: usize,
+    capacity: usize,
+) -> (usize, usize) {
     if len <= capacity {
         return (0, len);
     }
-    let offset = selected
-        .saturating_sub(capacity / 2)
-        .min(len - capacity);
+    let offset = selected.saturating_sub(capacity / 2).min(len - capacity);
     (offset, capacity)
 }
 
@@ -218,7 +220,11 @@ pub(crate) fn sync_theme_settings(
         return;
     }
     cache.theme_settings = hash;
-    imp::rebuild_theme_settings(window, model.map(|(s, r)| (theme_settings_view_model(s), r)), colors);
+    imp::rebuild_theme_settings(
+        window,
+        model.map(|(s, r)| (theme_settings_view_model(s), r)),
+        colors,
+    );
 }
 
 /// Sync the native confirm-dialog card (same contract as
@@ -359,7 +365,9 @@ pub(crate) fn theme_settings_view_model(
     };
 
     ThemeSettingsViewModel {
-        badge: state.badge_visible().then_some("Chrome/tabs update on Save"),
+        badge: state
+            .badge_visible()
+            .then_some("Chrome/tabs update on Save"),
         theme_section_focused: state.section() == Section::ThemePicker,
         filter: state.filter().to_string(),
         themes,
@@ -620,8 +628,7 @@ mod imp {
             let wash = make_view(bounds);
             if !wash.is_null() {
                 tint_layer(wash, ns_color(colors.surface_bg, 0.55), radius);
-                let _: () =
-                    msg_send![wash, setAutoresizingMask: (1usize << 1) | (1usize << 4)];
+                let _: () = msg_send![wash, setAutoresizingMask: (1usize << 1) | (1usize << 4)];
                 let _: () = msg_send![effect, addSubview: wash];
                 release_owned(wash);
             }
@@ -708,7 +715,8 @@ mod imp {
                 length: text.encode_utf16().count(),
             };
             if !base_font.is_null() {
-                let _: () = msg_send![attr, addAttribute: &*font_key, value: base_font, range: full];
+                let _: () =
+                    msg_send![attr, addAttribute: &*font_key, value: base_font, range: full];
             }
             if !base_color.is_null() {
                 let _: () =
@@ -882,7 +890,10 @@ mod imp {
                     mono_digit_font(11.0),
                     muted,
                     NSRect::new(
-                        NSPoint::new(card_w - CARD_PAD_H - counter_w, from_top(card_h, 16.0, 14.0)),
+                        NSPoint::new(
+                            card_w - CARD_PAD_H - counter_w,
+                            from_top(card_h, 16.0, 14.0),
+                        ),
                         NSSize::new(counter_w, 14.0),
                     ),
                 );
@@ -1144,8 +1155,9 @@ mod imp {
             let theme_highlight = vm.themes.iter().position(|(_, h)| *h).unwrap_or(0);
             let (theme_off, theme_shown) =
                 overlay_scroll_window(vm.themes.len(), theme_highlight, list_rows);
-            for (i, (name, highlighted)) in
-                vm.themes[theme_off..theme_off + theme_shown].iter().enumerate()
+            for (i, (name, highlighted)) in vm.themes[theme_off..theme_off + theme_shown]
+                .iter()
+                .enumerate()
             {
                 let y_top = list_top + i as f64 * row_h;
                 if *highlighted {
@@ -1161,7 +1173,14 @@ mod imp {
                 }
                 let label = make_label(
                     name,
-                    system_font(13.0, if *highlighted { WEIGHT_MEDIUM } else { WEIGHT_REGULAR }),
+                    system_font(
+                        13.0,
+                        if *highlighted {
+                            WEIGHT_MEDIUM
+                        } else {
+                            WEIGHT_REGULAR
+                        },
+                    ),
                     if *highlighted && vm.theme_section_focused {
                         accent
                     } else {
@@ -1200,12 +1219,7 @@ mod imp {
                     NSSize::new(sw, sw),
                 ));
                 if !square.is_null() {
-                    let color = [
-                        r as f32 / 255.0,
-                        g as f32 / 255.0,
-                        b as f32 / 255.0,
-                        1.0,
-                    ];
+                    let color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
                     tint_layer(square, ns_color(color, 1.0), 4.0);
                     let _: () = msg_send![effect, addSubview: square];
                     release_owned(square);
@@ -1225,12 +1239,7 @@ mod imp {
                     NSSize::new(w, sw),
                 ));
                 if !square.is_null() {
-                    let color = [
-                        r as f32 / 255.0,
-                        g as f32 / 255.0,
-                        b as f32 / 255.0,
-                        1.0,
-                    ];
+                    let color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
                     tint_layer(square, ns_color(color, 1.0), 4.0);
                     let _: () = msg_send![effect, addSubview: square];
                     release_owned(square);
@@ -1470,7 +1479,6 @@ mod imp {
             }
         }
     }
-
 }
 
 #[cfg(not(target_os = "macos"))]

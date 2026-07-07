@@ -79,6 +79,12 @@ impl Parser {
         self.state
     }
 
+    /// Test-only: heap capacity currently held by the OSC accumulation buffer.
+    #[cfg(test)]
+    pub(crate) fn osc_buffer_capacity(&self) -> usize {
+        self.osc.capacity()
+    }
+
     /// True when the next byte takes the plain ground path (no UTF-8
     /// continuation pending), i.e. a printable-ASCII byte maps 1:1 onto
     /// `Action::Print`. Lets `Stream::feed` batch runs of plain text past
@@ -334,7 +340,10 @@ impl Parser {
                 if self.osc.len() < MAX_OSC_BYTES {
                     self.osc.push(b);
                 } else {
-                    self.osc.clear();
+                    // Free, don't clear: the buffer is at its 12 MiB cap and
+                    // nothing accumulates until the runaway OSC terminates, so
+                    // clearing would pin the capacity for the parser's life.
+                    self.osc = Vec::new();
                     self.osc_overflow = true;
                 }
             }

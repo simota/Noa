@@ -368,6 +368,25 @@ fn osc_payload_over_limit_is_dropped() {
 }
 
 #[test]
+fn osc_overflow_releases_the_buffer_allocation() {
+    // A runaway OSC that hits the cap must free the 12 MiB accumulation
+    // buffer, not `clear()` it — clearing pins the capacity for the
+    // parser's (i.e. the pane's) whole life.
+    let mut parser = crate::parser::Parser::new();
+    let mut sink = |_: Action| {};
+    for &b in b"\x1b]0;".iter() {
+        parser.advance(b, &mut sink);
+    }
+    for _ in 0..(12 * (1 << 20) + 1) {
+        parser.advance(b'a', &mut sink);
+    }
+    parser.advance(0x07, &mut sink); // BEL terminates the OSC
+
+    assert_eq!(parser.state(), crate::state::State::Ground);
+    assert_eq!(parser.osc_buffer_capacity(), 0);
+}
+
+#[test]
 fn esc_dispatch_ris_and_index() {
     assert_eq!(
         actions(b"\x1bc"),

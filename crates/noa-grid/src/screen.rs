@@ -20,6 +20,12 @@ use unicode_width::UnicodeWidthChar;
 /// active grid (which is unbounded-small at rows×cols).
 const DEFAULT_SCROLLBACK_LIMIT_BYTES: usize = 10_000_000;
 
+/// Hard cap on live kitty placements per screen. Image *data* is bounded by
+/// [`crate::kitty::ImageStore`]'s byte quota, but placements (~100 B each) had
+/// no ceiling — a client minting a fresh `p=` id per put grows the vec forever.
+/// Far above any legitimate simultaneous-placement count.
+pub(crate) const KITTY_PLACEMENT_CAP: usize = 4096;
+
 #[derive(Clone, Copy)]
 struct ReflowPoint {
     x: u16,

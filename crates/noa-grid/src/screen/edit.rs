@@ -42,6 +42,13 @@ impl Screen {
         self.kitty_placements.retain(|p| {
             !(p.image_id == placement.image_id && p.placement_id == placement.placement_id)
         });
+        // Abuse guard: a client minting a fresh `p=` id per put grows this
+        // vec without bound (image *data* is quota-capped in `ImageStore`,
+        // placements were not). Drop the oldest placement past the cap —
+        // scroll-eviction pruning handles the normal decay path.
+        if self.kitty_placements.len() >= KITTY_PLACEMENT_CAP {
+            self.kitty_placements.remove(0);
+        }
         self.kitty_placements.push(placement);
     }
 

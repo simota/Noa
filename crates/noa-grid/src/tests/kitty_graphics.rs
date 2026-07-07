@@ -104,6 +104,33 @@ fn kitty_transmit_and_display_creates_placement_and_moves_cursor() {
 }
 
 #[test]
+fn kitty_placement_count_is_hard_capped() {
+    let mut t = kitty_terminal();
+    let placement = |id: u32| crate::KittyPlacement {
+        image_id: 1,
+        placement_id: id,
+        anchor_abs_row: 0,
+        anchor_col: 0,
+        cell_x_off: 0,
+        cell_y_off: 0,
+        src: None,
+        cols: 1,
+        rows: 1,
+        z: 0,
+        is_virtual: false,
+    };
+    let cap = crate::screen::KITTY_PLACEMENT_CAP;
+    for id in 0..(cap as u32 + 8) {
+        t.primary.insert_kitty_placement(placement(id));
+    }
+    let placements = &t.primary.kitty_placements;
+    assert_eq!(placements.len(), cap);
+    // Oldest placements were evicted; the newest survive.
+    assert_eq!(placements[0].placement_id, 8);
+    assert_eq!(placements.last().unwrap().placement_id, cap as u32 + 7);
+}
+
+#[test]
 fn kitty_cursor_no_move_keeps_cursor() {
     let mut t = kitty_terminal();
     feed(

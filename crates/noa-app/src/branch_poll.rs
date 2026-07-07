@@ -64,6 +64,12 @@ pub const BRANCH_POLL_MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// to "no branch" (NFR-5) instead of blocking every later cwd change.
 const GIT_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Hard cap on distinct cwds retained in the branch cache. Without one the
+/// cache grows with every directory ever visited across the app's whole life.
+/// Evicting the least-recently-polled entry only costs a re-probe on revisit,
+/// and 1024 far exceeds any realistic working set.
+const BRANCH_CACHE_CAP: usize = 1024;
+
 /// A cwd-change notification the worker acts on: re-detect the icon and
 /// (throttled) re-poll the branch for `cwd`, then post a [`SessionDelta::Branch`]
 /// keyed by `id`.
@@ -307,6 +313,7 @@ fn resolve(cache: &mut HashMap<String, BranchCache>, cwd: &str) -> (Option<Strin
         BranchPollAction::Skip => entry.and_then(|c| c.branch.clone()),
         BranchPollAction::Spawn => {
             let probe = run_git_branch(cwd, GIT_TIMEOUT);
+            evict_branch_cache_if_full(cache, cwd);
             cache.insert(
                 cwd.to_string(),
                 BranchCache {
@@ -319,6 +326,22 @@ fn resolve(cache: &mut HashMap<String, BranchCache>, cwd: &str) -> (Option<Strin
         }
     };
     (branch, icon)
+}
+
+/// Drop the least-recently-polled entry when inserting `cwd` would push the
+/// cache past [`BRANCH_CACHE_CAP`]. The linear scan is fine: it runs at most
+/// once per `git` spawn, which is already throttled and process-spawn priced.
+fn evict_branch_cache_if_full(cache: &mut HashMap<String, BranchCache>, cwd: &str) {
+    if cache.len() < BRANCH_CACHE_CAP || cache.contains_key(cwd) {
+        return;
+    }
+    if let Some(oldest) = cache
+        .iter()
+        .min_by_key(|(_, entry)| entry.at)
+        .map(|(key, _)| key.clone())
+    {
+        cache.remove(&oldest);
+    }
 }
 
 /// Outcome of one `git branch --show-current` probe. `is_git` is false when git
@@ -477,6 +500,36 @@ mod tests {
             decide_branch_poll(now, Some(negative.at), Some(&negative)),
             BranchPollAction::Hit(None)
         );
+    }
+
+    // The branch cache never outgrows its cap: inserting a new cwd at the cap
+    // evicts the least-recently-polled entry, and a re-poll of a cached cwd
+    // evicts nothing.
+    #[test]
+    fn branch_cache_evicts_oldest_at_cap() {
+        let now = Instant::now();
+        let mut cache: HashMap<String, BranchCache> = (0..BRANCH_CACHE_CAP)
+            .map(|i| {
+                (
+                    format!("/dir/{i}"),
+                    BranchCache {
+                        branch: None,
+                        at: now + Duration::from_secs(i as u64),
+                        non_git: false,
+                    },
+                )
+            })
+            .collect();
+
+        // Refreshing an existing cwd at the cap evicts nothing.
+        evict_branch_cache_if_full(&mut cache, "/dir/5");
+        assert_eq!(cache.len(), BRANCH_CACHE_CAP);
+
+        // A new cwd at the cap evicts the entry with the oldest poll time.
+        evict_branch_cache_if_full(&mut cache, "/dir/new");
+        assert_eq!(cache.len(), BRANCH_CACHE_CAP - 1);
+        assert!(!cache.contains_key("/dir/0"));
+        assert!(cache.contains_key("/dir/1"));
     }
 
     // AC-11 (FR-9): the icon table returns the first matching marker.

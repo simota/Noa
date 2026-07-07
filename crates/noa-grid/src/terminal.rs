@@ -69,6 +69,10 @@ pub struct Terminal {
     pub colors: TerminalColors,
     /// Policy for OSC 52 clipboard writes/queries.
     pub osc52_policy: Osc52Policy,
+    /// Whether `CSI 21 t` may report the window title (`title-report`).
+    /// Off by default, matching Ghostty: the reply echoes program-settable
+    /// text (OSC 0/2) back into the pty as input — an injection vector.
+    pub title_report: bool,
     pub size: GridSize,
     /// Bytes the terminal must write back to the pty (query replies).
     pub pending_writes: Vec<u8>,
@@ -145,6 +149,7 @@ impl Terminal {
             shell_marks: Vec::new(),
             colors: TerminalColors::default(),
             osc52_policy: Osc52Policy::default(),
+            title_report: false,
             size,
             pending_writes: Vec::new(),
             pending_clipboard_writes: Vec::new(),
@@ -1519,7 +1524,10 @@ impl Handler for Terminal {
             18 => self.pending_writes.extend_from_slice(
                 format!("\x1b[8;{};{}t", self.size.rows, self.size.cols).as_bytes(),
             ),
-            21 => {
+            // Gated on `title-report` (default off, Ghostty parity): the
+            // title is program-settable via OSC 0/2, so an unconditional
+            // reply lets any displayed byte stream inject text into stdin.
+            21 if self.title_report => {
                 self.pending_writes.extend_from_slice(b"\x1b]l");
                 self.pending_writes.extend_from_slice(self.title.as_bytes());
                 self.pending_writes.extend_from_slice(b"\x1b\\");

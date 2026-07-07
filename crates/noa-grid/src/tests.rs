@@ -21,6 +21,15 @@ fn run_size(cols: u16, rows: u16, bytes: &[u8]) -> Terminal {
     t
 }
 
+/// Like [`run`], but with `title-report` enabled so `CSI 21 t` replies.
+fn run_title_report(bytes: &[u8]) -> Terminal {
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.title_report = true;
+    let mut s = Stream::new();
+    s.feed(bytes, &mut t);
+    t
+}
+
 fn run_with_base_colors(
     bytes: &[u8],
     default_fg: Rgb,
@@ -2446,8 +2455,18 @@ fn ac_win_001_report_size_in_chars() {
 
 #[test]
 fn ac_win_002_report_window_title() {
-    let t = run(b"\x1b]2;foo\x1b\\\x1b[21t");
+    let t = run_title_report(b"\x1b]2;foo\x1b\\\x1b[21t");
     assert_eq!(t.pending_writes, b"\x1b]lfoo\x1b\\");
+}
+
+// `title-report` defaults off (Ghostty parity): the reply echoes
+// program-settable title text back into the pty, so any displayed byte
+// stream could inject input (e.g. a Claude Code task summary reappearing
+// in its own prompt).
+#[test]
+fn ac_win_011_title_report_disabled_by_default() {
+    let t = run(b"\x1b]2;foo\x1b\\\x1b[21t");
+    assert!(t.pending_writes.is_empty());
 }
 
 #[test]
@@ -2480,19 +2499,19 @@ fn ac_win_005_pixel_metrics_reflect_latest_set_no_stale_values() {
 
 #[test]
 fn ac_win_006_title_stack_push_pop_restores_pushed_title() {
-    let t = run(b"\x1b]2;first\x1b\\\x1b[22;2t\x1b]2;second\x1b\\\x1b[23;2t\x1b[21t");
+    let t = run_title_report(b"\x1b]2;first\x1b\\\x1b[22;2t\x1b]2;second\x1b\\\x1b[23;2t\x1b[21t");
     assert_eq!(t.pending_writes, b"\x1b]lfirst\x1b\\");
 }
 
 #[test]
 fn ac_win_007_ps1_zero_and_two_are_equivalent() {
-    let t = run(b"\x1b]2;first\x1b\\\x1b[22;0t\x1b]2;second\x1b\\\x1b[23;0t\x1b[21t");
+    let t = run_title_report(b"\x1b]2;first\x1b\\\x1b[22;0t\x1b]2;second\x1b\\\x1b[23;0t\x1b[21t");
     assert_eq!(t.pending_writes, b"\x1b]lfirst\x1b\\");
 }
 
 #[test]
 fn ac_win_008_ps1_one_icon_only_is_a_noop() {
-    let t = run(b"\x1b]2;first\x1b\\\x1b[22;1t\x1b]2;second\x1b\\\x1b[23;1t\x1b[21t");
+    let t = run_title_report(b"\x1b]2;first\x1b\\\x1b[22;1t\x1b]2;second\x1b\\\x1b[23;1t\x1b[21t");
     // Push/pop with Ps[1]=1 never touched the stack, so title stays "second".
     assert_eq!(t.pending_writes, b"\x1b]lsecond\x1b\\");
 }
@@ -2505,7 +2524,7 @@ fn ac_win_009_unsupported_ps_values_produce_no_reply() {
 
 #[test]
 fn ac_win_010_third_param_stack_index_round_trips() {
-    let t = run(b"\x1b]2;first\x1b\\\x1b[22;2;5t\x1b]2;second\x1b\\\x1b[23;2;5t\x1b[21t");
+    let t = run_title_report(b"\x1b]2;first\x1b\\\x1b[22;2;5t\x1b]2;second\x1b\\\x1b[23;2;5t\x1b[21t");
     assert_eq!(t.pending_writes, b"\x1b]lfirst\x1b\\");
 }
 
@@ -2516,6 +2535,7 @@ fn ac_win_010_third_param_stack_index_round_trips() {
 #[test]
 fn title_stack_evicts_oldest_entry_past_cap_of_64() {
     let mut t = run(b"");
+    t.title_report = true;
     let mut s = Stream::new();
     for i in 0..65 {
         s.feed(

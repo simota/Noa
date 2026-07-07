@@ -223,6 +223,11 @@ pub(super) struct WindowState {
     pub(super) active_split_drag: Option<SplitResizeDrag>,
     pub(super) occluded: bool,
     pub(super) title: String,
+    /// A user-set tab title (tab-title REQ-TTL-2/5). While `Some`, it masks
+    /// the shell-driven title on the native tab label and overview tile;
+    /// `Terminal.title` keeps tracking OSC 0/2 underneath so clearing the
+    /// override reveals the *latest* shell title.
+    pub(super) title_override: Option<String>,
     /// Vertical scroll offset (px) of the sidebar card list (FR-15), clamped to
     /// `[0, content_h - viewport_h]` when consumed by the layout.
     pub(super) sidebar_scroll: u32,
@@ -433,11 +438,19 @@ pub(super) struct SidebarRenameSession {
     pub(super) buffer: String,
 }
 
+/// An open "Set Tab Title" prompt (tab-title REQ-TTL-1), bound to the tab it
+/// was opened for. Modal for its window's keyboard while it is open.
+pub(super) struct TabTitlePromptSession {
+    pub(super) window_id: WindowId,
+    pub(super) buffer: String,
+}
+
 /// The modal layer owning a window's IME composition (see
 /// `App::modal_ime_target`), in `KeyboardInput` routing priority order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ModalImeTarget {
     ConfirmDialog,
+    TabTitlePrompt,
     SearchPrompt,
     CommandPalette,
     ThemeSettings,

@@ -1217,3 +1217,13 @@ fn command_palette_snapshot_reflects_query_selection_and_keybinds() {
         "keybind hints are resolved from the engine and rendered as symbols"
     );
 }
+
+// tab-title AC-TTL-5: the override masks any shell title; without one the
+// existing shell-title/fallback path is untouched.
+#[test]
+fn resolved_tab_title_prefers_the_override_over_any_shell_title() {
+    assert_eq!(resolved_tab_title(Some("api server"), "vim"), "api server");
+    assert_eq!(resolved_tab_title(Some("api server"), ""), "api server");
+    assert_eq!(resolved_tab_title(None, "vim"), "vim");
+    assert_eq!(resolved_tab_title(None, ""), "Noa");
+}

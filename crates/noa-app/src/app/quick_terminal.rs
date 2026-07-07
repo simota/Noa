@@ -431,6 +431,7 @@ impl App {
                 active_split_drag: None,
                 occluded: false,
                 title: "Noa".to_string(),
+                title_override: None,
                 sidebar_scroll: 0,
                 sidebar_button_hover: false,
                 sidebar_menu: None,

@@ -111,3 +111,13 @@ pub(crate) fn tab_title(title: &str) -> String {
         title.to_string()
     }
 }
+
+/// The tab label to display: a user-set override verbatim when present
+/// (tab-title REQ-TTL-5 — it masks any shell title), else the shell-driven
+/// path with its `"Noa"` fallback.
+pub(crate) fn resolved_tab_title(title_override: Option<&str>, shell_title: &str) -> String {
+    match title_override {
+        Some(title) => title.to_string(),
+        None => tab_title(shell_title),
+    }
+}

@@ -202,7 +202,10 @@ pub fn encode_mouse_motion(
 ) -> Option<Vec<u8>> {
     let button_code = match tracking {
         MouseTracking::Off | MouseTracking::X10 | MouseTracking::Press => return None,
-        MouseTracking::ButtonMotion | MouseTracking::AnyMotion => button_code(pressed_button?)?,
+        MouseTracking::ButtonMotion => button_code(pressed_button?)?,
+        // Mode 1003 reports all motion, not just dragging: no button held
+        // still reports, using button code 3 (xterm/Ghostty convention).
+        MouseTracking::AnyMotion => pressed_button.and_then(button_code).unwrap_or(3),
     };
 
     encode_mouse_report(format, button_code + 32 + modifier_bits(mods), false, cell)
@@ -524,6 +527,19 @@ mod tests {
             ),
             Some(b"\x1b[<32;1;1M".to_vec())
         );
+        // ButtonMotion (1002) only reports while a button is held.
+        assert_eq!(
+            encode_mouse_motion(
+                MouseFormat::Sgr,
+                MouseTracking::ButtonMotion,
+                None,
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            None
+        );
+        // AnyMotion (1003) reports even with no button pressed, using
+        // button code 3.
         assert_eq!(
             encode_mouse_motion(
                 MouseFormat::Sgr,
@@ -532,7 +548,7 @@ mod tests {
                 point(0, 0),
                 ModifiersState::ALT
             ),
-            None
+            Some(b"\x1b[<43;1;1M".to_vec())
         );
         assert_eq!(
             encode_mouse_motion(
@@ -543,6 +559,33 @@ mod tests {
                 ModifiersState::ALT
             ),
             Some(b"\x1b[<40;1;1M".to_vec())
+        );
+    }
+
+    #[test]
+    fn any_motion_reports_without_pressed_button_but_button_motion_does_not() {
+        // Regression test for a merge that collapsed the AnyMotion and
+        // ButtonMotion arms, silently dropping all mode-1003 motion reports
+        // when no button was pressed.
+        assert_eq!(
+            encode_mouse_motion(
+                MouseFormat::Sgr,
+                MouseTracking::AnyMotion,
+                None,
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            Some(b"\x1b[<35;1;1M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_motion(
+                MouseFormat::Sgr,
+                MouseTracking::ButtonMotion,
+                None,
+                point(0, 0),
+                ModifiersState::empty()
+            ),
+            None
         );
     }
 
@@ -769,7 +812,7 @@ mod tests {
                 point(0, 0),
                 ModifiersState::empty()
             ),
-            None
+            Some(b"\x1b[67;1;1M".to_vec())
         );
         assert_eq!(
             encode_mouse_motion(

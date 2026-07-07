@@ -21,10 +21,10 @@ impl App {
         match action {
             SearchAction::Find => {
                 // Only one prompt is tracked app-wide; cmd+f while one is
-                // already open (in this pane or another) is a no-op —
-                // the `KeyboardInput` handler routes every other keystroke
-                // to it in the common case (same window), and this guard
-                // covers the cross-window case. Also refuses while the
+                // already open in the same window toggles it closed (in
+                // `handle_search_prompt_key`, which owns that window's
+                // keyboard), and reaching this action anyway (menu bar) is
+                // a no-op via the overlay guard below. Also refuses while the
                 // theme-settings overlay owns this window (R-3) — command
                 // palette is already covered structurally (its own key
                 // handler swallows an unmatched `cmd+f` instead of letting
@@ -62,12 +62,13 @@ impl App {
 
     /// Drives the open search prompt's buffer from a keypress instead of
     /// the normal keybind-resolve -> pty-encode path (the prompt is modal
-    /// while open). `cmd+g`/`cmd+shift+g` still navigate matches without
-    /// closing it; every other keystroke is either consumed by the prompt
-    /// (Escape/Enter/Backspace/printable text) or swallowed outright —
-    /// nothing falls through to the pty while the prompt is open. Only
-    /// called when `self.search_prompt` targets `window_id` (checked by
-    /// the caller).
+    /// while open). `Enter`/`shift+Enter` (and `cmd+g`/`cmd+shift+g`)
+    /// navigate to the next/previous match without closing it; a repeated
+    /// `cmd+f` toggles the prompt closed keeping highlights + the active
+    /// match; every other keystroke is either consumed by the prompt
+    /// (Escape/Backspace/printable text) or swallowed outright — nothing
+    /// falls through to the pty while the prompt is open. Only called when
+    /// `self.search_prompt` targets `window_id` (checked by the caller).
     pub(in crate::app) fn handle_search_prompt_key(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -80,7 +81,16 @@ impl App {
                 return;
             }
             Key::Named(NamedKey::Enter) => {
-                self.close_search_prompt(false);
+                let action = if self.modifiers.shift_key() {
+                    SearchAction::FindPrevious
+                } else {
+                    SearchAction::FindNext
+                };
+                self.handle_app_command(
+                    event_loop,
+                    AppCommand::Search(action),
+                    CommandOrigin::TerminalWindow,
+                );
                 return;
             }
             Key::Named(NamedKey::Backspace) => {
@@ -97,14 +107,21 @@ impl App {
         }
 
         if let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers) {
-            if matches!(
-                command,
-                AppCommand::Search(SearchAction::FindNext | SearchAction::FindPrevious)
-            ) {
-                self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);
+            match command {
+                AppCommand::Search(SearchAction::FindNext | SearchAction::FindPrevious) => {
+                    self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);
+                }
+                // A repeated Find toggles the prompt closed, keeping the
+                // highlights + active match alive so `cmd+g`/`cmd+shift+g`
+                // keep navigating (Enter navigates instead of committing,
+                // so this is the "commit and close" path now).
+                AppCommand::Search(SearchAction::Find) => {
+                    self.close_search_prompt(false);
+                }
+                // Every other resolved command is swallowed while the
+                // modal prompt owns the keyboard.
+                _ => {}
             }
-            // Every other resolved command (including a repeated Find) is
-            // swallowed while the modal prompt owns the keyboard.
             return;
         }
 
@@ -163,9 +180,9 @@ impl App {
     }
 
     /// Close the open search prompt (no-op if none is open). `clear` also
-    /// clears the underlying terminal search (Escape); committing with
-    /// Enter passes `clear = false` so highlights + the active match
-    /// survive and `cmd+g`/`cmd+shift+g` keep navigating.
+    /// clears the underlying terminal search (Escape); committing with a
+    /// repeated `cmd+f` passes `clear = false` so highlights + the active
+    /// match survive and `cmd+g`/`cmd+shift+g` keep navigating.
     pub(in crate::app) fn close_search_prompt(&mut self, clear: bool) {
         let Some(session) = self.search_prompt.take() else {
             return;

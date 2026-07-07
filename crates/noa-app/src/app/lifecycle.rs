@@ -281,6 +281,7 @@ impl App {
                 last_grid: None,
                 resize_overlay: None,
                 bell_flash_until: None,
+                title_override: None,
                 native_overlays: Default::default(),
             },
         );
@@ -543,6 +544,14 @@ impl App {
             .is_some_and(|session| session.window_id == window_id)
         {
             self.command_palette = None;
+        }
+        // Same leak shape again for the "Set Tab Title" prompt.
+        if self
+            .tab_title_prompt
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.tab_title_prompt = None;
         }
         // Same leak shape as the palette: a theme-settings overlay bound to
         // the closed window would strand a dead-window reference. Drop the

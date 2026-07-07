@@ -190,6 +190,9 @@ pub struct App {
     /// The open inline sidebar-card rename, if any — see
     /// [`SidebarRenameSession`].
     sidebar_rename: Option<SidebarRenameSession>,
+    /// The open "Set Tab Title" prompt (tab-title REQ-TTL-1), if any — see
+    /// [`TabTitlePromptSession`].
+    tab_title_prompt: Option<TabTitlePromptSession>,
     /// Live IME composition text owned by whichever modal currently holds the
     /// keyboard (see `App::modal_ime_target`). Mirrored into that modal's
     /// input-row display and committed into its buffer, instead of being fed
@@ -310,6 +313,7 @@ impl App {
             theme_settings: None,
             confirm_dialog: None,
             sidebar_rename: None,
+            tab_title_prompt: None,
             modal_preedit: None,
             sidebar_clock_deadline: None,
             sidebar_autosort_deadline: None,

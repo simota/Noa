@@ -8,6 +8,7 @@ mod layout;
 mod overlays;
 mod pointer;
 mod search;
+mod tab_title;
 mod terminal;
 mod theme_settings;
 

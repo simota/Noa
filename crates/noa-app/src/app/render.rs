@@ -45,6 +45,20 @@ impl App {
                 message: session.message.clone(),
                 hint: session.hint.clone(),
             });
+        // Same for the "Set Tab Title" prompt: its own modal card, showing the
+        // live buffer plus any in-flight IME composition (display only — the
+        // composition joins the real buffer on commit, REQ-TTL-6).
+        let title_prompt_input = self
+            .tab_title_prompt
+            .as_ref()
+            .filter(|session| session.window_id == window_id)
+            .map(|session| {
+                format!(
+                    "{}{}",
+                    session.buffer,
+                    self.modal_preedit_for(window_id, ModalImeTarget::TabTitlePrompt)
+                )
+            });
         // Resolved before the `gpu`/`state` borrows below (the snapshot loop
         // holds them mutably).
         let search_preedit = self
@@ -69,7 +83,11 @@ impl App {
         }
 
         let mut snapshots = Vec::new();
-        let mut title = "Noa".to_string();
+        // A user-set override wins over the focused pane's shell title
+        // (tab-title REQ-TTL-2/5); the shell path below only applies while
+        // there is no override.
+        let title_override = state.title_override.clone();
+        let mut title = resolved_tab_title(title_override.as_deref(), "");
         // Scrolled panes' scrollbar-thumb state, captured under the same
         // terminal lock the snapshot takes (no extra lock later).
         let mut scroll_thumbs: Vec<sidebar::ScrollThumb> = Vec::new();
@@ -80,7 +98,7 @@ impl App {
             };
             let mut term = surface.terminal.lock();
             if pane_id == state.focused_pane {
-                title = tab_title(&term.title);
+                title = resolved_tab_title(title_override.as_deref(), &term.title);
             }
             if term.viewport_offset() > 0 {
                 scroll_thumbs.push(sidebar::ScrollThumb {
@@ -270,6 +288,14 @@ impl App {
                     .and_then(|d| focused_rect.map(|r| (d, r))),
                 &colors,
             );
+            crate::macos_overlay::sync_title_prompt(
+                &state.window,
+                &mut state.native_overlays,
+                title_prompt_input
+                    .as_deref()
+                    .and_then(|input| focused_rect.map(|r| (input, r))),
+                &colors,
+            );
             let toast_now = Instant::now();
             let toast_text = state
                 .resize_overlay
@@ -365,6 +391,36 @@ impl App {
                 &view,
                 surface_size,
                 dialog,
+                render_pane_rect(*rect),
+                snapshot.cols,
+                snapshot.rows_n,
+                padding,
+                state.window.scale_factor() as f32,
+            );
+        }
+        // The "Set Tab Title" prompt reuses the confirm-dialog card off macOS
+        // (macOS renders it as its own native card above): message row shows
+        // the live input + caret, hint row the key legend.
+        #[cfg(not(target_os = "macos"))]
+        if let Some(input) = title_prompt_input.as_deref()
+            && let Some((_, rect, snapshot)) = snapshots
+                .iter()
+                .find(|(pane_id, _, _)| *pane_id == state.focused_pane)
+        {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            let dialog = noa_render::ConfirmDialogSnapshot {
+                message: format!("Set Tab Title: {input}\u{258f}"),
+                hint: crate::macos_overlay::TITLE_PROMPT_HINT.to_string(),
+            };
+            sidebar::draw_confirm_dialog_card(
+                gpu,
+                state.surface_config.format,
+                &view,
+                surface_size,
+                &dialog,
                 render_pane_rect(*rect),
                 snapshot.cols,
                 snapshot.rows_n,

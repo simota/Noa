@@ -66,6 +66,7 @@ impl App {
                 }
             }
             AppCommand::SelectTab(index) => self.select_tab(index),
+            AppCommand::SetTabTitle => self.open_tab_title_prompt(),
             AppCommand::NextTab => self.select_next_tab(),
             AppCommand::PrevTab => self.select_previous_tab(),
             AppCommand::Copy => self.copy_selection_to_clipboard(),

@@ -296,6 +296,21 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // The "Set Tab Title" prompt owns this window's keyboard
+                // (tab-title REQ-TTL-NF-4): printable text edits the buffer,
+                // Enter commits, Escape cancels — nothing leaks to keybinds
+                // or the pty while it is up. Sits right below the confirm
+                // dialog, mirroring `App::modal_ime_target`'s priority order.
+                if self
+                    .tab_title_prompt
+                    .as_ref()
+                    .is_some_and(|session| session.window_id == window_id)
+                {
+                    if pressed {
+                        self.handle_tab_title_prompt_key(&event);
+                    }
+                    return;
+                }
                 if self
                     .search_prompt
                     .as_ref()

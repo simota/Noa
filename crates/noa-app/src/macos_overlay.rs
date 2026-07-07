@@ -47,8 +47,14 @@ pub(crate) struct NativeOverlayCache {
     palette: Option<u64>,
     theme_settings: Option<u64>,
     confirm: Option<u64>,
+    title_prompt: Option<u64>,
     toast: Option<u64>,
 }
+
+/// Key legend under the "Set Tab Title" prompt's input row (tab-title
+/// REQ-TTL-3's empty-clears affordance). Shared with the non-macOS fallback
+/// card in `app.rs`.
+pub(crate) const TITLE_PROMPT_HINT: &str = "Enter to set \u{b7} Empty clears \u{b7} Esc to cancel";
 
 /// A pane rectangle in AppKit points, top-left origin relative to the
 /// window's content view (i.e. physical px / scale factor).
@@ -250,6 +256,29 @@ pub(crate) fn sync_confirm_dialog(
     imp::rebuild_confirm(window, model, colors);
 }
 
+/// Sync the native "Set Tab Title" prompt card (same contract as
+/// [`sync_command_palette`]); `model`'s `&str` is the live input text with
+/// any IME composition already appended.
+pub(crate) fn sync_title_prompt(
+    window: &Window,
+    cache: &mut NativeOverlayCache,
+    model: Option<(&str, PaneRectPt)>,
+    colors: &OverlayColors,
+) {
+    let hash = model.map(|(input, rect)| {
+        hash_u64(|h| {
+            input.hash(h);
+            rect.hash_into(h);
+            colors.hash_into(h);
+        })
+    });
+    if cache.title_prompt == hash {
+        return;
+    }
+    cache.title_prompt = hash;
+    imp::rebuild_title_prompt(window, model, colors);
+}
+
 /// Sync the native resize toast (window-centered; not pane-bound).
 pub(crate) fn sync_toast(
     window: &Window,
@@ -412,6 +441,7 @@ mod imp {
     const ID_PALETTE: &str = "noa.native-overlay.palette";
     const ID_THEME: &str = "noa.native-overlay.theme-settings";
     const ID_CONFIRM: &str = "noa.native-overlay.confirm";
+    const ID_TITLE_PROMPT: &str = "noa.native-overlay.title-prompt";
     const ID_TOAST: &str = "noa.native-overlay.toast";
 
     /// Palette metrics (points).
@@ -1429,6 +1459,93 @@ mod imp {
     }
 
     // -----------------------------------------------------------------------
+    // "Set Tab Title" prompt
+    // -----------------------------------------------------------------------
+
+    pub(super) fn rebuild_title_prompt(
+        window: &Window,
+        model: Option<(&str, PaneRectPt)>,
+        colors: &OverlayColors,
+    ) {
+        let view = content_view(window);
+        if view.is_null() {
+            return;
+        }
+        unsafe {
+            remove_subview(view, ID_TITLE_PROMPT);
+            let Some((input, pane)) = model else {
+                return;
+            };
+            let root = make_modal_root(view, ID_TITLE_PROMPT, pane, true);
+            if root.is_null() {
+                return;
+            }
+
+            let card_w = 420.0_f64.min(pane.w - 32.0).max(240.0);
+            let card_h = 104.0;
+            let card_frame = NSRect::new(
+                NSPoint::new(
+                    (pane.w - card_w) / 2.0,
+                    from_top(pane.h, (pane.h * 0.30).min(pane.h - card_h), card_h),
+                ),
+                NSSize::new(card_w, card_h),
+            );
+            let (host, effect) = make_card(card_frame, MATERIAL_POPOVER, colors, CARD_RADIUS);
+            if host.is_null() || effect.is_null() {
+                return;
+            }
+            let _: () = msg_send![root, addSubview: host];
+            release_owned(host);
+
+            let title = make_label(
+                "Set Tab Title",
+                system_font(13.5, WEIGHT_SEMIBOLD),
+                ns_color(colors.surface_fg, 1.0),
+                NSRect::new(
+                    NSPoint::new(CARD_PAD_H, from_top(card_h, 14.0, 18.0)),
+                    NSSize::new(card_w - CARD_PAD_H * 2.0, 18.0),
+                ),
+            );
+            if !title.is_null() {
+                set_alignment(title, ALIGN_CENTER);
+                let _: () = msg_send![effect, addSubview: title];
+            }
+            // Input row: live text with a trailing accent caret, mirroring the
+            // palette's query row.
+            let text = format!("{input}\u{258f}");
+            let caret_pos = text.chars().count() - 1;
+            let input_label = make_match_label(
+                &text,
+                &[caret_pos],
+                15.0,
+                ns_color(colors.surface_fg, 1.0),
+                ns_color(colors.accent, 1.0),
+                NSRect::new(
+                    NSPoint::new(CARD_PAD_H, from_top(card_h, 40.0, 20.0)),
+                    NSSize::new(card_w - CARD_PAD_H * 2.0, 20.0),
+                ),
+            );
+            if !input_label.is_null() {
+                set_alignment(input_label, ALIGN_CENTER);
+                let _: () = msg_send![effect, addSubview: input_label];
+            }
+            let hint = make_label(
+                super::TITLE_PROMPT_HINT,
+                system_font(11.5, WEIGHT_REGULAR),
+                ns_color(colors.muted, 1.0),
+                NSRect::new(
+                    NSPoint::new(CARD_PAD_H, from_top(card_h, 72.0, 15.0)),
+                    NSSize::new(card_w - CARD_PAD_H * 2.0, 15.0),
+                ),
+            );
+            if !hint.is_null() {
+                set_alignment(hint, ALIGN_CENTER);
+                let _: () = msg_send![effect, addSubview: hint];
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // resize toast
     // -----------------------------------------------------------------------
 
@@ -1502,6 +1619,12 @@ mod imp {
     pub(super) fn rebuild_confirm(
         _: &Window,
         _: Option<(&ConfirmDialogSnapshot, PaneRectPt)>,
+        _: &OverlayColors,
+    ) {
+    }
+    pub(super) fn rebuild_title_prompt(
+        _: &Window,
+        _: Option<(&str, PaneRectPt)>,
         _: &OverlayColors,
     ) {
     }

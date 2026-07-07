@@ -71,6 +71,7 @@ impl App {
             .unwrap_or(0);
         session::TabSession {
             focused_leaf,
+            title: state.title_override.clone(),
             split,
         }
     }
@@ -158,6 +159,9 @@ impl App {
                         }
                     };
                 tab_ids.push(window_id);
+                if let Some(state) = self.windows.get_mut(&window_id) {
+                    state.title_override = tab.title.clone();
+                }
                 self.materialize_tab(window_id, tab);
             }
             if let Some(first) = tab_ids.first() {

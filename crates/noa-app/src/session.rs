@@ -51,6 +51,9 @@ pub struct TabSession {
     /// Index (in leaf pre-order, matching [`PaneNode`] traversal) of the
     /// focused pane.
     pub focused_leaf: usize,
+    /// The user-set tab title override (tab-title REQ-TTL-10), if any.
+    /// Optional in the schema: files predating the field parse to `None`.
+    pub title: Option<String>,
     pub split: PaneNode,
 }
 
@@ -150,6 +153,12 @@ fn serialize_tab(out: &mut String, tab: &TabSession) {
     out.push('{');
     push_key(out, "focused_leaf");
     out.push_str(&tab.focused_leaf.to_string());
+    out.push(',');
+    push_key(out, "title");
+    match &tab.title {
+        Some(title) => push_string(out, title),
+        None => out.push_str("null"),
+    }
     out.push(',');
     push_key(out, "split");
     serialize_node(out, &tab.split);
@@ -305,9 +314,15 @@ fn parse_frame(value: &json::Value) -> Option<WindowFrame> {
 fn parse_tab(value: &json::Value) -> Option<TabSession> {
     let object = value.as_object()?;
     let focused_leaf = usize::try_from(object.field("focused_leaf")?.as_u64()?).ok()?;
+    // Absent (pre-field session files) and null both mean "no override".
+    let title = match object.field("title") {
+        None | Some(json::Value::Null) => None,
+        Some(title) => Some(title.as_str()?.to_string()),
+    };
     let split = parse_node(object.field("split")?)?;
     Some(TabSession {
         focused_leaf,
+        title,
         split,
     })
 }
@@ -626,6 +641,7 @@ mod tests {
                     focused_tab: 0,
                     tabs: vec![TabSession {
                         focused_leaf: 0,
+                        title: Some("api server \u{65e5}\u{672c}\u{8a9e} \u{1f680}".to_string()),
                         split: PaneNode::Leaf {
                             cwd: Some("/home/user".to_string()),
                         },
@@ -637,6 +653,7 @@ mod tests {
                     tabs: vec![
                         TabSession {
                             focused_leaf: 2,
+                            title: None,
                             split: PaneNode::Split {
                                 orientation: Orientation::Horizontal,
                                 ratio: 0.4,
@@ -655,6 +672,7 @@ mod tests {
                         },
                         TabSession {
                             focused_leaf: 0,
+                            title: Some("logs \"quoted\"\\slash".to_string()),
                             split: PaneNode::Leaf { cwd: None },
                         },
                     ],
@@ -699,6 +717,7 @@ mod tests {
                 focused_tab: 0,
                 tabs: vec![TabSession {
                     focused_leaf: 1,
+                    title: None,
                     split,
                 }],
             }],
@@ -715,6 +734,7 @@ mod tests {
                 focused_tab: 0,
                 tabs: vec![TabSession {
                     focused_leaf: 0,
+                    title: None,
                     split: PaneNode::Leaf {
                         cwd: Some("/path/with \"quote\"\tand\\slash".to_string()),
                     },
@@ -722,6 +742,20 @@ mod tests {
             }],
         };
         assert_eq!(parse(&serialize(&state)), Some(state));
+    }
+
+    #[test]
+    fn tab_without_title_field_parses_to_none_override() {
+        // A session file written before the tab-title field existed
+        // (tab-title AC-TTL-10 backward compatibility).
+        let source = concat!(
+            "{\"version\":1,\"focused_window\":0,\"windows\":[",
+            "{\"frame\":null,\"focused_tab\":0,\"tabs\":[",
+            "{\"focused_leaf\":0,\"split\":{\"type\":\"leaf\",\"cwd\":null}}",
+            "]}]}",
+        );
+        let state = parse(source).expect("pre-title session must parse");
+        assert_eq!(state.windows[0].tabs[0].title, None);
     }
 
     #[test]

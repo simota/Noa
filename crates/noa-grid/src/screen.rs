@@ -250,8 +250,14 @@ impl Screen {
         }
     }
 
-    fn follow_live_output(&mut self) {
-        self.viewport_offset = 0;
+    /// Keep a scrolled-back viewport anchored to its content when `n` rows
+    /// enter scrollback: the offset counts back from the live bottom, so it
+    /// must grow with the history for the same rows to stay visible. A
+    /// viewport at the live bottom (`offset == 0`) keeps following output.
+    fn pin_viewport_for_scrollback_push(&mut self, n: usize) {
+        if self.viewport_offset > 0 {
+            self.viewport_offset = (self.viewport_offset + n).min(self.max_viewport_offset());
+        }
     }
 
     fn max_viewport_offset(&self) -> usize {

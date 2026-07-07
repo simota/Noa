@@ -761,15 +761,50 @@ fn viewport_can_jump_to_scrollback_top() {
 }
 
 #[test]
-fn output_returns_viewport_to_live_bottom() {
+fn output_keeps_scrolled_viewport_pinned_to_content() {
     let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
     t.scroll_viewport_up(1);
 
     let mut s = Stream::new();
+    // In-place output must not move a scrolled-back viewport.
     s.feed(b"E", &mut t);
+    assert_eq!(t.viewport_offset(), 1);
+
+    // Output that scrolls rows into scrollback grows the offset so the
+    // same content stays on screen (a repainting TUI must not yank the
+    // viewport back to the live bottom).
+    s.feed(b"\r\nF", &mut t);
+    assert_eq!(t.viewport_offset(), 2);
+    let rows = t.active().visible_rows();
+    assert_eq!(rows_text(&rows, 0, 1), "A");
+    assert_eq!(rows_text(&rows, 1, 1), "B");
+    assert_eq!(rows_text(&rows, 2, 1), "C");
+}
+
+#[test]
+fn output_at_live_bottom_keeps_following() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+
+    let mut s = Stream::new();
+    s.feed(b"\r\nE\r\nF", &mut t);
 
     assert_eq!(t.viewport_offset(), 0);
-    assert_eq!(row_text(&t, 2, 2), "DE");
+    let rows = t.active().visible_rows();
+    assert_eq!(rows_text(&rows, 2, 1), "F");
+}
+
+#[test]
+fn pinned_viewport_clamps_when_scrollback_evicts() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+    t.scroll_viewport_to_top();
+    let pinned = t.viewport_offset();
+    assert!(pinned > 0);
+
+    // Shrinking the limit below the retained history evicts rows; the
+    // pinned offset must clamp to the remaining scrollback.
+    t.set_scrollback_limit_bytes(0);
+    assert_eq!(t.scrollback_len(), 0);
+    assert_eq!(t.viewport_offset(), 0);
 }
 
 #[test]

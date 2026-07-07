@@ -13,7 +13,6 @@ impl Screen {
     /// candidate-1 scope, not full UAX#29) attaches to that cluster's cell
     /// instead of printing into a new one, and the cursor does not move.
     pub fn print(&mut self, c: char, autowrap: bool, grapheme_clustering: bool) {
-        self.follow_live_output();
         if grapheme_clustering && self.extend_cluster_at_cursor(c) {
             return;
         }
@@ -134,7 +133,6 @@ impl Screen {
             bytes.iter().all(|&b| (0x20..=0x7e).contains(&b)),
             "print_ascii_run only takes printable ASCII"
         );
-        self.follow_live_output();
         let mut bytes = bytes;
         if grapheme_clustering {
             // Only a run prefix can extend a pre-existing cluster (an ASCII
@@ -231,7 +229,6 @@ impl Screen {
     /// width-2 path.
     pub fn print_wide_run(&mut self, text: &str, autowrap: bool, grapheme_clustering: bool) {
         debug_assert!(text.chars().all(Self::is_plain_wide));
-        self.follow_live_output();
         let mut text = text;
         if grapheme_clustering {
             // As in `print_ascii_run`: only a run prefix can extend a

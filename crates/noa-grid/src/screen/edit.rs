@@ -173,7 +173,6 @@ impl Screen {
 
     /// Index (IND / LF without CR): down one row, scrolling at the region bottom.
     pub fn index(&mut self) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         if self.cursor.y == self.region.bottom {
             self.scroll_up_region(1);
@@ -184,7 +183,6 @@ impl Screen {
 
     /// Reverse index (RI): up one row, scrolling down at the region top.
     pub fn reverse_index(&mut self) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         if self.cursor.y == self.region.top {
             self.scroll_down_region(1);
@@ -196,7 +194,6 @@ impl Screen {
     /// Scroll the scroll region up by `n` rows (top rows discarded; inc-1 has
     /// no scrollback retention — `PageList` lands in inc≥3).
     pub fn scroll_up_region(&mut self, n: u16) {
-        self.follow_live_output();
         let (top, bottom) = (self.region.top as usize, self.region.bottom as usize);
         if bottom < top {
             return;
@@ -218,6 +215,7 @@ impl Screen {
                 evicted += self.scrollback.push_row(row);
             }
             self.note_scrollback_evictions(evicted);
+            self.pin_viewport_for_scrollback_push(n);
         }
         let blank = self.blank();
         self.grid[top..=bottom].rotate_left(n);
@@ -245,7 +243,6 @@ impl Screen {
 
     /// Scroll the scroll region down by `n` rows (bottom rows discarded).
     pub fn scroll_down_region(&mut self, n: u16) {
-        self.follow_live_output();
         let (top, bottom) = (self.region.top as usize, self.region.bottom as usize);
         if bottom < top {
             return;
@@ -269,19 +266,16 @@ impl Screen {
     // ── horizontal / absolute motion ────────────────────────────────
 
     pub fn carriage_return(&mut self) {
-        self.follow_live_output();
         self.cursor.x = self.left_margin();
         self.cursor.pending_wrap = false;
     }
 
     pub fn backspace(&mut self) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         self.cursor.x = self.cursor.x.saturating_sub(1).max(self.left_margin());
     }
 
     pub fn cursor_up(&mut self, n: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
         let top = if self.cursor.y >= self.region.top && self.cursor.y <= self.region.bottom {
@@ -293,7 +287,6 @@ impl Screen {
     }
 
     pub fn cursor_down(&mut self, n: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
         let bottom = if self.cursor.y >= self.region.top && self.cursor.y <= self.region.bottom {
@@ -305,40 +298,34 @@ impl Screen {
     }
 
     pub fn cursor_forward(&mut self, n: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
         self.cursor.x = self.cursor.x.saturating_add(n).min(self.right_margin());
     }
 
     pub fn cursor_backward(&mut self, n: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let n = n.max(1);
         self.cursor.x = self.cursor.x.saturating_sub(n).max(self.left_margin());
     }
 
     pub fn cursor_position(&mut self, row: u16, col: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         self.cursor.y = row.saturating_sub(1).min(self.rows.saturating_sub(1));
         self.cursor.x = self.clamp_x_to_margins(col.saturating_sub(1));
     }
 
     pub fn cursor_col_abs(&mut self, col: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         self.cursor.x = self.clamp_x_to_margins(col.saturating_sub(1));
     }
 
     pub fn cursor_row_abs(&mut self, row: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         self.cursor.y = row.saturating_sub(1).min(self.rows.saturating_sub(1));
     }
 
     pub fn tab(&mut self, n: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         for _ in 0..n.max(1) {
             self.cursor.x = self.tabstops.next(self.cursor.x, self.cols);
@@ -346,7 +333,6 @@ impl Screen {
     }
 
     pub fn tab_back(&mut self, n: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         for _ in 0..n.max(1) {
             self.cursor.x = self.tabstops.prev(self.cursor.x);
@@ -354,17 +340,14 @@ impl Screen {
     }
 
     pub fn set_tab_stop(&mut self) {
-        self.follow_live_output();
         self.tabstops.set(self.cursor.x);
     }
 
     pub fn clear_tab_stop(&mut self) {
-        self.follow_live_output();
         self.tabstops.clear(self.cursor.x);
     }
 
     pub fn clear_all_tab_stops(&mut self) {
-        self.follow_live_output();
         self.tabstops.clear_all();
     }
 
@@ -408,7 +391,6 @@ impl Screen {
     // ── erase ────────────────────────────────────────────────────────
 
     pub fn erase_display(&mut self, mode: EraseDisplay) {
-        self.follow_live_output();
         // Erasing rewrites cells under the selection; drop a selection
         // touching the live area rather than letting a later copy pick up
         // whatever is written there next. (ED 3 handles its own shift below.)
@@ -477,7 +459,6 @@ impl Screen {
     }
 
     pub fn erase_line(&mut self, mode: EraseLine) {
-        self.follow_live_output();
         let blank = self.blank();
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
         let row = &mut self.grid[y];
@@ -505,7 +486,6 @@ impl Screen {
     /// `DECALN` — fill every cell of the active screen with `'E'` (default
     /// attributes) and home the cursor. Margins and modes are untouched.
     pub fn screen_alignment_test(&mut self) {
-        self.follow_live_output();
         let template = Cell {
             ch: 'E',
             ..Cell::default()
@@ -519,7 +499,6 @@ impl Screen {
     // ── edit ─────────────────────────────────────────────────────────
 
     pub fn insert_blank_chars(&mut self, n: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let blank = self.blank();
         let x = self.cursor.x as usize;
@@ -536,7 +515,6 @@ impl Screen {
     }
 
     pub fn delete_chars(&mut self, n: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let blank = self.blank();
         let x = self.cursor.x as usize;
@@ -553,7 +531,6 @@ impl Screen {
     }
 
     pub fn erase_chars(&mut self, n: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         let blank = self.blank();
         let x = self.cursor.x as usize;
@@ -569,7 +546,6 @@ impl Screen {
     }
 
     pub fn insert_lines(&mut self, n: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         if self.cursor.y < self.region.top || self.cursor.y > self.region.bottom {
             return;
@@ -590,7 +566,6 @@ impl Screen {
     }
 
     pub fn delete_lines(&mut self, n: u16) {
-        self.follow_live_output();
         self.cursor.pending_wrap = false;
         if self.cursor.y < self.region.top || self.cursor.y > self.region.bottom {
             return;

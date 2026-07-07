@@ -819,7 +819,7 @@ impl App {
             return;
         };
 
-        let (tracking, format, alternate_scroll, app_cursor_keys) =
+        let (tracking, format, active_is_alt, alternate_scroll_mode, app_cursor_keys) =
             self.mouse_wheel_modes(window_id, pane_id);
         let cell = self
             .windows
@@ -850,10 +850,16 @@ impl App {
             .map(|gpu| gpu.font.metrics().cell_h)
             .unwrap_or(1.0);
         if let Some(scroll) = mouse_wheel_viewport_scroll(delta, cell_h) {
-            // DECSET 1007 alternate scroll: the alternate screen has no
-            // scrollback, so an untracked wheel becomes cursor key presses
-            // (how TUIs like less/codex scroll their own content).
-            if tracking == MouseTracking::Off && alternate_scroll {
+            // Cursor-key wheel routing covers the DECSET 1007 alternate-screen
+            // path and Codex's primary-screen TUI. Both have no useful local
+            // scrollback target for the wheel; the application owns the view.
+            let send_cursor_keys = mouse_wheel_should_send_cursor_keys(
+                tracking,
+                active_is_alt,
+                alternate_scroll_mode,
+                self.pane_foreground_process_name(window_id, pane_id),
+            );
+            if send_cursor_keys {
                 let (up, rows) = match scroll {
                     MouseWheelViewportScroll::Up(rows) => (true, rows),
                     MouseWheelViewportScroll::Down(rows) => (false, rows),

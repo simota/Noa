@@ -1248,13 +1248,13 @@ impl App {
     }
 
     /// Wheel-routing state read under one terminal lock: mouse tracking mode,
-    /// report format, whether DECSET 1007 alternate scroll applies (alternate
-    /// screen active + mode set), and DECCKM application cursor keys.
+    /// report format, active screen identity, DECSET 1007 alternate-scroll
+    /// mode, and DECCKM application cursor keys.
     pub(super) fn mouse_wheel_modes(
         &self,
         window_id: WindowId,
         pane_id: PaneId,
-    ) -> (MouseTracking, MouseFormat, bool, bool) {
+    ) -> (MouseTracking, MouseFormat, bool, bool, bool) {
         self.windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
@@ -1263,11 +1263,23 @@ impl App {
                 (
                     terminal.modes.mouse_tracking(),
                     terminal.modes.mouse_format(),
-                    terminal.active_is_alt && terminal.modes.alternate_scroll(),
+                    terminal.active_is_alt,
+                    terminal.modes.alternate_scroll(),
                     terminal.modes.app_cursor_keys(),
                 )
             })
-            .unwrap_or((MouseTracking::Off, MouseFormat::Legacy, false, false))
+            .unwrap_or((MouseTracking::Off, MouseFormat::Legacy, false, false, false))
+    }
+
+    pub(super) fn pane_foreground_process_name(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) -> Option<&str> {
+        let id = Self::session_card_id(window_id, pane_id);
+        self.session_store
+            .get(&id)
+            .and_then(|card| card.process.as_deref())
     }
 
     /// Snap `window_id`'s focused pane viewport back to the live bottom, if it

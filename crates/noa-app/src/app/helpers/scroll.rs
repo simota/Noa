@@ -65,6 +65,23 @@ pub(crate) fn mouse_wheel_viewport_scroll(
     }
 }
 
+pub(crate) fn mouse_wheel_should_send_cursor_keys(
+    tracking: MouseTracking,
+    active_is_alt: bool,
+    alternate_scroll_mode: bool,
+    foreground_process: Option<&str>,
+) -> bool {
+    if tracking != MouseTracking::Off || !alternate_scroll_mode {
+        return false;
+    }
+    if active_is_alt {
+        return true;
+    }
+    foreground_process.is_some_and(|process| {
+        crate::sidebar::classify_agent(process) == crate::sidebar::AgentKind::Codex
+    })
+}
+
 pub(crate) fn apply_mouse_wheel_viewport_scroll(
     terminal: &mut Terminal,
     scroll: MouseWheelViewportScroll,

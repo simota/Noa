@@ -528,6 +528,53 @@ fn mouse_wheel_delta_maps_to_viewport_scroll_rows() {
 }
 
 #[test]
+fn mouse_wheel_cursor_key_routing_keeps_shells_local_but_handles_codex() {
+    assert!(mouse_wheel_should_send_cursor_keys(
+        MouseTracking::Off,
+        true,
+        true,
+        Some("zsh")
+    ));
+    assert!(mouse_wheel_should_send_cursor_keys(
+        MouseTracking::Off,
+        false,
+        true,
+        Some("codex")
+    ));
+    assert!(mouse_wheel_should_send_cursor_keys(
+        MouseTracking::Off,
+        false,
+        true,
+        Some("codex-aarch64-apple-darwin")
+    ));
+
+    assert!(!mouse_wheel_should_send_cursor_keys(
+        MouseTracking::Off,
+        false,
+        true,
+        Some("zsh")
+    ));
+    assert!(!mouse_wheel_should_send_cursor_keys(
+        MouseTracking::Off,
+        false,
+        true,
+        None
+    ));
+    assert!(!mouse_wheel_should_send_cursor_keys(
+        MouseTracking::Off,
+        false,
+        false,
+        Some("codex")
+    ));
+    assert!(!mouse_wheel_should_send_cursor_keys(
+        MouseTracking::Press,
+        false,
+        true,
+        Some("codex")
+    ));
+}
+
+#[test]
 fn mouse_wheel_viewport_scroll_moves_terminal_viewport() {
     let grid_size = GridSize::new(5, 3);
     let mut terminal = terminal_with_scrollback(grid_size);

@@ -2134,6 +2134,23 @@ fn esc_decsc_decrc_save_and_restore_cursor() {
 }
 
 #[test]
+fn decsc_decrc_does_not_save_or_restore_cursor_visibility() {
+    // DECTCEM is terminal-wide mode state, not part of what DECSC/DECRC
+    // capture (xterm/ECMA-48; Ghostty's SavedCursor omits it too) — hiding
+    // the cursor after DECSC must survive a DECRC.
+    let t = run(b"\x1b7\x1b[?25l\x1b8");
+    assert!(!t.primary.cursor.visible);
+}
+
+#[test]
+fn decsc_decrc_does_not_save_or_restore_cursor_shape() {
+    // Same reasoning for DECSCUSR: the shape set after DECSC must survive
+    // a later DECRC.
+    let t = run(b"\x1b7\x1b[3 q\x1b8");
+    assert_eq!(t.primary.cursor.style, CursorStyle::BlinkingUnderline);
+}
+
+#[test]
 fn esc_ri_reverse_index_moves_cursor_up() {
     let t = run(b"\x1b[5;1H\x1bM");
     assert_eq!(t.primary.cursor.y, 3);

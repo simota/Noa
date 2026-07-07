@@ -1405,7 +1405,7 @@ impl Handler for Terminal {
         screen.cursor.attrs = CellAttrs::empty();
         // Next DECRC restores to the default position/attributes, not
         // whatever was saved before the reset.
-        screen.saved_cursor = Some(Cursor::default());
+        screen.saved_cursor = Some(Cursor::default().into());
     }
 
     fn insert_blank_chars(&mut self, n: u16) {

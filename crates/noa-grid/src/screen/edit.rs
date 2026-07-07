@@ -388,12 +388,12 @@ impl Screen {
     }
 
     pub fn save_cursor(&mut self) {
-        self.saved_cursor = Some(self.cursor);
+        self.saved_cursor = Some(self.cursor.into());
     }
 
     pub fn restore_cursor(&mut self) {
-        if let Some(c) = self.saved_cursor {
-            self.cursor = c;
+        if let Some(saved) = self.saved_cursor {
+            self.cursor.restore_from(saved);
         }
     }
 

@@ -3,7 +3,7 @@
 //! `Handler` implementation drives.
 
 use crate::cell::{Cell, Row};
-use crate::cursor::{Cursor, HorizontalMargins, ScrollRegion};
+use crate::cursor::{Cursor, HorizontalMargins, SavedCursor, ScrollRegion};
 use crate::scrollback::PagedScrollback;
 use crate::search::{SearchMatch, SearchState, append_row_matches, needle_len};
 use crate::selection::{Selection, SelectionPoint};
@@ -121,7 +121,7 @@ pub struct Screen {
     pub cursor: Cursor,
     pub selection: Option<Selection>,
     pub search: SearchState,
-    pub saved_cursor: Option<Cursor>,
+    pub saved_cursor: Option<SavedCursor>,
     pub region: ScrollRegion,
     pub horizontal_margins: Option<HorizontalMargins>,
     pub tabstops: Tabstops,

@@ -186,6 +186,13 @@ impl App {
             crate::io_thread::QueueInputResult::Deferred => {
                 log::debug!("deferred pty input until the io thread queue has capacity");
             }
+            crate::io_thread::QueueInputResult::Dropped => {
+                log::warn!(
+                    "dropped {} bytes of pty input: the overflow buffer is full \
+                     (the foreground program is not reading its tty)",
+                    bytes.len()
+                );
+            }
             crate::io_thread::QueueInputResult::Disconnected => {
                 log::warn!("failed to queue pty input because the io thread is gone");
             }

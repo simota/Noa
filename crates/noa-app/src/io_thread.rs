@@ -72,6 +72,13 @@ pub(crate) type PtyInput = Box<[u8]>;
 pub(crate) const PTY_INPUT_QUEUE_CAPACITY: usize = 1024;
 const PTY_DATA_DRAIN_BYTE_LIMIT: usize = 256 * 1024;
 
+/// Ceiling on bytes parked in a pane's input overflow buffer. The overflow
+/// absorbs a burst (huge paste) faster than the program reads; against a
+/// program that *stops* reading it would otherwise grow without bound. Writes
+/// past the cap are dropped — by then the target has ignored 64 MiB of input,
+/// so preserving order matters more than preserving the excess.
+const PTY_INPUT_OVERFLOW_BYTE_CAP: usize = 64 * 1024 * 1024;
+
 /// The longest the io thread withholds a redraw while an application holds
 /// synchronized output (DECSET 2026) open. Mode 2026 has no standardized
 /// timeout — the spec leaves it to the terminal, tmux uses 1s — and Ghostty
@@ -135,6 +142,9 @@ pub(crate) fn input_channel() -> (PtyInputQueue, Receiver<PtyInput>) {
 pub(crate) enum QueueInputResult {
     Queued,
     Deferred,
+    /// The overflow buffer is at [`PTY_INPUT_OVERFLOW_BYTE_CAP`]; the input
+    /// was discarded rather than parked.
+    Dropped,
     Disconnected,
 }
 
@@ -156,7 +166,35 @@ pub(crate) struct PtyInputQueue {
 #[derive(Default)]
 struct InputOverflow {
     queue: std::collections::VecDeque<PtyInput>,
+    /// Sum of `queue`'s element lengths, enforced against
+    /// [`PTY_INPUT_OVERFLOW_BYTE_CAP`].
+    queued_bytes: usize,
     drainer_active: bool,
+}
+
+impl InputOverflow {
+    /// Park `input` unless doing so would exceed the byte cap; reports whether
+    /// it was accepted.
+    fn park(&mut self, input: PtyInput) -> bool {
+        if self.queued_bytes.saturating_add(input.len()) > PTY_INPUT_OVERFLOW_BYTE_CAP {
+            return false;
+        }
+        self.queued_bytes += input.len();
+        self.queue.push_back(input);
+        true
+    }
+
+    fn pop(&mut self) -> Option<PtyInput> {
+        let input = self.queue.pop_front()?;
+        self.queued_bytes -= input.len();
+        Some(input)
+    }
+
+    fn reset(&mut self) {
+        self.queue.clear();
+        self.queued_bytes = 0;
+        self.drainer_active = false;
+    }
 }
 
 impl PtyInputQueue {
@@ -171,13 +209,18 @@ impl PtyInputQueue {
     pub(crate) fn queue(&self, input: PtyInput) -> QueueInputResult {
         let mut overflow = self.overflow.lock();
         if overflow.drainer_active {
-            overflow.queue.push_back(input);
-            return QueueInputResult::Deferred;
+            return if overflow.park(input) {
+                QueueInputResult::Deferred
+            } else {
+                QueueInputResult::Dropped
+            };
         }
         match self.tx.try_send(input) {
             Ok(()) => QueueInputResult::Queued,
             Err(TrySendError::Full(input)) => {
-                overflow.queue.push_back(input);
+                if !overflow.park(input) {
+                    return QueueInputResult::Dropped;
+                }
                 overflow.drainer_active = true;
                 drop(overflow);
                 let drainer = self.clone();
@@ -188,9 +231,7 @@ impl PtyInputQueue {
                     Ok(_) => QueueInputResult::Deferred,
                     Err(err) => {
                         log::warn!("failed to spawn the pty input spillover thread: {err}");
-                        let mut overflow = self.overflow.lock();
-                        overflow.queue.clear();
-                        overflow.drainer_active = false;
+                        self.overflow.lock().reset();
                         QueueInputResult::Disconnected
                     }
                 }
@@ -208,7 +249,7 @@ impl PtyInputQueue {
         loop {
             let input = {
                 let mut overflow = self.overflow.lock();
-                match overflow.queue.pop_front() {
+                match overflow.pop() {
                     Some(input) => input,
                     None => {
                         overflow.drainer_active = false;
@@ -217,9 +258,7 @@ impl PtyInputQueue {
                 }
             };
             if self.tx.send(input).is_err() {
-                let mut overflow = self.overflow.lock();
-                overflow.queue.clear();
-                overflow.drainer_active = false;
+                self.overflow.lock().reset();
                 return;
             }
         }
@@ -1358,6 +1397,27 @@ mod tests {
                 .as_ref(),
             b"key"
         );
+    }
+
+    #[test]
+    fn input_overflow_past_byte_cap_is_dropped() {
+        fn input(bytes: &[u8]) -> PtyInput {
+            bytes.to_vec().into_boxed_slice()
+        }
+
+        let (queue, rx) = input_channel();
+        for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
+            assert_eq!(queue.queue(input(b"x")), QueueInputResult::Queued);
+        }
+
+        // A parked write that alone exceeds the byte cap is refused outright
+        // instead of growing the overflow buffer without bound.
+        let huge = vec![0u8; PTY_INPUT_OVERFLOW_BYTE_CAP + 1].into_boxed_slice();
+        assert_eq!(queue.queue(huge), QueueInputResult::Dropped);
+
+        // The drop leaves the queue fully usable.
+        assert_eq!(rx.recv().expect("queued input").as_ref(), b"x");
+        assert_eq!(queue.queue(input(b"y")), QueueInputResult::Queued);
     }
 
     // AC-18 (NFR-2): git must never be spawned on the io read loop — it lives

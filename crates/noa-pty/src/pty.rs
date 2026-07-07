@@ -122,6 +122,12 @@ impl Pty {
 
         cmd.env("TERM", &config.term);
         cmd.env("COLORTERM", "truecolor");
+        // When noa itself is launched from another terminal, the parent's
+        // identity would leak into the child and make programs style their
+        // output for that terminal (e.g. an inherited TERM_PROGRAM=ghostty
+        // makes Claude Code emit Ghostty-targeted sequences). Scrub it.
+        cmd.env_remove("TERM_PROGRAM");
+        cmd.env_remove("TERM_PROGRAM_VERSION");
         if let Some(cwd) = &config.cwd {
             cmd.cwd(cwd);
         }

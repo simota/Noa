@@ -7,7 +7,7 @@ impl Screen {
     pub(crate) fn clear_display(&mut self) {
         let blank = self.blank();
         for row in &mut self.grid {
-            row.clear(blank.clone());
+            row.clear(&blank);
         }
         self.viewport_offset = 0;
         // The cleared cells may sit inside the selection; don't let a later
@@ -207,15 +207,21 @@ impl Screen {
             return;
         }
         let recorded = self.records_scrollback_for_region(top, bottom);
-        let leaving = if recorded {
-            self.grid[top..top + n].to_vec()
-        } else {
-            Vec::new()
-        };
+        if recorded {
+            // Pack the leaving rows straight into scrollback *before* the
+            // rotation, borrowing them in place — cloning them out first
+            // (the previous shape) cost a full `Vec<Cell>` clone per
+            // scrolled line and dominated bulk-output profiles.
+            let mut evicted = 0;
+            for row in &self.grid[top..top + n] {
+                evicted += self.scrollback.push_row(row);
+            }
+            self.note_scrollback_evictions(evicted);
+        }
         let blank = self.blank();
         self.grid[top..=bottom].rotate_left(n);
         for r in &mut self.grid[(bottom + 1 - n)..=bottom] {
-            r.clear(blank.clone());
+            r.clear(&blank);
         }
         if recorded {
             // A scrollback-recording scroll is a pure translation of the
@@ -228,9 +234,6 @@ impl Screen {
             for r in &mut self.grid[top..=bottom] {
                 r.dirty = true;
             }
-        }
-        for row in leaving {
-            self.push_scrollback_row(row);
         }
         self.track_scroll_up(top, bottom, n, recorded);
     }
@@ -250,7 +253,7 @@ impl Screen {
         let blank = self.blank();
         self.grid[top..=bottom].rotate_right(n);
         for r in &mut self.grid[top..(top + n)] {
-            r.clear(blank.clone());
+            r.clear(&blank);
         }
         for r in &mut self.grid[top..=bottom] {
             r.dirty = true;
@@ -422,12 +425,12 @@ impl Screen {
                 Self::sanitize_wide_row(&mut self.grid[y], &blank);
                 self.grid[y].dirty = true;
                 for r in &mut self.grid[y + 1..] {
-                    r.clear(blank.clone());
+                    r.clear(&blank);
                 }
             }
             EraseDisplay::Above => {
                 for r in &mut self.grid[..y] {
-                    r.clear(blank.clone());
+                    r.clear(&blank);
                 }
                 for c in &mut self.grid[y].cells[..=x] {
                     *c = blank.clone();
@@ -437,7 +440,7 @@ impl Screen {
             }
             EraseDisplay::Complete => {
                 for r in &mut self.grid {
-                    r.clear(blank.clone());
+                    r.clear(&blank);
                 }
                 // Ghostty parity: ED 2 removes placements intersecting the screen.
                 let last = self.rows as usize - 1;
@@ -503,7 +506,7 @@ impl Screen {
             ..Cell::default()
         };
         for row in &mut self.grid {
-            row.clear(template.clone());
+            row.clear(&template);
         }
         self.cursor_position(1, 1);
     }
@@ -573,7 +576,7 @@ impl Screen {
         let blank = self.blank();
         self.grid[start..=bottom].rotate_right(n);
         for r in &mut self.grid[start..start + n] {
-            r.clear(blank.clone());
+            r.clear(&blank);
         }
         for r in &mut self.grid[start..=bottom] {
             r.dirty = true;
@@ -594,7 +597,7 @@ impl Screen {
         let blank = self.blank();
         self.grid[start..=bottom].rotate_left(n);
         for r in &mut self.grid[bottom + 1 - n..=bottom] {
-            r.clear(blank.clone());
+            r.clear(&blank);
         }
         for r in &mut self.grid[start..=bottom] {
             r.dirty = true;

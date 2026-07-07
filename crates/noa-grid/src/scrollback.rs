@@ -440,7 +440,16 @@ impl PagedScrollback {
 /// row's trailing blanks *before* packing (so a background-color-erase blank,
 /// whose style is non-default, is preserved).
 fn pack_is_default_blank(cell: &Cell) -> bool {
-    *cell == Cell::default()
+    // Field-wise, not `*cell == Cell::default()`: this runs once per trailing
+    // cell of every pushed row, and constructing a `Cell` (with its `String`)
+    // just to compare is measurable on the bulk-output path.
+    cell.ch == ' '
+        && cell.combining.is_empty()
+        && cell.fg == Color::Default
+        && cell.bg == Color::Default
+        && cell.underline_color.is_none()
+        && cell.hyperlink.is_none()
+        && cell.attrs.is_empty()
 }
 
 #[cfg(test)]

@@ -200,7 +200,7 @@ impl Screen {
                     Self::clear_wide_at(row, x + k, &blank);
                 }
                 let cell = &mut row.cells[x + k];
-                *cell = template.clone();
+                cell.set_from(&template);
                 cell.ch = b as char;
             }
             row.dirty = true;
@@ -213,6 +213,125 @@ impl Screen {
             } else {
                 self.cursor.x = new_x;
             }
+        }
+    }
+
+    /// Whether `c` qualifies for [`Self::print_wide_run`]: rendered two cells
+    /// wide with no cluster side channel. Fitzpatrick modifiers are wide but
+    /// may *extend* the preceding cluster under mode 2027, so they stay on
+    /// the per-scalar path.
+    pub(crate) fn is_plain_wide(c: char) -> bool {
+        Self::print_width(c) == 2 && !matches!(c, '\u{1F3FB}'..='\u{1F3FF}')
+    }
+
+    /// Bulk print a run of plain width-2 scalars (see [`Self::is_plain_wide`]),
+    /// semantically identical to calling [`Self::print`] once per scalar —
+    /// the CJK analog of [`Self::print_ascii_run`], with the same hoisted pen
+    /// template and per-iteration wrap/latch handling as the per-scalar
+    /// width-2 path.
+    pub fn print_wide_run(&mut self, text: &str, autowrap: bool, grapheme_clustering: bool) {
+        debug_assert!(text.chars().all(Self::is_plain_wide));
+        self.follow_live_output();
+        let mut text = text;
+        if grapheme_clustering {
+            // As in `print_ascii_run`: only a run prefix can extend a
+            // pre-existing cluster (a plain wide scalar extends only across
+            // a trailing ZWJ, which the run itself never contains).
+            while let Some(c) = text.chars().next() {
+                if !self.extend_cluster_at_cursor(c) {
+                    break;
+                }
+                text = &text[c.len_utf8()..];
+            }
+        }
+        if text.is_empty() {
+            return;
+        }
+        if self.right_margin() <= self.left_margin() {
+            // Degenerate margins take the width-2 special case in `print`;
+            // keep the per-scalar path authoritative there.
+            for c in text.chars() {
+                self.print(c, autowrap, grapheme_clustering);
+            }
+            return;
+        }
+        let blank = self.blank();
+        let attrs = self.pen_attrs();
+        let mut lead = Cell {
+            ch: ' ',
+            combining: String::new(),
+            fg: self.cursor.fg,
+            bg: self.cursor.bg,
+            underline_color: self.cursor.underline_color,
+            hyperlink: self.cursor.hyperlink,
+            attrs,
+        };
+        lead.attrs.insert(CellAttrs::WIDE);
+        let mut spacer = lead.clone();
+        spacer.attrs.remove(CellAttrs::WIDE);
+        spacer.attrs.insert(CellAttrs::WIDE_SPACER);
+        let left = self.left_margin();
+        let right = self.right_margin();
+        for c in text.chars() {
+            if self.cursor.pending_wrap && autowrap {
+                if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
+                    row.wrapped = true;
+                }
+                self.index();
+                self.cursor.x = left;
+                self.cursor.pending_wrap = false;
+            }
+            if self.cursor.x.saturating_add(1) > right {
+                if autowrap {
+                    if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
+                        row.wrapped = true;
+                    }
+                    self.index();
+                    self.cursor.x = left;
+                    self.cursor.pending_wrap = false;
+                } else {
+                    // No room before the margin and no autowrap: the scalar
+                    // drops, clearing any wide pair under the cursor (matches
+                    // the per-scalar path).
+                    let x = self.cursor.x as usize;
+                    let Some(row) = self.grid.get_mut(self.cursor.y as usize) else {
+                        return;
+                    };
+                    Self::clear_wide_at(row, x, &blank);
+                    row.dirty = true;
+                    self.cursor.pending_wrap = false;
+                    self.last_printed = Some(c);
+                    continue;
+                }
+            }
+            let x = self.cursor.x as usize;
+            let Some(row) = self.grid.get_mut(self.cursor.y as usize) else {
+                return;
+            };
+            if x + 2 > row.cells.len() {
+                // Off the row: per-scalar `print` drops every such scalar
+                // without further state change, so the whole rest drops.
+                return;
+            }
+            for k in [x, x + 1] {
+                if row.cells[k]
+                    .attrs
+                    .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+                {
+                    Self::clear_wide_at(row, k, &blank);
+                }
+            }
+            row.cells[x].set_from(&lead);
+            row.cells[x].ch = c;
+            row.cells[x + 1].set_from(&spacer);
+            row.dirty = true;
+            if self.cursor.x.saturating_add(2) > right {
+                self.cursor.x = right;
+                self.cursor.pending_wrap = true; // latch; stay in the last column
+            } else {
+                self.cursor.x += 2;
+            }
+            self.last_printed = Some(c);
         }
     }
 

@@ -220,12 +220,12 @@ impl Screen {
         }
 
         if row.cells[x].attrs.contains(CellAttrs::WIDE_SPACER) && x > 0 {
-            row.cells[x - 1] = blank.clone();
+            row.cells[x - 1].set_from(blank);
         }
         if row.cells[x].attrs.contains(CellAttrs::WIDE) && x + 1 < row.cells.len() {
-            row.cells[x + 1] = blank.clone();
+            row.cells[x + 1].set_from(blank);
         }
-        row.cells[x] = blank.clone();
+        row.cells[x].set_from(blank);
     }
 
     fn sanitize_wide_row(row: &mut Row, blank: &Cell) {
@@ -236,7 +236,7 @@ impl Screen {
                 if x + 1 >= row.cells.len()
                     || !row.cells[x + 1].attrs.contains(CellAttrs::WIDE_SPACER)
                 {
-                    row.cells[x] = blank.clone();
+                    row.cells[x].set_from(blank);
                 } else {
                     x += 2;
                     continue;
@@ -244,7 +244,7 @@ impl Screen {
             } else if attrs.contains(CellAttrs::WIDE_SPACER)
                 && (x == 0 || !row.cells[x - 1].attrs.contains(CellAttrs::WIDE))
             {
-                row.cells[x] = blank.clone();
+                row.cells[x].set_from(blank);
             }
             x += 1;
         }
@@ -271,6 +271,14 @@ impl Screen {
             return;
         }
         let evicted = self.scrollback.push_row(&row);
+        self.note_scrollback_evictions(evicted);
+    }
+
+    /// Book-keeping owed after pushing rows into scrollback: shift the
+    /// selection and placements past any evicted rows and re-clamp the
+    /// viewport. Split from [`Self::push_scrollback_row`] so scroll paths
+    /// can push borrowed rows directly and settle the eviction debt once.
+    fn note_scrollback_evictions(&mut self, evicted: usize) {
         if evicted > 0 {
             self.rows_evicted += evicted;
             self.selection = self
@@ -284,7 +292,7 @@ impl Screen {
     fn row_with_blank(cols: u16, blank: &Cell) -> Row {
         let mut row = Row::new(cols);
         if blank != &Cell::default() {
-            row.clear(blank.clone());
+            row.clear(blank);
         }
         row
     }

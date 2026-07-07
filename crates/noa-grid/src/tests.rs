@@ -3478,3 +3478,45 @@ fn bulk_print_throughput_probe() {
         );
     }
 }
+
+#[test]
+fn bulk_wide_run_matches_per_scalar_for_cjk_wrap() {
+    // Even columns: wide scalars tile exactly; odd columns: every row ends
+    // with one spare cell, forcing the wide-at-margin wrap each row.
+    for cols in [10, 11] {
+        assert_bulk_print_matches_per_scalar(cols, 6, b"", &"日本語のテキスト出力".repeat(4));
+    }
+    // Ends exactly at the margin: the deferred-wrap latch must match.
+    assert_bulk_print_matches_per_scalar(10, 4, b"", "あいうえお");
+}
+
+#[test]
+fn bulk_wide_run_matches_per_scalar_with_autowrap_off() {
+    assert_bulk_print_matches_per_scalar(10, 4, b"\x1b[?7l", &"漢".repeat(12));
+}
+
+#[test]
+fn bulk_wide_run_matches_per_scalar_inside_horizontal_margins() {
+    assert_bulk_print_matches_per_scalar(12, 4, b"\x1b[?69h\x1b[3;8s\x1b[1;4H", "日本語のテキスト");
+    // Degenerate one-column margin region: falls back to the per-scalar path.
+    assert_bulk_print_matches_per_scalar(12, 4, b"\x1b[?69h\x1b[5;5s\x1b[1;5H", "日本");
+}
+
+#[test]
+fn bulk_wide_run_matches_per_scalar_overwriting_and_mixed() {
+    // Wide over narrow, narrow over wide, and alternating segments.
+    assert_bulk_print_matches_per_scalar(20, 6, "abcdefghij\r".as_bytes(), "日本語");
+    assert_bulk_print_matches_per_scalar(20, 6, "日本語あいう\r".as_bytes(), "xy日z本語w");
+    assert_bulk_print_matches_per_scalar(20, 6, b"\x1b[35;44;3m", "混ぜmix交ぜmix");
+}
+
+#[test]
+fn bulk_wide_run_matches_per_scalar_extending_a_cluster_under_mode_2027() {
+    // Trailing ZWJ: the run's first wide scalar extends the cluster instead
+    // of printing a new cell.
+    let setup = "\x1b[?2027h👩\u{200D}".as_bytes();
+    assert_bulk_print_matches_per_scalar(80, 24, setup, "👧日本");
+    // Fitzpatrick modifiers are wide but cluster-extending: they must stay
+    // per-scalar and attach, not print into fresh cells.
+    assert_bulk_print_matches_per_scalar(80, 24, "\x1b[?2027h👍".as_bytes(), "\u{1F3FD}日本");
+}

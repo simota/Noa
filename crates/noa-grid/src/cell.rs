@@ -80,6 +80,21 @@ impl Cell {
     pub fn text_chars(&self) -> impl Iterator<Item = char> + '_ {
         std::iter::once(self.ch).chain(self.combining.chars())
     }
+
+    /// Make this cell equal to `template` in place, reusing the existing
+    /// `combining` buffer instead of dropping and cloning a `String` — the
+    /// hot bulk-print/scroll paths overwrite cells wholesale, and the
+    /// per-cell `String` churn of `*cell = template.clone()` dominates them.
+    pub fn set_from(&mut self, template: &Cell) {
+        self.ch = template.ch;
+        self.combining.clear();
+        self.combining.push_str(&template.combining);
+        self.fg = template.fg;
+        self.bg = template.bg;
+        self.underline_color = template.underline_color;
+        self.hyperlink = template.hyperlink;
+        self.attrs = template.attrs;
+    }
 }
 
 /// A row of cells plus its soft-wrap and damage flags.
@@ -102,9 +117,9 @@ impl Row {
     }
 
     /// Fill every cell with `template` and reset wrap.
-    pub fn clear(&mut self, template: Cell) {
+    pub fn clear(&mut self, template: &Cell) {
         for c in &mut self.cells {
-            *c = template.clone();
+            c.set_from(template);
         }
         self.wrapped = false;
         self.dirty = true;

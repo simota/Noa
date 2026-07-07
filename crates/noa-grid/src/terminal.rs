@@ -1178,10 +1178,20 @@ impl Handler for Terminal {
                 screen.print_ascii_run(&bytes[i..end], autowrap, grapheme_clustering);
                 i = end;
             } else {
-                // Wide/combining/cluster handling lives in the per-scalar path.
                 let c = s[i..].chars().next().expect("s is valid UTF-8");
-                screen.print(c, autowrap, grapheme_clustering);
-                i += c.len_utf8();
+                if Screen::is_plain_wide(c) {
+                    // CJK/emoji runs take the bulk width-2 path.
+                    let end = s[i..]
+                        .char_indices()
+                        .find(|&(_, c)| !Screen::is_plain_wide(c))
+                        .map_or(s.len(), |(off, _)| i + off);
+                    screen.print_wide_run(&s[i..end], autowrap, grapheme_clustering);
+                    i = end;
+                } else {
+                    // Combining/cluster scalars stay on the per-scalar path.
+                    screen.print(c, autowrap, grapheme_clustering);
+                    i += c.len_utf8();
+                }
             }
         }
     }

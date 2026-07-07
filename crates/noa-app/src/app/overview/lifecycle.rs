@@ -136,6 +136,22 @@ impl App {
     pub(in crate::app) fn hide_tab_overview(&mut self) {
         self.overview_visible = false;
         self.overview_visible_gate.store(false, Ordering::Relaxed);
+        // Release the overlay's GPU resources (full-window scratch texture +
+        // per-tab tile textures — tens of MB at Retina, linear in tab count)
+        // and each pane's mirror snapshot (a viewport-sized grid clone).
+        // Every one of these is rebuilt lazily on the next show — the
+        // `ensure_*` helpers recreate textures, and `seed_overview_snapshots`
+        // re-peeks every pane — so nothing needs to survive a hide.
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.thumbnails = None;
+            overview.label_renderer = None;
+            overview.chrome_card = None;
+        }
+        for state in self.windows.values() {
+            for surface in state.surfaces.values() {
+                *surface.overview_snapshot.lock() = None;
+            }
+        }
         // The host window keeps existing under the overlay; repaint it so the
         // terminal content replaces the overview frame.
         if let Some(state) = self

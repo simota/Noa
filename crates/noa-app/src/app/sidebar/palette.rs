@@ -574,7 +574,7 @@ pub(in crate::app) fn draw_toast_card(
 /// deferred follow-up per the spec's own [GUI目視] acceptance markers on the
 /// rendering-heavy ACs.
 const THEME_SETTINGS_COLS: u16 = 56;
-const THEME_SETTINGS_ROWS: u16 = 24;
+const THEME_SETTINGS_ROWS: u16 = 25;
 /// Row/column of the left theme-list column and its width, and the sample
 /// pane's starting column, all in the overlay's own logical grid.
 const LIST_COL: u16 = 0;
@@ -703,6 +703,13 @@ fn format_row_value(draft: &RowDraft) -> String {
         RowDraft::WindowPadding(x, y) => format!("{x:.1} x {y:.1}"),
         RowDraft::MacosTitlebarStyle(style) => format!("{style:?}"),
         RowDraft::SidebarPreviewLines(lines) => lines.to_string(),
+        RowDraft::ConfirmQuit(confirm) => {
+            if *confirm {
+                "On".to_string()
+            } else {
+                "Off".to_string()
+            }
+        }
     }
 }
 

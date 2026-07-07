@@ -498,6 +498,7 @@ impl App {
             window_padding_y: self.config.window_padding_y.unwrap_or(0.0),
             macos_titlebar_style: self.config.macos_titlebar_style,
             sidebar_preview_lines: self.config.sidebar_preview_lines,
+            confirm_quit: self.config.confirm_quit,
             font_family,
             available_font_families,
         };
@@ -760,10 +761,10 @@ impl App {
         // here — the overlay is closed.
     }
 
-    /// Mirror the just-committed *live* rows (font-size, background-opacity,
-    /// background-blur-radius, cursor-style, sidebar-preview-lines) into
-    /// `self.config` so a future reopen of the overlay shows them as the new
-    /// "current" values. The
+    /// Mirror the just-committed runtime rows (font-size, background-opacity,
+    /// background-blur-radius, cursor-style, sidebar-preview-lines,
+    /// confirm-quit) into `self.config` so a future reopen of the overlay
+    /// shows them as the new "current" values. The
     /// commit-only rows are deliberately excluded: nothing on screen
     /// actually changes for them until a restart, so leaving `self.config`
     /// at its pre-commit value keeps it truthful to what the user still
@@ -790,6 +791,9 @@ impl App {
                 }
                 (SettingsRowKind::SidebarPreviewLines, RowDraft::SidebarPreviewLines(v)) => {
                     self.apply_live_sidebar_preview_lines(*v);
+                }
+                (SettingsRowKind::ConfirmQuit, RowDraft::ConfirmQuit(v)) => {
+                    self.config.confirm_quit = *v;
                 }
                 // Commit-only rows: intentionally not mirrored (see the doc
                 // comment above).

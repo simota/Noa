@@ -82,10 +82,11 @@ pub(crate) enum SettingsRowKind {
     WindowPadding,
     MacosTitlebarStyle,
     SidebarPreviewLines,
+    ConfirmQuit,
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 8;
+    pub(crate) const COUNT: usize = 9;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -95,6 +96,7 @@ impl SettingsRowKind {
         Self::WindowPadding,
         Self::MacosTitlebarStyle,
         Self::SidebarPreviewLines,
+        Self::ConfirmQuit,
     ];
 
     /// R-8: the fixed live/commit-only classification, one row's kind at a
@@ -125,6 +127,7 @@ impl SettingsRowKind {
             Self::WindowPadding => "Window Padding",
             Self::MacosTitlebarStyle => "Titlebar Style",
             Self::SidebarPreviewLines => "Sidebar Preview Lines",
+            Self::ConfirmQuit => "Confirm Quit",
         }
     }
 }
@@ -141,6 +144,7 @@ pub(crate) enum RowDraft {
     WindowPadding(f32, f32),
     MacosTitlebarStyle(MacosTitlebarStyle),
     SidebarPreviewLines(usize),
+    ConfirmQuit(bool),
 }
 
 /// One settings row: its draft value and whether the user has actually
@@ -202,6 +206,7 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) window_padding_y: f32,
     pub(crate) macos_titlebar_style: MacosTitlebarStyle,
     pub(crate) sidebar_preview_lines: usize,
+    pub(crate) confirm_quit: bool,
     pub(crate) font_family: String,
     pub(crate) available_font_families: Vec<String>,
 }
@@ -337,6 +342,10 @@ impl ThemeSettings {
                 draft: RowDraft::SidebarPreviewLines(init.sidebar_preview_lines),
                 touched: false,
             },
+            SettingsRow {
+                draft: RowDraft::ConfirmQuit(init.confirm_quit),
+                touched: false,
+            },
         ];
         let mut settings = ThemeSettings {
             section: Section::ThemePicker,
@@ -443,6 +452,9 @@ impl ThemeSettings {
                     row,
                     SettingsRowKind::BackgroundOpacity | SettingsRowKind::BackgroundBlurRadius
                 );
+        }
+        if matches!(row, SettingsRowKind::ConfirmQuit) {
+            return false;
         }
         let index = SettingsRowKind::ALL
             .iter()
@@ -684,6 +696,15 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
+            SettingsRowKind::ConfirmQuit => {
+                let RowDraft::ConfirmQuit(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = !current;
+                self.rows[idx].draft = RowDraft::ConfirmQuit(new);
+                self.rows[idx].touched = true;
+                RowEffect::None
+            }
         }
     }
 
@@ -815,6 +836,9 @@ impl ThemeSettings {
                 RowDraft::SidebarPreviewLines(lines) => {
                     updates.push(("sidebar-preview-lines".to_string(), lines.to_string()));
                 }
+                RowDraft::ConfirmQuit(confirm) => {
+                    updates.push(("confirm-quit".to_string(), confirm.to_string()));
+                }
             }
         }
         updates
@@ -917,6 +941,7 @@ mod tests {
             window_padding_y: 2.0,
             macos_titlebar_style: MacosTitlebarStyle::Native,
             sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
+            confirm_quit: true,
             font_family: "Menlo".to_string(),
             available_font_families: vec![
                 "Menlo".to_string(),
@@ -1080,6 +1105,7 @@ mod tests {
         assert!(!settings.restart_note(SettingsRowKind::WindowPadding));
         assert!(!settings.restart_note(SettingsRowKind::MacosTitlebarStyle));
         assert!(!settings.restart_note(SettingsRowKind::SidebarPreviewLines));
+        assert!(!settings.restart_note(SettingsRowKind::ConfirmQuit));
 
         settings.toggle_section();
         for _ in 0..4 {
@@ -1094,6 +1120,7 @@ mod tests {
         assert!(!settings.restart_note(SettingsRowKind::WindowPadding));
         assert!(!settings.restart_note(SettingsRowKind::MacosTitlebarStyle));
         assert!(!settings.restart_note(SettingsRowKind::SidebarPreviewLines));
+        assert!(!settings.restart_note(SettingsRowKind::ConfirmQuit));
     }
 
     // AC-4a: the badge is invisible until either the theme highlight moves
@@ -1321,6 +1348,30 @@ mod tests {
         assert_eq!(
             updates.iter().find(|(k, _)| k == "sidebar-preview-lines"),
             Some(&("sidebar-preview-lines".to_string(), "0".to_string()))
+        );
+    }
+
+    #[test]
+    fn confirm_quit_row_toggles_and_commits_without_restart_note() {
+        let mut settings = ThemeSettings::open(init());
+        settings.toggle_section();
+        for _ in 0..8 {
+            settings.move_down();
+        }
+        assert_eq!(
+            SettingsRowKind::ALL[settings.selected_row()],
+            SettingsRowKind::ConfirmQuit
+        );
+
+        let effect = settings.adjust(1, Instant::now());
+        assert_eq!(effect, RowEffect::None);
+        assert_eq!(settings.rows()[8].draft, RowDraft::ConfirmQuit(false));
+        assert!(!settings.restart_note(SettingsRowKind::ConfirmQuit));
+
+        let updates = settings.commit_updates();
+        assert_eq!(
+            updates.iter().find(|(k, _)| k == "confirm-quit"),
+            Some(&("confirm-quit".to_string(), "false".to_string()))
         );
     }
 

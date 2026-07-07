@@ -424,11 +424,13 @@ pub(super) fn rebuild_pane_cached(
     // colors/theme/search members are real clones — is built only when
     // something actually changed. On the steady-state frame nothing is
     // cloned at all.
+    let atlas_identity = font.atlas_identity();
     let key_fields_match = |k: &FrameInvalidationKey, atlas_gen: u64| {
         k.active_is_alt == snap.active_is_alt
             && k.cols == snap.cols
             && k.rows == snap.rows_n
             && k.cell_size == cell_size
+            && k.atlas_identity == atlas_identity
             && k.atlas_eviction_generation == atlas_gen
             && k.selection == snap.selection
             && k.hover_link == snap.hover_link
@@ -647,6 +649,7 @@ pub(super) fn rebuild_pane_cached(
                 search: snap.search.clone(),
                 cell_size,
                 hover_link: snap.hover_link,
+                atlas_identity,
                 atlas_eviction_generation: final_gen,
             });
         }

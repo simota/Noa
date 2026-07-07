@@ -77,9 +77,10 @@ struct PaneImages {
 
 /// Everything that must be identical between two frames for a pane's
 /// per-row instance cache to stay valid (WP4, ADR-R4 / FM-11). Bundled into
-/// one `PartialEq`-compared struct on purpose: any single field drifting
-/// forces a full rebuild, and a struct comparison is structurally harder to
-/// under-implement (forget one field) than N scattered `if` checks.
+/// one struct on purpose: any single field drifting must force a full rebuild.
+/// The hot path compares fields manually in `key_fields_match` to avoid
+/// cloning larger members on steady-state frames, so new fields added here
+/// must also be added to that comparison.
 ///
 /// `Row.dirty` (consumed via `FrameSnapshot::row_dirty`) only tracks CELL
 /// mutations; every field here changes a row's *rendered* instances without
@@ -90,9 +91,10 @@ struct PaneImages {
 ///
 /// Atlas growth is deliberately NOT part of this key: `etagere`'s packing
 /// never moves an already-packed rect, so growth changes the atlas texture
-/// size but not any existing glyph's `atlas_pos`. Atlas eviction IS part of
-/// the key: row cache entries hold concrete atlas coordinates, and eviction
-/// makes those coordinates reusable for another glyph.
+/// size but not any existing glyph's `atlas_pos`. A fresh atlas identity and
+/// atlas eviction ARE part of the key: row cache entries hold concrete atlas
+/// coordinates, and both a `FontGrid` replacement and eviction can make those
+/// coordinates refer to different texture contents.
 #[derive(Clone, PartialEq)]
 struct FrameInvalidationKey {
     /// Session-absolute viewport base row (`FrameSnapshot::abs_row_base`), NOT
@@ -113,9 +115,13 @@ struct FrameInvalidationKey {
     cell_size: (f32, f32),
     /// Cmd+hover has no corresponding `Row::dirty` bit (it changes with the
     /// mouse/modifier state, not terminal output), so it rides the same
-    /// full-pane-invalidation bundle as the other 6 pane-wide triggers
-    /// above rather than tracking affected rows individually.
+    /// full-pane-invalidation bundle as the other pane-wide triggers rather
+    /// than tracking affected rows individually.
     hover_link: Option<HoverLink>,
+    /// Identity of the [`FontGrid`] atlas pair. Unlike generation counters,
+    /// this changes whenever a new FontGrid is constructed, even if the new
+    /// atlas starts at the same generation and size as the old one.
+    atlas_identity: u64,
     /// Monotonic [`FontGrid`] atlas-eviction epoch. A changed epoch means at
     /// least one cached glyph atlas coordinate may now refer to reclaimed
     /// space, so every row must regenerate its glyph instances.

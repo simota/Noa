@@ -1694,6 +1694,65 @@ fn atlas_eviction_epoch_forces_full_row_cache_rebuild() {
 }
 
 #[test]
+fn atlas_identity_change_forces_full_row_cache_rebuild() {
+    // Regression: replacing FontGrid creates a fresh atlas whose eviction
+    // generation restarts at the same value. Row-cache glyph instances still
+    // contain coordinates from the old atlas identity, so clean rows must not
+    // cache-hit after the replacement.
+    let Some(mut font) = skip_font() else { return };
+    let first_identity = font.atlas_identity();
+    let first_generation = font.atlas_eviction_generation();
+    let first_metrics = font.metrics();
+    let theme = Theme::new();
+    let mut cache = PaneRenderCache::empty();
+    let snap = baseline_snapshot(['A', 'B', 'C']);
+    let mut instances = Vec::new();
+
+    let first = rebuild_pane_cached(&mut cache, &mut instances, &snap, &mut font, &theme, false);
+    assert_eq!(
+        first.rows_rebuilt, 3,
+        "fresh pane cache should build every visible row"
+    );
+    instances.clear();
+
+    let mut rebuilt_font = match FontGrid::new(14.0, FontConfig::default()) {
+        Ok(font) => font,
+        Err(err) => {
+            eprintln!("skipping: no system monospace font available: {err}");
+            return;
+        }
+    };
+    assert_ne!(
+        rebuilt_font.atlas_identity(),
+        first_identity,
+        "the regression requires a fresh FontGrid identity"
+    );
+    assert_eq!(
+        rebuilt_font.atlas_eviction_generation(),
+        first_generation,
+        "the regression requires matching eviction generations"
+    );
+    assert_eq!(
+        rebuilt_font.metrics(),
+        first_metrics,
+        "the regression should isolate atlas identity from font metrics changes"
+    );
+
+    let second = rebuild_pane_cached(
+        &mut cache,
+        &mut instances,
+        &snap,
+        &mut rebuilt_font,
+        &theme,
+        false,
+    );
+    assert_eq!(
+        second.rows_rebuilt, 3,
+        "FontGrid identity changes must force a full row-cache rebuild even when row_dirty is false"
+    );
+}
+
+#[test]
 fn per_row_patch_output_matches_a_full_rebuild_ac_wp4_03() {
     // AC-WP4-03 (REQ-PERF-3): identical terminal state rendered once via
     // a full rebuild and once via the per-row patch path must produce
@@ -1846,10 +1905,10 @@ fn scroll_translation_output_matches_a_full_rebuild() {
 
 #[test]
 fn pane_wide_invalidation_triggers_are_covered_fm11() {
-    // FM-11: each of the 7 pane-wide triggers bundled into
+    // FM-11: representative pane-wide triggers bundled into
     // `FrameInvalidationKey` must force EVERY row in the pane dirty when
     // it differs from the previous frame, even though `row_dirty` says
-    // no cell changed. Cursor movement (the narrower 8th case) instead
+    // no cell changed. Cursor movement, a narrower case, instead
     // dirties exactly the two affected rows.
     let Some((device, queue)) = device_queue() else {
         eprintln!("no wgpu adapter available — skipping FM-11 trigger table test");

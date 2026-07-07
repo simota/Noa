@@ -42,6 +42,25 @@ impl App {
             PasteContents::Text(text) => text,
             PasteContents::Empty => String::new(),
         };
+        self.paste_text_to_pane(window_id, pane_id, text);
+    }
+
+    pub(in crate::app) fn paste_file_paths_to_pane(
+        &mut self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        paths: &[std::path::PathBuf],
+    ) {
+        let text = clipboard::file_urls_to_paste_string(paths);
+        self.paste_text_to_pane(window_id, pane_id, text);
+    }
+
+    pub(in crate::app) fn paste_text_to_pane(
+        &mut self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        text: String,
+    ) {
         let bracketed_paste = self.bracketed_paste(window_id, pane_id);
         // Paste protection: confirm before sending content that could run a
         // command on its own (a newline), or that tries to break out of
@@ -62,11 +81,20 @@ impl App {
             );
             return;
         }
-        let Some(bytes) = input::encode_paste(&text, bracketed_paste) else {
-            return;
-        };
-        self.snap_focused_viewport_to_bottom(window_id);
-        self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+        self.write_paste_text_to_pane(window_id, pane_id, &text);
+    }
+
+    pub(in crate::app) fn write_paste_text_to_pane(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        text: &str,
+    ) {
+        let bracketed_paste = self.bracketed_paste(window_id, pane_id);
+        if let Some(bytes) = input::encode_paste(text, bracketed_paste) {
+            self.snap_focused_viewport_to_bottom(window_id);
+            self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+        }
     }
 
     pub(in crate::app) fn bracketed_paste(&self, window_id: WindowId, pane_id: PaneId) -> bool {
@@ -168,14 +196,7 @@ impl App {
                 window_id,
                 pane_id,
                 text,
-            } => {
-                let bracketed_paste = self.bracketed_paste(window_id, pane_id);
-                let Some(bytes) = input::encode_paste(&text, bracketed_paste) else {
-                    return;
-                };
-                self.snap_focused_viewport_to_bottom(window_id);
-                self.write_pane_pty_bytes(window_id, pane_id, &bytes);
-            }
+            } => self.write_paste_text_to_pane(window_id, pane_id, &text),
             ConfirmAction::ClipboardRead {
                 window_id,
                 pane_id,

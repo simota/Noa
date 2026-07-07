@@ -255,6 +255,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.on_mouse_input(event_loop, window_id, state, button)
             }
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(window_id, delta),
+            WindowEvent::HoveredFile(path) => self.on_hovered_file(window_id, path),
+            WindowEvent::HoveredFileCancelled => self.on_hovered_file_cancelled(window_id),
+            WindowEvent::DroppedFile(path) => self.on_dropped_file(window_id, path),
             WindowEvent::Ime(event) => self.on_ime_event(window_id, event),
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
@@ -449,6 +452,31 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
+    pub(super) fn on_hovered_file(&mut self, window_id: WindowId, path: std::path::PathBuf) {
+        if let Some(state) = self.windows.get_mut(&window_id) {
+            state.file_drop.hover(path);
+        }
+    }
+
+    pub(super) fn on_hovered_file_cancelled(&mut self, window_id: WindowId) {
+        if let Some(state) = self.windows.get_mut(&window_id) {
+            state.file_drop.cancel_hover();
+        }
+    }
+
+    pub(super) fn on_dropped_file(&mut self, window_id: WindowId, path: std::path::PathBuf) {
+        let Some((pane_id, paths)) = self.windows.get_mut(&window_id).and_then(|state| {
+            state
+                .file_drop
+                .dropped_paths(path)
+                .map(|paths| (state.focused_pane, paths))
+        }) else {
+            return;
+        };
+
+        self.paste_file_paths_to_pane(window_id, pane_id, &paths);
+    }
+
     pub(super) fn on_scale_factor_changed(&mut self, window_id: WindowId, scale_factor: f64) {
         // #TODO(agent): the FontGrid is app-wide, so on a mixed-DPI setup
         // every other window keeps rasterizing at this window's scale factor

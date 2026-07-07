@@ -436,6 +436,7 @@ impl App {
                 sidebar_menu: None,
                 sidebar_drag: None,
                 link_click_in_flight: false,
+                file_drop: FileDropState::default(),
                 last_grid: None,
                 resize_overlay: None,
                 bell_flash_until: None,

@@ -4,6 +4,8 @@
 //! on app construction, rendering, and lifecycle methods while preserving the
 //! existing sibling-module access pattern.
 
+use std::path::PathBuf;
+
 use super::*;
 
 /// App-wide GPU and glyph state shared by every tab/window.
@@ -234,6 +236,10 @@ pub(super) struct WindowState {
     /// Set when a left press was consumed by Cmd+click-to-open, so only the
     /// matching release is swallowed.
     pub(super) link_click_in_flight: bool,
+    /// File paths currently being dragged over the window. `winit` emits
+    /// multi-file drops as one event per path, so this lets us paste the
+    /// hovered batch once instead of duplicating paths on drop.
+    pub(super) file_drop: FileDropState,
     /// The focused pane's last laid-out grid size, for the resize-overlay
     /// change check (`resize-overlay = after-first` skips the first layout).
     pub(super) last_grid: Option<(u16, u16)>,
@@ -278,6 +284,52 @@ pub(super) struct SidebarDrag {
     /// True once the pointer moved past the threshold; distinguishes a drag
     /// from a click.
     pub(super) active: bool,
+}
+
+#[derive(Default)]
+pub(super) struct FileDropState {
+    hovered_paths: Vec<PathBuf>,
+    suppressed_dropped_paths: Vec<PathBuf>,
+}
+
+impl FileDropState {
+    pub(super) fn hover(&mut self, path: PathBuf) {
+        if !self.hovered_paths.contains(&path) {
+            self.hovered_paths.push(path);
+        }
+    }
+
+    pub(super) fn cancel_hover(&mut self) {
+        self.hovered_paths.clear();
+        self.suppressed_dropped_paths.clear();
+    }
+
+    pub(super) fn dropped_paths(&mut self, path: PathBuf) -> Option<Vec<PathBuf>> {
+        if let Some(index) = self
+            .suppressed_dropped_paths
+            .iter()
+            .position(|suppressed| suppressed == &path)
+        {
+            self.suppressed_dropped_paths.remove(index);
+            return None;
+        }
+
+        if self.hovered_paths.is_empty() {
+            self.suppressed_dropped_paths.clear();
+            return Some(vec![path]);
+        }
+
+        let mut paths = std::mem::take(&mut self.hovered_paths);
+        if !paths.contains(&path) {
+            paths.push(path.clone());
+        }
+        self.suppressed_dropped_paths = paths
+            .iter()
+            .filter(|dropped_path| *dropped_path != &path)
+            .cloned()
+            .collect();
+        Some(paths)
+    }
 }
 
 /// State for the in-window Session Overview overlay. The Overview no longer
@@ -539,6 +591,62 @@ pub(super) fn overview_chrome_card_style(metrics: OverviewMetrics) -> CardStyle 
         border_width: 1.0 * metrics.scale(),
         focus_width: 1.0 * metrics.scale(),
         focus_glow_width: 0.0,
+    }
+}
+
+#[cfg(test)]
+mod file_drop_tests {
+    use super::FileDropState;
+    use std::path::PathBuf;
+
+    #[test]
+    fn dropped_path_without_hover_pastes_that_path() {
+        let mut state = FileDropState::default();
+        assert_eq!(
+            state.dropped_paths(PathBuf::from("/tmp/a.txt")),
+            Some(vec![PathBuf::from("/tmp/a.txt")])
+        );
+    }
+
+    #[test]
+    fn hovered_multi_file_drop_pastes_batch_once() {
+        let mut state = FileDropState::default();
+        state.hover(PathBuf::from("/tmp/a.txt"));
+        state.hover(PathBuf::from("/tmp/b.txt"));
+
+        assert_eq!(
+            state.dropped_paths(PathBuf::from("/tmp/a.txt")),
+            Some(vec![
+                PathBuf::from("/tmp/a.txt"),
+                PathBuf::from("/tmp/b.txt")
+            ])
+        );
+        assert_eq!(state.dropped_paths(PathBuf::from("/tmp/b.txt")), None);
+    }
+
+    #[test]
+    fn suppressed_drop_events_are_matched_by_path() {
+        let mut state = FileDropState::default();
+        state.hover(PathBuf::from("/tmp/a.txt"));
+        state.hover(PathBuf::from("/tmp/b.txt"));
+
+        assert!(state.dropped_paths(PathBuf::from("/tmp/a.txt")).is_some());
+        assert_eq!(
+            state.dropped_paths(PathBuf::from("/tmp/c.txt")),
+            Some(vec![PathBuf::from("/tmp/c.txt")])
+        );
+    }
+
+    #[test]
+    fn hover_cancel_clears_batch_state() {
+        let mut state = FileDropState::default();
+        state.hover(PathBuf::from("/tmp/a.txt"));
+        state.cancel_hover();
+
+        assert_eq!(
+            state.dropped_paths(PathBuf::from("/tmp/b.txt")),
+            Some(vec![PathBuf::from("/tmp/b.txt")])
+        );
     }
 }
 

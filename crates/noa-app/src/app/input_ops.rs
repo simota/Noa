@@ -1275,17 +1275,6 @@ impl App {
             .unwrap_or((MouseTracking::Off, MouseFormat::Legacy, false, false, false))
     }
 
-    pub(super) fn pane_foreground_process_name(
-        &self,
-        window_id: WindowId,
-        pane_id: PaneId,
-    ) -> Option<&str> {
-        let id = Self::session_card_id(window_id, pane_id);
-        self.session_store
-            .get(&id)
-            .and_then(|card| card.process.as_deref())
-    }
-
     /// Snap `window_id`'s focused pane viewport back to the live bottom, if it
     /// is scrolled into scrollback. Called on user input destined for the pty
     /// (keys, IME commits, pastes) so typing always follows the prompt;

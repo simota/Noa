@@ -850,15 +850,12 @@ impl App {
             .map(|gpu| gpu.font.metrics().cell_h)
             .unwrap_or(1.0);
         if let Some(scroll) = mouse_wheel_viewport_scroll(delta, cell_h) {
-            // Cursor-key wheel routing covers the DECSET 1007 alternate-screen
-            // path and Codex's primary-screen TUI. Both have no useful local
-            // scrollback target for the wheel; the application owns the view.
-            let send_cursor_keys = mouse_wheel_should_send_cursor_keys(
-                tracking,
-                active_is_alt,
-                alternate_scroll_mode,
-                self.pane_foreground_process_name(window_id, pane_id),
-            );
+            // DECSET 1007 alternate-scroll maps wheel turns to cursor keys
+            // only on the alternate screen. Primary-screen apps such as Codex
+            // should keep local terminal scrollback instead of receiving
+            // cursor keys that their input area can consume.
+            let send_cursor_keys =
+                mouse_wheel_should_send_cursor_keys(tracking, active_is_alt, alternate_scroll_mode);
             if send_cursor_keys {
                 let (up, rows) = match scroll {
                     MouseWheelViewportScroll::Up(rows) => (true, rows),

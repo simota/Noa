@@ -528,49 +528,32 @@ fn mouse_wheel_delta_maps_to_viewport_scroll_rows() {
 }
 
 #[test]
-fn mouse_wheel_cursor_key_routing_keeps_shells_local_but_handles_codex() {
+fn mouse_wheel_cursor_key_routing_keeps_primary_screen_local() {
     assert!(mouse_wheel_should_send_cursor_keys(
         MouseTracking::Off,
         true,
-        true,
-        Some("zsh")
-    ));
-    assert!(mouse_wheel_should_send_cursor_keys(
-        MouseTracking::Off,
-        false,
-        true,
-        Some("codex")
-    ));
-    assert!(mouse_wheel_should_send_cursor_keys(
-        MouseTracking::Off,
-        false,
-        true,
-        Some("codex-aarch64-apple-darwin")
+        true
     ));
 
     assert!(!mouse_wheel_should_send_cursor_keys(
         MouseTracking::Off,
         false,
+        true
+    ));
+    assert!(!mouse_wheel_should_send_cursor_keys(
+        MouseTracking::Off,
         true,
-        Some("zsh")
+        false
     ));
     assert!(!mouse_wheel_should_send_cursor_keys(
         MouseTracking::Off,
         false,
-        true,
-        None
-    ));
-    assert!(!mouse_wheel_should_send_cursor_keys(
-        MouseTracking::Off,
-        false,
-        false,
-        Some("codex")
+        false
     ));
     assert!(!mouse_wheel_should_send_cursor_keys(
         MouseTracking::Press,
-        false,
         true,
-        Some("codex")
+        true
     ));
 }
 

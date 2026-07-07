@@ -1,0 +1,582 @@
+#[test]
+fn title_from_osc() {
+    let t = run(b"\x1b]0;my title\x07");
+    assert_eq!(t.title, "my title");
+}
+
+#[test]
+fn osc8_hyperlink_state_is_stored_on_printed_cells() {
+    let t = run(b"\x1b]8;id=docs;https://example.test/docs\x1b\\AB\
+          \x1b]8;;\x1b\\C");
+
+    let link_id = cell(&t, 0, 0).hyperlink.expect("A should carry link");
+    assert_eq!(cell(&t, 1, 0).hyperlink, Some(link_id));
+    assert_eq!(cell(&t, 2, 0).hyperlink, None);
+    assert_eq!(t.hyperlinks[link_id].uri, "https://example.test/docs");
+    assert_eq!(t.hyperlinks[link_id].id.as_deref(), Some("docs"));
+}
+
+#[test]
+fn osc8_repeated_link_dedupes_and_registry_growth_is_capped() {
+    // The same target sent twice reuses one registry slot.
+    let t = run(b"\x1b]8;;https://example.test\x07A\x1b]8;;\x07\
+          \x1b]8;;https://example.test\x07B");
+    assert_eq!(t.hyperlinks.len(), 1);
+    assert_eq!(cell(&t, 0, 0).hyperlink, cell(&t, 1, 0).hyperlink);
+
+    // Streaming unique URIs stops growing the registry at the cap; cells
+    // printed past it carry no link instead of a bogus index.
+    let mut t = Terminal::new(GridSize::new(20, 4));
+    let mut s = Stream::new();
+    for i in 0..(crate::terminal::HYPERLINK_REGISTRY_CAP + 10) {
+        s.feed(format!("\x1b]8;;https://u{i}.test\x07x").as_bytes(), &mut t);
+    }
+    assert_eq!(t.hyperlinks.len(), crate::terminal::HYPERLINK_REGISTRY_CAP);
+    assert_eq!(t.active().cursor.hyperlink, None);
+}
+
+#[test]
+fn shell_mark_recording_is_capped() {
+    let mut t = Terminal::new(GridSize::new(20, 4));
+    let mut s = Stream::new();
+    for _ in 0..(crate::terminal::SHELL_MARK_CAP + 50) {
+        s.feed(b"\x1b]133;A\x07", &mut t);
+    }
+    assert_eq!(t.shell_marks.len(), crate::terminal::SHELL_MARK_CAP);
+}
+
+#[test]
+fn osc8_malformed_payload_is_ignored_without_mutating_active_link() {
+    let t = run(b"\x1b]8;;https://example.test\x07A\x1b]8;missing-separator\x07B");
+
+    assert_eq!(cell(&t, 0, 0).hyperlink, cell(&t, 1, 0).hyperlink);
+    assert_eq!(t.hyperlinks.len(), 1);
+    assert_eq!(t.hyperlinks[0].uri, "https://example.test");
+}
+
+#[test]
+fn osc7_cwd_updates_from_file_uri_and_rejects_malformed_payloads() {
+    let t = run(b"\x1b]7;file://localhost/Users/noa%20dev/project\x07\
+          \x1b]7;file://localhost/%zz\x07");
+
+    assert_eq!(t.cwd.as_deref(), Some("/Users/noa dev/project"));
+}
+
+#[test]
+fn osc133_prompt_marks_record_cursor_positions_and_exit_status() {
+    let t = run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\x1b]133;D;7\x07");
+
+    assert_eq!(t.shell_marks.len(), 4);
+    assert_eq!(t.shell_marks[0].kind, ShellIntegrationMarkKind::PromptStart);
+    assert_eq!(t.shell_marks[0].point, crate::SelectionPoint::new(0, 0));
+    assert_eq!(t.shell_marks[1].kind, ShellIntegrationMarkKind::InputStart);
+    assert_eq!(t.shell_marks[1].point, crate::SelectionPoint::new(2, 0));
+    assert_eq!(
+        t.shell_marks[2].kind,
+        ShellIntegrationMarkKind::CommandStart
+    );
+    assert_eq!(t.shell_marks[2].point, crate::SelectionPoint::new(5, 0));
+    assert_eq!(t.shell_marks[3].kind, ShellIntegrationMarkKind::CommandEnd);
+    assert_eq!(t.shell_marks[3].exit_status, Some(7));
+}
+
+#[test]
+fn osc133_latest_command_start_marks_running_program() {
+    assert!(!run(b"plain shell output").has_running_program());
+    assert!(!run(b"\x1b]133;A\x07$ \x1b]133;B\x07").has_running_program());
+    assert!(run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07").has_running_program());
+    assert!(
+        !run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\x1b]133;D;0\x07")
+            .has_running_program()
+    );
+    assert!(
+        !run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\x1b]133;A\x07")
+            .has_running_program()
+    );
+}
+
+#[test]
+fn scroll_to_prompt_jumps_between_prompt_marks() {
+    // A 3-row screen with three prompts (OSC 133;A) separated by output, so
+    // history scrolls and the prompts land at known absolute rows:
+    // history = [p0, a, b, p1, c, d, p2] (indices 0..=6), prompts at 0/3/6.
+    let mut t = Terminal::new(GridSize::new(20, 3));
+    let mut s = Stream::new();
+    s.feed(b"\x1b]133;A\x07p0\r\na\r\nb\r\n", &mut t);
+    s.feed(b"\x1b]133;A\x07p1\r\nc\r\nd\r\n", &mut t);
+    s.feed(b"\x1b]133;A\x07p2", &mut t);
+
+    let prompt_rows: Vec<usize> = t
+        .shell_marks
+        .iter()
+        .filter(|mark| mark.kind == ShellIntegrationMarkKind::PromptStart)
+        .map(|mark| mark.point.y)
+        .collect();
+    assert_eq!(prompt_rows, vec![0, 3, 6]);
+
+    // First cell pair of the top visible row, to identify which prompt line
+    // is at the viewport top after a jump.
+    let top_line = |t: &Terminal| -> String {
+        let rows = t.primary.visible_rows();
+        let row = &rows[0];
+        row.cells[0]
+            .text_chars()
+            .chain(row.cells[1].text_chars())
+            .collect()
+    };
+
+    t.scroll_viewport_to_bottom();
+    assert_eq!(t.viewport_offset(), 0);
+
+    // Prev from the bottom lands on the prompt just above the viewport top (p1).
+    assert!(t.scroll_to_prompt(PromptJump::Prev));
+    assert_eq!(t.viewport_offset(), 1);
+    assert_eq!(top_line(&t), "p1");
+
+    // Another Prev climbs to the oldest prompt (p0), clamped to the top.
+    assert!(t.scroll_to_prompt(PromptJump::Prev));
+    assert_eq!(t.viewport_offset(), 4);
+    assert_eq!(top_line(&t), "p0");
+
+    // No prompt above the top: no-op, viewport unchanged.
+    assert!(!t.scroll_to_prompt(PromptJump::Prev));
+    assert_eq!(t.viewport_offset(), 4);
+
+    // Next walks back down through the prompts.
+    assert!(t.scroll_to_prompt(PromptJump::Next));
+    assert_eq!(t.viewport_offset(), 1);
+    assert_eq!(top_line(&t), "p1");
+}
+
+#[test]
+fn scroll_to_prompt_without_marks_is_a_noop() {
+    let mut t = run_size(20, 3, b"hello\r\nworld\r\nfoo\r\nbar\r\n");
+    let before = t.viewport_offset();
+    assert!(!t.scroll_to_prompt(PromptJump::Prev));
+    assert!(!t.scroll_to_prompt(PromptJump::Next));
+    assert_eq!(t.viewport_offset(), before);
+}
+
+#[test]
+fn osc_protocol_state_clears_on_full_reset() {
+    let t = run(b"\x1b]7;file://localhost/tmp\x07\
+          \x1b]8;;https://example.test\x07A\
+          \x1b]133;A\x07\
+          \x1bc");
+
+    assert!(t.cwd.is_none());
+    assert!(t.hyperlinks.is_empty());
+    assert!(t.shell_marks.is_empty());
+    assert_eq!(cell(&t, 0, 0).hyperlink, None);
+}
+
+#[test]
+fn osc9_queues_a_notification_with_no_title() {
+    let mut t = run(b"\x1b]9;build finished\x07");
+
+    let notifications = t.take_pending_notifications();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].title, None);
+    assert_eq!(notifications[0].body, "build finished");
+}
+
+#[test]
+fn osc9_body_keeps_embedded_semicolons() {
+    let mut t = run(b"\x1b]9;a;b;c\x1b\\");
+
+    let notifications = t.take_pending_notifications();
+    assert_eq!(notifications[0].body, "a;b;c");
+}
+
+#[test]
+fn osc9_empty_body_queues_nothing() {
+    let mut t = run(b"\x1b]9;\x07");
+    assert!(t.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn osc9_4_progress_report_is_not_a_notification() {
+    // ConEmu/Windows Terminal progress: `OSC 9;4;<state>;<pct>`. noa has no
+    // progress UI, so it is silently ignored rather than notified.
+    let mut t = run(b"\x1b]9;4;1;50\x07");
+    assert!(t.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn osc9_4_progress_clear_is_not_a_notification() {
+    let mut t = run(b"\x1b]9;4;0\x07");
+    assert!(t.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn osc9_4x_body_is_still_a_notification() {
+    // Starts with `4` but is not the `9;4;` progress form, so it notifies.
+    let mut t = run(b"\x1b]9;4x\x07");
+    let notifications = t.take_pending_notifications();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].body, "4x");
+}
+
+#[test]
+fn osc777_notify_queues_title_and_body() {
+    let mut t = run(b"\x1b]777;notify;Title;the body\x1b\\");
+
+    let notifications = t.take_pending_notifications();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].title.as_deref(), Some("Title"));
+    assert_eq!(notifications[0].body, "the body");
+}
+
+#[test]
+fn osc777_notify_body_keeps_embedded_semicolons() {
+    let mut t = run(b"\x1b]777;notify;T;a;b\x07");
+
+    let notifications = t.take_pending_notifications();
+    assert_eq!(notifications[0].title.as_deref(), Some("T"));
+    assert_eq!(notifications[0].body, "a;b");
+}
+
+#[test]
+fn osc777_ignores_non_notify_subcommands() {
+    let mut t = run(b"\x1b]777;precmd;foo\x07");
+    assert!(t.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn osc777_without_a_body_queues_nothing() {
+    let mut t = run(b"\x1b]777;notify;just a title\x07");
+    assert!(t.take_pending_notifications().is_empty());
+}
+
+#[test]
+fn notification_queue_drops_the_oldest_past_the_cap() {
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    let mut s = Stream::new();
+    // 40 notifications into a queue capped at 32: the first 8 are evicted, so
+    // the survivors are bodies 8..=39, oldest first.
+    for i in 0..40 {
+        s.feed(format!("\x1b]9;n{i}\x07").as_bytes(), &mut t);
+    }
+
+    let notifications = t.take_pending_notifications();
+    assert_eq!(notifications.len(), 32);
+    assert_eq!(notifications.first().unwrap().body, "n8");
+    assert_eq!(notifications.last().unwrap().body, "n39");
+}
+
+#[test]
+fn osc52_write_is_decoded_and_queued() {
+    let mut t = run(b"\x1b]52;c;aGVsbG8=\x07");
+
+    assert_eq!(t.take_pending_clipboard_writes(), vec!["hello".to_string()]);
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn osc52_rejects_query_by_default() {
+    let mut t = run(b"\x1b]52;c;?\x07");
+
+    assert!(t.take_pending_clipboard_writes().is_empty());
+    assert!(t.take_pending_clipboard_reads().is_empty());
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn osc52_query_queues_a_read_request_when_allowed() {
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.osc52_policy.allow_read = true;
+    let mut s = Stream::new();
+    s.feed(b"\x1b]52;c;?\x07", &mut t);
+
+    // The grid queues a read request rather than replying inline (it can't
+    // read the system clipboard); no bytes go to the pty yet.
+    assert_eq!(t.take_pending_clipboard_reads(), vec!["c".to_string()]);
+    assert!(t.pending_writes.is_empty());
+}
+
+#[test]
+fn osc52_read_reply_base64_encodes_the_clipboard_text() {
+    // "hi" -> "aGk=", full ST-terminated OSC 52 reply.
+    assert_eq!(
+        Terminal::osc52_read_reply("c", "hi"),
+        b"\x1b]52;c;aGk=\x1b\\".to_vec()
+    );
+    // Round-trips the write test's payload ("hello" -> "aGVsbG8=").
+    assert_eq!(
+        Terminal::osc52_read_reply("c", "hello"),
+        b"\x1b]52;c;aGVsbG8=\x1b\\".to_vec()
+    );
+}
+
+#[test]
+fn osc52_primary_and_secondary_targets_map_to_the_clipboard() {
+    // macOS has one system clipboard; `p`/`s` writes land there instead of
+    // being silently dropped (Ghostty's fallback behavior).
+    let mut t = run(b"\x1b]52;p;aGVsbG8=\x07");
+    assert_eq!(t.take_pending_clipboard_writes(), vec!["hello".to_string()]);
+
+    // A `p` query queues a read echoing the requested target.
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.osc52_policy.allow_read = true;
+    let mut s = Stream::new();
+    s.feed(b"\x1b]52;p;?\x07", &mut t);
+    assert_eq!(t.take_pending_clipboard_reads(), vec!["p".to_string()]);
+
+    // A target without any known selection char is still ignored.
+    let mut t = run(b"\x1b]52;q;aGVsbG8=\x07");
+    assert!(t.take_pending_clipboard_writes().is_empty());
+}
+
+#[test]
+fn osc52_write_accepts_unpadded_base64() {
+    // "hi" -> "aGk" without the trailing `=`.
+    let mut t = run(b"\x1b]52;c;aGk\x07");
+    assert_eq!(t.take_pending_clipboard_writes(), vec!["hi".to_string()]);
+
+    // "hello" -> "aGVsbG8" without padding.
+    let mut t = run(b"\x1b]52;c;aGVsbG8\x07");
+    assert_eq!(t.take_pending_clipboard_writes(), vec!["hello".to_string()]);
+
+    // A single leftover symbol can never encode a byte: still rejected.
+    let mut t = run(b"\x1b]52;c;aGkA1\x07");
+    assert!(t.take_pending_clipboard_writes().is_empty());
+}
+
+#[test]
+fn osc52_default_limit_accepts_multi_kilobyte_payloads() {
+    // A 64 KiB payload (well past the old 3 KiB cap) decodes and queues.
+    let raw = vec![b'x'; 64 * 1024];
+    let mut encoded = Vec::new();
+    crate::osc::encode_base64(&raw, &mut encoded);
+    let mut seq = b"\x1b]52;c;".to_vec();
+    seq.extend_from_slice(&encoded);
+    seq.push(0x07);
+
+    let mut t = run(&seq);
+    let writes = t.take_pending_clipboard_writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].len(), 64 * 1024);
+}
+
+#[test]
+fn osc52_policy_can_disable_writes_and_limit_payloads() {
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.osc52_policy.allow_write = false;
+    let mut s = Stream::new();
+    s.feed(b"\x1b]52;c;aGk=\x07", &mut t);
+    assert!(t.take_pending_clipboard_writes().is_empty());
+
+    t.osc52_policy.allow_write = true;
+    t.osc52_policy.max_decoded_bytes = 1;
+    s.feed(b"\x1b]52;c;aGk=\x07", &mut t);
+    assert!(t.take_pending_clipboard_writes().is_empty());
+}
+
+#[test]
+fn osc_palette_set_query_and_selected_reset() {
+    let t = run(b"\x1b]4;1;#112233\x07\
+          \x1b]4;1;?\x07\
+          \x1b]104;1\x07\
+          \x1b]4;1;?\x07");
+
+    assert_eq!(t.colors.palette(1), None);
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b]4;1;rgb:1111/2222/3333\x1b\\\
+          \x1b]4;1;rgb:cdcd/0000/0000\x1b\\"
+    );
+}
+
+#[test]
+fn osc_palette_accepts_multiple_pairs_and_resets_all() {
+    let t = run(b"\x1b]4;1;#010203;2;rgb:0404/0505/0606\x07\
+          \x1b]104\x07");
+
+    assert_eq!(t.colors.palette(1), None);
+    assert_eq!(t.colors.palette(2), None);
+}
+
+#[test]
+fn osc_default_slots_set_query_and_reset() {
+    let t = run(b"\x1b]10;#112233\x07\
+          \x1b]11;rgb:4444/5555/6666\x07\
+          \x1b]12;rgb:a/b/c\x07\
+          \x1b]10;?\x07\
+          \x1b]11;?\x07\
+          \x1b]12;?\x07\
+          \x1b]110\x07\
+          \x1b]111\x07\
+          \x1b]112\x07");
+
+    assert_eq!(t.colors.default_fg(), None);
+    assert_eq!(t.colors.default_bg(), None);
+    assert_eq!(t.colors.cursor(), None);
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b]10;rgb:1111/2222/3333\x1b\\\
+          \x1b]11;rgb:4444/5555/6666\x1b\\\
+          \x1b]12;rgb:aaaa/bbbb/cccc\x1b\\"
+    );
+}
+
+#[test]
+fn osc_default_queries_use_theme_defaults() {
+    let t = run(b"\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07");
+
+    assert_eq!(
+        t.pending_writes,
+        b"\x1b]10;rgb:e0e0/e0e0/e0e0\x1b\\\
+          \x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\\
+          \x1b]12;rgb:e0e0/e0e0/e0e0\x1b\\"
+    );
+}
+
+#[test]
+fn terminal_colors_default_base_layer_matches_legacy_defaults() {
+    let colors = crate::TerminalColors::default();
+
+    assert_eq!(colors.base_default_fg(), DEFAULT_FG);
+    assert_eq!(colors.base_default_bg(), DEFAULT_BG);
+    assert_eq!(colors.base_cursor(), DEFAULT_CURSOR);
+    assert_eq!(colors.base_palette(1), xterm_palette_color(1));
+    assert_eq!(colors.default_fg(), None);
+    assert_eq!(colors.default_bg(), None);
+    assert_eq!(colors.cursor(), None);
+    assert_eq!(colors.palette(1), None);
+}
+
+#[test]
+fn terminal_set_base_colors_seeds_colors_without_clearing_dynamic_overrides() {
+    let mut palette = xterm_palette();
+    palette[1] = Rgb::new(0x10, 0x20, 0x30);
+    let dynamic_fg = Rgb::new(0x01, 0x02, 0x03);
+    let dynamic_palette = Rgb::new(0x04, 0x05, 0x06);
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.colors.set_default_fg(dynamic_fg);
+    t.colors.set_palette(1, dynamic_palette);
+
+    t.set_base_colors(
+        Rgb::new(0xaa, 0xbb, 0xcc),
+        Rgb::new(0x11, 0x22, 0x33),
+        Rgb::new(0x44, 0x55, 0x66),
+        palette,
+    );
+
+    assert_eq!(t.colors.base_default_fg(), Rgb::new(0xaa, 0xbb, 0xcc));
+    assert_eq!(t.colors.base_default_bg(), Rgb::new(0x11, 0x22, 0x33));
+    assert_eq!(t.colors.base_cursor(), Rgb::new(0x44, 0x55, 0x66));
+    assert_eq!(t.colors.base_palette(1), Rgb::new(0x10, 0x20, 0x30));
+    assert_eq!(t.colors.default_fg(), Some(dynamic_fg));
+    assert_eq!(t.colors.palette(1), Some(dynamic_palette));
+    assert_eq!(t.colors.default_bg(), None);
+    assert_eq!(t.colors.cursor(), None);
+}
+
+#[test]
+fn osc_11_and_color_queries_report_active_base_colors() {
+    let mut palette = xterm_palette();
+    palette[1] = Rgb::new(0x10, 0x20, 0x30);
+    let mut t = run_with_base_colors(
+        b"\x1b]4;1;?\x07\
+          \x1b]10;?\x07\
+          \x1b]11;?\x07\
+          \x1b]12;?\x07",
+        Rgb::new(0x0a, 0x0b, 0x0c),
+        Rgb::new(0xaa, 0xbb, 0xcc),
+        Rgb::new(0x44, 0x55, 0x66),
+        palette,
+    );
+
+    assert_eq!(
+        t.take_pending_writes(),
+        b"\x1b]4;1;rgb:1010/2020/3030\x1b\\\
+          \x1b]10;rgb:0a0a/0b0b/0c0c\x1b\\\
+          \x1b]11;rgb:aaaa/bbbb/cccc\x1b\\\
+          \x1b]12;rgb:4444/5555/6666\x1b\\"
+    );
+}
+
+#[test]
+fn osc_resets_restore_active_base_colors() {
+    let mut palette = xterm_palette();
+    palette[1] = Rgb::new(0x12, 0x34, 0x56);
+    let mut t = run_with_base_colors(
+        b"\x1b]4;1;#010203\x07\
+          \x1b]10;#040506\x07\
+          \x1b]11;#070809\x07\
+          \x1b]12;#0a0b0c\x07\
+          \x1b]104;1\x07\
+          \x1b]110\x07\
+          \x1b]111\x07\
+          \x1b]112\x07\
+          \x1b]4;1;?\x07\
+          \x1b]10;?\x07\
+          \x1b]11;?\x07\
+          \x1b]12;?\x07",
+        Rgb::new(0xde, 0xad, 0xbe),
+        Rgb::new(0x13, 0x57, 0x9b),
+        Rgb::new(0x24, 0x68, 0xac),
+        palette,
+    );
+
+    assert_eq!(t.colors.palette(1), None);
+    assert_eq!(t.colors.default_fg(), None);
+    assert_eq!(t.colors.default_bg(), None);
+    assert_eq!(t.colors.cursor(), None);
+    assert_eq!(
+        t.take_pending_writes(),
+        b"\x1b]4;1;rgb:1212/3434/5656\x1b\\\
+          \x1b]10;rgb:dede/adad/bebe\x1b\\\
+          \x1b]11;rgb:1313/5757/9b9b\x1b\\\
+          \x1b]12;rgb:2424/6868/acac\x1b\\"
+    );
+}
+
+#[test]
+fn full_reset_preserves_active_base_colors() {
+    let mut palette = xterm_palette();
+    palette[2] = Rgb::new(0x21, 0x43, 0x65);
+    let mut t = run_with_base_colors(
+        b"\x1b]4;2;#010203\x07\
+          \x1b]10;#040506\x07\
+          \x1b]11;#070809\x07\
+          \x1b]12;#0a0b0c\x07\
+          \x1bc\
+          \x1b]4;2;?\x07\
+          \x1b]10;?\x07\
+          \x1b]11;?\x07\
+          \x1b]12;?\x07",
+        Rgb::new(0x90, 0x91, 0x92),
+        Rgb::new(0x30, 0x31, 0x32),
+        Rgb::new(0x70, 0x71, 0x72),
+        palette,
+    );
+
+    assert_eq!(t.colors.palette(2), None);
+    assert_eq!(t.colors.default_fg(), None);
+    assert_eq!(t.colors.default_bg(), None);
+    assert_eq!(t.colors.cursor(), None);
+    assert_eq!(
+        t.take_pending_writes(),
+        b"\x1b]4;2;rgb:2121/4343/6565\x1b\\\
+          \x1b]10;rgb:9090/9191/9292\x1b\\\
+          \x1b]11;rgb:3030/3131/3232\x1b\\\
+          \x1b]12;rgb:7070/7171/7272\x1b\\"
+    );
+}
+
+#[test]
+fn osc_color_rejects_malformed_without_mutation_or_reply() {
+    let t = run(b"\x1b]4;256;#112233\x07\
+          \x1b]4;1;#bad\x07\
+          \x1b]10;#010203;#040506\x07\
+          \x1b]11;rgb:12//34\x07\
+          \x1b]12;not-a-color\x07\
+          \x1b]110;unexpected\x07");
+
+    assert_eq!(t.colors.palette(1), None);
+    assert_eq!(t.colors.default_fg(), None);
+    assert_eq!(t.colors.default_bg(), None);
+    assert_eq!(t.colors.cursor(), None);
+    assert!(t.pending_writes.is_empty());
+}

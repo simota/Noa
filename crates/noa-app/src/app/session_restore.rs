@@ -107,9 +107,7 @@ impl App {
             return;
         };
         let state = self.capture_session();
-        if let Err(err) = session::save(&path, &state) {
-            log::warn!("failed to save session state: {err}");
-        }
+        self.session_persister.save(path, state);
     }
 
     /// Restore the saved session on launch, if enabled and present. Suppressed

@@ -266,6 +266,10 @@ pub struct App {
     /// [`crate::session_store::SessionDelta::Branch`]. Kept off the io read loop
     /// (NFR-2/AC-18) and joined at teardown (Omen T6, in `Drop`).
     branch_poll: Option<crate::branch_poll::BranchPollHandle>,
+    /// Serializes and writes session state off the main thread; captures still
+    /// happen on the caller. Its `Drop` (as an `App` field) flushes the last
+    /// queued state to disk, covering the quit path.
+    session_persister: crate::session_persist::SessionPersister,
 }
 
 impl App {
@@ -330,6 +334,7 @@ impl App {
             session_store: SessionStore::new(),
             sidebar_hotkey: None,
             branch_poll: Some(crate::branch_poll::spawn(proxy_for_branch_poll)),
+            session_persister: crate::session_persist::SessionPersister::spawn(),
             sidebar_visible_gate,
             sidebar_preview_lines_gate,
             sidebar_visible_groups: HashSet::new(),

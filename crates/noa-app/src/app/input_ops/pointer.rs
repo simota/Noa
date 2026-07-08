@@ -181,7 +181,7 @@ impl App {
         let terminal = surface.terminal.lock();
         let row = terminal.active().visible_row(cell.y)?;
         if let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink) {
-            return Some((pane_id, HoverLink::Registry(link_id)));
+            return Some((pane_id, HoverLink::Registry(link_id.get())));
         }
         let url = noa_grid::detect_url_at_column(&row, cell.x)?;
         Some((
@@ -274,7 +274,7 @@ impl App {
         if let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink) {
             return terminal
                 .hyperlinks
-                .get(link_id)
+                .get(link_id.get())
                 .map(|link| link.uri.clone());
         }
         noa_grid::detect_url_at_column(&row, cell.x).map(|url| url.uri)

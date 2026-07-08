@@ -261,9 +261,9 @@ fn hover_link_registry_underlines_only_cells_carrying_that_link_id() {
 
     let mut terminal = Terminal::new(GridSize::new(3, 1));
     terminal.primary.grid[0].cells[0].ch = 'M';
-    terminal.primary.grid[0].cells[0].hyperlink = Some(0);
+    terminal.primary.grid[0].cells[0].hyperlink = HyperlinkId::new(0);
     terminal.primary.grid[0].cells[1].ch = 'M';
-    terminal.primary.grid[0].cells[1].hyperlink = Some(1); // a different link
+    terminal.primary.grid[0].cells[1].hyperlink = HyperlinkId::new(1); // a different link
     terminal.primary.grid[0].cells[2].ch = 'M'; // no link at all
 
     let mut snap = FrameSnapshot::from_terminal(&mut terminal);

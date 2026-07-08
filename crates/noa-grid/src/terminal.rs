@@ -8,7 +8,7 @@ mod reports;
 
 use std::collections::{HashMap, VecDeque};
 
-use crate::cell::Hyperlink;
+use crate::cell::{Hyperlink, HyperlinkId};
 use crate::charset::CharsetState;
 use crate::cursor::CursorStyle;
 use crate::kitty::ImageStore;
@@ -36,6 +36,7 @@ const NOTIFICATION_QUEUE_CAP: usize = 32;
 /// cap is hit, further *new* links print as plain text instead. This bounds
 /// memory against a program streaming unique URIs forever.
 pub(crate) const HYPERLINK_REGISTRY_CAP: usize = 8192;
+const _: () = assert!(HYPERLINK_REGISTRY_CAP < u16::MAX as usize);
 
 /// Cap on recorded OSC 133 shell marks. Marks whose rows scrolled out of
 /// trimmed history are useless (`scroll_to_prompt` skips them), so those are
@@ -457,7 +458,7 @@ impl Terminal {
                 id
             }
         };
-        self.active_mut().cursor.hyperlink = Some(id);
+        self.active_mut().cursor.hyperlink = HyperlinkId::new(id);
     }
 
     fn clear_current_hyperlink(&mut self) {

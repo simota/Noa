@@ -2,6 +2,8 @@
 
 use noa_core::{CellAttrs, Color};
 
+use crate::cell::HyperlinkId;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CursorStyle {
     #[default]
@@ -26,7 +28,7 @@ pub struct Cursor {
     pub fg: Color,
     pub bg: Color,
     pub underline_color: Option<Color>,
-    pub hyperlink: Option<usize>,
+    pub hyperlink: Option<HyperlinkId>,
     pub attrs: CellAttrs,
     /// DECTCEM (mode 25).
     pub visible: bool,
@@ -63,7 +65,7 @@ pub struct SavedCursor {
     pub fg: Color,
     pub bg: Color,
     pub underline_color: Option<Color>,
-    pub hyperlink: Option<usize>,
+    pub hyperlink: Option<HyperlinkId>,
     pub attrs: CellAttrs,
 }
 

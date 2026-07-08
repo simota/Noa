@@ -25,7 +25,7 @@ pub mod url;
 #[cfg(test)]
 mod tests;
 
-pub use cell::{Cell, Hyperlink, Row};
+pub use cell::{Cell, Hyperlink, HyperlinkId, Row};
 pub use cursor::{Cursor, CursorStyle, HorizontalMargins, ScrollRegion};
 pub use kitty::{ImageStore, KittyImage};
 pub use kitty_keyboard::{

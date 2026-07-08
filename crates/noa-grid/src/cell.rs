@@ -1,11 +1,32 @@
 //! A screen cell and a row of cells.
 
+use std::num::NonZeroU16;
+
 use noa_core::{CellAttrs, Color};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Hyperlink {
     pub uri: String,
     pub id: Option<String>,
+}
+
+/// Compact index into `Terminal::hyperlinks`.
+///
+/// Cells carry this on every live grid row and snapshot, so storing the
+/// zero-based index as non-zero `u16` keeps `Option<HyperlinkId>` at two bytes.
+/// `Terminal::HYPERLINK_REGISTRY_CAP` is far below this range.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct HyperlinkId(NonZeroU16);
+
+impl HyperlinkId {
+    pub fn new(index: usize) -> Option<Self> {
+        let encoded = u16::try_from(index).ok()?.checked_add(1)?;
+        Some(Self(NonZeroU16::new(encoded)?))
+    }
+
+    pub fn get(self) -> usize {
+        self.0.get() as usize - 1
+    }
 }
 
 /// A single grid cell. Inc-1 layout is inlined (no `StyleId` interning yet).
@@ -18,7 +39,7 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub underline_color: Option<Color>,
-    pub hyperlink: Option<usize>,
+    pub hyperlink: Option<HyperlinkId>,
     pub attrs: CellAttrs,
 }
 

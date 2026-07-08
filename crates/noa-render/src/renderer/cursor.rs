@@ -215,7 +215,7 @@ pub(super) fn push_cell_decorations(
 /// target (see [`HoverLink`]).
 pub(super) fn is_hover_link_cell(snap: &FrameSnapshot, cell: &Cell, x: u16, y: u16) -> bool {
     match snap.hover_link {
-        Some(HoverLink::Registry(id)) => cell.hyperlink == Some(id),
+        Some(HoverLink::Registry(id)) => cell.hyperlink.is_some_and(|link| link.get() == id),
         Some(HoverLink::Range {
             y: row_y,
             x_start,

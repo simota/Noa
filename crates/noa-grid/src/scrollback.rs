@@ -13,7 +13,7 @@
 //! / [`PagedScrollback::for_each_row`]), so the renderer's `FrameSnapshot`
 //! boundary is unchanged.
 
-use crate::cell::{Cell, Row};
+use crate::cell::{Cell, HyperlinkId, Row};
 use noa_core::{CellAttrs, Color};
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -174,7 +174,7 @@ impl Page {
             fg: style.fg,
             bg: style.bg,
             underline_color: style.underline_color,
-            hyperlink: style.hyperlink.map(|h| h as usize),
+            hyperlink: style.hyperlink.and_then(|h| HyperlinkId::new(h as usize)),
             attrs,
         }
     }
@@ -215,7 +215,7 @@ fn style_of(cell: &Cell) -> Style {
         bg: cell.bg,
         underline_color: cell.underline_color,
         attrs,
-        hyperlink: cell.hyperlink.map(|h| h as u32),
+        hyperlink: cell.hyperlink.map(|h| h.get() as u32),
     }
 }
 
@@ -486,9 +486,10 @@ mod tests {
     }
 
     #[test]
-    fn inlined_cell_is_at_most_64_bytes() {
-        // Documents the interning win: an inlined `Cell` is ~8x a `PackedCell`.
-        assert!(std::mem::size_of::<Cell>() <= 64);
+    fn inlined_cell_is_48_bytes() {
+        // `HyperlinkId` keeps the hot live/snapshot cell layout compact while
+        // preserving the combining `String` buffer reuse path.
+        assert_eq!(std::mem::size_of::<Cell>(), 48);
     }
 
     #[test]
@@ -499,7 +500,7 @@ mod tests {
             fg: Color::Rgb(Rgb::new(1, 2, 3)),
             bg: Color::Palette(5),
             underline_color: Some(Color::Rgb(Rgb::new(9, 9, 9))),
-            hyperlink: Some(42),
+            hyperlink: HyperlinkId::new(42),
             attrs: CellAttrs::BOLD | CellAttrs::UNDERLINE,
             ..Cell::default()
         };
@@ -510,7 +511,7 @@ mod tests {
             fg: Color::Rgb(Rgb::new(1, 2, 3)),
             bg: Color::Palette(5),
             underline_color: Some(Color::Rgb(Rgb::new(9, 9, 9))),
-            hyperlink: Some(42),
+            hyperlink: HyperlinkId::new(42),
             ..Cell::default()
         };
         spacer.attrs.insert(CellAttrs::WIDE_SPACER);

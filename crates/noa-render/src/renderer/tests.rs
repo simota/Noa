@@ -3,7 +3,7 @@
 use super::*;
 use noa_core::{Color, GridSize, Rgb};
 use noa_font::{FontConfig, ShapeCell, StyleKey};
-use noa_grid::{Cell, Cursor, SearchMatch, SelectionPoint, Terminal};
+use noa_grid::{Cell, Cursor, HyperlinkId, SearchMatch, SelectionPoint, Terminal};
 use noa_vt::Stream;
 
 use crate::segment::CellRenderInfo;

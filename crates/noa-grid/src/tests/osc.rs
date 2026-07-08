@@ -12,8 +12,8 @@ fn osc8_hyperlink_state_is_stored_on_printed_cells() {
     let link_id = cell(&t, 0, 0).hyperlink.expect("A should carry link");
     assert_eq!(cell(&t, 1, 0).hyperlink, Some(link_id));
     assert_eq!(cell(&t, 2, 0).hyperlink, None);
-    assert_eq!(t.hyperlinks[link_id].uri, "https://example.test/docs");
-    assert_eq!(t.hyperlinks[link_id].id.as_deref(), Some("docs"));
+    assert_eq!(t.hyperlinks[link_id.get()].uri, "https://example.test/docs");
+    assert_eq!(t.hyperlinks[link_id.get()].id.as_deref(), Some("docs"));
 }
 
 #[test]

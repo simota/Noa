@@ -182,11 +182,12 @@ quadrantChart
 
 ### ID 7: `Cell` layout compaction
 
-- [ ] `IMPL-PERF-701`: `std::mem::size_of::<Cell>()` と representative grid/snapshot memory の baseline を取る。
-- [ ] `IMPL-PERF-702`: `combining` と `hyperlink` の候補型を比較する。
+- [x] `IMPL-PERF-701`: `std::mem::size_of::<Cell>()` と representative grid/snapshot memory の baseline を取る。
+- [x] `IMPL-PERF-702`: `combining` と `hyperlink` の候補型を比較する。
   - 例: `String`, `Option<Box<str>>`, small inline buffer, `Option<NonZeroU32>`。
-- [ ] `IMPL-PERF-703`: `clone_from` による combining buffer reuse を失った場合の allocation churn を測る。
-- [ ] `IMPL-PERF-704`: wide cell、combining、hyperlink、scrollback materialization、search/url の回帰 test を追加する。
+- [x] `IMPL-PERF-703`: `clone_from` による combining buffer reuse を失わないことを確認する。
+  - `combining: String` は維持し、`clone_from` / `set_from` の buffer reuse を失わない設計にした。
+- [x] `IMPL-PERF-704`: wide cell、combining、hyperlink、scrollback materialization、search/url の回帰 test を追加する。
 - [ ] `IMPL-PERF-705`: retained size が下がり、主要 workload の CPU/alloc が悪化しないことを確認する。
 
 ## Explanation

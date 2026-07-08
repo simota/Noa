@@ -23,9 +23,7 @@ use crate::auto_approve::{
 };
 use crate::events::UserEvent;
 use crate::session_overview::OVERVIEW_TILE_MIN_RENDER_INTERVAL;
-use crate::session_store::{
-    self, PreviewLine, PreviewSpan, SessionCardId, SessionDelta, SessionWindowId,
-};
+use crate::session_store::{PreviewLine, PreviewSpan, SessionCardId, SessionDelta, SessionWindowId};
 use crate::split_tree::PaneId;
 
 /// Which window/pane's `UserEvent`s this io thread posts back to the main
@@ -1063,7 +1061,9 @@ mod tests {
                 .preview
                 .expect("visible feed extracts the preview")
                 .iter()
-                .any(|line| session_store::preview_line_text(line).contains("second line"))
+                .any(|line| {
+                    crate::session_store::preview_line_text(line).contains("second line")
+                })
         );
         assert!(last_sidebar_publish.is_some());
 
@@ -1109,7 +1109,7 @@ mod tests {
             .expect("visible feed extracts preview");
         let lines: Vec<_> = preview
             .iter()
-            .map(|line| session_store::preview_line_text(line))
+            .map(|line| crate::session_store::preview_line_text(line))
             .collect();
         assert_eq!(lines, vec!["three", "four", "five"]);
     }
@@ -1134,7 +1134,7 @@ mod tests {
                 .as_ref()
                 .expect("visible feed extracts preview")
                 .iter()
-                .map(|line| session_store::preview_line_text(line))
+                .map(|line| crate::session_store::preview_line_text(line))
                 .collect()
         };
 

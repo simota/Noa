@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Monitor CPU and RSS usage for noa and comparable terminal apps.
+# Monitor CPU, memory, and scheduling metrics for noa and comparable terminal apps.
 set -uo pipefail
 
-VERSION="0.1.0"
-DEFAULT_PROCESSES=("noa" "Ghostty")
+VERSION="0.2.0"
+DEFAULT_PROCESSES=("noa" "Ghostty" "Terminal" "iTerm2")
 
 INTERVAL="2"
 SAMPLES="0"
@@ -17,9 +17,9 @@ print_help() {
 Usage:
   scripts/monitor-resources.sh [options] [process ...]
 
-Monitor CPU percent and RSS memory for terminal processes. By default this
-samples noa and Ghostty. Use --process or positional process names to replace
-the default targets.
+Monitor CPU percent, RSS, memory footprint, thread count, and idle wakeups for
+terminal processes. By default this samples noa, Ghostty, Terminal, and iTerm2.
+Use --process or positional process names to replace the default targets.
 
 Options:
   -p, --process NAME     Add a process command name to monitor. May be repeated.
@@ -34,6 +34,16 @@ Output:
   Human mode prints one table row per process per sample.
   JSON mode prints one JSON object per sample with a processes array.
   Missing processes are reported with cpu_percent=0, rss_kib=0, and status=missing.
+
+Metrics:
+  cpu%, rss        From ps. RSS counts shared pages, so it overstates real cost.
+  footprint        Physical memory footprint from top (what Activity Monitor
+                   shows as "Memory"); the right metric for real memory cost.
+  th               Thread count.
+  idlew            Idle wakeups, cumulative since process start. Diff between
+                   samples to get a rate; lower is better for battery.
+  Footprint, th, and idlew are 0 when the top command is unavailable or fails
+  (e.g. sandboxed environments); cpu%/rss still come from ps.
 
 Exit codes:
   0    Completed successfully, including when targets are missing.
@@ -224,22 +234,22 @@ join_targets() {
 read_process_table_comm() {
   local output
 
-  if output="$(ps -axo comm=,pcpu=,rss= 2>/dev/null)"; then
+  if output="$(ps -axo pid=,comm=,pcpu=,rss= 2>/dev/null)"; then
     printf '%s\n' "$output"
     return 0
   fi
 
-  if output="$(ps -axo comm=,%cpu=,rss= 2>/dev/null)"; then
+  if output="$(ps -axo pid=,comm=,%cpu=,rss= 2>/dev/null)"; then
     printf '%s\n' "$output"
     return 0
   fi
 
-  if output="$(ps -eo comm=,pcpu=,rss= 2>/dev/null)"; then
+  if output="$(ps -eo pid=,comm=,pcpu=,rss= 2>/dev/null)"; then
     printf '%s\n' "$output"
     return 0
   fi
 
-  if output="$(ps -eo comm=,%cpu=,rss= 2>/dev/null)"; then
+  if output="$(ps -eo pid=,comm=,%cpu=,rss= 2>/dev/null)"; then
     printf '%s\n' "$output"
     return 0
   fi
@@ -250,27 +260,34 @@ read_process_table_comm() {
 read_process_table_ucomm() {
   local output
 
-  if output="$(ps -axo ucomm=,pcpu=,rss= 2>/dev/null)"; then
+  if output="$(ps -axo pid=,ucomm=,pcpu=,rss= 2>/dev/null)"; then
     printf '%s\n' "$output"
     return 0
   fi
 
-  if output="$(ps -axo ucomm=,%cpu=,rss= 2>/dev/null)"; then
+  if output="$(ps -axo pid=,ucomm=,%cpu=,rss= 2>/dev/null)"; then
     printf '%s\n' "$output"
     return 0
   fi
 
-  if output="$(ps -eo ucomm=,pcpu=,rss= 2>/dev/null)"; then
+  if output="$(ps -eo pid=,ucomm=,pcpu=,rss= 2>/dev/null)"; then
     printf '%s\n' "$output"
     return 0
   fi
 
-  if output="$(ps -eo ucomm=,%cpu=,rss= 2>/dev/null)"; then
+  if output="$(ps -eo pid=,ucomm=,%cpu=,rss= 2>/dev/null)"; then
     printf '%s\n' "$output"
     return 0
   fi
 
   return 1
+}
+
+# Per-process footprint / threads / idle wakeups. Only top exposes these
+# without root; absence is tolerated (fields report 0).
+read_top_table() {
+  command -v top >/dev/null 2>&1 || return 1
+  top -l 1 -stats pid,th,idlew,mem 2>/dev/null
 }
 
 read_process_table() {
@@ -291,10 +308,27 @@ read_process_table() {
 }
 
 collect_rows() {
-  local targets
+  local targets top_output
   targets="$(join_targets)"
 
-  read_process_table | awk -v targets="$targets" '
+  {
+    read_process_table
+    if top_output="$(read_top_table)"; then
+      printf '__NOA_MONITOR_TOP__\n'
+      printf '%s\n' "$top_output"
+    fi
+  } | awk -v targets="$targets" '
+    # Converts top MEM values like "12M+", "2912K", "0B" to KiB.
+    function mem_to_kib(value,    number, unit) {
+      gsub(/[+\-]/, "", value)
+      unit = value
+      sub(/^[0-9.]+/, "", unit)
+      number = value + 0
+      if (unit == "B") return int(number / 1024)
+      if (unit == "M") return int(number * 1024)
+      if (unit == "G") return int(number * 1024 * 1024)
+      return int(number)
+    }
     BEGIN {
       n = split(targets, target, "\t")
       source = "primary"
@@ -302,19 +336,48 @@ collect_rows() {
         cpu[i] = 0
         rss[i] = 0
         count[i] = 0
-        fallback_counting[i] = 0
+        footprint[i] = 0
+        threads[i] = 0
+        idlew[i] = 0
       }
     }
     /^__NOA_MONITOR_UCOMM_FALLBACK__$/ {
       source = "fallback"
       next
     }
+    /^__NOA_MONITOR_TOP__$/ {
+      source = "top"
+      next
+    }
+    source == "top" {
+      # top rows: PID  #TH  IDLEW  MEM (skip the summary header block).
+      if (NF < 4 || $1 !~ /^[0-9]+$/) {
+        next
+      }
+      if (!($1 in pid_targets)) {
+        next
+      }
+      th_value = $2
+      sub(/\/.*$/, "", th_value)
+      idlew_value = $3
+      gsub(/[^0-9]/, "", idlew_value)
+      kib = mem_to_kib($4)
+      m = split(pid_targets[$1], hits, ",")
+      for (h = 1; h <= m; h++) {
+        i = hits[h]
+        threads[i] += th_value + 0
+        idlew[i] += idlew_value + 0
+        footprint[i] += kib
+      }
+      next
+    }
     {
-      if (NF < 3) {
+      if (NF < 4 || $1 !~ /^[0-9]+$/) {
         next
       }
 
       row = $0
+      pid = $1
       rss_value = $NF
       cpu_value = $(NF - 1)
 
@@ -323,6 +386,7 @@ collect_rows() {
       }
 
       command = row
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", command)
       sub(/[[:space:]]+[0-9]+([.][0-9]+)?[[:space:]]+[0-9]+[[:space:]]*$/, "", command)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", command)
 
@@ -335,22 +399,21 @@ collect_rows() {
       for (i = 1; i <= n; i++) {
         lower_target = tolower(target[i])
         if (lower_command == lower_target || lower_base == lower_target) {
-          if (source == "fallback" && count[i] > 0 && fallback_counting[i] == 0) {
+          if ((i, pid) in seen) {
             continue
           }
-          if (source == "fallback") {
-            fallback_counting[i] = 1
-          }
+          seen[i, pid] = 1
           cpu[i] += cpu_value
           rss[i] += rss_value
           count[i] += 1
+          pid_targets[pid] = (pid in pid_targets) ? pid_targets[pid] "," i : i
         }
       }
     }
     END {
       for (i = 1; i <= n; i++) {
         status = count[i] > 0 ? "running" : "missing"
-        printf "%s\t%.1f\t%d\t%d\t%s\n", target[i], cpu[i], rss[i], count[i], status
+        printf "%s\t%.1f\t%d\t%d\t%s\t%d\t%d\t%d\n", target[i], cpu[i], rss[i], count[i], status, footprint[i], threads[i], idlew[i]
       }
     }
   '
@@ -381,19 +444,20 @@ rss_human() {
 }
 
 emit_human_header() {
-  emit_line "$(printf '%-20s %6s %-24s %-8s %5s %8s %12s' "timestamp" "sample" "process" "status" "procs" "cpu%" "rss")"
+  emit_line "$(printf '%-20s %6s %-24s %-8s %5s %8s %12s %12s %5s %8s' "timestamp" "sample" "process" "status" "procs" "cpu%" "rss" "footprint" "th" "idlew")"
 }
 
 emit_human_rows() {
   local timestamp="$1"
   local sample="$2"
   local rows="$3"
-  local process cpu rss count status rss_display
+  local process cpu rss count status footprint threads idlew rss_display footprint_display
 
-  while IFS=$'\t' read -r process cpu rss count status; do
+  while IFS=$'\t' read -r process cpu rss count status footprint threads idlew; do
     [ -n "$process" ] || continue
     rss_display="$(rss_human "$rss")"
-    emit_line "$(printf '%-20s %6s %-24s %-8s %5s %8s %12s' "$timestamp" "$sample" "$process" "$status" "$count" "$cpu" "$rss_display")"
+    footprint_display="$(rss_human "$footprint")"
+    emit_line "$(printf '%-20s %6s %-24s %-8s %5s %8s %12s %12s %5s %8s' "$timestamp" "$sample" "$process" "$status" "$count" "$cpu" "$rss_display" "$footprint_display" "$threads" "$idlew")"
   done <<< "$rows"
 }
 
@@ -403,17 +467,18 @@ emit_json_sample() {
   local rows="$3"
   local first=1
   local json
-  local process cpu rss count status rss_bytes escaped_process
+  local process cpu rss count status footprint threads idlew rss_bytes footprint_bytes escaped_process
 
   json="{\"timestamp\":\"$(json_escape "$timestamp")\",\"sample\":$sample,\"processes\":["
 
-  while IFS=$'\t' read -r process cpu rss count status; do
+  while IFS=$'\t' read -r process cpu rss count status footprint threads idlew; do
     [ -n "$process" ] || continue
     [ "$first" -eq 1 ] || json="${json},"
     first=0
     rss_bytes=$((rss * 1024))
+    footprint_bytes=$((footprint * 1024))
     escaped_process="$(json_escape "$process")"
-    json="${json}{\"name\":\"$escaped_process\",\"status\":\"$status\",\"pid_count\":$count,\"cpu_percent\":$cpu,\"rss_kib\":$rss,\"rss_bytes\":$rss_bytes}"
+    json="${json}{\"name\":\"$escaped_process\",\"status\":\"$status\",\"pid_count\":$count,\"cpu_percent\":$cpu,\"rss_kib\":$rss,\"rss_bytes\":$rss_bytes,\"phys_footprint_kib\":$footprint,\"phys_footprint_bytes\":$footprint_bytes,\"thread_count\":$threads,\"idle_wakeups\":$idlew}"
   done <<< "$rows"
 
   json="${json}]}"

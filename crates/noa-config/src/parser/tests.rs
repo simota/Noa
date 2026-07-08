@@ -918,7 +918,7 @@ fn sidebar_enabled_and_width_parse_and_default() {
         resolved.sidebar_preview_lines,
         crate::DEFAULT_SIDEBAR_PREVIEW_LINES
     );
-    assert_eq!(resolved.sidebar_preview_lines, 3);
+    assert_eq!(resolved.sidebar_preview_lines, 5);
 }
 
 #[test]

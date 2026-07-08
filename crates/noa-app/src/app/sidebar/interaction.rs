@@ -291,6 +291,9 @@ impl App {
         let next = (state.sidebar_scroll as i64 + delta).max(0) as u32;
         state.sidebar_scroll = crate::sidebar::clamp_scroll(next, content_h, viewport_h);
         state.window.request_redraw();
+        // The pointer hasn't moved but the cards under it have: recompute the
+        // hover so the lifted face follows the scroll instead of sticking.
+        self.update_sidebar_button_hover(window_id, point);
         true
     }
 

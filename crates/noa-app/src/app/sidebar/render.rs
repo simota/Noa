@@ -572,6 +572,74 @@ pub(in crate::app) fn draw_sidebar_band(
                     selected,
                 }],
             );
+
+        // Status accent bar (busy / attention / bell) along the card's left
+        // edge: a thin solid capsule composited over the card border, inset
+        // past the corner radius so it never pokes outside the rounding. One
+        // reused scratch serves every bar in turn (same pattern as the card
+        // texture), refilled per card because the color varies.
+        if let Some(accent) = card_draw.accent {
+            let bar_w = (2.0 * model.scale).round().max(1.0) as u32;
+            let inset_y = (crate::chrome::RADIUS_LG * model.scale).round() as u32;
+            let bar_h = card_draw.rect.h.saturating_sub(2 * inset_y);
+            if bar_h > 0 {
+                if ensure_scratch(
+                    &mut gpu.chrome_textures.sidebar_accent_tex,
+                    &gpu.device,
+                    PixelSize { w: bar_w, h: bar_h },
+                    surface_format,
+                    "noa-sidebar-accent",
+                ) {
+                    #[cfg(debug_assertions)]
+                    gpu.chrome_textures.record_rebuild();
+                }
+                if let Some((_, _, accent_view)) = gpu.chrome_textures.sidebar_accent_tex.as_ref()
+                {
+                    rasterize_runs(
+                        gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
+                        &gpu.device,
+                        &gpu.queue,
+                        &mut gpu.sidebar_font,
+                        active_theme(&gpu.theme, &gpu.preview_theme),
+                        accent_view,
+                        PixelSize { w: bar_w, h: bar_h },
+                        GridSize { cols: 1, rows: 1 },
+                        accent,
+                        1.0,
+                        &[],
+                    );
+                    let accent_style = CardStyle {
+                        background: rgb_to_rgba(accent),
+                        border_color: [0.0; 4],
+                        focus_color: [0.0; 4],
+                        corner_radius: bar_w as f32 / 2.0,
+                        border_width: 0.0,
+                        focus_width: 0.0,
+                        focus_glow_width: 0.0,
+                    };
+                    gpu.chrome_textures
+                        .sidebar_card
+                        .as_ref()
+                        .unwrap()
+                        .pipeline
+                        .overlay_texture_cards(
+                            &gpu.device,
+                            &gpu.queue,
+                            view,
+                            surface_size,
+                            &accent_style,
+                            &[CardTexturePlacement {
+                                texture_view: accent_view,
+                                x: card_draw.rect.x,
+                                y: card_draw.rect.y + inset_y,
+                                w: bar_w,
+                                h: bar_h,
+                                selected: false,
+                            }],
+                        );
+                }
+            }
+        }
     }
 
     // 2b) Drag-reorder feedback: the accent drop-indicator line at the insertion

@@ -160,42 +160,45 @@ impl App {
         }
     }
 
-    /// Reconcile the toolbar `+` hover state for `window_id` from the pointer at
-    /// `point` (window px, or `None` when the pointer left the surface). On a
-    /// change it repaints the sidebar (so the button lifts to its hover style)
-    /// and refreshes the cursor icon (pointer over the button). Returns whether
-    /// the pointer is currently over the button, so the caller can gate the
-    /// cursor icon without recomputing the hit-test.
+    /// Reconcile the sidebar hover state for `window_id` from the pointer at
+    /// `point` (window px, or `None` when the pointer left the surface): the
+    /// toolbar `+` button (hover style + pointer cursor) and the hovered card
+    /// (lifted face + visible `…` glyph). On a change it repaints the sidebar.
+    /// Returns whether the pointer is currently over the `+` button, so the
+    /// caller can gate the cursor icon without recomputing the hit-test.
     pub(in crate::app) fn update_sidebar_button_hover(
         &mut self,
         window_id: WindowId,
         point: Option<split_tree::Point>,
     ) -> bool {
         let inset = self.window_sidebar_inset_px(window_id);
-        let hovered = inset != 0
-            && point.is_some_and(|point| {
-                if point.x >= inset {
-                    return false;
+        let hit = point.filter(|point| inset != 0 && point.x < inset).and_then(
+            |point| -> Option<crate::sidebar::SidebarHit> {
+                let state = self.windows.get(&window_id)?;
+                // No card hover feedback while a drag-reorder floats a card
+                // over the list — the float carries the emphasis.
+                if state.sidebar_drag.is_some_and(|drag| drag.active) {
+                    return None;
                 }
-                let Some(state) = self.windows.get(&window_id) else {
-                    return false;
-                };
                 let metrics = self.sidebar_metrics(window_id);
                 let bounds = self.sidebar_layout_bounds(window_id, inset);
                 let windows = self.session_windows_for_window(window_id);
                 let ids = self.session_store.ordered_ids_for_windows(&windows);
-                matches!(
-                    metrics.hit_test(bounds, &ids, state.sidebar_scroll, point),
-                    Some(crate::sidebar::SidebarHit::NewSession)
-                )
-            });
+                metrics.hit_test(bounds, &ids, state.sidebar_scroll, point)
+            },
+        );
+        let hovered = matches!(hit, Some(crate::sidebar::SidebarHit::NewSession));
+        let hovered_card = match hit {
+            Some(crate::sidebar::SidebarHit::Card(id))
+            | Some(crate::sidebar::SidebarHit::CardMenu(id)) => Some(id),
+            _ => None,
+        };
         if let Some(state) = self.windows.get_mut(&window_id)
-            && state.sidebar_button_hover != hovered
+            && (state.sidebar_button_hover != hovered || state.sidebar_card_hover != hovered_card)
         {
             state.sidebar_button_hover = hovered;
-            if let Some(state) = self.windows.get(&window_id) {
-                state.window.request_redraw();
-            }
+            state.sidebar_card_hover = hovered_card;
+            state.window.request_redraw();
         }
         hovered
     }

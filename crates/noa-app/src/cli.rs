@@ -568,7 +568,7 @@ mod tests {
         assert!(output.contains("sidebar-enabled = false\n"));
         assert!(output.contains("sidebar-width = 360\n"));
         assert!(output.contains("sidebar-hotkey = \n"));
-        assert!(output.contains("sidebar-preview-lines = 3\n"));
+        assert!(output.contains("sidebar-preview-lines = 5\n"));
         assert!(
             output.lines().all(|line| line.contains(" = ")),
             "every line must be `key = value`"

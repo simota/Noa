@@ -130,6 +130,31 @@ fn icon_color(icon: crate::session_store::IconKind) -> Rgb {
     }
 }
 
+/// The color of the status accent bar along a card's left edge, or `None` for
+/// an idle card (no bar — absence is the idle signal). Attention follows the
+/// blink phase (`attention_marker`) so the bar blinks with the dot; busy and
+/// unread-bell are steady.
+fn card_accent(card: &SessionCard, attention_marker: bool) -> Option<Rgb> {
+    if card.attention {
+        return attention_marker.then(|| chrome().dot_red);
+    }
+    if card.unread_bell {
+        return Some(chrome().dot_yellow);
+    }
+    if card.busy {
+        return Some(chrome().dot_blue);
+    }
+    None
+}
+
+/// Linear mix of two chrome tones (`t` = 0 → `a`, 1 → `b`), for derived states
+/// the palette has no dedicated slot for (the card hover face sits between the
+/// resting and selected faces).
+fn mix_rgb(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Rgb::new(mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b))
+}
+
 /// The card's status dot with the attention blink applied (FR-A1): while an
 /// attention marker is in its hidden phase, show the underlying status (bell /
 /// busy / idle) instead of the red attention dot, so the dot blinks red↔status.
@@ -212,6 +237,9 @@ struct SidebarCardDraw {
     /// and glow, while the focused card keeps its blue focus ring and uses the
     /// red dot/label for the request state.
     attention: bool,
+    /// The status accent bar color along the card's left edge (busy /
+    /// attention / bell), or `None` for an idle card.
+    accent: Option<Rgb>,
     runs: Vec<SidebarTextRun>,
 }
 

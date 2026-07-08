@@ -115,6 +115,10 @@ pub(super) struct ChromeTextures {
     /// `CHROME_ACCENT` strip composited at the insertion gap during an active
     /// card drag.
     pub(super) sidebar_drop_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// Reused scratch texture for the per-card status accent bar (busy /
+    /// attention / bell) composited along a card's left edge; refilled with
+    /// each card's accent color in turn like the card scratch.
+    pub(super) sidebar_accent_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// The palette block texture, cached with its size so it is reused
     /// frame-to-frame and only reallocated when the block dimensions change.
     pub(super) palette_scratch: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
@@ -154,6 +158,7 @@ impl ChromeTextures {
         self.sidebar_button_tex = None;
         self.sidebar_divider_tex = None;
         self.sidebar_drop_tex = None;
+        self.sidebar_accent_tex = None;
         self.palette_scratch = None;
         self.scrollbar_tex = None;
         self.bell_flash_tex = None;
@@ -234,6 +239,10 @@ pub(super) struct WindowState {
     /// Whether the pointer is currently over the toolbar `+` button, driving its
     /// hover style (brighter fill + accent ring) and the pointer cursor icon.
     pub(super) sidebar_button_hover: bool,
+    /// The card the pointer is currently over, driving its hover style (a
+    /// lifted face + a visible `…` glyph). `None` while no card is hovered or
+    /// a drag-reorder is active.
+    pub(super) sidebar_card_hover: Option<SessionCardId>,
     /// The card whose `...` menu popup is open in this window (FR-7), or `None`.
     pub(super) sidebar_menu: Option<SessionCardId>,
     /// An in-flight sidebar card drag-reorder, or `None`.
@@ -690,6 +699,7 @@ mod chrome_textures_tests {
         assert!(textures.sidebar_button_tex.is_none());
         assert!(textures.sidebar_divider_tex.is_none());
         assert!(textures.sidebar_drop_tex.is_none());
+        assert!(textures.sidebar_accent_tex.is_none());
         assert!(textures.palette_scratch.is_none());
         assert!(textures.scrollbar_tex.is_none());
         assert!(textures.bell_flash_tex.is_none());

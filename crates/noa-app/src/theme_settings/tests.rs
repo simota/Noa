@@ -404,8 +404,8 @@ fn sidebar_preview_lines_row_adjusts_clamps_and_commits() {
     );
 
     let effect = settings.adjust(1, Instant::now());
-    assert_eq!(effect, RowEffect::SidebarPreviewLines(4));
-    assert_eq!(settings.rows()[7].draft, RowDraft::SidebarPreviewLines(4));
+    assert_eq!(effect, RowEffect::SidebarPreviewLines(6));
+    assert_eq!(settings.rows()[7].draft, RowDraft::SidebarPreviewLines(6));
     assert!(!settings.restart_note(SettingsRowKind::SidebarPreviewLines));
 
     for _ in 0..20 {

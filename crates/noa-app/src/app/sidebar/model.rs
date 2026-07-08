@@ -81,6 +81,7 @@ impl App {
         // so its static slot is left as a bare backdrop gap — the affordance that
         // the card has lifted out of the list.
         let dragging_id = state.sidebar_drag.filter(|d| d.active).map(|d| d.card);
+        let hovered_id = state.sidebar_card_hover;
         for card_rects in &layout.cards {
             if Some(card_rects.id) == dragging_id {
                 continue;
@@ -105,6 +106,10 @@ impl App {
                     )
                 });
             let renaming = renaming.as_deref();
+            // The `…` glyph surfaces on the hovered card (discoverability) and
+            // stays visible while its menu popup is open.
+            let menu_hint = hovered_id == Some(card_rects.id)
+                || state.sidebar_menu == Some(card_rects.id);
             let full = card_rects.bounds.h == layout_metrics.card_h;
             // A fully-visible card is covered by its opaque rounded overlay, so
             // its backdrop text would never show — only emit it for partial
@@ -112,6 +117,7 @@ impl App {
             if !full {
                 emit_card_text(
                     &mut runs, card_rects, card, &lines, &band_cell, marker, palette, renaming,
+                    menu_hint,
                 );
             }
 
@@ -128,17 +134,23 @@ impl App {
                     marker,
                     palette,
                     renaming,
+                    menu_hint,
                 );
                 cards.push(SidebarCardDraw {
                     rect: card_rects.bounds,
                     grid: card_grid,
                     bg: if selected {
                         chrome().card_selected
+                    } else if hovered_id == Some(card_rects.id) {
+                        // Hover face: halfway between resting and selected, so
+                        // the card lifts without competing with the selection.
+                        mix_rgb(chrome().card, chrome().card_selected, 0.5)
                     } else {
                         chrome().card
                     },
                     selected,
                     attention: card.attention,
+                    accent: card_accent(card, marker),
                     runs: card_runs,
                 });
             }
@@ -204,6 +216,7 @@ impl App {
                     marker,
                     palette,
                     None,
+                    false,
                 );
                 // Floating top follows the cursor, clamped inside the band.
                 let max_top = height.saturating_sub(layout_metrics.card_h) as i64;
@@ -219,6 +232,7 @@ impl App {
                     bg: chrome().card_selected,
                     selected: true,
                     attention: false,
+                    accent: None,
                     runs: card_runs,
                 };
                 // Drop indicator at the target gap, spanning the card width with a
@@ -317,12 +331,43 @@ fn resolve_preview_color(color: noa_core::Color, palette: &[Rgb; 256]) -> Rgb {
     }
 }
 
-/// Emit one card's text runs (status dot, project icon, bold name, cwd, the
-/// meta row `process · ⎇ branch`, configured preview rows, updated-time)
-/// through `to_cell`. Shared by the flat backdrop (window coords) and each
-/// rounded overlay (card-local coords) so both agree on layout. `renaming`
-/// carries the live rename buffer when this card's inline rename is open —
-/// it replaces the name run with the buffer + caret in the accent color.
+/// A text run right-aligned within `rect`: the run's column is backed off from
+/// the rect's right edge by the text's display width (ASCII narrow, everything
+/// else wide — enough for the updated-time strings this positions).
+fn right_aligned_run(
+    to_cell: &impl Fn(u32, u32) -> (u16, u16),
+    rect: SidebarRect,
+    text: String,
+    fg: Rgb,
+) -> Option<SidebarTextRun> {
+    if rect.w == 0 || rect.h == 0 || text.is_empty() {
+        return None;
+    }
+    let (left_col, row) = to_cell(rect.x, rect.y);
+    let (right_col, _) = to_cell(rect.x + rect.w, rect.y);
+    let width: u16 = text
+        .chars()
+        .map(|c| if c.is_ascii() { 1u16 } else { 2 })
+        .sum();
+    let col = right_col.saturating_sub(width).max(left_col);
+    Some(SidebarTextRun {
+        col,
+        row,
+        text,
+        fg,
+        bg: None,
+        bold: false,
+    })
+}
+
+/// Emit one card's text runs (status dot, project icon, bold name with the
+/// right-aligned updated-time, the meta row `process · ⎇ branch · cwd`, and
+/// the configured preview rows) through `to_cell`. Shared by the flat backdrop
+/// (window coords) and each rounded overlay (card-local coords) so both agree
+/// on layout. `renaming` carries the live rename buffer when this card's
+/// inline rename is open — it replaces the name run with the buffer + caret in
+/// the accent color. `menu_hint` surfaces the `…` glyph over its (always-live)
+/// hit region — on for the hovered card and while the card's menu is open.
 #[allow(clippy::too_many_arguments)]
 fn emit_card_text(
     out: &mut Vec<SidebarTextRun>,
@@ -333,6 +378,7 @@ fn emit_card_text(
     attention_marker: bool,
     palette: &[Rgb; 256],
     renaming: Option<&str>,
+    menu_hint: bool,
 ) {
     out.extend(window_run(
         to_cell,
@@ -360,20 +406,34 @@ fn emit_card_text(
         name_fg,
         true,
     ));
-    out.extend(window_run(
+    // Updated-time, right-aligned on the name row. Emitted after the name so
+    // an overlong name's overflow cells are overwritten by the time, not the
+    // other way around.
+    out.extend(right_aligned_run(
         to_cell,
-        rects.cwd_line,
-        lines.cwd.clone(),
+        rects.updated,
+        lines.updated.clone(),
         chrome().dim_fg,
-        false,
     ));
+    // The `…` menu affordance (its hit region is always live; the glyph shows
+    // on hover / while its menu is open). Emitted after the name/time for the
+    // same overflow-overwrite reason.
+    if menu_hint {
+        out.extend(window_run(
+            to_cell,
+            rects.menu_button,
+            "⋯".to_string(),
+            chrome().dim_fg,
+            false,
+        ));
+    }
 
     // Meta row: a recognized AI agent gets its brand glyph/color/name (busy or
     // idle); any other process shows green `✳` while running, dim `❯` while
-    // idle. The git branch follows on the same row, dim. A pending interaction
-    // request (FR-16) overrides the badge with the attention color and appends
-    // the waiting label; the label is held steady while pending (only the dot
-    // blinks, via `effective_status_dot`) so it stays legible.
+    // idle. The git branch and the dim cwd follow on the same row. A pending
+    // interaction request (FR-16) overrides the badge with the attention color
+    // and appends the waiting label; the label is held steady while pending
+    // (only the dot blinks, via `effective_status_dot`) so it stays legible.
     if rects.meta.w > 0 && rects.meta.h > 0 {
         let (badge, badge_fg) = process_badge(&lines.process, card.busy);
         let (badge, badge_fg) = if card.attention {
@@ -381,12 +441,19 @@ fn emit_card_text(
         } else {
             (badge, badge_fg)
         };
-        let text = if lines.branch.is_empty() {
+        // The dim suffix (branch + cwd) is recolored inline; the run fg colors
+        // the badge portion.
+        let mut suffix = String::new();
+        if !lines.branch.is_empty() {
+            suffix.push_str(&format!(" · ⎇ {}", lines.branch));
+        }
+        if !lines.cwd.is_empty() {
+            suffix.push_str(&format!(" · {}", lines.cwd));
+        }
+        let text = if suffix.is_empty() {
             badge
         } else {
-            // The dim branch suffix is recolored inline; the run fg colors the
-            // badge portion.
-            format!("{badge}{} · ⎇ {}", sgr_fg(chrome().dim_fg), lines.branch)
+            format!("{badge}{}{suffix}", sgr_fg(chrome().dim_fg))
         };
         out.extend(window_run(to_cell, rects.meta, text, badge_fg, false));
     }
@@ -406,14 +473,6 @@ fn emit_card_text(
             .unwrap_or(chrome().dim_fg);
         out.extend(window_run(to_cell, *rect, text, fg, false));
     }
-
-    out.extend(window_run(
-        to_cell,
-        rects.updated,
-        lines.updated.clone(),
-        chrome().dim_fg,
-        false,
-    ));
 }
 
 /// Wall-clock now, in the viewer's local zone, for the sidebar's relative

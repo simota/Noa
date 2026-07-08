@@ -38,7 +38,7 @@ pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "ctrl+grave";
 /// `sidebar-width` default: the session sidebar's width in points when visible.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 360.0;
 /// `sidebar-preview-lines` default: card last-output preview rows.
-pub const DEFAULT_SIDEBAR_PREVIEW_LINES: usize = 3;
+pub const DEFAULT_SIDEBAR_PREVIEW_LINES: usize = 5;
 /// Largest supported `sidebar-preview-lines` value. Higher values make each
 /// card too tall for the sidebar's dense session-list use case.
 pub const MAX_SIDEBAR_PREVIEW_LINES: usize = 10;

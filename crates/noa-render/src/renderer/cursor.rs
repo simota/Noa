@@ -44,20 +44,16 @@ pub(super) fn cursor_visual_for(snap: &FrameSnapshot) -> CursorVisual {
 }
 
 /// The cursor's own color: an explicit OSC 12 override if set, else the
-/// cell's foreground (so an unstyled cursor tracks the text it sits on).
+/// effective cell foreground (so an unstyled cursor tracks the text it sits on).
 /// The returned color is contrast-adjusted against the effective cell
 /// background so the cursor stays visible even on low-contrast themes.
 pub(super) fn cursor_fill_rgb(
     theme: &Theme,
     snap: &FrameSnapshot,
-    fg_color: Color,
+    text_rgb: noa_core::Rgb,
     bg_rgb: noa_core::Rgb,
 ) -> noa_core::Rgb {
-    let base = if let Some(cursor) = snap.colors.cursor() {
-        cursor
-    } else {
-        theme.resolve_rgb_with_colors(fg_color, true, &snap.colors)
-    };
+    let base = snap.colors.cursor().unwrap_or(text_rgb);
     theme.contrast_adjusted_fg(base, bg_rgb)
 }
 

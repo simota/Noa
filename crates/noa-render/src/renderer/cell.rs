@@ -117,15 +117,16 @@ pub(super) fn rebuild_row_instances(
             (cursor_here || cursor_on_lead) && cursor_visual == CursorVisual::Block;
 
         let inverse = cell.attrs.contains(CellAttrs::INVERSE);
-        let (fg_color, bg_color) = if inverse {
-            (cell.bg, cell.fg)
+        let normal_fg_rgb = theme.resolve_rgb_with_colors(cell.fg, true, &snap.colors);
+        let normal_bg_rgb = theme.resolve_rgb_with_colors(cell.bg, false, &snap.colors);
+        let (cell_bg_rgb, cell_text_rgb) = if inverse {
+            (normal_fg_rgb, normal_bg_rgb)
         } else {
-            (cell.fg, cell.bg)
+            (normal_bg_rgb, normal_fg_rgb)
         };
-        let cell_bg_rgb = theme.resolve_rgb_with_colors(bg_color, false, &snap.colors);
         let (bg_rgb, text_base_rgb) = if cursor_block_fill {
             (
-                cursor_fill_rgb(theme, snap, fg_color, cell_bg_rgb),
+                cursor_fill_rgb(theme, snap, cell_text_rgb, cell_bg_rgb),
                 cell_bg_rgb,
             )
         } else if selected {
@@ -135,15 +136,12 @@ pub(super) fn rebuild_row_instances(
         } else if search_match {
             (theme.search_bg, theme.search_fg)
         } else {
-            (
-                cell_bg_rgb,
-                theme.resolve_rgb_with_colors(fg_color, true, &snap.colors),
-            )
+            (cell_bg_rgb, cell_text_rgb)
         };
 
         // Background quad: skip when it's the plain default bg (the
         // clear color already fills that), unless inverted.
-        let bg_is_default = matches!(bg_color, Color::Default) && !inverse;
+        let bg_is_default = matches!(cell.bg, Color::Default) && !inverse;
         if cursor_block_fill || selected || active_search || search_match || !bg_is_default {
             let bg = surface_output_rgb(bg_rgb, target_format_is_srgb);
             bg_instances.push(CellInstance {
@@ -214,7 +212,7 @@ pub(super) fn rebuild_row_instances(
         // the cursor is a UI overlay, not part of the cell's own ink).
         if cursor_here && cursor_visual != CursorVisual::Block {
             let cursor_rgba = surface_output_rgb(
-                cursor_fill_rgb(theme, snap, fg_color, bg_rgb),
+                cursor_fill_rgb(theme, snap, text_base_rgb, bg_rgb),
                 target_format_is_srgb,
             );
             push_cursor_decorations(

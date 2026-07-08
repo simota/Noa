@@ -113,6 +113,51 @@ fn cursor_cell_with_glyph_generates_reversed_glyph_instance() {
 }
 
 #[test]
+fn inverse_default_colors_resolve_against_opposite_slots() {
+    let Some(mut font) = font_with_rasterized_m() else {
+        return;
+    };
+
+    let mut terminal = Terminal::new(GridSize::new(1, 1));
+    terminal.primary.cursor.visible = false;
+    terminal.primary.grid[0].cells[0].ch = 'M';
+    terminal.primary.grid[0].cells[0]
+        .attrs
+        .insert(CellAttrs::INVERSE);
+    let snap = FrameSnapshot::from_terminal(&mut terminal);
+
+    let mut theme = Theme::new();
+    theme.default_fg = Rgb::new(10, 20, 30);
+    theme.default_bg = Rgb::new(200, 210, 220);
+
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &theme, false);
+
+    let inverse_bg = instances
+        .iter()
+        .find(|instance| instance.grid_pos == [0, 0] && instance.flags == 0)
+        .expect("inverse default cell should paint a background quad");
+    assert_eq!(
+        rgb_from_instance(inverse_bg),
+        theme.default_fg,
+        "inverse default background should use the normal default foreground"
+    );
+
+    let glyph = instances
+        .iter()
+        .find(|instance| {
+            instance.grid_pos == [0, 0]
+                && instance.flags & CellInstance::FLAG_GLYPH == CellInstance::FLAG_GLYPH
+        })
+        .expect("inverse cell glyph should still be emitted");
+    assert_eq!(
+        rgb_from_instance(glyph),
+        theme.default_bg,
+        "inverse default glyph should use the normal default background"
+    );
+}
+
+#[test]
 fn wide_cell_decorations_span_both_cells_and_spacer_emits_none() {
     let Some(mut font) = font_with_rasterized_m() else {
         return;

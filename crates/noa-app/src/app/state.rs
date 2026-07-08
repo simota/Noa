@@ -14,6 +14,10 @@ pub(super) struct GpuState {
     pub(super) adapter: wgpu::Adapter,
     pub(super) device: wgpu::Device,
     pub(super) queue: wgpu::Queue,
+    /// Format-keyed shared pipeline sets: every `Renderer` (tab, quick
+    /// terminal, sidebar band, palette, overview labels) draws with the same
+    /// three pipelines per format, so each is compiled once and cloned out.
+    pub(super) pipelines: noa_render::PipelineCache,
     pub(super) font: FontGrid,
     /// Dedicated, smaller font for the session sidebar (mockup-dense typography,
     /// [`SIDEBAR_FONT_POINT_SIZE`]), sized independently of the terminal font

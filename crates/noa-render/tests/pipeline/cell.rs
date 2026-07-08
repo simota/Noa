@@ -34,6 +34,40 @@ fn cell_pipeline_builds_without_validation_error() {
     );
 }
 
+/// Two `Renderer`s built from one [`noa_render::SharedPipelines`] set (the
+/// per-tab production path via `PipelineCache`) must both draw a frame with
+/// no validation error — guards the pipeline-sharing refactor against a
+/// shared-vs-per-renderer resource mismatch (e.g. a bind group built against
+/// a layout the shared pipeline doesn't own).
+#[test]
+fn two_renderers_sharing_pipelines_draw_without_validation_error() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping GPU shared-pipeline test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let mut cache = noa_render::PipelineCache::default();
+    let pipelines = cache.get(&device, format);
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    for text in ["first tab", "second tab"] {
+        let mut renderer =
+            Renderer::with_pipelines(&device, &queue, &pipelines, &mut font, DEFAULT_GRID_PADDING)
+                .expect("build renderer from shared pipelines");
+        renderer.resize(PixelSize { w: 64, h: 32 });
+        rebuild_text_frame(&mut renderer, &mut font, &device, &queue, text);
+        let (_target, view) = render_target(&device, 64, 32);
+        renderer.draw(&device, &queue, &view);
+    }
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error drawing via shared pipelines: {err:?}"
+    );
+}
+
 #[test]
 fn cell_pipeline_draws_one_frame_without_validation_error() {
     let Some((device, queue)) = device_queue() else {

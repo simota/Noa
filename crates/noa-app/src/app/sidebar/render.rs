@@ -134,10 +134,11 @@ pub(in crate::app) fn draw_sidebar_band(
         .as_ref()
         .is_none_or(|renderer| renderer.target_format() != surface_format)
     {
-        gpu.chrome_textures.sidebar_renderer = Renderer::new(
+        let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
+        gpu.chrome_textures.sidebar_renderer = Renderer::with_pipelines(
             &gpu.device,
             &gpu.queue,
-            surface_format,
+            &pipelines,
             &mut gpu.sidebar_font,
             padding,
         )

@@ -170,7 +170,7 @@ impl PaneRenderCache {
 /// already-created `Device`/`Queue`/surface format and never touches
 /// `winit` or `wgpu::Surface`.
 pub struct Renderer {
-    cell: CellPipeline,
+    cell: std::sync::Arc<CellPipeline>,
     image_layer: ImageLayer,
     /// Terminal background image (design: `background-image*`). Drawn once per
     /// frame in the lowest z band — below every pane's background quad, above
@@ -245,10 +245,32 @@ impl Renderer {
         font: &mut FontGrid,
         grid_padding: GridPadding,
     ) -> anyhow::Result<Renderer> {
+        Self::with_pipelines(
+            device,
+            queue,
+            &crate::SharedPipelines::new(device, format),
+            font,
+            grid_padding,
+        )
+    }
+
+    /// Build a `Renderer` around an existing pipeline set, skipping shader
+    /// module + pipeline construction. Every construction site with more than
+    /// one `Renderer` per format should come through here (via
+    /// [`crate::PipelineCache`]); [`Renderer::new`] is the build-them-fresh
+    /// convenience for tests and one-off renderers.
+    pub fn with_pipelines(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipelines: &crate::SharedPipelines,
+        font: &mut FontGrid,
+        grid_padding: GridPadding,
+    ) -> anyhow::Result<Renderer> {
         RENDERER_CONSTRUCTION_COUNT.fetch_add(1, Ordering::Relaxed);
-        let cell = CellPipeline::new(device, format);
-        let image_layer = ImageLayer::new(device, format);
-        let background_image_layer = BackgroundImageLayer::new(device, format);
+        let format = pipelines.format();
+        let cell = pipelines.cell.clone();
+        let image_layer = ImageLayer::new(pipelines.image.clone());
+        let background_image_layer = BackgroundImageLayer::new(pipelines.background_image.clone());
 
         let (mask_w, mask_h) = font.mask_atlas_size();
         let mask_atlas_texture = create_atlas_texture(

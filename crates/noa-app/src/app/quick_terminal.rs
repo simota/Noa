@@ -385,10 +385,11 @@ impl App {
                 view_formats: vec![],
             };
             surface.configure(&gpu.device, &surface_config);
-            let mut renderer = Renderer::new(
+            let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
+            let mut renderer = Renderer::with_pipelines(
                 &gpu.device,
                 &gpu.queue,
-                surface_format,
+                &pipelines,
                 &mut gpu.font,
                 self.padding,
             )

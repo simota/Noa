@@ -151,6 +151,7 @@ impl App {
                 adapter,
                 device,
                 queue,
+                pipelines: noa_render::PipelineCache::default(),
                 font: first_font.expect("first tab must initialize the font"),
                 sidebar_font: FontGrid::new(
                     sidebar_font_pixel_size(window_scale_factor),
@@ -203,10 +204,11 @@ impl App {
             };
             surface.configure(&gpu.device, &surface_config);
 
-            let mut renderer = Renderer::new(
+            let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
+            let mut renderer = Renderer::with_pipelines(
                 &gpu.device,
                 &gpu.queue,
-                surface_format,
+                &pipelines,
                 &mut gpu.font,
                 self.padding,
             )

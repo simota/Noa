@@ -13,6 +13,7 @@
 //! GPU gotcha), and `ALPHA_BLENDING` with straight (non-premultiplied) alpha.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use noa_core::{GridPadding, PixelSize};
 
@@ -148,10 +149,16 @@ pub struct ImageDraw {
     bind_group: wgpu::BindGroup,
 }
 
-pub struct ImageLayer {
+/// The immutable GPU half of the image layer, shareable across `Renderer`s
+/// via [`crate::SharedPipelines`].
+pub struct ImagePipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+}
+
+pub struct ImageLayer {
+    shared: Arc<ImagePipeline>,
     cache: HashMap<(u64, u32), ImageTextureEntry>,
     total_bytes: usize,
     frame: u64,
@@ -160,7 +167,7 @@ pub struct ImageLayer {
     uploads: u64,
 }
 
-impl ImageLayer {
+impl ImagePipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("noa-image-shader"),
@@ -257,6 +264,14 @@ impl ImageLayer {
             pipeline,
             bind_group_layout,
             sampler,
+        }
+    }
+}
+
+impl ImageLayer {
+    pub fn new(shared: Arc<ImagePipeline>) -> Self {
+        Self {
+            shared,
             cache: HashMap::new(),
             total_bytes: 0,
             frame: 0,
@@ -397,7 +412,7 @@ impl ImageLayer {
             queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniforms));
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("noa-image-bind-group"),
-                layout: &self.bind_group_layout,
+                layout: &self.shared.bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -405,7 +420,7 @@ impl ImageLayer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        resource: wgpu::BindingResource::Sampler(&self.shared.sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -427,7 +442,7 @@ impl ImageLayer {
         if draws.is_empty() {
             return;
         }
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(&self.shared.pipeline);
         for draw in draws {
             pass.set_bind_group(0, &draw.bind_group, &[]);
             pass.draw(0..6, 0..1);

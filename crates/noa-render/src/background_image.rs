@@ -218,14 +218,20 @@ pub struct BgImageDraw {
 
 /// Owns the background-image pipeline, sampler, and (once set) the uploaded
 /// texture. One per [`crate::Renderer`], so each surface carries its own image.
-pub struct BackgroundImageLayer {
+/// The immutable GPU half of the background-image layer, shareable across
+/// `Renderer`s via [`crate::SharedPipelines`].
+pub struct BackgroundImagePipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+}
+
+pub struct BackgroundImageLayer {
+    shared: Arc<BackgroundImagePipeline>,
     image: Option<BackgroundImageGpu>,
 }
 
-impl BackgroundImageLayer {
+impl BackgroundImagePipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("noa-background-image-shader"),
@@ -324,6 +330,14 @@ impl BackgroundImageLayer {
             pipeline,
             bind_group_layout,
             sampler,
+        }
+    }
+}
+
+impl BackgroundImageLayer {
+    pub fn new(shared: Arc<BackgroundImagePipeline>) -> Self {
+        Self {
+            shared,
             image: None,
         }
     }
@@ -435,7 +449,7 @@ impl BackgroundImageLayer {
         queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniforms));
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("noa-background-image-bind-group"),
-            layout: &self.bind_group_layout,
+            layout: &self.shared.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -443,7 +457,7 @@ impl BackgroundImageLayer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.shared.sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -463,7 +477,7 @@ impl BackgroundImageLayer {
         let Some(draw) = draw else {
             return;
         };
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(&self.shared.pipeline);
         pass.set_bind_group(0, &draw.bind_group, &[]);
         pass.draw(0..6, 0..1);
     }

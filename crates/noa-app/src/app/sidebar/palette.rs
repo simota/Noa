@@ -44,10 +44,11 @@ fn ensure_overlay_card_gpu(
         .is_none_or(|renderer| renderer.target_format() != surface_format)
         || gpu.palette_padding != interior
     {
-        gpu.palette_renderer = Renderer::new(
+        let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
+        gpu.palette_renderer = Renderer::with_pipelines(
             &gpu.device,
             &gpu.queue,
-            surface_format,
+            &pipelines,
             &mut gpu.font,
             interior,
         )

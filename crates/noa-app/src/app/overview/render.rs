@@ -160,11 +160,12 @@ impl App {
             .as_ref()
             .is_none_or(|renderer| renderer.target_format() != format);
         if stale {
+            let pipelines = gpu.pipelines.get(&gpu.device, format);
             overview.label_renderer = Some(
-                Renderer::new(
+                Renderer::with_pipelines(
                     &gpu.device,
                     &gpu.queue,
-                    format,
+                    &pipelines,
                     &mut gpu.sidebar_font,
                     GridPadding::ZERO,
                 )

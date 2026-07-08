@@ -13,6 +13,7 @@ mod instance;
 mod pipeline;
 mod renderer;
 mod segment;
+mod shared;
 mod snapshot;
 mod theme;
 
@@ -31,6 +32,7 @@ pub use renderer::{
     ConfirmDialogLayout, PaletteLayout, PaneFrame, Renderer, command_palette_layout,
     confirm_dialog_layout, renderer_construction_count,
 };
+pub use shared::{PipelineCache, SharedPipelines};
 pub use snapshot::{
     CommandPaletteSnapshot, ConfirmDialogSnapshot, FrameSnapshot, HoverLink,
     ImagePlacementSnapshot, PaletteRow, Preedit, SnapshotImage,

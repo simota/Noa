@@ -139,10 +139,10 @@ quadrantChart
 ### ID 2: Dirty-row-only visible snapshot copy
 
 - [ ] `IMPL-PERF-201`: 1行更新、連続 scroll、selection/search ありの baseline を取る。
-- [ ] `IMPL-PERF-202`: `FrameSnapshot` の rows reuse 前提と row-base 変化時の invalidation 条件を整理する。
-- [ ] `IMPL-PERF-203`: clean 行 copy を避ける最小設計を決める。
+- [x] `IMPL-PERF-202`: `FrameSnapshot` の rows reuse 前提と row-base 変化時の invalidation 条件を整理する。
+- [x] `IMPL-PERF-203`: clean 行 copy を避ける最小設計を決める。
   - 前回 snapshot row を保持するか、dirty mask と renderer cache だけで十分かを判断する。
-- [ ] `IMPL-PERF-204`: scrollback viewport、resize、alt screen、search/selection の回帰 test を追加する。
+- [x] `IMPL-PERF-204`: scrollback viewport、resize、alt screen、search/selection の回帰 test を追加する。
 - [ ] `IMPL-PERF-205`: terminal lock hold time と copy bytes が baseline より下がることを確認する。
 
 ### ID 3: Overview `FrameSnapshot::peek` reuse

@@ -551,10 +551,10 @@ pub(super) struct Surface {
     pub(super) hover_link: Option<HoverLink>,
     /// The Session Overview mirror's read-only publish slot (Fix B, REQ-NF-6).
     pub(super) overview_snapshot: Arc<Mutex<Option<Arc<FrameSnapshot>>>>,
-    /// Previous frame's snapshot rows, handed back after each redraw so
-    /// `FrameSnapshot::from_terminal_recycled` can reuse the row/cell
-    /// allocations instead of cloning the grid into fresh heap every frame.
-    pub(super) snapshot_recycle: Vec<noa_grid::Row>,
+    /// Previous frame's snapshot rows + viewport identity, handed back after
+    /// each redraw so `FrameSnapshot::from_terminal_recycle` can reuse row/cell
+    /// allocations and skip clean-row copies when the viewport is unchanged.
+    pub(super) snapshot_recycle: noa_render::FrameSnapshotRecycle,
 }
 
 impl WindowState {

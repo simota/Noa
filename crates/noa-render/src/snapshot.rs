@@ -250,6 +250,27 @@ pub struct FrameSnapshot {
     pub images: Vec<SnapshotImage>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameSnapshotReuseKey {
+    row_base: usize,
+    abs_row_base: usize,
+    active_is_alt: bool,
+    cols: u16,
+    rows_n: u16,
+}
+
+/// Row storage retained from the previous terminal-frame snapshot.
+///
+/// The key records the viewport/screen identity those rows came from. When the
+/// next snapshot has the same key, clean rows can keep their previous `Row`
+/// storage untouched instead of copying every cell again. A key mismatch
+/// degrades to ordinary allocation reuse and reclones every visible row.
+#[derive(Default)]
+pub struct FrameSnapshotRecycle {
+    rows: Vec<Row>,
+    key: Option<FrameSnapshotReuseKey>,
+}
+
 /// The screen `Terminal` is currently rendering, borrowed mutably so its
 /// rows' dirty bits can be consumed-and-cleared in the same locked pass
 /// (`Screen::take_visible_rows_with_damage`). Mirrors `Terminal::active()`'s
@@ -277,9 +298,73 @@ impl FrameSnapshot {
     /// handed back by the caller) so a steady-state frame clones the grid
     /// without fresh heap allocation.
     pub fn from_terminal_recycled(terminal: &mut Terminal, mut rows_buf: Vec<Row>) -> Self {
+        Self::from_terminal_with_recycle_inner(terminal, &mut rows_buf, false)
+    }
+
+    /// Like [`Self::from_terminal_recycled`], but also reuses clean row content
+    /// when the recycle key proves the viewport did not move or change shape.
+    pub fn from_terminal_recycle(
+        terminal: &mut Terminal,
+        mut recycle: FrameSnapshotRecycle,
+    ) -> Self {
         let colors = terminal.colors.clone();
         let (image_placements, images) = kitty_snapshot(terminal);
+        let active_is_alt = terminal.active_is_alt;
         let screen = active_screen_mut(terminal);
+        let row_base = screen.visible_row_base();
+        let abs_row_base = screen.rows_evicted() + row_base;
+        let cols = screen.cols;
+        let rows_n = screen.rows;
+        let key = FrameSnapshotReuseKey {
+            row_base,
+            abs_row_base,
+            active_is_alt,
+            cols,
+            rows_n,
+        };
+        let reuse_clean_rows = recycle.key == Some(key);
+        let snapshot = Self::from_screen_recycle(
+            active_is_alt,
+            colors,
+            image_placements,
+            images,
+            screen,
+            &mut recycle.rows,
+            reuse_clean_rows,
+        );
+        debug_assert_eq!(snapshot.reuse_key(), key);
+        snapshot
+    }
+
+    fn from_terminal_with_recycle_inner(
+        terminal: &mut Terminal,
+        rows_buf: &mut Vec<Row>,
+        reuse_clean_rows: bool,
+    ) -> Self {
+        let colors = terminal.colors.clone();
+        let (image_placements, images) = kitty_snapshot(terminal);
+        let active_is_alt = terminal.active_is_alt;
+        let screen = active_screen_mut(terminal);
+        Self::from_screen_recycle(
+            active_is_alt,
+            colors,
+            image_placements,
+            images,
+            screen,
+            rows_buf,
+            reuse_clean_rows,
+        )
+    }
+
+    fn from_screen_recycle(
+        active_is_alt: bool,
+        colors: TerminalColors,
+        image_placements: Vec<ImagePlacementSnapshot>,
+        images: Vec<SnapshotImage>,
+        screen: &mut Screen,
+        rows_buf: &mut Vec<Row>,
+        reuse_clean_rows: bool,
+    ) -> Self {
         let mut cursor = screen.cursor;
         if screen.viewport_offset() > 0 {
             cursor.visible = false;
@@ -291,10 +376,14 @@ impl FrameSnapshot {
         let selection = screen.selection;
         let search = screen.search.clone();
         let mut row_dirty = Vec::new();
-        screen.take_visible_rows_with_damage_into(&mut rows_buf, &mut row_dirty);
+        screen.take_visible_rows_with_damage_into_reusing_clean(
+            rows_buf,
+            &mut row_dirty,
+            reuse_clean_rows,
+        );
         let scroll_shift = screen.take_scroll_shift();
         FrameSnapshot {
-            rows: rows_buf,
+            rows: std::mem::take(rows_buf),
             row_dirty,
             scroll_shift,
             cursor,
@@ -303,7 +392,7 @@ impl FrameSnapshot {
             search,
             row_base,
             abs_row_base,
-            active_is_alt: terminal.active_is_alt,
+            active_is_alt,
             cols,
             rows_n,
             focused: true,
@@ -315,6 +404,24 @@ impl FrameSnapshot {
             preedit: None,
             image_placements,
             images,
+        }
+    }
+
+    fn reuse_key(&self) -> FrameSnapshotReuseKey {
+        FrameSnapshotReuseKey {
+            row_base: self.row_base,
+            abs_row_base: self.abs_row_base,
+            active_is_alt: self.active_is_alt,
+            cols: self.cols,
+            rows_n: self.rows_n,
+        }
+    }
+
+    pub fn into_recycle(self) -> FrameSnapshotRecycle {
+        let key = self.reuse_key();
+        FrameSnapshotRecycle {
+            rows: self.rows,
+            key: Some(key),
         }
     }
 
@@ -472,6 +579,71 @@ mod tests {
         let snap = FrameSnapshot::from_terminal(&mut term);
 
         assert_eq!(snap.rows[0].cells[0].text(), "a\u{301}");
+    }
+
+    #[test]
+    fn recycled_snapshot_keeps_clean_rows_when_viewport_key_matches() {
+        let mut term = Terminal::new(GridSize::new(2, 2));
+        put(&mut term, 0, 'A');
+        put(&mut term, 1, 'B');
+        let first = FrameSnapshot::from_terminal(&mut term);
+        let row0_ptr = first.rows[0].cells.as_ptr();
+        let recycle = first.into_recycle();
+
+        put(&mut term, 1, 'C');
+        term.primary.grid[1].dirty = true;
+        let second = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
+
+        assert_eq!(second.row_dirty, vec![false, true]);
+        assert_eq!(second.rows[0].cells[0].ch, 'A');
+        assert_eq!(second.rows[0].cells.as_ptr(), row0_ptr);
+        assert_eq!(second.rows[1].cells[0].ch, 'C');
+    }
+
+    #[test]
+    fn recycled_snapshot_reclones_rows_when_viewport_key_changes() {
+        let mut term = Terminal::new(GridSize::new(2, 2));
+        put(&mut term, 0, 'A');
+        put(&mut term, 1, 'B');
+        let recycle = FrameSnapshot::from_terminal(&mut term).into_recycle();
+
+        term.primary.scroll_up_region(1);
+        put(&mut term, 1, 'C');
+        let snap = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
+
+        assert_eq!(snap.rows[0].cells[0].ch, 'B');
+        assert_eq!(snap.rows[1].cells[0].ch, 'C');
+    }
+
+    #[test]
+    fn recycled_snapshot_reclones_rows_when_size_changes() {
+        let mut term = Terminal::new(GridSize::new(2, 2));
+        put(&mut term, 0, 'A');
+        let recycle = FrameSnapshot::from_terminal(&mut term).into_recycle();
+
+        term.resize(GridSize::new(3, 2));
+        term.primary.grid[0].cells[2].ch = 'C';
+        let snap = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
+
+        assert_eq!(snap.cols, 3);
+        assert_eq!(snap.rows[0].cells[0].ch, 'A');
+        assert_eq!(snap.rows[0].cells[2].ch, 'C');
+    }
+
+    #[test]
+    fn recycled_snapshot_reclones_rows_when_active_screen_changes() {
+        let mut term = Terminal::new(GridSize::new(3, 1));
+        let mut stream = noa_vt::Stream::new();
+        stream.feed(b"PRI", &mut term);
+        let recycle = FrameSnapshot::from_terminal(&mut term).into_recycle();
+
+        stream.feed(b"\x1b[?1049hALT", &mut term);
+        let snap = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
+
+        assert!(snap.active_is_alt);
+        assert_eq!(snap.rows[0].cells[0].ch, 'A');
+        assert_eq!(snap.rows[0].cells[1].ch, 'L');
+        assert_eq!(snap.rows[0].cells[2].ch, 'T');
     }
 
     #[test]

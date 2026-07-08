@@ -513,7 +513,7 @@ impl App {
             rect,
             hover_link: None,
             overview_snapshot,
-            snapshot_recycle: Vec::new(),
+            snapshot_recycle: noa_render::FrameSnapshotRecycle::default(),
         })
     }
 

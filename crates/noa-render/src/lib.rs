@@ -34,7 +34,7 @@ pub use renderer::{
 };
 pub use shared::{GlyphAtlasCache, PipelineCache, SharedGlyphAtlases, SharedPipelines};
 pub use snapshot::{
-    CommandPaletteSnapshot, ConfirmDialogSnapshot, FrameSnapshot, HoverLink,
+    CommandPaletteSnapshot, ConfirmDialogSnapshot, FrameSnapshot, FrameSnapshotRecycle, HoverLink,
     ImagePlacementSnapshot, PaletteRow, Preedit, SnapshotImage,
 };
 pub use theme::{OverlayStyle, Theme, UI_ACCENT, blend};

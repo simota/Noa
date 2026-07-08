@@ -463,6 +463,20 @@ impl Screen {
         out_rows: &mut Vec<Row>,
         out_dirty: &mut Vec<bool>,
     ) {
+        self.take_visible_rows_with_damage_into_reusing_clean(out_rows, out_dirty, false);
+    }
+
+    /// Variant of [`Self::take_visible_rows_with_damage_into`] that may leave
+    /// clean row slots untouched when the caller has already proven that
+    /// `out_rows` represents the exact same viewport as this call. This preserves
+    /// correctness for dirty rows while avoiding clean-row cell copies in the
+    /// renderer's steady-state snapshot path.
+    pub fn take_visible_rows_with_damage_into_reusing_clean(
+        &mut self,
+        out_rows: &mut Vec<Row>,
+        out_dirty: &mut Vec<bool>,
+        reuse_clean_rows: bool,
+    ) {
         let rows = self.rows as usize;
         let scrollback_len = self.scrollback.len();
         let start = self.visible_row_base();
@@ -474,6 +488,10 @@ impl Screen {
         for (slot_idx, idx) in (start..start + rows).enumerate() {
             if idx < scrollback_len {
                 out_dirty.push(false);
+                if reuse_clean_rows && let Some(slot) = out_rows.get_mut(slot_idx) {
+                    slot.dirty = false;
+                    continue;
+                }
                 let row = self
                     .scrollback
                     .row(idx)
@@ -484,7 +502,15 @@ impl Screen {
                 }
             } else {
                 let row = &mut self.grid[idx - scrollback_len];
-                out_dirty.push(row.dirty);
+                let dirty = row.dirty;
+                out_dirty.push(dirty);
+                if reuse_clean_rows
+                    && !dirty
+                    && let Some(slot) = out_rows.get_mut(slot_idx)
+                {
+                    slot.dirty = false;
+                    continue;
+                }
                 match out_rows.get_mut(slot_idx) {
                     Some(slot) => {
                         // Field-wise so the cell vec's allocation (and each

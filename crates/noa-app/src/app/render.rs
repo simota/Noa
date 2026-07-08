@@ -108,7 +108,7 @@ impl App {
                     viewport_rows: term.active().rows,
                 });
             }
-            let mut snapshot = FrameSnapshot::from_terminal_recycled(
+            let mut snapshot = FrameSnapshot::from_terminal_recycle(
                 &mut term,
                 std::mem::take(&mut surface.snapshot_recycle),
             );
@@ -466,10 +466,10 @@ impl App {
         }
 
         // Hand each snapshot's row buffer back to its pane so the next
-        // frame's `from_terminal_recycled` reuses the allocations.
+        // frame's `from_terminal_recycle` reuses allocations and clean rows.
         for (pane_id, _, snapshot) in snapshots {
             if let Some(surface) = state.surfaces.get_mut(&pane_id) {
-                surface.snapshot_recycle = snapshot.rows;
+                surface.snapshot_recycle = snapshot.into_recycle();
             }
         }
     }

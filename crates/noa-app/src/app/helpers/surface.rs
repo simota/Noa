@@ -5,10 +5,15 @@ use super::*;
 /// Abort startup with a user-readable message instead of a panic backtrace.
 /// Only for GPU/font bring-up failures the user must fix in their
 /// environment (missing Metal driver, headless session, broken font).
-pub(crate) fn gpu_init_fatal(what: &str, detail: impl std::fmt::Display) -> ! {
+pub(crate) fn gpu_init_fatal(
+    persister: &mut crate::session_persist::SessionPersister,
+    what: &str,
+    detail: impl std::fmt::Display,
+) -> ! {
     log::error!("GPU initialization failed: {what}: {detail}");
     eprintln!("noa: {what} ({detail})");
     eprintln!("noa: a working GPU (Metal) and a usable monospace font are required.");
+    persister.flush();
     std::process::exit(1);
 }
 

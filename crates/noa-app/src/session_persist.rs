@@ -55,16 +55,22 @@ impl SessionPersister {
             let _ = tx.send((path, state));
         }
     }
+
+    /// Flush the newest queued state and stop the worker. After this returns,
+    /// later `save` calls are ignored.
+    pub fn flush(&mut self) {
+        self.tx.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 impl Drop for SessionPersister {
     fn drop(&mut self) {
         // Close the channel so the worker drains the queue and exits, then
         // join so the final state is on disk before the process ends.
-        self.tx.take();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        self.flush();
     }
 }
 
@@ -89,6 +95,27 @@ mod tests {
             persister.save(path.clone(), state);
         }
         drop(persister);
+        let restored = session::load(&path).expect("session file written");
+        assert_eq!(restored.focused_window, Some(9));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_flush_writes_the_newest_queued_state() {
+        let dir = std::env::temp_dir().join(format!(
+            "noa-session-persist-flush-test-{}",
+            std::process::id()
+        ));
+        let path = dir.join("session.json");
+        let mut persister = SessionPersister::spawn();
+        for generation in 0..10usize {
+            let state = SessionState {
+                windows: Vec::new(),
+                focused_window: Some(generation),
+            };
+            persister.save(path.clone(), state);
+        }
+        persister.flush();
         let restored = session::load(&path).expect("session file written");
         assert_eq!(restored.focused_window, Some(9));
         let _ = std::fs::remove_dir_all(&dir);

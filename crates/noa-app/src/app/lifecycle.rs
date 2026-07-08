@@ -118,14 +118,26 @@ impl App {
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
             let surface = instance
                 .create_surface(window.clone())
-                .unwrap_or_else(|e| gpu_init_fatal("could not create the window surface", e));
+                .unwrap_or_else(|e| {
+                    gpu_init_fatal(
+                        &mut self.session_persister,
+                        "could not create the window surface",
+                        e,
+                    )
+                });
             let adapter =
                 pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::default(),
                     compatible_surface: Some(&surface),
                     force_fallback_adapter: false,
                 }))
-                .unwrap_or_else(|e| gpu_init_fatal("no compatible GPU adapter found", e));
+                .unwrap_or_else(|e| {
+                    gpu_init_fatal(
+                        &mut self.session_persister,
+                        "no compatible GPU adapter found",
+                        e,
+                    )
+                });
             let (device, queue) =
                 pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                     label: Some("noa-device"),
@@ -135,7 +147,13 @@ impl App {
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::Off,
                 }))
-                .unwrap_or_else(|e| gpu_init_fatal("could not open a GPU device", e));
+                .unwrap_or_else(|e| {
+                    gpu_init_fatal(
+                        &mut self.session_persister,
+                        "could not open a GPU device",
+                        e,
+                    )
+                });
             // Validation errors and device loss must not abort inside the
             // macOS winit delegate (non-unwinding); log them instead. Device
             // loss then surfaces as SurfaceError::Lost on the next frame and
@@ -157,7 +175,13 @@ impl App {
                     sidebar_font_pixel_size(window_scale_factor),
                     font_config_from_noa_config(&self.config.font),
                 )
-                .unwrap_or_else(|e| gpu_init_fatal("could not load the sidebar font", e)),
+                .unwrap_or_else(|e| {
+                    gpu_init_fatal(
+                        &mut self.session_persister,
+                        "could not load the sidebar font",
+                        e,
+                    )
+                }),
                 theme: {
                     let theme = crate::theme::resolve_theme_with_overrides(
                         self.config.theme.as_deref(),
@@ -180,7 +204,13 @@ impl App {
             let gpu = self.gpu.as_ref().expect("gpu initialized");
             gpu.instance
                 .create_surface(window.clone())
-                .unwrap_or_else(|e| gpu_init_fatal("could not create the window surface", e))
+                .unwrap_or_else(|e| {
+                    gpu_init_fatal(
+                        &mut self.session_persister,
+                        "could not create the window surface",
+                        e,
+                    )
+                })
         };
 
         let (surface_config, renderer) = {
@@ -212,7 +242,13 @@ impl App {
                 &mut gpu.font,
                 self.padding,
             )
-            .unwrap_or_else(|e| gpu_init_fatal("could not build the renderer", e));
+            .unwrap_or_else(|e| {
+                gpu_init_fatal(
+                    &mut self.session_persister,
+                    "could not build the renderer",
+                    e,
+                )
+            });
             renderer.set_background_opacity(self.config.background_opacity);
             renderer.set_background_image(&gpu.device, &gpu.queue, self.background_image.clone());
             renderer.resize(PixelSize {

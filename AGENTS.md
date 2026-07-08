@@ -25,7 +25,7 @@ Keep dependency boundaries intact: only `noa-app` and `noa-render` should use
 - `cargo run -p noa -- --cols 100 --rows 30 --font-size 15`: launch the
   terminal with explicit startup dimensions.
 - `scripts/bundle-macos.sh`: build the release binary and assemble
-  `target/release/noa.app`.
+  `target/release/Noa.app`.
 - `cargo fmt --all`: format Rust code before submitting changes.
 
 ## Coding Style & Naming Conventions

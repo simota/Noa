@@ -1,8 +1,8 @@
 use clap::Parser;
 
-/// noa — a faithful Rust clone of the Ghostty terminal emulator.
+/// Noa — a faithful Rust clone of the Ghostty terminal emulator.
 #[derive(Parser, Debug)]
-#[command(name = "noa", version, about)]
+#[command(name = "Noa", version, about)]
 struct Args {
     /// Initial columns.
     #[arg(long)]
@@ -21,7 +21,7 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    // `noa +<action>` runs a one-shot query and exits without the GUI, so it
+    // `Noa +<action>` runs a one-shot query and exits without the GUI, so it
     // must be dispatched before clap sees (and rejects) the `+` argument.
     let argv: Vec<String> = std::env::args().collect();
     match noa_app::parse_invocation(&argv) {
@@ -138,7 +138,7 @@ fn ghostty_config_exists() -> bool {
 
 fn import_hint(config_exists: bool, any_candidate_exists: bool) -> Option<&'static str> {
     (!config_exists && any_candidate_exists).then_some(
-        "Ghostty config detected. Run `noa --import-ghostty-config` to create a noa config.",
+        "Ghostty config detected. Run `Noa --import-ghostty-config` to create a noa config.",
     )
 }
 
@@ -251,12 +251,12 @@ mod tests {
     fn theme_cli_input_is_not_defined() {
         let flag = ["--", "theme"].concat();
 
-        assert!(Args::try_parse_from(["noa", flag.as_str(), "3024 Day"]).is_err());
+        assert!(Args::try_parse_from(["Noa", flag.as_str(), "3024 Day"]).is_err());
     }
 
     #[test]
     fn import_flag_is_defined() {
-        let args = Args::try_parse_from(["noa", "--import-ghostty-config"]).unwrap();
+        let args = Args::try_parse_from(["Noa", "--import-ghostty-config"]).unwrap();
 
         assert!(args.import_ghostty_config);
     }
@@ -265,13 +265,13 @@ mod tests {
     fn plus_actions_must_be_dispatched_before_clap() {
         // clap rejects `+version` outright, which is why main() classifies
         // the invocation first and only falls through to clap for the GUI.
-        assert!(Args::try_parse_from(["noa", "+version"]).is_err());
+        assert!(Args::try_parse_from(["Noa", "+version"]).is_err());
         assert_eq!(
-            noa_app::parse_invocation(&["noa", "+version"]),
+            noa_app::parse_invocation(&["Noa", "+version"]),
             noa_app::Invocation::Action(noa_app::CliAction::Version)
         );
         assert_eq!(
-            noa_app::parse_invocation(&["noa", "--cols", "100"]),
+            noa_app::parse_invocation(&["Noa", "--cols", "100"]),
             noa_app::Invocation::Gui
         );
     }
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(
             import_hint(false, true),
             Some(
-                "Ghostty config detected. Run `noa --import-ghostty-config` to create a noa config."
+                "Ghostty config detected. Run `Noa --import-ghostty-config` to create a noa config."
             )
         );
         assert_eq!(import_hint(false, false), None);

@@ -1,4 +1,4 @@
-//! `+action` CLI mode, mirroring `ghostty +<action>`: `noa +list-themes`
+//! `+action` CLI mode, mirroring `ghostty +<action>`: `Noa +list-themes`
 //! runs a one-shot query, prints to stdout, and exits without starting the
 //! GUI event loop.
 //!
@@ -15,7 +15,7 @@ use noa_core::Rgb;
 
 use crate::commands::KeybindEngine;
 
-/// One-shot CLI actions (`noa +<action>`).
+/// One-shot CLI actions (`Noa +<action>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliAction {
     Version,
@@ -124,7 +124,7 @@ pub fn run_action(action: CliAction) -> anyhow::Result<()> {
 /// The stderr report for an unrecognized `+action` (ends with a newline; the
 /// caller prints it verbatim and exits with status 1).
 pub fn unknown_action_message(name: &str) -> String {
-    format!("noa: unknown action: +{name}\n\n{}", list_actions_output())
+    format!("Noa: unknown action: +{name}\n\n{}", list_actions_output())
 }
 
 fn version_output() -> String {
@@ -134,7 +134,7 @@ fn version_output() -> String {
         "release"
     };
     format!(
-        "noa {}\nA faithful Rust clone of the Ghostty terminal emulator.\nbuild: {}-{} ({profile})\n",
+        "Noa {}\nA faithful Rust clone of the Ghostty terminal emulator.\nbuild: {}-{} ({profile})\n",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::ARCH,
         std::env::consts::OS,
@@ -440,7 +440,7 @@ mod tests {
         for action in CliAction::ALL {
             let argv1 = format!("+{}", action.name());
             assert_eq!(
-                parse_invocation(&["noa", argv1.as_str()]),
+                parse_invocation(&["Noa", argv1.as_str()]),
                 Invocation::Action(action),
                 "{argv1} should parse"
             );
@@ -449,27 +449,27 @@ mod tests {
 
     #[test]
     fn non_plus_argv_launches_the_gui() {
-        assert_eq!(parse_invocation(&["noa"]), Invocation::Gui);
+        assert_eq!(parse_invocation(&["Noa"]), Invocation::Gui);
         assert_eq!(
-            parse_invocation(&["noa", "--cols", "100", "--rows", "30"]),
+            parse_invocation(&["Noa", "--cols", "100", "--rows", "30"]),
             Invocation::Gui
         );
         assert_eq!(
-            parse_invocation(&["noa", "--import-ghostty-config"]),
+            parse_invocation(&["Noa", "--import-ghostty-config"]),
             Invocation::Gui
         );
         // A `+` later in argv is not an action selector.
-        assert_eq!(parse_invocation(&["noa", "--cols", "+1"]), Invocation::Gui);
+        assert_eq!(parse_invocation(&["Noa", "--cols", "+1"]), Invocation::Gui);
     }
 
     #[test]
     fn unknown_plus_action_is_reported_by_name() {
         assert_eq!(
-            parse_invocation(&["noa", "+bogus"]),
+            parse_invocation(&["Noa", "+bogus"]),
             Invocation::Unknown("bogus".to_string())
         );
         assert_eq!(
-            parse_invocation(&["noa", "+"]),
+            parse_invocation(&["Noa", "+"]),
             Invocation::Unknown(String::new())
         );
     }
@@ -486,7 +486,7 @@ mod tests {
     fn version_output_names_the_binary_and_version() {
         let output = version_output();
 
-        assert!(output.starts_with(&format!("noa {}\n", env!("CARGO_PKG_VERSION"))));
+        assert!(output.starts_with(&format!("Noa {}\n", env!("CARGO_PKG_VERSION"))));
         assert!(output.contains("build: "));
         assert!(output.ends_with('\n'));
     }

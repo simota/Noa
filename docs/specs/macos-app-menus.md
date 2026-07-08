@@ -89,11 +89,11 @@ than direct `objc2-app-kit` integration.
 - `REQ-003` Initial menu slice: The first custom menu must expose app-level
   commands for About, Preferences, Close Window, and Quit.
 - `REQ-004` Launch parity: The menu behavior must work when launched from both
-  `cargo run -p noa` and a bundled `noa.app`.
+  `cargo run -p noa` and a bundled `Noa.app`.
 - `REQ-005` Shortcut preservation: Cmd-key app shortcuts must not be forwarded
   to the PTY.
 - `REQ-006` Standard macOS menu bar shape: The custom menu bar must expose the
-  top-level menus `noa`, `File`, `Edit`, `View`, `Window`, and `Help`.
+  top-level menus `Noa`, `File`, `Edit`, `View`, `Window`, and `Help`.
 
 ### Cross-Functional Requirements
 
@@ -294,10 +294,10 @@ Scenario: SC-AC-MACOS-MENUS-007-HP-001 - Menu dependencies stay in noa-app
 
 ```gherkin
 Scenario: SC-AC-MACOS-MENUS-008-HP-001 - Cargo and bundle launches both show the menu
-  Given the same build of noa is available as a cargo-run binary and as noa.app
-  When noa is launched by each supported launch method on macOS
+  Given the same build of Noa is available as a cargo-run binary and as Noa.app
+  When Noa is launched by each supported launch method on macOS
   Then both launches show the custom native menu
-  And both launches support Quit noa through the menu
+  And both launches support Quit Noa through the menu
 ```
 
 ### `AC-MACOS-MENUS-009` - Standard top-level menus are visible

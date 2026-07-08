@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Build noa and assemble a double-clickable macOS .app bundle.
+# Build Noa and assemble a double-clickable macOS .app bundle.
 #
-#   scripts/bundle-macos.sh            # release build -> target/release/noa.app
-#   scripts/bundle-macos.sh debug      # debug build   -> target/debug/noa.app
+#   scripts/bundle-macos.sh            # release build -> target/release/Noa.app
+#   scripts/bundle-macos.sh debug      # debug build   -> target/debug/Noa.app
 #
 # No external tooling required (no cargo-bundle): assembles the bundle by hand,
 # generates the app icon if missing, and ad-hoc code-signs so it launches
@@ -22,8 +22,8 @@ case "$MODE" in
   *) echo "usage: $0 [release|debug]" >&2; exit 2 ;;
 esac
 
-BIN="$TARGET_DIR/noa"
-APP="$TARGET_DIR/noa.app"
+BIN="$TARGET_DIR/Noa"
+APP="$TARGET_DIR/Noa.app"
 CONTENTS="$APP/Contents"
 
 [ -x "$BIN" ] || { echo "error: binary not found at $BIN" >&2; exit 1; }
@@ -35,7 +35,7 @@ fi
 
 rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
-cp "$BIN" "$CONTENTS/MacOS/noa"
+cp "$BIN" "$CONTENTS/MacOS/Noa"
 
 ICON_KEY=""
 if [ -f "$ROOT/assets/noa.icns" ]; then
@@ -57,7 +57,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>
     <string>${BUNDLE_ID}</string>
     <key>CFBundleExecutable</key>
-    <string>noa</string>${ICON_KEY}
+    <string>Noa</string>${ICON_KEY}
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

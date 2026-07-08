@@ -80,8 +80,8 @@ navigation: line, page, top, and bottom scrolling via `Shift+ArrowUp/Down`,
 `.app` bundle:
 
 ```bash
-scripts/bundle-macos.sh          # → target/release/noa.app  (ad-hoc signed)
-open target/release/noa.app      # or double-click it in Finder
+scripts/bundle-macos.sh          # → target/release/Noa.app  (ad-hoc signed)
+open target/release/Noa.app      # or double-click it in Finder
 ```
 
 The script builds a release binary, assembles the bundle (`Info.plist`, icon,

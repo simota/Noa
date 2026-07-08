@@ -21,7 +21,7 @@ cargo test -p noa-vt             # one crate's tests
 cargo test -p noa-grid deferred  # one test by name substring
 cargo run -p noa-pty --example probe   # diagnose pty/shell spawn issues
 
-scripts/bundle-macos.sh          # → target/release/noa.app (ad-hoc signed)
+scripts/bundle-macos.sh          # → target/release/Noa.app (ad-hoc signed)
 scripts/gen-icon.sh              # regenerate assets/noa.icns
 ```
 

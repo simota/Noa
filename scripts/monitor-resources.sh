@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Monitor CPU, memory, and scheduling metrics for noa and comparable terminal apps.
+# Monitor CPU, memory, and scheduling metrics for Noa and comparable terminal apps.
 set -uo pipefail
 
 VERSION="0.2.0"
-DEFAULT_PROCESSES=("noa" "Ghostty" "Terminal" "iTerm2")
+DEFAULT_PROCESSES=("Noa" "Ghostty" "Terminal" "iTerm2")
 
 INTERVAL="2"
 SAMPLES="0"
@@ -18,7 +18,7 @@ Usage:
   scripts/monitor-resources.sh [options] [process ...]
 
 Monitor CPU percent, RSS, memory footprint, thread count, and idle wakeups for
-terminal processes. By default this samples noa, Ghostty, Terminal, and iTerm2.
+terminal processes. By default this samples Noa, Ghostty, Terminal, and iTerm2.
 Use --process or positional process names to replace the default targets.
 
 Options:
@@ -57,7 +57,7 @@ Examples:
   scripts/monitor-resources.sh
   scripts/monitor-resources.sh --samples 5 --interval 1
   scripts/monitor-resources.sh --json --samples 1 --interval 0
-  scripts/monitor-resources.sh --process noa --process Ghostty --output resources.jsonl --json
+  scripts/monitor-resources.sh --process Noa --process Ghostty --output resources.jsonl --json
   scripts/monitor-resources.sh wezterm Alacritty
 EOF
 }

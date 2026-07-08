@@ -5,7 +5,7 @@ version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "noa"
+name = "Noa"
 path = "src/main.rs"
 
 [dependencies]
@@ -18,7 +18,7 @@ env_logger.workspace = true
 # Optional: `cargo bundle` reads this. The supported, dependency-free path is
 # `scripts/bundle-macos.sh`; this block just makes cargo-bundle work too.
 [package.metadata.bundle]
-name = "noa"
+name = "Noa"
 identifier = "com.simota.noa"
 category = "public.app-category.developer-tools"
 short_description = "A faithful Rust clone of the Ghostty terminal emulator."

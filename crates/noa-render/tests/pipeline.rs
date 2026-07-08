@@ -23,5 +23,7 @@ mod cell;
 mod images;
 #[path = "pipeline/overview.rs"]
 mod overview;
+#[path = "pipeline/shared_atlas.rs"]
+mod shared_atlas;
 #[path = "pipeline/split_atlas.rs"]
 mod split_atlas;

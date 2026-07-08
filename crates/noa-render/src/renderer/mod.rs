@@ -1,4 +1,4 @@
-//! [`Renderer`] — owns the GPU pipeline, the font atlas texture, and the
+//! [`Renderer`] — owns GPU draw state, references the shared font atlas, and the
 //! instance buffers; rebuilds them from a [`crate::FrameSnapshot`] and draws.
 
 use std::collections::HashMap;
@@ -49,6 +49,7 @@ pub struct PaneFrame<'a> {
 struct PaneGpuState {
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    atlas_texture_generation: u64,
     bind_group_rebuilds: u64,
 }
 
@@ -177,10 +178,7 @@ pub struct Renderer {
     /// the `LoadOp::Clear` color — spanning the whole surface. Empty until
     /// `noa-app` calls [`Renderer::set_background_image`].
     background_image_layer: BackgroundImageLayer,
-    mask_atlas_texture: wgpu::Texture,
-    mask_atlas_view: wgpu::TextureView,
-    color_atlas_texture: wgpu::Texture,
-    color_atlas_view: wgpu::TextureView,
+    glyph_atlases: crate::SharedGlyphAtlases,
     pane_gpu: Vec<PaneGpuState>,
     instance_buffer: wgpu::Buffer,
     instance_capacity: usize,
@@ -211,10 +209,6 @@ pub struct Renderer {
     focus_indicator_color: [u8; 4],
     target_format: wgpu::TextureFormat,
     target_format_is_srgb: bool,
-    mask_atlas_seen_identity: u64,
-    mask_atlas_seen_generation: u64,
-    color_atlas_seen_identity: u64,
-    color_atlas_seen_generation: u64,
     /// Per-pane row-instance cache for dirty-row diffing (WP4), keyed by the
     /// pane's stable render-side identity so it survives split reordering
     /// across frames.
@@ -245,24 +239,29 @@ impl Renderer {
         font: &mut FontGrid,
         grid_padding: GridPadding,
     ) -> anyhow::Result<Renderer> {
+        let pipelines = crate::SharedPipelines::new(device, format);
+        let glyph_atlases = crate::SharedGlyphAtlases::new(device, queue, format, font);
         Self::with_pipelines(
             device,
             queue,
-            &crate::SharedPipelines::new(device, format),
+            &pipelines,
+            &glyph_atlases,
             font,
             grid_padding,
         )
     }
 
-    /// Build a `Renderer` around an existing pipeline set, skipping shader
-    /// module + pipeline construction. Every construction site with more than
-    /// one `Renderer` per format should come through here (via
-    /// [`crate::PipelineCache`]); [`Renderer::new`] is the build-them-fresh
+    /// Build a `Renderer` around existing shared GPU resources, skipping
+    /// shader module + pipeline construction and sharing glyph atlas textures.
+    /// Every construction site with more than one `Renderer` per format should
+    /// come through here (via [`crate::PipelineCache`] and
+    /// [`crate::GlyphAtlasCache`]); [`Renderer::new`] is the build-them-fresh
     /// convenience for tests and one-off renderers.
     pub fn with_pipelines(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pipelines: &crate::SharedPipelines,
+        glyph_atlases: &crate::SharedGlyphAtlases,
         font: &mut FontGrid,
         grid_padding: GridPadding,
     ) -> anyhow::Result<Renderer> {
@@ -271,48 +270,7 @@ impl Renderer {
         let cell = pipelines.cell.clone();
         let image_layer = ImageLayer::new(pipelines.image.clone());
         let background_image_layer = BackgroundImageLayer::new(pipelines.background_image.clone());
-
-        let (mask_w, mask_h) = font.mask_atlas_size();
-        let mask_atlas_texture = create_atlas_texture(
-            device,
-            mask_w,
-            mask_h,
-            wgpu::TextureFormat::R8Unorm,
-            "noa-glyph-mask-atlas",
-        );
-        let mask_atlas_view =
-            mask_atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        upload_atlas(
-            queue,
-            &mask_atlas_texture,
-            font.mask_atlas_data(),
-            mask_w,
-            mask_h,
-            MASK_BYTES_PER_PX,
-        );
-        let mask_atlas_seen_identity = font.atlas_identity();
-        let mask_atlas_seen_generation = font.mask_atlas_generation();
-
-        let (color_w, color_h) = font.color_atlas_size();
-        let color_atlas_texture = create_atlas_texture(
-            device,
-            color_w,
-            color_h,
-            color_atlas_format(format.is_srgb()),
-            "noa-glyph-color-atlas",
-        );
-        let color_atlas_view =
-            color_atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        upload_atlas(
-            queue,
-            &color_atlas_texture,
-            font.color_atlas_data(),
-            color_w,
-            color_h,
-            COLOR_BYTES_PER_PX,
-        );
-        let color_atlas_seen_identity = font.atlas_identity();
-        let color_atlas_seen_generation = font.color_atlas_generation();
+        glyph_atlases.sync(device, queue, font);
 
         let instance_capacity = 4096;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -328,10 +286,7 @@ impl Renderer {
             cell,
             image_layer,
             background_image_layer,
-            mask_atlas_texture,
-            mask_atlas_view,
-            color_atlas_texture,
-            color_atlas_view,
+            glyph_atlases: glyph_atlases.clone(),
             pane_gpu: Vec::new(),
             instance_buffer,
             instance_capacity,
@@ -351,10 +306,6 @@ impl Renderer {
             focus_indicator_color: FOCUS_INDICATOR_RGBA,
             target_format: format,
             target_format_is_srgb: format.is_srgb(),
-            mask_atlas_seen_identity,
-            mask_atlas_seen_generation,
-            color_atlas_seen_identity,
-            color_atlas_seen_generation,
             pane_render_cache: HashMap::new(),
             rows_rebuilt_last_frame: 0,
             frame_unstable: false,
@@ -419,12 +370,22 @@ impl Renderer {
 
     /// Mask atlas generation this renderer has uploaded.
     pub fn mask_atlas_seen_generation(&self) -> u64 {
-        self.mask_atlas_seen_generation
+        self.glyph_atlases.mask_seen_generation()
     }
 
     /// Color atlas generation this renderer has uploaded.
     pub fn color_atlas_seen_generation(&self) -> u64 {
-        self.color_atlas_seen_generation
+        self.glyph_atlases.color_seen_generation()
+    }
+
+    /// Mask atlas identity this renderer's shared atlas has uploaded.
+    pub fn mask_atlas_seen_identity(&self) -> u64 {
+        self.glyph_atlases.mask_seen_identity()
+    }
+
+    /// Color atlas identity this renderer's shared atlas has uploaded.
+    pub fn color_atlas_seen_identity(&self) -> u64 {
+        self.glyph_atlases.color_seen_identity()
     }
 
     pub fn target_format(&self) -> wgpu::TextureFormat {
@@ -789,55 +750,19 @@ impl Renderer {
         out
     }
 
-    /// Re-upload either/both atlas textures if `font`'s mask or color atlas
-    /// grew or changed since the last upload. Call this before
+    /// Re-upload either/both shared atlas textures if `font`'s mask or color
+    /// atlas grew or changed since the last upload. Call this before
     /// [`Renderer::draw`] each frame (from `noa-app`, while still holding
     /// `font` mutably for `rebuild_cells`).
     ///
-    /// Shared per-atlas sync path (FM-09 mitigation, WP1): both atlases are
-    /// synced through the same [`sync_one_atlas`] helper rather than two
-    /// hand-copied blocks, so a size-changed realloc on *either* atlas always
-    /// rebuilds every pane bind group — the two-atlas bind group carries both
-    /// texture views, so a stale view on the un-synced atlas would otherwise
-    /// be an easy "fixed one, forgot the other" bug.
+    /// The upload is shared across all renderers using the same
+    /// [`crate::SharedGlyphAtlases`]. If either texture/view is recreated,
+    /// this renderer refreshes any already-created pane bind groups; renderers
+    /// that did not call `sync_atlas` still perform the same generation check
+    /// in [`Renderer::draw_panes`] before drawing.
     pub fn sync_atlas(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, font: &mut FontGrid) {
-        let mask_changed = sync_one_atlas(
-            device,
-            queue,
-            &mut self.mask_atlas_texture,
-            &mut self.mask_atlas_view,
-            &mut self.mask_atlas_seen_identity,
-            &mut self.mask_atlas_seen_generation,
-            AtlasSyncInput {
-                data: font.mask_atlas_data(),
-                size: font.mask_atlas_size(),
-                identity: font.atlas_identity(),
-                generation: font.mask_atlas_generation(),
-                format: wgpu::TextureFormat::R8Unorm,
-                bytes_per_px: MASK_BYTES_PER_PX,
-                label: "noa-glyph-mask-atlas",
-            },
-        );
-        let color_changed = sync_one_atlas(
-            device,
-            queue,
-            &mut self.color_atlas_texture,
-            &mut self.color_atlas_view,
-            &mut self.color_atlas_seen_identity,
-            &mut self.color_atlas_seen_generation,
-            AtlasSyncInput {
-                data: font.color_atlas_data(),
-                size: font.color_atlas_size(),
-                identity: font.atlas_identity(),
-                generation: font.color_atlas_generation(),
-                format: color_atlas_format(self.target_format_is_srgb),
-                bytes_per_px: COLOR_BYTES_PER_PX,
-                label: "noa-glyph-color-atlas",
-            },
-        );
-        if mask_changed || color_changed {
-            self.rebuild_pane_bind_groups(device);
-        }
+        self.glyph_atlases.sync(device, queue, font);
+        self.refresh_stale_pane_bind_groups(device);
     }
 
     fn full_viewport_rect(&self) -> PaneRect {
@@ -845,34 +770,50 @@ impl Renderer {
     }
 
     fn ensure_pane_gpu_count(&mut self, device: &wgpu::Device, count: usize) {
+        let atlas_views = self.glyph_atlases.views();
         while self.pane_gpu.len() < count {
             let uniform_buffer = self.cell.make_uniform_buffer(device);
             let bind_group = self.cell.make_bind_group(
                 device,
                 &uniform_buffer,
-                &self.mask_atlas_view,
-                &self.color_atlas_view,
+                atlas_views.mask.as_ref(),
+                atlas_views.color.as_ref(),
             );
             self.pane_gpu.push(PaneGpuState {
                 uniform_buffer,
                 bind_group,
+                atlas_texture_generation: atlas_views.texture_generation,
                 bind_group_rebuilds: 1,
             });
         }
+        self.refresh_stale_pane_bind_groups_with_views(device, &atlas_views);
     }
 
-    /// Rebuild every pane's bind group against the current mask + color
-    /// atlas views. Called whenever *either* atlas texture is recreated
-    /// (`sync_atlas`), so a realloc of just one atlas still refreshes both
-    /// views baked into each pane's bind group (FM-09).
-    fn rebuild_pane_bind_groups(&mut self, device: &wgpu::Device) {
+    /// Rebuild every stale pane bind group against the current mask + color
+    /// atlas views. Called from both `sync_atlas` and `draw_panes`, so a
+    /// renderer that did not perform the shared upload still refreshes before
+    /// using a bind group that points at an old texture view.
+    fn refresh_stale_pane_bind_groups(&mut self, device: &wgpu::Device) {
+        let atlas_views = self.glyph_atlases.views();
+        self.refresh_stale_pane_bind_groups_with_views(device, &atlas_views);
+    }
+
+    fn refresh_stale_pane_bind_groups_with_views(
+        &mut self,
+        device: &wgpu::Device,
+        atlas_views: &crate::shared::SharedGlyphAtlasViews,
+    ) {
         for pane in &mut self.pane_gpu {
+            if pane.atlas_texture_generation == atlas_views.texture_generation {
+                continue;
+            }
             pane.bind_group = self.cell.make_bind_group(
                 device,
                 &pane.uniform_buffer,
-                &self.mask_atlas_view,
-                &self.color_atlas_view,
+                atlas_views.mask.as_ref(),
+                atlas_views.color.as_ref(),
             );
+            pane.atlas_texture_generation = atlas_views.texture_generation;
             pane.bind_group_rebuilds = pane.bind_group_rebuilds.saturating_add(1);
         }
     }
@@ -1017,7 +958,6 @@ impl Renderer {
     }
 }
 
-mod atlas;
 mod cell;
 mod color;
 mod cursor;
@@ -1025,7 +965,6 @@ mod overlay;
 #[cfg(test)]
 mod tests;
 
-use atlas::*;
 use cell::*;
 use color::*;
 use cursor::*;

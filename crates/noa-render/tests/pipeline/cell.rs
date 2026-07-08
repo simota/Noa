@@ -48,14 +48,22 @@ fn two_renderers_sharing_pipelines_draw_without_validation_error() {
     let format = wgpu::TextureFormat::Bgra8UnormSrgb;
     let mut cache = noa_render::PipelineCache::default();
     let pipelines = cache.get(&device, format);
+    let mut atlas_cache = noa_render::GlyphAtlasCache::default();
     let mut font =
         FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
 
     device.push_error_scope(wgpu::ErrorFilter::Validation);
     for text in ["first tab", "second tab"] {
-        let mut renderer =
-            Renderer::with_pipelines(&device, &queue, &pipelines, &mut font, DEFAULT_GRID_PADDING)
-                .expect("build renderer from shared pipelines");
+        let atlases = atlas_cache.get(&device, &queue, format, &font);
+        let mut renderer = Renderer::with_pipelines(
+            &device,
+            &queue,
+            &pipelines,
+            &atlases,
+            &mut font,
+            DEFAULT_GRID_PADDING,
+        )
+        .expect("build renderer from shared pipelines");
         renderer.resize(PixelSize { w: 64, h: 32 });
         rebuild_text_frame(&mut renderer, &mut font, &device, &queue, text);
         let (_target, view) = render_target(&device, 64, 32);

@@ -32,7 +32,7 @@ pub use renderer::{
     ConfirmDialogLayout, PaletteLayout, PaneFrame, Renderer, command_palette_layout,
     confirm_dialog_layout, renderer_construction_count,
 };
-pub use shared::{PipelineCache, SharedPipelines};
+pub use shared::{GlyphAtlasCache, PipelineCache, SharedGlyphAtlases, SharedPipelines};
 pub use snapshot::{
     CommandPaletteSnapshot, ConfirmDialogSnapshot, FrameSnapshot, HoverLink,
     ImagePlacementSnapshot, PaletteRow, Preedit, SnapshotImage,

@@ -18,8 +18,8 @@ fn sync_atlas_uploads_rebuilt_font_grid_even_when_generation_restarts() {
     )
     .expect("build renderer");
     let first_identity = first_font.atlas_identity();
-    assert_eq!(renderer.mask_atlas_seen_identity, first_identity);
-    assert_eq!(renderer.color_atlas_seen_identity, first_identity);
+    assert_eq!(renderer.mask_atlas_seen_identity(), first_identity);
+    assert_eq!(renderer.color_atlas_seen_identity(), first_identity);
 
     let mut rebuilt_font = match FontGrid::new(14.0, FontConfig::default()) {
         Ok(font) => font,
@@ -38,12 +38,12 @@ fn sync_atlas_uploads_rebuilt_font_grid_even_when_generation_restarts() {
     renderer.sync_atlas(&device, &queue, &mut rebuilt_font);
 
     assert_eq!(
-        renderer.mask_atlas_seen_identity,
+        renderer.mask_atlas_seen_identity(),
         rebuilt_font.atlas_identity(),
         "mask atlas sync must not skip a rebuilt FontGrid just because generation matches"
     );
     assert_eq!(
-        renderer.color_atlas_seen_identity,
+        renderer.color_atlas_seen_identity(),
         rebuilt_font.atlas_identity(),
         "color atlas sync must not skip a rebuilt FontGrid just because generation matches"
     );

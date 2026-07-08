@@ -1,6 +1,7 @@
 //! The custom winit user event this app drives its event loop with.
 
-use crate::session_store::SessionDelta;
+use crate::auto_approve::AutoApproveSignature;
+use crate::session_store::{SessionCardId, SessionDelta};
 use crate::{AppCommand, split_tree::PaneId};
 use winit::window::WindowId;
 
@@ -47,6 +48,15 @@ pub enum UserEvent {
     /// (FR-1). Carries only GUI-agnostic ids, so it never leaks a windowing
     /// type into the store.
     SessionDelta(SessionDelta),
+    /// A recognized agent prompt matched the conservative auto-approve matrix
+    /// on a pane's live viewport. The main thread must re-read the terminal
+    /// before writing anything to the pty.
+    AutoApprove {
+        id: SessionCardId,
+        signature: AutoApproveSignature,
+        bytes: Vec<u8>,
+        disable_after: bool,
+    },
     /// New terminal output is available; request a redraw.
     Redraw(WindowId, PaneId),
     /// The pty's child process exited (or errored) — the app should close.

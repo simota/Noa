@@ -12,12 +12,15 @@ use parking_lot::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError};
-use noa_core::GridSize;
+use noa_core::{GridSize, Point};
 use noa_grid::Terminal;
 use noa_pty::{Pty, PtyWriter};
 use noa_render::FrameSnapshot;
 use winit::event_loop::EventLoopProxy;
 
+use crate::auto_approve::{
+    self, AutoApproveInputGuards, AutoApproveSignature, AutoApproveState, Decision, DetectContext,
+};
 use crate::events::UserEvent;
 use crate::session_overview::OVERVIEW_TILE_MIN_RENDER_INTERVAL;
 use crate::session_store::{
@@ -65,6 +68,12 @@ pub(crate) struct OverviewPublish {
 pub(crate) struct SidebarPublish {
     pub(crate) visible: Arc<AtomicBool>,
     pub(crate) preview_lines: Arc<AtomicUsize>,
+}
+
+#[derive(Clone)]
+pub(crate) struct AutoApprovePublish {
+    pub(crate) enabled: Arc<AtomicBool>,
+    pub(crate) guards: Arc<Mutex<AutoApproveInputGuards>>,
 }
 
 pub(crate) type PtyInput = Box<[u8]>;
@@ -284,11 +293,19 @@ struct TerminalOutput {
     /// it with the current wall-clock + card generation and posts it as a
     /// [`SessionDelta::Upsert`].
     sidebar_upsert: Option<SidebarUpsert>,
+    /// A prompt matched the auto-approve matrix and passed debounce.
+    auto_approve: Option<AutoApproveCandidate>,
     /// An unread bell was drained this feed (FR-11); the spawn loop posts a
     /// [`SessionDelta::Bell`]. Drained unconditionally (FR-A4): the main
     /// thread classifies it, so an agent session's bell can escalate to an
     /// attention request even with every sidebar hidden.
     sidebar_bell: bool,
+}
+
+struct AutoApproveCandidate {
+    signature: AutoApproveSignature,
+    bytes: Vec<u8>,
+    disable_after: bool,
 }
 
 /// Per-feed sidebar card state extracted under the terminal lock (FR-2). Time
@@ -379,6 +396,11 @@ fn feed_terminal(
     sidebar: &SidebarPublish,
     last_sidebar_publish: &mut Option<Instant>,
 ) -> TerminalOutput {
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(AutoApproveInputGuards::default())),
+    };
+    let mut auto_approve_state = AutoApproveState::default();
     feed_terminal_batch(
         terminal,
         stream,
@@ -388,6 +410,8 @@ fn feed_terminal(
         last_overview_publish,
         sidebar,
         last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
     )
 }
 
@@ -401,6 +425,8 @@ fn feed_terminal_batch<'a>(
     last_overview_publish: &mut Option<Instant>,
     sidebar: &SidebarPublish,
     last_sidebar_publish: &mut Option<Instant>,
+    auto_approve: &AutoApprovePublish,
+    auto_approve_state: &mut AutoApproveState,
 ) -> TerminalOutput {
     let mut term = terminal.lock();
     stream.feed(first, &mut *term);
@@ -433,6 +459,8 @@ fn feed_terminal_batch<'a>(
                 .then(|| preview_rows(&term, sidebar.preview_lines.load(Ordering::Relaxed))),
         )
     });
+    let auto_approve_candidate =
+        detect_auto_approve_candidate(&term, auto_approve, auto_approve_state);
 
     let mut output = TerminalOutput {
         pending_writes: term.take_pending_writes(),
@@ -442,6 +470,7 @@ fn feed_terminal_batch<'a>(
         synchronized_output: term.modes.synchronized_output(),
         overview_publish_pending,
         sidebar_upsert: None,
+        auto_approve: auto_approve_candidate,
         sidebar_bell,
     };
     drop(term);
@@ -452,6 +481,50 @@ fn feed_terminal_batch<'a>(
         preview: rows.map(preview_spans),
     });
     output
+}
+
+fn detect_auto_approve_candidate(
+    term: &Terminal,
+    publish: &AutoApprovePublish,
+    state: &mut AutoApproveState,
+) -> Option<AutoApproveCandidate> {
+    if !publish.enabled.load(Ordering::Relaxed) {
+        state.reset_for_mode_off();
+        return None;
+    }
+    let ctx = DetectContext {
+        now: Instant::now(),
+        alt_screen: term.active_is_alt,
+        scrollback_offset: term.viewport_offset(),
+        guards: *publish.guards.lock(),
+    };
+    if !ctx.alt_screen && ctx.scrollback_offset != 0 {
+        return None;
+    }
+    let rows = auto_approve::viewport_rows_from_terminal(term);
+    let cursor = term.active().cursor;
+    let decision = auto_approve::detect_and_update_any_agent(
+        &rows,
+        Point {
+            x: cursor.x,
+            y: cursor.y,
+        },
+        ctx,
+        state,
+    );
+    match decision {
+        Decision::Fire {
+            signature,
+            bytes,
+            disable_after,
+            ..
+        } => Some(AutoApproveCandidate {
+            signature,
+            bytes: bytes.to_vec(),
+            disable_after,
+        }),
+        Decision::Hold | Decision::Suppressed(_) => None,
+    }
 }
 
 /// Stamp a wall-clock timestamp for a sidebar upsert (FR-10): the current Unix
@@ -623,6 +696,7 @@ pub fn spawn(
     input_rx: Receiver<PtyInput>,
     overview: OverviewPublish,
     sidebar: SidebarPublish,
+    auto_approve: AutoApprovePublish,
 ) -> IoThreadHandle {
     let IoThreadTarget { window_id, pane_id } = target;
     // The GUI-agnostic card key for every sidebar delta this thread posts. The
@@ -635,6 +709,7 @@ pub fn spawn(
         let mut stream = noa_vt::Stream::new();
         let mut last_overview_publish: Option<Instant> = None;
         let mut last_sidebar_publish: Option<Instant> = None;
+        let mut auto_approve_state = AutoApproveState::default();
         // Per-card generation for [`SessionDelta::Upsert`], monotonic so the
         // store can drop a reordered/stale upsert (`SessionStore::apply`).
         let mut sidebar_seq: u64 = 0;
@@ -722,10 +797,13 @@ pub fn spawn(
                             &mut last_overview_publish,
                             &sidebar,
                             &mut last_sidebar_publish,
+                            &auto_approve,
+                            &mut auto_approve_state,
                         );
                         publish_pending_at = output.overview_publish_pending;
                         let sidebar_bell = output.sidebar_bell;
                         let sidebar_upsert = output.sidebar_upsert.take();
+                        let auto_approve_candidate = output.auto_approve.take();
                         if sidebar_bell
                             && proxy
                                 .send_event(UserEvent::SessionDelta(SessionDelta::Bell {
@@ -744,6 +822,9 @@ pub fn spawn(
                                     name: upsert.name,
                                     cwd: upsert.cwd,
                                     busy: upsert.busy,
+                                    auto_approve_enabled: auto_approve
+                                        .enabled
+                                        .load(Ordering::Relaxed),
                                     updated_at: sidebar_wall_clock_now(),
                                     preview: upsert.preview,
                                 }))
@@ -751,6 +832,18 @@ pub fn spawn(
                             {
                                 break; // event loop gone
                             }
+                        }
+                        if let Some(candidate) = auto_approve_candidate
+                            && proxy
+                                .send_event(UserEvent::AutoApprove {
+                                    id: card_id,
+                                    signature: candidate.signature,
+                                    bytes: candidate.bytes,
+                                    disable_after: candidate.disable_after,
+                                })
+                                .is_err()
+                        {
+                            break; // event loop gone
                         }
                         if !output.pending_writes.is_empty() {
                             write_pty_bytes(&writer, &output.pending_writes);

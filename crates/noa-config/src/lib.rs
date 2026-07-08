@@ -388,6 +388,9 @@ pub struct StartupConfig {
     /// rings BEL (the desktop notification is suppressed there). Default off.
     /// noa-specific key (no Ghostty analog).
     pub visual_bell: bool,
+    /// `auto-approve`: seed new tabs with agent-CLI auto approval enabled.
+    /// Runtime use is still per-tab opt-in; default off.
+    pub auto_approve: bool,
 }
 
 impl Default for StartupConfig {
@@ -432,6 +435,7 @@ impl Default for StartupConfig {
             sidebar_preview_lines: DEFAULT_SIDEBAR_PREVIEW_LINES,
             resize_overlay: ResizeOverlay::default(),
             visual_bell: false,
+            auto_approve: false,
         }
     }
 }
@@ -478,6 +482,7 @@ pub struct ConfigOverrides {
     pub sidebar_preview_lines: Option<usize>,
     pub resize_overlay: Option<ResizeOverlay>,
     pub visual_bell: Option<bool>,
+    pub auto_approve: Option<bool>,
 }
 
 impl ConfigOverrides {
@@ -554,6 +559,7 @@ impl ConfigOverrides {
                 .or(self.sidebar_preview_lines),
             resize_overlay: higher_priority.resize_overlay.or(self.resize_overlay),
             visual_bell: higher_priority.visual_bell.or(self.visual_bell),
+            auto_approve: higher_priority.auto_approve.or(self.auto_approve),
         }
     }
 
@@ -616,6 +622,7 @@ impl ConfigOverrides {
                 .unwrap_or(base.sidebar_preview_lines),
             resize_overlay: self.resize_overlay.unwrap_or(base.resize_overlay),
             visual_bell: self.visual_bell.unwrap_or(base.visual_bell),
+            auto_approve: self.auto_approve.unwrap_or(base.auto_approve),
         }
     }
 }
@@ -796,6 +803,7 @@ mod tests {
                 sidebar_preview_lines: DEFAULT_SIDEBAR_PREVIEW_LINES,
                 resize_overlay: ResizeOverlay::AfterFirst,
                 visual_bell: false,
+                auto_approve: false,
             }
         );
     }

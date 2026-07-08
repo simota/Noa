@@ -57,6 +57,7 @@ pub(crate) fn build_overrides(
     let mut sidebar_preview_lines = None;
     let mut resize_overlay = None;
     let mut visual_bell = None;
+    let mut auto_approve = None;
     let mut diagnostics = Vec::new();
 
     for directive in directives {
@@ -253,6 +254,9 @@ pub(crate) fn build_overrides(
             "visual-bell" => {
                 visual_bell = parse_bool_directive(path, directive, &mut diagnostics);
             }
+            "auto-approve" => {
+                auto_approve = parse_bool_directive(path, directive, &mut diagnostics);
+            }
             "keybind" | "palette" => {
                 diagnostics.push(list_key_diagnostic(path, &directive.key));
             }
@@ -315,6 +319,7 @@ pub(crate) fn build_overrides(
             sidebar_preview_lines,
             resize_overlay,
             visual_bell,
+            auto_approve,
         },
         diagnostics,
     )
@@ -362,5 +367,6 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "sidebar-preview-lines"
             | "resize-overlay"
             | "visual-bell"
+            | "auto-approve"
     )
 }

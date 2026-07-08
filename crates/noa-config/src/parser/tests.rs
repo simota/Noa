@@ -901,13 +901,14 @@ fn quick_terminal_keys_are_supported_scalar_keys_for_import() {
 fn sidebar_enabled_and_width_parse_and_default() {
     let (overrides, diagnostics) = parse_overrides(
         path(),
-        "sidebar-enabled = true\nsidebar-width = 300\nsidebar-preview-lines = 4",
+        "sidebar-enabled = true\nsidebar-width = 300\nsidebar-preview-lines = 4\nauto-approve = true",
     );
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert_eq!(overrides.sidebar_enabled, Some(true));
     assert_eq!(overrides.sidebar_width, Some(300.0));
     assert_eq!(overrides.sidebar_preview_lines, Some(4));
+    assert_eq!(overrides.auto_approve, Some(true));
 
     // Absent width falls back to the default via `apply_to`.
     let resolved = ConfigOverrides::default().apply_to(crate::StartupConfig::default());
@@ -983,6 +984,7 @@ fn sidebar_keys_are_supported_scalar_keys_for_import() {
     assert!(is_supported_scalar_key("sidebar-width"));
     assert!(is_supported_scalar_key("sidebar-hotkey"));
     assert!(is_supported_scalar_key("sidebar-preview-lines"));
+    assert!(is_supported_scalar_key("auto-approve"));
     assert!(is_supported_scalar_key("confirm-quit"));
 }
 

@@ -263,6 +263,21 @@ fn take_visible_rows_with_damage_isolates_a_single_row_and_clears_on_consume() {
 }
 
 #[test]
+fn visible_rows_into_reuses_live_row_storage() {
+    let mut t = run_size(4, 2, b"AB");
+    let mut rows = t.primary.visible_rows();
+    let row0_cells = rows[0].cells.as_ptr();
+
+    t.primary.cursor_position(1, 1);
+    t.primary.print('Z', true, false);
+    t.primary.visible_rows_into(&mut rows);
+
+    assert_eq!(rows[0].cells.as_ptr(), row0_cells);
+    assert_eq!(rows[0].cells[0].ch, 'Z');
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
 fn resize_shrink_rows_keeps_cursor_on_its_content() {
     // Cursor mid-screen (row 11 → y=10) with a marker on its line; shrinking
     // to 10 rows must keep the cursor on that same content, not drop it.

@@ -481,6 +481,58 @@ impl FrameSnapshot {
         }
     }
 
+    /// Refresh an existing read-only overview snapshot in place, reusing the
+    /// visible row/cell buffers while preserving [`Self::peek`]'s semantics.
+    pub fn peek_into(terminal: &Terminal, snapshot: &mut Self) {
+        let colors = terminal.colors.clone();
+        let (image_placements, images) = kitty_snapshot(terminal);
+        let screen = terminal.active();
+        let mut cursor = screen.cursor;
+        cursor.visible = false;
+        let row_base = screen.visible_row_base();
+        let abs_row_base = screen.rows_evicted() + row_base;
+        let cols = screen.cols;
+        let rows_n = screen.rows;
+        let selection = screen.selection;
+        let search = screen.search.clone();
+        screen.visible_rows_into(&mut snapshot.rows);
+        snapshot.row_dirty.clear();
+        snapshot.row_dirty.resize(snapshot.rows.len(), true);
+        snapshot.scroll_shift = 0;
+        snapshot.cursor = cursor;
+        snapshot.colors = colors;
+        snapshot.selection = selection;
+        snapshot.search = search;
+        snapshot.row_base = row_base;
+        snapshot.abs_row_base = abs_row_base;
+        snapshot.active_is_alt = terminal.active_is_alt;
+        snapshot.cols = cols;
+        snapshot.rows_n = rows_n;
+        snapshot.focused = true;
+        snapshot.cursor_blink_visible = true;
+        snapshot.hover_link = None;
+        snapshot.search_prompt = None;
+        snapshot.command_palette = None;
+        snapshot.confirm_dialog = None;
+        snapshot.preedit = None;
+        snapshot.image_placements = image_placements;
+        snapshot.images = images;
+    }
+
+    /// Refresh a publish slot for the Session Overview.
+    ///
+    /// If the previously published [`Arc`] is unique to the slot, this mutates
+    /// its [`FrameSnapshot`] in place and reuses row/cell allocations. If the
+    /// render thread still holds a clone, it publishes a fresh snapshot instead
+    /// so already-borrowed overview frames remain immutable.
+    pub fn refresh_peek_slot(slot: &mut Option<Arc<Self>>, terminal: &Terminal) {
+        if let Some(snapshot) = slot.as_mut().and_then(Arc::get_mut) {
+            Self::peek_into(terminal, snapshot);
+            return;
+        }
+        *slot = Some(Arc::new(Self::peek(terminal)));
+    }
+
     pub fn is_selected(&self, x: u16, y: u16) -> bool {
         let Some(selection) = self.selection else {
             return false;
@@ -579,6 +631,58 @@ mod tests {
         let snap = FrameSnapshot::from_terminal(&mut term);
 
         assert_eq!(snap.rows[0].cells[0].text(), "a\u{301}");
+    }
+
+    #[test]
+    fn peek_into_reuses_visible_row_storage() {
+        let mut term = Terminal::new(GridSize::new(2, 2));
+        put(&mut term, 0, 'A');
+        let mut snap = FrameSnapshot::peek(&term);
+        let row0_ptr = snap.rows[0].cells.as_ptr();
+        snap.hover_link = Some(HoverLink::Range {
+            y: 0,
+            x_start: 0,
+            x_end: 1,
+        });
+
+        put(&mut term, 0, 'B');
+        FrameSnapshot::peek_into(&term, &mut snap);
+
+        assert_eq!(snap.rows[0].cells.as_ptr(), row0_ptr);
+        assert_eq!(snap.rows[0].cells[0].ch, 'B');
+        assert!(snap.row_dirty.iter().all(|&dirty| dirty));
+        assert!(snap.hover_link.is_none());
+    }
+
+    #[test]
+    fn refresh_peek_slot_reuses_unique_arc_snapshot() {
+        let mut term = Terminal::new(GridSize::new(2, 1));
+        put(&mut term, 0, 'A');
+        let mut slot = Some(std::sync::Arc::new(FrameSnapshot::peek(&term)));
+        let first_ptr = std::sync::Arc::as_ptr(slot.as_ref().unwrap());
+
+        put(&mut term, 0, 'B');
+        FrameSnapshot::refresh_peek_slot(&mut slot, &term);
+
+        let snap = slot.as_ref().unwrap();
+        assert_eq!(std::sync::Arc::as_ptr(snap), first_ptr);
+        assert_eq!(snap.rows[0].cells[0].ch, 'B');
+    }
+
+    #[test]
+    fn refresh_peek_slot_replaces_shared_arc_snapshot() {
+        let mut term = Terminal::new(GridSize::new(2, 1));
+        put(&mut term, 0, 'A');
+        let mut slot = Some(std::sync::Arc::new(FrameSnapshot::peek(&term)));
+        let held = std::sync::Arc::clone(slot.as_ref().unwrap());
+
+        put(&mut term, 0, 'B');
+        FrameSnapshot::refresh_peek_slot(&mut slot, &term);
+
+        let snap = slot.as_ref().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&held, snap));
+        assert_eq!(held.rows[0].cells[0].ch, 'A');
+        assert_eq!(snap.rows[0].cells[0].ch, 'B');
     }
 
     #[test]

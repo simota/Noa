@@ -125,10 +125,9 @@ impl App {
     pub(in crate::app) fn seed_overview_snapshots(&self) {
         for state in self.windows.values() {
             for surface in state.surfaces.values() {
-                let Some(snapshot) = try_peek_overview_snapshot(&surface.terminal) else {
+                if !try_refresh_overview_snapshot(&surface.terminal, &surface.overview_snapshot) {
                     continue;
-                };
-                *surface.overview_snapshot.lock() = Some(snapshot);
+                }
             }
         }
     }

@@ -266,12 +266,16 @@ pub(crate) fn overview_should_intercept_command(
         && overview_command_scope(command) == CommandScope::Overview
 }
 
-pub(crate) fn try_peek_overview_snapshot(
+pub(crate) fn try_refresh_overview_snapshot(
     terminal: &Arc<Mutex<Terminal>>,
-) -> Option<Arc<FrameSnapshot>> {
-    terminal
-        .try_lock()
-        .map(|term| Arc::new(FrameSnapshot::peek(&term)))
+    slot: &Arc<Mutex<Option<Arc<FrameSnapshot>>>>,
+) -> bool {
+    let Some(term) = terminal.try_lock() else {
+        return false;
+    };
+    let mut slot = slot.lock();
+    FrameSnapshot::refresh_peek_slot(&mut *slot, &term);
+    true
 }
 
 pub(crate) fn resolve_command_target<Id: Copy>(

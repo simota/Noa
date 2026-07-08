@@ -412,25 +412,39 @@ impl Screen {
     }
 
     pub fn visible_rows(&self) -> Vec<Row> {
-        let rows = self.rows as usize;
-        if self.viewport_offset == 0 {
-            return self.grid.clone();
-        }
+        let mut out_rows = Vec::new();
+        self.visible_rows_into(&mut out_rows);
+        out_rows
+    }
 
+    /// In-place variant of [`Self::visible_rows`]: recycles `out_rows`'
+    /// existing row/cell allocations while preserving the read-only contract.
+    pub fn visible_rows_into(&self, out_rows: &mut Vec<Row>) {
+        let rows = self.rows as usize;
         let scrollback_len = self.scrollback.len();
         let start = self.visible_row_base();
 
-        (start..start + rows)
-            .map(|idx| {
-                if idx < scrollback_len {
-                    self.scrollback
-                        .row(idx)
-                        .unwrap_or_else(|| Row::new(self.cols))
-                } else {
-                    self.grid[idx - scrollback_len].clone()
+        out_rows.truncate(rows);
+        out_rows.reserve(rows.saturating_sub(out_rows.len()));
+
+        for (slot_idx, idx) in (start..start + rows).enumerate() {
+            if idx < scrollback_len {
+                let row = self
+                    .scrollback
+                    .row(idx)
+                    .unwrap_or_else(|| Row::new(self.cols));
+                match out_rows.get_mut(slot_idx) {
+                    Some(slot) => clone_row_into(slot, &row),
+                    None => out_rows.push(row),
                 }
-            })
-            .collect()
+            } else {
+                let row = &self.grid[idx - scrollback_len];
+                match out_rows.get_mut(slot_idx) {
+                    Some(slot) => clone_row_into(slot, row),
+                    None => out_rows.push(row.clone()),
+                }
+            }
+        }
     }
 
     /// Clone the visible rows AND report which were dirty, clearing the
@@ -497,7 +511,7 @@ impl Screen {
                     .row(idx)
                     .unwrap_or_else(|| Row::new(self.cols));
                 match out_rows.get_mut(slot_idx) {
-                    Some(slot) => *slot = row,
+                    Some(slot) => clone_row_into(slot, &row),
                     None => out_rows.push(row),
                 }
             } else {
@@ -512,13 +526,7 @@ impl Screen {
                     continue;
                 }
                 match out_rows.get_mut(slot_idx) {
-                    Some(slot) => {
-                        // Field-wise so the cell vec's allocation (and each
-                        // cell's combining-string buffer) is reused.
-                        slot.cells.clone_from(&row.cells);
-                        slot.wrapped = row.wrapped;
-                        slot.dirty = row.dirty;
-                    }
+                    Some(slot) => clone_row_into(slot, row),
                     None => out_rows.push(row.clone()),
                 }
                 row.dirty = false;
@@ -536,4 +544,12 @@ impl Screen {
     pub fn take_scroll_shift(&mut self) -> usize {
         std::mem::take(&mut self.scroll_shift)
     }
+}
+
+fn clone_row_into(slot: &mut Row, row: &Row) {
+    // Field-wise so the cell vec's allocation (and each cell's
+    // combining-string buffer) is reused.
+    slot.cells.clone_from(&row.cells);
+    slot.wrapped = row.wrapped;
+    slot.dirty = row.dirty;
 }

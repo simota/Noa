@@ -615,8 +615,8 @@ fn publish_overview_snapshot(
     match decide_overview_publish(visible, *last_overview_publish, now) {
         OverviewPublishDecision::Skip => None,
         OverviewPublishDecision::Publish => {
-            let snapshot = Arc::new(FrameSnapshot::peek(terminal));
-            *overview.slot.lock() = Some(snapshot);
+            let mut slot = overview.slot.lock();
+            FrameSnapshot::refresh_peek_slot(&mut *slot, terminal);
             *last_overview_publish = Some(now);
             None
         }
@@ -636,11 +636,9 @@ fn flush_pending_overview_publish(
     last_overview_publish: &mut Option<Instant>,
 ) {
     let now = Instant::now();
-    let snapshot = {
-        let term = terminal.lock();
-        Arc::new(FrameSnapshot::peek(&term))
-    };
-    *overview.slot.lock() = Some(snapshot);
+    let term = terminal.lock();
+    let mut slot = overview.slot.lock();
+    FrameSnapshot::refresh_peek_slot(&mut *slot, &term);
     *last_overview_publish = Some(now);
 }
 
@@ -1486,6 +1484,45 @@ mod tests {
             "the trailing flush must publish unconditionally, regardless of the gate"
         );
         assert!(last_overview_publish.is_some());
+    }
+
+    #[test]
+    fn overview_publish_reuses_unique_snapshot_slot_when_due() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+        let mut stream = noa_vt::Stream::new();
+        let overview = test_overview_publish();
+        overview.visible.store(true, Ordering::Relaxed);
+        let mut last_overview_publish = None;
+
+        feed_terminal(
+            &terminal,
+            &mut stream,
+            b"first",
+            &overview,
+            &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut None,
+        );
+        let first_ptr = {
+            let slot = overview.slot.lock();
+            Arc::as_ptr(slot.as_ref().expect("first feed publishes"))
+        };
+
+        last_overview_publish = Some(Instant::now() - OVERVIEW_TILE_MIN_RENDER_INTERVAL);
+        feed_terminal(
+            &terminal,
+            &mut stream,
+            b"second",
+            &overview,
+            &mut last_overview_publish,
+            &test_sidebar_publish(false),
+            &mut None,
+        );
+
+        let slot = overview.slot.lock();
+        let snap = slot.as_ref().expect("due feed publishes");
+        assert_eq!(Arc::as_ptr(snap), first_ptr);
+        assert_eq!(snap.rows[0].cells[5].ch, 's');
     }
 
     #[test]

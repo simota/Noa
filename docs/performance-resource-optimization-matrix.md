@@ -148,10 +148,10 @@ quadrantChart
 ### ID 3: Overview `FrameSnapshot::peek` reuse
 
 - [ ] `IMPL-PERF-301`: Session Overview visible + active output の baseline を取る。
-- [ ] `IMPL-PERF-302`: publish-slot の `Arc<FrameSnapshot>` 所有権を壊さない reuse 方式を選ぶ。
+- [x] `IMPL-PERF-302`: publish-slot の `Arc<FrameSnapshot>` 所有権を壊さない reuse 方式を選ぶ。
   - 候補: io thread 内 scratch buffer、double buffer、または `peek_into` + publish clone 境界。
-- [ ] `IMPL-PERF-303`: overview が source tab を直接 lock しない要件を維持する。
-- [ ] `IMPL-PERF-304`: overview tile 更新、occluded source tab、trailing flush の test を通す。
+- [x] `IMPL-PERF-303`: overview が source tab を直接 lock しない要件を維持する。
+- [x] `IMPL-PERF-304`: overview tile 更新、occluded source tab、trailing flush の test を通す。
 - [ ] `IMPL-PERF-305`: overview publish 時の allocation/copy が baseline より下がることを確認する。
 
 ### ID 4: PTY reader buffer reuse / pooling

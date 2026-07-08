@@ -1128,16 +1128,40 @@ fn overview_intercepts_only_non_terminal_window_commands() {
 #[test]
 fn overview_snapshot_seed_skips_locked_terminal_without_waiting() {
     let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(5, 3))));
+    let slot = Arc::new(Mutex::new(None));
     let _guard = terminal.lock();
 
-    assert!(try_peek_overview_snapshot(&terminal).is_none());
+    assert!(!try_refresh_overview_snapshot(&terminal, &slot));
+    assert!(slot.lock().is_none());
 }
 
 #[test]
-fn overview_snapshot_seed_peeks_available_terminal() {
+fn overview_snapshot_seed_refreshes_available_terminal() {
     let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(5, 3))));
+    let slot = Arc::new(Mutex::new(None));
 
-    assert!(try_peek_overview_snapshot(&terminal).is_some());
+    assert!(try_refresh_overview_snapshot(&terminal, &slot));
+    assert!(slot.lock().is_some());
+}
+
+#[test]
+fn overview_snapshot_seed_refresh_reuses_unique_slot() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(5, 3))));
+    let slot = Arc::new(Mutex::new(None));
+
+    assert!(try_refresh_overview_snapshot(&terminal, &slot));
+    let first_ptr = {
+        let slot = slot.lock();
+        Arc::as_ptr(slot.as_ref().expect("first refresh publishes"))
+    };
+
+    terminal.lock().primary.grid[0].cells[0].ch = 'Z';
+    assert!(try_refresh_overview_snapshot(&terminal, &slot));
+
+    let slot = slot.lock();
+    let snapshot = slot.as_ref().expect("second refresh publishes");
+    assert_eq!(Arc::as_ptr(snapshot), first_ptr);
+    assert_eq!(snapshot.rows[0].cells[0].ch, 'Z');
 }
 
 #[test]

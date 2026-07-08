@@ -10,6 +10,7 @@ swash.workspace = true
 etagere.workspace = true
 font-kit.workspace = true
 rustybuzz.workspace = true
+memmap2.workspace = true
 thiserror.workspace = true
 log.workspace = true
 

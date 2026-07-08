@@ -1429,6 +1429,7 @@ dependencies = [
  "etagere",
  "font-kit",
  "log",
+ "memmap2",
  "noa-core",
  "rustybuzz",
  "swash",

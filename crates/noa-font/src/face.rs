@@ -10,12 +10,57 @@ use swash::FontRef;
 
 use crate::{FontConfig, FontError};
 
+/// Backing storage for a font file: memory-mapped when loaded from disk
+/// (the common case), heap-owned when font-kit hands us in-memory bytes.
+///
+/// Mapping instead of `fs::read`ing keeps system fonts (Apple Color Emoji
+/// alone is ~190 MB) out of the process's dirty footprint: file-backed pages
+/// are clean, reclaimable, and shared across every mapping of the same file —
+/// including the one CoreText holds for other apps.
+pub enum FontBytes {
+    Owned(Vec<u8>),
+    Mapped(memmap2::Mmap),
+}
+
+impl std::ops::Deref for FontBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            FontBytes::Owned(bytes) => bytes,
+            FontBytes::Mapped(map) => map,
+        }
+    }
+}
+
+impl PartialEq for FontBytes {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl std::fmt::Debug for FontBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self {
+            FontBytes::Owned(_) => "Owned",
+            FontBytes::Mapped(_) => "Mapped",
+        };
+        write!(f, "FontBytes::{kind}({} bytes)", self.len())
+    }
+}
+
+impl From<Vec<u8>> for FontBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        FontBytes::Owned(bytes)
+    }
+}
+
 /// Raw font file bytes plus the face index within a collection.
 ///
 /// swash's [`FontRef`] borrows these bytes, so [`crate::FontGrid`] keeps the
-/// `Vec<u8>` owned alongside the derived `FontRef`.
+/// [`FontBytes`] owned alongside the derived `FontRef`.
 pub struct FontData {
-    pub bytes: Vec<u8>,
+    pub bytes: FontBytes,
     pub index: usize,
 }
 
@@ -247,39 +292,27 @@ pub fn load_font_stack(font_cfg: &FontConfig) -> Result<FontStack, FontError> {
     // mechanism as the primary/CJK discovery below; simply yields no match
     // on platforms/sandboxes without it, so the stack proceeds without an
     // emoji face rather than failing.
-    if let Ok(handle) = Source::select_family_by_name(&source, emoji_fallback_family_name())
-        .and_then(|family| {
-            family
-                .fonts()
-                .first()
-                .cloned()
-                .ok_or(font_kit::error::SelectionError::NotFound)
-        })
-    {
-        push_valid_face(&mut fallbacks, handle);
-    }
+    push_some_face(
+        &mut fallbacks,
+        family_fallback_face(&source, emoji_fallback_family_name()),
+    );
 
     // Private-use icons from Nerd Fonts are not present in the normal system
     // monospace/CJK stack. Keep these after emoji (so color emoji wins) but
     // before CJK (so PUA icons don't accidentally resolve to a CJK private
     // glyph when a Nerd Font candidate is installed).
     for family_name in nerd_font_fallback_family_names(&source) {
-        let family = [FamilyName::Title(family_name)];
-        if let Ok(handle) = Source::select_best_match(&source, &family, &Properties::new()) {
-            push_valid_face(&mut fallbacks, handle);
-        }
+        push_some_face(&mut fallbacks, family_fallback_face(&source, &family_name));
     }
 
     for postscript_name in cjk_fallback_postscript_names() {
-        if let Ok(handle) = Source::select_by_postscript_name(&source, postscript_name) {
-            push_valid_face(&mut fallbacks, handle);
-        }
+        push_some_face(
+            &mut fallbacks,
+            postscript_fallback_face(&source, postscript_name),
+        );
     }
     for family_name in cjk_fallback_family_names() {
-        let family = [FamilyName::Title((*family_name).to_string())];
-        if let Ok(handle) = Source::select_best_match(&source, &family, &Properties::new()) {
-            push_valid_face(&mut fallbacks, handle);
-        }
+        push_some_face(&mut fallbacks, family_fallback_face(&source, family_name));
     }
 
     Ok(FontStack::new(
@@ -451,14 +484,37 @@ fn handle_supports_style(handle: &Handle, style: FontStyle) -> bool {
     has_bold && has_italic
 }
 
-fn push_valid_face(faces: &mut Vec<FontData>, handle: Handle) {
-    let Ok(face) = handle_to_data(handle) else {
-        return;
-    };
-    if face.font_ref().is_err() {
-        return;
+fn push_some_face(faces: &mut Vec<FontData>, face: Option<FontData>) {
+    if let Some(face) = face {
+        faces.push(face);
     }
-    faces.push(face);
+}
+
+/// Resolve the best normal-style face of `family_name` for the fallback
+/// stack. On macOS this walks CoreText descriptors only — no font bytes are
+/// read until the chosen file is mmapped — because font-kit's `select_*`
+/// slurps every candidate file into the heap (Apple Color Emoji alone is
+/// ~190 MB of transient allocation per lookup). font-kit remains the
+/// portable/fallback path.
+fn family_fallback_face(source: &SystemSource, family_name: &str) -> Option<FontData> {
+    #[cfg(target_os = "macos")]
+    if let Some(face) = mapped_font_data_for_family(family_name) {
+        return Some(face);
+    }
+    let family = [FamilyName::Title(family_name.to_string())];
+    let handle = Source::select_best_match(source, &family, &Properties::new()).ok()?;
+    load_valid_handle(handle)
+}
+
+/// Resolve a PostScript name for the fallback stack; mmap-first like
+/// [`family_fallback_face`].
+fn postscript_fallback_face(source: &SystemSource, postscript_name: &str) -> Option<FontData> {
+    #[cfg(target_os = "macos")]
+    if let Some(face) = mapped_font_data_for_postscript_name(postscript_name) {
+        return Some(face);
+    }
+    let handle = Source::select_by_postscript_name(source, postscript_name).ok()?;
+    load_valid_handle(handle)
 }
 
 /// The macOS system color-emoji family name (REQ-EMOJI-1). `font-kit`'s
@@ -579,12 +635,17 @@ pub(crate) fn cascade_fallback_face(ch: char) -> Option<FontData> {
         return None;
     }
 
-    // Resolve the substitute to loadable bytes + face index via font-kit's
-    // PostScript-name lookup (which picks the correct `.ttc` collection index),
-    // reusing the same handle→bytes path as the curated fallbacks.
-    let source = SystemSource::new();
-    let handle = Source::select_by_postscript_name(&source, &postscript).ok()?;
-    let data = load_valid_handle(handle)?;
+    // Resolve the substitute to loadable bytes + face index. Prefer the
+    // direct mmap path (no whole-file read); fall back to font-kit's
+    // PostScript-name lookup for faces without an on-disk file.
+    let data = mapped_font_data_for_postscript_name(&postscript).or_else(|| {
+        let source = SystemSource::new();
+        let handle = Source::select_by_postscript_name(&source, &postscript).ok()?;
+        load_valid_handle(handle)
+    })?;
+    if data.font_ref().is_err() {
+        return None;
+    }
 
     // Guarantee the returned face actually maps `ch`: font-kit's PostScript
     // lookup should hand back exactly CoreText's substitute, but verifying it
@@ -636,18 +697,135 @@ fn cjk_fallback_family_names() -> &'static [&'static str] {
 
 fn handle_to_data(handle: Handle) -> Result<FontData, FontError> {
     match handle {
-        Handle::Memory { bytes, font_index } => Ok(FontData {
-            bytes: bytes.as_ref().clone(),
-            index: font_index as usize,
-        }),
-        Handle::Path { path, font_index } => {
-            let bytes = std::fs::read(&path).map_err(|_| FontError::NoFont)?;
+        Handle::Memory { bytes, font_index } => {
+            // font-kit's CoreText source slurps every selected font file into
+            // memory and only ever returns `Handle::Memory` on macOS, so a
+            // naive clone would keep e.g. Apple Color Emoji's ~190 MB resident
+            // per FontGrid. Re-resolve the face to its on-disk file via its
+            // PostScript name and map that instead; the slurped copy dies with
+            // the handle.
+            #[cfg(target_os = "macos")]
+            if let Some(name) = postscript_name_in(&bytes, font_index as usize)
+                && let Some(mapped) = mapped_font_data_for_postscript_name(&name)
+            {
+                return Ok(mapped);
+            }
             Ok(FontData {
-                bytes,
+                bytes: FontBytes::Owned(bytes.as_ref().clone()),
+                index: font_index as usize,
+            })
+        }
+        Handle::Path { path, font_index } => {
+            let file = std::fs::File::open(&path).map_err(|_| FontError::NoFont)?;
+            // SAFETY: mapping is UB if the file is truncated/rewritten while
+            // mapped. Installed font files are replaced atomically (rename),
+            // never mutated in place, so the mapping stays valid for its
+            // lifetime — the same contract CoreText relies on.
+            let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|_| FontError::NoFont)?;
+            Ok(FontData {
+                bytes: FontBytes::Mapped(map),
                 index: font_index as usize,
             })
         }
     }
+}
+
+/// Read the PostScript name of face `index` inside a font file/collection.
+#[cfg(target_os = "macos")]
+fn postscript_name_in(data: &[u8], index: usize) -> Option<String> {
+    let font = FontRef::from_index(data, index)?;
+    let name = font
+        .localized_strings()
+        .find_by_id(swash::StringId::PostScript, None)?;
+    Some(name.chars().collect())
+}
+
+/// Resolve a PostScript name back to its installed font file via CoreText
+/// (same normalized-descriptor lookup font-kit uses) and return the face
+/// memory-mapped, locating the `.ttc` face index by PostScript name.
+///
+/// Returns `None` for faces without an on-disk file (e.g. downloadable
+/// fonts); the caller keeps the in-memory bytes instead.
+#[cfg(target_os = "macos")]
+fn mapped_font_data_for_postscript_name(postscript_name: &str) -> Option<FontData> {
+    let matched = matching_descriptors("NSFontNameAttribute", postscript_name)?;
+    mapped_font_data_from_descriptor(&*matched.get(0)?)
+}
+
+/// Resolve the best normal-style face of a family via CoreText descriptors,
+/// memory-mapped. Skips italics and takes the weight closest to regular
+/// (CoreText normalized weight 0.0), lighter on ties — the face font-kit's
+/// CSS matcher picks for `Properties::new()` in practice (e.g. Hiragino W3
+/// over W6, "Regular" over "Bold").
+#[cfg(target_os = "macos")]
+fn mapped_font_data_for_family(family_name: &str) -> Option<FontData> {
+    use core_text::font_descriptor::{TraitAccessors, kCTFontItalicTrait};
+
+    let matched = matching_descriptors("NSFontFamilyAttribute", family_name)?;
+    let mut best: Option<((bool, f64, f64), isize)> = None;
+    for index in 0..matched.len() {
+        let Some(descriptor) = matched.get(index) else {
+            continue;
+        };
+        let traits = descriptor.traits();
+        let weight = traits.normalized_weight();
+        let italic = traits.symbolic_traits() & kCTFontItalicTrait != 0;
+        let rank = (italic, weight.abs(), weight);
+        if best.as_ref().is_none_or(|(current, _)| rank < *current) {
+            best = Some((rank, index));
+        }
+    }
+    let (_, index) = best?;
+    mapped_font_data_from_descriptor(&*matched.get(index)?)
+}
+
+/// CoreText's normalized descriptors for `value` under the font attribute
+/// `attribute_name` — carrying the file URL and PostScript name without
+/// loading any font data (the whole point of this path).
+#[cfg(target_os = "macos")]
+fn matching_descriptors(
+    attribute_name: &str,
+    value: &str,
+) -> Option<core_foundation::array::CFArray<core_text::font_descriptor::CTFontDescriptor>> {
+    use core_foundation::array::CFArray;
+    use core_foundation::base::TCFType;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+    use core_text::{font_collection, font_descriptor};
+
+    let attributes = CFDictionary::from_CFType_pairs(&[(
+        CFString::new(attribute_name),
+        CFString::new(value).as_CFType(),
+    )]);
+    let descriptor = font_descriptor::new_from_attributes(&attributes);
+    let descriptors = CFArray::from_CFTypes(&[descriptor]);
+    let collection = font_collection::new_from_descriptors(&descriptors);
+    let matched = collection.get_descriptors()?;
+    (!matched.is_empty()).then_some(matched)
+}
+
+#[cfg(target_os = "macos")]
+fn mapped_font_data_from_descriptor(
+    descriptor: &core_text::font_descriptor::CTFontDescriptor,
+) -> Option<FontData> {
+    let postscript_name = descriptor.font_name();
+    let path = descriptor.font_path()?;
+    let file = std::fs::File::open(&path).ok()?;
+    // SAFETY: see the `Handle::Path` arm of `handle_to_data`.
+    let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+    let index = face_index_for_postscript_name(&map, &postscript_name)?;
+    Some(FontData {
+        bytes: FontBytes::Mapped(map),
+        index,
+    })
+}
+
+/// Find the face inside `data` (a single font or a `.ttc` collection) whose
+/// PostScript name is exactly `postscript_name`.
+#[cfg(target_os = "macos")]
+fn face_index_for_postscript_name(data: &[u8], postscript_name: &str) -> Option<usize> {
+    let fonts = swash::FontDataRef::new(data)?;
+    (0..fonts.len()).find(|&index| postscript_name_in(data, index).as_deref() == Some(postscript_name))
 }
 
 #[cfg(test)]
@@ -756,15 +934,15 @@ mod tests {
     #[test]
     fn font_stack_tracks_native_style_faces_separately() {
         let primary = FontData {
-            bytes: vec![1, 2, 3],
+            bytes: vec![1, 2, 3].into(),
             index: 0,
         };
         let bold = FontData {
-            bytes: vec![4, 5, 6],
+            bytes: vec![4, 5, 6].into(),
             index: 0,
         };
         let fallback = FontData {
-            bytes: vec![7, 8, 9],
+            bytes: vec![7, 8, 9].into(),
             index: 0,
         };
 
@@ -780,11 +958,11 @@ mod tests {
     #[test]
     fn duplicate_style_face_falls_back_to_regular_stack() {
         let primary = FontData {
-            bytes: vec![1, 2, 3],
+            bytes: vec![1, 2, 3].into(),
             index: 0,
         };
         let same_as_primary = FontData {
-            bytes: vec![1, 2, 3],
+            bytes: vec![1, 2, 3].into(),
             index: 0,
         };
 
@@ -909,6 +1087,56 @@ mod tests {
             resolved.bytes, emoji_data.bytes,
             "emoji codepoint should resolve to the Apple Color Emoji face specifically, \
              not an unrelated fallback face"
+        );
+    }
+
+    /// System fonts must end up memory-mapped, not heap-copied: font-kit's
+    /// CoreText source returns `Handle::Memory` with the whole file slurped,
+    /// and keeping that copy per FontGrid cost hundreds of MB of dirty
+    /// footprint (Apple Color Emoji alone is ~190 MB).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn system_font_faces_are_memory_mapped() {
+        let stack = match load_font_stack(&FontConfig::default()) {
+            Ok(stack) => stack,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+        for face in stack.faces() {
+            assert!(
+                matches!(face.bytes, FontBytes::Mapped(_)),
+                "system font face should be memory-mapped, got {:?}",
+                face.bytes
+            );
+            assert!(face.font_ref().is_ok(), "mapped face must stay parseable");
+        }
+    }
+
+    /// The mmap re-resolution must map the same face the handle described:
+    /// same bytes, correct `.ttc` index (PostScript names must match).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn mapped_face_matches_handle_memory_bytes() {
+        let source = SystemSource::new();
+        let Ok(handle) = source.select_by_postscript_name("AppleColorEmoji") else {
+            eprintln!("skipping: Apple Color Emoji not installed");
+            return;
+        };
+        let (memory_bytes, memory_index) = match &handle {
+            Handle::Memory { bytes, font_index } => (bytes.clone(), *font_index as usize),
+            Handle::Path { .. } => {
+                eprintln!("skipping: font-kit returned a path handle; nothing to re-resolve");
+                return;
+            }
+        };
+        let data = handle_to_data(handle).expect("load Apple Color Emoji");
+        assert!(matches!(data.bytes, FontBytes::Mapped(_)));
+        assert_eq!(
+            postscript_name_in(&data.bytes, data.index),
+            postscript_name_in(&memory_bytes, memory_index),
+            "mapped face must be the exact face the handle selected"
         );
     }
 

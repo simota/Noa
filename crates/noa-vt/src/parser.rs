@@ -10,7 +10,7 @@
 //! control bytes are 7-bit ASCII.
 
 use crate::action::Action;
-use crate::csi::{Csi, DcsPayload, Esc, MAX_INTERMEDIATES, MAX_PARAMS};
+use crate::csi::{Csi, DcsPayload, Esc, Intermediates, Params, Separators, MAX_PARAMS};
 use crate::state::State;
 
 /// OSC payloads include OSC 52 clipboard writes, whose base64 must carry the
@@ -26,9 +26,9 @@ const MAX_APC_BYTES: usize = 1 << 20; // 1 MiB
 /// The from-scratch VT parser. Cheap to construct; holds only small buffers.
 pub struct Parser {
     state: State,
-    params: Vec<u16>,
-    sep_colon: Vec<bool>,
-    intermediates: Vec<u8>,
+    params: Params,
+    sep_colon: Separators,
+    intermediates: Intermediates,
     private: u8,
     osc: Vec<u8>,
     osc_overflow: bool,
@@ -57,9 +57,9 @@ impl Parser {
     pub fn new() -> Self {
         Self {
             state: State::Ground,
-            params: Vec::new(),
-            sep_colon: Vec::new(),
-            intermediates: Vec::new(),
+            params: Params::default(),
+            sep_colon: Separators::default(),
+            intermediates: Intermediates::default(),
             private: 0,
             osc: Vec::new(),
             osc_overflow: false,
@@ -458,9 +458,7 @@ impl Parser {
     }
 
     fn collect(&mut self, b: u8) {
-        if self.intermediates.len() < MAX_INTERMEDIATES {
-            self.intermediates.push(b);
-        }
+        self.intermediates.push(b);
     }
 
     fn param_digit(&mut self, b: u8) {
@@ -491,20 +489,20 @@ impl Parser {
     }
 
     fn csi_dispatch<F: FnMut(Action)>(&mut self, final_byte: u8, sink: &mut F) {
-        sink(Action::CsiDispatch(Csi {
-            params: self.params.clone(),
-            sep_colon: self.sep_colon.clone(),
-            intermediates: self.intermediates.clone(),
-            private: self.private,
+        sink(Action::CsiDispatch(Csi::from_parts(
+            self.params,
+            self.sep_colon,
+            self.intermediates,
+            self.private,
             final_byte,
-        }));
+        )));
     }
 
     fn esc_dispatch<F: FnMut(Action)>(&mut self, final_byte: u8, sink: &mut F) {
-        sink(Action::EscDispatch(Esc {
-            intermediates: self.intermediates.clone(),
+        sink(Action::EscDispatch(Esc::from_parts(
+            self.intermediates,
             final_byte,
-        }));
+        )));
     }
 
     fn finish_dcs<F: FnMut(Action)>(&mut self, sink: &mut F) {

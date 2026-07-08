@@ -41,7 +41,7 @@ pub enum SgrAttr {
 /// Decode an SGR (`CSI … m`) sequence into a list of attribute changes.
 /// An empty parameter list means `SGR 0` (reset).
 pub fn parse_sgr(csi: &Csi) -> Vec<SgrAttr> {
-    let p = &csi.params;
+    let p = csi.params();
     if p.is_empty() {
         return vec![SgrAttr::Reset];
     }
@@ -54,7 +54,7 @@ pub fn parse_sgr(csi: &Csi) -> Vec<SgrAttr> {
             2 => out.push(SgrAttr::Faint),
             3 => out.push(SgrAttr::Italic),
             4 => {
-                if csi.sep_colon.get(i).copied().unwrap_or(false) {
+                if csi.separator_is_colon(i) {
                     match p.get(i + 1).copied().unwrap_or(1) {
                         0 => out.push(SgrAttr::ResetUnderline),
                         1 => out.push(SgrAttr::Underline),
@@ -124,7 +124,7 @@ pub fn parse_sgr(csi: &Csi) -> Vec<SgrAttr> {
 /// Parse an extended (38/48/58) color operand starting at index `i` (the
 /// `38`/`48`/`58` code). Returns the color and how many params to advance past.
 fn parse_ext_color(csi: &Csi, i: usize) -> (Option<Color>, usize) {
-    let p = &csi.params;
+    let p = csi.params();
     match p.get(i + 1).copied() {
         Some(5) => {
             let n = p.get(i + 2).copied().unwrap_or(0) as u8;
@@ -133,7 +133,7 @@ fn parse_ext_color(csi: &Csi, i: usize) -> (Option<Color>, usize) {
         Some(2) => {
             // Colon form with an (often empty) colorspace field is `38:2:cs:r:g:b`
             // (6 params); semicolon form is `38;2;r;g;b` (5 params).
-            let colon = csi.sep_colon.get(i + 1).copied().unwrap_or(false);
+            let colon = csi.separator_is_colon(i + 1);
             let rgb_start = if colon && p.len() >= i + 6 {
                 i + 3
             } else {

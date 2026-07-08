@@ -96,7 +96,7 @@ fn dispatch<H: Handler>(action: Action, h: &mut H) {
 }
 
 fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
-    let plain = csi.private == 0 && csi.intermediates.is_empty();
+    let plain = csi.private == 0 && csi.intermediates().is_empty();
     match csi.final_byte {
         b'@' if plain => h.insert_blank_chars(csi.param(0, 1)),
         b'A' => h.cursor_up(csi.param(0, 1)),
@@ -135,22 +135,22 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
         // read as SGR is underline-on + faint, sticking underline on every
         // cell printed afterwards.
         b'm' if csi.private == b'>' => {
-            if csi.params.is_empty() || csi.param(0, 0) == 4 {
+            if csi.params().is_empty() || csi.param(0, 0) == 4 {
                 h.set_modify_other_keys(csi.param(1, 0));
             }
         }
-        b'p' if csi.intermediates.as_slice() == [b'$'] => {
+        b'p' if csi.intermediates() == [b'$'] => {
             h.request_mode(ModeRequest {
                 value: csi.param(0, 0),
                 ansi: csi.private != b'?',
             });
         }
-        b'p' if csi.intermediates.as_slice() == [b'!'] => h.soft_reset(), // DECSTR
-        b'q' if csi.private == 0 && csi.intermediates.as_slice() == [b' '] => {
+        b'p' if csi.intermediates() == [b'!'] => h.soft_reset(), // DECSTR
+        b'q' if csi.private == 0 && csi.intermediates() == [b' '] => {
             // `param` collapses an explicit `0` to its default, but DECSCUSR 0
             // must reset to the configured default, so match the raw param:
             // an explicit `0` is `Default`, an absent param is blinking block.
-            let style = match csi.params.first().copied() {
+            let style = match csi.params().first().copied() {
                 Some(0) => CursorStyle::Default,
                 Some(3) => CursorStyle::BlinkingUnderline,
                 Some(4) => CursorStyle::SteadyUnderline,
@@ -165,7 +165,7 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
         b'h' | b'l' => {
             let on = csi.final_byte == b'h';
             let ansi = csi.private != b'?';
-            for &value in &csi.params {
+            for &value in csi.params() {
                 h.set_mode(value, ansi, on);
             }
         }
@@ -180,11 +180,11 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
             _ => {}
         },
         b'r' if csi.private == 0 => h.set_scroll_region(csi.param(0, 1), csi.param(1, 0)),
-        b's' if csi.private == 0 && csi.params.is_empty() => h.save_cursor(),
+        b's' if csi.private == 0 && csi.params().is_empty() => h.save_cursor(),
         b's' if csi.private == 0 => h.set_horizontal_margins(csi.param(0, 1), csi.param(1, 0)),
         // Plain `CSI u` is SCORC (restore cursor). The private markers select
         // the Kitty keyboard protocol progressive-enhancement operations.
-        b'u' if csi.private == 0 && csi.intermediates.is_empty() => h.restore_cursor(),
+        b'u' if csi.private == 0 && csi.intermediates().is_empty() => h.restore_cursor(),
         b'u' if csi.private == b'?' => h.kitty_keyboard_query(),
         b'u' if csi.private == b'>' => h.kitty_keyboard_push(csi.param(0, 0) as u8),
         b'u' if csi.private == b'<' => h.kitty_keyboard_pop(csi.param(0, 1)),
@@ -202,7 +202,7 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
 }
 
 fn dispatch_esc<H: Handler>(esc: &Esc, h: &mut H) {
-    match esc.intermediates.as_slice() {
+    match esc.intermediates() {
         [] => match esc.final_byte {
             b'c' => h.full_reset(),                  // RIS
             b'7' => h.save_cursor(),                 // DECSC

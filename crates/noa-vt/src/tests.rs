@@ -2,9 +2,9 @@
 //! ported from the semantics of Ghostty's `Parser.zig` unit tests.
 
 use crate::action::Action;
-use crate::csi::Csi;
+use crate::csi::{Csi, Esc};
 use crate::parser::Parser;
-use crate::sgr::{SgrAttr, parse_sgr};
+use crate::sgr::{parse_sgr, SgrAttr};
 use noa_core::{Color, Rgb};
 
 /// Run the parser over `bytes` and collect every emitted action.
@@ -53,9 +53,9 @@ fn del_ignored_in_ground() {
 fn csi_sgr_31m() {
     // ESC [ 3 1 m  →  CsiDispatch{ params:[31], final:'m' }
     let csi = only_csi(b"\x1b[31m");
-    assert_eq!(csi.params, vec![31]);
+    assert_eq!(csi.params(), &[31]);
     assert_eq!(csi.final_byte, b'm');
-    assert!(csi.intermediates.is_empty());
+    assert!(csi.intermediates().is_empty());
     assert_eq!(csi.private, 0);
     assert_eq!(parse_sgr(&csi), vec![SgrAttr::Fg(Color::Palette(1))]);
 }
@@ -122,7 +122,7 @@ fn sgr_colon_underline_does_not_consume_semicolon_params() {
 #[test]
 fn cup_two_params() {
     let csi = only_csi(b"\x1b[5;10H");
-    assert_eq!(csi.params, vec![5, 10]);
+    assert_eq!(csi.params(), &[5, 10]);
     assert_eq!(csi.final_byte, b'H');
     assert_eq!(csi.param(0, 1), 5);
     assert_eq!(csi.param(1, 1), 10);
@@ -141,7 +141,7 @@ fn private_mode_marker() {
     // ESC [ ? 2 5 h  (DECTCEM show cursor)
     let csi = only_csi(b"\x1b[?25h");
     assert_eq!(csi.private, b'?');
-    assert_eq!(csi.params, vec![25]);
+    assert_eq!(csi.params(), &[25]);
     assert_eq!(csi.final_byte, b'h');
 }
 
@@ -149,8 +149,8 @@ fn private_mode_marker() {
 fn decscusr_has_space_intermediate() {
     let csi = only_csi(b"\x1b[4 q");
 
-    assert_eq!(csi.params, vec![4]);
-    assert_eq!(csi.intermediates, vec![b' ']);
+    assert_eq!(csi.params(), &[4]);
+    assert_eq!(csi.intermediates(), &[b' ']);
     assert_eq!(csi.final_byte, b'q');
 }
 
@@ -158,8 +158,8 @@ fn decscusr_has_space_intermediate() {
 fn decslrm_uses_plain_s_final() {
     let csi = only_csi(b"\x1b[3;7s");
 
-    assert_eq!(csi.params, vec![3, 7]);
-    assert!(csi.intermediates.is_empty());
+    assert_eq!(csi.params(), &[3, 7]);
+    assert!(csi.intermediates().is_empty());
     assert_eq!(csi.private, 0);
     assert_eq!(csi.final_byte, b's');
 }
@@ -169,14 +169,8 @@ fn keypad_modes_parse_as_esc_dispatch() {
     assert_eq!(
         actions(b"\x1b=\x1b>"),
         vec![
-            Action::EscDispatch(crate::csi::Esc {
-                intermediates: Vec::new(),
-                final_byte: b'=',
-            }),
-            Action::EscDispatch(crate::csi::Esc {
-                intermediates: Vec::new(),
-                final_byte: b'>',
-            }),
+            Action::EscDispatch(Esc::new(&[], b'=')),
+            Action::EscDispatch(Esc::new(&[], b'>')),
         ]
     );
 }
@@ -337,11 +331,9 @@ fn dcs_overflow_is_discarded_without_dispatch() {
     bytes.extend(std::iter::repeat_n(b'a', 4097));
     bytes.extend_from_slice(b"\x1b\\");
 
-    assert!(
-        actions(&bytes)
-            .into_iter()
-            .all(|action| !matches!(action, Action::DcsDispatch(_)))
-    );
+    assert!(actions(&bytes)
+        .into_iter()
+        .all(|action| !matches!(action, Action::DcsDispatch(_))));
 }
 
 #[test]
@@ -360,11 +352,9 @@ fn osc_payload_over_limit_is_dropped() {
 
     let acts = actions(&bytes);
 
-    assert!(
-        !acts
-            .iter()
-            .any(|action| matches!(action, Action::OscDispatch(_)))
-    );
+    assert!(!acts
+        .iter()
+        .any(|action| matches!(action, Action::OscDispatch(_))));
 }
 
 #[test]
@@ -390,10 +380,7 @@ fn osc_overflow_releases_the_buffer_allocation() {
 fn esc_dispatch_ris_and_index() {
     assert_eq!(
         actions(b"\x1bc"),
-        vec![Action::EscDispatch(crate::csi::Esc {
-            intermediates: vec![],
-            final_byte: b'c'
-        })]
+        vec![Action::EscDispatch(Esc::new(&[], b'c'))]
     );
 }
 
@@ -401,13 +388,7 @@ fn esc_dispatch_ris_and_index() {
 fn charset_designation_has_intermediate() {
     // ESC ( B  → EscDispatch with intermediate '('
     let acts = actions(b"\x1b(B");
-    assert_eq!(
-        acts,
-        vec![Action::EscDispatch(crate::csi::Esc {
-            intermediates: vec![b'('],
-            final_byte: b'B'
-        })]
-    );
+    assert_eq!(acts, vec![Action::EscDispatch(Esc::new(&[b'('], b'B'))]);
 }
 
 #[test]
@@ -422,10 +403,9 @@ fn c0_in_the_middle_of_csi_executes() {
     let acts = actions(b"\x1b[3\r1m");
     assert!(acts.contains(&Action::Execute(0x0d)));
     // The sequence still completes as SGR 31.
-    assert!(
-        acts.iter()
-            .any(|a| matches!(a, Action::CsiDispatch(c) if c.final_byte == b'm'))
-    );
+    assert!(acts
+        .iter()
+        .any(|a| matches!(a, Action::CsiDispatch(c) if c.final_byte == b'm')));
 }
 
 #[test]
@@ -434,13 +414,7 @@ fn c1_csi_dispatches_like_escape_bracket() {
     assert_eq!(
         acts,
         vec![
-            Action::CsiDispatch(Csi {
-                params: vec![31],
-                sep_colon: vec![],
-                intermediates: vec![],
-                private: 0,
-                final_byte: b'm',
-            }),
+            Action::CsiDispatch(Csi::new(&[31], &[], &[], 0, b'm')),
             Action::Print('X'),
         ]
     );
@@ -564,10 +538,9 @@ fn apc_esc_non_backslash_aborts_and_reprocesses() {
     // ESC inside APC followed by a non-`\` byte abandons the APC and the ESC
     // sequence is reparsed from Escape (here ESC c = RIS).
     let acts = actions(b"\x1b_Gi=1;AA\x1bc");
-    assert!(
-        acts.iter()
-            .all(|a| !matches!(a, Action::ApcDispatch { .. }))
-    );
+    assert!(acts
+        .iter()
+        .all(|a| !matches!(a, Action::ApcDispatch { .. })));
     assert!(acts.iter().any(|a| matches!(
         a,
         Action::EscDispatch(e) if e.final_byte == b'c'

@@ -3,9 +3,9 @@
 //! Ghostty has no analog.
 //!
 //! Two off-the-read-loop jobs share this one thread: cwd-driven git branch /
-//! project-icon polling (below), and a ~1s tick that reads each live session's
-//! foreground process name from a [`ForegroundProcessProbe`] and posts a
-//! [`SessionDelta::Process`] on change (running-process display).
+//! project-icon polling (below), and an adaptive tick that reads each live
+//! session's foreground process name from a [`ForegroundProcessProbe`] and posts
+//! a [`SessionDelta::Process`] on change (running-process display).
 //!
 //! git must never be spawned on the io read loop (`io_thread::feed_terminal`,
 //! AC-18): a slow `git` on a network filesystem would stall pty draining. So a
@@ -34,14 +34,22 @@ use winit::event_loop::EventLoopProxy;
 use crate::events::UserEvent;
 use crate::session_store::{IconKind, SessionCardId, SessionDelta};
 
-/// Poll interval for each live session's foreground process (running-process
-/// display + agent-bell classification). Matches [`BRANCH_POLL_MIN_INTERVAL`];
-/// the tick only fires while at least one probe is registered. It is *not*
-/// gated on sidebar visibility: the store's `process` field feeds the
-/// agent-bell → attention escalation (FR-A3), which must work with every
-/// sidebar hidden — the poll itself is one cheap proc lookup per pane per
-/// second, posted only on change.
+/// Minimum poll interval for each live session's foreground process
+/// (running-process display + agent-bell classification). A changed process
+/// name resets to this cadence; stable names back off up to
+/// [`PROCESS_POLL_MAX_INTERVAL`].
+///
+/// It is *not* gated on sidebar visibility: the store's `process` field feeds
+/// the agent-bell → attention escalation (FR-A3), which must work with every
+/// sidebar hidden.
 pub const PROCESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Maximum stable-process poll interval. Keep this deliberately short:
+/// agent-bell escalation is classified synchronously from the last posted
+/// process name, so a transition from `zsh` to an agent can be missed until the
+/// next poll. Four seconds cuts many-pane idle wakeups while bounding that stale
+/// classification window.
+pub const PROCESS_POLL_MAX_INTERVAL: Duration = Duration::from_secs(4);
 
 /// A registration change for a session's foreground-process probe. The io/main
 /// thread hands over a probe when a pane spawns and prunes dead ones on GC.
@@ -217,26 +225,25 @@ fn worker_loop(
 ) {
     let mut cache: HashMap<String, BranchCache> = HashMap::new();
     // Per-session foreground-process probe + last-posted name (so only changes
-    // are posted).
-    let mut probes: HashMap<SessionCardId, (ForegroundProcessProbe, Option<String>)> =
-        HashMap::new();
+    // are posted) + per-probe adaptive schedule.
+    let mut probes: HashMap<SessionCardId, ProcessProbeEntry> = HashMap::new();
     loop {
         let mut sel = crossbeam_channel::Select::new();
         let shutdown_op = sel.recv(shutdown_rx);
         let request_op = sel.recv(request_rx);
         let probe_op = sel.recv(probe_rx);
 
-        // Tick to poll processes only while there is something to poll. Not
-        // gated on sidebar visibility — see [`PROCESS_POLL_INTERVAL`].
-        let tick = !probes.is_empty();
-        let selected = if tick {
-            sel.select_timeout(PROCESS_POLL_INTERVAL).ok()
-        } else {
-            Some(sel.select())
+        // Tick at the earliest due probe instead of a fixed 1s cadence for every
+        // pane. Not gated on sidebar visibility — see [`PROCESS_POLL_INTERVAL`].
+        let selected = match next_process_poll_at(&probes) {
+            Some(deadline) => sel
+                .select_timeout(deadline.saturating_duration_since(Instant::now()))
+                .ok(),
+            None => Some(sel.select()),
         };
         let Some(oper) = selected else {
-            // The poll interval elapsed: re-read each probe and post changes.
-            if !poll_processes(&mut probes, proxy) {
+            // At least one process poll is due: re-read due probes and post changes.
+            if !poll_due_processes(&mut probes, proxy, Instant::now()) {
                 break; // event loop gone
             }
             continue;
@@ -265,7 +272,7 @@ fn worker_loop(
             }
             i if i == probe_op => match oper.recv(probe_rx) {
                 Ok(ProbeControl::Register { id, probe }) => {
-                    probes.insert(id, (probe, None));
+                    probes.insert(id, ProcessProbeEntry::new(probe, Instant::now()));
                 }
                 Ok(ProbeControl::Retain(live)) => {
                     probes.retain(|id, _| live.contains(id));
@@ -277,19 +284,95 @@ fn worker_loop(
     }
 }
 
-/// Poll every registered probe once and post a [`SessionDelta::Process`] for any
-/// whose foreground process name changed since the last post. Returns `false`
-/// when the event loop is gone (caller should stop).
-fn poll_processes(
-    probes: &mut HashMap<SessionCardId, (ForegroundProcessProbe, Option<String>)>,
+struct ProcessProbeEntry {
+    probe: ForegroundProcessProbe,
+    state: ProcessPollState,
+}
+
+impl ProcessProbeEntry {
+    fn new(probe: ForegroundProcessProbe, now: Instant) -> Self {
+        Self {
+            probe,
+            state: ProcessPollState::new(now),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProcessPollState {
+    last: Option<String>,
+    schedule: ProcessPollSchedule,
+}
+
+impl ProcessPollState {
+    fn new(now: Instant) -> Self {
+        Self {
+            last: None,
+            schedule: ProcessPollSchedule::new(now),
+        }
+    }
+
+    fn record_name(&mut self, now: Instant, name: Option<String>) -> bool {
+        let changed = self.last != name;
+        self.schedule.record_poll(now, changed);
+        if changed {
+            self.last = name;
+        }
+        changed
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProcessPollSchedule {
+    interval: Duration,
+    next_poll_at: Instant,
+}
+
+impl ProcessPollSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            interval: PROCESS_POLL_INTERVAL,
+            next_poll_at: now,
+        }
+    }
+
+    fn record_poll(&mut self, now: Instant, changed: bool) {
+        self.interval = next_process_poll_interval(self.interval, changed);
+        self.next_poll_at = now + self.interval;
+    }
+}
+
+fn next_process_poll_interval(current: Duration, changed: bool) -> Duration {
+    if changed {
+        PROCESS_POLL_INTERVAL
+    } else {
+        current.saturating_mul(2).min(PROCESS_POLL_MAX_INTERVAL)
+    }
+}
+
+fn next_process_poll_at(probes: &HashMap<SessionCardId, ProcessProbeEntry>) -> Option<Instant> {
+    probes
+        .values()
+        .map(|entry| entry.state.schedule.next_poll_at)
+        .min()
+}
+
+/// Poll due probes and post a [`SessionDelta::Process`] for any whose foreground
+/// process name changed since the last post. Returns `false` when the event loop
+/// is gone (caller should stop).
+fn poll_due_processes(
+    probes: &mut HashMap<SessionCardId, ProcessProbeEntry>,
     proxy: &EventLoopProxy<UserEvent>,
+    now: Instant,
 ) -> bool {
-    for (id, (probe, last)) in probes.iter_mut() {
-        let name = probe.poll();
-        if *last == name {
+    for (id, entry) in probes.iter_mut() {
+        if entry.state.schedule.next_poll_at > now {
             continue;
         }
-        *last = name.clone();
+        let name = entry.probe.poll();
+        if !entry.state.record_name(now, name.clone()) {
+            continue;
+        }
         if proxy
             .send_event(UserEvent::SessionDelta(SessionDelta::Process {
                 id: *id,
@@ -500,6 +583,37 @@ mod tests {
             decide_branch_poll(now, Some(negative.at), Some(&negative)),
             BranchPollAction::Hit(None)
         );
+    }
+
+    #[test]
+    fn process_poll_state_posts_changes_backs_off_and_resets() {
+        let now = Instant::now();
+        let mut state = ProcessPollState::new(now);
+        assert_eq!(state.last, None);
+        assert_eq!(state.schedule.interval, PROCESS_POLL_INTERVAL);
+        assert_eq!(state.schedule.next_poll_at, now);
+
+        assert!(state.record_name(now, Some("zsh".to_string())));
+        assert_eq!(state.last.as_deref(), Some("zsh"));
+        assert_eq!(state.schedule.interval, PROCESS_POLL_INTERVAL);
+        assert_eq!(state.schedule.next_poll_at, now + PROCESS_POLL_INTERVAL);
+
+        assert!(!state.record_name(now + Duration::from_secs(1), Some("zsh".to_string())));
+        assert_eq!(state.schedule.interval, Duration::from_secs(2));
+        assert_eq!(state.schedule.next_poll_at, now + Duration::from_secs(3));
+
+        assert!(!state.record_name(now + Duration::from_secs(3), Some("zsh".to_string())));
+        assert_eq!(state.schedule.interval, PROCESS_POLL_MAX_INTERVAL);
+        assert_eq!(state.schedule.next_poll_at, now + Duration::from_secs(7));
+
+        assert!(!state.record_name(now + Duration::from_secs(7), Some("zsh".to_string())));
+        assert_eq!(state.schedule.interval, PROCESS_POLL_MAX_INTERVAL);
+        assert_eq!(state.schedule.next_poll_at, now + Duration::from_secs(11));
+
+        assert!(state.record_name(now + Duration::from_secs(11), Some("codex".to_string())));
+        assert_eq!(state.last.as_deref(), Some("codex"));
+        assert_eq!(state.schedule.interval, PROCESS_POLL_INTERVAL);
+        assert_eq!(state.schedule.next_poll_at, now + Duration::from_secs(12));
     }
 
     // The branch cache never outgrows its cap: inserting a new cwd at the cap

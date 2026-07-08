@@ -166,10 +166,10 @@ quadrantChart
 ### ID 5: Foreground process polling backoff
 
 - [ ] `IMPL-PERF-501`: 1/10/50 pane idle で poll 回数、CPU、wakeup の baseline を取る。
-- [ ] `IMPL-PERF-502`: process name が安定した pane の backoff policy を決める。
-  - reset trigger: focus、PTY output、process name 変化、pane spawn/exit、probe register。
-- [ ] `IMPL-PERF-503`: agent-bell / attention escalation の遅延許容を明記する。
-- [ ] `IMPL-PERF-504`: process 表示更新と attention 判定の回帰 test を追加する。
+- [x] `IMPL-PERF-502`: process name が安定した pane の backoff policy を決める。
+  - reset trigger: process name 変化、pane spawn/exit、probe register。
+- [x] `IMPL-PERF-503`: agent-bell / attention escalation の遅延許容を明記する。
+- [x] `IMPL-PERF-504`: process 表示更新と attention 判定の回帰 test を追加する。
 - [ ] `IMPL-PERF-505`: many-pane idle で poll 回数と wakeup が baseline より下がることを確認する。
 
 ### ID 6: Occluded window surface release

@@ -165,6 +165,16 @@ impl App {
         pane_id: PaneId,
         bytes: &[u8],
     ) {
+        let result = self.queue_pane_pty_bytes(window_id, pane_id, bytes);
+        log_pty_input_result(result, bytes.len());
+    }
+
+    pub(in crate::app) fn queue_pane_pty_bytes(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        bytes: &[u8],
+    ) -> crate::io_thread::QueueInputResult {
         if std::env::var_os("NOA_IME_TRACE").is_some() {
             eprintln!(
                 "[ime-trace] pty write: {:?}",
@@ -176,27 +186,9 @@ impl App {
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
         else {
-            return;
+            return crate::io_thread::QueueInputResult::Disconnected;
         };
-        match surface
-            .pty_input_tx
-            .queue(bytes.to_vec().into_boxed_slice())
-        {
-            crate::io_thread::QueueInputResult::Queued => {}
-            crate::io_thread::QueueInputResult::Deferred => {
-                log::debug!("deferred pty input until the io thread queue has capacity");
-            }
-            crate::io_thread::QueueInputResult::Dropped => {
-                log::warn!(
-                    "dropped {} bytes of pty input: the overflow buffer is full \
-                     (the foreground program is not reading its tty)",
-                    bytes.len()
-                );
-            }
-            crate::io_thread::QueueInputResult::Disconnected => {
-                log::warn!("failed to queue pty input because the io thread is gone");
-            }
-        }
+        surface.pty_input_tx.queue(bytes.to_vec().into_boxed_slice())
     }
 
     pub(in crate::app) fn resolve_pane_command_target(
@@ -207,5 +199,23 @@ impl App {
         let state = self.windows.get(&window_id)?;
         let pane_id = split_tree::resolve_pane_command_target(command, Some(state.focused_pane))?;
         state.contains_pane(pane_id).then_some((window_id, pane_id))
+    }
+}
+
+fn log_pty_input_result(result: crate::io_thread::QueueInputResult, bytes_len: usize) {
+    match result {
+        crate::io_thread::QueueInputResult::Queued => {}
+        crate::io_thread::QueueInputResult::Deferred => {
+            log::debug!("deferred pty input until the io thread queue has capacity");
+        }
+        crate::io_thread::QueueInputResult::Dropped => {
+            log::warn!(
+                "dropped {bytes_len} bytes of pty input: the overflow buffer is full \
+                 (the foreground program is not reading its tty)"
+            );
+        }
+        crate::io_thread::QueueInputResult::Disconnected => {
+            log::warn!("failed to queue pty input because the io thread is gone");
+        }
     }
 }

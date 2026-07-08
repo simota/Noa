@@ -13,7 +13,6 @@ use crate::sidebar::AgentKind;
 pub(crate) const USER_INPUT_SUPPRESSION: Duration = Duration::from_secs(3);
 pub(crate) const APPROVAL_WINDOW: Duration = Duration::from_secs(60);
 pub(crate) const APPROVAL_LIMIT: usize = 6;
-pub(crate) const AUDIT_CAPACITY: usize = 16;
 
 pub(crate) type RowText = String;
 
@@ -81,7 +80,7 @@ const SIGNATURES: &[Signature] = &[
         id: AutoApproveSignature::ClaudeEdit,
         agent: AgentKind::ClaudeCode,
         kind: PromptKind::Edit,
-        anchors: &["Claude wants to edit"],
+        anchors: &["claude wants to edit"],
         yes_label: Some("1. Yes"),
         requires_marker: true,
         bytes: b"1\r",
@@ -90,7 +89,7 @@ const SIGNATURES: &[Signature] = &[
         id: AutoApproveSignature::ClaudeWrite,
         agent: AgentKind::ClaudeCode,
         kind: PromptKind::Write,
-        anchors: &["Claude wants to write", "Claude wants to create"],
+        anchors: &["claude wants to write", "claude wants to create"],
         yes_label: Some("1. Yes"),
         requires_marker: true,
         bytes: b"1\r",
@@ -99,7 +98,7 @@ const SIGNATURES: &[Signature] = &[
         id: AutoApproveSignature::ClaudeRead,
         agent: AgentKind::ClaudeCode,
         kind: PromptKind::Read,
-        anchors: &["Claude wants to read"],
+        anchors: &["claude wants to read"],
         yes_label: Some("1. Yes"),
         requires_marker: true,
         bytes: b"1\r",
@@ -108,7 +107,7 @@ const SIGNATURES: &[Signature] = &[
         id: AutoApproveSignature::ClaudeAskUserQuestion,
         agent: AgentKind::ClaudeCode,
         kind: PromptKind::AskUserQuestion,
-        anchors: &["Claude has a question", "Claude asks"],
+        anchors: &["claude has a question", "claude asks"],
         yes_label: Some("1."),
         requires_marker: true,
         bytes: b"1\r",
@@ -117,7 +116,7 @@ const SIGNATURES: &[Signature] = &[
         id: AutoApproveSignature::ClaudeEnterConfirm,
         agent: AgentKind::ClaudeCode,
         kind: PromptKind::EnterConfirm,
-        anchors: &["Press Enter to continue"],
+        anchors: &["press enter to continue"],
         yes_label: None,
         requires_marker: false,
         bytes: b"\r",
@@ -172,7 +171,6 @@ pub(crate) enum SuppressReason {
 pub(crate) enum Decision {
     Fire {
         signature: AutoApproveSignature,
-        bytes: &'static [u8],
         region_hash: u64,
         disable_after: bool,
     },
@@ -184,6 +182,7 @@ pub(crate) enum Decision {
 pub(crate) struct AutoApproveState {
     last_match: Option<MatchKey>,
     match_count: u8,
+    pending_fire: Option<PendingPrompt>,
     awaiting_change: Option<ConsumedPrompt>,
     approvals: VecDeque<Instant>,
     disabled_by_runaway: bool,
@@ -193,12 +192,59 @@ impl AutoApproveState {
     pub(crate) fn reset_for_mode_off(&mut self) {
         *self = Self::default();
     }
+
+    pub(crate) fn needs_static_rescan(&self) -> bool {
+        !self.disabled_by_runaway
+            && self.pending_fire.is_none()
+            && self.awaiting_change.is_none()
+            && self.last_match.is_some()
+            && self.match_count >= 1
+    }
+
+    pub(crate) fn apply_feedback(
+        &mut self,
+        signature: AutoApproveSignature,
+        region_hash: u64,
+        accepted: bool,
+        now: Instant,
+    ) {
+        self.approvals
+            .retain(|at| now.saturating_duration_since(*at) <= APPROVAL_WINDOW);
+
+        let Some(pending) = self.pending_fire else {
+            return;
+        };
+        if pending.signature != signature || pending.region_hash != region_hash {
+            return;
+        }
+
+        self.pending_fire = None;
+        if !accepted {
+            return;
+        }
+
+        self.approvals.push_back(now);
+        self.awaiting_change = Some(ConsumedPrompt {
+            signature,
+            region_hash,
+        });
+        self.last_match = None;
+        self.match_count = 0;
+        self.disabled_by_runaway = pending.disable_after;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MatchKey {
     signature: AutoApproveSignature,
     region_hash: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingPrompt {
+    signature: AutoApproveSignature,
+    region_hash: u64,
+    disable_after: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -289,6 +335,11 @@ fn detect_inner(
     }) {
         return Decision::Hold;
     }
+    if state.pending_fire.is_some_and(|pending| {
+        pending.signature == matched.signature && pending.region_hash == matched.region_hash
+    }) {
+        return Decision::Hold;
+    }
 
     let key = MatchKey {
         signature: matched.signature,
@@ -301,7 +352,6 @@ fn detect_inner(
     let approvals_in_window = count_recent_approvals(&state.approvals, ctx.now);
     Decision::Fire {
         signature: matched.signature,
-        bytes: matched.signature.bytes(),
         region_hash: matched.region_hash,
         disable_after: approvals_in_window + 1 >= APPROVAL_LIMIT,
     }
@@ -324,17 +374,20 @@ fn apply_decision_state(
             disable_after,
             ..
         } => {
-            state.approvals.push_back(ctx.now);
-            state.awaiting_change = Some(ConsumedPrompt {
+            state.pending_fire = Some(PendingPrompt {
                 signature: *signature,
                 region_hash: *region_hash,
+                disable_after: *disable_after,
             });
-            state.last_match = None;
-            state.match_count = 0;
-            state.disabled_by_runaway = *disable_after;
         }
         Decision::Hold => {
             if let Some(matched) = find_prompt(rows, cursor, None) {
+                if state.pending_fire.is_some_and(|pending| {
+                    pending.signature != matched.signature
+                        || pending.region_hash != matched.region_hash
+                }) {
+                    state.pending_fire = None;
+                }
                 if state.awaiting_change.is_some_and(|consumed| {
                     consumed.signature == matched.signature
                         && consumed.region_hash != matched.region_hash
@@ -354,12 +407,14 @@ fn apply_decision_state(
             } else {
                 state.last_match = None;
                 state.match_count = 0;
+                state.pending_fire = None;
                 state.awaiting_change = None;
             }
         }
         Decision::Suppressed(_) => {
             state.last_match = None;
             state.match_count = 0;
+            state.pending_fire = None;
         }
     }
 }
@@ -390,23 +445,31 @@ fn suppression(ctx: DetectContext, disabled_by_runaway: bool) -> Option<Suppress
 }
 
 fn find_prompt(rows: &[RowText], cursor: Point, agent: Option<AgentKind>) -> Option<MatchedPrompt> {
+    let lowercase_rows = lowercase_rows(rows);
     SIGNATURES
         .iter()
         .filter(|sig| agent.is_none_or(|agent| sig.agent == agent))
-        .find_map(|sig| find_signature(rows, cursor, sig))
+        .find_map(|sig| find_signature_with_lowercase(rows, &lowercase_rows, cursor, sig))
 }
 
 fn find_signature(rows: &[RowText], cursor: Point, sig: &Signature) -> Option<MatchedPrompt> {
+    let lowercase_rows = lowercase_rows(rows);
+    find_signature_with_lowercase(rows, &lowercase_rows, cursor, sig)
+}
+
+fn find_signature_with_lowercase(
+    rows: &[RowText],
+    lowercase_rows: &[RowText],
+    cursor: Point,
+    sig: &Signature,
+) -> Option<MatchedPrompt> {
     if rows.is_empty() || cursor.y as usize >= rows.len() {
         return None;
     }
 
-    let anchor_index = rows.iter().position(|row| {
-        let lowered = row.to_ascii_lowercase();
-        sig.anchors
-            .iter()
-            .any(|anchor| lowered.contains(&anchor.to_ascii_lowercase()))
-    })?;
+    let anchor_index = lowercase_rows
+        .iter()
+        .position(|row| sig.anchors.iter().any(|anchor| row.contains(anchor)))?;
 
     let option_index = match sig.yes_label {
         Some(label) => {
@@ -433,6 +496,10 @@ fn find_signature(rows: &[RowText], cursor: Point, sig: &Signature) -> Option<Ma
         region_hash: region_hash(rows, region.clone()),
         region,
     })
+}
+
+fn lowercase_rows(rows: &[RowText]) -> Vec<RowText> {
+    rows.iter().map(|row| row.to_ascii_lowercase()).collect()
 }
 
 fn affirmative_selected(row: &str, yes_label: &str, requires_marker: bool) -> bool {
@@ -585,10 +652,12 @@ mod tests {
         let now = fixed_now();
         let mut state = AutoApproveState::default();
         let prompt = claude_edit_prompt();
+        assert!(!state.needs_static_rescan());
         assert_eq!(
             detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state),
             Decision::Hold
         );
+        assert!(state.needs_static_rescan());
         let second = detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state);
         assert!(matches!(
             second,
@@ -597,6 +666,7 @@ mod tests {
                 ..
             }
         ));
+        assert!(!state.needs_static_rescan());
 
         let mut state = AutoApproveState::default();
         let _ = detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state);
@@ -653,6 +723,43 @@ mod tests {
             detect_and_update_any_agent(&changed, cursor(1), base_ctx(now), &mut state),
             Decision::Fire { .. }
         ));
+    }
+
+    #[test]
+    fn fire_waits_for_feedback_before_consuming_prompt() {
+        let now = fixed_now();
+        let prompt = claude_edit_prompt();
+        let mut state = AutoApproveState::default();
+        let _ = detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state);
+        let decision = detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state);
+        let Decision::Fire {
+            signature,
+            region_hash,
+            ..
+        } = decision
+        else {
+            panic!("second stable scan should fire: {decision:?}");
+        };
+
+        assert_eq!(
+            detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state),
+            Decision::Hold,
+            "pending candidates must not spam the main thread"
+        );
+
+        state.apply_feedback(signature, region_hash, false, now);
+        assert!(state.needs_static_rescan());
+        assert!(matches!(
+            detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state),
+            Decision::Fire { .. }
+        ));
+
+        state.apply_feedback(signature, region_hash, true, now);
+        assert_eq!(
+            detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state),
+            Decision::Hold,
+            "accepted prompts stay consumed until their region changes"
+        );
     }
 
     #[test]
@@ -715,16 +822,20 @@ mod tests {
         };
         let _ = detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state);
         let decision = detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state);
+        let Decision::Fire {
+            signature,
+            region_hash,
+            disable_after,
+            ..
+        } = decision
+        else {
+            panic!("sixth approval should fire: {decision:?}");
+        };
+        assert!(disable_after);
+        state.apply_feedback(signature, region_hash, true, now);
         assert!(matches!(
-            decision,
-            Decision::Fire {
-                disable_after: true,
-                ..
-            }
-        ));
-        assert_eq!(
             detect_and_update_any_agent(&prompt, cursor(1), base_ctx(now), &mut state),
             Decision::Suppressed(SuppressReason::Disabled)
-        );
+        ));
     }
 }

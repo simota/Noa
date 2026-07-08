@@ -85,8 +85,20 @@ impl App {
             &delta,
             SessionDelta::Bell { .. } | SessionDelta::Attention { .. }
         );
+        let upsert_window = match &delta {
+            SessionDelta::Upsert { id, .. } => Some(id.window_id),
+            _ => None,
+        };
         let pane_id = delta.id().pane_id;
         self.session_store.apply(delta);
+        if let Some(session_window_id) = upsert_window
+            && let Some(state) = self.windows.get(&WindowId::from(session_window_id.0))
+        {
+            self.session_store.set_auto_approve_for_window(
+                session_window_id,
+                state.auto_approve_enabled.load(Ordering::Relaxed),
+            );
+        }
         self.request_sidebar_redraw();
         if flags_overview_tile {
             self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));

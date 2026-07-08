@@ -56,9 +56,9 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::AutoApprove {
                 id,
                 signature,
-                bytes,
+                region_hash,
                 disable_after,
-            } => self.handle_auto_approve(id, signature, bytes, disable_after),
+            } => self.handle_auto_approve(id, signature, region_hash, disable_after),
             UserEvent::ClipboardWrite {
                 window_id,
                 pane_id,

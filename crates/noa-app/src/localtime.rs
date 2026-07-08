@@ -21,3 +21,13 @@ pub(crate) fn local_offset_seconds() -> i64 {
 pub(crate) fn local_offset_seconds() -> i64 {
     0
 }
+
+/// Current local civil wall-clock used by session sidebar timestamps and
+/// auto-approve audit entries.
+pub(crate) fn wall_clock_now() -> crate::session_store::WallClock {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    crate::session_store::civil_from_unix_secs(unix + local_offset_seconds())
+}

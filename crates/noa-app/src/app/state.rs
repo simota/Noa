@@ -518,6 +518,7 @@ pub(super) enum ConfirmAction {
 pub(super) struct Surface {
     pub(super) terminal: Arc<Mutex<Terminal>>,
     pub(super) pty_input_tx: crate::io_thread::PtyInputQueue,
+    pub(super) auto_approve_feedback_tx: Sender<crate::io_thread::AutoApproveFeedback>,
     pub(super) resize_tx: Sender<GridSize>,
     pub(super) io_thread: Option<crate::io_thread::IoThreadHandle>,
     pub(super) grid_size: GridSize,

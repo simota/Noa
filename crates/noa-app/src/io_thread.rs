@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError};
 use noa_core::{GridSize, Point};
@@ -24,7 +24,7 @@ use crate::auto_approve::{
 use crate::events::UserEvent;
 use crate::session_overview::OVERVIEW_TILE_MIN_RENDER_INTERVAL;
 use crate::session_store::{
-    self, PreviewLine, PreviewSpan, SessionCardId, SessionDelta, SessionWindowId, WallClock,
+    self, PreviewLine, PreviewSpan, SessionCardId, SessionDelta, SessionWindowId,
 };
 use crate::split_tree::PaneId;
 
@@ -76,6 +76,13 @@ pub(crate) struct AutoApprovePublish {
     pub(crate) guards: Arc<Mutex<AutoApproveInputGuards>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AutoApproveFeedback {
+    pub(crate) signature: AutoApproveSignature,
+    pub(crate) region_hash: u64,
+    pub(crate) accepted: bool,
+}
+
 pub(crate) type PtyInput = Box<[u8]>;
 
 pub(crate) const PTY_INPUT_QUEUE_CAPACITY: usize = 1024;
@@ -103,6 +110,11 @@ const PTY_INPUT_OVERFLOW_BYTE_CAP: usize = 64 * 1024 * 1024;
 /// the cap never fires for it), while sustained back-to-back frames refresh at
 /// ~10fps instead of freezing until output happens to stop on a frame boundary.
 const SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION: Duration = Duration::from_millis(100);
+
+/// Delay for the second stability scan when a prompt becomes static after its
+/// final pty frame. The scan stays event-driven: it is armed only after a first
+/// matching prompt frame and cancelled when the prompt changes or is consumed.
+const AUTO_APPROVE_STABILITY_RESCAN_DELAY: Duration = Duration::from_millis(350);
 
 /// Owned handle for stopping and joining a PTY io thread.
 pub(crate) struct IoThreadHandle {
@@ -304,7 +316,7 @@ struct TerminalOutput {
 
 struct AutoApproveCandidate {
     signature: AutoApproveSignature,
-    bytes: Vec<u8>,
+    region_hash: u64,
     disable_after: bool,
 }
 
@@ -498,9 +510,6 @@ fn detect_auto_approve_candidate(
         scrollback_offset: term.viewport_offset(),
         guards: *publish.guards.lock(),
     };
-    if !ctx.alt_screen && ctx.scrollback_offset != 0 {
-        return None;
-    }
     let rows = auto_approve::viewport_rows_from_terminal(term);
     let cursor = term.active().cursor;
     let decision = auto_approve::detect_and_update_any_agent(
@@ -515,26 +524,22 @@ fn detect_auto_approve_candidate(
     match decision {
         Decision::Fire {
             signature,
-            bytes,
+            region_hash,
             disable_after,
             ..
         } => Some(AutoApproveCandidate {
             signature,
-            bytes: bytes.to_vec(),
+            region_hash,
             disable_after,
         }),
         Decision::Hold | Decision::Suppressed(_) => None,
     }
 }
 
-/// Stamp a wall-clock timestamp for a sidebar upsert (FR-10): the current Unix
-/// time shifted into the viewer's local zone, decomposed into calendar fields.
-fn sidebar_wall_clock_now() -> WallClock {
-    let unix_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0);
-    session_store::civil_from_unix_secs(unix_secs + crate::localtime::local_offset_seconds())
+fn auto_approve_rescan_deadline(state: &AutoApproveState, now: Instant) -> Option<Instant> {
+    state
+        .needs_static_rescan()
+        .then_some(now + AUTO_APPROVE_STABILITY_RESCAN_DELAY)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -694,6 +699,7 @@ pub fn spawn(
     target: IoThreadTarget,
     resize_rx: Receiver<GridSize>,
     input_rx: Receiver<PtyInput>,
+    auto_approve_feedback_rx: Receiver<AutoApproveFeedback>,
     overview: OverviewPublish,
     sidebar: SidebarPublish,
     auto_approve: AutoApprovePublish,
@@ -729,16 +735,22 @@ pub fn spawn(
         // nothing is owed and the select below blocks exactly as before.
         let mut last_redraw_at: Option<Instant> = None;
         let mut sync_redraw_deadline: Option<Instant> = None;
+        let mut auto_approve_rescan_at: Option<Instant> = None;
         loop {
             let mut sel = crossbeam_channel::Select::new();
             let shutdown_op = sel.recv(&shutdown_rx);
             let pty_op = sel.recv(pty.event_rx());
             let resize_op = sel.recv(&resize_rx);
             let input_op = sel.recv(&input_rx);
+            let auto_approve_feedback_op = sel.recv(&auto_approve_feedback_rx);
 
             // Wake at whichever owed deadline comes first: an overview trailing
             // flush (Fix B defect 1) or a withheld synchronized-output redraw.
-            let next_deadline = [publish_pending_at, sync_redraw_deadline]
+            let next_deadline = [
+                publish_pending_at,
+                sync_redraw_deadline,
+                auto_approve_rescan_at,
+            ]
                 .into_iter()
                 .flatten()
                 .min();
@@ -752,6 +764,7 @@ pub fn spawn(
             let Some(oper) = selected else {
                 // A deadline elapsed with nothing else waking the thread first.
                 let now = Instant::now();
+                let mut needs_redraw = false;
                 if publish_pending_at.is_some_and(|deadline| now >= deadline) {
                     // The throttle window elapsed — flush now (Fix B defect 1).
                     flush_pending_overview_publish(
@@ -760,11 +773,40 @@ pub fn spawn(
                         &mut last_overview_publish,
                     );
                     publish_pending_at = None;
+                    needs_redraw = true;
                 }
                 if sync_redraw_deadline.is_some_and(|deadline| now >= deadline) {
                     // The synchronized-output suppression cap elapsed — force
                     // the withheld repaint so the stale frame can't persist.
                     sync_redraw_deadline = None;
+                    needs_redraw = true;
+                }
+                if auto_approve_rescan_at.is_some_and(|deadline| now >= deadline) {
+                    let candidate = {
+                        let term = terminal.lock();
+                        detect_auto_approve_candidate(
+                            &term,
+                            &auto_approve,
+                            &mut auto_approve_state,
+                        )
+                    };
+                    auto_approve_rescan_at =
+                        auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
+                    if let Some(candidate) = candidate
+                        && proxy
+                            .send_event(UserEvent::AutoApprove {
+                                id: card_id,
+                                signature: candidate.signature,
+                                region_hash: candidate.region_hash,
+                                disable_after: candidate.disable_after,
+                            })
+                            .is_err()
+                    {
+                        break; // event loop gone
+                    }
+                }
+                if !needs_redraw {
+                    continue;
                 }
                 // Either deadline means the frame the main thread holds is
                 // stale; a single redraw covers both.
@@ -800,6 +842,8 @@ pub fn spawn(
                             &auto_approve,
                             &mut auto_approve_state,
                         );
+                        auto_approve_rescan_at =
+                            auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
                         publish_pending_at = output.overview_publish_pending;
                         let sidebar_bell = output.sidebar_bell;
                         let sidebar_upsert = output.sidebar_upsert.take();
@@ -822,10 +866,7 @@ pub fn spawn(
                                     name: upsert.name,
                                     cwd: upsert.cwd,
                                     busy: upsert.busy,
-                                    auto_approve_enabled: auto_approve
-                                        .enabled
-                                        .load(Ordering::Relaxed),
-                                    updated_at: sidebar_wall_clock_now(),
+                                    updated_at: crate::localtime::wall_clock_now(),
                                     preview: upsert.preview,
                                 }))
                                 .is_err()
@@ -838,7 +879,7 @@ pub fn spawn(
                                 .send_event(UserEvent::AutoApprove {
                                     id: card_id,
                                     signature: candidate.signature,
-                                    bytes: candidate.bytes,
+                                    region_hash: candidate.region_hash,
                                     disable_after: candidate.disable_after,
                                 })
                                 .is_err()
@@ -917,7 +958,20 @@ pub fn spawn(
                     Ok(bytes) => write_pty_bytes(&writer, bytes.as_ref()),
                     Err(_) => break, // main thread / App dropped
                 },
-                _ => unreachable!("select only registers the four operations above"),
+                i if i == auto_approve_feedback_op => match oper.recv(&auto_approve_feedback_rx) {
+                    Ok(feedback) => {
+                        auto_approve_state.apply_feedback(
+                            feedback.signature,
+                            feedback.region_hash,
+                            feedback.accepted,
+                            Instant::now(),
+                        );
+                        auto_approve_rescan_at =
+                            auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
+                    }
+                    Err(_) => break, // main thread / App dropped
+                },
+                _ => unreachable!("select only registers the registered operations above"),
             }
         }
     });

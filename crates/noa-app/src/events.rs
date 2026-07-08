@@ -54,7 +54,7 @@ pub enum UserEvent {
     AutoApprove {
         id: SessionCardId,
         signature: AutoApproveSignature,
-        bytes: Vec<u8>,
+        region_hash: u64,
         disable_after: bool,
     },
     /// New terminal output is available; request a redraw.

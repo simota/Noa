@@ -49,6 +49,7 @@ pub fn preview_line_text(line: &[PreviewSpan]) -> String {
 /// outlast any in-flight message, so evicting the oldest entry is safe and
 /// keeps the map bounded rather than growing for the process lifetime.
 const TOMBSTONE_CAP: usize = 64;
+const AUTO_APPROVE_AUDIT_CAPACITY: usize = 16;
 
 /// GUI-agnostic window identity. The app boundary (PR3) converts the winit
 /// `WindowId` into this newtype so the store never sees a windowing type.
@@ -141,7 +142,7 @@ pub struct SessionCard {
     pub busy: bool,
     /// Per-tab agent-prompt auto approval is enabled for this card's tab.
     pub auto_approve_enabled: bool,
-    /// Rolling audit of injected approvals, capped by the app layer.
+    /// Rolling audit of injected approvals, capped by the store.
     pub auto_approve_audit: VecDeque<AutoApproveAuditEntry>,
     /// The tty's current foreground process name (FR — running-process display),
     /// e.g. `zsh` / `cargo` / `claude`. `None` until the session-metadata worker
@@ -187,7 +188,6 @@ pub enum SessionDelta {
         name: String,
         cwd: String,
         busy: bool,
-        auto_approve_enabled: bool,
         updated_at: WallClock,
         preview: Option<Vec<PreviewLine>>,
     },
@@ -445,21 +445,12 @@ impl SessionStore {
     }
 
     /// Append one audit item to a card's bounded ring buffer.
-    pub fn record_auto_approve(
-        &mut self,
-        id: SessionCardId,
-        entry: AutoApproveAuditEntry,
-        cap: usize,
-    ) {
+    pub fn record_auto_approve(&mut self, id: SessionCardId, entry: AutoApproveAuditEntry) {
         let Some(card) = self.cards.get_mut(&id) else {
             return;
         };
-        if cap == 0 {
-            card.auto_approve_audit.clear();
-            return;
-        }
         card.auto_approve_audit.push_back(entry);
-        while card.auto_approve_audit.len() > cap {
+        if card.auto_approve_audit.len() > AUTO_APPROVE_AUDIT_CAPACITY {
             card.auto_approve_audit.pop_front();
         }
     }
@@ -501,7 +492,6 @@ impl SessionStore {
                 name,
                 cwd,
                 busy,
-                auto_approve_enabled,
                 updated_at,
                 preview,
             } => {
@@ -524,7 +514,6 @@ impl SessionStore {
                         card.name = name;
                         card.cwd = cwd;
                         card.busy = busy;
-                        card.auto_approve_enabled = auto_approve_enabled;
                         card.updated_at = updated_at;
                         if let Some(preview) = preview {
                             card.preview = preview;
@@ -549,7 +538,7 @@ impl SessionStore {
                                 unread_bell: false,
                                 attention: false,
                                 busy,
-                                auto_approve_enabled,
+                                auto_approve_enabled: false,
                                 auto_approve_audit: VecDeque::new(),
                                 process: None,
                                 updated_at,
@@ -779,7 +768,6 @@ mod tests {
             name: name.to_string(),
             cwd: "/repo".to_string(),
             busy: false,
-            auto_approve_enabled: false,
             updated_at: wall(10, 0),
             preview: None,
         }
@@ -1014,22 +1002,29 @@ mod tests {
 
         store.set_auto_approve_for_window(id.window_id, true);
         assert!(store.get(&id).unwrap().auto_approve_enabled);
+        store.apply(upsert(id, 2, "s2"));
+        assert!(
+            store.get(&id).unwrap().auto_approve_enabled,
+            "Upsert must not revert the main-thread toggle state"
+        );
 
-        for index in 0..3 {
+        for index in 0..(AUTO_APPROVE_AUDIT_CAPACITY + 2) {
             store.record_auto_approve(
                 id,
                 AutoApproveAuditEntry {
-                    at: wall(10, index),
+                    at: wall(10, index as u32),
                     agent: "Claude Code".to_string(),
                     prompt: format!("Edit {index}"),
                 },
-                2,
             );
         }
         let card = store.get(&id).unwrap();
-        assert_eq!(card.auto_approve_audit.len(), 2);
-        assert_eq!(card.auto_approve_audit.front().unwrap().prompt, "Edit 1");
-        assert_eq!(card.auto_approve_audit.back().unwrap().prompt, "Edit 2");
+        assert_eq!(card.auto_approve_audit.len(), AUTO_APPROVE_AUDIT_CAPACITY);
+        assert_eq!(card.auto_approve_audit.front().unwrap().prompt, "Edit 2");
+        assert_eq!(
+            card.auto_approve_audit.back().unwrap().prompt,
+            format!("Edit {}", AUTO_APPROVE_AUDIT_CAPACITY + 1)
+        );
     }
 
     // AC-12 (FR-10): relative-time formatting at each boundary.
@@ -1332,7 +1327,6 @@ mod tests {
             name: "busy".to_string(),
             cwd: "/repo".to_string(),
             busy: true,
-            auto_approve_enabled: false,
             updated_at: wall(10, 0),
             preview: None,
         });

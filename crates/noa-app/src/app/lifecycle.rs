@@ -424,6 +424,8 @@ impl App {
         let terminal = Arc::new(Mutex::new(terminal));
         let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
         let (pty_input_tx, pty_input_rx) = crate::io_thread::input_channel();
+        let (auto_approve_feedback_tx, auto_approve_feedback_rx) =
+            crossbeam_channel::unbounded();
         let auto_approve_guards = Arc::new(Mutex::new(
             crate::auto_approve::AutoApproveInputGuards::default(),
         ));
@@ -447,6 +449,7 @@ impl App {
             crate::io_thread::IoThreadTarget { window_id, pane_id },
             resize_rx,
             pty_input_rx,
+            auto_approve_feedback_rx,
             overview_publish,
             sidebar_publish,
             auto_approve,
@@ -455,6 +458,7 @@ impl App {
         Ok(Surface {
             terminal,
             pty_input_tx,
+            auto_approve_feedback_tx,
             resize_tx,
             io_thread: Some(io_thread),
             grid_size,

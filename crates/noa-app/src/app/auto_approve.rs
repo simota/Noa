@@ -1,5 +1,6 @@
 use super::*;
-use crate::auto_approve::{self, AUDIT_CAPACITY, AutoApproveSignature, DetectContext};
+use crate::auto_approve::{self, AutoApproveSignature, DetectContext};
+use crate::io_thread::{AutoApproveFeedback, QueueInputResult};
 use crate::session_store::{AutoApproveAuditEntry, SessionDelta};
 use crate::sidebar::{agent_display_name, classify_agent};
 
@@ -10,23 +11,37 @@ impl App {
         &mut self,
         id: SessionCardId,
         signature: AutoApproveSignature,
-        bytes: Vec<u8>,
+        region_hash: u64,
         disable_after: bool,
     ) {
-        if bytes.as_slice() != signature.bytes() {
-            return;
-        }
-
         let window_id = WindowId::from(id.window_id.0);
         let pane_id = id.pane_id;
         if self.is_quick_terminal_window(window_id) {
             return;
         }
 
-        let Some(state) = self.windows.get(&window_id) else {
+        let Some((feedback_tx, pane_live, auto_enabled)) =
+            self.windows.get(&window_id).and_then(|state| {
+                state.surfaces.get(&pane_id).map(|surface| {
+                    (
+                        surface.auto_approve_feedback_tx.clone(),
+                        state.contains_pane(pane_id),
+                        state.auto_approve_enabled.load(Ordering::Relaxed),
+                    )
+                })
+            })
+        else {
             return;
         };
-        if !state.contains_pane(pane_id) || !state.auto_approve_enabled.load(Ordering::Relaxed) {
+        let reject = || {
+            let _ = feedback_tx.send(AutoApproveFeedback {
+                signature,
+                region_hash,
+                accepted: false,
+            });
+        };
+        if !pane_live || !auto_enabled {
+            reject();
             return;
         }
 
@@ -35,9 +50,11 @@ impl App {
             .get(&id)
             .and_then(|card| card.process.clone())
         else {
+            reject();
             return;
         };
         if classify_agent(&process) != signature.agent() {
+            reject();
             return;
         }
 
@@ -47,6 +64,7 @@ impl App {
                 .get(&window_id)
                 .and_then(|state| state.surfaces.get(&pane_id))
             else {
+                reject();
                 return;
             };
             let terminal = surface.terminal.lock();
@@ -56,9 +74,6 @@ impl App {
                 scrollback_offset: terminal.viewport_offset(),
                 guards: *surface.auto_approve_guards.lock(),
             };
-            if !ctx.alt_screen && ctx.scrollback_offset != 0 {
-                return;
-            }
             let rows = auto_approve::viewport_rows_from_terminal(&terminal);
             let cursor = terminal.active().cursor;
             auto_approve::rescan_signature(
@@ -71,19 +86,31 @@ impl App {
                 ctx,
             )
         };
-        if live_match.is_none() {
+        if !live_match.is_some_and(|matched| matched.region_hash == region_hash) {
+            reject();
             return;
         }
 
-        self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+        match self.queue_pane_pty_bytes(window_id, pane_id, signature.bytes()) {
+            QueueInputResult::Queued | QueueInputResult::Deferred => {}
+            QueueInputResult::Dropped | QueueInputResult::Disconnected => {
+                reject();
+                return;
+            }
+        }
+        let _ = feedback_tx.send(AutoApproveFeedback {
+            signature,
+            region_hash,
+            accepted: true,
+        });
+
         self.session_store.record_auto_approve(
             id,
             AutoApproveAuditEntry {
-                at: auto_approve_wall_clock_now(),
+                at: crate::localtime::wall_clock_now(),
                 agent: agent_display_name(signature.agent(), &process).to_string(),
                 prompt: signature.label().to_string(),
             },
-            AUDIT_CAPACITY,
         );
         self.auto_approve_flash_until
             .insert(id, Instant::now() + AUTO_APPROVE_FLASH_DURATION);
@@ -168,12 +195,4 @@ impl App {
             guards.mark_user_input(now);
         }
     }
-}
-
-fn auto_approve_wall_clock_now() -> crate::session_store::WallClock {
-    let unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0);
-    crate::session_store::civil_from_unix_secs(unix + crate::localtime::local_offset_seconds())
 }

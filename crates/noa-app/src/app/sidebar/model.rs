@@ -67,7 +67,7 @@ impl App {
 
         // Card text on the flat backdrop, plus a rounded overlay for every
         // fully-visible card (FR-2). Partially-scrolled cards stay flat.
-        let now = sidebar_wall_clock_now();
+        let now = crate::localtime::wall_clock_now();
         let now_instant = Instant::now();
         let home = std::env::var("HOME").ok();
         let palette = &active_theme(&gpu.theme, &gpu.preview_theme).palette;
@@ -513,14 +513,4 @@ fn emit_card_text(
             .unwrap_or(chrome().dim_fg);
         out.extend(window_run(to_cell, *rect, text, fg, false));
     }
-}
-
-/// Wall-clock now, in the viewer's local zone, for the sidebar's relative
-/// updated-time (mirrors the io thread's stamp so both agree).
-fn sidebar_wall_clock_now() -> crate::session_store::WallClock {
-    let unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0);
-    crate::session_store::civil_from_unix_secs(unix + crate::localtime::local_offset_seconds())
 }

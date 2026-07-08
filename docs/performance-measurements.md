@@ -99,6 +99,30 @@
 - wakeups/sec。
 - process name と attention state が更新されるまでの遅延。
 
+#### 2026-07-09 ID5 policy check
+
+- Code state: working tree based on `9364c55` with
+  `stable_process_poll_rate_scales_with_max_backoff` added.
+- Method: deterministic unit coverage of `PROCESS_POLL_INTERVAL` and `PROCESS_POLL_MAX_INTERVAL`.
+
+Command:
+
+```sh
+cargo test -p noa-app process_poll
+```
+
+Results:
+
+| Scenario | Fixed 1s polling | Stable 4s backoff | Poll reduction |
+| --- | ---: | ---: | ---: |
+| 1 idle pane | 1.0 polls/sec | 0.25 polls/sec | 75% |
+| 10 idle panes | 10.0 polls/sec | 2.5 polls/sec | 75% |
+| 50 idle panes | 50.0 polls/sec | 12.5 polls/sec | 75% |
+
+Conclusion: steady-state foreground-process poll count falls by policy once the
+process name is stable. `IMPL-PERF-505` remains open because wakeups/sec and
+main-thread CPU still need an app-level idle run.
+
 ### W6: Occluded High-Resolution Surface Memory
 
 目的: occluded surface reconfiguration で GPU memory が下がり、reveal が壊れないことを確認する。

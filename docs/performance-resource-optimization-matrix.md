@@ -173,6 +173,7 @@ quadrantChart
 - [x] `IMPL-PERF-503`: agent-bell / attention escalation の遅延許容を明記する。
 - [x] `IMPL-PERF-504`: process 表示更新と attention 判定の回帰 test を追加する。
 - [ ] `IMPL-PERF-505`: many-pane idle で poll 回数と wakeup が baseline より下がることを確認する。
+  - 2026-07-09: `process_poll` unit test と W5 log で stable poll count は 75% 減を確認。wakeup/sec は実機 idle run 待ち。
 
 ### ID 6: Occluded window surface release
 

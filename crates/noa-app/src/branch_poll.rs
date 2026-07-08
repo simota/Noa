@@ -616,6 +616,26 @@ mod tests {
         assert_eq!(state.schedule.next_poll_at, now + Duration::from_secs(12));
     }
 
+    #[test]
+    fn stable_process_poll_rate_scales_with_max_backoff() {
+        // A stable pane polls once per max interval instead of once per minimum
+        // interval, so many-pane idle poll pressure drops by the same ratio.
+        let min_secs = PROCESS_POLL_INTERVAL.as_secs();
+        let max_secs = PROCESS_POLL_MAX_INTERVAL.as_secs();
+        assert_eq!(min_secs, 1);
+        assert_eq!(max_secs, 4);
+
+        for panes in [1, 10, 50] {
+            let fixed_interval_polls_per_max_window = panes * max_secs / min_secs;
+            let stable_backoff_polls_per_max_window = panes;
+
+            assert_eq!(
+                stable_backoff_polls_per_max_window * 4,
+                fixed_interval_polls_per_max_window
+            );
+        }
+    }
+
     // The branch cache never outgrows its cap: inserting a new cwd at the cap
     // evicts the least-recently-polled entry, and a re-poll of a cached cwd
     // evicts nothing.

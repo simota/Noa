@@ -81,6 +81,30 @@ pub(crate) fn preferred_surface_alpha_mode(
         .unwrap_or(wgpu::CompositeAlphaMode::Auto)
 }
 
+const OCCLUDED_SURFACE_EXTENT: u32 = 1;
+
+pub(crate) fn effective_surface_config(
+    config: &wgpu::SurfaceConfiguration,
+    occluded: bool,
+) -> wgpu::SurfaceConfiguration {
+    let mut effective = config.clone();
+    if occluded {
+        effective.width = OCCLUDED_SURFACE_EXTENT;
+        effective.height = OCCLUDED_SURFACE_EXTENT;
+    }
+    effective
+}
+
+pub(crate) fn configure_wgpu_surface(
+    surface: &wgpu::Surface<'static>,
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+    occluded: bool,
+) {
+    let effective = effective_surface_config(config, occluded);
+    surface.configure(device, &effective);
+}
+
 pub(crate) fn focus_report_bytes(focused: bool, focus_reporting: bool) -> Option<&'static [u8]> {
     if !focus_reporting {
         return None;

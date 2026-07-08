@@ -175,8 +175,10 @@ quadrantChart
 ### ID 6: Occluded window surface release
 
 - [ ] `IMPL-PERF-601`: 高解像度 + 多 tab で GPU memory baseline を取る。
-- [ ] `IMPL-PERF-602`: wgpu 27 の public API で surface を安全に解放・再構成できる方式を確認する。
-- [ ] `IMPL-PERF-603`: `WindowState` の `surface` / `surface_config` / `renderer` lifecycle 変更範囲を設計する。
+- [x] `IMPL-PERF-602`: wgpu 27 の public API で surface を安全に解放・再構成できる方式を確認する。
+  - `Surface::unconfigure` ではなく、occluded 中だけ `Surface::configure` へ渡す effective config を 1x1 に縮める。
+- [x] `IMPL-PERF-603`: `WindowState` の `surface` / `surface_config` / `renderer` lifecycle 変更範囲を設計する。
+  - `surface_config` は論理的な最新 window size として保持し、実際の configure size だけ occluded gate で切り替える。
 - [ ] `IMPL-PERF-604`: occluded/unoccluded、resize、scale factor change、overview host の回帰 scenario を確認する。
 - [ ] `IMPL-PERF-605`: 再表示 latency と GPU memory 削減量の tradeoff を記録する。
 

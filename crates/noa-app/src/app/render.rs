@@ -196,7 +196,12 @@ impl App {
                 if !matches!(e, wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) {
                     log::warn!("surface error: {e}; reconfiguring");
                 }
-                state.surface.configure(&gpu.device, &state.surface_config);
+                configure_wgpu_surface(
+                    &state.surface,
+                    &gpu.device,
+                    &state.surface_config,
+                    state.occluded,
+                );
                 state.window.request_redraw();
                 return;
             }

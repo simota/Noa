@@ -220,6 +220,41 @@ fn initial_window_size_converts_physical_metrics_to_logical_size() {
     assert_eq!(size.height, 392.0);
 }
 
+fn test_surface_config(width: u32, height: u32) -> wgpu::SurfaceConfiguration {
+    wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: wgpu::TextureFormat::Bgra8Unorm,
+        width,
+        height,
+        present_mode: wgpu::PresentMode::Fifo,
+        desired_maximum_frame_latency: 2,
+        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+        view_formats: vec![],
+    }
+}
+
+#[test]
+fn effective_surface_config_preserves_visible_size() {
+    let config = test_surface_config(3840, 2160);
+    let effective = effective_surface_config(&config, false);
+
+    assert_eq!(effective.width, 3840);
+    assert_eq!(effective.height, 2160);
+    assert_eq!(config.width, 3840);
+    assert_eq!(config.height, 2160);
+}
+
+#[test]
+fn effective_surface_config_minimizes_occluded_size_without_mutating_state_config() {
+    let config = test_surface_config(3840, 2160);
+    let effective = effective_surface_config(&config, true);
+
+    assert_eq!(effective.width, 1);
+    assert_eq!(effective.height, 1);
+    assert_eq!(config.width, 3840);
+    assert_eq!(config.height, 2160);
+}
+
 #[test]
 fn surface_format_prefers_non_srgb_for_native_gamma_correct_blending() {
     // WP3 / REQ-AA-1 / AC-WP3-01: a non-sRGB surface format keeps the

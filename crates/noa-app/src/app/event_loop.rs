@@ -247,8 +247,17 @@ impl ApplicationHandler<UserEvent> for App {
                 if !occluded {
                     self.reset_cursor_blink_phase();
                 }
+                let gpu = self.gpu.as_ref();
                 if let Some(state) = self.windows.get_mut(&window_id) {
                     state.occluded = occluded;
+                    if let Some(gpu) = gpu {
+                        configure_wgpu_surface(
+                            &state.surface,
+                            &gpu.device,
+                            &state.surface_config,
+                            state.occluded,
+                        );
+                    }
                     if !occluded {
                         state.window.request_redraw();
                     }
@@ -585,7 +594,12 @@ impl App {
         }
         state.surface_config.width = size.width;
         state.surface_config.height = size.height;
-        state.surface.configure(&gpu.device, &state.surface_config);
+        configure_wgpu_surface(
+            &state.surface,
+            &gpu.device,
+            &state.surface_config,
+            state.occluded,
+        );
         state.renderer.resize(PixelSize {
             w: size.width,
             h: size.height,

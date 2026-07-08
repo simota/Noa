@@ -604,9 +604,12 @@ impl App {
         let frame = match host_state.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                host_state
-                    .surface
-                    .configure(&gpu.device, &host_state.surface_config);
+                configure_wgpu_surface(
+                    &host_state.surface,
+                    &gpu.device,
+                    &host_state.surface_config,
+                    host_state.occluded,
+                );
                 host_state.window.request_redraw();
                 return;
             }

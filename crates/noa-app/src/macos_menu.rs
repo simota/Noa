@@ -9,20 +9,30 @@ use winit::{dpi::PhysicalPosition, event_loop::EventLoopProxy, window::Window};
 
 use crate::{AppCommand, FontSizeAction, SearchAction, TerminalAction, UserEvent, ViewportScroll};
 
+const AUTO_APPROVE_MENU_LABEL_OFF: &str = "Auto Approve: Off";
+const AUTO_APPROVE_MENU_LABEL_ON: &str = "Auto Approve: On";
+
 const SPLIT_CONTEXT_MENU_ITEMS: &[(AppCommand, &str)] = &[
     (AppCommand::NewSplitRight, "Split Right"),
     (AppCommand::NewSplitDown, "Split Down"),
     (AppCommand::EqualizeSplits, "Equalize Splits"),
     (AppCommand::ToggleSplitZoom, "Toggle Split Zoom"),
-    (AppCommand::ToggleAutoApprove, "Auto Approve: Off"),
+    (AppCommand::ToggleAutoApprove, AUTO_APPROVE_MENU_LABEL_OFF),
     (AppCommand::SetTabTitle, "Set Tab Title\u{2026}"),
 ];
 
+const SPLIT_RIGHT_ITEM: usize = 0;
+const SPLIT_DOWN_ITEM: usize = 1;
+const EQUALIZE_SPLITS_ITEM: usize = 2;
+const TOGGLE_SPLIT_ZOOM_ITEM: usize = 3;
+const TOGGLE_AUTO_APPROVE_ITEM: usize = 4;
+const SET_TAB_TITLE_ITEM: usize = 5;
+
 fn auto_approve_menu_label(enabled: bool) -> &'static str {
     if enabled {
-        "Auto Approve: On"
+        AUTO_APPROVE_MENU_LABEL_ON
     } else {
-        "Auto Approve: Off"
+        AUTO_APPROVE_MENU_LABEL_OFF
     }
 }
 
@@ -407,21 +417,22 @@ impl MacosMenu {
 }
 
 fn build_split_context_menu() -> anyhow::Result<(Menu, CheckMenuItem)> {
-    let split_right = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[0]);
-    let split_down = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[1]);
+    let split_right = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_RIGHT_ITEM]);
+    let split_down = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_DOWN_ITEM]);
     let separator = PredefinedMenuItem::separator();
-    let equalize = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[2]);
-    let toggle_zoom = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[3]);
+    let equalize = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[EQUALIZE_SPLITS_ITEM]);
+    let toggle_zoom = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[TOGGLE_SPLIT_ZOOM_ITEM]);
+    let auto_approve_spec = SPLIT_CONTEXT_MENU_ITEMS[TOGGLE_AUTO_APPROVE_ITEM];
     let auto_approve = CheckMenuItem::with_id(
-        AppCommand::ToggleAutoApprove.menu_id(),
-        auto_approve_menu_label(false),
+        auto_approve_spec.0.menu_id(),
+        auto_approve_spec.1,
         true,
         false,
         None,
     );
     // Ghostty parity: "Change Title" lives on the surface context menu too.
     let title_separator = PredefinedMenuItem::separator();
-    let set_tab_title = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[5]);
+    let set_tab_title = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SET_TAB_TITLE_ITEM]);
 
     let menu = Menu::with_id_and_items(
         "noa.menu.split-context",

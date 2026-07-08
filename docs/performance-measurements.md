@@ -137,3 +137,37 @@ cargo test -p noa-grid --release bench_push_throughput_and_memory_bound -- --ign
 - bulk print と scrollback push の rows/sec。
 - retained scrollback bytes。
 - 保存済み baseline と比べた allocation または wall-clock regression の有無。
+
+#### 2026-07-09 ID7 comparison
+
+- Baseline commit: `b90eca7` (`perf(overview): reuse snapshot slots`)
+- Current commit: `1ab4c87` (`docs(perf): define measurement workloads`)
+- Machine / OS: local macOS environment, display scale not relevant for `noa-grid` probes.
+- Method: current checkout plus a temporary detached worktree at `/private/tmp/noa-id7-baseline`.
+
+Commands:
+
+```sh
+cargo test -p noa-grid inlined_cell_is_48_bytes
+cargo test -p noa-grid --release bulk_print_throughput_probe -- --ignored --nocapture
+cargo test -p noa-grid --release bench_push_throughput_and_memory_bound -- --ignored --nocapture
+```
+
+Results:
+
+| Metric | Baseline `b90eca7` | Current `1ab4c87` | Notes |
+| --- | --- | --- | --- |
+| `std::mem::size_of::<Cell>()` | 64 bytes | 48 bytes | 16 bytes/cell reduction. |
+| Bulk print ascii run 1 | 132 MB/s | 136 MB/s | Same order of magnitude. |
+| Bulk print utf8 run 1 | 173 MB/s | 171 MB/s | Same order of magnitude. |
+| Bulk print ascii run 2 | 160 MB/s | 159 MB/s | Warm run. |
+| Bulk print utf8 run 2 | 178 MB/s | 175 MB/s | Warm run. |
+| Scrollback push run 1 | 1,818,942 rows/s | 1,673,140 rows/s | Current lower in this wall-clock probe. |
+| Scrollback push run 2 | 1,933,784 rows/s | 1,683,075 rows/s | Current lower again; needs a steadier perf harness before closing `IMPL-PERF-705`. |
+| Retained scrollback bytes | 9,964,160 bytes | 9,964,160 bytes | Packed scrollback storage unchanged. |
+
+Conclusion: retained live/snapshot cell size is reduced, and bulk-print throughput
+does not show a clear regression in this quick probe. `IMPL-PERF-705` remains
+open because the scrollback push wall-clock probe was lower on current in two
+runs; use a steadier benchmark or allocation sampler before declaring the
+workload fully non-regressed.

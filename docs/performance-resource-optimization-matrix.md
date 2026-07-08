@@ -193,6 +193,7 @@ quadrantChart
   - `combining: String` は維持し、`clone_from` / `set_from` の buffer reuse を失わない設計にした。
 - [x] `IMPL-PERF-704`: wide cell、combining、hyperlink、scrollback materialization、search/url の回帰 test を追加する。
 - [ ] `IMPL-PERF-705`: retained size が下がり、主要 workload の CPU/alloc が悪化しないことを確認する。
+  - 2026-07-09: `docs/performance-measurements.md` に W7 quick probe を保存。`Cell` は 64B → 48B、bulk print は同等。scrollback push が低く出たため、完了扱いにはせず追加計測待ち。
 
 ## Explanation
 

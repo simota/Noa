@@ -118,13 +118,15 @@ quadrantChart
 
 ### 共通準備
 
-- [ ] `IMPL-PERF-000`: 対象 workload を決める。
+- [x] `IMPL-PERF-000`: 対象 workload を決める。
   - 例: background idle、bulk PTY output、Session Overview + active output、
     many-pane idle、高解像度多 tab。
+  - `docs/performance-measurements.md` に W1-W7 として定義した。
 - [ ] `IMPL-PERF-001`: 変更前 baseline を保存する。
   - CPU: wakeup 数、redraw request 数、frame time、main-thread CPU。
   - メモリ: RSS、GPU memory、allocation count、allocation bytes。
-- [ ] `IMPL-PERF-002`: 変更ごとの測定コマンド、手順、結果メモの置き場所を決める。
+- [x] `IMPL-PERF-002`: 変更ごとの測定コマンド、手順、結果メモの置き場所を決める。
+  - 測定手順と結果メモの追記先は `docs/performance-measurements.md`。
 - [x] `IMPL-PERF-003`: `cargo fmt --all` と対象 crate の test 範囲を確認する。
 
 ### ID 1: Cursor blink OS focus gate

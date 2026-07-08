@@ -110,6 +110,16 @@ pub enum StatusDot {
     Red,
 }
 
+/// One auto-approve audit entry shown on the session card. The store keeps the
+/// ring buffer as pure data; the app layer decides when an approval is valid
+/// and records only a non-sensitive agent/prompt summary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoApproveAuditEntry {
+    pub at: WallClock,
+    pub agent: String,
+    pub prompt: String,
+}
+
 /// One session's card state. `name` is the title reported by the shell (OSC
 /// 0/2); `name_override` is a user rename (FR-7) that shadows it — see
 /// [`SessionCard::display_name`]. `seq` is the per-card generation carried by
@@ -129,6 +139,10 @@ pub struct SessionCard {
     /// card's window gains focus.
     pub attention: bool,
     pub busy: bool,
+    /// Per-tab agent-prompt auto approval is enabled for this card's tab.
+    pub auto_approve_enabled: bool,
+    /// Rolling audit of injected approvals, capped by the app layer.
+    pub auto_approve_audit: VecDeque<AutoApproveAuditEntry>,
     /// The tty's current foreground process name (FR — running-process display),
     /// e.g. `zsh` / `cargo` / `claude`. `None` until the session-metadata worker
     /// resolves it, or where detection is unavailable (non-macOS, NFR-5).
@@ -173,6 +187,7 @@ pub enum SessionDelta {
         name: String,
         cwd: String,
         busy: bool,
+        auto_approve_enabled: bool,
         updated_at: WallClock,
         preview: Option<Vec<PreviewLine>>,
     },
@@ -420,6 +435,35 @@ impl SessionStore {
         }
     }
 
+    /// Mirror a per-tab auto-approve toggle into every card in that tab.
+    pub fn set_auto_approve_for_window(&mut self, window_id: SessionWindowId, enabled: bool) {
+        for (id, card) in self.cards.iter_mut() {
+            if id.window_id == window_id {
+                card.auto_approve_enabled = enabled;
+            }
+        }
+    }
+
+    /// Append one audit item to a card's bounded ring buffer.
+    pub fn record_auto_approve(
+        &mut self,
+        id: SessionCardId,
+        entry: AutoApproveAuditEntry,
+        cap: usize,
+    ) {
+        let Some(card) = self.cards.get_mut(&id) else {
+            return;
+        };
+        if cap == 0 {
+            card.auto_approve_audit.clear();
+            return;
+        }
+        card.auto_approve_audit.push_back(entry);
+        while card.auto_approve_audit.len() > cap {
+            card.auto_approve_audit.pop_front();
+        }
+    }
+
     /// The number of live cards whose program is running (FR-5 header status).
     pub fn busy_count(&self) -> usize {
         self.cards.values().filter(|card| card.busy).count()
@@ -457,6 +501,7 @@ impl SessionStore {
                 name,
                 cwd,
                 busy,
+                auto_approve_enabled,
                 updated_at,
                 preview,
             } => {
@@ -479,6 +524,7 @@ impl SessionStore {
                         card.name = name;
                         card.cwd = cwd;
                         card.busy = busy;
+                        card.auto_approve_enabled = auto_approve_enabled;
                         card.updated_at = updated_at;
                         if let Some(preview) = preview {
                             card.preview = preview;
@@ -503,6 +549,8 @@ impl SessionStore {
                                 unread_bell: false,
                                 attention: false,
                                 busy,
+                                auto_approve_enabled,
+                                auto_approve_audit: VecDeque::new(),
                                 process: None,
                                 updated_at,
                                 preview: preview.unwrap_or_default(),
@@ -731,6 +779,7 @@ mod tests {
             name: name.to_string(),
             cwd: "/repo".to_string(),
             busy: false,
+            auto_approve_enabled: false,
             updated_at: wall(10, 0),
             preview: None,
         }
@@ -892,6 +941,8 @@ mod tests {
             unread_bell: false,
             attention: false,
             busy: false,
+            auto_approve_enabled: false,
+            auto_approve_audit: VecDeque::new(),
             process: None,
             updated_at: wall(10, 0),
             preview: Vec::new(),
@@ -952,6 +1003,33 @@ mod tests {
         let card = store.get(&id).unwrap();
         assert!(!card.attention);
         assert!(!card.unread_bell);
+    }
+
+    #[test]
+    fn auto_approve_toggle_and_audit_are_card_state() {
+        let mut store = SessionStore::new();
+        let id = card_id(1, 1);
+        store.apply(upsert(id, 1, "s"));
+        assert!(!store.get(&id).unwrap().auto_approve_enabled);
+
+        store.set_auto_approve_for_window(id.window_id, true);
+        assert!(store.get(&id).unwrap().auto_approve_enabled);
+
+        for index in 0..3 {
+            store.record_auto_approve(
+                id,
+                AutoApproveAuditEntry {
+                    at: wall(10, index),
+                    agent: "Claude Code".to_string(),
+                    prompt: format!("Edit {index}"),
+                },
+                2,
+            );
+        }
+        let card = store.get(&id).unwrap();
+        assert_eq!(card.auto_approve_audit.len(), 2);
+        assert_eq!(card.auto_approve_audit.front().unwrap().prompt, "Edit 1");
+        assert_eq!(card.auto_approve_audit.back().unwrap().prompt, "Edit 2");
     }
 
     // AC-12 (FR-10): relative-time formatting at each boundary.
@@ -1254,6 +1332,7 @@ mod tests {
             name: "busy".to_string(),
             cwd: "/repo".to_string(),
             busy: true,
+            auto_approve_enabled: false,
             updated_at: wall(10, 0),
             preview: None,
         });

@@ -142,6 +142,30 @@ main-thread CPU still need an app-level idle run.
 - Surface lost/outdated error。
 - resize、scale factor change、overview rendering 後の visual correctness。
 
+#### 2026-07-09 ID6 unit coverage check
+
+- Code state: `69b23ab` (`test(app): cover stable process poll backoff rate`)
+- Method: unit coverage for occluded effective surface config and overview occlusion redraw gating.
+
+Commands:
+
+```sh
+cargo test -p noa-app effective_surface_config
+cargo test -p noa-app overview_redraw_decision
+```
+
+Results:
+
+| Check | Result | Coverage |
+| --- | --- | --- |
+| `effective_surface_config_minimizes_occluded_size_without_mutating_state_config` | pass | occluded configure size becomes 1x1 while logical `surface_config` keeps the real window size. |
+| `effective_surface_config_preserves_visible_size` | pass | visible configure size stays equal to the logical `surface_config`. |
+| `overview_redraw_decision_respects_visibility_and_occlusion` | pass | overview redraw requests respect source and host occlusion gates. |
+
+Conclusion: unit-level lifecycle invariants for occlusion and overview gating are
+covered. `IMPL-PERF-604` remains open until an app-level reveal/resize/scale
+factor/overview visual run is recorded.
+
 ### W7: Cell Layout Retained Size
 
 目的: `Cell` retained size が下がり、明確な throughput regression がないことを確認する。

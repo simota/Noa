@@ -183,6 +183,7 @@ quadrantChart
 - [x] `IMPL-PERF-603`: `WindowState` の `surface` / `surface_config` / `renderer` lifecycle 変更範囲を設計する。
   - `surface_config` は論理的な最新 window size として保持し、実際の configure size だけ occluded gate で切り替える。
 - [ ] `IMPL-PERF-604`: occluded/unoccluded、resize、scale factor change、overview host の回帰 scenario を確認する。
+  - 2026-07-09: W6 log に unit-level occlusion config / overview redraw gate 確認を保存。実機 reveal/resize/scale factor/overview visual run は未実施。
 - [ ] `IMPL-PERF-605`: 再表示 latency と GPU memory 削減量の tradeoff を記録する。
 
 ### ID 7: `Cell` layout compaction

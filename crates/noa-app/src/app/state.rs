@@ -18,11 +18,15 @@ pub(super) struct GpuState {
     /// terminal, sidebar band, palette, overview labels) draws with the same
     /// three pipelines per format, so each is compiled once and cloned out.
     pub(super) pipelines: noa_render::PipelineCache,
+    /// Format-keyed shared atlas textures for the app-wide terminal font.
+    pub(super) font_atlases: noa_render::GlyphAtlasCache,
     pub(super) font: FontGrid,
     /// Dedicated, smaller font for the session sidebar (mockup-dense typography,
     /// [`SIDEBAR_FONT_POINT_SIZE`]), sized independently of the terminal font
     /// and rebuilt on a scale change alongside `font`.
     pub(super) sidebar_font: FontGrid,
+    /// Format-keyed shared atlas textures for the dedicated sidebar/UI font.
+    pub(super) sidebar_font_atlases: noa_render::GlyphAtlasCache,
     pub(super) theme: Theme,
     /// The theme-settings-ui live-preview override (R-6): when `Some`, every
     /// draw-path theme read must go through [`active_theme`] instead of
@@ -85,8 +89,10 @@ pub(super) struct ChromeTextures {
     /// synthetic terminal cells (Omen T3: one renderer for every card, never
     /// per-card). Built lazily for the first window's surface format.
     pub(super) sidebar_renderer: Option<Renderer>,
-    /// Rounded-card pipeline reused to composite the rasterized sidebar band
-    /// onto each window's surface (CardStyle/overlay_texture_cards).
+    /// Rounded-card pipeline reused while composing the cached sidebar band:
+    /// card/menu/button/divider scratch textures are stamped into the offscreen
+    /// band texture with straight RGBA replacement, then that one band texture
+    /// is composited onto the window surface below.
     pub(super) sidebar_card: Option<OverviewChromeCardPipeline>,
     /// Alpha-blending variant used only for the band backdrop composite: the
     /// band texture is transparent outside its text runs, so blending lets the
@@ -95,11 +101,16 @@ pub(super) struct ChromeTextures {
     /// pipeline above stays in charge of cards/menu/divider whose translucency
     /// must settle to `background-opacity` exactly.
     pub(super) sidebar_band_card: Option<OverviewChromeCardPipeline>,
-    /// The band texture the sidebar rasterizes into, cached with its size so it
-    /// is reused frame-to-frame and only reallocated when the band dimensions
-    /// change (a window resize or sidebar-width change). This holds the band's
-    /// text runs over a transparent base that per-card rounded cards overlay.
+    /// The final sidebar band texture, cached with its size so it is reused
+    /// frame-to-frame and only reallocated when the band dimensions change (a
+    /// window resize or sidebar-width change). On a sidebar raster-cache hit,
+    /// this already contains the band, cards, menu, divider, and toolbar.
     pub(super) sidebar_band: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// The exact input key that produced [`sidebar_band`](Self::sidebar_band).
+    /// When the next redraw sees the same key and the texture still exists, it
+    /// skips every synthetic-terminal raster pass and only composites the
+    /// cached band texture onto the window surface.
+    pub(super) sidebar_raster_cache_key: Option<super::sidebar::SidebarRasterCacheKey>,
     /// Reused scratch texture for one rounded session card (inset x card
     /// height): each visible card is rendered into it then composited as a
     /// rounded card in turn, so a single texture serves every card without a
@@ -157,6 +168,7 @@ impl ChromeTextures {
         self.sidebar_card = None;
         self.sidebar_band_card = None;
         self.sidebar_band = None;
+        self.sidebar_raster_cache_key = None;
         self.sidebar_card_tex = None;
         self.sidebar_menu_tex = None;
         self.sidebar_button_tex = None;
@@ -703,6 +715,7 @@ mod chrome_textures_tests {
         assert!(textures.sidebar_card.is_none());
         assert!(textures.sidebar_band_card.is_none());
         assert!(textures.sidebar_band.is_none());
+        assert!(textures.sidebar_raster_cache_key.is_none());
         assert!(textures.sidebar_card_tex.is_none());
         assert!(textures.sidebar_menu_tex.is_none());
         assert!(textures.sidebar_button_tex.is_none());

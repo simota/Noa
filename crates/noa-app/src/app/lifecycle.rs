@@ -170,6 +170,7 @@ impl App {
                 device,
                 queue,
                 pipelines: noa_render::PipelineCache::default(),
+                font_atlases: noa_render::GlyphAtlasCache::default(),
                 font: first_font.expect("first tab must initialize the font"),
                 sidebar_font: FontGrid::new(
                     sidebar_font_pixel_size(window_scale_factor),
@@ -182,6 +183,7 @@ impl App {
                         e,
                     )
                 }),
+                sidebar_font_atlases: noa_render::GlyphAtlasCache::default(),
                 theme: {
                     let theme = crate::theme::resolve_theme_with_overrides(
                         self.config.theme.as_deref(),
@@ -235,10 +237,14 @@ impl App {
             surface.configure(&gpu.device, &surface_config);
 
             let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
+            let font_atlases =
+                gpu.font_atlases
+                    .get(&gpu.device, &gpu.queue, surface_format, &gpu.font);
             let mut renderer = Renderer::with_pipelines(
                 &gpu.device,
                 &gpu.queue,
                 &pipelines,
+                &font_atlases,
                 &mut gpu.font,
                 self.padding,
             )

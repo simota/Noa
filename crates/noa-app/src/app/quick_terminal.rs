@@ -386,10 +386,14 @@ impl App {
             };
             surface.configure(&gpu.device, &surface_config);
             let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
+            let font_atlases =
+                gpu.font_atlases
+                    .get(&gpu.device, &gpu.queue, surface_format, &gpu.font);
             let mut renderer = Renderer::with_pipelines(
                 &gpu.device,
                 &gpu.queue,
                 &pipelines,
+                &font_atlases,
                 &mut gpu.font,
                 self.padding,
             )

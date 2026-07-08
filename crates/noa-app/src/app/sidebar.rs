@@ -202,6 +202,7 @@ fn rgb_to_rgba(color: Rgb) -> [f32; 4] {
 /// cells (used by the `…` menu popup and the selected-card accent bar); `None`
 /// leaves the underlying background showing. `bold` renders the run's cells in
 /// the bold weight (card names).
+#[derive(Clone, Debug, PartialEq)]
 struct SidebarTextRun {
     col: u16,
     row: u16,
@@ -228,6 +229,7 @@ impl SidebarTextRun {
 /// per-card grid, background color, selection flag, and the text runs in the
 /// card's local texture space. Only fully-visible cards get one; partially
 /// scrolled cards stay flat on the backdrop.
+#[derive(Clone, Debug, PartialEq)]
 struct SidebarCardDraw {
     rect: SidebarRect,
     grid: GridSize,
@@ -245,6 +247,7 @@ struct SidebarCardDraw {
 
 /// The open card `…` menu popup, composited above the cards so a rounded card
 /// can never hide it.
+#[derive(Clone, Debug, PartialEq)]
 struct SidebarMenuDraw {
     rect: SidebarRect,
     grid: GridSize,
@@ -256,6 +259,7 @@ struct SidebarMenuDraw {
 /// (header/toolbar chrome + every card's text) rasterized into the band
 /// texture; `cards` are the per-card rounded overlays drawn on top for fully
 /// visible cards; `menu` is the optional popup above them all.
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct SidebarDrawModel {
     inset: u32,
     height: u32,
@@ -319,4 +323,4 @@ pub(super) use palette::{ScrollThumb, draw_bell_flash, draw_scrollbar_thumbs};
 pub(super) use palette::{
     draw_command_palette_card, draw_confirm_dialog_card, draw_theme_settings_card, draw_toast_card,
 };
-pub(super) use render::draw_sidebar_band;
+pub(super) use render::{SidebarRasterCacheKey, draw_sidebar_band};

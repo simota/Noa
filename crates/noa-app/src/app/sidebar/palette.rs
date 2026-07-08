@@ -45,10 +45,14 @@ fn ensure_overlay_card_gpu(
         || gpu.palette_padding != interior
     {
         let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
+        let font_atlases = gpu
+            .font_atlases
+            .get(&gpu.device, &gpu.queue, surface_format, &gpu.font);
         gpu.palette_renderer = Renderer::with_pipelines(
             &gpu.device,
             &gpu.queue,
             &pipelines,
+            &font_atlases,
             &mut gpu.font,
             interior,
         )

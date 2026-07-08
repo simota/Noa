@@ -2,6 +2,19 @@ use std::fmt::Write as _;
 
 use super::*;
 
+const SIDEBAR_OFFSCREEN_BLEND: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::Zero,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::Zero,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
 /// Rasterize one synthetic sidebar grid (background + positioned text/dots)
 /// with the reused `Renderer` into `view`. `base_bg` fills the empty cells and
 /// the clear color so a card texture reads as its own surface. `bg_opacity`
@@ -96,6 +109,99 @@ pub(super) fn ensure_scratch(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SidebarFontCacheKey {
+    atlas_identity: u64,
+    mask_atlas_generation: u64,
+    color_atlas_generation: u64,
+    atlas_eviction_generation: u64,
+}
+
+impl SidebarFontCacheKey {
+    fn from_font(font: &FontGrid) -> Self {
+        Self {
+            atlas_identity: font.atlas_identity(),
+            mask_atlas_generation: font.mask_atlas_generation(),
+            color_atlas_generation: font.color_atlas_generation(),
+            atlas_eviction_generation: font.atlas_eviction_generation(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(in crate::app) struct SidebarRasterCacheKey {
+    surface_format: wgpu::TextureFormat,
+    padding: GridPadding,
+    theme: Theme,
+    chrome: crate::chrome::ChromePalette,
+    font: SidebarFontCacheKey,
+    model: SidebarDrawModel,
+}
+
+impl SidebarRasterCacheKey {
+    fn new(
+        surface_format: wgpu::TextureFormat,
+        padding: GridPadding,
+        theme: &Theme,
+        chrome: crate::chrome::ChromePalette,
+        font: &FontGrid,
+        model: &SidebarDrawModel,
+    ) -> Self {
+        Self {
+            surface_format,
+            padding,
+            theme: theme.clone(),
+            chrome,
+            font: SidebarFontCacheKey::from_font(font),
+            model: model.clone(),
+        }
+    }
+}
+
+fn sidebar_cache_hit(
+    previous: Option<&SidebarRasterCacheKey>,
+    next: &SidebarRasterCacheKey,
+) -> bool {
+    previous.is_some_and(|previous| previous == next)
+}
+
+fn composite_sidebar_band_cache(
+    gpu: &GpuState,
+    view: &wgpu::TextureView,
+    surface_size: PixelSize,
+    model: &SidebarDrawModel,
+) {
+    let flat_style = CardStyle {
+        background: rgb_to_rgba(active_theme(&gpu.theme, &gpu.preview_theme).default_bg),
+        border_color: [0.0; 4],
+        focus_color: [0.0, 0.0, 0.0, 1.0],
+        corner_radius: 0.0,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: SEAM_SHADOW_WIDTH * model.scale,
+    };
+    gpu.chrome_textures
+        .sidebar_band_card
+        .as_ref()
+        .unwrap()
+        .pipeline
+        .overlay_texture_cards(
+            &gpu.device,
+            &gpu.queue,
+            view,
+            surface_size,
+            &flat_style,
+            &[CardTexturePlacement {
+                texture_view: &gpu.chrome_textures.sidebar_band.as_ref().unwrap().2,
+                x: 0,
+                y: 0,
+                w: model.inset,
+                h: model.height,
+                selected: true,
+            }],
+        );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SidebarCardFrame {
     Resting,
     Selected,
@@ -135,10 +241,17 @@ pub(in crate::app) fn draw_sidebar_band(
         .is_none_or(|renderer| renderer.target_format() != surface_format)
     {
         let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
+        let sidebar_font_atlases = gpu.sidebar_font_atlases.get(
+            &gpu.device,
+            &gpu.queue,
+            surface_format,
+            &gpu.sidebar_font,
+        );
         gpu.chrome_textures.sidebar_renderer = Renderer::with_pipelines(
             &gpu.device,
             &gpu.queue,
             &pipelines,
+            &sidebar_font_atlases,
             &mut gpu.sidebar_font,
             padding,
         )
@@ -154,9 +267,10 @@ pub(in crate::app) fn draw_sidebar_band(
     {
         gpu.chrome_textures.sidebar_card = Some(OverviewChromeCardPipeline {
             format: surface_format,
-            // Alpha-replace so card/menu/divider composites settle to a uniform
-            // background-opacity alpha instead of accumulating toward opaque.
-            pipeline: CardPipeline::new(&gpu.device, surface_format, CardPipeline::ALPHA_REPLACE),
+            // The sidebar cache texture is sampled one frame later as straight
+            // RGBA, so offscreen composition must replace color+alpha instead
+            // of premultiplying translucent cards into the cache.
+            pipeline: CardPipeline::new(&gpu.device, surface_format, SIDEBAR_OFFSCREEN_BLEND),
         });
         #[cfg(debug_assertions)]
         gpu.chrome_textures.record_rebuild();
@@ -186,16 +300,42 @@ pub(in crate::app) fn draw_sidebar_band(
         w: model.inset.max(1),
         h: model.height.max(1),
     };
-    if ensure_scratch(
+    let sidebar_band_rebuilt = ensure_scratch(
         &mut gpu.chrome_textures.sidebar_band,
         &gpu.device,
         band_size,
         surface_format,
         "noa-sidebar-band",
-    ) {
+    );
+    if sidebar_band_rebuilt {
         #[cfg(debug_assertions)]
         gpu.chrome_textures.record_rebuild();
+        gpu.chrome_textures.sidebar_raster_cache_key = None;
     }
+    if gpu.chrome_textures.sidebar_renderer.is_none()
+        || gpu.chrome_textures.sidebar_card.is_none()
+        || gpu.chrome_textures.sidebar_band_card.is_none()
+        || gpu.chrome_textures.sidebar_band.is_none()
+    {
+        return;
+    }
+
+    let next_cache_key = SidebarRasterCacheKey::new(
+        surface_format,
+        padding,
+        active_theme(&gpu.theme, &gpu.preview_theme),
+        chrome(),
+        &gpu.sidebar_font,
+        model,
+    );
+    if sidebar_cache_hit(
+        gpu.chrome_textures.sidebar_raster_cache_key.as_ref(),
+        &next_cache_key,
+    ) {
+        composite_sidebar_band_cache(gpu, view, surface_size, model);
+        return;
+    }
+
     if !model.cards.is_empty()
         && ensure_scratch(
             &mut gpu.chrome_textures.sidebar_card_tex,
@@ -227,66 +367,23 @@ pub(in crate::app) fn draw_sidebar_band(
         gpu.chrome_textures.record_rebuild();
     }
 
-    if gpu.chrome_textures.sidebar_renderer.is_none()
-        || gpu.chrome_textures.sidebar_card.is_none()
-        || gpu.chrome_textures.sidebar_band_card.is_none()
-        || gpu.chrome_textures.sidebar_band.is_none()
-    {
-        return;
-    }
-
-    // 1) Band text runs over a fully transparent base → band texture,
-    // alpha-blended over the inset with no rounding, so the pane pass's clear
-    // color + background image underneath stay untouched and the band's
-    // background is pixel-identical to the panes'. The placement is drawn
-    // `selected` with a black focus color and zero focus stroke, which turns
-    // the card shader's outer glow into a soft shadow the band casts onto the
-    // panes — the seam's depth cue (its crisp line is the hairline below).
-    {
-        let band_view = &gpu.chrome_textures.sidebar_band.as_ref().unwrap().2;
-        rasterize_runs(
-            gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
-            &gpu.device,
-            &gpu.queue,
-            &mut gpu.sidebar_font,
-            active_theme(&gpu.theme, &gpu.preview_theme),
-            band_view,
-            band_size,
-            model.grid,
-            active_theme(&gpu.theme, &gpu.preview_theme).default_bg,
-            0.0,
-            &model.runs,
-        );
-    }
-    let flat_style = CardStyle {
-        background: rgb_to_rgba(active_theme(&gpu.theme, &gpu.preview_theme).default_bg),
-        border_color: [0.0; 4],
-        focus_color: [0.0, 0.0, 0.0, 1.0],
-        corner_radius: 0.0,
-        border_width: 0.0,
-        focus_width: 0.0,
-        focus_glow_width: SEAM_SHADOW_WIDTH * model.scale,
-    };
-    gpu.chrome_textures
-        .sidebar_band_card
-        .as_ref()
-        .unwrap()
-        .pipeline
-        .overlay_texture_cards(
-            &gpu.device,
-            &gpu.queue,
-            view,
-            surface_size,
-            &flat_style,
-            &[CardTexturePlacement {
-                texture_view: &gpu.chrome_textures.sidebar_band.as_ref().unwrap().2,
-                x: 0,
-                y: 0,
-                w: model.inset,
-                h: model.height,
-                selected: true,
-            }],
-        );
+    // 1) Band text runs over a fully transparent base. The rest of this path
+    // stamps every sidebar overlay into the same offscreen texture; a cache
+    // hit returns above and reuses that finished texture.
+    let band_view = &gpu.chrome_textures.sidebar_band.as_ref().unwrap().2;
+    rasterize_runs(
+        gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
+        &gpu.device,
+        &gpu.queue,
+        &mut gpu.sidebar_font,
+        active_theme(&gpu.theme, &gpu.preview_theme),
+        band_view,
+        band_size,
+        model.grid,
+        active_theme(&gpu.theme, &gpu.preview_theme).default_bg,
+        0.0,
+        &model.runs,
+    );
 
     // 1b) Hairline divider over the band's rightmost pixel(s): a solid
     // `chrome().divider` strip that gives the seam a crisp edge against the
@@ -341,8 +438,8 @@ pub(in crate::app) fn draw_sidebar_band(
                 .overlay_texture_cards(
                     &gpu.device,
                     &gpu.queue,
-                    view,
-                    surface_size,
+                    band_view,
+                    band_size,
                     &divider_style,
                     &[CardTexturePlacement {
                         texture_view: divider_view,
@@ -418,8 +515,8 @@ pub(in crate::app) fn draw_sidebar_band(
                 .overlay_texture_cards(
                     &gpu.device,
                     &gpu.queue,
-                    view,
-                    surface_size,
+                    band_view,
+                    band_size,
                     &button_style,
                     &[CardTexturePlacement {
                         texture_view: &gpu.chrome_textures.sidebar_button_tex.as_ref().unwrap().2,
@@ -482,8 +579,8 @@ pub(in crate::app) fn draw_sidebar_band(
             .overlay_texture_cards(
                 &gpu.device,
                 &gpu.queue,
-                view,
-                surface_size,
+                band_view,
+                band_size,
                 &bar_style,
                 &[
                     CardTexturePlacement {
@@ -561,8 +658,8 @@ pub(in crate::app) fn draw_sidebar_band(
             .overlay_texture_cards(
                 &gpu.device,
                 &gpu.queue,
-                view,
-                surface_size,
+                band_view,
+                band_size,
                 style,
                 &[CardTexturePlacement {
                     texture_view: &gpu.chrome_textures.sidebar_card_tex.as_ref().unwrap().2,
@@ -625,8 +722,8 @@ pub(in crate::app) fn draw_sidebar_band(
                         .overlay_texture_cards(
                             &gpu.device,
                             &gpu.queue,
-                            view,
-                            surface_size,
+                            band_view,
+                            band_size,
                             &accent_style,
                             &[CardTexturePlacement {
                                 texture_view: accent_view,
@@ -692,8 +789,8 @@ pub(in crate::app) fn draw_sidebar_band(
                 .overlay_texture_cards(
                     &gpu.device,
                     &gpu.queue,
-                    view,
-                    surface_size,
+                    band_view,
+                    band_size,
                     &drop_style,
                     &[CardTexturePlacement {
                         texture_view: drop_view,
@@ -733,8 +830,8 @@ pub(in crate::app) fn draw_sidebar_band(
             .overlay_texture_cards(
                 &gpu.device,
                 &gpu.queue,
-                view,
-                surface_size,
+                band_view,
+                band_size,
                 &card_style,
                 &[CardTexturePlacement {
                     texture_view: &gpu.chrome_textures.sidebar_card_tex.as_ref().unwrap().2,
@@ -784,8 +881,8 @@ pub(in crate::app) fn draw_sidebar_band(
             .overlay_texture_cards(
                 &gpu.device,
                 &gpu.queue,
-                view,
-                surface_size,
+                band_view,
+                band_size,
                 &menu_style,
                 &[CardTexturePlacement {
                     texture_view: &gpu.chrome_textures.sidebar_menu_tex.as_ref().unwrap().2,
@@ -797,11 +894,75 @@ pub(in crate::app) fn draw_sidebar_band(
                 }],
             );
     }
+
+    gpu.chrome_textures.sidebar_raster_cache_key = Some(SidebarRasterCacheKey::new(
+        surface_format,
+        padding,
+        active_theme(&gpu.theme, &gpu.preview_theme),
+        chrome(),
+        &gpu.sidebar_font,
+        model,
+    ));
+    composite_sidebar_band_cache(gpu, view, surface_size, model);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noa_core::Rgb;
+
+    fn cache_model() -> SidebarDrawModel {
+        SidebarDrawModel {
+            inset: 240,
+            height: 600,
+            scale: 2.0,
+            card_h: 120,
+            card_w: 216,
+            grid: GridSize { cols: 24, rows: 40 },
+            runs: vec![SidebarTextRun::new(
+                1,
+                1,
+                "sidebar".to_string(),
+                Rgb::new(1, 2, 3),
+            )],
+            new_button: SidebarRect::new(200, 4, 28, 22),
+            new_button_hover: false,
+            cards: vec![SidebarCardDraw {
+                rect: SidebarRect::new(8, 40, 216, 120),
+                grid: GridSize { cols: 24, rows: 8 },
+                bg: Rgb::new(10, 11, 12),
+                selected: true,
+                attention: false,
+                accent: None,
+                runs: vec![SidebarTextRun::new(
+                    1,
+                    1,
+                    "card".to_string(),
+                    Rgb::new(4, 5, 6),
+                )],
+            }],
+            menu: None,
+            dragging: None,
+            drop_indicator: None,
+            background_opacity: 0.85,
+        }
+    }
+
+    fn cache_key(model: SidebarDrawModel) -> SidebarRasterCacheKey {
+        SidebarRasterCacheKey {
+            surface_format: wgpu::TextureFormat::Bgra8Unorm,
+            padding: GridPadding::ZERO,
+            theme: Theme::new(),
+            chrome: crate::chrome::CHROME_DARK,
+            font: SidebarFontCacheKey {
+                atlas_identity: 1,
+                mask_atlas_generation: 2,
+                color_atlas_generation: 3,
+                atlas_eviction_generation: 4,
+            },
+            model,
+        }
+    }
 
     #[test]
     fn attention_frame_does_not_override_selected_sidebar_card() {
@@ -809,5 +970,45 @@ mod tests {
         assert_eq!(sidebar_card_frame(false, true), SidebarCardFrame::Attention);
         assert_eq!(sidebar_card_frame(true, false), SidebarCardFrame::Selected);
         assert_eq!(sidebar_card_frame(true, true), SidebarCardFrame::Selected);
+    }
+
+    #[test]
+    fn identical_sidebar_raster_key_hits() {
+        let key = cache_key(cache_model());
+        let next = key.clone();
+
+        assert!(sidebar_cache_hit(Some(&key), &next));
+        assert!(!sidebar_cache_hit(None, &next));
+    }
+
+    #[test]
+    fn sidebar_raster_key_misses_when_model_changes() {
+        let model = cache_model();
+        let previous = cache_key(model.clone());
+        let mut changed_hover = model.clone();
+        changed_hover.new_button_hover = true;
+        let mut changed_text = model;
+        changed_text.runs[0].text.push_str(" changed");
+
+        assert!(!sidebar_cache_hit(
+            Some(&previous),
+            &cache_key(changed_hover)
+        ));
+        assert!(!sidebar_cache_hit(
+            Some(&previous),
+            &cache_key(changed_text)
+        ));
+    }
+
+    #[test]
+    fn sidebar_raster_key_misses_when_external_inputs_change() {
+        let previous = cache_key(cache_model());
+        let mut changed_theme = previous.clone();
+        changed_theme.theme.default_bg = Rgb::new(9, 8, 7);
+        let mut changed_font = previous.clone();
+        changed_font.font.mask_atlas_generation += 1;
+
+        assert!(!sidebar_cache_hit(Some(&previous), &changed_theme));
+        assert!(!sidebar_cache_hit(Some(&previous), &changed_font));
     }
 }

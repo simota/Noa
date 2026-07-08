@@ -967,6 +967,71 @@ mod tests {
         assert_eq!(lines, vec!["three", "four", "five"]);
     }
 
+    // Agent "intermediate output" — a spinner/status line rewritten in place
+    // (cursor-up + EL, no newline) — must flow into successive upserts'
+    // previews: this is what makes a busy agent's card read as live.
+    #[test]
+    fn preview_tracks_in_place_intermediate_output_rewrites() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 8))));
+        let mut stream = noa_vt::Stream::new();
+        let overview = test_overview_publish();
+        let mut last_overview_publish = None;
+        let sidebar = test_sidebar_publish(true);
+
+        let preview_texts = |output: &TerminalOutput| -> Vec<String> {
+            output
+                .sidebar_upsert
+                .as_ref()
+                .expect("visible feed publishes")
+                .preview
+                .as_ref()
+                .expect("visible feed extracts preview")
+                .iter()
+                .map(|line| session_store::preview_line_text(line))
+                .collect()
+        };
+
+        // Codex-style bottom UI: spinner, prompt, footer.
+        let mut last_sidebar_publish = None;
+        let output = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"Reviewing changes (1)\r\n> prompt\r\nfooter",
+            &overview,
+            &mut last_overview_publish,
+            &sidebar,
+            &mut last_sidebar_publish,
+        );
+        assert!(
+            preview_texts(&output)
+                .iter()
+                .any(|l| l.contains("Reviewing changes (1)"))
+        );
+
+        // The spinner ticks by rewriting its own row: cursor up ×2, clear the
+        // line, print the new frame. A fresh throttle window (as after 100ms)
+        // must publish the rewritten text.
+        let mut last_sidebar_publish = None;
+        let output = feed_terminal(
+            &terminal,
+            &mut stream,
+            b"\x1b[2A\r\x1b[2KReviewing changes (2)\x1b[2B\r",
+            &overview,
+            &mut last_overview_publish,
+            &sidebar,
+            &mut last_sidebar_publish,
+        );
+        let lines = preview_texts(&output);
+        assert!(
+            lines.iter().any(|l| l.contains("Reviewing changes (2)")),
+            "rewritten spinner must reach the preview: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("(1)")),
+            "the stale frame must be gone: {lines:?}"
+        );
+    }
+
     #[test]
     fn feed_terminal_preserves_utf8_split_across_pty_reads() {
         let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(4, 1))));

@@ -548,7 +548,7 @@ enum PtyDrainTerminalEvent {
 
 fn drain_queued_pty_data(
     rx: &Receiver<noa_pty::PtyEvent>,
-    chunks: &mut Vec<Box<[u8]>>,
+    chunks: &mut Vec<noa_pty::PtyData>,
     mut buffered_bytes: usize,
 ) -> Option<PtyDrainTerminalEvent> {
     while buffered_bytes < PTY_DATA_DRAIN_BYTE_LIMIT {
@@ -1395,10 +1395,8 @@ mod tests {
     #[test]
     fn drain_queued_pty_data_preserves_data_before_terminal_event() {
         let (tx, rx) = crossbeam_channel::unbounded();
-        tx.send(noa_pty::PtyEvent::Data(
-            b"queued".to_vec().into_boxed_slice(),
-        ))
-        .unwrap();
+        tx.send(noa_pty::PtyEvent::Data(b"queued".to_vec().into()))
+            .unwrap();
         tx.send(noa_pty::PtyEvent::Exit(0)).unwrap();
 
         let mut chunks = Vec::new();
@@ -1412,9 +1410,9 @@ mod tests {
     #[test]
     fn drain_queued_pty_data_stops_after_byte_cap() {
         let (tx, rx) = crossbeam_channel::unbounded();
-        tx.send(noa_pty::PtyEvent::Data(b"a".to_vec().into_boxed_slice()))
+        tx.send(noa_pty::PtyEvent::Data(b"a".to_vec().into()))
             .unwrap();
-        tx.send(noa_pty::PtyEvent::Data(b"b".to_vec().into_boxed_slice()))
+        tx.send(noa_pty::PtyEvent::Data(b"b".to_vec().into()))
             .unwrap();
 
         let mut chunks = Vec::new();

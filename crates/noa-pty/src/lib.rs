@@ -5,11 +5,13 @@
 //! Spawns a PTY-backed shell, streams output bytes out over a
 //! [`crossbeam_channel`] as [`PtyEvent`]s, and accepts input bytes / resizes.
 
+mod data;
 mod pty;
 mod reader;
 mod shell_integration;
 mod writer;
 
+pub use data::PtyData;
 pub use pty::{ForegroundProcessProbe, Pty, PtyConfig};
 pub use writer::PtyWriter;
 
@@ -17,7 +19,7 @@ pub use writer::PtyWriter;
 #[derive(Debug)]
 pub enum PtyEvent {
     /// A chunk of bytes read from the PTY master.
-    Data(Box<[u8]>),
+    Data(PtyData),
     /// The child process exited with the given status code.
     Exit(i32),
     /// An error occurred while reading from the PTY master.

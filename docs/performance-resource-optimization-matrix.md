@@ -157,10 +157,10 @@ quadrantChart
 ### ID 4: PTY reader buffer reuse / pooling
 
 - [ ] `IMPL-PERF-401`: bulk output で `Box<[u8]>` allocation count/bytes の baseline を取る。
-- [ ] `IMPL-PERF-402`: buffer reuse の上限を決める。
+- [x] `IMPL-PERF-402`: buffer reuse の上限を決める。
   - burst 後に 64KiB buffer が大量常駐しないことを完了条件に含める。
-- [ ] `IMPL-PERF-403`: `PtyEvent::Data` の所有権 model を維持するか、変更範囲を明示する。
-- [ ] `IMPL-PERF-404`: EOF/error、receiver dropped、bounded queue full の挙動を確認する。
+- [x] `IMPL-PERF-403`: `PtyEvent::Data` の所有権 model を維持するか、変更範囲を明示する。
+- [x] `IMPL-PERF-404`: EOF/error、receiver dropped、bounded queue full の挙動を確認する。
 - [ ] `IMPL-PERF-405`: bulk output throughput と allocation churn が baseline より改善することを確認する。
 
 ### ID 5: Foreground process polling backoff

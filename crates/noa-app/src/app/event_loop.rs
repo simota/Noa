@@ -203,6 +203,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(true) => {
                 self.focused = Some(window_id);
                 self.os_focused = Some(window_id);
+                self.reset_cursor_blink_phase();
                 // A window gaining focus clears its cards' unread bells (FR-11).
                 self.clear_session_bell_for_window(window_id);
                 // The native tab bar appears/disappears without a `Resized`
@@ -243,6 +244,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Occluded(occluded) => {
+                if !occluded {
+                    self.reset_cursor_blink_phase();
+                }
                 if let Some(state) = self.windows.get_mut(&window_id) {
                     state.occluded = occluded;
                     if !occluded {
@@ -273,8 +277,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // blink phase and restarts the interval, matching common
                     // terminal behavior (typing shouldn't leave the cursor
                     // stuck invisible mid-blink).
-                    self.cursor_blink_visible = true;
-                    self.cursor_blink_deadline = None;
+                    self.reset_cursor_blink_phase();
                 }
                 // IME composition and the modal UI layers (confirm dialog,
                 // search prompt, command palette) fully own the keyboard while

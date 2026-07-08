@@ -3,17 +3,28 @@
 
 use super::*;
 
+fn cursor_blink_focus_gate<Window: Copy + PartialEq>(
+    sticky_focused: Option<Window>,
+    os_focused: Option<Window>,
+    window_id: Window,
+    occluded: bool,
+) -> bool {
+    sticky_focused == Some(window_id) && os_focused == Some(window_id) && !occluded
+}
+
 impl App {
     /// Whether the focused pane has a displayable `Blinking*` cursor.
     fn focused_cursor_wants_blink(&self) -> bool {
         let Some(window_id) = self.focused else {
             return false;
         };
-        let Some(surface) = self
-            .windows
-            .get(&window_id)
-            .and_then(WindowState::focused_surface)
-        else {
+        let Some(state) = self.windows.get(&window_id) else {
+            return false;
+        };
+        if !cursor_blink_focus_gate(self.focused, self.os_focused, window_id, state.occluded) {
+            return false;
+        }
+        let Some(surface) = state.focused_surface() else {
             return false;
         };
         let terminal = surface.terminal.lock();
@@ -28,11 +39,15 @@ impl App {
             )
     }
 
+    pub(super) fn reset_cursor_blink_phase(&mut self) {
+        self.cursor_blink_visible = true;
+        self.cursor_blink_deadline = None;
+    }
+
     /// Advance the cursor blink phase and return the next wake-up deadline.
     pub(super) fn tick_cursor_blink(&mut self) -> Option<Instant> {
         if !self.focused_cursor_wants_blink() {
-            self.cursor_blink_visible = true;
-            self.cursor_blink_deadline = None;
+            self.reset_cursor_blink_phase();
             return None;
         }
 
@@ -247,5 +262,27 @@ impl App {
         self.overview_wake_deadline = None;
         self.request_overview_redraw();
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cursor_blink_focus_gate;
+
+    #[test]
+    fn cursor_blink_focus_gate_requires_real_os_focus_and_visibility() {
+        assert!(cursor_blink_focus_gate(Some(1_u8), Some(1_u8), 1_u8, false));
+        assert!(
+            !cursor_blink_focus_gate(Some(1_u8), None, 1_u8, false),
+            "sticky focus alone must not keep cursor blink armed while the app is backgrounded"
+        );
+        assert!(!cursor_blink_focus_gate(
+            Some(1_u8),
+            Some(2_u8),
+            1_u8,
+            false
+        ));
+        assert!(!cursor_blink_focus_gate(Some(1_u8), Some(1_u8), 1_u8, true));
+        assert!(!cursor_blink_focus_gate(None, Some(1_u8), 1_u8, false));
     }
 }

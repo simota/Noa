@@ -86,7 +86,7 @@ impl App {
                 ctx,
             )
         };
-        if !live_match.is_some_and(|matched| matched.region_hash == region_hash) {
+        if live_match.is_none_or(|matched| matched.region_hash != region_hash) {
             reject();
             return;
         }

@@ -984,6 +984,7 @@ mod tests {
             name: name.to_string(),
             cwd: cwd.to_string(),
             busy: false,
+            auto_approve_enabled: false,
             updated_at: wall(10, 0),
             preview: Some(plain_preview(&["line one", "line two"])),
         });
@@ -1092,7 +1093,10 @@ mod tests {
             // Claude Code's native installer names the versioned executable
             // after its bare version, so the accounting name is the version.
             ("2.1.203", ClaudeCode),
-            ("/Users/dev/.local/share/claude/versions/2.1.203", ClaudeCode),
+            (
+                "/Users/dev/.local/share/claude/versions/2.1.203",
+                ClaudeCode,
+            ),
             ("2", Generic),
             ("1.2.3a", Generic),
             ("Claude", ClaudeCode),
@@ -1212,6 +1216,7 @@ mod tests {
             name: "shell".to_string(),
             cwd: "/repo".to_string(),
             busy: false,
+            auto_approve_enabled: false,
             updated_at: wall(10, 0),
             preview: None,
         });
@@ -1226,6 +1231,7 @@ mod tests {
             name: "shell".to_string(),
             cwd: "/repo".to_string(),
             busy: true,
+            auto_approve_enabled: false,
             updated_at: wall(10, 0),
             preview: None,
         });

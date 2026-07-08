@@ -407,8 +407,16 @@ impl App {
         let initial_rect = PaneRectApp::new(0, 0, surface_config.width, surface_config.height);
         let metrics = self.gpu.as_ref()?.font.metrics();
         let grid = grid_size_for_pane_rect(initial_rect, metrics, self.padding);
+        let auto_approve_enabled = Arc::new(AtomicBool::new(false));
         let initial_surface = self
-            .spawn_pane_surface(window_id, initial_pane, grid, initial_rect, None)
+            .spawn_pane_surface(
+                window_id,
+                initial_pane,
+                grid,
+                initial_rect,
+                None,
+                auto_approve_enabled.clone(),
+            )
             .ok()?;
         let mut surfaces = HashMap::new();
         surfaces.insert(initial_pane, initial_surface);
@@ -432,6 +440,7 @@ impl App {
                 occluded: false,
                 title: "Noa".to_string(),
                 title_override: None,
+                auto_approve_enabled,
                 sidebar_scroll: 0,
                 sidebar_button_hover: false,
                 sidebar_card_hover: None,

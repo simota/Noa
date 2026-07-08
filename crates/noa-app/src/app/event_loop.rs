@@ -53,6 +53,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.apply_session_delta(delta)
             }
+            UserEvent::AutoApprove {
+                id,
+                signature,
+                bytes,
+                disable_after,
+            } => self.handle_auto_approve(id, signature, bytes, disable_after),
             UserEvent::ClipboardWrite {
                 window_id,
                 pane_id,
@@ -206,6 +212,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // when the layout is unchanged (same grid ⇒ no SIGWINCH).
                 self.relayout_and_resize_window(window_id);
                 self.report_focus_event(window_id, true);
+                self.sync_macos_auto_approve_menu_state(window_id);
                 self.secure_input
                     .on_focus_change(true, &mut crate::secure_input::CarbonSecureInput);
                 if let Some(state) = self.windows.get(&window_id) {
@@ -422,6 +429,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // Typing follows the prompt: writing keyboard input snaps
                     // a scrolled-back viewport to the live bottom (Ghostty
                     // behavior).
+                    self.mark_focused_pane_user_input(window_id);
                     self.snap_focused_viewport_to_bottom(window_id);
                     self.write_pty_bytes(window_id, &bytes);
                 }
@@ -658,6 +666,7 @@ impl App {
                 cell,
                 self.modifiers,
             ) {
+                self.mark_pane_user_input(window_id, pane_id);
                 self.write_pane_pty_bytes(window_id, pane_id, &bytes);
             }
             return;
@@ -779,6 +788,7 @@ impl App {
                 && let Some(bytes) =
                     mouse::encode_mouse_input(format, tracking, button, state, cell, self.modifiers)
             {
+                self.mark_pane_user_input(window_id, pane_id);
                 self.write_pane_pty_bytes(window_id, pane_id, &bytes);
             }
 
@@ -883,6 +893,7 @@ impl App {
             cell,
             self.modifiers,
         ) {
+            self.mark_pane_user_input(window_id, pane_id);
             self.write_pane_pty_bytes(window_id, pane_id, &bytes);
             return;
         }
@@ -905,6 +916,7 @@ impl App {
                     MouseWheelViewportScroll::Down(rows) => (false, rows),
                 };
                 let bytes = mouse::alternate_scroll_bytes(up, rows, app_cursor_keys);
+                self.mark_pane_user_input(window_id, pane_id);
                 self.write_pane_pty_bytes(window_id, pane_id, &bytes);
                 return;
             }
@@ -945,10 +957,16 @@ impl App {
             .windows
             .get_mut(&window_id)
             .and_then(|state| state.focused_surface_mut())
-            .and_then(|surface| surface.ime_state.handle_event(&event));
+            .and_then(|surface| {
+                let bytes = surface.ime_state.handle_event(&event);
+                surface.auto_approve_guards.lock().ime_preedit_active =
+                    surface.ime_state.preedit_active();
+                bytes
+            });
 
         if let (Some(pane_id), Some(bytes)) = (pane_id, bytes) {
             // Committed IME text follows the prompt like typed keys do.
+            self.mark_pane_user_input(window_id, pane_id);
             self.snap_focused_viewport_to_bottom(window_id);
             self.write_pane_pty_bytes(window_id, pane_id, &bytes);
         }

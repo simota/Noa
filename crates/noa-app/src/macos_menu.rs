@@ -14,8 +14,17 @@ const SPLIT_CONTEXT_MENU_ITEMS: &[(AppCommand, &str)] = &[
     (AppCommand::NewSplitDown, "Split Down"),
     (AppCommand::EqualizeSplits, "Equalize Splits"),
     (AppCommand::ToggleSplitZoom, "Toggle Split Zoom"),
+    (AppCommand::ToggleAutoApprove, "Auto Approve: Off"),
     (AppCommand::SetTabTitle, "Set Tab Title\u{2026}"),
 ];
+
+fn auto_approve_menu_label(enabled: bool) -> &'static str {
+    if enabled {
+        "Auto Approve: On"
+    } else {
+        "Auto Approve: Off"
+    }
+}
 
 /// Holds the native menu alive for the lifetime of the winit event loop.
 pub(crate) struct MacosMenu {
@@ -24,6 +33,8 @@ pub(crate) struct MacosMenu {
     /// The "Secure Keyboard Entry" item, retained so its checkmark can track
     /// the toggle state (see [`MacosMenu::set_secure_keyboard_entry_checked`]).
     secure_keyboard_entry: CheckMenuItem,
+    auto_approve: CheckMenuItem,
+    split_context_auto_approve: CheckMenuItem,
 }
 
 impl MacosMenu {
@@ -44,6 +55,13 @@ impl MacosMenu {
         let secure_keyboard_entry = CheckMenuItem::with_id(
             AppCommand::ToggleSecureKeyboardEntry.menu_id(),
             "Secure Keyboard Entry",
+            true,
+            false,
+            None,
+        );
+        let auto_approve = CheckMenuItem::with_id(
+            AppCommand::ToggleAutoApprove.menu_id(),
+            auto_approve_menu_label(false),
             true,
             false,
             None,
@@ -254,6 +272,7 @@ impl MacosMenu {
                     true,
                     Some(cmd_shift_accelerator(Code::KeyS)),
                 ),
+                &auto_approve,
                 &PredefinedMenuItem::separator(),
                 &disabled_item("noa.view.toggle-full-screen", "Toggle Full Screen"),
             ],
@@ -334,8 +353,10 @@ impl MacosMenu {
 
         Ok(Self {
             _menu: menu,
-            split_context_menu,
+            split_context_auto_approve: split_context_menu.1,
+            split_context_menu: split_context_menu.0,
             secure_keyboard_entry,
+            auto_approve,
         })
     }
 
@@ -344,11 +365,24 @@ impl MacosMenu {
         self.secure_keyboard_entry.set_checked(checked);
     }
 
+    /// Reflect the focused tab's Auto Approve state in both the app menu and
+    /// pane context menu so the toggle is discoverable without opening the
+    /// sidebar.
+    pub(crate) fn set_auto_approve_checked(&self, checked: bool) {
+        let label = auto_approve_menu_label(checked);
+        self.auto_approve.set_checked(checked);
+        self.auto_approve.set_text(label);
+        self.split_context_auto_approve.set_checked(checked);
+        self.split_context_auto_approve.set_text(label);
+    }
+
     pub(crate) fn show_split_context_menu(
         &self,
         window: &Window,
         position: Option<PhysicalPosition<f64>>,
+        auto_approve_enabled: bool,
     ) -> anyhow::Result<()> {
+        self.set_auto_approve_checked(auto_approve_enabled);
         let raw_handle = window.window_handle()?.as_raw();
         let ns_view = match raw_handle {
             RawWindowHandle::AppKit(handle) => handle.ns_view.as_ptr(),
@@ -372,17 +406,24 @@ impl MacosMenu {
     }
 }
 
-fn build_split_context_menu() -> anyhow::Result<Menu> {
+fn build_split_context_menu() -> anyhow::Result<(Menu, CheckMenuItem)> {
     let split_right = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[0]);
     let split_down = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[1]);
     let separator = PredefinedMenuItem::separator();
     let equalize = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[2]);
     let toggle_zoom = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[3]);
+    let auto_approve = CheckMenuItem::with_id(
+        AppCommand::ToggleAutoApprove.menu_id(),
+        auto_approve_menu_label(false),
+        true,
+        false,
+        None,
+    );
     // Ghostty parity: "Change Title" lives on the surface context menu too.
     let title_separator = PredefinedMenuItem::separator();
-    let set_tab_title = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[4]);
+    let set_tab_title = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[5]);
 
-    Ok(Menu::with_id_and_items(
+    let menu = Menu::with_id_and_items(
         "noa.menu.split-context",
         &[
             &split_right,
@@ -390,10 +431,12 @@ fn build_split_context_menu() -> anyhow::Result<Menu> {
             &separator,
             &equalize,
             &toggle_zoom,
+            &auto_approve,
             &title_separator,
             &set_tab_title,
         ],
-    )?)
+    )?;
+    Ok((menu, auto_approve))
 }
 
 fn context_menu_item((command, label): (AppCommand, &'static str)) -> MenuItem {
@@ -438,6 +481,7 @@ mod tests {
                 (AppCommand::NewSplitDown, "Split Down"),
                 (AppCommand::EqualizeSplits, "Equalize Splits"),
                 (AppCommand::ToggleSplitZoom, "Toggle Split Zoom"),
+                (AppCommand::ToggleAutoApprove, "Auto Approve: Off"),
                 (AppCommand::SetTabTitle, "Set Tab Title\u{2026}"),
             ]
         );

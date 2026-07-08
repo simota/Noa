@@ -202,6 +202,18 @@ impl App {
                 }
             }
         }
+        let before = self.auto_approve_flash_until.len();
+        self.auto_approve_flash_until.retain(|_, until| {
+            if now >= *until {
+                false
+            } else {
+                next = Some(next.map_or(*until, |n| n.min(*until)));
+                true
+            }
+        });
+        if self.auto_approve_flash_until.len() != before {
+            self.request_sidebar_redraw();
+        }
         next
     }
 

@@ -233,6 +233,9 @@ pub(super) struct WindowState {
     /// `Terminal.title` keeps tracking OSC 0/2 underneath so clearing the
     /// override reveals the *latest* shell title.
     pub(super) title_override: Option<String>,
+    /// Per-tab opt-in for agent CLI prompt auto approval. Split panes in the
+    /// same native tab share this flag with their io threads.
+    pub(super) auto_approve_enabled: Arc<AtomicBool>,
     /// Vertical scroll offset (px) of the sidebar card list (FR-15), clamped to
     /// `[0, content_h - viewport_h]` when consumed by the layout.
     pub(super) sidebar_scroll: u32,
@@ -523,6 +526,7 @@ pub(super) struct Surface {
     pub(super) last_mouse_cell: Option<Point>,
     pub(super) pressed_mouse_button: Option<MouseButton>,
     pub(super) ime_state: input::ImeState,
+    pub(super) auto_approve_guards: Arc<Mutex<crate::auto_approve::AutoApproveInputGuards>>,
     pub(super) rect: PaneRectApp,
     /// The Cmd+hover underline target for this pane, recomputed on every
     /// `CursorMoved`/`ModifiersChanged` (`App::sync_hover_link`) and fed into

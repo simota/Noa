@@ -38,6 +38,7 @@ pub enum AppCommand {
     ToggleQuickTerminal,
     ToggleSecureKeyboardEntry,
     ToggleSidebar,
+    ToggleAutoApprove,
     /// Open the theme-settings overlay (theme-settings-ui R-1). Reachable
     /// only from the command palette — deliberately unbound in
     /// [`KeybindEngine::default`], so it carries no menu id either (mirrors
@@ -137,6 +138,7 @@ impl AppCommand {
     pub(crate) const TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID: &'static str =
         "noa.app.toggle-secure-keyboard-entry";
     pub(crate) const TOGGLE_SIDEBAR_MENU_ID: &'static str = "noa.view.toggle-sidebar";
+    pub(crate) const TOGGLE_AUTO_APPROVE_MENU_ID: &'static str = "noa.view.toggle-auto-approve";
 
     pub(crate) fn menu_id(self) -> &'static str {
         match self {
@@ -195,6 +197,7 @@ impl AppCommand {
             AppCommand::ToggleQuickTerminal => Self::TOGGLE_QUICK_TERMINAL_MENU_ID,
             AppCommand::ToggleSecureKeyboardEntry => Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID,
             AppCommand::ToggleSidebar => Self::TOGGLE_SIDEBAR_MENU_ID,
+            AppCommand::ToggleAutoApprove => Self::TOGGLE_AUTO_APPROVE_MENU_ID,
         }
     }
 
@@ -255,6 +258,7 @@ impl AppCommand {
             Self::TOGGLE_QUICK_TERMINAL_MENU_ID => Some(Self::ToggleQuickTerminal),
             Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID => Some(Self::ToggleSecureKeyboardEntry),
             Self::TOGGLE_SIDEBAR_MENU_ID => Some(Self::ToggleSidebar),
+            Self::TOGGLE_AUTO_APPROVE_MENU_ID => Some(Self::ToggleAutoApprove),
             _ => None,
         }
     }
@@ -333,6 +337,7 @@ impl AppCommand {
             Self::ToggleQuickTerminal => "quick-terminal.toggle",
             Self::ToggleSecureKeyboardEntry => "secure-keyboard-entry.toggle",
             Self::ToggleSidebar => "sidebar.toggle",
+            Self::ToggleAutoApprove => "auto-approve.toggle",
             Self::OpenThemeSettings => "theme-settings.open",
         }
     }
@@ -395,6 +400,7 @@ impl AppCommand {
             "quick-terminal.toggle" => Some(Self::ToggleQuickTerminal),
             "secure-keyboard-entry.toggle" => Some(Self::ToggleSecureKeyboardEntry),
             "sidebar.toggle" => Some(Self::ToggleSidebar),
+            "auto-approve.toggle" => Some(Self::ToggleAutoApprove),
             "theme-settings.open" => Some(Self::OpenThemeSettings),
             _ => None,
         }

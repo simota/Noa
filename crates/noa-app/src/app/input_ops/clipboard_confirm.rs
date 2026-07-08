@@ -85,13 +85,14 @@ impl App {
     }
 
     pub(in crate::app) fn write_paste_text_to_pane(
-        &self,
+        &mut self,
         window_id: WindowId,
         pane_id: PaneId,
         text: &str,
     ) {
         let bracketed_paste = self.bracketed_paste(window_id, pane_id);
         if let Some(bytes) = input::encode_paste(text, bracketed_paste) {
+            self.mark_pane_paste_input(window_id, pane_id);
             self.snap_focused_viewport_to_bottom(window_id);
             self.write_pane_pty_bytes(window_id, pane_id, &bytes);
         }

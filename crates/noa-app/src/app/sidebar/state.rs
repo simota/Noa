@@ -172,8 +172,9 @@ impl App {
         point: Option<split_tree::Point>,
     ) -> bool {
         let inset = self.window_sidebar_inset_px(window_id);
-        let hit = point.filter(|point| inset != 0 && point.x < inset).and_then(
-            |point| -> Option<crate::sidebar::SidebarHit> {
+        let hit = point
+            .filter(|point| inset != 0 && point.x < inset)
+            .and_then(|point| -> Option<crate::sidebar::SidebarHit> {
                 let state = self.windows.get(&window_id)?;
                 // No card hover feedback while a drag-reorder floats a card
                 // over the list — the float carries the emphasis.
@@ -185,8 +186,7 @@ impl App {
                 let windows = self.session_windows_for_window(window_id);
                 let ids = self.session_store.ordered_ids_for_windows(&windows);
                 metrics.hit_test(bounds, &ids, state.sidebar_scroll, point)
-            },
-        );
+            });
         let hovered = matches!(hit, Some(crate::sidebar::SidebarHit::NewSession));
         let hovered_card = match hit {
             Some(crate::sidebar::SidebarHit::Card(id))

@@ -85,6 +85,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ToggleQuickTerminal => "Toggle Quick Terminal",
         AppCommand::ToggleSecureKeyboardEntry => "Toggle Secure Keyboard Entry",
         AppCommand::ToggleSidebar => "Toggle Sidebar",
+        AppCommand::ToggleAutoApprove => "Toggle Auto Approve",
         // Deviation: the locked spec's literal label is Japanese
         // ("テーマ・設定を開く"), but every existing palette title is English
         // (this whole `match`) — following that established convention
@@ -143,6 +144,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ToggleQuickTerminal,
         AppCommand::ToggleSecureKeyboardEntry,
         AppCommand::ToggleSidebar,
+        AppCommand::ToggleAutoApprove,
         AppCommand::SetTabTitle,
         AppCommand::CloseTab,
         AppCommand::NextTab,
@@ -320,7 +322,8 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         AppCommand::ToggleCommandPalette
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleSecureKeyboardEntry
-        | AppCommand::ToggleSidebar => CommandCategory::Toggles,
+        | AppCommand::ToggleSidebar
+        | AppCommand::ToggleAutoApprove => CommandCategory::Toggles,
     }
 }
 
@@ -604,6 +607,7 @@ mod tests {
             AppCommand::ToggleQuickTerminal,
             AppCommand::ToggleSecureKeyboardEntry,
             AppCommand::ToggleSidebar,
+            AppCommand::ToggleAutoApprove,
         ];
         commands.extend((1..=9).map(AppCommand::SelectTab));
         commands

@@ -593,8 +593,7 @@ pub(in crate::app) fn draw_sidebar_band(
                     #[cfg(debug_assertions)]
                     gpu.chrome_textures.record_rebuild();
                 }
-                if let Some((_, _, accent_view)) = gpu.chrome_textures.sidebar_accent_tex.as_ref()
-                {
+                if let Some((_, _, accent_view)) = gpu.chrome_textures.sidebar_accent_tex.as_ref() {
                     rasterize_runs(
                         gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
                         &gpu.device,

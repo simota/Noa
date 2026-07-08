@@ -68,6 +68,7 @@ impl App {
         // Card text on the flat backdrop, plus a rounded overlay for every
         // fully-visible card (FR-2). Partially-scrolled cards stay flat.
         let now = sidebar_wall_clock_now();
+        let now_instant = Instant::now();
         let home = std::env::var("HOME").ok();
         let palette = &active_theme(&gpu.theme, &gpu.preview_theme).palette;
         let mut cards: Vec<SidebarCardDraw> = Vec::new();
@@ -108,8 +109,8 @@ impl App {
             let renaming = renaming.as_deref();
             // The `…` glyph surfaces on the hovered card (discoverability) and
             // stays visible while its menu popup is open.
-            let menu_hint = hovered_id == Some(card_rects.id)
-                || state.sidebar_menu == Some(card_rects.id);
+            let menu_hint =
+                hovered_id == Some(card_rects.id) || state.sidebar_menu == Some(card_rects.id);
             let full = card_rects.bounds.h == layout_metrics.card_h;
             // A fully-visible card is covered by its opaque rounded overlay, so
             // its backdrop text would never show — only emit it for partial
@@ -123,6 +124,10 @@ impl App {
 
             if full {
                 let selected = card_rects.id == selected_id;
+                let auto_flash = self
+                    .auto_approve_flash_until
+                    .get(&card_rects.id)
+                    .is_some_and(|until| now_instant < *until);
                 let local = layout_metrics.card_local_rects(card_rects.id, card_w);
                 let mut card_runs = Vec::new();
                 emit_card_text(
@@ -139,7 +144,9 @@ impl App {
                 cards.push(SidebarCardDraw {
                     rect: card_rects.bounds,
                     grid: card_grid,
-                    bg: if selected {
+                    bg: if auto_flash {
+                        mix_rgb(chrome().card_selected, chrome().accent, 0.35)
+                    } else if selected {
                         chrome().card_selected
                     } else if hovered_id == Some(card_rects.id) {
                         // Hover face: halfway between resting and selected, so
@@ -441,27 +448,60 @@ fn emit_card_text(
         } else {
             (badge, badge_fg)
         };
+        let mut text = String::new();
+        let run_fg = if card.auto_approve_enabled {
+            text.push_str("AUTO ON");
+            text.push_str(&sgr_fg(chrome().dim_fg));
+            text.push_str(" · ");
+            text.push_str(&sgr_fg(badge_fg));
+            text.push_str(&badge);
+            chrome().accent
+        } else {
+            text.push_str(&badge);
+            badge_fg
+        };
         // The dim suffix (branch + cwd) is recolored inline; the run fg colors
         // the badge portion.
-        let mut suffix = String::new();
         if !lines.branch.is_empty() {
-            suffix.push_str(&format!(" · ⎇ {}", lines.branch));
+            text.push_str(&sgr_fg(chrome().dim_fg));
+            text.push_str(&format!(" · ⎇ {}", lines.branch));
         }
         if !lines.cwd.is_empty() {
-            suffix.push_str(&format!(" · {}", lines.cwd));
+            text.push_str(&sgr_fg(chrome().dim_fg));
+            text.push_str(&format!(" · {}", lines.cwd));
         }
-        let text = if suffix.is_empty() {
-            badge
-        } else {
-            format!("{badge}{}{suffix}", sgr_fg(chrome().dim_fg))
-        };
-        out.extend(window_run(to_cell, rects.meta, text, badge_fg, false));
+        out.extend(window_run(to_cell, rects.meta, text, run_fg, false));
     }
 
-    // Last-output preview rows, in their original ANSI colors: each
-    // span is recolored inline via an embedded SGR prefix, so one run carries
-    // the whole line. Rows the card has no preview line for stay blank.
-    for (rect, line) in rects.preview.iter().zip(card.preview.iter()) {
+    // The first preview row carries the auto-approve audit summary when
+    // present; remaining rows show last-output preview in their original ANSI
+    // colors. Rows the card has no preview line for stay blank.
+    let audit = card.auto_approve_audit.back().map(|entry| {
+        format!(
+            "AUTO APPROVED {} · {} {}",
+            card.auto_approve_audit.len(),
+            entry.agent,
+            entry.prompt
+        )
+    });
+    let mut preview_index = 0;
+    for (row_index, rect) in rects.preview.iter().enumerate() {
+        if row_index == 0
+            && let Some(audit) = audit.as_ref()
+        {
+            out.extend(window_run(
+                to_cell,
+                *rect,
+                audit.clone(),
+                chrome().accent,
+                false,
+            ));
+            continue;
+        }
+        let Some(line) = card.preview.get(preview_index) else {
+            continue;
+        };
+        preview_index += 1;
         let mut text = String::new();
         for span in line {
             text.push_str(&sgr_fg(resolve_preview_color(span.fg, palette)));

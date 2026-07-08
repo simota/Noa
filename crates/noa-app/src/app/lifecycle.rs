@@ -244,12 +244,16 @@ impl App {
             }),
             content_margin_px(self.config.macos_titlebar_style, window.scale_factor()),
         );
+        let auto_approve_enabled = Arc::new(AtomicBool::new(
+            self.config.auto_approve && self.window_sidebar_eligible(window_id),
+        ));
         let initial_surface = self.spawn_pane_surface(
             window_id,
             initial_pane,
             initial_grid_size,
             initial_rect,
             inherited_cwd,
+            auto_approve_enabled.clone(),
         )?;
         let mut surfaces = HashMap::new();
         surfaces.insert(initial_pane, initial_surface);
@@ -272,6 +276,7 @@ impl App {
                 active_split_drag: None,
                 occluded: false,
                 title: "Noa".to_string(),
+                auto_approve_enabled,
                 sidebar_scroll: 0,
                 sidebar_button_hover: false,
                 sidebar_card_hover: None,
@@ -375,6 +380,7 @@ impl App {
         grid_size: GridSize,
         rect: PaneRectApp,
         cwd: Option<String>,
+        auto_approve_enabled: Arc<AtomicBool>,
     ) -> anyhow::Result<Surface> {
         let pty_config = PtyConfig {
             size: grid_size,
@@ -416,6 +422,9 @@ impl App {
         let terminal = Arc::new(Mutex::new(terminal));
         let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
         let (pty_input_tx, pty_input_rx) = crate::io_thread::input_channel();
+        let auto_approve_guards = Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        ));
         let overview_snapshot = Arc::new(Mutex::new(None));
         let overview_publish = crate::io_thread::OverviewPublish {
             slot: overview_snapshot.clone(),
@@ -424,6 +433,10 @@ impl App {
         let sidebar_publish = crate::io_thread::SidebarPublish {
             visible: self.sidebar_visible_gate.clone(),
             preview_lines: self.sidebar_preview_lines_gate.clone(),
+        };
+        let auto_approve = crate::io_thread::AutoApprovePublish {
+            enabled: auto_approve_enabled.clone(),
+            guards: auto_approve_guards.clone(),
         };
         let io_thread = crate::io_thread::spawn(
             pty,
@@ -434,6 +447,7 @@ impl App {
             pty_input_rx,
             overview_publish,
             sidebar_publish,
+            auto_approve,
         );
 
         Ok(Surface {
@@ -447,6 +461,7 @@ impl App {
             last_mouse_cell: None,
             pressed_mouse_button: None,
             ime_state: input::ImeState::default(),
+            auto_approve_guards,
             rect,
             hover_link: None,
             overview_snapshot,
@@ -862,6 +877,9 @@ impl App {
                     .expect("failed to install macOS app menu"),
             );
         }
+        if let Some(window_id) = self.focused {
+            self.sync_macos_auto_approve_menu_state(window_id);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -876,7 +894,13 @@ impl App {
         else {
             return;
         };
-        if let Err(error) = menu.show_split_context_menu(window.as_ref(), None) {
+        let auto_approve_enabled = self
+            .windows
+            .get(&window_id)
+            .is_some_and(|state| state.auto_approve_enabled.load(Ordering::Relaxed));
+        if let Err(error) =
+            menu.show_split_context_menu(window.as_ref(), None, auto_approve_enabled)
+        {
             log::debug!("failed to show macOS split context menu: {error:#}");
         }
     }

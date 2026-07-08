@@ -219,17 +219,25 @@ impl App {
         // (`spawn_pane_surface` borrows `&self`). A rough grid/rect is fine —
         // `relayout_and_resize_window` fixes every pane's geometry below.
         let placeholder_grid = GridSize::new(self.config.cols, self.config.rows);
+        let auto_approve_enabled = self
+            .windows
+            .get(&window_id)
+            .map(|state| state.auto_approve_enabled.clone());
         let mut spawned = Vec::new();
         for leaf in &leaves {
             if leaf.is_root {
                 continue;
             }
+            let Some(auto_approve_enabled) = auto_approve_enabled.clone() else {
+                continue;
+            };
             match self.spawn_pane_surface(
                 window_id,
                 leaf.pane,
                 placeholder_grid,
                 placeholder_rect,
                 leaf.cwd.clone(),
+                auto_approve_enabled,
             ) {
                 Ok(surface) => spawned.push((leaf.pane, surface)),
                 Err(err) => log::warn!("session restore: failed to spawn split pane: {err}"),

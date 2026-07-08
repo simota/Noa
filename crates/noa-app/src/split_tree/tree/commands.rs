@@ -43,6 +43,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleSecureKeyboardEntry
         | AppCommand::ToggleSidebar
+        | AppCommand::ToggleAutoApprove
         | AppCommand::SelectTab(_)
         | AppCommand::NextTab
         | AppCommand::PrevTab

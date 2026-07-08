@@ -8,7 +8,7 @@ impl App {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        let Some((focused_pane, new_pane, focused_rect)) =
+        let Some((focused_pane, new_pane, focused_rect, auto_approve_enabled)) =
             self.windows.get_mut(&window_id).and_then(|state| {
                 let focused_rect = state.focused_surface()?.rect;
                 if !can_split_rect(focused_rect, orientation) {
@@ -16,7 +16,12 @@ impl App {
                 }
                 let new_pane = PaneId::new(state.next_pane_id);
                 state.next_pane_id = state.next_pane_id.saturating_add(1);
-                Some((state.focused_pane, new_pane, focused_rect))
+                Some((
+                    state.focused_pane,
+                    new_pane,
+                    focused_rect,
+                    state.auto_approve_enabled.clone(),
+                ))
             })
         else {
             return;
@@ -30,6 +35,7 @@ impl App {
             grid_size,
             focused_rect,
             inherited_cwd,
+            auto_approve_enabled,
         ) {
             Ok(surface) => surface,
             Err(err) => {

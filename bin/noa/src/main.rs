@@ -122,6 +122,7 @@ fn app_config_from_startup(
         sidebar_preview_lines: config.sidebar_preview_lines,
         resize_overlay: config.resize_overlay,
         visual_bell: config.visual_bell,
+        auto_approve: config.auto_approve,
     }
 }
 
@@ -158,6 +159,7 @@ mod tests {
             macos_option_as_alt: noa_config::MacosOptionAsAlt::Both,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Transparent,
             sidebar_preview_lines: 4,
+            auto_approve: true,
             ..Default::default()
         };
 
@@ -179,6 +181,7 @@ mod tests {
             noa_config::MacosTitlebarStyle::Transparent
         );
         assert_eq!(app_config.sidebar_preview_lines, 4);
+        assert!(app_config.auto_approve);
     }
 
     // AC-7: a config carrying all five background-image keys resolves through

@@ -80,6 +80,7 @@ impl App {
             AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             AppCommand::ToggleSecureKeyboardEntry => self.toggle_secure_keyboard_entry(),
             AppCommand::ToggleSidebar => self.toggle_sidebar(),
+            AppCommand::ToggleAutoApprove => self.toggle_auto_approve(),
             AppCommand::CloseWindow => self.request_close_window(event_loop),
             AppCommand::Quit => self.request_quit(event_loop),
         }

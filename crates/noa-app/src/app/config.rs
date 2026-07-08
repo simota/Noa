@@ -110,6 +110,9 @@ pub struct AppConfig {
     /// `visual-bell`: flash the window briefly when its terminal rings BEL
     /// while OS-focused (where the desktop notification is suppressed).
     pub visual_bell: bool,
+    /// `auto-approve`: seed new tabs with agent-CLI auto approval enabled.
+    /// Runtime toggles are still per-tab.
+    pub auto_approve: bool,
 }
 
 /// Maps the parsed `noa-config` font settings onto the `noa-font` runtime

@@ -67,6 +67,7 @@ use crate::split_tree::{
 };
 use crate::{AppCommand, ViewportScroll};
 
+mod auto_approve;
 mod commands;
 mod config;
 mod event_loop;
@@ -167,6 +168,8 @@ pub struct App {
     /// attention is already pending, so a repeat request doesn't restart the
     /// blink.
     attention_onset: HashMap<SessionCardId, Instant>,
+    /// Short-lived card flash after an automatic approval is injected.
+    auto_approve_flash_until: HashMap<SessionCardId, Instant>,
     /// Next scheduled attention-blink repaint; `None` while no card is within
     /// its blink window (the event loop then needs no wake-up for this).
     attention_blink_deadline: Option<Instant>,
@@ -306,6 +309,7 @@ impl App {
             cursor_blink_visible: true,
             cursor_blink_deadline: None,
             attention_onset: HashMap::new(),
+            auto_approve_flash_until: HashMap::new(),
             attention_blink_deadline: None,
             hovered_link: None,
             search_prompt: None,

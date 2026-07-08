@@ -369,6 +369,7 @@ fn show_config_output(config: &StartupConfig) -> String {
         "sidebar-preview-lines",
         &config.sidebar_preview_lines.to_string(),
     );
+    push_line(&mut out, "auto-approve", &config.auto_approve.to_string());
     out
 }
 
@@ -569,6 +570,7 @@ mod tests {
         assert!(output.contains("sidebar-width = 360\n"));
         assert!(output.contains("sidebar-hotkey = \n"));
         assert!(output.contains("sidebar-preview-lines = 5\n"));
+        assert!(output.contains("auto-approve = false\n"));
         assert!(
             output.lines().all(|line| line.contains(" = ")),
             "every line must be `key = value`"
@@ -589,6 +591,7 @@ mod tests {
             sidebar_width: 280.0,
             sidebar_hotkey: Some("cmd+shift+s".to_string()),
             sidebar_preview_lines: 4,
+            auto_approve: true,
             font: noa_config::FontConfig {
                 families: vec!["JetBrains Mono".to_string(), "Menlo".to_string()],
                 features: vec![noa_config::FontFeature {
@@ -617,6 +620,7 @@ mod tests {
         assert!(output.contains("sidebar-width = 280\n"));
         assert!(output.contains("sidebar-hotkey = cmd+shift+s\n"));
         assert!(output.contains("sidebar-preview-lines = 4\n"));
+        assert!(output.contains("auto-approve = true\n"));
         assert!(output.contains("font-family = JetBrains Mono\n"));
         assert!(output.contains("font-family = Menlo\n"));
         assert!(output.contains("font-feature = -liga\n"));

@@ -12,6 +12,43 @@ fn cursor_blink_focus_gate<Window: Copy + PartialEq>(
     sticky_focused == Some(window_id) && os_focused == Some(window_id) && !occluded
 }
 
+const LIVE_WALLPAPER_FADE_DURATION: Duration = Duration::from_secs(2);
+const LIVE_WALLPAPER_FADE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+fn live_wallpaper_timer_step(
+    deadline: Option<Instant>,
+    now: Instant,
+    interval: Duration,
+    eligible: bool,
+    wants_rotation: bool,
+) -> (Option<Instant>, bool) {
+    if !eligible || !wants_rotation {
+        return (None, false);
+    }
+    match deadline {
+        None => (Some(now + interval), false),
+        Some(deadline) if now < deadline => (Some(deadline), false),
+        Some(_) => (Some(now + interval), true),
+    }
+}
+
+fn live_wallpaper_fade_progress(
+    started_at: Instant,
+    now: Instant,
+    duration: Duration,
+) -> (f32, bool) {
+    if duration.is_zero() {
+        return (1.0, true);
+    }
+    let elapsed = now.saturating_duration_since(started_at);
+    if elapsed >= duration {
+        return (1.0, true);
+    }
+    let linear = (elapsed.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0);
+    let eased = linear * linear * (3.0 - 2.0 * linear);
+    (eased, false)
+}
+
 impl App {
     /// Whether the focused pane has a displayable `Blinking*` cursor.
     fn focused_cursor_wants_blink(&self) -> bool {
@@ -68,6 +105,168 @@ impl App {
             state.window.request_redraw();
         }
         Some(next)
+    }
+
+    fn live_wallpaper_eligible(&self) -> bool {
+        self.os_focused.is_some() && self.windows.values().any(|state| !state.occluded)
+    }
+
+    fn live_wallpaper_interval(&self) -> Duration {
+        Duration::from_secs(
+            self.config
+                .background_image_interval_secs
+                .max(noa_config::MIN_BACKGROUND_IMAGE_INTERVAL_SECS),
+        )
+    }
+
+    pub(super) fn sync_current_background_image_to_window(&mut self, window_id: WindowId) {
+        self.sync_background_image_to_window(window_id, Instant::now());
+    }
+
+    fn sync_background_image_to_window(&mut self, window_id: WindowId, now: Instant) {
+        let transition = self.live_wallpaper_transition.as_ref().map(|transition| {
+            let (progress, _) =
+                live_wallpaper_fade_progress(transition.started_at, now, transition.duration);
+            (
+                transition.previous.clone(),
+                transition.current.clone(),
+                progress,
+            )
+        });
+        let image = self.background_image.current_image();
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        if let Some((previous, current, progress)) = transition {
+            state.renderer.set_background_image_transition(
+                &gpu.device,
+                &gpu.queue,
+                previous,
+                current,
+                progress,
+            );
+        } else {
+            state
+                .renderer
+                .set_background_image(&gpu.device, &gpu.queue, image);
+        }
+    }
+
+    fn sync_current_background_image_to_visible_windows(&mut self) {
+        let image = self.background_image.current_image();
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        for state in self.windows.values_mut() {
+            if state.occluded {
+                continue;
+            }
+            state
+                .renderer
+                .set_background_image(&gpu.device, &gpu.queue, image.clone());
+            state.window.request_redraw();
+        }
+    }
+
+    fn begin_live_wallpaper_transition(
+        &mut self,
+        previous: Option<noa_render::BackgroundImage>,
+        current: Option<noa_render::BackgroundImage>,
+        now: Instant,
+    ) {
+        self.live_wallpaper_transition = Some(LiveWallpaperTransition {
+            previous,
+            current,
+            started_at: now,
+            duration: LIVE_WALLPAPER_FADE_DURATION,
+        });
+        self.sync_live_wallpaper_transition_to_visible_windows(now);
+    }
+
+    fn sync_live_wallpaper_transition_to_visible_windows(&mut self, now: Instant) {
+        let Some(transition) = self.live_wallpaper_transition.as_ref() else {
+            return;
+        };
+        let (progress, _) =
+            live_wallpaper_fade_progress(transition.started_at, now, transition.duration);
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        for state in self.windows.values_mut() {
+            if state.occluded {
+                continue;
+            }
+            state.renderer.set_background_image_transition(
+                &gpu.device,
+                &gpu.queue,
+                transition.previous.clone(),
+                transition.current.clone(),
+                progress,
+            );
+            state.window.request_redraw();
+        }
+    }
+
+    fn update_live_wallpaper_transition_progress(&mut self, progress: f32) {
+        for state in self.windows.values_mut() {
+            if state.occluded {
+                continue;
+            }
+            state
+                .renderer
+                .set_background_image_transition_progress(progress);
+            state.window.request_redraw();
+        }
+    }
+
+    pub(super) fn tick_live_wallpaper(&mut self) -> Option<Instant> {
+        let now = Instant::now();
+        let eligible = self.live_wallpaper_eligible();
+        if !eligible {
+            self.live_wallpaper_deadline = None;
+            if self.live_wallpaper_transition.take().is_some() {
+                self.sync_current_background_image_to_visible_windows();
+            }
+            return None;
+        }
+        if let Some(transition) = self.live_wallpaper_transition.as_ref() {
+            let (progress, finished) =
+                live_wallpaper_fade_progress(transition.started_at, now, transition.duration);
+            if finished {
+                self.live_wallpaper_transition = None;
+                self.sync_current_background_image_to_visible_windows();
+                return self.live_wallpaper_deadline;
+            }
+            self.update_live_wallpaper_transition_progress(progress);
+            let frame_deadline = now + LIVE_WALLPAPER_FADE_FRAME_INTERVAL;
+            return Some(match self.live_wallpaper_deadline {
+                Some(rotation_deadline) => frame_deadline.min(rotation_deadline),
+                None => frame_deadline,
+            });
+        }
+        let (deadline, should_rotate) = live_wallpaper_timer_step(
+            self.live_wallpaper_deadline,
+            now,
+            self.live_wallpaper_interval(),
+            eligible,
+            self.background_image.wants_rotation(),
+        );
+        self.live_wallpaper_deadline = deadline;
+        if should_rotate {
+            let previous = self.background_image.current_image();
+            if self.background_image.advance() {
+                let current = self.background_image.current_image();
+                self.begin_live_wallpaper_transition(previous, current, now);
+                return Some(now + LIVE_WALLPAPER_FADE_FRAME_INTERVAL);
+            }
+        }
+        if !self.background_image.wants_rotation() {
+            self.live_wallpaper_deadline = None;
+        }
+        self.live_wallpaper_deadline
     }
 
     /// Whether an attention marker is currently visible for `id` (FR-A1).
@@ -267,7 +466,11 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::cursor_blink_focus_gate;
+    use super::{
+        LIVE_WALLPAPER_FADE_DURATION, cursor_blink_focus_gate, live_wallpaper_fade_progress,
+        live_wallpaper_timer_step,
+    };
+    use std::time::{Duration, Instant};
 
     #[test]
     fn cursor_blink_focus_gate_requires_real_os_focus_and_visibility() {
@@ -284,5 +487,84 @@ mod tests {
         ));
         assert!(!cursor_blink_focus_gate(Some(1_u8), Some(1_u8), 1_u8, true));
         assert!(!cursor_blink_focus_gate(None, Some(1_u8), 1_u8, false));
+    }
+
+    #[test]
+    fn live_wallpaper_timer_arms_waits_and_rotates_one_step_when_due() {
+        let now = Instant::now();
+        let interval = Duration::from_secs(5);
+
+        let (deadline, rotate) = live_wallpaper_timer_step(None, now, interval, true, true);
+        assert_eq!(deadline, Some(now + interval));
+        assert!(!rotate);
+
+        let (deadline, rotate) =
+            live_wallpaper_timer_step(deadline, now + Duration::from_secs(4), interval, true, true);
+        assert_eq!(deadline, Some(now + interval));
+        assert!(!rotate);
+
+        let (deadline, rotate) =
+            live_wallpaper_timer_step(deadline, now + interval, interval, true, true);
+        assert_eq!(deadline, Some(now + interval + interval));
+        assert!(rotate);
+    }
+
+    #[test]
+    fn live_wallpaper_timer_does_not_catch_up_after_background_pause() {
+        let now = Instant::now();
+        let interval = Duration::from_secs(5);
+        let (deadline, rotate) = live_wallpaper_timer_step(None, now, interval, true, true);
+        assert_eq!(deadline, Some(now + interval));
+        assert!(!rotate);
+
+        let paused = now + Duration::from_secs(20);
+        let (deadline, rotate) = live_wallpaper_timer_step(deadline, paused, interval, false, true);
+        assert_eq!(deadline, None);
+        assert!(!rotate);
+
+        let (deadline, rotate) = live_wallpaper_timer_step(None, paused, interval, true, true);
+        assert_eq!(deadline, Some(paused + interval));
+        assert!(
+            !rotate,
+            "resume must arm a fresh interval instead of replaying missed rotations"
+        );
+    }
+
+    #[test]
+    fn live_wallpaper_timer_disarms_without_rotation_work() {
+        let now = Instant::now();
+        let interval = Duration::from_secs(5);
+        let stale_deadline = Some(now - Duration::from_secs(5));
+
+        let (deadline, rotate) =
+            live_wallpaper_timer_step(stale_deadline, now, interval, true, false);
+        assert_eq!(deadline, None);
+        assert!(!rotate);
+    }
+
+    #[test]
+    fn live_wallpaper_fade_progress_clamps_and_completes() {
+        let now = Instant::now();
+        let duration = LIVE_WALLPAPER_FADE_DURATION;
+        assert_eq!(duration, Duration::from_secs(2));
+
+        assert_eq!(
+            live_wallpaper_fade_progress(now, now - Duration::from_millis(10), duration),
+            (0.0, false)
+        );
+        let (mid, done) = live_wallpaper_fade_progress(now, now + duration / 2, duration);
+        assert!(
+            (mid - 0.5).abs() < 0.001,
+            "smoothstep midpoint should be 0.5: {mid}"
+        );
+        assert!(!done);
+        assert_eq!(
+            live_wallpaper_fade_progress(now, now + duration, duration),
+            (1.0, true)
+        );
+        assert_eq!(
+            live_wallpaper_fade_progress(now, now, Duration::ZERO),
+            (1.0, true)
+        );
     }
 }

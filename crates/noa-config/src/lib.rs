@@ -42,6 +42,12 @@ pub const DEFAULT_SIDEBAR_PREVIEW_LINES: usize = 5;
 /// Largest supported `sidebar-preview-lines` value. Higher values make each
 /// card too tall for the sidebar's dense session-list use case.
 pub const MAX_SIDEBAR_PREVIEW_LINES: usize = 10;
+/// `background-image-interval` default: rotate directory-backed background
+/// images every 30 seconds.
+pub const DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS: u64 = 30;
+/// Smallest positive `background-image-interval` value. Lower positive values
+/// are clamped so the feature cannot become a display-rate animation loop.
+pub const MIN_BACKGROUND_IMAGE_INTERVAL_SECS: u64 = 5;
 
 /// `clipboard-read` policy for OSC 52 clipboard *read* (query) requests.
 /// Mirrors Ghostty, whose default is `ask`.
@@ -361,6 +367,9 @@ pub struct StartupConfig {
     /// `background-image-repeat`: tile the image across the surface when it
     /// does not fill it (primarily meaningful with `fit = none`).
     pub background_image_repeat: bool,
+    /// `background-image-interval`: seconds between rotations when
+    /// `background-image` resolves to a directory. Noa-specific extension.
+    pub background_image_interval_secs: u64,
     /// `scrollback-limit`: total bytes of scrollback storage retained before
     /// page-granular eviction (`0` disables scrollback). Ghostty default 10 MB.
     pub scrollback_limit: usize,
@@ -461,6 +470,7 @@ impl Default for StartupConfig {
             background_image_position: BackgroundImagePosition::default(),
             background_image_fit: BackgroundImageFit::default(),
             background_image_repeat: false,
+            background_image_interval_secs: DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
             scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
             window_save_state: WindowSaveState::default(),
             macos_option_as_alt: MacosOptionAsAlt::default(),
@@ -513,6 +523,7 @@ pub struct ConfigOverrides {
     pub background_image_position: Option<BackgroundImagePosition>,
     pub background_image_fit: Option<BackgroundImageFit>,
     pub background_image_repeat: Option<bool>,
+    pub background_image_interval_secs: Option<u64>,
     pub scrollback_limit: Option<usize>,
     pub window_save_state: Option<WindowSaveState>,
     pub macos_option_as_alt: Option<MacosOptionAsAlt>,
@@ -585,6 +596,9 @@ impl ConfigOverrides {
             background_image_repeat: higher_priority
                 .background_image_repeat
                 .or(self.background_image_repeat),
+            background_image_interval_secs: higher_priority
+                .background_image_interval_secs
+                .or(self.background_image_interval_secs),
             scrollback_limit: higher_priority.scrollback_limit.or(self.scrollback_limit),
             window_save_state: higher_priority.window_save_state.or(self.window_save_state),
             macos_option_as_alt: higher_priority
@@ -667,6 +681,9 @@ impl ConfigOverrides {
             background_image_repeat: self
                 .background_image_repeat
                 .unwrap_or(base.background_image_repeat),
+            background_image_interval_secs: self
+                .background_image_interval_secs
+                .unwrap_or(base.background_image_interval_secs),
             scrollback_limit: self.scrollback_limit.unwrap_or(base.scrollback_limit),
             window_save_state: self.window_save_state.unwrap_or(base.window_save_state),
             macos_option_as_alt: self.macos_option_as_alt.unwrap_or(base.macos_option_as_alt),
@@ -865,6 +882,7 @@ mod tests {
                 background_image_position: BackgroundImagePosition::default(),
                 background_image_fit: BackgroundImageFit::default(),
                 background_image_repeat: false,
+                background_image_interval_secs: DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
                 scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
                 window_save_state: WindowSaveState::default(),
                 macos_option_as_alt: MacosOptionAsAlt::default(),
@@ -1038,6 +1056,35 @@ font-size = 15.5
                 .apply_to(StartupConfig::default())
                 .scrollback_limit,
             0
+        );
+    }
+
+    #[test]
+    fn background_image_interval_flows_through_parse_apply_and_precedence() {
+        let (overrides, diagnostics) =
+            parse_overrides(test_path(), "background-image-interval = 12");
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.background_image_interval_secs, Some(12));
+
+        assert_eq!(
+            ConfigOverrides::default()
+                .apply_to(StartupConfig::default())
+                .background_image_interval_secs,
+            DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS
+        );
+        let file = ConfigOverrides {
+            background_image_interval_secs: Some(12),
+            ..Default::default()
+        };
+        let cli = ConfigOverrides {
+            background_image_interval_secs: Some(60),
+            ..Default::default()
+        };
+        assert_eq!(
+            file.merge(cli)
+                .apply_to(StartupConfig::default())
+                .background_image_interval_secs,
+            60
         );
     }
 

@@ -339,6 +339,28 @@ impl Renderer {
         self.background_image_layer.set_image(device, queue, image);
     }
 
+    /// Set a two-image background transition. The textures are uploaded once
+    /// when the transition begins; subsequent animation frames update only the
+    /// fade progress via [`Renderer::set_background_image_transition_progress`].
+    pub fn set_background_image_transition(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        previous: Option<BackgroundImage>,
+        current: Option<BackgroundImage>,
+        progress: f32,
+    ) {
+        self.background_image_layer
+            .set_transition_images(device, queue, previous, current, progress);
+    }
+
+    /// Update the alpha coefficients for an already-uploaded background-image
+    /// transition. This does not upload image textures.
+    pub fn set_background_image_transition_progress(&mut self, progress: f32) {
+        self.background_image_layer
+            .set_transition_progress(progress);
+    }
+
     /// Whether a background image is currently set (test/introspection).
     pub fn has_background_image(&self) -> bool {
         self.background_image_layer.has_image()

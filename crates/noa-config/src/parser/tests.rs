@@ -721,7 +721,49 @@ fn background_image_repeat_parses_bool() {
     );
 }
 
-// AC-6: all five keys are supported scalar keys for Ghostty import.
+#[test]
+fn background_image_interval_parses_seconds_and_clamps_small_positive_values() {
+    for (value, expected) in [("30", 30), ("10", 10), ("5", 5), ("1", 5)] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("background-image-interval = {value}"));
+
+        assert_eq!(
+            overrides.background_image_interval_secs,
+            Some(expected),
+            "{value:?}"
+        );
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+    }
+
+    assert_eq!(
+        ConfigOverrides::default()
+            .apply_to(crate::StartupConfig::default())
+            .background_image_interval_secs,
+        crate::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS
+    );
+}
+
+#[test]
+fn background_image_interval_rejects_zero_negative_and_non_integer_values() {
+    for value in ["0", "-1", "1.5", "fast"] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("background-image-interval = {value}"));
+
+        assert_eq!(overrides.background_image_interval_secs, None, "{value:?}");
+        assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+        assert!(diagnostics[0].message.contains("background-image-interval"));
+        assert_eq!(
+            overrides
+                .apply_to(crate::StartupConfig::default())
+                .background_image_interval_secs,
+            crate::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+            "{value:?}"
+        );
+    }
+}
+
+// AC-6 plus Noa's directory slideshow interval: background-image scalar keys
+// are preserved by the one-shot import filter when present.
 #[test]
 fn background_image_keys_are_supported_scalar_keys_for_import() {
     for key in [
@@ -730,6 +772,7 @@ fn background_image_keys_are_supported_scalar_keys_for_import() {
         "background-image-position",
         "background-image-fit",
         "background-image-repeat",
+        "background-image-interval",
     ] {
         assert!(is_supported_scalar_key(key), "{key}");
     }

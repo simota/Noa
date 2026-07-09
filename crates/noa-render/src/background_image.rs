@@ -6,8 +6,8 @@
 //! reads through wherever the terminal's default background is visible while
 //! text and explicit-background cells still draw over it.
 //!
-//! [`BackgroundImageLayer`] owns the pipeline + sampler and (once set) one
-//! uploaded texture. Placement is pure geometry: [`background_image_quads`]
+//! [`BackgroundImageLayer`] owns the pipeline + sampler and (once set) one or
+//! two uploaded textures. Placement is pure geometry: [`background_image_placement`]
 //! resolves the fit/position/repeat config into a set of window-pixel
 //! destination rectangles for the current surface size, recomputed every frame
 //! so a resize is handled for free (spec AC-13/14). The image quad's alpha is
@@ -209,11 +209,39 @@ struct BackgroundImageGpu {
     opacity: f32,
 }
 
-/// A per-tile draw resource: its uniform buffer and bind group, alive for the
+#[derive(Clone, Copy)]
+enum BackgroundImageFadeRole {
+    Static,
+    FadeOut,
+    FadeIn,
+}
+
+struct BackgroundImageSlot {
+    gpu: BackgroundImageGpu,
+    role: BackgroundImageFadeRole,
+    fade_alpha: f32,
+}
+
+impl BackgroundImageSlot {
+    fn effective_opacity(&self) -> f32 {
+        (self.gpu.opacity * self.fade_alpha).clamp(0.0, 1.0)
+    }
+}
+
+fn background_image_transition_alphas(progress: f32) -> (f32, f32) {
+    let progress = progress.clamp(0.0, 1.0);
+    (1.0 - progress, progress)
+}
+
+/// A per-image draw resource: its uniform buffer and bind group, alive for the
 /// whole render pass.
 pub struct BgImageDraw {
     _buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+}
+
+pub struct BgImageDraws {
+    draws: Vec<BgImageDraw>,
 }
 
 /// Owns the background-image pipeline, sampler, and (once set) the uploaded
@@ -228,7 +256,7 @@ pub struct BackgroundImagePipeline {
 
 pub struct BackgroundImageLayer {
     shared: Arc<BackgroundImagePipeline>,
-    image: Option<BackgroundImageGpu>,
+    images: Vec<BackgroundImageSlot>,
 }
 
 impl BackgroundImagePipeline {
@@ -338,13 +366,13 @@ impl BackgroundImageLayer {
     pub fn new(shared: Arc<BackgroundImagePipeline>) -> Self {
         Self {
             shared,
-            image: None,
+            images: Vec::new(),
         }
     }
 
     /// Whether a background image is currently set.
     pub fn has_image(&self) -> bool {
-        self.image.is_some()
+        !self.images.is_empty()
     }
 
     /// Upload (or clear) the background image. A startup-time call: `noa-app`
@@ -356,130 +384,201 @@ impl BackgroundImageLayer {
         queue: &wgpu::Queue,
         image: Option<BackgroundImage>,
     ) {
+        self.images.clear();
         let Some(image) = image else {
-            self.image = None;
             return;
         };
-        if image.width == 0 || image.height == 0 || image.rgba.is_empty() {
-            self.image = None;
-            return;
+        if let Some(gpu) = upload_background_image(device, queue, image) {
+            self.images.push(BackgroundImageSlot {
+                gpu,
+                role: BackgroundImageFadeRole::Static,
+                fade_alpha: 1.0,
+            });
         }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("noa-background-image-texture"),
-            size: wgpu::Extent3d {
-                width: image.width,
-                height: image.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &image.rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(image.width * 4),
-                rows_per_image: Some(image.height),
-            },
-            wgpu::Extent3d {
-                width: image.width,
-                height: image.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.image = Some(BackgroundImageGpu {
-            _texture: texture,
-            view,
-            width: image.width,
-            height: image.height,
-            fit: image.fit,
-            position: image.position,
-            repeat: image.repeat,
-            opacity: image.opacity.clamp(0.0, 1.0),
-        });
     }
 
-    /// Build this frame's single draw resource for the current `surface` size,
-    /// or `None` when no image is set (the common path allocates nothing). Even
-    /// a tiling `repeat` is ONE quad + ONE buffer + ONE bind group — the Repeat
-    /// sampler does the tiling — so per-frame cost is O(1) regardless of image
-    /// size vs. surface size. The placement recomputes from `surface` every
-    /// call, so a resize needs no extra bookkeeping (spec AC-13/14).
+    pub fn set_transition_images(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        previous: Option<BackgroundImage>,
+        current: Option<BackgroundImage>,
+        progress: f32,
+    ) {
+        self.images.clear();
+        let (previous_alpha, current_alpha) = background_image_transition_alphas(progress);
+        if let Some(gpu) = previous.and_then(|image| upload_background_image(device, queue, image))
+        {
+            self.images.push(BackgroundImageSlot {
+                gpu,
+                role: BackgroundImageFadeRole::FadeOut,
+                fade_alpha: previous_alpha,
+            });
+        }
+        if let Some(gpu) = current.and_then(|image| upload_background_image(device, queue, image)) {
+            self.images.push(BackgroundImageSlot {
+                gpu,
+                role: BackgroundImageFadeRole::FadeIn,
+                fade_alpha: current_alpha,
+            });
+        }
+    }
+
+    pub fn set_transition_progress(&mut self, progress: f32) {
+        let (previous_alpha, current_alpha) = background_image_transition_alphas(progress);
+        for slot in &mut self.images {
+            slot.fade_alpha = match slot.role {
+                BackgroundImageFadeRole::Static => 1.0,
+                BackgroundImageFadeRole::FadeOut => previous_alpha,
+                BackgroundImageFadeRole::FadeIn => current_alpha,
+            };
+        }
+    }
+
+    /// Build this frame's draw resources for the current `surface` size, or
+    /// `None` when no image is set (the common path allocates nothing). Even a
+    /// tiling `repeat` is ONE quad per image; a fade transition is at most two
+    /// quads, one fading out and one fading in.
     pub fn build_draw(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         surface: PixelSize,
-    ) -> Option<BgImageDraw> {
-        let image = self.image.as_ref()?;
-        if surface.w == 0 || surface.h == 0 {
+    ) -> Option<BgImageDraws> {
+        if self.images.is_empty() || surface.w == 0 || surface.h == 0 {
             return None;
         }
-        let placement = background_image_placement(
-            (image.width, image.height),
-            (surface.w, surface.h),
-            image.fit,
-            image.position,
-            image.repeat,
-        );
-        let uniforms = BgImageUniformsRaw {
-            dest_rect: placement.dest_rect,
-            surface_size: [surface.w as f32, surface.h as f32],
-            uv_scale: placement.uv_scale,
-            opacity: image.opacity,
-            _pad: [0.0; 3],
-        };
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("noa-background-image-uniform"),
-            size: std::mem::size_of::<BgImageUniformsRaw>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniforms));
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("noa-background-image-bind-group"),
-            layout: &self.shared.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&image.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.shared.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffer.as_entire_binding(),
-                },
-            ],
-        });
-        Some(BgImageDraw {
-            _buffer: buffer,
-            bind_group,
-        })
+        let mut draws = Vec::with_capacity(self.images.len());
+        for slot in &self.images {
+            draws.push(build_background_image_draw(
+                &self.shared,
+                device,
+                queue,
+                surface,
+                slot,
+            ));
+        }
+        Some(BgImageDraws { draws })
     }
 
-    /// Draw the prepared background-image quad, if any. The caller has left the
-    /// default full-surface scissor; a single 6-vertex instance-1 draw.
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, draw: Option<&BgImageDraw>) {
-        let Some(draw) = draw else {
+    /// Draw the prepared background-image quads, if any. The caller has left
+    /// the default full-surface scissor.
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, draws: Option<&BgImageDraws>) {
+        let Some(draws) = draws else {
             return;
         };
         pass.set_pipeline(&self.shared.pipeline);
-        pass.set_bind_group(0, &draw.bind_group, &[]);
-        pass.draw(0..6, 0..1);
+        for draw in &draws.draws {
+            pass.set_bind_group(0, &draw.bind_group, &[]);
+            pass.draw(0..6, 0..1);
+        }
+    }
+}
+
+fn upload_background_image(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    image: BackgroundImage,
+) -> Option<BackgroundImageGpu> {
+    if image.width == 0 || image.height == 0 || image.rgba.is_empty() {
+        return None;
+    }
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("noa-background-image-texture"),
+        size: wgpu::Extent3d {
+            width: image.width,
+            height: image.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(image.width * 4),
+            rows_per_image: Some(image.height),
+        },
+        wgpu::Extent3d {
+            width: image.width,
+            height: image.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Some(BackgroundImageGpu {
+        _texture: texture,
+        view,
+        width: image.width,
+        height: image.height,
+        fit: image.fit,
+        position: image.position,
+        repeat: image.repeat,
+        opacity: image.opacity.clamp(0.0, 1.0),
+    })
+}
+
+fn build_background_image_draw(
+    shared: &BackgroundImagePipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    surface: PixelSize,
+    slot: &BackgroundImageSlot,
+) -> BgImageDraw {
+    let image = &slot.gpu;
+    let placement = background_image_placement(
+        (image.width, image.height),
+        (surface.w, surface.h),
+        image.fit,
+        image.position,
+        image.repeat,
+    );
+    let uniforms = BgImageUniformsRaw {
+        dest_rect: placement.dest_rect,
+        surface_size: [surface.w as f32, surface.h as f32],
+        uv_scale: placement.uv_scale,
+        opacity: slot.effective_opacity(),
+        _pad: [0.0; 3],
+    };
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("noa-background-image-uniform"),
+        size: std::mem::size_of::<BgImageUniformsRaw>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&buffer, 0, bytemuck::bytes_of(&uniforms));
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("noa-background-image-bind-group"),
+        layout: &shared.bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&image.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&shared.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: buffer.as_entire_binding(),
+            },
+        ],
+    });
+    BgImageDraw {
+        _buffer: buffer,
+        bind_group,
     }
 }
 
@@ -673,5 +772,14 @@ mod tests {
         // dest_rect(16) + surface_size(8) + uv_scale(8) + opacity(4) + pad(12)
         // = 48, the std140 size (rounded up to the vec4 alignment).
         assert_eq!(std::mem::size_of::<BgImageUniformsRaw>(), 48);
+    }
+
+    #[test]
+    fn transition_alphas_cross_fade_and_clamp_progress() {
+        assert_eq!(background_image_transition_alphas(-1.0), (1.0, 0.0));
+        assert_eq!(background_image_transition_alphas(0.0), (1.0, 0.0));
+        assert_eq!(background_image_transition_alphas(0.25), (0.75, 0.25));
+        assert_eq!(background_image_transition_alphas(1.0), (0.0, 1.0));
+        assert_eq!(background_image_transition_alphas(2.0), (0.0, 1.0));
     }
 }

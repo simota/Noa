@@ -4,8 +4,8 @@ use noa_core::Rgb;
 
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, CursorShape,
-    FontFeature, FontVariation, MAX_SIDEBAR_PREVIEW_LINES, MacosOptionAsAlt, MacosTitlebarStyle,
-    ResizeOverlay, SyntheticStyleMode, WindowSaveState,
+    FontFeature, FontVariation, MAX_SIDEBAR_PREVIEW_LINES, MIN_BACKGROUND_IMAGE_INTERVAL_SECS,
+    MacosOptionAsAlt, MacosTitlebarStyle, ResizeOverlay, SyntheticStyleMode, WindowSaveState,
 };
 
 use super::diagnostics::*;
@@ -393,6 +393,29 @@ pub(super) fn parse_background_image_fit(
             None
         }
     }
+}
+
+/// Parse `background-image-interval`: positive integer seconds for Noa's
+/// directory-backed background-image slideshow. Values below the minimum clamp
+/// upward; zero, negative, and non-integers diagnose and fall back to default.
+pub(super) fn parse_background_image_interval(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<u64> {
+    let Some(value) = directive.value.as_deref() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, ""));
+        return None;
+    };
+    let Ok(parsed) = value.parse::<i64>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if parsed <= 0 {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some((parsed as u64).max(MIN_BACKGROUND_IMAGE_INTERVAL_SECS))
 }
 
 /// Smallest allowed `quick-terminal-size` fraction; below this the drop-down

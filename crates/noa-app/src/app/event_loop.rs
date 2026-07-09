@@ -276,7 +276,10 @@ impl ApplicationHandler<UserEvent> for App {
                             state.occluded,
                         );
                     }
-                    if !occluded {
+                }
+                if !occluded {
+                    self.sync_current_background_image_to_window(window_id);
+                    if let Some(state) = self.windows.get(&window_id) {
                         state.window.request_redraw();
                     }
                 }
@@ -485,6 +488,7 @@ impl ApplicationHandler<UserEvent> for App {
         let transient_overlay_deadline = self.tick_transient_overlays();
         let theme_settings_deadline = self.tick_theme_settings_debounce();
         let config_watch_deadline = self.tick_config_watch();
+        let live_wallpaper_deadline = self.tick_live_wallpaper();
         let deadline = [
             blink_deadline,
             overview_deadline,
@@ -495,6 +499,7 @@ impl ApplicationHandler<UserEvent> for App {
             transient_overlay_deadline,
             theme_settings_deadline,
             config_watch_deadline,
+            live_wallpaper_deadline,
         ]
         .into_iter()
         .flatten()

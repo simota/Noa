@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
 use noa_core::{DEFAULT_GRID_PADDING, GridPadding};
 use noa_grid::CursorStyle;
 #[cfg(target_os = "macos")]
@@ -52,8 +55,8 @@ pub struct AppConfig {
     /// native macOS window background blur; a no-op on other platforms.
     pub background_blur_radius: u16,
     /// `background-image`: path to a PNG laid behind the terminal grid, or
-    /// `None`. Decoded once at startup ([`decode_background_image`]); a missing
-    /// or undecodable file logs a diagnostic and disables the image.
+    /// `None`. Resolved at startup by [`load_background_image_runtime`]; a
+    /// missing or undecodable file logs a diagnostic and disables the image.
     pub background_image: Option<std::path::PathBuf>,
     /// `background-image-opacity`, `0.0..=1.0`. Scales the image quad's alpha,
     /// independent of `background-opacity`.
@@ -65,6 +68,9 @@ pub struct AppConfig {
     /// `background-image-repeat`: tile the image when it does not fill the
     /// surface.
     pub background_image_repeat: bool,
+    /// `background-image-interval`: seconds between slideshow rotations when
+    /// `background-image` resolves to a directory.
+    pub background_image_interval_secs: u64,
     /// `scrollback-limit`: total bytes of scrollback storage retained per pane
     /// before page-granular eviction (`0` disables scrollback). Applied to each
     /// new terminal at surface creation.
@@ -165,6 +171,7 @@ impl AppConfig {
             background_image_position: config.background_image_position,
             background_image_fit: config.background_image_fit,
             background_image_repeat: config.background_image_repeat,
+            background_image_interval_secs: config.background_image_interval_secs,
             scrollback_limit: config.scrollback_limit,
             window_save_state: config.window_save_state,
             macos_option_as_alt: config.macos_option_as_alt,
@@ -319,27 +326,215 @@ pub(super) fn background_image_position(
     }
 }
 
-/// Decode the configured background image once at startup into a render-ready
-/// [`noa_render::BackgroundImage`]. PNG-only (spec scope): a missing file, a
-/// non-PNG/undecodable file, or a zero-sized image logs a diagnostic and
-/// returns `None`, disabling the image while the terminal launches normally
-/// (spec FR-8 / AC-8 / AC-15). Never panics.
-pub(super) fn decode_background_image(config: &AppConfig) -> Option<noa_render::BackgroundImage> {
-    let path = config.background_image.as_ref()?;
-    decode_background_image_at(
-        path,
-        background_image_fit(config.background_image_fit),
-        background_image_position(config.background_image_position),
-        config.background_image_repeat,
-        config.background_image_opacity,
-    )
+/// Resolve the configured background image source. A file keeps the existing
+/// static PNG behavior; a directory becomes a deterministic PNG slideshow.
+/// Missing/unreadable paths degrade to no image and never panic.
+pub(super) fn load_background_image_runtime(config: &AppConfig) -> BackgroundImageRuntime {
+    let Some(path) = config.background_image.as_ref() else {
+        return BackgroundImageRuntime::Static(None);
+    };
+    let params = BackgroundImageParams {
+        fit: background_image_fit(config.background_image_fit),
+        position: background_image_position(config.background_image_position),
+        repeat: config.background_image_repeat,
+        opacity: config.background_image_opacity,
+    };
+    let resolved = expand_tilde(path);
+    let metadata = match std::fs::metadata(&resolved) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            log::warn!(
+                "background-image: cannot inspect {}: {error}; disabling background image",
+                resolved.display()
+            );
+            return BackgroundImageRuntime::Static(None);
+        }
+    };
+    if metadata.is_dir() {
+        return BackgroundImageRuntime::Slideshow(BackgroundImageSlideshow::from_dir(
+            resolved, params,
+        ));
+    }
+    if metadata.is_file() {
+        return BackgroundImageRuntime::Static(decode_background_image_at(
+            &resolved,
+            params.fit,
+            params.position,
+            params.repeat,
+            params.opacity,
+        ));
+    }
+    log::warn!(
+        "background-image: {} is neither a file nor a directory; disabling background image",
+        resolved.display()
+    );
+    BackgroundImageRuntime::Static(None)
 }
 
-/// Read + PNG-decode one background image. Split out from
-/// [`decode_background_image`] so the failure paths (missing / non-PNG /
-/// empty-file) are unit-testable without constructing a whole [`AppConfig`].
-/// Every failure logs a diagnostic and returns `None` (spec FR-8/AC-8/AC-15) —
-/// never panics.
+pub(super) enum BackgroundImageRuntime {
+    Static(Option<noa_render::BackgroundImage>),
+    Slideshow(BackgroundImageSlideshow),
+}
+
+impl BackgroundImageRuntime {
+    pub(super) fn current_image(&self) -> Option<noa_render::BackgroundImage> {
+        match self {
+            Self::Static(image) => image.clone(),
+            Self::Slideshow(slideshow) => slideshow.current_image(),
+        }
+    }
+
+    pub(super) fn wants_rotation(&self) -> bool {
+        match self {
+            Self::Static(_) => false,
+            Self::Slideshow(slideshow) => slideshow.wants_rotation(),
+        }
+    }
+
+    pub(super) fn advance(&mut self) -> bool {
+        match self {
+            Self::Static(_) => false,
+            Self::Slideshow(slideshow) => slideshow.advance(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BackgroundImageParams {
+    fit: noa_render::BackgroundImageFit,
+    position: noa_render::BackgroundImagePosition,
+    repeat: bool,
+    opacity: f32,
+}
+
+pub(super) struct BackgroundImageSlideshow {
+    candidates: Vec<PathBuf>,
+    current_index: usize,
+    current: Option<noa_render::BackgroundImage>,
+    params: BackgroundImageParams,
+    bad_paths: HashSet<PathBuf>,
+    rotation_exhausted: bool,
+}
+
+impl BackgroundImageSlideshow {
+    fn from_dir(dir: PathBuf, params: BackgroundImageParams) -> Self {
+        let candidates = collect_background_image_candidates(&dir);
+        if candidates.is_empty() {
+            log::warn!(
+                "background-image: {} contains no direct PNG candidates; disabling background image",
+                dir.display()
+            );
+        }
+        let mut slideshow = Self {
+            candidates,
+            current_index: 0,
+            current: None,
+            params,
+            bad_paths: HashSet::new(),
+            rotation_exhausted: false,
+        };
+        slideshow.select_initial();
+        slideshow
+    }
+
+    fn current_image(&self) -> Option<noa_render::BackgroundImage> {
+        self.current.clone()
+    }
+
+    fn wants_rotation(&self) -> bool {
+        self.current.is_some() && !self.rotation_exhausted && self.candidates.len() > 1
+    }
+
+    fn select_initial(&mut self) {
+        for index in 0..self.candidates.len() {
+            if let Some(image) = self.decode_candidate(index) {
+                self.current_index = index;
+                self.current = Some(image);
+                return;
+            }
+        }
+        if !self.candidates.is_empty() {
+            log::warn!(
+                "background-image: no PNG candidates in the configured directory could be decoded; disabling background image"
+            );
+        }
+        self.rotation_exhausted = true;
+    }
+
+    fn advance(&mut self) -> bool {
+        if !self.wants_rotation() {
+            return false;
+        }
+        for step in 1..self.candidates.len() {
+            let index = (self.current_index + step) % self.candidates.len();
+            if let Some(image) = self.decode_candidate(index) {
+                self.current_index = index;
+                self.current = Some(image);
+                return true;
+            }
+        }
+        self.rotation_exhausted = true;
+        false
+    }
+
+    fn decode_candidate(&mut self, index: usize) -> Option<noa_render::BackgroundImage> {
+        let path = self.candidates.get(index)?.clone();
+        if self.bad_paths.contains(&path) {
+            return None;
+        }
+        let image = decode_background_image_candidate_at(
+            &path,
+            self.params.fit,
+            self.params.position,
+            self.params.repeat,
+            self.params.opacity,
+        );
+        if image.is_none() {
+            self.bad_paths.insert(path);
+        }
+        image
+    }
+}
+
+fn collect_background_image_candidates(dir: &Path) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            log::warn!(
+                "background-image: cannot read directory {}: {error}; disabling background image",
+                dir.display()
+            );
+            return Vec::new();
+        }
+    };
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        if !has_png_extension(&path) {
+            continue;
+        }
+        if path.metadata().is_ok_and(|metadata| metadata.is_file()) {
+            candidates.push(path);
+        }
+    }
+    candidates.sort();
+    candidates
+}
+
+fn has_png_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+}
+
+/// Decode the configured static background image once at startup into a
+/// render-ready [`noa_render::BackgroundImage`]. PNG-only (spec scope): a
+/// missing file, a non-PNG/undecodable file, or a zero-sized image logs a
+/// diagnostic and returns `None`, disabling the image while the terminal
+/// launches normally. Never panics.
 fn decode_background_image_at(
     path: &std::path::Path,
     fit: noa_render::BackgroundImageFit,
@@ -347,13 +542,67 @@ fn decode_background_image_at(
     repeat: bool,
     opacity: f32,
 ) -> Option<noa_render::BackgroundImage> {
+    decode_background_image_with_context(
+        path,
+        fit,
+        position,
+        repeat,
+        opacity,
+        BackgroundImageDecodeContext::Disable,
+    )
+}
+
+/// Read + PNG-decode one slideshow candidate. Split out so the failure paths
+/// are unit-testable without constructing a whole [`AppConfig`]. Every failure
+/// logs a diagnostic and returns `None` — never panics.
+fn decode_background_image_candidate_at(
+    path: &std::path::Path,
+    fit: noa_render::BackgroundImageFit,
+    position: noa_render::BackgroundImagePosition,
+    repeat: bool,
+    opacity: f32,
+) -> Option<noa_render::BackgroundImage> {
+    decode_background_image_with_context(
+        path,
+        fit,
+        position,
+        repeat,
+        opacity,
+        BackgroundImageDecodeContext::SkipCandidate,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum BackgroundImageDecodeContext {
+    Disable,
+    SkipCandidate,
+}
+
+impl BackgroundImageDecodeContext {
+    fn action(self) -> &'static str {
+        match self {
+            Self::Disable => "disabling background image",
+            Self::SkipCandidate => "skipping slideshow candidate",
+        }
+    }
+}
+
+fn decode_background_image_with_context(
+    path: &std::path::Path,
+    fit: noa_render::BackgroundImageFit,
+    position: noa_render::BackgroundImagePosition,
+    repeat: bool,
+    opacity: f32,
+    context: BackgroundImageDecodeContext,
+) -> Option<noa_render::BackgroundImage> {
     let resolved = expand_tilde(path);
     let bytes = match std::fs::read(&resolved) {
         Ok(bytes) => bytes,
         Err(error) => {
             log::warn!(
-                "background-image: cannot read {}: {error}; disabling background image",
-                resolved.display()
+                "background-image: cannot read {}: {error}; {}",
+                resolved.display(),
+                context.action()
             );
             return None;
         }
@@ -362,17 +611,19 @@ fn decode_background_image_at(
         Ok(decoded) => decoded,
         Err(error) => {
             log::warn!(
-                "background-image: cannot decode {} as PNG: {error}; disabling background image \
+                "background-image: cannot decode {} as PNG: {error}; {} \
                  (only PNG is supported)",
-                resolved.display()
+                resolved.display(),
+                context.action()
             );
             return None;
         }
     };
     if width == 0 || height == 0 {
         log::warn!(
-            "background-image: {} decoded to an empty image; disabling background image",
-            resolved.display()
+            "background-image: {} decoded to an empty image; {}",
+            resolved.display(),
+            context.action()
         );
         return None;
     }
@@ -503,14 +754,27 @@ mod tests {
         ))
     }
 
-    fn write_1x1_png(path: &std::path::Path) {
+    fn write_1x1_png_with_rgba(path: &std::path::Path, rgba: [u8; 4]) {
         let file = std::fs::File::create(path).unwrap();
         let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 1, 1);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().unwrap();
-        writer.write_image_data(&[10, 20, 30, 255]).unwrap();
+        writer.write_image_data(&rgba).unwrap();
         writer.finish().unwrap();
+    }
+
+    fn write_1x1_png(path: &std::path::Path) {
+        write_1x1_png_with_rgba(path, [10, 20, 30, 255]);
+    }
+
+    fn test_background_params() -> BackgroundImageParams {
+        BackgroundImageParams {
+            fit: noa_render::BackgroundImageFit::Contain,
+            position: noa_render::BackgroundImagePosition::Center,
+            repeat: false,
+            opacity: 1.0,
+        }
     }
 
     #[test]
@@ -590,5 +854,77 @@ mod tests {
         );
         assert!(image.repeat);
         assert_eq!(image.opacity, 1.0);
+    }
+
+    #[test]
+    fn directory_candidates_filter_sort_and_do_not_recurse() {
+        let dir = temp_path("candidates");
+        let nested = dir.join("nested");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir(&nested).unwrap();
+        write_1x1_png(&dir.join("b.PNG"));
+        std::fs::write(dir.join("notes.txt"), b"not an image").unwrap();
+        write_1x1_png(&nested.join("c.png"));
+        write_1x1_png(&dir.join("a.png"));
+
+        let names = collect_background_image_candidates(&dir)
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(names, vec!["a.png", "b.PNG"]);
+    }
+
+    #[test]
+    fn slideshow_starts_at_first_decodable_candidate_and_marks_bad_paths() {
+        let dir = temp_path("skip-bad");
+        std::fs::create_dir(&dir).unwrap();
+        let bad = dir.join("00-bad.png");
+        std::fs::write(&bad, b"not a png").unwrap();
+        write_1x1_png_with_rgba(&dir.join("01-good.png"), [1, 2, 3, 255]);
+
+        let mut slideshow =
+            BackgroundImageSlideshow::from_dir(dir.clone(), test_background_params());
+        assert_eq!(slideshow.current_index, 1);
+        assert_eq!(&*slideshow.current.as_ref().unwrap().rgba, &[1, 2, 3, 255]);
+        assert!(slideshow.bad_paths.contains(&bad));
+        assert!(slideshow.wants_rotation());
+
+        assert!(!slideshow.advance());
+        assert!(!slideshow.wants_rotation());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slideshow_advances_to_next_decodable_candidate() {
+        let dir = temp_path("advance");
+        std::fs::create_dir(&dir).unwrap();
+        write_1x1_png_with_rgba(&dir.join("00-first.png"), [1, 0, 0, 255]);
+        write_1x1_png_with_rgba(&dir.join("01-second.png"), [2, 0, 0, 255]);
+
+        let mut slideshow =
+            BackgroundImageSlideshow::from_dir(dir.clone(), test_background_params());
+        assert_eq!(&*slideshow.current.as_ref().unwrap().rgba, &[1, 0, 0, 255]);
+
+        assert!(slideshow.advance());
+        assert_eq!(slideshow.current_index, 1);
+        assert_eq!(&*slideshow.current.as_ref().unwrap().rgba, &[2, 0, 0, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slideshow_with_all_corrupt_candidates_disables_image() {
+        let dir = temp_path("all-bad");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("00-bad.png"), b"not a png").unwrap();
+        std::fs::write(dir.join("01-bad.PNG"), b"also not a png").unwrap();
+
+        let slideshow = BackgroundImageSlideshow::from_dir(dir.clone(), test_background_params());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(slideshow.current.is_none());
+        assert!(!slideshow.wants_rotation());
+        assert!(slideshow.rotation_exhausted);
     }
 }

@@ -22,9 +22,9 @@ use noa_grid::{
 };
 use noa_pty::{Pty, PtyConfig};
 use noa_render::{
-    CardPipeline, CardStyle, CardTexturePlacement, CardTilePlacement, CommandPaletteSnapshot,
-    FrameSnapshot, HoverLink, OverviewThumbnailResources, PaletteRow, PaneFrame,
-    PaneId as RenderPaneId, PaneRect, Renderer, Theme,
+    BackgroundImage, CardPipeline, CardStyle, CardTexturePlacement, CardTilePlacement,
+    CommandPaletteSnapshot, FrameSnapshot, HoverLink, OverviewThumbnailResources, PaletteRow,
+    PaneFrame, PaneId as RenderPaneId, PaneRect, Renderer, Theme,
 };
 use noa_vt::Stream;
 use winit::application::ApplicationHandler;
@@ -90,12 +90,12 @@ use config_reload::ConfigWatcher;
 use quick_terminal::QuickTerminalState;
 use state::*;
 
+use config::{
+    BackgroundImageRuntime, font_config_from_noa_config, load_background_image_runtime,
+    resolve_cursor_style, resolve_grid_padding,
+};
 #[cfg(target_os = "macos")]
 use config::{apply_macos_titlebar_style, macos_option_as_alt, needs_macos_titlebar_backdrop};
-use config::{
-    decode_background_image, font_config_from_noa_config, resolve_cursor_style,
-    resolve_grid_padding,
-};
 use helpers::*;
 use input_ops::ActiveOverlay;
 #[cfg(test)]
@@ -103,6 +103,14 @@ use quick_terminal::{
     ease_out_cubic, quick_terminal_height, quick_terminal_progress,
     quick_terminal_reveal_top_offset, quick_terminal_slide_reveal, quick_terminal_top_offset,
 };
+
+#[derive(Clone)]
+struct LiveWallpaperTransition {
+    previous: Option<BackgroundImage>,
+    current: Option<BackgroundImage>,
+    started_at: Instant,
+    duration: Duration,
+}
 
 pub struct App {
     config: AppConfig,
@@ -113,10 +121,15 @@ pub struct App {
     /// Initial cursor style from `cursor-style` / `cursor-style-blink`, applied
     /// to each terminal at creation. `None` keeps the terminal default.
     initial_cursor_style: Option<CursorStyle>,
-    /// Decoded `background-image` (startup-time load, PNG-only). Shared (cheap
-    /// `Arc` clone) into every surface's renderer at creation. `None` when
-    /// unset or the file was missing/undecodable.
-    background_image: Option<noa_render::BackgroundImage>,
+    /// Static or directory-backed `background-image` runtime. Static mode keeps
+    /// the existing one decoded PNG; slideshow mode owns the directory snapshot
+    /// and the current decoded image.
+    background_image: BackgroundImageRuntime,
+    /// Next scheduled slideshow rotation wake-up. `None` while static,
+    /// exhausted, occluded, or backgrounded.
+    live_wallpaper_deadline: Option<Instant>,
+    /// Short cross-fade currently being applied after a slideshow rotation.
+    live_wallpaper_transition: Option<LiveWallpaperTransition>,
     runtime_font_size: f32,
     proxy: EventLoopProxy<UserEvent>,
     gpu: Option<GpuState>,
@@ -281,9 +294,7 @@ impl App {
         let padding = resolve_grid_padding(config.window_padding_x, config.window_padding_y);
         let initial_cursor_style =
             resolve_cursor_style(config.cursor_style, config.cursor_style_blink);
-        // Decode the background image once at startup; a missing/undecodable
-        // file logs a diagnostic inside and leaves this `None` (spec FR-8/NFR-1).
-        let background_image = decode_background_image(&config);
+        let background_image = load_background_image_runtime(&config);
         let (keybinds, keybind_diagnostics) = KeybindEngine::from_config(&config.keybinds);
         for diagnostic in keybind_diagnostics {
             log::warn!("config keybind: {diagnostic}");
@@ -300,6 +311,8 @@ impl App {
             padding,
             initial_cursor_style,
             background_image,
+            live_wallpaper_deadline: None,
+            live_wallpaper_transition: None,
             runtime_font_size: config.font_size,
             config,
             proxy,

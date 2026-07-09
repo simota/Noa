@@ -149,8 +149,8 @@ mod tests {
         assert!(app_config.auto_approve);
     }
 
-    // AC-7: a config carrying all five background-image keys resolves through
-    // `app_config_from_startup` into an `AppConfig` holding the five values.
+    // AC-7: a config carrying all background-image keys resolves through
+    // `AppConfig::from_startup` into an `AppConfig` holding those values.
     #[test]
     fn background_image_keys_flow_from_startup_config_to_app_config() {
         let config = noa_config::StartupConfig {
@@ -159,6 +159,7 @@ mod tests {
             background_image_position: noa_config::BackgroundImagePosition::TopRight,
             background_image_fit: noa_config::BackgroundImageFit::Cover,
             background_image_repeat: true,
+            background_image_interval_secs: 12,
             ..Default::default()
         };
 
@@ -179,6 +180,7 @@ mod tests {
             noa_config::BackgroundImageFit::Cover
         );
         assert!(app_config.background_image_repeat);
+        assert_eq!(app_config.background_image_interval_secs, 12);
     }
 
     // AC-7 (end-to-end from a config file): parsing a config source with all
@@ -191,7 +193,8 @@ mod tests {
              background-image-opacity = 0.25\n\
              background-image-position = bottom-left\n\
              background-image-fit = stretch\n\
-             background-image-repeat = true",
+             background-image-repeat = true\n\
+             background-image-interval = 45",
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let startup = overrides.apply_to(noa_config::StartupConfig::default());
@@ -215,6 +218,7 @@ mod tests {
             noa_config::BackgroundImageFit::Stretch
         );
         assert!(app_config.background_image_repeat);
+        assert_eq!(app_config.background_image_interval_secs, 45);
     }
 
     #[test]

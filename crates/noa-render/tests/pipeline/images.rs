@@ -374,3 +374,50 @@ fn background_image_draws_below_cells_with_independent_opacity() {
          background-opacity (NFR-3)"
     );
 }
+
+#[test]
+fn background_image_transition_draws_without_validation_error() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping background-image transition GPU test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        DEFAULT_GRID_PADDING,
+    )
+    .expect("build renderer");
+    let (w, h) = (16u32, 16u32);
+    renderer.resize(PixelSize { w, h });
+
+    let image = |rgba: [u8; 4]| BackgroundImage {
+        rgba: Arc::from(Vec::from(rgba)),
+        width: 1,
+        height: 1,
+        fit: BackgroundImageFit::Stretch,
+        position: BackgroundImagePosition::Center,
+        repeat: false,
+        opacity: 1.0,
+    };
+    let red = image([255, 0, 0, 255]);
+    let green = image([0, 255, 0, 255]);
+    let snap = snapshot_for_text(" ");
+    renderer.rebuild_cells(&snap, &mut font, &Theme::new());
+    renderer.sync_atlas(&device, &queue, &mut font);
+
+    renderer.set_background_image_transition(&device, &queue, Some(red), Some(green), 0.5);
+    assert!(renderer.has_background_image());
+
+    let (_target, view) = render_target(&device, w, h);
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.draw(&device, &queue, &view);
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error drawing background-image transition: {err:?}"
+    );
+}

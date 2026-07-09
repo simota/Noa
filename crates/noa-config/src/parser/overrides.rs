@@ -45,6 +45,7 @@ pub(crate) fn build_overrides(
     let mut background_image_position = None;
     let mut background_image_fit = None;
     let mut background_image_repeat = None;
+    let mut background_image_interval_secs = None;
     let mut scrollback_limit = None;
     let mut window_save_state = None;
     let mut macos_option_as_alt = None;
@@ -201,6 +202,10 @@ pub(crate) fn build_overrides(
             "background-image-repeat" => {
                 background_image_repeat = parse_bool_directive(path, directive, &mut diagnostics);
             }
+            "background-image-interval" => {
+                background_image_interval_secs =
+                    parse_background_image_interval(path, directive, &mut diagnostics);
+            }
             "scrollback-limit" => {
                 scrollback_limit = parse_usize(path, directive, &mut diagnostics);
             }
@@ -331,6 +336,7 @@ pub(crate) fn build_overrides(
             background_image_position,
             background_image_fit,
             background_image_repeat,
+            background_image_interval_secs,
             scrollback_limit,
             window_save_state,
             macos_option_as_alt,
@@ -418,6 +424,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "background-image-position"
             | "background-image-fit"
             | "background-image-repeat"
+            | "background-image-interval"
             | "scrollback-limit"
             | "window-save-state"
             | "macos-option-as-alt"

@@ -134,6 +134,8 @@ impl App {
         let cursor_changed = previous.cursor_style != applied.cursor_style
             || previous.cursor_style_blink != applied.cursor_style_blink;
         let background_image_changed = background_image_inputs_changed(&previous, &applied);
+        let background_image_interval_changed =
+            previous.background_image_interval_secs != applied.background_image_interval_secs;
         let opacity_changed = previous.background_opacity != applied.background_opacity;
         let blur_changed = previous.background_blur_radius != applied.background_blur_radius;
         let terminal_policy_changed = terminal_policy_inputs_changed(&previous, &applied);
@@ -156,6 +158,8 @@ impl App {
         }
         if background_image_changed {
             self.apply_reloaded_background_image();
+        } else if background_image_interval_changed {
+            self.live_wallpaper_deadline = None;
         }
         if opacity_changed {
             self.apply_reloaded_background_opacity();
@@ -269,16 +273,17 @@ impl App {
     }
 
     fn apply_reloaded_background_image(&mut self) {
-        self.background_image = decode_background_image(&self.config);
+        self.background_image = load_background_image_runtime(&self.config);
+        self.live_wallpaper_deadline = None;
+        self.live_wallpaper_transition = None;
+        let image = self.background_image.current_image();
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
         for state in self.windows.values_mut() {
-            state.renderer.set_background_image(
-                &gpu.device,
-                &gpu.queue,
-                self.background_image.clone(),
-            );
+            state
+                .renderer
+                .set_background_image(&gpu.device, &gpu.queue, image.clone());
         }
     }
 

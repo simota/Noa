@@ -55,7 +55,9 @@ impl App {
         target: ModalImeTarget,
     ) -> &str {
         match (&self.modal_preedit, self.modal_ime_target(window_id)) {
-            (Some(preedit), Some(owner)) if owner == target => preedit,
+            (Some(preedit), Some(owner)) if preedit.window_id == window_id && owner == target => {
+                &preedit.text
+            }
             _ => "",
         }
     }

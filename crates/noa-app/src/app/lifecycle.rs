@@ -618,6 +618,16 @@ impl App {
         {
             self.tab_title_prompt = None;
         }
+        // Same leak shape for an inline sidebar rename bound to the closed
+        // window. It is modal for that window's keyboard and cannot receive
+        // Escape/Enter once the tab is gone.
+        if self
+            .sidebar_rename
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.sidebar_rename = None;
+        }
         // Same leak shape as the palette: a theme-settings overlay bound to
         // the closed window would strand a dead-window reference. Drop the
         // preview along with it — nothing else can clear it once its owning
@@ -640,6 +650,13 @@ impl App {
             .is_some_and(|session| session.window_id == window_id)
         {
             self.confirm_dialog = None;
+        }
+        if self
+            .modal_preedit
+            .as_ref()
+            .is_some_and(|preedit| preedit.window_id == window_id)
+        {
+            self.modal_preedit = None;
         }
 
         match outcome {

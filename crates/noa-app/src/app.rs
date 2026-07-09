@@ -218,7 +218,7 @@ pub struct App {
     /// input-row display and committed into its buffer, instead of being fed
     /// to the focused pane's `ime_state` (which would draw the composition at
     /// the terminal cursor, behind the modal).
-    modal_preedit: Option<String>,
+    modal_preedit: Option<ModalPreedit>,
     /// Next scheduled relative-time repaint for visible sidebars, so a card's
     /// `3分前` keeps advancing without pty output. Armed only while at least
     /// one sidebar is visible; ticks once a minute (the formatter's finest

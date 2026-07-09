@@ -1116,6 +1116,16 @@ fn pane_keyboard_focus_uses_os_focus_not_sticky_last_focus() {
 }
 
 #[test]
+fn keyboard_preedit_swallowing_is_scoped_to_the_owning_window() {
+    assert!(keyboard_preedit_should_swallow_key(Some(1_u8), 1_u8, false));
+    assert!(
+        !keyboard_preedit_should_swallow_key(Some(1_u8), 2_u8, false),
+        "a modal preedit from another tab must not block this tab's keyboard input"
+    );
+    assert!(keyboard_preedit_should_swallow_key(None, 2_u8, true));
+}
+
+#[test]
 fn command_target_resolution_uses_focused_tab_only_for_terminal_commands() {
     let focused = Some(42_u8);
     for command in [

@@ -126,6 +126,14 @@ pub(crate) fn targeted_redraw_decision(exists: bool, occluded: bool) -> Targeted
     }
 }
 
+pub(crate) fn keyboard_preedit_should_swallow_key<Id: Eq>(
+    modal_preedit_owner: Option<Id>,
+    window_id: Id,
+    pane_preedit_active: bool,
+) -> bool {
+    modal_preedit_owner.is_some_and(|owner| owner == window_id) || pane_preedit_active
+}
+
 pub(crate) fn pane_user_event_redraw_decision(
     pane_state: Option<(bool, bool)>,
 ) -> TargetedRedrawDecision {

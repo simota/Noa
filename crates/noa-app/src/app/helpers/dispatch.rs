@@ -177,6 +177,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::PrevTab => CommandScope::NativeTabGroup,
         AppCommand::About
         | AppCommand::Preferences
+        | AppCommand::ReloadConfig
         | AppCommand::NewTab
         | AppCommand::NewWindow
         | AppCommand::ToggleCommandPalette
@@ -229,6 +230,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         AppCommand::ToggleTabOverview => CommandScope::NativeTabGroup,
         AppCommand::About
         | AppCommand::Preferences
+        | AppCommand::ReloadConfig
         | AppCommand::Quit
         | AppCommand::ToggleFullscreen
         | AppCommand::ToggleQuickTerminal

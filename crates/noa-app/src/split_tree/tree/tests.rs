@@ -911,6 +911,7 @@ fn pane_command_target_resolution_uses_focused_pane_for_terminal_commands() {
     for command in [
         AppCommand::About,
         AppCommand::Preferences,
+        AppCommand::ReloadConfig,
         AppCommand::NewTab,
         AppCommand::ToggleFullscreen,
         AppCommand::ToggleTabOverview,

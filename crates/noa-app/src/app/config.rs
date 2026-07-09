@@ -85,6 +85,9 @@ pub struct AppConfig {
     /// `--rows`). Session restore is suppressed in that case so the requested
     /// dimensions win over the saved topology (Ghostty parity).
     pub cli_grid_override: bool,
+    /// CLI-provided config overrides that must keep winning over file changes
+    /// during a live config reload, matching startup precedence.
+    pub cli_overrides: noa_config::ConfigOverrides,
     /// `quick-terminal-hotkey`: the global hotkey chord toggling the drop-down
     /// quick terminal (e.g. `cmd+grave`). `None` leaves the feature disabled.
     pub quick_terminal_hotkey: Option<String>,
@@ -124,6 +127,63 @@ pub struct AppConfig {
     /// `auto-approve`: seed new tabs with agent-CLI auto approval enabled.
     /// Runtime toggles are still per-tab.
     pub auto_approve: bool,
+}
+
+impl AppConfig {
+    pub fn from_startup(
+        config: noa_config::StartupConfig,
+        cli_grid_override: bool,
+        cli_overrides: noa_config::ConfigOverrides,
+    ) -> Self {
+        Self {
+            cols: config.cols,
+            rows: config.rows,
+            font_size: config.font_size,
+            theme: config.theme,
+            font: config.font,
+            clipboard_read: config.clipboard_read,
+            clipboard_paste_protection: config.clipboard_paste_protection,
+            confirm_quit: config.confirm_quit,
+            title_report: config.title_report,
+            window_padding_x: config.window_padding_x,
+            window_padding_y: config.window_padding_y,
+            background: config.background,
+            foreground: config.foreground,
+            cursor_color: config.cursor_color,
+            selection_foreground: config.selection_foreground,
+            selection_background: config.selection_background,
+            minimum_contrast: config.minimum_contrast,
+            cursor_style: config.cursor_style,
+            cursor_style_blink: config.cursor_style_blink,
+            background_opacity: config.background_opacity,
+            background_blur_radius: config.background_blur_radius,
+            background_image: config.background_image,
+            background_image_opacity: config.background_image_opacity,
+            background_image_position: config.background_image_position,
+            background_image_fit: config.background_image_fit,
+            background_image_repeat: config.background_image_repeat,
+            scrollback_limit: config.scrollback_limit,
+            window_save_state: config.window_save_state,
+            macos_option_as_alt: config.macos_option_as_alt,
+            macos_titlebar_style: config.macos_titlebar_style,
+            macos_non_native_fullscreen: config.macos_non_native_fullscreen,
+            cli_grid_override,
+            cli_overrides,
+            quick_terminal_hotkey: config.quick_terminal_hotkey,
+            quick_terminal_size: config.quick_terminal_size,
+            quick_terminal_autohide: config.quick_terminal_autohide,
+            sidebar_enabled: config.sidebar_enabled,
+            sidebar_width: config.sidebar_width,
+            sidebar_hotkey: config.sidebar_hotkey,
+            sidebar_preview_lines: config.sidebar_preview_lines,
+            resize_overlay: config.resize_overlay,
+            visual_bell: config.visual_bell,
+            audible_bell: config.audible_bell,
+            audible_bell_when_unfocused: config.audible_bell_when_unfocused,
+            audible_bell_dock_bounce: config.audible_bell_dock_bounce,
+            auto_approve: config.auto_approve,
+        }
+    }
 }
 
 /// Maps the parsed `noa-config` font settings onto the `noa-font` runtime

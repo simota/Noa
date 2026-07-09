@@ -28,6 +28,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
     match command {
         AppCommand::About => "About Noa",
         AppCommand::Preferences => "Open Preferences",
+        AppCommand::ReloadConfig => "Reload Configuration",
         AppCommand::Copy => "Copy to Clipboard",
         AppCommand::Paste => "Paste from Clipboard",
         AppCommand::Terminal(TerminalAction::Clear) => "Clear Screen",
@@ -109,6 +110,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::About,
         AppCommand::Preferences,
         AppCommand::OpenThemeSettings,
+        AppCommand::ReloadConfig,
         AppCommand::Copy,
         AppCommand::Paste,
         AppCommand::Terminal(TerminalAction::Clear),
@@ -302,6 +304,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::OpenThemeSettings
+        | AppCommand::ReloadConfig
         | AppCommand::Quit => CommandCategory::Application,
         AppCommand::Copy | AppCommand::Paste | AppCommand::Terminal(TerminalAction::SelectAll) => {
             CommandCategory::Clipboard
@@ -573,6 +576,7 @@ mod tests {
             AppCommand::About,
             AppCommand::Preferences,
             AppCommand::OpenThemeSettings,
+            AppCommand::ReloadConfig,
             AppCommand::Copy,
             AppCommand::Paste,
             AppCommand::Terminal(TerminalAction::Clear),

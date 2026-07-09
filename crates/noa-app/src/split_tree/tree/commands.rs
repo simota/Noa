@@ -37,6 +37,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::CloseTab => focused_pane,
         AppCommand::About
         | AppCommand::Preferences
+        | AppCommand::ReloadConfig
         | AppCommand::NewTab
         | AppCommand::NewWindow
         | AppCommand::ToggleTabOverview

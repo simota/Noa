@@ -484,6 +484,7 @@ impl ApplicationHandler<UserEvent> for App {
         let sidebar_autosort_deadline = self.tick_sidebar_autosort();
         let transient_overlay_deadline = self.tick_transient_overlays();
         let theme_settings_deadline = self.tick_theme_settings_debounce();
+        let config_watch_deadline = self.tick_config_watch();
         let deadline = [
             blink_deadline,
             overview_deadline,
@@ -493,6 +494,7 @@ impl ApplicationHandler<UserEvent> for App {
             sidebar_autosort_deadline,
             transient_overlay_deadline,
             theme_settings_deadline,
+            config_watch_deadline,
         ]
         .into_iter()
         .flatten()

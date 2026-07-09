@@ -39,13 +39,14 @@ fn main() -> anyhow::Result<()> {
         return run_import();
     }
 
-    let (config, diagnostics) = noa_config::load_startup_config(noa_config::ConfigOverrides {
+    let cli_overrides = noa_config::ConfigOverrides {
         cols: args.cols,
         rows: args.rows,
         font_size: args.font_size,
         theme: None,
         ..Default::default()
-    })?;
+    };
+    let (config, diagnostics) = noa_config::load_startup_config(cli_overrides.clone())?;
     for diagnostic in diagnostics {
         eprintln!("{}", diagnostic.message);
     }
@@ -56,7 +57,11 @@ fn main() -> anyhow::Result<()> {
     // dimensions, which suppresses session restore (the saved topology would
     // otherwise override them).
     let cli_grid_override = args.cols.is_some() || args.rows.is_some();
-    noa_app::run(app_config_from_startup(config, cli_grid_override))
+    noa_app::run(noa_app::AppConfig::from_startup(
+        config,
+        cli_grid_override,
+        cli_overrides,
+    ))
 }
 
 fn run_import() -> anyhow::Result<()> {
@@ -74,59 +79,6 @@ fn run_import() -> anyhow::Result<()> {
             eprintln!("{error:#}");
             std::process::exit(1);
         }
-    }
-}
-
-fn app_config_from_startup(
-    config: noa_config::StartupConfig,
-    cli_grid_override: bool,
-) -> noa_app::AppConfig {
-    noa_app::AppConfig {
-        cols: config.cols,
-        rows: config.rows,
-        font_size: config.font_size,
-        theme: config.theme,
-        font: config.font,
-        clipboard_read: config.clipboard_read,
-        clipboard_paste_protection: config.clipboard_paste_protection,
-        confirm_quit: config.confirm_quit,
-        title_report: config.title_report,
-        window_padding_x: config.window_padding_x,
-        window_padding_y: config.window_padding_y,
-        background: config.background,
-        foreground: config.foreground,
-        cursor_color: config.cursor_color,
-        selection_foreground: config.selection_foreground,
-        selection_background: config.selection_background,
-        minimum_contrast: config.minimum_contrast,
-        cursor_style: config.cursor_style,
-        cursor_style_blink: config.cursor_style_blink,
-        background_opacity: config.background_opacity,
-        background_blur_radius: config.background_blur_radius,
-        background_image: config.background_image,
-        background_image_opacity: config.background_image_opacity,
-        background_image_position: config.background_image_position,
-        background_image_fit: config.background_image_fit,
-        background_image_repeat: config.background_image_repeat,
-        scrollback_limit: config.scrollback_limit,
-        window_save_state: config.window_save_state,
-        macos_option_as_alt: config.macos_option_as_alt,
-        macos_titlebar_style: config.macos_titlebar_style,
-        macos_non_native_fullscreen: config.macos_non_native_fullscreen,
-        cli_grid_override,
-        quick_terminal_hotkey: config.quick_terminal_hotkey,
-        quick_terminal_size: config.quick_terminal_size,
-        quick_terminal_autohide: config.quick_terminal_autohide,
-        sidebar_enabled: config.sidebar_enabled,
-        sidebar_width: config.sidebar_width,
-        sidebar_hotkey: config.sidebar_hotkey,
-        sidebar_preview_lines: config.sidebar_preview_lines,
-        resize_overlay: config.resize_overlay,
-        visual_bell: config.visual_bell,
-        audible_bell: config.audible_bell,
-        audible_bell_when_unfocused: config.audible_bell_when_unfocused,
-        audible_bell_dock_bounce: config.audible_bell_dock_bounce,
-        auto_approve: config.auto_approve,
     }
 }
 
@@ -171,7 +123,8 @@ mod tests {
             ..Default::default()
         };
 
-        let app_config = app_config_from_startup(config, false);
+        let app_config =
+            noa_app::AppConfig::from_startup(config, false, noa_config::ConfigOverrides::default());
 
         assert_eq!(app_config.cols, 100);
         assert_eq!(app_config.rows, 30);
@@ -209,7 +162,8 @@ mod tests {
             ..Default::default()
         };
 
-        let app_config = app_config_from_startup(config, false);
+        let app_config =
+            noa_app::AppConfig::from_startup(config, false, noa_config::ConfigOverrides::default());
 
         assert_eq!(
             app_config.background_image,
@@ -241,7 +195,11 @@ mod tests {
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         let startup = overrides.apply_to(noa_config::StartupConfig::default());
-        let app_config = app_config_from_startup(startup, false);
+        let app_config = noa_app::AppConfig::from_startup(
+            startup,
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
 
         assert_eq!(
             app_config.background_image,

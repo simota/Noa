@@ -6,15 +6,12 @@
 
 use winit::window::Window;
 
-/// Apply `background-blur-radius` to `window`'s background. A startup-time
-/// action: called once per terminal window right after creation. `opacity` is
-/// only used to warn when blur was requested on a fully opaque window (where
-/// it has no visible effect).
+/// Apply `background-blur-radius` to `window`'s background. Also accepts
+/// `0` to clear a previously applied blur during live config reload.
+/// `opacity` is only used to warn when blur was requested on a fully opaque
+/// window (where it has no visible effect).
 pub(crate) fn apply_background_blur(window: &Window, radius: u16, opacity: f32) {
-    if radius == 0 {
-        return;
-    }
-    if opacity >= 1.0 {
+    if radius > 0 && opacity >= 1.0 {
         log::debug!(
             "background-blur-radius = {radius} has no visible effect while background-opacity is 1.0"
         );

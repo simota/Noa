@@ -9,6 +9,7 @@ use winit::keyboard::{Key, ModifiersState};
 pub enum AppCommand {
     About,
     Preferences,
+    ReloadConfig,
     Copy,
     Paste,
     Terminal(TerminalAction),
@@ -150,6 +151,7 @@ impl AppCommand {
         match self {
             AppCommand::About => Self::ABOUT_MENU_ID,
             AppCommand::Preferences => Self::PREFERENCES_MENU_ID,
+            AppCommand::ReloadConfig => "",
             AppCommand::Copy => Self::COPY_MENU_ID,
             AppCommand::Paste => Self::PASTE_MENU_ID,
             AppCommand::Terminal(TerminalAction::Clear) => Self::TERMINAL_CLEAR_MENU_ID,
@@ -292,6 +294,7 @@ impl AppCommand {
         match self {
             Self::About => "about",
             Self::Preferences => "preferences",
+            Self::ReloadConfig => "config.reload",
             Self::Copy => "copy",
             Self::Paste => "paste",
             Self::Terminal(TerminalAction::Clear) => "terminal.clear",
@@ -361,6 +364,7 @@ impl AppCommand {
         match name {
             "about" => Some(Self::About),
             "preferences" => Some(Self::Preferences),
+            "config.reload" => Some(Self::ReloadConfig),
             "copy" => Some(Self::Copy),
             "paste" => Some(Self::Paste),
             "terminal.clear" => Some(Self::Terminal(TerminalAction::Clear)),

@@ -71,6 +71,7 @@ use crate::{AppCommand, ViewportScroll};
 mod auto_approve;
 mod commands;
 mod config;
+mod config_reload;
 mod event_loop;
 mod helpers;
 mod input_ops;
@@ -85,6 +86,7 @@ mod state;
 mod timers;
 
 pub use config::AppConfig;
+use config_reload::ConfigWatcher;
 use quick_terminal::QuickTerminalState;
 use state::*;
 
@@ -104,6 +106,7 @@ use quick_terminal::{
 
 pub struct App {
     config: AppConfig,
+    config_watcher: ConfigWatcher,
     /// Grid padding derived once from `window-padding-x/y`, applied to every
     /// pane's geometry.
     padding: GridPadding,
@@ -289,6 +292,7 @@ impl App {
         let sidebar_visible_gate = Arc::new(AtomicBool::new(false));
         let sidebar_preview_lines_gate = Arc::new(AtomicUsize::new(config.sidebar_preview_lines));
         App {
+            config_watcher: ConfigWatcher::new(),
             padding,
             initial_cursor_style,
             background_image,

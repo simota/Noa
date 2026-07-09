@@ -464,6 +464,7 @@ fn action_names_map_to_commands() {
         AppCommand::CloseWindow,
         AppCommand::Quit,
         AppCommand::OpenThemeSettings,
+        AppCommand::ReloadConfig,
     ] {
         assert_eq!(
             AppCommand::from_action_name(command.action_name()),

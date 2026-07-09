@@ -60,6 +60,7 @@ impl App {
         match command {
             AppCommand::About => crate::app_actions::show_about(),
             AppCommand::Preferences => crate::app_actions::open_config_file(),
+            AppCommand::ReloadConfig => self.reload_config_from_disk(),
             AppCommand::NewTab => {
                 let _ = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow);
             }

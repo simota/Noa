@@ -38,13 +38,13 @@ pub const SIDEBAR_TOOLBAR_H: u32 = 30;
 /// Default number of last-output preview rows in one session card.
 pub const DEFAULT_SIDEBAR_PREVIEW_LINES: usize = noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES;
 
-/// Vertical gap between adjacent cards.
-pub const SIDEBAR_CARD_GUTTER: u32 = 8;
+/// Vertical gap between adjacent cards. Zero keeps the sidebar list flat and
+/// continuous instead of drawing separated floating tiles.
+pub const SIDEBAR_CARD_GUTTER: u32 = 0;
 
-/// Horizontal margin between a card and the sidebar's left/right edges, so the
-/// rounded card reads as a floating tile instead of touching the band edges
-/// (matches `SIDEBAR_CARD_GUTTER` so the gap reads uniform on all sides).
-pub const SIDEBAR_CARD_MARGIN_X: u32 = 8;
+/// Horizontal margin between a card and the sidebar's left/right edges. Zero
+/// lets each row span the whole sidebar band for a seamless flat list.
+pub const SIDEBAR_CARD_MARGIN_X: u32 = 0;
 
 /// Max characters of a cwd shown on the meta row before middle truncation.
 /// The cwd shares the row with the process badge and branch, so it is kept
@@ -309,17 +309,18 @@ impl SidebarMetrics {
     }
 
     /// One card's sub-rects in its own texture space (origin at the card's
-    /// top-left, width `inset`), unclipped. The per-card rounded-card renderer
-    /// draws each card into its own texture and positions text with these,
-    /// matching the window-space rects [`layout`](Self::layout) emits for the
-    /// flat backdrop.
+    /// top-left, width `card_w`), unclipped. The per-card overlay renderer draws
+    /// each card into its own texture and positions text with these, matching
+    /// the window-space rects [`layout`](Self::layout) emits for the flat
+    /// backdrop.
     pub fn card_local_rects(&self, id: SessionCardId, card_w: u32) -> CardRects {
         let vp = SidebarRect::new(0, 0, card_w, self.card_h);
         self.card_rects_at(id, 0, card_w as i64, 0, vp)
     }
 
     /// The width of one card for a sidebar `sidebar_w` wide: the full width
-    /// minus the horizontal margin on both sides.
+    /// minus the horizontal margin on both sides. The default margin is zero so
+    /// the rows form a seamless flat list.
     pub fn card_w(&self, sidebar_w: u32) -> u32 {
         sidebar_w.saturating_sub(2 * self.card_margin_x)
     }
@@ -415,7 +416,8 @@ impl SidebarMetrics {
     /// toolbar buttons first, then the scrolling card region: within a card, the
     /// per-card `…` button wins over the card body (callers need not fall back
     /// like the overview's separate close hit-test). Returns `None` for the
-    /// header, gutters between cards, or any point outside the sidebar.
+    /// header, any configured gutters between cards, or any point outside the
+    /// sidebar.
     pub fn hit_test(
         &self,
         bounds: SidebarRect,
@@ -445,7 +447,7 @@ impl SidebarMetrics {
 
         let index = (cy / self.card_stride) as usize;
         if index >= ids.len() || cy % self.card_stride >= self.card_h {
-            // Past the last card, or in the gutter between two cards.
+            // Past the last card, or in a configured gutter between cards.
             return None;
         }
         let id = ids[index];
@@ -1394,21 +1396,23 @@ mod tests {
     }
 
     #[test]
-    fn hit_test_misses_the_gutter_between_cards() {
+    fn hit_test_keeps_cards_contiguous_without_a_gutter() {
         let (bounds, ids) = six_id_bounds();
         let vp = m1().bands(bounds).viewport;
-        // The gutter sits just below the first card (stride = card + gutter).
-        let gutter = Point::new(vp.x + 40, vp.y + SIDEBAR_CARD_H + 3);
-        assert_eq!(m1().hit_test(bounds, &ids, 0, gutter), None);
+        let second_card_top = Point::new(vp.x + 40, vp.y + SIDEBAR_CARD_H);
+        assert_eq!(
+            m1().hit_test(bounds, &ids, 0, second_card_top),
+            Some(SidebarHit::Card(ids[1]))
+        );
     }
 
     // AC-23 (FR-15): with more cards than fit, scroll clamps to [0, max] and the
     // first/last cards are each reachable at the extremes.
     #[test]
     fn scroll_clamp_bounds_and_endpoints() {
-        let content = m1().content_height(6); // 600
-        let viewport_h = 3 * SIDEBAR_CARD_STRIDE; // 300
-        let max = content - viewport_h; // 300
+        let content = m1().content_height(6);
+        let viewport_h = 3 * SIDEBAR_CARD_STRIDE;
+        let max = content - viewport_h;
 
         assert_eq!(clamp_scroll(0, content, viewport_h), 0);
         assert_eq!(clamp_scroll(50, content, viewport_h), 50);
@@ -1573,7 +1577,7 @@ mod tests {
     fn layout_and_hit_test_scale_at_dpr_2() {
         let m2 = SidebarMetrics::new(2.0);
         let ids: Vec<_> = (0..6).map(|p| card_id(1, p)).collect();
-        // header(0, collapsed) + toolbar(60) + 3*stride(296) = 948, doubled width.
+        // Doubled width and height, with room for exactly three scaled rows.
         let bounds = SidebarRect::new(
             0,
             0,
@@ -1620,9 +1624,13 @@ mod tests {
             Some(SidebarHit::CardMenu(ids[0]))
         );
 
-        // The gutter past the doubled card height is a miss.
-        let gutter = Point::new(vp.x + 80, vp.y + m2.card_h + 3);
-        assert_eq!(m2.hit_test(bounds, &ids, 0, gutter), None);
+        // With the flat list there is no gutter; the next pixel row belongs to
+        // the next card.
+        let next_card = Point::new(vp.x + 80, vp.y + m2.card_h + 3);
+        assert_eq!(
+            m2.hit_test(bounds, &ids, 0, next_card),
+            Some(SidebarHit::Card(ids[1]))
+        );
     }
 
     #[test]

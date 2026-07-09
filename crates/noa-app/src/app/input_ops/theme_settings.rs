@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::super::*;
 use super::ActiveOverlay;
@@ -47,6 +47,12 @@ impl App {
             .first()
             .cloned()
             .unwrap_or_default();
+        let background_image = self
+            .config
+            .background_image
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let available_font_families = noa_font::list_families().unwrap_or_default();
         let init = ThemeSettingsInit {
             current_theme,
@@ -54,6 +60,12 @@ impl App {
             cursor_style,
             background_opacity: self.config.background_opacity,
             background_blur_radius: self.config.background_blur_radius,
+            background_image,
+            background_image_opacity: self.config.background_image_opacity,
+            background_image_position: self.config.background_image_position,
+            background_image_fit: self.config.background_image_fit,
+            background_image_repeat: self.config.background_image_repeat,
+            background_image_interval_secs: self.config.background_image_interval_secs,
             window_padding_x: self.config.window_padding_x.unwrap_or(0.0),
             window_padding_y: self.config.window_padding_y.unwrap_or(0.0),
             macos_titlebar_style: self.config.macos_titlebar_style,
@@ -133,11 +145,13 @@ impl App {
             _ => {}
         }
 
-        if self
-            .keybinds
-            .resolve(&event.logical_key, self.modifiers)
-            .is_some()
+        let resolved = self.keybinds.resolve(&event.logical_key, self.modifiers);
+        if resolved == Some(AppCommand::Paste)
+            && self.paste_clipboard_to_theme_settings_background_image(window_id)
         {
+            return;
+        }
+        if resolved.is_some() {
             // Every resolved keybind is swallowed while this modal owns the
             // keyboard — unlike the command palette, the overlay has no
             // self-toggle shortcut to special-case (R-1: it opens only from
@@ -154,6 +168,66 @@ impl App {
             session.state.push_text(text, Instant::now());
         }
         self.after_theme_settings_navigation(window_id);
+    }
+
+    pub(in crate::app) fn copy_theme_settings_background_image_to_clipboard(&mut self) -> bool {
+        let Some(text) = self
+            .focused
+            .and_then(|window_id| {
+                self.theme_settings
+                    .as_ref()
+                    .filter(|session| session.window_id == window_id)
+            })
+            .and_then(|session| selected_background_image_text(&session.state))
+        else {
+            return false;
+        };
+
+        if let Err(err) = self.clipboard.set_text(text) {
+            log::warn!("failed to copy theme-settings background image path: {err}");
+        }
+        true
+    }
+
+    pub(in crate::app) fn paste_clipboard_to_theme_settings_background_image(
+        &mut self,
+        window_id: WindowId,
+    ) -> bool {
+        let should_paste = self.theme_settings.as_ref().is_some_and(|session| {
+            session.window_id == window_id
+                && SettingsRowKind::ALL[session.state.selected_row()]
+                    == SettingsRowKind::BackgroundImage
+        });
+        if !should_paste {
+            return false;
+        }
+
+        let contents = match self.clipboard.get_paste_contents() {
+            Ok(contents) => contents,
+            Err(err) => {
+                log::warn!("failed to read clipboard for theme-settings background image: {err}");
+                return true;
+            }
+        };
+        let text = match background_image_path_text_from_paste_contents(contents) {
+            Ok(text) => text,
+            Err(err) => {
+                log::warn!("failed to prepare pasted background image path: {err}");
+                return true;
+            }
+        };
+        if text.is_empty() {
+            return true;
+        }
+        if let Some(session) = self
+            .theme_settings
+            .as_mut()
+            .filter(|session| session.window_id == window_id)
+        {
+            session.state.push_text(&text, Instant::now());
+        }
+        self.after_theme_settings_navigation(window_id);
+        true
     }
 
     /// ←→ on the focused settings row: applies the value change to the pure
@@ -327,9 +401,10 @@ impl App {
     }
 
     /// Mirror the just-committed runtime rows (font-size, background-opacity,
-    /// background-blur-radius, cursor-style, sidebar-preview-lines,
-    /// quick-terminal-size, confirm-quit) into `self.config` so a future reopen
-    /// of the overlay, or the next quick-terminal toggle, shows the new value.
+    /// background-blur-radius, background-image settings, cursor-style,
+    /// sidebar-preview-lines, quick-terminal-size, confirm-quit) into
+    /// `self.config` so a future reopen of the overlay, or the next quick-
+    /// terminal toggle, shows the new value.
     /// The restart-only rows are deliberately excluded: nothing on screen
     /// actually changes for them until a restart, so leaving `self.config` at
     /// its pre-commit value keeps it truthful to what the user still sees, even
@@ -340,6 +415,8 @@ impl App {
         rows: &[SettingsRow; SettingsRowKind::COUNT],
     ) {
         sync_quick_terminal_size_from_committed_rows(&mut self.config, rows);
+        let mut reload_background_image = false;
+        let mut reset_background_image_deadline = false;
         for (kind, row) in SettingsRowKind::ALL.iter().zip(rows.iter()) {
             if !row.touched {
                 continue;
@@ -351,6 +428,37 @@ impl App {
                 }
                 (SettingsRowKind::BackgroundBlurRadius, RowDraft::BackgroundBlurRadius(v)) => {
                     self.config.background_blur_radius = *v;
+                }
+                (SettingsRowKind::BackgroundImage, RowDraft::BackgroundImage(v)) => {
+                    self.config.background_image =
+                        (!v.is_empty()).then(|| PathBuf::from(v.as_str()));
+                    reload_background_image = true;
+                }
+                (SettingsRowKind::BackgroundImageOpacity, RowDraft::BackgroundImageOpacity(v)) => {
+                    self.config.background_image_opacity = *v;
+                    reload_background_image = true;
+                }
+                (
+                    SettingsRowKind::BackgroundImagePosition,
+                    RowDraft::BackgroundImagePosition(v),
+                ) => {
+                    self.config.background_image_position = *v;
+                    reload_background_image = true;
+                }
+                (SettingsRowKind::BackgroundImageFit, RowDraft::BackgroundImageFit(v)) => {
+                    self.config.background_image_fit = *v;
+                    reload_background_image = true;
+                }
+                (SettingsRowKind::BackgroundImageRepeat, RowDraft::BackgroundImageRepeat(v)) => {
+                    self.config.background_image_repeat = *v;
+                    reload_background_image = true;
+                }
+                (
+                    SettingsRowKind::BackgroundImageInterval,
+                    RowDraft::BackgroundImageInterval(v),
+                ) => {
+                    self.config.background_image_interval_secs = *v;
+                    reset_background_image_deadline = true;
                 }
                 (SettingsRowKind::CursorStyle, RowDraft::CursorStyle(v)) => {
                     self.config.cursor_style = Some(*v);
@@ -373,6 +481,11 @@ impl App {
                     )
                 }
             }
+        }
+        if reload_background_image {
+            self.apply_reloaded_background_image();
+        } else if reset_background_image_deadline {
+            self.live_wallpaper_deadline = None;
         }
     }
 
@@ -502,6 +615,33 @@ fn sync_quick_terminal_size_from_committed_rows(
     }
 }
 
+fn selected_background_image_text(state: &ThemeSettings) -> Option<&str> {
+    if SettingsRowKind::ALL[state.selected_row()] != SettingsRowKind::BackgroundImage {
+        return None;
+    }
+    match &state.rows()[state.selected_row()].draft {
+        RowDraft::BackgroundImage(path) => Some(path.as_str()),
+        _ => None,
+    }
+}
+
+fn background_image_path_text_from_paste_contents(
+    contents: PasteContents,
+) -> anyhow::Result<String> {
+    match contents {
+        PasteContents::FileUrls(paths) => Ok(paths
+            .first()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default()),
+        PasteContents::Image(png_bytes) => {
+            let path = clipboard::write_temp_png(&png_bytes)?;
+            Ok(path.to_string_lossy().into_owned())
+        }
+        PasteContents::Text(text) => Ok(text),
+        PasteContents::Empty => Ok(String::new()),
+    }
+}
+
 fn commit_redraw_targets<Id: Copy + Eq + std::hash::Hash, V>(windows: &HashMap<Id, V>) -> Vec<Id> {
     windows.keys().copied().collect()
 }
@@ -540,6 +680,12 @@ mod commit_theme_settings_tests {
             cursor_style: noa_config::CursorShape::Block,
             background_opacity: 1.0,
             background_blur_radius: 0,
+            background_image: String::new(),
+            background_image_opacity: 1.0,
+            background_image_position: noa_config::BackgroundImagePosition::Center,
+            background_image_fit: noa_config::BackgroundImageFit::Contain,
+            background_image_repeat: false,
+            background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
             window_padding_x: 2.0,
             window_padding_y: 2.0,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
@@ -550,7 +696,8 @@ mod commit_theme_settings_tests {
             available_font_families: Vec::new(),
         });
         settings.toggle_section();
-        for _ in 0..8 {
+        while SettingsRowKind::ALL[settings.selected_row()] != SettingsRowKind::QuickTerminalHeight
+        {
             settings.move_down();
         }
         assert_eq!(
@@ -569,6 +716,64 @@ mod commit_theme_settings_tests {
         assert!(
             (config.quick_terminal_size - 0.45).abs() < 0.001,
             "committed quick terminal height should update AppConfig for the next toggle"
+        );
+    }
+
+    #[test]
+    fn background_image_paste_uses_raw_first_file_url_path() {
+        let text = background_image_path_text_from_paste_contents(PasteContents::FileUrls(vec![
+            PathBuf::from("/Users/example/Pictures/wall paper.png"),
+            PathBuf::from("/Users/example/Pictures/other.png"),
+        ]))
+        .expect("file-url paste conversion should succeed");
+
+        assert_eq!(text, "/Users/example/Pictures/wall paper.png");
+    }
+
+    #[test]
+    fn background_image_paste_uses_plain_text_verbatim() {
+        let text = background_image_path_text_from_paste_contents(PasteContents::Text(
+            "/Users/example/Pictures/noa".to_string(),
+        ))
+        .expect("text paste conversion should succeed");
+
+        assert_eq!(text, "/Users/example/Pictures/noa");
+    }
+
+    #[test]
+    fn selected_background_image_text_only_returns_when_row_is_selected() {
+        let mut settings = ThemeSettings::open(ThemeSettingsInit {
+            current_theme: "3024 Day".to_string(),
+            font_size: 14.0,
+            cursor_style: noa_config::CursorShape::Block,
+            background_opacity: 1.0,
+            background_blur_radius: 0,
+            background_image: "/tmp/wall.png".to_string(),
+            background_image_opacity: 1.0,
+            background_image_position: noa_config::BackgroundImagePosition::Center,
+            background_image_fit: noa_config::BackgroundImageFit::Contain,
+            background_image_repeat: false,
+            background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+            window_padding_x: 2.0,
+            window_padding_y: 2.0,
+            macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
+            sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
+            quick_terminal_size: 0.4,
+            confirm_quit: true,
+            font_family: "Menlo".to_string(),
+            available_font_families: Vec::new(),
+        });
+
+        assert_eq!(selected_background_image_text(&settings), None);
+
+        settings.toggle_section();
+        while SettingsRowKind::ALL[settings.selected_row()] != SettingsRowKind::BackgroundImage {
+            settings.move_down();
+        }
+
+        assert_eq!(
+            selected_background_image_text(&settings),
+            Some("/tmp/wall.png")
         );
     }
 }

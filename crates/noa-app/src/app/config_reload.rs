@@ -272,7 +272,7 @@ impl App {
         self.refresh_macos_window_backgrounds();
     }
 
-    fn apply_reloaded_background_image(&mut self) {
+    pub(in crate::app) fn apply_reloaded_background_image(&mut self) {
         self.background_image = load_background_image_runtime(&self.config);
         self.live_wallpaper_deadline = None;
         self.live_wallpaper_transition = None;

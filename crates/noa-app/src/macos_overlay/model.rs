@@ -173,7 +173,9 @@ const THEME_LIST_ROWS: usize = 8;
 pub(crate) fn theme_settings_view_model(
     state: &crate::theme_settings::ThemeSettings,
 ) -> ThemeSettingsViewModel {
-    use crate::theme_settings::{Section, SettingsRowKind, Swatch, sample_swatches};
+    use crate::theme_settings::{
+        Section, SettingsRowKind, Swatch, sample_swatches, settings_row_display_value,
+    };
 
     let total = state.filtered_len();
     let highlighted = state.highlighted_index();
@@ -208,11 +210,13 @@ pub(crate) fn theme_settings_view_model(
         .iter()
         .enumerate()
         .map(|(idx, kind)| {
+            let selected = idx == state.selected_row();
+            let editing = selected && state.section() == Section::SettingsRows;
             (
                 kind.label().to_string(),
-                state.rows()[idx].draft.display_value(),
+                settings_row_display_value(*kind, &state.rows()[idx].draft, editing),
                 state.restart_note(*kind),
-                idx == state.selected_row(),
+                selected,
             )
         })
         .collect();

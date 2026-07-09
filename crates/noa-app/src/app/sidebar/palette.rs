@@ -12,6 +12,7 @@ use super::render::ensure_scratch;
 use super::*;
 use crate::theme_settings::{
     RowDraft, Section, SettingsRowKind, Swatch, ThemeSettings, sample_swatches,
+    settings_row_display_value,
 };
 
 /// Corner radius (logical px) of a modal overlay card (H) — the shared
@@ -705,8 +706,8 @@ fn sgr_reset(out: &mut String) {
 }
 
 /// Render `draft`'s current value as a short display string (E).
-fn format_row_value(draft: &RowDraft) -> String {
-    draft.display_value()
+fn format_row_value(kind: SettingsRowKind, draft: &RowDraft, editing: bool) -> String {
+    settings_row_display_value(kind, draft, editing)
 }
 
 /// Build the overlay's whole content as one ANSI-escaped string, fed through
@@ -871,7 +872,8 @@ fn theme_settings_overlay_text(
         }
         out.push(' ');
         sgr_reset(&mut out);
-        let value = format_row_value(&state.rows()[idx].draft);
+        let editing = idx == state.selected_row() && state.section() == Section::SettingsRows;
+        let value = format_row_value(kind, &state.rows()[idx].draft, editing);
         let note = if state.restart_note(kind) {
             " (restart to apply)"
         } else {

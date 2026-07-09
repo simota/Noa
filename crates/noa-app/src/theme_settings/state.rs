@@ -2,13 +2,14 @@ use std::io;
 use std::path::Path;
 use std::time::Instant;
 
-use noa_config::{CursorShape, MacosTitlebarStyle};
+use noa_config::{BackgroundImageFit, BackgroundImagePosition, CursorShape, MacosTitlebarStyle};
 
 use crate::command_palette::fuzzy_match;
 use crate::debounce::Debouncer;
 
 use super::{
     RevertValues, RowDraft, RowEffect, Section, SettingsRow, SettingsRowKind, ThemeSettingsInit,
+    background_image_fit_value, background_image_position_value,
 };
 
 /// The injectable config-writer seam [`ThemeSettings::commit`] takes
@@ -37,6 +38,10 @@ const FONT_SIZE_MAX: f32 = 96.0;
 
 /// Background-opacity step per ←→ press (SHAPE table: `0.0–1.0 step 0.05`).
 const OPACITY_STEP: f32 = 0.05;
+/// Background-image-opacity step per ←→ press.
+const BACKGROUND_IMAGE_OPACITY_STEP: f32 = 0.05;
+/// Background-image-interval step per ←→ press, in seconds.
+const BACKGROUND_IMAGE_INTERVAL_STEP_SECS: u64 = 5;
 /// Background-blur-radius step per ←→ press, and its config-documented cap
 /// (`noa-config`'s `background_blur_radius` doc comment: `0..=64`).
 const BLUR_STEP: i32 = 1;
@@ -92,6 +97,9 @@ pub(crate) struct ThemeSettings {
     /// font-size row (R-2's "数値行は直接入力も可"); reset whenever
     /// navigation leaves the row. `None` between edits.
     font_size_digits: Option<String>,
+    /// Text-entry buffer for `background-image`. `None` means the first typed
+    /// printable character replaces the current path; after that, text appends.
+    background_image_text: Option<String>,
     /// R-11 gate: set once at open from the opacity at that moment. A
     /// window can't transition opaque<->transparent at runtime, so this
     /// never changes for the life of one overlay session.
@@ -116,6 +124,12 @@ impl ThemeSettings {
             cursor_style: init.cursor_style,
             background_opacity: init.background_opacity,
             background_blur_radius: init.background_blur_radius,
+            background_image: init.background_image.clone(),
+            background_image_opacity: init.background_image_opacity,
+            background_image_position: init.background_image_position,
+            background_image_fit: init.background_image_fit,
+            background_image_repeat: init.background_image_repeat,
+            background_image_interval_secs: init.background_image_interval_secs,
             sidebar_preview_lines: init.sidebar_preview_lines,
             quick_terminal_size: init.quick_terminal_size,
         };
@@ -130,6 +144,30 @@ impl ThemeSettings {
             },
             SettingsRow {
                 draft: RowDraft::BackgroundBlurRadius(init.background_blur_radius),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::BackgroundImage(init.background_image),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::BackgroundImageOpacity(init.background_image_opacity),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::BackgroundImagePosition(init.background_image_position),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::BackgroundImageFit(init.background_image_fit),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::BackgroundImageRepeat(init.background_image_repeat),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::BackgroundImageInterval(init.background_image_interval_secs),
                 touched: false,
             },
             SettingsRow {
@@ -172,6 +210,7 @@ impl ThemeSettings {
             snapshot,
             font_size_debounce: Debouncer::new(FONT_SIZE_DEBOUNCE_WINDOW),
             font_size_digits: None,
+            background_image_text: None,
             opaque_at_startup: init.background_opacity >= 1.0,
             available_font_families: init.available_font_families,
             commit_error: None,
@@ -269,7 +308,14 @@ impl ThemeSettings {
         }
         if matches!(
             row,
-            SettingsRowKind::ConfirmQuit | SettingsRowKind::QuickTerminalHeight
+            SettingsRowKind::BackgroundImage
+                | SettingsRowKind::BackgroundImageOpacity
+                | SettingsRowKind::BackgroundImagePosition
+                | SettingsRowKind::BackgroundImageFit
+                | SettingsRowKind::BackgroundImageRepeat
+                | SettingsRowKind::BackgroundImageInterval
+                | SettingsRowKind::ConfirmQuit
+                | SettingsRowKind::QuickTerminalHeight
         ) {
             return false;
         }
@@ -304,7 +350,7 @@ impl ThemeSettings {
             Section::SettingsRows => {
                 if self.selected_row > 0 {
                     self.selected_row -= 1;
-                    self.font_size_digits = None;
+                    self.clear_row_input_state();
                 }
             }
         }
@@ -321,7 +367,7 @@ impl ThemeSettings {
             Section::SettingsRows => {
                 if self.selected_row + 1 < SettingsRowKind::ALL.len() {
                     self.selected_row += 1;
-                    self.font_size_digits = None;
+                    self.clear_row_input_state();
                 }
             }
         }
@@ -340,7 +386,11 @@ impl ThemeSettings {
                 self.filter.push_str(&filtered);
                 self.refilter_and_mark();
             }
-            Section::SettingsRows => self.push_font_size_digits(text, now),
+            Section::SettingsRows => match SettingsRowKind::ALL[self.selected_row] {
+                SettingsRowKind::FontSize => self.push_font_size_digits(text, now),
+                SettingsRowKind::BackgroundImage => self.push_background_image_text(text),
+                _ => {}
+            },
         }
     }
 
@@ -353,18 +403,37 @@ impl ThemeSettings {
                     self.refilter_and_mark();
                 }
             }
-            Section::SettingsRows => {
-                if SettingsRowKind::ALL[self.selected_row] != SettingsRowKind::FontSize {
-                    return;
-                }
-                if let Some(digits) = &mut self.font_size_digits {
-                    digits.pop();
-                    if let Ok(value) = digits.parse::<f32>() {
-                        self.set_font_size(value, now);
+            Section::SettingsRows => match SettingsRowKind::ALL[self.selected_row] {
+                SettingsRowKind::FontSize => {
+                    if let Some(digits) = &mut self.font_size_digits {
+                        digits.pop();
+                        if let Ok(value) = digits.parse::<f32>() {
+                            self.set_font_size(value, now);
+                        }
                     }
                 }
-            }
+                SettingsRowKind::BackgroundImage => {
+                    let idx = self.selected_row;
+                    let next = {
+                        let text = self.background_image_text.get_or_insert_with(|| {
+                            match &self.rows[idx].draft {
+                                RowDraft::BackgroundImage(path) => path.clone(),
+                                _ => String::new(),
+                            }
+                        });
+                        text.pop();
+                        text.clone()
+                    };
+                    self.set_background_image_text(next);
+                }
+                _ => {}
+            },
         }
+    }
+
+    fn clear_row_input_state(&mut self) {
+        self.font_size_digits = None;
+        self.background_image_text = None;
     }
 
     fn push_font_size_digits(&mut self, text: &str, now: Instant) {
@@ -379,6 +448,30 @@ impl ThemeSettings {
         }
         if let Ok(value) = digits.parse::<f32>() {
             self.set_font_size(value, now);
+        }
+    }
+
+    fn push_background_image_text(&mut self, text: &str) {
+        let filtered: String = text.chars().filter(|c| !c.is_control()).collect();
+        if filtered.is_empty() {
+            return;
+        }
+        let next = {
+            let text = self.background_image_text.get_or_insert_with(String::new);
+            text.push_str(&filtered);
+            text.clone()
+        };
+        self.set_background_image_text(next);
+    }
+
+    fn set_background_image_text(&mut self, value: String) {
+        let idx = self.selected_row;
+        let RowDraft::BackgroundImage(current) = &self.rows[idx].draft else {
+            return;
+        };
+        if current != &value {
+            self.rows[idx].draft = RowDraft::BackgroundImage(value);
+            self.rows[idx].touched = true;
         }
     }
 
@@ -444,6 +537,82 @@ impl ThemeSettings {
                 } else {
                     RowEffect::Blur(new)
                 }
+            }
+            SettingsRowKind::BackgroundImage => RowEffect::None,
+            SettingsRowKind::BackgroundImageOpacity => {
+                let RowDraft::BackgroundImageOpacity(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = (current + delta as f32 * BACKGROUND_IMAGE_OPACITY_STEP).clamp(0.0, 1.0);
+                if (new - current).abs() > f32::EPSILON {
+                    self.rows[idx].draft = RowDraft::BackgroundImageOpacity(new);
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
+            SettingsRowKind::BackgroundImagePosition => {
+                let RowDraft::BackgroundImagePosition(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = cycle(
+                    &[
+                        BackgroundImagePosition::TopLeft,
+                        BackgroundImagePosition::TopCenter,
+                        BackgroundImagePosition::TopRight,
+                        BackgroundImagePosition::CenterLeft,
+                        BackgroundImagePosition::Center,
+                        BackgroundImagePosition::CenterRight,
+                        BackgroundImagePosition::BottomLeft,
+                        BackgroundImagePosition::BottomCenter,
+                        BackgroundImagePosition::BottomRight,
+                    ],
+                    current,
+                    delta,
+                );
+                if new != current {
+                    self.rows[idx].draft = RowDraft::BackgroundImagePosition(new);
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
+            SettingsRowKind::BackgroundImageFit => {
+                let RowDraft::BackgroundImageFit(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = cycle(
+                    &[
+                        BackgroundImageFit::None,
+                        BackgroundImageFit::Contain,
+                        BackgroundImageFit::Cover,
+                        BackgroundImageFit::Stretch,
+                    ],
+                    current,
+                    delta,
+                );
+                if new != current {
+                    self.rows[idx].draft = RowDraft::BackgroundImageFit(new);
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
+            SettingsRowKind::BackgroundImageRepeat => {
+                let RowDraft::BackgroundImageRepeat(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                self.rows[idx].draft = RowDraft::BackgroundImageRepeat(!current);
+                self.rows[idx].touched = true;
+                RowEffect::None
+            }
+            SettingsRowKind::BackgroundImageInterval => {
+                let RowDraft::BackgroundImageInterval(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = adjust_background_image_interval(current, delta);
+                if new != current {
+                    self.rows[idx].draft = RowDraft::BackgroundImageInterval(new);
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
             }
             SettingsRowKind::CursorStyle => {
                 let RowDraft::CursorStyle(current) = self.rows[idx].draft else {
@@ -643,6 +812,30 @@ impl ThemeSettings {
                 RowDraft::BackgroundBlurRadius(v) => {
                     updates.push(("background-blur-radius".to_string(), v.to_string()));
                 }
+                RowDraft::BackgroundImage(path) => {
+                    updates.push(("background-image".to_string(), path.clone()));
+                }
+                RowDraft::BackgroundImageOpacity(v) => {
+                    updates.push(("background-image-opacity".to_string(), format!("{v:.2}")));
+                }
+                RowDraft::BackgroundImagePosition(position) => {
+                    updates.push((
+                        "background-image-position".to_string(),
+                        background_image_position_value(*position).to_string(),
+                    ));
+                }
+                RowDraft::BackgroundImageFit(fit) => {
+                    updates.push((
+                        "background-image-fit".to_string(),
+                        background_image_fit_value(*fit).to_string(),
+                    ));
+                }
+                RowDraft::BackgroundImageRepeat(repeat) => {
+                    updates.push(("background-image-repeat".to_string(), repeat.to_string()));
+                }
+                RowDraft::BackgroundImageInterval(secs) => {
+                    updates.push(("background-image-interval".to_string(), secs.to_string()));
+                }
                 RowDraft::CursorStyle(shape) => {
                     updates.push((
                         "cursor-style".to_string(),
@@ -737,6 +930,16 @@ fn cycle<T: Copy + PartialEq>(order: &[T], current: T, delta: i32) -> T {
     let idx = order.iter().position(|v| *v == current).unwrap_or(0) as i32;
     let next = (idx + delta).rem_euclid(len);
     order[next as usize]
+}
+
+fn adjust_background_image_interval(current: u64, delta: i32) -> u64 {
+    let step = BACKGROUND_IMAGE_INTERVAL_STEP_SECS * u64::from(delta.unsigned_abs());
+    let next = if delta.is_negative() {
+        current.saturating_sub(step)
+    } else {
+        current.saturating_add(step)
+    };
+    next.max(noa_config::MIN_BACKGROUND_IMAGE_INTERVAL_SECS)
 }
 
 /// The full theme catalog fuzzy-filtered by `filter`, best match first,

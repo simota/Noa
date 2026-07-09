@@ -120,8 +120,19 @@ impl App {
             AppCommand::SetTabTitle => self.open_tab_title_prompt(),
             AppCommand::NextTab => self.select_next_tab(),
             AppCommand::PrevTab => self.select_previous_tab(),
-            AppCommand::Copy => self.copy_selection_to_clipboard(),
-            AppCommand::Paste => self.paste_clipboard_to_pty(),
+            AppCommand::Copy => {
+                if !self.copy_theme_settings_background_image_to_clipboard() {
+                    self.copy_selection_to_clipboard();
+                }
+            }
+            AppCommand::Paste => {
+                let pasted_to_theme_settings = self.focused.is_some_and(|window_id| {
+                    self.paste_clipboard_to_theme_settings_background_image(window_id)
+                });
+                if !pasted_to_theme_settings {
+                    self.paste_clipboard_to_pty();
+                }
+            }
             AppCommand::SendSelectionToPane => self.open_send_selection_picker(),
             AppCommand::ExportScrollback => self.export_scrollback_to_temp_file(),
             AppCommand::PipeScrollbackToPager => self.pipe_scrollback_to_pager(event_loop),

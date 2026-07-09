@@ -1,5 +1,5 @@
 use super::*;
-use noa_config::{CursorShape, MacosTitlebarStyle};
+use noa_config::{BackgroundImageFit, BackgroundImagePosition, CursorShape, MacosTitlebarStyle};
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -13,6 +13,12 @@ fn init() -> ThemeSettingsInit {
         cursor_style: CursorShape::Block,
         background_opacity: 1.0,
         background_blur_radius: 0,
+        background_image: String::new(),
+        background_image_opacity: 1.0,
+        background_image_position: BackgroundImagePosition::Center,
+        background_image_fit: BackgroundImageFit::Contain,
+        background_image_repeat: false,
+        background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
         window_padding_x: 2.0,
         window_padding_y: 2.0,
         macos_titlebar_style: MacosTitlebarStyle::Native,
@@ -40,6 +46,26 @@ fn transparent_init() -> ThemeSettingsInit {
         background_opacity: 0.9,
         ..init()
     }
+}
+
+fn move_to_row(settings: &mut ThemeSettings, row: SettingsRowKind) {
+    if settings.section() != Section::SettingsRows {
+        settings.toggle_section();
+    }
+    let target = row_index(row);
+    while settings.selected_row() < target {
+        settings.move_down();
+    }
+    while settings.selected_row() > target {
+        settings.move_up();
+    }
+}
+
+fn row_index(row: SettingsRowKind) -> usize {
+    SettingsRowKind::ALL
+        .iter()
+        .position(|kind| *kind == row)
+        .expect("row kind is present in SettingsRowKind::ALL")
 }
 
 // AC-3 (R-5): the sample pane's data carries all 16 ANSI slots plus
@@ -91,7 +117,7 @@ fn tab_toggles_section_and_arrows_route_by_section() {
     // ←→ is a no-op while the theme list owns the section.
     let effect = settings.adjust(1, Instant::now());
     assert_eq!(effect, RowEffect::None);
-    assert!(!settings.rows()[3].touched);
+    assert!(!settings.rows()[row_index(SettingsRowKind::CursorStyle)].touched);
 
     // ↑↓ moves the theme highlight, one step from wherever the initial
     // highlight (the active theme's catalog position) landed.
@@ -123,18 +149,11 @@ fn tab_toggles_section_and_arrows_route_by_section() {
 #[test]
 fn cursor_style_row_cycles_and_applies_immediately() {
     let mut settings = ThemeSettings::open(init());
-    settings.toggle_section();
-    for _ in 0..3 {
-        settings.move_down();
-    }
-    assert_eq!(
-        SettingsRowKind::ALL[settings.selected_row()],
-        SettingsRowKind::CursorStyle
-    );
+    move_to_row(&mut settings, SettingsRowKind::CursorStyle);
 
     let effect = settings.adjust(1, Instant::now());
     assert_eq!(effect, RowEffect::CursorStyle(CursorShape::Bar));
-    assert!(settings.rows()[3].touched);
+    assert!(settings.rows()[row_index(SettingsRowKind::CursorStyle)].touched);
     assert!(settings.badge_visible());
 
     let effect = settings.adjust(1, Instant::now());
@@ -185,6 +204,12 @@ fn opaque_startup_disables_live_opacity_and_blur_but_keeps_draft() {
 #[test]
 fn touched_commit_only_rows_show_restart_note() {
     let mut settings = ThemeSettings::open(transparent_init());
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImage));
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImageOpacity));
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImagePosition));
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImageFit));
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImageRepeat));
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImageInterval));
     assert!(!settings.restart_note(SettingsRowKind::FontFamily));
     assert!(!settings.restart_note(SettingsRowKind::WindowPadding));
     assert!(!settings.restart_note(SettingsRowKind::MacosTitlebarStyle));
@@ -192,21 +217,166 @@ fn touched_commit_only_rows_show_restart_note() {
     assert!(!settings.restart_note(SettingsRowKind::QuickTerminalHeight));
     assert!(!settings.restart_note(SettingsRowKind::ConfirmQuit));
 
-    settings.toggle_section();
-    for _ in 0..4 {
-        settings.move_down();
-    }
-    assert_eq!(
-        SettingsRowKind::ALL[settings.selected_row()],
-        SettingsRowKind::FontFamily
-    );
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
     settings.adjust(1, Instant::now());
     assert!(settings.restart_note(SettingsRowKind::FontFamily));
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImage));
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImageOpacity));
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImagePosition));
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImageFit));
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImageRepeat));
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImageInterval));
     assert!(!settings.restart_note(SettingsRowKind::WindowPadding));
     assert!(!settings.restart_note(SettingsRowKind::MacosTitlebarStyle));
     assert!(!settings.restart_note(SettingsRowKind::SidebarPreviewLines));
     assert!(!settings.restart_note(SettingsRowKind::QuickTerminalHeight));
     assert!(!settings.restart_note(SettingsRowKind::ConfirmQuit));
+}
+
+#[test]
+fn background_image_row_accepts_file_or_directory_path_text_and_commits() {
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        background_image: "/tmp/old-wallpaper.png".to_string(),
+        ..init()
+    });
+    move_to_row(&mut settings, SettingsRowKind::BackgroundImage);
+
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::BackgroundImage)].draft,
+        RowDraft::BackgroundImage("/tmp/old-wallpaper.png".to_string())
+    );
+
+    let now = Instant::now();
+    settings.push_text("/Users/example/Pictures/noa", now);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::BackgroundImage)].draft,
+        RowDraft::BackgroundImage("/Users/example/Pictures/noa".to_string())
+    );
+    assert!(settings.rows()[row_index(SettingsRowKind::BackgroundImage)].touched);
+    assert!(!settings.restart_note(SettingsRowKind::BackgroundImage));
+
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "background-image"),
+        Some(&(
+            "background-image".to_string(),
+            "/Users/example/Pictures/noa".to_string()
+        ))
+    );
+}
+
+#[test]
+fn background_image_row_backspace_edits_the_existing_path() {
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        background_image: "/tmp/wall.png".to_string(),
+        ..init()
+    });
+    move_to_row(&mut settings, SettingsRowKind::BackgroundImage);
+
+    settings.backspace(Instant::now());
+
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::BackgroundImage)].draft,
+        RowDraft::BackgroundImage("/tmp/wall.pn".to_string())
+    );
+    assert_eq!(
+        settings.commit_updates(),
+        vec![("background-image".to_string(), "/tmp/wall.pn".to_string())]
+    );
+}
+
+#[test]
+fn background_image_display_value_marks_editing_state() {
+    let draft = RowDraft::BackgroundImage("/tmp/wall.png".to_string());
+
+    assert_eq!(
+        settings_row_display_value(SettingsRowKind::BackgroundImage, &draft, false),
+        "/tmp/wall.png"
+    );
+    assert_eq!(
+        settings_row_display_value(SettingsRowKind::BackgroundImage, &draft, true),
+        "/tmp/wall.png|"
+    );
+    assert_eq!(
+        settings_row_display_value(
+            SettingsRowKind::BackgroundImage,
+            &RowDraft::BackgroundImage(String::new()),
+            true,
+        ),
+        "|"
+    );
+}
+
+#[test]
+fn background_image_option_rows_adjust_and_commit_canonical_values() {
+    let mut settings = ThemeSettings::open(init());
+    let now = Instant::now();
+
+    move_to_row(&mut settings, SettingsRowKind::BackgroundImageOpacity);
+    settings.adjust(-1, now);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::BackgroundImageOpacity)].draft,
+        RowDraft::BackgroundImageOpacity(0.95)
+    );
+
+    move_to_row(&mut settings, SettingsRowKind::BackgroundImagePosition);
+    settings.adjust(1, now);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::BackgroundImagePosition)].draft,
+        RowDraft::BackgroundImagePosition(BackgroundImagePosition::CenterRight)
+    );
+
+    move_to_row(&mut settings, SettingsRowKind::BackgroundImageFit);
+    settings.adjust(1, now);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::BackgroundImageFit)].draft,
+        RowDraft::BackgroundImageFit(BackgroundImageFit::Cover)
+    );
+
+    move_to_row(&mut settings, SettingsRowKind::BackgroundImageRepeat);
+    settings.adjust(1, now);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::BackgroundImageRepeat)].draft,
+        RowDraft::BackgroundImageRepeat(true)
+    );
+
+    move_to_row(&mut settings, SettingsRowKind::BackgroundImageInterval);
+    settings.adjust(1, now);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::BackgroundImageInterval)].draft,
+        RowDraft::BackgroundImageInterval(noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS + 5)
+    );
+
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates
+            .iter()
+            .find(|(k, _)| k == "background-image-opacity"),
+        Some(&("background-image-opacity".to_string(), "0.95".to_string()))
+    );
+    assert_eq!(
+        updates
+            .iter()
+            .find(|(k, _)| k == "background-image-position"),
+        Some(&(
+            "background-image-position".to_string(),
+            "center-right".to_string()
+        ))
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "background-image-fit"),
+        Some(&("background-image-fit".to_string(), "cover".to_string()))
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "background-image-repeat"),
+        Some(&("background-image-repeat".to_string(), "true".to_string()))
+    );
+    assert_eq!(
+        updates
+            .iter()
+            .find(|(k, _)| k == "background-image-interval"),
+        Some(&("background-image-interval".to_string(), "35".to_string()))
+    );
 }
 
 // AC-4a: the badge is invisible until either the theme highlight moves
@@ -353,39 +523,27 @@ fn revert_returns_the_snapshot_and_cancels_pending_debounce() {
 #[test]
 fn font_family_and_titlebar_rows_cycle_and_wrap() {
     let mut settings = ThemeSettings::open(init());
-    settings.toggle_section();
-    for _ in 0..4 {
-        settings.move_down();
-    }
-    assert_eq!(
-        SettingsRowKind::ALL[settings.selected_row()],
-        SettingsRowKind::FontFamily
-    );
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
     settings.adjust(1, Instant::now());
     assert_eq!(
-        settings.rows()[4].draft,
+        settings.rows()[row_index(SettingsRowKind::FontFamily)].draft,
         RowDraft::FontFamily("Monaco".to_string())
     );
     settings.adjust(-1, Instant::now());
     settings.adjust(-1, Instant::now());
     assert_eq!(
-        settings.rows()[4].draft,
+        settings.rows()[row_index(SettingsRowKind::FontFamily)].draft,
         RowDraft::FontFamily("Courier New".to_string()),
         "wraps backward past the front"
     );
 
-    settings.move_down();
-    settings.move_down();
-    assert_eq!(
-        SettingsRowKind::ALL[settings.selected_row()],
-        SettingsRowKind::MacosTitlebarStyle
-    );
+    move_to_row(&mut settings, SettingsRowKind::MacosTitlebarStyle);
     settings.adjust(1, Instant::now());
     assert_eq!(
-        settings.rows()[6].draft,
+        settings.rows()[row_index(SettingsRowKind::MacosTitlebarStyle)].draft,
         RowDraft::MacosTitlebarStyle(MacosTitlebarStyle::Transparent)
     );
-    assert!(settings.rows()[6].touched);
+    assert!(settings.rows()[row_index(SettingsRowKind::MacosTitlebarStyle)].touched);
 }
 
 // Window-padding row moves both axes together on one ←→ step (the
@@ -393,46 +551,41 @@ fn font_family_and_titlebar_rows_cycle_and_wrap() {
 #[test]
 fn window_padding_row_adjusts_both_axes_together() {
     let mut settings = ThemeSettings::open(init());
-    settings.toggle_section();
-    for _ in 0..5 {
-        settings.move_down();
-    }
-    assert_eq!(
-        SettingsRowKind::ALL[settings.selected_row()],
-        SettingsRowKind::WindowPadding
-    );
+    move_to_row(&mut settings, SettingsRowKind::WindowPadding);
     settings.adjust(1, Instant::now());
-    assert_eq!(settings.rows()[5].draft, RowDraft::WindowPadding(3.0, 3.0));
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::WindowPadding)].draft,
+        RowDraft::WindowPadding(3.0, 3.0)
+    );
 }
 
 #[test]
 fn sidebar_preview_lines_row_adjusts_clamps_and_commits() {
     let mut settings = ThemeSettings::open(init());
-    settings.toggle_section();
-    for _ in 0..7 {
-        settings.move_down();
-    }
-    assert_eq!(
-        SettingsRowKind::ALL[settings.selected_row()],
-        SettingsRowKind::SidebarPreviewLines
-    );
+    move_to_row(&mut settings, SettingsRowKind::SidebarPreviewLines);
 
     let effect = settings.adjust(1, Instant::now());
     assert_eq!(effect, RowEffect::SidebarPreviewLines(6));
-    assert_eq!(settings.rows()[7].draft, RowDraft::SidebarPreviewLines(6));
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::SidebarPreviewLines)].draft,
+        RowDraft::SidebarPreviewLines(6)
+    );
     assert!(!settings.restart_note(SettingsRowKind::SidebarPreviewLines));
 
     for _ in 0..20 {
         settings.adjust(1, Instant::now());
     }
     assert_eq!(
-        settings.rows()[7].draft,
+        settings.rows()[row_index(SettingsRowKind::SidebarPreviewLines)].draft,
         RowDraft::SidebarPreviewLines(noa_config::MAX_SIDEBAR_PREVIEW_LINES)
     );
     for _ in 0..20 {
         settings.adjust(-1, Instant::now());
     }
-    assert_eq!(settings.rows()[7].draft, RowDraft::SidebarPreviewLines(0));
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::SidebarPreviewLines)].draft,
+        RowDraft::SidebarPreviewLines(0)
+    );
 
     let updates = settings.commit_updates();
     assert_eq!(
@@ -444,29 +597,36 @@ fn sidebar_preview_lines_row_adjusts_clamps_and_commits() {
 #[test]
 fn quick_terminal_height_row_adjusts_clamps_and_commits() {
     let mut settings = ThemeSettings::open(init());
-    settings.toggle_section();
-    for _ in 0..8 {
-        settings.move_down();
-    }
-    assert_eq!(
-        SettingsRowKind::ALL[settings.selected_row()],
-        SettingsRowKind::QuickTerminalHeight
-    );
+    move_to_row(&mut settings, SettingsRowKind::QuickTerminalHeight);
 
     let effect = settings.adjust(1, Instant::now());
     assert_eq!(effect, RowEffect::None);
-    assert_quick_terminal_height(&settings.rows()[8].draft, 0.45);
+    assert_quick_terminal_height(
+        &settings.rows()[row_index(SettingsRowKind::QuickTerminalHeight)].draft,
+        0.45,
+    );
     assert!(!settings.restart_note(SettingsRowKind::QuickTerminalHeight));
-    assert_eq!(settings.rows()[8].draft.display_value(), "45%");
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::QuickTerminalHeight)]
+            .draft
+            .display_value(),
+        "45%"
+    );
 
     for _ in 0..20 {
         settings.adjust(1, Instant::now());
     }
-    assert_quick_terminal_height(&settings.rows()[8].draft, 1.0);
+    assert_quick_terminal_height(
+        &settings.rows()[row_index(SettingsRowKind::QuickTerminalHeight)].draft,
+        1.0,
+    );
     for _ in 0..40 {
         settings.adjust(-1, Instant::now());
     }
-    assert_quick_terminal_height(&settings.rows()[8].draft, 0.1);
+    assert_quick_terminal_height(
+        &settings.rows()[row_index(SettingsRowKind::QuickTerminalHeight)].draft,
+        0.1,
+    );
 
     let updates = settings.commit_updates();
     assert_eq!(
@@ -478,18 +638,14 @@ fn quick_terminal_height_row_adjusts_clamps_and_commits() {
 #[test]
 fn confirm_quit_row_toggles_and_commits_without_restart_note() {
     let mut settings = ThemeSettings::open(init());
-    settings.toggle_section();
-    for _ in 0..9 {
-        settings.move_down();
-    }
-    assert_eq!(
-        SettingsRowKind::ALL[settings.selected_row()],
-        SettingsRowKind::ConfirmQuit
-    );
+    move_to_row(&mut settings, SettingsRowKind::ConfirmQuit);
 
     let effect = settings.adjust(1, Instant::now());
     assert_eq!(effect, RowEffect::None);
-    assert_eq!(settings.rows()[9].draft, RowDraft::ConfirmQuit(false));
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::ConfirmQuit)].draft,
+        RowDraft::ConfirmQuit(false)
+    );
     assert!(!settings.restart_note(SettingsRowKind::ConfirmQuit));
 
     let updates = settings.commit_updates();
@@ -552,10 +708,7 @@ fn commit_updates_omits_theme_when_highlight_returns_to_the_snapshot() {
 #[test]
 fn commit_updates_writes_both_padding_axes_from_one_row() {
     let mut settings = ThemeSettings::open(init());
-    settings.toggle_section();
-    for _ in 0..5 {
-        settings.move_down();
-    }
+    move_to_row(&mut settings, SettingsRowKind::WindowPadding);
     settings.adjust(1, Instant::now());
     let updates = settings.commit_updates();
     assert_eq!(
@@ -694,10 +847,7 @@ fn ac14_cli_override_value_never_leaks_only_touched_rows_reach_disk() {
         font_size: 20.0,
         ..init()
     });
-    untouched_session.toggle_section();
-    for _ in 0..3 {
-        untouched_session.move_down();
-    }
+    move_to_row(&mut untouched_session, SettingsRowKind::CursorStyle);
     assert_eq!(
         SettingsRowKind::ALL[untouched_session.selected_row()],
         SettingsRowKind::CursorStyle

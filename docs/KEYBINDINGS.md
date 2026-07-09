@@ -176,7 +176,10 @@ Carbon `RegisterEventHotKey` によるシステム全域ホットキー。アプ
 
 ## 主要ソース
 
-- `crates/noa-app/src/commands.rs` — `KeybindEngine`・`AppCommand`・チョードパーサー(真実源)
+- `crates/noa-app/src/commands/keybind.rs` — `KeybindEngine`・既定バインド・config適用(真実源)
+- `crates/noa-app/src/commands/command.rs` — `AppCommand`・action名の相互変換
+- `crates/noa-app/src/commands/key_token.rs` — チョードパーサー・キー別名
+- `crates/noa-app/src/commands.rs` — 上記モジュールのfacade / re-export
 - `crates/noa-app/src/macos_menu.rs` — メニューアクセラレータ + コンテキストメニュー
 - `crates/noa-app/src/app/event_loop.rs` — キー / マウスのルーティング
 - `crates/noa-app/src/app/input_ops.rs` — 検索プロンプト / コマンドパレット / 確認ダイアログ

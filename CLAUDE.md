@@ -25,7 +25,9 @@ scripts/bundle-macos.sh          # → target/release/Noa.app (ad-hoc signed)
 scripts/gen-icon.sh              # regenerate assets/noa.icns
 ```
 
-Most tests live in each crate's `src/tests.rs` (`noa-vt`, `noa-grid`) or inline `#[cfg(test)]` modules. `noa-render/tests/pipeline.rs` is a headless GPU regression test (see GPU gotchas below).
+Most tests live in `noa-vt/src/tests.rs`, `noa-grid/src/tests/`, or inline
+`#[cfg(test)]` modules. `noa-render/tests/pipeline.rs` is a headless GPU
+regression test (see GPU gotchas below).
 
 ### Sandbox constraints (important — these fail confusingly)
 
@@ -45,7 +47,7 @@ noa-vt    (from-scratch VT parser + Handler trait)        ← fidelity core
 noa-grid  (Terminal/Screen/cursor/modes; impls Handler)   ← fidelity core
 noa-font  (font-kit discovery → swash raster → etagere atlas)
 noa-theme (vendored Ghostty-compatible theme catalog, 574 themes)
-noa-config (config discovery/parse/validation/precedence; TOML + Ghostty)
+noa-config (Ghostty-compatible config discovery/parse/validation/precedence)
 noa-pty   (portable-pty spawn + reader/writer threads)
    ↓
 noa-render (wgpu instanced-cell renderer, surface-less)

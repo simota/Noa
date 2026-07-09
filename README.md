@@ -4,15 +4,15 @@
 
 A faithful **Rust** clone of the [Ghostty](https://ghostty.org) terminal emulator — GPU-accelerated, macOS-first, built from scratch on `winit` + `wgpu`.
 
-> Ghostty is written in Zig (Metal on macOS, GTK4/OpenGL on Linux). Noa reproduces its **observable behavior** — VT emulation, rendering, features — *idiomatically in Rust*, verified against Ghostty by differential parity rather than by transliterating its internals.
+> Ghostty is written in Zig (Metal on macOS, GTK4/OpenGL on Linux). Noa reproduces its **observable behavior** — VT emulation, rendering, features — *idiomatically in Rust*. Today, fixture-based regression tests and observable parity probes guard that behavior; an automated Ghostty oracle for differential comparison is still planned.
 
 ## Status
 
-**Increments 1-6 complete.** A GPU-accelerated terminal emulator written from scratch. The implementation features native multi-window/tab/split management, wgpu-based grid rendering with a Kitty-graphics image layer, PTY integration, CJK font fallback + ligatures, the Kitty keyboard protocol, paged byte-limited scrollback with interactive search, soft-wrap reflow on resize, shell integration (OSC 133/7), desktop notifications, session restore, a quick terminal, a command palette, background opacity/blur and background images, configuration file parsing (supporting both TOML and Ghostty formats) with live reload, and 574 vendored themes. Beyond the core parity increments it also adds a session sidebar, a session/tab overview, an agent auto-approve mode, and Ghostty config import (see [Roadmap](#roadmap)).
+**Increments 1-6 complete.** A GPU-accelerated terminal emulator written from scratch. The implementation features native multi-window/tab/split management, wgpu-based grid rendering with a Kitty-graphics image layer, PTY integration, CJK font fallback + ligatures, the Kitty keyboard protocol, paged byte-limited scrollback with interactive search, soft-wrap reflow on resize, shell integration (OSC 133/7), desktop notifications, session restore, a quick terminal, a command palette, background opacity/blur and background images, Ghostty-compatible `key = value` configuration parsing with live reload, and 574 vendored themes. Beyond the core parity increments it also adds a session sidebar, a session/tab overview, an agent auto-approve mode, and Ghostty config import (see [Roadmap](#roadmap)).
 
 ## Architecture
 
-A Cargo workspace mirroring Ghostty's reusable-core / platform-apprt split. Every crate below `noa-app` is GUI-agnostic (no `winit`/`wgpu`) — the same seam Ghostty draws between `libghostty` and its apprt.
+A Cargo workspace mirroring Ghostty's reusable-core / platform-apprt split. Lower-level crates remain windowing-agnostic; `noa-render` is the one GPU-facing lower-level crate, while `noa-app` owns windowing and application integration.
 
 ```
 crates/
@@ -21,14 +21,14 @@ crates/
   noa-grid      terminal state: screen grid, cursor, modes, scroll  ← fidelity core
   noa-font      glyph pipeline: font-kit discovery → swash raster → etagere atlas
   noa-theme     vendored Ghostty-compatible theme catalog (574 themes)
-  noa-config    config discovery / parsing / precedence (TOML + Ghostty formats)
+  noa-config    Ghostty-compatible config discovery / parsing / precedence
   noa-render    wgpu instanced-cell renderer (GPU-facing, not windowing)
   noa-pty       PTY spawn + reader/writer threads (portable-pty)
   noa-app       the apprt: winit event loop, Arc<Mutex<Terminal>>, io thread, input
 bin/
   noa           thin binary → noa_app::run()
 tests/
-  parity        differential-parity harness vs a captured Ghostty baseline
+  parity        fixture-based regression harness (Ghostty oracle planned)
 ```
 
 Dependency rule (enforceable via `cargo tree`): **only `noa-app` / `noa-render` may touch `wgpu`, and only `noa-app` may touch `winit`.** The VT parser and grid model have zero windowing dependencies so they stay unit-testable and reusable.
@@ -45,7 +45,10 @@ cargo test  --workspace     # run the VT/grid conformance + smoke tests
 cargo run   -p noa          # launch the terminal
 ```
 
-Options: `cargo run -p noa -- --cols 100 --rows 30 --font-size 15`.
+Options: `cargo run -p noa -- --cols 100 --rows 30 --font-size 15`. Use
+`--import-ghostty-config` to migrate supported settings from an existing
+Ghostty config. One-shot queries use `+version`, `+list-themes`,
+`+list-keybinds`, `+list-fonts`, `+show-config`, `+list-actions`, or `+help`.
 
 ### Configuration
 
@@ -55,6 +58,10 @@ the built-in defaults: `window-width = 80`, `window-height = 24`,
 `font-size = 14.0`, macOS `Menlo` as the default coding font with system CJK
 fallbacks, `minimum-contrast = 1.0`, and the built-in terminal theme.
 CLI flags override config file values.
+
+The legacy `$XDG_CONFIG_HOME/noa/config.toml` path is detected only to emit a
+migration warning; its TOML contents are not read. Move those settings to the
+extensionless `config` file using the Ghostty-compatible `key = value` syntax.
 
 ```conf
 window-width = 100
@@ -94,13 +101,14 @@ open target/release/Noa.app      # or double-click it in Finder
 
 The script builds a release binary, assembles the bundle (`Info.plist`, icon,
 `PkgInfo`), and ad-hoc code-signs it so it launches without a Gatekeeper
-prompt. The app icon is generated from scratch by `scripts/gen-icon.sh` (pure
-`python3` + macOS `sips`/`iconutil` — no external tools). `cargo bundle` also
+prompt. The app icon is generated from scratch by `scripts/gen-icon.sh` using
+`python3` + macOS `sips`; Python writes the ICNS container directly, so
+`iconutil` is not required. `cargo bundle` also
 works via the `[package.metadata.bundle]` in `bin/noa/Cargo.toml`.
 
 ## Fidelity approach
 
-Noa follows a **fidelity-over-faith** discipline: the copy's match to Ghostty is *proven*, not asserted. The Parity Map has five dimensions:
+Noa follows a **fidelity-over-faith** discipline: compatibility claims should be measured rather than assumed. The current automated parity harness protects Noa's fixture outputs from regression; Ghostty-backed capture and oracle comparison remain future work. The Parity Map has five dimensions:
 
 | Dimension | What "faithful" means | How it's checked |
 |-----------|----------------------|------------------|
@@ -115,7 +123,7 @@ Noa follows a **fidelity-over-faith** discipline: the copy's match to Ghostty is
 - **Deferred wrap (xenl):** `printf 'a%.0s' {1..200}` wraps at the same columns as Ghostty.
 - **SGR:** `printf '\e[31mRED\e[0m \e[1;32mBOLDGREEN\e[0m\n'` — 16-color + bold match.
 - **Cursor report:** `printf '\e[6n'` returns a well-formed `ESC[row;colR`.
-- **DA1:** the `ESC[c` probe gets `ESC[?62;22c` so the prompt doesn't hang.
+- **DA1:** the `ESC[c` probe gets `ESC[?62;4;22c` so the prompt doesn't hang.
 
 ## Roadmap
 

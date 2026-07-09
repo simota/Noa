@@ -3,7 +3,8 @@
 ## Project Structure & Module Organization
 
 `noa` is a Rust 2024 Cargo workspace for a macOS-first terminal emulator.
-Workspace members are `crates/*` plus the thin binary in `bin/noa`.
+Workspace members are `crates/*`, the thin binary in `bin/noa`, and the
+fixture-based parity regression harness in `tests/parity`.
 
 - `crates/noa-core`: shared primitives such as colors, attributes, and geometry.
 - `crates/noa-vt`: from-scratch ANSI/DEC VT parser and stream dispatch.

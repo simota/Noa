@@ -10,14 +10,17 @@
 //! control bytes are 7-bit ASCII.
 
 use crate::action::Action;
-use crate::csi::{Csi, DcsPayload, Esc, Intermediates, Params, Separators, MAX_PARAMS};
+use crate::csi::{Csi, DcsPayload, Esc, Intermediates, MAX_PARAMS, Params, Separators};
 use crate::state::State;
 
 /// OSC payloads include OSC 52 clipboard writes, whose base64 must carry the
 /// grid's 8 MiB decoded clipboard cap (~10.7 MiB encoded) plus target/params.
 /// The buffer grows on demand; the cap only bounds a runaway unterminated OSC.
 const MAX_OSC_BYTES: usize = 12 * (1 << 20); // 12 MiB
-const MAX_DCS_BYTES: usize = 4096;
+/// DCS now carries SIXEL image data in addition to small query protocols.
+/// Overflow still drops the unterminated payload, but the cap must be large
+/// enough for ordinary CLI-generated images.
+pub(crate) const MAX_DCS_BYTES: usize = 8 * (1 << 20); // 8 MiB
 /// APC payloads carry whole Kitty-graphics transfers, so the cap is generous
 /// (spec-compliant clients chunk at ≤4096B, but non-conforming tools send in
 /// one shot). Overflow truncates rather than discards — see [`Action::ApcDispatch`].

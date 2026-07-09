@@ -192,6 +192,33 @@ impl ImageStore {
         })
     }
 
+    /// Store already-rasterized straight RGBA pixels, assigning an internal
+    /// image id. Used by SIXEL, which has no protocol-level image id but can
+    /// share the same renderer/cache path.
+    pub fn insert_rgba(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<u32, KittyError> {
+        if width == 0 || height == 0 || width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM {
+            return Err(KittyError::TooBig);
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|px| px.checked_mul(4))
+            .ok_or(KittyError::TooBig)?;
+        if rgba.len() != expected {
+            return Err(KittyError::NoData);
+        }
+        if rgba.len() > SINGLE_IMAGE_LIMIT {
+            return Err(KittyError::TooBig);
+        }
+        let id = self.assign_auto_id();
+        self.insert(id, 0, width, height, rgba);
+        Ok(id)
+    }
+
     /// Discard an in-flight chunked transfer (a different command interrupted it).
     pub fn abort(&mut self) {
         self.transfer = None;
@@ -358,6 +385,10 @@ impl ImageStore {
         if cmd.image_id != 0 {
             return cmd.image_id;
         }
+        self.assign_auto_id()
+    }
+
+    fn assign_auto_id(&mut self) -> u32 {
         // Auto-assign the next free id (skipping any in use).
         loop {
             let id = self.next_auto_id;

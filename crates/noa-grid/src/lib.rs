@@ -18,6 +18,7 @@ pub mod screen;
 mod scrollback;
 pub mod search;
 pub mod selection;
+mod sixel;
 pub mod tabstops;
 pub mod terminal;
 pub mod url;

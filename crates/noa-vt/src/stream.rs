@@ -85,7 +85,13 @@ fn dispatch<H: Handler>(action: Action, h: &mut H) {
         Action::CsiDispatch(csi) => dispatch_csi(&csi, h),
         Action::EscDispatch(esc) => dispatch_esc(&esc, h),
         Action::OscDispatch(data) => h.osc_dispatch(&data),
-        Action::DcsDispatch(payload) => h.dcs_dispatch(&payload.data),
+        Action::DcsDispatch(payload) => {
+            if let Some(cmd) = crate::sixel::parse(&payload.data) {
+                h.sixel_graphics(cmd);
+            } else {
+                h.dcs_dispatch(&payload.data);
+            }
+        }
         Action::ApcDispatch { data, truncated } => {
             // Only Kitty graphics (`G`) is captured; other APC strings are dropped.
             if let [b'G', rest @ ..] = data.as_slice() {

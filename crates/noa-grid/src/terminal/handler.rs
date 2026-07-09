@@ -8,7 +8,7 @@ use crate::osc::{
 use noa_core::{CellAttrs, Color};
 use noa_vt::{
     Charset, CharsetSlot, CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine,
-    Handler, KittyAction, KittyGraphicsCommand, ModeRequest, SgrAttr,
+    Handler, KittyAction, KittyGraphicsCommand, ModeRequest, SgrAttr, SixelGraphicsCommand,
 };
 
 use super::{ShellIntegrationMarkKind, Terminal};
@@ -359,7 +359,7 @@ impl Handler for Terminal {
     fn device_attributes(&mut self, kind: DaKind) {
         match kind {
             // DA1: "I am a VT220 with these features" (matches Ghostty's reply shape).
-            DaKind::Primary => self.pending_writes.extend_from_slice(b"\x1b[?62;22c"),
+            DaKind::Primary => self.pending_writes.extend_from_slice(b"\x1b[?62;4;22c"),
             DaKind::Secondary => self.pending_writes.extend_from_slice(b"\x1b[>1;0;0c"),
         }
     }
@@ -486,6 +486,10 @@ impl Handler for Terminal {
         } else if let Some(payload) = data.strip_prefix(b"+q") {
             self.handle_xtgettcap(payload);
         }
+    }
+
+    fn sixel_graphics(&mut self, cmd: SixelGraphicsCommand) {
+        Terminal::sixel_graphics(self, cmd);
     }
 
     fn xtversion_query(&mut self) {

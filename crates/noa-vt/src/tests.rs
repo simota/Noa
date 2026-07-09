@@ -4,7 +4,7 @@
 use crate::action::Action;
 use crate::csi::{Csi, Esc};
 use crate::parser::Parser;
-use crate::sgr::{parse_sgr, SgrAttr};
+use crate::sgr::{SgrAttr, parse_sgr};
 use noa_core::{Color, Rgb};
 
 /// Run the parser over `bytes` and collect every emitted action.
@@ -328,12 +328,14 @@ fn dcs_payload_dispatches_on_c1_st() {
 #[test]
 fn dcs_overflow_is_discarded_without_dispatch() {
     let mut bytes = b"\x1bP".to_vec();
-    bytes.extend(std::iter::repeat_n(b'a', 4097));
+    bytes.extend(std::iter::repeat_n(b'a', crate::parser::MAX_DCS_BYTES + 1));
     bytes.extend_from_slice(b"\x1b\\");
 
-    assert!(actions(&bytes)
-        .into_iter()
-        .all(|action| !matches!(action, Action::DcsDispatch(_))));
+    assert!(
+        actions(&bytes)
+            .into_iter()
+            .all(|action| !matches!(action, Action::DcsDispatch(_)))
+    );
 }
 
 #[test]
@@ -352,9 +354,11 @@ fn osc_payload_over_limit_is_dropped() {
 
     let acts = actions(&bytes);
 
-    assert!(!acts
-        .iter()
-        .any(|action| matches!(action, Action::OscDispatch(_))));
+    assert!(
+        !acts
+            .iter()
+            .any(|action| matches!(action, Action::OscDispatch(_)))
+    );
 }
 
 #[test]
@@ -403,9 +407,10 @@ fn c0_in_the_middle_of_csi_executes() {
     let acts = actions(b"\x1b[3\r1m");
     assert!(acts.contains(&Action::Execute(0x0d)));
     // The sequence still completes as SGR 31.
-    assert!(acts
-        .iter()
-        .any(|a| matches!(a, Action::CsiDispatch(c) if c.final_byte == b'm')));
+    assert!(
+        acts.iter()
+            .any(|a| matches!(a, Action::CsiDispatch(c) if c.final_byte == b'm'))
+    );
 }
 
 #[test]
@@ -538,9 +543,10 @@ fn apc_esc_non_backslash_aborts_and_reprocesses() {
     // ESC inside APC followed by a non-`\` byte abandons the APC and the ESC
     // sequence is reparsed from Escape (here ESC c = RIS).
     let acts = actions(b"\x1b_Gi=1;AA\x1bc");
-    assert!(acts
-        .iter()
-        .all(|a| !matches!(a, Action::ApcDispatch { .. })));
+    assert!(
+        acts.iter()
+            .all(|a| !matches!(a, Action::ApcDispatch { .. }))
+    );
     assert!(acts.iter().any(|a| matches!(
         a,
         Action::EscDispatch(e) if e.final_byte == b'c'
@@ -592,6 +598,74 @@ fn kitty_commands(bytes: &[u8]) -> Vec<crate::KittyGraphicsCommand> {
     let mut cap = Capture::default();
     stream.feed(bytes, &mut cap);
     cap.cmds
+}
+
+/// Feed `bytes` through [`crate::Stream`] and return the SIXEL graphics commands
+/// the handler received plus raw non-SIXEL DCS payloads.
+fn sixel_and_dcs(bytes: &[u8]) -> (Vec<crate::SixelGraphicsCommand>, Vec<Vec<u8>>) {
+    use crate::handler::{DaKind, DsrKind, EraseDisplay, EraseLine, Handler};
+    use crate::sgr::SgrAttr;
+
+    #[derive(Default)]
+    struct Capture {
+        sixel: Vec<crate::SixelGraphicsCommand>,
+        dcs: Vec<Vec<u8>>,
+    }
+    impl Handler for Capture {
+        fn print(&mut self, _c: char) {}
+        fn execute_c0(&mut self, _byte: u8) {}
+        fn cursor_up(&mut self, _n: u16) {}
+        fn cursor_down(&mut self, _n: u16) {}
+        fn cursor_forward(&mut self, _n: u16) {}
+        fn cursor_backward(&mut self, _n: u16) {}
+        fn cursor_position(&mut self, _row: u16, _col: u16) {}
+        fn cursor_col_abs(&mut self, _col: u16) {}
+        fn cursor_row_abs(&mut self, _row: u16) {}
+        fn erase_display(&mut self, _mode: EraseDisplay) {}
+        fn erase_line(&mut self, _mode: EraseLine) {}
+        fn set_attributes(&mut self, _attrs: &[SgrAttr]) {}
+        fn set_mode(&mut self, _value: u16, _ansi: bool, _on: bool) {}
+        fn carriage_return(&mut self) {}
+        fn linefeed(&mut self) {}
+        fn tab(&mut self, _n: u16) {}
+        fn reverse_index(&mut self) {}
+        fn save_cursor(&mut self) {}
+        fn restore_cursor(&mut self) {}
+        fn full_reset(&mut self) {}
+        fn device_attributes(&mut self, _kind: DaKind) {}
+        fn device_status_report(&mut self, _kind: DsrKind) {}
+        fn dcs_dispatch(&mut self, data: &[u8]) {
+            self.dcs.push(data.to_vec());
+        }
+        fn sixel_graphics(&mut self, cmd: crate::SixelGraphicsCommand) {
+            self.sixel.push(cmd);
+        }
+    }
+
+    let mut stream = crate::Stream::new();
+    let mut cap = Capture::default();
+    stream.feed(bytes, &mut cap);
+    (cap.sixel, cap.dcs)
+}
+
+#[test]
+fn dcs_sixel_dispatch_parses_params_and_payload() {
+    let (sixel, dcs) = sixel_and_dcs(b"\x1bP1;2;3q#1~~\x1b\\");
+
+    assert!(dcs.is_empty());
+    assert_eq!(sixel.len(), 1);
+    assert_eq!(sixel[0].aspect_ratio, 1);
+    assert_eq!(sixel[0].background, 2);
+    assert_eq!(sixel[0].horizontal_grid_size, 3);
+    assert_eq!(sixel[0].data, b"#1~~");
+}
+
+#[test]
+fn non_sixel_dcs_still_dispatches_as_raw_dcs() {
+    let (sixel, dcs) = sixel_and_dcs(b"\x1bP$qm\x1b\\");
+
+    assert!(sixel.is_empty());
+    assert_eq!(dcs, vec![b"$qm".to_vec()]);
 }
 
 #[test]

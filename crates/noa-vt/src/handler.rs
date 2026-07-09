@@ -222,6 +222,9 @@ pub trait Handler {
     fn osc_dispatch(&mut self, _data: &[u8]) {}
     /// DCS payload (`ESC P … ST`) for query protocols such as DECRQSS and XTGETTCAP.
     fn dcs_dispatch(&mut self, _data: &[u8]) {}
+    /// SIXEL graphics (`DCS Pa;Pb;Ph q Ps..Ps ST`). Parsed by `noa-vt`; the
+    /// grid layer rasterizes it and reuses the existing image placement path.
+    fn sixel_graphics(&mut self, _cmd: crate::sixel::SixelGraphicsCommand) {}
     /// Kitty graphics command (`ESC _ G … ST`). Parsed by `noa-vt`; the grid
     /// layer decodes the payload, stores the image, and queues any reply.
     fn kitty_graphics(&mut self, _cmd: crate::kitty_graphics::KittyGraphicsCommand) {}

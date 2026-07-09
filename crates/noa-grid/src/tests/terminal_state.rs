@@ -209,7 +209,7 @@ fn take_pending_writes_drains_queue() {
 #[test]
 fn da1_reply() {
     let t = run(b"\x1b[c");
-    assert_eq!(t.pending_writes, b"\x1b[?62;22c");
+    assert_eq!(t.pending_writes, b"\x1b[?62;4;22c");
 }
 
 #[test]

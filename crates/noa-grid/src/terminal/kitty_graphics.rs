@@ -1,9 +1,22 @@
 use crate::kitty::{KittyError, KittyImage, TransmitStep};
 use crate::kitty_placeholder::scan_row;
 use crate::screen::{KittyPlacement, VisibleKittyPlacement};
-use noa_vt::{KittyAction, KittyDelete, KittyGraphicsCommand};
+use crate::sixel;
+use noa_vt::{KittyAction, KittyDelete, KittyGraphicsCommand, SixelGraphicsCommand};
 
 use super::Terminal;
+
+struct ImagePlace {
+    placement_id: u32,
+    cell_x_off: u16,
+    cell_y_off: u16,
+    src: Option<[u32; 4]>,
+    cols: u16,
+    rows: u16,
+    z: i32,
+    cursor_no_move: bool,
+    virtual_placement: bool,
+}
 
 impl Terminal {
     /// Emit a Kitty graphics reply (`ESC _ G i=<id>[,I=..][,p=..];<body> ESC \`).
@@ -170,34 +183,94 @@ impl Terminal {
         let cell_x_off = ctrl.cell_x_off.min(cell_w - 1) as u16;
         let cell_y_off = ctrl.cell_y_off.min(cell_h - 1) as u16;
 
+        self.place_image(
+            image_id,
+            ImagePlace {
+                placement_id: ctrl.placement_id,
+                cell_x_off,
+                cell_y_off,
+                src,
+                cols,
+                rows,
+                z: ctrl.z_index,
+                cursor_no_move: ctrl.cursor_no_move,
+                virtual_placement: ctrl.virtual_placement,
+            },
+        )
+    }
+
+    fn place_image(&mut self, image_id: u32, spec: ImagePlace) -> Result<(), KittyError> {
         let screen = self.active_mut();
         let anchor_abs_row =
             screen.rows_evicted() + screen.scrollback_len() + screen.cursor.y as usize;
         let anchor_col = screen.cursor.x;
         screen.insert_kitty_placement(KittyPlacement {
             image_id,
-            placement_id: ctrl.placement_id,
+            placement_id: spec.placement_id,
             anchor_abs_row,
             anchor_col,
-            cell_x_off,
-            cell_y_off,
-            src,
-            cols,
-            rows,
-            z: ctrl.z_index,
-            is_virtual: ctrl.virtual_placement,
+            cell_x_off: spec.cell_x_off,
+            cell_y_off: spec.cell_y_off,
+            src: spec.src,
+            cols: spec.cols,
+            rows: spec.rows,
+            z: spec.z,
+            is_virtual: spec.virtual_placement,
         });
 
-        if !ctrl.cursor_no_move && !ctrl.virtual_placement {
+        if !spec.cursor_no_move && !spec.virtual_placement {
             // Move to the image's last row, one column past its right edge.
-            for _ in 1..rows {
+            for _ in 1..spec.rows {
                 screen.index();
             }
             let max_x = screen.cols.saturating_sub(1);
-            screen.cursor.x = (anchor_col as usize + cols as usize).min(max_x as usize) as u16;
+            screen.cursor.x = (anchor_col as usize + spec.cols as usize).min(max_x as usize) as u16;
             screen.cursor.pending_wrap = false;
         }
         Ok(())
+    }
+
+    /// Rasterize and display a SIXEL image at the current cursor using the
+    /// existing image store / placement / render path.
+    pub(super) fn sixel_graphics(&mut self, cmd: SixelGraphicsCommand) {
+        let (cell_w, cell_h) = (self.cell_width_px, self.cell_height_px);
+        if cell_w == 0 || cell_h == 0 {
+            return;
+        }
+
+        let Ok(raster) = sixel::rasterize(&cmd) else {
+            return;
+        };
+        let cols = raster.width.div_ceil(cell_w).clamp(1, u16::MAX as u32) as u16;
+        let rows = raster.height.div_ceil(cell_h).clamp(1, u16::MAX as u32) as u16;
+
+        let Ok(image_id) = self
+            .kitty_images
+            .insert_rgba(raster.width, raster.height, raster.rgba)
+        else {
+            return;
+        };
+
+        if self
+            .place_image(
+                image_id,
+                ImagePlace {
+                    placement_id: 0,
+                    cell_x_off: 0,
+                    cell_y_off: 0,
+                    src: None,
+                    cols,
+                    rows,
+                    z: 0,
+                    cursor_no_move: false,
+                    virtual_placement: false,
+                },
+            )
+            .is_ok()
+        {
+            self.kitty_images
+                .enforce_quota(&self.referenced_image_ids());
+        }
     }
 
     /// Delete placements (and, for uppercase specifiers, image data) per `a=d`.

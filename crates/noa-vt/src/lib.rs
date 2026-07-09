@@ -16,6 +16,7 @@ pub mod handler;
 pub mod kitty_graphics;
 pub mod parser;
 pub mod sgr;
+pub mod sixel;
 pub mod state;
 pub mod stream;
 
@@ -33,5 +34,6 @@ pub use kitty_graphics::{
 };
 pub use parser::Parser;
 pub use sgr::{SgrAttr, parse_sgr};
+pub use sixel::SixelGraphicsCommand;
 pub use state::State;
 pub use stream::Stream;

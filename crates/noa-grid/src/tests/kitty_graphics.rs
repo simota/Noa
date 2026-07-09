@@ -419,6 +419,64 @@ fn kitty_placement_pruned_when_its_row_is_evicted() {
     assert!(t.kitty_images.get(1).is_some());
 }
 
+// ── SIXEL graphics (DCS → raster → image store → placement) ─────────
+
+fn sixel_dcs(body: &[u8]) -> Vec<u8> {
+    let mut out = b"\x1bP".to_vec();
+    out.extend_from_slice(body);
+    out.extend_from_slice(b"\x1b\\");
+    out
+}
+
+#[test]
+fn sixel_dcs_rasterizes_and_places_image() {
+    let mut t = kitty_terminal();
+
+    feed(&mut t, &sixel_dcs(b"q#1;2;100;0;0@A"));
+
+    assert_eq!(t.primary.kitty_placements.len(), 1);
+    let placement = &t.primary.kitty_placements[0];
+    let image = t.kitty_image(placement.image_id).unwrap();
+    assert_eq!((image.width, image.height), (2, 6));
+    assert_eq!(&image.rgba[0..4], &[255, 0, 0, 255]);
+    let second_col_row_1 = ((image.width as usize) + 1) * 4;
+    assert_eq!(
+        &image.rgba[second_col_row_1..second_col_row_1 + 4],
+        &[255, 0, 0, 255]
+    );
+    assert_eq!((placement.cols, placement.rows), (1, 1));
+    assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (1, 0));
+}
+
+#[test]
+fn sixel_repeat_and_raster_attributes_determine_size() {
+    let mut t = kitty_terminal();
+
+    feed(
+        &mut t,
+        &sixel_dcs(br#"q"1;1;12;7#2;2;0;100;0!3@-?"#),
+    );
+
+    let placement = &t.primary.kitty_placements[0];
+    let image = t.kitty_image(placement.image_id).unwrap();
+    assert_eq!((image.width, image.height), (12, 12));
+    assert_eq!((placement.cols, placement.rows), (2, 1));
+    for x in 0..3 {
+        let i = x * 4;
+        assert_eq!(&image.rgba[i..i + 4], &[0, 255, 0, 255]);
+    }
+}
+
+#[test]
+fn sixel_without_pixel_metrics_is_ignored() {
+    let mut t = Terminal::new(GridSize::new(20, 24));
+
+    feed(&mut t, &sixel_dcs(b"q#1;2;100;0;0@"));
+
+    assert!(t.primary.kitty_placements.is_empty());
+    assert_eq!(t.kitty_images.len(), 0);
+}
+
 // ── Kitty Unicode placeholders (U+10EEEE) ───────────────────────────
 
 /// Row/column/most-significant-byte diacritics for values 0, 1, 2 (the first

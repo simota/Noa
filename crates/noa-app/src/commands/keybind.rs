@@ -143,7 +143,6 @@ impl Default for KeybindEngine {
             ("cmd+shift+enter", AppCommand::ToggleSplitZoom),
             ("cmd+shift+o", AppCommand::ToggleTabOverview),
             ("cmd+ctrl+f", AppCommand::ToggleFullscreen),
-            ("cmd+`", AppCommand::ToggleQuickTerminal),
             ("cmd+shift+p", AppCommand::ToggleCommandPalette),
             ("cmd+shift+s", AppCommand::ToggleSidebar),
         ];

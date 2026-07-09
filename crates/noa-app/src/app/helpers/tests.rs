@@ -191,6 +191,14 @@ fn quick_terminal_height_is_a_clamped_screen_fraction() {
     assert_eq!(quick_terminal_height(1000, 0.0), 50);
 }
 
+#[test]
+fn quick_terminal_autohide_waits_for_focus_in_current_reveal() {
+    assert!(!quick_terminal_should_autohide_on_focus_loss(false, false));
+    assert!(!quick_terminal_should_autohide_on_focus_loss(false, true));
+    assert!(!quick_terminal_should_autohide_on_focus_loss(true, false));
+    assert!(quick_terminal_should_autohide_on_focus_loss(true, true));
+}
+
 fn metrics(cell_w: f32, cell_h: f32) -> noa_font::Metrics {
     noa_font::Metrics {
         cell_w,

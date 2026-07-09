@@ -221,6 +221,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(true) => {
                 self.focused = Some(window_id);
                 self.os_focused = Some(window_id);
+                if self.is_quick_terminal_window(window_id) {
+                    self.mark_quick_terminal_focused(window_id);
+                }
                 self.reset_cursor_blink_phase();
                 // A window gaining focus clears its cards' unread bells (FR-11).
                 self.clear_session_bell_for_window(window_id);

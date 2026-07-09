@@ -46,6 +46,10 @@ const BLUR_MAX: u16 = 64;
 const WINDOW_PADDING_STEP: f32 = 1.0;
 /// Sidebar preview line count step per ←→ press.
 const SIDEBAR_PREVIEW_LINES_STEP: i32 = 1;
+/// Quick terminal height fraction step per ←→ press.
+const QUICK_TERMINAL_SIZE_STEP: f32 = 0.05;
+const QUICK_TERMINAL_SIZE_MIN: f32 = 0.1;
+const QUICK_TERMINAL_SIZE_MAX: f32 = 1.0;
 
 /// One theme catalog match: an index into `noa_theme::THEMES` plus the fuzzy
 /// match char positions (for highlight rendering), reusing
@@ -113,6 +117,7 @@ impl ThemeSettings {
             background_opacity: init.background_opacity,
             background_blur_radius: init.background_blur_radius,
             sidebar_preview_lines: init.sidebar_preview_lines,
+            quick_terminal_size: init.quick_terminal_size,
         };
         let rows = [
             SettingsRow {
@@ -145,6 +150,10 @@ impl ThemeSettings {
             },
             SettingsRow {
                 draft: RowDraft::SidebarPreviewLines(init.sidebar_preview_lines),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::QuickTerminalHeight(init.quick_terminal_size),
                 touched: false,
             },
             SettingsRow {
@@ -258,7 +267,10 @@ impl ThemeSettings {
                     SettingsRowKind::BackgroundOpacity | SettingsRowKind::BackgroundBlurRadius
                 );
         }
-        if matches!(row, SettingsRowKind::ConfirmQuit) {
+        if matches!(
+            row,
+            SettingsRowKind::ConfirmQuit | SettingsRowKind::QuickTerminalHeight
+        ) {
             return false;
         }
         let index = SettingsRowKind::ALL
@@ -501,6 +513,18 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
+            SettingsRowKind::QuickTerminalHeight => {
+                let RowDraft::QuickTerminalHeight(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = (current + delta as f32 * QUICK_TERMINAL_SIZE_STEP)
+                    .clamp(QUICK_TERMINAL_SIZE_MIN, QUICK_TERMINAL_SIZE_MAX);
+                if (new - current).abs() > f32::EPSILON {
+                    self.rows[idx].draft = RowDraft::QuickTerminalHeight(new);
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
             SettingsRowKind::ConfirmQuit => {
                 let RowDraft::ConfirmQuit(current) = self.rows[idx].draft else {
                     return RowEffect::None;
@@ -640,6 +664,9 @@ impl ThemeSettings {
                 }
                 RowDraft::SidebarPreviewLines(lines) => {
                     updates.push(("sidebar-preview-lines".to_string(), lines.to_string()));
+                }
+                RowDraft::QuickTerminalHeight(size) => {
+                    updates.push(("quick-terminal-size".to_string(), format!("{size:.2}")));
                 }
                 RowDraft::ConfirmQuit(confirm) => {
                     updates.push(("confirm-quit".to_string(), confirm.to_string()));

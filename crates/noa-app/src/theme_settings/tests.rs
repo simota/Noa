@@ -17,6 +17,7 @@ fn init() -> ThemeSettingsInit {
         window_padding_y: 2.0,
         macos_titlebar_style: MacosTitlebarStyle::Native,
         sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
+        quick_terminal_size: noa_config::DEFAULT_QUICK_TERMINAL_SIZE,
         confirm_quit: true,
         font_family: "Menlo".to_string(),
         available_font_families: vec![
@@ -25,6 +26,13 @@ fn init() -> ThemeSettingsInit {
             "Courier New".to_string(),
         ],
     }
+}
+
+fn assert_quick_terminal_height(draft: &RowDraft, expected: f32) {
+    let RowDraft::QuickTerminalHeight(actual) = draft else {
+        panic!("expected quick terminal height draft, got {draft:?}");
+    };
+    assert!((*actual - expected).abs() < 0.001, "got {actual}");
 }
 
 fn transparent_init() -> ThemeSettingsInit {
@@ -181,6 +189,7 @@ fn touched_commit_only_rows_show_restart_note() {
     assert!(!settings.restart_note(SettingsRowKind::WindowPadding));
     assert!(!settings.restart_note(SettingsRowKind::MacosTitlebarStyle));
     assert!(!settings.restart_note(SettingsRowKind::SidebarPreviewLines));
+    assert!(!settings.restart_note(SettingsRowKind::QuickTerminalHeight));
     assert!(!settings.restart_note(SettingsRowKind::ConfirmQuit));
 
     settings.toggle_section();
@@ -196,6 +205,7 @@ fn touched_commit_only_rows_show_restart_note() {
     assert!(!settings.restart_note(SettingsRowKind::WindowPadding));
     assert!(!settings.restart_note(SettingsRowKind::MacosTitlebarStyle));
     assert!(!settings.restart_note(SettingsRowKind::SidebarPreviewLines));
+    assert!(!settings.restart_note(SettingsRowKind::QuickTerminalHeight));
     assert!(!settings.restart_note(SettingsRowKind::ConfirmQuit));
 }
 
@@ -325,6 +335,10 @@ fn revert_returns_the_snapshot_and_cancels_pending_debounce() {
         values.sidebar_preview_lines,
         noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES
     );
+    assert_eq!(
+        values.quick_terminal_size,
+        noa_config::DEFAULT_QUICK_TERMINAL_SIZE
+    );
 
     // The pending font-size value must never fire after revert.
     assert_eq!(
@@ -428,10 +442,44 @@ fn sidebar_preview_lines_row_adjusts_clamps_and_commits() {
 }
 
 #[test]
-fn confirm_quit_row_toggles_and_commits_without_restart_note() {
+fn quick_terminal_height_row_adjusts_clamps_and_commits() {
     let mut settings = ThemeSettings::open(init());
     settings.toggle_section();
     for _ in 0..8 {
+        settings.move_down();
+    }
+    assert_eq!(
+        SettingsRowKind::ALL[settings.selected_row()],
+        SettingsRowKind::QuickTerminalHeight
+    );
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert_quick_terminal_height(&settings.rows()[8].draft, 0.45);
+    assert!(!settings.restart_note(SettingsRowKind::QuickTerminalHeight));
+    assert_eq!(settings.rows()[8].draft.display_value(), "45%");
+
+    for _ in 0..20 {
+        settings.adjust(1, Instant::now());
+    }
+    assert_quick_terminal_height(&settings.rows()[8].draft, 1.0);
+    for _ in 0..40 {
+        settings.adjust(-1, Instant::now());
+    }
+    assert_quick_terminal_height(&settings.rows()[8].draft, 0.1);
+
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "quick-terminal-size"),
+        Some(&("quick-terminal-size".to_string(), "0.10".to_string()))
+    );
+}
+
+#[test]
+fn confirm_quit_row_toggles_and_commits_without_restart_note() {
+    let mut settings = ThemeSettings::open(init());
+    settings.toggle_section();
+    for _ in 0..9 {
         settings.move_down();
     }
     assert_eq!(
@@ -441,7 +489,7 @@ fn confirm_quit_row_toggles_and_commits_without_restart_note() {
 
     let effect = settings.adjust(1, Instant::now());
     assert_eq!(effect, RowEffect::None);
-    assert_eq!(settings.rows()[8].draft, RowDraft::ConfirmQuit(false));
+    assert_eq!(settings.rows()[9].draft, RowDraft::ConfirmQuit(false));
     assert!(!settings.restart_note(SettingsRowKind::ConfirmQuit));
 
     let updates = settings.commit_updates();

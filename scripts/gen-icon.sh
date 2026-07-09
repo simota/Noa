@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Generate assets/noa.icns from scratch — no external image tools required
-# (pure-stdlib Python draws the master PNG; macOS `sips` + `iconutil` build the
-# .icns). Safe to re-run; overwrites assets/noa.icns.
+# Generate assets/noa.icns. If assets/noa-icon-1024.png exists, it is used as
+# the master image; otherwise this falls back to the built-in procedural icon.
+# Safe to re-run; overwrites assets/noa.icns.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -10,8 +10,11 @@ mkdir -p "$OUT_DIR"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-MASTER="$WORK/noa-1024.png"
+MASTER_SOURCE="$OUT_DIR/noa-icon-1024.png"
+MASTER="$MASTER_SOURCE"
 
+if [ ! -f "$MASTER_SOURCE" ]; then
+  MASTER="$WORK/noa-1024.png"
 python3 - "$MASTER" <<'PY'
 import sys, struct, zlib
 
@@ -108,6 +111,9 @@ def png(path, w, h, rgba):
 png(OUT, N, N, out)
 print(f"wrote {OUT}")
 PY
+else
+  echo "Using $MASTER_SOURCE"
+fi
 
 # Build the .iconset (all required sizes) from the master, then the .icns.
 ICONSET="$WORK/noa.iconset"
@@ -116,5 +122,35 @@ for sz in 16 32 128 256 512; do
   sips -z "$sz" "$sz"           "$MASTER" --out "$ICONSET/icon_${sz}x${sz}.png"    >/dev/null
   sips -z $((sz*2)) $((sz*2))   "$MASTER" --out "$ICONSET/icon_${sz}x${sz}@2x.png" >/dev/null
 done
-iconutil -c icns "$ICONSET" -o "$OUT_DIR/noa.icns"
+python3 - "$ICONSET" "$OUT_DIR/noa.icns" <<'PY'
+import sys
+from pathlib import Path
+
+iconset = Path(sys.argv[1])
+out = Path(sys.argv[2])
+
+# PNG-backed ICNS chunks. The duplicated logical sizes mirror iconutil output:
+# normal-size chunks plus @2x retina chunks.
+entries = [
+    ("icp4", "icon_16x16.png"),
+    ("ic11", "icon_16x16@2x.png"),
+    ("icp5", "icon_32x32.png"),
+    ("ic12", "icon_32x32@2x.png"),
+    ("ic07", "icon_128x128.png"),
+    ("ic13", "icon_128x128@2x.png"),
+    ("ic08", "icon_256x256.png"),
+    ("ic14", "icon_256x256@2x.png"),
+    ("ic09", "icon_512x512.png"),
+    ("ic10", "icon_512x512@2x.png"),
+]
+
+body = bytearray()
+for typ, filename in entries:
+    data = (iconset / filename).read_bytes()
+    body += typ.encode("ascii")
+    body += (len(data) + 8).to_bytes(4, "big")
+    body += data
+
+out.write_bytes(b"icns" + (len(body) + 8).to_bytes(4, "big") + body)
+PY
 echo "Built $OUT_DIR/noa.icns"

@@ -68,6 +68,8 @@ impl App {
         let search_preedit = self
             .modal_preedit_for(window_id, ModalImeTarget::SearchPrompt)
             .to_string();
+        #[cfg(target_os = "macos")]
+        let has_visible_background_image = self.background_image.has_visible_image();
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
             return;
         };
@@ -78,7 +80,11 @@ impl App {
                 gpu.theme.default_bg,
                 self.config.background_opacity,
             );
-            if needs_macos_titlebar_backdrop(self.config.background_opacity) {
+            if needs_macos_titlebar_backdrop(
+                self.config.macos_titlebar_style,
+                self.config.background_opacity,
+                has_visible_background_image,
+            ) {
                 crate::macos_window::install_titlebar_backdrop(&state.window, gpu.theme.default_bg);
             }
         }

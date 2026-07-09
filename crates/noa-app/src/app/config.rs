@@ -384,6 +384,13 @@ impl BackgroundImageRuntime {
         }
     }
 
+    pub(super) fn has_visible_image(&self) -> bool {
+        match self {
+            Self::Static(image) => image.as_ref().is_some_and(background_image_is_visible),
+            Self::Slideshow(slideshow) => slideshow.has_visible_image(),
+        }
+    }
+
     pub(super) fn wants_rotation(&self) -> bool {
         match self {
             Self::Static(_) => false,
@@ -439,6 +446,12 @@ impl BackgroundImageSlideshow {
 
     fn current_image(&self) -> Option<noa_render::BackgroundImage> {
         self.current.clone()
+    }
+
+    fn has_visible_image(&self) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(background_image_is_visible)
     }
 
     fn wants_rotation(&self) -> bool {
@@ -528,6 +541,10 @@ fn has_png_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+}
+
+fn background_image_is_visible(image: &noa_render::BackgroundImage) -> bool {
+    image.opacity > 0.0 && image.width > 0 && image.height > 0 && !image.rgba.is_empty()
 }
 
 /// Decode the configured static background image once at startup into a
@@ -733,8 +750,13 @@ pub(super) fn apply_macos_titlebar_style(
     }
 }
 
-pub(super) fn needs_macos_titlebar_backdrop(background_opacity: f32) -> bool {
+pub(super) fn needs_macos_titlebar_backdrop(
+    style: noa_config::MacosTitlebarStyle,
+    background_opacity: f32,
+    has_visible_background_image: bool,
+) -> bool {
     background_opacity < 1.0
+        && (style != noa_config::MacosTitlebarStyle::Transparent || !has_visible_background_image)
 }
 
 #[cfg(test)]
@@ -779,8 +801,47 @@ mod tests {
 
     #[test]
     fn translucent_macos_titlebar_chrome_needs_backdrop() {
-        assert!(needs_macos_titlebar_backdrop(0.85));
-        assert!(!needs_macos_titlebar_backdrop(1.0));
+        assert!(needs_macos_titlebar_backdrop(
+            noa_config::MacosTitlebarStyle::Native,
+            0.85,
+            false
+        ));
+        assert!(needs_macos_titlebar_backdrop(
+            noa_config::MacosTitlebarStyle::Transparent,
+            0.85,
+            false
+        ));
+        assert!(!needs_macos_titlebar_backdrop(
+            noa_config::MacosTitlebarStyle::Transparent,
+            0.85,
+            true
+        ));
+        assert!(!needs_macos_titlebar_backdrop(
+            noa_config::MacosTitlebarStyle::Native,
+            1.0,
+            false
+        ));
+    }
+
+    #[test]
+    fn background_image_runtime_visibility_tracks_alpha_and_payload() {
+        let visible = noa_render::BackgroundImage {
+            rgba: std::sync::Arc::from([1, 2, 3, 255]),
+            width: 1,
+            height: 1,
+            fit: noa_render::BackgroundImageFit::Contain,
+            position: noa_render::BackgroundImagePosition::Center,
+            repeat: false,
+            opacity: 1.0,
+        };
+        let invisible = noa_render::BackgroundImage {
+            opacity: 0.0,
+            ..visible.clone()
+        };
+
+        assert!(BackgroundImageRuntime::Static(Some(visible)).has_visible_image());
+        assert!(!BackgroundImageRuntime::Static(Some(invisible)).has_visible_image());
+        assert!(!BackgroundImageRuntime::Static(None).has_visible_image());
     }
 
     // AC-8: a missing path does not panic and returns None (no image).

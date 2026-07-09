@@ -276,7 +276,11 @@ impl App {
                 bg,
                 self.config.background_opacity,
             );
-            if needs_macos_titlebar_backdrop(self.config.background_opacity) {
+            if needs_macos_titlebar_backdrop(
+                self.config.macos_titlebar_style,
+                self.config.background_opacity,
+                self.background_image.has_visible_image(),
+            ) {
                 crate::macos_window::install_titlebar_backdrop(&window, bg);
             }
         }

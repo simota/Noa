@@ -49,6 +49,8 @@ impl App {
 
     pub(in crate::app) fn relayout_and_resize_window(&mut self, window_id: WindowId) {
         #[cfg(target_os = "macos")]
+        let has_visible_background_image = self.background_image.has_visible_image();
+        #[cfg(target_os = "macos")]
         if let Some(state) = self.windows.get(&window_id)
             && let Some(gpu) = self.gpu.as_ref()
         {
@@ -57,7 +59,11 @@ impl App {
                 gpu.theme.default_bg,
                 self.config.background_opacity,
             );
-            if needs_macos_titlebar_backdrop(self.config.background_opacity) {
+            if needs_macos_titlebar_backdrop(
+                self.config.macos_titlebar_style,
+                self.config.background_opacity,
+                has_visible_background_image,
+            ) {
                 crate::macos_window::install_titlebar_backdrop(&state.window, gpu.theme.default_bg);
             }
         }

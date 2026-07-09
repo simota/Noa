@@ -277,14 +277,17 @@ impl App {
         self.live_wallpaper_deadline = None;
         self.live_wallpaper_transition = None;
         let image = self.background_image.current_image();
-        let Some(gpu) = self.gpu.as_mut() else {
-            return;
-        };
-        for state in self.windows.values_mut() {
-            state
-                .renderer
-                .set_background_image(&gpu.device, &gpu.queue, image.clone());
+        {
+            let Some(gpu) = self.gpu.as_mut() else {
+                return;
+            };
+            for state in self.windows.values_mut() {
+                state
+                    .renderer
+                    .set_background_image(&gpu.device, &gpu.queue, image.clone());
+            }
         }
+        self.refresh_macos_window_backgrounds();
     }
 
     fn apply_reloaded_background_opacity(&mut self) {
@@ -371,14 +374,21 @@ impl App {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
+        let needs_titlebar_backdrop = needs_macos_titlebar_backdrop(
+            self.config.macos_titlebar_style,
+            self.config.background_opacity,
+            self.background_image.has_visible_image(),
+        );
         for state in self.windows.values() {
             crate::macos_window::set_window_background_color(
                 &state.window,
                 gpu.theme.default_bg,
                 self.config.background_opacity,
             );
-            if needs_macos_titlebar_backdrop(self.config.background_opacity) {
+            if needs_titlebar_backdrop {
                 crate::macos_window::install_titlebar_backdrop(&state.window, gpu.theme.default_bg);
+            } else {
+                crate::macos_window::remove_titlebar_backdrop(&state.window);
             }
         }
     }

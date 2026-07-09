@@ -1,3 +1,5 @@
+![Noa](assets/noa-header.jpg)
+
 # Noa
 
 A faithful **Rust** clone of the [Ghostty](https://ghostty.org) terminal emulator — GPU-accelerated, macOS-first, built from scratch on `winit` + `wgpu`.

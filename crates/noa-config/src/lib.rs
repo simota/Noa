@@ -149,6 +149,29 @@ impl WindowSaveState {
     }
 }
 
+/// One `keybind = ...` directive from config. The config crate stores chord
+/// and action text verbatim; `noa-app` owns chord parsing and action lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeybindConfig {
+    /// `keybind = clear`: remove all default and previously configured
+    /// bindings before applying later entries.
+    Clear,
+    /// `keybind = <chord>=<action>`: bind or replace a chord.
+    Bind { trigger: String, action: String },
+    /// `keybind = <chord>=unbind`: remove any binding for the chord.
+    Unbind { trigger: String },
+}
+
+impl KeybindConfig {
+    pub fn config_value(&self) -> String {
+        match self {
+            Self::Clear => "clear".to_string(),
+            Self::Bind { trigger, action } => format!("{trigger}={action}"),
+            Self::Unbind { trigger } => format!("{trigger}=unbind"),
+        }
+    }
+}
+
 /// `macos-option-as-alt`: which macOS Option key(s) should be treated as
 /// terminal Alt instead of producing macOS alternate characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -404,6 +427,9 @@ pub struct StartupConfig {
     /// `auto-approve`: seed new tabs with agent-CLI auto approval enabled.
     /// Runtime use is still per-tab opt-in; default off.
     pub auto_approve: bool,
+    /// `keybind`: repeatable in-app keybinding edits applied to the default
+    /// [`noa-app`] keybinding engine in config order.
+    pub keybinds: Vec<KeybindConfig>,
 }
 
 impl Default for StartupConfig {
@@ -453,6 +479,7 @@ impl Default for StartupConfig {
             audible_bell_when_unfocused: false,
             audible_bell_dock_bounce: false,
             auto_approve: false,
+            keybinds: Vec::new(),
         }
     }
 }
@@ -504,10 +531,13 @@ pub struct ConfigOverrides {
     pub audible_bell_when_unfocused: Option<bool>,
     pub audible_bell_dock_bounce: Option<bool>,
     pub auto_approve: Option<bool>,
+    pub keybinds: Vec<KeybindConfig>,
 }
 
 impl ConfigOverrides {
     pub fn merge(self, higher_priority: Self) -> Self {
+        let mut keybinds = self.keybinds;
+        keybinds.extend(higher_priority.keybinds);
         Self {
             cols: higher_priority.cols.or(self.cols),
             rows: higher_priority.rows.or(self.rows),
@@ -591,10 +621,13 @@ impl ConfigOverrides {
                 .audible_bell_dock_bounce
                 .or(self.audible_bell_dock_bounce),
             auto_approve: higher_priority.auto_approve.or(self.auto_approve),
+            keybinds,
         }
     }
 
     pub fn apply_to(self, base: StartupConfig) -> StartupConfig {
+        let mut keybinds = base.keybinds;
+        keybinds.extend(self.keybinds);
         StartupConfig {
             cols: self.cols.unwrap_or(base.cols),
             rows: self.rows.unwrap_or(base.rows),
@@ -664,6 +697,7 @@ impl ConfigOverrides {
                 .audible_bell_dock_bounce
                 .unwrap_or(base.audible_bell_dock_bounce),
             auto_approve: self.auto_approve.unwrap_or(base.auto_approve),
+            keybinds,
         }
     }
 }
@@ -849,6 +883,7 @@ mod tests {
                 audible_bell_when_unfocused: false,
                 audible_bell_dock_bounce: false,
                 auto_approve: false,
+                keybinds: Vec::new(),
             }
         );
     }
@@ -886,6 +921,10 @@ font-size = 15.5
             font_size: Some(15.5),
             theme: Some("3024 Day".to_string()),
             font: FontConfig::default(),
+            keybinds: vec![KeybindConfig::Bind {
+                trigger: "cmd+t".to_string(),
+                action: "tab.new".to_string(),
+            }],
             ..Default::default()
         };
         let cli = ConfigOverrides {
@@ -894,6 +933,9 @@ font-size = 15.5
             font_size: Some(16.0),
             theme: None,
             font: FontConfig::default(),
+            keybinds: vec![KeybindConfig::Unbind {
+                trigger: "cmd+t".to_string(),
+            }],
             ..Default::default()
         };
 
@@ -907,6 +949,15 @@ font-size = 15.5
                 font_size: 16.0,
                 theme: Some("3024 Day".to_string()),
                 font: FontConfig::default(),
+                keybinds: vec![
+                    KeybindConfig::Bind {
+                        trigger: "cmd+t".to_string(),
+                        action: "tab.new".to_string(),
+                    },
+                    KeybindConfig::Unbind {
+                        trigger: "cmd+t".to_string(),
+                    },
+                ],
                 ..Default::default()
             }
         );

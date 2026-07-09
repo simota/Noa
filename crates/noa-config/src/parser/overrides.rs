@@ -1,9 +1,10 @@
 use std::path::Path;
 
-use crate::{ConfigOverrides, FontConfig};
+use crate::{ConfigOverrides, FontConfig, KeybindConfig};
 
 use super::diagnostics::{
-    config_file_diagnostic, list_key_diagnostic, unknown_key_diagnostic, window_pair_diagnostic,
+    config_file_diagnostic, invalid_value_diagnostic, list_key_diagnostic, unknown_key_diagnostic,
+    window_pair_diagnostic,
 };
 use super::directives::parse_directives;
 use super::values::*;
@@ -62,6 +63,7 @@ pub(crate) fn build_overrides(
     let mut audible_bell_when_unfocused = None;
     let mut audible_bell_dock_bounce = None;
     let mut auto_approve = None;
+    let mut keybinds = Vec::new();
     let mut diagnostics = Vec::new();
 
     for directive in directives {
@@ -275,7 +277,12 @@ pub(crate) fn build_overrides(
             "auto-approve" => {
                 auto_approve = parse_bool_directive(path, directive, &mut diagnostics);
             }
-            "keybind" | "palette" => {
+            "keybind" => {
+                if let Some(keybind) = parse_keybind_config(path, directive, &mut diagnostics) {
+                    keybinds.push(keybind);
+                }
+            }
+            "palette" => {
                 diagnostics.push(list_key_diagnostic(path, &directive.key));
             }
             "config-file" => {
@@ -342,9 +349,44 @@ pub(crate) fn build_overrides(
             audible_bell_when_unfocused,
             audible_bell_dock_bounce,
             auto_approve,
+            keybinds,
         },
         diagnostics,
     )
+}
+
+fn parse_keybind_config(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<KeybindConfig> {
+    let Some(value) = directive.value.as_deref().map(str::trim) else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, ""));
+        return None;
+    };
+    if value.eq_ignore_ascii_case("clear") {
+        return Some(KeybindConfig::Clear);
+    }
+
+    let Some((trigger, action)) = value.split_once('=') else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    let trigger = trigger.trim();
+    let action = action.trim();
+    if trigger.is_empty() || action.is_empty() {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    if action.eq_ignore_ascii_case("unbind") {
+        return Some(KeybindConfig::Unbind {
+            trigger: trigger.to_string(),
+        });
+    }
+    Some(KeybindConfig::Bind {
+        trigger: trigger.to_string(),
+        action: action.to_string(),
+    })
 }
 
 pub(crate) fn is_supported_scalar_key(key: &str) -> bool {

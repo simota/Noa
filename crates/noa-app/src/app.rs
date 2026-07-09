@@ -284,6 +284,10 @@ impl App {
         // Decode the background image once at startup; a missing/undecodable
         // file logs a diagnostic inside and leaves this `None` (spec FR-8/NFR-1).
         let background_image = decode_background_image(&config);
+        let (keybinds, keybind_diagnostics) = KeybindEngine::from_config(&config.keybinds);
+        for diagnostic in keybind_diagnostics {
+            log::warn!("config keybind: {diagnostic}");
+        }
         // Clone the proxy for the session-metadata worker before `proxy` is
         // moved into the struct — it posts `SessionDelta::Branch`/`Process` back
         // over it. The worker also shares the sidebar-visible gate so its
@@ -311,7 +315,7 @@ impl App {
             next_group_id: 0,
             modifiers: ModifiersState::empty(),
             clipboard: SystemClipboard::new(),
-            keybinds: KeybindEngine::default(),
+            keybinds,
             overview_visible: false,
             overview_visible_gate: Arc::new(AtomicBool::new(false)),
             overview_wake_deadline: None,

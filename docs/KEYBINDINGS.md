@@ -1,13 +1,27 @@
 # Noa キーボードショートカット一覧
 
 Noa が処理するキーボードショートカットの全数リファレンス(シェル側のキーは含まない)。
-実装の真実源は `crates/noa-app/src/commands.rs` の `KeybindEngine::default()`。有効なバインド一覧は CLI からも確認できる:
+既定値の実装源は `crates/noa-app/src/commands/keybind.rs` の `KeybindEngine::default()`。
+config の `keybind =` はこの既定表に順番に適用される。有効なバインド一覧は CLI からも確認できる:
 
 ```bash
 noa +list-keybinds
 ```
 
-> **キーバインドのカスタマイズについて**: 実行時のキー再割り当ては現状未対応。config の `keybind =` キーは認識されるが値は破棄される(警告を出力)。config で変更できるのはグローバルホットキー 2 種のみ(→ [グローバルシステムホットキー](#グローバルシステムホットキー))。
+## config の `keybind =`
+
+`keybind = <chord>=<action>` で既定表へ追加または上書きできる。同じ chord は後勝ち。
+`keybind = <chord>=unbind` はその chord を解除し、`keybind = clear` はそれ以前の全バインドを消去する。
+
+```text
+keybind = cmd+i=prompt_surface_title
+keybind = cmd+t=unbind
+keybind = cmd+shift+n=tab.new
+```
+
+`<chord>` は `+` 区切り。修飾キー別名は `cmd`/`command`/`super`/`meta`、`ctrl`/`control`、`alt`/`option`、`shift`。キーは単一文字、`plus`、`arrowup` 等、`pageup`、`pagedown`、`home`、`end`、`enter`/`return` を受け付ける。
+
+`<action>` は `noa +list-keybinds` の右辺に出る canonical 名を使う。互換入力として `new_tab`、`prompt_surface_title`、`toggle_quick_terminal` など一部の Ghostty 風 action 名も受け付ける。
 
 ## グローバル(ターミナルフォーカス時)
 

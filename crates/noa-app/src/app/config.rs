@@ -127,6 +127,9 @@ pub struct AppConfig {
     /// `auto-approve`: seed new tabs with agent-CLI auto approval enabled.
     /// Runtime toggles are still per-tab.
     pub auto_approve: bool,
+    /// Raw `keybind = ...` entries from config. Parsed into the runtime
+    /// [`crate::commands::KeybindEngine`] by `App::new` and live reload.
+    pub keybinds: Vec<noa_config::KeybindConfig>,
 }
 
 impl AppConfig {
@@ -182,6 +185,7 @@ impl AppConfig {
             audible_bell_when_unfocused: config.audible_bell_when_unfocused,
             audible_bell_dock_bounce: config.audible_bell_dock_bounce,
             auto_approve: config.auto_approve,
+            keybinds: config.keybinds,
         }
     }
 }

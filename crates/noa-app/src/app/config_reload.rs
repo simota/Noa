@@ -139,6 +139,7 @@ impl App {
         let terminal_policy_changed = terminal_policy_inputs_changed(&previous, &applied);
         let sidebar_preview_changed =
             previous.sidebar_preview_lines != applied.sidebar_preview_lines;
+        let keybinds_changed = previous.keybinds != applied.keybinds;
 
         self.config = applied;
 
@@ -172,6 +173,15 @@ impl App {
             self.sidebar_preview_lines_gate
                 .store(self.config.sidebar_preview_lines, Ordering::Relaxed);
             self.request_sidebar_redraw();
+        }
+        if keybinds_changed {
+            let (keybinds, diagnostics) = KeybindEngine::from_config(&self.config.keybinds);
+            for diagnostic in diagnostics {
+                log::warn!("config reload keybind: {diagnostic}");
+            }
+            self.keybinds = keybinds;
+            self.request_all_windows_redraw();
+            self.request_overview_redraw();
         }
 
         if font_applied || padding_changed || self.config.sidebar_width != previous.sidebar_width {

@@ -119,11 +119,15 @@ fn import_line(line: &str) -> (String, ImportLineKind) {
         return (format!("# {line}"), ImportLineKind::CommentedOut);
     };
 
-    if is_supported_scalar_key(&directive.key) {
+    if is_supported_import_key(&directive.key) {
         (line.to_string(), ImportLineKind::Supported)
     } else {
         (format!("# {line}"), ImportLineKind::CommentedOut)
     }
+}
+
+fn is_supported_import_key(key: &str) -> bool {
+    is_supported_scalar_key(key) || key == "keybind"
 }
 
 #[cfg(test)]
@@ -142,11 +146,11 @@ mod tests {
 
         assert!(output.contains("window-width = 100\n"));
         assert!(output.contains("theme = \"Foo\"\n"));
-        assert!(output.contains("# keybind = cmd+n=new_tab\n"));
+        assert!(output.contains("keybind = cmd+n=new_tab\n"));
         assert!(output.contains("# window-decoration = false\n"));
         assert!(output.contains("# comment\n"));
-        assert_eq!(stats.supported, 2);
-        assert_eq!(stats.commented_out, 2);
+        assert_eq!(stats.supported, 3);
+        assert_eq!(stats.commented_out, 1);
     }
 
     #[test]
@@ -222,6 +226,39 @@ mod tests {
 
         assert!(diagnostics.is_empty());
         assert_eq!(overrides.font_size, Some(14.0));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn import_preserves_keybinds_when_read_back() {
+        let dir = unique_temp_path("keybinds");
+        let source = dir.join("ghostty/config");
+        let target = dir.join("noa/config");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(
+            &source,
+            "keybind = cmd+i=prompt_surface_title\nkeybind = cmd+t=unbind\nkeybind = clear\n",
+        )
+        .unwrap();
+
+        import_ghostty_config_at(&[source], &target).unwrap();
+        let output = fs::read_to_string(&target).unwrap();
+        let (overrides, diagnostics) = crate::parse_overrides(&target, &output);
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            overrides.keybinds,
+            vec![
+                crate::KeybindConfig::Bind {
+                    trigger: "cmd+i".to_string(),
+                    action: "prompt_surface_title".to_string(),
+                },
+                crate::KeybindConfig::Unbind {
+                    trigger: "cmd+t".to_string(),
+                },
+                crate::KeybindConfig::Clear,
+            ],
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -103,7 +103,18 @@ pub fn run_action(action: CliAction) -> anyhow::Result<()> {
     match action {
         CliAction::Version => print!("{}", version_output()),
         CliAction::ListThemes => print!("{}", list_themes_output()),
-        CliAction::ListKeybinds => print!("{}", list_keybinds_output()),
+        CliAction::ListKeybinds => {
+            let (config, diagnostics) =
+                noa_config::load_startup_config(noa_config::ConfigOverrides::default())?;
+            for diagnostic in diagnostics {
+                eprintln!("{}", diagnostic.message);
+            }
+            let (keybinds, diagnostics) = KeybindEngine::from_config(&config.keybinds);
+            for diagnostic in diagnostics {
+                eprintln!("config keybind: {diagnostic}");
+            }
+            print!("{}", list_keybinds_output(&keybinds));
+        }
         CliAction::ListFonts => {
             let families = noa_font::list_families()?;
             print!("{}", list_fonts_output(&families));
@@ -159,11 +170,9 @@ fn theme_variant(theme: &noa_theme::ThemeDef) -> &'static str {
     if luma >= 128.0 { "light" } else { "dark" }
 }
 
-/// One `chord = action` line per binding. noa's config format has no
-/// `keybind` key yet (noa-config diagnoses it as unsupported), so the
-/// default engine *is* the effective binding set.
-fn list_keybinds_output() -> String {
-    KeybindEngine::default()
+/// One `chord = action` line per effective binding.
+fn list_keybinds_output(keybinds: &KeybindEngine) -> String {
+    keybinds
         .list()
         .into_iter()
         .map(|(chord, action)| format!("{chord} = {action}\n"))
@@ -387,6 +396,11 @@ fn show_config_output(config: &StartupConfig) -> String {
         &config.audible_bell_dock_bounce.to_string(),
     );
     push_line(&mut out, "auto-approve", &config.auto_approve.to_string());
+    push_repeatable_lines(
+        &mut out,
+        "keybind",
+        config.keybinds.iter().map(|keybind| keybind.config_value()),
+    );
     out
 }
 
@@ -534,7 +548,8 @@ mod tests {
 
     #[test]
     fn list_keybinds_output_matches_the_default_engine() {
-        let output = list_keybinds_output();
+        let keybinds = KeybindEngine::default();
+        let output = list_keybinds_output(&keybinds);
 
         assert!(!output.is_empty());
         assert!(output.contains("cmd+t = tab.new\n"));
@@ -550,10 +565,26 @@ mod tests {
                 "{action} must be a registered action name"
             );
         }
-        assert_eq!(
-            output.lines().count(),
-            KeybindEngine::default().list().len()
-        );
+        assert_eq!(output.lines().count(), keybinds.list().len());
+    }
+
+    #[test]
+    fn list_keybinds_output_uses_the_supplied_effective_engine() {
+        let (keybinds, diagnostics) = KeybindEngine::from_config(&[
+            noa_config::KeybindConfig::Unbind {
+                trigger: "cmd+t".to_string(),
+            },
+            noa_config::KeybindConfig::Bind {
+                trigger: "cmd+i".to_string(),
+                action: "prompt_surface_title".to_string(),
+            },
+        ]);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let output = list_keybinds_output(&keybinds);
+
+        assert!(!output.contains("cmd+t = tab.new\n"));
+        assert!(output.contains("cmd+i = tab.set-title\n"));
     }
 
     #[test]
@@ -578,6 +609,7 @@ mod tests {
         assert!(output.contains("confirm-quit = true\n"));
         assert!(output.contains("title-report = false\n"));
         assert!(output.contains("minimum-contrast = 1\n"));
+        assert!(output.contains("keybind = \n"));
         assert!(output.contains("background-opacity = 1\n"));
         assert!(output.contains("background-blur-radius = 0\n"));
         assert!(output.contains("window-save-state = default\n"));

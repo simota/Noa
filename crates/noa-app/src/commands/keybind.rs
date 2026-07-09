@@ -1,6 +1,7 @@
 use super::command::{AppCommand, FontSizeAction, SearchAction, TerminalAction, ViewportScroll};
 use super::key_token::{KeyTrigger, KeybindParseError};
 use crate::split_tree::Direction;
+use noa_config::KeybindConfig;
 use winit::keyboard::{Key, ModifiersState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +157,47 @@ impl Default for KeybindEngine {
 }
 
 impl KeybindEngine {
+    pub(crate) fn from_config(configs: &[KeybindConfig]) -> (Self, Vec<String>) {
+        let mut engine = Self::default();
+        let mut diagnostics = Vec::new();
+
+        for config in configs {
+            match config {
+                KeybindConfig::Clear => engine.bindings.clear(),
+                KeybindConfig::Unbind { trigger } => match KeyTrigger::parse(trigger) {
+                    Ok(trigger) => engine.remove_trigger(&trigger),
+                    Err(error) => diagnostics.push(format!(
+                        "invalid keybind `{}`: {error}; value ignored",
+                        config.config_value()
+                    )),
+                },
+                KeybindConfig::Bind { trigger, action } => {
+                    let Some(command) = command_from_keybind_action(action) else {
+                        diagnostics.push(format!(
+                            "unknown keybind action `{action}` in `{}`; value ignored",
+                            config.config_value()
+                        ));
+                        continue;
+                    };
+                    let trigger = match KeyTrigger::parse(trigger) {
+                        Ok(trigger) => trigger,
+                        Err(error) => {
+                            diagnostics.push(format!(
+                                "invalid keybind `{}`: {error}; value ignored",
+                                config.config_value()
+                            ));
+                            continue;
+                        }
+                    };
+                    engine.remove_trigger(&trigger);
+                    engine.bindings.push(KeyBinding { trigger, command });
+                }
+            }
+        }
+
+        (engine, diagnostics)
+    }
+
     pub(crate) fn resolve(&self, logical_key: &Key, mods: ModifiersState) -> Option<AppCommand> {
         self.bindings
             .iter()
@@ -184,5 +226,145 @@ impl KeybindEngine {
             .iter()
             .map(|binding| (binding.trigger.to_string(), binding.command.action_name()))
             .collect()
+    }
+
+    fn remove_trigger(&mut self, trigger: &KeyTrigger) {
+        self.bindings.retain(|binding| binding.trigger != *trigger);
+    }
+}
+
+fn command_from_keybind_action(action: &str) -> Option<AppCommand> {
+    let action = action.trim();
+    AppCommand::from_action_name(action)
+        .or_else(|| AppCommand::from_action_name(&action.replace('_', "-")))
+        .or_else(|| ghostty_action_alias(action))
+}
+
+fn ghostty_action_alias(action: &str) -> Option<AppCommand> {
+    match action {
+        "new_tab" => Some(AppCommand::NewTab),
+        "new_window" => Some(AppCommand::NewWindow),
+        "close_tab" | "close_surface" => Some(AppCommand::CloseTab),
+        "close_window" => Some(AppCommand::CloseWindow),
+        "quit" => Some(AppCommand::Quit),
+        "copy_to_clipboard" => Some(AppCommand::Copy),
+        "paste_from_clipboard" => Some(AppCommand::Paste),
+        "clear_screen" | "clear_terminal" => Some(AppCommand::Terminal(TerminalAction::Clear)),
+        "select_all" => Some(AppCommand::Terminal(TerminalAction::SelectAll)),
+        "increase_font_size" => Some(AppCommand::FontSize(FontSizeAction::Increase)),
+        "decrease_font_size" => Some(AppCommand::FontSize(FontSizeAction::Decrease)),
+        "reset_font_size" => Some(AppCommand::FontSize(FontSizeAction::Reset)),
+        "find" => Some(AppCommand::Search(SearchAction::Find)),
+        "find_next" => Some(AppCommand::Search(SearchAction::FindNext)),
+        "find_previous" => Some(AppCommand::Search(SearchAction::FindPrevious)),
+        "new_split:left" => Some(AppCommand::NewSplitLeft),
+        "new_split:right" => Some(AppCommand::NewSplitRight),
+        "new_split:up" => Some(AppCommand::NewSplitUp),
+        "new_split:down" => Some(AppCommand::NewSplitDown),
+        "focus_split:left" | "goto_split:left" => Some(AppCommand::FocusDirection(Direction::Left)),
+        "focus_split:right" | "goto_split:right" => {
+            Some(AppCommand::FocusDirection(Direction::Right))
+        }
+        "focus_split:up" | "goto_split:up" => Some(AppCommand::FocusDirection(Direction::Up)),
+        "focus_split:down" | "goto_split:down" => Some(AppCommand::FocusDirection(Direction::Down)),
+        "resize_split:left" => Some(AppCommand::ResizeSplit(Direction::Left)),
+        "resize_split:right" => Some(AppCommand::ResizeSplit(Direction::Right)),
+        "resize_split:up" => Some(AppCommand::ResizeSplit(Direction::Up)),
+        "resize_split:down" => Some(AppCommand::ResizeSplit(Direction::Down)),
+        "equalize_splits" => Some(AppCommand::EqualizeSplits),
+        "toggle_split_zoom" => Some(AppCommand::ToggleSplitZoom),
+        "toggle_tab_overview" | "toggle_session_overview" => Some(AppCommand::ToggleTabOverview),
+        "toggle_fullscreen" => Some(AppCommand::ToggleFullscreen),
+        "next_tab" => Some(AppCommand::NextTab),
+        "previous_tab" | "prev_tab" => Some(AppCommand::PrevTab),
+        "prompt_surface_title" | "set_tab_title" => Some(AppCommand::SetTabTitle),
+        "toggle_command_palette" => Some(AppCommand::ToggleCommandPalette),
+        "toggle_quick_terminal" => Some(AppCommand::ToggleQuickTerminal),
+        "toggle_secure_keyboard_entry" => Some(AppCommand::ToggleSecureKeyboardEntry),
+        "toggle_sidebar" => Some(AppCommand::ToggleSidebar),
+        "toggle_auto_approve" => Some(AppCommand::ToggleAutoApprove),
+        "open_theme_settings" => Some(AppCommand::OpenThemeSettings),
+        _ => action
+            .strip_prefix("goto_tab:")
+            .and_then(|index| index.parse::<usize>().ok())
+            .filter(|index| (1..=9).contains(index))
+            .map(AppCommand::SelectTab),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::keyboard::{Key, ModifiersState};
+
+    #[test]
+    fn configured_keybinds_override_unbind_and_clear_in_order() {
+        let (engine, diagnostics) = KeybindEngine::from_config(&[
+            KeybindConfig::Bind {
+                trigger: "cmd+t".to_string(),
+                action: "new_window".to_string(),
+            },
+            KeybindConfig::Unbind {
+                trigger: "cmd+w".to_string(),
+            },
+            KeybindConfig::Bind {
+                trigger: "cmd+i".to_string(),
+                action: "prompt_surface_title".to_string(),
+            },
+        ]);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        assert_eq!(
+            engine.resolve(&Key::Character("t".into()), ModifiersState::SUPER),
+            Some(AppCommand::NewWindow)
+        );
+        assert_eq!(
+            engine.resolve(&Key::Character("w".into()), ModifiersState::SUPER),
+            None
+        );
+        assert_eq!(
+            engine.resolve(&Key::Character("i".into()), ModifiersState::SUPER),
+            Some(AppCommand::SetTabTitle)
+        );
+
+        let (engine, diagnostics) = KeybindEngine::from_config(&[
+            KeybindConfig::Clear,
+            KeybindConfig::Bind {
+                trigger: "cmd+i".to_string(),
+                action: "tab.set-title".to_string(),
+            },
+        ]);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            engine.resolve(&Key::Character("t".into()), ModifiersState::SUPER),
+            None
+        );
+        assert_eq!(
+            engine.list(),
+            vec![("cmd+i".to_string(), AppCommand::SetTabTitle.action_name())]
+        );
+    }
+
+    #[test]
+    fn invalid_configured_keybinds_do_not_remove_existing_bindings() {
+        let (engine, diagnostics) = KeybindEngine::from_config(&[
+            KeybindConfig::Bind {
+                trigger: "cmd+t".to_string(),
+                action: "no.such.action".to_string(),
+            },
+            KeybindConfig::Bind {
+                trigger: "cmd+not-a-key".to_string(),
+                action: "window.new".to_string(),
+            },
+            KeybindConfig::Unbind {
+                trigger: "cmd+not-a-key".to_string(),
+            },
+        ]);
+
+        assert_eq!(diagnostics.len(), 3, "{diagnostics:?}");
+        assert_eq!(
+            engine.resolve(&Key::Character("t".into()), ModifiersState::SUPER),
+            Some(AppCommand::NewTab)
+        );
     }
 }

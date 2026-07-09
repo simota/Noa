@@ -4,8 +4,8 @@ use noa_core::Rgb;
 
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess,
-    ConfigOverrides, CursorShape, FontConfig, FontFeature, FontVariation, MacosOptionAsAlt,
-    MacosTitlebarStyle, SyntheticStyleMode, WindowSaveState,
+    ConfigOverrides, CursorShape, FontConfig, FontFeature, FontVariation, KeybindConfig,
+    MacosOptionAsAlt, MacosTitlebarStyle, SyntheticStyleMode, WindowSaveState,
 };
 
 use super::*;
@@ -87,7 +87,7 @@ fn quoted_empty_numeric_value_is_invalid_not_reset() {
 #[test]
 fn unknown_list_and_config_file_diagnostics_are_distinct() {
     let (_, unknown) = parse_overrides(path(), "bogus-key = x");
-    let (_, list) = parse_overrides(path(), "keybind = cmd+n=new_tab");
+    let (_, list) = parse_overrides(path(), "palette = 1=#ffffff");
     let (_, config_file) = parse_overrides(path(), "config-file = ~/.config/ghostty/extra");
 
     let messages = [
@@ -101,14 +101,49 @@ fn unknown_list_and_config_file_diagnostics_are_distinct() {
 }
 
 #[test]
-fn list_keys_are_recognized_but_not_retained() {
-    for key in ["keybind", "palette"] {
-        let (overrides, diagnostics) = parse_overrides(path(), &format!("{key} = value"));
+fn unsupported_list_keys_are_recognized_but_not_retained() {
+    let (overrides, diagnostics) = parse_overrides(path(), "palette = value");
 
-        assert_eq!(overrides, ConfigOverrides::default());
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains(key));
-        assert!(diagnostics[0].message.contains("list key"));
+    assert_eq!(overrides, ConfigOverrides::default());
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].message.contains("palette"));
+    assert!(diagnostics[0].message.contains("list key"));
+}
+
+#[test]
+fn keybind_entries_are_retained_in_order() {
+    let (overrides, diagnostics) = parse_overrides(
+        path(),
+        "keybind = cmd+i=prompt_surface_title\n\
+         keybind = cmd+t=unbind\n\
+         keybind = clear",
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        overrides.keybinds,
+        vec![
+            KeybindConfig::Bind {
+                trigger: "cmd+i".to_string(),
+                action: "prompt_surface_title".to_string(),
+            },
+            KeybindConfig::Unbind {
+                trigger: "cmd+t".to_string(),
+            },
+            KeybindConfig::Clear,
+        ]
+    );
+}
+
+#[test]
+fn keybind_rejects_malformed_values() {
+    for source in ["keybind =", "keybind = cmd+t", "keybind = =tab.new"] {
+        let (overrides, diagnostics) = parse_overrides(path(), source);
+
+        assert!(overrides.keybinds.is_empty(), "{source:?}");
+        assert_eq!(diagnostics.len(), 1, "{source:?}: {diagnostics:?}");
+        assert!(diagnostics[0].message.contains("keybind"));
+        assert!(diagnostics[0].message.contains("invalid value"));
     }
 }
 

@@ -1,5 +1,11 @@
 # Background Image — Feature Spec (LOCKED)
 
+> **Historical baseline:** This locked specification preserves the
+> pre-implementation problem statement and design-time source references.
+> Background images, including directory-backed rotation, are implemented;
+> use `docs/FEATURES.md` and the current `noa-app` / `noa-render` modules for
+> present behavior.
+
 **Metadata**
 - slug: `background-image`
 - title: Terminal background image support

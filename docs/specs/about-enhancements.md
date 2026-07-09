@@ -1,5 +1,10 @@
 # Spec: About パネル拡張 (about-enhancements)
 
+> **Implementation note:** This feature is implemented. Design-time line
+> numbers below are historical; current regression tests live in
+> `crates/noa-app/src/cli.rs` and
+> `crates/noa-grid/src/tests/terminal_state.rs`.
+
 ## Metadata
 - slug: about-enhancements
 - title: About パネル拡張(ビルドメタデータ + アイコン明示指定)
@@ -19,7 +24,7 @@
 - メニュー: `crates/noa-app/src/macos_menu.rs:34,291` — muda 0.19 製 NSMenu に「About Noa」項目(`app_menu.append_items(&[&about, ...])`)。
 - コマンド: `AppCommand::About`(`commands.rs:9`)、dispatch `crates/noa-app/src/app.rs:1026`(`AppCommand::About => crate::app_actions::show_about()`)。
 - バージョン源: `env!("CARGO_PKG_VERSION")` のみ。使用箇所は3か所 — `app_actions.rs:31,61`、`cli.rs:138`(`--version` 出力)、`crates/noa-grid/src/terminal.rs:1527`(XTVERSION/DA応答 `>|noa {version}`)。build.rs 不在。
-- 既存回帰防止テスト: `crates/noa-app/src/cli.rs:468-473` `version_output_names_the_binary_and_version`(`--version` が素の `CARGO_PKG_VERSION` で始まることを assert)、`crates/noa-grid/src/tests.rs:280-296` `xtgettcap_and_xtversion_report_selected_capabilities`(XTVERSION DCS応答が素の `CARGO_PKG_VERSION` を埋め込むことを assert)。
+- 既存回帰防止テスト: `crates/noa-app/src/cli.rs` の `version_output_names_the_binary_and_version`(`--version` が素の `CARGO_PKG_VERSION` で始まることを assert)、`crates/noa-grid/src/tests/terminal_state.rs` の `xtversion_query_reports_name_and_version`(XTVERSION DCS応答が素の `CARGO_PKG_VERSION` を埋め込むことを assert)。
 - アイコン: `assets/noa.icns`(`scripts/gen-icon.sh` で生成、`scripts/bundle-macos.sh:41-42` が `.app/Contents/Resources/noa.icns` にコピー済み、`CFBundleIconFile=noa` を Info.plist に設定)。About は `ApplicationIcon` 未指定でバンドル依存。
 - 制約: 非 macOS は log のみ(no-op、`app_actions.rs:28-31`)。About はネイティブ AppKit ダイアログで wgpu/renderer 非関与。
 - 導入コミット: 38bdd51(About/Preferences/Toggle Sidebar)、74a3f8c(表示名 noa→Noa)。
@@ -81,7 +86,7 @@
 | AC-6 | R-6 | `version_string()` の unit test が「両方非空→合成書式」「片方でも空→素バージョン」の2分岐を網羅する。 | 機械検証可能(unit test) |
 | AC-7 | R-7 | git log 上でアイコン変更(コミットA)とビルドメタデータ変更(コミットB)が独立した2コミットに分かれている。 | 目視(human-visual, `git log` 確認) |
 | AC-8 | NFR-1 | 本変更の diff に `Cargo.toml` / `Cargo.lock` への新規 crate 追加が含まれない(git 呼び出しは `std::process::Command` のみ)。 | 機械検証可能(diff確認 / `cargo tree` 比較) |
-| AC-9 | NFR-2 | 既存テスト `crates/noa-app/src/cli.rs:468-473` (`version_output_names_the_binary_and_version`) と `crates/noa-grid/src/tests.rs:280-296` (`xtgettcap_and_xtversion_report_selected_capabilities`) が変更なしで PASS し続ける — `--version` と XTVERSION/DA 応答が素の `CARGO_PKG_VERSION` のまま不変であることの回帰確認。 | 機械検証可能(`cargo test --offline -p noa-app -p noa-grid`) |
+| AC-9 | NFR-2 | 既存テスト `crates/noa-app/src/cli.rs` (`version_output_names_the_binary_and_version`) と `crates/noa-grid/src/tests/terminal_state.rs` (`xtversion_query_reports_name_and_version`) が変更なしで PASS し続ける — `--version` と XTVERSION/DA 応答が素の `CARGO_PKG_VERSION` のまま不変であることの回帰確認。 | 機械検証可能(`cargo test --offline -p noa-app -p noa-grid`) |
 | AC-10 | NFR-3 | 変更なしで連続 `cargo build --offline -p noa` を2回実行した場合、2回目に build.rs の再実行("Running build script" 相当の再コンパイル)が発生しない。注: バックグラウンドの git housekeeping(index refresh・loose-ref 書き込み)が `.git/HEAD`/`.git/refs` の mtime を更新した場合の再実行は正当であり flake として許容する(検証時は事前に ref の mtime を確認)。 | 機械検証可能(`cargo build -vv` 出力比較、mtime事前確認付き) |
 | AC-11 | NFR-4 | `show_about()` の `#[cfg(not(target_os = "macos"))]` 分岐がログ出力のみのまま変更されず、`cargo check --offline --workspace` が成功する。 | 機械検証可能(コードレビュー + `cargo check`) |
 | AC-12 | 全体品質ゲート | `cargo clippy --workspace --offline` が新規 warning なしで通る。 | 機械検証可能(`cargo clippy`) |

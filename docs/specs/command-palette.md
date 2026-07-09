@@ -1,5 +1,10 @@
 # Spec: コマンドパレット (command-palette)
 
+> **Historical baseline:** Source paths and line numbers in FRAME/L2 record
+> the pre-implementation layout. The current implementation is split across
+> `command_palette.rs`, `app/commands.rs`, `app/input_ops/overlays.rs`, and
+> `noa-render/src/renderer/overlay.rs`; prefer those symbols for navigation.
+
 ## Metadata
 
 - slug: `command-palette`

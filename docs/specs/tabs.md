@@ -1,5 +1,11 @@
 # Tabs
 
+> **Historical baseline:** The Problem and FRAME sections describe the
+> pre-implementation architecture at specification time. Native tabs,
+> multi-window state, and split-aware sessions are implemented; use
+> `docs/FEATURES.md` and current symbols rather than the historical line
+> numbers below when navigating the code.
+
 ## Metadata
 
 - slug: tabs

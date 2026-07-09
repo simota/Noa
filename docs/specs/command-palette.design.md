@@ -1,5 +1,10 @@
 # Command Palette — Implementation Design + Risk Gate (ADR)
 
+> **Historical baseline:** This accepted design retains its implementation-time
+> file list and line references. The renderer implementation now lives in
+> `noa-render/src/renderer/overlay.rs`, while app dispatch and input routing live
+> under `noa-app/src/app/`; use symbol names below as the stable anchors.
+
 - status: **Accepted** (Atlas Phase 5, 2026-07-04)
 - spec (authoritative): `docs/specs/command-palette.md` (locked). This design does not re-litigate scope.
 - gate verdict: **Conditional-Go** (4 conditions, §5). Phase 6 (orbit/builder) may proceed.
@@ -142,7 +147,7 @@ Conditions folded into the Builder change list (all four are low-effort, single-
 1. **`crates/noa-app/src/commands.rs`** — add `ToggleCommandPalette` variant; 4 roundtrip arms (`menu_id`/`from_menu_id`/`action_name`/`from_action_name`); `TOGGLE_COMMAND_PALETTE_MENU_ID`; keybind spec `("cmd+shift+p", …)`; `impl Display for KeyTrigger` + `KeybindEngine::chord_for`. Tests: AC-1, AC-2, AC-5.
 2. **`crates/noa-app/src/command_palette.rs`** *(new)* — `command_palette_title` (exhaustive, no `_`), `command_palette_entries`, `command_palette_filter`, `is_subsequence_ci`, `command_palette_keybind`. Tests: AC-3, AC-4, AC-8, AC-9, AC-23.
 3. **`crates/noa-render/src/snapshot.rs`** — `CommandPaletteSnapshot` struct; `FrameSnapshot.command_palette` field + `None` default.
-4. **`crates/noa-render/src/renderer.rs`** — `append_command_palette_instances` (multi-row); wire at both search_prompt call sites (697, 1001).
+4. **`crates/noa-render/src/renderer/overlay.rs`** — `append_command_palette_instances` (multi-row); the symbol, rather than the historical call-site line numbers, is the stable anchor.
 5. **`crates/noa-app/src/app.rs`** — `CommandPaletteSession`; `App.command_palette` field + init; scope arms (`command_scope`, `overview_command_scope`); `handle_app_command` toggle arm + **C1** defensive close; `toggle_command_palette`; **C2** routing branch; `handle_command_palette_key`; **C4** `close_tab` cleanup; **C3** snapshot build. Tests: AC-6, AC-7, AC-10..17, AC-18.
 6. **`crates/noa-app/src/macos_menu.rs`** — View-menu item + `cmd_shift_accelerator(Code::KeyP)`.
 7. **`crates/noa-app/src/lib.rs`** — `mod command_palette;` (+ any re-export needed for `CommandPaletteSnapshot` used across app↔render).

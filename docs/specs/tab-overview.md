@@ -1,5 +1,10 @@
 # Spec: Session Overview (セッション俯瞰ビュー)
 
+> **Historical baseline:** Inline `file:line` references preserve the
+> 2026-07-03/04 design worktrees and are not current navigation targets. The
+> implementation now lives primarily in `session_overview/`, `app/overview/`,
+> and `app/input_ops/`; use the named symbols as stable anchors.
+
 ## Metadata
 - slug: `tab-overview`
 - title: 全タブをタイルで俯瞰する監視ダッシュボードビュー
@@ -292,7 +297,7 @@ Judge + Attest が FAIL を返した Run 1 の全指摘への対応(各1行)。
 - trigger: ユーザー提示のターゲット UI モックアップ画像(2026-07-04)。本節の要件はエージェントが画像を直接見た結果ではなく、依頼者が言語化した観察記述を正としてスペック化したもの。
 - scope mode: **Standard 追記**(REQ-OV-11..17 の 7 functional + REQ-NF-12..13 の 2 non-functional = 9 要件、AC 16 件)。
 - 継続方針: v1 の不変条件(等サイズ・行優先・非重複、REQ-OV-3)・スコープ境界(Void CUT/DEFER、L0 パリティ例外)は維持し上書きしない。本節は v1 requirement の**補完**(REQ-OV-5 の未達解消含む)であり、v1 REQ/AC 番号は再利用しない。
-- グラウンディング: 本節の現状記述はすべて `feat/tab-overview-v2` ワークツリーのコード調査(2026-07-04)に基づく。主要参照: `crates/noa-app/src/tab_overview.rs`(純関数層)、`crates/noa-app/src/app.rs`(ウィンドウ/描画/コマンド配線)、`crates/noa-app/src/command_palette.rs`(フィルタ機構の参考実装)。
+- グラウンディング: 本節の現状記述はすべて `feat/tab-overview-v2` ワークツリーのコード調査(2026-07-04)に基づく。現在の主要参照は `crates/noa-app/src/session_overview/`(純関数層)、`crates/noa-app/src/app/overview/` と `app/input_ops/`(描画・入力配線)、`crates/noa-app/src/command_palette.rs`(フィルタ機構の参考実装)。以下の旧パスと行番号は当時の証跡として保持する。
 
 ### L0 — Vision delta (v2)
 - v1 は「出しっぱなし監視ダッシュボード」を主目的としクリック操作のみを KEEP 、タイル間キーボードナビ・活動バッジ・並替等を CUT した(Void スコープ、90-102行)。ユーザー提示のモックアップは、その CUT 済みキーボードナビの一部(矢印移動・Cmd+1-9直接切替)と、v1 で未実装のタイトルバー表示・クローズボタン・検索フィルタ・ヒントバーを新たに要求している。これは v1 の Void CUT を撤回するものではなく、**ユーザーが明示的にスコープを復活させた** v2 追加要求として扱う。

@@ -1,5 +1,10 @@
 # Spec: テーマ選択機能 (theme-selection)
 
+> **Historical baseline:** L0/FRAME は仕様作成時点の実装前状態を保存している。
+> 現在は574テーマのカタログ、設定UI、テーマを含むlive config reloadが実装済み。
+> 現行状態は `docs/FEATURES.md` と現在のsymbolを参照し、以下の行番号は設計時点の
+> 証跡として扱うこと。
+
 ## Metadata
 
 - slug: `theme-selection`

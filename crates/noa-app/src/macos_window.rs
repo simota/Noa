@@ -216,6 +216,12 @@ pub(crate) fn install_titlebar_backdrop(window: &Window, bg: noa_core::Rgb) {
     install_titlebar_backdrop_impl(window, bg);
 }
 
+/// Remove Noa's titlebar backdrop view when a full-size content view can supply
+/// defined pixels itself, such as a visible terminal background image.
+pub(crate) fn remove_titlebar_backdrop(window: &Window) {
+    remove_titlebar_backdrop_impl(window);
+}
+
 #[cfg(target_os = "macos")]
 fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
     use objc2::msg_send;
@@ -366,6 +372,95 @@ fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
 
 #[cfg(not(target_os = "macos"))]
 fn install_titlebar_backdrop_impl(_window: &Window, _bg: noa_core::Rgb) {}
+
+#[cfg(target_os = "macos")]
+fn remove_titlebar_backdrop_impl(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::NSString;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    const CONTAINER_CLASS: &[u8] = b"NSTitlebarContainerView";
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+    let identifier = NSString::from_str(TITLEBAR_BACKDROP_ID);
+
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let content_view: *mut AnyObject = msg_send![ns_window, contentView];
+        if content_view.is_null() {
+            return;
+        }
+        let theme_frame: *mut AnyObject = msg_send![content_view, superview];
+        if theme_frame.is_null() {
+            return;
+        }
+        let mut queue = vec![theme_frame];
+        let mut container: *mut AnyObject = std::ptr::null_mut();
+        while let Some(current_view) = queue.pop() {
+            if current_view.is_null() {
+                continue;
+            }
+            let class: *const AnyClass = msg_send![current_view, class];
+            if let Some(class) = class.as_ref()
+                && class
+                    .name()
+                    .to_bytes()
+                    .windows(CONTAINER_CLASS.len())
+                    .any(|w| w == CONTAINER_CLASS)
+            {
+                container = current_view;
+                break;
+            }
+            let subviews: *mut AnyObject = msg_send![current_view, subviews];
+            if !subviews.is_null() {
+                let count: usize = msg_send![subviews, count];
+                for i in 0..count {
+                    let subview: *mut AnyObject = msg_send![subviews, objectAtIndex: i];
+                    if !subview.is_null() {
+                        queue.push(subview);
+                    }
+                }
+            }
+        }
+        if container.is_null() {
+            return;
+        }
+
+        let container_subviews: *mut AnyObject = msg_send![container, subviews];
+        if container_subviews.is_null() {
+            return;
+        }
+        let n: usize = msg_send![container_subviews, count];
+        for i in 0..n {
+            let view: *mut AnyObject = msg_send![container_subviews, objectAtIndex: i];
+            if view.is_null() {
+                continue;
+            }
+            let ident: *mut AnyObject = msg_send![view, identifier];
+            if ident.is_null() {
+                continue;
+            }
+            let same: bool = msg_send![ident, isEqualToString: &*identifier];
+            if same {
+                let _: () = msg_send![view, removeFromSuperview];
+                return;
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn remove_titlebar_backdrop_impl(_window: &Window) {}
 
 pub(crate) fn set_window_background_color(window: &Window, bg: noa_core::Rgb, alpha: f32) {
     set_window_background_color_impl(window, bg, alpha);

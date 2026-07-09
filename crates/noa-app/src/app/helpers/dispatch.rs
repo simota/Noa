@@ -181,6 +181,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::NewWindow
         | AppCommand::ToggleCommandPalette
         | AppCommand::OpenThemeSettings
+        | AppCommand::ToggleFullscreen
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleSecureKeyboardEntry
         | AppCommand::ToggleSidebar
@@ -229,6 +230,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::Quit
+        | AppCommand::ToggleFullscreen
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleSecureKeyboardEntry
         | AppCommand::ToggleSidebar => CommandScope::App,

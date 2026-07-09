@@ -78,6 +78,9 @@ pub struct AppConfig {
     /// `macos-titlebar-style`: titlebar presentation for ordinary terminal
     /// windows.
     pub macos_titlebar_style: noa_config::MacosTitlebarStyle,
+    /// `macos-non-native-fullscreen`: use borderless-window fullscreen instead
+    /// of AppKit's native fullscreen Space on macOS.
+    pub macos_non_native_fullscreen: bool,
     /// Set when the user passed an explicit grid size on the CLI (`--cols` /
     /// `--rows`). Session restore is suppressed in that case so the requested
     /// dimensions win over the saved topology (Ghostty parity).

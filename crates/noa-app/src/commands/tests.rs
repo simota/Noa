@@ -47,6 +47,7 @@ fn stable_menu_ids_map_to_commands() {
         AppCommand::EqualizeSplits,
         AppCommand::ToggleSplitZoom,
         AppCommand::ToggleTabOverview,
+        AppCommand::ToggleFullscreen,
         AppCommand::CloseTab,
         AppCommand::NextTab,
         AppCommand::PrevTab,
@@ -238,6 +239,13 @@ fn split_shortcuts_map_to_pane_commands() {
         ),
         Some(AppCommand::ToggleTabOverview)
     );
+    assert_eq!(
+        AppCommand::from_key(
+            &Key::Character("f".into()),
+            ModifiersState::SUPER | ModifiersState::CONTROL
+        ),
+        Some(AppCommand::ToggleFullscreen)
+    );
 }
 
 #[test]
@@ -369,6 +377,10 @@ fn chord_for_reverse_maps_bound_commands_and_reports_none_for_unbound() {
         Some("cmd+shift+s")
     );
     assert_eq!(
+        engine.chord_for(AppCommand::ToggleFullscreen).as_deref(),
+        Some("cmd+ctrl+f")
+    );
+    assert_eq!(
         engine
             .chord_for(AppCommand::ScrollViewport(ViewportScroll::LineUp))
             .as_deref(),
@@ -444,6 +456,7 @@ fn action_names_map_to_commands() {
         AppCommand::EqualizeSplits,
         AppCommand::ToggleSplitZoom,
         AppCommand::ToggleTabOverview,
+        AppCommand::ToggleFullscreen,
         AppCommand::CloseTab,
         AppCommand::SelectTab(3),
         AppCommand::NextTab,

@@ -65,6 +65,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::EqualizeSplits => "Equalize Splits",
         AppCommand::ToggleSplitZoom => "Toggle Split Zoom",
         AppCommand::ToggleTabOverview => "Toggle Session Overview",
+        AppCommand::ToggleFullscreen => "Toggle Full Screen",
         AppCommand::CloseTab => "Close Tab",
         AppCommand::SelectTab(index) => match index {
             1 => "Go to Tab 1",
@@ -145,6 +146,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::EqualizeSplits,
         AppCommand::ToggleSplitZoom,
         AppCommand::ToggleTabOverview,
+        AppCommand::ToggleFullscreen,
         AppCommand::ToggleQuickTerminal,
         AppCommand::ToggleSecureKeyboardEntry,
         AppCommand::ToggleSidebar,
@@ -306,7 +308,8 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         }
         AppCommand::Terminal(TerminalAction::Clear)
         | AppCommand::Terminal(TerminalAction::ClearScrollback)
-        | AppCommand::FontSize(_) => CommandCategory::View,
+        | AppCommand::FontSize(_)
+        | AppCommand::ToggleFullscreen => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
         AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
         AppCommand::NewSplitLeft
@@ -607,6 +610,7 @@ mod tests {
             AppCommand::EqualizeSplits,
             AppCommand::ToggleSplitZoom,
             AppCommand::ToggleTabOverview,
+            AppCommand::ToggleFullscreen,
             AppCommand::CloseTab,
             AppCommand::NextTab,
             AppCommand::PrevTab,

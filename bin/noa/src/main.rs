@@ -112,6 +112,7 @@ fn app_config_from_startup(
         window_save_state: config.window_save_state,
         macos_option_as_alt: config.macos_option_as_alt,
         macos_titlebar_style: config.macos_titlebar_style,
+        macos_non_native_fullscreen: config.macos_non_native_fullscreen,
         cli_grid_override,
         quick_terminal_hotkey: config.quick_terminal_hotkey,
         quick_terminal_size: config.quick_terminal_size,
@@ -158,6 +159,7 @@ mod tests {
             confirm_quit: false,
             macos_option_as_alt: noa_config::MacosOptionAsAlt::Both,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Transparent,
+            macos_non_native_fullscreen: true,
             sidebar_preview_lines: 4,
             auto_approve: true,
             ..Default::default()
@@ -180,6 +182,7 @@ mod tests {
             app_config.macos_titlebar_style,
             noa_config::MacosTitlebarStyle::Transparent
         );
+        assert!(app_config.macos_non_native_fullscreen);
         assert_eq!(app_config.sidebar_preview_lines, 4);
         assert!(app_config.auto_approve);
     }

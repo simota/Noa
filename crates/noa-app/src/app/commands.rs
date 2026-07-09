@@ -124,6 +124,7 @@ impl App {
             AppCommand::ScrollViewport(scroll) => self.scroll_viewport(scroll),
             AppCommand::ToggleCommandPalette => self.toggle_command_palette(),
             AppCommand::OpenThemeSettings => self.open_theme_settings(),
+            AppCommand::ToggleFullscreen => self.toggle_fullscreen(),
             AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             AppCommand::ToggleSecureKeyboardEntry => self.toggle_secure_keyboard_entry(),
             AppCommand::ToggleSidebar => self.toggle_sidebar(),
@@ -156,6 +157,24 @@ impl App {
         }
     }
 
+    fn toggle_fullscreen(&mut self) {
+        let Some(window_id) = self.focused else {
+            return;
+        };
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
+
+        #[cfg(target_os = "macos")]
+        if !self.config.macos_non_native_fullscreen
+            && crate::macos_window::toggle_native_fullscreen(&state.window)
+        {
+            return;
+        }
+
+        toggle_borderless_fullscreen(&state.window);
+    }
+
     /// Toggle Secure Keyboard Entry. A toggle only reaches us while the app is
     /// frontmost, so the switch takes effect immediately; focus changes and app
     /// exit reconcile it afterwards. The menu checkmark tracks the user intent.
@@ -169,4 +188,15 @@ impl App {
         }
         let _ = desired;
     }
+}
+
+fn toggle_borderless_fullscreen(window: &Window) {
+    let fullscreen = if window.fullscreen().is_some() {
+        None
+    } else {
+        Some(winit::window::Fullscreen::Borderless(
+            window.current_monitor(),
+        ))
+    };
+    window.set_fullscreen(fullscreen);
 }

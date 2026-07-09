@@ -1142,6 +1142,7 @@ fn command_target_resolution_uses_focused_tab_only_for_terminal_commands() {
         AppCommand::SelectTab(1),
         AppCommand::NextTab,
         AppCommand::PrevTab,
+        AppCommand::ToggleFullscreen,
         AppCommand::Quit,
     ] {
         assert_eq!(resolve_command_target(command, focused), None);
@@ -1300,6 +1301,22 @@ fn command_palette_toggle_is_app_scoped_and_overview_no_op() {
     assert_eq!(
         overview_command_scope(AppCommand::ToggleCommandPalette),
         CommandScope::Overview
+    );
+}
+
+#[test]
+fn fullscreen_toggle_is_app_scoped() {
+    assert_eq!(
+        command_scope(AppCommand::ToggleFullscreen),
+        CommandScope::App
+    );
+    assert_eq!(
+        overview_command_scope(AppCommand::ToggleFullscreen),
+        CommandScope::App
+    );
+    assert_eq!(
+        resolve_command_target(AppCommand::ToggleFullscreen, Some(42_u8)),
+        None
     );
 }
 

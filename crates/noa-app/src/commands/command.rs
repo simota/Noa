@@ -26,6 +26,7 @@ pub enum AppCommand {
     EqualizeSplits,
     ToggleSplitZoom,
     ToggleTabOverview,
+    ToggleFullscreen,
     CloseTab,
     SelectTab(usize),
     NextTab,
@@ -130,6 +131,7 @@ impl AppCommand {
     pub(crate) const TOGGLE_TAB_OVERVIEW_MENU_ID: &'static str = "noa.view.toggle-session-overview";
     pub(crate) const LEGACY_TOGGLE_TAB_OVERVIEW_MENU_ID: &'static str =
         "noa.view.toggle-tab-overview";
+    pub(crate) const TOGGLE_FULLSCREEN_MENU_ID: &'static str = "noa.view.toggle-full-screen";
     pub(crate) const CLOSE_TAB_MENU_ID: &'static str = "noa.file.close-tab";
     pub(crate) const NEXT_TAB_MENU_ID: &'static str = "noa.window.next-tab";
     pub(crate) const PREV_TAB_MENU_ID: &'static str = "noa.window.previous-tab";
@@ -191,6 +193,7 @@ impl AppCommand {
             AppCommand::EqualizeSplits => Self::EQUALIZE_SPLITS_MENU_ID,
             AppCommand::ToggleSplitZoom => Self::TOGGLE_SPLIT_ZOOM_MENU_ID,
             AppCommand::ToggleTabOverview => Self::TOGGLE_TAB_OVERVIEW_MENU_ID,
+            AppCommand::ToggleFullscreen => Self::TOGGLE_FULLSCREEN_MENU_ID,
             AppCommand::CloseTab => Self::CLOSE_TAB_MENU_ID,
             AppCommand::SelectTab(_) => "",
             AppCommand::OpenThemeSettings => "",
@@ -256,6 +259,7 @@ impl AppCommand {
             Self::TOGGLE_TAB_OVERVIEW_MENU_ID | Self::LEGACY_TOGGLE_TAB_OVERVIEW_MENU_ID => {
                 Some(Self::ToggleTabOverview)
             }
+            Self::TOGGLE_FULLSCREEN_MENU_ID => Some(Self::ToggleFullscreen),
             Self::CLOSE_TAB_MENU_ID => Some(Self::CloseTab),
             Self::NEXT_TAB_MENU_ID => Some(Self::NextTab),
             Self::PREV_TAB_MENU_ID => Some(Self::PrevTab),
@@ -325,6 +329,7 @@ impl AppCommand {
             Self::EqualizeSplits => "split.equalize",
             Self::ToggleSplitZoom => "split.toggle-zoom",
             Self::ToggleTabOverview => "session-overview.toggle",
+            Self::ToggleFullscreen => "fullscreen.toggle",
             Self::CloseTab => "tab.close",
             Self::SelectTab(index) => match index {
                 1 => "tab.select-1",
@@ -393,6 +398,7 @@ impl AppCommand {
             "split.equalize" => Some(Self::EqualizeSplits),
             "split.toggle-zoom" => Some(Self::ToggleSplitZoom),
             "session-overview.toggle" | "tab-overview.toggle" => Some(Self::ToggleTabOverview),
+            "fullscreen.toggle" => Some(Self::ToggleFullscreen),
             "tab.close" => Some(Self::CloseTab),
             "tab.select-1" => Some(Self::SelectTab(1)),
             "tab.select-2" => Some(Self::SelectTab(2)),

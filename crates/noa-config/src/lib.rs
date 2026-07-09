@@ -351,6 +351,9 @@ pub struct StartupConfig {
     /// `macos-titlebar-style`: titlebar presentation for ordinary terminal
     /// windows. Default is native.
     pub macos_titlebar_style: MacosTitlebarStyle,
+    /// `macos-non-native-fullscreen`: use borderless-window fullscreen instead
+    /// of the native macOS fullscreen Space. No-op outside macOS.
+    pub macos_non_native_fullscreen: bool,
     /// `quick-terminal-hotkey`: the global hotkey chord that toggles the
     /// drop-down quick terminal (e.g. `cmd+grave`). Defaults to
     /// [`DEFAULT_QUICK_TERMINAL_HOTKEY`]; set the config value to `none` (or
@@ -426,6 +429,7 @@ impl Default for StartupConfig {
             window_save_state: WindowSaveState::default(),
             macos_option_as_alt: MacosOptionAsAlt::default(),
             macos_titlebar_style: MacosTitlebarStyle::default(),
+            macos_non_native_fullscreen: false,
             quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
             quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
             quick_terminal_autohide: true,
@@ -473,6 +477,7 @@ pub struct ConfigOverrides {
     pub window_save_state: Option<WindowSaveState>,
     pub macos_option_as_alt: Option<MacosOptionAsAlt>,
     pub macos_titlebar_style: Option<MacosTitlebarStyle>,
+    pub macos_non_native_fullscreen: Option<bool>,
     pub quick_terminal_hotkey: Option<String>,
     pub quick_terminal_size: Option<f32>,
     pub quick_terminal_autohide: Option<bool>,
@@ -542,6 +547,9 @@ impl ConfigOverrides {
             macos_titlebar_style: higher_priority
                 .macos_titlebar_style
                 .or(self.macos_titlebar_style),
+            macos_non_native_fullscreen: higher_priority
+                .macos_non_native_fullscreen
+                .or(self.macos_non_native_fullscreen),
             quick_terminal_hotkey: higher_priority
                 .quick_terminal_hotkey
                 .or(self.quick_terminal_hotkey),
@@ -609,6 +617,9 @@ impl ConfigOverrides {
             macos_titlebar_style: self
                 .macos_titlebar_style
                 .unwrap_or(base.macos_titlebar_style),
+            macos_non_native_fullscreen: self
+                .macos_non_native_fullscreen
+                .unwrap_or(base.macos_non_native_fullscreen),
             quick_terminal_hotkey: self.quick_terminal_hotkey.or(base.quick_terminal_hotkey),
             quick_terminal_size: self.quick_terminal_size.unwrap_or(base.quick_terminal_size),
             quick_terminal_autohide: self
@@ -794,6 +805,7 @@ mod tests {
                 window_save_state: WindowSaveState::default(),
                 macos_option_as_alt: MacosOptionAsAlt::default(),
                 macos_titlebar_style: MacosTitlebarStyle::default(),
+                macos_non_native_fullscreen: false,
                 quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
                 quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
                 quick_terminal_autohide: true,
@@ -974,7 +986,9 @@ font-size = 15.5
     fn macos_native_keys_flow_through_parse_apply_and_precedence() {
         let (overrides, diagnostics) = parse_overrides(
             test_path(),
-            "macos-option-as-alt = left\nmacos-titlebar-style = transparent",
+            "macos-option-as-alt = left\n\
+             macos-titlebar-style = transparent\n\
+             macos-non-native-fullscreen = true",
         );
         assert!(diagnostics.is_empty());
         assert_eq!(overrides.macos_option_as_alt, Some(MacosOptionAsAlt::Left));
@@ -982,18 +996,22 @@ font-size = 15.5
             overrides.macos_titlebar_style,
             Some(MacosTitlebarStyle::Transparent)
         );
+        assert_eq!(overrides.macos_non_native_fullscreen, Some(true));
 
         let default = ConfigOverrides::default().apply_to(StartupConfig::default());
         assert_eq!(default.macos_option_as_alt, MacosOptionAsAlt::None);
         assert_eq!(default.macos_titlebar_style, MacosTitlebarStyle::Native);
+        assert!(!default.macos_non_native_fullscreen);
 
         let file = ConfigOverrides {
             macos_option_as_alt: Some(MacosOptionAsAlt::Left),
             macos_titlebar_style: Some(MacosTitlebarStyle::Transparent),
+            macos_non_native_fullscreen: Some(true),
             ..Default::default()
         };
         let cli = ConfigOverrides {
             macos_option_as_alt: Some(MacosOptionAsAlt::Both),
+            macos_non_native_fullscreen: Some(false),
             ..Default::default()
         };
         let resolved = file.merge(cli).apply_to(StartupConfig::default());
@@ -1002,6 +1020,7 @@ font-size = 15.5
             resolved.macos_titlebar_style,
             MacosTitlebarStyle::Transparent
         );
+        assert!(!resolved.macos_non_native_fullscreen);
     }
 
     #[test]

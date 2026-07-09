@@ -816,9 +816,39 @@ fn macos_titlebar_style_rejects_unknown_value() {
 }
 
 #[test]
+fn macos_non_native_fullscreen_parses_bool() {
+    for (value, expected) in [("true", true), ("false", false)] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("macos-non-native-fullscreen = {value}"));
+
+        assert_eq!(
+            overrides.macos_non_native_fullscreen,
+            Some(expected),
+            "{value:?}"
+        );
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+    }
+}
+
+#[test]
+fn macos_non_native_fullscreen_rejects_unknown_value() {
+    let (overrides, diagnostics) = parse_overrides(path(), "macos-non-native-fullscreen = maybe");
+
+    assert_eq!(overrides.macos_non_native_fullscreen, None);
+    assert_eq!(diagnostics.len(), 1);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("macos-non-native-fullscreen")
+    );
+    assert!(diagnostics[0].message.contains("maybe"));
+}
+
+#[test]
 fn macos_native_keys_are_supported_scalar_keys_for_import() {
     assert!(is_supported_scalar_key("macos-option-as-alt"));
     assert!(is_supported_scalar_key("macos-titlebar-style"));
+    assert!(is_supported_scalar_key("macos-non-native-fullscreen"));
 }
 
 #[test]

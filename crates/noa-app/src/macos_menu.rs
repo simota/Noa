@@ -1,8 +1,8 @@
 //! Native macOS menu construction.
 
 use muda::{
-    CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     accelerator::{Accelerator, Code, Modifiers},
+    CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::{dpi::PhysicalPosition, event_loop::EventLoopProxy, window::Window};
@@ -91,6 +91,8 @@ impl MacosMenu {
             preferences_enabled,
             Some(preferences_accelerator),
         );
+        let (fullscreen_command, fullscreen_label, fullscreen_enabled, fullscreen_accelerator) =
+            fullscreen_menu_item_spec();
         let secure_keyboard_entry = CheckMenuItem::with_id(
             AppCommand::ToggleSecureKeyboardEntry.menu_id(),
             "Secure Keyboard Entry",
@@ -313,7 +315,12 @@ impl MacosMenu {
                 ),
                 &auto_approve,
                 &PredefinedMenuItem::separator(),
-                &disabled_item("noa.view.toggle-full-screen", "Toggle Full Screen"),
+                &MenuItem::with_id(
+                    fullscreen_command.menu_id(),
+                    fullscreen_label,
+                    fullscreen_enabled,
+                    Some(fullscreen_accelerator),
+                ),
             ],
         )?;
         let window_menu = Submenu::with_id_and_items(
@@ -508,6 +515,15 @@ fn preferences_menu_item_spec() -> (AppCommand, &'static str, bool, Accelerator)
     )
 }
 
+fn fullscreen_menu_item_spec() -> (AppCommand, &'static str, bool, Accelerator) {
+    (
+        AppCommand::ToggleFullscreen,
+        "Toggle Full Screen",
+        true,
+        cmd_ctrl_accelerator(Code::KeyF),
+    )
+}
+
 fn disabled_item(id: &'static str, text: &'static str) -> MenuItem {
     MenuItem::with_id(id, text, false, None)
 }
@@ -518,6 +534,10 @@ fn cmd_accelerator(code: Code) -> Accelerator {
 
 fn cmd_shift_accelerator(code: Code) -> Accelerator {
     Accelerator::new(Some(Modifiers::SUPER | Modifiers::SHIFT), code)
+}
+
+fn cmd_ctrl_accelerator(code: Code) -> Accelerator {
+    Accelerator::new(Some(Modifiers::SUPER | Modifiers::CONTROL), code)
 }
 
 fn shift_accelerator(code: Code) -> Accelerator {
@@ -579,5 +599,16 @@ mod tests {
         assert_eq!(label, "Settings...");
         assert!(enabled);
         assert_eq!(accelerator, cmd_accelerator(Code::Comma));
+    }
+
+    #[test]
+    fn fullscreen_menu_item_is_enabled_and_routes_to_toggle_fullscreen() {
+        let (command, label, enabled, accelerator) = fullscreen_menu_item_spec();
+
+        assert_eq!(command, AppCommand::ToggleFullscreen);
+        assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+        assert_eq!(label, "Toggle Full Screen");
+        assert!(enabled);
+        assert_eq!(accelerator, cmd_ctrl_accelerator(Code::KeyF));
     }
 }

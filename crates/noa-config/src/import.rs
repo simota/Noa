@@ -173,14 +173,18 @@ mod tests {
     #[test]
     fn macos_native_keys_are_preserved_uncommented_on_import() {
         let (output, stats) = build_import_output(&[String::from(
-            "macos-option-as-alt = true\nmacos-titlebar-style = transparent\n",
+            "macos-option-as-alt = true\n\
+             macos-titlebar-style = transparent\n\
+             macos-non-native-fullscreen = true\n",
         )]);
 
         assert!(output.contains("macos-option-as-alt = true\n"));
         assert!(output.contains("macos-titlebar-style = transparent\n"));
+        assert!(output.contains("macos-non-native-fullscreen = true\n"));
         assert!(!output.contains("# macos-option-as-alt"));
         assert!(!output.contains("# macos-titlebar-style"));
-        assert_eq!(stats.supported, 2);
+        assert!(!output.contains("# macos-non-native-fullscreen"));
+        assert_eq!(stats.supported, 3);
         assert_eq!(stats.commented_out, 0);
     }
 

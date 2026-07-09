@@ -16,6 +16,45 @@ pub(crate) fn configure_quick_terminal_window(window: &Window) {
     apply(window);
 }
 
+/// Toggle AppKit's native fullscreen Space for a normal terminal window.
+/// Returns `false` only when the live NSWindow cannot be reached.
+pub(crate) fn toggle_native_fullscreen(window: &Window) -> bool {
+    toggle_native_fullscreen_impl(window)
+}
+
+#[cfg(target_os = "macos")]
+fn toggle_native_fullscreen_impl(window: &Window) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return false;
+    };
+    let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+
+    // SAFETY: `ns_view` is winit's live AppKit `NSView` for this window and we
+    // are on the main event loop thread. `toggleFullScreen:` is an AppKit
+    // window action; a nil sender is the documented programmatic form.
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return false;
+        }
+        let sender: *mut AnyObject = std::ptr::null_mut();
+        let _: () = msg_send![ns_window, toggleFullScreen: sender];
+    }
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+fn toggle_native_fullscreen_impl(_window: &Window) -> bool {
+    false
+}
+
 #[cfg(target_os = "macos")]
 fn apply(window: &Window) {
     use objc2::msg_send;

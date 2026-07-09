@@ -340,6 +340,11 @@ fn show_config_output(config: &StartupConfig) -> String {
     );
     push_line(
         &mut out,
+        "macos-non-native-fullscreen",
+        &config.macos_non_native_fullscreen.to_string(),
+    );
+    push_line(
+        &mut out,
         "quick-terminal-hotkey",
         config.quick_terminal_hotkey.as_deref().unwrap_or(""),
     );
@@ -566,6 +571,7 @@ mod tests {
         assert!(output.contains("window-save-state = default\n"));
         assert!(output.contains("macos-option-as-alt = false\n"));
         assert!(output.contains("macos-titlebar-style = native\n"));
+        assert!(output.contains("macos-non-native-fullscreen = false\n"));
         assert!(output.contains("sidebar-enabled = false\n"));
         assert!(output.contains("sidebar-width = 360\n"));
         assert!(output.contains("sidebar-hotkey = \n"));
@@ -587,6 +593,7 @@ mod tests {
             confirm_quit: false,
             macos_option_as_alt: MacosOptionAsAlt::Right,
             macos_titlebar_style: MacosTitlebarStyle::Transparent,
+            macos_non_native_fullscreen: true,
             sidebar_enabled: true,
             sidebar_width: 280.0,
             sidebar_hotkey: Some("cmd+shift+s".to_string()),
@@ -616,6 +623,7 @@ mod tests {
         assert!(output.contains("confirm-quit = false\n"));
         assert!(output.contains("macos-option-as-alt = right\n"));
         assert!(output.contains("macos-titlebar-style = transparent\n"));
+        assert!(output.contains("macos-non-native-fullscreen = true\n"));
         assert!(output.contains("sidebar-enabled = true\n"));
         assert!(output.contains("sidebar-width = 280\n"));
         assert!(output.contains("sidebar-hotkey = cmd+shift+s\n"));

@@ -2,25 +2,16 @@ use std::fmt::Write as _;
 
 use super::*;
 
-const SIDEBAR_OFFSCREEN_BLEND: wgpu::BlendState = wgpu::BlendState {
-    color: wgpu::BlendComponent {
-        src_factor: wgpu::BlendFactor::One,
-        dst_factor: wgpu::BlendFactor::Zero,
-        operation: wgpu::BlendOperation::Add,
-    },
-    alpha: wgpu::BlendComponent {
-        src_factor: wgpu::BlendFactor::One,
-        dst_factor: wgpu::BlendFactor::Zero,
-        operation: wgpu::BlendOperation::Add,
-    },
-};
+const SIDEBAR_CARD_RULE_HEIGHT: f32 = 1.0;
+const SIDEBAR_CARD_RULE_BORDER_MIX: f32 = 0.34;
+const SIDEBAR_CARD_STATIC_FILL_OPACITY: f32 = 0.0;
 
 /// Rasterize one synthetic sidebar grid (background + positioned text/dots)
-/// with the reused `Renderer` into `view`. `base_bg` fills the empty cells and
-/// the clear color so a card texture reads as its own surface. `bg_opacity`
-/// scales that clear color's alpha (1.0 keeps it fully opaque); the card
-/// composite shader now passes the sampled texture's alpha through
-/// (`card.wgsl`), so this is what makes the caller's backdrop translucent.
+/// with the reused `Renderer` into `view`. `base_bg` supplies the clear RGB and
+/// default cell background; `bg_opacity` scales that clear alpha (0.0 makes the
+/// texture text-only, 1.0 keeps it fully opaque). The card composite shader
+/// passes the sampled texture alpha through (`card.wgsl`), so callers decide
+/// whether a scratch is a surface or just foreground content.
 #[allow(clippy::too_many_arguments)]
 fn rasterize_runs(
     renderer: &mut Renderer,
@@ -219,12 +210,12 @@ fn sidebar_card_frame(selected: bool, attention: bool) -> SidebarCardFrame {
 }
 
 /// Rasterize the sidebar and composite it onto `view` at the window's left
-/// inset via the reused rounded-card pipeline: a flat backdrop matching the
-/// terminal theme's background (so the band reads as one surface with the
-/// panes), then each fully-visible card as a rounded card with a subtle
-/// border and a focus ring on the selected one, then the optional `…` menu
-/// popup above them all. Runs inline in `redraw` with the already-borrowed
-/// `gpu`, so the model must be prebuilt (no `self` here).
+/// inset via the reused card pipeline: a flat backdrop matching the terminal
+/// theme's background (so the band reads as one surface with the panes), then
+/// each fully-visible card as a square, borderless row with state carried by
+/// its fill and status markers, then the optional `…` menu popup above them
+/// all. Runs inline in `redraw` with the already-borrowed `gpu`, so the model
+/// must be prebuilt (no `self` here).
 pub(in crate::app) fn draw_sidebar_band(
     gpu: &mut GpuState,
     surface_format: wgpu::TextureFormat,
@@ -267,10 +258,14 @@ pub(in crate::app) fn draw_sidebar_band(
     {
         gpu.chrome_textures.sidebar_card = Some(OverviewChromeCardPipeline {
             format: surface_format,
-            // The sidebar cache texture is sampled one frame later as straight
-            // RGBA, so offscreen composition must replace color+alpha instead
-            // of premultiplying translucent cards into the cache.
-            pipeline: CardPipeline::new(&gpu.device, surface_format, SIDEBAR_OFFSCREEN_BLEND),
+            // Static sidebar cards now render as transparent text layers over a
+            // seamless band; alpha blending preserves already-drawn chrome where
+            // those layers have no fill.
+            pipeline: CardPipeline::new(
+                &gpu.device,
+                surface_format,
+                wgpu::BlendState::ALPHA_BLENDING,
+            ),
         });
         #[cfg(debug_assertions)]
         gpu.chrome_textures.record_rebuild();
@@ -603,27 +598,18 @@ pub(in crate::app) fn draw_sidebar_band(
             );
     }
 
-    // 2) Each fully-visible card as a rounded card. One reused scratch texture
-    // serves every card in turn (render → composite), so submits serialize the
-    // reuse safely.
+    // 2) Each fully-visible card as text-only content over the seamless band.
+    // The card texture clear is transparent, so rows do not create a separate
+    // rectangular surface; status bars and rules below carry the boundaries.
+    let panel_bg = active_theme(&gpu.theme, &gpu.preview_theme).default_bg;
     let card_style = CardStyle {
-        background: rgb_to_rgba(chrome().card),
-        border_color: rgb_to_rgba(chrome().border),
-        focus_color: rgb_to_rgba(chrome().accent),
-        corner_radius: crate::chrome::RADIUS_LG * model.scale,
-        border_width: 1.0 * model.scale,
-        focus_width: crate::chrome::RING_SELECTED * model.scale,
+        background: rgb_to_rgba(sidebar_card_bg(panel_bg)),
+        border_color: [0.0; 4],
+        focus_color: [0.0; 4],
+        corner_radius: 0.0,
+        border_width: 0.0,
+        focus_width: 0.0,
         focus_glow_width: 0.0,
-    };
-    // A non-focused card with a pending interaction request swaps the blue
-    // focus accent for a red ring (FR-16), drawn through the selected branch.
-    // Sidebar cards do not use an outer selected glow, so attention follows
-    // that treatment and leaves the red dot/label to carry the extra urgency.
-    let attention_style = CardStyle {
-        focus_color: rgb_to_rgba(chrome().dot_red),
-        focus_width: crate::chrome::RING_ATTENTION * model.scale,
-        focus_glow_width: 0.0,
-        ..card_style
     };
     for card_draw in &model.cards {
         let Some((_, _, card_view)) = gpu.chrome_textures.sidebar_card_tex.as_ref() else {
@@ -642,13 +628,15 @@ pub(in crate::app) fn draw_sidebar_band(
             },
             card_draw.grid,
             card_draw.bg,
-            model.background_opacity,
+            SIDEBAR_CARD_STATIC_FILL_OPACITY,
             &card_draw.runs,
         );
         let (style, selected) = match sidebar_card_frame(card_draw.selected, card_draw.attention) {
             SidebarCardFrame::Resting => (&card_style, false),
             SidebarCardFrame::Selected => (&card_style, true),
-            SidebarCardFrame::Attention => (&attention_style, true),
+            // Attention keeps the same flat row treatment; red dot/label/accent
+            // bar carry the urgency without reintroducing an outline seam.
+            SidebarCardFrame::Attention => (&card_style, true),
         };
         gpu.chrome_textures
             .sidebar_card
@@ -672,14 +660,12 @@ pub(in crate::app) fn draw_sidebar_band(
             );
 
         // Status accent bar (busy / attention / bell) along the card's left
-        // edge: a thin solid capsule composited over the card border, inset
-        // past the corner radius so it never pokes outside the rounding. One
-        // reused scratch serves every bar in turn (same pattern as the card
-        // texture), refilled per card because the color varies.
+        // edge: a thin full-height strip on the flat row. One reused scratch
+        // serves every bar in turn (same pattern as the card texture), refilled
+        // per card because the color varies.
         if let Some(accent) = card_draw.accent {
             let bar_w = (2.0 * model.scale).round().max(1.0) as u32;
-            let inset_y = (crate::chrome::RADIUS_LG * model.scale).round() as u32;
-            let bar_h = card_draw.rect.h.saturating_sub(2 * inset_y);
+            let bar_h = card_draw.rect.h;
             if bar_h > 0 {
                 if ensure_scratch(
                     &mut gpu.chrome_textures.sidebar_accent_tex,
@@ -709,7 +695,7 @@ pub(in crate::app) fn draw_sidebar_band(
                         background: rgb_to_rgba(accent),
                         border_color: [0.0; 4],
                         focus_color: [0.0; 4],
-                        corner_radius: bar_w as f32 / 2.0,
+                        corner_radius: 0.0,
                         border_width: 0.0,
                         focus_width: 0.0,
                         focus_glow_width: 0.0,
@@ -728,13 +714,102 @@ pub(in crate::app) fn draw_sidebar_band(
                             &[CardTexturePlacement {
                                 texture_view: accent_view,
                                 x: card_draw.rect.x,
-                                y: card_draw.rect.y + inset_y,
+                                y: card_draw.rect.y,
                                 w: bar_w,
                                 h: bar_h,
                                 selected: false,
                             }],
                         );
                 }
+            }
+        }
+    }
+
+    // 2a) Thin horizontal rules only at boundaries between adjacent flat rows.
+    // This keeps the one-piece surface while making the cell breaks legible.
+    if model.cards.len() > 1 {
+        let rule_h = (SIDEBAR_CARD_RULE_HEIGHT * model.scale).round().max(1.0) as u32;
+        if ensure_scratch(
+            &mut gpu.chrome_textures.sidebar_rule_tex,
+            &gpu.device,
+            PixelSize {
+                w: model.card_w.max(1),
+                h: rule_h,
+            },
+            surface_format,
+            "noa-sidebar-card-rule",
+        ) {
+            #[cfg(debug_assertions)]
+            gpu.chrome_textures.record_rebuild();
+        }
+        if let Some((_, _, rule_view)) = gpu.chrome_textures.sidebar_rule_tex.as_ref() {
+            let rule_color = mix_rgb(
+                sidebar_card_bg(panel_bg),
+                chrome().border,
+                SIDEBAR_CARD_RULE_BORDER_MIX,
+            );
+            rasterize_runs(
+                gpu.chrome_textures.sidebar_renderer.as_mut().unwrap(),
+                &gpu.device,
+                &gpu.queue,
+                &mut gpu.sidebar_font,
+                active_theme(&gpu.theme, &gpu.preview_theme),
+                rule_view,
+                PixelSize {
+                    w: model.card_w.max(1),
+                    h: rule_h,
+                },
+                GridSize { cols: 1, rows: 1 },
+                rule_color,
+                1.0,
+                &[],
+            );
+            let rule_style = CardStyle {
+                background: rgb_to_rgba(rule_color),
+                border_color: [0.0; 4],
+                focus_color: [0.0; 4],
+                corner_radius: 0.0,
+                border_width: 0.0,
+                focus_width: 0.0,
+                focus_glow_width: 0.0,
+            };
+            let rule_placements: Vec<_> = model
+                .cards
+                .windows(2)
+                .filter_map(|pair| {
+                    let upper = &pair[0];
+                    let lower = &pair[1];
+                    if upper.rect.bottom() == lower.rect.y
+                        && upper.rect.w > 0
+                        && upper.rect.h >= rule_h
+                    {
+                        Some(CardTexturePlacement {
+                            texture_view: rule_view,
+                            x: upper.rect.x,
+                            y: lower.rect.y.saturating_sub(rule_h),
+                            w: upper.rect.w,
+                            h: rule_h,
+                            selected: false,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !rule_placements.is_empty() {
+                gpu.chrome_textures
+                    .sidebar_card
+                    .as_ref()
+                    .unwrap()
+                    .pipeline
+                    .overlay_texture_cards(
+                        &gpu.device,
+                        &gpu.queue,
+                        band_view,
+                        band_size,
+                        &rule_style,
+                        &rule_placements,
+                    );
             }
         }
     }

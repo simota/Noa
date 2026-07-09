@@ -134,6 +134,9 @@ pub(super) struct ChromeTextures {
     /// attention / bell) composited along a card's left edge; refilled with
     /// each card's accent color in turn like the card scratch.
     pub(super) sidebar_accent_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// Reused scratch texture for subtle horizontal rules between flat sidebar
+    /// card rows.
+    pub(super) sidebar_rule_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// The palette block texture, cached with its size so it is reused
     /// frame-to-frame and only reallocated when the block dimensions change.
     pub(super) palette_scratch: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
@@ -175,6 +178,7 @@ impl ChromeTextures {
         self.sidebar_divider_tex = None;
         self.sidebar_drop_tex = None;
         self.sidebar_accent_tex = None;
+        self.sidebar_rule_tex = None;
         self.palette_scratch = None;
         self.scrollbar_tex = None;
         self.bell_flash_tex = None;
@@ -761,6 +765,7 @@ mod chrome_textures_tests {
         assert!(textures.sidebar_divider_tex.is_none());
         assert!(textures.sidebar_drop_tex.is_none());
         assert!(textures.sidebar_accent_tex.is_none());
+        assert!(textures.sidebar_rule_tex.is_none());
         assert!(textures.palette_scratch.is_none());
         assert!(textures.scrollbar_tex.is_none());
         assert!(textures.bell_flash_tex.is_none());

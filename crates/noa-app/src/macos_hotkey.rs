@@ -1,12 +1,8 @@
-//! Global (system-wide) hotkey registration for the quick terminal, via the
-//! Carbon `RegisterEventHotKey` API.
-//!
-//! `RegisterEventHotKey` is deliberately chosen over a `CGEventTap`: it needs
-//! **no Accessibility permission**, delivers the hotkey through the process's
-//! normal Carbon/Cocoa event target (so the callback runs on the main thread
-//! alongside winit), and is exactly the mechanism Ghostty uses for the same
-//! feature. The tradeoff is that the chord is a fixed keycode+modifier combo
-//! (no fuzzy matching), which is all a single toggle hotkey needs.
+//! Global (system-wide) hotkey registration for the quick terminal. Carbon
+//! `RegisterEventHotKey` is the primary path because it needs no Accessibility
+//! permission and delivers through the process's normal Carbon/Cocoa event
+//! target. If Carbon rejects a reserved chord (notably `cmd+grave` on macOS),
+//! a listen-only `CGEventTap` fallback observes the same chord globally.
 //!
 //! The chord string (`cmd+grave`) is parsed by [`parse_hotkey`] into a Carbon
 //! virtual keycode + modifier mask; that parse is pure and unit-tested. The
@@ -121,7 +117,7 @@ fn carbon_keycode(key: &str) -> Option<u32> {
 }
 
 /// A registered global hotkey. Dropping it unregisters the hotkey and removes
-/// the event handler, and frees the boxed proxy the callback borrowed.
+/// the event handler/tap, and frees the boxed proxy the callback borrowed.
 pub(crate) struct GlobalHotKey {
     // Held only for its `Drop` (unregister); never read.
     #[cfg(target_os = "macos")]
@@ -199,6 +195,18 @@ mod macos {
     type EventRef = *mut c_void;
     type EventHotKeyRef = *mut c_void;
     type EventHandlerUpp = extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> OsStatus;
+    type CFMachPortRef = *mut c_void;
+    type CFRunLoopRef = *mut c_void;
+    type CFRunLoopSourceRef = *mut c_void;
+    type CFStringRef = *const c_void;
+    type CGEventTapProxy = *mut c_void;
+    type CGEventRef = *mut c_void;
+    type CGEventType = u32;
+    type CGEventMask = u64;
+    type CGEventField = u32;
+    type CGEventFlags = u64;
+    type CGEventTapCallBack =
+        extern "C" fn(CGEventTapProxy, CGEventType, CGEventRef, *mut c_void) -> CGEventRef;
 
     #[repr(C)]
     struct EventTypeSpec {
@@ -220,6 +228,22 @@ mod macos {
     // carrying the fired hotkey's `EventHotKeyID`, read to dispatch by id.
     const K_EVENT_PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
     const TYPE_EVENT_HOTKEY_ID: u32 = u32::from_be_bytes(*b"hkid");
+    const K_CG_SESSION_EVENT_TAP: u32 = 1;
+    const K_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
+    const K_CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
+    const K_CG_EVENT_KEY_DOWN: CGEventType = 10;
+    const K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT: CGEventType = 0xFFFF_FFFE;
+    const K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT: CGEventType = 0xFFFF_FFFF;
+    const K_CG_KEYBOARD_EVENT_AUTOREPEAT: CGEventField = 8;
+    const K_CG_KEYBOARD_EVENT_KEYCODE: CGEventField = 9;
+    const K_CG_EVENT_FLAG_MASK_SHIFT: CGEventFlags = 1 << 17;
+    const K_CG_EVENT_FLAG_MASK_CONTROL: CGEventFlags = 1 << 18;
+    const K_CG_EVENT_FLAG_MASK_ALTERNATE: CGEventFlags = 1 << 19;
+    const K_CG_EVENT_FLAG_MASK_COMMAND: CGEventFlags = 1 << 20;
+    const K_CG_RELEVANT_MODIFIER_FLAGS: CGEventFlags = K_CG_EVENT_FLAG_MASK_SHIFT
+        | K_CG_EVENT_FLAG_MASK_CONTROL
+        | K_CG_EVENT_FLAG_MASK_ALTERNATE
+        | K_CG_EVENT_FLAG_MASK_COMMAND;
 
     #[link(name = "Carbon", kind = "framework")]
     unsafe extern "C" {
@@ -251,6 +275,37 @@ mod macos {
             out_actual_size: *mut usize,
             out_data: *mut c_void,
         ) -> OsStatus;
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventTapCreate(
+            tap: u32,
+            place: u32,
+            options: u32,
+            events_of_interest: CGEventMask,
+            callback: CGEventTapCallBack,
+            user_info: *mut c_void,
+        ) -> CFMachPortRef;
+        fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+        fn CGEventGetIntegerValueField(event: CGEventRef, field: CGEventField) -> i64;
+        fn CGEventGetFlags(event: CGEventRef) -> CGEventFlags;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFRunLoopCommonModes: CFStringRef;
+
+        fn CFRunLoopGetMain() -> CFRunLoopRef;
+        fn CFMachPortCreateRunLoopSource(
+            allocator: *const c_void,
+            port: CFMachPortRef,
+            order: isize,
+        ) -> CFRunLoopSourceRef;
+        fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
+        fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
+        fn CFMachPortInvalidate(port: CFMachPortRef);
+        fn CFRelease(cf: *const c_void);
     }
 
     /// The boxed state each installed handler borrows: the proxy to post
@@ -299,13 +354,47 @@ mod macos {
     }
 
     pub(super) struct Registration {
+        _inner: RegistrationInner,
+    }
+
+    enum RegistrationInner {
+        Carbon { _registration: CarbonRegistration },
+        EventTap { _registration: EventTapRegistration },
+    }
+
+    impl Registration {
+        pub(super) fn install(
+            chord: HotkeyChord,
+            proxy: EventLoopProxy<UserEvent>,
+            action: HotkeyAction,
+        ) -> Option<Self> {
+            if let Some(registration) = CarbonRegistration::install(chord, proxy.clone(), action) {
+                return Some(Self {
+                    _inner: RegistrationInner::Carbon {
+                        _registration: registration,
+                    },
+                });
+            }
+
+            log::warn!(
+                "falling back to CGEventTap for global hotkey; Accessibility permission may be required"
+            );
+            EventTapRegistration::install(chord, proxy, action).map(|registration| Self {
+                _inner: RegistrationInner::EventTap {
+                    _registration: registration,
+                },
+            })
+        }
+    }
+
+    struct CarbonRegistration {
         hotkey_ref: EventHotKeyRef,
         handler_ref: EventHandlerRef,
         data: *mut HandlerData,
     }
 
-    impl Registration {
-        pub(super) fn install(
+    impl CarbonRegistration {
+        fn install(
             chord: HotkeyChord,
             proxy: EventLoopProxy<UserEvent>,
             action: HotkeyAction,
@@ -370,7 +459,7 @@ mod macos {
         }
     }
 
-    impl Drop for Registration {
+    impl Drop for CarbonRegistration {
         fn drop(&mut self) {
             // SAFETY: both refs were produced by the matching register/install
             // calls and are unregistered exactly once here; the boxed handler
@@ -380,6 +469,205 @@ mod macos {
                 RemoveEventHandler(self.handler_ref);
                 drop(Box::from_raw(self.data));
             }
+        }
+    }
+
+    struct EventTapData {
+        proxy: EventLoopProxy<UserEvent>,
+        event: UserEvent,
+        chord: HotkeyChord,
+        tap: CFMachPortRef,
+    }
+
+    extern "C" fn event_tap_handler(
+        _proxy: CGEventTapProxy,
+        event_type: CGEventType,
+        event: CGEventRef,
+        user_data: *mut c_void,
+    ) -> CGEventRef {
+        // SAFETY: `user_data` is the `Box<EventTapData>` leaked in
+        // `EventTapRegistration::install` and freed only after the tap is
+        // disabled and removed from the main run loop.
+        let data = unsafe { &*(user_data as *const EventTapData) };
+        if event_type == K_CG_EVENT_TAP_DISABLED_BY_TIMEOUT
+            || event_type == K_CG_EVENT_TAP_DISABLED_BY_USER_INPUT
+        {
+            if !data.tap.is_null() {
+                // SAFETY: the tap ref belongs to this registration and stays
+                // live while the callback can run.
+                unsafe { CGEventTapEnable(data.tap, true) };
+            }
+            return event;
+        }
+
+        if event_type != K_CG_EVENT_KEY_DOWN || event.is_null() {
+            return event;
+        }
+
+        // SAFETY: `event` is the live key event for this callback.
+        let is_repeat =
+            unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_AUTOREPEAT) != 0 };
+        if is_repeat {
+            return event;
+        }
+        // SAFETY: same live event; both reads are side-effect-free.
+        let keycode =
+            unsafe { CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) } as u32;
+        let flags = unsafe { CGEventGetFlags(event) };
+
+        if event_tap_matches_chord(data.chord, keycode, flags) {
+            let _ = data.proxy.send_event(data.event.clone());
+        }
+        event
+    }
+
+    struct EventTapRegistration {
+        tap: CFMachPortRef,
+        source: CFRunLoopSourceRef,
+        data: *mut EventTapData,
+    }
+
+    impl EventTapRegistration {
+        fn install(
+            chord: HotkeyChord,
+            proxy: EventLoopProxy<UserEvent>,
+            action: HotkeyAction,
+        ) -> Option<Self> {
+            let data = Box::into_raw(Box::new(EventTapData {
+                proxy,
+                event: action.event(),
+                chord,
+                tap: std::ptr::null_mut(),
+            }));
+            let mask = 1u64 << K_CG_EVENT_KEY_DOWN;
+
+            // SAFETY: callback and user data remain valid for the lifetime of
+            // the returned `EventTapRegistration`; listen-only leaves the
+            // original keyboard event untouched.
+            let tap = unsafe {
+                CGEventTapCreate(
+                    K_CG_SESSION_EVENT_TAP,
+                    K_CG_HEAD_INSERT_EVENT_TAP,
+                    K_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
+                    mask,
+                    event_tap_handler,
+                    data as *mut c_void,
+                )
+            };
+            if tap.is_null() {
+                // SAFETY: ownership of `data` has not escaped because tap
+                // creation failed.
+                unsafe { drop(Box::from_raw(data)) };
+                log::warn!(
+                    "CGEventTap fallback failed for global hotkey; grant Accessibility permission to Noa if the chord must work while unfocused"
+                );
+                return None;
+            }
+
+            // SAFETY: callback cannot run before the tap source is scheduled,
+            // so filling this self-reference now is safe.
+            unsafe {
+                (*data).tap = tap;
+            }
+            // SAFETY: `tap` is a valid CFMachPortRef created above.
+            let source = unsafe { CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0) };
+            if source.is_null() {
+                // SAFETY: release the tap/data pair created above.
+                unsafe {
+                    CFMachPortInvalidate(tap);
+                    CFRelease(tap.cast());
+                    drop(Box::from_raw(data));
+                }
+                log::warn!("CFMachPortCreateRunLoopSource failed for global hotkey fallback");
+                return None;
+            }
+
+            // SAFETY: both refs are valid and the main run loop owns the
+            // callback dispatch for the app lifetime.
+            unsafe {
+                CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
+                CGEventTapEnable(tap, true);
+            }
+
+            Some(Self { tap, source, data })
+        }
+    }
+
+    impl Drop for EventTapRegistration {
+        fn drop(&mut self) {
+            // SAFETY: refs were created in `install`; removing the run-loop
+            // source and disabling the tap stops callbacks before freeing data.
+            unsafe {
+                CGEventTapEnable(self.tap, false);
+                CFRunLoopRemoveSource(CFRunLoopGetMain(), self.source, kCFRunLoopCommonModes);
+                CFMachPortInvalidate(self.tap);
+                CFRelease(self.source.cast());
+                CFRelease(self.tap.cast());
+                drop(Box::from_raw(self.data));
+            }
+        }
+    }
+
+    fn event_tap_matches_chord(chord: HotkeyChord, keycode: u32, flags: CGEventFlags) -> bool {
+        chord.keycode == keycode
+            && (flags & K_CG_RELEVANT_MODIFIER_FLAGS)
+                == cg_flags_for_carbon_modifiers(chord.modifiers)
+    }
+
+    fn cg_flags_for_carbon_modifiers(modifiers: u32) -> CGEventFlags {
+        let mut flags = 0;
+        if modifiers & super::CMD_KEY != 0 {
+            flags |= K_CG_EVENT_FLAG_MASK_COMMAND;
+        }
+        if modifiers & super::SHIFT_KEY != 0 {
+            flags |= K_CG_EVENT_FLAG_MASK_SHIFT;
+        }
+        if modifiers & super::OPTION_KEY != 0 {
+            flags |= K_CG_EVENT_FLAG_MASK_ALTERNATE;
+        }
+        if modifiers & super::CONTROL_KEY != 0 {
+            flags |= K_CG_EVENT_FLAG_MASK_CONTROL;
+        }
+        flags
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn event_tap_matches_cmd_grave_without_extra_modifiers() {
+            let chord = super::super::parse_hotkey("cmd+grave").expect("cmd+grave parses");
+
+            assert!(event_tap_matches_chord(
+                chord,
+                0x32,
+                K_CG_EVENT_FLAG_MASK_COMMAND
+            ));
+            assert!(!event_tap_matches_chord(
+                chord,
+                0x32,
+                K_CG_EVENT_FLAG_MASK_COMMAND | K_CG_EVENT_FLAG_MASK_SHIFT
+            ));
+            assert!(!event_tap_matches_chord(
+                chord,
+                0x31,
+                K_CG_EVENT_FLAG_MASK_COMMAND
+            ));
+        }
+
+        #[test]
+        fn event_tap_translates_all_supported_modifiers() {
+            let chord = super::super::parse_hotkey("cmd+ctrl+alt+shift+grave").expect("parses");
+
+            assert!(event_tap_matches_chord(
+                chord,
+                0x32,
+                K_CG_EVENT_FLAG_MASK_COMMAND
+                    | K_CG_EVENT_FLAG_MASK_CONTROL
+                    | K_CG_EVENT_FLAG_MASK_ALTERNATE
+                    | K_CG_EVENT_FLAG_MASK_SHIFT
+            ));
         }
     }
 }

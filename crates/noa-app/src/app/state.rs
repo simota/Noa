@@ -516,6 +516,14 @@ pub(super) enum ModalImeTarget {
     SidebarRename,
 }
 
+/// Live IME composition text owned by a modal in one window. The owner is
+/// tracked so a stale composition from a closed native tab cannot swallow
+/// keyboard input delivered to another tab.
+pub(super) struct ModalPreedit {
+    pub(super) window_id: WindowId,
+    pub(super) text: String,
+}
+
 /// An open confirmation dialog (paste protection or OSC 52 clipboard-read),
 /// bound to the window it was raised from.
 pub(super) struct ConfirmDialogSession {

@@ -58,6 +58,7 @@ impl App {
             window_padding_y: self.config.window_padding_y.unwrap_or(0.0),
             macos_titlebar_style: self.config.macos_titlebar_style,
             sidebar_preview_lines: self.config.sidebar_preview_lines,
+            quick_terminal_size: self.config.quick_terminal_size,
             confirm_quit: self.config.confirm_quit,
             font_family,
             available_font_families,
@@ -327,17 +328,18 @@ impl App {
 
     /// Mirror the just-committed runtime rows (font-size, background-opacity,
     /// background-blur-radius, cursor-style, sidebar-preview-lines,
-    /// confirm-quit) into `self.config` so a future reopen of the overlay
-    /// shows them as the new "current" values. The
-    /// commit-only rows are deliberately excluded: nothing on screen
-    /// actually changes for them until a restart, so leaving `self.config`
-    /// at its pre-commit value keeps it truthful to what the user still
-    /// sees, even though the file on disk has already moved (the same
-    /// config-vs-runtime divergence an external edit would produce).
+    /// quick-terminal-size, confirm-quit) into `self.config` so a future reopen
+    /// of the overlay, or the next quick-terminal toggle, shows the new value.
+    /// The restart-only rows are deliberately excluded: nothing on screen
+    /// actually changes for them until a restart, so leaving `self.config` at
+    /// its pre-commit value keeps it truthful to what the user still sees, even
+    /// though the file on disk has already moved (the same config-vs-runtime
+    /// divergence an external edit would produce).
     fn sync_config_from_committed_live_rows(
         &mut self,
         rows: &[SettingsRow; SettingsRowKind::COUNT],
     ) {
+        sync_quick_terminal_size_from_committed_rows(&mut self.config, rows);
         for (kind, row) in SettingsRowKind::ALL.iter().zip(rows.iter()) {
             if !row.touched {
                 continue;
@@ -356,6 +358,7 @@ impl App {
                 (SettingsRowKind::SidebarPreviewLines, RowDraft::SidebarPreviewLines(v)) => {
                     self.apply_live_sidebar_preview_lines(*v);
                 }
+                (SettingsRowKind::QuickTerminalHeight, RowDraft::QuickTerminalHeight(_)) => {}
                 (SettingsRowKind::ConfirmQuit, RowDraft::ConfirmQuit(v)) => {
                     self.config.confirm_quit = *v;
                 }
@@ -483,6 +486,22 @@ impl App {
     }
 }
 
+fn sync_quick_terminal_size_from_committed_rows(
+    config: &mut AppConfig,
+    rows: &[SettingsRow; SettingsRowKind::COUNT],
+) {
+    for (kind, row) in SettingsRowKind::ALL.iter().zip(rows.iter()) {
+        if !row.touched {
+            continue;
+        }
+        if let (SettingsRowKind::QuickTerminalHeight, RowDraft::QuickTerminalHeight(size)) =
+            (kind, &row.draft)
+        {
+            config.quick_terminal_size = *size;
+        }
+    }
+}
+
 fn commit_redraw_targets<Id: Copy + Eq + std::hash::Hash, V>(windows: &HashMap<Id, V>) -> Vec<Id> {
     windows.keys().copied().collect()
 }
@@ -511,5 +530,45 @@ mod commit_theme_settings_tests {
     fn commit_redraw_targets_empty_when_no_windows_open() {
         let windows: HashMap<u32, ()> = HashMap::new();
         assert!(commit_redraw_targets(&windows).is_empty());
+    }
+
+    #[test]
+    fn quick_terminal_size_syncs_from_committed_row_into_app_config() {
+        let mut settings = ThemeSettings::open(ThemeSettingsInit {
+            current_theme: "3024 Day".to_string(),
+            font_size: 14.0,
+            cursor_style: noa_config::CursorShape::Block,
+            background_opacity: 1.0,
+            background_blur_radius: 0,
+            window_padding_x: 2.0,
+            window_padding_y: 2.0,
+            macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
+            sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
+            quick_terminal_size: 0.4,
+            confirm_quit: true,
+            font_family: "Menlo".to_string(),
+            available_font_families: Vec::new(),
+        });
+        settings.toggle_section();
+        for _ in 0..8 {
+            settings.move_down();
+        }
+        assert_eq!(
+            SettingsRowKind::ALL[settings.selected_row()],
+            SettingsRowKind::QuickTerminalHeight
+        );
+        settings.adjust(1, Instant::now());
+
+        let mut config = AppConfig::from_startup(
+            noa_config::StartupConfig::default(),
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
+        sync_quick_terminal_size_from_committed_rows(&mut config, settings.rows());
+
+        assert!(
+            (config.quick_terminal_size - 0.45).abs() < 0.001,
+            "committed quick terminal height should update AppConfig for the next toggle"
+        );
     }
 }

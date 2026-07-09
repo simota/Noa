@@ -30,11 +30,10 @@ pub const DEFAULT_MINIMUM_CONTRAST: f32 = 1.0;
 /// `quick-terminal-size` default: 40% of the screen height. (Ghostty's own
 /// default is 25%; noa opts for a slightly taller default drop-down.)
 pub const DEFAULT_QUICK_TERMINAL_SIZE: f32 = 0.4;
-/// `quick-terminal-hotkey` default: `ctrl+grave` (⌃`). (Ghostty ships no
-/// default; noa binds one so the drop-down works out of the box. `⌘`` is
-/// avoided because macOS reserves it for same-app window cycling. Set
+/// `quick-terminal-hotkey` default: `cmd+grave` (⌘`). (Ghostty ships no
+/// default; noa binds one so the drop-down works out of the box. Set
 /// `quick-terminal-hotkey = none` to disable it.)
-pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "ctrl+grave";
+pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "cmd+grave";
 /// `sidebar-width` default: the session sidebar's width in points when visible.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 360.0;
 /// `sidebar-preview-lines` default: card last-output preview rows.
@@ -903,6 +902,14 @@ mod tests {
                 auto_approve: false,
                 keybinds: Vec::new(),
             }
+        );
+    }
+
+    #[test]
+    fn quick_terminal_hotkey_defaults_to_cmd_grave() {
+        assert_eq!(
+            StartupConfig::default().quick_terminal_hotkey.as_deref(),
+            Some("cmd+grave")
         );
     }
 

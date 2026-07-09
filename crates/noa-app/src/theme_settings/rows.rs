@@ -21,11 +21,12 @@ pub(crate) enum SettingsRowKind {
     WindowPadding,
     MacosTitlebarStyle,
     SidebarPreviewLines,
+    QuickTerminalHeight,
     ConfirmQuit,
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 9;
+    pub(crate) const COUNT: usize = 10;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -35,6 +36,7 @@ impl SettingsRowKind {
         Self::WindowPadding,
         Self::MacosTitlebarStyle,
         Self::SidebarPreviewLines,
+        Self::QuickTerminalHeight,
         Self::ConfirmQuit,
     ];
 
@@ -66,6 +68,7 @@ impl SettingsRowKind {
             Self::WindowPadding => "Window Padding",
             Self::MacosTitlebarStyle => "Titlebar Style",
             Self::SidebarPreviewLines => "Sidebar Preview Lines",
+            Self::QuickTerminalHeight => "Quick Terminal Height",
             Self::ConfirmQuit => "Confirm Quit",
         }
     }
@@ -83,6 +86,7 @@ pub(crate) enum RowDraft {
     WindowPadding(f32, f32),
     MacosTitlebarStyle(MacosTitlebarStyle),
     SidebarPreviewLines(usize),
+    QuickTerminalHeight(f32),
     ConfirmQuit(bool),
 }
 
@@ -99,6 +103,7 @@ impl RowDraft {
             RowDraft::WindowPadding(x, y) => format!("{x:.1} x {y:.1}"),
             RowDraft::MacosTitlebarStyle(style) => format!("{style:?}"),
             RowDraft::SidebarPreviewLines(lines) => lines.to_string(),
+            RowDraft::QuickTerminalHeight(size) => format!("{:.0}%", size * 100.0),
             RowDraft::ConfirmQuit(confirm) => {
                 if *confirm {
                     "On".to_string()
@@ -152,6 +157,7 @@ pub(crate) struct RevertValues {
     pub(crate) background_opacity: f32,
     pub(crate) background_blur_radius: u16,
     pub(crate) sidebar_preview_lines: usize,
+    pub(crate) quick_terminal_size: f32,
 }
 
 /// Everything `App` must supply to open the overlay — the session's live
@@ -169,6 +175,7 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) window_padding_y: f32,
     pub(crate) macos_titlebar_style: MacosTitlebarStyle,
     pub(crate) sidebar_preview_lines: usize,
+    pub(crate) quick_terminal_size: f32,
     pub(crate) confirm_quit: bool,
     pub(crate) font_family: String,
     pub(crate) available_font_families: Vec<String>,

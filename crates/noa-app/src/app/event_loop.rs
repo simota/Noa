@@ -221,6 +221,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(true) => {
                 self.focused = Some(window_id);
                 self.os_focused = Some(window_id);
+                if self.is_quick_terminal_window(window_id) {
+                    self.mark_quick_terminal_focused(window_id);
+                }
                 self.reset_cursor_blink_phase();
                 // A window gaining focus clears its cards' unread bells (FR-11).
                 self.clear_session_bell_for_window(window_id);
@@ -314,13 +317,18 @@ impl ApplicationHandler<UserEvent> for App {
                 // active — they act on presses and swallow releases so nothing
                 // leaks to keybinds or the pty. Only the Kitty keyboard
                 // protocol (below) ever emits release events.
-                if self.modal_preedit.is_some()
-                    || self
-                        .windows
-                        .get(&window_id)
-                        .and_then(WindowState::focused_surface)
-                        .is_some_and(|surface| surface.ime_state.preedit_active())
-                {
+                let modal_preedit_owner =
+                    self.modal_preedit.as_ref().map(|preedit| preedit.window_id);
+                let pane_preedit_active = self
+                    .windows
+                    .get(&window_id)
+                    .and_then(WindowState::focused_surface)
+                    .is_some_and(|surface| surface.ime_state.preedit_active());
+                if keyboard_preedit_should_swallow_key(
+                    modal_preedit_owner,
+                    window_id,
+                    pane_preedit_active,
+                ) {
                     return;
                 }
                 // A confirmation dialog is fully modal — it sits ahead of
@@ -999,7 +1007,10 @@ impl App {
         if let Some(target) = self.modal_ime_target(window_id) {
             match &event {
                 Ime::Preedit(text, _) => {
-                    self.modal_preedit = (!text.is_empty()).then(|| text.clone());
+                    self.modal_preedit = (!text.is_empty()).then(|| ModalPreedit {
+                        window_id,
+                        text: text.clone(),
+                    });
                 }
                 Ime::Commit(text) => {
                     self.modal_preedit = None;

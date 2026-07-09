@@ -22,6 +22,10 @@ pub(super) struct QuickTerminalState {
     /// Whether the panel is revealed (or animating toward revealed). When
     /// `false` and `anim` is `None`, the window is hidden.
     visible: bool,
+    /// Whether this reveal cycle has received a real OS focus event. macOS can
+    /// emit stale `Focused(false)` events while a borderless all-Spaces window
+    /// is being ordered front; those must not immediately auto-hide the panel.
+    focused_this_reveal: bool,
     /// The in-flight slide, if any.
     anim: Option<QuickTerminalAnim>,
 }
@@ -73,6 +77,10 @@ impl QuickTerminalState {
         }
         if self.visible { 1.0 } else { 0.0 }
     }
+
+    fn should_autohide_on_focus_loss(&self) -> bool {
+        quick_terminal_should_autohide_on_focus_loss(self.visible, self.focused_this_reveal)
+    }
 }
 
 /// The shared house easing curve (see [`crate::anim`]), re-exported for the
@@ -115,6 +123,13 @@ pub(super) fn quick_terminal_slide_reveal(
 pub(super) fn quick_terminal_height(screen_height: u32, size: f32) -> u32 {
     let raw = (screen_height as f32 * size.clamp(0.05, 1.0)).round() as u32;
     raw.clamp(1, screen_height.max(1))
+}
+
+pub(super) fn quick_terminal_should_autohide_on_focus_loss(
+    visible: bool,
+    focused_this_reveal: bool,
+) -> bool {
+    visible && focused_this_reveal
 }
 
 /// Quick terminal (drop-down) support.
@@ -211,6 +226,7 @@ impl App {
                 width,
                 height,
                 visible: false,
+                focused_this_reveal: false,
                 anim: None,
             });
         } else if let Some(qt) = self.quick_terminal.as_mut() {
@@ -233,6 +249,7 @@ impl App {
         let now = Instant::now();
         let from_reveal = qt.current_reveal(now);
         qt.visible = true;
+        qt.focused_this_reveal = false;
         qt.anim = Some(QuickTerminalAnim::new(now, from_reveal, 1.0));
         let window_id = qt.window_id;
         let current_top =
@@ -242,7 +259,7 @@ impl App {
                 .window
                 .set_outer_position(PhysicalPosition::new(origin_x, current_top));
             state.window.set_visible(true);
-            state.window.focus_window();
+            crate::macos_window::show_quick_terminal_window(&state.window);
             state.window.request_redraw();
         }
         self.focused = Some(window_id);
@@ -259,6 +276,7 @@ impl App {
         let now = Instant::now();
         let from_reveal = qt.current_reveal(now);
         qt.visible = false;
+        qt.focused_this_reveal = false;
         qt.anim = Some(QuickTerminalAnim::new(now, from_reveal, 0.0));
         let window_id = qt.window_id;
         if let Some(state) = self.windows.get(&window_id) {
@@ -272,8 +290,21 @@ impl App {
         if !self.config.quick_terminal_autohide {
             return;
         }
-        if self.quick_terminal.as_ref().is_some_and(|qt| qt.visible) {
+        if self
+            .quick_terminal
+            .as_ref()
+            .is_some_and(QuickTerminalState::should_autohide_on_focus_loss)
+        {
             self.start_quick_terminal_hide();
+        }
+    }
+
+    pub(super) fn mark_quick_terminal_focused(&mut self, window_id: WindowId) {
+        if let Some(qt) = self.quick_terminal.as_mut()
+            && qt.window_id == window_id
+            && qt.visible
+        {
+            qt.focused_this_reveal = true;
         }
     }
 

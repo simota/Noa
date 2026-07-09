@@ -142,6 +142,10 @@ fn cmd_characters_map_only_supported_shortcuts() {
         ),
         Some(AppCommand::FontSize(FontSizeAction::Increase))
     );
+    // Quick Terminal uses the system-wide `quick-terminal-hotkey` by default.
+    // Keeping Cmd+grave out of the in-app defaults prevents one physical key
+    // press from toggling twice when the app is already focused.
+    assert_eq!(AppCommand::from_cmd_character("`"), None);
     assert_eq!(AppCommand::from_cmd_character(","), None);
 }
 

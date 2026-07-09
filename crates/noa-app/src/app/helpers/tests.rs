@@ -191,6 +191,14 @@ fn quick_terminal_height_is_a_clamped_screen_fraction() {
     assert_eq!(quick_terminal_height(1000, 0.0), 50);
 }
 
+#[test]
+fn quick_terminal_autohide_waits_for_focus_in_current_reveal() {
+    assert!(!quick_terminal_should_autohide_on_focus_loss(false, false));
+    assert!(!quick_terminal_should_autohide_on_focus_loss(false, true));
+    assert!(!quick_terminal_should_autohide_on_focus_loss(true, false));
+    assert!(quick_terminal_should_autohide_on_focus_loss(true, true));
+}
+
 fn metrics(cell_w: f32, cell_h: f32) -> noa_font::Metrics {
     noa_font::Metrics {
         cell_w,
@@ -1191,6 +1199,16 @@ fn pane_keyboard_focus_uses_os_focus_not_sticky_last_focus() {
         !pane_owns_keyboard_focus(1_u8, 10_u8, None, 10_u8),
         "a backgrounded app keeps sticky focus for commands, but not for cursor rendering"
     );
+}
+
+#[test]
+fn keyboard_preedit_swallowing_is_scoped_to_the_owning_window() {
+    assert!(keyboard_preedit_should_swallow_key(Some(1_u8), 1_u8, false));
+    assert!(
+        !keyboard_preedit_should_swallow_key(Some(1_u8), 2_u8, false),
+        "a modal preedit from another tab must not block this tab's keyboard input"
+    );
+    assert!(keyboard_preedit_should_swallow_key(None, 2_u8, true));
 }
 
 #[test]

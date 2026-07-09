@@ -16,6 +16,12 @@ pub(crate) fn configure_quick_terminal_window(window: &Window) {
     apply(window);
 }
 
+/// Bring the quick-terminal window to the front and make it key. `Window::focus_window`
+/// alone can be too weak when the global hotkey fires while Noa is not active.
+pub(crate) fn show_quick_terminal_window(window: &Window) {
+    show_quick_terminal_window_impl(window);
+}
+
 /// Toggle AppKit's native fullscreen Space for a normal terminal window.
 /// Returns `false` only when the live NSWindow cannot be reached.
 pub(crate) fn toggle_native_fullscreen(window: &Window) -> bool {
@@ -53,6 +59,46 @@ fn toggle_native_fullscreen_impl(window: &Window) -> bool {
 #[cfg(not(target_os = "macos"))]
 fn toggle_native_fullscreen_impl(_window: &Window) -> bool {
     false
+}
+
+#[cfg(target_os = "macos")]
+fn show_quick_terminal_window_impl(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+
+    // SAFETY: command dispatch runs on the main event-loop thread, and the
+    // objects are live AppKit objects owned by winit. Each pointer is nil-
+    // checked before selectors are sent.
+    unsafe {
+        if let Some(app_class) = AnyClass::get(c"NSApplication") {
+            let app: *mut AnyObject = msg_send![app_class, sharedApplication];
+            if !app.is_null() {
+                let _: () = msg_send![app, activateIgnoringOtherApps: true];
+            }
+        }
+
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let sender: *mut AnyObject = std::ptr::null_mut();
+        let _: () = msg_send![ns_window, makeKeyAndOrderFront: sender];
+        let _: () = msg_send![ns_window, orderFrontRegardless];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_quick_terminal_window_impl(window: &Window) {
+    window.focus_window();
 }
 
 #[cfg(target_os = "macos")]

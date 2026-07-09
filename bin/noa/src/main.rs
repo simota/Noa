@@ -123,6 +123,9 @@ fn app_config_from_startup(
         sidebar_preview_lines: config.sidebar_preview_lines,
         resize_overlay: config.resize_overlay,
         visual_bell: config.visual_bell,
+        audible_bell: config.audible_bell,
+        audible_bell_when_unfocused: config.audible_bell_when_unfocused,
+        audible_bell_dock_bounce: config.audible_bell_dock_bounce,
         auto_approve: config.auto_approve,
     }
 }
@@ -161,6 +164,9 @@ mod tests {
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Transparent,
             macos_non_native_fullscreen: true,
             sidebar_preview_lines: 4,
+            audible_bell: true,
+            audible_bell_when_unfocused: true,
+            audible_bell_dock_bounce: true,
             auto_approve: true,
             ..Default::default()
         };
@@ -184,6 +190,9 @@ mod tests {
         );
         assert!(app_config.macos_non_native_fullscreen);
         assert_eq!(app_config.sidebar_preview_lines, 4);
+        assert!(app_config.audible_bell);
+        assert!(app_config.audible_bell_when_unfocused);
+        assert!(app_config.audible_bell_dock_bounce);
         assert!(app_config.auto_approve);
     }
 

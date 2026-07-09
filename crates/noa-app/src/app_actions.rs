@@ -31,6 +31,13 @@ pub(crate) const CONFIG_TEMPLATE: &str = "\
 #
 # Flash the window briefly when its terminal rings the bell.
 # visual-bell = true
+#
+# Play the system alert sound when a terminal rings the bell. The optional
+# focus gate keeps it quiet while you are looking at the target window; the
+# Dock bounce is only requested for unfocused target windows.
+# audible-bell = true
+# audible-bell-when-unfocused = true
+# audible-bell-dock-bounce = true
 ";
 
 /// Show the standard macOS About panel for Noa, seeded with the app name and

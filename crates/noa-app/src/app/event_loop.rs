@@ -41,15 +41,33 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             UserEvent::ToggleSidebar => self.toggle_sidebar(),
             UserEvent::SessionDelta(delta) => {
-                // `visual-bell`: BEL flashes its window briefly (the desktop
-                // notification is suppressed for the focused window, so this
-                // is the visible cue there).
-                if self.config.visual_bell
-                    && let crate::session_store::SessionDelta::Bell { id } = &delta
-                    && let Some(state) = self.windows.get_mut(&WindowId::from(id.window_id.0))
-                {
-                    state.bell_flash_until = Some(Instant::now() + BELL_FLASH_DURATION);
-                    state.window.request_redraw();
+                if let crate::session_store::SessionDelta::Bell { id } = &delta {
+                    let window_id = WindowId::from(id.window_id.0);
+                    if self.windows.contains_key(&window_id)
+                        && crate::notification::should_ring_audible_bell(
+                            self.config.audible_bell,
+                            self.config.audible_bell_when_unfocused,
+                            self.os_focused,
+                            window_id,
+                        )
+                    {
+                        crate::notification::beep();
+                        if self.config.audible_bell_dock_bounce
+                            && crate::notification::should_notify(self.os_focused, window_id)
+                            && !self.agent_bell_will_bounce_dock(*id)
+                        {
+                            crate::notification::bounce_dock();
+                        }
+                    }
+                    // `visual-bell`: BEL flashes its window briefly (the
+                    // desktop notification is suppressed for the focused
+                    // window, so this is the visible cue there).
+                    if self.config.visual_bell
+                        && let Some(state) = self.windows.get_mut(&window_id)
+                    {
+                        state.bell_flash_until = Some(Instant::now() + BELL_FLASH_DURATION);
+                        state.window.request_redraw();
+                    }
                 }
                 self.apply_session_delta(delta)
             }
@@ -483,6 +501,17 @@ impl ApplicationHandler<UserEvent> for App {
             Some(deadline) => ControlFlow::WaitUntil(deadline),
             None => ControlFlow::Wait,
         });
+    }
+}
+
+impl App {
+    fn agent_bell_will_bounce_dock(&self, id: SessionCardId) -> bool {
+        let window_id = WindowId::from(id.window_id.0);
+        self.os_focused != Some(window_id)
+            && self.session_store.get(&id).is_some_and(|card| {
+                !card.attention
+                    && crate::sidebar::bell_escalates_to_attention(card.process.as_deref())
+            })
     }
 }
 

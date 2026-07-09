@@ -17,6 +17,16 @@ pub(crate) fn should_notify<Id: PartialEq>(os_focused: Option<Id>, target: Id) -
     os_focused != Some(target)
 }
 
+/// Whether a BEL should play the audible system bell under the resolved config.
+pub(crate) fn should_ring_audible_bell<Id: PartialEq>(
+    audible_bell: bool,
+    when_unfocused: bool,
+    os_focused: Option<Id>,
+    target: Id,
+) -> bool {
+    audible_bell && (!when_unfocused || should_notify(os_focused, target))
+}
+
 /// The title to display: the requested one when non-empty, else `"Noa"`.
 pub(crate) fn notification_title(title: Option<&str>) -> &str {
     match title {
@@ -29,6 +39,22 @@ pub(crate) fn notification_title(title: Option<&str>) -> &str {
 /// notification center and bounce the Dock. Call only from the main thread.
 pub(crate) fn post_notification(title: Option<&str>, body: &str) {
     post(notification_title(title), body);
+}
+
+/// Play the macOS system alert sound for terminal BEL. A no-op off macOS.
+pub(crate) fn beep() {
+    #[cfg(target_os = "macos")]
+    // SAFETY: `NSBeep` is a documented AppKit function and is called on the
+    // winit main thread from BEL event handling.
+    unsafe {
+        NSBeep();
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "AppKit", kind = "framework")]
+unsafe extern "C" {
+    fn NSBeep();
 }
 
 #[cfg(target_os = "macos")]
@@ -121,6 +147,15 @@ mod tests {
         assert!(should_notify(Some(2), 1));
         // …and a fully backgrounded app (nothing focused) always fires.
         assert!(should_notify(None, 1));
+    }
+
+    #[test]
+    fn audible_bell_respects_enabled_flag_and_focus_gate() {
+        assert!(!should_ring_audible_bell(false, false, Some(1), 1));
+        assert!(should_ring_audible_bell(true, false, Some(1), 1));
+        assert!(!should_ring_audible_bell(true, true, Some(1), 1));
+        assert!(should_ring_audible_bell(true, true, Some(2), 1));
+        assert!(should_ring_audible_bell(true, true, None::<i32>, 1));
     }
 
     #[test]

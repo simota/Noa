@@ -113,6 +113,14 @@ pub struct AppConfig {
     /// `visual-bell`: flash the window briefly when its terminal rings BEL
     /// while OS-focused (where the desktop notification is suppressed).
     pub visual_bell: bool,
+    /// `audible-bell`: play the platform bell when a terminal rings BEL.
+    pub audible_bell: bool,
+    /// `audible-bell-when-unfocused`: only play the audible bell when the
+    /// target window is not the OS-focused window.
+    pub audible_bell_when_unfocused: bool,
+    /// `audible-bell-dock-bounce`: bounce the Dock for audible BEL events that
+    /// target an unfocused window. No-op outside macOS.
+    pub audible_bell_dock_bounce: bool,
     /// `auto-approve`: seed new tabs with agent-CLI auto approval enabled.
     /// Runtime toggles are still per-tab.
     pub auto_approve: bool,

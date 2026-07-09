@@ -391,6 +391,16 @@ pub struct StartupConfig {
     /// rings BEL (the desktop notification is suppressed there). Default off.
     /// noa-specific key (no Ghostty analog).
     pub visual_bell: bool,
+    /// `audible-bell`: play the platform bell when a terminal rings BEL.
+    /// Default off.
+    pub audible_bell: bool,
+    /// `audible-bell-when-unfocused`: when set, suppress the audible bell for
+    /// the OS-focused window, but keep it for other windows/backgrounded app
+    /// state. Default off.
+    pub audible_bell_when_unfocused: bool,
+    /// `audible-bell-dock-bounce`: bounce the Dock for an audible BEL that
+    /// targets an unfocused window. Default off. No-op outside macOS.
+    pub audible_bell_dock_bounce: bool,
     /// `auto-approve`: seed new tabs with agent-CLI auto approval enabled.
     /// Runtime use is still per-tab opt-in; default off.
     pub auto_approve: bool,
@@ -439,6 +449,9 @@ impl Default for StartupConfig {
             sidebar_preview_lines: DEFAULT_SIDEBAR_PREVIEW_LINES,
             resize_overlay: ResizeOverlay::default(),
             visual_bell: false,
+            audible_bell: false,
+            audible_bell_when_unfocused: false,
+            audible_bell_dock_bounce: false,
             auto_approve: false,
         }
     }
@@ -487,6 +500,9 @@ pub struct ConfigOverrides {
     pub sidebar_preview_lines: Option<usize>,
     pub resize_overlay: Option<ResizeOverlay>,
     pub visual_bell: Option<bool>,
+    pub audible_bell: Option<bool>,
+    pub audible_bell_when_unfocused: Option<bool>,
+    pub audible_bell_dock_bounce: Option<bool>,
     pub auto_approve: Option<bool>,
 }
 
@@ -567,6 +583,13 @@ impl ConfigOverrides {
                 .or(self.sidebar_preview_lines),
             resize_overlay: higher_priority.resize_overlay.or(self.resize_overlay),
             visual_bell: higher_priority.visual_bell.or(self.visual_bell),
+            audible_bell: higher_priority.audible_bell.or(self.audible_bell),
+            audible_bell_when_unfocused: higher_priority
+                .audible_bell_when_unfocused
+                .or(self.audible_bell_when_unfocused),
+            audible_bell_dock_bounce: higher_priority
+                .audible_bell_dock_bounce
+                .or(self.audible_bell_dock_bounce),
             auto_approve: higher_priority.auto_approve.or(self.auto_approve),
         }
     }
@@ -633,6 +656,13 @@ impl ConfigOverrides {
                 .unwrap_or(base.sidebar_preview_lines),
             resize_overlay: self.resize_overlay.unwrap_or(base.resize_overlay),
             visual_bell: self.visual_bell.unwrap_or(base.visual_bell),
+            audible_bell: self.audible_bell.unwrap_or(base.audible_bell),
+            audible_bell_when_unfocused: self
+                .audible_bell_when_unfocused
+                .unwrap_or(base.audible_bell_when_unfocused),
+            audible_bell_dock_bounce: self
+                .audible_bell_dock_bounce
+                .unwrap_or(base.audible_bell_dock_bounce),
             auto_approve: self.auto_approve.unwrap_or(base.auto_approve),
         }
     }
@@ -815,6 +845,9 @@ mod tests {
                 sidebar_preview_lines: DEFAULT_SIDEBAR_PREVIEW_LINES,
                 resize_overlay: ResizeOverlay::AfterFirst,
                 visual_bell: false,
+                audible_bell: false,
+                audible_bell_when_unfocused: false,
+                audible_bell_dock_bounce: false,
                 auto_approve: false,
             }
         );

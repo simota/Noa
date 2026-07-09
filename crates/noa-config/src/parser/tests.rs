@@ -1019,6 +1019,31 @@ fn sidebar_keys_are_supported_scalar_keys_for_import() {
 }
 
 #[test]
+fn bell_keys_parse_and_are_supported_scalar_keys_for_import() {
+    let (overrides, diagnostics) = parse_overrides(
+        path(),
+        "visual-bell = true\n\
+         audible-bell = true\n\
+         audible-bell-when-unfocused = true\n\
+         audible-bell-dock-bounce = true",
+    );
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(overrides.visual_bell, Some(true));
+    assert_eq!(overrides.audible_bell, Some(true));
+    assert_eq!(overrides.audible_bell_when_unfocused, Some(true));
+    assert_eq!(overrides.audible_bell_dock_bounce, Some(true));
+    for key in [
+        "visual-bell",
+        "audible-bell",
+        "audible-bell-when-unfocused",
+        "audible-bell-dock-bounce",
+    ] {
+        assert!(is_supported_scalar_key(key), "{key}");
+    }
+}
+
+#[test]
 fn invalid_values_warn_and_fall_back() {
     let (overrides, diagnostics) = parse_overrides(path(), "font-size = not-a-number");
 

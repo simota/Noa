@@ -374,6 +374,18 @@ fn show_config_output(config: &StartupConfig) -> String {
         "sidebar-preview-lines",
         &config.sidebar_preview_lines.to_string(),
     );
+    push_line(&mut out, "visual-bell", &config.visual_bell.to_string());
+    push_line(&mut out, "audible-bell", &config.audible_bell.to_string());
+    push_line(
+        &mut out,
+        "audible-bell-when-unfocused",
+        &config.audible_bell_when_unfocused.to_string(),
+    );
+    push_line(
+        &mut out,
+        "audible-bell-dock-bounce",
+        &config.audible_bell_dock_bounce.to_string(),
+    );
     push_line(&mut out, "auto-approve", &config.auto_approve.to_string());
     out
 }
@@ -576,6 +588,10 @@ mod tests {
         assert!(output.contains("sidebar-width = 360\n"));
         assert!(output.contains("sidebar-hotkey = \n"));
         assert!(output.contains("sidebar-preview-lines = 5\n"));
+        assert!(output.contains("visual-bell = false\n"));
+        assert!(output.contains("audible-bell = false\n"));
+        assert!(output.contains("audible-bell-when-unfocused = false\n"));
+        assert!(output.contains("audible-bell-dock-bounce = false\n"));
         assert!(output.contains("auto-approve = false\n"));
         assert!(
             output.lines().all(|line| line.contains(" = ")),
@@ -598,6 +614,10 @@ mod tests {
             sidebar_width: 280.0,
             sidebar_hotkey: Some("cmd+shift+s".to_string()),
             sidebar_preview_lines: 4,
+            visual_bell: true,
+            audible_bell: true,
+            audible_bell_when_unfocused: true,
+            audible_bell_dock_bounce: true,
             auto_approve: true,
             font: noa_config::FontConfig {
                 families: vec!["JetBrains Mono".to_string(), "Menlo".to_string()],
@@ -628,6 +648,10 @@ mod tests {
         assert!(output.contains("sidebar-width = 280\n"));
         assert!(output.contains("sidebar-hotkey = cmd+shift+s\n"));
         assert!(output.contains("sidebar-preview-lines = 4\n"));
+        assert!(output.contains("visual-bell = true\n"));
+        assert!(output.contains("audible-bell = true\n"));
+        assert!(output.contains("audible-bell-when-unfocused = true\n"));
+        assert!(output.contains("audible-bell-dock-bounce = true\n"));
         assert!(output.contains("auto-approve = true\n"));
         assert!(output.contains("font-family = JetBrains Mono\n"));
         assert!(output.contains("font-family = Menlo\n"));

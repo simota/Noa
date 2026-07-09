@@ -65,15 +65,19 @@ impl App {
         let btn = layout.new_button;
         let new_button_hover = state.sidebar_button_hover;
 
-        // Card text on the flat backdrop, plus a rounded overlay for every
-        // fully-visible card (FR-2). Partially-scrolled cards stay flat.
+        // Card text on the flat backdrop, plus a transparent text overlay for
+        // every fully-visible card (FR-2). Partially-scrolled cards stay on the
+        // backdrop.
         let now = crate::localtime::wall_clock_now();
         let now_instant = Instant::now();
         let home = std::env::var("HOME").ok();
-        let palette = &active_theme(&gpu.theme, &gpu.preview_theme).palette;
+        let theme = active_theme(&gpu.theme, &gpu.preview_theme);
+        let palette = &theme.palette;
+        let panel_bg = theme.default_bg;
         let mut cards: Vec<SidebarCardDraw> = Vec::new();
-        // Cards are inset from the sidebar edges, so their texture (and cell
-        // grid) is the margin-narrowed card width, not the full sidebar inset.
+        // The card texture uses the same width as the laid-out row. The margin
+        // is currently zero for a seamless list, but stays in the metric so the
+        // pure layout remains the single source of geometry.
         let card_w = layout_metrics.card_w(inset).max(1);
         let card_band = PaneRectApp::new(0, 0, card_w, layout_metrics.card_h);
         let card_grid = grid_size_for_pane_rect(card_band, metrics, self.padding);
@@ -112,9 +116,8 @@ impl App {
             let menu_hint =
                 hovered_id == Some(card_rects.id) || state.sidebar_menu == Some(card_rects.id);
             let full = card_rects.bounds.h == layout_metrics.card_h;
-            // A fully-visible card is covered by its opaque rounded overlay, so
-            // its backdrop text would never show — only emit it for partial
-            // (edge-clipped) cards, which have no overlay.
+            // Fully-visible cards draw text through their transparent overlay;
+            // only partial edge-clipped cards emit text directly to the band.
             if !full {
                 emit_card_text(
                     &mut runs, card_rects, card, &lines, &band_cell, marker, palette, renaming,
@@ -141,19 +144,18 @@ impl App {
                     renaming,
                     menu_hint,
                 );
+                let selected_bg = sidebar_selected_card_bg(panel_bg);
                 cards.push(SidebarCardDraw {
                     rect: card_rects.bounds,
                     grid: card_grid,
                     bg: if auto_flash {
-                        mix_rgb(chrome().card_selected, chrome().accent, 0.35)
+                        sidebar_auto_flash_card_bg(panel_bg)
                     } else if selected {
-                        chrome().card_selected
+                        selected_bg
                     } else if hovered_id == Some(card_rects.id) {
-                        // Hover face: halfway between resting and selected, so
-                        // the card lifts without competing with the selection.
-                        mix_rgb(chrome().card, chrome().card_selected, 0.5)
+                        sidebar_hover_card_bg(panel_bg)
                     } else {
-                        chrome().card
+                        sidebar_card_bg(panel_bg)
                     },
                     selected,
                     attention: card.attention,
@@ -164,7 +166,7 @@ impl App {
         }
 
         // Card `…` menu popup (FR-7): its own overlay, composited above the cards
-        // so a rounded card can never hide it. Skipped when the open card has
+        // so a card row can never hide it. Skipped when the open card has
         // scrolled out of view or the popup would spill past the window bottom.
         let menu = state.sidebar_menu.and_then(|open| {
             let card_rects = layout.cards.iter().find(|c| c.id == open)?;
@@ -236,7 +238,7 @@ impl App {
                         layout_metrics.card_h,
                     ),
                     grid: card_grid,
-                    bg: chrome().card_selected,
+                    bg: sidebar_selected_card_bg(panel_bg),
                     selected: true,
                     attention: false,
                     accent: None,
@@ -370,8 +372,8 @@ fn right_aligned_run(
 /// Emit one card's text runs (status dot, project icon, bold name with the
 /// right-aligned updated-time, the meta row `process · ⎇ branch · cwd`, and
 /// the configured preview rows) through `to_cell`. Shared by the flat backdrop
-/// (window coords) and each rounded overlay (card-local coords) so both agree
-/// on layout. `renaming` carries the live rename buffer when this card's
+/// (window coords) and each card overlay (card-local coords) so both agree on
+/// layout. `renaming` carries the live rename buffer when this card's
 /// inline rename is open — it replaces the name run with the buffer + caret in
 /// the accent color. `menu_hint` surfaces the `…` glyph over its (always-live)
 /// hit region — on for the hovered card and while the card's menu is open.

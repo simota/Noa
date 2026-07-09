@@ -56,6 +56,13 @@ fn chrome() -> crate::chrome::ChromePalette {
     crate::chrome::palette()
 }
 
+// Flat card color tuning. The base row mostly follows the resolved terminal
+// panel background so it does not read as a separate navy card surface.
+const SIDEBAR_CARD_PANEL_BG_MIX: f32 = 0.08;
+const SIDEBAR_CARD_SELECTED_BG_MIX: f32 = 0.20;
+const SIDEBAR_CARD_HOVER_BG_MIX: f32 = 0.10;
+const SIDEBAR_CARD_AUTO_FLASH_ACCENT_MIX: f32 = 0.12;
+
 // Toolbar `+` button chrome (logical px). Borderless: just the `+` glyph at
 // rest, with a subtle rounded fill + brighter glyph on hover.
 const TOOLBAR_BUTTON_RADIUS: f32 = crate::chrome::RADIUS_SM;
@@ -153,6 +160,34 @@ fn card_accent(card: &SessionCard, attention_marker: bool) -> Option<Rgb> {
 fn mix_rgb(a: Rgb, b: Rgb, t: f32) -> Rgb {
     let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
     Rgb::new(mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b))
+}
+
+fn sidebar_card_bg(panel_bg: Rgb) -> Rgb {
+    mix_rgb(panel_bg, chrome().card, SIDEBAR_CARD_PANEL_BG_MIX)
+}
+
+fn sidebar_selected_card_bg(panel_bg: Rgb) -> Rgb {
+    mix_rgb(
+        sidebar_card_bg(panel_bg),
+        chrome().card_selected,
+        SIDEBAR_CARD_SELECTED_BG_MIX,
+    )
+}
+
+fn sidebar_hover_card_bg(panel_bg: Rgb) -> Rgb {
+    mix_rgb(
+        sidebar_card_bg(panel_bg),
+        chrome().card_selected,
+        SIDEBAR_CARD_HOVER_BG_MIX,
+    )
+}
+
+fn sidebar_auto_flash_card_bg(panel_bg: Rgb) -> Rgb {
+    mix_rgb(
+        sidebar_selected_card_bg(panel_bg),
+        chrome().accent,
+        SIDEBAR_CARD_AUTO_FLASH_ACCENT_MIX,
+    )
 }
 
 /// The card's status dot with the attention blink applied (FR-A1): while an

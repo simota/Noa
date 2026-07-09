@@ -44,6 +44,8 @@ noa-vt    (from-scratch VT parser + Handler trait)        ← fidelity core
    ↓
 noa-grid  (Terminal/Screen/cursor/modes; impls Handler)   ← fidelity core
 noa-font  (font-kit discovery → swash raster → etagere atlas)
+noa-theme (vendored Ghostty-compatible theme catalog, 574 themes)
+noa-config (config discovery/parse/validation/precedence; TOML + Ghostty)
 noa-pty   (portable-pty spawn + reader/writer threads)
    ↓
 noa-render (wgpu instanced-cell renderer, surface-less)
@@ -67,7 +69,7 @@ The **VT parser (`noa-vt`) and terminal state model (`noa-grid`) are written fro
 1. **io thread** (`noa-app/src/io_thread.rs`) owns the `Pty` outright (`Pty` is `Send` but **not `Sync`**, so it can't live behind the shared `Arc`). It reads pty bytes → feeds them through one long-lived `Stream` into the `Arc<Mutex<Terminal>>` → drains `take_pending_writes()` back to the pty → pokes the event loop with `UserEvent::Redraw`. Resize requests arrive from the main thread over a `crossbeam-channel`.
 2. **main thread** (`noa-app/src/app.rs`) is the winit `ApplicationHandler`: owns the window/surface/renderer, and on redraw locks the terminal only to build a `FrameSnapshot`, then renders + presents. macOS requires presenting on the window-owning thread.
 
-Resize is **grid-first**: resize the shared `Terminal` grid *before* sending the new winsize to the pty (`on_resize` in `app.rs`), so the shell's SIGWINCH repaint isn't fed into a stale grid. (This is a grid resize, not soft-wrap reflow — reflow lands in inc≥3.)
+Resize is **grid-first**: resize the shared `Terminal` grid *before* sending the new winsize to the pty (`on_resize` in `app.rs`), so the shell's SIGWINCH repaint isn't fed into a stale grid. Grid resize now includes soft-wrap reflow on column changes (`noa-grid/src/screen/reflow.rs`).
 
 ## GPU gotchas (silent at build time, crash at runtime)
 

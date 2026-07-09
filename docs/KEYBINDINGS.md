@@ -19,7 +19,7 @@ keybind = cmd+t=unbind
 keybind = cmd+shift+n=tab.new
 ```
 
-`<chord>` は `+` 区切り。修飾キー別名は `cmd`/`command`/`super`/`meta`、`ctrl`/`control`、`alt`/`option`、`shift`。キーは単一文字、`plus`、`arrowup` 等、`pageup`、`pagedown`、`home`、`end`、`enter`/`return` を受け付ける。
+`<chord>` は `+` 区切り。修飾キー別名は `cmd`/`command`/`super`/`meta`、`ctrl`/`control`、`alt`/`option`、`shift`。キーは単一文字、`plus`、`arrowup`/`up` 等の矢印(短縮別名可)、`pageup`、`pagedown`、`home`、`end`、`enter`/`return`、`grave`/`backtick`(`` ` ``)を受け付ける。
 
 `<action>` は `noa +list-keybinds` の右辺に出る canonical 名を使う。互換入力として `new_tab`、`prompt_surface_title`、`toggle_quick_terminal` など一部の Ghostty 風 action 名も受け付ける。
 
@@ -98,7 +98,7 @@ Shift 単独スクロールは他の修飾キーが付くと発動しない。
 | ⌘⇧P | コマンドパレットのトグル |
 | ⌘⇧S | サイドバーのトグル |
 
-キーバインドはないがコマンドパレット / メニューから実行できるアクション: Clear Scrollback、Toggle Quick Terminal、Secure Keyboard Entry、About。
+キーバインドはないがコマンドパレット / メニューから実行できるアクション: Clear Scrollback、Toggle Quick Terminal、Secure Keyboard Entry、About、Open Preferences、Open Theme & Settings、Export Scrollback、Pipe Scrollback to Pager、Toggle Auto Approve、Set Tab Title。
 
 > 未バインドの ⌘ 併用キーは pty へ漏らさず握り潰される。
 
@@ -122,8 +122,9 @@ Carbon `RegisterEventHotKey` によるシステム全域ホットキー。アプ
 | キー | 動作 |
 |---|---|
 | Escape | 閉じてクエリをクリア |
-| Enter | 確定して閉じる(ハイライトは維持) |
+| Enter / ⇧Enter | 開いたまま次 / 前のマッチへ移動 |
 | ⌘G / ⌘⇧G | 開いたまま次 / 前へ |
+| ⌘F(再押下) | 閉じる(ハイライトとアクティブマッチは維持) |
 | Backspace | 1 文字削除 |
 | 印字文字 | クエリに追記 |
 

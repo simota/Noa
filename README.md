@@ -8,7 +8,7 @@ A faithful **Rust** clone of the [Ghostty](https://ghostty.org) terminal emulato
 
 ## Status
 
-**Increment 6 (In Progress).** A GPU-accelerated terminal emulator written from scratch. Currently, the implementation features native multi-window/tab/split management, wgpu-based grid rendering with a Kitty-graphics image layer, PTY integration, CJK font fallback + ligatures, the Kitty keyboard protocol, paged byte-limited scrollback with interactive search, shell integration (OSC 133/7), desktop notifications, session restore, a quick terminal, configuration file parsing (supporting both TOML and Ghostty formats), and over 460 vendored themes (see [Roadmap](#roadmap)).
+**Increments 1-6 complete.** A GPU-accelerated terminal emulator written from scratch. The implementation features native multi-window/tab/split management, wgpu-based grid rendering with a Kitty-graphics image layer, PTY integration, CJK font fallback + ligatures, the Kitty keyboard protocol, paged byte-limited scrollback with interactive search, soft-wrap reflow on resize, shell integration (OSC 133/7), desktop notifications, session restore, a quick terminal, a command palette, background opacity/blur and background images, configuration file parsing (supporting both TOML and Ghostty formats) with live reload, and 574 vendored themes. Beyond the core parity increments it also adds a session sidebar, a session/tab overview, an agent auto-approve mode, and Ghostty config import (see [Roadmap](#roadmap)).
 
 ## Architecture
 
@@ -20,11 +20,15 @@ crates/
   noa-vt        from-scratch DEC ANSI VT parser + stream dispatch   ← fidelity core
   noa-grid      terminal state: screen grid, cursor, modes, scroll  ← fidelity core
   noa-font      glyph pipeline: font-kit discovery → swash raster → etagere atlas
+  noa-theme     vendored Ghostty-compatible theme catalog (574 themes)
+  noa-config    config discovery / parsing / precedence (TOML + Ghostty formats)
   noa-render    wgpu instanced-cell renderer (GPU-facing, not windowing)
   noa-pty       PTY spawn + reader/writer threads (portable-pty)
   noa-app       the apprt: winit event loop, Arc<Mutex<Terminal>>, io thread, input
 bin/
   noa           thin binary → noa_app::run()
+tests/
+  parity        differential-parity harness vs a captured Ghostty baseline
 ```
 
 Dependency rule (enforceable via `cargo tree`): **only `noa-app` / `noa-render` may touch `wgpu`, and only `noa-app` may touch `winit`.** The VT parser and grid model have zero windowing dependencies so they stay unit-testable and reusable.
@@ -73,11 +77,13 @@ floor from `1.0` through `21.0`; `1.0` preserves theme colors unchanged.
 
 Noa runs as a proper foreground macOS app (Dock icon, custom native menu bar,
 Cmd+Q/Cmd+W app shortcuts, native window controls). The menu bar shows `Noa`,
-`File`, `Edit`, `View`, `Window`, and `Help`. The app menu currently includes
-`About Noa`, disabled `Preferences...` (shown as `Settings…` on current macOS),
-`Close Window`, and `Quit Noa`; preferences and unsupported terminal actions
-stay disabled until backing features exist. The `View` menu exposes scrollback
-navigation: line, page, top, and bottom scrolling via `Shift+ArrowUp/Down`,
+`File`, `Edit`, `View`, `Window`, and `Help`. The app menu includes `About Noa`,
+`Settings…` (Cmd+`,`, opens the theme & settings overlay), `Secure Keyboard
+Entry` (a checkable toggle), `Close Tab`, and `Quit Noa`. The `View` menu
+exposes clear/clear-scrollback, font-size controls, `Session Overview`
+(Cmd+Shift+O), `Command Palette` (Cmd+Shift+P), `Quick Terminal`, `Sidebar`
+(Cmd+Shift+S), `Auto Approve`, full-screen toggle, and scrollback navigation —
+line, page, top, and bottom scrolling via `Shift+ArrowUp/Down`,
 `Shift+PageUp/PageDown`, and `Shift+Home/End`. To produce a double-clickable
 `.app` bundle:
 
@@ -118,9 +124,10 @@ Noa follows a **fidelity-over-faith** discipline: the copy's match to Ghostty is
 | **1** | Vertical slice: window + wgpu grid, PTY `$SHELL`, from-scratch parser (C0, core CSI, SGR 16+truecolor, deferred-wrap), block cursor, ASCII+arrow input, DA/DSR | ✅ Done |
 | **2** | Resize behavior, full CSI/edit set, 256+truecolor palette, alt screen, DECSC/DECRC, bracketed paste, UTF-8 wide cells, interaction basics | ✅ Done |
 | **3** | Paged scrollback storage, interned styles, OSC 8 hyperlinks, interactive search UI, expanded configuration | ✅ Done |
-| **4** | Tabs + split tree + multi-window, config file, ~460 themes, font fallback + ligatures + Nerd/box glyphs | ✅ Done |
+| **4** | Tabs + split tree + multi-window, config file, 574 themes, font fallback + ligatures + Nerd/box glyphs, soft-wrap reflow on resize | ✅ Done |
 | **5** | Kitty graphics + keyboard protocols, shell integration (OSC 133/7), DCS, legacy mouse encodings | ✅ Done |
 | **6** | macOS-native polish: quick terminal, command palette, background blur, session restore, secure keyboard entry, notifications (OSC 9/777), CLI actions (`+list-themes` …), titlebar styles, Option-as-Alt config | ✅ Done |
+| **+** | Beyond core parity: session sidebar, session/tab overview, background images, agent auto-approve mode, Ghostty config import, live config reload | ✅ Done |
 
 ## License
 

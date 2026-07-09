@@ -13,7 +13,8 @@ const MATERIAL_POPOVER: isize = 6;
 const MATERIAL_HUD_WINDOW: isize = 13;
 const BLENDING_WITHIN_WINDOW: isize = 1;
 const STATE_ACTIVE: isize = 1;
-// NSTextAlignment (macOS values: right is 1, center is 2).
+// NSTextAlignment (macOS values: left is 0, right is 1, center is 2).
+const ALIGN_LEFT: isize = 0;
 const ALIGN_RIGHT: isize = 1;
 const ALIGN_CENTER: isize = 2;
 // NSLineBreakMode.byTruncatingTail.
@@ -1030,7 +1031,7 @@ pub(in crate::macos_overlay) fn rebuild_confirm(
             ),
         );
         if !message.is_null() {
-            set_alignment(message, ALIGN_CENTER);
+            set_alignment(message, ALIGN_LEFT);
             let _: () = msg_send![effect, addSubview: message];
         }
         let hint = make_label(

@@ -12,6 +12,7 @@ pub enum AppCommand {
     ReloadConfig,
     Copy,
     Paste,
+    SendSelectionToPane,
     ExportScrollback,
     PipeScrollbackToPager,
     Terminal(TerminalAction),
@@ -97,6 +98,8 @@ impl AppCommand {
     pub(crate) const PREFERENCES_MENU_ID: &'static str = "noa.app.preferences";
     pub(crate) const COPY_MENU_ID: &'static str = "noa.edit.copy";
     pub(crate) const PASTE_MENU_ID: &'static str = "noa.edit.paste";
+    pub(crate) const SEND_SELECTION_TO_PANE_MENU_ID: &'static str =
+        "noa.edit.send-selection-to-pane";
     pub(crate) const EXPORT_SCROLLBACK_MENU_ID: &'static str = "noa.file.export-scrollback";
     pub(crate) const PIPE_SCROLLBACK_TO_PAGER_MENU_ID: &'static str =
         "noa.file.pipe-scrollback-to-pager";
@@ -159,6 +162,7 @@ impl AppCommand {
             AppCommand::ReloadConfig => "",
             AppCommand::Copy => Self::COPY_MENU_ID,
             AppCommand::Paste => Self::PASTE_MENU_ID,
+            AppCommand::SendSelectionToPane => Self::SEND_SELECTION_TO_PANE_MENU_ID,
             AppCommand::ExportScrollback => Self::EXPORT_SCROLLBACK_MENU_ID,
             AppCommand::PipeScrollbackToPager => Self::PIPE_SCROLLBACK_TO_PAGER_MENU_ID,
             AppCommand::Terminal(TerminalAction::Clear) => Self::TERMINAL_CLEAR_MENU_ID,
@@ -225,6 +229,7 @@ impl AppCommand {
             Self::PREFERENCES_MENU_ID => Some(Self::Preferences),
             Self::COPY_MENU_ID => Some(Self::Copy),
             Self::PASTE_MENU_ID => Some(Self::Paste),
+            Self::SEND_SELECTION_TO_PANE_MENU_ID => Some(Self::SendSelectionToPane),
             Self::EXPORT_SCROLLBACK_MENU_ID => Some(Self::ExportScrollback),
             Self::PIPE_SCROLLBACK_TO_PAGER_MENU_ID => Some(Self::PipeScrollbackToPager),
             Self::TERMINAL_CLEAR_MENU_ID => Some(Self::Terminal(TerminalAction::Clear)),
@@ -306,6 +311,7 @@ impl AppCommand {
             Self::ReloadConfig => "config.reload",
             Self::Copy => "copy",
             Self::Paste => "paste",
+            Self::SendSelectionToPane => "pane.send-selection",
             Self::ExportScrollback => "terminal.export-scrollback",
             Self::PipeScrollbackToPager => "terminal.pipe-scrollback-to-pager",
             Self::Terminal(TerminalAction::Clear) => "terminal.clear",
@@ -378,6 +384,7 @@ impl AppCommand {
             "config.reload" => Some(Self::ReloadConfig),
             "copy" => Some(Self::Copy),
             "paste" => Some(Self::Paste),
+            "pane.send-selection" => Some(Self::SendSelectionToPane),
             "terminal.export-scrollback" => Some(Self::ExportScrollback),
             "terminal.pipe-scrollback-to-pager" => Some(Self::PipeScrollbackToPager),
             "terminal.clear" => Some(Self::Terminal(TerminalAction::Clear)),

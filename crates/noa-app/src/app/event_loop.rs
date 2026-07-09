@@ -336,6 +336,16 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                if self
+                    .send_selection_picker
+                    .as_ref()
+                    .is_some_and(|session| session.window_id == window_id)
+                {
+                    if pressed {
+                        self.handle_send_selection_picker_key(window_id, &event);
+                    }
+                    return;
+                }
                 // The "Set Tab Title" prompt owns this window's keyboard
                 // (tab-title REQ-TTL-NF-4): printable text edits the buffer,
                 // Enter commits, Escape cancels — nothing leaks to keybinds

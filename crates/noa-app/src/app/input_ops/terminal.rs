@@ -175,10 +175,21 @@ impl App {
     /// (keys, IME commits, pastes) so typing always follows the prompt;
     /// program-initiated writes (DA/DSR replies, mouse reports) do not snap.
     pub(in crate::app) fn snap_focused_viewport_to_bottom(&self, window_id: WindowId) {
+        let Some(pane_id) = self.windows.get(&window_id).map(|state| state.focused_pane) else {
+            return;
+        };
+        self.snap_pane_viewport_to_bottom(window_id, pane_id);
+    }
+
+    pub(in crate::app) fn snap_pane_viewport_to_bottom(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) {
         let Some(surface) = self
             .windows
             .get(&window_id)
-            .and_then(WindowState::focused_surface)
+            .and_then(|state| state.surfaces.get(&pane_id))
         else {
             return;
         };

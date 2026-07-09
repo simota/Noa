@@ -65,6 +65,79 @@ pub(crate) fn ids_in_group<Id: Copy, G: Copy + Eq>(
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct InterPaneTarget<Window, Pane> {
+    pub(crate) window_id: Window,
+    pub(crate) pane_id: Pane,
+    pub(crate) tab_index: usize,
+    pub(crate) pane_index: usize,
+}
+
+/// Candidate targets for a source pane's explicit one-shot transfer. The
+/// window order supplies tab order; each tab's split-tree leaf order supplies
+/// pane order. The source is excluded by `(window, pane)` pair, not by pane id
+/// alone, because pane ids are scoped to a tab.
+pub(crate) fn inter_pane_targets_in_group<W: Copy + Eq, G: Copy + Eq, P: Copy + Eq>(
+    order: &[W],
+    mut group_of: impl FnMut(W) -> Option<G>,
+    mut pane_ids_for_window: impl FnMut(W) -> Vec<P>,
+    source_window: W,
+    source_pane: P,
+) -> Vec<InterPaneTarget<W, P>> {
+    let Some(source_group) = group_of(source_window) else {
+        return Vec::new();
+    };
+    let mut targets = Vec::new();
+    let mut tab_index = 0;
+    for window_id in order.iter().copied() {
+        if group_of(window_id) != Some(source_group) {
+            continue;
+        }
+        tab_index += 1;
+        for (pane_offset, pane_id) in pane_ids_for_window(window_id).into_iter().enumerate() {
+            if window_id == source_window && pane_id == source_pane {
+                continue;
+            }
+            targets.push(InterPaneTarget {
+                window_id,
+                pane_id,
+                tab_index,
+                pane_index: pane_offset + 1,
+            });
+        }
+    }
+    targets
+}
+
+pub(crate) fn inter_pane_target_label(
+    tab_index: usize,
+    tab_title: Option<&str>,
+    pane_index: usize,
+    pane_id: u64,
+) -> String {
+    let title = tab_title
+        .filter(|title| !title.trim().is_empty())
+        .map(|title| format!(" - {}", title.trim()))
+        .unwrap_or_default();
+    format!("Tab {tab_index}{title} / Pane {pane_index} (PaneId {pane_id})")
+}
+
+pub(crate) fn split_tree_pane_ids(tree: &SplitTree) -> Vec<PaneId> {
+    fn collect(tree: &SplitTree, out: &mut Vec<PaneId>) {
+        match tree {
+            SplitTree::Leaf { pane } => out.push(*pane),
+            SplitTree::Split { first, second, .. } => {
+                collect(first, out);
+                collect(second, out);
+            }
+        }
+    }
+
+    let mut panes = Vec::new();
+    collect(tree, &mut panes);
+    panes
+}
+
 pub(crate) fn overview_tile_source_order<W: Copy + Eq, P: Copy>(
     window_order: &[W],
     mut live_window: impl FnMut(W) -> bool,
@@ -156,6 +229,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
     match command {
         AppCommand::Copy
         | AppCommand::Paste
+        | AppCommand::SendSelectionToPane
         | AppCommand::ExportScrollback
         | AppCommand::PipeScrollbackToPager
         | AppCommand::Terminal(_)
@@ -244,6 +318,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::OpenThemeSettings
         | AppCommand::Copy
         | AppCommand::Paste
+        | AppCommand::SendSelectionToPane
         | AppCommand::ExportScrollback
         | AppCommand::PipeScrollbackToPager
         | AppCommand::Terminal(_)

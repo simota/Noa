@@ -814,6 +814,84 @@ fn ids_in_group_filters_focused_windows_tabs() {
 }
 
 #[test]
+fn inter_pane_targets_include_same_group_all_tabs_and_exclude_source_pair() {
+    let order = [1_u8, 2, 3];
+    let group_of = |window| match window {
+        1 | 3 => Some(7_u8),
+        2 => Some(8_u8),
+        _ => None,
+    };
+    let panes = |window| match window {
+        1 => vec![10_u8, 11],
+        2 => vec![20],
+        3 => vec![10, 31],
+        _ => Vec::new(),
+    };
+
+    let targets = inter_pane_targets_in_group(&order, group_of, panes, 1, 10);
+
+    assert_eq!(
+        targets,
+        vec![
+            InterPaneTarget {
+                window_id: 1,
+                pane_id: 11,
+                tab_index: 1,
+                pane_index: 2,
+            },
+            InterPaneTarget {
+                window_id: 3,
+                pane_id: 10,
+                tab_index: 2,
+                pane_index: 1,
+            },
+            InterPaneTarget {
+                window_id: 3,
+                pane_id: 31,
+                tab_index: 2,
+                pane_index: 2,
+            },
+        ]
+    );
+}
+
+#[test]
+fn inter_pane_targets_noop_when_source_is_the_only_pane_in_group() {
+    let only_source = inter_pane_targets_in_group(&[1_u8], |_| Some(1_u8), |_| vec![9_u8], 1, 9);
+    assert!(only_source.is_empty());
+}
+
+#[test]
+fn inter_pane_target_label_uses_tab_title_and_pane_identity() {
+    assert_eq!(
+        inter_pane_target_label(2, Some("api"), 3, 42),
+        "Tab 2 - api / Pane 3 (PaneId 42)"
+    );
+    assert_eq!(
+        inter_pane_target_label(1, Some("  "), 1, 7),
+        "Tab 1 / Pane 1 (PaneId 7)"
+    );
+}
+
+#[test]
+fn split_tree_pane_ids_returns_all_leaves_in_tree_order() {
+    let tree = SplitTree::split_even(
+        SplitOrientation::Horizontal,
+        SplitTree::leaf(PaneId::new(1)),
+        SplitTree::split_even(
+            SplitOrientation::Vertical,
+            SplitTree::leaf(PaneId::new(2)),
+            SplitTree::leaf(PaneId::new(3)),
+        ),
+    );
+
+    assert_eq!(
+        split_tree_pane_ids(&tree),
+        vec![PaneId::new(1), PaneId::new(2), PaneId::new(3)]
+    );
+}
+
+#[test]
 fn overview_window_order_excludes_overview_and_closed_tabs() {
     let window_order = [1_u8, 2, 3, 4];
     let live_windows = |id| id != 3;
@@ -1121,6 +1199,7 @@ fn command_target_resolution_uses_focused_tab_only_for_terminal_commands() {
     for command in [
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::SendSelectionToPane,
         AppCommand::ExportScrollback,
         AppCommand::PipeScrollbackToPager,
         AppCommand::Terminal(TerminalAction::Clear),
@@ -1169,6 +1248,7 @@ fn overview_command_scope_resolves_terminal_commands_to_no_ops() {
     for command in [
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::SendSelectionToPane,
         AppCommand::ExportScrollback,
         AppCommand::PipeScrollbackToPager,
         AppCommand::Terminal(TerminalAction::Clear),

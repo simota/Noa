@@ -57,6 +57,9 @@ impl App {
         if command != AppCommand::ToggleCommandPalette {
             self.command_palette = None;
         }
+        if command != AppCommand::SendSelectionToPane {
+            self.send_selection_picker = None;
+        }
         match command {
             AppCommand::About => crate::app_actions::show_about(),
             AppCommand::Preferences => crate::app_actions::open_config_file(),
@@ -119,6 +122,7 @@ impl App {
             AppCommand::PrevTab => self.select_previous_tab(),
             AppCommand::Copy => self.copy_selection_to_clipboard(),
             AppCommand::Paste => self.paste_clipboard_to_pty(),
+            AppCommand::SendSelectionToPane => self.open_send_selection_picker(),
             AppCommand::ExportScrollback => self.export_scrollback_to_temp_file(),
             AppCommand::PipeScrollbackToPager => self.pipe_scrollback_to_pager(event_loop),
             AppCommand::Terminal(action) => self.handle_terminal_action(action),

@@ -31,6 +31,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ReloadConfig => "Reload Configuration",
         AppCommand::Copy => "Copy to Clipboard",
         AppCommand::Paste => "Paste from Clipboard",
+        AppCommand::SendSelectionToPane => "Send Selection to Pane",
         AppCommand::ExportScrollback => "Export Scrollback to File",
         AppCommand::PipeScrollbackToPager => "Pipe Scrollback to Pager",
         AppCommand::Terminal(TerminalAction::Clear) => "Clear Screen",
@@ -115,6 +116,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ReloadConfig,
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::SendSelectionToPane,
         AppCommand::ExportScrollback,
         AppCommand::PipeScrollbackToPager,
         AppCommand::Terminal(TerminalAction::Clear),
@@ -310,9 +312,10 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::OpenThemeSettings
         | AppCommand::ReloadConfig
         | AppCommand::Quit => CommandCategory::Application,
-        AppCommand::Copy | AppCommand::Paste | AppCommand::Terminal(TerminalAction::SelectAll) => {
-            CommandCategory::Clipboard
-        }
+        AppCommand::Copy
+        | AppCommand::Paste
+        | AppCommand::SendSelectionToPane
+        | AppCommand::Terminal(TerminalAction::SelectAll) => CommandCategory::Clipboard,
         AppCommand::ExportScrollback | AppCommand::PipeScrollbackToPager => CommandCategory::Scroll,
         AppCommand::Terminal(TerminalAction::Clear)
         | AppCommand::Terminal(TerminalAction::ClearScrollback)
@@ -584,6 +587,7 @@ mod tests {
             AppCommand::ReloadConfig,
             AppCommand::Copy,
             AppCommand::Paste,
+            AppCommand::SendSelectionToPane,
             AppCommand::ExportScrollback,
             AppCommand::PipeScrollbackToPager,
             AppCommand::Terminal(TerminalAction::Clear),

@@ -200,6 +200,8 @@ pub struct App {
     /// The open command palette (`cmd+shift+p`), if any — see
     /// [`CommandPaletteSession`].
     command_palette: Option<CommandPaletteSession>,
+    /// The open send-selection target picker, if any.
+    send_selection_picker: Option<SendSelectionPickerSession>,
     /// The open theme-settings overlay (theme-settings-ui R-1), if any — see
     /// [`ThemeSettingsSession`]. Mutually exclusive with `command_palette`
     /// and `search_prompt` (R-3, `App::active_overlay`).
@@ -340,6 +342,7 @@ impl App {
             hovered_link: None,
             search_prompt: None,
             command_palette: None,
+            send_selection_picker: None,
             theme_settings: None,
             confirm_dialog: None,
             sidebar_rename: None,

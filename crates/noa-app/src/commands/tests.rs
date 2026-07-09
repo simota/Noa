@@ -12,6 +12,7 @@ fn stable_menu_ids_map_to_commands() {
         AppCommand::Preferences,
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::SendSelectionToPane,
         AppCommand::ExportScrollback,
         AppCommand::PipeScrollbackToPager,
         AppCommand::Terminal(TerminalAction::Clear),
@@ -99,6 +100,13 @@ fn cmd_characters_map_only_supported_shortcuts() {
     );
     assert_eq!(AppCommand::from_cmd_character("c"), Some(AppCommand::Copy));
     assert_eq!(AppCommand::from_cmd_character("V"), Some(AppCommand::Paste));
+    assert_eq!(
+        AppCommand::from_key(
+            &Key::Character("m".into()),
+            ModifiersState::SUPER | ModifiersState::SHIFT
+        ),
+        Some(AppCommand::SendSelectionToPane)
+    );
     assert_eq!(
         AppCommand::from_cmd_character("k"),
         Some(AppCommand::Terminal(TerminalAction::Clear))
@@ -361,6 +369,10 @@ fn command_palette_binding_does_not_shadow_existing_cmd_shift_shortcuts() {
         engine.resolve(&Key::Character("p".into()), cmd_shift),
         Some(AppCommand::ToggleCommandPalette)
     );
+    assert_eq!(
+        engine.resolve(&Key::Character("m".into()), cmd_shift),
+        Some(AppCommand::SendSelectionToPane)
+    );
 }
 
 #[test]
@@ -377,6 +389,10 @@ fn chord_for_reverse_maps_bound_commands_and_reports_none_for_unbound() {
     assert_eq!(
         engine.chord_for(AppCommand::ToggleSidebar).as_deref(),
         Some("cmd+shift+s")
+    );
+    assert_eq!(
+        engine.chord_for(AppCommand::SendSelectionToPane).as_deref(),
+        Some("cmd+shift+m")
     );
     assert_eq!(
         engine.chord_for(AppCommand::ToggleFullscreen).as_deref(),
@@ -430,6 +446,7 @@ fn action_names_map_to_commands() {
     for command in [
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::SendSelectionToPane,
         AppCommand::ExportScrollback,
         AppCommand::PipeScrollbackToPager,
         AppCommand::Terminal(TerminalAction::Clear),

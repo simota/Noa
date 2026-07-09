@@ -4,6 +4,7 @@ use super::super::*;
 pub(in crate::app) enum ActiveOverlay {
     None,
     CommandPalette,
+    SendSelectionPicker,
     Search,
     ThemeSettings,
 }
@@ -16,11 +17,14 @@ pub(in crate::app) enum ActiveOverlay {
 /// supplying the three `Option::is_some_and(...)` checks.
 fn active_overlay_gate(
     command_palette_open: bool,
+    send_selection_picker_open: bool,
     search_open: bool,
     theme_settings_open: bool,
 ) -> ActiveOverlay {
     if command_palette_open {
         ActiveOverlay::CommandPalette
+    } else if send_selection_picker_open {
+        ActiveOverlay::SendSelectionPicker
     } else if search_open {
         ActiveOverlay::Search
     } else if theme_settings_open {
@@ -59,6 +63,207 @@ fn palette_enter_decision_for_command(
 }
 
 impl App {
+    pub(in crate::app) fn open_send_selection_picker(&mut self) {
+        let Some((source_window_id, source_pane)) =
+            self.resolve_pane_command_target(AppCommand::SendSelectionToPane)
+        else {
+            return;
+        };
+        let Some((selected_text, targets)) =
+            self.send_selection_picker_payload_and_targets(source_window_id, source_pane)
+        else {
+            return;
+        };
+
+        self.send_selection_picker = Some(SendSelectionPickerSession {
+            window_id: source_window_id,
+            source_pane,
+            selected_text,
+            targets,
+            selected: 0,
+            opened_at: Instant::now(),
+        });
+        self.request_window_redraw(source_window_id);
+    }
+
+    pub(in crate::app) fn can_open_send_selection_picker_for_pane(
+        &self,
+        source_window_id: WindowId,
+        source_pane: PaneId,
+    ) -> bool {
+        self.send_selection_picker_payload_and_targets(source_window_id, source_pane)
+            .is_some()
+    }
+
+    fn send_selection_picker_payload_and_targets(
+        &self,
+        source_window_id: WindowId,
+        source_pane: PaneId,
+    ) -> Option<(String, Vec<SendSelectionTarget>)> {
+        if self.active_overlay(source_window_id) != ActiveOverlay::None
+            || self
+                .confirm_dialog
+                .as_ref()
+                .is_some_and(|session| session.window_id == source_window_id)
+            || self
+                .tab_title_prompt
+                .as_ref()
+                .is_some_and(|session| session.window_id == source_window_id)
+            || self
+                .sidebar_rename
+                .as_ref()
+                .is_some_and(|session| session.window_id == source_window_id)
+        {
+            return None;
+        }
+
+        let selected_text = self
+            .windows
+            .get(&source_window_id)
+            .and_then(|state| state.surfaces.get(&source_pane))
+            .and_then(|surface| surface.terminal.lock().selected_text());
+        let Some(selected_text) = selected_text.filter(|text| !text.is_empty()) else {
+            return None;
+        };
+
+        let targets = self.send_selection_targets(source_window_id, source_pane);
+        if targets.is_empty() {
+            return None;
+        }
+
+        Some((selected_text, targets))
+    }
+
+    fn send_selection_targets(
+        &self,
+        source_window_id: WindowId,
+        source_pane: PaneId,
+    ) -> Vec<SendSelectionTarget> {
+        inter_pane_targets_in_group(
+            &self.window_order,
+            |window_id| self.windows.get(&window_id).map(|state| state.group),
+            |window_id| {
+                self.windows
+                    .get(&window_id)
+                    .map(|state| split_tree_pane_ids(&state.split_tree))
+                    .unwrap_or_default()
+            },
+            source_window_id,
+            source_pane,
+        )
+        .into_iter()
+        .filter_map(|target| {
+            let state = self.windows.get(&target.window_id)?;
+            if !state.surfaces.contains_key(&target.pane_id) {
+                return None;
+            }
+            let label = inter_pane_target_label(
+                target.tab_index,
+                state
+                    .title_override
+                    .as_deref()
+                    .or(Some(state.title.as_str())),
+                target.pane_index,
+                target.pane_id.get(),
+            );
+            Some(SendSelectionTarget {
+                window_id: target.window_id,
+                pane_id: target.pane_id,
+                label,
+            })
+        })
+        .collect()
+    }
+
+    pub(in crate::app) fn handle_send_selection_picker_key(
+        &mut self,
+        window_id: WindowId,
+        event: &KeyEvent,
+    ) {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.send_selection_picker = None;
+                self.request_window_redraw(window_id);
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if let Some(session) = self.send_selection_picker.as_mut() {
+                    session.move_up();
+                }
+                self.request_window_redraw(window_id);
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if let Some(session) = self.send_selection_picker.as_mut() {
+                    session.move_down();
+                }
+                self.request_window_redraw(window_id);
+            }
+            Key::Named(NamedKey::Enter) => {
+                if let Some(selected) = self
+                    .send_selection_picker
+                    .as_ref()
+                    .map(|session| session.selected)
+                {
+                    self.commit_send_selection_picker_target(selected);
+                }
+            }
+            Key::Character(s) => {
+                let Some(index) = picker_digit_index(s) else {
+                    return;
+                };
+                self.commit_send_selection_picker_target(index);
+            }
+            _ => {}
+        }
+    }
+
+    fn commit_send_selection_picker_target(&mut self, index: usize) {
+        let Some(session) = self.send_selection_picker.take() else {
+            return;
+        };
+        let Some(target) = session.targets.get(index).cloned() else {
+            self.send_selection_picker = Some(session);
+            return;
+        };
+        let confirm_window_id = session.window_id;
+        self.request_window_redraw(confirm_window_id);
+        self.paste_text_to_pane_with_confirm_window(
+            confirm_window_id,
+            target.window_id,
+            target.pane_id,
+            session.selected_text,
+        );
+    }
+
+    pub(in crate::app) fn send_selection_picker_snapshot(
+        &self,
+        window_id: WindowId,
+    ) -> Option<(CommandPaletteSnapshot, Instant)> {
+        let session = self
+            .send_selection_picker
+            .as_ref()
+            .filter(|session| session.window_id == window_id)?;
+        let rows = session
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| PaletteRow::Entry {
+                title: target.label.clone(),
+                hint: (index < 9).then(|| (index + 1).to_string()),
+                match_positions: Vec::new(),
+                enabled: true,
+            })
+            .collect::<Vec<_>>();
+        Some((
+            CommandPaletteSnapshot {
+                query: format!("Send selection from PaneId {}", session.source_pane.get()),
+                rows,
+                selected: session.selected,
+                total_entries: session.targets.len(),
+            },
+            session.opened_at,
+        ))
+    }
+
     pub(in crate::app) fn handle_command_palette_key(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -144,6 +349,9 @@ impl App {
             self.command_palette
                 .as_ref()
                 .is_some_and(|s| s.window_id == window_id),
+            self.send_selection_picker
+                .as_ref()
+                .is_some_and(|s| s.window_id == window_id),
             self.search_prompt
                 .as_ref()
                 .is_some_and(|s| s.window_id == window_id),
@@ -164,8 +372,16 @@ mod active_overlay_gate_tests {
     #[test]
     fn command_palette_open_refuses_theme_settings() {
         assert_eq!(
-            active_overlay_gate(true, false, false),
+            active_overlay_gate(true, false, false, false),
             ActiveOverlay::CommandPalette
+        );
+    }
+
+    #[test]
+    fn send_selection_picker_refuses_other_overlays() {
+        assert_eq!(
+            active_overlay_gate(false, true, false, false),
+            ActiveOverlay::SendSelectionPicker
         );
     }
 
@@ -176,7 +392,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn theme_settings_open_refuses_palette_and_search() {
         assert_eq!(
-            active_overlay_gate(false, false, true),
+            active_overlay_gate(false, false, false, true),
             ActiveOverlay::ThemeSettings
         );
     }
@@ -187,7 +403,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn search_open_refuses_theme_settings() {
         assert_eq!(
-            active_overlay_gate(false, true, false),
+            active_overlay_gate(false, false, true, false),
             ActiveOverlay::Search
         );
     }
@@ -235,8 +451,28 @@ mod palette_enter_decision_tests {
         assert!(decision.close_palette);
         let palette_open_after_enter = !decision.close_palette;
         assert_eq!(
-            active_overlay_gate(palette_open_after_enter, false, false),
+            active_overlay_gate(palette_open_after_enter, false, false, false),
             ActiveOverlay::None
         );
     }
+
+    #[test]
+    fn picker_digit_index_maps_number_keys_to_zero_based_indices() {
+        assert_eq!(picker_digit_index("1"), Some(0));
+        assert_eq!(picker_digit_index("9"), Some(8));
+        assert_eq!(picker_digit_index("0"), None);
+        assert_eq!(picker_digit_index("10"), None);
+        assert_eq!(picker_digit_index("x"), None);
+    }
+}
+
+fn picker_digit_index(text: &str) -> Option<usize> {
+    let mut chars = text.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    ch.to_digit(10)
+        .and_then(|digit| digit.checked_sub(1))
+        .map(|index| index as usize)
 }

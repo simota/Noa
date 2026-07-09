@@ -20,6 +20,7 @@ const SPLIT_CONTEXT_MENU_ITEMS: &[(AppCommand, &str)] = &[
     (AppCommand::EqualizeSplits, "Equalize Splits"),
     (AppCommand::ToggleSplitZoom, "Toggle Split Zoom"),
     (AppCommand::ToggleAutoApprove, AUTO_APPROVE_MENU_LABEL_OFF),
+    (AppCommand::SendSelectionToPane, "Send Selection to Pane"),
     (AppCommand::SetTabTitle, "Set Tab Title\u{2026}"),
 ];
 
@@ -30,7 +31,8 @@ const SPLIT_DOWN_ITEM: usize = 3;
 const EQUALIZE_SPLITS_ITEM: usize = 4;
 const TOGGLE_SPLIT_ZOOM_ITEM: usize = 5;
 const TOGGLE_AUTO_APPROVE_ITEM: usize = 6;
-const SET_TAB_TITLE_ITEM: usize = 7;
+const SEND_SELECTION_TO_PANE_ITEM: usize = 7;
+const SET_TAB_TITLE_ITEM: usize = 8;
 
 fn auto_approve_menu_label(enabled: bool) -> &'static str {
     if enabled {
@@ -50,6 +52,7 @@ pub(crate) struct MacosMenu {
     secure_keyboard_entry: CheckMenuItem,
     auto_approve: CheckMenuItem,
     split_context_auto_approve: CheckMenuItem,
+    split_context_send_selection: MenuItem,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -66,6 +69,8 @@ struct SplitContextSplitItems {
     up: MenuItem,
     down: MenuItem,
 }
+
+type SplitContextMenuParts = (Menu, SplitContextSplitItems, CheckMenuItem, MenuItem);
 
 impl SplitContextSplitItems {
     fn set_enabled(&self, enabled: SplitContextMenuEnabled) {
@@ -417,6 +422,7 @@ impl MacosMenu {
             split_context_menu: split_context_menu.0,
             split_context_splits: split_context_menu.1,
             split_context_auto_approve: split_context_menu.2,
+            split_context_send_selection: split_context_menu.3,
             secure_keyboard_entry,
             auto_approve,
         })
@@ -444,9 +450,12 @@ impl MacosMenu {
         position: Option<PhysicalPosition<f64>>,
         auto_approve_enabled: bool,
         split_enabled: SplitContextMenuEnabled,
+        send_selection_enabled: bool,
     ) -> anyhow::Result<()> {
         self.set_auto_approve_checked(auto_approve_enabled);
         self.split_context_splits.set_enabled(split_enabled);
+        self.split_context_send_selection
+            .set_enabled(send_selection_enabled);
         let raw_handle = window.window_handle()?.as_raw();
         let ns_view = match raw_handle {
             RawWindowHandle::AppKit(handle) => handle.ns_view.as_ptr(),
@@ -470,7 +479,7 @@ impl MacosMenu {
     }
 }
 
-fn build_split_context_menu() -> anyhow::Result<(Menu, SplitContextSplitItems, CheckMenuItem)> {
+fn build_split_context_menu() -> anyhow::Result<SplitContextMenuParts> {
     let split_left = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_LEFT_ITEM]);
     let split_right = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_RIGHT_ITEM]);
     let split_up = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_UP_ITEM]);
@@ -488,6 +497,7 @@ fn build_split_context_menu() -> anyhow::Result<(Menu, SplitContextSplitItems, C
     );
     // Ghostty parity: "Change Title" lives on the surface context menu too.
     let title_separator = PredefinedMenuItem::separator();
+    let send_selection = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SEND_SELECTION_TO_PANE_ITEM]);
     let set_tab_title = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SET_TAB_TITLE_ITEM]);
 
     let menu = Menu::with_id_and_items(
@@ -502,6 +512,7 @@ fn build_split_context_menu() -> anyhow::Result<(Menu, SplitContextSplitItems, C
             &toggle_zoom,
             &auto_approve,
             &title_separator,
+            &send_selection,
             &set_tab_title,
         ],
     )?;
@@ -514,6 +525,7 @@ fn build_split_context_menu() -> anyhow::Result<(Menu, SplitContextSplitItems, C
             down: split_down,
         },
         auto_approve,
+        send_selection,
     ))
 }
 
@@ -575,6 +587,7 @@ mod tests {
                 (AppCommand::EqualizeSplits, "Equalize Splits"),
                 (AppCommand::ToggleSplitZoom, "Toggle Split Zoom"),
                 (AppCommand::ToggleAutoApprove, "Auto Approve: Off"),
+                (AppCommand::SendSelectionToPane, "Send Selection to Pane"),
                 (AppCommand::SetTabTitle, "Set Tab Title\u{2026}"),
             ]
         );

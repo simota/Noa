@@ -610,6 +610,13 @@ impl App {
         {
             self.command_palette = None;
         }
+        if self
+            .send_selection_picker
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.send_selection_picker = None;
+        }
         // Same leak shape again for the "Set Tab Title" prompt.
         if self
             .tab_title_prompt
@@ -957,9 +964,18 @@ impl App {
                 down: self.can_create_split_in_window(window_id, Direction::Down),
             })
             .unwrap_or_default();
-        if let Err(error) =
-            menu.show_split_context_menu(window.as_ref(), None, auto_approve_enabled, split_enabled)
-        {
+        let send_selection_enabled = self
+            .windows
+            .get(&window_id)
+            .map(|state| state.focused_pane)
+            .is_some_and(|pane| self.can_open_send_selection_picker_for_pane(window_id, pane));
+        if let Err(error) = menu.show_split_context_menu(
+            window.as_ref(),
+            None,
+            auto_approve_enabled,
+            split_enabled,
+            send_selection_enabled,
+        ) {
             log::debug!("failed to show macOS split context menu: {error:#}");
         }
     }

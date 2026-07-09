@@ -458,6 +458,37 @@ pub(super) struct ThemeSettingsSession {
     pub(super) opened_at: Instant,
 }
 
+#[derive(Clone)]
+pub(super) struct SendSelectionTarget {
+    pub(super) window_id: WindowId,
+    pub(super) pane_id: PaneId,
+    pub(super) label: String,
+}
+
+/// A modal picker for explicitly sending the focused pane's selected text to
+/// another pane. The payload is captured at open time so cancellation is a
+/// pure state drop and later selection edits cannot race the send.
+pub(super) struct SendSelectionPickerSession {
+    pub(super) window_id: WindowId,
+    pub(super) source_pane: PaneId,
+    pub(super) selected_text: String,
+    pub(super) targets: Vec<SendSelectionTarget>,
+    pub(super) selected: usize,
+    pub(super) opened_at: Instant,
+}
+
+impl SendSelectionPickerSession {
+    pub(super) fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub(super) fn move_down(&mut self) {
+        if self.selected + 1 < self.targets.len() {
+            self.selected += 1;
+        }
+    }
+}
+
 /// An open inline rename on a sidebar card (FR-7 Rename). Modal for its
 /// window's keyboard while it is open.
 pub(super) struct SidebarRenameSession {

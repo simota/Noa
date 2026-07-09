@@ -23,7 +23,9 @@ use crate::auto_approve::{
 };
 use crate::events::UserEvent;
 use crate::session_overview::OVERVIEW_TILE_MIN_RENDER_INTERVAL;
-use crate::session_store::{PreviewLine, PreviewSpan, SessionCardId, SessionDelta, SessionWindowId};
+use crate::session_store::{
+    PreviewLine, PreviewSpan, SessionCardId, SessionDelta, SessionWindowId,
+};
 use crate::split_tree::PaneId;
 
 /// Which window/pane's `UserEvent`s this io thread posts back to the main
@@ -747,9 +749,9 @@ pub fn spawn(
                 sync_redraw_deadline,
                 auto_approve_rescan_at,
             ]
-                .into_iter()
-                .flatten()
-                .min();
+            .into_iter()
+            .flatten()
+            .min();
             let selected = match next_deadline {
                 Some(deadline) => sel
                     .select_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -780,11 +782,7 @@ pub fn spawn(
                 if auto_approve_rescan_at.is_some_and(|deadline| now >= deadline) {
                     let candidate = {
                         let term = terminal.lock();
-                        detect_auto_approve_candidate(
-                            &term,
-                            &auto_approve,
-                            &mut auto_approve_state,
-                        )
+                        detect_auto_approve_candidate(&term, &auto_approve, &mut auto_approve_state)
                     };
                     auto_approve_rescan_at =
                         auto_approve_rescan_deadline(&auto_approve_state, Instant::now());

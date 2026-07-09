@@ -81,10 +81,8 @@ mod tests {
     /// A burst of saves must land the *latest* state on disk after drop.
     #[test]
     fn drop_flushes_the_newest_queued_state() {
-        let dir = std::env::temp_dir().join(format!(
-            "noa-session-persist-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("noa-session-persist-test-{}", std::process::id()));
         let path = dir.join("session.json");
         let persister = SessionPersister::spawn();
         for generation in 0..10usize {

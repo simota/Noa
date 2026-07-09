@@ -825,7 +825,8 @@ fn mapped_font_data_from_descriptor(
 #[cfg(target_os = "macos")]
 fn face_index_for_postscript_name(data: &[u8], postscript_name: &str) -> Option<usize> {
     let fonts = swash::FontDataRef::new(data)?;
-    (0..fonts.len()).find(|&index| postscript_name_in(data, index).as_deref() == Some(postscript_name))
+    (0..fonts.len())
+        .find(|&index| postscript_name_in(data, index).as_deref() == Some(postscript_name))
 }
 
 #[cfg(test)]

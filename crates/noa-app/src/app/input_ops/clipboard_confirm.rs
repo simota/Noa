@@ -61,6 +61,16 @@ impl App {
         pane_id: PaneId,
         text: String,
     ) {
+        self.paste_text_to_pane_with_confirm_window(window_id, window_id, pane_id, text);
+    }
+
+    pub(in crate::app) fn paste_text_to_pane_with_confirm_window(
+        &mut self,
+        confirm_window_id: WindowId,
+        window_id: WindowId,
+        pane_id: PaneId,
+        text: String,
+    ) {
         let bracketed_paste = self.bracketed_paste(window_id, pane_id);
         // Paste protection: confirm before sending content that could run a
         // command on its own (a newline), or that tries to break out of
@@ -71,7 +81,7 @@ impl App {
         {
             let lines = text.lines().count().max(1);
             self.open_confirm_dialog(
-                window_id,
+                confirm_window_id,
                 format!("Paste {lines} line(s) of text?"),
                 ConfirmAction::Paste {
                     window_id,
@@ -93,7 +103,7 @@ impl App {
         let bracketed_paste = self.bracketed_paste(window_id, pane_id);
         if let Some(bytes) = input::encode_paste(text, bracketed_paste) {
             self.mark_pane_paste_input(window_id, pane_id);
-            self.snap_focused_viewport_to_bottom(window_id);
+            self.snap_pane_viewport_to_bottom(window_id, pane_id);
             self.write_pane_pty_bytes(window_id, pane_id, &bytes);
         }
     }

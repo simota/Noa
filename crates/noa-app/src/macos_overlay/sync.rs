@@ -35,11 +35,13 @@ pub(crate) fn sync_command_palette(
                         title,
                         hint,
                         match_positions,
+                        enabled,
                     } => {
                         1u8.hash(h);
                         title.hash(h);
                         hint.hash(h);
                         match_positions.hash(h);
+                        enabled.hash(h);
                     }
                 }
             }

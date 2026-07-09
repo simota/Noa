@@ -26,7 +26,9 @@ pub fn resolve_pane_command_target(
         | AppCommand::FontSize(_)
         | AppCommand::Search(_)
         | AppCommand::ScrollViewport(_)
+        | AppCommand::NewSplitLeft
         | AppCommand::NewSplitRight
+        | AppCommand::NewSplitUp
         | AppCommand::NewSplitDown
         | AppCommand::FocusDirection(_)
         | AppCommand::ResizeSplit(_)

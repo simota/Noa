@@ -4,6 +4,8 @@
 //! layer supplies pane ids and already-computed pane rectangles; the renderer
 //! turns that into one ordered render-pass plan.
 
+const DIVIDER_THICKNESS_PX: u32 = 1;
+
 /// Stable render-side identity for a pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PaneId(u64);
@@ -126,6 +128,9 @@ fn vertical_divider_between(left: PaneRect, right: PaneRect) -> Option<PaneRect>
     if left.right() >= right.x {
         return None;
     }
+    if right.x - left.right() != DIVIDER_THICKNESS_PX {
+        return None;
+    }
 
     let top = left.y.max(right.y);
     let bottom = left.bottom().min(right.bottom());
@@ -139,6 +144,9 @@ fn vertical_divider_between(left: PaneRect, right: PaneRect) -> Option<PaneRect>
 
 fn horizontal_divider_between(top: PaneRect, bottom: PaneRect) -> Option<PaneRect> {
     if top.bottom() >= bottom.y {
+        return None;
+    }
+    if bottom.y - top.bottom() != DIVIDER_THICKNESS_PX {
         return None;
     }
 
@@ -298,6 +306,30 @@ mod tests {
             vec![(PaneId::new(2), PaneRect::new(51, 0, 49, 20), 1)]
         );
         assert!(matches!(plan.last(), Some(DrawOp::Dividers { rects }) if rects.is_empty()));
+    }
+
+    #[test]
+    fn divider_plan_ignores_large_gaps_from_incomplete_layouts() {
+        let horizontal_gap = [
+            (PaneId::new(1), PaneRect::new(0, 0, 33, 20)),
+            (PaneId::new(3), PaneRect::new(68, 0, 32, 20)),
+        ];
+        let vertical_gap = [
+            (PaneId::new(1), PaneRect::new(0, 0, 40, 33)),
+            (PaneId::new(3), PaneRect::new(0, 68, 40, 32)),
+        ];
+
+        let horizontal_plan = build_draw_plan(&horizontal_gap, None, None);
+        let vertical_plan = build_draw_plan(&vertical_gap, None, None);
+
+        assert!(
+            matches!(horizontal_plan.last(), Some(DrawOp::Dividers { rects }) if rects.is_empty()),
+            "large horizontal gaps should not be painted as split dividers"
+        );
+        assert!(
+            matches!(vertical_plan.last(), Some(DrawOp::Dividers { rects }) if rects.is_empty()),
+            "large vertical gaps should not be painted as split dividers"
+        );
     }
 
     #[test]

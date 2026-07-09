@@ -3,6 +3,43 @@
 use super::*;
 
 impl App {
+    pub(in crate::app) fn command_is_enabled(
+        &self,
+        window_id: WindowId,
+        command: AppCommand,
+    ) -> bool {
+        match command {
+            AppCommand::NewSplitLeft => self.can_create_split_in_window(window_id, Direction::Left),
+            AppCommand::NewSplitRight => {
+                self.can_create_split_in_window(window_id, Direction::Right)
+            }
+            AppCommand::NewSplitUp => self.can_create_split_in_window(window_id, Direction::Up),
+            AppCommand::NewSplitDown => self.can_create_split_in_window(window_id, Direction::Down),
+            _ => true,
+        }
+    }
+
+    pub(in crate::app) fn can_create_split_in_window(
+        &self,
+        window_id: WindowId,
+        direction: Direction,
+    ) -> bool {
+        self.windows
+            .get(&window_id)
+            .and_then(|state| {
+                let rect = state.focused_surface()?.rect;
+                Some(
+                    can_create_split_in_direction(state.pane_count(), rect, direction)
+                        && can_add_pane_in_direction(
+                            &state.split_tree,
+                            state.focused_pane,
+                            direction,
+                        ),
+                )
+            })
+            .unwrap_or(false)
+    }
+
     pub(super) fn handle_app_command(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -29,14 +66,24 @@ impl App {
             AppCommand::NewWindow => {
                 let _ = self.spawn_tab(event_loop, SpawnTarget::NewWindow);
             }
+            AppCommand::NewSplitLeft => {
+                if let Some(window_id) = self.focused {
+                    self.new_split(window_id, Direction::Left);
+                }
+            }
             AppCommand::NewSplitRight => {
                 if let Some(window_id) = self.focused {
-                    self.new_split(window_id, SplitOrientation::Horizontal);
+                    self.new_split(window_id, Direction::Right);
+                }
+            }
+            AppCommand::NewSplitUp => {
+                if let Some(window_id) = self.focused {
+                    self.new_split(window_id, Direction::Up);
                 }
             }
             AppCommand::NewSplitDown => {
                 if let Some(window_id) = self.focused {
-                    self.new_split(window_id, SplitOrientation::Vertical);
+                    self.new_split(window_id, Direction::Down);
                 }
             }
             AppCommand::FocusDirection(direction) => {

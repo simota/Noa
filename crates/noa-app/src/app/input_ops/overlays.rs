@@ -48,6 +48,16 @@ fn palette_enter_decision(selected_command: Option<AppCommand>) -> PaletteEnterD
     }
 }
 
+fn palette_enter_decision_for_command(
+    selected_command: Option<AppCommand>,
+    command_enabled: impl FnOnce(AppCommand) -> bool,
+) -> PaletteEnterDecision {
+    match selected_command {
+        Some(command) if command_enabled(command) => palette_enter_decision(Some(command)),
+        Some(_) | None => palette_enter_decision(None),
+    }
+}
+
 impl App {
     pub(in crate::app) fn handle_command_palette_key(
         &mut self,
@@ -67,7 +77,9 @@ impl App {
                     .command_palette
                     .as_ref()
                     .and_then(|session| session.palette.selected_command());
-                let decision = palette_enter_decision(command);
+                let decision = palette_enter_decision_for_command(command, |command| {
+                    self.command_is_enabled(window_id, command)
+                });
                 if decision.close_palette {
                     self.command_palette = None;
                 }
@@ -195,6 +207,15 @@ mod palette_enter_decision_tests {
     #[test]
     fn no_selection_leaves_palette_open_and_dispatches_nothing() {
         let decision = palette_enter_decision(None);
+        assert!(!decision.close_palette);
+        assert!(decision.dispatch.is_none());
+    }
+
+    #[test]
+    fn disabled_selected_command_keeps_palette_open_and_dispatches_nothing() {
+        let decision =
+            palette_enter_decision_for_command(Some(AppCommand::NewSplitRight), |_| false);
+
         assert!(!decision.close_palette);
         assert!(decision.dispatch.is_none());
     }

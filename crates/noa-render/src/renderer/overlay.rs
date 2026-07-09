@@ -354,12 +354,14 @@ pub(super) fn append_command_palette_instances(
                     title,
                     hint,
                     match_positions,
+                    enabled,
                 } => {
                     let selected = offset + i == palette.selected;
                     let row_bg = if selected { selected_bg } else { surface_bg };
                     let text = palette_line(title, hint.as_deref(), inner);
                     let ncols = text.chars().count();
-                    let mut fg = vec![surface_fg; ncols];
+                    let base_fg = if *enabled { surface_fg } else { muted_fg };
+                    let mut fg = vec![base_fg; ncols];
                     let mut bold = vec![false; ncols];
                     // Dim the right-aligned keybind hint.
                     let hint_cols = hint.as_deref().map_or(0, |h| h.chars().count());
@@ -372,12 +374,14 @@ pub(super) fn append_command_palette_instances(
                     // Highlight the query-matched title chars: bold, plus the
                     // accent color on non-selected rows (on the selected row the
                     // accent bar already marks it, so keep the fg readable — C).
-                    for &pos in match_positions {
-                        let col = pos + 1; // +1 for the leading pad column
-                        if col < ncols {
-                            bold[col] = true;
-                            if !selected {
-                                fg[col] = accent;
+                    if *enabled {
+                        for &pos in match_positions {
+                            let col = pos + 1; // +1 for the leading pad column
+                            if col < ncols {
+                                bold[col] = true;
+                                if !selected {
+                                    fg[col] = accent;
+                                }
                             }
                         }
                     }

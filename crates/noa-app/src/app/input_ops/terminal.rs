@@ -188,7 +188,9 @@ impl App {
         else {
             return crate::io_thread::QueueInputResult::Disconnected;
         };
-        surface.pty_input_tx.queue(bytes.to_vec().into_boxed_slice())
+        surface
+            .pty_input_tx
+            .queue(bytes.to_vec().into_boxed_slice())
     }
 
     pub(in crate::app) fn resolve_pane_command_target(

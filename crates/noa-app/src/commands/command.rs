@@ -17,7 +17,9 @@ pub enum AppCommand {
     ScrollViewport(ViewportScroll),
     NewTab,
     NewWindow,
+    NewSplitLeft,
     NewSplitRight,
+    NewSplitUp,
     NewSplitDown,
     FocusDirection(Direction),
     ResizeSplit(Direction),
@@ -111,7 +113,9 @@ impl AppCommand {
     pub(crate) const SCROLL_NEXT_PROMPT_MENU_ID: &'static str = "noa.view.scroll-next-prompt";
     pub(crate) const NEW_TAB_MENU_ID: &'static str = "noa.file.new-tab";
     pub(crate) const NEW_WINDOW_MENU_ID: &'static str = "noa.file.new-window";
+    pub(crate) const NEW_SPLIT_LEFT_MENU_ID: &'static str = "noa.file.new-split-left";
     pub(crate) const NEW_SPLIT_RIGHT_MENU_ID: &'static str = "noa.file.new-split-right";
+    pub(crate) const NEW_SPLIT_UP_MENU_ID: &'static str = "noa.file.new-split-up";
     pub(crate) const NEW_SPLIT_DOWN_MENU_ID: &'static str = "noa.file.new-split-down";
     pub(crate) const FOCUS_SPLIT_LEFT_MENU_ID: &'static str = "noa.split.focus-left";
     pub(crate) const FOCUS_SPLIT_RIGHT_MENU_ID: &'static str = "noa.split.focus-right";
@@ -172,7 +176,9 @@ impl AppCommand {
             }
             AppCommand::NewTab => Self::NEW_TAB_MENU_ID,
             AppCommand::NewWindow => Self::NEW_WINDOW_MENU_ID,
+            AppCommand::NewSplitLeft => Self::NEW_SPLIT_LEFT_MENU_ID,
             AppCommand::NewSplitRight => Self::NEW_SPLIT_RIGHT_MENU_ID,
+            AppCommand::NewSplitUp => Self::NEW_SPLIT_UP_MENU_ID,
             AppCommand::NewSplitDown => Self::NEW_SPLIT_DOWN_MENU_ID,
             AppCommand::FocusDirection(Direction::Left) => Self::FOCUS_SPLIT_LEFT_MENU_ID,
             AppCommand::FocusDirection(Direction::Right) => Self::FOCUS_SPLIT_RIGHT_MENU_ID,
@@ -233,7 +239,9 @@ impl AppCommand {
             }
             Self::NEW_TAB_MENU_ID => Some(Self::NewTab),
             Self::NEW_WINDOW_MENU_ID => Some(Self::NewWindow),
+            Self::NEW_SPLIT_LEFT_MENU_ID => Some(Self::NewSplitLeft),
             Self::NEW_SPLIT_RIGHT_MENU_ID => Some(Self::NewSplitRight),
+            Self::NEW_SPLIT_UP_MENU_ID => Some(Self::NewSplitUp),
             Self::NEW_SPLIT_DOWN_MENU_ID => Some(Self::NewSplitDown),
             Self::FOCUS_SPLIT_LEFT_MENU_ID => Some(Self::FocusDirection(Direction::Left)),
             Self::FOCUS_SPLIT_RIGHT_MENU_ID => Some(Self::FocusDirection(Direction::Right)),
@@ -302,7 +310,9 @@ impl AppCommand {
             Self::ScrollViewport(ViewportScroll::NextPrompt) => "scroll.next-prompt",
             Self::NewTab => "tab.new",
             Self::NewWindow => "window.new",
+            Self::NewSplitLeft => "split.new-left",
             Self::NewSplitRight => "split.new-right",
+            Self::NewSplitUp => "split.new-up",
             Self::NewSplitDown => "split.new-down",
             Self::FocusDirection(Direction::Left) => "split.focus-left",
             Self::FocusDirection(Direction::Right) => "split.focus-right",
@@ -368,7 +378,9 @@ impl AppCommand {
             "scroll.next-prompt" => Some(Self::ScrollViewport(ViewportScroll::NextPrompt)),
             "tab.new" => Some(Self::NewTab),
             "window.new" => Some(Self::NewWindow),
+            "split.new-left" => Some(Self::NewSplitLeft),
             "split.new-right" => Some(Self::NewSplitRight),
+            "split.new-up" => Some(Self::NewSplitUp),
             "split.new-down" => Some(Self::NewSplitDown),
             "split.focus-left" => Some(Self::FocusDirection(Direction::Left)),
             "split.focus-right" => Some(Self::FocusDirection(Direction::Right)),

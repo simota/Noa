@@ -21,13 +21,15 @@ pub use commands::{ImeOp, focus_switch_plan, resolve_pane_command_target};
 pub use focus::{focus_in_direction, focus_in_direction_in_layout};
 pub use hit_test::{HitTarget, hit_test};
 pub use layout::compute_layout;
-pub use ops::{equalize, split_pane};
+pub use ops::{
+    can_add_pane_in_direction, contains_pane, equalize, split_pane, split_pane_in_direction,
+};
 pub use resize::{
     SplitResizeDrag, resize_split, resize_split_to_drag_point, split_resize_drag_target_at_point,
 };
 pub use types::{
-    DIVIDER_HIT_ZONE_PX, DIVIDER_WIDTH_PX, Direction, MIN_PANE_SIZE_PX, PaneId, Point, Rect,
-    SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitTree,
+    DIVIDER_HIT_ZONE_PX, DIVIDER_WIDTH_PX, Direction, MAX_PANES_PER_AXIS, MAX_PANES_PER_TAB,
+    MIN_PANE_SIZE_PX, PaneId, Point, Rect, SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitTree,
 };
 pub use zoom::{
     ZoomCloseOutcome, ZoomDecision, close_pane_with_zoom, zoom_decision, zoom_resize_targets,

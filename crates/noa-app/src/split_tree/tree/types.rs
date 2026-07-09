@@ -10,6 +10,12 @@ pub const SPLIT_RESIZE_STEP_PX: u32 = 10;
 /// Minimum pane extent along a split axis.
 pub const MIN_PANE_SIZE_PX: u32 = 1;
 
+/// Maximum live panes in one tab.
+pub const MAX_PANES_PER_TAB: usize = 9;
+
+/// Maximum panes in one row or column when adding panes along an axis.
+pub const MAX_PANES_PER_AXIS: usize = 3;
+
 pub(super) const DEFAULT_SPLIT_RATIO: f32 = 0.5;
 
 /// Stable identity for a pane inside one tab.
@@ -82,6 +88,19 @@ pub enum Direction {
     Right,
     Up,
     Down,
+}
+
+impl Direction {
+    pub const fn split_orientation(self) -> SplitOrientation {
+        match self {
+            Self::Left | Self::Right => SplitOrientation::Horizontal,
+            Self::Up | Self::Down => SplitOrientation::Vertical,
+        }
+    }
+
+    pub const fn places_new_split_before_existing(self) -> bool {
+        matches!(self, Self::Left | Self::Up)
+    }
 }
 
 /// Recursive split-pane tree.

@@ -38,6 +38,7 @@ pub enum PaletteRow {
         title: String,
         hint: Option<String>,
         match_positions: Vec<usize>,
+        enabled: bool,
     },
 }
 

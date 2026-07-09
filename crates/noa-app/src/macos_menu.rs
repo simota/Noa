@@ -13,20 +13,24 @@ const AUTO_APPROVE_MENU_LABEL_OFF: &str = "Auto Approve: Off";
 const AUTO_APPROVE_MENU_LABEL_ON: &str = "Auto Approve: On";
 
 const SPLIT_CONTEXT_MENU_ITEMS: &[(AppCommand, &str)] = &[
-    (AppCommand::NewSplitRight, "Split Right"),
-    (AppCommand::NewSplitDown, "Split Down"),
+    (AppCommand::NewSplitLeft, "Add Pane Left"),
+    (AppCommand::NewSplitRight, "Add Pane Right"),
+    (AppCommand::NewSplitUp, "Add Pane Up"),
+    (AppCommand::NewSplitDown, "Add Pane Down"),
     (AppCommand::EqualizeSplits, "Equalize Splits"),
     (AppCommand::ToggleSplitZoom, "Toggle Split Zoom"),
     (AppCommand::ToggleAutoApprove, AUTO_APPROVE_MENU_LABEL_OFF),
     (AppCommand::SetTabTitle, "Set Tab Title\u{2026}"),
 ];
 
-const SPLIT_RIGHT_ITEM: usize = 0;
-const SPLIT_DOWN_ITEM: usize = 1;
-const EQUALIZE_SPLITS_ITEM: usize = 2;
-const TOGGLE_SPLIT_ZOOM_ITEM: usize = 3;
-const TOGGLE_AUTO_APPROVE_ITEM: usize = 4;
-const SET_TAB_TITLE_ITEM: usize = 5;
+const SPLIT_LEFT_ITEM: usize = 0;
+const SPLIT_RIGHT_ITEM: usize = 1;
+const SPLIT_UP_ITEM: usize = 2;
+const SPLIT_DOWN_ITEM: usize = 3;
+const EQUALIZE_SPLITS_ITEM: usize = 4;
+const TOGGLE_SPLIT_ZOOM_ITEM: usize = 5;
+const TOGGLE_AUTO_APPROVE_ITEM: usize = 6;
+const SET_TAB_TITLE_ITEM: usize = 7;
 
 fn auto_approve_menu_label(enabled: bool) -> &'static str {
     if enabled {
@@ -40,11 +44,36 @@ fn auto_approve_menu_label(enabled: bool) -> &'static str {
 pub(crate) struct MacosMenu {
     _menu: Menu,
     split_context_menu: Menu,
+    split_context_splits: SplitContextSplitItems,
     /// The "Secure Keyboard Entry" item, retained so its checkmark can track
     /// the toggle state (see [`MacosMenu::set_secure_keyboard_entry_checked`]).
     secure_keyboard_entry: CheckMenuItem,
     auto_approve: CheckMenuItem,
     split_context_auto_approve: CheckMenuItem,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SplitContextMenuEnabled {
+    pub(crate) left: bool,
+    pub(crate) right: bool,
+    pub(crate) up: bool,
+    pub(crate) down: bool,
+}
+
+struct SplitContextSplitItems {
+    left: MenuItem,
+    right: MenuItem,
+    up: MenuItem,
+    down: MenuItem,
+}
+
+impl SplitContextSplitItems {
+    fn set_enabled(&self, enabled: SplitContextMenuEnabled) {
+        self.left.set_enabled(enabled.left);
+        self.right.set_enabled(enabled.right);
+        self.up.set_enabled(enabled.up);
+        self.down.set_enabled(enabled.down);
+    }
 }
 
 impl MacosMenu {
@@ -363,8 +392,9 @@ impl MacosMenu {
 
         Ok(Self {
             _menu: menu,
-            split_context_auto_approve: split_context_menu.1,
             split_context_menu: split_context_menu.0,
+            split_context_splits: split_context_menu.1,
+            split_context_auto_approve: split_context_menu.2,
             secure_keyboard_entry,
             auto_approve,
         })
@@ -391,8 +421,10 @@ impl MacosMenu {
         window: &Window,
         position: Option<PhysicalPosition<f64>>,
         auto_approve_enabled: bool,
+        split_enabled: SplitContextMenuEnabled,
     ) -> anyhow::Result<()> {
         self.set_auto_approve_checked(auto_approve_enabled);
+        self.split_context_splits.set_enabled(split_enabled);
         let raw_handle = window.window_handle()?.as_raw();
         let ns_view = match raw_handle {
             RawWindowHandle::AppKit(handle) => handle.ns_view.as_ptr(),
@@ -416,8 +448,10 @@ impl MacosMenu {
     }
 }
 
-fn build_split_context_menu() -> anyhow::Result<(Menu, CheckMenuItem)> {
+fn build_split_context_menu() -> anyhow::Result<(Menu, SplitContextSplitItems, CheckMenuItem)> {
+    let split_left = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_LEFT_ITEM]);
     let split_right = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_RIGHT_ITEM]);
+    let split_up = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_UP_ITEM]);
     let split_down = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_DOWN_ITEM]);
     let separator = PredefinedMenuItem::separator();
     let equalize = context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[EQUALIZE_SPLITS_ITEM]);
@@ -437,7 +471,9 @@ fn build_split_context_menu() -> anyhow::Result<(Menu, CheckMenuItem)> {
     let menu = Menu::with_id_and_items(
         "noa.menu.split-context",
         &[
+            &split_left,
             &split_right,
+            &split_up,
             &split_down,
             &separator,
             &equalize,
@@ -447,7 +483,16 @@ fn build_split_context_menu() -> anyhow::Result<(Menu, CheckMenuItem)> {
             &set_tab_title,
         ],
     )?;
-    Ok((menu, auto_approve))
+    Ok((
+        menu,
+        SplitContextSplitItems {
+            left: split_left,
+            right: split_right,
+            up: split_up,
+            down: split_down,
+        },
+        auto_approve,
+    ))
 }
 
 fn context_menu_item((command, label): (AppCommand, &'static str)) -> MenuItem {
@@ -488,8 +533,10 @@ mod tests {
         assert_eq!(
             SPLIT_CONTEXT_MENU_ITEMS,
             &[
-                (AppCommand::NewSplitRight, "Split Right"),
-                (AppCommand::NewSplitDown, "Split Down"),
+                (AppCommand::NewSplitLeft, "Add Pane Left"),
+                (AppCommand::NewSplitRight, "Add Pane Right"),
+                (AppCommand::NewSplitUp, "Add Pane Up"),
+                (AppCommand::NewSplitDown, "Add Pane Down"),
                 (AppCommand::EqualizeSplits, "Equalize Splits"),
                 (AppCommand::ToggleSplitZoom, "Toggle Split Zoom"),
                 (AppCommand::ToggleAutoApprove, "Auto Approve: Off"),
@@ -499,6 +546,28 @@ mod tests {
         for (command, _) in SPLIT_CONTEXT_MENU_ITEMS {
             assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(*command));
         }
+    }
+
+    #[test]
+    fn split_context_split_items_apply_enabled_state() {
+        let items = SplitContextSplitItems {
+            left: context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_LEFT_ITEM]),
+            right: context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_RIGHT_ITEM]),
+            up: context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_UP_ITEM]),
+            down: context_menu_item(SPLIT_CONTEXT_MENU_ITEMS[SPLIT_DOWN_ITEM]),
+        };
+
+        items.set_enabled(SplitContextMenuEnabled {
+            left: false,
+            right: true,
+            up: false,
+            down: true,
+        });
+
+        assert!(!items.left.is_enabled());
+        assert!(items.right.is_enabled());
+        assert!(!items.up.is_enabled());
+        assert!(items.down.is_enabled());
     }
 
     #[test]

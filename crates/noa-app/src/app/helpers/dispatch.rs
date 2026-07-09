@@ -160,7 +160,9 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::FontSize(_)
         | AppCommand::Search(_)
         | AppCommand::ScrollViewport(_)
+        | AppCommand::NewSplitLeft
         | AppCommand::NewSplitRight
+        | AppCommand::NewSplitUp
         | AppCommand::NewSplitDown
         | AppCommand::FocusDirection(_)
         | AppCommand::ResizeSplit(_)
@@ -193,6 +195,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
 pub(crate) fn command_palette_snapshot(
     keybinds: &KeybindEngine,
     palette: &CommandPalette,
+    mut command_enabled: impl FnMut(AppCommand) -> bool,
 ) -> CommandPaletteSnapshot {
     use command_palette::PaletteItem;
     let rows = palette
@@ -208,6 +211,7 @@ pub(crate) fn command_palette_snapshot(
                 hint: command_palette::command_palette_keybind(keybinds, *command)
                     .map(|chord| command_palette::keybind_symbols(&chord)),
                 match_positions: positions.clone(),
+                enabled: command_enabled(*command),
             },
         })
         .collect();
@@ -240,7 +244,9 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ScrollViewport(_)
         | AppCommand::NewTab
         | AppCommand::NewWindow
+        | AppCommand::NewSplitLeft
         | AppCommand::NewSplitRight
+        | AppCommand::NewSplitUp
         | AppCommand::NewSplitDown
         | AppCommand::FocusDirection(_)
         | AppCommand::ResizeSplit(_)

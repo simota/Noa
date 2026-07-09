@@ -50,8 +50,10 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ScrollViewport(ViewportScroll::NextPrompt) => "Jump to Next Prompt",
         AppCommand::NewTab => "New Tab",
         AppCommand::NewWindow => "New Window",
-        AppCommand::NewSplitRight => "Split Right",
-        AppCommand::NewSplitDown => "Split Down",
+        AppCommand::NewSplitLeft => "Add Pane Left",
+        AppCommand::NewSplitRight => "Add Pane Right",
+        AppCommand::NewSplitUp => "Add Pane Up",
+        AppCommand::NewSplitDown => "Add Pane Down",
         AppCommand::FocusDirection(Direction::Left) => "Focus Split Left",
         AppCommand::FocusDirection(Direction::Right) => "Focus Split Right",
         AppCommand::FocusDirection(Direction::Up) => "Focus Split Up",
@@ -128,7 +130,9 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
         AppCommand::NewTab,
         AppCommand::NewWindow,
+        AppCommand::NewSplitLeft,
         AppCommand::NewSplitRight,
+        AppCommand::NewSplitUp,
         AppCommand::NewSplitDown,
         AppCommand::FocusDirection(Direction::Left),
         AppCommand::FocusDirection(Direction::Right),
@@ -305,7 +309,9 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::FontSize(_) => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
         AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
-        AppCommand::NewSplitRight
+        AppCommand::NewSplitLeft
+        | AppCommand::NewSplitRight
+        | AppCommand::NewSplitUp
         | AppCommand::NewSplitDown
         | AppCommand::FocusDirection(_)
         | AppCommand::ResizeSplit(_)
@@ -585,7 +591,10 @@ mod tests {
             AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
             AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
             AppCommand::NewTab,
+            AppCommand::NewWindow,
+            AppCommand::NewSplitLeft,
             AppCommand::NewSplitRight,
+            AppCommand::NewSplitUp,
             AppCommand::NewSplitDown,
             AppCommand::FocusDirection(Direction::Left),
             AppCommand::FocusDirection(Direction::Right),
@@ -654,33 +663,38 @@ mod tests {
         assert_eq!(entries.first(), Some(&AppCommand::About));
         assert_eq!(entries.last(), Some(&AppCommand::Quit));
         let new_tab = entries.iter().position(|c| *c == AppCommand::NewTab);
+        let split_left = entries.iter().position(|c| *c == AppCommand::NewSplitLeft);
         let split_right = entries.iter().position(|c| *c == AppCommand::NewSplitRight);
-        assert!(new_tab < split_right, "NewTab precedes NewSplitRight");
+        assert!(new_tab < split_left, "NewTab precedes NewSplitLeft");
+        assert!(
+            split_left < split_right,
+            "Add Pane Left precedes Add Pane Right"
+        );
     }
 
     #[test]
     fn matches_are_case_insensitive_non_contiguous_subsequences() {
-        let commands: Vec<AppCommand> = command_palette_matches("splt")
+        let commands: Vec<AppCommand> = command_palette_matches("add")
             .into_iter()
             .map(|m| m.command)
             .collect();
-        // "splt" keeps only titles carrying s..p..l..t in order.
+        // "add" keeps the pane-addition commands in declaration order.
+        assert!(commands.contains(&AppCommand::NewSplitLeft));
         assert!(commands.contains(&AppCommand::NewSplitRight));
+        assert!(commands.contains(&AppCommand::NewSplitUp));
         assert!(commands.contains(&AppCommand::NewSplitDown));
-        assert!(commands.contains(&AppCommand::ToggleSplitZoom));
         assert!(!commands.contains(&AppCommand::Copy));
 
-        // Equal-scoring prefix matches keep registry order (Split Right before
-        // Split Down); the scattered "Toggle Split Zoom" ranks below both.
+        // Equal-scoring prefix matches keep registry order across pane-addition commands.
+        let left = commands.iter().position(|c| *c == AppCommand::NewSplitLeft);
         let right = commands
             .iter()
             .position(|c| *c == AppCommand::NewSplitRight);
+        let up = commands.iter().position(|c| *c == AppCommand::NewSplitUp);
         let down = commands.iter().position(|c| *c == AppCommand::NewSplitDown);
-        let zoom = commands
-            .iter()
-            .position(|c| *c == AppCommand::ToggleSplitZoom);
-        assert!(right < down);
-        assert!(down < zoom);
+        assert!(left < right);
+        assert!(right < up);
+        assert!(up < down);
 
         // Case-insensitive: "QUIT" matches "Quit Noa".
         let quit: Vec<AppCommand> = command_palette_matches("QUIT")
@@ -798,11 +812,11 @@ mod tests {
     fn fuzzy_match_reports_positions_and_prefix_beats_scatter() {
         // B/C: a prefix, contiguous match outranks a scattered subsequence, and
         // the reported positions are the matched char indices.
-        let (prefix_score, positions) = fuzzy_match("split", "Split Right").unwrap();
-        assert_eq!(positions, vec![0, 1, 2, 3, 4]);
+        let (prefix_score, positions) = fuzzy_match("add", "Add Pane Right").unwrap();
+        assert_eq!(positions, vec![0, 1, 2]);
         let (scatter_score, _) = fuzzy_match("split", "Toggle Split Zoom").unwrap();
         assert!(prefix_score > scatter_score);
-        assert!(fuzzy_match("zzz", "Split Right").is_none());
+        assert!(fuzzy_match("zzz", "Add Pane Right").is_none());
         // Empty query: matches with no highlight.
         assert_eq!(fuzzy_match("", "anything"), Some((0, vec![])));
     }

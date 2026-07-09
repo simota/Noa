@@ -116,15 +116,13 @@ impl App {
 
         let surface = if self.gpu.is_none() {
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-            let surface = instance
-                .create_surface(window.clone())
-                .unwrap_or_else(|e| {
-                    gpu_init_fatal(
-                        &mut self.session_persister,
-                        "could not create the window surface",
-                        e,
-                    )
-                });
+            let surface = instance.create_surface(window.clone()).unwrap_or_else(|e| {
+                gpu_init_fatal(
+                    &mut self.session_persister,
+                    "could not create the window surface",
+                    e,
+                )
+            });
             let adapter =
                 pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::default(),
@@ -466,8 +464,7 @@ impl App {
         let terminal = Arc::new(Mutex::new(terminal));
         let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
         let (pty_input_tx, pty_input_rx) = crate::io_thread::input_channel();
-        let (auto_approve_feedback_tx, auto_approve_feedback_rx) =
-            crossbeam_channel::unbounded();
+        let (auto_approve_feedback_tx, auto_approve_feedback_rx) = crossbeam_channel::unbounded();
         let auto_approve_guards = Arc::new(Mutex::new(
             crate::auto_approve::AutoApproveInputGuards::default(),
         ));
@@ -946,8 +943,18 @@ impl App {
             .windows
             .get(&window_id)
             .is_some_and(|state| state.auto_approve_enabled.load(Ordering::Relaxed));
+        let split_enabled = self
+            .windows
+            .contains_key(&window_id)
+            .then(|| crate::macos_menu::SplitContextMenuEnabled {
+                left: self.can_create_split_in_window(window_id, Direction::Left),
+                right: self.can_create_split_in_window(window_id, Direction::Right),
+                up: self.can_create_split_in_window(window_id, Direction::Up),
+                down: self.can_create_split_in_window(window_id, Direction::Down),
+            })
+            .unwrap_or_default();
         if let Err(error) =
-            menu.show_split_context_menu(window.as_ref(), None, auto_approve_enabled)
+            menu.show_split_context_menu(window.as_ref(), None, auto_approve_enabled, split_enabled)
         {
             log::debug!("failed to show macOS split context menu: {error:#}");
         }

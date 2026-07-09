@@ -4,18 +4,22 @@
 use super::*;
 
 impl App {
-    pub(super) fn new_split(&mut self, window_id: WindowId, orientation: SplitOrientation) {
+    pub(super) fn new_split(&mut self, window_id: WindowId, direction: Direction) {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
         let Some((focused_pane, new_pane, focused_rect, auto_approve_enabled)) =
             self.windows.get_mut(&window_id).and_then(|state| {
                 let focused_rect = state.focused_surface()?.rect;
-                if !can_split_rect(focused_rect, orientation) {
+                if !can_create_split_in_direction(state.pane_count(), focused_rect, direction)
+                    || !can_add_pane_in_direction(&state.split_tree, state.focused_pane, direction)
+                {
                     return None;
                 }
-                let new_pane = PaneId::new(state.next_pane_id);
-                state.next_pane_id = state.next_pane_id.saturating_add(1);
+                let new_pane = mint_available_pane_id(&mut state.next_pane_id, |pane| {
+                    state.surfaces.contains_key(&pane)
+                        || split_tree::contains_pane(&state.split_tree, pane)
+                });
                 Some((
                     state.focused_pane,
                     new_pane,
@@ -50,7 +54,7 @@ impl App {
                 surface.shutdown();
                 return;
             };
-            if !split_pane(&mut state.split_tree, focused_pane, new_pane, orientation) {
+            if !split_pane_in_direction(&mut state.split_tree, focused_pane, new_pane, direction) {
                 let mut surface = new_surface;
                 surface.shutdown();
                 return;

@@ -18,7 +18,10 @@ impl App {
             .as_ref()
             .filter(|session| session.window_id == window_id)
             .map(|session| {
-                let mut snapshot = command_palette_snapshot(&self.keybinds, &session.palette);
+                let mut snapshot =
+                    command_palette_snapshot(&self.keybinds, &session.palette, |command| {
+                        self.command_is_enabled(window_id, command)
+                    });
                 // Live IME composition appends to the displayed query
                 // (display only — it filters entries once committed).
                 snapshot
@@ -94,6 +97,10 @@ impl App {
         let visible_panes = visible_pane_ids(&state.split_tree, state.zoomed);
         for pane_id in visible_panes {
             let Some(surface) = state.surfaces.get_mut(&pane_id) else {
+                log::error!(
+                    "split tree references missing pane surface: pane={}",
+                    pane_id.get()
+                );
                 continue;
             };
             let mut term = surface.terminal.lock();

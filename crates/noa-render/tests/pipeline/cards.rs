@@ -222,11 +222,13 @@ fn command_palette_card_composites_without_validation_error() {
                 title: "Split Right".to_string(),
                 hint: Some("\u{2318}D".to_string()),
                 match_positions: vec![0, 1],
+                enabled: true,
             },
             noa_render::PaletteRow::Entry {
                 title: "Split Down".to_string(),
                 hint: None,
                 match_positions: vec![0, 1],
+                enabled: true,
             },
         ],
         selected: 1,

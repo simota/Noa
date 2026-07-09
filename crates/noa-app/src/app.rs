@@ -60,10 +60,11 @@ use crate::session_overview::{
 };
 use crate::session_store::{SessionCardId, SessionStore, SessionWindowId};
 use crate::split_tree::{
-    self, Direction, HitTarget, ImeOp, MIN_PANE_SIZE_PX, PaneId, Rect as PaneRectApp,
-    SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitResizeDrag, SplitTree, equalize,
-    focus_in_direction, focus_switch_plan, hit_test, resize_split, resize_split_to_drag_point,
-    split_pane, split_resize_drag_target_at_point, zoom_resize_targets, zoom_toggle,
+    self, Direction, HitTarget, ImeOp, MAX_PANES_PER_TAB, MIN_PANE_SIZE_PX, PaneId,
+    Rect as PaneRectApp, SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitResizeDrag, SplitTree,
+    can_add_pane_in_direction, equalize, focus_in_direction, focus_switch_plan, hit_test,
+    resize_split, resize_split_to_drag_point, split_pane_in_direction,
+    split_resize_drag_target_at_point, zoom_resize_targets, zoom_toggle,
 };
 use crate::{AppCommand, ViewportScroll};
 

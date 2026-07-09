@@ -567,6 +567,7 @@ pub(in crate::macos_overlay) fn rebuild_palette(
                     title,
                     hint,
                     match_positions,
+                    enabled,
                 } => {
                     let selected = offset + i == snap.selected;
                     if selected {
@@ -585,8 +586,16 @@ pub(in crate::macos_overlay) fn rebuild_palette(
                         NSPoint::new(CARD_PAD_H, from_top(card_h, y_top + 5.0, 17.0)),
                         NSSize::new(card_w - CARD_PAD_H * 2.0 - hint_w, 17.0),
                     );
-                    let title_label =
-                        make_match_label(title, match_positions, 13.0, fg, accent, title_frame);
+                    let title_fg = if *enabled { fg } else { muted };
+                    let match_accent = if *enabled { accent } else { muted };
+                    let title_label = make_match_label(
+                        title,
+                        match_positions,
+                        13.0,
+                        title_fg,
+                        match_accent,
+                        title_frame,
+                    );
                     if !title_label.is_null() {
                         let _: () = msg_send![effect, addSubview: title_label];
                     }

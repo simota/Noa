@@ -48,6 +48,72 @@ fn ease_out_cubic_is_clamped_and_anchored() {
 }
 
 #[test]
+fn split_creation_gate_rejects_maximum_existing_panes_and_too_small_rects() {
+    let splittable = PaneRectApp::new(0, 0, 3, 3);
+    assert!(can_create_split(
+        MAX_PANES_PER_TAB - 1,
+        splittable,
+        SplitOrientation::Horizontal
+    ));
+    assert!(can_create_split(
+        MAX_PANES_PER_TAB - 1,
+        splittable,
+        SplitOrientation::Vertical
+    ));
+
+    assert!(!can_create_split(
+        MAX_PANES_PER_TAB,
+        splittable,
+        SplitOrientation::Horizontal
+    ));
+    assert!(!can_create_split(
+        MAX_PANES_PER_TAB - 1,
+        PaneRectApp::new(0, 0, 2, 3),
+        SplitOrientation::Horizontal
+    ));
+    assert!(!can_create_split(
+        MAX_PANES_PER_TAB - 1,
+        PaneRectApp::new(0, 0, 3, 2),
+        SplitOrientation::Vertical
+    ));
+}
+
+#[test]
+fn split_creation_direction_gate_matches_axis_requirements() {
+    assert!(can_create_split_in_direction(
+        MAX_PANES_PER_TAB - 1,
+        PaneRectApp::new(0, 0, 3, 2),
+        Direction::Left
+    ));
+    assert!(can_create_split_in_direction(
+        MAX_PANES_PER_TAB - 1,
+        PaneRectApp::new(0, 0, 3, 2),
+        Direction::Right
+    ));
+    assert!(!can_create_split_in_direction(
+        MAX_PANES_PER_TAB - 1,
+        PaneRectApp::new(0, 0, 3, 2),
+        Direction::Up
+    ));
+    assert!(!can_create_split_in_direction(
+        MAX_PANES_PER_TAB,
+        PaneRectApp::new(0, 0, 3, 3),
+        Direction::Left
+    ));
+}
+
+#[test]
+fn mint_available_pane_id_skips_ids_already_used_by_tree_or_surface() {
+    let mut next = 2;
+    let used = [PaneId::new(2), PaneId::new(3)];
+
+    let pane = mint_available_pane_id(&mut next, |candidate| used.contains(&candidate));
+
+    assert_eq!(pane, PaneId::new(4));
+    assert_eq!(next, 5);
+}
+
+#[test]
 fn quick_terminal_progress_is_linear_and_clamped() {
     let duration = Duration::from_millis(200);
     assert!((quick_terminal_progress(Duration::ZERO, duration)).abs() < 0.001);
@@ -1111,7 +1177,9 @@ fn overview_command_scope_resolves_terminal_commands_to_no_ops() {
         AppCommand::Search(SearchAction::FindPrevious),
         AppCommand::Search(SearchAction::Clear),
         AppCommand::ScrollViewport(ViewportScroll::PageDown),
+        AppCommand::NewSplitLeft,
         AppCommand::NewSplitRight,
+        AppCommand::NewSplitUp,
         AppCommand::NewSplitDown,
         AppCommand::FocusDirection(Direction::Left),
         AppCommand::ResizeSplit(Direction::Right),
@@ -1243,7 +1311,7 @@ fn command_palette_snapshot_reflects_query_selection_and_keybinds() {
     let keybinds = KeybindEngine::default();
     let palette = CommandPalette::open();
 
-    let snapshot = command_palette_snapshot(&keybinds, &palette);
+    let snapshot = command_palette_snapshot(&keybinds, &palette, |_| true);
     assert_eq!(snapshot.query, "");
     assert_eq!(
         snapshot.total_entries,
@@ -1266,15 +1334,36 @@ fn command_palette_snapshot_reflects_query_selection_and_keybinds() {
         title: "About Noa".to_string(),
         hint: None,
         match_positions: Vec::new(),
+        enabled: true,
     }));
     assert!(
         snapshot.rows.contains(&PaletteRow::Entry {
             title: "Copy to Clipboard".to_string(),
             hint: Some("\u{2318}C".to_string()),
             match_positions: Vec::new(),
+            enabled: true,
         }),
         "keybind hints are resolved from the engine and rendered as symbols"
     );
+}
+
+#[test]
+fn command_palette_snapshot_marks_unavailable_commands_disabled() {
+    use noa_render::PaletteRow;
+    let keybinds = KeybindEngine::default();
+    let mut palette = CommandPalette::open();
+    palette.push_text("add pane right");
+
+    let snapshot = command_palette_snapshot(&keybinds, &palette, |command| {
+        command != AppCommand::NewSplitRight
+    });
+
+    assert!(snapshot.rows.contains(&PaletteRow::Entry {
+        title: "Add Pane Right".to_string(),
+        hint: Some("\u{2318}D".to_string()),
+        match_positions: (0..14).collect(),
+        enabled: false,
+    }));
 }
 
 // tab-title AC-TTL-5: the override masks any shell title; without one the

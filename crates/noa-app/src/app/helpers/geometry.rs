@@ -72,6 +72,35 @@ pub(crate) fn can_split_rect(rect: PaneRectApp, orientation: SplitOrientation) -
     }
 }
 
+pub(crate) fn can_create_split(
+    pane_count: usize,
+    rect: PaneRectApp,
+    orientation: SplitOrientation,
+) -> bool {
+    pane_count < MAX_PANES_PER_TAB && can_split_rect(rect, orientation)
+}
+
+pub(crate) fn can_create_split_in_direction(
+    pane_count: usize,
+    rect: PaneRectApp,
+    direction: Direction,
+) -> bool {
+    can_create_split(pane_count, rect, direction.split_orientation())
+}
+
+pub(crate) fn mint_available_pane_id(
+    next: &mut u64,
+    mut is_used: impl FnMut(PaneId) -> bool,
+) -> PaneId {
+    loop {
+        let pane = PaneId::new(*next);
+        *next = next.checked_add(1).unwrap_or(1);
+        if !is_used(pane) {
+            return pane;
+        }
+    }
+}
+
 pub(crate) fn grid_size_for_pane_rect(
     rect: PaneRectApp,
     metrics: noa_font::Metrics,

@@ -217,29 +217,42 @@ impl App {
         // (`spawn_pane_surface` borrows `&self`). A rough grid/rect is fine —
         // `relayout_and_resize_window` fixes every pane's geometry below.
         let placeholder_grid = GridSize::new(self.config.cols, self.config.rows);
-        let auto_approve_enabled = self
+        let Some(auto_approve_enabled) = self
             .windows
             .get(&window_id)
-            .map(|state| state.auto_approve_enabled.clone());
+            .map(|state| state.auto_approve_enabled.clone())
+        else {
+            return;
+        };
         let mut spawned = Vec::new();
+        let mut spawn_failed = false;
         for leaf in &leaves {
             if leaf.is_root {
                 continue;
             }
-            let Some(auto_approve_enabled) = auto_approve_enabled.clone() else {
-                continue;
-            };
             match self.spawn_pane_surface(
                 window_id,
                 leaf.pane,
                 placeholder_grid,
                 placeholder_rect,
                 leaf.cwd.clone(),
-                auto_approve_enabled,
+                auto_approve_enabled.clone(),
             ) {
                 Ok(surface) => spawned.push((leaf.pane, surface)),
-                Err(err) => log::warn!("session restore: failed to spawn split pane: {err}"),
+                Err(err) => {
+                    spawn_failed = true;
+                    log::warn!("session restore: failed to spawn split pane: {err}");
+                }
             }
+        }
+        if spawn_failed {
+            for (_, mut surface) in spawned {
+                surface.shutdown();
+            }
+            log::warn!(
+                "session restore: skipped split topology because one or more panes failed to spawn"
+            );
+            return;
         }
 
         let focused_pane = leaves

@@ -1,8 +1,8 @@
 //! Native macOS menu construction.
 
 use muda::{
-    accelerator::{Accelerator, Code, Modifiers},
     CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
+    accelerator::{Accelerator, Code, Modifiers},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::{dpi::PhysicalPosition, event_loop::EventLoopProxy, window::Window};
@@ -135,6 +135,18 @@ impl MacosMenu {
             true,
             Some(cmd_accelerator(Code::KeyN)),
         );
+        let file_export_scrollback = MenuItem::with_id(
+            AppCommand::ExportScrollback.menu_id(),
+            "Export Scrollback to File",
+            true,
+            None,
+        );
+        let file_pipe_scrollback_to_pager = MenuItem::with_id(
+            AppCommand::PipeScrollbackToPager.menu_id(),
+            "Pipe Scrollback to Pager",
+            true,
+            None,
+        );
         let file_close_tab = MenuItem::with_id(
             AppCommand::CloseTab.menu_id(),
             "Close Tab",
@@ -154,6 +166,9 @@ impl MacosMenu {
             &[
                 &file_new_tab,
                 &file_new_window,
+                &PredefinedMenuItem::separator(),
+                &file_export_scrollback,
+                &file_pipe_scrollback_to_pager,
                 &PredefinedMenuItem::separator(),
                 &file_close_tab,
                 &file_close_window,

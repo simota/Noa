@@ -12,6 +12,8 @@ fn stable_menu_ids_map_to_commands() {
         AppCommand::Preferences,
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::ExportScrollback,
+        AppCommand::PipeScrollbackToPager,
         AppCommand::Terminal(TerminalAction::Clear),
         AppCommand::Terminal(TerminalAction::ClearScrollback),
         AppCommand::Terminal(TerminalAction::SelectAll),
@@ -428,6 +430,8 @@ fn action_names_map_to_commands() {
     for command in [
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::ExportScrollback,
+        AppCommand::PipeScrollbackToPager,
         AppCommand::Terminal(TerminalAction::Clear),
         AppCommand::Terminal(TerminalAction::ClearScrollback),
         AppCommand::Terminal(TerminalAction::SelectAll),

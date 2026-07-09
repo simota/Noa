@@ -23,6 +23,49 @@ impl App {
         }
     }
 
+    pub(in crate::app) fn export_scrollback_to_temp_file(&self) {
+        let Some(text) = self.focused_scrollback_text(AppCommand::ExportScrollback) else {
+            return;
+        };
+        match crate::app_actions::write_scrollback_temp_file(&text) {
+            Ok(path) => log::info!("exported scrollback to {}", path.display()),
+            Err(err) => log::warn!("failed to export scrollback: {err}"),
+        }
+    }
+
+    pub(in crate::app) fn pipe_scrollback_to_pager(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(text) = self.focused_scrollback_text(AppCommand::PipeScrollbackToPager) else {
+            return;
+        };
+        let path = match crate::app_actions::write_scrollback_temp_file(&text) {
+            Ok(path) => path,
+            Err(err) => {
+                log::warn!("failed to export scrollback for pager: {err}");
+                return;
+            }
+        };
+        let command = crate::app_actions::pager_shell_command(&path);
+        match self.spawn_tab(event_loop, SpawnTarget::CurrentWindow) {
+            Ok(window_id) => self.write_pty_bytes(window_id, command.as_bytes()),
+            Err(err) => log::warn!("failed to open pager tab for scrollback: {err:#}"),
+        }
+    }
+
+    fn focused_scrollback_text(&self, command: AppCommand) -> Option<String> {
+        let Some((window_id, pane_id)) = self.resolve_pane_command_target(command) else {
+            return None;
+        };
+        let text = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .and_then(|surface| surface.terminal.lock().scrollback_text());
+        if text.is_none() {
+            log::debug!("focused terminal has no scrollback text to export");
+        }
+        text
+    }
+
     pub(in crate::app) fn handle_font_size_action(&mut self, action: FontSizeAction) {
         let Some((window_id, _pane_id)) =
             self.resolve_pane_command_target(AppCommand::FontSize(action))

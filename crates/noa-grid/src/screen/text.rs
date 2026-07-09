@@ -273,6 +273,44 @@ impl Screen {
         if text.is_empty() { None } else { Some(text) }
     }
 
+    /// Plain text for the active screen's retained history followed by the
+    /// live grid, using the same cell-to-text rules as selection copy.
+    pub fn scrollback_text(&mut self) -> Option<String> {
+        if self.cols == 0 || !self.has_selectable_text() {
+            return None;
+        }
+
+        let mut text = String::new();
+        let mut previous_wrapped = false;
+        let mut first_row = true;
+        let scrollback_len = self.scrollback_len();
+        self.for_each_scrollback_row(0..scrollback_len, |_, row| {
+            Self::push_full_row_text(row, &mut text, &mut previous_wrapped, &mut first_row);
+        });
+        for row in &self.grid {
+            Self::push_full_row_text(row, &mut text, &mut previous_wrapped, &mut first_row);
+        }
+
+        if text.is_empty() { None } else { Some(text) }
+    }
+
+    fn push_full_row_text(
+        row: &Row,
+        text: &mut String,
+        previous_wrapped: &mut bool,
+        first_row: &mut bool,
+    ) {
+        let Some(row_end) = row.cells.len().checked_sub(1) else {
+            return;
+        };
+        if !*first_row && !*previous_wrapped {
+            text.push('\n');
+        }
+        Self::push_selected_row_text(row, 0, row_end, text);
+        *previous_wrapped = row.wrapped;
+        *first_row = false;
+    }
+
     pub(super) fn push_selected_row_text(
         row: &Row,
         start_x: usize,

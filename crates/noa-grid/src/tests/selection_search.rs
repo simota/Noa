@@ -12,6 +12,22 @@ fn select_all_primary_selects_scrollback_and_live_grid() {
 }
 
 #[test]
+fn scrollback_text_extracts_scrollback_and_live_grid_without_selecting() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+
+    assert_eq!(t.scrollback_text().as_deref(), Some("A\nB\nC\nD"));
+    assert_eq!(t.active().selection, None);
+}
+
+#[test]
+fn scrollback_text_uses_selection_copy_wrapping_rules() {
+    let mut t = run_size(5, 2, b"ABCDE\r\nFG");
+    t.primary.grid[0].wrapped = true;
+
+    assert_eq!(t.scrollback_text().as_deref(), Some("ABCDEFG"));
+}
+
+#[test]
 fn select_all_alternate_selects_visible_grid_only() {
     let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD\x1b[?1049hX\r\nY\r\nZ");
     let primary_scrollback_len = t.primary.scrollback_len();

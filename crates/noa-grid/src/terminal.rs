@@ -251,6 +251,10 @@ impl Terminal {
         self.active().selected_text()
     }
 
+    pub fn scrollback_text(&mut self) -> Option<String> {
+        self.active_mut().scrollback_text()
+    }
+
     pub fn set_search_query(&mut self, query: impl Into<String>) {
         self.active_mut().set_search_query(query);
     }

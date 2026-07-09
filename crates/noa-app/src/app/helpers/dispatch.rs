@@ -156,6 +156,8 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
     match command {
         AppCommand::Copy
         | AppCommand::Paste
+        | AppCommand::ExportScrollback
+        | AppCommand::PipeScrollbackToPager
         | AppCommand::Terminal(_)
         | AppCommand::FontSize(_)
         | AppCommand::Search(_)
@@ -242,6 +244,8 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::OpenThemeSettings
         | AppCommand::Copy
         | AppCommand::Paste
+        | AppCommand::ExportScrollback
+        | AppCommand::PipeScrollbackToPager
         | AppCommand::Terminal(_)
         | AppCommand::FontSize(_)
         | AppCommand::Search(_)

@@ -119,6 +119,8 @@ impl App {
             AppCommand::PrevTab => self.select_previous_tab(),
             AppCommand::Copy => self.copy_selection_to_clipboard(),
             AppCommand::Paste => self.paste_clipboard_to_pty(),
+            AppCommand::ExportScrollback => self.export_scrollback_to_temp_file(),
+            AppCommand::PipeScrollbackToPager => self.pipe_scrollback_to_pager(event_loop),
             AppCommand::Terminal(action) => self.handle_terminal_action(action),
             AppCommand::FontSize(action) => self.handle_font_size_action(action),
             AppCommand::Search(action) => self.handle_search_action(action),

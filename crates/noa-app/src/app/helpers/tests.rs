@@ -1121,6 +1121,8 @@ fn command_target_resolution_uses_focused_tab_only_for_terminal_commands() {
     for command in [
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::ExportScrollback,
+        AppCommand::PipeScrollbackToPager,
         AppCommand::Terminal(TerminalAction::Clear),
         AppCommand::Terminal(TerminalAction::ClearScrollback),
         AppCommand::Terminal(TerminalAction::SelectAll),
@@ -1167,6 +1169,8 @@ fn overview_command_scope_resolves_terminal_commands_to_no_ops() {
     for command in [
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::ExportScrollback,
+        AppCommand::PipeScrollbackToPager,
         AppCommand::Terminal(TerminalAction::Clear),
         AppCommand::Terminal(TerminalAction::ClearScrollback),
         AppCommand::Terminal(TerminalAction::SelectAll),

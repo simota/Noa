@@ -888,6 +888,8 @@ fn pane_command_target_resolution_uses_focused_pane_for_terminal_commands() {
     for command in [
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::ExportScrollback,
+        AppCommand::PipeScrollbackToPager,
         AppCommand::Terminal(TerminalAction::Clear),
         AppCommand::Terminal(TerminalAction::ClearScrollback),
         AppCommand::Terminal(TerminalAction::SelectAll),

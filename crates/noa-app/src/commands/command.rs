@@ -12,6 +12,8 @@ pub enum AppCommand {
     ReloadConfig,
     Copy,
     Paste,
+    ExportScrollback,
+    PipeScrollbackToPager,
     Terminal(TerminalAction),
     FontSize(FontSizeAction),
     Search(SearchAction),
@@ -95,6 +97,9 @@ impl AppCommand {
     pub(crate) const PREFERENCES_MENU_ID: &'static str = "noa.app.preferences";
     pub(crate) const COPY_MENU_ID: &'static str = "noa.edit.copy";
     pub(crate) const PASTE_MENU_ID: &'static str = "noa.edit.paste";
+    pub(crate) const EXPORT_SCROLLBACK_MENU_ID: &'static str = "noa.file.export-scrollback";
+    pub(crate) const PIPE_SCROLLBACK_TO_PAGER_MENU_ID: &'static str =
+        "noa.file.pipe-scrollback-to-pager";
     pub(crate) const TERMINAL_SELECT_ALL_MENU_ID: &'static str = "noa.edit.select-all";
     pub(crate) const SEARCH_FIND_MENU_ID: &'static str = "noa.edit.find";
     pub(crate) const SEARCH_FIND_NEXT_MENU_ID: &'static str = "noa.edit.find-next";
@@ -154,6 +159,8 @@ impl AppCommand {
             AppCommand::ReloadConfig => "",
             AppCommand::Copy => Self::COPY_MENU_ID,
             AppCommand::Paste => Self::PASTE_MENU_ID,
+            AppCommand::ExportScrollback => Self::EXPORT_SCROLLBACK_MENU_ID,
+            AppCommand::PipeScrollbackToPager => Self::PIPE_SCROLLBACK_TO_PAGER_MENU_ID,
             AppCommand::Terminal(TerminalAction::Clear) => Self::TERMINAL_CLEAR_MENU_ID,
             AppCommand::Terminal(TerminalAction::ClearScrollback) => {
                 Self::TERMINAL_CLEAR_SCROLLBACK_MENU_ID
@@ -218,6 +225,8 @@ impl AppCommand {
             Self::PREFERENCES_MENU_ID => Some(Self::Preferences),
             Self::COPY_MENU_ID => Some(Self::Copy),
             Self::PASTE_MENU_ID => Some(Self::Paste),
+            Self::EXPORT_SCROLLBACK_MENU_ID => Some(Self::ExportScrollback),
+            Self::PIPE_SCROLLBACK_TO_PAGER_MENU_ID => Some(Self::PipeScrollbackToPager),
             Self::TERMINAL_CLEAR_MENU_ID => Some(Self::Terminal(TerminalAction::Clear)),
             Self::TERMINAL_CLEAR_SCROLLBACK_MENU_ID => {
                 Some(Self::Terminal(TerminalAction::ClearScrollback))
@@ -297,6 +306,8 @@ impl AppCommand {
             Self::ReloadConfig => "config.reload",
             Self::Copy => "copy",
             Self::Paste => "paste",
+            Self::ExportScrollback => "terminal.export-scrollback",
+            Self::PipeScrollbackToPager => "terminal.pipe-scrollback-to-pager",
             Self::Terminal(TerminalAction::Clear) => "terminal.clear",
             Self::Terminal(TerminalAction::ClearScrollback) => "terminal.clear-scrollback",
             Self::Terminal(TerminalAction::SelectAll) => "terminal.select-all",
@@ -367,6 +378,8 @@ impl AppCommand {
             "config.reload" => Some(Self::ReloadConfig),
             "copy" => Some(Self::Copy),
             "paste" => Some(Self::Paste),
+            "terminal.export-scrollback" => Some(Self::ExportScrollback),
+            "terminal.pipe-scrollback-to-pager" => Some(Self::PipeScrollbackToPager),
             "terminal.clear" => Some(Self::Terminal(TerminalAction::Clear)),
             "terminal.clear-scrollback" => Some(Self::Terminal(TerminalAction::ClearScrollback)),
             "terminal.select-all" => Some(Self::Terminal(TerminalAction::SelectAll)),

@@ -4,7 +4,10 @@
 //! the config-file bootstrap live in one testable place; the pure config-file
 //! template helper is unit-tested without touching AppKit or the filesystem.
 
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The seed written to a missing config file the first time the user opens
 /// Preferences, so the editor always has something to show (an empty file
@@ -193,6 +196,81 @@ fn ensure_config_file(path: &Path) {
     }
 }
 
+pub(crate) fn write_scrollback_temp_file(text: &str) -> io::Result<PathBuf> {
+    write_scrollback_temp_file_in_dir(text, &std::env::temp_dir())
+}
+
+fn write_scrollback_temp_file_in_dir(text: &str, dir: &Path) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for attempt in 0..100 {
+        let path = dir.join(format!(
+            "noa-scrollback-{}-{stamp}-{attempt}.txt",
+            std::process::id()
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(text.as_bytes())?;
+                return Ok(path);
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique scrollback export file",
+    ))
+}
+
+pub(crate) fn pager_shell_command(path: &Path) -> String {
+    pager_shell_command_from_parts(path, pager_command())
+}
+
+fn pager_shell_command_from_parts(path: &Path, pager: PagerCommand) -> String {
+    let mut parts = Vec::with_capacity(1 + pager.args.len() + 2);
+    parts.push(crate::clipboard::shell_escape(&pager.program));
+    parts.extend(
+        pager
+            .args
+            .iter()
+            .map(|arg| crate::clipboard::shell_escape(arg)),
+    );
+    parts.push("<".to_string());
+    parts.push(crate::clipboard::shell_escape(&path.to_string_lossy()));
+    format!("{}\n", parts.join(" "))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PagerCommand {
+    program: String,
+    args: Vec<String>,
+}
+
+fn pager_command() -> PagerCommand {
+    pager_command_from_env_value(std::env::var("PAGER").ok().as_deref())
+}
+
+fn pager_command_from_env_value(value: Option<&str>) -> PagerCommand {
+    let mut parts = value
+        .unwrap_or("")
+        .split_whitespace()
+        .filter(|part| !part.is_empty());
+    let Some(program) = parts.next() else {
+        return PagerCommand {
+            program: "less".to_string(),
+            args: vec!["-R".to_string()],
+        };
+    };
+    PagerCommand {
+        program: program.to_string(),
+        args: parts.map(str::to_string).collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +334,60 @@ mod tests {
         let existing = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let candidates = vec![PathBuf::from("/nonexistent/noa.icns"), existing.clone()];
         assert_eq!(icon_path_from_candidates(&candidates), Some(existing));
+    }
+
+    #[test]
+    fn scrollback_temp_file_is_written_with_requested_text() {
+        let dir = std::env::temp_dir().join(format!(
+            "noa-scrollback-export-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let path = write_scrollback_temp_file_in_dir("one\ntwo\n", &dir).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pager_command_defaults_to_less_r_and_splits_simple_env_values() {
+        assert_eq!(
+            pager_command_from_env_value(None),
+            PagerCommand {
+                program: "less".to_string(),
+                args: vec!["-R".to_string()],
+            }
+        );
+        assert_eq!(
+            pager_command_from_env_value(Some("more -d")),
+            PagerCommand {
+                program: "more".to_string(),
+                args: vec!["-d".to_string()],
+            }
+        );
+        assert_eq!(
+            pager_command_from_env_value(Some("   ")),
+            PagerCommand {
+                program: "less".to_string(),
+                args: vec!["-R".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn pager_shell_command_pipes_temp_file_to_pager() {
+        let command = pager_shell_command_from_parts(
+            Path::new("/tmp/noa scrollback's.txt"),
+            PagerCommand {
+                program: "less".to_string(),
+                args: vec!["-R".to_string()],
+            },
+        );
+
+        assert_eq!(command, "less -R < '/tmp/noa scrollback'\\''s.txt'\n");
     }
 }

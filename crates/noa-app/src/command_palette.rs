@@ -31,6 +31,8 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ReloadConfig => "Reload Configuration",
         AppCommand::Copy => "Copy to Clipboard",
         AppCommand::Paste => "Paste from Clipboard",
+        AppCommand::ExportScrollback => "Export Scrollback to File",
+        AppCommand::PipeScrollbackToPager => "Pipe Scrollback to Pager",
         AppCommand::Terminal(TerminalAction::Clear) => "Clear Screen",
         AppCommand::Terminal(TerminalAction::ClearScrollback) => "Clear Scrollback",
         AppCommand::Terminal(TerminalAction::SelectAll) => "Select All",
@@ -113,6 +115,8 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ReloadConfig,
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::ExportScrollback,
+        AppCommand::PipeScrollbackToPager,
         AppCommand::Terminal(TerminalAction::Clear),
         AppCommand::Terminal(TerminalAction::ClearScrollback),
         AppCommand::Terminal(TerminalAction::SelectAll),
@@ -309,6 +313,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         AppCommand::Copy | AppCommand::Paste | AppCommand::Terminal(TerminalAction::SelectAll) => {
             CommandCategory::Clipboard
         }
+        AppCommand::ExportScrollback | AppCommand::PipeScrollbackToPager => CommandCategory::Scroll,
         AppCommand::Terminal(TerminalAction::Clear)
         | AppCommand::Terminal(TerminalAction::ClearScrollback)
         | AppCommand::FontSize(_)
@@ -579,6 +584,8 @@ mod tests {
             AppCommand::ReloadConfig,
             AppCommand::Copy,
             AppCommand::Paste,
+            AppCommand::ExportScrollback,
+            AppCommand::PipeScrollbackToPager,
             AppCommand::Terminal(TerminalAction::Clear),
             AppCommand::Terminal(TerminalAction::ClearScrollback),
             AppCommand::Terminal(TerminalAction::SelectAll),

@@ -22,6 +22,8 @@ pub fn resolve_pane_command_target(
     match command {
         AppCommand::Copy
         | AppCommand::Paste
+        | AppCommand::ExportScrollback
+        | AppCommand::PipeScrollbackToPager
         | AppCommand::Terminal(_)
         | AppCommand::FontSize(_)
         | AppCommand::Search(_)

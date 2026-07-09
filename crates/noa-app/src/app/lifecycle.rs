@@ -950,8 +950,11 @@ impl App {
     pub(super) fn install_macos_menu_if_needed(&mut self) {
         if self.macos_menu.is_none() {
             self.macos_menu = Some(
-                crate::macos_menu::MacosMenu::install(self.proxy.clone())
-                    .expect("failed to install macOS app menu"),
+                crate::macos_menu::MacosMenu::install(
+                    self.proxy.clone(),
+                    self.config.quick_terminal_hotkey.as_deref(),
+                )
+                .expect("failed to install macOS app menu"),
             );
         }
         if let Some(window_id) = self.focused {

@@ -53,6 +53,7 @@ pub(crate) struct MacosMenu {
     auto_approve: CheckMenuItem,
     split_context_auto_approve: CheckMenuItem,
     split_context_send_selection: MenuItem,
+    quick_terminal: MenuItem,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -82,7 +83,10 @@ impl SplitContextSplitItems {
 }
 
 impl MacosMenu {
-    pub(crate) fn install(proxy: EventLoopProxy<UserEvent>) -> anyhow::Result<Self> {
+    pub(crate) fn install(
+        proxy: EventLoopProxy<UserEvent>,
+        quick_terminal_hotkey: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let menu = Menu::new();
         let split_context_menu = build_split_context_menu()?;
         let app_menu = Submenu::with_id("noa.menu.app", "Noa", true);
@@ -104,6 +108,12 @@ impl MacosMenu {
             true,
             false,
             None,
+        );
+        let quick_terminal = MenuItem::with_id(
+            AppCommand::ToggleQuickTerminal.menu_id(),
+            "Quick Terminal",
+            true,
+            quick_terminal_accelerator(quick_terminal_hotkey),
         );
         let auto_approve = CheckMenuItem::with_id(
             AppCommand::ToggleAutoApprove.menu_id(),
@@ -318,15 +328,7 @@ impl MacosMenu {
                     true,
                     Some(cmd_shift_accelerator(Code::KeyP)),
                 ),
-                // No accelerator: the quick terminal is driven by the global
-                // `quick-terminal-hotkey` (a system-wide Carbon hotkey), which
-                // muda's app-local accelerators can't represent.
-                &MenuItem::with_id(
-                    AppCommand::ToggleQuickTerminal.menu_id(),
-                    "Quick Terminal",
-                    true,
-                    None,
-                ),
+                &quick_terminal,
                 &MenuItem::with_id(
                     AppCommand::ToggleSidebar.menu_id(),
                     "Sidebar",
@@ -425,6 +427,7 @@ impl MacosMenu {
             split_context_send_selection: split_context_menu.3,
             secure_keyboard_entry,
             auto_approve,
+            quick_terminal,
         })
     }
 
@@ -442,6 +445,18 @@ impl MacosMenu {
         self.auto_approve.set_text(label);
         self.split_context_auto_approve.set_checked(checked);
         self.split_context_auto_approve.set_text(label);
+    }
+
+    /// Reflect the configured system-wide Quick Terminal hotkey in the native
+    /// menu's shortcut column. The actual registration stays in the Carbon /
+    /// CGEventTap hotkey path.
+    pub(crate) fn set_quick_terminal_hotkey(&self, hotkey: Option<&str>) {
+        if let Err(err) = self
+            .quick_terminal
+            .set_accelerator(quick_terminal_accelerator(hotkey))
+        {
+            log::warn!("failed to update Quick Terminal menu accelerator: {err}");
+        }
     }
 
     pub(crate) fn show_split_context_menu(
@@ -555,6 +570,98 @@ fn disabled_item(id: &'static str, text: &'static str) -> MenuItem {
     MenuItem::with_id(id, text, false, None)
 }
 
+fn quick_terminal_accelerator(hotkey: Option<&str>) -> Option<Accelerator> {
+    hotkey.and_then(accelerator_from_hotkey)
+}
+
+fn accelerator_from_hotkey(hotkey: &str) -> Option<Accelerator> {
+    let chord = crate::macos_hotkey::parse_hotkey(hotkey)?;
+    Some(Accelerator::new(
+        Some(accelerator_modifiers(chord.modifiers)),
+        accelerator_code(chord.keycode)?,
+    ))
+}
+
+const CARBON_CMD_KEY: u32 = 0x0100;
+const CARBON_SHIFT_KEY: u32 = 0x0200;
+const CARBON_OPTION_KEY: u32 = 0x0800;
+const CARBON_CONTROL_KEY: u32 = 0x1000;
+
+fn accelerator_modifiers(carbon_modifiers: u32) -> Modifiers {
+    let mut modifiers = Modifiers::empty();
+    if carbon_modifiers & CARBON_CMD_KEY != 0 {
+        modifiers |= Modifiers::SUPER;
+    }
+    if carbon_modifiers & CARBON_SHIFT_KEY != 0 {
+        modifiers |= Modifiers::SHIFT;
+    }
+    if carbon_modifiers & CARBON_OPTION_KEY != 0 {
+        modifiers |= Modifiers::ALT;
+    }
+    if carbon_modifiers & CARBON_CONTROL_KEY != 0 {
+        modifiers |= Modifiers::CONTROL;
+    }
+    modifiers
+}
+
+fn accelerator_code(carbon_keycode: u32) -> Option<Code> {
+    Some(match carbon_keycode {
+        0x00 => Code::KeyA,
+        0x01 => Code::KeyS,
+        0x02 => Code::KeyD,
+        0x03 => Code::KeyF,
+        0x04 => Code::KeyH,
+        0x05 => Code::KeyG,
+        0x06 => Code::KeyZ,
+        0x07 => Code::KeyX,
+        0x08 => Code::KeyC,
+        0x09 => Code::KeyV,
+        0x0B => Code::KeyB,
+        0x0C => Code::KeyQ,
+        0x0D => Code::KeyW,
+        0x0E => Code::KeyE,
+        0x0F => Code::KeyR,
+        0x10 => Code::KeyY,
+        0x11 => Code::KeyT,
+        0x12 => Code::Digit1,
+        0x13 => Code::Digit2,
+        0x14 => Code::Digit3,
+        0x15 => Code::Digit4,
+        0x16 => Code::Digit6,
+        0x17 => Code::Digit5,
+        0x18 => Code::Equal,
+        0x19 => Code::Digit9,
+        0x1A => Code::Digit7,
+        0x1B => Code::Minus,
+        0x1C => Code::Digit8,
+        0x1D => Code::Digit0,
+        0x1E => Code::BracketRight,
+        0x1F => Code::KeyO,
+        0x20 => Code::KeyU,
+        0x21 => Code::BracketLeft,
+        0x22 => Code::KeyI,
+        0x23 => Code::KeyP,
+        0x25 => Code::KeyL,
+        0x26 => Code::KeyJ,
+        0x28 => Code::KeyK,
+        0x29 => Code::Semicolon,
+        0x2A => Code::Backslash,
+        0x5D => Code::IntlYen,
+        0x5E => Code::IntlRo,
+        0x2B => Code::Comma,
+        0x2C => Code::Slash,
+        0x2D => Code::KeyN,
+        0x2E => Code::KeyM,
+        0x2F => Code::Period,
+        0x32 => Code::Backquote,
+        0x24 => Code::Enter,
+        0x30 => Code::Tab,
+        0x31 => Code::Space,
+        0x35 => Code::Escape,
+        _ => return None,
+    })
+}
+
 fn cmd_accelerator(code: Code) -> Accelerator {
     Accelerator::new(Some(Modifiers::SUPER), code)
 }
@@ -638,5 +745,35 @@ mod tests {
         assert_eq!(label, "Toggle Full Screen");
         assert!(enabled);
         assert_eq!(accelerator, cmd_ctrl_accelerator(Code::KeyF));
+    }
+
+    #[test]
+    fn quick_terminal_hotkey_maps_to_menu_accelerator() {
+        let accelerator = accelerator_from_hotkey("cmd+shift+backslash").expect("accelerator");
+        assert_eq!(accelerator.modifiers(), Modifiers::SUPER | Modifiers::SHIFT);
+        assert_eq!(accelerator.key(), Code::Backslash);
+
+        let accelerator = accelerator_from_hotkey("cmd+shift+yen").expect("accelerator");
+        assert_eq!(accelerator.modifiers(), Modifiers::SUPER | Modifiers::SHIFT);
+        assert_eq!(accelerator.key(), Code::IntlYen);
+
+        let accelerator = accelerator_from_hotkey("cmd+shift+intl-ro").expect("accelerator");
+        assert_eq!(accelerator.modifiers(), Modifiers::SUPER | Modifiers::SHIFT);
+        assert_eq!(accelerator.key(), Code::IntlRo);
+
+        let accelerator = accelerator_from_hotkey("ctrl+alt+shift+t").expect("accelerator");
+        assert_eq!(
+            accelerator.modifiers(),
+            Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT
+        );
+        assert_eq!(accelerator.key(), Code::KeyT);
+    }
+
+    #[test]
+    fn quick_terminal_hotkey_accelerator_ignores_disabled_or_invalid_chords() {
+        assert!(quick_terminal_accelerator(None).is_none());
+        assert!(quick_terminal_accelerator(Some("")).is_none());
+        assert!(quick_terminal_accelerator(Some("cmd+unknown-key")).is_none());
+        assert!(quick_terminal_accelerator(Some("cmd+t+x")).is_none());
     }
 }

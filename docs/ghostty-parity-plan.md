@@ -151,7 +151,7 @@ GUI 非依存 → ユニットテストで完結。
 
 | キー | 型 | 既定 | 意味 |
 |---|---|---|---|
-| `quick-terminal-hotkey` | 文字列 | `ctrl+grave` | トグル用グローバルホットキー。`ctrl+grave` 形式（アプリ内キーバインドと同表記）。`none` / `off` / 空値ならホットキー登録を行わない。 |
+| `quick-terminal-hotkey` | 文字列 | `cmd+grave` | トグル用グローバルホットキー。`cmd+grave` 形式（アプリ内キーバインドと同表記）。`grave` / `backtick` / `` ` `` は同義。`backslash` は ANSI `\` と JIS `¥` / `ろ` の両方を登録する。`none` / `off` / 空値ならホットキー登録を行わない。 |
 | `quick-terminal-size` | 分数 or `%` | `0.4` | 画面高に対するパネル高の割合。`0.4` または `40%`。`0.1..=1.0` にクランプ。 |
 | `quick-terminal-autohide` | bool | `true` | フォーカスを失ったら自動的に隠す。 |
 
@@ -165,9 +165,9 @@ GUI 非依存 → ユニットテストで完結。
 - 既定サイズは 40%（Ghostty 既定は 25%）。
 
 **実機確認手順**（GUI 起動が必要なため未自動化）:
-1. `~/.config/noa/config` に `quick-terminal-hotkey = ctrl+grave` を記述して `cargo run -p noa`。
-2. 任意のアプリ最前面で `Ctrl+\`` → 上端からスライドインし、フォーカスが移る。
-3. 再度 `Ctrl+\`` またはフォーカスを外す（autohide）→ スライドアウトして隠れる。
+1. `~/.config/noa/config` に `quick-terminal-hotkey = cmd+grave` を記述して `cargo run -p noa`。
+2. 任意のアプリ最前面で `Cmd+\`` → 上端からスライドインし、フォーカスが移る。
+3. 再度同じホットキーまたはフォーカスを外す（autohide）→ スライドアウトして隠れる。
 4. 別 Space / フルスクリーンアプリ上でも出現することを確認。
 5. ドロップダウン内でシェルを `exit` → ウィンドウが破棄され、次回トグルで再生成される。
 

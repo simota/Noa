@@ -132,6 +132,19 @@ pub(super) fn quick_terminal_should_autohide_on_focus_loss(
     visible && focused_this_reveal
 }
 
+pub(super) fn quick_terminal_anchor_window_id<W: Copy>(
+    os_focused: Option<W>,
+    focused: Option<W>,
+    window_order: &[W],
+    mut is_regular_window: impl FnMut(W) -> bool,
+) -> Option<W> {
+    os_focused
+        .into_iter()
+        .chain(focused)
+        .chain(window_order.iter().rev().copied())
+        .find(|id| is_regular_window(*id))
+}
+
 /// Quick terminal (drop-down) support.
 impl App {
     pub(super) fn is_quick_terminal_window(&self, window_id: WindowId) -> bool {
@@ -198,14 +211,27 @@ impl App {
         &self,
         event_loop: &ActiveEventLoop,
     ) -> Option<(i32, i32, u32, u32)> {
-        let monitor = event_loop.primary_monitor().or_else(|| {
-            self.focused_window()
-                .and_then(|window| window.current_monitor())
-        })?;
+        let monitor = self
+            .quick_terminal_anchor_window()
+            .and_then(|window| window.current_monitor())
+            .or_else(|| event_loop.primary_monitor())?;
         let position = monitor.position();
         let size = monitor.size();
         let height = quick_terminal_height(size.height, self.config.quick_terminal_size);
         Some((position.x, position.y, size.width, height))
+    }
+
+    fn quick_terminal_anchor_window(&self) -> Option<Arc<Window>> {
+        quick_terminal_anchor_window_id(
+            self.os_focused,
+            self.focused,
+            &self.window_order,
+            |window_id| {
+                self.windows.contains_key(&window_id) && !self.is_quick_terminal_window(window_id)
+            },
+        )
+        .and_then(|window_id| self.windows.get(&window_id))
+        .map(|state| state.window.clone())
     }
 
     fn start_quick_terminal_show(&mut self, event_loop: &ActiveEventLoop) {

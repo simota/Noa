@@ -199,6 +199,20 @@ fn quick_terminal_autohide_waits_for_focus_in_current_reveal() {
     assert!(quick_terminal_should_autohide_on_focus_loss(true, true));
 }
 
+#[test]
+fn quick_terminal_anchor_prefers_os_focused_regular_window() {
+    let anchor = quick_terminal_anchor_window_id(Some(2), Some(1), &[1, 2, 3], |id| id != 3);
+
+    assert_eq!(anchor, Some(2));
+}
+
+#[test]
+fn quick_terminal_anchor_skips_quick_terminal_and_falls_back_to_recent_regular_window() {
+    let anchor = quick_terminal_anchor_window_id(Some(3), Some(3), &[1, 2], |id| id != 3);
+
+    assert_eq!(anchor, Some(2));
+}
+
 fn metrics(cell_w: f32, cell_h: f32) -> noa_font::Metrics {
     noa_font::Metrics {
         cell_w,

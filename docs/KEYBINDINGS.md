@@ -108,10 +108,10 @@ Carbon `RegisterEventHotKey` によるシステム全域ホットキー。アプ
 
 | config キー | 既定値 | アクション |
 |---|---|---|
-| `quick-terminal-hotkey` | `ctrl+grave`(⌃`) | Quick Terminal のトグル |
+| `quick-terminal-hotkey` | `cmd+grave`(⌘`) | Quick Terminal のトグル |
 | `sidebar-hotkey` | なし(無効) | サイドバーのトグル |
 
-構文は `+` 区切りのチョード(例: `cmd+shift+t`)。修飾キー別名: `cmd`/`command`/`super`/`meta`、`ctrl`/`control`、`alt`/`option`、`shift`。キーは単一文字のほか `plus` / `arrowup` 等 / `pageup` / `pagedown` / `home` / `end` / `enter`(`return`)を受け付ける。
+構文は `+` 区切りのチョード(例: `cmd+shift+t`)。修飾キー別名: `cmd`/`command`/`super`/`meta`、`ctrl`/`control`、`alt`/`option`、`shift`。キーは単一文字のほか `plus` / `arrowup` 等 / `pageup` / `pagedown` / `home` / `end` / `enter`(`return`)を受け付ける。`grave` / `backtick` / `` ` `` は同義。`backslash` は ANSI `\` と JIS `¥` / `ろ` の両方を登録する。
 
 ## オーバーレイ内のキー操作
 

@@ -5,8 +5,8 @@
 //! a listen-only `CGEventTap` fallback observes the same chord globally.
 //!
 //! The chord string (`cmd+grave`) is parsed by [`parse_hotkey`] into a Carbon
-//! virtual keycode + modifier mask; that parse is pure and unit-tested. The
-//! FFI registration ([`GlobalHotKey::register`]) is macOS-only and a no-op
+//! virtual keycode + modifier mask; that parse is pure and unit-tested. The FFI
+//! registration ([`GlobalHotKey::register`]) is macOS-only and a no-op
 //! elsewhere.
 
 use winit::event_loop::EventLoopProxy;
@@ -20,6 +20,10 @@ pub(crate) struct HotkeyChord {
     pub modifiers: u32,
 }
 
+const ANSI_BACKSLASH_KEY: u32 = 0x2A;
+const JIS_YEN_KEY: u32 = 0x5D;
+const JIS_UNDERSCORE_KEY: u32 = 0x5E;
+
 // Carbon modifier masks (`Events.h`).
 const CMD_KEY: u32 = 0x0100;
 const SHIFT_KEY: u32 = 0x0200;
@@ -32,8 +36,12 @@ const CONTROL_KEY: u32 = 0x1000;
 /// `shift`). Returns `None` for an empty chord, a missing/unknown key, or a
 /// chord naming more than one non-modifier key.
 pub(crate) fn parse_hotkey(spec: &str) -> Option<HotkeyChord> {
+    parse_hotkey_variants(spec)?.into_iter().next()
+}
+
+fn parse_hotkey_variants(spec: &str) -> Option<Vec<HotkeyChord>> {
     let mut modifiers = 0u32;
-    let mut keycode = None;
+    let mut keycodes = None;
     for token in spec
         .split('+')
         .map(str::trim)
@@ -46,14 +54,33 @@ pub(crate) fn parse_hotkey(spec: &str) -> Option<HotkeyChord> {
             "alt" | "option" => modifiers |= OPTION_KEY,
             "shift" => modifiers |= SHIFT_KEY,
             key => {
-                if keycode.is_some() {
+                if keycodes.is_some() {
                     return None;
                 }
-                keycode = Some(carbon_keycode(key)?);
+                keycodes = Some(carbon_keycodes(key)?);
             }
         }
     }
-    keycode.map(|keycode| HotkeyChord { keycode, modifiers })
+    Some(
+        keycodes?
+            .into_iter()
+            .map(|keycode| HotkeyChord { keycode, modifiers })
+            .collect(),
+    )
+}
+
+fn carbon_keycodes(key: &str) -> Option<Vec<u32>> {
+    match key {
+        // On JIS keyboards the visible `\` may be kVK_JIS_Yen or
+        // kVK_JIS_Underscore (`ろ`), not kVK_ANSI_Backslash. Register all
+        // physical candidates so the same config works across layouts.
+        "\\" | "backslash" => Some(vec![ANSI_BACKSLASH_KEY, JIS_YEN_KEY, JIS_UNDERSCORE_KEY]),
+        "yen" | "jis-yen" | "jis_yen" | "intl-yen" | "intl_yen" => Some(vec![JIS_YEN_KEY]),
+        "underscore" | "jis-underscore" | "jis_underscore" | "intl-ro" | "intl_ro" => {
+            Some(vec![JIS_UNDERSCORE_KEY])
+        }
+        key => Some(vec![carbon_keycode(key)?]),
+    }
 }
 
 /// Map a key token to its Carbon virtual keycode (`kVK_ANSI_*` / `kVK_*`).
@@ -100,7 +127,7 @@ fn carbon_keycode(key: &str) -> Option<u32> {
         "j" => 0x26,
         "k" => 0x28,
         ";" | "semicolon" => 0x29,
-        "\\" | "backslash" => 0x2A,
+        "\\" | "backslash" => ANSI_BACKSLASH_KEY,
         "," | "comma" => 0x2B,
         "/" | "slash" => 0x2C,
         "n" => 0x2D,
@@ -121,7 +148,7 @@ fn carbon_keycode(key: &str) -> Option<u32> {
 pub(crate) struct GlobalHotKey {
     // Held only for its `Drop` (unregister); never read.
     #[cfg(target_os = "macos")]
-    _registration: macos::Registration,
+    _registrations: Vec<macos::Registration>,
     #[cfg(not(target_os = "macos"))]
     _unused: (),
 }
@@ -138,11 +165,11 @@ pub(crate) enum HotkeyAction {
 
 impl HotkeyAction {
     /// The Carbon hotkey id and the `UserEvent` this action forwards.
-    fn id(self) -> u32 {
-        match self {
-            HotkeyAction::QuickTerminal => 1,
-            HotkeyAction::Sidebar => 2,
-        }
+    fn id(self, slot: u32) -> u32 {
+        (match self {
+            HotkeyAction::QuickTerminal => 1_000,
+            HotkeyAction::Sidebar => 2_000,
+        }) + slot
     }
 
     fn event(self) -> UserEvent {
@@ -164,16 +191,23 @@ impl GlobalHotKey {
         proxy: EventLoopProxy<UserEvent>,
         action: HotkeyAction,
     ) -> Option<Self> {
-        let chord = parse_hotkey(spec)?;
+        let chords = parse_hotkey_variants(spec)?;
         #[cfg(target_os = "macos")]
         {
-            macos::Registration::install(chord, proxy, action).map(|registration| Self {
-                _registration: registration,
+            let registrations: Vec<_> = chords
+                .into_iter()
+                .enumerate()
+                .filter_map(|(slot, chord)| {
+                    macos::Registration::install(chord, proxy.clone(), action, slot as u32)
+                })
+                .collect();
+            (!registrations.is_empty()).then_some(Self {
+                _registrations: registrations,
             })
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (chord, proxy, action);
+            let _ = (chords, proxy, action);
             None
         }
     }
@@ -220,8 +254,10 @@ mod macos {
         id: u32,
     }
 
+    const EVENT_NOT_HANDLED_ERR: OsStatus = -9874;
     const K_EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
-    const K_EVENT_HOTKEY_PRESSED: u32 = 6;
+    // CarbonEvents.h: kEventHotKeyPressed = 5, kEventHotKeyReleased = 6.
+    const K_EVENT_HOTKEY_PRESSED: u32 = 5;
     // FourCharCode signature identifying this app's hotkeys.
     const HOTKEY_SIGNATURE: u32 = u32::from_be_bytes(*b"noaq");
     // `kEventParamDirectObject` / `typeEventHotKeyID` — the event parameter
@@ -348,9 +384,18 @@ mod macos {
             )
         };
         if status == 0 && fired.signature == HOTKEY_SIGNATURE && fired.id == data.id {
+            log::debug!("Carbon global hotkey fired id={}", fired.id);
             let _ = data.proxy.send_event(data.event.clone());
+            return 0;
         }
-        0
+
+        log::debug!(
+            "Carbon global hotkey event ignored: status={status} signature={:#x} id={} expected_id={}",
+            fired.signature,
+            fired.id,
+            data.id
+        );
+        EVENT_NOT_HANDLED_ERR
     }
 
     pub(super) struct Registration {
@@ -367,8 +412,11 @@ mod macos {
             chord: HotkeyChord,
             proxy: EventLoopProxy<UserEvent>,
             action: HotkeyAction,
+            slot: u32,
         ) -> Option<Self> {
-            if let Some(registration) = CarbonRegistration::install(chord, proxy.clone(), action) {
+            if let Some(registration) =
+                CarbonRegistration::install(chord, proxy.clone(), action, slot)
+            {
                 return Some(Self {
                     _inner: RegistrationInner::Carbon {
                         _registration: registration,
@@ -398,8 +446,9 @@ mod macos {
             chord: HotkeyChord,
             proxy: EventLoopProxy<UserEvent>,
             action: HotkeyAction,
+            slot: u32,
         ) -> Option<Self> {
-            let hotkey_id = action.id();
+            let hotkey_id = action.id(slot);
             let data = Box::into_raw(Box::new(HandlerData {
                 proxy,
                 event: action.event(),
@@ -446,11 +495,20 @@ mod macos {
                 if status != 0 {
                     RemoveEventHandler(handler_ref);
                     drop(Box::from_raw(data));
-                    log::warn!("RegisterEventHotKey failed for global hotkey: {status}");
+                    log::warn!(
+                        "RegisterEventHotKey failed for global hotkey: status={status} keycode={} modifiers={:#x} id={hotkey_id}",
+                        chord.keycode,
+                        chord.modifiers
+                    );
                     return None;
                 }
             }
 
+            log::info!(
+                "registered Carbon global hotkey keycode={} modifiers={:#x} id={hotkey_id}",
+                chord.keycode,
+                chord.modifiers
+            );
             Some(Self {
                 hotkey_ref,
                 handler_ref,
@@ -516,6 +574,11 @@ mod macos {
         let flags = unsafe { CGEventGetFlags(event) };
 
         if event_tap_matches_chord(data.chord, keycode, flags) {
+            log::debug!(
+                "CGEventTap global hotkey matched keycode={} flags={:#x}",
+                keycode,
+                flags
+            );
             let _ = data.proxy.send_event(data.event.clone());
         }
         event
@@ -636,6 +699,16 @@ mod macos {
         use super::*;
 
         #[test]
+        fn carbon_hotkey_pressed_event_kind_matches_sdk() {
+            assert_eq!(K_EVENT_HOTKEY_PRESSED, 5);
+        }
+
+        #[test]
+        fn carbon_unmatched_handler_status_propagates_to_next_handler() {
+            assert_eq!(EVENT_NOT_HANDLED_ERR, -9874);
+        }
+
+        #[test]
         fn event_tap_matches_cmd_grave_without_extra_modifiers() {
             let chord = super::super::parse_hotkey("cmd+grave").expect("cmd+grave parses");
 
@@ -681,6 +754,51 @@ mod tests {
         let chord = parse_hotkey("cmd+grave").expect("cmd+grave parses");
         assert_eq!(chord.keycode, 0x32);
         assert_eq!(chord.modifiers, CMD_KEY);
+    }
+
+    #[test]
+    fn parses_cmd_shift_backslash() {
+        let chord = parse_hotkey("cmd+shift+backslash").expect("cmd+shift+backslash parses");
+        assert_eq!(chord.keycode, ANSI_BACKSLASH_KEY);
+        assert_eq!(chord.modifiers, CMD_KEY | SHIFT_KEY);
+    }
+
+    #[test]
+    fn backslash_registers_ansi_and_jis_yen_variants() {
+        let chords =
+            parse_hotkey_variants("cmd+shift+backslash").expect("cmd+shift+backslash parses");
+
+        assert_eq!(
+            chords,
+            vec![
+                HotkeyChord {
+                    keycode: ANSI_BACKSLASH_KEY,
+                    modifiers: CMD_KEY | SHIFT_KEY,
+                },
+                HotkeyChord {
+                    keycode: JIS_YEN_KEY,
+                    modifiers: CMD_KEY | SHIFT_KEY,
+                },
+                HotkeyChord {
+                    keycode: JIS_UNDERSCORE_KEY,
+                    modifiers: CMD_KEY | SHIFT_KEY,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn yen_alias_targets_jis_yen_key() {
+        let chord = parse_hotkey("cmd+shift+yen").expect("cmd+shift+yen parses");
+        assert_eq!(chord.keycode, JIS_YEN_KEY);
+        assert_eq!(chord.modifiers, CMD_KEY | SHIFT_KEY);
+    }
+
+    #[test]
+    fn intl_ro_alias_targets_jis_underscore_key() {
+        let chord = parse_hotkey("cmd+shift+intl-ro").expect("cmd+shift+intl-ro parses");
+        assert_eq!(chord.keycode, JIS_UNDERSCORE_KEY);
+        assert_eq!(chord.modifiers, CMD_KEY | SHIFT_KEY);
     }
 
     #[test]

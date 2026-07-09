@@ -142,6 +142,10 @@ impl App {
         let sidebar_preview_changed =
             previous.sidebar_preview_lines != applied.sidebar_preview_lines;
         let keybinds_changed = previous.keybinds != applied.keybinds;
+        let quick_terminal_hotkey_changed =
+            previous.quick_terminal_hotkey != applied.quick_terminal_hotkey;
+        let sidebar_hotkey_changed = previous.sidebar_hotkey != applied.sidebar_hotkey;
+        let hotkeys_changed = quick_terminal_hotkey_changed || sidebar_hotkey_changed;
 
         self.config = applied;
 
@@ -186,6 +190,17 @@ impl App {
             self.keybinds = keybinds;
             self.request_all_windows_redraw();
             self.request_overview_redraw();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if quick_terminal_hotkey_changed && let Some(menu) = self.macos_menu.as_ref() {
+                menu.set_quick_terminal_hotkey(self.config.quick_terminal_hotkey.as_deref());
+            }
+        }
+        if hotkeys_changed {
+            self.quick_terminal_hotkey = None;
+            self.sidebar_hotkey = None;
+            self.hotkey_install_attempted = false;
         }
 
         if font_applied || padding_changed || self.config.sidebar_width != previous.sidebar_width {

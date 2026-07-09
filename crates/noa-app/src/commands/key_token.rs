@@ -89,6 +89,9 @@ impl KeyToken {
         if token == "plus" {
             return Ok(Self::Character('+'));
         }
+        if token == "grave" || token == "backtick" {
+            return Ok(Self::Character('`'));
+        }
         let mut chars = token.chars();
         if let (Some(ch), None) = (chars.next(), chars.next()) {
             return Ok(Self::Character(ch));
@@ -128,6 +131,7 @@ impl std::fmt::Display for KeyToken {
             // `+` parses from the `plus` alias, so render it back that way
             // (a bare `+` would read as a separator on re-parse).
             Self::Character('+') => f.write_str("plus"),
+            Self::Character('`') => f.write_str("grave"),
             Self::Character(ch) => write!(f, "{ch}"),
             Self::Named(named) => f.write_str(named.as_str()),
         }

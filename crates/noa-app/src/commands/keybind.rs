@@ -143,6 +143,7 @@ impl Default for KeybindEngine {
             ("cmd+shift+enter", AppCommand::ToggleSplitZoom),
             ("cmd+shift+o", AppCommand::ToggleTabOverview),
             ("cmd+ctrl+f", AppCommand::ToggleFullscreen),
+            ("cmd+`", AppCommand::ToggleQuickTerminal),
             ("cmd+shift+p", AppCommand::ToggleCommandPalette),
             ("cmd+shift+s", AppCommand::ToggleSidebar),
         ];
@@ -366,5 +367,32 @@ mod tests {
             engine.resolve(&Key::Character("t".into()), ModifiersState::SUPER),
             Some(AppCommand::NewTab)
         );
+    }
+
+    #[test]
+    fn grave_aliases_bind_quick_terminal() {
+        for trigger in ["cmd+grave", "cmd+backtick", "cmd+`"] {
+            let (engine, diagnostics) = KeybindEngine::from_config(&[
+                KeybindConfig::Clear,
+                KeybindConfig::Bind {
+                    trigger: trigger.to_string(),
+                    action: "quick-terminal.toggle".to_string(),
+                },
+            ]);
+
+            assert!(diagnostics.is_empty(), "{trigger}: {diagnostics:?}");
+            assert_eq!(
+                engine.resolve(&Key::Character("`".into()), ModifiersState::SUPER),
+                Some(AppCommand::ToggleQuickTerminal),
+                "{trigger} should bind Cmd+`"
+            );
+            assert_eq!(
+                engine.list(),
+                vec![(
+                    "cmd+grave".to_string(),
+                    AppCommand::ToggleQuickTerminal.action_name()
+                )]
+            );
+        }
     }
 }

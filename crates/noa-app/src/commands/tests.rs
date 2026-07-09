@@ -134,6 +134,10 @@ fn cmd_characters_map_only_supported_shortcuts() {
         ),
         Some(AppCommand::FontSize(FontSizeAction::Increase))
     );
+    assert_eq!(
+        AppCommand::from_cmd_character("`"),
+        Some(AppCommand::ToggleQuickTerminal)
+    );
     assert_eq!(AppCommand::from_cmd_character(","), None);
 }
 

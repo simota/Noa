@@ -238,10 +238,11 @@ impl ForegroundProcessProbe {
     }
 
     /// The name of the tty's foreground process — the leader of the current
-    /// foreground process group (e.g. `zsh`, `cargo`, `claude`). `None` when
-    /// there is no foreground group (the session ended) or on a platform
-    /// without the query (only macOS is implemented; NFR-5 graceful
-    /// degradation).
+    /// foreground process group (e.g. `zsh`, `cargo`, `claude`). Known generic
+    /// runtime wrappers (`bun`, `node`, …) are canonicalized only when their
+    /// argv identifies a direct Codex launch. `None` when there is no foreground
+    /// group (the session ended) or on a platform without the query (only macOS
+    /// is implemented; NFR-5 graceful degradation).
     pub fn poll(&self) -> Option<String> {
         #[cfg(target_os = "macos")]
         {
@@ -286,7 +287,125 @@ fn foreground_process_name(fd: std::os::fd::RawFd) -> Option<String> {
         return None;
     }
     let name = std::str::from_utf8(&buf[..len as usize]).ok()?.trim();
-    (!name.is_empty()).then(|| name.to_string())
+    if name.is_empty() {
+        return None;
+    }
+    let args = if wrapper_can_host_codex(name) {
+        foreground_process_args(pgid)
+    } else {
+        None
+    };
+    Some(canonical_process_name(name, args.as_deref()))
+}
+
+#[cfg(target_os = "macos")]
+fn foreground_process_args(pid: libc::pid_t) -> Option<Vec<String>> {
+    let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+    if arg_max <= 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; arg_max as usize];
+    let mut size = buf.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as u32,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size == 0 {
+        return None;
+    }
+    buf.truncate(size);
+    parse_procargs2(&buf)
+}
+
+fn canonical_process_name(name: &str, args: Option<&[String]>) -> String {
+    if wrapper_can_host_codex(name) && args.is_some_and(argv_mentions_codex) {
+        return "codex".to_string();
+    }
+    name.to_string()
+}
+
+fn wrapper_can_host_codex(name: &str) -> bool {
+    matches!(
+        executable_basename(name).as_str(),
+        "bun" | "bunx" | "node" | "npx"
+    )
+}
+
+fn argv_mentions_codex(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let lower = arg.trim().to_ascii_lowercase();
+        lower == "@openai/codex"
+            || lower.starts_with("@openai/codex@")
+            || lower.starts_with("@openai/codex/")
+            || lower.contains("/@openai/codex/")
+            || lower.ends_with("/@openai/codex")
+            || looks_like_codex_executable(&lower)
+    })
+}
+
+fn looks_like_codex_executable(value: &str) -> bool {
+    let base = executable_basename(value);
+    let mut tokens = base
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty());
+    let first = tokens.next().unwrap_or(&base);
+    if first == "openai" && tokens.next() == Some("codex") {
+        return true;
+    }
+    first == "codex"
+}
+
+fn executable_basename(value: &str) -> String {
+    value
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+#[cfg(target_os = "macos")]
+fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
+    let argc_len = std::mem::size_of::<libc::c_int>();
+    if buf.len() <= argc_len {
+        return None;
+    }
+    let argc = libc::c_int::from_ne_bytes(buf[..argc_len].try_into().ok()?) as usize;
+    if argc == 0 {
+        return None;
+    }
+
+    let mut index = argc_len;
+    while index < buf.len() && buf[index] != 0 {
+        index += 1;
+    }
+    while index < buf.len() && buf[index] == 0 {
+        index += 1;
+    }
+
+    let mut args = Vec::new();
+    while index < buf.len() && args.len() < argc {
+        let start = index;
+        while index < buf.len() && buf[index] != 0 {
+            index += 1;
+        }
+        if start < index {
+            let arg = std::str::from_utf8(&buf[start..index]).ok()?.to_string();
+            args.push(arg);
+        }
+        while index < buf.len() && buf[index] == 0 {
+            index += 1;
+        }
+    }
+
+    (!args.is_empty()).then_some(args)
 }
 
 impl std::fmt::Debug for Pty {
@@ -432,6 +551,57 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!("never saw the shell as the foreground process; last = {last:?}");
+    }
+
+    #[test]
+    fn canonical_process_name_detects_codex_through_runtime_wrappers() {
+        assert_eq!(
+            canonical_process_name(
+                "bun",
+                Some(&[
+                    "bun".to_string(),
+                    "x".to_string(),
+                    "@openai/codex".to_string()
+                ])
+            ),
+            "codex"
+        );
+        assert_eq!(
+            canonical_process_name(
+                "node",
+                Some(&[
+                    "node".to_string(),
+                    "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js".to_string()
+                ])
+            ),
+            "codex"
+        );
+        assert_eq!(
+            canonical_process_name(
+                "bun",
+                Some(&["bun".to_string(), "/tmp/openai-codex".to_string()])
+            ),
+            "codex"
+        );
+
+        assert_eq!(
+            canonical_process_name(
+                "bun",
+                Some(&["bun".to_string(), "run".to_string(), "build".to_string()])
+            ),
+            "bun"
+        );
+        assert_eq!(
+            canonical_process_name(
+                "bun",
+                Some(&["bun".to_string(), "my-openai-codex".to_string()])
+            ),
+            "bun"
+        );
+        assert_eq!(
+            canonical_process_name("node", Some(&["node".to_string(), "codexify".to_string()])),
+            "node"
+        );
     }
 
     #[test]

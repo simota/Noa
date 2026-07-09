@@ -740,7 +740,7 @@ pub enum AgentKind {
 }
 
 /// Classify a foreground process name into a known AI agent. Case-insensitive,
-/// matched on the executable basename's leading stem (so a target-triple suffix
+/// matched on the executable basename's leading token (so a target-triple suffix
 /// on a distribution binary — `codex-aarch64-apple-darwin` — still classifies).
 ///
 /// Note: `proc_name` can report a wrapper (e.g. `node`) rather than the agent
@@ -760,12 +760,19 @@ pub fn classify_agent(process: &str) -> AgentKind {
     if is_bare_version(&base) {
         return AgentKind::ClaudeCode;
     }
-    // Distribution binaries carry a target-triple suffix (Homebrew's Codex cask
-    // installs `codex-aarch64-apple-darwin` and symlinks `codex` to it, so the
-    // tty's foreground name reports the real basename, not `codex`). Match on the
-    // leading stem before the first `-`/`.` so the suffix doesn't defeat branding.
-    let stem = base.split(['-', '.']).next().unwrap_or(&base);
-    match stem {
+    // Distribution binaries carry suffixes (`codex-aarch64-apple-darwin`) and
+    // wrapper scripts can use alternate separators (`codex_cli`). Match the
+    // leading alphanumeric token so those suffixes do not defeat branding, and
+    // allow the known vendor-prefixed OpenAI form without matching arbitrary
+    // names that merely contain "codex" as a substring.
+    let mut tokens = base
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty());
+    let first = tokens.next().unwrap_or(&base);
+    if first == "openai" && tokens.next() == Some("codex") {
+        return AgentKind::Codex;
+    }
+    match first {
         "claude" => AgentKind::ClaudeCode,
         "codex" => AgentKind::Codex,
         "agy" | "gemini" => AgentKind::Agy,
@@ -1107,12 +1114,19 @@ mod tests {
             // classifies, independent of arch or version.
             ("codex-aarch64-apple-darwin", Codex),
             ("codex-x86_64-apple-darwin", Codex),
+            ("codex_cli", Codex),
+            ("openai-codex", Codex),
+            ("openai_codex", Codex),
+            ("mycodex", Generic),
+            ("my-openai-codex", Generic),
+            ("node-openai-codex", Generic),
             ("agy", Agy),
             ("gemini", Agy),
             ("Gemini", Agy),
             ("zsh", Generic),
             ("cargo", Generic),
             ("node", Generic),
+            ("bun", Generic),
         ] {
             assert_eq!(classify_agent(input), expect, "input {input:?}");
         }
@@ -1139,11 +1153,16 @@ mod tests {
     fn bell_escalates_only_for_known_agents() {
         assert!(bell_escalates_to_attention(Some("claude")));
         assert!(bell_escalates_to_attention(Some("codex")));
+        assert!(bell_escalates_to_attention(Some("codex_cli")));
+        assert!(bell_escalates_to_attention(Some("openai-codex")));
+        assert!(bell_escalates_to_attention(Some("openai_codex")));
         assert!(bell_escalates_to_attention(Some("agy")));
         assert!(bell_escalates_to_attention(Some("/usr/local/bin/gemini")));
+        assert!(!bell_escalates_to_attention(Some("mycodex")));
         assert!(!bell_escalates_to_attention(Some("zsh")));
         assert!(!bell_escalates_to_attention(Some("cargo")));
         assert!(!bell_escalates_to_attention(Some("node")));
+        assert!(!bell_escalates_to_attention(Some("bun")));
         assert!(!bell_escalates_to_attention(None));
     }
 

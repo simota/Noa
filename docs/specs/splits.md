@@ -87,8 +87,7 @@ AC-1..19 behavior) regresses nowhere.
 
 - Divider drag-resize (keyboard resize covers it; deferred).
 - unfocused-split-opacity / unfocused-split-fill config (deferred).
-- new_split left/up/auto variants (Ghostty has them; start right/down —
-  revisit at SHAPE).
+- new_split auto variants (Ghostty has them; start with explicit directions).
 - Split topology session restore (Phase 6), cwd inheritance for new
   panes (Phase 5, same deferral as tabs), multi-window.
 
@@ -256,9 +255,8 @@ CHALLENGE staging decision.
 
 ### Assumptions
 
-- Pane counts stay single-digit in realistic usage (2-6 typical); no
-  pane-count pooling or hard cap in v1 (Void: do not scaffold
-  MAX_PANES).
+- Pane counts are capped at three panes per row/column and nine panes per tab,
+  matching the intended maximum 3x3 split surface; no pane-count pooling in v1.
 - N-full-row-clone `FrameSnapshot` cost per redraw is accepted for v1
   pane counts; dirty-row diffing remains the explicit P2 backlog
   follow-up, not pulled forward here.
@@ -277,9 +275,11 @@ CHALLENGE staging decision.
 
 ### Functional
 
-- **REQ-SPL-1**: Cmd+D splits the focused pane right, adding a new `Surface` as a sibling leaf in the `SplitTree` and focusing it. Splitting a pane too small to host two panes plus a divider above the minimum-size floor (REQ-NF-4) is a no-op (provisional rule; see Open Questions).
-- **REQ-SPL-2**: Cmd+Shift+D splits the focused pane down — same mechanics as REQ-SPL-1 with vertical orientation.
-- **REQ-SPL-3**: A new split's ratio defaults to equal (50/50) between the split pane and its new sibling.
+- **REQ-SPL-1**: Cmd+D adds a new `Surface` to the right of the focused pane and focuses it. If the focused pane is already in a horizontal row model, the new pane is inserted into that row and the row is rebalanced by pane count; otherwise the focused pane is locally split right. Adding to a pane too small to host two panes plus a divider above the minimum-size floor (REQ-NF-4) is a no-op (provisional rule; see Open Questions).
+- **REQ-SPL-2**: Cmd+Shift+D adds a new `Surface` below the focused pane — same mechanics as REQ-SPL-1 with vertical orientation.
+- **REQ-SPL-2A**: Add Pane Left and Add Pane Up are reachable from the command palette, action-name registry, and split context menu. They use the same same-axis insertion mechanics as right/down, but insert before the focused pane in that row/column and focus the new pane.
+- **REQ-SPL-2B**: A tab can host at most nine live panes, and a row/column can host at most three panes along its axis. Any pane-add command issued while the tab or target axis group is already at its limit is a no-op.
+- **REQ-SPL-3**: A new pane added to an existing same-axis row/column rebalances that axis group by pane count; adding horizontally to a rectangular grid rebuilds the target row, and adding vertically rebuilds the target column. The first local split in an empty axis still defaults to equal (50/50).
 - **REQ-SPL-4**: Cmd+W with 2+ panes in the focused tab removes and re-lays-out only the focused pane; the tab itself stays open. **Deliberate behavior change from tabs**: Cmd+W now closes the focused split before it closes the tab.
 - **REQ-SPL-5**: A pane's pty exit removes that pane and re-lays-out its tab; only the last pane's exit closes the tab (today's unconditional PtyExit→close_tab, app.rs:555, becomes per-pane).
 - **REQ-SPL-6**: Cmd+Opt+arrow moves focus to the pane adjacent across the focused pane's edge in that direction; among multiple candidates, the pane with the greatest perpendicular overlap with the focused pane wins, remaining ties resolved to the top-most (horizontal moves) / left-most (vertical moves) candidate; focus is unchanged if no pane exists in that direction.
@@ -319,7 +319,7 @@ CHALLENGE staging decision.
 - `WindowState` decomposes into two tiers: window-level fields stay on `WindowState` (winit `Window`, wgpu surface, one `Renderer`, `split_tree: SplitTree`, `zoomed: Option<PaneId>`, `focused_pane: PaneId`); everything terminal-specific moves into a new `Surface` held at tree leaves: `Arc<Mutex<Terminal>>`, pty input/resize senders, io-thread shutdown handle, `ime_state`, mouse/selection state (`mouse_selection`, `last_mouse_cell`, `pressed_mouse_button`), and a computed `rect: PaneRect`.
 - `PaneId` is a newtype (Copy+Eq+Hash) minted on split-create, stable across resize/equalize/zoom.
 - `SplitTree`: recursive `enum { Leaf(Surface), Split { orientation: Orientation, ratio: f32, first: Box<SplitTree>, second: Box<SplitTree> } }` — internal nodes carry ratio + orientation, leaves are `Surface`s, expressing arbitrarily nested split-of-a-split layouts per the direction-A decision.
-- New `AppCommand` variants — `NewSplitRight`, `NewSplitDown`, `FocusDirection(Direction)`, `ResizeSplit(Direction)`, `EqualizeSplits`, `ToggleSplitZoom` — route through the existing `KeybindEngine`/`menu_id` plumbing (commands.rs:270-350).
+- New `AppCommand` variants — `NewSplitLeft`, `NewSplitRight`, `NewSplitUp`, `NewSplitDown`, `FocusDirection(Direction)`, `ResizeSplit(Direction)`, `EqualizeSplits`, `ToggleSplitZoom` — route through the existing `KeybindEngine`/`menu_id` plumbing (commands.rs:270-350).
 - `CloseTab`/Cmd+W interposes a pane-count check ahead of tab-close (REQ-SPL-4): 2+ panes → remove+re-layout the focused pane only; 1 pane → falls through to today's `close_tab_outcome` path.
 - Pure-function seam (unit-testable, no `Window`/GPU): `compute_layout(&SplitTree, bounds) -> Vec<(PaneId, Rect)>` (reserves `DIVIDER_WIDTH_PX`, ratio division, odd-pixel remainder to first pane, REQ-SPL-13/14); `focus_in_direction(&SplitTree, PaneId, Direction) -> Option<PaneId>` (overlap-then-top/left tie-break, REQ-SPL-6); `resize_split(&mut SplitTree, PaneId, Direction, step)` (nearest matching ancestor + `SPLIT_RESIZE_STEP_PX`, REQ-NF-4 floor); `equalize(&mut SplitTree)`; `zoom_toggle(...) -> ZoomDecision`; `close_pane(&mut SplitTree, PaneId) -> CloseOutcome { next_focus, tab_should_close }`; `hit_test(&[(PaneId, Rect)], point) -> HitTarget::{Pane(PaneId), Divider(..)}` (`DIVIDER_HIT_ZONE_PX`); `focus_switch_plan(losing, winning) -> Vec<ImeOp>` (ordered: `CommitPreedit(losing)` then `RetargetIme(winning)`, REQ-SPL-15 — the winit calls merely execute this plan); pane command-target resolution (REQ-SPL-18, mirroring tabs' `resolve_command_target`).
 - `UserEvent`'s per-surface variants gain `PaneId` alongside `WindowId`; `user_event()` resolves `(WindowId, PaneId)` to the exact `Surface` and no-ops on stale ids (mirrors tabs' stale-`WindowId` no-op; REQ-SPL-16/REQ-NF-9).
@@ -345,7 +345,9 @@ CHALLENGE staging decision.
 
 - **AC-1** (REQ-SPL-1) [manual-visual] — Given one pane focused, When the user presses Cmd+D, Then a new pane appears to its right running a fresh login shell and gains focus.
 - **AC-2** (REQ-SPL-2) [manual-visual] — Given one pane focused, When the user presses Cmd+Shift+D, Then a new pane appears below it and gains focus.
-- **AC-3** (REQ-SPL-3) [unit] — Given `compute_layout` on a tree with one freshly created split node, When evaluated, Then both children's rects are equal within the odd-pixel remainder rule.
+- **AC-3** (REQ-SPL-3) [unit] — Given an existing horizontal or vertical same-axis group, When a pane is added along that axis, Then the group is rebuilt in insertion order with count-based equal ratios.
+- **AC-3a** (REQ-SPL-3) [unit] — Given a rectangular 2x2 grid, When a pane is added right/down to one cell, Then the target row/column is rebuilt in insertion order with count-based equal ratios while the opposite axis remains tiled.
+- **AC-3b** (REQ-SPL-2B) [unit] — Given the split creation gate with nine existing panes or a target row/column with three panes, When any split direction beyond that limit is requested, Then it rejects creation before spawning a new `Surface`.
 - **AC-4a** (REQ-SPL-4) [unit] — Given `close_pane` + `compute_layout` on a 2-leaf tree for the focused pane, When evaluated, Then the outcome is remove-and-relayout with `tab_should_close=false` and the survivor's rect fills the freed space (pure, no `ActiveEventLoop` — tabs AC-2/AC-10 precedent).
 - **AC-4b** (REQ-SPL-4) [manual-visual] — Given a tab with 2 panes, When the user presses Cmd+W, Then only the focused pane disappears, the tab stays open, and the sibling expands into the freed rect.
 - **AC-5** (REQ-SPL-5) [unit] — Given `close_pane` on a 3-leaf tree for a pty-exited pane, When evaluated, Then it returns `next_focus` to a sibling with `tab_should_close=false`; given the tree's last leaf, Then `tab_should_close=true`.
@@ -401,7 +403,7 @@ CHALLENGE staging decision.
   model is a binary tree). Staging: land as TWO PRs — PR1 mechanical
   Window+Vec<Surface> decomposition with exactly one Surface (behavior
   no-op, suite green), PR2 SplitTree + scissor + commands on the clean
-  seam. Do not scaffold MAX_PANES or SplitDirection::Auto.
+  seam. Do not scaffold SplitDirection::Auto.
 - **Ripple impact (A): risk 7.5/10 HIGH, Conditional-Go**, mandatory
   mitigations (→ ACs): (1) spec PtyExit-for-one-pane explicitly —
   remove pane + re-layout; close window only when last pane exits

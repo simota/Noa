@@ -139,7 +139,7 @@ per-crate のシームのみ定義する(コードは書かない)。
 - **AC-5 → R-4** [NH] [unit]: Given `command_palette_keybind`。When `Copy`/`NewTab`/`Search(Find)`/`Quit` に対し呼ぶ。Then それぞれ `cmd+c`/`cmd+t`/`cmd+f`/`cmd+q` 相当の chord 文字列を返す。When `ClearScrollback`(バインド無し)に対し呼ぶ。Then `None` を返す。
 - **AC-6 → R-5** [MH] [unit]: Given パレット閉状態と focused ウィンドウ。When `ToggleCommandPalette` を dispatch。Then `command_palette` が `Some`(query 空、filtered = 全エントリ、selected=0、window_id = focused)になる。When 再度 dispatch。Then `command_palette` が `None` に戻る(トグル)。
 - **AC-7 → R-6** [MH] [unit]+[manual]: Given パレットが window_id をターゲット中。When 当該ウィンドウで文字キーの `KeyboardInput` を処理。Then パレットハンドラが消費し、keybind-resolve/pty-encode 経路に到達しない(unit: ルーティング分岐);When 文字入力(manual)。Then どの pty にもバイトが届かない。
-- **AC-8 → R-7** [MH] [unit]: Given `command_palette_filter`。When `"splt"` でフィルタ(部分列)。Then "Split Right"/"Split Down"/"Toggle Split Zoom"/"Equalize Splits" 等タイトルに `s..p..l..t` を部分列として含むエントリのみ返り、順序は宣言順。When 大文字クエリ `"QUIT"`。Then "Quit noa" がマッチ(大文字小文字無視)。When 各フィルタ後、selected は 0。
+- **AC-8 → R-7** [MH] [unit]: Given `command_palette_filter`。When `"add"` でフィルタ(部分列)。Then "Add Pane Left"/"Add Pane Right"/"Add Pane Up"/"Add Pane Down" 等タイトルに `a..d..d` を部分列として含むエントリのみ返り、順序は宣言順。When 大文字クエリ `"QUIT"`。Then "Quit noa" がマッチ(大文字小文字無視)。When 各フィルタ後、selected は 0。
 - **AC-9 → R-7** [MH] [unit]: Given query `"new"` の状態。When Backspace を処理。Then query が `"ne"` になり filtered が再計算され selected=0。
 - **AC-10 → R-8** [MH] [unit]: Given filtered 3 件・selected=0。When ArrowDown×2→ArrowDown。Then selected は 1→2→2(末尾クランプ、ラップなし)。When ArrowUp を先頭で。Then selected=0 に留まる。
 - **AC-11 → R-8** [MH] [unit]+[manual]: Given filtered 非空・selected=k。When Enter を処理。Then `filtered[k]` が `handle_app_command` に渡され、`command_palette` が `None` になる(unit: dispatch 記録);Given 実 GUI で "New Tab" をハイライトし Enter。Then 新規タブが開きパレットが閉じる(manual)。
@@ -208,34 +208,37 @@ per-crate のシームのみ定義する(コードは書かない)。
 | 19 | `ScrollViewport(Top)` | Scroll to Top | shift+Home | ✓ |
 | 20 | `ScrollViewport(Bottom)` | Scroll to Bottom | shift+End | ✓ |
 | 21 | `NewTab` | New Tab | cmd+t | ✓ |
-| 22 | `NewSplitRight` | Split Right | cmd+d | ✓ |
-| 23 | `NewSplitDown` | Split Down | cmd+shift+d | ✓ |
-| 24 | `FocusDirection(Left)` | Focus Split Left | cmd+alt+← | ✓ |
-| 25 | `FocusDirection(Right)` | Focus Split Right | cmd+alt+→ | ✓ |
-| 26 | `FocusDirection(Up)` | Focus Split Up | cmd+alt+↑ | ✓ |
-| 27 | `FocusDirection(Down)` | Focus Split Down | cmd+alt+↓ | ✓ |
-| 28 | `ResizeSplit(Left)` | Resize Split Left | cmd+ctrl+← | ✓ |
-| 29 | `ResizeSplit(Right)` | Resize Split Right | cmd+ctrl+→ | ✓ |
-| 30 | `ResizeSplit(Up)` | Resize Split Up | cmd+ctrl+↑ | ✓ |
-| 31 | `ResizeSplit(Down)` | Resize Split Down | cmd+ctrl+↓ | ✓ |
-| 32 | `EqualizeSplits` | Equalize Splits | cmd+ctrl+= | ✓ |
-| 33 | `ToggleSplitZoom` | Toggle Split Zoom | cmd+shift+enter | ✓ |
-| 34 | `ToggleTabOverview` | Toggle Session Overview | cmd+shift+o | ✓ |
-| 35 | `CloseTab` | Close Tab | cmd+w | ✓ |
-| 36 | `SelectTab(1)` | Go to Tab 1 | cmd+1 | — (CUT) |
-| 37 | `SelectTab(2)` | Go to Tab 2 | cmd+2 | — (CUT) |
-| 38 | `SelectTab(3)` | Go to Tab 3 | cmd+3 | — (CUT) |
-| 39 | `SelectTab(4)` | Go to Tab 4 | cmd+4 | — (CUT) |
-| 40 | `SelectTab(5)` | Go to Tab 5 | cmd+5 | — (CUT) |
-| 41 | `SelectTab(6)` | Go to Tab 6 | cmd+6 | — (CUT) |
-| 42 | `SelectTab(7)` | Go to Tab 7 | cmd+7 | — (CUT) |
-| 43 | `SelectTab(8)` | Go to Tab 8 | cmd+8 | — (CUT) |
-| 44 | `SelectTab(9)` | Go to Tab 9 | cmd+9 | — (CUT) |
-| 45 | `NextTab` | Next Tab | cmd+shift+] | ✓ |
-| 46 | `PrevTab` | Previous Tab | cmd+shift+[ | ✓ |
-| 47 | `CloseWindow` | Close Window | | ✓ |
-| 48 | `Quit` | Quit noa | cmd+q | ✓ |
-| 49 | `ToggleCommandPalette` *(new, R-1)* | Toggle Command Palette | cmd+shift+p | — (self) |
+| 22 | `NewWindow` | New Window | cmd+n | ✓ |
+| 23 | `NewSplitLeft` | Add Pane Left | | ✓ |
+| 24 | `NewSplitRight` | Add Pane Right | cmd+d | ✓ |
+| 25 | `NewSplitUp` | Add Pane Up | | ✓ |
+| 26 | `NewSplitDown` | Add Pane Down | cmd+shift+d | ✓ |
+| 27 | `FocusDirection(Left)` | Focus Split Left | cmd+alt+← | ✓ |
+| 28 | `FocusDirection(Right)` | Focus Split Right | cmd+alt+→ | ✓ |
+| 29 | `FocusDirection(Up)` | Focus Split Up | cmd+alt+↑ | ✓ |
+| 30 | `FocusDirection(Down)` | Focus Split Down | cmd+alt+↓ | ✓ |
+| 31 | `ResizeSplit(Left)` | Resize Split Left | cmd+ctrl+← | ✓ |
+| 32 | `ResizeSplit(Right)` | Resize Split Right | cmd+ctrl+→ | ✓ |
+| 33 | `ResizeSplit(Up)` | Resize Split Up | cmd+ctrl+↑ | ✓ |
+| 34 | `ResizeSplit(Down)` | Resize Split Down | cmd+ctrl+↓ | ✓ |
+| 35 | `EqualizeSplits` | Equalize Splits | cmd+ctrl+= | ✓ |
+| 36 | `ToggleSplitZoom` | Toggle Split Zoom | cmd+shift+enter | ✓ |
+| 37 | `ToggleTabOverview` | Toggle Session Overview | cmd+shift+o | ✓ |
+| 38 | `CloseTab` | Close Tab | cmd+w | ✓ |
+| 39 | `SelectTab(1)` | Go to Tab 1 | cmd+1 | — (CUT) |
+| 40 | `SelectTab(2)` | Go to Tab 2 | cmd+2 | — (CUT) |
+| 41 | `SelectTab(3)` | Go to Tab 3 | cmd+3 | — (CUT) |
+| 42 | `SelectTab(4)` | Go to Tab 4 | cmd+4 | — (CUT) |
+| 43 | `SelectTab(5)` | Go to Tab 5 | cmd+5 | — (CUT) |
+| 44 | `SelectTab(6)` | Go to Tab 6 | cmd+6 | — (CUT) |
+| 45 | `SelectTab(7)` | Go to Tab 7 | cmd+7 | — (CUT) |
+| 46 | `SelectTab(8)` | Go to Tab 8 | cmd+8 | — (CUT) |
+| 47 | `SelectTab(9)` | Go to Tab 9 | cmd+9 | — (CUT) |
+| 48 | `NextTab` | Next Tab | cmd+shift+] | ✓ |
+| 49 | `PrevTab` | Previous Tab | cmd+shift+[ | ✓ |
+| 50 | `CloseWindow` | Close Window | | ✓ |
+| 51 | `Quit` | Quit noa | cmd+q | ✓ |
+| 52 | `ToggleCommandPalette` *(new, R-1)* | Toggle Command Palette | cmd+shift+p | — (self) |
 
 > `SelectTab(n)` は `action_name` が `tab.select-{n}`(commands.rs:254-265)で index を持つため、タイトルレジストリは 1..9 を個別行として保持する(網羅マッチ完全性、NFR-4)。表示集合からの除外は R-3 の `command_palette_entries()` で行う。
 

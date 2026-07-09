@@ -28,15 +28,18 @@ noa +list-keybinds
 
 | キー | アクション |
 |---|---|
-| ⌘D | 右に分割 |
-| ⌘⇧D | 下に分割 |
+| ⌘D | 右にペイン追加 |
+| ⌘⇧D | 下にペイン追加 |
 | ⌘⌃← / → / ↑ / ↓ | 分割フォーカス移動 |
 | ⌘⌥← / → / ↑ / ↓ | 分割フォーカス移動(別名) |
 | ⌘⌃⇧← / → / ↑ / ↓ | 分割リサイズ |
 | ⌘⌃= | 分割を均等化 |
 | ⌘⇧Enter | 分割ズームのトグル |
 
-分割系はメニューにはなく、キーバインドと右クリックコンテキストメニュー(Split Right / Split Down / Equalize Splits / Toggle Split Zoom)からのみ到達可能。
+Add Pane Left / Add Pane Up はデフォルトキーバインドなし。コマンドパレットまたは右クリックコンテキストメニューから実行できる。
+ペイン追加は各行/列最大3枚、1タブあたり最大9ペインまで。上限到達時の追加は no-op。
+コマンドパレットと右クリックコンテキストメニューでは、これ以上作成できない Add Pane 方向は disabled になる。
+分割系はメニューにはなく、キーバインドと右クリックコンテキストメニュー(Add Pane Left / Add Pane Right / Add Pane Up / Add Pane Down / Equalize Splits / Toggle Split Zoom)からのみ到達可能。
 
 ### 編集 / 端末 / フォント
 

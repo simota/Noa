@@ -352,9 +352,11 @@ pub struct StartupConfig {
     /// points, `0..=64` (0 = no blur). Only visible with `background_opacity`
     /// below 1.0. No-op on non-macOS.
     pub background_blur_radius: u16,
-    /// `background-image`: path to a PNG laid behind the terminal grid. `None`
-    /// leaves the background as the clear color only. The path is stored
-    /// verbatim (leading `~` expanded); decode happens in `noa-app`.
+    /// `background-image`: path to a PNG laid behind the terminal grid, or the
+    /// reserved value `noa` for Noa's bundled wallpaper directory. `None`
+    /// leaves the background as the clear color only. Values are stored
+    /// verbatim (leading `~` expanded); resolution and decode happen in
+    /// `noa-app`.
     pub background_image: Option<PathBuf>,
     /// `background-image-opacity`: `0.0..=1.0`, clamped, default `1.0`. Scales
     /// the background image quad's alpha, independent of `background-opacity`.

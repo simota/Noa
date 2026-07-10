@@ -100,15 +100,16 @@ font-variation = wght=550
 
 | キー | 許容値 | 既定値 | 説明 |
 |---|---|---|---|
-| `background-image` | PNG ファイルまたはディレクトリのパス | なし | `~` を展開する。ディレクトリの場合は直下の PNG を名前順にローテーション |
+| `background-image` | `noa`、PNG ファイル、ディレクトリのパス | なし | `noa` はアプリ同梱壁紙、パスは `~` を展開する。ディレクトリの場合は直下の PNG を名前順にローテーション |
 | `background-image-opacity` | 有限小数 | `1.0` | `0.0..=1.0` へ clamp。ウィンドウの opacity とは独立 |
 | `background-image-position` | `top-left`, `top-center`, `top-right`, `center-left`, `center`, `center-right`, `bottom-left`, `bottom-center`, `bottom-right` | `center` | 配置または crop の anchor |
 | `background-image-fit` | `none`, `contain`, `cover`, `stretch` | `contain` | 拡大縮小方法 |
 | `background-image-repeat` | `true`, `false` | `false` | 画像を tile 表示 |
 | `background-image-interval` | 正の整数秒 | `30` | ディレクトリの切替間隔。`1..=4` は `5` 秒へ切り上げる |
 
-画像デコードは PNG のみ対応する。ファイルがない、PNG でない、デコードできない場合は診断を
-表示して背景画像を無効化する。
+未指定または空の `background-image` は背景画像を表示しない。完全一致の `noa` を指定した場合
+だけアプリ同梱壁紙を使用する。画像デコードは PNG のみ対応する。ファイルがない、PNG でない、
+デコードできない場合は診断を表示して背景画像を無効化する。
 
 ## 端末、クリップボード、ベル
 
@@ -180,4 +181,3 @@ chord の構文、全 canonical action、既定バインドは [KEYBINDINGS.md](
 `noa --import-ghostty-config` は Ghostty の候補 config を読み、Noa がインポート対象として認識する
 行を `$XDG_CONFIG_HOME/noa/config` へコピーする。対象ファイルが既に存在する場合は上書きしない。
 未対応行は削除せず `# ` でコメントアウトする。
-

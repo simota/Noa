@@ -8,6 +8,8 @@ use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
 #[cfg(target_os = "macos")]
 use winit::window::WindowAttributes;
 
+const BUILTIN_WALLPAPER_SOURCE: &str = "noa";
+
 /// Configuration the binary passes into [`crate::run`].
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -54,9 +56,9 @@ pub struct AppConfig {
     /// `background-blur-radius` in points (`0..=64`, 0 = off). Applied as a
     /// native macOS window background blur; a no-op on other platforms.
     pub background_blur_radius: u16,
-    /// `background-image`: path to a PNG laid behind the terminal grid. When
-    /// unset, [`load_background_image_runtime`] falls back to the bundled (or
-    /// development) wallpaper directory. Missing or undecodable paths log a
+    /// `background-image`: path to a PNG laid behind the terminal grid, or the
+    /// reserved value `noa` for the bundled wallpaper directory. `None` leaves
+    /// the background image disabled. Missing or undecodable paths log a
     /// diagnostic and disable the image.
     pub background_image: Option<std::path::PathBuf>,
     /// `background-image-opacity`, `0.0..=1.0`. Scales the image quad's alpha,
@@ -327,9 +329,10 @@ pub(super) fn background_image_position(
     }
 }
 
-/// Resolve the configured or default background image source. A file keeps the
-/// existing static PNG behavior; a directory becomes a deterministic PNG
-/// slideshow. Missing/unreadable paths degrade to no image and never panic.
+/// Resolve the configured background image source. A file keeps the existing
+/// static PNG behavior; a directory becomes a deterministic PNG slideshow;
+/// the reserved value `noa` selects bundled wallpapers. Missing/unreadable
+/// paths degrade to no image and never panic.
 pub(super) fn load_background_image_runtime(config: &AppConfig) -> BackgroundImageRuntime {
     let current_exe = std::env::current_exe().ok();
     let development_wallpapers =
@@ -384,7 +387,8 @@ fn resolve_background_image_source(
     current_exe: Option<&Path>,
     development_wallpapers: &Path,
 ) -> Option<PathBuf> {
-    if let Some(configured) = configured {
+    let configured = configured?;
+    if configured != Path::new(BUILTIN_WALLPAPER_SOURCE) {
         return Some(configured.to_path_buf());
     }
 
@@ -845,7 +849,20 @@ mod tests {
     }
 
     #[test]
-    fn bundled_wallpapers_win_over_development_wallpapers() {
+    fn only_exact_noa_value_selects_bundled_wallpapers() {
+        let development = Path::new("/missing/development-wallpapers");
+
+        for configured in ["Noa", "noa.png", "./noa"] {
+            let configured = Path::new(configured);
+            assert_eq!(
+                resolve_background_image_source(Some(configured), None, development).as_deref(),
+                Some(configured)
+            );
+        }
+    }
+
+    #[test]
+    fn unset_background_image_disables_default_wallpapers() {
         let root = temp_path("bundled-source");
         let current_exe = root.join("Noa.app/Contents/MacOS/Noa");
         let bundled = root.join("Noa.app/Contents/Resources/wallpapers");
@@ -856,29 +873,59 @@ mod tests {
         let resolved = resolve_background_image_source(None, Some(&current_exe), &development);
         let _ = std::fs::remove_dir_all(&root);
 
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn noa_background_image_uses_bundled_wallpapers() {
+        let root = temp_path("noa-bundled-source");
+        let current_exe = root.join("Noa.app/Contents/MacOS/Noa");
+        let bundled = root.join("Noa.app/Contents/Resources/wallpapers");
+        let development = root.join("development-wallpapers");
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::create_dir_all(&development).unwrap();
+
+        let resolved = resolve_background_image_source(
+            Some(Path::new("noa")),
+            Some(&current_exe),
+            &development,
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
         assert_eq!(resolved.as_deref(), Some(bundled.as_path()));
     }
 
     #[test]
-    fn development_wallpapers_are_the_unbundled_fallback() {
+    fn noa_background_image_uses_development_wallpapers_when_unbundled() {
         let root = temp_path("development-source");
         let current_exe = root.join("target/debug/Noa");
         let development = root.join("development-wallpapers");
         std::fs::create_dir_all(&development).unwrap();
 
-        let resolved = resolve_background_image_source(None, Some(&current_exe), &development);
+        let resolved = resolve_background_image_source(
+            Some(Path::new("noa")),
+            Some(&current_exe),
+            &development,
+        );
         let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(resolved.as_deref(), Some(development.as_path()));
     }
 
     #[test]
-    fn missing_default_wallpaper_directories_resolve_to_none() {
+    fn noa_background_image_without_wallpaper_directories_resolves_to_none() {
         let root = temp_path("missing-sources");
         let current_exe = root.join("target/debug/Noa");
         let development = root.join("development-wallpapers");
 
-        assert!(resolve_background_image_source(None, Some(&current_exe), &development).is_none());
+        assert!(
+            resolve_background_image_source(
+                Some(Path::new("noa")),
+                Some(&current_exe),
+                &development
+            )
+            .is_none()
+        );
     }
 
     #[test]

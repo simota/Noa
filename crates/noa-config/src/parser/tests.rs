@@ -593,8 +593,9 @@ fn background_blur_radius_rejects_non_integer() {
     assert!(diagnostics[0].message.contains("background-blur-radius"));
 }
 
-// AC-1: `background-image` parses to a path stored verbatim (tilde
-// expansion is deferred to noa-app to keep this module IO-free).
+// AC-1: `background-image` parses to a path stored verbatim (`noa` is
+// interpreted downstream); tilde expansion is also deferred to noa-app to keep
+// this module IO-free.
 #[test]
 fn background_image_parses_path_verbatim() {
     let (overrides, diagnostics) = parse_overrides(path(), "background-image = /tmp/wall.png");
@@ -610,6 +611,18 @@ fn background_image_parses_path_verbatim() {
         overrides.background_image,
         Some(PathBuf::from("~/pics/wall.png"))
     );
+
+    let (overrides, diagnostics) = parse_overrides(path(), "background-image = noa");
+    assert!(diagnostics.is_empty());
+    assert_eq!(overrides.background_image, Some(PathBuf::from("noa")));
+}
+
+#[test]
+fn empty_background_image_disables_the_image() {
+    let (overrides, diagnostics) = parse_overrides(path(), "background-image =");
+
+    assert!(diagnostics.is_empty());
+    assert_eq!(overrides.background_image, None);
 }
 
 // AC-2: `background-image-opacity` clamps like `background-opacity`.

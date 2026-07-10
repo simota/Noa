@@ -32,18 +32,80 @@ const PAGE_HEADER_COST: usize = 256;
 /// Charged per grapheme-table entry on top of the stored `String`'s capacity.
 const GRAPHEME_ENTRY_COST: usize = 32;
 
-/// The drawing style interned per page. Layout attributes (`WIDE` /
-/// `WIDE_SPACER`) live on [`PackedCell::flags`] instead, so a run of wide
-/// glyphs sharing one pen does not spawn a new style per cell.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// The drawing style interned per page, held in a fixed-width encoded form:
+/// the per-cell "same style as the last cell?" check is the hottest compare
+/// on the bulk-output path, and flat `u32` fields make it (and the intern
+/// map's hashing) a few integer ops instead of a field-by-field enum walk.
+/// Layout attributes (`WIDE` / `WIDE_SPACER`) live on [`PackedCell::flags`]
+/// instead, so a run of wide glyphs sharing one pen does not spawn a new
+/// style per cell.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Style {
-    fg: Color,
-    bg: Color,
-    underline_color: Option<Color>,
-    /// `WIDE` / `WIDE_SPACER` already stripped.
-    attrs: CellAttrs,
-    /// Index into `Terminal::hyperlinks` (`Cell::hyperlink`, narrowed to `u32`).
-    hyperlink: Option<u32>,
+    /// [`encode_color`] of the foreground.
+    fg: u32,
+    /// [`encode_color`] of the background.
+    bg: u32,
+    /// [`encode_color`] of the underline color, or [`UNDERLINE_NONE`].
+    underline: u32,
+    /// Index into `Terminal::hyperlinks` (`Cell::hyperlink`, narrowed to
+    /// `u32`); meaningful only when [`Self::META_HAS_LINK`] is set.
+    link: u32,
+    /// `WIDE` / `WIDE_SPACER`-stripped [`CellAttrs`] bits, plus
+    /// [`Self::META_HAS_LINK`].
+    meta: u32,
+}
+
+impl Style {
+    const META_HAS_LINK: u32 = 1 << 16;
+
+    fn attrs(&self) -> CellAttrs {
+        CellAttrs::from_bits_truncate(self.meta as u16)
+    }
+
+    fn hyperlink(&self) -> Option<u32> {
+        (self.meta & Self::META_HAS_LINK != 0).then_some(self.link)
+    }
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Style {
+            fg: encode_color(Color::Default),
+            bg: encode_color(Color::Default),
+            underline: UNDERLINE_NONE,
+            link: 0,
+            meta: 0,
+        }
+    }
+}
+
+/// `Option<Color>::None` sentinel for [`Style::underline`]; disjoint from
+/// every [`encode_color`] value (tag byte `0x03`).
+const UNDERLINE_NONE: u32 = 0x0300_0000;
+
+/// Encode a [`Color`] into one `u32`: tag in the top byte (`0` default, `1`
+/// palette, `2` rgb), payload below. Lossless — [`decode_color`] inverts it.
+#[inline]
+fn encode_color(color: Color) -> u32 {
+    match color {
+        Color::Default => 0,
+        Color::Palette(i) => 0x0100_0000 | i as u32,
+        Color::Rgb(rgb) => {
+            0x0200_0000 | (rgb.r as u32) << 16 | (rgb.g as u32) << 8 | rgb.b as u32
+        }
+    }
+}
+
+fn decode_color(key: u32) -> Color {
+    match key >> 24 {
+        0x01 => Color::Palette(key as u8),
+        0x02 => Color::Rgb(noa_core::Rgb::new(
+            (key >> 16) as u8,
+            (key >> 8) as u8,
+            key as u8,
+        )),
+        _ => Color::Default,
+    }
 }
 
 /// A style's index within its page's [`StyleTable`]. `StyleId(0)` is always
@@ -83,6 +145,10 @@ impl PackedCell {
 struct StyleTable {
     styles: Vec<Style>,
     lookup: HashMap<Style, StyleId>,
+    /// Most recently interned entry. Bulk output holds one pen for cells,
+    /// rows, even whole pages at a time, so nearly every intern short-circuits
+    /// here instead of paying the hash lookup.
+    last: (Style, StyleId),
 }
 
 impl StyleTable {
@@ -92,18 +158,32 @@ impl StyleTable {
         StyleTable {
             styles: vec![Style::default()],
             lookup,
+            last: (Style::default(), StyleId(0)),
         }
     }
 
     /// Intern `style`, returning its id and whether it was newly added (so the
-    /// caller can bill the extra `size_of::<Style>()`).
+    /// caller can bill the extra `size_of::<Style>()`). Split so the
+    /// memo-hit path — taken for nearly every cell of bulk output — inlines
+    /// into the caller's loop; the table paths stay out of line.
+    #[inline]
     fn intern(&mut self, style: Style) -> (StyleId, bool) {
+        if self.last.0 == style {
+            return (self.last.1, false);
+        }
+        self.intern_uncached(style)
+    }
+
+    #[cold]
+    fn intern_uncached(&mut self, style: Style) -> (StyleId, bool) {
         if let Some(&id) = self.lookup.get(&style) {
+            self.last = (style, id);
             return (id, false);
         }
         let id = StyleId(self.styles.len() as u16);
         self.styles.push(style);
         self.lookup.insert(style, id);
+        self.last = (style, id);
         (id, true)
     }
 
@@ -113,6 +193,15 @@ impl StyleTable {
 
     fn len(&self) -> usize {
         self.styles.len()
+    }
+
+    /// Return to the freshly-built state, keeping allocations for reuse.
+    fn reset(&mut self) {
+        self.styles.clear();
+        self.styles.push(Style::default());
+        self.lookup.clear();
+        self.lookup.insert(Style::default(), StyleId(0));
+        self.last = (Style::default(), StyleId(0));
     }
 }
 
@@ -143,8 +232,14 @@ impl Page {
         let bytes = PAGE_HEADER_COST + styles.len() * std::mem::size_of::<Style>();
         Page {
             cols,
-            cells: Vec::new(),
-            rows: Vec::new(),
+            // A page fills to capacity before sealing, so allocate the whole
+            // arena up front: growing from empty reallocs (and memmoves) the
+            // hot bulk-output path several times per page. A row is never
+            // split across pages, so the final row can overshoot the seal
+            // threshold by up to `cols` cells — reserve for that too, or
+            // every page pays one last doubling realloc.
+            cells: Vec::with_capacity(PAGE_CELL_CAPACITY + cols as usize),
+            rows: Vec::with_capacity(PAGE_CELL_CAPACITY / cols.max(1) as usize + 1),
             styles,
             graphemes: HashMap::new(),
             bytes,
@@ -153,7 +248,7 @@ impl Page {
 
     fn unpack_cell(&self, packed: PackedCell, cell_index: usize) -> Cell {
         let style = self.styles.get(packed.style);
-        let mut attrs = style.attrs;
+        let mut attrs = style.attrs();
         if packed.flags.contains(PackedFlags::WIDE) {
             attrs.insert(CellAttrs::WIDE);
         }
@@ -171,10 +266,13 @@ impl Page {
         Cell {
             ch: packed.ch,
             combining,
-            fg: style.fg,
-            bg: style.bg,
-            underline_color: style.underline_color,
-            hyperlink: style.hyperlink.and_then(|h| HyperlinkId::new(h as usize)),
+            fg: decode_color(style.fg),
+            bg: decode_color(style.bg),
+            underline_color: (style.underline != UNDERLINE_NONE)
+                .then(|| decode_color(style.underline)),
+            hyperlink: style
+                .hyperlink()
+                .and_then(|h| HyperlinkId::new(h as usize)),
             attrs,
         }
     }
@@ -196,6 +294,17 @@ impl Page {
         out.dirty = false;
     }
 
+    /// Return this evicted page to the state [`Page::new`] produces, keeping
+    /// its cell arena and table allocations for reuse.
+    fn reset(&mut self, cols: u16) {
+        self.cols = cols;
+        self.cells.clear();
+        self.rows.clear();
+        self.graphemes.clear();
+        self.styles.reset();
+        self.bytes = PAGE_HEADER_COST + self.styles.len() * std::mem::size_of::<Style>();
+    }
+
     fn materialize_row(&self, local: usize) -> Row {
         let mut row = Row {
             cells: Vec::with_capacity(self.cols as usize),
@@ -207,15 +316,20 @@ impl Page {
     }
 }
 
+#[inline]
 fn style_of(cell: &Cell) -> Style {
     let mut attrs = cell.attrs;
     attrs.remove(CellAttrs::WIDE | CellAttrs::WIDE_SPACER);
+    let (link, has_link) = match cell.hyperlink {
+        Some(h) => (h.get() as u32, Style::META_HAS_LINK),
+        None => (0, 0),
+    };
     Style {
-        fg: cell.fg,
-        bg: cell.bg,
-        underline_color: cell.underline_color,
-        attrs,
-        hyperlink: cell.hyperlink.map(|h| h.get() as u32),
+        fg: encode_color(cell.fg),
+        bg: encode_color(cell.bg),
+        underline: cell.underline_color.map_or(UNDERLINE_NONE, encode_color),
+        link,
+        meta: attrs.bits() as u32 | has_link,
     }
 }
 
@@ -250,6 +364,11 @@ pub(crate) struct PagedScrollback {
     limit_bytes: usize,
     /// Reused row buffer for [`Self::for_each_row`] (zero-allocation walks).
     scratch: Row,
+    /// One evicted page kept for reuse: a sustained flood at the retention
+    /// limit evicts a page every few dozen rows, and the allocator round-trip
+    /// for its 64KiB arena (malloc, plus madvise on free) is measurable
+    /// there.
+    spare: Option<Page>,
 }
 
 impl PagedScrollback {
@@ -260,6 +379,7 @@ impl PagedScrollback {
             total_bytes: 0,
             limit_bytes,
             scratch: empty_row(),
+            spare: None,
         }
     }
 
@@ -282,6 +402,7 @@ impl PagedScrollback {
         self.pages.clear();
         self.total_rows = 0;
         self.total_bytes = 0;
+        self.spare = None;
     }
 
     /// Pack one row that fell off the live grid and append it. Returns the
@@ -299,22 +420,16 @@ impl PagedScrollback {
 
         let page = self.ensure_page(cols);
         let offset = page.cells.len() as u32;
-        let mut delta = 0usize;
-        let mut memo: Option<(Style, StyleId)> = None;
+        let mut delta = len * PACKED_CELL_SIZE;
 
         for cell in &row.cells[..len] {
-            let style = style_of(cell);
-            let id = match memo {
-                Some((prev, id)) if prev == style => id,
-                _ => {
-                    let (id, is_new) = page.styles.intern(style);
-                    if is_new {
-                        delta += std::mem::size_of::<Style>();
-                    }
-                    memo = Some((style, id));
-                    id
-                }
-            };
+            // The style memo lives in the table (`StyleTable::last`), so a pen
+            // held across cells — or across whole rows of bulk output — skips
+            // the hash lookup entirely.
+            let (id, is_new) = page.styles.intern(style_of(cell));
+            if is_new {
+                delta += std::mem::size_of::<Style>();
+            }
             let flags = flags_of(cell);
             let index = page.cells.len() as u32;
             if flags.contains(PackedFlags::HAS_GRAPHEME) {
@@ -327,7 +442,6 @@ impl PagedScrollback {
                 style: id,
                 flags,
             });
-            delta += PACKED_CELL_SIZE;
         }
 
         page.rows.push(RowMeta {
@@ -414,7 +528,17 @@ impl PagedScrollback {
             Some(page) => page.cols != cols || page.cells.len() >= PAGE_CELL_CAPACITY,
         };
         if need_new {
-            let page = Page::new(cols);
+            // Reuse the spare evicted page when its arena is big enough for
+            // this width; otherwise build a fresh one.
+            let page = match self.spare.take() {
+                Some(mut spare)
+                    if spare.cells.capacity() >= PAGE_CELL_CAPACITY + cols as usize =>
+                {
+                    spare.reset(cols);
+                    spare
+                }
+                _ => Page::new(cols),
+            };
             self.total_bytes += page.bytes;
             self.pages.push_back(page);
         }
@@ -431,6 +555,7 @@ impl PagedScrollback {
             self.total_bytes -= page.bytes;
             self.total_rows -= page.rows.len();
             evicted += page.rows.len();
+            self.spare = Some(page);
         }
         evicted
     }

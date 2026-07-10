@@ -132,6 +132,70 @@ fn bulk_print_throughput_probe() {
     }
 }
 
+/// Manual stream-level scroll throughput probe (not a regression gate —
+/// wall-clock): reconstructs the previous optimization round's
+/// `bench/150MB_*.txt` workload in-process (same line pool as
+/// `bench/generate_data.py`, no external data files needed) and feeds it
+/// through one long-lived `Stream` into a 200x60 `Terminal` with scrollback
+/// enabled, so every line past the initial 60 rows exercises
+/// `PagedScrollback::push_row` — the architectural-round bottleneck.
+/// `cargo test -p noa-grid --release --offline stream_scroll_throughput_probe -- --ignored --nocapture`
+#[test]
+#[ignore = "manual wall-clock throughput probe"]
+fn stream_scroll_throughput_probe() {
+    let ascii_lines = [
+        "The quick brown fox jumps over the lazy dog.",
+        "Ghostty is now undeniably the fastest terminal emulator in IO throughput.",
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+        "ASCII, Unicode, and CSI tests show Ghostty is more than 2x faster.",
+        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "We are pair programming with a USER to solve their coding task.",
+        "Speed improvements apply directly to libghostty-vt users.",
+        "Testing various shapes of input: plain ASCII, heavy CSI, Unicode.",
+    ];
+    let unicode_lines = [
+        "Ghostty は今や、IO スループットにおいて紛れもなく最速のターミナルエミュレータであり、圧倒的な差をつけています。",
+        "ASCII、Unicode、CSI テストにおいて、Ghostty は他の主要な「高速」ターミナルよりも 2 倍以上速いです。",
+        "これらの変更は libghostty に直接適用されているため、皆が得をします。 🚀🔥",
+        "Hello World! こんにちは世界！ 안녕하세요! こんにちは！ Salut le monde!",
+        "日本語と English と 🦀 Rust と 🐍 Python が混ざったテキストです。",
+        "Wide characters: 繁體中文 简体中文 한국어日本語 Русский 𐎪𐎫𐎬",
+        "Emoji test: 🌍🔥🚀💻⚡️🎨📈🛠️👁️‍🗨️",
+        "CSI test cases and Unicode combined: \x1b[31mRed Text\x1b[0m and \x1b[32mGreen Text\x1b[0m.",
+    ];
+
+    fn build(lines: &[&str], target_bytes: usize) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(target_bytes + 4096);
+        let mut i = 0usize;
+        while buf.len() < target_bytes {
+            buf.extend_from_slice(lines[i % lines.len()].as_bytes());
+            buf.push(b'\n');
+            i += 1;
+        }
+        buf
+    }
+
+    let target = 150 * 1024 * 1024;
+    for (name, lines) in [("ascii", &ascii_lines[..]), ("unicode", &unicode_lines[..])] {
+        let data = build(lines, target);
+        let mut t = Terminal::new(GridSize::new(200, 60));
+        let mut s = Stream::new();
+        const CHUNK: usize = 1024 * 1024;
+        let start = std::time::Instant::now();
+        for chunk in data.chunks(CHUNK) {
+            s.feed(chunk, &mut t);
+            let _ = t.take_pending_writes();
+        }
+        let elapsed = start.elapsed();
+        let mib = data.len() as f64 / (1024.0 * 1024.0);
+        println!(
+            "{name}: {mib:.1} MiB in {elapsed:?} = {:.1} MiB/s (200x60, scrollback {} rows)",
+            mib / elapsed.as_secs_f64(),
+            t.scrollback_len()
+        );
+    }
+}
+
 #[test]
 fn bulk_wide_run_matches_per_scalar_for_cjk_wrap() {
     // Even columns: wide scalars tile exactly; odd columns: every row ends

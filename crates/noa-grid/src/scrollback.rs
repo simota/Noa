@@ -433,34 +433,90 @@ impl PagedScrollback {
         // bookkeeping. `intern`/`graphemes.insert` never touch `page.cells`, so
         // the pointer stays valid across them.
         let dst = page.cells.as_mut_ptr();
-        for (i, cell) in row.cells[..len].iter().enumerate() {
-            // The style memo lives in the table (`StyleTable::last`), so a pen
-            // held across cells — or across whole rows of bulk output — skips
-            // the hash lookup entirely.
-            let (id, is_new) = page.styles.intern(style_of(cell));
+        let cells = &row.cells[..len];
+        let layout = CellAttrs::WIDE | CellAttrs::WIDE_SPACER;
+
+        // Bulk output overwhelmingly pushes cells that share one pen with no
+        // combining marks, yet deriving the full `Style` per cell (three
+        // `encode_color` branches, the hyperlink match, the attr strip) plus
+        // the 20-byte intern compare dominated this loop (measured: 76.5% of
+        // push_row self-time even with the intern memo always hitting). So
+        // pack runs: the outer loop pays the full derivation once for a run's
+        // first cell (its "anchor"), and the inner loop reuses that interned
+        // id while cells keep matching the anchor's raw style fields — a few
+        // predictable compares per cell instead of the whole construction.
+        // Wide glyphs stay in a run (`WIDE`/`WIDE_SPACER` are layout flags,
+        // masked out of the style compare); a style change or combining mark
+        // ends the run and anchors the next one, so style-diverse rows pay at
+        // most one failed compare chain per cell on top of the old cost.
+        let mut i = 0usize;
+        while i < len {
+            // Run anchor: full style/flags derivation, grapheme handling.
+            let anchor = &cells[i];
+            // The style memo lives in the table (`StyleTable::last`), so a
+            // pen held across runs — or across whole rows of bulk output —
+            // skips the hash lookup entirely.
+            let (id, is_new) = page.styles.intern(style_of(anchor));
             if is_new {
                 delta += std::mem::size_of::<Style>();
             }
-            let flags = flags_of(cell);
+            let flags = flags_of(anchor);
             if flags.contains(PackedFlags::HAS_GRAPHEME) {
                 // Rare (only combining-mark cells); keep the index arithmetic
                 // and the grapheme clone off the common per-cell path.
-                let grapheme = cell.combining.clone();
+                let grapheme = anchor.combining.clone();
                 delta += grapheme.capacity() + GRAPHEME_ENTRY_COST;
                 page.graphemes.insert((base + i) as u32, grapheme);
             }
-            // SAFETY: `reserve(len)` guaranteed room for indices `base..base+len`;
+            // SAFETY: `reserve(len)` guaranteed room for `base..base+len`;
             // `i < len` and `page.cells` is untouched by the calls above, so
             // `dst.add(base + i)` is in-bounds and uninitialized.
             unsafe {
                 dst.add(base + i).write(PackedCell {
-                    ch: cell.ch,
+                    ch: anchor.ch,
                     style: id,
                     flags,
                 });
             }
+            let anchor_style_attrs = anchor.attrs.difference(layout);
+            i += 1;
+
+            // Run continuation: cells whose style fields match the anchor's.
+            while i < len {
+                let cell = &cells[i];
+                // Short-circuit `||`, deliberately: a fused bitwise-`|`
+                // divergence test was measured 24% slower (it forces all six
+                // loads/compares into one dependency chain per cell).
+                if cell.fg != anchor.fg
+                    || cell.bg != anchor.bg
+                    || cell.underline_color != anchor.underline_color
+                    || cell.hyperlink != anchor.hyperlink
+                    || cell.attrs.difference(layout) != anchor_style_attrs
+                    || !cell.combining.is_empty()
+                {
+                    break;
+                }
+                // `flags_of` sans the combining check (proven empty above).
+                let mut flags = PackedFlags::empty();
+                if cell.attrs.contains(CellAttrs::WIDE) {
+                    flags.insert(PackedFlags::WIDE);
+                }
+                if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
+                    flags.insert(PackedFlags::WIDE_SPACER);
+                }
+                // SAFETY: same argument as the anchor write above; nothing in
+                // this loop touches `page.cells`.
+                unsafe {
+                    dst.add(base + i).write(PackedCell {
+                        ch: cell.ch,
+                        style: id,
+                        flags,
+                    });
+                }
+                i += 1;
+            }
         }
-        // SAFETY: the loop initialized exactly slots `base..base+len`.
+        // SAFETY: the loops above initialized exactly slots `base..base+len`.
         unsafe {
             page.cells.set_len(base + len);
         }
@@ -806,6 +862,180 @@ mod tests {
         );
         // Retention stays within the limit plus at most one over-target page.
         assert!(sb.bytes() <= limit + PAGE_TARGET_BYTES + PAGE_HEADER_COST);
+    }
+
+    #[test]
+    fn push_row_run_packing_roundtrips_mid_row_transitions() {
+        // Pins the run-packing fast path's boundaries: a same-pen run broken
+        // by (1) a style change, (2) a grapheme cell between two same-style
+        // runs (the interned id must be reused across the break), (3) wide
+        // lead/spacer cells *inside* a run (layout flags differ, style does
+        // not), and (4) a hyperlink divergence.
+        let mut sb = PagedScrollback::new(usize::MAX);
+
+        let red = Cell {
+            ch: 'r',
+            fg: Color::Palette(1),
+            ..Cell::default()
+        };
+        let mut red_grapheme = red.clone();
+        red_grapheme.combining.push('\u{0301}');
+        let mut red_wide = Cell {
+            ch: '漢',
+            fg: Color::Palette(1),
+            ..Cell::default()
+        };
+        red_wide.attrs.insert(CellAttrs::WIDE);
+        let mut red_spacer = Cell {
+            ch: ' ',
+            fg: Color::Palette(1),
+            ..Cell::default()
+        };
+        red_spacer.attrs.insert(CellAttrs::WIDE_SPACER);
+        let blue = Cell {
+            ch: 'b',
+            fg: Color::Palette(4),
+            ..Cell::default()
+        };
+        let linked = Cell {
+            ch: 'l',
+            fg: Color::Palette(4),
+            hyperlink: HyperlinkId::new(7),
+            ..Cell::default()
+        };
+
+        let source = vec![
+            red.clone(),
+            red.clone(),
+            red_grapheme.clone(),
+            red.clone(), // same style resumes after the grapheme break
+            red_wide.clone(),
+            red_spacer.clone(), // wide pair inside the red run
+            red.clone(),
+            blue.clone(), // style change mid-row
+            blue.clone(),
+            linked.clone(), // hyperlink divergence
+        ];
+        sb.push_row(&row_from(source.clone()));
+
+        let out = sb.row(0).unwrap();
+        assert_eq!(out.cells, source);
+        // red (shared across grapheme/wide breaks), blue, linked, + default:
+        // run packing must not mint duplicate style entries.
+        assert_eq!(sb.pages[0].styles.len(), 4);
+    }
+
+    #[test]
+    fn push_row_run_packing_breaks_on_bg_underline_and_non_layout_attrs() {
+        // The previous roundtrip test only diverges runs via `fg` and
+        // `hyperlink`; the continuation compare chain also gates on `bg`,
+        // `underline_color`, and non-layout `attrs` (e.g. `BOLD`) — pin each
+        // of those independently so a dropped comparison can't silently
+        // fuse two differently-styled cells into one run.
+        let mut sb = PagedScrollback::new(usize::MAX);
+
+        let base = Cell {
+            ch: 'a',
+            fg: Color::Palette(1),
+            bg: Color::Palette(2),
+            ..Cell::default()
+        };
+        let bg_diverges = Cell {
+            ch: 'b',
+            bg: Color::Palette(3), // only `bg` differs from `base`
+            ..base.clone()
+        };
+        let underline_diverges = Cell {
+            ch: 'c',
+            underline_color: Some(Color::Palette(5)), // only `underline_color` differs
+            ..base.clone()
+        };
+        let mut bold_diverges = base.clone();
+        bold_diverges.ch = 'd';
+        bold_diverges.attrs.insert(CellAttrs::BOLD); // only a non-layout attr differs
+
+        let source = vec![
+            base.clone(),
+            base.clone(),
+            bg_diverges.clone(),
+            bg_diverges.clone(),
+            underline_diverges.clone(),
+            underline_diverges.clone(),
+            bold_diverges.clone(),
+            bold_diverges.clone(),
+        ];
+        sb.push_row(&row_from(source.clone()));
+
+        let out = sb.row(0).unwrap();
+        assert_eq!(out.cells, source);
+        // base, bg_diverges, underline_diverges, bold_diverges, + default:
+        // each divergence must mint its own style, not fuse into `base`'s run.
+        assert_eq!(sb.pages[0].styles.len(), 5);
+    }
+
+    #[test]
+    #[ignore = "benchmark; run with `--ignored --nocapture`"]
+    fn bench_push_alternating_style_forces_intern_miss_per_cell() {
+        // Every cell alternates fg between two colors (a syntax-highlighted /
+        // build-log shape), so `style_of` differs from `StyleTable::last` on
+        // nearly every cell — `intern` falls through to `intern_uncached`'s
+        // hash-map lookup ~200 times per row instead of ~once.
+        let limit = 10_000_000;
+        let mut sb = PagedScrollback::new(limit);
+        let cells: Vec<Cell> = (0..200)
+            .map(|i| Cell {
+                ch: 'x',
+                fg: if i % 2 == 0 {
+                    Color::Palette(1)
+                } else {
+                    Color::Palette(2)
+                },
+                ..Cell::default()
+            })
+            .collect();
+        let row = row_from(cells);
+        let n = 1_000_000;
+
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            sb.push_row(&row);
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "push (alternating style): {n} rows of 200 cols in {elapsed:?} ({:.0} rows/s)",
+            n as f64 / elapsed.as_secs_f64()
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark; run with `--ignored --nocapture`"]
+    fn bench_push_one_in_ten_graphemes() {
+        // 1-in-10 cells carries one combining scalar (accented Latin text
+        // shape), exercising the `HAS_GRAPHEME` clone + grapheme-table insert
+        // on the bulk-output path.
+        let limit = 10_000_000;
+        let mut sb = PagedScrollback::new(limit);
+        let cells: Vec<Cell> = (0..200)
+            .map(|i| {
+                let mut c = cell('x');
+                if i % 10 == 0 {
+                    c.combining.push('\u{0301}');
+                }
+                c
+            })
+            .collect();
+        let row = row_from(cells);
+        let n = 1_000_000;
+
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            sb.push_row(&row);
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "push (1-in-10 graphemes): {n} rows of 200 cols in {elapsed:?} ({:.0} rows/s)",
+            n as f64 / elapsed.as_secs_f64()
+        );
     }
 
     #[test]

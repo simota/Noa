@@ -401,6 +401,11 @@ pub struct StartupConfig {
     /// `macos-titlebar-proxy-icon`: whether the titlebar shows the focused
     /// pane's OSC 7 pwd as a folder/file proxy icon. Default shows it.
     pub macos_titlebar_proxy_icon: MacosTitlebarProxyIcon,
+    /// `macos-applescript`: install the AppleScript / Apple Event bridge on
+    /// launch (Ghostty parity, default **true**). When false the Apple Event
+    /// handlers are never registered, so scripting the app is a no-op. No-op
+    /// outside macOS.
+    pub macos_applescript: bool,
     /// `quick-terminal-hotkey`: the global hotkey chord that toggles the
     /// drop-down quick terminal (e.g. `cmd+grave`). Defaults to
     /// [`DEFAULT_QUICK_TERMINAL_HOTKEY`]; set the config value to `none` (or
@@ -492,6 +497,7 @@ impl Default for StartupConfig {
             macos_titlebar_style: MacosTitlebarStyle::default(),
             macos_non_native_fullscreen: false,
             macos_titlebar_proxy_icon: MacosTitlebarProxyIcon::default(),
+            macos_applescript: true,
             quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
             quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
             quick_terminal_autohide: true,
@@ -546,6 +552,7 @@ pub struct ConfigOverrides {
     pub macos_titlebar_style: Option<MacosTitlebarStyle>,
     pub macos_non_native_fullscreen: Option<bool>,
     pub macos_titlebar_proxy_icon: Option<MacosTitlebarProxyIcon>,
+    pub macos_applescript: Option<bool>,
     pub quick_terminal_hotkey: Option<String>,
     pub quick_terminal_size: Option<f32>,
     pub quick_terminal_autohide: Option<bool>,
@@ -630,6 +637,7 @@ impl ConfigOverrides {
             macos_titlebar_proxy_icon: higher_priority
                 .macos_titlebar_proxy_icon
                 .or(self.macos_titlebar_proxy_icon),
+            macos_applescript: higher_priority.macos_applescript.or(self.macos_applescript),
             quick_terminal_hotkey: higher_priority
                 .quick_terminal_hotkey
                 .or(self.quick_terminal_hotkey),
@@ -716,6 +724,7 @@ impl ConfigOverrides {
             macos_titlebar_proxy_icon: self
                 .macos_titlebar_proxy_icon
                 .unwrap_or(base.macos_titlebar_proxy_icon),
+            macos_applescript: self.macos_applescript.unwrap_or(base.macos_applescript),
             quick_terminal_hotkey: self.quick_terminal_hotkey.or(base.quick_terminal_hotkey),
             quick_terminal_size: self.quick_terminal_size.unwrap_or(base.quick_terminal_size),
             quick_terminal_autohide: self
@@ -912,6 +921,7 @@ mod tests {
                 macos_titlebar_style: MacosTitlebarStyle::default(),
                 macos_non_native_fullscreen: false,
                 macos_titlebar_proxy_icon: MacosTitlebarProxyIcon::default(),
+                macos_applescript: true,
                 quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
                 quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
                 quick_terminal_autohide: true,
@@ -1199,6 +1209,41 @@ font-size = 15.5
             resolved.macos_titlebar_proxy_icon,
             MacosTitlebarProxyIcon::Hidden
         );
+    }
+
+    #[test]
+    fn macos_applescript_parses_and_defaults_true() {
+        let (overrides, diagnostics) = parse_overrides(test_path(), "macos-applescript = false");
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.macos_applescript, Some(false));
+
+        // Default is on (Ghostty parity): unset config leaves the bridge enabled.
+        let default = ConfigOverrides::default().apply_to(StartupConfig::default());
+        assert!(default.macos_applescript);
+
+        // A file `false` survives a CLI that leaves the key unset, and a CLI
+        // `false` still wins over a file `true` (precedence via `.or()`).
+        let file = ConfigOverrides {
+            macos_applescript: Some(false),
+            ..Default::default()
+        };
+        let resolved = file
+            .clone()
+            .merge(ConfigOverrides::default())
+            .apply_to(StartupConfig::default());
+        assert!(!resolved.macos_applescript);
+
+        let cli = ConfigOverrides {
+            macos_applescript: Some(false),
+            ..Default::default()
+        };
+        let resolved = ConfigOverrides {
+            macos_applescript: Some(true),
+            ..Default::default()
+        }
+        .merge(cli)
+        .apply_to(StartupConfig::default());
+        assert!(!resolved.macos_applescript);
     }
 
     #[test]

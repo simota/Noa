@@ -52,6 +52,7 @@ pub(crate) fn build_overrides(
     let mut macos_titlebar_style = None;
     let mut macos_non_native_fullscreen = None;
     let mut macos_titlebar_proxy_icon = None;
+    let mut macos_applescript = None;
     let mut quick_terminal_hotkey = None;
     let mut quick_terminal_size = None;
     let mut quick_terminal_autohide = None;
@@ -228,6 +229,9 @@ pub(crate) fn build_overrides(
                 macos_titlebar_proxy_icon =
                     parse_macos_titlebar_proxy_icon(path, directive, &mut diagnostics);
             }
+            "macos-applescript" => {
+                macos_applescript = parse_bool_directive(path, directive, &mut diagnostics);
+            }
             "quick-terminal-hotkey" => {
                 // `none`/`off`/`false`/empty explicitly disable the hotkey,
                 // normalized to the empty-string sentinel so it overrides the
@@ -348,6 +352,7 @@ pub(crate) fn build_overrides(
             macos_titlebar_style,
             macos_non_native_fullscreen,
             macos_titlebar_proxy_icon,
+            macos_applescript,
             quick_terminal_hotkey,
             quick_terminal_size,
             quick_terminal_autohide,
@@ -437,6 +442,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "macos-titlebar-style"
             | "macos-non-native-fullscreen"
             | "macos-titlebar-proxy-icon"
+            | "macos-applescript"
             | "quick-terminal-hotkey"
             | "quick-terminal-size"
             | "quick-terminal-autohide"

@@ -57,9 +57,57 @@ jobs:
           fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
+      - name: Determine signing mode
+        id: signing
+        shell: bash
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          # Secrets cannot be referenced in step-level `if:`, so resolve the
+          # decision once here and gate later steps on this output. Forks and
+          # secret-less runs take the ad-hoc path (identical to prior behavior).
+          if [[ -n "${MACOS_SIGN_IDENTITY}" ]]; then
+            echo "enabled=true" >> "${GITHUB_OUTPUT}"
+            echo "Developer ID signing enabled."
+          else
+            echo "enabled=false" >> "${GITHUB_OUTPUT}"
+            echo "MACOS_SIGN_IDENTITY not set; falling back to ad-hoc signing (no notarization)."
+          fi
+
+      - name: Import Developer ID certificate
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain_password="$(uuidgen)"
+          keychain="${RUNNER_TEMP}/noa-signing.keychain-db"
+          cert_path="${RUNNER_TEMP}/certificate.p12"
+          printf '%s' "${MACOS_CERTIFICATE_P12}" | base64 --decode > "${cert_path}"
+          security create-keychain -p "${keychain_password}" "${keychain}"
+          # Prevent the keychain from auto-locking mid-build (6 h timeout).
+          security set-keychain-settings -lut 21600 "${keychain}"
+          security unlock-keychain -p "${keychain_password}" "${keychain}"
+          security import "${cert_path}" -k "${keychain}" \
+            -P "${MACOS_CERTIFICATE_PASSWORD}" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "${keychain_password}" "${keychain}"
+          # Prepend our keychain to the user search list, keeping the existing
+          # keychains reachable, and make it the default for codesign lookups.
+          security list-keychains -d user -s "${keychain}" \
+            $(security list-keychains -d user | sed 's/["[:space:]]//g')
+          security default-keychain -s "${keychain}"
+          rm -f "${cert_path}"
+          echo "NOA_SIGNING_KEYCHAIN=${keychain}" >> "${GITHUB_ENV}"
+
       - name: Build app bundle
         env:
           NOA_VERSION: ${{ steps.version.outputs.version }}
+          NOA_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
         run: scripts/bundle-macos.sh release
 
       - name: Verify app bundle
@@ -72,6 +120,37 @@ jobs:
             "${{ steps.version.outputs.version }}"
           file "${app}/Contents/MacOS/Noa" | grep -q "arm64"
           codesign --verify --deep --strict --verbose=2 "${app}"
+
+      - name: Notarize and staple
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          app="target/release/Noa.app"
+          key_path="${RUNNER_TEMP}/AuthKey.p8"
+          # The App Store Connect key may be stored raw (PEM) or base64-encoded.
+          if printf '%s' "${APPLE_API_KEY}" | grep -q "BEGIN PRIVATE KEY"; then
+            printf '%s\n' "${APPLE_API_KEY}" > "${key_path}"
+          else
+            printf '%s' "${APPLE_API_KEY}" | base64 --decode > "${key_path}"
+          fi
+          notarize_zip="${RUNNER_TEMP}/Noa-notarize.zip"
+          # notarytool wants a zip; keepParent preserves the .app directory.
+          ditto -c -k --keepParent "${app}" "${notarize_zip}"
+          xcrun notarytool submit "${notarize_zip}" \
+            --key "${key_path}" \
+            --key-id "${APPLE_API_KEY_ID}" \
+            --issuer "${APPLE_API_ISSUER_ID}" \
+            --wait
+          # Staple the ticket into the .app so Gatekeeper validates offline.
+          xcrun stapler staple "${app}"
+          rm -f "${key_path}" "${notarize_zip}"
+          # Final gate: confirm Gatekeeper accepts the signed, stapled bundle.
+          spctl -a -t exec -vv "${app}"
 
       - name: Package release asset
         id: package
@@ -97,6 +176,15 @@ jobs:
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.archive }}.sha256
           if-no-files-found: error
+
+      - name: Clean up signing keychain
+        if: always() && steps.signing.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${NOA_SIGNING_KEYCHAIN:-}" && -f "${NOA_SIGNING_KEYCHAIN}" ]]; then
+            security delete-keychain "${NOA_SIGNING_KEYCHAIN}" || true
+          fi
 
   release:
     name: Publish GitHub Release

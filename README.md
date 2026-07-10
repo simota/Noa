@@ -48,8 +48,11 @@ archive and its SHA-256 checksum.
 
 The cask temporarily uses `sha256 :no_check` because no release archive exists
 yet. Replace it with the published checksum after the first release. Release
-artifacts are currently ad-hoc signed; Developer ID signing and notarization
-are still required for a prompt-free Gatekeeper experience after download.
+artifacts are Developer ID signed and notarized for a prompt-free Gatekeeper
+experience after download when the signing secrets are configured; without them
+the workflow falls back to ad-hoc signing. See
+[docs/release-signing.md](docs/release-signing.md) for the required secrets and
+local testing steps.
 
 ## Releasing
 

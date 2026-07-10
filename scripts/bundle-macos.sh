@@ -5,8 +5,16 @@
 #   scripts/bundle-macos.sh debug      # debug build   -> target/debug/Noa.app
 #
 # No external tooling required (no cargo-bundle): assembles the bundle by hand,
-# generates the app icon if missing, and ad-hoc code-signs so it launches
-# without a Gatekeeper prompt on this machine.
+# generates the app icon if missing, and code-signs the result.
+#
+# Signing behavior:
+#   - If NOA_SIGN_IDENTITY is set (e.g. "Developer ID Application: Name (TEAMID)"),
+#     sign for distribution: hardened runtime + secure timestamp, signing the
+#     inner Mach-O binary first and the .app second (inside-out; no --deep).
+#     A Developer ID signature plus a later notarization pass gives a
+#     prompt-free Gatekeeper experience after download.
+#   - Otherwise, ad-hoc sign (--sign -) so double-clicking / `open` doesn't trip
+#     Gatekeeper on the machine that built it.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -109,9 +117,20 @@ PLIST
 
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
-# Ad-hoc code signature so double-clicking / `open` doesn't trip Gatekeeper.
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 \
-  || echo "warning: ad-hoc codesign failed (app still runnable via terminal)" >&2
+if [ -n "${NOA_SIGN_IDENTITY:-}" ]; then
+  # Distribution signing: hardened runtime + timestamp, inside-out (no --deep).
+  # Sign the inner binary before the enclosing bundle so the outer signature
+  # seals an already-signed executable.
+  codesign --force --options runtime --timestamp \
+    --sign "$NOA_SIGN_IDENTITY" "$CONTENTS/MacOS/Noa"
+  codesign --force --options runtime --timestamp \
+    --sign "$NOA_SIGN_IDENTITY" "$APP"
+  echo "Signed $APP with Developer ID identity: $NOA_SIGN_IDENTITY"
+else
+  # Ad-hoc code signature so double-clicking / `open` doesn't trip Gatekeeper.
+  codesign --force --deep --sign - "$APP" >/dev/null 2>&1 \
+    || echo "warning: ad-hoc codesign failed (app still runnable via terminal)" >&2
+fi
 
 echo "Built $APP"
 echo "Run it:  open \"$APP\"   (or double-click in Finder)"

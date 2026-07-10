@@ -118,4 +118,4 @@ Dependency boundaries are intentional: only `noa-app` and `noa-render` use
 
 ## License
 
-MIT, matching Ghostty's license. Noa is an independent reimplementation.
+MIT. See [LICENSE](LICENSE).

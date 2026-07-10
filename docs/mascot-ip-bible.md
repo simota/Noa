@@ -18,7 +18,7 @@ means every bit of it.
 | Register | Introverted, deadpan, few words — but a sharp, dry wit when she does speak |
 | Core | Strong-willed, own-pace, unfawning; **soft and loyal underneath** |
 | Signature look | Oversized black hoodie, single warm-orange `#E8A33D` accent |
-| Companion | Her ghost sprite (see §2) — almost always with her |
+| Companion | Ember, her ghost sprite (see §2) — almost always with her |
 
 **Speech style** (for captions / voice / VTuber): short flat lines, trailing "…",
 occasional cutting one-liner. Never bubbly, never a caption full of emoji. Warmth
@@ -45,28 +45,22 @@ snack, being left alone *with company nearby*.
 
 ---
 
-## 2. The Ghost Companion
+## 2. The Ghost Companion — Ember
 
-Her emotional and comedic **foil**: as expressive as she is flat. Needy, warm,
-bouncy, wears its heart on its (nonexistent) sleeve. It does the reacting so she
-doesn't have to — the duo dynamic is the heart of the IP.
+**Ember** — her emotional and comedic **foil**: as expressive as she is flat.
+Needy, warm, bouncy, wears its heart on its (nonexistent) sleeve. Ember does the
+reacting so Noa doesn't have to — the duo dynamic is the heart of the IP.
 
 - **Role**: reaction engine, comfort object, occasional troublemaker.
-- **Personality**: clingy, food-motivated, brave-when-it-matters, glows brighter
+- **Personality**: clingy, food-motivated, brave-when-it-matters; glows brighter
   with emotion (and on Halloween).
+- **Name meaning**: a warm coal that flares with feeling — ties directly to Noa's
+  `#E8A33D` accent, so the duo shares one light.
 - **Visual rules**: small, round, soft edges; a faint warm-orange inner glow ties
   it to Noa's accent; simplest possible face (two dots + mood).
 
-**Name candidates** (populates the earlier TODO — pick one to lock the duo):
-
-| Candidate | Why |
-|-----------|-----|
-| **Ember** *(recommended)* | Ties to the `#E8A33D` glow + the "brighter with emotion" trait |
-| Mochi | Round, soft, plush-merch-friendly, instantly cute |
-| Boo | Classic, short, universal |
-
-> A **named** duo unlocks duo-content, plush merch, and collab framing. Recommend
-> locking one before the first merch run.
+> **Name locked (2026-07-10): Ember.** The named duo unlocks duo-content, plush
+> merch, and collab framing — an Ember plush is the recommended first goods lead (§5).
 
 ---
 
@@ -138,7 +132,7 @@ mirror-opposite of Noa's warm-orange scruff, flat vector / cel-shaded, 4k
 | **4-koma / comic strip** | Noa's flat one-liners vs the ghost's overreactions — daily-life gags, "she says she doesn't care" punchline engine | Low |
 | **Sticker / emote sets** | Themed packs off §F reactions (`mascot-ip.md`): "deadpan", "night owl", "the ghost & me" | Low |
 | **Motion / VTuber-style** | Rig the Signature stand; idle = flat blink + ghost bob; her dry voice is the draw | Med |
-| **Plush / acrylic goods** | Lead with the **ghost plush** (§2), then chibi Noa acrylic stands | Med |
+| **Plush / acrylic goods** | Lead with the **Ember plush** (§2), then chibi Noa acrylic stands | Med |
 | **Seasonal drops** | One key visual per season (`mascot-ip.md` §E) + a matching outfit (§3) | Low |
 | **Collab** | Use the §3 collab-ready base; partner supplies the accent theme | Med |
 
@@ -152,8 +146,8 @@ quarterly merch/outfit drop. Consistent duo presence in every piece.
 1. **Silhouette**: petite, black bob + blunt bangs, oversized black hoodie.
 2. **Color**: Noa = single `#E8A33D` orange, always. Cast get their own single accent.
 3. **Register**: deadpan default; warmth leaks through action, never gushes.
-4. **Duo**: the ghost appears in nearly every piece; it carries the emotion.
+4. **Duo**: Ember appears in nearly every piece; it carries the emotion.
 5. **Style**: flat vector / clean cel-shaded, crisp outlines, sticker-ready.
 
-#TODO(agent): lock the ghost's name (§2), then decide cast scope — one Foil first,
-or commit to the full duo-cast. Both are creative-owner calls left open.
+#TODO(agent): decide cast scope (§4) — introduce one Foil first, or commit to the
+full duo-cast. Creative-owner call left open. (Ghost name locked: Ember.)

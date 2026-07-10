@@ -9,7 +9,7 @@ worldview, daily life, hobbies, her ghost companion, seasons, and merch.
 
 1. **Low-key & her own pace** — introverted, deadpan, few words.
 2. **Soft underneath** — genuinely kind once you get past the flat face.
-3. **The ghost companion** — a mutual, devoted duo (naming recommended).
+3. **The ghost companion** — **Ember**, a mutual, devoted duo (profile: `mascot-ip-bible.md` §2).
 4. **Black × orange identity** — jet-black bob + oversized black hoodie + a single
    warm signature-orange accent, held across every scene.
 
@@ -29,7 +29,8 @@ gaze, flat vector / clean cel-shaded style, crisp outlines, sticker-ready, 4k
 > mandatory dark background are removed. The retained DNA is the black bob + blunt
 > bangs, oversized black hoodie, the single orange accent, the ghost companion, and
 > the low-key-but-strong-willed personality. Orange `#E8A33D` stays as her brand
-> color even without the terminal.
+> color even without the terminal. The "ghost sprite" in every prompt below is
+> **Ember**, her named companion (character profile: `mascot-ip-bible.md` §2).
 
 ## Negative Prompt (shared)
 
@@ -222,8 +223,5 @@ night light, merch key-art vibe
   every other scene via i2i (image-to-image) so the art style matches.
 - **Color**: Restrict the accent to the single signature-orange `#E8A33D` — multiple
   accents scatter the look and dilute the brand.
-- **Duo discipline**: The ghost sprite should appear in almost every cut. The duo
-  relationship, not the girl alone, is what makes the IP.
-
-#TODO(agent): name the ghost companion — a named duo makes duo-content and merch
-much easier to run. Left open pending a creative decision.
+- **Duo discipline**: Ember (the ghost sprite) should appear in almost every cut.
+  The duo relationship, not the girl alone, is what makes the IP.

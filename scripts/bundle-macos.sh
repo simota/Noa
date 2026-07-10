@@ -80,6 +80,10 @@ if [ -f "$ROOT/assets/noa.icns" ]; then
     <string>noa</string>"
 fi
 
+# AppleScript dictionary: ship the .sdef and advertise it so Script Editor and
+# `osascript` can drive the app (applescript spec R-1).
+cp "$ROOT/assets/Noa.sdef" "$CONTENTS/Resources/Noa.sdef"
+
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -111,6 +115,10 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <string>NSApplication</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
+    <key>NSAppleScriptEnabled</key>
+    <true/>
+    <key>OSAScriptingDefinition</key>
+    <string>Noa.sdef</string>
 </dict>
 </plist>
 PLIST

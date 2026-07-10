@@ -6,6 +6,10 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Install the Apple Event handlers once, after `NSApp` finished
+        // launching (applescript R-2/Amendment 3). Guarded by its own flag so a
+        // later resume can't double-register, independent of the windows check.
+        self.install_applescript_if_needed();
         if !self.windows.is_empty() {
             return;
         }
@@ -164,6 +168,72 @@ impl ApplicationHandler<UserEvent> for App {
                     self.request_overview_redraw();
                 }
             }
+            UserEvent::WriteText {
+                window_id,
+                pane_id,
+                text,
+            } => {
+                // Ids were frozen at AE-resolve time (applescript Amendment
+                // 1.5); a target that closed since then just drops the write.
+                if self
+                    .windows
+                    .get(&window_id)
+                    .is_some_and(|state| state.contains_pane(pane_id))
+                {
+                    let bracketed = self.bracketed_paste(window_id, pane_id);
+                    if let Some(bytes) = input::applescript_input_bytes(&text, bracketed) {
+                        self.mark_pane_paste_input(window_id, pane_id);
+                        self.snap_pane_viewport_to_bottom(window_id, pane_id);
+                        self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+                    }
+                }
+            }
+            UserEvent::RaiseWindow {
+                window_id,
+                pane_id,
+                activate_app,
+            } => {
+                if self
+                    .windows
+                    .get(&window_id)
+                    .is_some_and(|state| state.contains_pane(pane_id))
+                {
+                    self.focused = Some(window_id);
+                    // Move split focus (a no-op when `pane_id` is already
+                    // focused) …
+                    self.focus_pane(window_id, pane_id);
+                    // … then raise the native tab/window regardless, so a
+                    // `select tab`/`focus`/`activate window` always re-orders
+                    // the UI even on the no-op focus path.
+                    if let Some(window) = self
+                        .windows
+                        .get(&window_id)
+                        .map(|state| state.window.clone())
+                    {
+                        window.focus_window();
+                    }
+                    #[cfg(target_os = "macos")]
+                    if activate_app {
+                        crate::macos_window::activate_app();
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = activate_app;
+                }
+            }
+            UserEvent::ClosePane { window_id, pane_id } => {
+                if self
+                    .windows
+                    .get(&window_id)
+                    .is_some_and(|state| state.contains_pane(pane_id))
+                {
+                    self.request_close_pane(event_loop, window_id, pane_id);
+                }
+            }
+            UserEvent::SpawnTab {
+                window_target,
+                cwd,
+                command,
+            } => self.spawn_applescript_tab(event_loop, window_target, cwd, command),
             UserEvent::PtyExit(window_id, pane_id) => {
                 // The quick terminal isn't a saved/tabbed window, so its shell
                 // exiting tears the whole drop-down down rather than routing
@@ -496,6 +566,9 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(target_os = "macos")]
         self.install_macos_menu_if_needed();
         self.install_global_hotkey_if_needed();
+        // Keep the AppleScript snapshot fresh for synchronous property reads
+        // (a no-op when the bridge was never installed).
+        self.sync_applescript_snapshot();
         // Each tick reports its own next wake-up instead of setting
         // `ControlFlow` directly, so a `WaitUntil` from one can't clobber a
         // more urgent one from the others — this pass sets it exactly once,

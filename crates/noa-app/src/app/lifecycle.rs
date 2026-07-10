@@ -356,6 +356,37 @@ impl App {
         Ok(window_id)
     }
 
+    /// Spawn a tab for AppleScript `new window` / `new tab` (applescript R-3).
+    /// `cwd` forces the initial pane's directory when set (otherwise the tab
+    /// inherits the focused shell's cwd like an interactive New Tab); `command`
+    /// is written to the new pane's pty followed by a newline so it runs in the
+    /// freshly spawned surface.
+    pub(super) fn spawn_applescript_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_target: crate::events::AppleScriptSpawnTarget,
+        cwd: Option<String>,
+        command: Option<String>,
+    ) {
+        let target = match window_target {
+            crate::events::AppleScriptSpawnTarget::CurrentWindow => SpawnTarget::CurrentWindow,
+            crate::events::AppleScriptSpawnTarget::NewWindow => SpawnTarget::NewWindow,
+        };
+        // `Some(..)` forces the cwd; `None` keeps the inherit-from-focused-shell
+        // behavior of an ordinary New Tab/New Window.
+        let cwd_override = cwd.map(Some);
+        match self.spawn_tab_with_cwd(event_loop, target, cwd_override) {
+            Ok(window_id) => {
+                if let Some(command) = command.filter(|command| !command.is_empty()) {
+                    let mut bytes = command.into_bytes();
+                    bytes.push(b'\n');
+                    self.write_pty_bytes(window_id, &bytes);
+                }
+            }
+            Err(err) => log::warn!("failed to spawn AppleScript tab: {err:#}"),
+        }
+    }
+
     fn tab_window_attributes(
         &self,
         inner_size: LogicalSize<f64>,

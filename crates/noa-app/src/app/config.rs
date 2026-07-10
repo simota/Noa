@@ -93,6 +93,10 @@ pub struct AppConfig {
     /// `macos-titlebar-proxy-icon`: whether the titlebar shows the focused
     /// pane's OSC 7 pwd as a folder/file proxy icon.
     pub macos_titlebar_proxy_icon: noa_config::MacosTitlebarProxyIcon,
+    /// `macos-applescript`: install the AppleScript / Apple Event bridge on
+    /// launch (default true). When false the Apple Event handlers are never
+    /// registered.
+    pub macos_applescript: bool,
     /// Set when the user passed an explicit grid size on the CLI (`--cols` /
     /// `--rows`). Session restore is suppressed in that case so the requested
     /// dimensions win over the saved topology (Ghostty parity).
@@ -184,6 +188,7 @@ impl AppConfig {
             macos_titlebar_style: config.macos_titlebar_style,
             macos_non_native_fullscreen: config.macos_non_native_fullscreen,
             macos_titlebar_proxy_icon: config.macos_titlebar_proxy_icon,
+            macos_applescript: config.macos_applescript,
             cli_grid_override,
             cli_overrides,
             quick_terminal_hotkey: config.quick_terminal_hotkey,

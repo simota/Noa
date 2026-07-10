@@ -68,6 +68,7 @@ use crate::split_tree::{
 };
 use crate::{AppCommand, ViewportScroll};
 
+mod applescript;
 mod auto_approve;
 mod commands;
 mod config;
@@ -291,6 +292,26 @@ pub struct App {
     /// happen on the caller. Its `Drop` (as an `App` field) flushes the last
     /// queued state to disk, covering the quit path.
     session_persister: crate::session_persist::SessionPersister,
+    /// The installed AppleScript / Apple Event bridge (applescript R-2), kept
+    /// alive for the app's lifetime (dropping it removes the handlers). `None`
+    /// until installed, when `macos-applescript` is false, or off macOS.
+    applescript: Option<crate::macos_applescript::Registration>,
+    /// The read-only window/tab/terminal projection the Apple Event handler
+    /// answers property queries from (applescript Amendment 1.1). The main
+    /// thread rebuilds it in `about_to_wait` while the bridge is installed; the
+    /// handler only ever locks and reads it, so scripting never blocks the loop.
+    applescript_snapshot: Arc<Mutex<crate::macos_applescript::AppStateSnapshot>>,
+    /// Guards the one-time Apple Event handler registration to the first
+    /// `resumed`, mirroring `hotkey_install_attempted`.
+    applescript_install_attempted: bool,
+    /// The cheap structural signature (topology/focus/titles) of the last
+    /// AppleScript snapshot rebuild, so `about_to_wait` skips the full
+    /// per-pane `terminal.lock()` rebuild when nothing relevant changed.
+    applescript_snapshot_sig: u64,
+    /// When the AppleScript snapshot was last rebuilt, for the coarse
+    /// time-based refresh that keeps cwd/title current under sustained output
+    /// without locking every terminal each frame.
+    applescript_snapshot_at: Option<Instant>,
 }
 
 impl App {
@@ -365,6 +386,13 @@ impl App {
             sidebar_visible_gate,
             sidebar_preview_lines_gate,
             sidebar_visible_groups: HashSet::new(),
+            applescript: None,
+            applescript_snapshot: Arc::new(Mutex::new(
+                crate::macos_applescript::AppStateSnapshot::default(),
+            )),
+            applescript_install_attempted: false,
+            applescript_snapshot_sig: 0,
+            applescript_snapshot_at: None,
         }
     }
 

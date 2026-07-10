@@ -33,9 +33,14 @@ character design, tall model proportions, lowres, blurry, jpeg artifacts
   so the pair stays on-model across all four.
 - **Framing**: keep the camera identical within a "time-lapse" strip (#4, #7) — the
   unchanging frame *is* the joke. Vary shots (wide / medium / close-up) in the
-  reaction strips, and give panel 4 the tightest, most readable framing.
-- **Aspect**: per-panel ≈ 1:1 (or 4:3). Full strip = 4 panels stacked, ≈ 9:16 → 1:4.
-- **Text**: leave bubbles empty; letter the dialogue afterward from the script doc.
+  reaction strips, and give the bottom-right (punchline) panel the tightest,
+  most readable framing.
+- **Layout**: 2×2 quadrant grid, square 1:1. Reading order (EN, left→right):
+  **top-left → top-right → bottom-left → bottom-right**. Per-panel renders ≈ 1:1.
+- **Text**: dialogue is short EN (canonical lines in `mascot-4koma.md`). Either
+  **bake** it into the bubbles (short lines render acceptably on text-capable
+  models — Ideogram / gpt-image / nano-banana) or leave bubbles empty and letter
+  in post for the cleanest type.
 
 ## Assembled example (Strip #1, Panel 1 — full copy-paste form)
 
@@ -108,19 +113,36 @@ front of her, empty speech bubble over her head
 
 ---
 
-## Single-image 4-koma grid (fast path, any strip)
+## Single-image 2×2 grid (one render per strip)
 
-Wrap a whole strip in one generation instead of four:
+Wrap a whole strip in one generation instead of four. Panels map TL / TR / BL / BR
+to the strip's P1 / P2 / P3 / P4; slot in each strip's four short EN lines from
+`mascot-4koma.md`:
 
 ```
-[Panel Base] + a vertical 4-panel manga 4-koma strip, four equal stacked panels
-read top to bottom with clean gutters, telling: (1) <P1 clause> (2) <P2 clause>
-(3) <P3 clause> (4) <P4 clause>, consistent character across all panels, empty
-speech bubbles with no text, 9:16
+[Panel Base] + a 2x2 four-panel manga grid, square 1:1, four equal panels with
+clean gutters, reading order top-left, top-right, bottom-left, bottom-right,
+telling: (TL) <P1 clause> (TR) <P2 clause> (BL) <P3 clause> (BR) <P4 clause>,
+consistent Noa and Ember across all four panels, short clean English speech-bubble
+text, 1:1
+```
+
+### Assembled example (Strip #1, baked short EN dialogue)
+
+```
+[Panel Base] + a 2x2 four-panel manga grid, square 1:1, clean gutters, reading
+top-left → top-right → bottom-left → bottom-right:
+(TL) Noa at her desk, flat deadpan, a wall screen behind her glowing red with a
+big ✗, bubble "…passes here."
+(TR) close on Ember squinting at the red ✗, one sweat drop, bubble "it's SO red."
+(BL) Noa gesturing flatly at her all-green screen, bubble "not my bug."
+(BR) Ember lifting a laptop overhead like an offering, Noa staring one beat too
+long, bubble "…ship your laptop?"
+consistent Noa and Ember, short clean English lettering, 1:1
 ```
 
 > Faster but less controllable; per-panel + i2i keeps the pair more on-model. Use
-> the grid for drafts, per-panel for finals.
+> the 2×2 grid for drafts and social posts, per-panel for finals.
 
 #TODO(agent): after a test render, tune the Panel Base tokens (screentone amount,
 outline weight) to the chosen generator, then lock a house style string.

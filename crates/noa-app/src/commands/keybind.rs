@@ -234,6 +234,36 @@ impl KeybindEngine {
     }
 }
 
+/// The closed `perform action` set for the AppleScript bridge (applescript
+/// R-8/L2): only these action names are accepted; everything else yields
+/// `errAEEventNotHandled`. Reuses [`AppCommand`] variants (no new commands),
+/// deliberately narrower than the keybind vocabulary so scripting cannot reach
+/// commands outside the ratified table.
+pub(crate) fn command_from_applescript_action(action: &str) -> Option<AppCommand> {
+    match action {
+        "new_tab" => Some(AppCommand::NewTab),
+        "new_window" => Some(AppCommand::NewWindow),
+        "new_split:right" => Some(AppCommand::NewSplitRight),
+        "new_split:left" => Some(AppCommand::NewSplitLeft),
+        "new_split:up" => Some(AppCommand::NewSplitUp),
+        "new_split:down" => Some(AppCommand::NewSplitDown),
+        "close_tab" => Some(AppCommand::CloseTab),
+        "close_window" => Some(AppCommand::CloseWindow),
+        "next_tab" => Some(AppCommand::NextTab),
+        "previous_tab" => Some(AppCommand::PrevTab),
+        "toggle_fullscreen" => Some(AppCommand::ToggleFullscreen),
+        "copy_to_clipboard" => Some(AppCommand::Copy),
+        "paste_from_clipboard" => Some(AppCommand::Paste),
+        "reload_config" => Some(AppCommand::ReloadConfig),
+        "quit" => Some(AppCommand::Quit),
+        _ => action
+            .strip_prefix("goto_tab:")
+            .and_then(|index| index.parse::<usize>().ok())
+            .filter(|index| (1..=9).contains(index))
+            .map(AppCommand::SelectTab),
+    }
+}
+
 fn command_from_keybind_action(action: &str) -> Option<AppCommand> {
     let action = action.trim();
     AppCommand::from_action_name(action)

@@ -61,4 +61,53 @@ pub enum UserEvent {
     Redraw(WindowId, PaneId),
     /// The pty's child process exited (or errored) — the app should close.
     PtyExit(WindowId, PaneId),
+    /// AppleScript `input text`: write text to a resolved pane's pty on the
+    /// main thread (applescript R-7). The `window_id`/`pane_id` are frozen at
+    /// AE-resolve time; the write is dropped if the target is gone, and the
+    /// bracketed-paste wrapping is decided at process time from the pane's
+    /// live mode. Never touches winit objects from the AE handler (R-11).
+    WriteText {
+        window_id: WindowId,
+        pane_id: PaneId,
+        text: String,
+    },
+    /// AppleScript `focus` / `select tab` / `activate window` (applescript
+    /// R-5/AC-6/AC-15): raise the target's native tab/window to the front and
+    /// move split focus to `pane_id`. Unlike a plain split-focus this always
+    /// re-orders the window (even when `pane_id` is already focused), and when
+    /// `activate_app` is set it also brings the whole app forward
+    /// (`activateIgnoringOtherApps`) for the application-level `activate`. Ids
+    /// frozen at AE-resolve time.
+    RaiseWindow {
+        window_id: WindowId,
+        pane_id: PaneId,
+        activate_app: bool,
+    },
+    /// AppleScript `close` on a terminal (applescript R-6/AC-16): close one
+    /// split pane through the existing confirm/close path. Ids frozen at
+    /// AE-resolve time.
+    ClosePane {
+        window_id: WindowId,
+        pane_id: PaneId,
+    },
+    /// AppleScript `new window` / `new tab` (applescript R-3): spawn a tab,
+    /// optionally in a saved cwd and/or running an initial command. Routed as a
+    /// dedicated event rather than an `AppCommand` so the payload does not have
+    /// to be threaded through the parameterless [`AppCommand`] variants.
+    SpawnTab {
+        window_target: AppleScriptSpawnTarget,
+        cwd: Option<String>,
+        command: Option<String>,
+    },
+}
+
+/// Whether an AppleScript-driven spawn joins the focused window's tab group or
+/// starts a fresh native window — the scripting-visible analog of the internal
+/// `SpawnTarget` (kept out of `events` to avoid leaking an `app`-private type).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppleScriptSpawnTarget {
+    /// Join the focused window's tab group (`new tab`).
+    CurrentWindow,
+    /// Start a fresh native window / tab group (`new window`).
+    NewWindow,
 }

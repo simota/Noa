@@ -302,6 +302,24 @@ impl Terminal {
         self.primary.set_scrollback_limit_bytes(bytes);
     }
 
+    /// Set the Kitty/SIXEL image storage byte budget (`image-storage-limit`),
+    /// evicting immediately if the new limit is smaller.
+    pub fn set_kitty_image_limit(&mut self, bytes: usize) {
+        self.kitty_images.set_byte_limit(bytes);
+    }
+
+    /// Advance Kitty graphics animations to the monotonic time `now_ms` (supplied
+    /// by the app layer so `noa-grid` stays timer-free). Returns whether any
+    /// frame changed (repaint) and the next animation deadline in the same clock.
+    pub fn advance_kitty_animations(&mut self, now_ms: u64) -> crate::kitty::AnimationTick {
+        self.kitty_images.advance_animations(now_ms)
+    }
+
+    /// Whether any stored image is currently animating (drives redraw scheduling).
+    pub fn has_kitty_animation(&self) -> bool {
+        self.kitty_images.has_running_animation()
+    }
+
     pub fn select_all(&mut self) {
         self.active_mut().select_all();
     }

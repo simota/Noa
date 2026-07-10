@@ -530,28 +530,28 @@ impl Handler for Terminal {
         }
 
         // A non-transmit command arriving mid-chunk aborts the pending transfer
-        // (continuation chunks always parse as `Transmit`).
+        // (continuation chunks always parse as `Transmit`). Frame transfers
+        // (`a=f`) are also chunkable, so they must not abort a pending one.
         if self.kitty_images.transfer_in_progress()
             && !matches!(
                 cmd.action,
-                KittyAction::Transmit | KittyAction::TransmitAndDisplay
+                KittyAction::Transmit
+                    | KittyAction::TransmitAndDisplay
+                    | KittyAction::TransmitFrame
             )
         {
             self.kitty_images.abort();
         }
 
         match cmd.action {
-            KittyAction::Unsupported => self.kitty_reply(
-                cmd.image_id,
-                cmd.image_number,
-                cmd.image_id,
-                cmd.placement_id,
-                cmd.quiet,
-                Err(crate::kitty::KittyError::Unsupported),
-            ),
-            KittyAction::Transmit | KittyAction::TransmitAndDisplay | KittyAction::Query => {
+            KittyAction::Transmit
+            | KittyAction::TransmitAndDisplay
+            | KittyAction::Query
+            | KittyAction::TransmitFrame => {
                 self.kitty_transmit(cmd);
             }
+            KittyAction::Animate => self.kitty_animate(&cmd),
+            KittyAction::Compose => self.kitty_compose(&cmd),
             KittyAction::Put => self.kitty_put(&cmd),
             KittyAction::Delete => self.kitty_delete(&cmd),
         }

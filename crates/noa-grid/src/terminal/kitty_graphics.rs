@@ -103,6 +103,32 @@ impl Terminal {
         }
     }
 
+    /// Apply an `a=a` animation-control command, replying on completion.
+    pub(super) fn kitty_animate(&mut self, cmd: &KittyGraphicsCommand) {
+        let result = self.kitty_images.animate(cmd);
+        self.kitty_reply(
+            cmd.image_id,
+            cmd.image_number,
+            cmd.image_id,
+            cmd.placement_id,
+            cmd.quiet,
+            result,
+        );
+    }
+
+    /// Apply an `a=c` frame-compose command, replying on completion.
+    pub(super) fn kitty_compose(&mut self, cmd: &KittyGraphicsCommand) {
+        let result = self.kitty_images.compose(cmd);
+        self.kitty_reply(
+            cmd.image_id,
+            cmd.image_number,
+            cmd.image_id,
+            cmd.placement_id,
+            cmd.quiet,
+            result,
+        );
+    }
+
     /// Display a stored image (`a=p`), placing it on the active screen.
     pub(super) fn kitty_put(&mut self, cmd: &KittyGraphicsCommand) {
         let image_id = self.resolve_put_image(cmd);
@@ -279,14 +305,15 @@ impl Terminal {
             return;
         };
         if let KittyDelete::AnimationFrames { .. } = spec {
-            self.kitty_reply(
-                cmd.image_id,
-                cmd.image_number,
-                cmd.image_id,
-                cmd.placement_id,
-                cmd.quiet,
-                Err(KittyError::Unsupported),
-            );
+            // `a=d,d=f` drops an image's animation frames (keeping the root),
+            // targeting the image by `i=` then `I=`.
+            if cmd.image_id != 0 {
+                self.kitty_images.delete_frames(cmd.image_id);
+            } else if cmd.image_number != 0 {
+                for id in self.kitty_images.ids_with_number(cmd.image_number) {
+                    self.kitty_images.delete_frames(id);
+                }
+            }
             return;
         }
         let free = kitty_delete_frees(spec);

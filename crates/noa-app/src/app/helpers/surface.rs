@@ -17,41 +17,48 @@ pub(crate) fn gpu_init_fatal(
     std::process::exit(1);
 }
 
-/// Choose the swapchain surface format, preferring a **non-sRGB** format
-/// (`Bgra8Unorm`) over an sRGB one (`Bgra8UnormSrgb`).
+/// Choose the swapchain surface format for the configured `alpha-blending`
+/// mode (WP3). The mode decides which blend space the GPU's fixed-function
+/// alpha blend unit runs in, and that space is a property of the target
+/// format:
 ///
-/// This is the WP3 (REQ-AA-1) "native gamma-correct AA" fix. When the
-/// surface format `.is_srgb()`, the GPU's fixed-function alpha blend unit
-/// decodes stored texels to linear before blending and re-encodes to sRGB
-/// on write — so `wgpu::BlendState::ALPHA_BLENDING` (`pipeline.rs`) executes
-/// in **linear** space. That's a different blend space than Ghostty's
-/// `native` macOS text-rendering mode, which blends glyph coverage against
-/// the background directly in gamma-encoded space (how CoreText/FreeType
-/// render by default) — the mismatch visibly thins dark-on-light glyph
-/// edges relative to Ghostty.
+/// - When the surface format `.is_srgb()`, the blend unit decodes stored
+///   texels to linear before blending and re-encodes to sRGB on write, so
+///   `wgpu::BlendState::ALPHA_BLENDING` (`pipeline.rs`) executes in **linear**
+///   space — that is Ghostty's `linear` / `linear-corrected`.
+/// - A non-sRGB format blends directly in gamma-encoded space (how
+///   CoreText/FreeType render by default) — Ghostty's `native`. Blending glyph
+///   coverage in linear space visibly thins dark-on-light glyph edges.
 ///
-/// Preferring a non-sRGB surface format makes all blending — solid
-/// backgrounds, selection highlights, and glyph coverage — happen in gamma
-/// space, matching `native`. This is in lockstep with
-/// `Renderer::new`'s `target_format_is_srgb: format.is_srgb()`
-/// (`noa-render/src/renderer.rs`), which routes `surface_output_rgba`
-/// (`noa-render/src/renderer.rs`) into its no-op branch whenever the
-/// surface format is non-sRGB: colors are written to the target unchanged,
-/// no double-gamma. Do **not** "fix" this back to preferring
-/// `Bgra8UnormSrgb` — that reintroduces the linear-blend thinning bug.
-/// Falls back to `Bgra8UnormSrgb`, then to the first available format, if
-/// the adapter offers no non-sRGB option.
-pub(crate) fn preferred_surface_format(available: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
+/// So `native` (`AlphaBlending::is_linear() == false`) prefers a **non-sRGB**
+/// format (`Bgra8Unorm`), and `linear`/`linear-corrected` prefer an **sRGB**
+/// one (`Bgra8UnormSrgb`). Either choice stays in lockstep with `Renderer`'s
+/// `target_format_is_srgb: format.is_srgb()`, which routes `surface_output_rgba`
+/// so solid colors are pre-linearized only on an sRGB target (no double-gamma).
+/// Each falls back to the other, then to the first available format, if the
+/// adapter lacks the preferred option. Do **not** hardcode this back to
+/// `Bgra8Unorm`: that would silently ignore a `linear` config and reintroduce
+/// the fixed native-only behavior.
+pub(crate) fn preferred_surface_format(
+    available: &[wgpu::TextureFormat],
+    alpha_blending: noa_font::AlphaBlending,
+) -> wgpu::TextureFormat {
+    let (preferred, fallback) = if alpha_blending.is_linear() {
+        (
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Bgra8Unorm,
+        )
+    } else {
+        (
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+        )
+    };
     available
         .iter()
         .copied()
-        .find(|f| *f == wgpu::TextureFormat::Bgra8Unorm)
-        .or_else(|| {
-            available
-                .iter()
-                .copied()
-                .find(|f| *f == wgpu::TextureFormat::Bgra8UnormSrgb)
-        })
+        .find(|f| *f == preferred)
+        .or_else(|| available.iter().copied().find(|f| *f == fallback))
         .unwrap_or(available[0])
 }
 

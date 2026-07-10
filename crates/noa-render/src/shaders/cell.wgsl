@@ -16,10 +16,32 @@ struct Uniforms {
     grid_size: vec2<f32>,
     cursor_pos: vec2<f32>,
     min_contrast: f32,
-    _pad0: f32,
+    // Coverage-blend mode: 0 native, 1 linear, 2 linear-corrected. Mirrors
+    // `instance.rs`'s `Uniforms::blend_mode` (see `BlendMode`). Only mode 2
+    // changes shader behavior (glyph-coverage correction); native vs linear
+    // differ only by the target's blend space (surface format).
+    blend_mode: u32,
     _pad1: f32,
     _pad2: f32,
 };
+
+const BLEND_LINEAR_CORRECTED: u32 = 2u;
+
+// Glyph-coverage correction for `linear-corrected` alpha blending. Linear-space
+// coverage blending thins dark-on-light text (partial-coverage edge pixels
+// carry too little weight once blended in linear space); Ghostty's
+// `linear-corrected` mode adds that weight back. We approximate its
+// stem-darkening by boosting partial coverage with a sub-1.0 gamma — full
+// (1.0) and empty (0.0) coverage are fixed points, midtones lift toward opaque,
+// restoring the perceived weight of gamma-space blending without a dst read.
+const LINEAR_CORRECTION_GAMMA: f32 = 0.72;
+
+fn corrected_coverage(coverage: f32) -> f32 {
+    if uniforms.blend_mode == BLEND_LINEAR_CORRECTED {
+        return pow(clamp(coverage, 0.0, 1.0), LINEAR_CORRECTION_GAMMA);
+    }
+    return coverage;
+}
 
 @group(0) @binding(0)
 var<uniform> uniforms: Uniforms;
@@ -138,7 +160,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let cuv = in.uv / vec2<f32>(textureDimensions(color_atlas_tex));
             return textureSample(color_atlas_tex, color_atlas_sampler, cuv);
         }
-        let coverage = textureSample(atlas_tex, mask_atlas_sampler, in.uv).r;
+        let coverage = corrected_coverage(textureSample(atlas_tex, mask_atlas_sampler, in.uv).r);
         return vec4<f32>(in.color.rgb, in.color.a * coverage);
     }
     return in.color;

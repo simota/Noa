@@ -14,7 +14,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::background_image::{BackgroundImage, BackgroundImageLayer};
 use crate::draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 use crate::image_layer::{ImageDraw, ImageLayer};
-use crate::instance::{CellInstance, PaneUniformParams, populate_pane_uniform};
+use crate::instance::{BlendMode, CellInstance, PaneUniformParams, populate_pane_uniform};
 use crate::pipeline::CellPipeline;
 use crate::segment::{SegmentCell, ShapeRun, segment_row};
 use crate::snapshot::{
@@ -228,6 +228,11 @@ pub struct Renderer {
     /// filled by the clear too). Explicit-bg / selection / cursor quads keep
     /// their own alpha (1.0), so they stay opaque — Ghostty semantics.
     background_opacity: f32,
+    /// `alpha-blending` coverage-blend mode (WP3), written into every pane
+    /// uniform. `native`/`linear` differ only by the target's blend space
+    /// (surface format, chosen in `noa-app`); `linear-corrected` additionally
+    /// enables the glyph-coverage correction in `shaders/cell.wgsl`.
+    blend_mode: BlendMode,
 }
 
 impl Renderer {
@@ -310,6 +315,7 @@ impl Renderer {
             rows_rebuilt_last_frame: 0,
             frame_unstable: false,
             background_opacity: 1.0,
+            blend_mode: BlendMode::Native,
         })
     }
 
@@ -320,6 +326,21 @@ impl Renderer {
     /// clamped into range.
     pub fn set_background_opacity(&mut self, opacity: f32) {
         self.background_opacity = opacity.clamp(0.0, 1.0);
+    }
+
+    /// Set the `alpha-blending` coverage-blend mode (WP3). A startup-time
+    /// setting: `noa-app` calls this once right after construction (after it
+    /// has already selected the matching sRGB/non-sRGB surface format), before
+    /// the first frame. The mode feeds every pane uniform, which
+    /// `rebuild_panes`/`upload_uniforms` repopulates each frame, so no cache
+    /// invalidation is needed. Maps `noa_font::AlphaBlending` onto the shader's
+    /// [`BlendMode`] encoding.
+    pub fn set_alpha_blending(&mut self, mode: noa_font::AlphaBlending) {
+        self.blend_mode = match mode {
+            noa_font::AlphaBlending::Native => BlendMode::Native,
+            noa_font::AlphaBlending::Linear => BlendMode::Linear,
+            noa_font::AlphaBlending::LinearCorrected => BlendMode::LinearCorrected,
+        };
     }
 
     /// Set (or clear) the terminal background image. A startup-time setting:
@@ -905,6 +926,7 @@ impl Renderer {
                     h: cell_h,
                 },
                 bg_color: self.clear_color,
+                blend_mode: self.blend_mode,
             });
             queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
         }

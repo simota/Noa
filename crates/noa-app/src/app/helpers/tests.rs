@@ -345,33 +345,75 @@ fn effective_surface_config_minimizes_occluded_size_without_mutating_state_confi
 
 #[test]
 fn surface_format_prefers_non_srgb_for_native_gamma_correct_blending() {
-    // WP3 / REQ-AA-1 / AC-WP3-01: a non-sRGB surface format keeps the
-    // fixed-function alpha blend unit in gamma space, matching
+    // WP3 / REQ-AA-1 / AC-WP3-01: `native` keeps a non-sRGB surface format so
+    // the fixed-function alpha blend unit stays in gamma space, matching
     // Ghostty's `native` macOS text-rendering mode.
     assert_eq!(
-        preferred_surface_format(&[
-            wgpu::TextureFormat::Bgra8UnormSrgb,
-            wgpu::TextureFormat::Bgra8Unorm,
-        ]),
+        preferred_surface_format(
+            &[
+                wgpu::TextureFormat::Bgra8UnormSrgb,
+                wgpu::TextureFormat::Bgra8Unorm,
+            ],
+            noa_font::AlphaBlending::Native,
+        ),
         wgpu::TextureFormat::Bgra8Unorm
     );
 }
 
 #[test]
+fn surface_format_prefers_srgb_for_linear_alpha_blending_modes() {
+    // WP3: `linear` / `linear-corrected` want an sRGB surface so the blend
+    // unit decodes to linear before blending.
+    for mode in [
+        noa_font::AlphaBlending::Linear,
+        noa_font::AlphaBlending::LinearCorrected,
+    ] {
+        assert_eq!(
+            preferred_surface_format(
+                &[
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    wgpu::TextureFormat::Bgra8UnormSrgb,
+                ],
+                mode,
+            ),
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            "{mode:?} must select an sRGB target for linear-space blending"
+        );
+    }
+}
+
+#[test]
 fn surface_format_falls_back_to_srgb_when_no_non_srgb_option_exists() {
     assert_eq!(
-        preferred_surface_format(&[wgpu::TextureFormat::Bgra8UnormSrgb]),
+        preferred_surface_format(
+            &[wgpu::TextureFormat::Bgra8UnormSrgb],
+            noa_font::AlphaBlending::Native,
+        ),
         wgpu::TextureFormat::Bgra8UnormSrgb
+    );
+}
+
+#[test]
+fn surface_format_linear_falls_back_to_non_srgb_when_no_srgb_option_exists() {
+    assert_eq!(
+        preferred_surface_format(
+            &[wgpu::TextureFormat::Bgra8Unorm],
+            noa_font::AlphaBlending::Linear,
+        ),
+        wgpu::TextureFormat::Bgra8Unorm
     );
 }
 
 #[test]
 fn surface_format_falls_back_to_first_available_when_neither_bgra8_option_exists() {
     assert_eq!(
-        preferred_surface_format(&[
-            wgpu::TextureFormat::Rgba16Float,
-            wgpu::TextureFormat::Rgba8Unorm,
-        ]),
+        preferred_surface_format(
+            &[
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureFormat::Rgba8Unorm,
+            ],
+            noa_font::AlphaBlending::Native,
+        ),
         wgpu::TextureFormat::Rgba16Float
     );
 }

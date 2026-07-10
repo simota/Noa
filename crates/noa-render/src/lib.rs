@@ -27,7 +27,7 @@ pub use blit::{
 };
 pub use draw_plan::{DrawOp, PaneId, PaneRect, build_draw_plan};
 pub use image_layer::{ImageBand, Z_BG_THRESHOLD, classify_band, resolve_image_quad};
-pub use instance::{CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform};
+pub use instance::{BlendMode, CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform};
 pub use renderer::{
     ConfirmDialogLayout, PaletteLayout, PaneFrame, Renderer, command_palette_layout,
     confirm_dialog_layout, renderer_construction_count,

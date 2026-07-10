@@ -21,7 +21,29 @@ keybind = cmd+shift+n=tab.new
 
 `<chord>` は `+` 区切り。修飾キー別名は `cmd`/`command`/`super`/`meta`、`ctrl`/`control`、`alt`/`option`、`shift`。キーは単一文字、`plus`、`arrowup`/`up` 等の矢印(短縮別名可)、`pageup`、`pagedown`、`home`、`end`、`enter`/`return`、`grave`/`backtick`(`` ` ``)を受け付ける。
 
-`<action>` は `noa +list-keybinds` の右辺に出る canonical 名を使う。互換入力として `new_tab`、`prompt_surface_title`、`toggle_quick_terminal` など一部の Ghostty 風 action 名も受け付ける。
+`<action>` は下の「canonical action 一覧」にある名前を使う。`noa +list-keybinds` は現在有効な
+バインドだけを表示するため、既定で未バインドの action は出力しない。互換入力として
+`new_tab`、`prompt_surface_title`、`toggle_quick_terminal` など一部の Ghostty 風 action 名も
+受け付ける。
+
+### canonical action 一覧
+
+| カテゴリ | action |
+|---|---|
+| アプリ | `about`, `preferences`, `config.reload`, `app.quit` |
+| 編集 | `copy`, `paste`, `pane.send-selection` |
+| 端末 | `terminal.clear`, `terminal.clear-scrollback`, `terminal.select-all`, `terminal.export-scrollback`, `terminal.pipe-scrollback-to-pager` |
+| フォント | `font-size.increase`, `font-size.decrease`, `font-size.reset` |
+| 検索 | `search.find`, `search.next`, `search.previous`, `search.clear` |
+| スクロール | `scroll.line-up`, `scroll.line-down`, `scroll.page-up`, `scroll.page-down`, `scroll.top`, `scroll.bottom`, `scroll.prev-prompt`, `scroll.next-prompt` |
+| タブ | `tab.new`, `tab.close`, `tab.next`, `tab.previous`, `tab.set-title`, `tab.select-1` … `tab.select-9` |
+| ウィンドウ | `window.new`, `window.close`, `fullscreen.toggle` |
+| 分割 | `split.new-left`, `split.new-right`, `split.new-up`, `split.new-down`, `split.focus-left`, `split.focus-right`, `split.focus-up`, `split.focus-down`, `split.resize-left`, `split.resize-right`, `split.resize-up`, `split.resize-down`, `split.equalize`, `split.toggle-zoom` |
+| UI | `session-overview.toggle`, `command-palette.toggle`, `quick-terminal.toggle`, `secure-keyboard-entry.toggle`, `sidebar.toggle`, `auto-approve.toggle`, `theme-settings.open` |
+
+`tab-overview.toggle` も `session-overview.toggle` の互換名として受け付ける。入力に `_` が
+含まれる場合は `-` に置き換えた名前も照合される。Ghostty 風 alias の完全な対応表は
+`crates/noa-app/src/commands/keybind.rs` の `ghostty_action_alias` が真実源。
 
 ## グローバル(ターミナルフォーカス時)
 
@@ -98,7 +120,10 @@ Shift 単独スクロールは他の修飾キーが付くと発動しない。
 | ⌘⇧P | コマンドパレットのトグル |
 | ⌘⇧S | サイドバーのトグル |
 
-キーバインドはないがコマンドパレット / メニューから実行できるアクション: Clear Scrollback、Toggle Quick Terminal、Secure Keyboard Entry、About、Open Preferences、Open Theme & Settings、Export Scrollback、Pipe Scrollback to Pager、Toggle Auto Approve、Set Tab Title。
+既定キーバインドがない action もコマンドパレット / メニューから実行できる。主なものは
+Reload Configuration、Clear Scrollback、Toggle Quick Terminal、Secure Keyboard Entry、About、
+Open Preferences、Open Theme & Settings、Export Scrollback、Pipe Scrollback to Pager、
+Toggle Auto Approve、Set Tab Title。
 
 > 未バインドの ⌘ 併用キーは pty へ漏らさず握り潰される。
 
@@ -111,7 +136,20 @@ Carbon `RegisterEventHotKey` によるシステム全域ホットキー。アプ
 | `quick-terminal-hotkey` | `cmd+grave`(⌘`) | Quick Terminal のトグル |
 | `sidebar-hotkey` | なし(無効) | サイドバーのトグル |
 
-構文は `+` 区切りのチョード(例: `cmd+shift+t`)。修飾キー別名: `cmd`/`command`/`super`/`meta`、`ctrl`/`control`、`alt`/`option`、`shift`。キーは単一文字のほか `plus` / `arrowup` 等 / `pageup` / `pagedown` / `home` / `end` / `enter`(`return`)を受け付ける。`grave` / `backtick` / `` ` `` は同義。`backslash` は ANSI `\` と JIS `¥` / `ろ` の両方を登録する。
+構文は `+` 区切りのチョード(例: `cmd+shift+t`)。修飾キー別名:
+`cmd`/`command`/`super`/`meta`、`ctrl`/`control`、`alt`/`option`、`shift`。
+キーは英字、数字、および次の token を受け付ける。
+
+- 記号: `=`/`equal`, `-`/`minus`, `[`/`leftbracket`, `]`/`rightbracket`,
+  `;`/`semicolon`, `,`/`comma`, `.`/`period`, `/`/`slash`
+- 基本キー: `enter`/`return`, `tab`, `space`, `escape`/`esc`
+- backtick: `grave`, `backtick`, `` ` ``
+- backslash: `backslash` または `\`。ANSI `\` と JIS `¥` / `ろ` を同時登録
+- JIS 個別指定: `yen`/`jis-yen`/`intl-yen`,
+  `underscore`/`jis-underscore`/`intl-ro` (`_` と `-` の別名も可)
+
+in-app の `keybind` と異なり、global hotkey は矢印、`PageUp` / `PageDown`、`Home` / `End`
+を受け付けない。`none` / `off` / `false` / 空値で hotkey を無効化できる。
 
 ## オーバーレイ内のキー操作
 
@@ -184,3 +222,4 @@ Carbon `RegisterEventHotKey` によるシステム全域ホットキー。アプ
 - `crates/noa-app/src/app/event_loop.rs` — キー / マウスのルーティング
 - `crates/noa-app/src/app/input_ops.rs` — 検索プロンプト / コマンドパレット / 確認ダイアログ
 - `crates/noa-app/src/macos_hotkey.rs` — グローバルホットキー
+- `docs/CONFIGURATION.md` — config キー・値・既定値の全数リファレンス

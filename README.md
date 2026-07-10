@@ -79,6 +79,9 @@ Theme names match the vendored Ghostty-compatible catalog in
 `theme = "Nord"` are valid. `--theme` is intentionally not a CLI flag; theme
 selection is config-file only. `minimum-contrast` accepts a WCAG contrast-ratio
 floor from `1.0` through `21.0`; `1.0` preserves theme colors unchanged.
+See [Configuration reference](docs/CONFIGURATION.md) for every supported key,
+accepted value, default, and fallback rule, and [Keybindings](docs/KEYBINDINGS.md)
+for default chords and the complete canonical action list.
 
 ### Build the macOS app
 

@@ -103,9 +103,44 @@ theme = "Catppuccin Mocha"
 ```
 
 Useful one-shot queries include `+version`, `+list-themes`, `+list-keybinds`,
-`+list-fonts`, `+show-config`, `+list-actions`, and `+help`. Use
-`--import-ghostty-config` to migrate supported settings from an existing
-Ghostty configuration.
+`+list-fonts`, `+show-config`, `+list-actions`, and `+help`.
+
+### Importing a Ghostty configuration
+
+From a source checkout, run:
+
+```bash
+cargo run -p noa -- --import-ghostty-config
+```
+
+For a Homebrew installation in `/Applications`, run the executable inside the
+app bundle:
+
+```bash
+/Applications/Noa.app/Contents/MacOS/Noa --import-ghostty-config
+```
+
+Noa imports every existing Ghostty configuration candidate in this order:
+
+1. `$XDG_CONFIG_HOME/ghostty/config.ghostty`
+2. `$XDG_CONFIG_HOME/ghostty/config`
+3. `~/Library/Application Support/com.mitchellh.ghostty/config.ghostty`
+4. `~/Library/Application Support/com.mitchellh.ghostty/config`
+
+When `XDG_CONFIG_HOME` is unset or empty, the first two paths use `~/.config`
+instead. The generated Noa configuration is
+`$XDG_CONFIG_HOME/noa/config`, or `~/.config/noa/config` when the variable is
+unset or empty.
+
+Lines whose keys are supported scalar settings, plus `keybind` lines, are
+copied unchanged. Non-comment lines that cannot be parsed as directives, and
+directives whose keys are unsupported, are retained as comments; existing
+comments and blank lines are preserved. In particular, `config-file` directives
+are commented out and their referenced files are not followed. When multiple
+candidates exist, their contents are appended in the order above, so later
+scalar values take precedence and `keybind` lines retain that order. The import
+refuses to overwrite an existing Noa configuration. Back up or rename the
+existing file before retrying if replacement is intended.
 
 See the [Configuration reference](docs/CONFIGURATION.md) for supported keys and
 defaults, and [Keybindings](docs/KEYBINDINGS.md) for shortcuts and actions.

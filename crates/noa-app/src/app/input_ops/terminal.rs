@@ -27,9 +27,17 @@ impl App {
         let Some(text) = self.focused_scrollback_text(AppCommand::ExportScrollback) else {
             return;
         };
-        match crate::app_actions::write_scrollback_temp_file(&text) {
-            Ok(path) => log::info!("exported scrollback to {}", path.display()),
-            Err(err) => log::warn!("failed to export scrollback: {err}"),
+        let selected_path = match crate::app_actions::choose_scrollback_export_path() {
+            Ok(path) => path,
+            Err(err) => {
+                log::warn!("failed to choose a scrollback export destination: {err}");
+                return;
+            }
+        };
+        match crate::app_actions::export_scrollback_to_file(&text, selected_path.as_deref()) {
+            Ok(Some(path)) => log::info!("exported scrollback to {}", path.display()),
+            Ok(None) => {}
+            Err(err) => log::warn!("failed to write scrollback to the selected file: {err}"),
         }
     }
 

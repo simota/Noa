@@ -336,6 +336,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Occluded(occluded) => {
+                // The quick terminal intentionally starts off-screen and
+                // slides on/off screen, so occlusion events would shrink its
+                // surface to 1×1 mid-slide (RC2) and cause repaint churn. It
+                // gates its own hidden-state redraws instead — see
+                // `quick_terminal_redraw_suppressed`.
+                if self.is_quick_terminal_window(window_id) {
+                    return;
+                }
                 if !occluded {
                     self.reset_cursor_blink_phase();
                 }

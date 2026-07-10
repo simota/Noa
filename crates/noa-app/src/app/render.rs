@@ -4,6 +4,14 @@ use super::*;
 
 impl App {
     pub(super) fn redraw(&mut self, window_id: WindowId) {
+        // The quick terminal is exempt from occlusion-driven surface
+        // shrinking (see `event_loop.rs`'s `Occluded` handler) and instead
+        // gates its own redraws here: once fully hidden and not sliding,
+        // pty output must not keep re-presenting frames to an ordered-out
+        // window.
+        if self.quick_terminal_redraw_suppressed(window_id) {
+            return;
+        }
         // Build the sidebar's draw model up front (reads only the store + pure
         // layout, AC-17) before borrowing `gpu`/`state` mutably, so the band can
         // be composited inline after the panes without a second borrow.

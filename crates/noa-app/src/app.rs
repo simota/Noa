@@ -104,8 +104,8 @@ use input_ops::ActiveOverlay;
 use quick_terminal::{
     ease_out_cubic, quick_terminal_anchor_window_id, quick_terminal_height,
     quick_terminal_progress, quick_terminal_reveal_top_offset,
-    quick_terminal_should_autohide_on_focus_loss, quick_terminal_slide_reveal,
-    quick_terminal_top_offset,
+    quick_terminal_should_autohide_on_focus_loss, quick_terminal_should_suppress_redraw,
+    quick_terminal_slide_reveal, quick_terminal_top_offset,
 };
 
 #[derive(Clone)]

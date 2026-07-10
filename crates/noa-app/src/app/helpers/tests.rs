@@ -200,6 +200,14 @@ fn quick_terminal_autohide_waits_for_focus_in_current_reveal() {
 }
 
 #[test]
+fn quick_terminal_suppresses_redraw_only_when_fully_hidden() {
+    assert!(!quick_terminal_should_suppress_redraw(false, true));
+    assert!(quick_terminal_should_suppress_redraw(false, false));
+    assert!(!quick_terminal_should_suppress_redraw(true, false));
+    assert!(!quick_terminal_should_suppress_redraw(true, true));
+}
+
+#[test]
 fn quick_terminal_anchor_prefers_os_focused_regular_window() {
     let anchor = quick_terminal_anchor_window_id(Some(2), Some(1), &[1, 2, 3], |id| id != 3);
 

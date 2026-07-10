@@ -3,8 +3,10 @@ use super::*;
 /// How long the quick terminal takes to slide fully in or out — the shared
 /// screen-scale duration.
 const QUICK_TERMINAL_SLIDE_DURATION: Duration = crate::anim::DUR_SLOW;
-/// The quick terminal repaints/repositions at roughly this cadence while
-/// sliding (approx. 60 fps), driven off the `about_to_wait` `WaitUntil` timer.
+/// The quick terminal repositions at roughly this cadence while sliding
+/// (approx. 60 fps), driven off the `about_to_wait` `WaitUntil` timer. The
+/// presented frame is static (painted once, pre-slide) and moves with the
+/// window — this cadence only repositions, it never re-renders.
 const QUICK_TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Runtime state for the drop-down quick terminal. The window itself is a
@@ -132,6 +134,15 @@ pub(super) fn quick_terminal_should_autohide_on_focus_loss(
     visible && focused_this_reveal
 }
 
+/// Whether redraws should be suppressed for a fully hidden, non-animating
+/// quick terminal. Once the hide slide finishes and the window is ordered
+/// out, pty output must not keep re-presenting frames to it — there is no
+/// occlusion event to gate on (the quick terminal is exempt, see
+/// `event_loop.rs`'s `Occluded` handler) so it gates itself instead.
+pub(super) fn quick_terminal_should_suppress_redraw(visible: bool, animating: bool) -> bool {
+    !visible && !animating
+}
+
 pub(super) fn quick_terminal_anchor_window_id<W: Copy>(
     os_focused: Option<W>,
     focused: Option<W>,
@@ -151,6 +162,17 @@ impl App {
         self.quick_terminal
             .as_ref()
             .is_some_and(|qt| qt.window_id == window_id)
+    }
+
+    /// Whether `window_id` is the quick terminal's window and it is fully
+    /// hidden (not visible, no slide in flight) — used by `render.rs` to skip
+    /// redraws to an ordered-out window instead of relying on occlusion
+    /// events (the quick terminal is exempt from those, see `event_loop.rs`).
+    pub(super) fn quick_terminal_redraw_suppressed(&self, window_id: WindowId) -> bool {
+        self.quick_terminal.as_ref().is_some_and(|qt| {
+            qt.window_id == window_id
+                && quick_terminal_should_suppress_redraw(qt.visible, qt.anim.is_some())
+        })
     }
 
     /// Register the global `quick-terminal-hotkey` and `sidebar-hotkey` once,
@@ -258,14 +280,26 @@ impl App {
         } else if let Some(qt) = self.quick_terminal.as_mut() {
             // Re-derive geometry each open: the active monitor (or its
             // resolution) may have changed since last time.
+            let window_id = qt.window_id;
+            let geometry_changed = qt.width != width || qt.height != height;
             qt.origin_x = origin_x;
             qt.top_y = top_y;
             qt.width = width;
             qt.height = height;
-            if let Some(state) = self.windows.get(&qt.window_id) {
-                let _ = state
-                    .window
-                    .request_inner_size(PhysicalSize::new(width, height));
+            if geometry_changed {
+                let new_size = self.windows.get(&window_id).and_then(|state| {
+                    state
+                        .window
+                        .request_inner_size(PhysicalSize::new(width, height))
+                });
+                // macOS applies `request_inner_size` synchronously and
+                // returns the new size directly (RC4) — fold it into the
+                // surface/renderer/layout now so they're consistent before
+                // the pre-paint below, instead of waiting on a `Resized`
+                // event that would otherwise land mid-slide.
+                if let Some(new_size) = new_size {
+                    self.on_resize(window_id, new_size);
+                }
             }
         }
 
@@ -284,9 +318,13 @@ impl App {
             state
                 .window
                 .set_outer_position(PhysicalPosition::new(origin_x, current_top));
+        }
+        // Pre-paint a valid frame while the window is still hidden/off-screen
+        // (RC1/RC2), before it is ever ordered front or starts sliding.
+        self.redraw(window_id);
+        if let Some(state) = self.windows.get(&window_id) {
             state.window.set_visible(true);
             crate::macos_window::show_quick_terminal_window(&state.window);
-            state.window.request_redraw();
         }
         self.focused = Some(window_id);
     }
@@ -304,10 +342,9 @@ impl App {
         qt.visible = false;
         qt.focused_this_reveal = false;
         qt.anim = Some(QuickTerminalAnim::new(now, from_reveal, 0.0));
-        let window_id = qt.window_id;
-        if let Some(state) = self.windows.get(&window_id) {
-            state.window.request_redraw();
-        }
+        // No redraw here: content doesn't change at hide start, and
+        // `about_to_wait` runs right after this event and picks up
+        // `tick_quick_terminal`'s deadline to drive the slide.
     }
 
     /// Hide the quick terminal when it loses focus, if `quick-terminal-autohide`
@@ -334,10 +371,11 @@ impl App {
         }
     }
 
-    /// Advance the slide, repositioning the window each frame. Reports the next
-    /// wake instant while animating (folded into `about_to_wait`'s deadline),
-    /// and `None` once the slide settles — hiding the window on a completed
-    /// slide-out.
+    /// Advance the slide, repositioning the window each frame — the presented
+    /// frame is static (painted once, pre-slide) and moves with the window,
+    /// so this never redraws. Reports the next wake instant while animating
+    /// (folded into `about_to_wait`'s deadline), and `None` once the slide
+    /// settles — hiding the window on a completed slide-out.
     pub(super) fn tick_quick_terminal(&mut self) -> Option<Instant> {
         let (window_id, origin_x, top_y, height, anim) = {
             let qt = self.quick_terminal.as_ref()?;
@@ -351,7 +389,6 @@ impl App {
             state
                 .window
                 .set_outer_position(PhysicalPosition::new(origin_x, top));
-            state.window.request_redraw();
         }
         if anim.done(now) {
             if let Some(qt) = self.quick_terminal.as_mut() {
@@ -407,7 +444,10 @@ impl App {
             .with_decorations(false)
             .with_inner_size(PhysicalSize::new(width, height))
             .with_position(PhysicalPosition::new(origin_x, top_y - height as i32))
-            .with_transparent(self.config.background_opacity < 1.0);
+            .with_transparent(self.config.background_opacity < 1.0)
+            // Never on screen until the show path explicitly reveals it
+            // (RC1): avoids ordering an unpainted window front.
+            .with_visible(false);
         #[cfg(target_os = "macos")]
         let attrs = attrs.with_option_as_alt(macos_option_as_alt(self.config.macos_option_as_alt));
         let window = Arc::new(event_loop.create_window(attrs).ok()?);

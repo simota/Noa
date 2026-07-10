@@ -13,6 +13,11 @@ pub enum CursorStyle {
     SteadyUnderline,
     BlinkingBar,
     SteadyBar,
+    /// `block_hollow`: a hollow rectangle outline, focused or not (unlike
+    /// the render layer's separate unfocused-pane hollow, this is the
+    /// user-requested DECSCUSR-adjacent shape and still honors blink).
+    BlinkingBlockHollow,
+    SteadyBlockHollow,
 }
 
 /// The terminal cursor: position, the deferred-wrap latch, and the active pen.

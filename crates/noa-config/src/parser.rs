@@ -1,5 +1,6 @@
 mod diagnostics;
 mod directives;
+mod includes;
 mod overrides;
 mod values;
 

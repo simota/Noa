@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use noa_core::Rgb;
@@ -5,7 +6,8 @@ use noa_core::Rgb;
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess,
     ConfigOverrides, CursorShape, FontConfig, FontFeature, FontVariation, KeybindConfig,
-    MacosOptionAsAlt, MacosTitlebarStyle, SyntheticStyleMode, WindowSaveState,
+    MacosOptionAsAlt, MacosTitlebarStyle, PaletteOverride, SyntheticStyleMode, ThemeAppearancePair,
+    WindowSaveState,
 };
 
 use super::*;
@@ -85,14 +87,17 @@ fn quoted_empty_numeric_value_is_invalid_not_reset() {
 }
 
 #[test]
-fn unknown_list_and_config_file_diagnostics_are_distinct() {
+fn unknown_key_malformed_palette_and_missing_include_diagnostics_are_distinct() {
     let (_, unknown) = parse_overrides(path(), "bogus-key = x");
-    let (_, list) = parse_overrides(path(), "palette = 1=#ffffff");
-    let (_, config_file) = parse_overrides(path(), "config-file = ~/.config/ghostty/extra");
+    let (_, palette) = parse_overrides(path(), "palette = not-a-valid-entry");
+    let (_, config_file) = parse_overrides(
+        path(),
+        "config-file = /nonexistent/noa-config-tests/missing",
+    );
 
     let messages = [
         unknown[0].message.as_str(),
-        list[0].message.as_str(),
+        palette[0].message.as_str(),
         config_file[0].message.as_str(),
     ];
     assert_ne!(messages[0], messages[1]);
@@ -101,13 +106,33 @@ fn unknown_list_and_config_file_diagnostics_are_distinct() {
 }
 
 #[test]
-fn unsupported_list_keys_are_recognized_but_not_retained() {
-    let (overrides, diagnostics) = parse_overrides(path(), "palette = value");
+fn palette_entries_parse_index_and_color() {
+    let (overrides, diagnostics) =
+        parse_overrides(path(), "palette = 0=#101010\npalette = 255=#eeeeee");
 
-    assert_eq!(overrides, ConfigOverrides::default());
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        overrides.palette,
+        vec![
+            PaletteOverride {
+                index: 0,
+                color: Rgb::new(0x10, 0x10, 0x10),
+            },
+            PaletteOverride {
+                index: 255,
+                color: Rgb::new(0xee, 0xee, 0xee),
+            },
+        ]
+    );
+}
+
+#[test]
+fn palette_entry_rejects_malformed_value() {
+    let (overrides, diagnostics) = parse_overrides(path(), "palette = not-a-valid-entry");
+
+    assert!(overrides.palette.is_empty());
     assert_eq!(diagnostics.len(), 1);
     assert!(diagnostics[0].message.contains("palette"));
-    assert!(diagnostics[0].message.contains("list key"));
 }
 
 #[test]
@@ -337,7 +362,7 @@ fn alpha_blending_native_is_real_with_no_diagnostic() {
 }
 
 #[test]
-fn alpha_blending_linear_parses_and_falls_back_with_a_diagnostic() {
+fn alpha_blending_linear_parses_with_no_diagnostic() {
     for (value, expected) in [
         ("linear", AlphaBlendingMode::Linear),
         ("linear-corrected", AlphaBlendingMode::LinearCorrected),
@@ -346,9 +371,7 @@ fn alpha_blending_linear_parses_and_falls_back_with_a_diagnostic() {
             parse_overrides(path(), &format!("alpha-blending = {value}"));
 
         assert_eq!(overrides.font.alpha_blending, Some(expected));
-        assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
-        assert!(diagnostics[0].message.contains("alpha-blending"));
-        assert!(diagnostics[0].message.contains("native"));
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
     }
 }
 
@@ -507,22 +530,13 @@ fn cursor_style_parses_each_shape() {
         ("block", CursorShape::Block),
         ("bar", CursorShape::Bar),
         ("underline", CursorShape::Underline),
+        ("block_hollow", CursorShape::BlockHollow),
     ] {
         let (overrides, diagnostics) = parse_overrides(path(), &format!("cursor-style = {value}"));
 
         assert_eq!(overrides.cursor_style, Some(expected), "{value:?}");
         assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
     }
-}
-
-#[test]
-fn cursor_style_block_hollow_warns_and_is_ignored() {
-    let (overrides, diagnostics) = parse_overrides(path(), "cursor-style = block_hollow");
-
-    assert_eq!(overrides.cursor_style, None);
-    assert_eq!(diagnostics.len(), 1);
-    assert!(diagnostics[0].message.contains("block_hollow"));
-    assert!(diagnostics[0].message.contains("not supported"));
 }
 
 #[test]
@@ -817,6 +831,30 @@ fn scrollback_limit_rejects_negative_and_non_numeric() {
 #[test]
 fn scrollback_limit_is_a_supported_scalar_key_for_import() {
     assert!(is_supported_scalar_key("scrollback-limit"));
+}
+
+#[test]
+fn image_storage_limit_parses_byte_counts_including_zero() {
+    for (value, expected) in [("320000000", 320_000_000), ("0", 0), ("1024", 1024)] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("image-storage-limit = {value}"));
+
+        assert_eq!(overrides.image_storage_limit, Some(expected), "{value:?}");
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+    }
+}
+
+#[test]
+fn image_storage_limit_rejects_non_numeric() {
+    let (overrides, diagnostics) = parse_overrides(path(), "image-storage-limit = lots");
+    assert_eq!(overrides.image_storage_limit, None);
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].message.contains("image-storage-limit"));
+}
+
+#[test]
+fn image_storage_limit_is_a_supported_scalar_key_for_import() {
+    assert!(is_supported_scalar_key("image-storage-limit"));
 }
 
 #[test]
@@ -1157,15 +1195,44 @@ fn theme_accepts_unquoted_and_quoted_names() {
 }
 
 #[test]
-fn theme_pair_syntax_warns_without_partial_acceptance() {
+fn theme_pair_syntax_parses_both_names() {
     let (overrides, diagnostics) = parse_overrides(path(), "theme = light:Foo,dark:Bar");
 
     assert_eq!(overrides.theme, None);
+    assert_eq!(
+        overrides.theme_appearance,
+        Some(ThemeAppearancePair {
+            light: "Foo".to_string(),
+            dark: "Bar".to_string(),
+        })
+    );
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn theme_pair_syntax_accepts_dark_before_light() {
+    let (overrides, diagnostics) = parse_overrides(path(), "theme = dark:Bar,light:Foo");
+
+    assert_eq!(
+        overrides.theme_appearance,
+        Some(ThemeAppearancePair {
+            light: "Foo".to_string(),
+            dark: "Bar".to_string(),
+        })
+    );
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn theme_pair_syntax_warns_on_a_missing_side() {
+    let (overrides, diagnostics) = parse_overrides(path(), "theme = light:Foo,light:Bar");
+
+    assert_eq!(overrides.theme, None);
+    assert_eq!(overrides.theme_appearance, None);
     assert_eq!(diagnostics.len(), 1);
     let message = &diagnostics[0].message;
     assert!(message.contains("light:"));
     assert!(message.contains("dark:"));
-    assert!(message.contains("single theme name"));
     assert!(!message.contains("unsupported key"));
     assert!(!message.contains("invalid value"));
 }
@@ -1216,7 +1283,9 @@ fn parse_overrides_is_deterministic() {
 }
 
 #[test]
-fn parser_module_stays_io_free() {
+fn parser_module_stays_io_free_outside_includes() {
+    // `includes.rs` is the deliberate exception: `config-file` recursively
+    // reads other files by design, so it alone may touch `std::fs`/`dirs`.
     let source = [
         include_str!("../parser.rs"),
         include_str!("diagnostics.rs"),
@@ -1232,4 +1301,108 @@ fn parser_module_stays_io_free() {
     ] {
         assert!(!source.contains(&forbidden), "{forbidden}");
     }
+}
+
+#[test]
+fn config_file_include_splices_directives_at_the_include_point() {
+    let dir = unique_temp_dir("config-file-splice");
+    fs::create_dir_all(&dir).unwrap();
+    let main_path = dir.join("config");
+    let included_path = dir.join("extra");
+    fs::write(&included_path, "font-size = 22\ntheme = Included").unwrap();
+    fs::write(
+        &main_path,
+        format!(
+            "font-size = 11\nconfig-file = {}\nfont-size = 33",
+            included_path.display()
+        ),
+    )
+    .unwrap();
+
+    let source = fs::read_to_string(&main_path).unwrap();
+    let (overrides, diagnostics) = parse_overrides(&main_path, &source);
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    // Last-wins, in the spliced order: 11, then the included file's 22,
+    // then the trailing 33 — so 33 wins.
+    assert_eq!(overrides.font_size, Some(33.0));
+    assert_eq!(overrides.theme.as_deref(), Some("Included"));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn config_file_include_resolves_relative_paths_against_the_including_file() {
+    let dir = unique_temp_dir("config-file-relative");
+    let sub_dir = dir.join("sub");
+    fs::create_dir_all(&sub_dir).unwrap();
+    let main_path = dir.join("config");
+    fs::write(sub_dir.join("extra"), "font-size = 44").unwrap();
+    fs::write(&main_path, "config-file = sub/extra").unwrap();
+
+    let source = fs::read_to_string(&main_path).unwrap();
+    let (overrides, diagnostics) = parse_overrides(&main_path, &source);
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(overrides.font_size, Some(44.0));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn config_file_include_missing_required_file_warns() {
+    let dir = unique_temp_dir("config-file-missing");
+    fs::create_dir_all(&dir).unwrap();
+    let main_path = dir.join("config");
+    fs::write(&main_path, "config-file = does-not-exist").unwrap();
+
+    let source = fs::read_to_string(&main_path).unwrap();
+    let (overrides, diagnostics) = parse_overrides(&main_path, &source);
+
+    assert_eq!(overrides.font_size, None);
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].message.contains("config-file"));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn config_file_include_optional_prefix_silences_a_missing_file() {
+    let dir = unique_temp_dir("config-file-optional");
+    fs::create_dir_all(&dir).unwrap();
+    let main_path = dir.join("config");
+    fs::write(&main_path, "config-file = ?does-not-exist\nfont-size = 12").unwrap();
+
+    let source = fs::read_to_string(&main_path).unwrap();
+    let (overrides, diagnostics) = parse_overrides(&main_path, &source);
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(overrides.font_size, Some(12.0));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn config_file_include_detects_a_direct_cycle() {
+    let dir = unique_temp_dir("config-file-cycle");
+    fs::create_dir_all(&dir).unwrap();
+    let a_path = dir.join("a");
+    let b_path = dir.join("b");
+    fs::write(&a_path, format!("config-file = {}", b_path.display())).unwrap();
+    fs::write(&b_path, format!("config-file = {}\nfont-size = 9", a_path.display())).unwrap();
+
+    let source = fs::read_to_string(&a_path).unwrap();
+    let (overrides, diagnostics) = parse_overrides(&a_path, &source);
+
+    assert_eq!(overrides.font_size, Some(9.0));
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].message.contains("cycle"));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+fn unique_temp_dir(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "noa-config-parser-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
 }

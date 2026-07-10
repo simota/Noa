@@ -62,6 +62,7 @@ fi
 rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 cp "$BIN" "$CONTENTS/MacOS/Noa"
+cp -RX "$ROOT/assets/wallpapers" "$CONTENTS/Resources/wallpapers"
 
 ICON_KEY=""
 if [ -f "$ROOT/assets/noa.icns" ]; then

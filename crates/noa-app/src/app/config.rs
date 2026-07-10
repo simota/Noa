@@ -54,9 +54,10 @@ pub struct AppConfig {
     /// `background-blur-radius` in points (`0..=64`, 0 = off). Applied as a
     /// native macOS window background blur; a no-op on other platforms.
     pub background_blur_radius: u16,
-    /// `background-image`: path to a PNG laid behind the terminal grid, or
-    /// `None`. Resolved at startup by [`load_background_image_runtime`]; a
-    /// missing or undecodable file logs a diagnostic and disables the image.
+    /// `background-image`: path to a PNG laid behind the terminal grid. When
+    /// unset, [`load_background_image_runtime`] falls back to the bundled (or
+    /// development) wallpaper directory. Missing or undecodable paths log a
+    /// diagnostic and disable the image.
     pub background_image: Option<std::path::PathBuf>,
     /// `background-image-opacity`, `0.0..=1.0`. Scales the image quad's alpha,
     /// independent of `background-opacity`.
@@ -326,11 +327,18 @@ pub(super) fn background_image_position(
     }
 }
 
-/// Resolve the configured background image source. A file keeps the existing
-/// static PNG behavior; a directory becomes a deterministic PNG slideshow.
-/// Missing/unreadable paths degrade to no image and never panic.
+/// Resolve the configured or default background image source. A file keeps the
+/// existing static PNG behavior; a directory becomes a deterministic PNG
+/// slideshow. Missing/unreadable paths degrade to no image and never panic.
 pub(super) fn load_background_image_runtime(config: &AppConfig) -> BackgroundImageRuntime {
-    let Some(path) = config.background_image.as_ref() else {
+    let current_exe = std::env::current_exe().ok();
+    let development_wallpapers =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/wallpapers");
+    let Some(path) = resolve_background_image_source(
+        config.background_image.as_deref(),
+        current_exe.as_deref(),
+        &development_wallpapers,
+    ) else {
         return BackgroundImageRuntime::Static(None);
     };
     let params = BackgroundImageParams {
@@ -339,7 +347,7 @@ pub(super) fn load_background_image_runtime(config: &AppConfig) -> BackgroundIma
         repeat: config.background_image_repeat,
         opacity: config.background_image_opacity,
     };
-    let resolved = expand_tilde(path);
+    let resolved = expand_tilde(&path);
     let metadata = match std::fs::metadata(&resolved) {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -369,6 +377,26 @@ pub(super) fn load_background_image_runtime(config: &AppConfig) -> BackgroundIma
         resolved.display()
     );
     BackgroundImageRuntime::Static(None)
+}
+
+fn resolve_background_image_source(
+    configured: Option<&Path>,
+    current_exe: Option<&Path>,
+    development_wallpapers: &Path,
+) -> Option<PathBuf> {
+    if let Some(configured) = configured {
+        return Some(configured.to_path_buf());
+    }
+
+    let bundled_wallpapers = current_exe
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|contents| contents.join("Resources/wallpapers"));
+    bundled_wallpapers.filter(|path| path.is_dir()).or_else(|| {
+        development_wallpapers
+            .is_dir()
+            .then(|| development_wallpapers.to_path_buf())
+    })
 }
 
 pub(super) enum BackgroundImageRuntime {
@@ -797,6 +825,60 @@ mod tests {
             repeat: false,
             opacity: 1.0,
         }
+    }
+
+    #[test]
+    fn configured_background_image_wins_over_default_wallpapers() {
+        let root = temp_path("configured-source");
+        let current_exe = root.join("Noa.app/Contents/MacOS/Noa");
+        let bundled = root.join("Noa.app/Contents/Resources/wallpapers");
+        let development = root.join("development-wallpapers");
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::create_dir_all(&development).unwrap();
+        let configured = root.join("custom.png");
+
+        let resolved =
+            resolve_background_image_source(Some(&configured), Some(&current_exe), &development);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(resolved.as_deref(), Some(configured.as_path()));
+    }
+
+    #[test]
+    fn bundled_wallpapers_win_over_development_wallpapers() {
+        let root = temp_path("bundled-source");
+        let current_exe = root.join("Noa.app/Contents/MacOS/Noa");
+        let bundled = root.join("Noa.app/Contents/Resources/wallpapers");
+        let development = root.join("development-wallpapers");
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::create_dir_all(&development).unwrap();
+
+        let resolved = resolve_background_image_source(None, Some(&current_exe), &development);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(resolved.as_deref(), Some(bundled.as_path()));
+    }
+
+    #[test]
+    fn development_wallpapers_are_the_unbundled_fallback() {
+        let root = temp_path("development-source");
+        let current_exe = root.join("target/debug/Noa");
+        let development = root.join("development-wallpapers");
+        std::fs::create_dir_all(&development).unwrap();
+
+        let resolved = resolve_background_image_source(None, Some(&current_exe), &development);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(resolved.as_deref(), Some(development.as_path()));
+    }
+
+    #[test]
+    fn missing_default_wallpaper_directories_resolve_to_none() {
+        let root = temp_path("missing-sources");
+        let current_exe = root.join("target/debug/Noa");
+        let development = root.join("development-wallpapers");
+
+        assert!(resolve_background_image_source(None, Some(&current_exe), &development).is_none());
     }
 
     #[test]

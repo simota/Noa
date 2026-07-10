@@ -150,3 +150,35 @@ pub(crate) fn resolved_tab_title(title_override: Option<&str>, shell_title: &str
         None => tab_title(shell_title),
     }
 }
+
+/// Titlebar proxy icon diff-cache (REQ-PXI-4): compares this frame's raw
+/// focused-pane cwd against the cached value from the last frame the setter
+/// actually ran for. Returns `None` (skip the native call) when unchanged,
+/// or `Some(new_cwd)` (call the setter, then cache `new_cwd`) when it
+/// differs — including a focus switch to a pane with a different cwd
+/// (REQ-PXI-3), even with no fresh OSC 7 sequence.
+///
+/// Deliberately keyed on the *raw* cwd rather than the config-gated resolved
+/// path: a `visible`/`hidden` config toggle alone (no cwd change) must not
+/// re-trigger the setter (REQ-PXI-6).
+pub(crate) fn proxy_icon_update(
+    cached_cwd: &Option<String>,
+    current_cwd: Option<&str>,
+) -> Option<Option<String>> {
+    if cached_cwd.as_deref() == current_cwd {
+        None
+    } else {
+        Some(current_cwd.map(str::to_string))
+    }
+}
+
+/// Resolves the focused pane's raw cwd to the path that should back the
+/// proxy icon: `None` when the config is `hidden` or the pane has no cwd.
+/// No `Path::exists` check (REQ-PXI-5, Ghostty parity): a stale/deleted
+/// directory still populates the icon.
+pub(crate) fn resolve_proxy_icon_path(visible: bool, cwd: Option<&str>) -> Option<String> {
+    if !visible {
+        return None;
+    }
+    cwd.map(str::to_string)
+}

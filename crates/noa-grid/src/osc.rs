@@ -23,6 +23,9 @@ pub(crate) enum HyperlinkOsc {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CwdOsc {
     Set(String),
+    /// An empty OSC 7 value (`OSC 7 ; ST`): resets `Terminal.cwd` to `None`
+    /// rather than leaving it untouched like a malformed sequence (REQ-OSC-1).
+    Reset,
     Malformed,
 }
 
@@ -372,13 +375,85 @@ pub(crate) fn parse_notification_osc(data: &[u8]) -> Option<Notification> {
 
 pub(crate) fn parse_cwd_osc(data: &[u8]) -> Option<CwdOsc> {
     let uri = data.strip_prefix(b"7;")?;
+    if uri.is_empty() {
+        return Some(CwdOsc::Reset);
+    }
     let Some(uri) = utf8_no_controls(uri) else {
         return Some(CwdOsc::Malformed);
     };
-    let Some(path) = parse_file_uri_path(&uri) else {
+    // `kitty-shell-cwd://<host>/<path>` (REQ-OSC-3): the host is validated
+    // through the same `host_is_local` gate as `file://` below (REQ-OSC-2),
+    // but the path is taken raw with no percent-decoding — kitty's own
+    // semantics for this scheme, unlike `file://`.
+    let Some((host, path)) = parse_kitty_shell_cwd_path(&uri).or_else(|| parse_file_uri_path(&uri))
+    else {
         return Some(CwdOsc::Malformed);
     };
+    if !host_is_local(host) {
+        // Anti-spoofing (REQ-OSC-2): a non-local host (e.g. an SSH remote)
+        // is ignored, leaving `Terminal.cwd` at its previous value — same
+        // observable effect as `Malformed`, so no dedicated variant.
+        return Some(CwdOsc::Malformed);
+    }
     Some(CwdOsc::Set(path))
+}
+
+/// Case-insensitive OSC 7 hostname check (REQ-OSC-2): accepts a match on
+/// either side's full string or first dot-separated label, so `sg-h-0001`,
+/// `SG-H-0001.local`, and an FQDN all match a machine named `SG-H-0001`.
+/// Pure with respect to `local_hostname` so tests don't depend on the actual
+/// machine name; [`host_is_local`] is the thin caller that supplies it.
+pub(crate) fn hostname_matches_local(host: &str, local_hostname: &str) -> bool {
+    if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let host_label = host.split('.').next().unwrap_or(host);
+    let local_label = local_hostname.split('.').next().unwrap_or(local_hostname);
+    // Deliberately loose: accepts any FQDN/short-name mixture of the same
+    // machine name; fail-toward-accept protects the shipped sidebar cwd
+    // pipeline (spec REQ-OSC-2).
+    host_label.eq_ignore_ascii_case(local_label)
+}
+
+fn host_is_local(host: &str) -> bool {
+    match local_hostname() {
+        Some(local) => hostname_matches_local(host, &local),
+        // Fail open (REQ-OSC-2): a false accept only risks showing a stale
+        // proxy icon, while a false reject would break the shipped sidebar
+        // cwd feature on a machine where hostname resolution is unavailable.
+        None => true,
+    }
+}
+
+/// Cached across the process lifetime: the local hostname cannot change
+/// without a reboot, so there's no need to re-syscall on every OSC 7
+/// sequence.
+fn local_hostname() -> Option<String> {
+    static LOCAL_HOSTNAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LOCAL_HOSTNAME.get_or_init(query_local_hostname).clone()
+}
+
+fn query_local_hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is a valid, correctly-sized buffer for POSIX
+    // `gethostname(2)`; the call never writes past `buf.len()`.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0)?;
+    std::str::from_utf8(&buf[..end]).ok().map(str::to_owned)
+}
+
+/// Parses `kitty-shell-cwd://<host>/<path>` (including the empty-host
+/// `kitty-shell-cwd:///path` form). The path is returned raw — kitty
+/// semantics, no percent-decoding — unlike [`parse_file_uri_path`].
+fn parse_kitty_shell_cwd_path(uri: &str) -> Option<(&str, String)> {
+    let rest = uri.strip_prefix("kitty-shell-cwd://")?;
+    let path_start = rest.find('/')?;
+    let host = &rest[..path_start];
+    let path = &rest[path_start..];
+    validate_path(path.to_owned()).map(|path| (host, path))
 }
 
 pub(crate) fn parse_shell_integration_osc(data: &[u8]) -> Option<ShellIntegrationOsc> {
@@ -434,16 +509,20 @@ fn hyperlink_id(params: &[u8]) -> Option<Option<String>> {
     Some(None)
 }
 
-fn parse_file_uri_path(uri: &str) -> Option<String> {
+fn parse_file_uri_path(uri: &str) -> Option<(&str, String)> {
     let rest = uri.strip_prefix("file://")?;
     let path_start = rest.find('/')?;
+    let host = &rest[..path_start];
     let path = &rest[path_start..];
-    if !path.starts_with('/') {
-        return None;
-    }
     let decoded = percent_decode_utf8(path)?;
-    if decoded.starts_with('/') && !decoded.chars().any(char::is_control) {
-        Some(decoded)
+    validate_path(decoded).map(|path| (host, path))
+}
+
+/// Shared tail validation for both `file://` and `kitty-shell-cwd://` paths:
+/// must be absolute and free of control characters.
+fn validate_path(path: String) -> Option<String> {
+    if path.starts_with('/') && !path.chars().any(char::is_control) {
+        Some(path)
     } else {
         None
     }

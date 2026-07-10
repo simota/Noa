@@ -203,6 +203,11 @@ impl App {
             self.hotkey_install_attempted = false;
         }
 
+        // `macos-titlebar-proxy-icon` has no dedicated apply step here by
+        // design (REQ-PXI-6, Ghostty parity): the native setter only runs
+        // from the render-loop diff-cache keyed on the focused pane's raw
+        // cwd (`render.rs`), so a config-only toggle visibly applies on that
+        // pane's *next* cwd change, not immediately on reload.
         if font_applied || padding_changed || self.config.sidebar_width != previous.sidebar_width {
             self.relayout_all_windows();
         } else if theme_changed || background_image_changed || opacity_changed || blur_changed {

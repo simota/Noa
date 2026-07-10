@@ -245,6 +245,12 @@ pub(super) struct WindowState {
     pub(super) surfaces: HashMap<PaneId, Surface>,
     pub(super) last_mouse_pane: Option<PaneId>,
     pub(super) last_mouse_point: Option<split_tree::Point>,
+    /// Raw physical pointer position from the most recent `CursorMoved`.
+    /// Kept alongside `last_mouse_point`/`last_mouse_pane` for handlers that
+    /// need the exact pixel position rather than an already-hit-tested grid
+    /// cell — the Quick Look force-click gesture (`TouchpadPressure`) carries
+    /// no position of its own.
+    pub(super) last_mouse_physical_position: Option<PhysicalPosition<f64>>,
     pub(super) active_split_drag: Option<SplitResizeDrag>,
     pub(super) occluded: bool,
     pub(super) title: String,
@@ -253,6 +259,16 @@ pub(super) struct WindowState {
     /// `Terminal.title` keeps tracking OSC 0/2 underneath so clearing the
     /// override reveals the *latest* shell title.
     pub(super) title_override: Option<String>,
+    /// The last raw `Terminal.cwd` observed for the focused pane, used as the
+    /// titlebar proxy icon's diff-cache key (REQ-PXI-4). Deliberately the raw
+    /// cwd, not the config-gated resolved path: keying on the raw value means
+    /// a config-only `visible`/`hidden` toggle with no cwd change never
+    /// re-triggers the native setter (REQ-PXI-6 — see `render.rs`).
+    pub(super) proxy_icon_cwd: Option<String>,
+    /// The last `TouchpadPressure` stage seen for this window (REQ-QLK-1), so
+    /// only the transition *into* stage 2 fires Quick Look — repeated
+    /// pressure samples already at stage 2 must not retrigger it.
+    pub(super) last_touchpad_stage: i64,
     /// Per-tab opt-in for agent CLI prompt auto approval. Split panes in the
     /// same native tab share this flag with their io threads.
     pub(super) auto_approve_enabled: Arc<AtomicBool>,

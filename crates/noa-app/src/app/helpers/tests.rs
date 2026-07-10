@@ -1508,3 +1508,32 @@ fn resolved_tab_title_prefers_the_override_over_any_shell_title() {
     assert_eq!(resolved_tab_title(None, "vim"), "vim");
     assert_eq!(resolved_tab_title(None, ""), "Noa");
 }
+
+// AC-PXI-5: the diff-cache helper skips the setter when the raw cwd is
+// unchanged across frames, and fires (with the new value to cache) when it
+// changes — including a focus switch, which the caller feeds in as a
+// changed `current_cwd` with no OSC 7 involved.
+#[test]
+fn proxy_icon_update_only_fires_on_a_changed_raw_cwd() {
+    let cached = Some("/a".to_string());
+
+    assert_eq!(proxy_icon_update(&cached, Some("/a")), None);
+    assert_eq!(
+        proxy_icon_update(&cached, Some("/b")),
+        Some(Some("/b".to_string()))
+    );
+    assert_eq!(proxy_icon_update(&cached, None), Some(None));
+    assert_eq!(proxy_icon_update(&None, None), None);
+}
+
+// AC-PXI-6: no `Path::exists` check — a nonexistent path still resolves,
+// gated only by the `visible`/`hidden` config value.
+#[test]
+fn resolve_proxy_icon_path_gates_on_config_visibility_only() {
+    assert_eq!(
+        resolve_proxy_icon_path(true, Some("/does/not/exist")),
+        Some("/does/not/exist".to_string())
+    );
+    assert_eq!(resolve_proxy_icon_path(false, Some("/a")), None);
+    assert_eq!(resolve_proxy_icon_path(true, None), None);
+}

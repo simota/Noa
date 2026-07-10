@@ -160,6 +160,38 @@ pub fn physical_position_to_grid_point(
     Point { x: col, y: row }
 }
 
+/// Inverse of [`physical_position_to_grid_point`]: the top-left physical
+/// pixel offset of grid cell `point`, relative to the pane's own local
+/// origin (the caller adds the pane rect's offset for a window-relative
+/// position). Used by Quick Look (REQ-QLK-4) to anchor the definition popup
+/// at a word's start cell.
+pub fn grid_point_to_physical(
+    point: Point,
+    cell_w: f32,
+    cell_h: f32,
+    padding: GridPadding,
+) -> (f64, f64) {
+    let x = f64::from(padding.left) + f64::from(point.x) * f64::from(cell_w);
+    let y = f64::from(padding.top) + f64::from(point.y) * f64::from(cell_h);
+    (x, y)
+}
+
+/// Physical px (top-left origin) → AppKit `NSView` point (bottom-left
+/// origin), for `showDefinitionForAttributedString:atPoint:` (REQ-QLK-4):
+/// divide by `scale_factor`, then flip `y` against the view's height in
+/// points.
+pub fn physical_to_appkit_point(
+    physical_x: f64,
+    physical_y: f64,
+    scale_factor: f64,
+    view_height_points: f64,
+) -> (f64, f64) {
+    (
+        physical_x / scale_factor,
+        view_height_points - physical_y / scale_factor,
+    )
+}
+
 pub fn encode_mouse_input(
     format: MouseFormat,
     tracking: MouseTracking,
@@ -971,5 +1003,30 @@ mod tests {
             ),
             Some(b"\x1b[<0;3;4M".to_vec())
         );
+    }
+
+    #[test]
+    fn grid_point_to_physical_is_the_inverse_of_physical_position_to_grid_point() {
+        let padding = GridPadding::new(4.0, 0.0, 0.0, 8.0);
+
+        assert_eq!(
+            grid_point_to_physical(point(1, 1), 10.0, 20.0, padding),
+            (18.0, 24.0)
+        );
+        assert_eq!(
+            grid_point_to_physical(point(0, 0), 10.0, 20.0, padding),
+            (8.0, 4.0)
+        );
+    }
+
+    #[test]
+    fn physical_to_appkit_point_scales_and_flips_y() {
+        // AC-QLK-6: matches `(physical.x / scale, view_height - physical.y /
+        // scale)` exactly.
+        assert_eq!(
+            physical_to_appkit_point(100.0, 40.0, 2.0, 300.0),
+            (50.0, 280.0)
+        );
+        assert_eq!(physical_to_appkit_point(0.0, 0.0, 1.0, 100.0), (0.0, 100.0));
     }
 }

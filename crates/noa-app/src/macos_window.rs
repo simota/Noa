@@ -506,3 +506,229 @@ fn set_window_background_color_impl(window: &Window, bg: noa_core::Rgb, alpha: f
 
 #[cfg(not(target_os = "macos"))]
 fn set_window_background_color_impl(_window: &Window, _bg: noa_core::Rgb, _alpha: f32) {}
+
+/// Set (or clear) the titlebar proxy icon: `NSWindow.representedURL`, the
+/// folder/file glyph Finder can Cmd-click or drag from (REQ-PXI-2).
+/// `path: None` clears it to `nil`. No file-existence check is made
+/// (REQ-PXI-5, Ghostty parity) — a stale/deleted directory still sets it.
+pub(crate) fn set_represented_url(window: &Window, path: Option<&str>) {
+    set_represented_url_impl(window, path);
+}
+
+#[cfg(target_os = "macos")]
+fn set_represented_url_impl(window: &Window, path: Option<&str>) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::NSString;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+
+    // SAFETY: `ns_view` is winit's live AppKit `NSView` for this window and
+    // we are on the main (window-owning) thread. `setRepresentedURL:` is a
+    // plain AppKit property write that accepts nil to clear the icon.
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let Some(path) = path else {
+            let nil: *mut AnyObject = std::ptr::null_mut();
+            let _: () = msg_send![ns_window, setRepresentedURL: nil];
+            return;
+        };
+        let Some(url_class) = AnyClass::get(c"NSURL") else {
+            return;
+        };
+        let ns_path = NSString::from_str(path);
+        let url: *mut AnyObject = msg_send![url_class, fileURLWithPath: &*ns_path];
+        if url.is_null() {
+            return;
+        }
+        let _: () = msg_send![ns_window, setRepresentedURL: url];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_represented_url_impl(_window: &Window, _path: Option<&str>) {}
+
+/// Show the system dictionary/definition popup for `text`, anchored at
+/// `(point_x, point_y)` — AppKit view coordinates: points, bottom-left
+/// origin (Quick Look force-click, REQ-QLK-4). `font_name`/`font_size` are a
+/// best-effort `NSFont` attribute (REQ-QLK-6): a lookup failure still shows
+/// the popup, just without a font attribute.
+pub(crate) fn show_definition(
+    window: &Window,
+    text: &str,
+    font_name: Option<&str>,
+    font_size: f32,
+    point_x: f64,
+    point_y: f64,
+) {
+    show_definition_impl(window, text, font_name, font_size, point_x, point_y);
+}
+
+#[cfg(target_os = "macos")]
+fn show_definition_impl(
+    window: &Window,
+    text: &str,
+    font_name: Option<&str>,
+    font_size: f32,
+    point_x: f64,
+    point_y: f64,
+) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::{NSPoint, NSString};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+    let ns_text = NSString::from_str(text);
+    let point = NSPoint {
+        x: point_x,
+        y: point_y,
+    };
+
+    let font = font_name.and_then(|name| resolve_font(name, font_size));
+
+    // SAFETY: main (window-owning) thread; every object pointer is
+    // nil-checked before use. `NSAttributedString`/`NSDictionary` are built
+    // via the codebase's raw `AnyClass::get` + `msg_send!` pattern (as
+    // `NSColor`/`NSView` already are above) rather than objc2-foundation's
+    // typed, feature-gated wrappers — that feature isn't declared in this
+    // crate (only `muda` pulls in `NSAttributedString` transitively today),
+    // so relying on it would be fragile and declaring it is an unneeded
+    // Cargo.toml change for this one call.
+    unsafe {
+        let Some(string_class) = AnyClass::get(c"NSAttributedString") else {
+            return;
+        };
+        let alloc: *mut AnyObject = msg_send![string_class, alloc];
+        if alloc.is_null() {
+            return;
+        }
+
+        // `NSFontAttributeName`'s value is the stable, documented string
+        // `"NSFont"` — used directly rather than linking the constant symbol.
+        let dict: *mut AnyObject = match font.zip(AnyClass::get(c"NSDictionary")) {
+            Some((font, dict_class)) => {
+                let key = NSString::from_str("NSFont");
+                msg_send![dict_class, dictionaryWithObject: font, forKey: &*key]
+            }
+            None => std::ptr::null_mut(),
+        };
+
+        let attributed: *mut AnyObject = if dict.is_null() {
+            msg_send![alloc, initWithString: &*ns_text]
+        } else {
+            msg_send![alloc, initWithString: &*ns_text, attributes: dict]
+        };
+        if attributed.is_null() {
+            return;
+        }
+
+        let _: () =
+            msg_send![ns_view, showDefinitionForAttributedString: attributed, atPoint: point];
+
+        // `alloc`+`initWithString:`/`initWithString:attributes:` above
+        // yielded a +1-retained object; release our reference now that
+        // `showDefinitionForAttributedString:atPoint:` (which retains its
+        // own copy internally) has returned.
+        let _: () = msg_send![attributed, release];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn show_definition_impl(
+    _window: &Window,
+    _text: &str,
+    _font_name: Option<&str>,
+    _font_size: f32,
+    _point_x: f64,
+    _point_y: f64,
+) {
+}
+
+/// Resolves `name`/`size` to a live `NSFont` via `fontWithName:size:`,
+/// returning `None` on lookup failure (unknown family) rather than
+/// panicking (REQ-QLK-6) — the caller still shows the definition popup,
+/// just without a font attribute.
+#[cfg(target_os = "macos")]
+fn resolve_font(name: &str, size: f32) -> Option<*mut objc2::runtime::AnyObject> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::NSString;
+
+    let font_class = AnyClass::get(c"NSFont")?;
+    let ns_name = NSString::from_str(name);
+    // SAFETY: `fontWithName:size:` is a plain AppKit class method; an
+    // unknown family name returns nil rather than throwing.
+    let font: *mut AnyObject =
+        unsafe { msg_send![font_class, fontWithName: &*ns_name, size: f64::from(size)] };
+    if font.is_null() { None } else { Some(font) }
+}
+
+/// The `com.apple.trackpad.forceClick` user default (REQ-QLK-1): fires when
+/// the key is absent or `true` (Apple's factory default is force-click
+/// enabled), and is suppressed only when it's explicitly `false` — a bare
+/// `boolForKey:` would return `false` for an absent key and silently disable
+/// Quick Look on never-customized systems, so the key's presence is checked
+/// first via `objectForKey:`.
+pub(crate) fn force_click_preference_enabled() -> bool {
+    force_click_preference_enabled_impl()
+}
+
+#[cfg(target_os = "macos")]
+fn force_click_preference_enabled_impl() -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::NSString;
+
+    let Some(defaults_class) = AnyClass::get(c"NSUserDefaults") else {
+        return true;
+    };
+    let key = NSString::from_str("com.apple.trackpad.forceClick");
+
+    // SAFETY: `NSUserDefaults`/`objectForKey:`/`boolForKey:` are plain,
+    // main-thread-safe Foundation reads.
+    unsafe {
+        let defaults: *mut AnyObject = msg_send![defaults_class, standardUserDefaults];
+        if defaults.is_null() {
+            return true;
+        }
+        let value: *mut AnyObject = msg_send![defaults, objectForKey: &*key];
+        if value.is_null() {
+            return true;
+        }
+        msg_send![defaults, boolForKey: &*key]
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn force_click_preference_enabled_impl() -> bool {
+    true
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    // AC-QLK-8: an unknown font family must not panic, and resolves to
+    // `None` so the caller falls back to no font attribute.
+    #[test]
+    fn resolve_font_returns_none_for_an_unknown_family() {
+        assert!(resolve_font("Definitely-Not-A-Real-Font-XYZ-12345", 12.0).is_none());
+    }
+}

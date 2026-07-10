@@ -239,6 +239,13 @@ impl Terminal {
         self.active_mut().select_word_at_viewport_point(point);
     }
 
+    /// Read-only word lookup at `point` for Quick Look force-click
+    /// (REQ-QLK-2): the word text and its start point, without mutating
+    /// selection state.
+    pub fn word_at_viewport_point(&self, point: Point) -> Option<(String, Point)> {
+        self.active().word_at_viewport_point(point)
+    }
+
     pub fn select_line_at_viewport_point(&mut self, point: Point) {
         self.active_mut().select_line_at_viewport_point(point);
     }

@@ -90,6 +90,9 @@ pub struct AppConfig {
     /// `macos-non-native-fullscreen`: use borderless-window fullscreen instead
     /// of AppKit's native fullscreen Space on macOS.
     pub macos_non_native_fullscreen: bool,
+    /// `macos-titlebar-proxy-icon`: whether the titlebar shows the focused
+    /// pane's OSC 7 pwd as a folder/file proxy icon.
+    pub macos_titlebar_proxy_icon: noa_config::MacosTitlebarProxyIcon,
     /// Set when the user passed an explicit grid size on the CLI (`--cols` /
     /// `--rows`). Session restore is suppressed in that case so the requested
     /// dimensions win over the saved topology (Ghostty parity).
@@ -180,6 +183,7 @@ impl AppConfig {
             macos_option_as_alt: config.macos_option_as_alt,
             macos_titlebar_style: config.macos_titlebar_style,
             macos_non_native_fullscreen: config.macos_non_native_fullscreen,
+            macos_titlebar_proxy_icon: config.macos_titlebar_proxy_icon,
             cli_grid_override,
             cli_overrides,
             quick_terminal_hotkey: config.quick_terminal_hotkey,

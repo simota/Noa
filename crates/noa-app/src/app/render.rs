@@ -98,6 +98,13 @@ impl App {
         // there is no override.
         let title_override = state.title_override.clone();
         let mut title = resolved_tab_title(title_override.as_deref(), "");
+        // The focused pane's raw OSC 7 cwd diff-cache result, computed under
+        // the same terminal lock the title read already takes (no extra lock
+        // later) — feeds the titlebar proxy icon diff-apply below
+        // (REQ-PXI-2/3). `proxy_icon_update` only clones the cwd when it
+        // actually differs from the cached value, so an unchanged cwd costs
+        // no allocation per frame.
+        let mut focused_cwd_update: Option<Option<String>> = None;
         // Scrolled panes' scrollbar-thumb state, captured under the same
         // terminal lock the snapshot takes (no extra lock later).
         let mut scroll_thumbs: Vec<sidebar::ScrollThumb> = Vec::new();
@@ -113,6 +120,7 @@ impl App {
             let mut term = surface.terminal.lock();
             if pane_id == state.focused_pane {
                 title = resolved_tab_title(title_override.as_deref(), &term.title);
+                focused_cwd_update = proxy_icon_update(&state.proxy_icon_cwd, term.cwd.as_deref());
             }
             if term.viewport_offset() > 0 {
                 scroll_thumbs.push(sidebar::ScrollThumb {
@@ -165,6 +173,18 @@ impl App {
         if state.title != title {
             state.window.set_title(&title);
             state.title = title;
+        }
+        // Titlebar proxy icon (REQ-PXI-2/3/4): only re-derives/applies when
+        // the focused pane's raw cwd actually changed (via OSC 7 or a focus
+        // switch) — `set_represented_url` no-ops off macOS.
+        if let Some(new_cwd) = focused_cwd_update {
+            let visible = matches!(
+                self.config.macos_titlebar_proxy_icon,
+                noa_config::MacosTitlebarProxyIcon::Visible
+            );
+            let resolved = resolve_proxy_icon_path(visible, new_cwd.as_deref());
+            crate::macos_window::set_represented_url(&state.window, resolved.as_deref());
+            state.proxy_icon_cwd = new_cwd;
         }
         if let Some((_, rect, snapshot)) = snapshots
             .iter()

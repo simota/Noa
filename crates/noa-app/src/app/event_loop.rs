@@ -299,6 +299,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.on_mouse_input(event_loop, window_id, state, button)
             }
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(window_id, delta),
+            WindowEvent::TouchpadPressure { stage, .. } => {
+                self.on_touchpad_pressure(window_id, stage)
+            }
             WindowEvent::HoveredFile(path) => self.on_hovered_file(window_id, path),
             WindowEvent::HoveredFileCancelled => self.on_hovered_file_cancelled(window_id),
             WindowEvent::DroppedFile(path) => self.on_dropped_file(window_id, path),
@@ -680,6 +683,9 @@ impl App {
         let point = split_point_from_physical_position(position);
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.last_mouse_point = point;
+            // Kept for handlers with no position of their own (Quick Look
+            // force-click, `TouchpadPressure`).
+            state.last_mouse_physical_position = Some(position);
         }
         // Keep the toolbar `+` hover state (style + cursor) in sync with the
         // pointer before any early return below; a no-op when the sidebar is
@@ -774,6 +780,87 @@ impl App {
         if overview_changed {
             self.request_overview_redraw();
         }
+    }
+
+    /// Force-click detection (REQ-QLK-1): only the transition *into*
+    /// pressure stage 2 fires Quick Look — repeated samples already at
+    /// stage 2 within the same press must not retrigger it.
+    pub(super) fn on_touchpad_pressure(&mut self, window_id: WindowId, stage: i64) {
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        let previous_stage = state.last_touchpad_stage;
+        state.last_touchpad_stage = stage;
+        if stage != 2 || previous_stage == 2 {
+            return;
+        }
+        // Read live rather than memoized (force-clicks are rare, and
+        // NSUserDefaults caches internally): a System Settings change to
+        // `com.apple.trackpad.forceClick` must take effect without an app
+        // restart, matching Ghostty's per-event read.
+        if !crate::macos_window::force_click_preference_enabled() {
+            return;
+        }
+        self.trigger_quick_look(window_id);
+    }
+
+    /// Quick Look force-click (REQ-QLK-3/4/5): map the last known pointer
+    /// position to a grid cell, look up the word there without touching
+    /// selection, and show the system definition popup anchored at the
+    /// word's start cell. No word at that point ⇒ no-op.
+    fn trigger_quick_look(&mut self, window_id: WindowId) {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return;
+        };
+        let metrics = gpu.font.metrics();
+        let Some(position) = self
+            .windows
+            .get(&window_id)
+            .and_then(|state| state.last_mouse_physical_position)
+        else {
+            return;
+        };
+        let Some((pane_id, cell)) = self.pane_cell_at_position(window_id, position, metrics) else {
+            return;
+        };
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
+        let Some(surface) = state.surfaces.get(&pane_id) else {
+            return;
+        };
+        let word = {
+            let terminal = surface.terminal.lock();
+            terminal.word_at_viewport_point(cell)
+        };
+        let Some((word, start)) = word else {
+            return;
+        };
+
+        // Word start cell → window-relative physical px (inverse of the
+        // pointer→cell mapping) → AppKit view point (scale + y-flip).
+        let (local_x, local_y) =
+            mouse::grid_point_to_physical(start, metrics.cell_w, metrics.cell_h, self.padding);
+        let physical_x = f64::from(surface.rect.x) + local_x;
+        let physical_y = f64::from(surface.rect.y) + local_y;
+        let scale_factor = state.window.scale_factor();
+        let view_height_points = f64::from(state.window.inner_size().height) / scale_factor;
+        let (point_x, point_y) = mouse::physical_to_appkit_point(
+            physical_x,
+            physical_y,
+            scale_factor,
+            view_height_points,
+        );
+
+        let font_name = self.config.font.families.first().map(String::as_str);
+        crate::macos_window::show_definition(
+            &state.window,
+            &word,
+            font_name,
+            self.config.font_size,
+            point_x,
+            point_y,
+        );
     }
 
     pub(super) fn on_mouse_input(

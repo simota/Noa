@@ -203,6 +203,17 @@ pub enum MacosTitlebarStyle {
     Transparent,
 }
 
+/// `macos-titlebar-proxy-icon`: whether the titlebar shows the folder/file
+/// proxy icon derived from the focused pane's OSC 7 pwd. No-op outside macOS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MacosTitlebarProxyIcon {
+    /// Show the proxy icon (Ghostty parity).
+    #[default]
+    Visible,
+    /// Never show the proxy icon.
+    Hidden,
+}
+
 /// `resize-overlay`: whether the `cols × rows` grid-size toast shows during a
 /// live resize. Mirrors Ghostty's `resize-overlay`. Default `after-first`
 /// (every resize except the window's initial layout).
@@ -387,6 +398,9 @@ pub struct StartupConfig {
     /// `macos-non-native-fullscreen`: use borderless-window fullscreen instead
     /// of the native macOS fullscreen Space. No-op outside macOS.
     pub macos_non_native_fullscreen: bool,
+    /// `macos-titlebar-proxy-icon`: whether the titlebar shows the focused
+    /// pane's OSC 7 pwd as a folder/file proxy icon. Default shows it.
+    pub macos_titlebar_proxy_icon: MacosTitlebarProxyIcon,
     /// `quick-terminal-hotkey`: the global hotkey chord that toggles the
     /// drop-down quick terminal (e.g. `cmd+grave`). Defaults to
     /// [`DEFAULT_QUICK_TERMINAL_HOTKEY`]; set the config value to `none` (or
@@ -477,6 +491,7 @@ impl Default for StartupConfig {
             macos_option_as_alt: MacosOptionAsAlt::default(),
             macos_titlebar_style: MacosTitlebarStyle::default(),
             macos_non_native_fullscreen: false,
+            macos_titlebar_proxy_icon: MacosTitlebarProxyIcon::default(),
             quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
             quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
             quick_terminal_autohide: true,
@@ -530,6 +545,7 @@ pub struct ConfigOverrides {
     pub macos_option_as_alt: Option<MacosOptionAsAlt>,
     pub macos_titlebar_style: Option<MacosTitlebarStyle>,
     pub macos_non_native_fullscreen: Option<bool>,
+    pub macos_titlebar_proxy_icon: Option<MacosTitlebarProxyIcon>,
     pub quick_terminal_hotkey: Option<String>,
     pub quick_terminal_size: Option<f32>,
     pub quick_terminal_autohide: Option<bool>,
@@ -611,6 +627,9 @@ impl ConfigOverrides {
             macos_non_native_fullscreen: higher_priority
                 .macos_non_native_fullscreen
                 .or(self.macos_non_native_fullscreen),
+            macos_titlebar_proxy_icon: higher_priority
+                .macos_titlebar_proxy_icon
+                .or(self.macos_titlebar_proxy_icon),
             quick_terminal_hotkey: higher_priority
                 .quick_terminal_hotkey
                 .or(self.quick_terminal_hotkey),
@@ -694,6 +713,9 @@ impl ConfigOverrides {
             macos_non_native_fullscreen: self
                 .macos_non_native_fullscreen
                 .unwrap_or(base.macos_non_native_fullscreen),
+            macos_titlebar_proxy_icon: self
+                .macos_titlebar_proxy_icon
+                .unwrap_or(base.macos_titlebar_proxy_icon),
             quick_terminal_hotkey: self.quick_terminal_hotkey.or(base.quick_terminal_hotkey),
             quick_terminal_size: self.quick_terminal_size.unwrap_or(base.quick_terminal_size),
             quick_terminal_autohide: self
@@ -889,6 +911,7 @@ mod tests {
                 macos_option_as_alt: MacosOptionAsAlt::default(),
                 macos_titlebar_style: MacosTitlebarStyle::default(),
                 macos_non_native_fullscreen: false,
+                macos_titlebar_proxy_icon: MacosTitlebarProxyIcon::default(),
                 quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
                 quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
                 quick_terminal_autohide: true,
@@ -1128,7 +1151,8 @@ font-size = 15.5
             test_path(),
             "macos-option-as-alt = left\n\
              macos-titlebar-style = transparent\n\
-             macos-non-native-fullscreen = true",
+             macos-non-native-fullscreen = true\n\
+             macos-titlebar-proxy-icon = hidden",
         );
         assert!(diagnostics.is_empty());
         assert_eq!(overrides.macos_option_as_alt, Some(MacosOptionAsAlt::Left));
@@ -1137,16 +1161,25 @@ font-size = 15.5
             Some(MacosTitlebarStyle::Transparent)
         );
         assert_eq!(overrides.macos_non_native_fullscreen, Some(true));
+        assert_eq!(
+            overrides.macos_titlebar_proxy_icon,
+            Some(MacosTitlebarProxyIcon::Hidden)
+        );
 
         let default = ConfigOverrides::default().apply_to(StartupConfig::default());
         assert_eq!(default.macos_option_as_alt, MacosOptionAsAlt::None);
         assert_eq!(default.macos_titlebar_style, MacosTitlebarStyle::Native);
         assert!(!default.macos_non_native_fullscreen);
+        assert_eq!(
+            default.macos_titlebar_proxy_icon,
+            MacosTitlebarProxyIcon::Visible
+        );
 
         let file = ConfigOverrides {
             macos_option_as_alt: Some(MacosOptionAsAlt::Left),
             macos_titlebar_style: Some(MacosTitlebarStyle::Transparent),
             macos_non_native_fullscreen: Some(true),
+            macos_titlebar_proxy_icon: Some(MacosTitlebarProxyIcon::Hidden),
             ..Default::default()
         };
         let cli = ConfigOverrides {
@@ -1161,6 +1194,11 @@ font-size = 15.5
             MacosTitlebarStyle::Transparent
         );
         assert!(!resolved.macos_non_native_fullscreen);
+        // CLI didn't touch this key, so the file's value still wins.
+        assert_eq!(
+            resolved.macos_titlebar_proxy_icon,
+            MacosTitlebarProxyIcon::Hidden
+        );
     }
 
     #[test]

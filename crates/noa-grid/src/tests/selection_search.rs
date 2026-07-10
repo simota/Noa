@@ -581,3 +581,25 @@ fn set_scrollback_limit_bytes_shrinks_and_disables_history() {
     t.set_scrollback_limit_bytes(0);
     assert_eq!(t.scrollback_len(), 0, "limit 0 disables scrollback");
 }
+
+#[test]
+fn word_at_viewport_point_finds_a_word_without_mutating_selection() {
+    // AC-QLK-3 + AC-QLK-4: an active selection survives the call byte-for-byte,
+    // and a point inside "world" returns the word plus its start point.
+    let mut t = run_size(20, 3, b"hello world");
+    t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 4, y: 0 });
+    let before = t.selected_text();
+
+    let result = t.word_at_viewport_point(Point { x: 8, y: 0 });
+
+    assert_eq!(result, Some(("world".to_string(), Point { x: 6, y: 0 })));
+    assert_eq!(t.selected_text(), before);
+}
+
+#[test]
+fn word_at_viewport_point_over_blank_cells_returns_none() {
+    // AC-QLK-5.
+    let t = run_size(20, 3, b"hi");
+
+    assert_eq!(t.word_at_viewport_point(Point { x: 10, y: 0 }), None);
+}

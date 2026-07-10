@@ -63,6 +63,85 @@ fn osc7_cwd_updates_from_file_uri_and_rejects_malformed_payloads() {
 }
 
 #[test]
+fn osc7_empty_value_resets_cwd_rather_than_ignoring_it() {
+    // AC-OSC-1: `OSC 7 ; ST` (empty value) is a pwd reset, not `Malformed` —
+    // it must clear an already-set cwd rather than leave it untouched.
+    let t = run(b"\x1b]7;file://localhost/tmp\x07\x1b]7;\x07");
+
+    assert!(t.cwd.is_none());
+}
+
+#[test]
+fn osc7_non_local_host_is_ignored_leaving_prior_cwd_unchanged() {
+    // AC-OSC-2: a hostname that can't possibly match this test-running
+    // machine is rejected; the earlier accepted cwd survives untouched.
+    let t = run(b"\x1b]7;file://localhost/first\x07\
+          \x1b]7;file://evil-remote-host/tmp\x07");
+
+    assert_eq!(t.cwd.as_deref(), Some("/first"));
+}
+
+#[test]
+fn osc7_empty_and_localhost_hosts_are_always_accepted() {
+    // AC-OSC-3: empty host and `localhost` both bypass hostname resolution
+    // entirely, so this holds regardless of the real machine's name.
+    let empty_host = run(b"\x1b]7;file:///Users/x\x07");
+    let localhost = run(b"\x1b]7;file://localhost/Users/x\x07");
+
+    assert_eq!(empty_host.cwd.as_deref(), Some("/Users/x"));
+    assert_eq!(localhost.cwd.as_deref(), Some("/Users/x"));
+}
+
+#[test]
+fn osc7_kitty_shell_cwd_scheme_is_accepted_as_a_raw_path() {
+    // AC-OSC-4: the empty-host form.
+    let t = run(b"\x1b]7;kitty-shell-cwd:///Users/x\x07");
+
+    assert_eq!(t.cwd.as_deref(), Some("/Users/x"));
+}
+
+#[test]
+fn osc7_kitty_shell_cwd_with_localhost_host_is_accepted() {
+    let t = run(b"\x1b]7;kitty-shell-cwd://localhost/Users/x\x07");
+
+    assert_eq!(t.cwd.as_deref(), Some("/Users/x"));
+}
+
+#[test]
+fn osc7_kitty_shell_cwd_non_local_host_is_ignored_leaving_prior_cwd_unchanged() {
+    // The host is validated through the same gate as `file://` (REQ-OSC-2).
+    let t = run(b"\x1b]7;kitty-shell-cwd://localhost/first\x07\
+          \x1b]7;kitty-shell-cwd://evil-remote-host/tmp\x07");
+
+    assert_eq!(t.cwd.as_deref(), Some("/first"));
+}
+
+#[test]
+fn osc7_kitty_shell_cwd_path_is_taken_raw_without_percent_decoding() {
+    // kitty semantics (REQ-OSC-3): unlike `file://`, `%20` in the path stays
+    // literal rather than being decoded to a space.
+    let t = run(b"\x1b]7;kitty-shell-cwd:///Users/noa%20dev\x07");
+
+    assert_eq!(t.cwd.as_deref(), Some("/Users/noa%20dev"));
+}
+
+#[test]
+fn hostname_matches_local_accepts_case_insensitive_full_or_short_label_shapes() {
+    // Pure-function coverage (REQ-OSC-2's match rule) that does not depend
+    // on the real machine's hostname: a machine named `SG-H-0001` must match
+    // itself, an FQDN, a differently-cased short form, and vice versa.
+    use crate::osc::hostname_matches_local;
+
+    assert!(hostname_matches_local("sg-h-0001", "SG-H-0001"));
+    assert!(hostname_matches_local("SG-H-0001.local", "sg-h-0001"));
+    assert!(hostname_matches_local("sg-h-0001", "SG-H-0001.local"));
+    assert!(hostname_matches_local("", "SG-H-0001"));
+    assert!(hostname_matches_local("localhost", "SG-H-0001"));
+    assert!(!hostname_matches_local("evil-remote-host", "SG-H-0001"));
+    assert!(!hostname_matches_local("sg-h-0002.local", "SG-H-0001.local"));
+}
+
+#[test]
 fn osc133_prompt_marks_record_cursor_positions_and_exit_status() {
     let t = run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\x1b]133;D;7\x07");
 

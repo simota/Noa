@@ -126,6 +126,41 @@ impl Screen {
         ));
     }
 
+    /// Read-only word lookup at `point`, for the Quick Look force-click
+    /// feature (REQ-QLK-2): reuses [`Self::word_bounds`], the same boundary
+    /// logic as [`Self::select_word_at_viewport_point`], but never touches
+    /// `self.selection` — not even temporarily. Returns the word text and its
+    /// start point (viewport coords), or `None` over blank/boundary cells.
+    pub fn word_at_viewport_point(&self, point: Point) -> Option<(String, Point)> {
+        let point = self.clamped_viewport_point(point);
+        let storage_y = self.visible_row_base() + point.y as usize;
+        let row = self.storage_row(storage_y)?;
+        let row: &Row = &row;
+        if row.cells.is_empty() {
+            return None;
+        }
+
+        let x = Self::word_cell_x(row, (point.x as usize).min(row.cells.len() - 1));
+        if !Self::is_word_cell(&row.cells[x]) {
+            return None;
+        }
+        let (start, end) = Self::word_bounds(row, x);
+
+        let mut text = String::new();
+        Self::push_selected_row_text(row, start, end, &mut text);
+        if text.is_empty() {
+            return None;
+        }
+
+        Some((
+            text,
+            Point {
+                x: start as u16,
+                y: point.y,
+            },
+        ))
+    }
+
     /// Select the whole logical line at `point`: the soft-wrap chain the row
     /// belongs to, not just the single visual row (Ghostty's triple-click).
     pub fn select_line_at_viewport_point(&mut self, point: Point) {

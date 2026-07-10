@@ -147,6 +147,7 @@ global hotkey chord の構文と対応キーは [KEYBINDINGS.md](KEYBINDINGS.md#
 | `macos-option-as-alt` | `false` / `none`, `true` / `both`, `left` / `only-left`, `right` / `only-right` | `false` | Option キーを terminal Alt として扱う範囲 |
 | `macos-titlebar-style` | `native` / `tabs`, `transparent` | `native` | 通常 terminal window の titlebar |
 | `macos-non-native-fullscreen` | `true`, `false` | `false` | native fullscreen Space の代わりに borderless fullscreen を使う |
+| `macos-titlebar-proxy-icon` | `visible` / `true`, `hidden` / `false` | `visible` | titlebar に focus 中 pane の OSC 7 pwd を proxy icon として表示するか |
 
 macOS 以外では macOS 専用の表示・window 動作は no-op になる。
 

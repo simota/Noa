@@ -452,8 +452,10 @@ impl Handler for Terminal {
             return;
         }
         if let Some(action) = parse_cwd_osc(data) {
-            if let CwdOsc::Set(cwd) = action {
-                self.cwd = Some(cwd);
+            match action {
+                CwdOsc::Set(cwd) => self.cwd = Some(cwd),
+                CwdOsc::Reset => self.cwd = None,
+                CwdOsc::Malformed => {}
             }
             return;
         }

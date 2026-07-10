@@ -5,7 +5,8 @@ use noa_core::Rgb;
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, CursorShape,
     FontFeature, FontVariation, MAX_SIDEBAR_PREVIEW_LINES, MIN_BACKGROUND_IMAGE_INTERVAL_SECS,
-    MacosOptionAsAlt, MacosTitlebarStyle, ResizeOverlay, SyntheticStyleMode, WindowSaveState,
+    MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle, ResizeOverlay,
+    SyntheticStyleMode, WindowSaveState,
 };
 
 use super::diagnostics::*;
@@ -576,6 +577,22 @@ pub(super) fn parse_macos_titlebar_style(
     match value {
         "native" | "tabs" => Some(MacosTitlebarStyle::Native),
         "transparent" => Some(MacosTitlebarStyle::Transparent),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_macos_titlebar_proxy_icon(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<MacosTitlebarProxyIcon> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "visible" | "true" => Some(MacosTitlebarProxyIcon::Visible),
+        "hidden" | "false" => Some(MacosTitlebarProxyIcon::Hidden),
         other => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
             None

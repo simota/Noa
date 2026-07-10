@@ -23,7 +23,10 @@ fn init() -> ThemeSettingsInit {
         window_padding_y: 2.0,
         macos_titlebar_style: MacosTitlebarStyle::Native,
         sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
-        quick_terminal_size: noa_config::DEFAULT_QUICK_TERMINAL_SIZE,
+        // Matches `noa_config::DEFAULT_QUICK_TERMINAL_SIZE`'s 40% primary —
+        // this row only ever edits a plain fraction (see
+        // `quick_terminal_height_fraction` at the `App` layer).
+        quick_terminal_size: 0.4,
         confirm_quit: true,
         font_family: "Menlo".to_string(),
         available_font_families: vec![
@@ -508,10 +511,7 @@ fn revert_returns_the_snapshot_and_cancels_pending_debounce() {
         values.sidebar_preview_lines,
         noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES
     );
-    assert_eq!(
-        values.quick_terminal_size,
-        noa_config::DEFAULT_QUICK_TERMINAL_SIZE
-    );
+    assert_eq!(values.quick_terminal_size, 0.4);
 
     // The pending font-size value must never fire after revert.
     assert_eq!(

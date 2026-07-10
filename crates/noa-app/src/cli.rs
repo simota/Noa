@@ -391,7 +391,7 @@ fn show_config_output(config: &StartupConfig) -> String {
     push_line(
         &mut out,
         "quick-terminal-size",
-        &config.quick_terminal_size.to_string(),
+        &quick_terminal_size_value(config.quick_terminal_size),
     );
     push_line(
         &mut out,
@@ -406,6 +406,22 @@ fn show_config_output(config: &StartupConfig) -> String {
             noa_config::QuickTerminalScreen::Mouse => "mouse",
             noa_config::QuickTerminalScreen::MacosMenuBar => "macos-menu-bar",
         },
+    );
+    push_line(
+        &mut out,
+        "quick-terminal-position",
+        match config.quick_terminal_position {
+            noa_config::QuickTerminalPosition::Top => "top",
+            noa_config::QuickTerminalPosition::Bottom => "bottom",
+            noa_config::QuickTerminalPosition::Left => "left",
+            noa_config::QuickTerminalPosition::Right => "right",
+            noa_config::QuickTerminalPosition::Center => "center",
+        },
+    );
+    push_line(
+        &mut out,
+        "quick-terminal-animation-duration",
+        &config.quick_terminal_animation_duration.to_string(),
     );
     push_line(
         &mut out,
@@ -449,6 +465,28 @@ fn push_line(out: &mut String, key: &str, value: &str) {
     out.push_str(" = ");
     out.push_str(value);
     out.push('\n');
+}
+
+/// Render one `quick-terminal-size` side back to Ghostty's `<n>%`/`<n>px`
+/// syntax.
+fn quick_terminal_size_dim_value(dim: noa_config::QuickTerminalSizeDim) -> String {
+    match dim {
+        noa_config::QuickTerminalSizeDim::Percent(pct) => format!("{pct}%"),
+        noa_config::QuickTerminalSizeDim::Pixels(px) => format!("{px}px"),
+    }
+}
+
+/// Render `quick-terminal-size` back to Ghostty's `<primary>[,<secondary>]`
+/// syntax.
+fn quick_terminal_size_value(size: noa_config::QuickTerminalSize) -> String {
+    let primary = size
+        .primary
+        .map(quick_terminal_size_dim_value)
+        .unwrap_or_default();
+    match size.secondary {
+        Some(secondary) => format!("{primary},{}", quick_terminal_size_dim_value(secondary)),
+        None => primary,
+    }
 }
 
 fn push_optional_line<T: std::fmt::Display>(out: &mut String, key: &str, value: Option<T>) {
@@ -659,7 +697,10 @@ mod tests {
         assert!(output.contains("macos-non-native-fullscreen = false\n"));
         assert!(output.contains("macos-titlebar-proxy-icon = visible\n"));
         assert!(output.contains("quick-terminal-hotkey = cmd+grave\n"));
+        assert!(output.contains("quick-terminal-size = 40%\n"));
         assert!(output.contains("quick-terminal-screen = mouse\n"));
+        assert!(output.contains("quick-terminal-position = top\n"));
+        assert!(output.contains("quick-terminal-animation-duration = 0.2\n"));
         assert!(output.contains("sidebar-enabled = false\n"));
         assert!(output.contains("sidebar-width = 360\n"));
         assert!(output.contains("sidebar-hotkey = \n"));
@@ -687,7 +728,13 @@ mod tests {
             macos_titlebar_style: MacosTitlebarStyle::Transparent,
             macos_non_native_fullscreen: true,
             macos_titlebar_proxy_icon: MacosTitlebarProxyIcon::Hidden,
+            quick_terminal_size: noa_config::QuickTerminalSize {
+                primary: Some(noa_config::QuickTerminalSizeDim::Percent(50.0)),
+                secondary: Some(noa_config::QuickTerminalSizeDim::Pixels(300)),
+            },
             quick_terminal_screen: noa_config::QuickTerminalScreen::MacosMenuBar,
+            quick_terminal_position: noa_config::QuickTerminalPosition::Left,
+            quick_terminal_animation_duration: 0.0,
             sidebar_enabled: true,
             sidebar_width: 280.0,
             sidebar_hotkey: Some("cmd+shift+s".to_string()),
@@ -723,7 +770,10 @@ mod tests {
         assert!(output.contains("macos-titlebar-style = transparent\n"));
         assert!(output.contains("macos-non-native-fullscreen = true\n"));
         assert!(output.contains("macos-titlebar-proxy-icon = hidden\n"));
+        assert!(output.contains("quick-terminal-size = 50%,300px\n"));
         assert!(output.contains("quick-terminal-screen = macos-menu-bar\n"));
+        assert!(output.contains("quick-terminal-position = left\n"));
+        assert!(output.contains("quick-terminal-animation-duration = 0\n"));
         assert!(output.contains("sidebar-enabled = true\n"));
         assert!(output.contains("sidebar-width = 280\n"));
         assert!(output.contains("sidebar-hotkey = cmd+shift+s\n"));

@@ -118,14 +118,20 @@ pub struct AppConfig {
     /// `quick-terminal-hotkey`: the global hotkey chord toggling the drop-down
     /// quick terminal (e.g. `cmd+grave`). `None` leaves the feature disabled.
     pub quick_terminal_hotkey: Option<String>,
-    /// `quick-terminal-size`: the quick terminal's height as a fraction of the
-    /// screen height (`0.1..=1.0`).
-    pub quick_terminal_size: f32,
+    /// `quick-terminal-size`: the quick terminal's footprint (primary/
+    /// secondary sides, each a percent or pixel count).
+    pub quick_terminal_size: noa_config::QuickTerminalSize,
     /// `quick-terminal-autohide`: hide the quick terminal when it loses focus.
     pub quick_terminal_autohide: bool,
     /// `quick-terminal-screen`: which display the quick terminal appears on,
     /// resolved fresh every time it is shown.
     pub quick_terminal_screen: noa_config::QuickTerminalScreen,
+    /// `quick-terminal-position`: which screen edge the quick terminal slides
+    /// from.
+    pub quick_terminal_position: noa_config::QuickTerminalPosition,
+    /// `quick-terminal-animation-duration`: how long the quick terminal takes
+    /// to slide fully in or out, in seconds. `0` shows/hides it instantly.
+    pub quick_terminal_animation_duration: f32,
     /// `sidebar-enabled`: app-wide initial visibility of the session sidebar,
     /// seeded into each window's per-window toggle at creation (FR-4/FR-13).
     pub sidebar_enabled: bool,
@@ -212,6 +218,8 @@ impl AppConfig {
             quick_terminal_size: config.quick_terminal_size,
             quick_terminal_autohide: config.quick_terminal_autohide,
             quick_terminal_screen: config.quick_terminal_screen,
+            quick_terminal_position: config.quick_terminal_position,
+            quick_terminal_animation_duration: config.quick_terminal_animation_duration,
             sidebar_enabled: config.sidebar_enabled,
             sidebar_width: config.sidebar_width,
             sidebar_hotkey: config.sidebar_hotkey,

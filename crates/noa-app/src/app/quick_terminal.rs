@@ -1,26 +1,37 @@
 use super::*;
+use noa_config::{QuickTerminalPosition, QuickTerminalSize, QuickTerminalSizeDim};
 
-/// How long the quick terminal takes to slide fully in or out — the shared
-/// screen-scale duration.
-const QUICK_TERMINAL_SLIDE_DURATION: Duration = crate::anim::DUR_SLOW;
 /// The quick terminal repositions at roughly this cadence while sliding
 /// (approx. 60 fps), driven off the `about_to_wait` `WaitUntil` timer. The
 /// presented frame is static (painted once, pre-slide) and moves with the
 /// window — this cadence only repositions, it never re-renders.
 const QUICK_TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
-/// Runtime state for the drop-down quick terminal. The window itself is a
-/// normal [`WindowState`] entry in `App::windows`; this tracks the slide
-/// geometry (physical px, relative to the target monitor) and animation.
-pub(super) struct QuickTerminalState {
-    pub(super) window_id: WindowId,
-    /// Left edge of the panel (monitor origin x).
-    origin_x: i32,
-    /// The monitor's top edge — the panel's fully-revealed top.
-    top_y: i32,
+/// One resolved quick-terminal panel placement, re-derived fresh on every
+/// show (`App::quick_terminal_geometry`) since the target monitor or config
+/// may have changed since last time. All coordinates are absolute physical
+/// px (the target monitor's origin folded in).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct QuickTerminalGeometry {
+    /// Top-left origin when fully revealed.
+    final_x: i32,
+    final_y: i32,
     /// Panel width and height in physical pixels.
     width: u32,
     height: u32,
+    /// Top-left origin when fully hidden. Equal to `(final_x, final_y)` for
+    /// `Center`, which never slides — see `quick_terminal_position_geometry`.
+    hidden_x: i32,
+    hidden_y: i32,
+}
+
+/// Runtime state for the drop-down quick terminal. The window itself is a
+/// normal [`WindowState`] entry in `App::windows`; this tracks the slide
+/// geometry and animation.
+pub(super) struct QuickTerminalState {
+    pub(super) window_id: WindowId,
+    /// The panel's currently resolved placement.
+    geometry: QuickTerminalGeometry,
     /// Whether the panel is revealed (or animating toward revealed). When
     /// `false` and `anim` is `None`, the window is hidden.
     visible: bool,
@@ -30,6 +41,12 @@ pub(super) struct QuickTerminalState {
     focused_this_reveal: bool,
     /// The in-flight slide, if any.
     anim: Option<QuickTerminalAnim>,
+    /// The pid of whatever app was frontmost right before this reveal cycle
+    /// summoned the quick terminal (and thereby activated Noa), captured only
+    /// on a hidden→shown transition (Ghostty parity). Restored on hide, then
+    /// cleared — a re-toggle while already shown/animating must not overwrite
+    /// it with Noa's own frontmost state.
+    previous_app_pid: Option<i32>,
 }
 
 /// One in-flight quick-terminal slide.
@@ -40,14 +57,20 @@ struct QuickTerminalAnim {
     from_reveal: f32,
     /// Target reveal fraction for this slide.
     to_reveal: f32,
+    /// This slide's duration, taken from `quick-terminal-animation-duration`
+    /// at creation time. `0` collapses `reveal_at`/`done` to an instant jump
+    /// to `to_reveal` (`linear_progress` treats a zero duration as complete),
+    /// i.e. "no animation".
+    duration: Duration,
 }
 
 impl QuickTerminalAnim {
-    fn new(start: Instant, from_reveal: f32, to_reveal: f32) -> Self {
+    fn new(start: Instant, from_reveal: f32, to_reveal: f32, duration: Duration) -> Self {
         Self {
             start,
             from_reveal: from_reveal.clamp(0.0, 1.0),
             to_reveal: to_reveal.clamp(0.0, 1.0),
+            duration,
         }
     }
 
@@ -56,15 +79,12 @@ impl QuickTerminalAnim {
             self.from_reveal,
             self.to_reveal,
             now.duration_since(self.start),
-            QUICK_TERMINAL_SLIDE_DURATION,
+            self.duration,
         )
     }
 
     fn done(self, now: Instant) -> bool {
-        quick_terminal_progress(
-            now.duration_since(self.start),
-            QUICK_TERMINAL_SLIDE_DURATION,
-        ) >= 1.0
+        quick_terminal_progress(now.duration_since(self.start), self.duration) >= 1.0
     }
 
     fn hides(self) -> bool {
@@ -91,19 +111,6 @@ pub(super) use crate::anim::ease_out_cubic;
 /// Linear slide progress (`0.0..=1.0`) for `elapsed` of `duration`.
 pub(super) use crate::anim::linear_progress as quick_terminal_progress;
 
-/// The panel's top edge in physical px relative to the monitor top, for a
-/// slide `progress` in `0.0..=1.0` (0 = fully hidden above the screen, 1 =
-/// fully revealed). `height` is the panel height in px.
-#[cfg(test)]
-pub(super) fn quick_terminal_top_offset(height: f32, progress: f32) -> f32 {
-    quick_terminal_reveal_top_offset(height, ease_out_cubic(progress))
-}
-
-/// The panel's top edge offset for an already-eased reveal fraction.
-pub(super) fn quick_terminal_reveal_top_offset(height: f32, reveal: f32) -> f32 {
-    -height * (1.0 - reveal.clamp(0.0, 1.0))
-}
-
 /// Eased reveal fraction between the current and target reveal states. This
 /// keeps interrupted show/hide transitions moving from their current position
 /// instead of snapping back to an endpoint.
@@ -120,11 +127,182 @@ pub(super) fn quick_terminal_slide_reveal(
     )
 }
 
-/// The panel height in physical px for a screen `screen_height` px tall and a
-/// `size` fraction, clamped to at least one row's worth of pixels.
-pub(super) fn quick_terminal_height(screen_height: u32, size: f32) -> u32 {
-    let raw = (screen_height as f32 * size.clamp(0.05, 1.0)).round() as u32;
-    raw.clamp(1, screen_height.max(1))
+/// The panel's absolute origin (physical px) for an already-eased reveal
+/// fraction, lerping independently on each axis from `hidden` to `final`.
+/// Generalizes the old top-only `quick_terminal_reveal_top_offset`: axes
+/// where `hidden == final` (see `quick_terminal_position_geometry`) simply
+/// don't move, and `center` (`hidden == final` on both axes) doesn't move at
+/// all.
+pub(super) fn quick_terminal_reveal_origin(
+    final_origin: (i32, i32),
+    hidden_origin: (i32, i32),
+    reveal: f32,
+) -> (i32, i32) {
+    let reveal = reveal.clamp(0.0, 1.0);
+    let x = crate::anim::lerp(hidden_origin.0 as f32, final_origin.0 as f32, reveal).round() as i32;
+    let y = crate::anim::lerp(hidden_origin.1 as f32, final_origin.1 as f32, reveal).round() as i32;
+    (x, y)
+}
+
+/// Fallback panel size (AppKit points, scaled to physical px like any other
+/// `Pixels` side) for the short/cross axis: `top`/`bottom`'s height,
+/// `left`/`right`'s width, and `center`'s short axis, whenever that side
+/// isn't configured.
+const QUICK_TERMINAL_DEFAULT_CROSS_AXIS_PX: f32 = 400.0;
+/// Fallback size for `center`'s long axis when `primary` isn't configured.
+const QUICK_TERMINAL_DEFAULT_CENTER_LONG_AXIS_PX: f32 = 800.0;
+
+/// What an absent `QuickTerminalSizeDim` side falls back to.
+#[derive(Clone, Copy)]
+enum QuickTerminalSizeDefault {
+    /// Fill the parent (monitor) dimension.
+    FullParent,
+    /// A fixed size in AppKit points, scaled to physical px like `Pixels`.
+    FixedPoints(f32),
+}
+
+/// One `QuickTerminalSize` side resolved to physical px against `parent`
+/// (the matching monitor dimension), clamped to `1..=parent`.
+fn resolve_quick_terminal_dim(
+    dim: Option<QuickTerminalSizeDim>,
+    parent: u32,
+    scale_factor: f64,
+    default: QuickTerminalSizeDefault,
+) -> u32 {
+    let raw = match dim {
+        Some(QuickTerminalSizeDim::Percent(pct)) => parent as f64 * (pct as f64 / 100.0),
+        Some(QuickTerminalSizeDim::Pixels(px)) => px as f64 * scale_factor,
+        None => match default {
+            QuickTerminalSizeDefault::FullParent => parent as f64,
+            QuickTerminalSizeDefault::FixedPoints(points) => points as f64 * scale_factor,
+        },
+    };
+    raw.round().clamp(1.0, parent.max(1) as f64) as u32
+}
+
+/// The panel's width/height in physical px for `position`/`size` on a
+/// monitor `monitor_width`x`monitor_height` physical px at `scale_factor` — a
+/// port of Ghostty's `QuickTerminalSize.calculate`. Replaces/generalizes the
+/// old top-only `quick_terminal_height`. Each dimension clamps to
+/// `1..=<matching monitor dimension>`.
+pub(super) fn quick_terminal_size_footprint(
+    position: QuickTerminalPosition,
+    size: QuickTerminalSize,
+    monitor_width: u32,
+    monitor_height: u32,
+    scale_factor: f64,
+) -> (u32, u32) {
+    use QuickTerminalSizeDefault::{FixedPoints, FullParent};
+    match position {
+        QuickTerminalPosition::Top | QuickTerminalPosition::Bottom => {
+            let width =
+                resolve_quick_terminal_dim(size.secondary, monitor_width, scale_factor, FullParent);
+            let height = resolve_quick_terminal_dim(
+                size.primary,
+                monitor_height,
+                scale_factor,
+                FixedPoints(QUICK_TERMINAL_DEFAULT_CROSS_AXIS_PX),
+            );
+            (width, height)
+        }
+        QuickTerminalPosition::Left | QuickTerminalPosition::Right => {
+            let width = resolve_quick_terminal_dim(
+                size.primary,
+                monitor_width,
+                scale_factor,
+                FixedPoints(QUICK_TERMINAL_DEFAULT_CROSS_AXIS_PX),
+            );
+            let height = resolve_quick_terminal_dim(
+                size.secondary,
+                monitor_height,
+                scale_factor,
+                FullParent,
+            );
+            (width, height)
+        }
+        QuickTerminalPosition::Center if monitor_width >= monitor_height => {
+            let width = resolve_quick_terminal_dim(
+                size.primary,
+                monitor_width,
+                scale_factor,
+                FixedPoints(QUICK_TERMINAL_DEFAULT_CENTER_LONG_AXIS_PX),
+            );
+            let height = resolve_quick_terminal_dim(
+                size.secondary,
+                monitor_height,
+                scale_factor,
+                FixedPoints(QUICK_TERMINAL_DEFAULT_CROSS_AXIS_PX),
+            );
+            (width, height)
+        }
+        QuickTerminalPosition::Center => {
+            // Portrait monitor: the long axis is now vertical.
+            let width = resolve_quick_terminal_dim(
+                size.secondary,
+                monitor_width,
+                scale_factor,
+                FixedPoints(QUICK_TERMINAL_DEFAULT_CROSS_AXIS_PX),
+            );
+            let height = resolve_quick_terminal_dim(
+                size.primary,
+                monitor_height,
+                scale_factor,
+                FixedPoints(QUICK_TERMINAL_DEFAULT_CENTER_LONG_AXIS_PX),
+            );
+            (width, height)
+        }
+    }
+}
+
+/// The panel's final (fully revealed) origin and fully-hidden origin — both
+/// absolute physical-px screen coordinates — for `position` on the monitor at
+/// `(monitor_x, monitor_y)` sized `monitor_width`x`monitor_height`, given the
+/// panel's own `width`/`height` (from `quick_terminal_size_footprint`). Uses
+/// the monitor's full bounds, not `visibleFrame`, for every position — a
+/// known simplification shared with the pre-existing `top` behavior (which
+/// may overlap the menu bar); `bottom` may similarly overlap the Dock.
+pub(super) fn quick_terminal_position_geometry(
+    position: QuickTerminalPosition,
+    monitor_x: i32,
+    monitor_y: i32,
+    monitor_width: u32,
+    monitor_height: u32,
+    width: u32,
+    height: u32,
+) -> ((i32, i32), (i32, i32)) {
+    let centered_x = monitor_x + (monitor_width as i32 - width as i32) / 2;
+    let centered_y = monitor_y + (monitor_height as i32 - height as i32) / 2;
+    match position {
+        QuickTerminalPosition::Top => (
+            (centered_x, monitor_y),
+            (centered_x, monitor_y - height as i32),
+        ),
+        QuickTerminalPosition::Bottom => {
+            let final_y = monitor_y + monitor_height as i32 - height as i32;
+            (
+                (centered_x, final_y),
+                (centered_x, monitor_y + monitor_height as i32),
+            )
+        }
+        QuickTerminalPosition::Left => (
+            (monitor_x, centered_y),
+            (monitor_x - width as i32, centered_y),
+        ),
+        QuickTerminalPosition::Right => {
+            let final_x = monitor_x + monitor_width as i32 - width as i32;
+            (
+                (final_x, centered_y),
+                (monitor_x + monitor_width as i32, centered_y),
+            )
+        }
+        QuickTerminalPosition::Center => {
+            // No travel (see the type's doc comment): Ghostty fades `center`
+            // in/out via window alpha, and noa has no window-alpha animation
+            // machinery, so hidden == final here.
+            let origin = (centered_x, centered_y);
+            (origin, origin)
+        }
+    }
 }
 
 pub(super) fn quick_terminal_should_autohide_on_focus_loss(
@@ -227,15 +405,14 @@ impl App {
         }
     }
 
-    /// The target monitor's origin and the panel's full-width x fractional-
-    /// height footprint, all in physical pixels. The target monitor is
-    /// resolved fresh on every call: `quick-terminal-screen` first (macOS
-    /// only), falling back to the anchor window's monitor, then the primary
-    /// monitor.
+    /// The panel's fully resolved placement (final rect + hidden-state
+    /// origin), all in physical pixels. The target monitor is resolved fresh
+    /// on every call: `quick-terminal-screen` first (macOS only), falling
+    /// back to the anchor window's monitor, then the primary monitor.
     fn quick_terminal_geometry(
         &self,
         event_loop: &ActiveEventLoop,
-    ) -> Option<(i32, i32, u32, u32)> {
+    ) -> Option<QuickTerminalGeometry> {
         let monitor = self
             .quick_terminal_screen_monitor(event_loop)
             .or_else(|| {
@@ -245,8 +422,31 @@ impl App {
             .or_else(|| event_loop.primary_monitor())?;
         let position = monitor.position();
         let size = monitor.size();
-        let height = quick_terminal_height(size.height, self.config.quick_terminal_size);
-        Some((position.x, position.y, size.width, height))
+        let scale_factor = monitor.scale_factor();
+        let (width, height) = quick_terminal_size_footprint(
+            self.config.quick_terminal_position,
+            self.config.quick_terminal_size,
+            size.width,
+            size.height,
+            scale_factor,
+        );
+        let (final_origin, hidden_origin) = quick_terminal_position_geometry(
+            self.config.quick_terminal_position,
+            position.x,
+            position.y,
+            size.width,
+            size.height,
+            width,
+            height,
+        );
+        Some(QuickTerminalGeometry {
+            final_x: final_origin.0,
+            final_y: final_origin.1,
+            width,
+            height,
+            hidden_x: hidden_origin.0,
+            hidden_y: hidden_origin.1,
+        })
     }
 
     /// The monitor resolved by `quick-terminal-screen` (`main` / `mouse` /
@@ -289,40 +489,46 @@ impl App {
     }
 
     fn start_quick_terminal_show(&mut self, event_loop: &ActiveEventLoop) {
-        let Some((origin_x, top_y, width, height)) = self.quick_terminal_geometry(event_loop)
-        else {
+        // Capture whatever app was frontmost before anything below activates
+        // Noa (Ghostty parity: restored on hide, see `start_quick_terminal_hide`).
+        // Only on a hidden→shown edge — a re-toggle while already
+        // shown/animating-in must not clobber the stored pid with Noa's own
+        // frontmost state once `show_quick_terminal_window` below has run.
+        let was_hidden = self.quick_terminal.as_ref().is_none_or(|qt| !qt.visible);
+        let captured_app_pid = was_hidden
+            .then(crate::macos_window::frontmost_app_pid)
+            .flatten();
+
+        let Some(geometry) = self.quick_terminal_geometry(event_loop) else {
             return;
         };
         if self.quick_terminal.is_none() {
-            let Some(window_id) =
-                self.create_quick_terminal(event_loop, origin_x, top_y, width, height)
-            else {
+            let Some(window_id) = self.create_quick_terminal(event_loop, geometry) else {
                 return;
             };
             self.quick_terminal = Some(QuickTerminalState {
                 window_id,
-                origin_x,
-                top_y,
-                width,
-                height,
+                geometry,
                 visible: false,
                 focused_this_reveal: false,
                 anim: None,
+                previous_app_pid: captured_app_pid,
             });
         } else if let Some(qt) = self.quick_terminal.as_mut() {
             // Re-derive geometry each open: the active monitor (or its
             // resolution) may have changed since last time.
             let window_id = qt.window_id;
-            let geometry_changed = qt.width != width || qt.height != height;
-            qt.origin_x = origin_x;
-            qt.top_y = top_y;
-            qt.width = width;
-            qt.height = height;
+            let geometry_changed =
+                qt.geometry.width != geometry.width || qt.geometry.height != geometry.height;
+            qt.geometry = geometry;
+            if was_hidden {
+                qt.previous_app_pid = captured_app_pid;
+            }
             if geometry_changed {
                 let new_size = self.windows.get(&window_id).and_then(|state| {
                     state
                         .window
-                        .request_inner_size(PhysicalSize::new(width, height))
+                        .request_inner_size(PhysicalSize::new(geometry.width, geometry.height))
                 });
                 // macOS applies `request_inner_size` synchronously and
                 // returns the new size directly (RC4) — fold it into the
@@ -335,6 +541,7 @@ impl App {
             }
         }
 
+        let slide_duration = Duration::from_secs_f32(self.config.quick_terminal_animation_duration);
         let Some(qt) = self.quick_terminal.as_mut() else {
             return;
         };
@@ -342,14 +549,24 @@ impl App {
         let from_reveal = qt.current_reveal(now);
         qt.visible = true;
         qt.focused_this_reveal = false;
-        qt.anim = Some(QuickTerminalAnim::new(now, from_reveal, 1.0));
+        let anim = QuickTerminalAnim::new(now, from_reveal, 1.0, slide_duration);
+        qt.anim = Some(anim);
         let window_id = qt.window_id;
-        let current_top =
-            top_y + quick_terminal_reveal_top_offset(height as f32, from_reveal).round() as i32;
+        let geometry = qt.geometry;
+        // `anim.reveal_at(now)` rather than the raw `from_reveal`: with a
+        // zero `quick-terminal-animation-duration` this is already the fully
+        // revealed position (`linear_progress` treats zero duration as
+        // complete), so the drop-down appears fully shown with no animation
+        // instead of one frame at the pre-slide position.
+        let (current_x, current_y) = quick_terminal_reveal_origin(
+            (geometry.final_x, geometry.final_y),
+            (geometry.hidden_x, geometry.hidden_y),
+            anim.reveal_at(now),
+        );
         if let Some(state) = self.windows.get(&window_id) {
             state
                 .window
-                .set_outer_position(PhysicalPosition::new(origin_x, current_top));
+                .set_outer_position(PhysicalPosition::new(current_x, current_y));
         }
         // Pre-paint a valid frame while the window is still hidden/off-screen
         // (RC1/RC2), before it is ever ordered front or starts sliding.
@@ -362,6 +579,7 @@ impl App {
     }
 
     pub(super) fn start_quick_terminal_hide(&mut self) {
+        let slide_duration = Duration::from_secs_f32(self.config.quick_terminal_animation_duration);
         let Some(qt) = self.quick_terminal.as_mut() else {
             return;
         };
@@ -373,10 +591,29 @@ impl App {
         let from_reveal = qt.current_reveal(now);
         qt.visible = false;
         qt.focused_this_reveal = false;
-        qt.anim = Some(QuickTerminalAnim::new(now, from_reveal, 0.0));
+        qt.anim = Some(QuickTerminalAnim::new(
+            now,
+            from_reveal,
+            0.0,
+            slide_duration,
+        ));
         // No redraw here: content doesn't change at hide start, and
         // `about_to_wait` runs right after this event and picks up
         // `tick_quick_terminal`'s deadline to drive the slide.
+
+        // Restore the previously frontmost app now, at hide *start* (Ghostty
+        // parity: "when the animation completes macOS will bring forward
+        // another window" — done up front so the slide-out and the other
+        // app's raise happen together). Only when Noa is still the active
+        // app: if the user already switched away on their own (e.g. the
+        // autohide-on-focus-loss path), that app is already frontmost and
+        // stealing focus back would fight them.
+        let previous_app_pid = qt.previous_app_pid.take();
+        if let Some(pid) = previous_app_pid
+            && crate::macos_window::app_is_active()
+        {
+            crate::macos_window::activate_app_with_pid(pid);
+        }
     }
 
     /// Hide the quick terminal when it loses focus, if `quick-terminal-autohide`
@@ -409,18 +646,20 @@ impl App {
     /// (folded into `about_to_wait`'s deadline), and `None` once the slide
     /// settles — hiding the window on a completed slide-out.
     pub(super) fn tick_quick_terminal(&mut self) -> Option<Instant> {
-        let (window_id, origin_x, top_y, height, anim) = {
+        let (window_id, geometry, anim) = {
             let qt = self.quick_terminal.as_ref()?;
             let anim = *qt.anim.as_ref()?;
-            (qt.window_id, qt.origin_x, qt.top_y, qt.height, anim)
+            (qt.window_id, qt.geometry, anim)
         };
         let now = Instant::now();
         let reveal = anim.reveal_at(now);
-        let top = top_y + quick_terminal_reveal_top_offset(height as f32, reveal).round() as i32;
+        let (x, y) = quick_terminal_reveal_origin(
+            (geometry.final_x, geometry.final_y),
+            (geometry.hidden_x, geometry.hidden_y),
+            reveal,
+        );
         if let Some(state) = self.windows.get(&window_id) {
-            state
-                .window
-                .set_outer_position(PhysicalPosition::new(origin_x, top));
+            state.window.set_outer_position(PhysicalPosition::new(x, y));
         }
         if anim.done(now) {
             if let Some(qt) = self.quick_terminal.as_mut() {
@@ -444,6 +683,10 @@ impl App {
     /// before they reach the store (FR-14/AC-16b) — there is never a QT card to
     /// leave behind.
     pub(super) fn destroy_quick_terminal(&mut self) {
+        // `qt` (including any stored `previous_app_pid`) is dropped whole at
+        // the end of this function; unlike `start_quick_terminal_hide` this
+        // path never restores focus — the shell exiting isn't a user-driven
+        // hide, so there is no "previous app" hand-off to honor.
         let Some(qt) = self.quick_terminal.take() else {
             return;
         };
@@ -466,16 +709,13 @@ impl App {
     fn create_quick_terminal(
         &mut self,
         event_loop: &ActiveEventLoop,
-        origin_x: i32,
-        top_y: i32,
-        width: u32,
-        height: u32,
+        geometry: QuickTerminalGeometry,
     ) -> Option<WindowId> {
         let attrs = WindowAttributes::default()
             .with_title("Quick Terminal")
             .with_decorations(false)
-            .with_inner_size(PhysicalSize::new(width, height))
-            .with_position(PhysicalPosition::new(origin_x, top_y - height as i32))
+            .with_inner_size(PhysicalSize::new(geometry.width, geometry.height))
+            .with_position(PhysicalPosition::new(geometry.hidden_x, geometry.hidden_y))
             .with_transparent(self.config.background_opacity < 1.0)
             // Never on screen until the show path explicitly reveals it
             // (RC1): avoids ordering an unpainted window front.

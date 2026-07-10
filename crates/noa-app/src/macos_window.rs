@@ -116,6 +116,115 @@ fn quick_terminal_target_display_impl(_mode: noa_config::QuickTerminalScreen) ->
     None
 }
 
+/// The frontmost app's pid at the moment the quick terminal is about to
+/// summon itself (Ghostty parity: it restores this app on hide instead of
+/// leaving whatever macOS happens to raise next). `None` when the frontmost
+/// app is already Noa itself — never store our own pid, or hide would
+/// "restore" us to ourselves — or off macOS.
+pub(crate) fn frontmost_app_pid() -> Option<i32> {
+    frontmost_app_pid_impl()
+}
+
+#[cfg(target_os = "macos")]
+fn frontmost_app_pid_impl() -> Option<i32> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    // SAFETY: `NSWorkspace` is a live AppKit singleton queried on the main
+    // (window-owning) thread; every object pointer is nil-checked before use.
+    unsafe {
+        let workspace_class = AnyClass::get(c"NSWorkspace")?;
+        let workspace: *mut AnyObject = msg_send![workspace_class, sharedWorkspace];
+        if workspace.is_null() {
+            return None;
+        }
+        let app: *mut AnyObject = msg_send![workspace, frontmostApplication];
+        if app.is_null() {
+            return None;
+        }
+        let pid: i32 = msg_send![app, processIdentifier];
+        if pid == std::process::id() as i32 {
+            return None;
+        }
+        Some(pid)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn frontmost_app_pid_impl() -> Option<i32> {
+    None
+}
+
+/// Activate the running application identified by `pid` (`NSRunningApplication
+/// .activateWithOptions:`), used to restore focus to whatever app was
+/// frontmost before the quick terminal was summoned. `false` when the pid no
+/// longer resolves to a running application (e.g. it quit while the panel was
+/// open) or off macOS.
+pub(crate) fn activate_app_with_pid(pid: i32) -> bool {
+    activate_app_with_pid_impl(pid)
+}
+
+#[cfg(target_os = "macos")]
+fn activate_app_with_pid_impl(pid: i32) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    // NSApplicationActivationOptions: none — just bring the app forward
+    // without also unhiding/activating all of its windows.
+    const NS_APPLICATION_ACTIVATE_NONE: usize = 0;
+
+    // SAFETY: `NSRunningApplication` is a live AppKit class queried on the
+    // main (window-owning) thread; the looked-up object is nil-checked
+    // before the selector is sent.
+    unsafe {
+        let Some(class) = AnyClass::get(c"NSRunningApplication") else {
+            return false;
+        };
+        let app: *mut AnyObject = msg_send![class, runningApplicationWithProcessIdentifier: pid];
+        if app.is_null() {
+            return false;
+        }
+        msg_send![app, activateWithOptions: NS_APPLICATION_ACTIVATE_NONE]
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate_app_with_pid_impl(_pid: i32) -> bool {
+    false
+}
+
+/// Whether Noa is currently the active (frontmost) application
+/// (`NSApplication.isActive`). Used to guard restoring a stored previous-app
+/// pid on quick-terminal hide: if Noa isn't active, the user already switched
+/// away on their own and stealing focus back would fight them.
+pub(crate) fn app_is_active() -> bool {
+    app_is_active_impl()
+}
+
+#[cfg(target_os = "macos")]
+fn app_is_active_impl() -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    // SAFETY: `NSApplication` is a live AppKit singleton queried on the main
+    // (window-owning) thread; the shared instance is nil-checked before use.
+    unsafe {
+        let Some(app_class) = AnyClass::get(c"NSApplication") else {
+            return false;
+        };
+        let app: *mut AnyObject = msg_send![app_class, sharedApplication];
+        if app.is_null() {
+            return false;
+        }
+        msg_send![app, isActive]
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn app_is_active_impl() -> bool {
+    false
+}
+
 /// Bring the whole app to the front (`activateIgnoringOtherApps:`), for the
 /// AppleScript application-level `activate` verb (applescript R-5). A no-op off
 /// macOS.

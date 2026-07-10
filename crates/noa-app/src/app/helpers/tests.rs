@@ -23,17 +23,66 @@ fn macos_option_as_alt_maps_to_winit_modes() {
 }
 
 #[test]
-fn quick_terminal_slide_offset_spans_hidden_to_revealed() {
-    let height = 400.0;
-    // Fully hidden: the whole panel sits above the screen top.
-    assert!((quick_terminal_top_offset(height, 0.0) - (-height)).abs() < 0.001);
-    // Fully revealed: flush with the screen top.
-    assert!(quick_terminal_top_offset(height, 1.0).abs() < 0.001);
-    // Monotonic: more reveal never moves the panel back up.
-    let quarter = quick_terminal_top_offset(height, 0.25);
-    let half = quick_terminal_top_offset(height, 0.5);
-    assert!(quarter < half);
-    assert!(half < 0.0);
+fn quick_terminal_reveal_origin_lerps_hidden_to_final_per_axis() {
+    // Top-like travel: only y moves.
+    let final_origin = (100, 50);
+    let hidden_origin = (100, 50 - 400);
+    assert_eq!(
+        quick_terminal_reveal_origin(final_origin, hidden_origin, 0.0),
+        hidden_origin
+    );
+    assert_eq!(
+        quick_terminal_reveal_origin(final_origin, hidden_origin, 1.0),
+        final_origin
+    );
+    let mid = quick_terminal_reveal_origin(final_origin, hidden_origin, 0.5);
+    assert_eq!(mid.0, 100);
+    assert!(mid.1 > hidden_origin.1 && mid.1 < final_origin.1);
+
+    // Left-like travel: only x moves.
+    let final_origin = (10, 20);
+    let hidden_origin = (10 - 300, 20);
+    let mid = quick_terminal_reveal_origin(final_origin, hidden_origin, 0.5);
+    assert_eq!(mid.1, 20);
+    assert!(mid.0 > hidden_origin.0 && mid.0 < final_origin.0);
+
+    // Center: no travel at all — every reveal fraction is the same point.
+    let center = (5, 5);
+    assert_eq!(quick_terminal_reveal_origin(center, center, 0.0), center);
+    assert_eq!(quick_terminal_reveal_origin(center, center, 0.5), center);
+    assert_eq!(quick_terminal_reveal_origin(center, center, 1.0), center);
+}
+
+#[test]
+fn quick_terminal_position_geometry_hidden_and_final_per_position() {
+    use noa_config::QuickTerminalPosition::{Bottom, Center, Left, Right, Top};
+
+    // Monitor at (0, 0), 1000x800, panel 200x100.
+    let (mx, my, mw, mh, w, h) = (0, 0, 1000u32, 800u32, 200u32, 100u32);
+
+    let (final_origin, hidden_origin) = quick_terminal_position_geometry(Top, mx, my, mw, mh, w, h);
+    assert_eq!(final_origin, (400, 0)); // centered x, flush with the top
+    assert_eq!(hidden_origin, (400, -100)); // fully above the screen
+
+    let (final_origin, hidden_origin) =
+        quick_terminal_position_geometry(Bottom, mx, my, mw, mh, w, h);
+    assert_eq!(final_origin, (400, 700)); // flush with the bottom
+    assert_eq!(hidden_origin, (400, 800)); // fully below the screen
+
+    let (final_origin, hidden_origin) =
+        quick_terminal_position_geometry(Left, mx, my, mw, mh, w, h);
+    assert_eq!(final_origin, (0, 350)); // flush with the left edge, centered y
+    assert_eq!(hidden_origin, (-200, 350)); // fully off the left edge
+
+    let (final_origin, hidden_origin) =
+        quick_terminal_position_geometry(Right, mx, my, mw, mh, w, h);
+    assert_eq!(final_origin, (800, 350)); // flush with the right edge
+    assert_eq!(hidden_origin, (1000, 350)); // fully off the right edge
+
+    let (final_origin, hidden_origin) =
+        quick_terminal_position_geometry(Center, mx, my, mw, mh, w, h);
+    assert_eq!(final_origin, (400, 350)); // centered on both axes
+    assert_eq!(hidden_origin, final_origin, "center never travels");
 }
 
 #[test]
@@ -148,17 +197,20 @@ fn quick_terminal_slide_reveal_moves_from_current_state_to_target() {
 
 #[test]
 fn quick_terminal_slide_reveal_keeps_pixel_position_continuous_when_reversed() {
-    let height = 400.0;
+    let final_origin = (0, 0);
+    let hidden_origin = (0, -400);
     let duration = Duration::from_millis(200);
     let reveal_before_reverse =
         quick_terminal_slide_reveal(0.0, 1.0, Duration::from_millis(80), duration);
-    let top_before_reverse = quick_terminal_reveal_top_offset(height, reveal_before_reverse);
+    let top_before_reverse =
+        quick_terminal_reveal_origin(final_origin, hidden_origin, reveal_before_reverse).1;
 
     let reveal_after_reverse =
         quick_terminal_slide_reveal(reveal_before_reverse, 0.0, Duration::ZERO, duration);
-    let top_after_reverse = quick_terminal_reveal_top_offset(height, reveal_after_reverse);
+    let top_after_reverse =
+        quick_terminal_reveal_origin(final_origin, hidden_origin, reveal_after_reverse).1;
 
-    assert!((top_after_reverse - top_before_reverse).abs() < 0.001);
+    assert_eq!(top_after_reverse, top_before_reverse);
 }
 
 #[test]
@@ -183,12 +235,102 @@ fn quick_terminal_slide_reveal_is_monotone_at_frame_interval_samples() {
 }
 
 #[test]
-fn quick_terminal_height_is_a_clamped_screen_fraction() {
-    assert_eq!(quick_terminal_height(1000, 0.4), 400);
-    assert_eq!(quick_terminal_height(1000, 1.0), 1000);
-    // Fraction is clamped to a usable range and never exceeds the screen.
-    assert_eq!(quick_terminal_height(1000, 2.0), 1000);
-    assert_eq!(quick_terminal_height(1000, 0.0), 50);
+fn quick_terminal_size_footprint_maps_percent_and_defaults_per_position() {
+    use noa_config::QuickTerminalPosition::{Bottom, Left, Right, Top};
+    use noa_config::{QuickTerminalSize, QuickTerminalSizeDim};
+
+    let forty_percent = QuickTerminalSize {
+        primary: Some(QuickTerminalSizeDim::Percent(40.0)),
+        secondary: None,
+    };
+    // top/bottom: primary is height (a % of monitor height), secondary
+    // absent fills the full monitor width.
+    assert_eq!(
+        quick_terminal_size_footprint(Top, forty_percent, 1000, 800, 1.0),
+        (1000, 320)
+    );
+    assert_eq!(
+        quick_terminal_size_footprint(Bottom, forty_percent, 1000, 800, 1.0),
+        (1000, 320)
+    );
+    // left/right: primary is width, secondary absent fills the full height.
+    assert_eq!(
+        quick_terminal_size_footprint(Left, forty_percent, 1000, 800, 1.0),
+        (400, 800)
+    );
+    assert_eq!(
+        quick_terminal_size_footprint(Right, forty_percent, 1000, 800, 1.0),
+        (400, 800)
+    );
+}
+
+#[test]
+fn quick_terminal_size_footprint_uses_fixed_defaults_when_a_side_is_unset() {
+    use noa_config::QuickTerminalPosition::{Left, Top};
+    use noa_config::QuickTerminalSize;
+
+    // No primary/secondary at all: falls back to the 400px cross-axis
+    // default on the configured side, full parent on the other.
+    let unset = QuickTerminalSize {
+        primary: None,
+        secondary: None,
+    };
+    assert_eq!(
+        quick_terminal_size_footprint(Top, unset, 1000, 800, 1.0),
+        (1000, 400)
+    );
+    assert_eq!(
+        quick_terminal_size_footprint(Left, unset, 1000, 800, 1.0),
+        (400, 800)
+    );
+}
+
+#[test]
+fn quick_terminal_size_footprint_center_picks_long_axis_by_orientation() {
+    use noa_config::QuickTerminalPosition::Center;
+    use noa_config::QuickTerminalSize;
+
+    let unset = QuickTerminalSize {
+        primary: None,
+        secondary: None,
+    };
+    // Landscape (width >= height): primary is width (800px default), 400px
+    // default the short (height) axis.
+    assert_eq!(
+        quick_terminal_size_footprint(Center, unset, 1000, 800, 1.0),
+        (800, 400)
+    );
+    // Portrait: the long axis flips to height.
+    assert_eq!(
+        quick_terminal_size_footprint(Center, unset, 800, 1000, 1.0),
+        (400, 800)
+    );
+}
+
+#[test]
+fn quick_terminal_size_footprint_scales_pixels_by_scale_factor_and_clamps() {
+    use noa_config::QuickTerminalPosition::Top;
+    use noa_config::{QuickTerminalSize, QuickTerminalSizeDim};
+
+    let two_hundred_points = QuickTerminalSize {
+        primary: Some(QuickTerminalSizeDim::Pixels(200)),
+        secondary: None,
+    };
+    // 200 AppKit points at a 2x scale factor is 400 physical px.
+    assert_eq!(
+        quick_terminal_size_footprint(Top, two_hundred_points, 1000, 800, 2.0),
+        (1000, 400)
+    );
+
+    // A configured side that would exceed the monitor clamps to it instead.
+    let oversized = QuickTerminalSize {
+        primary: Some(QuickTerminalSizeDim::Percent(150.0)),
+        secondary: None,
+    };
+    assert_eq!(
+        quick_terminal_size_footprint(Top, oversized, 1000, 800, 1.0),
+        (1000, 800)
+    );
 }
 
 #[test]

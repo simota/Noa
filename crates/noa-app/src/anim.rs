@@ -11,8 +11,6 @@ use std::time::{Duration, Instant};
 pub const DUR_FAST: Duration = Duration::from_millis(120);
 /// Base transition (spatial movement: zoom, slide-adjacent moves).
 pub const DUR_BASE: Duration = Duration::from_millis(150);
-/// Slow, screen-scale movement (the quick terminal's full-height slide).
-pub const DUR_SLOW: Duration = Duration::from_millis(200);
 
 /// Cubic ease-out (fast start, gentle stop) — the house curve for
 /// enter/reveal transitions.

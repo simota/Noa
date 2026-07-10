@@ -30,9 +30,16 @@ pub const DEFAULT_IMAGE_STORAGE_LIMIT: usize = 320_000_000;
 /// `minimum-contrast` default: 1.0 means no automatic adjustment, matching
 /// Ghostty's contrast-ratio scale where 1 permits identical colors.
 pub const DEFAULT_MINIMUM_CONTRAST: f32 = 1.0;
-/// `quick-terminal-size` default: 40% of the screen height. (Ghostty's own
-/// default is 25%; noa opts for a slightly taller default drop-down.)
-pub const DEFAULT_QUICK_TERMINAL_SIZE: f32 = 0.4;
+/// `quick-terminal-size` default: 40% of the primary axis, no secondary side
+/// (fills the cross axis). (Ghostty's own default is 25%; noa opts for a
+/// slightly taller default drop-down.)
+pub const DEFAULT_QUICK_TERMINAL_SIZE: QuickTerminalSize = QuickTerminalSize {
+    primary: Some(QuickTerminalSizeDim::Percent(40.0)),
+    secondary: None,
+};
+/// `quick-terminal-animation-duration` default: 0.2s, matching Ghostty's
+/// slide-in/out duration.
+pub const DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION: f32 = 0.2;
 /// `quick-terminal-hotkey` default: `cmd+grave` (⌘`). (Ghostty ships no
 /// default; noa binds one so the drop-down works out of the box. Set
 /// `quick-terminal-hotkey = none` to disable it.)
@@ -263,6 +270,51 @@ pub enum QuickTerminalScreen {
     MacosMenuBar,
 }
 
+/// `quick-terminal-position`: which edge of the target screen the drop-down
+/// quick terminal slides in from. Mirrors Ghostty's `quick-terminal-position`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuickTerminalPosition {
+    /// Slides down from the top edge, full width. Ghostty's default.
+    #[default]
+    Top,
+    /// Slides up from the bottom edge, full width.
+    Bottom,
+    /// Slides in from the left edge, full height.
+    Left,
+    /// Slides in from the right edge, full height.
+    Right,
+    /// Centered on screen. **Deviation from Ghostty**: Ghostty fades this
+    /// position in/out via window alpha; noa has no window-alpha animation
+    /// machinery, so `center` never slides *or* fades — it simply appears and
+    /// disappears in place (see `noa-app`'s `quick_terminal_position_geometry`).
+    Center,
+}
+
+/// One side (`primary` or `secondary`) of a `quick-terminal-size` value: a
+/// percentage of the parent (monitor) dimension, or an absolute pixel count
+/// in AppKit points (`noa-app` scales these to physical px at use).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum QuickTerminalSizeDim {
+    Percent(f32),
+    Pixels(u32),
+}
+
+/// `quick-terminal-size`: the drop-down panel's footprint, Ghostty's
+/// `<primary>[,<secondary>]` format (e.g. `40%`, `400px`, `40%,300px`). Which
+/// side maps to width and which to height depends on `quick-terminal-position`
+/// — see `noa-app`'s `quick_terminal_size_footprint` (a port of Ghostty's
+/// `QuickTerminalSize.calculate`): `top`/`bottom` treat `primary` as height
+/// and `secondary` as width; `left`/`right` the reverse; `center` treats
+/// `primary` as its long axis and `secondary` as its short axis. An absent
+/// `secondary` fills the cross axis for `top`/`bottom`/`left`/`right`; for
+/// `center` (which has no "fill" axis) it falls back to a fixed default, same
+/// as an absent `primary` does everywhere.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuickTerminalSize {
+    pub primary: Option<QuickTerminalSizeDim>,
+    pub secondary: Option<QuickTerminalSizeDim>,
+}
+
 /// `resize-overlay`: whether the `cols × rows` grid-size toast shows during a
 /// live resize. Mirrors Ghostty's `resize-overlay`. Default `after-first`
 /// (every resize except the window's initial layout).
@@ -473,9 +525,10 @@ pub struct StartupConfig {
     /// string is the "explicitly disabled" sentinel. noa-specific key; Ghostty
     /// expresses the same thing as `keybind = global:<chord>=toggle_quick_terminal`.
     pub quick_terminal_hotkey: Option<String>,
-    /// `quick-terminal-size`: the quick terminal's height as a fraction of the
-    /// screen height, clamped to `0.1..=1.0`. Ghostty default is 25%.
-    pub quick_terminal_size: f32,
+    /// `quick-terminal-size`: the quick terminal's footprint — see
+    /// [`QuickTerminalSize`]. Default [`DEFAULT_QUICK_TERMINAL_SIZE`] (Ghostty
+    /// default is 25%; noa's is 40%).
+    pub quick_terminal_size: QuickTerminalSize,
     /// `quick-terminal-autohide`: hide the quick terminal when it loses focus.
     /// Ghostty default is on.
     pub quick_terminal_autohide: bool,
@@ -484,6 +537,14 @@ pub struct StartupConfig {
     /// (a deliberate deviation from Ghostty's `main` — see that variant's
     /// doc comment).
     pub quick_terminal_screen: QuickTerminalScreen,
+    /// `quick-terminal-position`: which screen edge the quick terminal slides
+    /// from. Default [`QuickTerminalPosition::Top`] (Ghostty parity).
+    pub quick_terminal_position: QuickTerminalPosition,
+    /// `quick-terminal-animation-duration`: how long the quick terminal takes
+    /// to slide fully in or out, in seconds. `0` disables the animation (the
+    /// panel shows/hides instantly). Default
+    /// [`DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION`], matching Ghostty.
+    pub quick_terminal_animation_duration: f32,
     /// `sidebar-enabled`: app-wide initial visibility of the session sidebar.
     /// Per-window visibility is toggled from this starting value at runtime.
     /// Default off. noa-specific key (no Ghostty analog).
@@ -570,6 +631,8 @@ impl Default for StartupConfig {
             quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
             quick_terminal_autohide: true,
             quick_terminal_screen: QuickTerminalScreen::default(),
+            quick_terminal_position: QuickTerminalPosition::default(),
+            quick_terminal_animation_duration: DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION,
             sidebar_enabled: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_hotkey: None,
@@ -626,9 +689,11 @@ pub struct ConfigOverrides {
     pub macos_titlebar_proxy_icon: Option<MacosTitlebarProxyIcon>,
     pub macos_applescript: Option<bool>,
     pub quick_terminal_hotkey: Option<String>,
-    pub quick_terminal_size: Option<f32>,
+    pub quick_terminal_size: Option<QuickTerminalSize>,
     pub quick_terminal_autohide: Option<bool>,
     pub quick_terminal_screen: Option<QuickTerminalScreen>,
+    pub quick_terminal_position: Option<QuickTerminalPosition>,
+    pub quick_terminal_animation_duration: Option<f32>,
     pub sidebar_enabled: Option<bool>,
     pub sidebar_width: Option<f32>,
     pub sidebar_hotkey: Option<String>,
@@ -728,6 +793,12 @@ impl ConfigOverrides {
             quick_terminal_screen: higher_priority
                 .quick_terminal_screen
                 .or(self.quick_terminal_screen),
+            quick_terminal_position: higher_priority
+                .quick_terminal_position
+                .or(self.quick_terminal_position),
+            quick_terminal_animation_duration: higher_priority
+                .quick_terminal_animation_duration
+                .or(self.quick_terminal_animation_duration),
             sidebar_enabled: higher_priority.sidebar_enabled.or(self.sidebar_enabled),
             sidebar_width: higher_priority.sidebar_width.or(self.sidebar_width),
             sidebar_hotkey: higher_priority.sidebar_hotkey.or(self.sidebar_hotkey),
@@ -800,9 +871,7 @@ impl ConfigOverrides {
                 .background_image_interval_secs
                 .unwrap_or(base.background_image_interval_secs),
             scrollback_limit: self.scrollback_limit.unwrap_or(base.scrollback_limit),
-            image_storage_limit: self
-                .image_storage_limit
-                .unwrap_or(base.image_storage_limit),
+            image_storage_limit: self.image_storage_limit.unwrap_or(base.image_storage_limit),
             window_save_state: self.window_save_state.unwrap_or(base.window_save_state),
             macos_option_as_alt: self.macos_option_as_alt.unwrap_or(base.macos_option_as_alt),
             macos_titlebar_style: self
@@ -823,6 +892,12 @@ impl ConfigOverrides {
             quick_terminal_screen: self
                 .quick_terminal_screen
                 .unwrap_or(base.quick_terminal_screen),
+            quick_terminal_position: self
+                .quick_terminal_position
+                .unwrap_or(base.quick_terminal_position),
+            quick_terminal_animation_duration: self
+                .quick_terminal_animation_duration
+                .unwrap_or(base.quick_terminal_animation_duration),
             sidebar_enabled: self.sidebar_enabled.unwrap_or(base.sidebar_enabled),
             sidebar_width: self.sidebar_width.unwrap_or(base.sidebar_width),
             sidebar_hotkey: self.sidebar_hotkey.or(base.sidebar_hotkey),
@@ -1022,6 +1097,8 @@ mod tests {
                 quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
                 quick_terminal_autohide: true,
                 quick_terminal_screen: QuickTerminalScreen::Mouse,
+                quick_terminal_position: QuickTerminalPosition::Top,
+                quick_terminal_animation_duration: DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION,
                 sidebar_enabled: false,
                 sidebar_width: DEFAULT_SIDEBAR_WIDTH,
                 sidebar_hotkey: None,
@@ -1050,6 +1127,33 @@ mod tests {
         assert_eq!(
             StartupConfig::default().quick_terminal_screen,
             QuickTerminalScreen::Mouse
+        );
+    }
+
+    #[test]
+    fn quick_terminal_position_defaults_to_top() {
+        assert_eq!(
+            StartupConfig::default().quick_terminal_position,
+            QuickTerminalPosition::Top
+        );
+    }
+
+    #[test]
+    fn quick_terminal_size_defaults_to_forty_percent_primary_only() {
+        assert_eq!(
+            StartupConfig::default().quick_terminal_size,
+            QuickTerminalSize {
+                primary: Some(QuickTerminalSizeDim::Percent(40.0)),
+                secondary: None,
+            }
+        );
+    }
+
+    #[test]
+    fn quick_terminal_animation_duration_defaults_to_point_two_seconds() {
+        assert_eq!(
+            StartupConfig::default().quick_terminal_animation_duration,
+            DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION
         );
     }
 

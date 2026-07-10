@@ -6,7 +6,8 @@ use noa_core::Rgb;
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess,
     ConfigOverrides, CursorShape, FontConfig, FontFeature, FontVariation, KeybindConfig,
-    MacosOptionAsAlt, MacosTitlebarStyle, PaletteOverride, QuickTerminalScreen, SyntheticStyleMode,
+    MacosOptionAsAlt, MacosTitlebarStyle, PaletteOverride, QuickTerminalPosition,
+    QuickTerminalScreen, QuickTerminalSize, QuickTerminalSizeDim, SyntheticStyleMode,
     ThemeAppearancePair, WindowSaveState,
 };
 
@@ -1014,29 +1015,62 @@ fn quick_terminal_hotkey_none_disables_via_empty_sentinel() {
 }
 
 #[test]
-fn quick_terminal_size_parses_fraction_and_percent_and_clamps() {
-    for (value, expected) in [
-        ("0.4", 0.4),
-        ("40%", 0.4),
-        ("100%", 1.0),
-        ("2.0", 1.0),
-        ("0.01", 0.1),
-    ] {
-        let (overrides, diagnostics) =
-            parse_overrides(path(), &format!("quick-terminal-size = {value}"));
+fn quick_terminal_size_parses_percent_pixels_and_pair() {
+    let (overrides, diagnostics) = parse_overrides(path(), "quick-terminal-size = 40%");
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        overrides.quick_terminal_size,
+        Some(QuickTerminalSize {
+            primary: Some(QuickTerminalSizeDim::Percent(40.0)),
+            secondary: None,
+        })
+    );
 
-        assert_eq!(overrides.quick_terminal_size, Some(expected), "{value:?}");
-        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
-    }
+    let (overrides, diagnostics) = parse_overrides(path(), "quick-terminal-size = 400px");
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        overrides.quick_terminal_size,
+        Some(QuickTerminalSize {
+            primary: Some(QuickTerminalSizeDim::Pixels(400)),
+            secondary: None,
+        })
+    );
+
+    let (overrides, diagnostics) = parse_overrides(path(), "quick-terminal-size = 40%,300px");
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        overrides.quick_terminal_size,
+        Some(QuickTerminalSize {
+            primary: Some(QuickTerminalSizeDim::Percent(40.0)),
+            secondary: Some(QuickTerminalSizeDim::Pixels(300)),
+        })
+    );
 }
 
 #[test]
-fn quick_terminal_size_rejects_non_numeric() {
-    let (overrides, diagnostics) = parse_overrides(path(), "quick-terminal-size = tall");
+fn quick_terminal_size_accepts_legacy_bare_fraction() {
+    let (overrides, diagnostics) = parse_overrides(path(), "quick-terminal-size = 0.4");
 
-    assert_eq!(overrides.quick_terminal_size, None);
-    assert_eq!(diagnostics.len(), 1);
-    assert!(diagnostics[0].message.contains("quick-terminal-size"));
+    assert!(diagnostics.is_empty());
+    assert_eq!(
+        overrides.quick_terminal_size,
+        Some(QuickTerminalSize {
+            primary: Some(QuickTerminalSizeDim::Percent(40.0)),
+            secondary: None,
+        })
+    );
+}
+
+#[test]
+fn quick_terminal_size_rejects_invalid_values() {
+    for value in ["-5%", "abc", "0%", "0px", "2.0", "-0.5", "tall"] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("quick-terminal-size = {value}"));
+
+        assert_eq!(overrides.quick_terminal_size, None, "{value:?}");
+        assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+        assert!(diagnostics[0].message.contains("quick-terminal-size"));
+    }
 }
 
 #[test]
@@ -1078,11 +1112,96 @@ fn quick_terminal_screen_defaults_to_mouse_via_apply_to() {
 }
 
 #[test]
+fn quick_terminal_position_parses_modes() {
+    for (value, expected) in [
+        ("top", QuickTerminalPosition::Top),
+        ("bottom", QuickTerminalPosition::Bottom),
+        ("left", QuickTerminalPosition::Left),
+        ("right", QuickTerminalPosition::Right),
+        ("center", QuickTerminalPosition::Center),
+    ] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("quick-terminal-position = {value}"));
+        assert_eq!(
+            overrides.quick_terminal_position,
+            Some(expected),
+            "{value:?}"
+        );
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+    }
+}
+
+#[test]
+fn quick_terminal_position_rejects_unknown_value() {
+    let (overrides, diagnostics) = parse_overrides(path(), "quick-terminal-position = diagonal");
+
+    assert_eq!(overrides.quick_terminal_position, None);
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].message.contains("quick-terminal-position"));
+    assert!(diagnostics[0].message.contains("diagonal"));
+}
+
+#[test]
+fn quick_terminal_position_defaults_to_top_via_apply_to() {
+    let resolved = ConfigOverrides::default().apply_to(crate::StartupConfig::default());
+    assert_eq!(resolved.quick_terminal_position, QuickTerminalPosition::Top);
+}
+
+#[test]
 fn quick_terminal_keys_are_supported_scalar_keys_for_import() {
     assert!(is_supported_scalar_key("quick-terminal-hotkey"));
     assert!(is_supported_scalar_key("quick-terminal-size"));
     assert!(is_supported_scalar_key("quick-terminal-autohide"));
     assert!(is_supported_scalar_key("quick-terminal-screen"));
+    assert!(is_supported_scalar_key("quick-terminal-position"));
+    assert!(is_supported_scalar_key("quick-terminal-animation-duration"));
+}
+
+#[test]
+fn quick_terminal_animation_duration_parses_non_negative_seconds() {
+    let (overrides, diagnostics) =
+        parse_overrides(path(), "quick-terminal-animation-duration = 0.5");
+
+    assert_eq!(overrides.quick_terminal_animation_duration, Some(0.5));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn quick_terminal_animation_duration_accepts_zero_to_disable_animation() {
+    let (overrides, diagnostics) = parse_overrides(path(), "quick-terminal-animation-duration = 0");
+
+    assert_eq!(overrides.quick_terminal_animation_duration, Some(0.0));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn quick_terminal_animation_duration_rejects_negative_and_non_numeric() {
+    for value in ["-0.1", "fast"] {
+        let (overrides, diagnostics) = parse_overrides(
+            path(),
+            &format!("quick-terminal-animation-duration = {value}"),
+        );
+
+        assert_eq!(
+            overrides.quick_terminal_animation_duration, None,
+            "{value:?}"
+        );
+        assert_eq!(diagnostics.len(), 1, "{value:?}");
+        assert!(
+            diagnostics[0]
+                .message
+                .contains("quick-terminal-animation-duration")
+        );
+    }
+}
+
+#[test]
+fn quick_terminal_animation_duration_defaults_via_apply_to() {
+    let resolved = ConfigOverrides::default().apply_to(crate::StartupConfig::default());
+    assert_eq!(
+        resolved.quick_terminal_animation_duration,
+        crate::DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION
+    );
 }
 
 // AC-15a: `sidebar-enabled`/`sidebar-width` parse; the default width (360)
@@ -1416,7 +1535,11 @@ fn config_file_include_detects_a_direct_cycle() {
     let a_path = dir.join("a");
     let b_path = dir.join("b");
     fs::write(&a_path, format!("config-file = {}", b_path.display())).unwrap();
-    fs::write(&b_path, format!("config-file = {}\nfont-size = 9", a_path.display())).unwrap();
+    fs::write(
+        &b_path,
+        format!("config-file = {}\nfont-size = 9", a_path.display()),
+    )
+    .unwrap();
 
     let source = fs::read_to_string(&a_path).unwrap();
     let (overrides, diagnostics) = parse_overrides(&a_path, &source);

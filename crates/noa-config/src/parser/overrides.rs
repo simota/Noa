@@ -2,7 +2,9 @@ use std::path::Path;
 
 use crate::{ConfigOverrides, FontConfig, KeybindConfig};
 
-use super::diagnostics::{invalid_value_diagnostic, unknown_key_diagnostic, window_pair_diagnostic};
+use super::diagnostics::{
+    invalid_value_diagnostic, unknown_key_diagnostic, window_pair_diagnostic,
+};
 use super::includes::{SourcedDirective, expand_directives};
 use super::values::*;
 use super::{Diagnostic, Directive};
@@ -58,6 +60,8 @@ pub(crate) fn build_overrides(
     let mut quick_terminal_size = None;
     let mut quick_terminal_autohide = None;
     let mut quick_terminal_screen = None;
+    let mut quick_terminal_position = None;
+    let mut quick_terminal_animation_duration = None;
     let mut sidebar_enabled = None;
     let mut sidebar_width = None;
     let mut sidebar_hotkey = None;
@@ -266,6 +270,14 @@ pub(crate) fn build_overrides(
                 quick_terminal_screen =
                     parse_quick_terminal_screen(path, directive, &mut diagnostics);
             }
+            "quick-terminal-position" => {
+                quick_terminal_position =
+                    parse_quick_terminal_position(path, directive, &mut diagnostics);
+            }
+            "quick-terminal-animation-duration" => {
+                quick_terminal_animation_duration =
+                    parse_non_negative_f32(path, directive, &mut diagnostics);
+            }
             "sidebar-enabled" => {
                 sidebar_enabled = parse_bool_directive(path, directive, &mut diagnostics);
             }
@@ -373,6 +385,8 @@ pub(crate) fn build_overrides(
             quick_terminal_size,
             quick_terminal_autohide,
             quick_terminal_screen,
+            quick_terminal_position,
+            quick_terminal_animation_duration,
             sidebar_enabled,
             sidebar_width,
             sidebar_hotkey,
@@ -465,6 +479,8 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "quick-terminal-size"
             | "quick-terminal-autohide"
             | "quick-terminal-screen"
+            | "quick-terminal-position"
+            | "quick-terminal-animation-duration"
             | "sidebar-enabled"
             | "sidebar-width"
             | "sidebar-hotkey"

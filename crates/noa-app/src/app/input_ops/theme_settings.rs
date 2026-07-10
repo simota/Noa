@@ -73,7 +73,7 @@ impl App {
             window_padding_y: self.config.window_padding_y.unwrap_or(0.0),
             macos_titlebar_style: self.config.macos_titlebar_style,
             sidebar_preview_lines: self.config.sidebar_preview_lines,
-            quick_terminal_size: self.config.quick_terminal_size,
+            quick_terminal_size: quick_terminal_height_fraction(self.config.quick_terminal_size),
             confirm_quit: self.config.confirm_quit,
             font_family,
             available_font_families,
@@ -616,8 +616,35 @@ fn sync_quick_terminal_size_from_committed_rows(
         if let (SettingsRowKind::QuickTerminalHeight, RowDraft::QuickTerminalHeight(size)) =
             (kind, &row.draft)
         {
-            config.quick_terminal_size = *size;
+            config.quick_terminal_size = quick_terminal_size_from_height_fraction(*size);
         }
+    }
+}
+
+/// The quick-terminal-height settings row only edits a plain percentage —
+/// Ghostty's px/secondary-side forms are config-file-only, not exposed by
+/// this interactive control. Reads the primary side as a `0.0..=1.0`
+/// fraction; a `Pixels` primary (or an absent one) falls back to noa's
+/// default fraction (`noa_config::DEFAULT_QUICK_TERMINAL_SIZE`).
+fn quick_terminal_height_fraction(size: noa_config::QuickTerminalSize) -> f32 {
+    match size.primary {
+        Some(noa_config::QuickTerminalSizeDim::Percent(pct)) => pct / 100.0,
+        _ => 0.4,
+    }
+}
+
+/// Inverse of `quick_terminal_height_fraction`: a percent-only primary with
+/// no secondary side, matching how `RowDraft::QuickTerminalHeight` commits
+/// have always been written to `quick-terminal-size` (see
+/// `ThemeSettings::commit_updates`, which still writes the legacy bare-
+/// fraction string that `quick-terminal-size` parsing accepts for
+/// back-compat).
+fn quick_terminal_size_from_height_fraction(fraction: f32) -> noa_config::QuickTerminalSize {
+    noa_config::QuickTerminalSize {
+        primary: Some(noa_config::QuickTerminalSizeDim::Percent(
+            fraction.clamp(0.0, 1.0) * 100.0,
+        )),
+        secondary: None,
     }
 }
 
@@ -720,7 +747,7 @@ mod commit_theme_settings_tests {
         sync_quick_terminal_size_from_committed_rows(&mut config, settings.rows());
 
         assert!(
-            (config.quick_terminal_size - 0.45).abs() < 0.001,
+            (quick_terminal_height_fraction(config.quick_terminal_size) - 0.45).abs() < 0.001,
             "committed quick terminal height should update AppConfig for the next toggle"
         );
     }

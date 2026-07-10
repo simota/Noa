@@ -6,7 +6,8 @@ use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, CursorShape,
     FontFeature, FontVariation, MAX_SIDEBAR_PREVIEW_LINES, MIN_BACKGROUND_IMAGE_INTERVAL_SECS,
     MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle, PaletteOverride,
-    QuickTerminalScreen, ResizeOverlay, SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
+    QuickTerminalPosition, QuickTerminalScreen, QuickTerminalSize, QuickTerminalSizeDim,
+    ResizeOverlay, SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
 };
 
 use super::diagnostics::*;
@@ -453,33 +454,71 @@ pub(super) fn parse_background_image_interval(
     Some((parsed as u64).max(MIN_BACKGROUND_IMAGE_INTERVAL_SECS))
 }
 
-/// Smallest allowed `quick-terminal-size` fraction; below this the drop-down
-/// would be too short to be usable.
-const MIN_QUICK_TERMINAL_SIZE: f32 = 0.1;
+/// Parse one `quick-terminal-size` side: a percentage (`40%`) or a pixel
+/// count in AppKit points (`400px`). `None` for anything else, including a
+/// non-positive magnitude.
+fn parse_quick_terminal_size_dim(text: &str) -> Option<QuickTerminalSizeDim> {
+    if let Some(percent) = text.strip_suffix('%') {
+        let pct = percent.trim().parse::<f32>().ok()?;
+        return (pct.is_finite() && pct > 0.0).then_some(QuickTerminalSizeDim::Percent(pct));
+    }
+    if let Some(pixels) = text.strip_suffix("px") {
+        let px = pixels.trim().parse::<u32>().ok()?;
+        return (px > 0).then_some(QuickTerminalSizeDim::Pixels(px));
+    }
+    None
+}
 
-/// Parse `quick-terminal-size`: the drop-down height as a fraction of the
-/// screen height. Accepts either a bare fraction (`0.4`) or a percentage
-/// (`40%`). Out-of-range values clamp to `0.1..=1.0`; only an unparseable
-/// value produces a diagnostic.
+/// Parse `quick-terminal-size`: Ghostty's `<primary>[,<secondary>]` format,
+/// each side a percentage (`40%`) or a pixel count (`400px`, AppKit points —
+/// `noa-app` scales these to physical px at use). For noa back-compat, a bare
+/// fraction in `(0.0, 1.0]` — the pre-Ghostty-parity noa format, e.g. `0.4`
+/// — is accepted as `primary = Percent(value * 100)` with no secondary side.
+/// Unparseable values, non-positive magnitudes, and out-of-range bare
+/// fractions all diagnose.
 pub(super) fn parse_quick_terminal_size(
     path: &Path,
     directive: &Directive,
     diagnostics: &mut Vec<Diagnostic>,
-) -> Option<f32> {
+) -> Option<QuickTerminalSize> {
     let value = directive.value.as_deref()?;
-    let parsed = match value.strip_suffix('%') {
-        Some(percent) => percent.trim().parse::<f32>().map(|n| n / 100.0),
-        None => value.parse::<f32>(),
-    };
-    let Ok(parsed) = parsed else {
-        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
-        return None;
-    };
-    if !parsed.is_finite() || parsed <= 0.0 {
-        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
-        return None;
+
+    // Ghostty's format always carries a `%`/`px` unit or a `,` side
+    // separator, so a bare number never collides with it.
+    if !value.contains(['%', ',']) && !value.contains("px") {
+        return match value.parse::<f32>() {
+            Ok(fraction) if fraction.is_finite() && fraction > 0.0 && fraction <= 1.0 => {
+                Some(QuickTerminalSize {
+                    primary: Some(QuickTerminalSizeDim::Percent(fraction * 100.0)),
+                    secondary: None,
+                })
+            }
+            _ => {
+                diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+                None
+            }
+        };
     }
-    Some(parsed.clamp(MIN_QUICK_TERMINAL_SIZE, 1.0))
+
+    let mut sides = value.splitn(2, ',').map(str::trim);
+    let Some(primary) = sides.next().and_then(parse_quick_terminal_size_dim) else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    let secondary = match sides.next() {
+        Some(text) => {
+            let Some(dim) = parse_quick_terminal_size_dim(text) else {
+                diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+                return None;
+            };
+            Some(dim)
+        }
+        None => None,
+    };
+    Some(QuickTerminalSize {
+        primary: Some(primary),
+        secondary,
+    })
 }
 
 /// Parse `sidebar-preview-lines`: the number of trailing output rows shown on
@@ -668,6 +707,25 @@ pub(super) fn parse_quick_terminal_screen(
         "main" => Some(QuickTerminalScreen::Main),
         "mouse" => Some(QuickTerminalScreen::Mouse),
         "macos-menu-bar" => Some(QuickTerminalScreen::MacosMenuBar),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_quick_terminal_position(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<QuickTerminalPosition> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "top" => Some(QuickTerminalPosition::Top),
+        "bottom" => Some(QuickTerminalPosition::Bottom),
+        "left" => Some(QuickTerminalPosition::Left),
+        "right" => Some(QuickTerminalPosition::Right),
+        "center" => Some(QuickTerminalPosition::Center),
         other => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
             None

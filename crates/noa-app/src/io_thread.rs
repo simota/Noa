@@ -86,7 +86,13 @@ pub(crate) struct AutoApproveFeedback {
 pub(crate) type PtyInput = Box<[u8]>;
 
 pub(crate) const PTY_INPUT_QUEUE_CAPACITY: usize = 1024;
-const PTY_DATA_DRAIN_BYTE_LIMIT: usize = 256 * 1024;
+
+/// Ceiling on pty bytes coalesced into one parse batch (one terminal-lock
+/// hold). Bigger batches drain a sustained flood in proportionally fewer
+/// lock/wake cycles, while the cap bounds how long a single hold can block
+/// the main thread's snapshot pass (~1 MiB parses in a few ms even on the
+/// heavier unicode path).
+const PTY_DATA_DRAIN_BYTE_LIMIT: usize = 1024 * 1024;
 
 /// Ceiling on bytes parked in a pane's input overflow buffer. The overflow
 /// absorbs a burst (huge paste) faster than the program reads; against a
@@ -110,6 +116,14 @@ const PTY_INPUT_OVERFLOW_BYTE_CAP: usize = 64 * 1024 * 1024;
 /// the cap never fires for it), while sustained back-to-back frames refresh at
 /// ~10fps instead of freezing until output happens to stop on a frame boundary.
 const SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION: Duration = Duration::from_millis(100);
+
+/// Floor between consecutive redraw requests outside synchronized output.
+/// Each `UserEvent::Redraw` is a real OS wake-up of the winit event loop and
+/// the display can't present faster than its refresh, so a flood of parse
+/// batches requesting one repaint each is pure overhead. A withheld redraw
+/// arms the same trailing deadline as synchronized output, so a burst's
+/// final frame always paints. One 120Hz frame.
+const REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(8);
 
 /// Delay for the second stability scan when a prompt becomes static after its
 /// final pty frame. The scan stays event-driven: it is armed only after a first
@@ -655,34 +669,39 @@ fn write_pty_bytes(writer: &PtyWriter, bytes: &[u8]) {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RedrawDecision {
-    /// Ask the main thread to repaint now — synchronized output is not active,
-    /// or the suppression cap has elapsed since the last paint.
+    /// Ask the main thread to repaint now — the redraw floor (or, under
+    /// synchronized output, the suppression cap) has elapsed since the last
+    /// paint.
     Now,
     /// Withhold this feed's redraw. Wake and force one at `deadline` unless
-    /// intervening output clears synchronized output (or its own cap) first.
+    /// intervening output earns an immediate repaint first.
     Suppress { deadline: Instant },
 }
 
 /// Decide whether a just-fed batch should trigger a redraw. `synchronized` is
 /// the terminal's DECSET 2026 state at end of batch; `last_redraw` is when the
-/// io thread last actually asked the main thread to repaint. A batch left in
-/// synchronized output withholds its redraw (that is the point of mode 2026) —
-/// but never for longer than [`SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION`] since the
-/// last paint, so a stalled or batch-straddled frame can't freeze the screen
-/// (bounds staleness to the cap even under a continuous burst of frames).
+/// io thread last actually asked the main thread to repaint. Two suppression
+/// windows apply: outside synchronized output redraws are floored to
+/// [`REDRAW_MIN_INTERVAL`], so a flood of parse batches can't wake the event
+/// loop faster than the display presents; a batch left in synchronized output
+/// withholds its redraw (that is the point of mode 2026) — but never for
+/// longer than [`SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION`] since the last paint,
+/// so a stalled or batch-straddled frame can't freeze the screen. Either way
+/// a suppressed batch owes a redraw at `deadline`, so a burst's final frame
+/// always paints.
 fn decide_redraw(synchronized: bool, last_redraw: Option<Instant>, now: Instant) -> RedrawDecision {
-    if !synchronized {
-        return RedrawDecision::Now;
-    }
+    let window = if synchronized {
+        SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION
+    } else {
+        REDRAW_MIN_INTERVAL
+    };
     match last_redraw {
-        // Painted recently: hold this frame, but arm a deadline so the cap is
-        // enforced even if no further output arrives to release 2026.
-        Some(last) if now.saturating_duration_since(last) < SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION => {
-            RedrawDecision::Suppress {
-                deadline: last + SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION,
-            }
-        }
-        // Never painted, or the cap already elapsed: paint now to bound staleness.
+        // Painted recently: hold this frame, but arm a deadline so the window
+        // is enforced even if no further output arrives.
+        Some(last) if now.saturating_duration_since(last) < window => RedrawDecision::Suppress {
+            deadline: last + window,
+        },
+        // Never painted, or the window already elapsed: paint now.
         _ => RedrawDecision::Now,
     }
 }
@@ -727,66 +746,109 @@ pub fn spawn(
         // instead of a constant poll interval.
         let mut publish_pending_at: Option<Instant> = None;
         // When the io thread last asked the main thread to repaint, and a
-        // deadline owed by a redraw currently withheld under synchronized
-        // output (DECSET 2026). Together they cap how long a mid-sync frame
-        // can sit unpainted (see [`decide_redraw`]); `None` deadline means
-        // nothing is owed and the select below blocks exactly as before.
+        // deadline owed by a redraw currently withheld — by the
+        // [`REDRAW_MIN_INTERVAL`] floor or the synchronized-output (DECSET
+        // 2026) cap. Together they bound how long a fed-but-unpainted frame
+        // can sit (see [`decide_redraw`]); `None` deadline means nothing is
+        // owed and the select below blocks exactly as before.
         let mut last_redraw_at: Option<Instant> = None;
-        let mut sync_redraw_deadline: Option<Instant> = None;
+        let mut redraw_deadline: Option<Instant> = None;
         let mut auto_approve_rescan_at: Option<Instant> = None;
         loop {
-            let mut sel = crossbeam_channel::Select::new();
-            let shutdown_op = sel.recv(&shutdown_rx);
-            let pty_op = sel.recv(pty.event_rx());
-            let resize_op = sel.recv(&resize_rx);
-            let input_op = sel.recv(&input_rx);
-            let auto_approve_feedback_op = sel.recv(&auto_approve_feedback_rx);
-
-            // Wake at whichever owed deadline comes first: an overview trailing
-            // flush (Fix B defect 1) or a withheld synchronized-output redraw.
-            let next_deadline = [
-                publish_pending_at,
-                sync_redraw_deadline,
-                auto_approve_rescan_at,
-            ]
-            .into_iter()
-            .flatten()
-            .min();
-            let selected = match next_deadline {
-                Some(deadline) => sel
-                    .select_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .ok(),
-                None => Some(sel.select()),
-            };
-
-            let Some(oper) = selected else {
-                // A deadline elapsed with nothing else waking the thread first.
-                let now = Instant::now();
-                let mut needs_redraw = false;
-                if publish_pending_at.is_some_and(|deadline| now >= deadline) {
-                    // The throttle window elapsed — flush now (Fix B defect 1).
-                    flush_pending_overview_publish(
-                        &terminal,
-                        &overview,
-                        &mut last_overview_publish,
+            // Fast path: poll every channel with `try_recv` before falling
+            // back to a blocking `Select`. During sustained output the pty
+            // channel is almost always ready, so rebuilding the five-op
+            // `Select` per batch is pure overhead — while the control
+            // channels are still polled every iteration, so a flood can't
+            // starve shutdown, resize, or user input (^C must reach the
+            // shell mid-flood).
+            match shutdown_rx.try_recv() {
+                Ok(()) | Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => {}
+            }
+            let mut did_work = false;
+            match resize_rx.try_recv() {
+                Ok(size) => {
+                    let _ = pty.resize(size);
+                    did_work = true;
+                }
+                Err(TryRecvError::Disconnected) => break, // main thread / App dropped
+                Err(TryRecvError::Empty) => {}
+            }
+            match input_rx.try_recv() {
+                Ok(bytes) => {
+                    write_pty_bytes(&writer, bytes.as_ref());
+                    did_work = true;
+                }
+                Err(TryRecvError::Disconnected) => break, // main thread / App dropped
+                Err(TryRecvError::Empty) => {}
+            }
+            match auto_approve_feedback_rx.try_recv() {
+                Ok(feedback) => {
+                    auto_approve_state.apply_feedback(
+                        feedback.signature,
+                        feedback.region_hash,
+                        feedback.accepted,
+                        Instant::now(),
                     );
-                    publish_pending_at = None;
-                    needs_redraw = true;
-                }
-                if sync_redraw_deadline.is_some_and(|deadline| now >= deadline) {
-                    // The synchronized-output suppression cap elapsed — force
-                    // the withheld repaint so the stale frame can't persist.
-                    sync_redraw_deadline = None;
-                    needs_redraw = true;
-                }
-                if auto_approve_rescan_at.is_some_and(|deadline| now >= deadline) {
-                    let candidate = {
-                        let term = terminal.lock();
-                        detect_auto_approve_candidate(&term, &auto_approve, &mut auto_approve_state)
-                    };
                     auto_approve_rescan_at =
                         auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
-                    if let Some(candidate) = candidate
+                    did_work = true;
+                }
+                Err(TryRecvError::Disconnected) => break, // main thread / App dropped
+                Err(TryRecvError::Empty) => {}
+            }
+            match pty.event_rx().try_recv() {
+                Ok(noa_pty::PtyEvent::Data(bytes)) => {
+                    did_work = true;
+                    let mut drained = Vec::new();
+                    let terminal_event =
+                        drain_queued_pty_data(pty.event_rx(), &mut drained, bytes.len());
+                    let mut output = feed_terminal_batch(
+                        &terminal,
+                        &mut stream,
+                        bytes.as_ref(),
+                        drained.iter().map(|chunk| chunk.as_ref()),
+                        &overview,
+                        &mut last_overview_publish,
+                        &sidebar,
+                        &mut last_sidebar_publish,
+                        &auto_approve,
+                        &mut auto_approve_state,
+                    );
+                    auto_approve_rescan_at =
+                        auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
+                    publish_pending_at = output.overview_publish_pending;
+                    let sidebar_bell = output.sidebar_bell;
+                    let sidebar_upsert = output.sidebar_upsert.take();
+                    let auto_approve_candidate = output.auto_approve.take();
+                    if sidebar_bell
+                        && proxy
+                            .send_event(UserEvent::SessionDelta(SessionDelta::Bell {
+                                id: card_id,
+                            }))
+                            .is_err()
+                    {
+                        break; // event loop gone
+                    }
+                    if let Some(upsert) = sidebar_upsert {
+                        sidebar_seq += 1;
+                        if proxy
+                            .send_event(UserEvent::SessionDelta(SessionDelta::Upsert {
+                                id: card_id,
+                                seq: sidebar_seq,
+                                name: upsert.name,
+                                cwd: upsert.cwd,
+                                busy: upsert.busy,
+                                updated_at: crate::localtime::wall_clock_now(),
+                                preview: upsert.preview,
+                            }))
+                            .is_err()
+                        {
+                            break; // event loop gone
+                        }
+                    }
+                    if let Some(candidate) = auto_approve_candidate
                         && proxy
                             .send_event(UserEvent::AutoApprove {
                                 id: card_id,
@@ -798,174 +860,151 @@ pub fn spawn(
                     {
                         break; // event loop gone
                     }
-                }
-                if !needs_redraw {
-                    continue;
-                }
-                // Either deadline means the frame the main thread holds is
-                // stale; a single redraw covers both.
-                last_redraw_at = Some(now);
-                if proxy
-                    .send_event(UserEvent::Redraw(window_id, pane_id))
-                    .is_err()
-                {
-                    break; // event loop gone
-                }
-                continue;
-            };
-
-            match oper.index() {
-                i if i == shutdown_op => {
-                    let _ = oper.recv(&shutdown_rx);
-                    break;
-                }
-                i if i == pty_op => match oper.recv(pty.event_rx()) {
-                    Ok(noa_pty::PtyEvent::Data(bytes)) => {
-                        let mut drained = Vec::new();
-                        let terminal_event =
-                            drain_queued_pty_data(pty.event_rx(), &mut drained, bytes.len());
-                        let mut output = feed_terminal_batch(
-                            &terminal,
-                            &mut stream,
-                            bytes.as_ref(),
-                            drained.iter().map(|chunk| chunk.as_ref()),
-                            &overview,
-                            &mut last_overview_publish,
-                            &sidebar,
-                            &mut last_sidebar_publish,
-                            &auto_approve,
-                            &mut auto_approve_state,
-                        );
-                        auto_approve_rescan_at =
-                            auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
-                        publish_pending_at = output.overview_publish_pending;
-                        let sidebar_bell = output.sidebar_bell;
-                        let sidebar_upsert = output.sidebar_upsert.take();
-                        let auto_approve_candidate = output.auto_approve.take();
-                        if sidebar_bell
-                            && proxy
-                                .send_event(UserEvent::SessionDelta(SessionDelta::Bell {
-                                    id: card_id,
-                                }))
-                                .is_err()
-                        {
-                            break; // event loop gone
-                        }
-                        if let Some(upsert) = sidebar_upsert {
-                            sidebar_seq += 1;
+                    if !output.pending_writes.is_empty() {
+                        write_pty_bytes(&writer, &output.pending_writes);
+                    }
+                    let redraw = decide_redraw(
+                        output.synchronized_output,
+                        last_redraw_at,
+                        Instant::now(),
+                    );
+                    for text in output.pending_clipboard_writes {
+                        let _ = proxy.send_event(UserEvent::ClipboardWrite {
+                            window_id,
+                            pane_id,
+                            text,
+                        });
+                    }
+                    for target in output.pending_clipboard_reads {
+                        let _ = proxy.send_event(UserEvent::ClipboardRead {
+                            window_id,
+                            pane_id,
+                            target,
+                        });
+                    }
+                    for notification in output.pending_notifications {
+                        let _ = proxy.send_event(UserEvent::Notify {
+                            window_id,
+                            pane_id,
+                            title: notification.title,
+                            body: notification.body,
+                        });
+                    }
+                    match redraw {
+                        RedrawDecision::Now => {
+                            redraw_deadline = None;
+                            last_redraw_at = Some(Instant::now());
                             if proxy
-                                .send_event(UserEvent::SessionDelta(SessionDelta::Upsert {
-                                    id: card_id,
-                                    seq: sidebar_seq,
-                                    name: upsert.name,
-                                    cwd: upsert.cwd,
-                                    busy: upsert.busy,
-                                    updated_at: crate::localtime::wall_clock_now(),
-                                    preview: upsert.preview,
-                                }))
+                                .send_event(UserEvent::Redraw(window_id, pane_id))
                                 .is_err()
                             {
                                 break; // event loop gone
                             }
                         }
-                        if let Some(candidate) = auto_approve_candidate
-                            && proxy
-                                .send_event(UserEvent::AutoApprove {
-                                    id: card_id,
-                                    signature: candidate.signature,
-                                    region_hash: candidate.region_hash,
-                                    disable_after: candidate.disable_after,
-                                })
-                                .is_err()
-                        {
-                            break; // event loop gone
-                        }
-                        if !output.pending_writes.is_empty() {
-                            write_pty_bytes(&writer, &output.pending_writes);
-                        }
-                        let redraw = decide_redraw(
-                            output.synchronized_output,
-                            last_redraw_at,
-                            Instant::now(),
-                        );
-                        for text in output.pending_clipboard_writes {
-                            let _ = proxy.send_event(UserEvent::ClipboardWrite {
-                                window_id,
-                                pane_id,
-                                text,
-                            });
-                        }
-                        for target in output.pending_clipboard_reads {
-                            let _ = proxy.send_event(UserEvent::ClipboardRead {
-                                window_id,
-                                pane_id,
-                                target,
-                            });
-                        }
-                        for notification in output.pending_notifications {
-                            let _ = proxy.send_event(UserEvent::Notify {
-                                window_id,
-                                pane_id,
-                                title: notification.title,
-                                body: notification.body,
-                            });
-                        }
-                        match redraw {
-                            RedrawDecision::Now => {
-                                sync_redraw_deadline = None;
-                                last_redraw_at = Some(Instant::now());
-                                if proxy
-                                    .send_event(UserEvent::Redraw(window_id, pane_id))
-                                    .is_err()
-                                {
-                                    break; // event loop gone
-                                }
-                            }
-                            // Frame withheld under synchronized output: owe a
-                            // redraw at the cap deadline so it can't get stuck.
-                            RedrawDecision::Suppress { deadline } => {
-                                sync_redraw_deadline = Some(deadline);
-                            }
-                        }
-                        match terminal_event {
-                            Some(PtyDrainTerminalEvent::ExitOrError) => {
-                                let _ = proxy.send_event(UserEvent::PtyExit(window_id, pane_id));
-                                break;
-                            }
-                            Some(PtyDrainTerminalEvent::Disconnected) => break,
-                            None => {}
+                        // Frame withheld (redraw floor or synchronized
+                        // output): owe a redraw at the window deadline so it
+                        // can't get stuck.
+                        RedrawDecision::Suppress { deadline } => {
+                            redraw_deadline = Some(deadline);
                         }
                     }
-                    Ok(noa_pty::PtyEvent::Exit(_)) | Ok(noa_pty::PtyEvent::Error(_)) => {
-                        let _ = proxy.send_event(UserEvent::PtyExit(window_id, pane_id));
-                        break;
+                    match terminal_event {
+                        Some(PtyDrainTerminalEvent::ExitOrError) => {
+                            let _ = proxy.send_event(UserEvent::PtyExit(window_id, pane_id));
+                            break;
+                        }
+                        Some(PtyDrainTerminalEvent::Disconnected) => break,
+                        None => {}
                     }
-                    Err(_) => break, // channel closed
-                },
-                i if i == resize_op => match oper.recv(&resize_rx) {
-                    Ok(size) => {
-                        let _ = pty.resize(size);
+                }
+                Ok(noa_pty::PtyEvent::Exit(_)) | Ok(noa_pty::PtyEvent::Error(_)) => {
+                    let _ = proxy.send_event(UserEvent::PtyExit(window_id, pane_id));
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => break, // channel closed
+                Err(TryRecvError::Empty) => {}
+            }
+            if did_work {
+                continue;
+            }
+
+            // Nothing ready: settle any elapsed deadline, then block.
+            let now = Instant::now();
+            let mut deadline_elapsed = false;
+            let mut needs_redraw = false;
+            if publish_pending_at.is_some_and(|deadline| now >= deadline) {
+                // The throttle window elapsed — flush now (Fix B defect 1).
+                flush_pending_overview_publish(&terminal, &overview, &mut last_overview_publish);
+                publish_pending_at = None;
+                deadline_elapsed = true;
+                needs_redraw = true;
+            }
+            if redraw_deadline.is_some_and(|deadline| now >= deadline) {
+                // A withheld redraw (floor or synchronized-output cap) came
+                // due — force the repaint so the stale frame can't persist.
+                redraw_deadline = None;
+                deadline_elapsed = true;
+                needs_redraw = true;
+            }
+            if auto_approve_rescan_at.is_some_and(|deadline| now >= deadline) {
+                deadline_elapsed = true;
+                let candidate = {
+                    let term = terminal.lock();
+                    detect_auto_approve_candidate(&term, &auto_approve, &mut auto_approve_state)
+                };
+                auto_approve_rescan_at =
+                    auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
+                if let Some(candidate) = candidate
+                    && proxy
+                        .send_event(UserEvent::AutoApprove {
+                            id: card_id,
+                            signature: candidate.signature,
+                            region_hash: candidate.region_hash,
+                            disable_after: candidate.disable_after,
+                        })
+                        .is_err()
+                {
+                    break; // event loop gone
+                }
+            }
+            if deadline_elapsed {
+                if needs_redraw {
+                    // Either deadline means the frame the main thread holds
+                    // is stale; a single redraw covers both.
+                    last_redraw_at = Some(now);
+                    if proxy
+                        .send_event(UserEvent::Redraw(window_id, pane_id))
+                        .is_err()
+                    {
+                        break; // event loop gone
                     }
-                    Err(_) => break, // main thread / App dropped
-                },
-                i if i == input_op => match oper.recv(&input_rx) {
-                    Ok(bytes) => write_pty_bytes(&writer, bytes.as_ref()),
-                    Err(_) => break, // main thread / App dropped
-                },
-                i if i == auto_approve_feedback_op => match oper.recv(&auto_approve_feedback_rx) {
-                    Ok(feedback) => {
-                        auto_approve_state.apply_feedback(
-                            feedback.signature,
-                            feedback.region_hash,
-                            feedback.accepted,
-                            Instant::now(),
-                        );
-                        auto_approve_rescan_at =
-                            auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
-                    }
-                    Err(_) => break, // main thread / App dropped
-                },
-                _ => unreachable!("select only registers the registered operations above"),
+                }
+                continue;
+            }
+
+            // Wake at whichever owed deadline comes first: an overview
+            // trailing flush (Fix B defect 1), a withheld redraw, or an
+            // auto-approve stability rescan. `ready`/`ready_timeout` report
+            // readiness without receiving; the fast-path drains above
+            // complete the operation on the next iteration (a spurious
+            // wake-up just loops back here).
+            let next_deadline = [publish_pending_at, redraw_deadline, auto_approve_rescan_at]
+                .into_iter()
+                .flatten()
+                .min();
+            let mut sel = crossbeam_channel::Select::new();
+            sel.recv(&shutdown_rx);
+            sel.recv(pty.event_rx());
+            sel.recv(&resize_rx);
+            sel.recv(&input_rx);
+            sel.recv(&auto_approve_feedback_rx);
+            match next_deadline {
+                Some(deadline) => {
+                    let _ = sel.ready_timeout(deadline.saturating_duration_since(Instant::now()));
+                }
+                None => {
+                    let _ = sel.ready();
+                }
             }
         }
     });
@@ -1319,13 +1358,13 @@ mod tests {
             &mut None,
         );
 
-        // Releasing 2026 paints immediately, regardless of how recent the last
-        // paint was.
+        // Releasing 2026 drops the suppression window from the sync cap to
+        // the ordinary redraw floor.
         assert!(!output.synchronized_output);
         assert_eq!(
             decide_redraw(
                 output.synchronized_output,
-                Some(Instant::now()),
+                Some(Instant::now() - REDRAW_MIN_INTERVAL),
                 Instant::now()
             ),
             RedrawDecision::Now
@@ -1356,6 +1395,29 @@ mod tests {
             decide_redraw(true, Some(recent), now),
             RedrawDecision::Suppress {
                 deadline: recent + SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION
+            }
+        );
+    }
+
+    // A pty flood parsed in many batches must not request one repaint per
+    // batch: outside synchronized output, redraws are floored to
+    // REDRAW_MIN_INTERVAL, with the trailing deadline guaranteeing the
+    // burst's final frame still paints.
+    #[test]
+    fn unsynchronized_redraws_are_floored_to_the_min_interval() {
+        let now = Instant::now();
+        // First-ever paint, or a paint older than the floor: draw now.
+        assert_eq!(decide_redraw(false, None, now), RedrawDecision::Now);
+        assert_eq!(
+            decide_redraw(false, Some(now - REDRAW_MIN_INTERVAL), now),
+            RedrawDecision::Now
+        );
+        // Inside the floor: hold, arming the trailing deadline.
+        let recent = now - REDRAW_MIN_INTERVAL / 2;
+        assert_eq!(
+            decide_redraw(false, Some(recent), now),
+            RedrawDecision::Suppress {
+                deadline: recent + REDRAW_MIN_INTERVAL
             }
         );
     }

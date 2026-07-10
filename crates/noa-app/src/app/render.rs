@@ -323,17 +323,13 @@ impl App {
             crate::macos_overlay::sync_confirm_dialog(
                 &state.window,
                 &mut state.native_overlays,
-                dialog_card
-                    .as_ref()
-                    .and_then(|d| focused_rect.map(|r| (d, r))),
+                dialog_card.as_ref().zip(focused_rect),
                 &colors,
             );
             crate::macos_overlay::sync_title_prompt(
                 &state.window,
                 &mut state.native_overlays,
-                title_prompt_input
-                    .as_deref()
-                    .and_then(|input| focused_rect.map(|r| (input, r))),
+                title_prompt_input.as_deref().zip(focused_rect),
                 &colors,
             );
             let toast_now = Instant::now();

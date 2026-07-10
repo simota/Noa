@@ -60,9 +60,7 @@ impl App {
     }
 
     fn focused_scrollback_text(&self, command: AppCommand) -> Option<String> {
-        let Some((window_id, pane_id)) = self.resolve_pane_command_target(command) else {
-            return None;
-        };
+        let (window_id, pane_id) = self.resolve_pane_command_target(command)?;
         let text = self
             .windows
             .get(&window_id)

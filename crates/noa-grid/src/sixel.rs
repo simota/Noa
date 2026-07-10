@@ -144,12 +144,11 @@ pub fn rasterize(cmd: &SixelGraphicsCommand) -> Result<SixelRaster, KittyError> 
                 let (params, next) = parse_params(&cmd.data, i + 1);
                 if let Some(&reg) = params.first() {
                     current_color = (reg as usize).min(COLOR_REGISTERS - 1);
-                    if params.len() >= 5 {
-                        if let Some(color) =
+                    if params.len() >= 5
+                        && let Some(color) =
                             decode_color(params[1], params[2], params[3], params[4])
-                        {
-                            palette[current_color] = color;
-                        }
+                    {
+                        palette[current_color] = color;
                     }
                 }
                 i = next;

@@ -200,7 +200,7 @@ pub(crate) fn command_palette_matches(query: &str) -> Vec<PaletteMatch> {
         .collect();
     // Stable: equal scores preserve the registry declaration order they were
     // collected in.
-    matches.sort_by(|a, b| b.score.cmp(&a.score));
+    matches.sort_by_key(|b| std::cmp::Reverse(b.score));
     matches
 }
 

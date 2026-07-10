@@ -122,9 +122,7 @@ impl App {
             .get(&source_window_id)
             .and_then(|state| state.surfaces.get(&source_pane))
             .and_then(|surface| surface.terminal.lock().selected_text());
-        let Some(selected_text) = selected_text.filter(|text| !text.is_empty()) else {
-            return None;
-        };
+        let selected_text = selected_text.filter(|text| !text.is_empty())?;
 
         let targets = self.send_selection_targets(source_window_id, source_pane);
         if targets.is_empty() {

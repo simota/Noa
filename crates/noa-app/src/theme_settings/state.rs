@@ -962,6 +962,6 @@ fn filter_themes(filter: &str) -> Vec<ThemeMatch> {
                 .map(|(score, positions)| (score, ThemeMatch { index, positions }))
         })
         .collect();
-    matches.sort_by(|a, b| b.0.cmp(&a.0));
+    matches.sort_by_key(|b| std::cmp::Reverse(b.0));
     matches.into_iter().map(|(_, m)| m).collect()
 }

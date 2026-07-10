@@ -77,7 +77,7 @@ pub(super) fn publish_overview_snapshot(
         OverviewPublishDecision::Skip => None,
         OverviewPublishDecision::Publish => {
             let mut slot = overview.slot.lock();
-            FrameSnapshot::refresh_peek_slot(&mut *slot, terminal);
+            FrameSnapshot::refresh_peek_slot(&mut slot, terminal);
             *last_overview_publish = Some(now);
             None
         }
@@ -99,6 +99,6 @@ pub(super) fn flush_pending_overview_publish(
     let now = Instant::now();
     let term = terminal.lock();
     let mut slot = overview.slot.lock();
-    FrameSnapshot::refresh_peek_slot(&mut *slot, &term);
+    FrameSnapshot::refresh_peek_slot(&mut slot, &term);
     *last_overview_publish = Some(now);
 }

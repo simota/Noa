@@ -1029,7 +1029,7 @@ fn blend_pixel(canvas: &mut [u8], d: usize, src: &[u8], overwrite: bool) {
         let sc = src[c] as u32;
         let dc = canvas[d + c] as u32;
         let num = sc * sa + dc * da * (255 - sa) / 255;
-        canvas[d + c] = if out_a == 0 { 0 } else { (num / out_a) as u8 };
+        canvas[d + c] = num.checked_div(out_a).unwrap_or(0) as u8;
     }
     canvas[d + 3] = out_a as u8;
 }

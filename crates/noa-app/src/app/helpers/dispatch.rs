@@ -371,7 +371,7 @@ pub(crate) fn try_refresh_overview_snapshot(
         return false;
     };
     let mut slot = slot.lock();
-    FrameSnapshot::refresh_peek_slot(&mut *slot, &term);
+    FrameSnapshot::refresh_peek_slot(&mut slot, &term);
     true
 }
 

@@ -121,7 +121,17 @@ impl App {
             self.padding,
         );
 
-        let surface = if self.gpu.is_none() {
+        let surface = if let Some(gpu) = &self.gpu {
+            gpu.instance
+                .create_surface(window.clone())
+                .unwrap_or_else(|e| {
+                    gpu_init_fatal(
+                        &mut self.session_persister,
+                        "could not create the window surface",
+                        e,
+                    )
+                })
+        } else {
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
             let surface = instance.create_surface(window.clone()).unwrap_or_else(|e| {
                 gpu_init_fatal(
@@ -207,17 +217,6 @@ impl App {
                 palette_scrim: None,
             });
             surface
-        } else {
-            let gpu = self.gpu.as_ref().expect("gpu initialized");
-            gpu.instance
-                .create_surface(window.clone())
-                .unwrap_or_else(|e| {
-                    gpu_init_fatal(
-                        &mut self.session_persister,
-                        "could not create the window surface",
-                        e,
-                    )
-                })
         };
 
         let (surface_config, renderer) = {
@@ -1022,16 +1021,16 @@ impl App {
             .windows
             .get(&window_id)
             .is_some_and(|state| state.auto_approve_enabled.load(Ordering::Relaxed));
-        let split_enabled = self
-            .windows
-            .contains_key(&window_id)
-            .then(|| crate::macos_menu::SplitContextMenuEnabled {
+        let split_enabled = if self.windows.contains_key(&window_id) {
+            crate::macos_menu::SplitContextMenuEnabled {
                 left: self.can_create_split_in_window(window_id, Direction::Left),
                 right: self.can_create_split_in_window(window_id, Direction::Right),
                 up: self.can_create_split_in_window(window_id, Direction::Up),
                 down: self.can_create_split_in_window(window_id, Direction::Down),
-            })
-            .unwrap_or_default();
+            }
+        } else {
+            Default::default()
+        };
         let send_selection_enabled = self
             .windows
             .get(&window_id)

@@ -767,7 +767,7 @@ fn theme_settings_overlay_text(
     let highlighted = state.highlighted_index();
     let offset = highlighted
         .saturating_sub(list_rows as usize / 2)
-        .min(total.saturating_sub(list_rows as usize).max(0));
+        .min(total.saturating_sub(list_rows as usize));
     for i in 0..list_rows {
         let idx = offset + i as usize;
         let Some((name, _positions)) = state.filtered_entry(idx) else {

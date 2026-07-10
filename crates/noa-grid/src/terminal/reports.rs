@@ -57,6 +57,10 @@ impl Terminal {
             crate::cursor::CursorStyle::SteadyUnderline => 4,
             crate::cursor::CursorStyle::BlinkingBar => 5,
             crate::cursor::CursorStyle::SteadyBar => 6,
+            // DECSCUSR has no hollow-block code; report as the nearest
+            // standard shape (block) for query purposes.
+            crate::cursor::CursorStyle::BlinkingBlockHollow => 1,
+            crate::cursor::CursorStyle::SteadyBlockHollow => 2,
         }
     }
 

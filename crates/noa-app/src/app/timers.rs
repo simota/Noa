@@ -73,6 +73,7 @@ impl App {
                 CursorStyle::BlinkingBlock
                     | CursorStyle::BlinkingUnderline
                     | CursorStyle::BlinkingBar
+                    | CursorStyle::BlinkingBlockHollow
             )
     }
 
@@ -220,6 +221,52 @@ impl App {
                 .set_background_image_transition_progress(progress);
             state.window.request_redraw();
         }
+    }
+
+    /// Advance Kitty-graphics animations across every pane and return the next
+    /// frame-due wake-up. `noa-grid` holds no timer: it advances against a
+    /// monotonic ms clock (`kitty_anim_origin`) supplied here, and reports the
+    /// soonest next deadline, which this schedules like the other tick sources.
+    pub(super) fn tick_kitty_animations(&mut self) -> Option<Instant> {
+        let now = Instant::now();
+        let origin = self.kitty_anim_origin.unwrap_or(now);
+        let now_ms = now.saturating_duration_since(origin).as_millis() as u64;
+
+        let mut next_wake_ms: Option<u64> = None;
+        let mut any_running = false;
+        let mut dirty_windows: Vec<WindowId> = Vec::new();
+        for (window_id, state) in &self.windows {
+            let mut changed = false;
+            for surface in state.surfaces.values() {
+                let mut term = surface.terminal.lock();
+                if !term.has_kitty_animation() {
+                    continue;
+                }
+                any_running = true;
+                let tick = term.advance_kitty_animations(now_ms);
+                changed |= tick.changed;
+                if let Some(w) = tick.next_wake {
+                    next_wake_ms = Some(next_wake_ms.map_or(w, |cur| cur.min(w)));
+                }
+            }
+            if changed {
+                dirty_windows.push(*window_id);
+            }
+        }
+
+        if !any_running {
+            self.kitty_anim_origin = None;
+            self.kitty_anim_deadline = None;
+            return None;
+        }
+        self.kitty_anim_origin = Some(origin);
+        for window_id in dirty_windows {
+            if let Some(state) = self.windows.get(&window_id) {
+                state.window.request_redraw();
+            }
+        }
+        self.kitty_anim_deadline = next_wake_ms.map(|ms| origin + Duration::from_millis(ms));
+        self.kitty_anim_deadline
     }
 
     pub(super) fn tick_live_wallpaper(&mut self) -> Option<Instant> {

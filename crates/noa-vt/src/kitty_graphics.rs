@@ -26,8 +26,12 @@ pub enum KittyAction {
     Delete,
     /// `a=q` — query: validate without storing, reply with the outcome.
     Query,
-    /// `a=f`/`a=a`/`a=c` — animation frames/control; not implemented.
-    Unsupported,
+    /// `a=f` — transmit an animation frame onto an existing image.
+    TransmitFrame,
+    /// `a=a` — control animation playback (state, current frame, loops, gaps).
+    Animate,
+    /// `a=c` — compose one frame's pixels onto another.
+    Compose,
 }
 
 /// The `f=` pixel format of a raw (non-PNG) transfer.
@@ -78,7 +82,7 @@ pub enum KittyDelete {
     ByNumber { free: bool },
     /// `d=c`/`C` — placements intersecting the cursor.
     AtCursor { free: bool },
-    /// `d=f`/`F` — animation frames; not implemented.
+    /// `d=f`/`F` — an image's animation frames (keeps the root frame).
     AnimationFrames { free: bool },
     /// `d=p`/`P` — placements at a cell (`x=`,`y=`).
     AtCell { free: bool },
@@ -264,7 +268,9 @@ pub fn parse(data: &[u8], truncated: bool) -> KittyGraphicsCommand {
                 Some(b'p') => cmd.action = KittyAction::Put,
                 Some(b'd') => cmd.action = KittyAction::Delete,
                 Some(b'q') => cmd.action = KittyAction::Query,
-                Some(b'f') | Some(b'a') | Some(b'c') => cmd.action = KittyAction::Unsupported,
+                Some(b'f') => cmd.action = KittyAction::TransmitFrame,
+                Some(b'a') => cmd.action = KittyAction::Animate,
+                Some(b'c') => cmd.action = KittyAction::Compose,
                 _ => cmd.parse_error = true,
             },
             b'f' => match u32val(val) {
@@ -431,10 +437,10 @@ mod tests {
     }
 
     #[test]
-    fn animation_actions_are_unsupported() {
-        for v in [b"a=f".as_slice(), b"a=a", b"a=c"] {
-            assert_eq!(parse(v, false).action, KittyAction::Unsupported);
-        }
+    fn animation_actions_parse() {
+        assert_eq!(parse(b"a=f", false).action, KittyAction::TransmitFrame);
+        assert_eq!(parse(b"a=a", false).action, KittyAction::Animate);
+        assert_eq!(parse(b"a=c", false).action, KittyAction::Compose);
     }
 
     #[test]

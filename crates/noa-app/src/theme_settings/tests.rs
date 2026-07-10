@@ -159,6 +159,9 @@ fn cursor_style_row_cycles_and_applies_immediately() {
     let effect = settings.adjust(1, Instant::now());
     assert_eq!(effect, RowEffect::CursorStyle(CursorShape::Underline));
 
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::CursorStyle(CursorShape::BlockHollow));
+
     // Wraps back to the front.
     let effect = settings.adjust(1, Instant::now());
     assert_eq!(effect, RowEffect::CursorStyle(CursorShape::Block));

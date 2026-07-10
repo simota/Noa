@@ -68,6 +68,7 @@ use crate::split_tree::{
 };
 use crate::{AppCommand, ViewportScroll};
 
+mod applescript;
 mod auto_approve;
 mod commands;
 mod config;
@@ -91,8 +92,9 @@ use quick_terminal::QuickTerminalState;
 use state::*;
 
 use config::{
-    BackgroundImageRuntime, font_config_from_noa_config, load_background_image_runtime,
-    resolve_cursor_style, resolve_grid_padding,
+    BackgroundImageRuntime, alpha_blending_mode, apply_palette_overrides, effective_theme_name,
+    font_config_from_noa_config, load_background_image_runtime, resolve_cursor_style,
+    resolve_grid_padding,
 };
 #[cfg(target_os = "macos")]
 use config::{apply_macos_titlebar_style, macos_option_as_alt, needs_macos_titlebar_backdrop};
@@ -117,6 +119,11 @@ struct LiveWallpaperTransition {
 pub struct App {
     config: AppConfig,
     config_watcher: ConfigWatcher,
+    /// Current macOS system appearance (light/dark), seeded from the first
+    /// window's `Window::theme()` and kept live via
+    /// `WindowEvent::ThemeChanged`. Only consulted when `config.theme_appearance`
+    /// (a `theme = light:...,dark:...` pair) is set.
+    system_appearance: winit::window::Theme,
     /// Grid padding derived once from `window-padding-x/y`, applied to every
     /// pane's geometry.
     padding: GridPadding,
@@ -179,6 +186,13 @@ pub struct App {
     /// displayable `Blinking*` cursor (the event loop then sits at
     /// `ControlFlow::Wait`, no busy wake-ups).
     cursor_blink_deadline: Option<Instant>,
+    /// Monotonic origin for the Kitty-graphics animation clock. Set lazily on the
+    /// first animation tick; `advance_kitty_animations` takes ms since this so
+    /// `noa-grid` stays timer-free.
+    kitty_anim_origin: Option<Instant>,
+    /// Next scheduled Kitty animation frame wake-up; `None` while no stored image
+    /// is animating (the event loop then needs no wake-up for this).
+    kitty_anim_deadline: Option<Instant>,
     /// Monotonic onset of each card's current attention request (FR-A1), keyed
     /// by card id. Set on the `false→true` attention transition and removed
     /// when the flag is cleared (window focus) or the session is torn down.
@@ -291,6 +305,26 @@ pub struct App {
     /// happen on the caller. Its `Drop` (as an `App` field) flushes the last
     /// queued state to disk, covering the quit path.
     session_persister: crate::session_persist::SessionPersister,
+    /// The installed AppleScript / Apple Event bridge (applescript R-2), kept
+    /// alive for the app's lifetime (dropping it removes the handlers). `None`
+    /// until installed, when `macos-applescript` is false, or off macOS.
+    applescript: Option<crate::macos_applescript::Registration>,
+    /// The read-only window/tab/terminal projection the Apple Event handler
+    /// answers property queries from (applescript Amendment 1.1). The main
+    /// thread rebuilds it in `about_to_wait` while the bridge is installed; the
+    /// handler only ever locks and reads it, so scripting never blocks the loop.
+    applescript_snapshot: Arc<Mutex<crate::macos_applescript::AppStateSnapshot>>,
+    /// Guards the one-time Apple Event handler registration to the first
+    /// `resumed`, mirroring `hotkey_install_attempted`.
+    applescript_install_attempted: bool,
+    /// The cheap structural signature (topology/focus/titles) of the last
+    /// AppleScript snapshot rebuild, so `about_to_wait` skips the full
+    /// per-pane `terminal.lock()` rebuild when nothing relevant changed.
+    applescript_snapshot_sig: u64,
+    /// When the AppleScript snapshot was last rebuilt, for the coarse
+    /// time-based refresh that keeps cwd/title current under sustained output
+    /// without locking every terminal each frame.
+    applescript_snapshot_at: Option<Instant>,
 }
 
 impl App {
@@ -312,6 +346,11 @@ impl App {
         let sidebar_preview_lines_gate = Arc::new(AtomicUsize::new(config.sidebar_preview_lines));
         App {
             config_watcher: ConfigWatcher::new(),
+            // Corrected once the first window exists and can report
+            // `Window::theme()` (see `lifecycle.rs`); light is a harmless
+            // placeholder until then since startup theme resolution for a
+            // `theme_appearance` pair happens after that point.
+            system_appearance: winit::window::Theme::Light,
             padding,
             initial_cursor_style,
             background_image,
@@ -338,6 +377,8 @@ impl App {
             overview_wake_deadline: None,
             cursor_blink_visible: true,
             cursor_blink_deadline: None,
+            kitty_anim_origin: None,
+            kitty_anim_deadline: None,
             attention_onset: HashMap::new(),
             auto_approve_flash_until: HashMap::new(),
             attention_blink_deadline: None,
@@ -365,6 +406,13 @@ impl App {
             sidebar_visible_gate,
             sidebar_preview_lines_gate,
             sidebar_visible_groups: HashSet::new(),
+            applescript: None,
+            applescript_snapshot: Arc::new(Mutex::new(
+                crate::macos_applescript::AppStateSnapshot::default(),
+            )),
+            applescript_install_attempted: false,
+            applescript_snapshot_sig: 0,
+            applescript_snapshot_at: None,
         }
     }
 

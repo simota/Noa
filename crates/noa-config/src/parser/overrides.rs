@@ -2,28 +2,28 @@ use std::path::Path;
 
 use crate::{ConfigOverrides, FontConfig, KeybindConfig};
 
-use super::diagnostics::{
-    config_file_diagnostic, invalid_value_diagnostic, list_key_diagnostic, unknown_key_diagnostic,
-    window_pair_diagnostic,
-};
-use super::directives::parse_directives;
+use super::diagnostics::{invalid_value_diagnostic, unknown_key_diagnostic, window_pair_diagnostic};
+use super::includes::{SourcedDirective, expand_directives};
 use super::values::*;
 use super::{Diagnostic, Directive};
 
 pub fn parse_overrides(path: &Path, source: &str) -> (ConfigOverrides, Vec<Diagnostic>) {
-    let directives = parse_directives(source);
-    build_overrides(path, &directives)
+    let (directives, mut diagnostics) = expand_directives(path, source);
+    let (overrides, mut build_diagnostics) = build_overrides(&directives);
+    diagnostics.append(&mut build_diagnostics);
+    (overrides, diagnostics)
 }
 
 pub(crate) fn build_overrides(
-    path: &Path,
-    directives: &[Directive],
+    directives: &[SourcedDirective],
 ) -> (ConfigOverrides, Vec<Diagnostic>) {
     let mut cols = None;
     let mut rows = None;
     let mut font_size = None;
     let mut theme = None;
+    let mut theme_appearance = None;
     let mut font = FontConfig::default();
+    let mut palette = Vec::new();
     let mut clipboard_read = None;
     let mut clipboard_paste_protection = None;
     let mut confirm_quit = None;
@@ -47,11 +47,13 @@ pub(crate) fn build_overrides(
     let mut background_image_repeat = None;
     let mut background_image_interval_secs = None;
     let mut scrollback_limit = None;
+    let mut image_storage_limit = None;
     let mut window_save_state = None;
     let mut macos_option_as_alt = None;
     let mut macos_titlebar_style = None;
     let mut macos_non_native_fullscreen = None;
     let mut macos_titlebar_proxy_icon = None;
+    let mut macos_applescript = None;
     let mut quick_terminal_hotkey = None;
     let mut quick_terminal_size = None;
     let mut quick_terminal_autohide = None;
@@ -67,21 +69,28 @@ pub(crate) fn build_overrides(
     let mut auto_approve = None;
     let mut keybinds = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut window_pair_path = std::path::PathBuf::new();
 
-    for directive in directives {
+    for sourced in directives {
+        let path = sourced.path.as_path();
+        let directive = &sourced.directive;
         match directive.key.as_str() {
             "window-width" => {
+                window_pair_path = path.to_path_buf();
                 cols = parse_u16(path, directive, &mut diagnostics);
             }
             "window-height" => {
+                window_pair_path = path.to_path_buf();
                 rows = parse_u16(path, directive, &mut diagnostics);
             }
             "font-size" => {
                 font_size = parse_font_size(path, directive, &mut diagnostics);
             }
-            "theme" => {
-                theme = parse_theme(path, directive, &mut diagnostics);
-            }
+            "theme" => match parse_theme(path, directive, &mut diagnostics) {
+                Some(ThemeSetting::Single(name)) => theme = Some(name),
+                Some(ThemeSetting::Pair(pair)) => theme_appearance = Some(pair),
+                None => {}
+            },
             "font-family" => {
                 parse_family(path, directive, &mut diagnostics, &mut font.families);
             }
@@ -210,6 +219,9 @@ pub(crate) fn build_overrides(
             "scrollback-limit" => {
                 scrollback_limit = parse_usize(path, directive, &mut diagnostics);
             }
+            "image-storage-limit" => {
+                image_storage_limit = parse_usize(path, directive, &mut diagnostics);
+            }
             "window-save-state" => {
                 window_save_state = parse_window_save_state(path, directive, &mut diagnostics);
             }
@@ -227,6 +239,9 @@ pub(crate) fn build_overrides(
             "macos-titlebar-proxy-icon" => {
                 macos_titlebar_proxy_icon =
                     parse_macos_titlebar_proxy_icon(path, directive, &mut diagnostics);
+            }
+            "macos-applescript" => {
+                macos_applescript = parse_bool_directive(path, directive, &mut diagnostics);
             }
             "quick-terminal-hotkey" => {
                 // `none`/`off`/`false`/empty explicitly disable the hotkey,
@@ -293,10 +308,7 @@ pub(crate) fn build_overrides(
                 }
             }
             "palette" => {
-                diagnostics.push(list_key_diagnostic(path, &directive.key));
-            }
-            "config-file" => {
-                diagnostics.push(config_file_diagnostic(path));
+                parse_palette_entry(path, directive, &mut diagnostics, &mut palette);
             }
             unknown => {
                 diagnostics.push(unknown_key_diagnostic(path, unknown));
@@ -305,7 +317,7 @@ pub(crate) fn build_overrides(
     }
 
     if cols.is_some() ^ rows.is_some() {
-        diagnostics.push(window_pair_diagnostic(path));
+        diagnostics.push(window_pair_diagnostic(&window_pair_path));
         cols = None;
         rows = None;
     } else if let (Some(width), Some(height)) = (cols, rows) {
@@ -319,7 +331,9 @@ pub(crate) fn build_overrides(
             rows,
             font_size,
             theme,
+            theme_appearance,
             font,
+            palette,
             clipboard_read,
             clipboard_paste_protection,
             confirm_quit,
@@ -343,11 +357,13 @@ pub(crate) fn build_overrides(
             background_image_repeat,
             background_image_interval_secs,
             scrollback_limit,
+            image_storage_limit,
             window_save_state,
             macos_option_as_alt,
             macos_titlebar_style,
             macos_non_native_fullscreen,
             macos_titlebar_proxy_icon,
+            macos_applescript,
             quick_terminal_hotkey,
             quick_terminal_size,
             quick_terminal_autohide,
@@ -432,11 +448,13 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "background-image-repeat"
             | "background-image-interval"
             | "scrollback-limit"
+            | "image-storage-limit"
             | "window-save-state"
             | "macos-option-as-alt"
             | "macos-titlebar-style"
             | "macos-non-native-fullscreen"
             | "macos-titlebar-proxy-icon"
+            | "macos-applescript"
             | "quick-terminal-hotkey"
             | "quick-terminal-size"
             | "quick-terminal-autohide"

@@ -688,6 +688,37 @@ fn paste_with_only_bracket_markers_emits_no_bytes() {
     assert_eq!(encode_paste("\x1b[200~\x1b[201~", true), None);
 }
 
+// applescript AC-8: `input text` bytes match the clipboard-paste encoding —
+// raw on the primary screen, ESC[200~/201~-wrapped under DECSET 2004.
+#[test]
+fn applescript_input_matches_paste_encoding() {
+    assert_eq!(
+        applescript_input_bytes("echo hi\n", false),
+        Some(b"echo hi\n".to_vec())
+    );
+    assert_eq!(
+        applescript_input_bytes("echo hi\n", true),
+        Some(b"\x1b[200~echo hi\n\x1b[201~".to_vec())
+    );
+    assert_eq!(applescript_input_bytes("", false), None);
+}
+
+// applescript Amendment 1.5: an oversized `input text` payload is truncated to
+// the cap on a UTF-8 boundary before encoding, never split mid-codepoint.
+#[test]
+fn applescript_input_caps_oversized_payload_on_char_boundary() {
+    let cap = super::paste::APPLESCRIPT_INPUT_TEXT_CAP;
+    // Multi-byte trailing chars: the cut must land on a boundary, so the
+    // encoded length is at most the cap and always valid UTF-8.
+    let text = "a".repeat(cap - 1) + "あ"; // 'あ' is 3 bytes, straddling the cap
+    let bytes = applescript_input_bytes(&text, false).expect("non-empty");
+    assert!(bytes.len() <= cap);
+    assert!(std::str::from_utf8(&bytes).is_ok());
+    // The final 'あ' is dropped whole (its bytes cross the cap), leaving only
+    // the ASCII run.
+    assert_eq!(bytes.len(), cap - 1);
+}
+
 // ── Kitty keyboard protocol encoding ───────────────────────────────
 
 /// Encode a press with the given Kitty flags (no physical key, not repeat).

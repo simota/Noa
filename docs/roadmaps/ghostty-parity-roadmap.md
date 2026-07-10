@@ -317,8 +317,9 @@ Exit criteria:
   References `REQ-MACOS-001`.
 - [ ] `IMPL-MACOS-002`: Add command palette backed by the action registry.
   References `REQ-MACOS-002`.
-- [ ] `IMPL-MACOS-003`: Add AppleScript dictionary and command bridge.
-  References `REQ-MACOS-003`.
+- [x] `IMPL-MACOS-003`: Add AppleScript dictionary and command bridge.
+  References `REQ-MACOS-003`. Implemented per `docs/specs/applescript.md`
+  (verb-first subset; object-model queries deferred).
 - [ ] `IMPL-MACOS-004`: Add secure keyboard entry controls. References
   `REQ-MACOS-004`.
 - [ ] `IMPL-MACOS-005`: Add background opacity and blur controls. References

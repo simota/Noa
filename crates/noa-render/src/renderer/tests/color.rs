@@ -42,6 +42,42 @@ fn renderer_target_format_is_srgb_stays_in_lockstep_with_surface_format() {
 }
 
 #[test]
+fn set_alpha_blending_maps_config_mode_onto_the_shader_blend_mode() {
+    // WP3: the `alpha-blending` config value selects the pipeline constant the
+    // glyph shader branches on. native/linear share the non-correcting path (0
+    // / 1) and differ only by the target's blend space (surface format);
+    // linear-corrected selects the coverage-correction path (2).
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping set_alpha_blending test");
+        return;
+    };
+    let Some(mut font) = skip_font() else {
+        return;
+    };
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8Unorm,
+        &mut font,
+        GridPadding::ZERO,
+    )
+    .expect("build renderer");
+
+    assert_eq!(renderer.blend_mode, BlendMode::Native, "default is native");
+
+    renderer.set_alpha_blending(noa_font::AlphaBlending::Linear);
+    assert_eq!(renderer.blend_mode, BlendMode::Linear);
+    assert_eq!(renderer.blend_mode.as_u32(), 1);
+
+    renderer.set_alpha_blending(noa_font::AlphaBlending::LinearCorrected);
+    assert_eq!(renderer.blend_mode, BlendMode::LinearCorrected);
+    assert_eq!(renderer.blend_mode.as_u32(), 2);
+
+    renderer.set_alpha_blending(noa_font::AlphaBlending::Native);
+    assert_eq!(renderer.blend_mode.as_u32(), 0);
+}
+
+#[test]
 fn background_opacity_scales_only_clear_alpha() {
     let base = [0.1, 0.2, 0.3, 1.0];
     // Fully opaque leaves the clear color untouched.

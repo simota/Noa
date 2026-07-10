@@ -21,6 +21,30 @@ pub fn encode_paste(text: &str, bracketed_paste: bool) -> Option<Vec<u8>> {
     }
 }
 
+/// Largest `input text` payload accepted from AppleScript in one Apple Event
+/// (applescript Amendment 1.5). Sized to the terminal's OSC 52 clipboard cap
+/// (8 MiB decoded) so a scripted write can never queue more than an equivalent
+/// clipboard paste; anything longer is truncated on a UTF-8 boundary.
+pub(crate) const APPLESCRIPT_INPUT_TEXT_CAP: usize = 8 * 1024 * 1024;
+
+/// Encode AppleScript `input text` for the pty (applescript R-7/AC-8). It
+/// travels the exact same path as a clipboard paste — bracketed when DECSET
+/// 2004 is active, raw otherwise — after first capping the payload to
+/// [`APPLESCRIPT_INPUT_TEXT_CAP`] on a UTF-8 boundary. Pure and unit-tested so
+/// the byte-level contract can be verified without an Apple Event.
+pub(crate) fn applescript_input_bytes(text: &str, bracketed_paste: bool) -> Option<Vec<u8>> {
+    let capped = if text.len() > APPLESCRIPT_INPUT_TEXT_CAP {
+        let mut end = APPLESCRIPT_INPUT_TEXT_CAP;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    } else {
+        text
+    };
+    encode_paste(capped, bracketed_paste)
+}
+
 /// Whether a paste should be confirmed before being sent
 /// (`clipboard-paste-protection`). A newline can submit a command line on its
 /// own, so unbracketed multi-line pastes are the risk. In bracketed-paste

@@ -266,13 +266,29 @@ impl App {
         true
     }
 
+    /// `WindowEvent::ThemeChanged`: the OS light/dark appearance flipped.
+    /// Only load-bearing when `theme = light:...,dark:...` is configured —
+    /// a plain `theme` name is appearance-independent.
+    pub(in crate::app) fn on_system_appearance_changed(&mut self, theme: winit::window::Theme) {
+        if self.system_appearance == theme {
+            return;
+        }
+        self.system_appearance = theme;
+        if self.config.theme_appearance.is_some() {
+            self.apply_reloaded_theme();
+        }
+    }
+
     fn apply_reloaded_theme(&mut self) {
         let overrides = theme_overrides_for_config(&self.config);
+        let palette_overrides = self.config.palette.clone();
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
-        gpu.theme =
-            crate::theme::resolve_theme_with_overrides(self.config.theme.as_deref(), &overrides);
+        gpu.theme = crate::theme::resolve_theme_with_overrides(
+            effective_theme_name(&self.config, self.system_appearance).as_deref(),
+            &overrides,
+        );
         gpu.preview_theme = None;
         crate::chrome::select_palette(gpu.theme.is_light());
         gpu.chrome_textures.reset();
@@ -280,7 +296,7 @@ impl App {
         let default_fg = gpu.theme.default_fg;
         let default_bg = gpu.theme.default_bg;
         let cursor = gpu.theme.cursor;
-        let palette = gpu.theme.palette;
+        let palette = apply_palette_overrides(gpu.theme.palette, &palette_overrides);
         for state in self.windows.values() {
             for surface in state.surfaces.values() {
                 surface
@@ -364,6 +380,7 @@ impl App {
                     self.config.clipboard_read != noa_config::ClipboardAccess::Deny;
                 terminal.title_report = self.config.title_report;
                 terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
+                terminal.set_kitty_image_limit(self.config.image_storage_limit);
             }
         }
     }
@@ -419,6 +436,8 @@ impl App {
 
 fn theme_inputs_changed(previous: &AppConfig, next: &AppConfig) -> bool {
     previous.theme != next.theme
+        || previous.theme_appearance != next.theme_appearance
+        || previous.palette != next.palette
         || previous.background != next.background
         || previous.foreground != next.foreground
         || previous.cursor_color != next.cursor_color
@@ -439,6 +458,7 @@ fn terminal_policy_inputs_changed(previous: &AppConfig, next: &AppConfig) -> boo
     previous.clipboard_read != next.clipboard_read
         || previous.title_report != next.title_report
         || previous.scrollback_limit != next.scrollback_limit
+        || previous.image_storage_limit != next.image_storage_limit
 }
 
 fn theme_overrides_for_config(config: &AppConfig) -> crate::theme::ThemeOverrides {

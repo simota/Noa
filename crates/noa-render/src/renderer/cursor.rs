@@ -31,7 +31,10 @@ pub(super) fn cursor_visual_for(snap: &FrameSnapshot) -> CursorVisual {
     }
     let is_blinking_style = matches!(
         snap.cursor.style,
-        CursorStyle::BlinkingBlock | CursorStyle::BlinkingUnderline | CursorStyle::BlinkingBar
+        CursorStyle::BlinkingBlock
+            | CursorStyle::BlinkingUnderline
+            | CursorStyle::BlinkingBar
+            | CursorStyle::BlinkingBlockHollow
     );
     if is_blinking_style && !snap.cursor_blink_visible {
         return CursorVisual::None;
@@ -40,6 +43,7 @@ pub(super) fn cursor_visual_for(snap: &FrameSnapshot) -> CursorVisual {
         CursorStyle::BlinkingBlock | CursorStyle::SteadyBlock => CursorVisual::Block,
         CursorStyle::BlinkingUnderline | CursorStyle::SteadyUnderline => CursorVisual::Underline,
         CursorStyle::BlinkingBar | CursorStyle::SteadyBar => CursorVisual::Bar,
+        CursorStyle::BlinkingBlockHollow | CursorStyle::SteadyBlockHollow => CursorVisual::Hollow,
     }
 }
 

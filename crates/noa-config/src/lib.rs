@@ -24,6 +24,9 @@ pub const DEFAULT_ROWS: u16 = 24;
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 /// `scrollback-limit` default: 10 MB of scrollback storage, matching Ghostty.
 pub const DEFAULT_SCROLLBACK_LIMIT: usize = 10_000_000;
+/// `image-storage-limit` default: 320 MB of decoded image data, matching
+/// Ghostty/Kitty's per-terminal graphics storage budget.
+pub const DEFAULT_IMAGE_STORAGE_LIMIT: usize = 320_000_000;
 /// `minimum-contrast` default: 1.0 means no automatic adjustment, matching
 /// Ghostty's contrast-ratio scale where 1 permits identical colors.
 pub const DEFAULT_MINIMUM_CONTRAST: f32 = 1.0;
@@ -88,13 +91,33 @@ pub enum SyntheticStyleMode {
     NoItalic,
 }
 
-/// `cursor-style` shape. Ghostty also has `block_hollow`, which noa does not
-/// render yet (the parser emits a diagnostic and ignores it).
+/// `theme = light:NAME,dark:NAME`: resolves at the app layer by the current
+/// system appearance (`noa-config` has no notion of macOS appearance).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeAppearancePair {
+    pub light: String,
+    pub dark: String,
+}
+
+/// One `palette = N=#rrggbb` 256-color override. Repeatable; later entries
+/// for the same index win (see [`merge_list`] wholesale-replace semantics
+/// for cross-source precedence — within one source, [`crate::parser`]
+/// simply pushes each in file order, so a later same-index entry appended
+/// downstream shadows an earlier one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaletteOverride {
+    pub index: u8,
+    pub color: Rgb,
+}
+
+/// `cursor-style` shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorShape {
     Block,
     Bar,
     Underline,
+    /// A hollow rectangle outline.
+    BlockHollow,
 }
 
 /// `background-image-position`: the 9-anchor grid used to place the image
@@ -319,7 +342,15 @@ pub struct StartupConfig {
     pub rows: u16,
     pub font_size: f32,
     pub theme: Option<String>,
+    /// `theme = light:NAME,dark:NAME`: when set, `noa-app` resolves the
+    /// active theme from this pair by system appearance instead of
+    /// [`Self::theme`] (mutually exclusive in practice — the parser only
+    /// ever sets one of the two from a single `theme` directive).
+    pub theme_appearance: Option<ThemeAppearancePair>,
     pub font: FontConfig,
+    /// `palette = N=#rrggbb` 256-color overrides, applied over the resolved
+    /// theme's palette. Repeatable; later entries win.
+    pub palette: Vec<PaletteOverride>,
     /// OSC 52 clipboard read (query) policy.
     pub clipboard_read: ClipboardAccess,
     /// Whether to confirm before pasting content that could run commands
@@ -385,6 +416,9 @@ pub struct StartupConfig {
     /// `scrollback-limit`: total bytes of scrollback storage retained before
     /// page-granular eviction (`0` disables scrollback). Ghostty default 10 MB.
     pub scrollback_limit: usize,
+    /// `image-storage-limit`: total bytes of decoded Kitty/SIXEL image data
+    /// retained before oldest-first eviction. Ghostty default 320 MB.
+    pub image_storage_limit: usize,
     /// `window-save-state`: whether the window/tab/split session is persisted
     /// and restored across launches. Default restores.
     pub window_save_state: WindowSaveState,
@@ -401,6 +435,11 @@ pub struct StartupConfig {
     /// `macos-titlebar-proxy-icon`: whether the titlebar shows the focused
     /// pane's OSC 7 pwd as a folder/file proxy icon. Default shows it.
     pub macos_titlebar_proxy_icon: MacosTitlebarProxyIcon,
+    /// `macos-applescript`: install the AppleScript / Apple Event bridge on
+    /// launch (Ghostty parity, default **true**). When false the Apple Event
+    /// handlers are never registered, so scripting the app is a no-op. No-op
+    /// outside macOS.
+    pub macos_applescript: bool,
     /// `quick-terminal-hotkey`: the global hotkey chord that toggles the
     /// drop-down quick terminal (e.g. `cmd+grave`). Defaults to
     /// [`DEFAULT_QUICK_TERMINAL_HOTKEY`]; set the config value to `none` (or
@@ -463,7 +502,9 @@ impl Default for StartupConfig {
             rows: DEFAULT_ROWS,
             font_size: DEFAULT_FONT_SIZE,
             theme: None,
+            theme_appearance: None,
             font: FontConfig::default(),
+            palette: Vec::new(),
             clipboard_read: ClipboardAccess::default(),
             clipboard_paste_protection: true,
             confirm_quit: true,
@@ -487,11 +528,13 @@ impl Default for StartupConfig {
             background_image_repeat: false,
             background_image_interval_secs: DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
             scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
+            image_storage_limit: DEFAULT_IMAGE_STORAGE_LIMIT,
             window_save_state: WindowSaveState::default(),
             macos_option_as_alt: MacosOptionAsAlt::default(),
             macos_titlebar_style: MacosTitlebarStyle::default(),
             macos_non_native_fullscreen: false,
             macos_titlebar_proxy_icon: MacosTitlebarProxyIcon::default(),
+            macos_applescript: true,
             quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
             quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
             quick_terminal_autohide: true,
@@ -517,7 +560,9 @@ pub struct ConfigOverrides {
     pub rows: Option<u16>,
     pub font_size: Option<f32>,
     pub theme: Option<String>,
+    pub theme_appearance: Option<ThemeAppearancePair>,
     pub font: FontConfig,
+    pub palette: Vec<PaletteOverride>,
     pub clipboard_read: Option<ClipboardAccess>,
     pub clipboard_paste_protection: Option<bool>,
     pub confirm_quit: Option<bool>,
@@ -541,11 +586,13 @@ pub struct ConfigOverrides {
     pub background_image_repeat: Option<bool>,
     pub background_image_interval_secs: Option<u64>,
     pub scrollback_limit: Option<usize>,
+    pub image_storage_limit: Option<usize>,
     pub window_save_state: Option<WindowSaveState>,
     pub macos_option_as_alt: Option<MacosOptionAsAlt>,
     pub macos_titlebar_style: Option<MacosTitlebarStyle>,
     pub macos_non_native_fullscreen: Option<bool>,
     pub macos_titlebar_proxy_icon: Option<MacosTitlebarProxyIcon>,
+    pub macos_applescript: Option<bool>,
     pub quick_terminal_hotkey: Option<String>,
     pub quick_terminal_size: Option<f32>,
     pub quick_terminal_autohide: Option<bool>,
@@ -571,7 +618,9 @@ impl ConfigOverrides {
             rows: higher_priority.rows.or(self.rows),
             font_size: higher_priority.font_size.or(self.font_size),
             theme: higher_priority.theme.or(self.theme),
+            theme_appearance: higher_priority.theme_appearance.or(self.theme_appearance),
             font: self.font.merge(higher_priority.font),
+            palette: merge_list(self.palette, higher_priority.palette),
             clipboard_read: higher_priority.clipboard_read.or(self.clipboard_read),
             clipboard_paste_protection: higher_priority
                 .clipboard_paste_protection
@@ -617,6 +666,9 @@ impl ConfigOverrides {
                 .background_image_interval_secs
                 .or(self.background_image_interval_secs),
             scrollback_limit: higher_priority.scrollback_limit.or(self.scrollback_limit),
+            image_storage_limit: higher_priority
+                .image_storage_limit
+                .or(self.image_storage_limit),
             window_save_state: higher_priority.window_save_state.or(self.window_save_state),
             macos_option_as_alt: higher_priority
                 .macos_option_as_alt
@@ -630,6 +682,7 @@ impl ConfigOverrides {
             macos_titlebar_proxy_icon: higher_priority
                 .macos_titlebar_proxy_icon
                 .or(self.macos_titlebar_proxy_icon),
+            macos_applescript: higher_priority.macos_applescript.or(self.macos_applescript),
             quick_terminal_hotkey: higher_priority
                 .quick_terminal_hotkey
                 .or(self.quick_terminal_hotkey),
@@ -667,7 +720,13 @@ impl ConfigOverrides {
             rows: self.rows.unwrap_or(base.rows),
             font_size: self.font_size.unwrap_or(base.font_size),
             theme: self.theme.or(base.theme),
+            theme_appearance: self.theme_appearance.or(base.theme_appearance),
             font: self.font.apply_to(base.font),
+            palette: if self.palette.is_empty() {
+                base.palette
+            } else {
+                self.palette
+            },
             clipboard_read: self.clipboard_read.unwrap_or(base.clipboard_read),
             clipboard_paste_protection: self
                 .clipboard_paste_protection
@@ -705,6 +764,9 @@ impl ConfigOverrides {
                 .background_image_interval_secs
                 .unwrap_or(base.background_image_interval_secs),
             scrollback_limit: self.scrollback_limit.unwrap_or(base.scrollback_limit),
+            image_storage_limit: self
+                .image_storage_limit
+                .unwrap_or(base.image_storage_limit),
             window_save_state: self.window_save_state.unwrap_or(base.window_save_state),
             macos_option_as_alt: self.macos_option_as_alt.unwrap_or(base.macos_option_as_alt),
             macos_titlebar_style: self
@@ -716,6 +778,7 @@ impl ConfigOverrides {
             macos_titlebar_proxy_icon: self
                 .macos_titlebar_proxy_icon
                 .unwrap_or(base.macos_titlebar_proxy_icon),
+            macos_applescript: self.macos_applescript.unwrap_or(base.macos_applescript),
             quick_terminal_hotkey: self.quick_terminal_hotkey.or(base.quick_terminal_hotkey),
             quick_terminal_size: self.quick_terminal_size.unwrap_or(base.quick_terminal_size),
             quick_terminal_autohide: self
@@ -883,7 +946,9 @@ mod tests {
                 rows: 24,
                 font_size: 14.0,
                 theme: None,
+                theme_appearance: None,
                 font: FontConfig::default(),
+                palette: Vec::new(),
                 clipboard_read: ClipboardAccess::Ask,
                 clipboard_paste_protection: true,
                 confirm_quit: true,
@@ -907,11 +972,13 @@ mod tests {
                 background_image_repeat: false,
                 background_image_interval_secs: DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
                 scrollback_limit: DEFAULT_SCROLLBACK_LIMIT,
+                image_storage_limit: DEFAULT_IMAGE_STORAGE_LIMIT,
                 window_save_state: WindowSaveState::default(),
                 macos_option_as_alt: MacosOptionAsAlt::default(),
                 macos_titlebar_style: MacosTitlebarStyle::default(),
                 macos_non_native_fullscreen: false,
                 macos_titlebar_proxy_icon: MacosTitlebarProxyIcon::default(),
+                macos_applescript: true,
                 quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
                 quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
                 quick_terminal_autohide: true,
@@ -1202,6 +1269,41 @@ font-size = 15.5
     }
 
     #[test]
+    fn macos_applescript_parses_and_defaults_true() {
+        let (overrides, diagnostics) = parse_overrides(test_path(), "macos-applescript = false");
+        assert!(diagnostics.is_empty());
+        assert_eq!(overrides.macos_applescript, Some(false));
+
+        // Default is on (Ghostty parity): unset config leaves the bridge enabled.
+        let default = ConfigOverrides::default().apply_to(StartupConfig::default());
+        assert!(default.macos_applescript);
+
+        // A file `false` survives a CLI that leaves the key unset, and a CLI
+        // `false` still wins over a file `true` (precedence via `.or()`).
+        let file = ConfigOverrides {
+            macos_applescript: Some(false),
+            ..Default::default()
+        };
+        let resolved = file
+            .clone()
+            .merge(ConfigOverrides::default())
+            .apply_to(StartupConfig::default());
+        assert!(!resolved.macos_applescript);
+
+        let cli = ConfigOverrides {
+            macos_applescript: Some(false),
+            ..Default::default()
+        };
+        let resolved = ConfigOverrides {
+            macos_applescript: Some(true),
+            ..Default::default()
+        }
+        .merge(cli)
+        .apply_to(StartupConfig::default());
+        assert!(!resolved.macos_applescript);
+    }
+
+    #[test]
     fn cli_overrides_win_for_appearance_keys() {
         let file = ConfigOverrides {
             window_padding_x: Some(2.0),
@@ -1288,16 +1390,30 @@ font-size = 15.5
     }
 
     #[test]
-    fn light_dark_syntax_is_rejected() {
+    fn light_dark_syntax_parses_into_theme_appearance() {
         let (overrides, diagnostics) = parse_overrides(test_path(), "theme = light:Foo,dark:Bar");
 
         assert_eq!(overrides.theme, None);
+        assert_eq!(
+            overrides.theme_appearance,
+            Some(ThemeAppearancePair {
+                light: "Foo".to_string(),
+                dark: "Bar".to_string(),
+            })
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn light_dark_syntax_rejects_a_missing_side() {
+        let (overrides, diagnostics) = parse_overrides(test_path(), "theme = light:Foo");
+
+        assert_eq!(overrides.theme, None);
+        assert_eq!(overrides.theme_appearance, None);
         assert_eq!(diagnostics.len(), 1);
         let message = &diagnostics[0].message;
         assert!(message.contains("light:"));
         assert!(message.contains("dark:"));
-        assert!(message.contains("not supported"));
-        assert!(message.contains("single theme name"));
     }
 
     #[test]

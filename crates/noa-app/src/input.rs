@@ -16,7 +16,7 @@ pub(crate) use ime::ImeState;
 use key::encode_key;
 pub(crate) use key::encode_key_with_modes;
 pub use paste::encode_paste;
-pub(crate) use paste::paste_is_unsafe;
+pub(crate) use paste::{applescript_input_bytes, paste_is_unsafe};
 #[cfg(test)]
 use text::encode_text;
 

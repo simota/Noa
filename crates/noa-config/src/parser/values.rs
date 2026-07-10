@@ -5,8 +5,8 @@ use noa_core::Rgb;
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, CursorShape,
     FontFeature, FontVariation, MAX_SIDEBAR_PREVIEW_LINES, MIN_BACKGROUND_IMAGE_INTERVAL_SECS,
-    MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle, ResizeOverlay,
-    SyntheticStyleMode, WindowSaveState,
+    MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle, PaletteOverride, ResizeOverlay,
+    SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
 };
 
 use super::diagnostics::*;
@@ -63,17 +63,57 @@ pub(super) fn parse_font_size(
     Some(parsed)
 }
 
+/// Outcome of parsing the `theme` directive: either a single theme name, or
+/// a `light:X,dark:Y` appearance-paired pair. `None` covers both "key
+/// absent" and "malformed pair" (a diagnostic is pushed for the latter).
+pub(super) enum ThemeSetting {
+    Single(String),
+    Pair(ThemeAppearancePair),
+}
+
 pub(super) fn parse_theme(
     path: &Path,
     directive: &Directive,
     diagnostics: &mut Vec<Diagnostic>,
-) -> Option<String> {
+) -> Option<ThemeSetting> {
     let value = directive.value.as_deref()?;
     if value.starts_with("light:") || value.starts_with("dark:") {
-        diagnostics.push(theme_pair_diagnostic(path));
-        return None;
+        return match parse_theme_pair(value) {
+            Some(pair) => Some(ThemeSetting::Pair(pair)),
+            None => {
+                diagnostics.push(theme_pair_diagnostic(path));
+                None
+            }
+        };
     }
-    Some(value.to_string())
+    Some(ThemeSetting::Single(value.to_string()))
+}
+
+/// Parse `light:NAME,dark:NAME` (either order, both required, comma-
+/// separated) into a [`ThemeAppearancePair`].
+fn parse_theme_pair(value: &str) -> Option<ThemeAppearancePair> {
+    let mut light = None;
+    let mut dark = None;
+    for part in value.split(',') {
+        let part = part.trim();
+        if let Some(name) = part.strip_prefix("light:") {
+            if name.is_empty() {
+                return None;
+            }
+            light = Some(name.to_string());
+        } else if let Some(name) = part.strip_prefix("dark:") {
+            if name.is_empty() {
+                return None;
+            }
+            dark = Some(name.to_string());
+        } else {
+            return None;
+        }
+    }
+    Some(ThemeAppearancePair {
+        light: light?,
+        dark: dark?,
+    })
 }
 
 pub(super) fn parse_family(
@@ -181,14 +221,8 @@ pub(super) fn parse_alpha_blending(
     let value = directive.value.as_deref()?;
     match value {
         "native" => Some(AlphaBlendingMode::Native),
-        "linear" => {
-            diagnostics.push(alpha_blending_fallback_diagnostic(path, value));
-            Some(AlphaBlendingMode::Linear)
-        }
-        "linear-corrected" => {
-            diagnostics.push(alpha_blending_fallback_diagnostic(path, value));
-            Some(AlphaBlendingMode::LinearCorrected)
-        }
+        "linear" => Some(AlphaBlendingMode::Linear),
+        "linear-corrected" => Some(AlphaBlendingMode::LinearCorrected),
         other => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
             None
@@ -484,6 +518,33 @@ pub(super) fn parse_color(
     }
 }
 
+/// Parse one `palette = N=#rrggbb` directive (index `0..=255`, hex color)
+/// and push it onto `target`. Repeatable; a later same-index entry shadows
+/// an earlier one when the palette is applied (last wins, in file order).
+pub(super) fn parse_palette_entry(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+    target: &mut Vec<PaletteOverride>,
+) {
+    let Some(value) = directive.value.as_deref() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, ""));
+        return;
+    };
+    let Some((index_str, color_str)) = value.split_once('=') else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return;
+    };
+    let (Ok(index), Some(color)) = (
+        index_str.trim().parse::<u8>(),
+        rgb_from_hex(color_str.trim()),
+    ) else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return;
+    };
+    target.push(PaletteOverride { index, color });
+}
+
 fn rgb_from_hex(value: &str) -> Option<Rgb> {
     let hex = value.strip_prefix('#').unwrap_or(value);
     if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -505,10 +566,7 @@ pub(super) fn parse_cursor_style(
         "block" => Some(CursorShape::Block),
         "bar" => Some(CursorShape::Bar),
         "underline" => Some(CursorShape::Underline),
-        "block_hollow" => {
-            diagnostics.push(cursor_style_unsupported_diagnostic(path, value));
-            None
-        }
+        "block_hollow" => Some(CursorShape::BlockHollow),
         other => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
             None

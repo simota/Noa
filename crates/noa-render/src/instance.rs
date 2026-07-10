@@ -64,7 +64,37 @@ pub struct Uniforms {
     grid_size: [f32; 2],
     cursor_pos: [f32; 2],
     min_contrast: f32,
-    _pad: [f32; 3],
+    /// Coverage-blend mode (see [`BlendMode`]): `0` native, `1` linear, `2`
+    /// linear-corrected. Only `2` changes the shader (glyph-coverage
+    /// correction); `0`/`1` differ only by the target's blend space, which is
+    /// selected by the surface format, not here.
+    blend_mode: u32,
+    _pad: [f32; 2],
+}
+
+/// Coverage-blend mode encoded into [`Uniforms::blend_mode`]. Kept as a small
+/// render-side enum (rather than depending on `noa_font::AlphaBlending`
+/// directly at the uniform layer) so the GPU encoding lives next to the field
+/// it feeds; [`crate::Renderer::set_alpha_blending`] maps the config enum onto
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    #[default]
+    Native,
+    Linear,
+    LinearCorrected,
+}
+
+impl BlendMode {
+    /// The `u32` written into [`Uniforms::blend_mode`] (mirrors the `blend_mode`
+    /// switch in `shaders/cell.wgsl`).
+    pub fn as_u32(self) -> u32 {
+        match self {
+            BlendMode::Native => 0,
+            BlendMode::Linear => 1,
+            BlendMode::LinearCorrected => 2,
+        }
+    }
 }
 
 /// Inputs for the single per-pane uniform population path.
@@ -75,6 +105,7 @@ pub struct PaneUniformParams {
     pub grid_padding: GridPadding,
     pub cell_size: CellSize,
     pub bg_color: [f32; 4],
+    pub blend_mode: BlendMode,
 }
 
 /// Populate uniform data for one pane.
@@ -121,7 +152,8 @@ pub fn populate_pane_uniform(params: PaneUniformParams) -> Uniforms {
         ],
         cursor_pos: [0.0, 0.0],
         min_contrast: 0.0,
-        _pad: [0.0; 3],
+        blend_mode: params.blend_mode.as_u32(),
+        _pad: [0.0; 2],
     }
 }
 
@@ -156,6 +188,7 @@ mod tests {
             grid_padding,
             cell_size,
             bg_color,
+            blend_mode: BlendMode::Native,
         });
         let right = populate_pane_uniform(PaneUniformParams {
             pane_rect: PaneRect::new(91, 0, 109, 100),
@@ -163,6 +196,7 @@ mod tests {
             grid_padding,
             cell_size,
             bg_color,
+            blend_mode: BlendMode::Native,
         });
 
         assert_eq!(left.screen_size, [200.0, 100.0]);
@@ -173,5 +207,32 @@ mod tests {
         assert_eq!(right.grid_size, [9.7, 23.0]);
         assert_eq!(left.bg_color, bg_color);
         assert_eq!(right.bg_color, bg_color);
+    }
+
+    #[test]
+    fn blend_mode_is_encoded_into_the_uniform() {
+        let params = PaneUniformParams {
+            pane_rect: PaneRect::new(0, 0, 90, 100),
+            window_size: PixelSize { w: 200, h: 100 },
+            grid_padding: GridPadding::new(0.0, 0.0, 0.0, 0.0),
+            cell_size: CellSize { w: 10.0, h: 4.0 },
+            bg_color: [0.0, 0.0, 0.0, 1.0],
+            blend_mode: BlendMode::LinearCorrected,
+        };
+        assert_eq!(populate_pane_uniform(params).blend_mode, 2);
+
+        let native = PaneUniformParams {
+            blend_mode: BlendMode::Native,
+            ..params
+        };
+        assert_eq!(populate_pane_uniform(native).blend_mode, 0);
+        assert_eq!(
+            populate_pane_uniform(PaneUniformParams {
+                blend_mode: BlendMode::Linear,
+                ..params
+            })
+            .blend_mode,
+            1
+        );
     }
 }

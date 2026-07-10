@@ -426,7 +426,8 @@ impl App {
         let (surface_config, renderer) = {
             let gpu = self.gpu.as_mut()?;
             let caps = surface.get_capabilities(&gpu.adapter);
-            let surface_format = preferred_surface_format(&caps.formats);
+            let alpha_blending = alpha_blending_mode(&self.config.font);
+            let surface_format = preferred_surface_format(&caps.formats, alpha_blending);
             let size = window.inner_size();
             let surface_config = wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -456,6 +457,7 @@ impl App {
             )
             .ok()?;
             renderer.set_background_opacity(self.config.background_opacity);
+            renderer.set_alpha_blending(alpha_blending);
             renderer.set_background_image(
                 &gpu.device,
                 &gpu.queue,

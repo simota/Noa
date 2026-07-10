@@ -17,11 +17,18 @@ pub struct AppConfig {
     pub rows: u16,
     pub font_size: f32,
     pub theme: Option<String>,
+    /// `theme = light:NAME,dark:NAME`: when set, [`effective_theme_name`]
+    /// picks `light` or `dark` by the current system appearance instead of
+    /// [`Self::theme`].
+    pub theme_appearance: Option<noa_config::ThemeAppearancePair>,
     /// Parsed font settings from `noa-config` (ADR-R1: a distinct type from
     /// `noa_font::FontConfig` — mapped to it via [`font_config_from_noa_config`]
     /// right before each `FontGrid::new` call, keeping `noa-font` free of any
     /// `noa-config`/`dirs` dependency).
     pub font: noa_config::FontConfig,
+    /// `palette = N=#rrggbb` 256-color overrides, applied over the resolved
+    /// theme's palette (last entry per index wins).
+    pub palette: Vec<noa_config::PaletteOverride>,
     /// OSC 52 clipboard read (query) policy.
     pub clipboard_read: noa_config::ClipboardAccess,
     /// Whether to confirm before pasting content that could run commands.
@@ -78,6 +85,10 @@ pub struct AppConfig {
     /// before page-granular eviction (`0` disables scrollback). Applied to each
     /// new terminal at surface creation.
     pub scrollback_limit: usize,
+    /// `image-storage-limit`: total bytes of decoded Kitty/SIXEL image data
+    /// retained per pane before oldest-first eviction. Applied to each new
+    /// terminal at surface creation.
+    pub image_storage_limit: usize,
     /// `window-save-state`: whether the window/tab/split session is saved on
     /// exit and restored on launch. `never` disables both.
     pub window_save_state: noa_config::WindowSaveState,
@@ -93,6 +104,10 @@ pub struct AppConfig {
     /// `macos-titlebar-proxy-icon`: whether the titlebar shows the focused
     /// pane's OSC 7 pwd as a folder/file proxy icon.
     pub macos_titlebar_proxy_icon: noa_config::MacosTitlebarProxyIcon,
+    /// `macos-applescript`: install the AppleScript / Apple Event bridge on
+    /// launch (default true). When false the Apple Event handlers are never
+    /// registered.
+    pub macos_applescript: bool,
     /// Set when the user passed an explicit grid size on the CLI (`--cols` /
     /// `--rows`). Session restore is suppressed in that case so the requested
     /// dimensions win over the saved topology (Ghostty parity).
@@ -155,7 +170,9 @@ impl AppConfig {
             rows: config.rows,
             font_size: config.font_size,
             theme: config.theme,
+            theme_appearance: config.theme_appearance,
             font: config.font,
+            palette: config.palette,
             clipboard_read: config.clipboard_read,
             clipboard_paste_protection: config.clipboard_paste_protection,
             confirm_quit: config.confirm_quit,
@@ -179,11 +196,13 @@ impl AppConfig {
             background_image_repeat: config.background_image_repeat,
             background_image_interval_secs: config.background_image_interval_secs,
             scrollback_limit: config.scrollback_limit,
+            image_storage_limit: config.image_storage_limit,
             window_save_state: config.window_save_state,
             macos_option_as_alt: config.macos_option_as_alt,
             macos_titlebar_style: config.macos_titlebar_style,
             macos_non_native_fullscreen: config.macos_non_native_fullscreen,
             macos_titlebar_proxy_icon: config.macos_titlebar_proxy_icon,
+            macos_applescript: config.macos_applescript,
             cli_grid_override,
             cli_overrides,
             quick_terminal_hotkey: config.quick_terminal_hotkey,
@@ -224,12 +243,7 @@ pub(super) fn font_config_from_noa_config(cfg: &noa_config::FontConfig) -> noa_f
             italic: false,
         },
     };
-    let alpha_blending = match cfg.alpha_blending {
-        None | Some(noa_config::AlphaBlendingMode::Native) => noa_font::AlphaBlending::Native,
-        Some(
-            noa_config::AlphaBlendingMode::Linear | noa_config::AlphaBlendingMode::LinearCorrected,
-        ) => noa_font::AlphaBlending::LinearFallback,
-    };
+    let alpha_blending = alpha_blending_mode(cfg);
 
     noa_font::FontConfig {
         families: cfg.families.clone(),
@@ -252,6 +266,20 @@ pub(super) fn font_config_from_noa_config(cfg: &noa_config::FontConfig) -> noa_f
         alpha_blending,
         thicken: cfg.thicken.unwrap_or(default.thicken),
         thicken_strength: cfg.thicken_strength.unwrap_or(default.thicken_strength),
+    }
+}
+
+/// Resolve the `alpha-blending` coverage-blend mode (WP3). Used both when
+/// building the `FontGrid` config and when choosing the surface format
+/// (`linear`/`linear-corrected` want an sRGB target so the fixed-function blend
+/// unit blends in linear space — see `preferred_surface_format`).
+pub(crate) fn alpha_blending_mode(cfg: &noa_config::FontConfig) -> noa_font::AlphaBlending {
+    match cfg.alpha_blending {
+        None | Some(noa_config::AlphaBlendingMode::Native) => noa_font::AlphaBlending::Native,
+        Some(noa_config::AlphaBlendingMode::Linear) => noa_font::AlphaBlending::Linear,
+        Some(noa_config::AlphaBlendingMode::LinearCorrected) => {
+            noa_font::AlphaBlending::LinearCorrected
+        }
     }
 }
 
@@ -298,7 +326,39 @@ pub(super) fn resolve_cursor_style(
         (noa_config::CursorShape::Bar, false) => CursorStyle::SteadyBar,
         (noa_config::CursorShape::Underline, true) => CursorStyle::BlinkingUnderline,
         (noa_config::CursorShape::Underline, false) => CursorStyle::SteadyUnderline,
+        (noa_config::CursorShape::BlockHollow, true) => CursorStyle::BlinkingBlockHollow,
+        (noa_config::CursorShape::BlockHollow, false) => CursorStyle::SteadyBlockHollow,
     })
+}
+
+/// Apply `palette = N=#rrggbb` overrides over a resolved theme's 256-color
+/// palette. Repeatable; a later entry for the same index wins (Ghostty
+/// parity — the palette is one flat last-wins keyspace, unlike the font
+/// lists' whole-source replace semantics).
+pub(super) fn apply_palette_overrides(
+    mut palette: [noa_core::Rgb; 256],
+    overrides: &[noa_config::PaletteOverride],
+) -> [noa_core::Rgb; 256] {
+    for entry in overrides {
+        palette[entry.index as usize] = entry.color;
+    }
+    palette
+}
+
+/// Resolve the theme name to actually look up: a `theme = light:X,dark:Y`
+/// pair picks `X` or `Y` by `appearance`; otherwise the plain `theme` name
+/// (or `None`, keeping the built-in default) is used unchanged.
+pub(super) fn effective_theme_name(
+    config: &AppConfig,
+    appearance: winit::window::Theme,
+) -> Option<String> {
+    match &config.theme_appearance {
+        Some(pair) => Some(match appearance {
+            winit::window::Theme::Light => pair.light.clone(),
+            winit::window::Theme::Dark => pair.dark.clone(),
+        }),
+        None => config.theme.clone(),
+    }
 }
 
 /// Map the parsed `background-image-fit` onto the render-side enum (the render

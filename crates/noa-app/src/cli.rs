@@ -195,7 +195,14 @@ fn show_config_output(config: &StartupConfig) -> String {
     push_line(&mut out, "window-width", &config.cols.to_string());
     push_line(&mut out, "window-height", &config.rows.to_string());
     push_line(&mut out, "font-size", &config.font_size.to_string());
-    push_line(&mut out, "theme", config.theme.as_deref().unwrap_or(""));
+    match &config.theme_appearance {
+        Some(pair) => push_line(
+            &mut out,
+            "theme",
+            &format!("light:{},dark:{}", pair.light, pair.dark),
+        ),
+        None => push_line(&mut out, "theme", config.theme.as_deref().unwrap_or("")),
+    }
 
     push_family_lines(&mut out, "font-family", &config.font.families);
     push_family_lines(&mut out, "font-family-bold", &config.font.families_bold);
@@ -289,6 +296,16 @@ fn show_config_output(config: &StartupConfig) -> String {
         "selection-background",
         config.selection_background,
     );
+    push_repeatable_lines(
+        &mut out,
+        "palette",
+        config.palette.iter().map(|entry| {
+            format!(
+                "{}=#{:02x}{:02x}{:02x}",
+                entry.index, entry.color.r, entry.color.g, entry.color.b
+            )
+        }),
+    );
     push_line(
         &mut out,
         "minimum-contrast",
@@ -302,6 +319,7 @@ fn show_config_output(config: &StartupConfig) -> String {
             Some(CursorShape::Block) => "block",
             Some(CursorShape::Bar) => "bar",
             Some(CursorShape::Underline) => "underline",
+            Some(CursorShape::BlockHollow) => "block_hollow",
         },
     );
     push_optional_line(&mut out, "cursor-style-blink", config.cursor_style_blink);
@@ -319,6 +337,11 @@ fn show_config_output(config: &StartupConfig) -> String {
         &mut out,
         "scrollback-limit",
         &config.scrollback_limit.to_string(),
+    );
+    push_line(
+        &mut out,
+        "image-storage-limit",
+        &config.image_storage_limit.to_string(),
     );
     push_line(
         &mut out,

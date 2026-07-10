@@ -83,6 +83,13 @@ impl App {
                 .expect("failed to create window"),
         );
         let window_scale_factor = window.scale_factor();
+        // Seed the system-appearance snapshot from the first real window we
+        // get a chance to ask (only meaningfully read once, at startup — a
+        // `theme = light:...,dark:...` pair's initial pick depends on it;
+        // live changes arrive via `WindowEvent::ThemeChanged` afterward).
+        if let Some(theme) = window.theme() {
+            self.system_appearance = theme;
+        }
         if let Some(font) = first_font.as_mut()
             && (window_scale_factor - monitor_scale_factor).abs() > f64::EPSILON
         {
@@ -184,7 +191,7 @@ impl App {
                 sidebar_font_atlases: noa_render::GlyphAtlasCache::default(),
                 theme: {
                     let theme = crate::theme::resolve_theme_with_overrides(
-                        self.config.theme.as_deref(),
+                        effective_theme_name(&self.config, self.system_appearance).as_deref(),
                         &self.theme_overrides(),
                     );
                     // Chrome (sidebar/overview) polarity follows the terminal
@@ -216,7 +223,8 @@ impl App {
         let (surface_config, renderer) = {
             let gpu = self.gpu.as_mut().expect("gpu initialized");
             let caps = surface.get_capabilities(&gpu.adapter);
-            let surface_format = preferred_surface_format(&caps.formats);
+            let alpha_blending = alpha_blending_mode(&self.config.font);
+            let surface_format = preferred_surface_format(&caps.formats, alpha_blending);
 
             let size = window.inner_size();
             let surface_config = wgpu::SurfaceConfiguration {
@@ -254,6 +262,7 @@ impl App {
                 )
             });
             renderer.set_background_opacity(self.config.background_opacity);
+            renderer.set_alpha_blending(alpha_blending);
             renderer.set_background_image(
                 &gpu.device,
                 &gpu.queue,
@@ -354,6 +363,37 @@ impl App {
         self.request_overview_redraw();
         self.persist_session();
         Ok(window_id)
+    }
+
+    /// Spawn a tab for AppleScript `new window` / `new tab` (applescript R-3).
+    /// `cwd` forces the initial pane's directory when set (otherwise the tab
+    /// inherits the focused shell's cwd like an interactive New Tab); `command`
+    /// is written to the new pane's pty followed by a newline so it runs in the
+    /// freshly spawned surface.
+    pub(super) fn spawn_applescript_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_target: crate::events::AppleScriptSpawnTarget,
+        cwd: Option<String>,
+        command: Option<String>,
+    ) {
+        let target = match window_target {
+            crate::events::AppleScriptSpawnTarget::CurrentWindow => SpawnTarget::CurrentWindow,
+            crate::events::AppleScriptSpawnTarget::NewWindow => SpawnTarget::NewWindow,
+        };
+        // `Some(..)` forces the cwd; `None` keeps the inherit-from-focused-shell
+        // behavior of an ordinary New Tab/New Window.
+        let cwd_override = cwd.map(Some);
+        match self.spawn_tab_with_cwd(event_loop, target, cwd_override) {
+            Ok(window_id) => {
+                if let Some(command) = command.filter(|command| !command.is_empty()) {
+                    let mut bytes = command.into_bytes();
+                    bytes.push(b'\n');
+                    self.write_pty_bytes(window_id, &bytes);
+                }
+            }
+            Err(err) => log::warn!("failed to spawn AppleScript tab: {err:#}"),
+        }
     }
 
     fn tab_window_attributes(
@@ -461,6 +501,7 @@ impl App {
             self.config.clipboard_read != noa_config::ClipboardAccess::Deny;
         terminal.title_report = self.config.title_report;
         terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
+        terminal.set_kitty_image_limit(self.config.image_storage_limit);
         if let Some(gpu) = self.gpu.as_ref() {
             // Deliberately `gpu.theme` directly, not the `active_theme()`
             // resolver: a live theme preview must never reach a `Terminal`'s
@@ -469,7 +510,7 @@ impl App {
                 gpu.theme.default_fg,
                 gpu.theme.default_bg,
                 gpu.theme.cursor,
-                gpu.theme.palette,
+                apply_palette_overrides(gpu.theme.palette, &self.config.palette),
             );
         }
         let terminal = Arc::new(Mutex::new(terminal));

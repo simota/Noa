@@ -28,6 +28,26 @@ pub(crate) fn toggle_native_fullscreen(window: &Window) -> bool {
     toggle_native_fullscreen_impl(window)
 }
 
+/// Bring the whole app to the front (`activateIgnoringOtherApps:`), for the
+/// AppleScript application-level `activate` verb (applescript R-5). A no-op off
+/// macOS.
+#[cfg(target_os = "macos")]
+pub(crate) fn activate_app() {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    // SAFETY: runs on the main event-loop thread; `NSApplication` is a live
+    // singleton and the pointer is nil-checked before the selector is sent.
+    unsafe {
+        if let Some(app_class) = AnyClass::get(c"NSApplication") {
+            let app: *mut AnyObject = msg_send![app_class, sharedApplication];
+            if !app.is_null() {
+                let _: () = msg_send![app, activateIgnoringOtherApps: true];
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn toggle_native_fullscreen_impl(window: &Window) -> bool {
     use objc2::msg_send;

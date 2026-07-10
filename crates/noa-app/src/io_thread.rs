@@ -562,6 +562,52 @@ enum PtyDrainTerminalEvent {
     Disconnected,
 }
 
+/// Debug pty capture (`NOA_PTY_CAPTURE=<prefix>`): open this pane's capture
+/// file, `<prefix>.<window>-<pane>.bin`. Every raw byte the io thread feeds
+/// into the terminal is appended verbatim, so a rendering-fidelity report can
+/// be replayed offline with `cargo run -p noa-grid --example replay -- <file>
+/// <cols> <rows>` and diffed against the on-screen state. One file per pane —
+/// panes must not interleave into a shared stream or the replay is garbage.
+fn open_pty_capture(window_id: winit::window::WindowId, pane_id: PaneId) -> Option<std::fs::File> {
+    let prefix = std::env::var_os("NOA_PTY_CAPTURE")?;
+    let path = std::path::PathBuf::from(format!(
+        "{}.{}-{}.bin",
+        prefix.to_string_lossy(),
+        u64::from(window_id),
+        pane_id.get()
+    ));
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => Some(file),
+        Err(err) => {
+            log::warn!("NOA_PTY_CAPTURE: cannot open {}: {err}", path.display());
+            None
+        }
+    }
+}
+
+/// Append one feed batch to the capture file. On a write error the capture is
+/// dropped (returns `false`) after a warning — a broken debug tap must not
+/// stall or kill the io thread.
+fn capture_pty_bytes<'a>(
+    file: &mut std::fs::File,
+    first: &[u8],
+    rest: impl IntoIterator<Item = &'a [u8]>,
+) -> bool {
+    use std::io::Write as _;
+    let result = file
+        .write_all(first)
+        .and_then(|()| rest.into_iter().try_for_each(|chunk| file.write_all(chunk)));
+    if let Err(err) = result {
+        log::warn!("NOA_PTY_CAPTURE: write failed, disabling capture: {err}");
+        return false;
+    }
+    true
+}
+
 fn drain_queued_pty_data(
     rx: &Receiver<noa_pty::PtyEvent>,
     chunks: &mut Vec<noa_pty::PtyData>,
@@ -730,6 +776,7 @@ pub fn spawn(
     let join = std::thread::spawn(move || {
         let writer = pty.writer();
         let mut stream = noa_vt::Stream::new();
+        let mut pty_capture = open_pty_capture(window_id, pane_id);
         let mut last_overview_publish: Option<Instant> = None;
         let mut last_sidebar_publish: Option<Instant> = None;
         let mut auto_approve_state = AutoApproveState::default();
@@ -804,6 +851,15 @@ pub fn spawn(
                     let mut drained = Vec::new();
                     let terminal_event =
                         drain_queued_pty_data(pty.event_rx(), &mut drained, bytes.len());
+                    if let Some(file) = pty_capture.as_mut()
+                        && !capture_pty_bytes(
+                            file,
+                            bytes.as_ref(),
+                            drained.iter().map(|chunk| chunk.as_ref()),
+                        )
+                    {
+                        pty_capture = None;
+                    }
                     let mut output = feed_terminal_batch(
                         &terminal,
                         &mut stream,
@@ -1443,6 +1499,32 @@ mod tests {
             output.overview_publish_pending.is_none(),
             "not-visible must not owe a trailing flush either"
         );
+    }
+
+    #[test]
+    fn capture_pty_bytes_appends_batches_verbatim() {
+        let dir = std::env::temp_dir().join(format!("noa-capture-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cap.bin");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+
+        assert!(capture_pty_bytes(
+            &mut file,
+            b"first",
+            [b"a".as_ref(), b"b".as_ref()]
+        ));
+        assert!(capture_pty_bytes(
+            &mut file,
+            b"|second",
+            std::iter::empty::<&[u8]>()
+        ));
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"firstab|second");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

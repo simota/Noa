@@ -19,6 +19,7 @@ mod input;
 mod io_thread;
 mod link_open;
 mod localtime;
+mod macos_applescript;
 mod macos_blur;
 mod macos_hotkey;
 #[cfg(target_os = "macos")]

@@ -1056,7 +1056,7 @@ fn sidebar_width_rejects_negative_and_non_numeric() {
 
 #[test]
 fn sidebar_preview_lines_rejects_negative_non_numeric_and_too_large() {
-    for value in ["-1", "many", "11"] {
+    for value in ["-1", "many", "21"] {
         let (overrides, diagnostics) =
             parse_overrides(path(), &format!("sidebar-preview-lines = {value}"));
 

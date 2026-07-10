@@ -40,7 +40,7 @@ pub const DEFAULT_SIDEBAR_WIDTH: f32 = 360.0;
 pub const DEFAULT_SIDEBAR_PREVIEW_LINES: usize = 5;
 /// Largest supported `sidebar-preview-lines` value. Higher values make each
 /// card too tall for the sidebar's dense session-list use case.
-pub const MAX_SIDEBAR_PREVIEW_LINES: usize = 10;
+pub const MAX_SIDEBAR_PREVIEW_LINES: usize = 20;
 /// `background-image-interval` default: rotate directory-backed background
 /// images every 30 seconds.
 pub const DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS: u64 = 30;

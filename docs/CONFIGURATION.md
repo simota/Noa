@@ -135,7 +135,7 @@ font-variation = wght=550
 | `sidebar-enabled` | `true`, `false` | `false` | 新規 window の sidebar 初期表示 |
 | `sidebar-width` | `0` 以上の有限小数 | `360` | sidebar 幅 (points) |
 | `sidebar-hotkey` | global hotkey chord、または `none` / `off` / `false` | なし | Sidebar の system-wide hotkey。空値も無効化 |
-| `sidebar-preview-lines` | `0..=10` の整数 | `5` | card に表示する末尾行数。`0` は preview なし |
+| `sidebar-preview-lines` | `0..=20` の整数 | `5` | card に表示する末尾行数。`0` は preview なし |
 
 global hotkey chord の構文と対応キーは [KEYBINDINGS.md](KEYBINDINGS.md#グローバルシステムホットキー)
 を参照。

@@ -51,6 +51,30 @@ yet. Replace it with the published checksum after the first release. Release
 artifacts are currently ad-hoc signed; Developer ID signing and notarization
 are still required for a prompt-free Gatekeeper experience after download.
 
+## Releasing
+
+Maintainers can validate and publish the version declared in `Cargo.toml` and
+`Casks/noa.rb` with the release script:
+
+```bash
+scripts/release.sh --dry-run
+scripts/release.sh
+```
+
+The script requires a clean `main` branch that exactly matches `origin/main`,
+runs formatting, locked workspace build, and locked workspace tests, then asks
+for confirmation before creating and pushing the matching `v<version>` tag.
+Use `scripts/release.sh --yes` only for trusted non-interactive automation.
+
+If an invalid release must be withdrawn before users depend on it, delete the
+GitHub Release first, then its remote and local tags:
+
+```bash
+gh release delete v0.1.0 --repo simota/Noa --yes
+git push origin :refs/tags/v0.1.0
+git tag -d v0.1.0
+```
+
 ## Key features
 
 - GPU-rendered terminal grid with Kitty graphics support

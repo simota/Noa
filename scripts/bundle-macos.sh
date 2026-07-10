@@ -13,15 +13,41 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 MODE="${1:-release}"
-VERSION="0.1.0"
 BUNDLE_ID="com.simota.noa"
 
+WORKSPACE_VERSION="$(
+  awk '
+    /^\[workspace\.package\]$/ { found = 1; next }
+    /^\[/ { found = 0 }
+    found && /^version[[:space:]]*=/ {
+      value = $0
+      sub(/^[^"]*"/, "", value)
+      sub(/".*$/, "", value)
+      print value
+      exit
+    }
+  ' Cargo.toml
+)"
+VERSION="${NOA_VERSION:-$WORKSPACE_VERSION}"
+[ -n "$VERSION" ] || {
+  echo "error: unable to determine the app version" >&2
+  exit 1
+}
+
+TARGET_ROOT="${CARGO_TARGET_DIR:-$ROOT/target}"
+case "$TARGET_ROOT" in
+  /*) ;;
+  *) TARGET_ROOT="$ROOT/$TARGET_ROOT" ;;
+esac
+export CARGO_TARGET_DIR="$TARGET_ROOT"
+
 case "$MODE" in
-  release) cargo build --release -p noa; TARGET_DIR="$ROOT/target/release" ;;
-  debug)   cargo build -p noa;           TARGET_DIR="$ROOT/target/debug"   ;;
+  release) cargo build --release -p noa; PROFILE="release" ;;
+  debug)   cargo build -p noa;           PROFILE="debug"   ;;
   *) echo "usage: $0 [release|debug]" >&2; exit 2 ;;
 esac
 
+TARGET_DIR="$TARGET_ROOT/$PROFILE"
 BIN="$TARGET_DIR/Noa"
 APP="$TARGET_DIR/Noa.app"
 CONTENTS="$APP/Contents"

@@ -30,6 +30,27 @@ open target/release/Noa.app
 The bundle script creates a local ad-hoc-signed app. It is not a notarized
 distribution workflow.
 
+## Install with Homebrew
+
+Noa currently supports Apple Silicon Macs. Install the cask from this source
+repository as a custom tap:
+
+```bash
+brew tap simota/noa https://github.com/simota/Noa.git
+brew install --cask simota/noa/noa
+```
+
+Installation requires a GitHub Release for the version declared in
+`Casks/noa.rb`, containing `Noa-<version>-macos-arm64.zip`. Maintainers create
+it by pushing a `v<workspace-version>` tag; the release workflow verifies that
+the Cargo, Cask, tag, and app-bundle versions match before publishing the
+archive and its SHA-256 checksum.
+
+The cask temporarily uses `sha256 :no_check` because no release archive exists
+yet. Replace it with the published checksum after the first release. Release
+artifacts are currently ad-hoc signed; Developer ID signing and notarization
+are still required for a prompt-free Gatekeeper experience after download.
+
 ## Key features
 
 - GPU-rendered terminal grid with Kitty graphics support
@@ -72,7 +93,8 @@ than source-level equivalence.
 - Current parity protection is fixture-based; the automated Ghostty oracle is
   not implemented yet.
 - Some advanced terminal behavior may still differ from Ghostty.
-- The documented installation path is a source build.
+- Installation is available from source; the custom Homebrew tap becomes usable
+  after a matching release is published.
 
 See the [parity harness](tests/parity/README.md) and
 [parity roadmap](docs/roadmaps/ghostty-parity-roadmap.md) for current coverage

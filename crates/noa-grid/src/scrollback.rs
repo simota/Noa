@@ -415,10 +415,25 @@ impl PagedScrollback {
         }
 
         let page = self.ensure_page(cols);
-        let offset = page.cells.len() as u32;
+        let base = page.cells.len();
+        let offset = base as u32;
         let mut delta = len * PACKED_CELL_SIZE;
 
-        for cell in &row.cells[..len] {
+        // The whole row fits without reallocating — `ensure_page` guarantees
+        // `PAGE_CELL_CAPACITY + cols` headroom and `len <= cols` — so fill the
+        // reserved tail directly and bump the length once at the end. A
+        // per-cell `Vec::push` re-loads and re-stores the vec's length (and
+        // re-checks capacity) on every one of the tens of cells per scrolled
+        // row; on the bulk-output path that store/reload dominated the pack
+        // loop over the actual style/flag work (measured).
+        page.cells.reserve(len);
+        // Raw destination pointer, not a `&mut` slice: writing through it does
+        // not borrow `page.cells`, so `page.styles`/`page.graphemes` stay
+        // freely usable in the loop, and each store carries no bounds or length
+        // bookkeeping. `intern`/`graphemes.insert` never touch `page.cells`, so
+        // the pointer stays valid across them.
+        let dst = page.cells.as_mut_ptr();
+        for (i, cell) in row.cells[..len].iter().enumerate() {
             // The style memo lives in the table (`StyleTable::last`), so a pen
             // held across cells — or across whole rows of bulk output — skips
             // the hash lookup entirely.
@@ -427,17 +442,27 @@ impl PagedScrollback {
                 delta += std::mem::size_of::<Style>();
             }
             let flags = flags_of(cell);
-            let index = page.cells.len() as u32;
             if flags.contains(PackedFlags::HAS_GRAPHEME) {
+                // Rare (only combining-mark cells); keep the index arithmetic
+                // and the grapheme clone off the common per-cell path.
                 let grapheme = cell.combining.clone();
                 delta += grapheme.capacity() + GRAPHEME_ENTRY_COST;
-                page.graphemes.insert(index, grapheme);
+                page.graphemes.insert((base + i) as u32, grapheme);
             }
-            page.cells.push(PackedCell {
-                ch: cell.ch,
-                style: id,
-                flags,
-            });
+            // SAFETY: `reserve(len)` guaranteed room for indices `base..base+len`;
+            // `i < len` and `page.cells` is untouched by the calls above, so
+            // `dst.add(base + i)` is in-bounds and uninitialized.
+            unsafe {
+                dst.add(base + i).write(PackedCell {
+                    ch: cell.ch,
+                    style: id,
+                    flags,
+                });
+            }
+        }
+        // SAFETY: the loop initialized exactly slots `base..base+len`.
+        unsafe {
+            page.cells.set_len(base + len);
         }
 
         page.rows.push(RowMeta {
@@ -781,6 +806,29 @@ mod tests {
         );
         // Retention stays within the limit plus at most one over-target page.
         assert!(sb.bytes() <= limit + PAGE_TARGET_BYTES + PAGE_HEADER_COST);
+    }
+
+    #[test]
+    fn push_row_packs_grapheme_at_first_and_last_index_and_fully_blank_row() {
+        let mut sb = PagedScrollback::new(usize::MAX);
+
+        // Full-width row (len == cols, no trailing trim): grapheme cells at
+        // both the first and the last index the raw-pointer fill loop
+        // writes, sandwiching a plain cell.
+        let mut first = cell('a');
+        first.combining.push('\u{0301}'); // combining acute accent
+        let middle = cell('b');
+        let mut last = cell('c');
+        last.combining.push('\u{0300}'); // combining grave accent
+        sb.push_row(&row_from(vec![first.clone(), middle.clone(), last.clone()]));
+        let out = sb.row(0).unwrap();
+        assert_eq!(out.cells, vec![first, middle, last]);
+
+        // Fully-blank row: every cell trims away, so the fill loop's body
+        // never runs and `set_len` bumps the arena by zero.
+        sb.push_row(&text_row("", 10));
+        let out = sb.row(1).unwrap();
+        assert!(out.cells.iter().all(|c| *c == Cell::default()));
     }
 
     #[test]

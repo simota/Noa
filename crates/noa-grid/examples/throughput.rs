@@ -13,7 +13,9 @@ use noa_grid::Terminal;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: throughput <file> [cols rows repeats]");
+    let path = args
+        .next()
+        .expect("usage: throughput <file> [cols rows repeats]");
     let cols: u16 = args.next().map_or(100, |s| s.parse().expect("cols"));
     let rows: u16 = args.next().map_or(30, |s| s.parse().expect("rows"));
     let repeats: usize = args.next().map_or(1, |s| s.parse().expect("repeats"));

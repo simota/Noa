@@ -824,9 +824,7 @@ pub fn spawn(
                     let auto_approve_candidate = output.auto_approve.take();
                     if sidebar_bell
                         && proxy
-                            .send_event(UserEvent::SessionDelta(SessionDelta::Bell {
-                                id: card_id,
-                            }))
+                            .send_event(UserEvent::SessionDelta(SessionDelta::Bell { id: card_id }))
                             .is_err()
                     {
                         break; // event loop gone
@@ -863,11 +861,8 @@ pub fn spawn(
                     if !output.pending_writes.is_empty() {
                         write_pty_bytes(&writer, &output.pending_writes);
                     }
-                    let redraw = decide_redraw(
-                        output.synchronized_output,
-                        last_redraw_at,
-                        Instant::now(),
-                    );
+                    let redraw =
+                        decide_redraw(output.synchronized_output, last_redraw_at, Instant::now());
                     for text in output.pending_clipboard_writes {
                         let _ = proxy.send_event(UserEvent::ClipboardWrite {
                             window_id,

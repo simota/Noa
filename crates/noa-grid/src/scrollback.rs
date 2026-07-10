@@ -90,9 +90,7 @@ fn encode_color(color: Color) -> u32 {
     match color {
         Color::Default => 0,
         Color::Palette(i) => 0x0100_0000 | i as u32,
-        Color::Rgb(rgb) => {
-            0x0200_0000 | (rgb.r as u32) << 16 | (rgb.g as u32) << 8 | rgb.b as u32
-        }
+        Color::Rgb(rgb) => 0x0200_0000 | (rgb.r as u32) << 16 | (rgb.g as u32) << 8 | rgb.b as u32,
     }
 }
 
@@ -270,9 +268,7 @@ impl Page {
             bg: decode_color(style.bg),
             underline_color: (style.underline != UNDERLINE_NONE)
                 .then(|| decode_color(style.underline)),
-            hyperlink: style
-                .hyperlink()
-                .and_then(|h| HyperlinkId::new(h as usize)),
+            hyperlink: style.hyperlink().and_then(|h| HyperlinkId::new(h as usize)),
             attrs,
         }
     }
@@ -531,9 +527,7 @@ impl PagedScrollback {
             // Reuse the spare evicted page when its arena is big enough for
             // this width; otherwise build a fresh one.
             let page = match self.spare.take() {
-                Some(mut spare)
-                    if spare.cells.capacity() >= PAGE_CELL_CAPACITY + cols as usize =>
-                {
+                Some(mut spare) if spare.cells.capacity() >= PAGE_CELL_CAPACITY + cols as usize => {
                     spare.reset(cols);
                     spare
                 }

@@ -1,0 +1,238 @@
+//! Terminal feed/drain: parses queued pty bytes into the shared `Terminal`
+//! under one lock hold, opportunistically publishing the overview and
+//! sidebar mirrors while the lock is already taken, plus the debug
+//! (`NOA_PTY_CAPTURE`) capture tap.
+
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Instant;
+
+use crossbeam_channel::{Receiver, TryRecvError};
+use parking_lot::Mutex;
+
+use noa_grid::Terminal;
+
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+
+#[cfg(test)]
+use crate::auto_approve::AutoApproveInputGuards;
+use crate::auto_approve::AutoApproveState;
+use crate::split_tree::PaneId;
+
+use super::auto_approve::{
+    AutoApproveCandidate, AutoApprovePublish, detect_auto_approve_candidate,
+};
+use super::overview::{OverviewPublish, publish_overview_snapshot};
+use super::sidebar::{
+    SidebarPublish, SidebarUpsert, decide_sidebar_publish, preview_rows, preview_spans,
+};
+
+/// Ceiling on pty bytes coalesced into one parse batch (one terminal-lock
+/// hold). Bigger batches drain a sustained flood in proportionally fewer
+/// lock/wake cycles, while the cap bounds how long a single hold can block
+/// the main thread's snapshot pass (~1 MiB parses in a few ms even on the
+/// heavier unicode path).
+pub(super) const PTY_DATA_DRAIN_BYTE_LIMIT: usize = 1024 * 1024;
+
+pub(super) struct TerminalOutput {
+    pub(super) pending_writes: Vec<u8>,
+    pub(super) pending_clipboard_writes: Vec<String>,
+    pub(super) pending_clipboard_reads: Vec<String>,
+    pub(super) pending_notifications: Vec<noa_grid::Notification>,
+    pub(super) synchronized_output: bool,
+    /// Trailing-flush deadline owed by this feed's throttled overview
+    /// publish (Fix B defect 1: a burst's final feed can land inside the
+    /// throttle window and get silently skipped, leaving the mirror stuck
+    /// on a stale mid-burst frame — REQ-OV-4). Threaded back to `spawn`'s
+    /// loop so it can wake the thread once it elapses even with no further
+    /// pty output. `None` when nothing is owed (published now, or the
+    /// overview isn't visible).
+    pub(super) overview_publish_pending: Option<Instant>,
+    /// A sidebar card upsert extracted this feed (name/cwd/busy/preview), or
+    /// `None` when the throttle window has not elapsed. The spawn loop stamps
+    /// it with the current wall-clock + card generation and posts it as a
+    /// [`crate::session_store::SessionDelta::Upsert`].
+    pub(super) sidebar_upsert: Option<SidebarUpsert>,
+    /// A prompt matched the auto-approve matrix and passed debounce.
+    pub(super) auto_approve: Option<AutoApproveCandidate>,
+    /// An unread bell was drained this feed (FR-11); the spawn loop posts a
+    /// [`crate::session_store::SessionDelta::Bell`]. Drained unconditionally
+    /// (FR-A4): the main thread classifies it, so an agent session's bell
+    /// can escalate to an attention request even with every sidebar hidden.
+    pub(super) sidebar_bell: bool,
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn feed_terminal(
+    terminal: &Arc<Mutex<Terminal>>,
+    stream: &mut noa_vt::Stream,
+    bytes: &[u8],
+    overview: &OverviewPublish,
+    last_overview_publish: &mut Option<Instant>,
+    sidebar: &SidebarPublish,
+    last_sidebar_publish: &mut Option<Instant>,
+) -> TerminalOutput {
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(AutoApproveInputGuards::default())),
+    };
+    let mut auto_approve_state = AutoApproveState::default();
+    feed_terminal_batch(
+        terminal,
+        stream,
+        bytes,
+        std::iter::empty::<&[u8]>(),
+        overview,
+        last_overview_publish,
+        sidebar,
+        last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn feed_terminal_batch<'a>(
+    terminal: &Arc<Mutex<Terminal>>,
+    stream: &mut noa_vt::Stream,
+    first: &[u8],
+    rest: impl IntoIterator<Item = &'a [u8]>,
+    overview: &OverviewPublish,
+    last_overview_publish: &mut Option<Instant>,
+    sidebar: &SidebarPublish,
+    last_sidebar_publish: &mut Option<Instant>,
+    auto_approve: &AutoApprovePublish,
+    auto_approve_state: &mut AutoApproveState,
+) -> TerminalOutput {
+    let mut term = terminal.lock();
+    stream.feed(first, &mut *term);
+    for bytes in rest {
+        stream.feed(bytes, &mut *term);
+    }
+    let overview_publish_pending =
+        publish_overview_snapshot(&term, overview, last_overview_publish);
+
+    // Sidebar publish (FR-1/FR-11) — extracted in this same lock section so the
+    // main thread never locks a `Terminal` to build card state (NFR-1). The
+    // bell is drained unconditionally (FR-A4): the main thread classifies it —
+    // an agent session's bell escalates to an attention request even with the
+    // sidebar hidden, while a generic bell only renders once the sidebar is
+    // shown (its flag is otherwise invisible).
+    let sidebar_visible = sidebar.visible.load(Ordering::Relaxed);
+    let sidebar_bell = term.take_pending_bell();
+    // Under the lock, clone only the raw preview rows plus the small card
+    // scalars; the span/string building runs after the lock is released so
+    // the main thread's snapshot pass is never blocked on string formatting.
+    // The upsert itself is not visibility-gated (see `decide_sidebar_publish`);
+    // only the preview-row clone — the expensive part — is.
+    let sidebar_raw = decide_sidebar_publish(*last_sidebar_publish, Instant::now()).then(|| {
+        *last_sidebar_publish = Some(Instant::now());
+        (
+            term.title.clone(),
+            term.cwd.clone().unwrap_or_default(),
+            term.has_running_program(),
+            sidebar_visible
+                .then(|| preview_rows(&term, sidebar.preview_lines.load(Ordering::Relaxed))),
+        )
+    });
+    let auto_approve_candidate =
+        detect_auto_approve_candidate(&term, auto_approve, auto_approve_state);
+
+    let mut output = TerminalOutput {
+        pending_writes: term.take_pending_writes(),
+        pending_clipboard_writes: term.take_pending_clipboard_writes(),
+        pending_clipboard_reads: term.take_pending_clipboard_reads(),
+        pending_notifications: term.take_pending_notifications(),
+        synchronized_output: term.modes.synchronized_output(),
+        overview_publish_pending,
+        sidebar_upsert: None,
+        auto_approve: auto_approve_candidate,
+        sidebar_bell,
+    };
+    drop(term);
+    output.sidebar_upsert = sidebar_raw.map(|(name, cwd, busy, rows)| SidebarUpsert {
+        name,
+        cwd,
+        busy,
+        preview: rows.map(preview_spans),
+    });
+    output
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PtyDrainTerminalEvent {
+    ExitOrError,
+    Disconnected,
+}
+
+/// Debug pty capture (`NOA_PTY_CAPTURE=<prefix>`): open this pane's capture
+/// file, `<prefix>.<window>-<pane>.bin`. Every raw byte the io thread feeds
+/// into the terminal is appended verbatim, so a rendering-fidelity report can
+/// be replayed offline with `cargo run -p noa-grid --example replay -- <file>
+/// <cols> <rows>` and diffed against the on-screen state. One file per pane —
+/// panes must not interleave into a shared stream or the replay is garbage.
+pub(super) fn open_pty_capture(
+    window_id: winit::window::WindowId,
+    pane_id: PaneId,
+) -> Option<std::fs::File> {
+    let prefix = std::env::var_os("NOA_PTY_CAPTURE")?;
+    let path = std::path::PathBuf::from(format!(
+        "{}.{}-{}.bin",
+        prefix.to_string_lossy(),
+        u64::from(window_id),
+        pane_id.get()
+    ));
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => Some(file),
+        Err(err) => {
+            log::warn!("NOA_PTY_CAPTURE: cannot open {}: {err}", path.display());
+            None
+        }
+    }
+}
+
+/// Append one feed batch to the capture file. On a write error the capture is
+/// dropped (returns `false`) after a warning — a broken debug tap must not
+/// stall or kill the io thread.
+pub(super) fn capture_pty_bytes<'a>(
+    file: &mut std::fs::File,
+    first: &[u8],
+    rest: impl IntoIterator<Item = &'a [u8]>,
+) -> bool {
+    use std::io::Write as _;
+    let result = file
+        .write_all(first)
+        .and_then(|()| rest.into_iter().try_for_each(|chunk| file.write_all(chunk)));
+    if let Err(err) = result {
+        log::warn!("NOA_PTY_CAPTURE: write failed, disabling capture: {err}");
+        return false;
+    }
+    true
+}
+
+pub(super) fn drain_queued_pty_data(
+    rx: &Receiver<noa_pty::PtyEvent>,
+    chunks: &mut Vec<noa_pty::PtyData>,
+    mut buffered_bytes: usize,
+) -> Option<PtyDrainTerminalEvent> {
+    while buffered_bytes < PTY_DATA_DRAIN_BYTE_LIMIT {
+        match rx.try_recv() {
+            Ok(noa_pty::PtyEvent::Data(bytes)) => {
+                buffered_bytes = buffered_bytes.saturating_add(bytes.len());
+                chunks.push(bytes);
+            }
+            Ok(noa_pty::PtyEvent::Exit(_)) | Ok(noa_pty::PtyEvent::Error(_)) => {
+                return Some(PtyDrainTerminalEvent::ExitOrError);
+            }
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => return Some(PtyDrainTerminalEvent::Disconnected),
+        }
+    }
+    None
+}

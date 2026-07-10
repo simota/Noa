@@ -200,6 +200,63 @@ pub(crate) fn write_scrollback_temp_file(text: &str) -> io::Result<PathBuf> {
     write_scrollback_temp_file_in_dir(text, &std::env::temp_dir())
 }
 
+pub(crate) fn export_scrollback_to_file(
+    text: &str,
+    selected_path: Option<&Path>,
+) -> io::Result<Option<PathBuf>> {
+    let Some(path) = selected_path else {
+        return Ok(None);
+    };
+    std::fs::write(path, text.as_bytes())?;
+    Ok(Some(path.to_path_buf()))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn choose_scrollback_export_path() -> io::Result<Option<PathBuf>> {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::NSString;
+
+    const NS_MODAL_RESPONSE_OK: isize = 1;
+
+    // SAFETY: command dispatch runs on the main thread. All selectors are
+    // documented NSSavePanel/NSURL APIs, and returned objects are nil-checked.
+    unsafe {
+        let panel_class = AnyClass::get(c"NSSavePanel")
+            .ok_or_else(|| io::Error::other("macOS save panel is unavailable"))?;
+        let panel: *mut AnyObject = msg_send![panel_class, savePanel];
+        if panel.is_null() {
+            return Err(io::Error::other("could not create the macOS save panel"));
+        }
+
+        let default_name = NSString::from_str("noa-scrollback.txt");
+        let _: () = msg_send![panel, setNameFieldStringValue: &*default_name];
+        let _: () = msg_send![panel, setCanCreateDirectories: true];
+        let response: isize = msg_send![panel, runModal];
+        if response != NS_MODAL_RESPONSE_OK {
+            return Ok(None);
+        }
+
+        let url: *mut AnyObject = msg_send![panel, URL];
+        if url.is_null() {
+            return Err(io::Error::other("the save panel returned no destination"));
+        }
+        let path: Option<Retained<NSString>> = msg_send![url, path];
+        let Some(path) = path.filter(|path| !path.is_empty()) else {
+            return Err(io::Error::other(
+                "the save panel returned an empty destination",
+            ));
+        };
+        Ok(Some(PathBuf::from(path.to_string())))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn choose_scrollback_export_path() -> io::Result<Option<PathBuf>> {
+    Ok(None)
+}
+
 fn write_scrollback_temp_file_in_dir(text: &str, dir: &Path) -> io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let stamp = SystemTime::now()
@@ -351,6 +408,39 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\n");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scrollback_export_uses_selected_path_and_preserves_exact_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "noa-scrollback-selected-export-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let selected_path = dir.join("chosen-scrollback.txt");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&selected_path, b"stale content that must be truncated").unwrap();
+        let scrollback = "first\r\nsecond\nUnicode: \u{7d42}\n";
+
+        let exported = export_scrollback_to_file(scrollback, Some(&selected_path)).unwrap();
+
+        assert_eq!(exported.as_deref(), Some(selected_path.as_path()));
+        assert_eq!(
+            std::fs::read(&selected_path).unwrap(),
+            scrollback.as_bytes()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancelled_scrollback_export_creates_no_file() {
+        let exported = export_scrollback_to_file("must not be written", None).unwrap();
+
+        assert_eq!(exported, None);
     }
 
     #[test]

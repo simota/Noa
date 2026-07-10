@@ -237,6 +237,32 @@ pub enum MacosTitlebarProxyIcon {
     Hidden,
 }
 
+/// `quick-terminal-screen`: which display the drop-down quick terminal
+/// appears on. Resolved fresh every time the quick terminal is shown (never
+/// cached), matching Ghostty. No-op outside macOS. Ghostty semantics:
+/// `main` -> `NSScreen.mainScreen`, `mouse` -> the screen whose frame
+/// contains `NSEvent.mouseLocation` (no match falls back like an
+/// unresolvable screen), `macos-menu-bar` -> `NSScreen.screens.first`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuickTerminalScreen {
+    /// `NSScreen.mainScreen` — the screen holding the key window. Ghostty's
+    /// default.
+    Main,
+    /// The screen under the mouse pointer (`NSEvent.mouseLocation`).
+    ///
+    /// **Deviation from Ghostty** (whose default is `main`): noa's global
+    /// hotkey fires while Noa is usually *not* the active app, and in that
+    /// state `NSScreen.mainScreen` degrades to the screen holding Noa's
+    /// existing main window — reproducing exactly the "quick terminal opens
+    /// on the wrong screen" bug this key exists to fix. Tracking the mouse
+    /// instead follows the screen the user is actually looking at, so noa
+    /// makes this the default instead.
+    #[default]
+    Mouse,
+    /// `NSScreen.screens.first` — the screen with the menu bar.
+    MacosMenuBar,
+}
+
 /// `resize-overlay`: whether the `cols × rows` grid-size toast shows during a
 /// live resize. Mirrors Ghostty's `resize-overlay`. Default `after-first`
 /// (every resize except the window's initial layout).
@@ -453,6 +479,11 @@ pub struct StartupConfig {
     /// `quick-terminal-autohide`: hide the quick terminal when it loses focus.
     /// Ghostty default is on.
     pub quick_terminal_autohide: bool,
+    /// `quick-terminal-screen`: which display the quick terminal appears on,
+    /// resolved fresh on every show. Default [`QuickTerminalScreen::Mouse`]
+    /// (a deliberate deviation from Ghostty's `main` — see that variant's
+    /// doc comment).
+    pub quick_terminal_screen: QuickTerminalScreen,
     /// `sidebar-enabled`: app-wide initial visibility of the session sidebar.
     /// Per-window visibility is toggled from this starting value at runtime.
     /// Default off. noa-specific key (no Ghostty analog).
@@ -538,6 +569,7 @@ impl Default for StartupConfig {
             quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
             quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
             quick_terminal_autohide: true,
+            quick_terminal_screen: QuickTerminalScreen::default(),
             sidebar_enabled: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_hotkey: None,
@@ -596,6 +628,7 @@ pub struct ConfigOverrides {
     pub quick_terminal_hotkey: Option<String>,
     pub quick_terminal_size: Option<f32>,
     pub quick_terminal_autohide: Option<bool>,
+    pub quick_terminal_screen: Option<QuickTerminalScreen>,
     pub sidebar_enabled: Option<bool>,
     pub sidebar_width: Option<f32>,
     pub sidebar_hotkey: Option<String>,
@@ -692,6 +725,9 @@ impl ConfigOverrides {
             quick_terminal_autohide: higher_priority
                 .quick_terminal_autohide
                 .or(self.quick_terminal_autohide),
+            quick_terminal_screen: higher_priority
+                .quick_terminal_screen
+                .or(self.quick_terminal_screen),
             sidebar_enabled: higher_priority.sidebar_enabled.or(self.sidebar_enabled),
             sidebar_width: higher_priority.sidebar_width.or(self.sidebar_width),
             sidebar_hotkey: higher_priority.sidebar_hotkey.or(self.sidebar_hotkey),
@@ -784,6 +820,9 @@ impl ConfigOverrides {
             quick_terminal_autohide: self
                 .quick_terminal_autohide
                 .unwrap_or(base.quick_terminal_autohide),
+            quick_terminal_screen: self
+                .quick_terminal_screen
+                .unwrap_or(base.quick_terminal_screen),
             sidebar_enabled: self.sidebar_enabled.unwrap_or(base.sidebar_enabled),
             sidebar_width: self.sidebar_width.unwrap_or(base.sidebar_width),
             sidebar_hotkey: self.sidebar_hotkey.or(base.sidebar_hotkey),
@@ -982,6 +1021,7 @@ mod tests {
                 quick_terminal_hotkey: Some(DEFAULT_QUICK_TERMINAL_HOTKEY.to_string()),
                 quick_terminal_size: DEFAULT_QUICK_TERMINAL_SIZE,
                 quick_terminal_autohide: true,
+                quick_terminal_screen: QuickTerminalScreen::Mouse,
                 sidebar_enabled: false,
                 sidebar_width: DEFAULT_SIDEBAR_WIDTH,
                 sidebar_hotkey: None,
@@ -1002,6 +1042,14 @@ mod tests {
         assert_eq!(
             StartupConfig::default().quick_terminal_hotkey.as_deref(),
             Some("cmd+grave")
+        );
+    }
+
+    #[test]
+    fn quick_terminal_screen_defaults_to_mouse() {
+        assert_eq!(
+            StartupConfig::default().quick_terminal_screen,
+            QuickTerminalScreen::Mouse
         );
     }
 

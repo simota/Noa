@@ -400,6 +400,15 @@ fn show_config_output(config: &StartupConfig) -> String {
     );
     push_line(
         &mut out,
+        "quick-terminal-screen",
+        match config.quick_terminal_screen {
+            noa_config::QuickTerminalScreen::Main => "main",
+            noa_config::QuickTerminalScreen::Mouse => "mouse",
+            noa_config::QuickTerminalScreen::MacosMenuBar => "macos-menu-bar",
+        },
+    );
+    push_line(
+        &mut out,
         "sidebar-enabled",
         &config.sidebar_enabled.to_string(),
     );
@@ -650,6 +659,7 @@ mod tests {
         assert!(output.contains("macos-non-native-fullscreen = false\n"));
         assert!(output.contains("macos-titlebar-proxy-icon = visible\n"));
         assert!(output.contains("quick-terminal-hotkey = cmd+grave\n"));
+        assert!(output.contains("quick-terminal-screen = mouse\n"));
         assert!(output.contains("sidebar-enabled = false\n"));
         assert!(output.contains("sidebar-width = 360\n"));
         assert!(output.contains("sidebar-hotkey = \n"));
@@ -677,6 +687,7 @@ mod tests {
             macos_titlebar_style: MacosTitlebarStyle::Transparent,
             macos_non_native_fullscreen: true,
             macos_titlebar_proxy_icon: MacosTitlebarProxyIcon::Hidden,
+            quick_terminal_screen: noa_config::QuickTerminalScreen::MacosMenuBar,
             sidebar_enabled: true,
             sidebar_width: 280.0,
             sidebar_hotkey: Some("cmd+shift+s".to_string()),
@@ -712,6 +723,7 @@ mod tests {
         assert!(output.contains("macos-titlebar-style = transparent\n"));
         assert!(output.contains("macos-non-native-fullscreen = true\n"));
         assert!(output.contains("macos-titlebar-proxy-icon = hidden\n"));
+        assert!(output.contains("quick-terminal-screen = macos-menu-bar\n"));
         assert!(output.contains("sidebar-enabled = true\n"));
         assert!(output.contains("sidebar-width = 280\n"));
         assert!(output.contains("sidebar-hotkey = cmd+shift+s\n"));

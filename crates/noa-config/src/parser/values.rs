@@ -5,8 +5,8 @@ use noa_core::Rgb;
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, CursorShape,
     FontFeature, FontVariation, MAX_SIDEBAR_PREVIEW_LINES, MIN_BACKGROUND_IMAGE_INTERVAL_SECS,
-    MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle, PaletteOverride, ResizeOverlay,
-    SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
+    MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle, PaletteOverride,
+    QuickTerminalScreen, ResizeOverlay, SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
 };
 
 use super::diagnostics::*;
@@ -651,6 +651,23 @@ pub(super) fn parse_macos_titlebar_proxy_icon(
     match value {
         "visible" | "true" => Some(MacosTitlebarProxyIcon::Visible),
         "hidden" | "false" => Some(MacosTitlebarProxyIcon::Hidden),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_quick_terminal_screen(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<QuickTerminalScreen> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "main" => Some(QuickTerminalScreen::Main),
+        "mouse" => Some(QuickTerminalScreen::Mouse),
+        "macos-menu-bar" => Some(QuickTerminalScreen::MacosMenuBar),
         other => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
             None

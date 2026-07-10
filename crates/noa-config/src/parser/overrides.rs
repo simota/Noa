@@ -57,6 +57,7 @@ pub(crate) fn build_overrides(
     let mut quick_terminal_hotkey = None;
     let mut quick_terminal_size = None;
     let mut quick_terminal_autohide = None;
+    let mut quick_terminal_screen = None;
     let mut sidebar_enabled = None;
     let mut sidebar_width = None;
     let mut sidebar_hotkey = None;
@@ -261,6 +262,10 @@ pub(crate) fn build_overrides(
             "quick-terminal-autohide" => {
                 quick_terminal_autohide = parse_bool_directive(path, directive, &mut diagnostics);
             }
+            "quick-terminal-screen" => {
+                quick_terminal_screen =
+                    parse_quick_terminal_screen(path, directive, &mut diagnostics);
+            }
             "sidebar-enabled" => {
                 sidebar_enabled = parse_bool_directive(path, directive, &mut diagnostics);
             }
@@ -367,6 +372,7 @@ pub(crate) fn build_overrides(
             quick_terminal_hotkey,
             quick_terminal_size,
             quick_terminal_autohide,
+            quick_terminal_screen,
             sidebar_enabled,
             sidebar_width,
             sidebar_hotkey,
@@ -458,6 +464,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "quick-terminal-hotkey"
             | "quick-terminal-size"
             | "quick-terminal-autohide"
+            | "quick-terminal-screen"
             | "sidebar-enabled"
             | "sidebar-width"
             | "sidebar-hotkey"

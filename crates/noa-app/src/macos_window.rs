@@ -28,6 +28,94 @@ pub(crate) fn toggle_native_fullscreen(window: &Window) -> bool {
     toggle_native_fullscreen_impl(window)
 }
 
+/// Resolves `quick-terminal-screen`'s `mode` to the `CGDirectDisplayID` of the
+/// target `NSScreen`, re-resolved fresh on every quick-terminal reveal (never
+/// cached) so the hotkey always targets whatever the mode currently points
+/// at. `None` when AppKit can't resolve a screen for `mode` (e.g. `mouse`
+/// with no screen under the pointer) or off macOS — the caller falls back to
+/// its existing anchor-window monitor.
+pub(crate) fn quick_terminal_target_display(mode: noa_config::QuickTerminalScreen) -> Option<u32> {
+    quick_terminal_target_display_impl(mode)
+}
+
+#[cfg(target_os = "macos")]
+fn quick_terminal_target_display_impl(mode: noa_config::QuickTerminalScreen) -> Option<u32> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::{NSPoint, NSRect, NSString};
+
+    let screen_class = AnyClass::get(c"NSScreen")?;
+
+    // SAFETY: `NSScreen`/`NSEvent` are live AppKit singletons queried on the
+    // main (window-owning) thread; every object pointer is nil-checked
+    // before use.
+    unsafe {
+        let screen: *mut AnyObject = match mode {
+            noa_config::QuickTerminalScreen::Main => msg_send![screen_class, mainScreen],
+            noa_config::QuickTerminalScreen::MacosMenuBar => {
+                let screens: *mut AnyObject = msg_send![screen_class, screens];
+                if screens.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    let count: usize = msg_send![screens, count];
+                    if count == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        msg_send![screens, objectAtIndex: 0_usize]
+                    }
+                }
+            }
+            noa_config::QuickTerminalScreen::Mouse => {
+                let event_class = AnyClass::get(c"NSEvent")?;
+                let point: NSPoint = msg_send![event_class, mouseLocation];
+                let screens: *mut AnyObject = msg_send![screen_class, screens];
+                let mut found: *mut AnyObject = std::ptr::null_mut();
+                if !screens.is_null() {
+                    let count: usize = msg_send![screens, count];
+                    for i in 0..count {
+                        let candidate: *mut AnyObject = msg_send![screens, objectAtIndex: i];
+                        if candidate.is_null() {
+                            continue;
+                        }
+                        // `frame` is in AppKit's global bottom-left-origin
+                        // coordinate space, same as `mouseLocation`.
+                        let frame: NSRect = msg_send![candidate, frame];
+                        let contains = point.x >= frame.origin.x
+                            && point.x < frame.origin.x + frame.size.width
+                            && point.y >= frame.origin.y
+                            && point.y < frame.origin.y + frame.size.height;
+                        if contains {
+                            found = candidate;
+                            break;
+                        }
+                    }
+                }
+                found
+            }
+        };
+        if screen.is_null() {
+            return None;
+        }
+
+        let device_description: *mut AnyObject = msg_send![screen, deviceDescription];
+        if device_description.is_null() {
+            return None;
+        }
+        let key = NSString::from_str("NSScreenNumber");
+        let number: *mut AnyObject = msg_send![device_description, objectForKey: &*key];
+        if number.is_null() {
+            return None;
+        }
+        let display_id: u32 = msg_send![number, unsignedIntValue];
+        Some(display_id)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn quick_terminal_target_display_impl(_mode: noa_config::QuickTerminalScreen) -> Option<u32> {
+    None
+}
+
 /// Bring the whole app to the front (`activateIgnoringOtherApps:`), for the
 /// AppleScript application-level `activate` verb (applescript R-5). A no-op off
 /// macOS.

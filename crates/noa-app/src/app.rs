@@ -33,7 +33,7 @@ use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, W
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 #[cfg(target_os = "macos")]
-use winit::platform::macos::{WindowAttributesExtMacOS, WindowExtMacOS};
+use winit::platform::macos::{MonitorHandleExtMacOS, WindowAttributesExtMacOS, WindowExtMacOS};
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
 use crate::clipboard::{self, PasteContents, SystemClipboard};

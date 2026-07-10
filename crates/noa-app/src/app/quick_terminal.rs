@@ -228,19 +228,51 @@ impl App {
     }
 
     /// The target monitor's origin and the panel's full-width x fractional-
-    /// height footprint, all in physical pixels.
+    /// height footprint, all in physical pixels. The target monitor is
+    /// resolved fresh on every call: `quick-terminal-screen` first (macOS
+    /// only), falling back to the anchor window's monitor, then the primary
+    /// monitor.
     fn quick_terminal_geometry(
         &self,
         event_loop: &ActiveEventLoop,
     ) -> Option<(i32, i32, u32, u32)> {
         let monitor = self
-            .quick_terminal_anchor_window()
-            .and_then(|window| window.current_monitor())
+            .quick_terminal_screen_monitor(event_loop)
+            .or_else(|| {
+                self.quick_terminal_anchor_window()
+                    .and_then(|window| window.current_monitor())
+            })
             .or_else(|| event_loop.primary_monitor())?;
         let position = monitor.position();
         let size = monitor.size();
         let height = quick_terminal_height(size.height, self.config.quick_terminal_size);
         Some((position.x, position.y, size.width, height))
+    }
+
+    /// The monitor resolved by `quick-terminal-screen` (`main` / `mouse` /
+    /// `macos-menu-bar`), matched back to a winit [`MonitorHandle`] by native
+    /// `CGDirectDisplayID`. `None` off macOS, when AppKit can't resolve a
+    /// screen for the configured mode (e.g. `mouse` with no screen under the
+    /// pointer), or when the resolved display doesn't match any monitor
+    /// winit currently reports.
+    #[cfg(target_os = "macos")]
+    fn quick_terminal_screen_monitor(
+        &self,
+        event_loop: &ActiveEventLoop,
+    ) -> Option<winit::monitor::MonitorHandle> {
+        let display_id =
+            crate::macos_window::quick_terminal_target_display(self.config.quick_terminal_screen)?;
+        event_loop
+            .available_monitors()
+            .find(|monitor| monitor.native_id() == display_id)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn quick_terminal_screen_monitor(
+        &self,
+        _event_loop: &ActiveEventLoop,
+    ) -> Option<winit::monitor::MonitorHandle> {
+        None
     }
 
     fn quick_terminal_anchor_window(&self) -> Option<Arc<Window>> {

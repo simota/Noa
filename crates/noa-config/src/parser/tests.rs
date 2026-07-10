@@ -6,8 +6,8 @@ use noa_core::Rgb;
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess,
     ConfigOverrides, CursorShape, FontConfig, FontFeature, FontVariation, KeybindConfig,
-    MacosOptionAsAlt, MacosTitlebarStyle, PaletteOverride, SyntheticStyleMode, ThemeAppearancePair,
-    WindowSaveState,
+    MacosOptionAsAlt, MacosTitlebarStyle, PaletteOverride, QuickTerminalScreen, SyntheticStyleMode,
+    ThemeAppearancePair, WindowSaveState,
 };
 
 use super::*;
@@ -1048,10 +1048,41 @@ fn quick_terminal_autohide_parses_bool() {
 }
 
 #[test]
+fn quick_terminal_screen_parses_modes() {
+    for (value, expected) in [
+        ("main", QuickTerminalScreen::Main),
+        ("mouse", QuickTerminalScreen::Mouse),
+        ("macos-menu-bar", QuickTerminalScreen::MacosMenuBar),
+    ] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("quick-terminal-screen = {value}"));
+        assert_eq!(overrides.quick_terminal_screen, Some(expected), "{value:?}");
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+    }
+}
+
+#[test]
+fn quick_terminal_screen_rejects_unknown_value() {
+    let (overrides, diagnostics) = parse_overrides(path(), "quick-terminal-screen = external");
+
+    assert_eq!(overrides.quick_terminal_screen, None);
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].message.contains("quick-terminal-screen"));
+    assert!(diagnostics[0].message.contains("external"));
+}
+
+#[test]
+fn quick_terminal_screen_defaults_to_mouse_via_apply_to() {
+    let resolved = ConfigOverrides::default().apply_to(crate::StartupConfig::default());
+    assert_eq!(resolved.quick_terminal_screen, QuickTerminalScreen::Mouse);
+}
+
+#[test]
 fn quick_terminal_keys_are_supported_scalar_keys_for_import() {
     assert!(is_supported_scalar_key("quick-terminal-hotkey"));
     assert!(is_supported_scalar_key("quick-terminal-size"));
     assert!(is_supported_scalar_key("quick-terminal-autohide"));
+    assert!(is_supported_scalar_key("quick-terminal-screen"));
 }
 
 // AC-15a: `sidebar-enabled`/`sidebar-width` parse; the default width (360)

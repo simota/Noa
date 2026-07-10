@@ -123,6 +123,9 @@ pub struct AppConfig {
     pub quick_terminal_size: f32,
     /// `quick-terminal-autohide`: hide the quick terminal when it loses focus.
     pub quick_terminal_autohide: bool,
+    /// `quick-terminal-screen`: which display the quick terminal appears on,
+    /// resolved fresh every time it is shown.
+    pub quick_terminal_screen: noa_config::QuickTerminalScreen,
     /// `sidebar-enabled`: app-wide initial visibility of the session sidebar,
     /// seeded into each window's per-window toggle at creation (FR-4/FR-13).
     pub sidebar_enabled: bool,
@@ -208,6 +211,7 @@ impl AppConfig {
             quick_terminal_hotkey: config.quick_terminal_hotkey,
             quick_terminal_size: config.quick_terminal_size,
             quick_terminal_autohide: config.quick_terminal_autohide,
+            quick_terminal_screen: config.quick_terminal_screen,
             sidebar_enabled: config.sidebar_enabled,
             sidebar_width: config.sidebar_width,
             sidebar_hotkey: config.sidebar_hotkey,

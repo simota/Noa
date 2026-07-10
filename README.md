@@ -2,144 +2,98 @@
 
 # Noa
 
-A faithful **Rust** clone of the [Ghostty](https://ghostty.org) terminal emulator — GPU-accelerated, macOS-first, built from scratch on `winit` + `wgpu`.
+Noa is a GPU-accelerated terminal emulator for macOS, implemented independently
+in Rust with `winit` and `wgpu`. It aims for observable compatibility with
+[Ghostty](https://ghostty.org) while keeping the core terminal model reusable
+and testable.
 
-> Ghostty is written in Zig (Metal on macOS, GTK4/OpenGL on Linux). Noa reproduces its **observable behavior** — VT emulation, rendering, features — *idiomatically in Rust*. Today, fixture-based regression tests and observable parity probes guard that behavior; an automated Ghostty oracle for differential comparison is still planned.
+Noa is under active development and is currently built from source. The macOS
+app bundle targets macOS 13 or later. Fixture-based regression tests cover
+terminal behavior; automated differential comparison against Ghostty is still
+planned.
 
-## Status
+## Quick start
 
-**Increments 1-6 complete.** A GPU-accelerated terminal emulator written from scratch. The implementation features native multi-window/tab/split management, wgpu-based grid rendering with a Kitty-graphics image layer, PTY integration, CJK font fallback + ligatures, the Kitty keyboard protocol, paged byte-limited scrollback with interactive search, soft-wrap reflow on resize, shell integration (OSC 133/7), desktop notifications, session restore, a quick terminal, a command palette, background opacity/blur and background images, Ghostty-compatible `key = value` configuration parsing with live reload, and 574 vendored themes. Beyond the core parity increments it also adds a session sidebar, a session/tab overview, an agent auto-approve mode, and Ghostty config import (see [Roadmap](#roadmap)).
-
-## Architecture
-
-A Cargo workspace mirroring Ghostty's reusable-core / platform-apprt split. Lower-level crates remain windowing-agnostic; `noa-render` is the one GPU-facing lower-level crate, while `noa-app` owns windowing and application integration.
-
-```
-crates/
-  noa-core      shared primitive types (Color, CellAttrs, geometry)
-  noa-vt        from-scratch DEC ANSI VT parser + stream dispatch   ← fidelity core
-  noa-grid      terminal state: screen grid, cursor, modes, scroll  ← fidelity core
-  noa-font      glyph pipeline: font-kit discovery → swash raster → etagere atlas
-  noa-theme     vendored Ghostty-compatible theme catalog (574 themes)
-  noa-config    Ghostty-compatible config discovery / parsing / precedence
-  noa-render    wgpu instanced-cell renderer (GPU-facing, not windowing)
-  noa-pty       PTY spawn + reader/writer threads (portable-pty)
-  noa-app       the apprt: winit event loop, Arc<Mutex<Terminal>>, io thread, input
-bin/
-  noa           thin binary → noa_app::run()
-tests/
-  parity        fixture-based regression harness (Ghostty oracle planned)
-```
-
-Dependency rule (enforceable via `cargo tree`): **only `noa-app` / `noa-render` may touch `wgpu`, and only `noa-app` may touch `winit`.** The VT parser and grid model have zero windowing dependencies so they stay unit-testable and reusable.
-
-The **VT parser and terminal state model are written from scratch** (no `vte` / `alacritty_terminal`) — that is the fidelity core the whole clone is built to get right.
-
-## Build & run
-
-Requires Rust 1.92+ (edition 2024) and macOS (Apple Silicon).
+Use a current stable Rust toolchain with Rust 2024 edition support.
 
 ```bash
-cargo build --workspace     # build everything
-cargo test  --workspace     # run the VT/grid conformance + smoke tests
-cargo run   -p noa          # launch the terminal
+cargo run -p noa
 ```
 
-Options: `cargo run -p noa -- --cols 100 --rows 30 --font-size 15`. Use
-`--import-ghostty-config` to migrate supported settings from an existing
-Ghostty config. One-shot queries use `+version`, `+list-themes`,
-`+list-keybinds`, `+list-fonts`, `+show-config`, `+list-actions`, or `+help`.
+To build a double-clickable macOS app:
 
-### Configuration
+```bash
+scripts/bundle-macos.sh
+open target/release/Noa.app
+```
 
-At startup, Noa reads `config` from `$XDG_CONFIG_HOME/noa/config`
-(`~/.config/noa/config` when `XDG_CONFIG_HOME` is unset). Missing config files keep
-the built-in defaults: `window-width = 80`, `window-height = 24`,
-`font-size = 14.0`, macOS `Menlo` as the default coding font with system CJK
-fallbacks, `minimum-contrast = 1.0`, and the built-in terminal theme.
-CLI flags override config file values.
+The bundle script creates a local ad-hoc-signed app. It is not a notarized
+distribution workflow.
 
-The legacy `$XDG_CONFIG_HOME/noa/config.toml` path is detected only to emit a
-migration warning; its TOML contents are not read. Move those settings to the
-extensionless `config` file using the Ghostty-compatible `key = value` syntax.
+## Key features
+
+- GPU-rendered terminal grid with Kitty graphics support
+- Tabs, splits, multiple windows, session restore, and a quick terminal
+- DEC/ANSI VT handling, Kitty keyboard protocol, shell integration, and search
+- Font fallback, ligatures, background images, opacity, and blur
+- Ghostty-compatible configuration, live reload, and 574 bundled themes
+- macOS menus, command palette, notifications, and secure keyboard entry
+
+See [Features](docs/FEATURES.md) for the complete feature inventory.
+
+## Configuration
+
+Noa reads its configuration from `$XDG_CONFIG_HOME/noa/config`, or
+`~/.config/noa/config` when `XDG_CONFIG_HOME` is unset. CLI flags override file
+values.
 
 ```conf
 window-width = 100
 window-height = 30
 font-size = 15.0
 theme = "Catppuccin Mocha"
-minimum-contrast = 3.0
-confirm-quit = true
-sidebar-preview-lines = 3
 ```
 
-Theme names match the vendored Ghostty-compatible catalog in
-`crates/noa-theme/vendor/themes/`, without the `.conf` suffix. For example,
-`theme = "TokyoNight Night"`, `theme = "Gruvbox Dark"`, and
-`theme = "Nord"` are valid. `--theme` is intentionally not a CLI flag; theme
-selection is config-file only. `minimum-contrast` accepts a WCAG contrast-ratio
-floor from `1.0` through `21.0`; `1.0` preserves theme colors unchanged.
-See [Configuration reference](docs/CONFIGURATION.md) for every supported key,
-accepted value, default, and fallback rule, and [Keybindings](docs/KEYBINDINGS.md)
-for default chords and the complete canonical action list.
+Useful one-shot queries include `+version`, `+list-themes`, `+list-keybinds`,
+`+list-fonts`, `+show-config`, `+list-actions`, and `+help`. Use
+`--import-ghostty-config` to migrate supported settings from an existing
+Ghostty configuration.
 
-### Build the macOS app
+See the [Configuration reference](docs/CONFIGURATION.md) for supported keys and
+defaults, and [Keybindings](docs/KEYBINDINGS.md) for shortcuts and actions.
 
-Noa runs as a proper foreground macOS app (Dock icon, custom native menu bar,
-Cmd+Q/Cmd+W app shortcuts, native window controls). The menu bar shows `Noa`,
-`File`, `Edit`, `View`, `Window`, and `Help`. The app menu includes `About Noa`,
-`Settings…` (Cmd+`,`, opens the theme & settings overlay), `Secure Keyboard
-Entry` (a checkable toggle), `Close Tab`, and `Quit Noa`. The `View` menu
-exposes clear/clear-scrollback, font-size controls, `Session Overview`
-(Cmd+Shift+O), `Command Palette` (Cmd+Shift+P), `Quick Terminal`, `Sidebar`
-(Cmd+Shift+S), `Auto Approve`, full-screen toggle, and scrollback navigation —
-line, page, top, and bottom scrolling via `Shift+ArrowUp/Down`,
-`Shift+PageUp/PageDown`, and `Shift+Home/End`. To produce a double-clickable
-`.app` bundle:
+## Compatibility and limitations
+
+Noa is an independent reimplementation and does not include or link Ghostty
+source code. Compatibility work focuses on observable terminal behavior rather
+than source-level equivalence.
+
+- The application and packaging workflow are macOS-first.
+- Current parity protection is fixture-based; the automated Ghostty oracle is
+  not implemented yet.
+- Some advanced terminal behavior may still differ from Ghostty.
+- The documented installation path is a source build.
+
+See the [parity harness](tests/parity/README.md) and
+[parity roadmap](docs/roadmaps/ghostty-parity-roadmap.md) for current coverage
+and planned work.
+
+## Development
 
 ```bash
-scripts/bundle-macos.sh          # → target/release/Noa.app  (ad-hoc signed)
-open target/release/Noa.app      # or double-click it in Finder
+cargo build --workspace
+cargo test --workspace
+cargo fmt --all
 ```
 
-The script builds a release binary, assembles the bundle (`Info.plist`, icon,
-`PkgInfo`), and ad-hoc code-signs it so it launches without a Gatekeeper
-prompt. The app icon is generated from scratch by `scripts/gen-icon.sh` using
-`python3` + macOS `sips`; Python writes the ICNS container directly, so
-`iconutil` is not required. `cargo bundle` also
-works via the `[package.metadata.bundle]` in `bin/noa/Cargo.toml`.
+Noa is a Cargo workspace. `noa-vt` and `noa-grid` implement the terminal parser
+and state model without windowing dependencies. `noa-render` owns GPU rendering,
+while `noa-app` owns the `winit` event loop and macOS integration. The binary in
+`bin/noa` is a thin entry point.
 
-## Fidelity approach
-
-Noa follows a **fidelity-over-faith** discipline: compatibility claims should be measured rather than assumed. The current automated parity harness protects Noa's fixture outputs from regression; Ghostty-backed capture and oracle comparison remain future work. The Parity Map has five dimensions:
-
-| Dimension | What "faithful" means | How it's checked |
-|-----------|----------------------|------------------|
-| **Behavioral** | Escape sequences, cursor/erase/scroll, deferred-wrap (xenl), DA/DSR replies behave identically | `noa-vt` / `noa-grid` unit tests (byte-sequence → action / grid assertions) |
-| **Visual** | Layout, color, monospace metrics match per screen | side-by-side vs Ghostty running the same command |
-| **Feature** | Every in-scope feature present & reachable | feature inventory coverage |
-| **Data-shape** | Cursor clamps, grid semantics follow the DEC spec | unit tests |
-| **Asset** | Fonts/glyphs faithful | system-font discovery + atlas |
-
-### Increment-1 behavioral parity checks (feasible now)
-
-- **Deferred wrap (xenl):** `printf 'a%.0s' {1..200}` wraps at the same columns as Ghostty.
-- **SGR:** `printf '\e[31mRED\e[0m \e[1;32mBOLDGREEN\e[0m\n'` — 16-color + bold match.
-- **Cursor report:** `printf '\e[6n'` returns a well-formed `ESC[row;colR`.
-- **DA1:** the `ESC[c` probe gets `ESC[?62;4;22c` so the prompt doesn't hang.
-
-## Roadmap
-
-| Inc | Scope | Status |
-|-----|-------|--------|
-| **1** | Vertical slice: window + wgpu grid, PTY `$SHELL`, from-scratch parser (C0, core CSI, SGR 16+truecolor, deferred-wrap), block cursor, ASCII+arrow input, DA/DSR | ✅ Done |
-| **2** | Resize behavior, full CSI/edit set, 256+truecolor palette, alt screen, DECSC/DECRC, bracketed paste, UTF-8 wide cells, interaction basics | ✅ Done |
-| **3** | Paged scrollback storage, interned styles, OSC 8 hyperlinks, interactive search UI, expanded configuration | ✅ Done |
-| **4** | Tabs + split tree + multi-window, config file, 574 themes, font fallback + ligatures + Nerd/box glyphs, soft-wrap reflow on resize | ✅ Done |
-| **5** | Kitty graphics + keyboard protocols, shell integration (OSC 133/7), DCS, legacy mouse encodings | ✅ Done |
-| **6** | macOS-native polish: quick terminal, command palette, background blur, session restore, secure keyboard entry, notifications (OSC 9/777), CLI actions (`+list-themes` …), titlebar styles, Option-as-Alt config | ✅ Done |
-| **+** | Beyond core parity: session sidebar, session/tab overview, background images, agent auto-approve mode, Ghostty config import, live config reload | ✅ Done |
+Dependency boundaries are intentional: only `noa-app` and `noa-render` use
+`wgpu`, and only `noa-app` uses `winit`.
 
 ## License
 
-MIT — matching Ghostty's license. Noa is an independent reimplementation; it links no Ghostty code.
+MIT, matching Ghostty's license. Noa is an independent reimplementation.

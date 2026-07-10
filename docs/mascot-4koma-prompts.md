@@ -1,148 +1,192 @@
 # Noa Mascot — 4-koma Image-Generation Prompts
 
-Ready-to-generate prompts for the strips in `mascot-4koma.md`. Each panel =
-**Panel Base** (character + style + framing DNA, prepended to every panel) **+**
-the panel's clause below. Dialogue is **not** baked into the image — generate art
-with empty bubbles and typeset the lines from `mascot-4koma.md` in post (diffusion
-models garble text).
+**One block = one complete 2×2 strip.** Each prompt below is fully self-contained:
+copy a single block, paste it into your image generator, get the whole four-panel
+strip with the short English dialogue baked in. Nothing to prepend or concatenate.
+Scripts these render: `mascot-4koma.md`.
 
-## Panel Base (prepend to every panel)
+## Notes
 
-```
-manga 4-koma panel, one consistent character Noa — a petite short girl, sleek
-jet-black bob with blunt bangs, oversized black hoodie, a single warm
-signature-orange (#E8A33D) accent; her companion Ember — a small round ghost with
-a faint warm-orange inner glow and a simple two-dot face; clean flat cel-shaded
-webcomic style, crisp black outlines, limited charcoal + warm-orange palette, soft
-screentone shading, empty speech bubbles with NO text and NO lettering, strong
-character consistency
-```
-
-## Negative Prompt (shared)
-
-```
-readable text, garbled letters, watermark, signature, extra fingers, deformed
-hands, realistic photo, cluttered background, multiple accent colors, inconsistent
-character design, tall model proportions, lowres, blurry, jpeg artifacts
-```
-
-## Workflow
-
-- **Consistency**: lock Noa + Ember once (seed or a character reference from the
-  Signature stand, `mascot-ip.md`), then generate every panel via i2i / same seed
-  so the pair stays on-model across all four.
-- **Framing**: keep the camera identical within a "time-lapse" strip (#4, #7) — the
-  unchanging frame *is* the joke. Vary shots (wide / medium / close-up) in the
-  reaction strips, and give the bottom-right (punchline) panel the tightest,
-  most readable framing.
-- **Layout**: 2×2 quadrant grid, square 1:1. Reading order (EN, left→right):
-  **top-left → top-right → bottom-left → bottom-right**. Per-panel renders ≈ 1:1.
-- **Text**: dialogue is short EN (canonical lines in `mascot-4koma.md`). Either
-  **bake** it into the bubbles (short lines render acceptably on text-capable
-  models — Ideogram / gpt-image / nano-banana) or leave bubbles empty and letter
-  in post for the cleanest type.
-
-## Assembled example (Strip #1, Panel 1 — full copy-paste form)
-
-```
-manga 4-koma panel, one consistent character Noa — a petite short girl, sleek
-jet-black bob with blunt bangs, oversized black hoodie, a single warm
-signature-orange (#E8A33D) accent; her companion Ember — a small round ghost with
-a faint warm-orange inner glow and a simple two-dot face; clean flat cel-shaded
-webcomic style, crisp black outlines, limited charcoal + warm-orange palette, soft
-screentone shading, empty speech bubbles with NO text and NO lettering, strong
-character consistency + medium shot, Noa at her desk with a flat deadpan face, a
-large wall screen behind her glowing red with a big ✗, a small green screen in
-front of her, empty speech bubble over her head
-```
-
-> Every clause below concatenates the same way: `Panel Base + <clause>`.
+- **Layout**: 2×2 grid, square 1:1, read **top-left → top-right → bottom-left →
+  bottom-right**.
+- **Text**: short EN lines are baked into the bubbles. They render best on
+  text-capable models (Ideogram / gpt-image / nano-banana). If type comes out
+  messy, drop the `bubble "…"` clauses and letter in post from `mascot-4koma.md`.
+- **`Avoid:`** is the negative prompt inline. Midjourney users: move those terms to
+  `--no`.
+- **Consistency**: for print-quality finals, split a block into its four TL/TR/BL/BR
+  lines and generate each with the same opening paragraph via i2i / a locked seed.
 
 ---
 
-## Panel clauses
+## Copy-paste prompts
 
 ### #1 — It Works On My Machine
-- **P1**: `+ medium shot, Noa at her desk with a flat deadpan face, a large wall screen behind her glowing red with a big ✗, a small green screen in front of her, empty bubble`
-- **P2**: `+ close-up on Ember squinting up at the red ✗, one nervous sweat drop, timid pose, empty bubble`
-- **P3**: `+ Noa gesturing flatly at her own all-green screen, unbothered, half-lidded eyes, empty bubble`
-- **P4**: `+ punchline wide shot, Ember lifting a laptop overhead like an offering toward the red screen, Noa staring at it one beat too long as if actually considering it, comedic pause, empty bubble`
+```
+manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
+read top-left → top-right → bottom-left → bottom-right. Consistent characters in
+every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
+oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
+round ghost with a faint warm-orange inner glow and a simple two-dot face. Clean
+flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
+palette, soft screentone, short clean English speech-bubble lettering.
+(TL) Noa at her desk, flat deadpan, a wall screen behind her glowing red with a big
+red ✗ — bubble "…passes here."
+(TR) close on Ember squinting up at the red ✗, one nervous sweat drop — bubble
+"it's SO red."
+(BL) Noa gesturing flatly at her own all-green screen, unbothered — bubble "not my
+bug."
+(BR) Ember lifting a laptop overhead like an offering, Noa staring at it one beat
+too long — bubble "…ship your laptop?"
+Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
+background, multiple accent colors, inconsistent character design, watermark.
+```
 
 ### #2 — Rubber Duck
-- **P1**: `+ two-shot, Noa turned to Ember dead-serious, one finger raised mid-explanation, empty bubble`
-- **P2**: `+ close-up, Ember sitting bolt upright, proud attentive nod, tiny sparkle of purpose`
-- **P3**: `+ Noa mid-gesture with eyes widening a fraction, already standing and turning away in sudden realization, empty bubble`
-- **P4**: `+ punchline, Ember alone in frame still nodding earnestly at empty air, an empty chair beside it, faint confusion, empty bubble`
+```
+manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
+read top-left → top-right → bottom-left → bottom-right. Consistent characters in
+every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
+oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
+round ghost with a faint warm-orange inner glow and a simple two-dot face. Clean
+flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
+palette, soft screentone, short clean English speech-bubble lettering.
+(TL) Noa turned to Ember, dead serious, one finger raised mid-explanation — bubble
+"so the bug is—"
+(TR) close on Ember sitting bolt upright, proud attentive nod, tiny sparkle of
+purpose — bubble "mm!"
+(BL) Noa's eyes widening a fraction, already standing and turning away in sudden
+realization — bubble "—oh. never mind."
+(BR) Ember alone in frame still nodding earnestly at empty air, an empty chair
+beside it — bubble "…I helped?"
+Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
+background, multiple accent colors, inconsistent character design, watermark.
+```
 
 ### #3 — The One-Character Fix
-- **P1**: `+ wide shot, Noa buried in a wall of glowing code tabs at 3 AM, messy hair, exhausted, sleeves over hands as sweater-paws`
-- **P2**: `+ close-up, Ember face-down asleep on the desk, a tiny snore bubble`
-- **P3**: `+ extreme close-up on a single line of code, one "=" turning into "==" highlighted in warm orange, Noa's flat eyes faintly reflected`
-- **P4**: `+ punchline split composition, Noa perfectly flat and deadpan in foreground, Ember behind her jolting awake mid-scream with motion lines, comedic contrast, empty bubbles`
+```
+manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
+read top-left → top-right → bottom-left → bottom-right. Consistent characters in
+every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
+oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
+round ghost with a faint warm-orange inner glow and a simple two-dot face. Clean
+flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
+palette, soft screentone, short clean English speech-bubble lettering.
+(TL) Noa buried in a wall of glowing code tabs at 3 AM, messy hair, exhausted,
+sleeves over hands as sweater-paws — caption box "hour 3."
+(TR) Ember face-down asleep on the desk, a tiny snore bubble — no dialogue.
+(BL) extreme close-up on one line of code, a single "=" turning into "==" highlighted
+in warm orange — bubble "…"
+(BR) Noa perfectly flat and deadpan in foreground, Ember behind her jolting awake
+mid-scream with motion lines — bubble "THREE HOURS?!"
+Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
+background, multiple accent colors, inconsistent character design, watermark.
+```
 
 ### #4 — The Five-Minute Estimate
-*(identical camera every panel — only the window light / time changes)*
-- **P1**: `+ medium shot, Noa hands in hoodie pocket glancing at a ticket, casual, window behind her in bright daylight, empty bubble`
-- **P2**: `+ same framing and pose, window now sunset orange`
-- **P3**: `+ same framing, window full night, Ember asleep, a small pile of mugs`
-- **P4**: `+ punchline, same framing, window sunrise, Noa still typing utterly unbothered with faint dark circles, empty bubble`
+```
+manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
+read top-left → top-right → bottom-left → bottom-right, IDENTICAL camera and pose
+in every panel — only the window light / time of day changes. Consistent characters:
+Noa — a petite short girl, sleek jet-black bob with blunt bangs, oversized black
+hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small round ghost with
+a faint warm-orange inner glow and a simple two-dot face. Clean flat cel-shaded
+webcomic style, crisp black outlines, limited charcoal + warm-orange palette, soft
+screentone, short clean English speech-bubble lettering.
+(TL) Noa hands in hoodie pocket glancing at a ticket, window behind her in bright
+daylight — bubble "five minutes."
+(TR) same framing and pose, window now sunset orange — no dialogue.
+(BL) same framing, window full night, Ember asleep, a small pile of mugs — no
+dialogue.
+(BR) same framing, window sunrise, Noa still typing utterly unbothered with faint
+dark circles — bubble "…almost done."
+Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
+background, multiple accent colors, inconsistent character design, watermark.
+```
 
 ### #5 — git blame
-- **P1**: `+ close-up, Noa reading her screen with quiet disgust, slight frown, empty bubble`
-- **P2**: `+ Ember helpfully tapping a key, small sparkles of initiative`
-- **P3**: `+ screen close-up, an author label reading "Noa" with an old date, spotlighted in warm orange`
-- **P4**: `+ punchline, Ember pointing at the screen, Noa yanking her hood halfway up to hide with averted eyes and a faint blush (embarrassed tell), empty bubbles`
+```
+manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
+read top-left → top-right → bottom-left → bottom-right. Consistent characters in
+every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
+oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
+round ghost with a faint warm-orange inner glow and a simple two-dot face. Clean
+flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
+palette, soft screentone, short clean English speech-bubble lettering.
+(TL) Noa reading her screen with quiet disgust, slight frown — bubble "…who wrote
+this."
+(TR) Ember helpfully tapping a key, small sparkles of initiative — bubble "git
+blame!"
+(BL) screen close-up, an author label reading "Noa" with an old date, spotlighted
+in warm orange — no dialogue.
+(BR) Ember pointing at the screen, Noa yanking her hood halfway up to hide with
+averted eyes and a faint blush — bubble "…nobody."
+Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
+background, multiple accent colors, inconsistent character design, watermark.
+```
 
 ### #6 — --force
-- **P1**: `+ close-up on Noa's hand, cursor hovering over a "force push" button, one finger raised, her face flat and calm, empty bubble`
-- **P2**: `+ the screen flashing white, a beat of dead silence, Noa expressionless`
-- **P3**: `+ Ember spiraling into pure horror, wide eyes, tiny hands to its face, empty bubble`
-- **P4**: `+ punchline, Noa already calmly typing again and serene in foreground, Ember collapsing in relief behind her with a small warm-orange "safe" glow`
+```
+manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
+read top-left → top-right → bottom-left → bottom-right. Consistent characters in
+every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
+oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
+round ghost with a faint warm-orange inner glow and a simple two-dot face. Clean
+flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
+palette, soft screentone, short clean English speech-bubble lettering.
+(TL) close on Noa's hand, cursor hovering over a "force push" button, one finger
+raised, her face flat and calm — bubble "…it's fine."
+(TR) the screen flashing white, a beat of dead silence, Noa expressionless — no
+dialogue.
+(BL) Ember spiraling into pure horror, wide eyes, tiny hands to its face — bubble
+"our HISTORY—!!"
+(BR) Noa already calmly typing again and serene in foreground, Ember collapsing in
+relief behind her with a small warm-orange safe glow — bubble "…reflog."
+Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
+background, multiple accent colors, inconsistent character design, watermark.
+```
 
 ### #7 — Just One More Feature
-- **P1**: `+ cozy dark room, warm-orange screen glow lighting Noa's calm-determined face, empty bubble`
-- **P2**: `+ Ember yawning and curling up asleep against the keyboard`
-- **P3**: `+ a spinning clock and a growing pile of mugs, time-lapse feel, Noa still lit by the screen`
-- **P4**: `+ punchline, sunrise light through the window, Ember waking to find Noa in the exact same pose, Ember's silent dread, empty bubble`
+```
+manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
+read top-left → top-right → bottom-left → bottom-right. Consistent characters in
+every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
+oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
+round ghost with a faint warm-orange inner glow and a simple two-dot face. Clean
+flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
+palette, soft screentone, short clean English speech-bubble lettering.
+(TL) cozy dark room, warm-orange screen glow lighting Noa's calm-determined face —
+bubble "one more, then bed."
+(TR) Ember yawning and curling up asleep against the keyboard — no dialogue.
+(BL) a spinning clock and a growing pile of mugs, time-lapse feel, Noa still lit by
+the screen — no dialogue.
+(BR) sunrise light through the window, Ember waking to find Noa in the exact same
+pose, Ember's silent dread — bubble "…one more."
+Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
+background, multiple accent colors, inconsistent character design, watermark.
+```
 
 ### #8 — The Heisenbug
-- **P1**: `+ Noa glaring at a small glitchy shadow-bug creature on her screen, challenging stare, empty bubble`
-- **P2**: `+ Noa adds one glowing line of code and the bug instantly poofs into nothing, Noa mildly satisfied, empty bubble`
-- **P3**: `+ Noa deletes the line and the bug pops back looking smug with tiny crossed arms`
-- **P4**: `+ punchline, Noa's long flat stare, the bug ducking behind Ember, Ember shrugging helplessly, empty bubbles`
-
----
-
-## Single-image 2×2 grid (one render per strip)
-
-Wrap a whole strip in one generation instead of four. Panels map TL / TR / BL / BR
-to the strip's P1 / P2 / P3 / P4; slot in each strip's four short EN lines from
-`mascot-4koma.md`:
-
 ```
-[Panel Base] + a 2x2 four-panel manga grid, square 1:1, four equal panels with
-clean gutters, reading order top-left, top-right, bottom-left, bottom-right,
-telling: (TL) <P1 clause> (TR) <P2 clause> (BL) <P3 clause> (BR) <P4 clause>,
-consistent Noa and Ember across all four panels, short clean English speech-bubble
-text, 1:1
-```
-
-### Assembled example (Strip #1, baked short EN dialogue)
-
-```
-[Panel Base] + a 2x2 four-panel manga grid, square 1:1, clean gutters, reading
-top-left → top-right → bottom-left → bottom-right:
-(TL) Noa at her desk, flat deadpan, a wall screen behind her glowing red with a
-big ✗, bubble "…passes here."
-(TR) close on Ember squinting at the red ✗, one sweat drop, bubble "it's SO red."
-(BL) Noa gesturing flatly at her all-green screen, bubble "not my bug."
-(BR) Ember lifting a laptop overhead like an offering, Noa staring one beat too
-long, bubble "…ship your laptop?"
-consistent Noa and Ember, short clean English lettering, 1:1
+manga 4-koma, 2x2 four-panel grid, square 1:1, four equal panels, clean gutters,
+read top-left → top-right → bottom-left → bottom-right. Consistent characters in
+every panel: Noa — a petite short girl, sleek jet-black bob with blunt bangs,
+oversized black hoodie, one warm signature-orange (#E8A33D) accent; Ember — a small
+round ghost with a faint warm-orange inner glow and a simple two-dot face. Clean
+flat cel-shaded webcomic style, crisp black outlines, limited charcoal + warm-orange
+palette, soft screentone, short clean English speech-bubble lettering.
+(TL) Noa glaring at a small glitchy shadow-bug creature on her screen, challenging
+stare — bubble "reproduce."
+(TR) Noa adds one glowing line of code and the bug instantly poofs into nothing,
+Noa mildly satisfied — bubble "…gone."
+(BL) Noa deletes the line and the bug pops back looking smug with tiny crossed arms
+— no dialogue.
+(BR) Noa's long flat stare, the bug ducking behind Ember, Ember shrugging helplessly
+— bubble "…"
+Avoid: garbled text, extra fingers, deformed hands, realistic photo, cluttered
+background, multiple accent colors, inconsistent character design, watermark.
 ```
 
-> Faster but less controllable; per-panel + i2i keeps the pair more on-model. Use
-> the 2×2 grid for drafts and social posts, per-panel for finals.
-
-#TODO(agent): after a test render, tune the Panel Base tokens (screentone amount,
-outline weight) to the chosen generator, then lock a house style string.
+#TODO(agent): after a test render, tune the shared opening paragraph (screentone
+amount, outline weight) to the chosen generator, then propagate the locked house
+style across all eight blocks.

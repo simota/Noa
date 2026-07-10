@@ -17,6 +17,14 @@ use super::{Diagnostic, Directive};
 /// this is a backstop against pathologically deep (but acyclic) chains.
 const MAX_INCLUDE_DEPTH: usize = 10;
 
+/// Total-includes cap. The `visited` set only blocks a file from including one
+/// of its own ancestors, so a DAG-shaped fan-out (each file including many
+/// distinct files) re-expands work exponentially — the config-include analogue
+/// of the XML "billion laughs" attack. This monotonic counter bounds the total
+/// number of `config-file` expansions across the whole recursion, independent of
+/// depth or path, so a hostile/mis-synced config cannot hang the terminal.
+const MAX_INCLUDED_FILES: usize = 256;
+
 /// A directive tagged with the path of the file it was declared in, so
 /// per-directive diagnostics point at the file that actually owns the
 /// value rather than the top-level config path.
@@ -35,7 +43,15 @@ pub(super) fn expand_directives(
     let mut diagnostics = Vec::new();
     let mut visited = HashSet::new();
     visited.insert(canonical_or_self(path));
-    let directives = expand(path, source, 0, &mut visited, &mut diagnostics);
+    let mut included_count = 0usize;
+    let directives = expand(
+        path,
+        source,
+        0,
+        &mut visited,
+        &mut included_count,
+        &mut diagnostics,
+    );
     (directives, diagnostics)
 }
 
@@ -44,6 +60,7 @@ fn expand(
     source: &str,
     depth: usize,
     visited: &mut HashSet<PathBuf>,
+    included_count: &mut usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<SourcedDirective> {
     let mut out = Vec::new();
@@ -89,6 +106,16 @@ fn expand(
             continue;
         }
 
+        if *included_count >= MAX_INCLUDED_FILES {
+            diagnostics.push(config_file_diagnostic(
+                path,
+                raw,
+                "exceeds the maximum number of included files",
+            ));
+            continue;
+        }
+        *included_count += 1;
+
         let included_source = match fs::read_to_string(&resolved) {
             Ok(text) => text,
             Err(_) if optional => continue,
@@ -104,6 +131,7 @@ fn expand(
             &included_source,
             depth + 1,
             visited,
+            included_count,
             diagnostics,
         ));
         visited.remove(&canonical);

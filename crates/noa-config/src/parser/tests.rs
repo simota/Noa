@@ -1396,6 +1396,38 @@ fn config_file_include_detects_a_direct_cycle() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn config_file_include_caps_total_included_files() {
+    // Regression (Critical DoS): the visited set only blocks a file from
+    // including one of its own ancestors, so a broad fan-out (or DAG) of
+    // includes re-expands work unbounded — the config-include "billion laughs".
+    // A monotonic total-includes cap must refuse work past the limit so parsing
+    // terminates instead of hanging the terminal at launch/reload.
+    let dir = unique_temp_dir("config-file-fanout");
+    fs::create_dir_all(&dir).unwrap();
+    let n = 300; // exceeds MAX_INCLUDED_FILES (256)
+    let mut main = String::new();
+    for i in 0..n {
+        let child = dir.join(format!("child-{i}"));
+        fs::write(&child, "").unwrap();
+        main.push_str(&format!("config-file = {}\n", child.display()));
+    }
+    let main_path = dir.join("config");
+    fs::write(&main_path, &main).unwrap();
+
+    let source = fs::read_to_string(&main_path).unwrap();
+    let (_overrides, diagnostics) = parse_overrides(&main_path, &source);
+
+    // Includes past the cap are refused with a diagnostic rather than expanded.
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("maximum number of included files")),
+        "expected a total-includes cap diagnostic, got {diagnostics:?}"
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 fn unique_temp_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "noa-config-parser-{name}-{}-{}",

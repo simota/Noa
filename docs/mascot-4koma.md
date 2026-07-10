@@ -13,6 +13,7 @@ between her calm and the disaster.
 - **Ember**: the reaction engine — screams, panics, cheers, the feelings Noa won't
   show. Food-motivated, clingy, glows with emotion.
 - **Art**: each panel = `[IP Common Block]` (`mascot-ip.md`) + the panel's `[visual]`.
+  Ready-to-generate per-panel prompts live in `mascot-4koma-prompts.md`.
 - Keep dialogue sparse; let the faces and the beat do the work.
 
 ---

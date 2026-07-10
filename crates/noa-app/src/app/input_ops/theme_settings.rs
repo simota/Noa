@@ -14,6 +14,9 @@ fn cursor_shape_of(style: CursorStyle) -> noa_config::CursorShape {
         CursorStyle::BlinkingUnderline | CursorStyle::SteadyUnderline => {
             noa_config::CursorShape::Underline
         }
+        CursorStyle::BlinkingBlockHollow | CursorStyle::SteadyBlockHollow => {
+            noa_config::CursorShape::BlockHollow
+        }
     }
 }
 
@@ -84,14 +87,15 @@ impl App {
     }
 
     /// Drive the open theme-settings overlay from a keypress (mirrors
-    /// [`Self::handle_command_palette_key`]): Escape and Enter both close it
-    /// for now (Enter is a stub — `// increment E: commit sequence` below),
-    /// Tab toggles section, ↑↓ navigate, ←→ adjusts the focused settings
-    /// row, Backspace/printable text edit the theme filter or a focused
-    /// numeric row. Every other resolved keybind is swallowed (R-3
-    /// direction 2: no other overlay's shortcut may leak through while this
-    /// one owns the keyboard). Only called when `self.theme_settings`
-    /// targets `window_id` (checked by the caller).
+    /// [`Self::handle_command_palette_key`]): Escape cancels (reverts every
+    /// live-previewed value and closes, see [`Self::close_theme_settings`]),
+    /// Enter commits (persists the touched rows and closes, see
+    /// [`Self::commit_theme_settings`]), Tab toggles section, ↑↓ navigate,
+    /// ←→ adjusts the focused settings row, Backspace/printable text edit
+    /// the theme filter or a focused numeric row. Every other resolved
+    /// keybind is swallowed (R-3 direction 2: no other overlay's shortcut
+    /// may leak through while this one owns the keyboard). Only called when
+    /// `self.theme_settings` targets `window_id` (checked by the caller).
     pub(in crate::app) fn handle_theme_settings_key(
         &mut self,
         window_id: WindowId,
@@ -287,9 +291,10 @@ impl App {
         ));
     }
 
-    /// Close the theme-settings overlay. `revert = true` (Esc, and the
-    /// Enter stub — see `handle_theme_settings_key`) restores every
-    /// live-previewed value to its pre-open snapshot (R-16): the theme
+    /// Close the theme-settings overlay. `revert = true` (Esc — see
+    /// `handle_theme_settings_key`; Enter closes via `commit_theme_settings`
+    /// instead and never reaches here) restores every live-previewed value
+    /// to its pre-open snapshot (R-16): the theme
     /// preview, cursor style, and background opacity/blur (a no-op restore
     /// when they were never live-applied in the first place, e.g. an
     /// opaque-at-startup session — see `ThemeSettings::adjust`). Font size
@@ -506,6 +511,7 @@ impl App {
                 CursorStyle::BlinkingBlock
                     | CursorStyle::BlinkingBar
                     | CursorStyle::BlinkingUnderline
+                    | CursorStyle::BlinkingBlockHollow
             ),
             None => true,
         };

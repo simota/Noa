@@ -619,7 +619,12 @@ impl ThemeSettings {
                     return RowEffect::None;
                 };
                 let new = cycle(
-                    &[CursorShape::Block, CursorShape::Bar, CursorShape::Underline],
+                    &[
+                        CursorShape::Block,
+                        CursorShape::Bar,
+                        CursorShape::Underline,
+                        CursorShape::BlockHollow,
+                    ],
                     current,
                     delta,
                 );
@@ -908,6 +913,7 @@ fn cursor_shape_config_value(shape: CursorShape) -> &'static str {
         CursorShape::Block => "block",
         CursorShape::Bar => "bar",
         CursorShape::Underline => "underline",
+        CursorShape::BlockHollow => "block_hollow",
     }
 }
 

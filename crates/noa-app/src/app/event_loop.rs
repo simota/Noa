@@ -288,6 +288,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.on_scale_factor_changed(window_id, scale_factor)
             }
             WindowEvent::Resized(size) => self.on_resize(window_id, size),
+            WindowEvent::ThemeChanged(theme) => self.on_system_appearance_changed(theme),
             WindowEvent::Focused(true) => {
                 self.focused = Some(window_id);
                 self.os_focused = Some(window_id);
@@ -583,6 +584,7 @@ impl ApplicationHandler<UserEvent> for App {
         let theme_settings_deadline = self.tick_theme_settings_debounce();
         let config_watch_deadline = self.tick_config_watch();
         let live_wallpaper_deadline = self.tick_live_wallpaper();
+        let kitty_anim_deadline = self.tick_kitty_animations();
         let deadline = [
             blink_deadline,
             overview_deadline,
@@ -594,6 +596,7 @@ impl ApplicationHandler<UserEvent> for App {
             theme_settings_deadline,
             config_watch_deadline,
             live_wallpaper_deadline,
+            kitty_anim_deadline,
         ]
         .into_iter()
         .flatten()

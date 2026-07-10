@@ -28,31 +28,3 @@ chmod +x run_benchmark.sh
 time cat 150MB_ascii.txt
 time cat 150MB_unicode.txt
 ```
-
-## 参考データ（ベンチマーク測定結果）
-
-Ghostty の最適化（6つの独立した最適化）適用によるスループット改善の比較データです。
-
-### 1. `time cat 150MB_ascii.txt`
-- **Ghostty nightly**: **575ms** (最速)
-- **Alacritty**: 1.2秒
-- **Ghostty 1.3.2**: 1.5秒
-- **Kitty**: 1.7秒
-- **Warp**: 3.8秒
-- **iTerm2、Terminal**: 60秒後に停止（フリーズまたはタイムアウト）
-
-### 2. `time cat 150MB_unicode.txt` (混合言語)
-- **Ghostty nightly**: **536ms** (最速)
-- **Alacritty**: 1.05秒
-- **Ghostty 1.3.2**: 1.22秒
-- **Kitty**: 1.35秒
-- **Warp**: 3.4秒
-- **iTerm2、Terminal**: 60秒後に停止
-
-### 3. `DOOM-Fire-Zig` (IOテスト)
-- **Ghostty nightly**: **842 fps**
-- **Alacritty**: 593 fps
-- **Warp**: 577 fps
-- **Ghostty 1.3.2**: 532 fps
-- **Kitty**: 485 fps
-- **iTerm2、Terminal**: 60 fps

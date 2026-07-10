@@ -681,10 +681,16 @@ impl ImageStore {
         let (canvas_w, canvas_h) = (img.width, img.height);
         let canvas_px = (canvas_w as usize) * (canvas_h as usize) * 4;
 
-        // The frame-data rectangle must fit within the image canvas.
+        // The frame-data rectangle must fit within the image canvas. Use checked
+        // arithmetic: a raw `off_x + data_w` wraps in release builds and lets an
+        // out-of-bounds x=/y= slip past into composite_rect's indexing.
         let off_x = cmd.src_x;
         let off_y = cmd.src_y;
-        if off_x + data_w > canvas_w || off_y + data_h > canvas_h {
+        let fits = off_x
+            .checked_add(data_w)
+            .zip(off_y.checked_add(data_h))
+            .is_some_and(|(x_end, y_end)| x_end <= canvas_w && y_end <= canvas_h);
+        if !fits {
             return Err(KittyError::Invalid);
         }
 
@@ -836,7 +842,14 @@ impl ImageStore {
         let rect_y = cmd.src_y;
         let rect_w = if cmd.src_w != 0 { cmd.src_w } else { canvas_w };
         let rect_h = if cmd.src_h != 0 { cmd.src_h } else { canvas_h };
-        if rect_x + rect_w > canvas_w || rect_y + rect_h > canvas_h {
+        // Reject attacker-controlled x=/y=/w=/h= geometry that overflows or falls
+        // outside the canvas. Plain `rect_x + rect_w` wraps in release builds (no
+        // overflow-checks), slipping past the bound into composite_from's indexing.
+        let fits = rect_x
+            .checked_add(rect_w)
+            .zip(rect_y.checked_add(rect_h))
+            .is_some_and(|(x_end, y_end)| x_end <= canvas_w && y_end <= canvas_h);
+        if !fits {
             return Err(KittyError::Invalid);
         }
         let overwrite = cmd.cell_x_off == 1; // X=1 replaces
@@ -961,8 +974,10 @@ fn composite_rect(
 ) {
     for row in 0..data_h {
         for col in 0..data_w {
-            let s = ((row * data_w + col) * 4) as usize;
-            let d = (((off_y + row) * canvas_w + (off_x + col)) * 4) as usize;
+            // Index in usize so the arithmetic cannot wrap even if a future caller
+            // forgets the bounds check the compose/store paths perform.
+            let s = (row as usize * data_w as usize + col as usize) * 4;
+            let d = ((off_y + row) as usize * canvas_w as usize + (off_x + col) as usize) * 4;
             blend_pixel(canvas, d, &data[s..s + 4], overwrite);
         }
     }
@@ -983,7 +998,9 @@ fn composite_from(
 ) {
     for row in 0..rh {
         for col in 0..rw {
-            let idx = (((ry + row) * canvas_w + (rx + col)) * 4) as usize;
+            // Index in usize so the arithmetic cannot wrap even if a future caller
+            // forgets the bounds check the compose path performs.
+            let idx = ((ry + row) as usize * canvas_w as usize + (rx + col) as usize) * 4;
             let s: [u8; 4] = [src[idx], src[idx + 1], src[idx + 2], src[idx + 3]];
             blend_pixel(dst, idx, &s, overwrite);
         }
@@ -1629,6 +1646,38 @@ mod tests {
             Ok(())
         );
         assert_eq!(&*store.get(1).unwrap().frames[0].rgba, frame.as_slice());
+    }
+
+    #[test]
+    fn compose_rejects_overflowing_source_rect() {
+        // Regression (Critical DoS): a hostile x=/w= near u32::MAX must not wrap
+        // past the bounds check (release builds wrap on overflow) into an
+        // out-of-bounds index in composite_from — that panic would kill the pty
+        // io thread and permanently freeze the pane.
+        let mut store = store_with_base(); // 2x1 canvas, image i=1
+        let done = store.compose(&direct("a=c,i=1,r=1,c=1,x=4294967295,w=2", &[]));
+        assert_eq!(done, Err(KittyError::Invalid));
+        // The destination frame is left untouched.
+        assert_eq!(
+            &*store.get(1).unwrap().frames[0].rgba,
+            &[10u8, 20, 30, 255, 40, 50, 60, 255]
+        );
+    }
+
+    #[test]
+    fn store_frame_rejects_overflowing_offset() {
+        // Regression (Critical DoS): the a=f frame path shared the same unguarded
+        // u32-addition bounds check; a hostile x= near u32::MAX must be rejected,
+        // not wrapped into composite_rect's indexing.
+        let mut store = store_with_base();
+        let TransmitStep::Done(done) =
+            store.transmit(&direct("a=f,i=1,f=32,s=1,v=1,x=4294967295", &[1u8, 2, 3, 4]))
+        else {
+            panic!("expected done");
+        };
+        assert_eq!(done.result, Err(KittyError::Invalid));
+        // No frame was appended past the base frame.
+        assert_eq!(store.get(1).unwrap().frame_count(), 1);
     }
 
     #[test]

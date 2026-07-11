@@ -1,7 +1,7 @@
 use crate::macos_overlay::model::{
     OverlayColors, PaneRectPt, ThemeSettingsViewModel, Tone, overlay_scroll_window,
 };
-use crate::theme_settings::ThemeSettingsMode;
+use crate::theme_settings::{Liveness, ThemeSettingsMode};
 use noa_render::{CommandPaletteSnapshot, ConfirmDialogSnapshot, PaletteRow};
 use objc2::msg_send;
 use objc2::rc::Retained;
@@ -791,11 +791,15 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
         let settings_header_h = 20.0;
         let footer_h = 34.0;
         let avail = (pane.h - 24.0).max(240.0);
-        let settings_total = vm.rows.len();
+        let settings_total = vm.settings_visible.len();
         // Settings mode has no filter line/theme list above it, so its
         // section header sits where the "Theme"/"Sample" column headers
         // otherwise would (y=46); rows start directly below the header.
         let settings_top = 46.0 + settings_header_h;
+        // R-6/R-5 fixed lines (Addendum D-3/FM-04): always reserve the
+        // description line; reserve the search line only while active.
+        let description_h = 19.0;
+        let search_h = 16.0;
 
         let (list_rows, settings_rows, card_h) = match vm.mode {
             ThemeSettingsMode::Theme => {
@@ -807,13 +811,17 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                 (list_rows, 0usize, needed(list_rows).min(avail))
             }
             ThemeSettingsMode::Settings => {
-                let needed =
-                    |settings_rows: usize| settings_top + settings_rows as f64 * srow_h + footer_h;
-                let mut settings_rows = settings_total;
-                while needed(settings_rows) > avail && settings_rows > 3 {
-                    settings_rows -= 1;
-                }
-                (0usize, settings_rows, needed(settings_rows).min(avail))
+                let (settings_rows, height) = crate::macos_overlay::model::settings_rows_budget(
+                    settings_total,
+                    avail,
+                    settings_top,
+                    srow_h,
+                    footer_h,
+                    description_h,
+                    search_h,
+                    vm.search_active,
+                );
+                (0usize, settings_rows, height)
             }
         };
         let card_frame = NSRect::new(
@@ -1059,60 +1067,137 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                     46.0,
                     200.0,
                 );
-                let rows_top = settings_top;
-                let settings_sel = vm.rows.iter().position(|r| r.3).unwrap_or(0);
-                let (settings_off, settings_shown) =
-                    overlay_scroll_window(settings_total, settings_sel, settings_rows);
-                for (i, (label_text, value, restart, selected)) in vm.rows
-                    [settings_off..settings_off + settings_shown]
-                    .iter()
-                    .enumerate()
-                {
-                    let y_top = rows_top + i as f64 * srow_h;
-                    if *selected {
-                        let bg = make_view(NSRect::new(
-                            NSPoint::new(pad - 8.0, from_top(card_h, y_top, srow_h)),
-                            NSSize::new(card_w - pad * 2.0 + 16.0, srow_h),
-                        ));
-                        if !bg.is_null() {
-                            tint_layer(bg, ns_color(colors.selected_bg, 1.0), 6.0);
-                            let _: () = msg_send![effect, addSubview: bg];
-                            release_owned(bg);
+                // R-5: the search line occupies the slot rows would
+                // otherwise start at, pushing the list down by exactly the
+                // height already reserved for it in `settings_rows_budget`.
+                if vm.search_active {
+                    let search_line = make_label(
+                        &format!("/{}", vm.search_query),
+                        mono_digit_font(12.0),
+                        muted,
+                        NSRect::new(
+                            NSPoint::new(pad, from_top(card_h, settings_top, search_h)),
+                            NSSize::new(card_w - pad * 2.0, search_h),
+                        ),
+                    );
+                    if !search_line.is_null() {
+                        let _: () = msg_send![effect, addSubview: search_line];
+                    }
+                }
+                let rows_top = settings_top + if vm.search_active { search_h } else { 0.0 };
+                if vm.search_active && vm.settings_visible.is_empty() {
+                    let empty = make_label(
+                        &format!("No settings match \u{201c}{}\u{201d}", vm.search_query),
+                        system_font(12.5, WEIGHT_REGULAR),
+                        muted,
+                        NSRect::new(
+                            NSPoint::new(pad, from_top(card_h, rows_top + 8.0, 16.0)),
+                            NSSize::new(card_w - pad * 2.0, 16.0),
+                        ),
+                    );
+                    if !empty.is_null() {
+                        set_alignment(empty, ALIGN_CENTER);
+                        let _: () = msg_send![effect, addSubview: empty];
+                    }
+                } else {
+                    let settings_sel = vm
+                        .settings_visible
+                        .iter()
+                        .position(|&idx| vm.rows[idx].selected)
+                        .unwrap_or(0);
+                    let (settings_off, settings_shown) =
+                        overlay_scroll_window(settings_total, settings_sel, settings_rows);
+                    for (i, &row_idx) in vm.settings_visible
+                        [settings_off..settings_off + settings_shown]
+                        .iter()
+                        .enumerate()
+                    {
+                        let row = &vm.rows[row_idx];
+                        let y_top = rows_top + i as f64 * srow_h;
+                        if row.selected {
+                            let bg = make_view(NSRect::new(
+                                NSPoint::new(pad - 8.0, from_top(card_h, y_top, srow_h)),
+                                NSSize::new(card_w - pad * 2.0 + 16.0, srow_h),
+                            ));
+                            if !bg.is_null() {
+                                let bg_color = if row.selected && vm.reset_flash {
+                                    colors.accent
+                                } else {
+                                    colors.selected_bg
+                                };
+                                tint_layer(bg, ns_color(bg_color, 1.0), 6.0);
+                                let _: () = msg_send![effect, addSubview: bg];
+                                release_owned(bg);
+                            }
+                        }
+                        let label = make_label(
+                            &row.label,
+                            system_font(12.5, WEIGHT_REGULAR),
+                            if row.selected && vm.settings_focused {
+                                accent
+                            } else {
+                                fg
+                            },
+                            NSRect::new(
+                                NSPoint::new(pad, from_top(card_h, y_top + 4.0, 16.0)),
+                                NSSize::new(170.0, 16.0),
+                            ),
+                        );
+                        if !label.is_null() {
+                            let _: () = msg_send![effect, addSubview: label];
+                        }
+                        // D-2 (authoritative, absolute pt): label x=20 w=170
+                        // · badge x=196 w=44 (right edge 240) · value
+                        // x=250 (pad+230, unchanged below).
+                        let badge_color = match row.liveness {
+                            Liveness::Live => accent,
+                            Liveness::OnSave | Liveness::OnLaunch => muted,
+                        };
+                        let badge = make_label(
+                            row.liveness.badge_text(),
+                            system_font(9.5, WEIGHT_SEMIBOLD),
+                            badge_color,
+                            NSRect::new(
+                                NSPoint::new(196.0, from_top(card_h, y_top + 4.0, 14.0)),
+                                NSSize::new(44.0, 14.0),
+                            ),
+                        );
+                        if !badge.is_null() {
+                            set_alignment(badge, ALIGN_RIGHT);
+                            let _: () = msg_send![effect, addSubview: badge];
+                        }
+                        let reason = row.restart_reason.note();
+                        let value_text = match reason {
+                            Some(text) => format!("{}  {text}", row.value),
+                            None => row.value.clone(),
+                        };
+                        let value_label = make_label(
+                            &value_text,
+                            system_font(12.5, WEIGHT_REGULAR),
+                            if reason.is_some() { muted } else { fg },
+                            NSRect::new(
+                                NSPoint::new(pad + 230.0, from_top(card_h, y_top + 4.0, 16.0)),
+                                NSSize::new(card_w - pad * 2.0 - 230.0, 16.0),
+                            ),
+                        );
+                        if !value_label.is_null() {
+                            let _: () = msg_send![effect, addSubview: value_label];
                         }
                     }
-                    let label = make_label(
-                        label_text,
-                        system_font(12.5, WEIGHT_REGULAR),
-                        if *selected && vm.settings_focused {
-                            accent
-                        } else {
-                            fg
-                        },
-                        NSRect::new(
-                            NSPoint::new(pad, from_top(card_h, y_top + 4.0, 16.0)),
-                            NSSize::new(220.0, 16.0),
-                        ),
-                    );
-                    if !label.is_null() {
-                        let _: () = msg_send![effect, addSubview: label];
-                    }
-                    let value_text = if *restart {
-                        format!("{value}  (restart to apply)")
-                    } else {
-                        value.clone()
-                    };
-                    let value_label = make_label(
-                        &value_text,
-                        system_font(12.5, WEIGHT_REGULAR),
-                        if *restart { muted } else { fg },
-                        NSRect::new(
-                            NSPoint::new(pad + 230.0, from_top(card_h, y_top + 4.0, 16.0)),
-                            NSSize::new(card_w - pad * 2.0 - 230.0, 16.0),
-                        ),
-                    );
-                    if !value_label.is_null() {
-                        let _: () = msg_send![effect, addSubview: value_label];
-                    }
+                }
+                // R-6: fixed one-line slot directly above the footer.
+                let description_y = card_h - footer_h - description_h;
+                let description = make_label(
+                    vm.selected_description,
+                    system_font(12.0, WEIGHT_REGULAR),
+                    muted,
+                    NSRect::new(
+                        NSPoint::new(pad, from_top(card_h, description_y, 16.0)),
+                        NSSize::new(card_w - pad * 2.0, 16.0),
+                    ),
+                );
+                if !description.is_null() {
+                    let _: () = msg_send![effect, addSubview: description];
                 }
             }
         }

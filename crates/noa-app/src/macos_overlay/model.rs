@@ -144,6 +144,19 @@ pub(crate) enum Tone {
     Danger,
 }
 
+/// One settings row's display data (R-1/R-3/R-6): label, current value, the
+/// always-visible [`crate::theme_settings::Liveness`] badge and
+/// [`crate::theme_settings::RestartReason`] note (independent signals, R-3),
+/// and whether this row is the currently selected/highlighted one.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct SettingsRowView {
+    pub(crate) label: String,
+    pub(crate) value: String,
+    pub(crate) liveness: crate::theme_settings::Liveness,
+    pub(crate) restart_reason: crate::theme_settings::RestartReason,
+    pub(crate) selected: bool,
+}
+
 /// A plain-data description of the theme-settings card, mirroring
 /// `theme_settings_overlay_text` (the wgpu path) so the two renderings show
 /// the same content. Structured instead of ANSI so the native layer can lay
@@ -153,7 +166,7 @@ pub(crate) struct ThemeSettingsViewModel {
     /// Which overlay this is — "Theme" picker or "Settings" rows. The
     /// picker fields (`filter`/`themes`/`*_swatches`) are only meaningful
     /// (and only rendered) in [`crate::theme_settings::ThemeSettingsMode::Theme`];
-    /// `rows` only in `Settings`.
+    /// `rows`/`settings_*` only in `Settings`.
     pub(crate) mode: crate::theme_settings::ThemeSettingsMode,
     pub(crate) badge: Option<&'static str>,
     pub(crate) theme_section_focused: bool,
@@ -166,8 +179,23 @@ pub(crate) struct ThemeSettingsViewModel {
     pub(crate) semantic_swatches: Vec<(u8, u8, u8)>,
     pub(crate) show_truecolor_ramp: bool,
     pub(crate) settings_focused: bool,
-    /// Settings rows: (label, value, restart_note, selected).
-    pub(crate) rows: Vec<(String, String, bool, bool)>,
+    /// Every settings row, in `SettingsRowKind::ALL` order (not the search
+    /// filter's order — see [`Self::settings_visible`] for which of these to
+    /// actually show right now).
+    pub(crate) rows: Vec<SettingsRowView>,
+    /// Indices into [`Self::rows`] currently shown: every row in `ALL` order
+    /// while search is inactive, or the R-5 fuzzy-filtered subset (best
+    /// match first) while it is.
+    pub(crate) settings_visible: Vec<usize>,
+    /// R-5: whether the row-search modal sub-state is active.
+    pub(crate) search_active: bool,
+    pub(crate) search_query: String,
+    /// R-6: the currently selected row's description — always
+    /// `SettingsRowKind::ALL[selected_row].description()`, independent of
+    /// search/highlight state (AC-17).
+    pub(crate) selected_description: &'static str,
+    /// R-7/C-5: whether the post-Reset highlight is still showing.
+    pub(crate) reset_flash: bool,
     /// The footer line: commit error (danger) or the key hint (muted).
     pub(crate) footer: (String, Tone),
 }
@@ -211,25 +239,53 @@ pub(crate) fn theme_settings_view_model(
         }
     }
 
-    let rows = SettingsRowKind::ALL
+    // R-5: while search is active, the highlighted row (a `settings_filtered`
+    // index) is the visually "selected" one instead of `selected_row` (which
+    // only updates on confirm, Addendum B) — both converge to the same
+    // `SettingsRowKind::ALL` index space so `SettingsRowView::selected` stays
+    // a single flag regardless of which mode is driving it.
+    let search_active = state.settings_search_active();
+    let highlighted_all_index = if search_active {
+        state.settings_filtered_row_index(state.settings_highlighted_index())
+    } else {
+        Some(state.selected_row())
+    };
+
+    let rows: Vec<SettingsRowView> = SettingsRowKind::ALL
         .iter()
         .enumerate()
         .map(|(idx, kind)| {
-            let selected = idx == state.selected_row();
-            let editing = selected && state.section() == Section::SettingsRows;
-            (
-                kind.label().to_string(),
-                settings_row_display_value(*kind, &state.rows()[idx].draft, editing),
-                state.restart_note(*kind),
-                selected,
-            )
+            let editing = !search_active
+                && idx == state.selected_row()
+                && state.section() == Section::SettingsRows;
+            SettingsRowView {
+                label: kind.label().to_string(),
+                value: settings_row_display_value(*kind, &state.rows()[idx].draft, editing),
+                liveness: state.liveness(*kind),
+                restart_reason: state.restart_reason(*kind),
+                selected: Some(idx) == highlighted_all_index,
+            }
         })
         .collect();
 
+    let settings_visible: Vec<usize> = if search_active {
+        (0..state.settings_filtered_len())
+            .filter_map(|i| state.settings_filtered_row_index(i))
+            .collect()
+    } else {
+        (0..SettingsRowKind::COUNT).collect()
+    };
+
+    let selected_description = SettingsRowKind::ALL[state.selected_row()].description();
+
     let footer = match state.commit_error() {
         Some(error) => (error.to_string(), Tone::Danger),
+        None if search_active => (
+            "Enter confirm row   Tab exit search   Esc cancel".to_string(),
+            Tone::Muted,
+        ),
         None => (
-            "\u{2191}\u{2193} navigate   \u{2190}\u{2192} adjust   Esc cancel   Enter save"
+            "\u{2191}\u{2193} navigate   \u{2190}\u{2192} adjust   Tab search   Delete reset   Esc cancel   Enter save"
                 .to_string(),
             Tone::Muted,
         ),
@@ -248,6 +304,85 @@ pub(crate) fn theme_settings_view_model(
         show_truecolor_ramp,
         settings_focused: state.section() == Section::SettingsRows,
         rows,
+        settings_visible,
+        search_active,
+        search_query: state.settings_filter().to_string(),
+        selected_description,
+        reset_flash: state.reset_flash_active(std::time::Instant::now()),
         footer,
+    }
+}
+
+/// Settings-mode row-shrink policy (Addendum D-3/FM-04): how many rows fit
+/// `avail` height once the footer, the always-on description line, and
+/// (while active) the search line are reserved — the same floor-of-3
+/// degradation the pre-existing Theme-mode list policy uses, extended to
+/// account for R-5/R-6's new fixed lines so the shrink loop re-solves with
+/// them included. Returns `(row_count, card_height)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn settings_rows_budget(
+    total_rows: usize,
+    avail: f64,
+    settings_top: f64,
+    row_h: f64,
+    footer_h: f64,
+    description_h: f64,
+    search_h: f64,
+    search_active: bool,
+) -> (usize, f64) {
+    let extra = description_h + if search_active { search_h } else { 0.0 };
+    let needed = |rows: usize| settings_top + rows as f64 * row_h + footer_h + extra;
+    let mut rows = total_rows.max(1);
+    while needed(rows) > avail && rows > 3 {
+        rows -= 1;
+    }
+    (rows, needed(rows).min(avail))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // FM-04: at the smallest supported pane, the floor-of-3 row budget must
+    // still fit `avail` with the description line (and, while searching,
+    // the search line) included — the AppKit card's `avail` floor is 240.0
+    // (`(pane.h - 24.0).max(240.0)`), so this proves the shrink loop never
+    // needs the "drop description/search before violating the row floor"
+    // fallback D-3 describes; the numbers alone already guarantee it holds.
+    #[test]
+    fn settings_rows_budget_floor_of_three_fits_smallest_pane_with_search() {
+        let avail = 240.0_f64;
+        let settings_top = 66.0;
+        let row_h = 23.0;
+        let footer_h = 34.0;
+        let description_h = 19.0;
+        let search_h = 16.0;
+
+        let (rows, height) = settings_rows_budget(
+            3,
+            avail,
+            settings_top,
+            row_h,
+            footer_h,
+            description_h,
+            search_h,
+            true,
+        );
+        assert_eq!(rows, 3);
+        assert!(height <= avail, "needed(3) with search must fit avail");
+    }
+
+    #[test]
+    fn settings_rows_budget_shrinks_to_floor_of_three_when_too_small() {
+        let (rows, height) =
+            settings_rows_budget(16, 100.0, 66.0, 23.0, 34.0, 19.0, 16.0, false);
+        assert_eq!(rows, 3, "never shrinks below the floor of 3 rows");
+        assert!(height <= 100.0f64.max(240.0));
+    }
+
+    #[test]
+    fn settings_rows_budget_shows_every_row_when_it_fits() {
+        let (rows, _) = settings_rows_budget(16, 1000.0, 66.0, 23.0, 34.0, 19.0, 16.0, false);
+        assert_eq!(rows, 16);
     }
 }

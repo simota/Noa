@@ -89,7 +89,7 @@ impl App {
             }
             ModalImeTarget::ThemeSettings => {
                 if let Some(session) = self.theme_settings.as_mut() {
-                    session.state.push_text(text, Instant::now());
+                    std::sync::Arc::make_mut(&mut session.state).push_text(text, Instant::now());
                 }
                 self.after_theme_settings_navigation(window_id);
             }

@@ -45,7 +45,7 @@ impl App {
             .theme_settings
             .as_ref()
             .filter(|session| session.window_id == window_id)
-            .map(|session| (session.state.clone(), session.opened_at));
+            .map(|session| (std::sync::Arc::clone(&session.state), session.opened_at));
         // Same for the confirm dialog: composited as its own modal card after
         // the panes (and above the palette — it blocks input), not inline in
         // the pane cell pass.
@@ -325,7 +325,7 @@ impl App {
                 &mut state.native_overlays,
                 theme_settings_card
                     .as_ref()
-                    .and_then(|(ts, _)| focused_rect.map(|r| (ts, r))),
+                    .and_then(|(ts, _)| focused_rect.map(|r| (ts.as_ref(), r))),
                 &colors,
             );
             crate::macos_overlay::sync_confirm_dialog(

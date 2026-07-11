@@ -553,10 +553,112 @@ pub(super) struct CommandPaletteSession {
 /// [`CommandPaletteSession`].
 pub(super) struct ThemeSettingsSession {
     pub(super) window_id: WindowId,
-    pub(super) state: crate::theme_settings::ThemeSettings,
+    /// `Arc`-shared (R-4): `App::redraw` snapshots this out with
+    /// `Arc::clone` (a refcount bump, not a deep copy of the catalog-sized
+    /// `filtered` list); the input-handling mutation sites go through
+    /// `Arc::make_mut`. The render path must never store its clone back into
+    /// `self` across event-loop turns (Atlas invariant, code-review gate) —
+    /// doing so would silently re-enable deep copies via `make_mut` forks.
+    pub(super) state: std::sync::Arc<crate::theme_settings::ThemeSettings>,
     /// When the overlay opened, driving the same brief fade-in the command
     /// palette uses ([`crate::anim::DUR_FAST`]).
     pub(super) opened_at: Instant,
+}
+
+#[cfg(test)]
+mod theme_settings_session_tests {
+    use super::ThemeSettingsSession;
+    use crate::theme_settings::{ThemeSettings, ThemeSettingsInit, ThemeSettingsMode};
+    use std::time::Instant;
+    use winit::window::WindowId;
+
+    fn init() -> ThemeSettingsInit {
+        ThemeSettingsInit {
+            mode: ThemeSettingsMode::Settings,
+            current_theme: "3024 Day".to_string(),
+            font_size: 14.0,
+            cursor_style: noa_config::CursorShape::Block,
+            background_opacity: 1.0,
+            background_blur_radius: 0,
+            background_image: String::new(),
+            background_image_opacity: 1.0,
+            background_image_position: noa_config::BackgroundImagePosition::Center,
+            background_image_fit: noa_config::BackgroundImageFit::Contain,
+            background_image_repeat: false,
+            background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+            window_padding_x: 2.0,
+            window_padding_y: 2.0,
+            macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
+            sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
+            quick_terminal_size: 0.4,
+            confirm_quit: true,
+            font_family: "Menlo".to_string(),
+            available_font_families: Vec::new(),
+        }
+    }
+
+    fn session() -> ThemeSettingsSession {
+        ThemeSettingsSession {
+            window_id: WindowId::from(1u64),
+            state: std::sync::Arc::new(ThemeSettings::open(init())),
+            opened_at: Instant::now(),
+        }
+    }
+
+    // AC-9/AC-24 (R-4/NFR-1): two redraw-path snapshots (`Arc::clone`, what
+    // `App::redraw` does at `render.rs`'s `theme_settings_card` line) taken
+    // with no mutation in between point at the same allocation — proof no
+    // deep clone happens on the read-only render path.
+    #[test]
+    fn consecutive_redraw_snapshots_share_the_same_allocation() {
+        let session = session();
+
+        let snapshot_a = std::sync::Arc::clone(&session.state);
+        let snapshot_b = std::sync::Arc::clone(&session.state);
+
+        assert!(std::sync::Arc::ptr_eq(&snapshot_a, &snapshot_b));
+    }
+
+    // AC-10 (pure-state half — the "existing behavior unchanged" half of
+    // this claim is the untouched `theme_settings::tests` suite staying
+    // green, R-8): once a render-path snapshot is dropped, `Arc::make_mut`
+    // still forks/mutates correctly and the result is observable through
+    // `session.state` exactly as a direct `&mut ThemeSettings` call would
+    // produce.
+    #[test]
+    fn mutation_after_snapshot_drop_applies_correctly() {
+        let mut session = session();
+        {
+            let _redraw_snapshot = std::sync::Arc::clone(&session.state);
+        } // dropped: refcount back to 1 before the mutation below
+
+        let before = session.state.selected_row();
+        std::sync::Arc::make_mut(&mut session.state).move_down();
+
+        assert_eq!(session.state.selected_row(), before + 1);
+    }
+
+    // AC-11 companion: a still-live snapshot (as if the render path had
+    // wrongly stored its clone back into `self` across a turn, the Atlas
+    // invariant this type's field doc warns against) forces `make_mut` to
+    // fork — the mutation still applies correctly to the *new* allocation,
+    // but the snapshot's pointer no longer matches, which is exactly the
+    // deep-copy regression this test would catch if that invariant were
+    // ever violated.
+    #[test]
+    fn mutation_while_a_snapshot_is_still_held_forks_the_allocation() {
+        let mut session = session();
+        let held_snapshot = std::sync::Arc::clone(&session.state);
+
+        std::sync::Arc::make_mut(&mut session.state).move_down();
+
+        assert!(
+            !std::sync::Arc::ptr_eq(&held_snapshot, &session.state),
+            "make_mut must fork rather than mutate through a still-shared Arc"
+        );
+        assert_eq!(session.state.selected_row(), 1);
+        assert_eq!(held_snapshot.selected_row(), 0, "the held snapshot is untouched");
+    }
 }
 
 #[derive(Clone)]

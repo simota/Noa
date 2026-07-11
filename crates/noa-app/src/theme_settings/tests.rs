@@ -979,3 +979,397 @@ fn preview_resolution_path_is_well_under_one_frame_budget() {
         "mean preview-resolution time {mean:?} exceeded the 16ms@60Hz budget"
     );
 }
+
+// -----------------------------------------------------------------------
+// settings-panel-enrichment: R-1 (restart_reason), R-3 (liveness), R-5
+// (search), R-6 (description), R-7 (reset). New tests only — nothing above
+// this line is touched (R-8).
+// -----------------------------------------------------------------------
+
+// AC-1: opaque startup's live opacity/blur row reports `OpaqueStartup`, not
+// just a bare boolean.
+#[test]
+fn restart_reason_opaque_startup_row_reports_opaque_startup() {
+    let settings = ThemeSettings::open(settings_init()); // opacity 1.0 = opaque
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::BackgroundOpacity),
+        RestartReason::OpaqueStartup
+    );
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::BackgroundBlurRadius),
+        RestartReason::OpaqueStartup
+    );
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::CursorStyle),
+        RestartReason::None
+    );
+}
+
+// AC-2: a touched commit-only row reports `CommitOnly`, a distinct variant
+// from AC-1's `OpaqueStartup` — and the `restart_note` bool wrapper (C-2,
+// the 28 existing call sites above) still agrees with it.
+#[test]
+fn restart_reason_touched_commit_only_row_reports_commit_only_and_differs_from_opaque() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+    settings.adjust(1, Instant::now());
+
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::FontFamily),
+        RestartReason::CommitOnly
+    );
+    assert_ne!(
+        settings.restart_reason(SettingsRowKind::FontFamily),
+        settings.restart_reason(SettingsRowKind::BackgroundOpacity),
+    );
+    assert!(settings.restart_note(SettingsRowKind::FontFamily));
+}
+
+// AC-7 analog (state-level source of truth for the view-model's badge):
+// every row's `liveness()` matches its static `is_live()` classification
+// outside the opaque downgrade (a transparent-started session).
+#[test]
+fn liveness_matches_is_live_outside_the_opaque_downgrade() {
+    let settings = ThemeSettings::open(transparent_init());
+    for kind in SettingsRowKind::ALL {
+        let expected = if kind.is_live() {
+            Liveness::Live
+        } else {
+            Liveness::OnLaunch
+        };
+        assert_eq!(settings.liveness(kind), expected, "{kind:?}");
+    }
+}
+
+// AC-8: editing a live row never changes its `liveness()` classification —
+// independent of `touched`, unlike `restart_reason`.
+#[test]
+fn liveness_is_independent_of_touched() {
+    let mut settings = ThemeSettings::open(transparent_init());
+    move_to_row(&mut settings, SettingsRowKind::CursorStyle);
+    assert_eq!(
+        settings.liveness(SettingsRowKind::CursorStyle),
+        Liveness::Live
+    );
+    settings.adjust(1, Instant::now());
+    assert_eq!(
+        settings.liveness(SettingsRowKind::CursorStyle),
+        Liveness::Live,
+        "liveness must not depend on touched"
+    );
+}
+
+// C-6: a live-class row downgraded by an opaque startup reports its
+// *effective* liveness (`OnLaunch`), not the static classification — the
+// other live rows (no runtime-apply dependency on transparency) stay
+// `Live` even in the same opaque session.
+#[test]
+fn liveness_downgrades_opaque_opacity_and_blur_to_on_launch() {
+    let settings = ThemeSettings::open(settings_init()); // opaque
+    assert_eq!(
+        settings.liveness(SettingsRowKind::BackgroundOpacity),
+        Liveness::OnLaunch
+    );
+    assert_eq!(
+        settings.liveness(SettingsRowKind::BackgroundBlurRadius),
+        Liveness::OnLaunch
+    );
+    assert_eq!(settings.liveness(SettingsRowKind::FontSize), Liveness::Live);
+    assert_eq!(settings.liveness(SettingsRowKind::CursorStyle), Liveness::Live);
+    assert_eq!(
+        settings.liveness(SettingsRowKind::SidebarPreviewLines),
+        Liveness::Live
+    );
+}
+
+// AC-16: every row's description is non-empty and distinct from its label.
+#[test]
+fn every_row_has_a_nonempty_description_distinct_from_its_label() {
+    for kind in SettingsRowKind::ALL {
+        let description = kind.description();
+        assert!(!description.is_empty(), "{kind:?}");
+        assert_ne!(description, kind.label(), "{kind:?}");
+    }
+}
+
+// AC-12: Tab in Settings mode enters search.
+#[test]
+fn tab_enters_settings_search() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(!settings.settings_search_active());
+    settings.toggle_settings_search();
+    assert!(settings.settings_search_active());
+}
+
+// AC-13: fuzzy-filtering by label, best match first. "cursor" (rather than
+// a shorter prefix like "curs") is chosen deliberately: `fuzzy_match` is a
+// subsequence matcher, and a shorter query also scatter-matches unrelated
+// labels (e.g. "curs" subsequence-matches "Background Blur Radius" too) —
+// this asserts the single, unambiguous match a real user query would
+// produce, not `fuzzy_match`'s own scoring order (already covered by its
+// existing test suite in `command_palette.rs`).
+#[test]
+fn search_filters_rows_by_label_fuzzy_match() {
+    let mut settings = ThemeSettings::open(settings_init());
+    settings.toggle_settings_search();
+    settings.push_text("cursor", Instant::now());
+    assert_eq!(settings.settings_filtered_len(), 1);
+    let idx = settings.settings_filtered_row_index(0).unwrap();
+    assert_eq!(SettingsRowKind::ALL[idx], SettingsRowKind::CursorStyle);
+}
+
+// AC-14: zero matches is an empty list, and ↑↓ never panics (no-op) —
+// mirrors the theme picker's own empty-filter guard.
+#[test]
+fn search_zero_matches_is_empty_and_navigation_is_a_no_op() {
+    let mut settings = ThemeSettings::open(settings_init());
+    settings.toggle_settings_search();
+    settings.push_text("zzzzzz", Instant::now());
+    assert_eq!(settings.settings_filtered_len(), 0);
+    settings.move_up();
+    settings.move_down();
+    assert_eq!(settings.settings_highlighted_index(), 0);
+}
+
+// AC-15: an empty query shows every row, in `ALL` order.
+#[test]
+fn search_empty_query_shows_every_row_in_all_order() {
+    let mut settings = ThemeSettings::open(settings_init());
+    settings.toggle_settings_search();
+    assert_eq!(settings.settings_filtered_len(), SettingsRowKind::COUNT);
+    for i in 0..SettingsRowKind::COUNT {
+        assert_eq!(settings.settings_filtered_row_index(i), Some(i));
+    }
+}
+
+// Addendum B: Enter while searching confirms the highlighted row and exits
+// search (never commits — see `confirm_settings_search_never_touches_commit_state`
+// below for the pure-state half of Addendum D-3/FM-02's contract).
+#[test]
+fn search_enter_confirms_the_highlighted_row_and_exits_search() {
+    let mut settings = ThemeSettings::open(settings_init());
+    settings.toggle_settings_search();
+    settings.push_text("cursor", Instant::now());
+    assert_eq!(settings.settings_filtered_len(), 1);
+
+    settings.confirm_settings_search();
+
+    assert!(!settings.settings_search_active());
+    assert_eq!(
+        SettingsRowKind::ALL[settings.selected_row()],
+        SettingsRowKind::CursorStyle
+    );
+}
+
+// Addendum B: Tab while searching exits *without* confirming, restoring the
+// pre-search selection — distinct from Enter's confirm-and-exit.
+#[test]
+fn search_tab_exit_restores_the_pre_search_selection() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+    settings.toggle_settings_search(); // enter
+    settings.push_text("curs", Instant::now());
+    settings.move_down(); // move the search highlight, never confirmed
+
+    settings.toggle_settings_search(); // exit without confirming
+
+    assert!(!settings.settings_search_active());
+    assert_eq!(
+        SettingsRowKind::ALL[settings.selected_row()],
+        SettingsRowKind::FontFamily,
+        "Tab-exit must restore the selection search started from"
+    );
+}
+
+// Addendum D-3/FM-02 (pure-state half — the App-level guarantee that Enter
+// mid-search routes here instead of `App::commit_theme_settings` is a
+// router change, code-reviewed at its call site in
+// `app/input_ops/theme_settings.rs::handle_theme_settings_key`): confirming
+// a search never touches commit machinery — no `commit_error`, no row
+// `touched` flips.
+#[test]
+fn confirm_settings_search_never_touches_commit_state() {
+    let mut settings = ThemeSettings::open(settings_init());
+    settings.toggle_settings_search();
+    settings.push_text("curs", Instant::now());
+
+    settings.confirm_settings_search();
+
+    assert!(settings.commit_error().is_none());
+    assert!(!settings.rows()[row_index(SettingsRowKind::CursorStyle)].touched);
+}
+
+// R-5 L2's open question, resolved: entering (and exiting) search discards
+// an in-progress font-size digit entry, so it can't resurrect a stale value
+// on the next keystroke.
+#[test]
+fn search_enter_and_exit_clear_in_progress_font_size_digit_entry() {
+    let mut settings = ThemeSettings::open(settings_init()); // selected_row = 0 = FontSize
+    settings.push_text("1", Instant::now()); // starts a digit entry ("1")
+
+    settings.toggle_settings_search();
+    settings.toggle_settings_search(); // back out, still on the FontSize row
+
+    settings.push_text("9", Instant::now());
+    assert_eq!(
+        settings.rows()[0].draft,
+        RowDraft::FontSize(9.0),
+        "a fresh single digit, not a resumed \"19\""
+    );
+}
+
+// AC-18: resetting a live row with an immediate `RowEffect` (CursorStyle)
+// restores the `StartupConfig::default()` value, marks touched, and
+// reports the effect for live application.
+#[test]
+fn reset_cursor_style_row_restores_default_and_returns_a_live_effect() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::CursorStyle);
+    settings.adjust(1, Instant::now()); // Block -> Bar
+    let idx = row_index(SettingsRowKind::CursorStyle);
+    assert_ne!(
+        settings.rows()[idx].draft,
+        RowDraft::CursorStyle(noa_config::CursorShape::Block)
+    );
+
+    let effect = settings.reset_selected_row(Instant::now());
+
+    assert_eq!(
+        effect,
+        RowEffect::CursorStyle(noa_config::CursorShape::Block)
+    );
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::CursorStyle(noa_config::CursorShape::Block)
+    );
+    assert!(settings.rows()[idx].touched);
+}
+
+// AC-18 (font-size never returns a live `RowEffect` directly — see
+// `RowEffect`'s doc comment): reset still restores the default and marks
+// touched, routing the live apply through the existing debounce path
+// exactly like `adjust` does.
+#[test]
+fn reset_font_size_row_restores_default_marks_touched_and_stays_debounced() {
+    let mut settings = ThemeSettings::open(settings_init());
+    settings.adjust(4, Instant::now()); // +2.0 from the 14.0 fixture -> 16.0
+    assert_eq!(settings.rows()[0].draft, RowDraft::FontSize(16.0));
+
+    let effect = settings.reset_selected_row(Instant::now());
+
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(
+        settings.rows()[0].draft,
+        RowDraft::FontSize(noa_config::DEFAULT_FONT_SIZE)
+    );
+    assert!(settings.rows()[0].touched);
+}
+
+// AC-19: resetting a row whose current draft already equals the default
+// (untouched) still marks it touched — an explicit reset's intent must not
+// be silently dropped by `commit_updates()`'s touched-gate just because the
+// value didn't move.
+#[test]
+fn reset_marks_touched_even_when_the_default_equals_the_current_value() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::MacosTitlebarStyle);
+    let idx = row_index(SettingsRowKind::MacosTitlebarStyle);
+    assert!(!settings.rows()[idx].touched);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::MacosTitlebarStyle(noa_config::MacosTitlebarStyle::Native)
+    );
+
+    settings.reset_selected_row(Instant::now());
+
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::MacosTitlebarStyle(noa_config::MacosTitlebarStyle::Native),
+        "value unchanged"
+    );
+    assert!(
+        settings.rows()[idx].touched,
+        "an explicit reset always marks touched, even with no value change"
+    );
+}
+
+// Addendum D-3/FM-06 (compound test): `reset_selected_row` calls
+// `clear_row_input_state()` (mirroring `move_up`/`move_down`) — an
+// in-progress digit entry can't resurrect the pre-reset value on the next
+// keystroke.
+#[test]
+fn reset_clears_in_progress_font_size_digit_entry() {
+    let mut settings = ThemeSettings::open(settings_init()); // selected_row = 0 = FontSize
+    settings.push_text("2", Instant::now());
+    settings.push_text("0", Instant::now()); // digits = "20" -> 20.0
+    assert_eq!(settings.rows()[0].draft, RowDraft::FontSize(20.0));
+
+    settings.reset_selected_row(Instant::now());
+    assert_eq!(
+        settings.rows()[0].draft,
+        RowDraft::FontSize(noa_config::DEFAULT_FONT_SIZE)
+    );
+
+    settings.push_text("9", Instant::now());
+    assert_eq!(
+        settings.rows()[0].draft,
+        RowDraft::FontSize(9.0),
+        "derives from the post-reset draft, not a resumed \"20\"+\"9\" buffer"
+    );
+}
+
+// Reset is scoped to the router's Delete/Cmd+Backspace gesture, which only
+// ever fires outside search (Addendum D-3/FM-02's router gate) — this pure-
+// state guard is the defense-in-depth backstop if that ever changes.
+#[test]
+fn reset_is_a_no_op_while_search_is_active() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+    settings.adjust(1, Instant::now());
+    let idx = row_index(SettingsRowKind::FontFamily);
+    let before = settings.rows()[idx].draft.clone();
+
+    settings.toggle_settings_search();
+    let effect = settings.reset_selected_row(Instant::now());
+
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(
+        settings.rows()[idx].draft, before,
+        "reset must no-op while search owns the keyboard"
+    );
+}
+
+// C-5: Reset starts a brief flash — the only misfire-detection cue for a
+// confirmation-free destructive-ish action.
+#[test]
+fn reset_starts_a_brief_flash_that_expires() {
+    let mut settings = ThemeSettings::open(settings_init());
+    let now = Instant::now();
+    assert!(!settings.reset_flash_active(now));
+
+    settings.reset_selected_row(now);
+
+    assert!(settings.reset_flash_active(now));
+    assert!(!settings.reset_flash_active(now + Duration::from_secs(1)));
+}
+
+#[test]
+fn poll_reset_flash_clears_once_elapsed_and_reports_the_transition_once() {
+    let mut settings = ThemeSettings::open(settings_init());
+    let now = Instant::now();
+    settings.reset_selected_row(now);
+
+    assert!(
+        !settings.poll_reset_flash(now),
+        "still pending, no transition yet"
+    );
+    let later = now + Duration::from_secs(1);
+    assert!(
+        settings.poll_reset_flash(later),
+        "elapsed: reports the transition exactly once"
+    );
+    assert!(
+        !settings.poll_reset_flash(later),
+        "already cleared: no further transition"
+    );
+}

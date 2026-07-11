@@ -481,23 +481,37 @@ impl App {
         next
     }
 
-    /// Poll the open theme-settings overlay's font-size debouncer (R-9): if
-    /// a burst has settled, apply it via the real runtime-font-size path and
-    /// report the next wake-up only while something is still pending — an
-    /// idle overlay (no font-size edits) never re-arms this tick at all
+    /// Poll the open theme-settings overlay's font-size debouncer (R-9) and
+    /// its R-7/C-5 post-Reset flash: if a font-size burst has settled, apply
+    /// it via the real runtime-font-size path; if the flash just elapsed,
+    /// clear it and force one more redraw (nothing else would repaint an
+    /// otherwise-idle overlay right at that instant). Reports the next
+    /// wake-up only while something is still pending — an idle overlay (no
+    /// font-size edits, no recent reset) never re-arms this tick at all
     /// (NFR-2: no busy-polling).
     pub(super) fn tick_theme_settings_debounce(&mut self) -> Option<Instant> {
         let session = self.theme_settings.as_mut()?;
         let now = Instant::now();
-        if let Some(value) = session.state.poll_font_size(now) {
+        if let Some(value) = std::sync::Arc::make_mut(&mut session.state).poll_font_size(now) {
             let window_id = session.window_id;
             self.apply_runtime_font_size(window_id, value);
         }
+        let session = self.theme_settings.as_mut()?;
+        let window_id = session.window_id;
+        if std::sync::Arc::make_mut(&mut session.state).poll_reset_flash(now) {
+            self.request_window_redraw(window_id);
+        }
         self.theme_settings.as_ref().and_then(|session| {
-            session
+            let debounce_deadline = session
                 .state
                 .font_size_debounce_pending()
-                .then_some(now + Duration::from_millis(30))
+                .then_some(now + Duration::from_millis(30));
+            let flash_deadline = session.state.reset_flash_deadline();
+            match (debounce_deadline, flash_deadline) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) | (None, Some(a)) => Some(a),
+                (None, None) => None,
+            }
         })
     }
 

@@ -102,6 +102,7 @@ impl MacosMenu {
         );
         let (fullscreen_command, fullscreen_label, fullscreen_enabled, fullscreen_accelerator) =
             fullscreen_menu_item_spec();
+        let (open_settings_command, open_settings_label) = open_settings_menu_item_spec();
         let secure_keyboard_entry = CheckMenuItem::with_id(
             AppCommand::ToggleSecureKeyboardEntry.menu_id(),
             "Secure Keyboard Entry",
@@ -328,6 +329,7 @@ impl MacosMenu {
                     true,
                     Some(cmd_shift_accelerator(Code::KeyP)),
                 ),
+                &MenuItem::with_id(open_settings_command.menu_id(), open_settings_label, true, None),
                 &quick_terminal,
                 &MenuItem::with_id(
                     AppCommand::ToggleSidebar.menu_id(),
@@ -566,6 +568,16 @@ fn fullscreen_menu_item_spec() -> (AppCommand, &'static str, bool, Accelerator) 
     )
 }
 
+/// R-2: the View-menu "Open Settings…" item — label matches the existing
+/// command-palette entry (`command_palette.rs`), deliberately unbound (no
+/// accelerator) so it can't be confused with the existing ⌘,
+/// (`AppCommand::Preferences`, unchanged, opens the config file in an
+/// external editor) — that decision is locked (`theme-settings-ui.md` R-1)
+/// and this item does not touch it.
+fn open_settings_menu_item_spec() -> (AppCommand, &'static str) {
+    (AppCommand::OpenSettings, "Open Settings\u{2026}")
+}
+
 fn disabled_item(id: &'static str, text: &'static str) -> MenuItem {
     MenuItem::with_id(id, text, false, None)
 }
@@ -745,6 +757,22 @@ mod tests {
         assert_eq!(label, "Toggle Full Screen");
         assert!(enabled);
         assert_eq!(accelerator, cmd_ctrl_accelerator(Code::KeyF));
+    }
+
+    // R-2/AC-4: a non-empty, round-tripping menu id — Critical#2's "add a
+    // native menu item" without touching the existing ⌘,/Preferences
+    // wiring (AC-5 is a diff/code-review check, not exercisable here).
+    #[test]
+    fn open_settings_menu_item_routes_to_open_settings_and_stays_unbound() {
+        let (command, label) = open_settings_menu_item_spec();
+
+        assert_eq!(command, AppCommand::OpenSettings);
+        assert_ne!(command.menu_id(), "");
+        assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+        assert_eq!(label, "Open Settings\u{2026}");
+        // Unbound: distinct from the existing ⌘,/Preferences item, which
+        // this addition must not alter.
+        assert_ne!(command, AppCommand::Preferences);
     }
 
     #[test]

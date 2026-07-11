@@ -53,7 +53,10 @@ pub enum AppCommand {
     /// `SelectTab`'s `menu_id() -> ""`).
     OpenThemePicker,
     /// Open the "Settings" rows half of the split theme-settings overlay.
-    /// Same reachability as [`Self::OpenThemePicker`].
+    /// Reachable from the command palette like [`Self::OpenThemePicker`],
+    /// plus (settings-panel-enrichment R-2) a native View-menu item —
+    /// deliberately unbound (no accelerator), so it carries no keybind, only
+    /// [`Self::OPEN_SETTINGS_MENU_ID`].
     OpenSettings,
 }
 
@@ -158,6 +161,7 @@ impl AppCommand {
         "noa.app.toggle-secure-keyboard-entry";
     pub(crate) const TOGGLE_SIDEBAR_MENU_ID: &'static str = "noa.view.toggle-sidebar";
     pub(crate) const TOGGLE_AUTO_APPROVE_MENU_ID: &'static str = "noa.view.toggle-auto-approve";
+    pub(crate) const OPEN_SETTINGS_MENU_ID: &'static str = "noa.view.open-settings";
 
     pub(crate) fn menu_id(self) -> &'static str {
         match self {
@@ -214,7 +218,7 @@ impl AppCommand {
             AppCommand::CloseTab => Self::CLOSE_TAB_MENU_ID,
             AppCommand::SelectTab(_) => "",
             AppCommand::OpenThemePicker => "",
-            AppCommand::OpenSettings => "",
+            AppCommand::OpenSettings => Self::OPEN_SETTINGS_MENU_ID,
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
             AppCommand::SetTabTitle => Self::SET_TAB_TITLE_MENU_ID,
@@ -292,6 +296,7 @@ impl AppCommand {
             Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID => Some(Self::ToggleSecureKeyboardEntry),
             Self::TOGGLE_SIDEBAR_MENU_ID => Some(Self::ToggleSidebar),
             Self::TOGGLE_AUTO_APPROVE_MENU_ID => Some(Self::ToggleAutoApprove),
+            Self::OPEN_SETTINGS_MENU_ID => Some(Self::OpenSettings),
             _ => None,
         }
     }

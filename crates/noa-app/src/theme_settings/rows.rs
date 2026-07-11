@@ -115,6 +115,99 @@ impl SettingsRowKind {
             Self::ConfirmQuit => "Confirm Quit",
         }
     }
+
+    /// R-6: a static one-line explanation shown for whichever row is
+    /// currently selected (Addendum B's description table).
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::FontSize => "Terminal text point size. Applies live.",
+            Self::BackgroundOpacity => {
+                "Window background transparency, from 0 (clear) to 1 (opaque)."
+            }
+            Self::BackgroundBlurRadius => {
+                "macOS background blur strength behind a transparent window."
+            }
+            Self::BackgroundImage => "Path to an image, or a directory of images, behind the grid.",
+            Self::BackgroundImageOpacity => {
+                "Background image alpha, independent of window opacity."
+            }
+            Self::BackgroundImagePosition => "Anchor point used to place the background image.",
+            Self::BackgroundImageFit => "How the background image scales to fill the window.",
+            Self::BackgroundImageRepeat => "Tile the background image instead of leaving gaps.",
+            Self::BackgroundImageInterval => {
+                "Seconds between slideshow rotations for a directory image source."
+            }
+            Self::CursorStyle => "Terminal cursor shape. Applies live.",
+            Self::FontFamily => "Primary font family for terminal text. Applies on next launch.",
+            Self::WindowPadding => "Uniform padding around the terminal grid, in points.",
+            Self::MacosTitlebarStyle => "Native or transparent titlebar presentation.",
+            Self::SidebarPreviewLines => "Trailing output rows shown in each sidebar card.",
+            Self::QuickTerminalHeight => {
+                "Drop-down quick terminal's height as a fraction of the screen."
+            }
+            Self::ConfirmQuit => "Ask for confirmation before quitting the app.",
+        }
+    }
+}
+
+/// R-1: why a row shows the "applies after restart" note instead of a live
+/// preview right now — `None` for a row that either applies live or has
+/// nothing touched, `OpaqueStartup` for a live opacity/blur row whose
+/// session started opaque (Critical#1: the transparency pipeline can't
+/// preview live in that case, so it degrades to next-launch), `CommitOnly`
+/// for any touched commit-only row. Distinct variants so the two cases can
+/// carry different explanatory text (AC-1/AC-2) — [`ThemeSettings::restart_note`]
+/// (kept as a `bool` compatibility wrapper, C-2) collapses this back to
+/// `self != RestartReason::None` for the 28 existing test call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum RestartReason {
+    None,
+    OpaqueStartup,
+    CommitOnly,
+}
+
+impl RestartReason {
+    /// The explanatory note text (R-1/Addendum B), or `None` for
+    /// [`RestartReason::None`] — the two backends each own how they space it
+    /// next to the value (existing convention, unchanged by this addition).
+    pub(crate) fn note(self) -> Option<&'static str> {
+        match self {
+            RestartReason::None => None,
+            RestartReason::CommitOnly => Some("(restart to apply)"),
+            RestartReason::OpaqueStartup => Some("(opaque window \u{2014} restart to preview)"),
+        }
+    }
+}
+
+/// R-3: the always-visible per-row classification badge, independent of
+/// `touched` (zero-lie display — every row shows this the instant the
+/// overlay opens). Three classes per Addendum D-1's FM-01 correction: `Live`
+/// applies as the user adjusts it, `OnSave` applies within a moment of the
+/// config write landing (the `ConfigWatcher` reload-applied keys — none of
+/// the current 16 rows are in this class yet, it exists so R-9's follow-up
+/// keys don't need a fourth badge type), `OnLaunch` needs a restart.
+/// [`ThemeSettings::liveness`] derives this from [`SettingsRowKind::is_live`]
+/// plus the same opaque-at-startup downgrade `restart_reason` uses (C-6:
+/// effective liveness, not the static classification — a live opacity/blur
+/// row that can't preview live this session must not claim `Live`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Liveness {
+    Live,
+    /// Reserved for R-9's reload-applied keys (Addendum D-1) — no must-have
+    /// row derives this yet, so it's otherwise unconstructed until then.
+    #[allow(dead_code)]
+    OnSave,
+    OnLaunch,
+}
+
+impl Liveness {
+    pub(crate) fn badge_text(self) -> &'static str {
+        match self {
+            Liveness::Live => "LIVE",
+            Liveness::OnSave => "ON SAVE",
+            Liveness::OnLaunch => "ON LAUNCH",
+        }
+    }
 }
 
 /// One settings row's current draft value, keyed by [`SettingsRowKind`] (the
@@ -180,6 +273,70 @@ impl RowDraft {
                     "Off".to_string()
                 }
             }
+        }
+    }
+
+    /// R-7: the reset-to-default draft for `kind`, derived from
+    /// `noa_config::StartupConfig::default()`'s corresponding field — the
+    /// same fields [`App::open_theme_settings`]'s `ThemeSettingsInit`
+    /// mapping reads from the live `self.config`, just against the built-in
+    /// default instead. `CursorStyle` and `FontFamily` mirror that mapping's
+    /// own fallback for an absent config value (`CursorShape::Block`, the
+    /// first available family or empty) since `StartupConfig` has no
+    /// unconditional default for either.
+    pub(crate) fn default_for(kind: SettingsRowKind) -> RowDraft {
+        let d = noa_config::StartupConfig::default();
+        match kind {
+            SettingsRowKind::FontSize => RowDraft::FontSize(d.font_size),
+            SettingsRowKind::BackgroundOpacity => RowDraft::BackgroundOpacity(d.background_opacity),
+            SettingsRowKind::BackgroundBlurRadius => {
+                RowDraft::BackgroundBlurRadius(d.background_blur_radius)
+            }
+            SettingsRowKind::BackgroundImage => RowDraft::BackgroundImage(
+                d.background_image
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            SettingsRowKind::BackgroundImageOpacity => {
+                RowDraft::BackgroundImageOpacity(d.background_image_opacity)
+            }
+            SettingsRowKind::BackgroundImagePosition => {
+                RowDraft::BackgroundImagePosition(d.background_image_position)
+            }
+            SettingsRowKind::BackgroundImageFit => {
+                RowDraft::BackgroundImageFit(d.background_image_fit)
+            }
+            SettingsRowKind::BackgroundImageRepeat => {
+                RowDraft::BackgroundImageRepeat(d.background_image_repeat)
+            }
+            SettingsRowKind::BackgroundImageInterval => {
+                RowDraft::BackgroundImageInterval(d.background_image_interval_secs)
+            }
+            SettingsRowKind::CursorStyle => RowDraft::CursorStyle(CursorShape::Block),
+            SettingsRowKind::FontFamily => {
+                RowDraft::FontFamily(d.font.families.first().cloned().unwrap_or_default())
+            }
+            SettingsRowKind::WindowPadding => RowDraft::WindowPadding(
+                d.window_padding_x.unwrap_or(0.0),
+                d.window_padding_y.unwrap_or(0.0),
+            ),
+            SettingsRowKind::MacosTitlebarStyle => {
+                RowDraft::MacosTitlebarStyle(d.macos_titlebar_style)
+            }
+            SettingsRowKind::SidebarPreviewLines => {
+                RowDraft::SidebarPreviewLines(d.sidebar_preview_lines)
+            }
+            SettingsRowKind::QuickTerminalHeight => {
+                // Mirrors `App`'s `quick_terminal_height_fraction` (app-layer,
+                // unreachable from this pure module) — kept in sync manually;
+                // both read the same `primary: Percent(_)` shape.
+                let fraction = match d.quick_terminal_size.primary {
+                    Some(noa_config::QuickTerminalSizeDim::Percent(pct)) => pct / 100.0,
+                    _ => 0.4,
+                };
+                RowDraft::QuickTerminalHeight(fraction)
+            }
+            SettingsRowKind::ConfirmQuit => RowDraft::ConfirmQuit(d.confirm_quit),
         }
     }
 }

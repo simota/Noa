@@ -8,8 +8,9 @@ use crate::command_palette::fuzzy_match;
 use crate::debounce::Debouncer;
 
 use super::{
-    RevertValues, RowDraft, RowEffect, Section, SettingsRow, SettingsRowKind, ThemeSettingsInit,
-    ThemeSettingsMode, background_image_fit_value, background_image_position_value,
+    Liveness, RestartReason, RevertValues, RowDraft, RowEffect, Section, SettingsRow,
+    SettingsRowKind, ThemeSettingsInit, ThemeSettingsMode, background_image_fit_value,
+    background_image_position_value,
 };
 
 /// The injectable config-writer seam [`ThemeSettings::commit`] takes
@@ -35,6 +36,10 @@ const FONT_SIZE_STEP: f32 = 0.5;
 /// the row while editing.
 const FONT_SIZE_MIN: f32 = 6.0;
 const FONT_SIZE_MAX: f32 = 96.0;
+
+/// R-7/C-5: how long the post-Reset row highlight flashes — the only
+/// misfire-detection cue for a confirmation-free reset.
+const RESET_FLASH_DURATION: std::time::Duration = std::time::Duration::from_millis(220);
 
 /// Background-opacity step per ←→ press (SHAPE table: `0.0–1.0 step 0.05`).
 const OPACITY_STEP: f32 = 0.05;
@@ -111,6 +116,31 @@ pub(crate) struct ThemeSettings {
     /// and on every successful [`Self::commit`] (a stale error from an
     /// earlier failed attempt must not survive a later success).
     commit_error: Option<String>,
+    /// R-5: whether the `Section::SettingsRows` modal sub-state (Tab
+    /// gesture) currently owns ↑↓/text input for row search instead of the
+    /// normal row navigation/edit paths. Only ever `true` in
+    /// [`ThemeSettingsMode::Settings`] sessions — Theme mode's Tab stays the
+    /// existing `toggle_section` no-op (never routes here).
+    settings_search_active: bool,
+    settings_filter: String,
+    /// Indices into `SettingsRowKind::ALL`/`rows`, best match first —
+    /// mirrors `filtered`/`ThemeMatch` for the theme picker, minus the match
+    /// positions (row labels are short enough not to need highlight spans).
+    settings_filtered: Vec<usize>,
+    /// Index into `settings_filtered` — a separate index space from
+    /// `selected_row` (Addendum D-3/FM-02), never itself an index into
+    /// `SettingsRowKind::ALL`.
+    settings_highlight: usize,
+    /// `selected_row` at the moment search was entered — restored on a
+    /// Tab-exit-without-confirming (Addendum B: Tab exits search restoring
+    /// the pre-search selection; only Enter confirms the highlighted row).
+    settings_pre_search_selected: usize,
+    /// R-7/C-5: brief post-Reset highlight deadline, the only misfire
+    /// detection cue for a confirmation-free destructive-ish action. `App`
+    /// polls this on its existing theme-settings timer tick and clears it
+    /// (with a redraw) once elapsed; rendering only needs to know whether
+    /// `now < deadline`.
+    reset_flash_until: Option<Instant>,
 }
 
 impl ThemeSettings {
@@ -216,6 +246,12 @@ impl ThemeSettings {
             opaque_at_startup: init.background_opacity >= 1.0,
             available_font_families: init.available_font_families,
             commit_error: None,
+            settings_search_active: false,
+            settings_filter: String::new(),
+            settings_filtered: Vec::new(),
+            settings_highlight: 0,
+            settings_pre_search_selected: 0,
+            reset_flash_until: None,
         };
         settings.recompute_filtered();
         if let Some(pos) = settings
@@ -294,7 +330,7 @@ impl ThemeSettings {
         self.opaque_at_startup
     }
 
-    /// R-11: whether `row` should show the "applies after restart" note
+    /// R-1/R-11: why `row` should show the "applies after restart" note
     /// instead of a live preview right now. Two independent cases: a *live*
     /// opacity/blur row whose session started opaque (R-11's original
     /// case — `FontSize`/`CursorStyle` always apply live regardless), or
@@ -302,14 +338,19 @@ impl ThemeSettings {
     /// `MacosTitlebarStyle`) the user has actually edited — those have
     /// no runtime-apply path at all (`App::commit_theme_settings`), so a
     /// touched edit persists to config but only takes effect on the next
-    /// launch.
-    pub(crate) fn restart_note(&self, row: SettingsRowKind) -> bool {
+    /// launch. The two cases carry distinct [`RestartReason`] variants so
+    /// the UI can explain *why* (AC-1/AC-2) instead of one blanket note.
+    pub(crate) fn restart_reason(&self, row: SettingsRowKind) -> RestartReason {
         if row.is_live() {
-            return self.opaque_at_startup
+            return if self.opaque_at_startup
                 && matches!(
                     row,
                     SettingsRowKind::BackgroundOpacity | SettingsRowKind::BackgroundBlurRadius
-                );
+                ) {
+                RestartReason::OpaqueStartup
+            } else {
+                RestartReason::None
+            };
         }
         if matches!(
             row,
@@ -322,13 +363,47 @@ impl ThemeSettings {
                 | SettingsRowKind::ConfirmQuit
                 | SettingsRowKind::QuickTerminalHeight
         ) {
-            return false;
+            return RestartReason::None;
         }
         let index = SettingsRowKind::ALL
             .iter()
             .position(|kind| *kind == row)
             .expect("SettingsRowKind::ALL contains every variant");
-        self.rows[index].touched
+        if self.rows[index].touched {
+            RestartReason::CommitOnly
+        } else {
+            RestartReason::None
+        }
+    }
+
+    /// Compatibility wrapper (Addendum C-2): the 28 existing test call sites
+    /// keep calling this `bool` form unchanged. New code calls
+    /// [`Self::restart_reason`] directly, so this has no production caller
+    /// left — kept `pub(crate)` rather than `#[cfg(test)]` per C-2's "thin
+    /// compatibility wrapper" framing, mirroring `opaque_at_startup` above.
+    #[allow(dead_code)]
+    pub(crate) fn restart_note(&self, row: SettingsRowKind) -> bool {
+        self.restart_reason(row) != RestartReason::None
+    }
+
+    /// R-3: the always-visible live/next-launch badge for `row`, independent
+    /// of `touched` (never lies — this is the same value the instant the
+    /// overlay opens as after any amount of editing). C-6: a live-class row
+    /// downgraded by [`RestartReason::OpaqueStartup`] reports its *effective*
+    /// liveness (`OnLaunch`) for this session, not the static
+    /// [`SettingsRowKind::is_live`] classification.
+    pub(crate) fn liveness(&self, row: SettingsRowKind) -> Liveness {
+        if row.is_live() {
+            if self.restart_reason(row) == RestartReason::OpaqueStartup {
+                Liveness::OnLaunch
+            } else {
+                Liveness::Live
+            }
+        } else {
+            // `OnSave` is reserved for the reload-applied keys R-9 adds
+            // (Addendum D-1) — none of the current 16 rows qualify yet.
+            Liveness::OnLaunch
+        }
     }
 
     /// AC-4a: the "Chrome updates on Save" badge is visible once the
@@ -342,8 +417,10 @@ impl ThemeSettings {
                 .any(|(i, kind)| kind.is_live() && self.rows[i].touched)
     }
 
-    /// ↑↓: theme-list highlight in `ThemePicker`, row selection in
-    /// `SettingsRows` — never a value adjustment (R-2).
+    /// ↑↓: theme-list highlight in `ThemePicker`, row selection (or, while
+    /// R-5 search is active, the search highlight over `settings_filtered` —
+    /// a separate index space, Addendum D-3/FM-02) in `SettingsRows` — never
+    /// a value adjustment (R-2).
     pub(crate) fn move_up(&mut self) {
         match self.section {
             Section::ThemePicker => {
@@ -353,6 +430,12 @@ impl ThemeSettings {
                 }
             }
             Section::SettingsRows => {
+                if self.settings_search_active {
+                    if self.settings_highlight > 0 {
+                        self.settings_highlight -= 1;
+                    }
+                    return;
+                }
                 if self.selected_row > 0 {
                     self.selected_row -= 1;
                     self.clear_row_input_state();
@@ -370,6 +453,14 @@ impl ThemeSettings {
                 }
             }
             Section::SettingsRows => {
+                if self.settings_search_active {
+                    if !self.settings_filtered.is_empty()
+                        && self.settings_highlight + 1 < self.settings_filtered.len()
+                    {
+                        self.settings_highlight += 1;
+                    }
+                    return;
+                }
                 if self.selected_row + 1 < SettingsRowKind::ALL.len() {
                     self.selected_row += 1;
                     self.clear_row_input_state();
@@ -391,11 +482,22 @@ impl ThemeSettings {
                 self.filter.push_str(&filtered);
                 self.refilter_and_mark();
             }
-            Section::SettingsRows => match SettingsRowKind::ALL[self.selected_row] {
-                SettingsRowKind::FontSize => self.push_font_size_digits(text, now),
-                SettingsRowKind::BackgroundImage => self.push_background_image_text(text),
-                _ => {}
-            },
+            Section::SettingsRows => {
+                if self.settings_search_active {
+                    let filtered: String = text.chars().filter(|c| !c.is_control()).collect();
+                    if filtered.is_empty() {
+                        return;
+                    }
+                    self.settings_filter.push_str(&filtered);
+                    self.recompute_settings_filtered();
+                    return;
+                }
+                match SettingsRowKind::ALL[self.selected_row] {
+                    SettingsRowKind::FontSize => self.push_font_size_digits(text, now),
+                    SettingsRowKind::BackgroundImage => self.push_background_image_text(text),
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -408,31 +510,40 @@ impl ThemeSettings {
                     self.refilter_and_mark();
                 }
             }
-            Section::SettingsRows => match SettingsRowKind::ALL[self.selected_row] {
-                SettingsRowKind::FontSize => {
-                    if let Some(digits) = &mut self.font_size_digits {
-                        digits.pop();
-                        if let Ok(value) = digits.parse::<f32>() {
-                            self.set_font_size(value, now);
+            Section::SettingsRows => {
+                if self.settings_search_active {
+                    if self.settings_filter.pop().is_some() {
+                        self.recompute_settings_filtered();
+                    }
+                    return;
+                }
+                match SettingsRowKind::ALL[self.selected_row] {
+                    SettingsRowKind::FontSize => {
+                        if let Some(digits) = &mut self.font_size_digits {
+                            digits.pop();
+                            if let Ok(value) = digits.parse::<f32>() {
+                                self.set_font_size(value, now);
+                            }
                         }
                     }
+                    SettingsRowKind::BackgroundImage => {
+                        let idx = self.selected_row;
+                        let next = {
+                            let text =
+                                self.background_image_text.get_or_insert_with(|| {
+                                    match &self.rows[idx].draft {
+                                        RowDraft::BackgroundImage(path) => path.clone(),
+                                        _ => String::new(),
+                                    }
+                                });
+                            text.pop();
+                            text.clone()
+                        };
+                        self.set_background_image_text(next);
+                    }
+                    _ => {}
                 }
-                SettingsRowKind::BackgroundImage => {
-                    let idx = self.selected_row;
-                    let next = {
-                        let text = self.background_image_text.get_or_insert_with(|| {
-                            match &self.rows[idx].draft {
-                                RowDraft::BackgroundImage(path) => path.clone(),
-                                _ => String::new(),
-                            }
-                        });
-                        text.pop();
-                        text.clone()
-                    };
-                    self.set_background_image_text(next);
-                }
-                _ => {}
-            },
+            }
         }
     }
 
@@ -500,7 +611,7 @@ impl ThemeSettings {
     /// a distinct gesture for the second axis; a future increment can split
     /// them if that turns out to matter.
     pub(crate) fn adjust(&mut self, delta: i32, now: Instant) -> RowEffect {
-        if self.section != Section::SettingsRows || delta == 0 {
+        if self.section != Section::SettingsRows || delta == 0 || self.settings_search_active {
             return RowEffect::None;
         }
         let idx = self.selected_row;
@@ -733,6 +844,154 @@ impl ThemeSettings {
     fn recompute_filtered(&mut self) {
         self.filtered = filter_themes(&self.filter);
         self.highlighted = 0;
+    }
+
+    /// R-5: whether the row-search modal sub-state currently owns ↑↓/text
+    /// input in `Section::SettingsRows`.
+    pub(crate) fn settings_search_active(&self) -> bool {
+        self.settings_search_active
+    }
+
+    pub(crate) fn settings_filter(&self) -> &str {
+        &self.settings_filter
+    }
+
+    pub(crate) fn settings_filtered_len(&self) -> usize {
+        self.settings_filtered.len()
+    }
+
+    pub(crate) fn settings_highlighted_index(&self) -> usize {
+        self.settings_highlight
+    }
+
+    /// The `SettingsRowKind::ALL`/`rows` index at filtered position `i`, or
+    /// `None` past the end (AC-14: an empty result never panics on lookup).
+    pub(crate) fn settings_filtered_row_index(&self, i: usize) -> Option<usize> {
+        self.settings_filtered.get(i).copied()
+    }
+
+    /// Tab (R-5): enter search (seed the full row list, remember the
+    /// pre-search selection) if inactive, or exit *without* confirming if
+    /// already active — Addendum B: Tab-exit restores the pre-search
+    /// selection, unlike Enter which confirms the highlight (see
+    /// [`Self::confirm_settings_search`]). Only meaningful in
+    /// `Section::SettingsRows`; Theme mode's Tab never calls this
+    /// (`toggle_section` stays its existing no-op).
+    pub(crate) fn toggle_settings_search(&mut self) {
+        if self.settings_search_active {
+            self.settings_search_active = false;
+            self.selected_row = self.settings_pre_search_selected;
+            self.clear_row_input_state();
+            return;
+        }
+        self.settings_pre_search_selected = self.selected_row;
+        self.settings_search_active = true;
+        self.settings_filter.clear();
+        self.recompute_settings_filtered();
+        self.settings_highlight = self
+            .settings_filtered
+            .iter()
+            .position(|&idx| idx == self.selected_row)
+            .unwrap_or(0);
+        self.clear_row_input_state();
+    }
+
+    /// Enter while searching (R-5/Addendum B): commit the highlighted match
+    /// as the row selection and leave search. Never touches config/commit —
+    /// the router gates this before `commit_theme_settings` ever runs
+    /// (Addendum D-3/FM-02). A no-op selection change (but still exits
+    /// search) when the filtered list is empty.
+    pub(crate) fn confirm_settings_search(&mut self) {
+        if let Some(&idx) = self.settings_filtered.get(self.settings_highlight) {
+            self.selected_row = idx;
+        }
+        self.settings_search_active = false;
+        self.clear_row_input_state();
+    }
+
+    fn recompute_settings_filtered(&mut self) {
+        self.settings_filtered = filter_settings_rows(&self.settings_filter);
+        self.settings_highlight = 0;
+    }
+
+    /// Delete / Cmd+Backspace (R-7): replace the selected row's draft with
+    /// [`RowDraft::default_for`]'s `StartupConfig::default()`-derived value
+    /// and mark it touched — an explicit reset always marks touched
+    /// (AC-19), even when the default happens to equal the untouched
+    /// snapshot, so the user's intent is never silently dropped by
+    /// `commit_updates()`'s touched-gate. Clears any in-progress digit/path
+    /// entry exactly like navigation does (Addendum D-3/FM-06) so a stale
+    /// buffer can't resurrect the pre-reset value on the next keystroke. A
+    /// no-op (both in effect and in the flash cue) outside
+    /// `Section::SettingsRows` or while search is active — search owns the
+    /// keyboard's editing semantics while it's up.
+    pub(crate) fn reset_selected_row(&mut self, now: Instant) -> RowEffect {
+        if self.section != Section::SettingsRows || self.settings_search_active {
+            return RowEffect::None;
+        }
+        let idx = self.selected_row;
+        let kind = SettingsRowKind::ALL[idx];
+        let default = RowDraft::default_for(kind);
+        self.rows[idx].draft = default.clone();
+        self.rows[idx].touched = true;
+        self.clear_row_input_state();
+        self.reset_flash_until = Some(now + RESET_FLASH_DURATION);
+        match (kind, default) {
+            // Font-size never returns a live `RowEffect` directly — like
+            // every other edit to this row, it always routes through the
+            // debouncer (`poll_font_size`), per R-9's existing contract.
+            (SettingsRowKind::FontSize, RowDraft::FontSize(value)) => {
+                self.font_size_debounce.submit(value, now);
+                RowEffect::None
+            }
+            (SettingsRowKind::BackgroundOpacity, RowDraft::BackgroundOpacity(value)) => {
+                if self.opaque_at_startup {
+                    RowEffect::None
+                } else {
+                    RowEffect::Opacity(value)
+                }
+            }
+            (SettingsRowKind::BackgroundBlurRadius, RowDraft::BackgroundBlurRadius(value)) => {
+                if self.opaque_at_startup {
+                    RowEffect::None
+                } else {
+                    RowEffect::Blur(value)
+                }
+            }
+            (SettingsRowKind::CursorStyle, RowDraft::CursorStyle(value)) => {
+                RowEffect::CursorStyle(value)
+            }
+            (SettingsRowKind::SidebarPreviewLines, RowDraft::SidebarPreviewLines(value)) => {
+                RowEffect::SidebarPreviewLines(value)
+            }
+            _ => RowEffect::None,
+        }
+    }
+
+    /// R-7/C-5: whether the post-Reset highlight is still showing at `now` —
+    /// the view-model build reads this every frame while the overlay is
+    /// open.
+    pub(crate) fn reset_flash_active(&self, now: Instant) -> bool {
+        self.reset_flash_until.is_some_and(|until| now < until)
+    }
+
+    /// `App`'s timer tick (mirrors [`Self::poll_font_size`]'s poll shape):
+    /// clears an elapsed flash and reports whether it just turned off — a
+    /// `true` return means `App` must force one more redraw, since nothing
+    /// else would repaint an otherwise-idle overlay right at the deadline.
+    pub(crate) fn poll_reset_flash(&mut self, now: Instant) -> bool {
+        if self.reset_flash_until.is_some_and(|until| now >= until) {
+            self.reset_flash_until = None;
+            return true;
+        }
+        false
+    }
+
+    /// The still-pending flash deadline, if any — `App`'s timer tick uses
+    /// this to keep re-arming its wake-up until the flash actually clears
+    /// (NFR-2: no busy-polling once it has).
+    pub(crate) fn reset_flash_deadline(&self) -> Option<Instant> {
+        self.reset_flash_until
     }
 
     /// Re-filter from `self.filter` and mark the highlight moved — unless
@@ -969,4 +1228,20 @@ fn filter_themes(filter: &str) -> Vec<ThemeMatch> {
         .collect();
     matches.sort_by_key(|b| std::cmp::Reverse(b.0));
     matches.into_iter().map(|(_, m)| m).collect()
+}
+
+/// R-5: `SettingsRowKind::ALL` fuzzy-filtered by label, best match first,
+/// reusing [`fuzzy_match`] like [`filter_themes`] does. An empty filter
+/// matches every row in `ALL` order (AC-15), mirroring `filter_themes`'s own
+/// empty-query behavior.
+fn filter_settings_rows(filter: &str) -> Vec<usize> {
+    let mut matches: Vec<(i32, usize)> = SettingsRowKind::ALL
+        .iter()
+        .enumerate()
+        .filter_map(|(index, kind)| {
+            fuzzy_match(filter, kind.label()).map(|(score, _)| (score, index))
+        })
+        .collect();
+    matches.sort_by_key(|b| std::cmp::Reverse(b.0));
+    matches.into_iter().map(|(_, idx)| idx).collect()
 }

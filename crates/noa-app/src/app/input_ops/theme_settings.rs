@@ -89,7 +89,7 @@ impl App {
         };
         self.theme_settings = Some(ThemeSettingsSession {
             window_id,
-            state: ThemeSettings::open(init),
+            state: std::sync::Arc::new(ThemeSettings::open(init)),
             opened_at: Instant::now(),
         });
         self.request_window_redraw(window_id);
@@ -99,11 +99,17 @@ impl App {
     /// [`Self::handle_command_palette_key`]): Escape cancels (reverts every
     /// live-previewed value and closes, see [`Self::close_theme_settings`]),
     /// Enter commits (persists the touched rows and closes, see
-    /// [`Self::commit_theme_settings`]), Tab is a no-op (each session's
-    /// section is now fixed by the mode it opened in, see
-    /// [`crate::theme_settings::ThemeSettingsMode`]), ↑↓ navigate, ←→
-    /// adjusts the focused settings row, Backspace/printable text edit
-    /// the theme filter or a focused numeric row. Every other resolved
+    /// [`Self::commit_theme_settings`]) — unless R-5 search is active, in
+    /// which case it confirms the highlighted row and stays open (Addendum
+    /// D-3/FM-02: checked here, before ever falling through to
+    /// `commit_theme_settings`). Tab toggles row search in Settings mode
+    /// (R-5) or stays the existing no-op in Theme mode (each session's
+    /// section is fixed by the mode it opened in, see
+    /// [`crate::theme_settings::ThemeSettingsMode`]). ↑↓ navigate (or, while
+    /// searching, move the search highlight). ←→ adjusts the focused
+    /// settings row. Delete / Cmd+Backspace resets the selected row to its
+    /// default (R-7); bare Backspace/printable text edit the theme filter,
+    /// a focused numeric row, or the search query. Every other resolved
     /// keybind is swallowed (R-3 direction 2: no other overlay's shortcut
     /// may leak through while this one owns the keyboard). Only called when
     /// `self.theme_settings` targets `window_id` (checked by the caller).
@@ -114,30 +120,49 @@ impl App {
     ) {
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
+                // Esc always cancels the whole overlay, even mid-search
+                // (Addendum B: never search-only) — no search-active check
+                // here.
                 self.close_theme_settings(true);
                 return;
             }
             Key::Named(NamedKey::Enter) => {
+                if self
+                    .theme_settings
+                    .as_ref()
+                    .is_some_and(|session| session.state.settings_search_active())
+                {
+                    if let Some(session) = self.theme_settings.as_mut() {
+                        std::sync::Arc::make_mut(&mut session.state).confirm_settings_search();
+                    }
+                    self.request_window_redraw(window_id);
+                    return;
+                }
                 self.commit_theme_settings();
                 return;
             }
             Key::Named(NamedKey::Tab) => {
                 if let Some(session) = self.theme_settings.as_mut() {
-                    session.state.toggle_section();
+                    let state = std::sync::Arc::make_mut(&mut session.state);
+                    if state.mode() == ThemeSettingsMode::Settings {
+                        state.toggle_settings_search();
+                    } else {
+                        state.toggle_section();
+                    }
                 }
                 self.request_window_redraw(window_id);
                 return;
             }
             Key::Named(NamedKey::ArrowUp) => {
                 if let Some(session) = self.theme_settings.as_mut() {
-                    session.state.move_up();
+                    std::sync::Arc::make_mut(&mut session.state).move_up();
                 }
                 self.after_theme_settings_navigation(window_id);
                 return;
             }
             Key::Named(NamedKey::ArrowDown) => {
                 if let Some(session) = self.theme_settings.as_mut() {
-                    session.state.move_down();
+                    std::sync::Arc::make_mut(&mut session.state).move_down();
                 }
                 self.after_theme_settings_navigation(window_id);
                 return;
@@ -150,9 +175,19 @@ impl App {
                 self.adjust_theme_settings_row(window_id, 1);
                 return;
             }
+            Key::Named(NamedKey::Delete) => {
+                self.reset_theme_settings_row(window_id);
+                return;
+            }
             Key::Named(NamedKey::Backspace) => {
+                // C-4: Cmd+Backspace is a laptop-reachable Reset alias; bare
+                // Backspace stays text-delete (unchanged).
+                if self.modifiers.super_key() {
+                    self.reset_theme_settings_row(window_id);
+                    return;
+                }
                 if let Some(session) = self.theme_settings.as_mut() {
-                    session.state.backspace(Instant::now());
+                    std::sync::Arc::make_mut(&mut session.state).backspace(Instant::now());
                 }
                 self.request_window_redraw(window_id);
                 return;
@@ -180,7 +215,7 @@ impl App {
             return;
         };
         if let Some(session) = self.theme_settings.as_mut() {
-            session.state.push_text(text, Instant::now());
+            std::sync::Arc::make_mut(&mut session.state).push_text(text, Instant::now());
         }
         self.after_theme_settings_navigation(window_id);
     }
@@ -239,7 +274,7 @@ impl App {
             .as_mut()
             .filter(|session| session.window_id == window_id)
         {
-            session.state.push_text(&text, Instant::now());
+            std::sync::Arc::make_mut(&mut session.state).push_text(&text, Instant::now());
         }
         self.after_theme_settings_navigation(window_id);
         true
@@ -253,7 +288,30 @@ impl App {
         let Some(session) = self.theme_settings.as_mut() else {
             return;
         };
-        let effect = session.state.adjust(delta, Instant::now());
+        let effect = std::sync::Arc::make_mut(&mut session.state).adjust(delta, Instant::now());
+        self.apply_theme_settings_row_effect(effect);
+        self.request_window_redraw(window_id);
+    }
+
+    /// Delete / Cmd+Backspace (R-7): reset the selected row to its default
+    /// and apply whichever live [`RowEffect`] that produces (same tail as
+    /// [`Self::adjust_theme_settings_row`]), plus the mandatory C-5 flash
+    /// cue — the only misfire-detection signal for a confirmation-free
+    /// reset.
+    fn reset_theme_settings_row(&mut self, window_id: WindowId) {
+        let Some(session) = self.theme_settings.as_mut() else {
+            return;
+        };
+        let effect =
+            std::sync::Arc::make_mut(&mut session.state).reset_selected_row(Instant::now());
+        self.apply_theme_settings_row_effect(effect);
+        self.request_window_redraw(window_id);
+    }
+
+    /// Shared tail of [`Self::adjust_theme_settings_row`] and
+    /// [`Self::reset_theme_settings_row`]: apply whichever live
+    /// [`RowEffect`] a row edit produced.
+    fn apply_theme_settings_row_effect(&mut self, effect: RowEffect) {
         match effect {
             RowEffect::None => {}
             RowEffect::CursorStyle(shape) => self.apply_live_cursor_style(shape),
@@ -267,7 +325,6 @@ impl App {
             }
             RowEffect::SidebarPreviewLines(lines) => self.apply_live_sidebar_preview_lines(lines),
         }
-        self.request_window_redraw(window_id);
     }
 
     /// After a key that may have moved the theme-list highlight (arrows,
@@ -317,7 +374,7 @@ impl App {
             return;
         };
         if revert {
-            let values = session.state.revert();
+            let values = std::sync::Arc::make_mut(&mut session.state).revert();
             if let Some(gpu) = self.gpu.as_mut() {
                 gpu.preview_theme = None;
             }
@@ -359,8 +416,7 @@ impl App {
         let window_id = session.window_id;
 
         let Some(config_path) = noa_config::default_config_path() else {
-            session
-                .state
+            std::sync::Arc::make_mut(&mut session.state)
                 .set_commit_error("could not resolve the config file path".to_string());
             self.theme_settings = Some(session);
             self.request_window_redraw(window_id);
@@ -370,7 +426,9 @@ impl App {
         let mut writer = |path: &Path, updates: &[(String, String)]| {
             noa_config::write_config_updates(path, updates)
         };
-        let Some(updates) = session.state.commit(&config_path, &mut writer) else {
+        let Some(updates) =
+            std::sync::Arc::make_mut(&mut session.state).commit(&config_path, &mut writer)
+        else {
             // AC-23: the write failed. `commit` already recorded the
             // display error and touched nothing else on `session.state` —
             // put the overlay back exactly as it was (still open,

@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 use super::render::ensure_scratch;
 use super::*;
 use crate::theme_settings::{
-    RowDraft, SettingsRowKind, Swatch, ThemeSettings, ThemeSettingsMode, sample_swatches,
+    Liveness, RowDraft, SettingsRowKind, Swatch, ThemeSettings, ThemeSettingsMode, sample_swatches,
     settings_row_display_value,
 };
 
@@ -896,37 +896,86 @@ fn settings_rows_overlay_text(
         sgr_reset(&mut out);
     }
 
-    let settings_top = LIST_TOP_ROW;
-    let settings_len = SettingsRowKind::ALL.len() as u16;
-    let hint_row = rows.saturating_sub(1);
-    // When the card is too short for every row, scroll the window around
-    // the selection.
-    let visible = settings_len.min(hint_row.saturating_sub(settings_top));
-    let settings_offset = state
-        .selected_row()
-        .saturating_sub(visible as usize / 2)
-        .min((settings_len - visible) as usize);
-    for i in 0..visible {
-        let idx = settings_offset + i as usize;
-        let kind = SettingsRowKind::ALL[idx];
-        cup(&mut out, settings_top + i, LIST_COL);
-        if idx == state.selected_row() {
-            sgr_fg(&mut out, accent);
-            out.push('>');
-        } else {
-            out.push(' ');
-        }
-        out.push(' ');
+    // R-5: the search line, mirroring the Theme picker's own filter row
+    // position (row `LIST_TOP_ROW - 1`) — hidden entirely while inactive.
+    let search_active = state.settings_search_active();
+    if search_active {
+        cup(&mut out, LIST_TOP_ROW - 1, LIST_COL);
+        sgr_fg(&mut out, muted);
+        let _ = write!(out, "/{}", state.settings_filter());
         sgr_reset(&mut out);
-        let editing = idx == state.selected_row();
-        let value = format_row_value(kind, &state.rows()[idx].draft, editing);
-        let note = if state.restart_note(kind) {
-            " (restart to apply)"
-        } else {
-            ""
-        };
-        let _ = write!(out, "{:<24}{value}{note}", kind.label());
     }
+
+    let settings_top = LIST_TOP_ROW;
+    let hint_row = rows.saturating_sub(1);
+    // R-6: the description line sits directly above the footer, so it must
+    // be reserved out of the row budget too (Addendum D-3/FM-04).
+    let description_row = hint_row.saturating_sub(1);
+    let visible_cap = description_row.saturating_sub(settings_top);
+
+    if search_active {
+        let total = state.settings_filtered_len();
+        if total == 0 {
+            let msg = format!("No settings match \u{201c}{}\u{201d}", state.settings_filter());
+            cup(&mut out, settings_top + visible_cap / 2, LIST_COL);
+            sgr_fg(&mut out, muted);
+            out.push_str(&msg);
+            sgr_reset(&mut out);
+        } else {
+            let highlight = state.settings_highlighted_index();
+            let shown = visible_cap.min(total as u16).max(1) as usize;
+            let offset = highlight
+                .saturating_sub(shown / 2)
+                .min(total.saturating_sub(shown));
+            for i in 0..shown {
+                let Some(row_idx) = state.settings_filtered_row_index(offset + i) else {
+                    break;
+                };
+                let kind = SettingsRowKind::ALL[row_idx];
+                let selected = offset + i == highlight;
+                write_settings_row(
+                    &mut out,
+                    state,
+                    kind,
+                    row_idx,
+                    selected,
+                    settings_top,
+                    i as u16,
+                    muted,
+                    accent,
+                );
+            }
+        }
+    } else {
+        let settings_len = SettingsRowKind::ALL.len() as u16;
+        let visible = settings_len.min(visible_cap);
+        let settings_offset = state
+            .selected_row()
+            .saturating_sub(visible as usize / 2)
+            .min((settings_len - visible) as usize);
+        for i in 0..visible {
+            let idx = settings_offset + i as usize;
+            let kind = SettingsRowKind::ALL[idx];
+            let selected = idx == state.selected_row();
+            write_settings_row(
+                &mut out,
+                state,
+                kind,
+                idx,
+                selected,
+                settings_top,
+                i,
+                muted,
+                accent,
+            );
+        }
+    }
+
+    // R-6: fixed one-line description slot for the currently selected row.
+    cup(&mut out, description_row, LIST_COL);
+    sgr_fg(&mut out, muted);
+    out.push_str(SettingsRowKind::ALL[state.selected_row()].description());
+    sgr_reset(&mut out);
 
     cup(&mut out, hint_row, LIST_COL);
     if let Some(error) = state.commit_error() {
@@ -938,13 +987,58 @@ fn settings_rows_overlay_text(
         out.push_str(&truncated);
     } else {
         sgr_fg(&mut out, muted);
-        out.push_str(
-            "\u{2191}\u{2193} navigate   \u{2190}\u{2192} adjust   Esc cancel   Enter save",
-        );
+        if search_active {
+            out.push_str("Enter confirm row   Tab exit search   Esc cancel");
+        } else {
+            out.push_str(
+                "\u{2191}\u{2193} navigate   \u{2190}\u{2192} adjust   Tab search   Delete reset   Esc cancel   Enter save",
+            );
+        }
     }
     sgr_reset(&mut out);
 
     out
+}
+
+/// One settings row (R-1/R-3/R-6): `{badge:<10}{label:<22}{value}{reason}`
+/// (Addendum B's wgpu fallback format — badge words identical to AppKit).
+#[allow(clippy::too_many_arguments)]
+fn write_settings_row(
+    out: &mut String,
+    state: &ThemeSettings,
+    kind: SettingsRowKind,
+    row_idx: usize,
+    selected: bool,
+    top_row: u16,
+    i: u16,
+    muted: Rgb,
+    accent: Rgb,
+) {
+    cup(out, top_row + i, LIST_COL);
+    if selected {
+        sgr_fg(out, accent);
+        out.push('>');
+    } else {
+        out.push(' ');
+    }
+    out.push(' ');
+    sgr_reset(out);
+    let editing = selected && !state.settings_search_active();
+    let value = format_row_value(kind, &state.rows()[row_idx].draft, editing);
+    let liveness = state.liveness(kind);
+    let reason = state.restart_reason(kind).note().unwrap_or("");
+    sgr_fg(out, if liveness == Liveness::Live { accent } else { muted });
+    let _ = write!(out, "{:<10}", liveness.badge_text());
+    sgr_reset(out);
+    let _ = write!(out, "{:<22}", kind.label());
+    if reason.is_empty() {
+        let _ = write!(out, "{value}");
+    } else {
+        let _ = write!(out, "{value} ");
+        sgr_fg(out, muted);
+        let _ = write!(out, "{reason}");
+        sgr_reset(out);
+    }
 }
 
 /// One scrolled pane's scrollbar-thumb input: its screen rect and scroll

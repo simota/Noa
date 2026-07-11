@@ -30,6 +30,7 @@ use super::feed::{
     open_pty_capture,
 };
 use super::input_queue::PtyInput;
+use super::ipc_tap::IpcOutputTap;
 use super::overview::{OverviewPublish, flush_pending_overview_publish};
 use super::redraw::{RedrawDecision, RedrawFloor};
 use super::sidebar::SidebarPublish;
@@ -127,6 +128,7 @@ pub fn spawn(
     sidebar: SidebarPublish,
     auto_approve: AutoApprovePublish,
     redraw_floor: RedrawFloor,
+    ipc: Option<IpcOutputTap>,
 ) -> IoThreadHandle {
     let IoThreadTarget { window_id, pane_id } = target;
     // The GUI-agnostic card key for every sidebar delta this thread posts. The
@@ -153,6 +155,16 @@ pub fn spawn(
         // it lets the timeout arm be added only when something is owed,
         // instead of a constant poll interval.
         let mut publish_pending_at: Option<Instant> = None;
+        // Last `noa.output` push instant for this pane (FR-17), `None` when
+        // no server is running (`ipc` is `None`) — the throttle gate is then
+        // never consulted, so a disabled server costs nothing per feed.
+        let mut last_ipc_push: Option<Instant> = None;
+        // Per-pane, lock-free-after-extraction cache of last-sent viewport
+        // row content hashes (F-6), keyed by viewport slot (`visible_rows()`
+        // index) — `feed_terminal_batch` diffs against this under the same
+        // lock hold it already extracts rows in, so `noa.output` only ever
+        // carries rows whose content actually changed.
+        let mut ipc_row_cache: Vec<u64> = Vec::new();
         // A deadline owed by a redraw currently withheld — by the window's
         // shared [`RedrawFloor`] or the synchronized-output (DECSET 2026)
         // cap. Bounds how long a fed-but-unpainted frame can sit (see
@@ -232,6 +244,9 @@ pub fn spawn(
                         &mut last_sidebar_publish,
                         &auto_approve,
                         &mut auto_approve_state,
+                        ipc.is_some(),
+                        &mut last_ipc_push,
+                        &mut ipc_row_cache,
                     );
                     auto_approve_rescan_at =
                         auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
@@ -274,6 +289,14 @@ pub fn spawn(
                             .is_err()
                     {
                         break; // event loop gone
+                    }
+                    // Row diff already extracted inside `feed_terminal_batch`
+                    // under its one `Terminal` lock hold (F-6) — no second
+                    // lock here, just handing the diff to the broadcaster.
+                    if let Some(rows) = output.ipc_output.take()
+                        && let Some(tap) = ipc.as_ref()
+                    {
+                        tap.broadcaster.broadcast_output(tap.ipc_pane_id, rows);
                     }
                     if !output.pending_writes.is_empty() {
                         write_pty_bytes(&writer, &output.pending_writes);

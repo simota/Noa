@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
 use std::time::{Duration, Instant};
@@ -76,6 +76,7 @@ mod config_reload;
 mod event_loop;
 mod helpers;
 mod input_ops;
+mod ipc;
 mod lifecycle;
 mod overview;
 mod quick_terminal;
@@ -333,6 +334,28 @@ pub struct App {
     /// time-based refresh that keeps cwd/title current under sustained output
     /// without locking every terminal each frame.
     applescript_snapshot_at: Option<Instant>,
+    /// The running `noa-ipc` server (noa-server spec FR-1/FR-2), if
+    /// `server-enable` is true and the loopback bind succeeded. Dropping it
+    /// stops the accept loop; kept alive for the app's lifetime otherwise.
+    ipc_server: Option<noa_ipc::ServerHandle>,
+    /// The main-thread-published IPC read snapshot + pane-id registry (DEC-B),
+    /// shared with `AppIpcBackend`'s off-main-thread reads (applescript
+    /// bridge's `applescript_snapshot` analog).
+    ipc_shared: Arc<Mutex<crate::ipc_bridge::IpcShared>>,
+    /// In-flight IPC mutations awaiting a main-thread reply (DEC-C).
+    ipc_pending: crate::ipc_bridge::IpcPendingTable,
+    /// Monotonic `UserEvent::IpcAction` request-id source.
+    ipc_next_request: Arc<AtomicU64>,
+    /// Guards the one-time `noa-ipc` server startup to the first `resumed`,
+    /// mirroring `applescript_install_attempted`.
+    ipc_install_attempted: bool,
+    /// The cheap structural signature of the last IPC snapshot rebuild
+    /// (mirrors `applescript_snapshot_sig`), so `about_to_wait` skips the
+    /// full per-pane rebuild when nothing relevant changed.
+    ipc_snapshot_sig: u64,
+    /// When the IPC snapshot was last rebuilt, for the coarse time-based
+    /// refresh (mirrors `applescript_snapshot_at`).
+    ipc_snapshot_at: Option<Instant>,
 }
 
 impl App {
@@ -423,6 +446,13 @@ impl App {
             applescript_install_attempted: false,
             applescript_snapshot_sig: 0,
             applescript_snapshot_at: None,
+            ipc_server: None,
+            ipc_shared: Arc::new(Mutex::new(crate::ipc_bridge::IpcShared::default())),
+            ipc_pending: Arc::new(Mutex::new(HashMap::new())),
+            ipc_next_request: Arc::new(AtomicU64::new(1)),
+            ipc_install_attempted: false,
+            ipc_snapshot_sig: 0,
+            ipc_snapshot_at: None,
         }
     }
 

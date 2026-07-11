@@ -553,6 +553,7 @@ impl App {
             enabled: auto_approve_enabled.clone(),
             guards: auto_approve_guards.clone(),
         };
+        let ipc_tap = self.ipc_output_tap(window_id, pane_id);
         let io_thread = crate::io_thread::spawn(
             pty,
             terminal.clone(),
@@ -565,6 +566,7 @@ impl App {
             sidebar_publish,
             auto_approve,
             redraw_floor,
+            ipc_tap,
         );
 
         Ok(Surface {

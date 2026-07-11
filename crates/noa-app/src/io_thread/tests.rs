@@ -14,6 +14,155 @@ fn test_sidebar_publish(visible: bool) -> SidebarPublish {
     }
 }
 
+/// Drives `feed_terminal_batch` directly (not through the `feed_terminal`
+/// test wrapper, which always passes `ipc_active: false`) — for F-6's row
+/// diff behavior.
+#[allow(clippy::too_many_arguments)]
+fn feed_terminal_ipc(
+    terminal: &Arc<Mutex<Terminal>>,
+    stream: &mut noa_vt::Stream,
+    bytes: &[u8],
+    overview: &OverviewPublish,
+    last_overview_publish: &mut Option<Instant>,
+    sidebar: &SidebarPublish,
+    last_sidebar_publish: &mut Option<Instant>,
+    last_ipc_push: &mut Option<Instant>,
+    ipc_row_cache: &mut Vec<u64>,
+) -> TerminalOutput {
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(crate::auto_approve::AutoApproveInputGuards::default())),
+    };
+    let mut auto_approve_state = crate::auto_approve::AutoApproveState::default();
+    feed_terminal_batch(
+        terminal,
+        stream,
+        bytes,
+        std::iter::empty::<&[u8]>(),
+        overview,
+        last_overview_publish,
+        sidebar,
+        last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        true,
+        last_ipc_push,
+        ipc_row_cache,
+    )
+}
+
+// ---- F-6: IPC output row diff ----
+
+#[test]
+fn ipc_output_first_feed_sends_the_full_viewport_as_a_diff() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = Vec::new();
+
+    let output = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"hello",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+
+    let rows = output.ipc_output.expect("first feed sends a diff");
+    assert_eq!(rows.len(), 4, "every viewport row is new on the first push");
+}
+
+#[test]
+fn ipc_output_only_diffs_rows_whose_content_actually_changed() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = Vec::new();
+
+    // First feed seeds the cache with all four rows.
+    let first = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"one\r\ntwo\r\nthree",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(first.ipc_output.is_some());
+
+    // Past the throttle window, only row 0 (cursor still at row 0) actually
+    // changes.
+    last_ipc_push = Some(Instant::now() - super::ipc_tap::OUTPUT_PUSH_MIN_INTERVAL);
+    let second = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"\x1b[Hedited",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    let rows = second.ipc_output.expect("changed content produces a diff");
+    assert_eq!(rows.len(), 1, "only the row that actually changed is resent");
+    assert_eq!(rows[0].row, 0);
+}
+
+#[test]
+fn ipc_output_is_none_when_nothing_changed_or_the_tap_is_inactive() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+
+    // Tap inactive: `feed_terminal` always passes `ipc_active: false`.
+    let inactive = feed_terminal(
+        &terminal,
+        &mut stream,
+        b"hello",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+    );
+    assert!(inactive.ipc_output.is_none());
+
+    // Tap active but still inside the throttle window: no push at all, not
+    // even an empty one.
+    let mut last_ipc_push = Some(Instant::now());
+    let mut ipc_row_cache = Vec::new();
+    let throttled = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"more",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(throttled.ipc_output.is_none());
+}
+
 #[test]
 fn decide_sidebar_publish_throttles() {
     let now = Instant::now();

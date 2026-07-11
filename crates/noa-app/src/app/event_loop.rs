@@ -10,6 +10,7 @@ impl ApplicationHandler<UserEvent> for App {
         // launching (applescript R-2/Amendment 3). Guarded by its own flag so a
         // later resume can't double-register, independent of the windows check.
         self.install_applescript_if_needed();
+        self.install_ipc_server_if_needed();
         if !self.windows.is_empty() {
             return;
         }
@@ -241,6 +242,9 @@ impl ApplicationHandler<UserEvent> for App {
                 cwd,
                 command,
             } => self.spawn_applescript_tab(event_loop, window_target, cwd, command),
+            UserEvent::IpcAction { request_id } => {
+                self.handle_ipc_action(event_loop, request_id)
+            }
             UserEvent::PtyExit(window_id, pane_id) => {
                 // The quick terminal isn't a saved/tabbed window, so its shell
                 // exiting tears the whole drop-down down rather than routing
@@ -621,6 +625,9 @@ impl ApplicationHandler<UserEvent> for App {
         // Keep the AppleScript snapshot fresh for synchronous property reads
         // (a no-op when the bridge was never installed).
         self.sync_applescript_snapshot();
+        // Keep the noa-ipc read snapshot fresh (a no-op when the server was
+        // never started).
+        self.sync_ipc_snapshot();
         // Each tick reports its own next wake-up instead of setting
         // `ControlFlow` directly, so a `WaitUntil` from one can't clobber a
         // more urgent one from the others — this pass sets it exactly once,

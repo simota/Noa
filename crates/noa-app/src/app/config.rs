@@ -166,6 +166,16 @@ pub struct AppConfig {
     /// Raw `keybind = ...` entries from config. Parsed into the runtime
     /// [`crate::commands::KeybindEngine`] by `App::new` and live reload.
     pub keybinds: Vec<noa_config::KeybindConfig>,
+    /// `server-enable`: start the `noa-ipc` external control server
+    /// (noa-server spec FR-1). Default off.
+    pub server_enable: bool,
+    /// `server-port`: loopback TCP port the server binds (FR-2).
+    pub server_port: u16,
+    /// `server-token`: bearer token override (FR-3). `None` auto-generates
+    /// and persists one to the token file.
+    pub server_token: Option<String>,
+    /// `server-scopes`: comma-separated grantable scope subset (FR-6).
+    pub server_scopes: String,
 }
 
 impl AppConfig {
@@ -231,6 +241,10 @@ impl AppConfig {
             audible_bell_dock_bounce: config.audible_bell_dock_bounce,
             auto_approve: config.auto_approve,
             keybinds: config.keybinds,
+            server_enable: config.server_enable,
+            server_port: config.server_port,
+            server_token: config.server_token,
+            server_scopes: config.server_scopes,
         }
     }
 }

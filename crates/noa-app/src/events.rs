@@ -99,6 +99,11 @@ pub enum UserEvent {
         cwd: Option<String>,
         command: Option<String>,
     },
+    /// A `noa-ipc` mutating RPC (`focusPane`/`newTab`/`split`/`closePane`/
+    /// `sendText`) is waiting on the main thread (noa-server spec DEC-C). The
+    /// payload lives in `App::ipc_pending`, keyed by `request_id`, because
+    /// `UserEvent` derives `Eq` and so cannot carry a reply channel directly.
+    IpcAction { request_id: u64 },
 }
 
 /// Whether an AppleScript-driven spawn joins the focused window's tab group or

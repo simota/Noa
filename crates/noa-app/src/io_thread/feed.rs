@@ -23,6 +23,7 @@ use crate::split_tree::PaneId;
 use super::auto_approve::{
     AutoApproveCandidate, AutoApprovePublish, detect_auto_approve_candidate,
 };
+use super::ipc_tap::{decide_ipc_output_push, hash_wire_row_spans};
 use super::overview::{OverviewPublish, publish_overview_snapshot};
 use super::sidebar::{
     SidebarPublish, SidebarUpsert, decide_sidebar_publish, preview_rows, preview_spans,
@@ -61,6 +62,14 @@ pub(super) struct TerminalOutput {
     /// (FR-A4): the main thread classifies it, so an agent session's bell
     /// can escalate to an attention request even with every sidebar hidden.
     pub(super) sidebar_bell: bool,
+    /// `noa.output` row diff (noa-server spec FR-17 / F-6): only the
+    /// viewport rows whose content hash changed since the last push,
+    /// carrying their absolute row indices. Extracted under this same
+    /// `Terminal` lock hold — no second lock in the spawn loop. `None` when
+    /// the IPC tap is inactive (server disabled, or this pane has no IPC
+    /// id) or the push is still within its throttle window; `Some(vec![])`
+    /// never happens (an empty diff just stays `None`).
+    pub(super) ipc_output: Option<Vec<noa_ipc::protocol::Row>>,
 }
 
 #[cfg(test)]
@@ -79,6 +88,8 @@ pub(super) fn feed_terminal(
         guards: Arc::new(Mutex::new(AutoApproveInputGuards::default())),
     };
     let mut auto_approve_state = AutoApproveState::default();
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = Vec::new();
     feed_terminal_batch(
         terminal,
         stream,
@@ -90,6 +101,9 @@ pub(super) fn feed_terminal(
         last_sidebar_publish,
         &auto_approve,
         &mut auto_approve_state,
+        false,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
     )
 }
 
@@ -105,6 +119,9 @@ pub(super) fn feed_terminal_batch<'a>(
     last_sidebar_publish: &mut Option<Instant>,
     auto_approve: &AutoApprovePublish,
     auto_approve_state: &mut AutoApproveState,
+    ipc_active: bool,
+    last_ipc_push: &mut Option<Instant>,
+    ipc_row_cache: &mut Vec<u64>,
 ) -> TerminalOutput {
     let mut term = terminal.lock();
     stream.feed(first, &mut *term);
@@ -140,6 +157,32 @@ pub(super) fn feed_terminal_batch<'a>(
     let auto_approve_candidate =
         detect_auto_approve_candidate(&term, auto_approve, auto_approve_state);
 
+    // IPC output row diff (FR-17 / F-6): extracted under this same lock
+    // hold — no second `Terminal` lock from the spawn loop. `ipc_active ==
+    // false` (server disabled or this pane has no IPC id yet) costs one
+    // bool check and nothing else.
+    let ipc_output = (ipc_active && decide_ipc_output_push(*last_ipc_push, Instant::now()))
+        .then(|| {
+            *last_ipc_push = Some(Instant::now());
+            let base = term.active().visible_row_base() as u64;
+            let rows = term.active().visible_rows();
+            if ipc_row_cache.len() != rows.len() {
+                ipc_row_cache.clear();
+                ipc_row_cache.resize(rows.len(), 0);
+            }
+            let mut diff = Vec::new();
+            for (i, row) in rows.iter().enumerate() {
+                let spans = crate::ipc_bridge::row_to_spans(row);
+                let hash = hash_wire_row_spans(&spans);
+                if ipc_row_cache[i] != hash {
+                    ipc_row_cache[i] = hash;
+                    diff.push(noa_ipc::protocol::Row { row: base + i as u64, spans });
+                }
+            }
+            diff
+        })
+        .filter(|diff: &Vec<noa_ipc::protocol::Row>| !diff.is_empty());
+
     let mut output = TerminalOutput {
         pending_writes: term.take_pending_writes(),
         pending_clipboard_writes: term.take_pending_clipboard_writes(),
@@ -150,6 +193,7 @@ pub(super) fn feed_terminal_batch<'a>(
         sidebar_upsert: None,
         auto_approve: auto_approve_candidate,
         sidebar_bell,
+        ipc_output,
     };
     drop(term);
     output.sidebar_upsert = sidebar_raw.map(|(name, cwd, busy, rows)| SidebarUpsert {

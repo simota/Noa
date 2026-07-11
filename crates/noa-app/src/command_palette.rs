@@ -107,14 +107,15 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
 /// The commands the palette lists, in registry declaration order (also the
 /// tie-break order for subsequence matches — v1 has no scoring).
 ///
-/// Two variants are excluded (R-3): `ToggleCommandPalette` (self-reference,
-/// like the overview's self-exclusion) and `SelectTab(1..9)` (nine redundant
-/// rows already reachable via `cmd+1..9` — kept in the title registry for
-/// completeness, cut only from display).
+/// Three variants are excluded (R-3): `ToggleCommandPalette` (self-reference,
+/// like the overview's self-exclusion), `SelectTab(1..9)` (nine redundant
+/// rows already reachable via `cmd+1..9`), and `Preferences` (dispatches to
+/// the same GUI settings overlay as `OpenSettings`, so its row would be a
+/// duplicate) — all kept in the title registry for completeness, cut only
+/// from display.
 pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
     const ENTRIES: &[AppCommand] = &[
         AppCommand::About,
-        AppCommand::Preferences,
         AppCommand::EditConfigFile,
         AppCommand::OpenThemePicker,
         AppCommand::OpenSettings,
@@ -668,13 +669,16 @@ mod tests {
         // AC-4.
         let entries = command_palette_entries();
         assert!(!entries.contains(&AppCommand::ToggleCommandPalette));
+        assert!(!entries.contains(&AppCommand::Preferences));
         for index in 1..=9 {
             assert!(!entries.contains(&AppCommand::SelectTab(index)));
         }
         for command in all_commands() {
             let excluded = matches!(
                 command,
-                AppCommand::ToggleCommandPalette | AppCommand::SelectTab(_)
+                AppCommand::ToggleCommandPalette
+                    | AppCommand::SelectTab(_)
+                    | AppCommand::Preferences
             );
             assert_eq!(
                 entries.contains(&command),

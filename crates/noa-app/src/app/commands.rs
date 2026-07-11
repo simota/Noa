@@ -154,6 +154,7 @@ impl App {
             AppCommand::ToggleCommandPalette => self.toggle_command_palette(),
             AppCommand::OpenThemePicker => self.open_theme_settings(ThemeSettingsMode::Theme),
             AppCommand::OpenSettings => self.open_theme_settings(ThemeSettingsMode::Settings),
+            AppCommand::ToggleProcessMonitor => self.toggle_process_monitor(),
             AppCommand::ToggleFullscreen => self.toggle_fullscreen(),
             AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             AppCommand::ToggleSecureKeyboardEntry => self.toggle_secure_keyboard_entry(),

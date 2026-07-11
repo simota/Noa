@@ -7,6 +7,7 @@ mod ime;
 mod layout;
 mod overlays;
 mod pointer;
+mod process_monitor;
 mod search;
 mod tab_title;
 mod terminal;

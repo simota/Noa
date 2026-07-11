@@ -507,6 +507,20 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // The process-monitor overlay (panel-metrics-view R-3) sits at
+                // the same priority tier as the palette/theme-settings:
+                // mutually exclusive with all three, every key consumed while
+                // it's open.
+                if self
+                    .process_monitor
+                    .as_ref()
+                    .is_some_and(|session| session.window_id == window_id)
+                {
+                    if pressed {
+                        self.handle_process_monitor_key(window_id, &event);
+                    }
+                    return;
+                }
                 // An open inline sidebar-card rename owns this window's
                 // keyboard (FR-7 Rename): printable text edits the buffer,
                 // Enter commits, Escape cancels — nothing leaks to keybinds or

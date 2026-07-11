@@ -613,6 +613,18 @@ pub(super) struct ThemeSettingsSession {
     pub(super) opened_at: Instant,
 }
 
+/// An open process-monitor overlay (panel-metrics-view FR-1), bound to the
+/// window it was opened from. A single app-wide overlay, mirroring
+/// [`ThemeSettingsSession`]/[`CommandPaletteSession`] — mutually exclusive
+/// with both (R-3, `App::active_overlay`).
+pub(super) struct ProcessMonitorSession {
+    pub(super) window_id: WindowId,
+    pub(super) state: crate::process_monitor::ProcessMonitor,
+    /// When the overlay opened, driving the same brief fade-in the palette /
+    /// theme-settings overlays use ([`crate::anim::DUR_FAST`]).
+    pub(super) opened_at: Instant,
+}
+
 #[cfg(test)]
 mod theme_settings_session_tests {
     use super::ThemeSettingsSession;

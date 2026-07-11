@@ -1,4 +1,6 @@
-use crate::macos_overlay::model::{OverlayColors, PaneRectPt, ThemeSettingsViewModel};
+use crate::macos_overlay::model::{
+    OverlayColors, PaneRectPt, ProcessMonitorViewModel, ThemeSettingsViewModel,
+};
 use noa_render::{CommandPaletteSnapshot, ConfirmDialogSnapshot};
 use winit::window::Window;
 
@@ -11,6 +13,12 @@ pub(in crate::macos_overlay) fn rebuild_palette(
 pub(in crate::macos_overlay) fn rebuild_theme_settings(
     _: &Window,
     _: Option<(ThemeSettingsViewModel, PaneRectPt)>,
+    _: &OverlayColors,
+) {
+}
+pub(in crate::macos_overlay) fn rebuild_process_monitor(
+    _: &Window,
+    _: Option<(ProcessMonitorViewModel, PaneRectPt)>,
     _: &OverlayColors,
 ) {
 }

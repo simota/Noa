@@ -268,6 +268,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ToggleCommandPalette
         | AppCommand::OpenThemePicker
         | AppCommand::OpenSettings
+        | AppCommand::ToggleProcessMonitor
         | AppCommand::ToggleFullscreen
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleSecureKeyboardEntry
@@ -328,6 +329,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         AppCommand::ToggleCommandPalette
         | AppCommand::OpenThemePicker
         | AppCommand::OpenSettings
+        | AppCommand::ToggleProcessMonitor
         | AppCommand::Copy
         | AppCommand::Paste
         | AppCommand::SendSelectionToPane

@@ -101,6 +101,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         // later split into two separately-openable overlays.
         AppCommand::OpenThemePicker => "Open Theme\u{2026}",
         AppCommand::OpenSettings => "Open Settings\u{2026}",
+        AppCommand::ToggleProcessMonitor => "Open Process Monitor",
     }
 }
 
@@ -119,6 +120,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::EditConfigFile,
         AppCommand::OpenThemePicker,
         AppCommand::OpenSettings,
+        AppCommand::ToggleProcessMonitor,
         AppCommand::ReloadConfig,
         AppCommand::Copy,
         AppCommand::Paste,
@@ -328,7 +330,8 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         AppCommand::Terminal(TerminalAction::Clear)
         | AppCommand::Terminal(TerminalAction::ClearScrollback)
         | AppCommand::FontSize(_)
-        | AppCommand::ToggleFullscreen => CommandCategory::View,
+        | AppCommand::ToggleFullscreen
+        | AppCommand::ToggleProcessMonitor => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
         AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
         AppCommand::NewSplitLeft

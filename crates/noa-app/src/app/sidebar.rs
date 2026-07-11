@@ -44,7 +44,8 @@ fn session_delta_should_apply(
         SessionDelta::Remove { .. }
         | SessionDelta::Branch { .. }
         | SessionDelta::Rename { .. }
-        | SessionDelta::Process { .. } => true,
+        | SessionDelta::Process { .. }
+        | SessionDelta::Metrics { .. } => true,
     }
 }
 
@@ -356,6 +357,7 @@ pub(super) use palette::{ScrollThumb, draw_bell_flash, draw_scrollbar_thumbs};
 // AppKit cards instead (`crate::macos_overlay`).
 #[cfg(not(target_os = "macos"))]
 pub(super) use palette::{
-    draw_command_palette_card, draw_confirm_dialog_card, draw_theme_settings_card, draw_toast_card,
+    draw_command_palette_card, draw_confirm_dialog_card, draw_process_monitor_card,
+    draw_theme_settings_card, draw_toast_card,
 };
 pub(super) use render::{SidebarRasterCacheKey, draw_sidebar_band};

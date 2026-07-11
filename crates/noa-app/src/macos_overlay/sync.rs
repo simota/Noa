@@ -5,8 +5,8 @@ use winit::window::Window;
 
 use super::imp;
 use super::model::{
-    NativeOverlayCache, OverlayColors, PaneRectPt, ThemeSettingsViewModel,
-    theme_settings_view_model,
+    NativeOverlayCache, OverlayColors, PaneRectPt, ProcessMonitorViewModel, ThemeSettingsViewModel,
+    process_monitor_view_model, theme_settings_view_model,
 };
 
 fn hash_u64(f: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
@@ -103,6 +103,34 @@ pub(crate) fn sync_theme_settings(
         return;
     };
     imp::rebuild_theme_settings(window, vm, colors);
+}
+
+/// Sync the native process-monitor card (panel-metrics-view; same contract as
+/// [`sync_command_palette`]). Unlike theme-settings' catalog-sized state, a
+/// process-monitor session is cheap to turn into a [`ProcessMonitorViewModel`]
+/// (row count is bounded by live panes), so this builds it unconditionally
+/// each call and hashes the *built* model directly rather than a separate
+/// fingerprint method.
+pub(crate) fn sync_process_monitor(
+    window: &Window,
+    cache: &mut NativeOverlayCache,
+    model: Option<(&crate::process_monitor::ProcessMonitor, PaneRectPt)>,
+    colors: &OverlayColors,
+) {
+    let built: Option<(ProcessMonitorViewModel, PaneRectPt)> =
+        model.map(|(state, rect)| (process_monitor_view_model(state), rect));
+    let hash = built.as_ref().map(|(vm, rect)| {
+        hash_u64(|h| {
+            vm.hash(h);
+            rect.hash_into(h);
+            colors.hash_into(h);
+        })
+    });
+    if cache.process_monitor == hash {
+        return;
+    }
+    cache.process_monitor = hash;
+    imp::rebuild_process_monitor(window, built, colors);
 }
 
 /// Sync the native confirm-dialog card (same contract as

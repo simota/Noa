@@ -26,5 +26,6 @@ mod tests;
 pub(crate) use model::cg;
 pub(crate) use model::{NativeOverlayCache, OverlayColors, PaneRectPt, TITLE_PROMPT_HINT};
 pub(crate) use sync::{
-    sync_command_palette, sync_confirm_dialog, sync_theme_settings, sync_title_prompt, sync_toast,
+    sync_command_palette, sync_confirm_dialog, sync_process_monitor, sync_theme_settings,
+    sync_title_prompt, sync_toast,
 };

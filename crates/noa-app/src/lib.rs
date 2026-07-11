@@ -28,6 +28,7 @@ mod macos_overlay;
 mod macos_window;
 mod mouse;
 mod notification;
+mod process_monitor;
 mod search_prompt;
 mod secure_input;
 mod session;

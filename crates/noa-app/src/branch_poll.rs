@@ -60,7 +60,18 @@ pub(crate) enum ProbeControl {
     },
     /// Drop every probe whose id is not in this live set (GC choke point).
     Retain(HashSet<SessionCardId>),
+    /// Turn the panel-metrics-view metrics tick on/off (FR-7/NFR-1): `true`
+    /// while the process-monitor overlay is open, `false` on close. Fully
+    /// independent of the process-name adaptive schedule above — it must
+    /// never reset that backoff, and that backoff's jitter must never starve
+    /// this fixed 1s cadence.
+    MetricsActive(bool),
 }
+
+/// Fixed metrics-tick cadence (panel-metrics-view FR-7/NFR-1): 1s while the
+/// process-monitor overlay is open, completely independent of
+/// [`PROCESS_POLL_INTERVAL`]'s adaptive backoff.
+pub const METRICS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Minimum interval between two `git` spawns for the *same* cwd (NFR-3). A
 /// cwd-change request that arrives within this window of the last poll for that
@@ -172,6 +183,13 @@ impl BranchPollHandle {
             .send(ProbeControl::Retain(live.iter().copied().collect()));
     }
 
+    /// Turn the metrics tick on/off (panel-metrics-view FR-7): the
+    /// process-monitor overlay's single open/close choke point calls this,
+    /// mirroring how probe registration/GC flow through the same channel.
+    pub(crate) fn set_metrics_active(&self, active: bool) {
+        let _ = self.probe_tx.send(ProbeControl::MetricsActive(active));
+    }
+
     /// Signal shutdown and join the worker within a bounded timeout, matching
     /// the io thread's teardown discipline (Omen T6).
     pub(crate) fn shutdown(&mut self) {
@@ -227,23 +245,44 @@ fn worker_loop(
     // Per-session foreground-process probe + last-posted name (so only changes
     // are posted) + per-probe adaptive schedule.
     let mut probes: HashMap<SessionCardId, ProcessProbeEntry> = HashMap::new();
+    // panel-metrics-view metrics tick (FR-7/NFR-1): a fixed 1s cadence, fully
+    // independent of the adaptive process-name schedule above.
+    // `next_metrics_at` is `None` whenever `metrics_active` is `false` (the
+    // overlay is closed) so [`metrics_deadline`] never contributes a select
+    // deadline while inactive (AC-8).
+    let mut metrics_active = false;
+    let mut next_metrics_at: Option<Instant> = None;
     loop {
         let mut sel = crossbeam_channel::Select::new();
         let shutdown_op = sel.recv(shutdown_rx);
         let request_op = sel.recv(request_rx);
         let probe_op = sel.recv(probe_rx);
 
-        // Tick at the earliest due probe instead of a fixed 1s cadence for every
-        // pane. Not gated on sidebar visibility — see [`PROCESS_POLL_INTERVAL`].
-        let selected = match next_process_poll_at(&probes) {
+        // Tick at the earliest due probe/metrics deadline instead of a fixed
+        // cadence for every pane. Not gated on sidebar visibility — see
+        // [`PROCESS_POLL_INTERVAL`].
+        let earliest = earliest_deadline(
+            next_process_poll_at(&probes),
+            metrics_deadline(metrics_active, next_metrics_at),
+        );
+        let selected = match earliest {
             Some(deadline) => sel
                 .select_timeout(deadline.saturating_duration_since(Instant::now()))
                 .ok(),
             None => Some(sel.select()),
         };
         let Some(oper) = selected else {
-            // At least one process poll is due: re-read due probes and post changes.
-            if !poll_due_processes(&mut probes, proxy, Instant::now()) {
+            let now = Instant::now();
+            // Both schedules are checked independently: either, both, or (in
+            // a spurious wakeup) neither may actually be due yet.
+            if next_process_poll_at(&probes).is_some_and(|deadline| deadline <= now)
+                && !poll_due_processes(&mut probes, proxy, now)
+            {
+                break; // event loop gone
+            }
+            if metrics_deadline(metrics_active, next_metrics_at).is_some_and(|deadline| deadline <= now)
+                && !tick_metrics(&mut probes, proxy, now, &mut next_metrics_at)
+            {
                 break; // event loop gone
             }
             continue;
@@ -277,11 +316,85 @@ fn worker_loop(
                 Ok(ProbeControl::Retain(live)) => {
                     probes.retain(|id, _| live.contains(id));
                 }
+                Ok(ProbeControl::MetricsActive(active)) => {
+                    metrics_active = active;
+                    // Fire immediately on activation so the overlay's first
+                    // frame doesn't wait a full second for its first sample;
+                    // clear the deadline on deactivation (AC-8).
+                    next_metrics_at = active.then(Instant::now);
+                }
                 Err(_) => break, // main thread / App dropped
             },
             _ => unreachable!("select only registers shutdown, request, and probe"),
         }
     }
+}
+
+/// The earlier of two optional deadlines (`None` = "no deadline").
+fn earliest_deadline(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+/// Pure metrics-tick deadline (AC-8): `None` whenever the tick is inactive,
+/// so an inactive overlay contributes no select deadline and the tick body
+/// (snapshot capture + `poll_metrics`) never runs. A parameter-only function
+/// (no `Instant::now()`/channel access inside) so it's directly unit-testable.
+fn metrics_deadline(active: bool, next_metrics_at: Option<Instant>) -> Option<Instant> {
+    if active { next_metrics_at } else { None }
+}
+
+/// One metrics tick (panel-metrics-view FR-7/NFR-2): capture the whole-system
+/// process snapshot exactly once, poll every registered probe against it, and
+/// post a [`SessionDelta::Metrics`] for each — unconditionally, including
+/// `None` (FR-8, so a pane whose foreground group vanished clears to "—"
+/// rather than keeping a stale reading). Returns `false` when the event loop
+/// is gone (caller should stop). The snapshot-sharing + always-post behavior
+/// is exercised through [`run_metrics_tick`] directly in tests; this is the
+/// thin real-probe/proxy wiring around it.
+fn tick_metrics(
+    probes: &mut HashMap<SessionCardId, ProcessProbeEntry>,
+    proxy: &EventLoopProxy<UserEvent>,
+    now: Instant,
+    next_metrics_at: &mut Option<Instant>,
+) -> bool {
+    let results = run_metrics_tick(
+        probes.iter_mut().map(|(id, entry)| (*id, &mut entry.probe)),
+        noa_pty::ProcSnapshot::capture,
+        |probe: &mut ForegroundProcessProbe, snap: &noa_pty::ProcSnapshot| probe.poll_metrics(snap),
+    );
+    *next_metrics_at = Some(now + METRICS_POLL_INTERVAL);
+    for (id, metrics) in results {
+        if proxy
+            .send_event(UserEvent::SessionDelta(SessionDelta::Metrics { id, metrics }))
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// The testable seam behind [`tick_metrics`] (AC-12/AC-8): `capture` runs
+/// exactly once regardless of how many probes are registered — proving the
+/// process-listing syscalls are shared, not repeated per pane — and every
+/// probe is polled against that one shared snapshot and reported
+/// unconditionally (including `None`, FR-8). Generic over the probe type `P`
+/// so a fake probe can stand in for [`ForegroundProcessProbe`] in tests
+/// without a real process table.
+fn run_metrics_tick<'a, P: 'a>(
+    probes: impl Iterator<Item = (SessionCardId, &'a mut P)>,
+    capture: impl FnOnce() -> noa_pty::ProcSnapshot,
+    mut poll: impl FnMut(&mut P, &noa_pty::ProcSnapshot) -> Option<noa_pty::PaneMetrics>,
+) -> Vec<(SessionCardId, Option<noa_pty::PaneMetrics>)> {
+    let snapshot = capture();
+    probes
+        .map(|(id, probe)| (id, poll(probe, &snapshot)))
+        .collect()
 }
 
 struct ProcessProbeEntry {
@@ -704,5 +817,92 @@ mod tests {
         if !probe.is_git {
             assert!(probe.branch.is_none());
         }
+    }
+
+    // AC-8 (FR-7/NFR-1): inactive ⇒ no deadline at all, regardless of any
+    // stale `next_metrics_at` left over from before deactivation.
+    #[test]
+    fn metrics_deadline_is_none_while_inactive() {
+        let now = Instant::now();
+        assert_eq!(metrics_deadline(false, Some(now)), None);
+        assert_eq!(metrics_deadline(false, None), None);
+        assert_eq!(metrics_deadline(true, Some(now)), Some(now));
+        assert_eq!(metrics_deadline(true, None), None);
+    }
+
+    #[test]
+    fn earliest_deadline_picks_the_smaller_of_two_optionals() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+        assert_eq!(earliest_deadline(Some(now), Some(later)), Some(now));
+        assert_eq!(earliest_deadline(Some(later), Some(now)), Some(now));
+        assert_eq!(earliest_deadline(Some(now), None), Some(now));
+        assert_eq!(earliest_deadline(None, Some(now)), Some(now));
+        assert_eq!(earliest_deadline(None, None), None);
+    }
+
+    // AC-12/NFR-2: `capture` runs exactly once per tick no matter how many
+    // probes are registered — the process-listing syscalls are shared, not
+    // repeated per pane.
+    #[test]
+    fn run_metrics_tick_captures_the_snapshot_exactly_once() {
+        let capture_count = std::cell::Cell::new(0u32);
+        let mut probes: HashMap<SessionCardId, u32> = HashMap::new();
+        probes.insert(card_id(1, 1), 10);
+        probes.insert(card_id(1, 2), 20);
+        probes.insert(card_id(1, 3), 30);
+
+        let results = run_metrics_tick(
+            probes.iter_mut().map(|(id, probe)| (*id, probe)),
+            || {
+                capture_count.set(capture_count.get() + 1);
+                noa_pty::ProcSnapshot::default()
+            },
+            |probe, _snap| {
+                Some(noa_pty::PaneMetrics {
+                    cpu_permille: Some(*probe),
+                    mem_bytes: 0,
+                    proc_count: 1,
+                    started_at: None,
+                })
+            },
+        );
+
+        assert_eq!(capture_count.get(), 1);
+        assert_eq!(results.len(), 3);
+    }
+
+    // AC-8/AC-10: every registered probe is reported unconditionally each
+    // tick, including a probe whose poll resolves to `None` (FR-8) — the
+    // caller must clear that pane to "—" rather than skip it.
+    #[test]
+    fn run_metrics_tick_reports_every_probe_including_none() {
+        let mut probes: HashMap<SessionCardId, bool> = HashMap::new();
+        probes.insert(card_id(1, 1), true);
+        probes.insert(card_id(1, 2), false);
+
+        let mut results = run_metrics_tick(
+            probes.iter_mut().map(|(id, probe)| (*id, probe)),
+            noa_pty::ProcSnapshot::default,
+            |probe: &mut bool, _snap| {
+                (*probe).then_some(noa_pty::PaneMetrics {
+                    cpu_permille: Some(500),
+                    mem_bytes: 1024,
+                    proc_count: 1,
+                    started_at: None,
+                })
+            },
+        );
+        results.sort_by_key(|(id, _)| id.pane_id.get());
+
+        assert!(results[0].1.is_some());
+        assert!(results[1].1.is_none());
+    }
+
+    fn card_id(window: u64, pane: u64) -> SessionCardId {
+        SessionCardId::new(
+            crate::session_store::SessionWindowId(window),
+            crate::split_tree::PaneId::new(pane),
+        )
     }
 }

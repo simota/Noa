@@ -719,6 +719,18 @@ impl App {
                 gpu.preview_theme = None;
             }
         }
+        // Same leak shape as the palette: a process-monitor overlay bound to
+        // the closed window would strand a dead-window reference and leave
+        // the metrics tick running forever. Route through the real close
+        // choke point (not a bare field clear) so the tick turns back off and
+        // every card's metrics are cleared, exactly like an Esc close.
+        if self
+            .process_monitor
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.close_process_monitor();
+        }
         // Same leak shape as the palette: a confirm dialog bound to the closed
         // window could deliver no keys (not even Escape), stranding a modal.
         if self

@@ -222,6 +222,10 @@ pub struct App {
     /// [`ThemeSettingsSession`]. Mutually exclusive with `command_palette`
     /// and `search_prompt` (R-3, `App::active_overlay`).
     theme_settings: Option<ThemeSettingsSession>,
+    /// The open process-monitor overlay (panel-metrics-view FR-1), if any —
+    /// see [`ProcessMonitorSession`]. Mutually exclusive with the palette,
+    /// theme-settings, and search prompt (R-3, `App::active_overlay`).
+    process_monitor: Option<ProcessMonitorSession>,
     /// R-29/ADR-5: the theme-settings-v2 favorites store — lazily loaded,
     /// mirrored read-only into each `ThemeSettings` session and updated
     /// (persisted immediately) by a `⌃F` toggle.
@@ -391,6 +395,7 @@ impl App {
             command_palette: None,
             send_selection_picker: None,
             theme_settings: None,
+            process_monitor: None,
             theme_favorites: crate::theme_favorites::ThemeFavorites::new(),
             confirm_dialog: None,
             sidebar_rename: None,

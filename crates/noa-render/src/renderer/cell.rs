@@ -682,7 +682,7 @@ pub(super) fn emit_run_glyph_instances(
     row: u16,
     metrics: Metrics,
 ) {
-    for glyph in shaped {
+    for (i, glyph) in shaped.iter().enumerate() {
         let cluster = glyph.cluster as usize;
         let (Some(cell), Some(render_info)) =
             (run.cells.get(cluster), run.cell_render.get(cluster))
@@ -690,7 +690,26 @@ pub(super) fn emit_run_glyph_instances(
             continue;
         };
 
-        let raster = font.raster_shaped(glyph.face_id, glyph.glyph_id, cell.style);
+        // Span (grid columns) the glyph is allotted, so a fallback glyph
+        // whose native advance overshoots it gets fit to the span instead
+        // of bleeding into the neighbor cell (see
+        // `noa_font::raster::rasterize_with_variations`'s doc comment).
+        // Two sources, take the max: the anchor cell's `unicode-width`
+        // (matches `noa-grid::Screen::print_width`; covers wide chars,
+        // whose spacer cell shapes as `' '` and thus yields a next-cluster
+        // distance of only 1) and the distance to the next distinct cluster
+        // (covers multi-cell ligature glyphs when `liga`/`calt` are
+        // re-enabled via config — their cluster-start cell is width 1).
+        let char_span = cell.ch.width().unwrap_or(1).min(2);
+        let cluster_span = shaped[i + 1..]
+            .iter()
+            .map(|g| g.cluster as usize)
+            .find(|&c| c > cluster)
+            .unwrap_or(run.cells.len())
+            .saturating_sub(cluster)
+            .max(1);
+        let span = char_span.max(cluster_span).min(u8::MAX as usize) as u8;
+        let raster = font.raster_shaped(glyph.face_id, glyph.glyph_id, cell.style, span);
         if raster.atlas_size[0] == 0 || raster.atlas_size[1] == 0 {
             continue;
         }

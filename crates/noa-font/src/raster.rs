@@ -84,35 +84,20 @@ fn thicken_mask(bitmap: &[u8], strength: u8) -> Vec<u8> {
     bitmap.iter().map(|&c| lut[c as usize]).collect()
 }
 
-/// Rasterize a single glyph at `px` pixels-per-em, applying `variation_coords`
-/// (D1: MUST be the same coords `FontGrid::shape_run` used for shaping this
-/// style — see `shape::variation_coords_for`) and optional synthetic-style
-/// transforms.
-///
-/// Color-bitmap glyphs (e.g. emoji `sbix`/CBDT strikes, detected via swash's
-/// [`Content::Color`]) keep their full RGBA data (REQ-EMOJI-2); everything
-/// else rasterizes to an R8 alpha mask, as before.
-///
-/// Returns an empty (zero-sized) glyph for whitespace / glyphs with no
-/// outline coverage; callers can treat that as "nothing to blit".
-pub fn rasterize_with_variations(
+/// Render `glyph_id` at `px` pixels-per-em once, returning swash's raw image
+/// (if any) plus the font's pen advance at that size. Factored out of
+/// [`rasterize_with_variations`] so the fit-to-cell path below can re-invoke
+/// it at a smaller `px` without duplicating the scaler/render setup.
+fn render_glyph_once(
     ctx: &mut ScaleContext,
     font: FontRef<'_>,
     glyph_id: u16,
     px: f32,
-    variation_coords: &[(u32, f32)],
+    normalized_coords: &[swash::NormalizedCoord],
     synthesis: GlyphSynthesis,
-) -> RasterizedGlyph {
-    let normalized_coords: Vec<swash::NormalizedCoord> = if variation_coords.is_empty() {
-        Vec::new()
-    } else {
-        font.variations()
-            .normalized_coords(variation_coords.iter().copied())
-            .collect()
-    };
-
+) -> (Option<swash::scale::image::Image>, f32) {
     let advance = font
-        .glyph_metrics(&normalized_coords)
+        .glyph_metrics(normalized_coords)
         .scale(px)
         .advance_width(glyph_id);
 
@@ -146,7 +131,97 @@ pub fn rasterize_with_variations(
         render.transform(Some(Transform::new(1.0, 0.0, -0.25, 1.0, 0.0, 0.0)));
     }
 
-    let image = render.render(&mut scaler, glyph_id);
+    (render.render(&mut scaler, glyph_id), advance)
+}
+
+/// Normalize a non-color swash image into an R8 coverage mask
+/// [`RasterizedGlyph`], applying stem-darkening if configured. Returns an
+/// empty (advance-only) glyph on an unexpected data layout.
+fn mask_glyph_from_image(
+    img: swash::scale::image::Image,
+    advance: f32,
+    synthesis: GlyphSynthesis,
+) -> RasterizedGlyph {
+    let width = img.placement.width;
+    let height = img.placement.height;
+    let expected_px = (width as usize) * (height as usize);
+
+    // Some non-color bitmap sources may still emit RGBA; take the alpha
+    // channel.
+    let mut bitmap = if img.data.len() == expected_px {
+        img.data
+    } else if expected_px > 0 && img.data.len() == expected_px * 4 {
+        img.data.chunks_exact(4).map(|px| px[3]).collect()
+    } else {
+        Vec::new()
+    };
+
+    if bitmap.len() != expected_px {
+        // Unexpected layout — treat as an empty (advance-only) glyph.
+        return RasterizedGlyph {
+            advance,
+            ..Default::default()
+        };
+    }
+
+    if synthesis.thicken && expected_px > 0 {
+        bitmap = thicken_mask(&bitmap, synthesis.thicken_strength);
+    }
+    RasterizedGlyph {
+        bitmap,
+        width,
+        height,
+        bearing_x: img.placement.left,
+        bearing_y: img.placement.top,
+        advance,
+        color: false,
+    }
+}
+
+/// Rasterize a single glyph at `px` pixels-per-em, applying `variation_coords`
+/// (D1: MUST be the same coords `FontGrid::shape_run` used for shaping this
+/// style — see `shape::variation_coords_for`) and optional synthetic-style
+/// transforms.
+///
+/// Color-bitmap glyphs (e.g. emoji `sbix`/CBDT strikes, detected via swash's
+/// [`Content::Color`]) keep their full RGBA data (REQ-EMOJI-2); everything
+/// else rasterizes to an R8 alpha mask, as before.
+///
+/// `fit_width`, when given, is the glyph's allotted span in device pixels
+/// (`span_cells * cell_w`, per the source cell's `unicode-width`). Some
+/// macOS fallback faces ship metrics sized for a wider layout than noa's
+/// grid gives the codepoint (e.g. East Asian Ambiguous-width symbols like
+/// `①`), so their outline advance overshoots the cell(s) and bleeds into a
+/// neighbor. When the rasterized advance exceeds `fit_width` by more than a
+/// 10% tolerance (headroom for ordinary ink overshoot, e.g. `x`'s slightly
+/// negative bearing), the glyph is uniformly downscaled — re-rendered at a
+/// smaller `px` so hinting stays correct at the new size, kitty-style —
+/// and centered in its allotted span. Color bitmap strikes are never
+/// downscaled (guarded below regardless of `fit_width`, since they resolve
+/// to a fixed strike and are already sized for a 2-cell span with headroom
+/// to spare); this is noa's own polish on top of the Ghostty parity target.
+///
+/// Returns an empty (zero-sized) glyph for whitespace / glyphs with no
+/// outline coverage; callers can treat that as "nothing to blit".
+pub fn rasterize_with_variations(
+    ctx: &mut ScaleContext,
+    font: FontRef<'_>,
+    glyph_id: u16,
+    px: f32,
+    variation_coords: &[(u32, f32)],
+    synthesis: GlyphSynthesis,
+    fit_width: Option<f32>,
+) -> RasterizedGlyph {
+    let normalized_coords: Vec<swash::NormalizedCoord> = if variation_coords.is_empty() {
+        Vec::new()
+    } else {
+        font.variations()
+            .normalized_coords(variation_coords.iter().copied())
+            .collect()
+    };
+
+    let (image, advance) =
+        render_glyph_once(ctx, font, glyph_id, px, &normalized_coords, synthesis);
 
     let Some(img) = image else {
         return RasterizedGlyph {
@@ -155,12 +230,12 @@ pub fn rasterize_with_variations(
         };
     };
 
-    let width = img.placement.width;
-    let height = img.placement.height;
-    let expected_px = (width as usize) * (height as usize);
-
     if img.content == Content::Color {
-        // Color bitmap strike: keep the full RGBA data, no alpha reduction.
+        // Color bitmap strike: keep the full RGBA data, no alpha reduction,
+        // and never fit-scaled (see doc comment above).
+        let width = img.placement.width;
+        let height = img.placement.height;
+        let expected_px = (width as usize) * (height as usize);
         if expected_px > 0 && img.data.len() == expected_px * 4 {
             return RasterizedGlyph {
                 bitmap: img.data,
@@ -179,36 +254,34 @@ pub fn rasterize_with_variations(
         };
     }
 
-    // Non-color path: normalize to an R8 coverage mask. Some non-color
-    // bitmap sources may still emit RGBA; take the alpha channel.
-    let mut bitmap = if img.data.len() == expected_px {
-        img.data
-    } else if expected_px > 0 && img.data.len() == expected_px * 4 {
-        img.data.chunks_exact(4).map(|px| px[3]).collect()
-    } else {
-        Vec::new()
-    };
-
-    if bitmap.len() == expected_px {
-        if synthesis.thicken && expected_px > 0 {
-            bitmap = thicken_mask(&bitmap, synthesis.thicken_strength);
+    if let Some(fit) = fit_width
+        && fit > 0.0
+        && advance > fit * 1.1
+    {
+        let scale = fit / advance;
+        let scaled_px = px * scale;
+        let (scaled_image, scaled_advance) =
+            render_glyph_once(ctx, font, glyph_id, scaled_px, &normalized_coords, synthesis);
+        // A shrunk render can only still resolve to an outline/alpha-bitmap
+        // source (color strikes are picked by fixed-size `StrikeWith::BestFit`
+        // regardless of `px`, and the un-scaled render above already proved
+        // this glyph is not one) — the `Content::Color` check is defense in
+        // depth, not a path this can actually take.
+        if let Some(scaled_img) = scaled_image
+            && scaled_img.content != Content::Color
+        {
+            let mut glyph = mask_glyph_from_image(scaled_img, scaled_advance, synthesis);
+            let extra = fit - glyph.advance;
+            if extra > 0.0 {
+                glyph.bearing_x += (extra / 2.0).round() as i32;
+            }
+            return glyph;
         }
-        RasterizedGlyph {
-            bitmap,
-            width,
-            height,
-            bearing_x: img.placement.left,
-            bearing_y: img.placement.top,
-            advance,
-            color: false,
-        }
-    } else {
-        // Unexpected layout — treat as an empty (advance-only) glyph.
-        RasterizedGlyph {
-            advance,
-            ..Default::default()
-        }
+        // Scaled render failed to produce anything — fall through and use
+        // the original, unscaled image rather than drop the glyph entirely.
     }
+
+    mask_glyph_from_image(img, advance, synthesis)
 }
 
 #[cfg(test)]

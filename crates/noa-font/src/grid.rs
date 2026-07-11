@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use etagere::AllocId;
 use swash::FontRef;
 use swash::scale::ScaleContext;
+use unicode_width::UnicodeWidthChar;
 
 use crate::atlas::Atlas;
 use crate::boxdraw::{self, is_builtin_glyph};
@@ -79,12 +80,15 @@ struct Cached {
 /// Cache key for the shaped-glyph raster path ([`FontGrid::raster_shaped`]):
 /// a rasterized glyph identified by face + glyph id + style (style matters
 /// because it selects both the variation coords and the synthetic-style
-/// transform).
+/// transform) + `span` (the cell width the glyph is fit to — see
+/// [`FontGrid::raster_shaped`]'s doc comment; two source cells of different
+/// width must never collide on the same cached, possibly fit-scaled, glyph).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct ShapedGlyphKey {
     face_id: FaceId,
     glyph_id: u16,
     style: StyleKey,
+    span: u8,
 }
 
 /// Owns the font bytes, a swash scale context, cell metrics, the two glyph
@@ -252,8 +256,16 @@ impl FontGrid {
             thicken: self.font_cfg.thicken,
             thicken_strength: self.font_cfg.thicken_strength,
         };
-        let glyph =
-            rasterize_with_variations(&mut self.ctx, font, glyph_id, self.px_size, &[], synthesis);
+        let fit_width = f32::from(span_for_char(ch)) * self.metrics.cell_w;
+        let glyph = rasterize_with_variations(
+            &mut self.ctx,
+            font,
+            glyph_id,
+            self.px_size,
+            &[],
+            synthesis,
+            Some(fit_width),
+        );
 
         self.store_and_cache(&glyph, SlotOwner::Char(key))
     }
@@ -474,11 +486,24 @@ impl FontGrid {
     /// via [`FontGrid::variation_coords`]) and, when the resolved face lacks
     /// the requested native style, a synthetic-style transform gated by
     /// `FontConfig.synthetic_style` (REQ-SHAPE-7).
-    pub fn raster_shaped(&mut self, face_id: FaceId, glyph_id: u16, style: StyleKey) -> GlyphInfo {
+    ///
+    /// `span` is the source cell's width in grid columns (1 or 2, per
+    /// `unicode-width` — the same measure `noa-grid`'s `print_width` uses),
+    /// so a fallback glyph whose advance overshoots its allotted `span *
+    /// cell_w` gets downscaled and centered rather than bleeding into the
+    /// neighbor cell (see `raster::rasterize_with_variations`'s doc comment).
+    pub fn raster_shaped(
+        &mut self,
+        face_id: FaceId,
+        glyph_id: u16,
+        style: StyleKey,
+        span: u8,
+    ) -> GlyphInfo {
         let key = ShapedGlyphKey {
             face_id,
             glyph_id,
             style,
+            span,
         };
         if let Some(cached) = self.raster_shaped_cache.get(&key).copied() {
             self.touch(cached.slot);
@@ -506,6 +531,7 @@ impl FontGrid {
             self.font_stack
                 .is_native_style_face(face_id.0 as usize, font_style),
         );
+        let fit_width = f32::from(span) * self.metrics.cell_w;
         let glyph = rasterize_with_variations(
             &mut self.ctx,
             font,
@@ -513,6 +539,7 @@ impl FontGrid {
             self.px_size,
             &variation_coords,
             synthesis,
+            Some(fit_width),
         );
 
         self.store_and_cache(&glyph, SlotOwner::Shaped(key))
@@ -778,6 +805,13 @@ impl FontGrid {
     }
 }
 
+/// A codepoint's grid width in columns (1 or 2), matching `noa-grid`'s
+/// `Screen::print_width` exactly — this is the span a glyph for `ch` is fit
+/// to (see [`FontGrid::get_or_raster`] / [`FontGrid::raster_shaped`]).
+fn span_for_char(ch: char) -> u8 {
+    ch.width().unwrap_or(1).min(2) as u8
+}
+
 /// Decide the synthetic-style transform for `style` under `font_cfg`
 /// (REQ-SHAPE-7): bold/italic synthesis is only attempted when the run
 /// actually requests that style AND the config toggle for it is on. Pulled
@@ -864,6 +898,46 @@ mod tests {
         let info2 = grid.get_or_raster('M');
         assert_eq!(info.atlas_pos, info2.atlas_pos);
         assert_eq!(grid.mask_atlas_generation(), generation);
+    }
+
+    /// Regression: a fallback glyph whose native advance overshoots its
+    /// grid cell (e.g. `①`, a circled digit some macOS fallback fonts size
+    /// for a wider layout than noa's single-cell East-Asian-Ambiguous width)
+    /// must be downscaled + centered to fit its allotted span instead of
+    /// bleeding into the neighbor cell (kitty-style fit-to-cell).
+    #[test]
+    fn narrow_fallback_glyph_fits_within_its_cell_span() {
+        let mut grid = match FontGrid::new(14.0, FontConfig::default()) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+        const CIRCLED_ONE: char = '①';
+        if !grid.has_glyph(CIRCLED_ONE) {
+            eprintln!("skipping: no installed font can render U+2460");
+            return;
+        }
+
+        let cell_w = grid.metrics().cell_w;
+        let info = grid.get_or_raster(CIRCLED_ONE);
+        assert!(
+            info.atlas_size[0] > 0 && info.atlas_size[1] > 0,
+            "'①' should rasterize to a non-empty atlas region: {:?}",
+            info.atlas_size
+        );
+        let bearing_x = i32::from(info.bearing[0]);
+        let right_edge = bearing_x + i32::from(info.atlas_size[0]);
+        assert!(
+            bearing_x >= 0,
+            "'①' must not bleed left of its cell: bearing_x = {bearing_x}"
+        );
+        assert!(
+            right_edge <= cell_w.round() as i32 + 1,
+            "'①' must fit within its single-cell span (+1px AA tolerance): \
+             right edge {right_edge}, cell_w {cell_w}"
+        );
     }
 
     #[test]
@@ -1232,7 +1306,7 @@ mod tests {
             .first()
             .expect("shaping 'M' must yield at least one glyph");
 
-        let raster = grid.raster_shaped(glyph.face_id, glyph.glyph_id, style);
+        let raster = grid.raster_shaped(glyph.face_id, glyph.glyph_id, style, 1);
         let raster_advance = raster.advance.round() as i32;
 
         assert!(

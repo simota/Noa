@@ -18,8 +18,8 @@ use crate::session_store::{PreviewLine, PreviewSpan};
 /// the preview-row extraction — the expensive part of an upsert — for a single
 /// atomic load. The lightweight card metadata (name/cwd/busy) still publishes
 /// so the attention pipeline works with every sidebar hidden (FR-A3/FR-A4).
-/// `preview_lines` is also shared because Theme & Settings can change the card
-/// preview size while the pane's io thread is already running.
+/// `preview_lines` is also shared because the Settings overlay can change the
+/// card preview size while the pane's io thread is already running.
 /// Unlike the overview there is no `FrameSnapshot` slot here: the
 /// `SessionStore` itself is the lock-free published surface (ADR 0001 —
 /// "SessionStore は overview_snapshot と同型の publish-slot 読取モデル"), fed by

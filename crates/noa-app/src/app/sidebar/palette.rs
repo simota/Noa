@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 use super::render::ensure_scratch;
 use super::*;
 use crate::theme_settings::{
-    RowDraft, Section, SettingsRowKind, Swatch, ThemeSettings, sample_swatches,
+    RowDraft, SettingsRowKind, Swatch, ThemeSettings, ThemeSettingsMode, sample_swatches,
     settings_row_display_value,
 };
 
@@ -712,9 +712,32 @@ fn format_row_value(kind: SettingsRowKind, draft: &RowDraft, editing: bool) -> S
 
 /// Build the overlay's whole content as one ANSI-escaped string, fed through
 /// [`Stream::feed`] into a fresh synthetic [`Terminal`] by the caller.
-/// `\x1b[?7l` disables autowrap first (matches [`draw_toast_card`]) so a
-/// too-long value never bleeds onto the next logical row.
+/// Dispatches on [`ThemeSettings::mode`] (theme-settings-ui split): a
+/// session only ever shows the picker half or the rows half, never both
+/// (DEC-2).
 fn theme_settings_overlay_text(
+    state: &ThemeSettings,
+    cols: u16,
+    rows: u16,
+    muted: Rgb,
+    accent: Rgb,
+    danger: Rgb,
+) -> String {
+    match state.mode() {
+        ThemeSettingsMode::Theme => {
+            theme_picker_overlay_text(state, cols, rows, muted, accent, danger)
+        }
+        ThemeSettingsMode::Settings => {
+            settings_rows_overlay_text(state, cols, rows, muted, accent, danger)
+        }
+    }
+}
+
+/// The "Theme" overlay: theme list + sample pane, full card height (no
+/// settings section to share it with in this mode). `\x1b[?7l` disables
+/// autowrap first (matches [`draw_toast_card`]) so a too-long value never
+/// bleeds onto the next logical row.
+fn theme_picker_overlay_text(
     state: &ThemeSettings,
     cols: u16,
     rows: u16,
@@ -726,7 +749,7 @@ fn theme_settings_overlay_text(
     out.push_str("\x1b[?7l");
 
     cup(&mut out, 0, 0);
-    out.push_str("Theme & Settings");
+    out.push_str("Theme");
     if state.badge_visible() {
         let badge = "Chrome/tabs update on Save";
         let col = cols.saturating_sub(badge.len() as u16 + 1);
@@ -736,14 +759,6 @@ fn theme_settings_overlay_text(
         sgr_reset(&mut out);
     }
 
-    cup(&mut out, LIST_TOP_ROW - 2, LIST_COL);
-    sgr_fg(&mut out, muted);
-    out.push_str(if state.section() == Section::ThemePicker {
-        "Theme (focused)"
-    } else {
-        "Theme"
-    });
-    sgr_reset(&mut out);
     cup(&mut out, LIST_TOP_ROW - 2, SAMPLE_COL);
     sgr_fg(&mut out, muted);
     out.push_str("Sample");
@@ -754,15 +769,10 @@ fn theme_settings_overlay_text(
     let _ = write!(out, "/{}", state.filter());
     sgr_reset(&mut out);
 
-    // On short cards, shrink the scrollable theme list before cutting into
-    // the settings section: prefer keeping every settings row visible with
-    // the list at ≥3 rows, and below that keep ≥3 settings rows visible and
-    // scroll the rest around the selection.
-    let settings_len = SettingsRowKind::ALL.len() as u16;
-    let list_full = rows.saturating_sub(LIST_TOP_ROW + 2 + settings_len);
-    let list_cap = rows.saturating_sub(LIST_TOP_ROW + 2 + settings_len.min(3));
-    let list_rows = LIST_ROWS.min(list_full).max(3).min(list_cap).max(1);
-    let settings_top = LIST_TOP_ROW + list_rows + 2;
+    // The whole card (minus the footer hint line) is available to the
+    // list now that there's no settings section to share it with.
+    let hint_row = rows.saturating_sub(1);
+    let list_rows = LIST_ROWS.min(hint_row.saturating_sub(LIST_TOP_ROW)).max(1);
     let total = state.filtered_len();
     let highlighted = state.highlighted_index();
     let offset = highlighted
@@ -774,7 +784,7 @@ fn theme_settings_overlay_text(
             break;
         };
         cup(&mut out, LIST_TOP_ROW + i, LIST_COL);
-        if idx == highlighted && state.section() == Section::ThemePicker {
+        if idx == highlighted {
             sgr_fg(&mut out, accent);
             out.push('>');
         } else {
@@ -795,9 +805,7 @@ fn theme_settings_overlay_text(
         // semantic swatch's position among just the non-ANSI entries (0..4)
         // gives its column slot directly, no separate counter needed.
         let mut semantic_slot = 0u16;
-        // On short cards the settings section climbs up into the sample
-        // area; drop any swatch row that would land on its gap/header.
-        let swatch_row_limit = settings_top.saturating_sub(2);
+        let swatch_row_limit = hint_row.saturating_sub(1);
         for swatch in sample_swatches(theme_def) {
             match swatch {
                 Swatch::Ansi(index, color) => {
@@ -844,18 +852,56 @@ fn theme_settings_overlay_text(
         }
     }
 
-    cup(&mut out, settings_top - 1, LIST_COL);
-    sgr_fg(&mut out, muted);
-    out.push_str(if state.section() == Section::SettingsRows {
-        "Settings (focused)"
+    cup(&mut out, hint_row, LIST_COL);
+    // A commit error (AC-23) takes over the hint line until the user
+    // either retries (Enter) or backs out (Esc) — the overlay stays open
+    // specifically so this is visible.
+    if let Some(error) = state.commit_error() {
+        sgr_fg(&mut out, danger);
+        let truncated: String = error
+            .chars()
+            .take(cols.saturating_sub(LIST_COL) as usize)
+            .collect();
+        out.push_str(&truncated);
     } else {
-        "Settings"
-    });
+        sgr_fg(&mut out, muted);
+        out.push_str("\u{2191}\u{2193} navigate   Esc cancel   Enter save");
+    }
     sgr_reset(&mut out);
 
-    // When even the shrunken layout can't fit every row, scroll the window
-    // around the selection (same policy as the theme list above).
-    let visible = settings_len.min(rows.saturating_sub(settings_top));
+    out
+}
+
+/// The "Settings" overlay: rows only, full card width (no theme list/sample
+/// pane to share it with in this mode).
+fn settings_rows_overlay_text(
+    state: &ThemeSettings,
+    cols: u16,
+    rows: u16,
+    muted: Rgb,
+    accent: Rgb,
+    danger: Rgb,
+) -> String {
+    let mut out = String::new();
+    out.push_str("\x1b[?7l");
+
+    cup(&mut out, 0, 0);
+    out.push_str("Settings");
+    if state.badge_visible() {
+        let badge = "Chrome/tabs update on Save";
+        let col = cols.saturating_sub(badge.len() as u16 + 1);
+        cup(&mut out, 0, col);
+        sgr_fg(&mut out, accent);
+        out.push_str(badge);
+        sgr_reset(&mut out);
+    }
+
+    let settings_top = LIST_TOP_ROW;
+    let settings_len = SettingsRowKind::ALL.len() as u16;
+    let hint_row = rows.saturating_sub(1);
+    // When the card is too short for every row, scroll the window around
+    // the selection.
+    let visible = settings_len.min(hint_row.saturating_sub(settings_top));
     let settings_offset = state
         .selected_row()
         .saturating_sub(visible as usize / 2)
@@ -864,7 +910,7 @@ fn theme_settings_overlay_text(
         let idx = settings_offset + i as usize;
         let kind = SettingsRowKind::ALL[idx];
         cup(&mut out, settings_top + i, LIST_COL);
-        if idx == state.selected_row() && state.section() == Section::SettingsRows {
+        if idx == state.selected_row() {
             sgr_fg(&mut out, accent);
             out.push('>');
         } else {
@@ -872,7 +918,7 @@ fn theme_settings_overlay_text(
         }
         out.push(' ');
         sgr_reset(&mut out);
-        let editing = idx == state.selected_row() && state.section() == Section::SettingsRows;
+        let editing = idx == state.selected_row();
         let value = format_row_value(kind, &state.rows()[idx].draft, editing);
         let note = if state.restart_note(kind) {
             " (restart to apply)"
@@ -882,27 +928,21 @@ fn theme_settings_overlay_text(
         let _ = write!(out, "{:<24}{value}{note}", kind.label());
     }
 
-    let hint_row = settings_top + visible + 1;
-    if hint_row < rows {
-        cup(&mut out, hint_row, LIST_COL);
-        // A commit error (AC-23) takes over the hint line until the user
-        // either retries (Enter) or backs out (Esc) — the overlay stays
-        // open specifically so this is visible.
-        if let Some(error) = state.commit_error() {
-            sgr_fg(&mut out, danger);
-            let truncated: String = error
-                .chars()
-                .take(cols.saturating_sub(LIST_COL) as usize)
-                .collect();
-            out.push_str(&truncated);
-        } else {
-            sgr_fg(&mut out, muted);
-            out.push_str(
-                "Tab switch section   \u{2191}\u{2193} navigate   \u{2190}\u{2192} adjust   Esc cancel   Enter save",
-            );
-        }
-        sgr_reset(&mut out);
+    cup(&mut out, hint_row, LIST_COL);
+    if let Some(error) = state.commit_error() {
+        sgr_fg(&mut out, danger);
+        let truncated: String = error
+            .chars()
+            .take(cols.saturating_sub(LIST_COL) as usize)
+            .collect();
+        out.push_str(&truncated);
+    } else {
+        sgr_fg(&mut out, muted);
+        out.push_str(
+            "\u{2191}\u{2193} navigate   \u{2190}\u{2192} adjust   Esc cancel   Enter save",
+        );
     }
+    sgr_reset(&mut out);
 
     out
 }

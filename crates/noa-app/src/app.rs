@@ -283,7 +283,7 @@ pub struct App {
     /// T1); flipped on while any window shows its sidebar.
     sidebar_visible_gate: Arc<AtomicBool>,
     /// Shared with every pane's io thread so `sidebar-preview-lines` can be
-    /// changed by Theme & Settings without respawning PTYs.
+    /// changed by the Settings overlay without respawning PTYs.
     sidebar_preview_lines_gate: Arc<AtomicUsize>,
     /// The tab groups (logical windows) whose session sidebar is currently
     /// shown (FR-4). Per-window, not app-wide: toggling flips every tab of the

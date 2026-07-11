@@ -538,6 +538,23 @@ impl ApplicationHandler<UserEvent> for App {
                     self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);
                     return;
                 }
+                // R-31: ⌘Z re-commits a still-live theme-settings Undo
+                // toast. Checked here (past every modal branch above, so it
+                // can never race `handle_theme_settings_key`'s own key
+                // handling while the overlay is open) and ahead of the
+                // generic Cmd-swallow right below, which would otherwise
+                // eat it silently either way — this just gives it an actual
+                // effect first.
+                if pressed
+                    && self.modifiers.super_key()
+                    && !self.modifiers.control_key()
+                    && !self.modifiers.alt_key()
+                    && !self.modifiers.shift_key()
+                    && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("z"))
+                    && self.undo_theme_settings_commit(window_id)
+                {
+                    return;
+                }
                 // The Overview has its own window/event path. If a terminal
                 // window receives this key while the Overview is still visible,
                 // that terminal owns focus and must keep accepting shell input.
@@ -1136,6 +1153,15 @@ impl App {
             MouseScrollDelta::PixelDelta(position) => position.y as f32 / 40.0,
         };
         if self.handle_sidebar_wheel(window_id, sidebar_lines) {
+            return;
+        }
+        // R-32: the theme-settings overlay owns the wheel while open, the
+        // same way it already owns every key (R-3 direction 2) — checked
+        // right after the sidebar (mirroring that branch's early-return
+        // position) and before any pane-scroll routing below.
+        if self.active_overlay(window_id) == ActiveOverlay::ThemeSettings
+            && self.handle_theme_settings_wheel(window_id, delta)
+        {
             return;
         }
         let pane_id = self

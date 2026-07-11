@@ -4,7 +4,10 @@ use noa_render::{CommandPaletteSnapshot, ConfirmDialogSnapshot};
 use winit::window::Window;
 
 use super::imp;
-use super::model::{NativeOverlayCache, OverlayColors, PaneRectPt, theme_settings_view_model};
+use super::model::{
+    NativeOverlayCache, OverlayColors, PaneRectPt, ThemeSettingsViewModel,
+    theme_settings_view_model,
+};
 
 fn hash_u64(f: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -56,6 +59,38 @@ pub(crate) fn sync_command_palette(
     imp::rebuild_palette(window, model, colors);
 }
 
+/// The window-free half of [`sync_theme_settings`] (ADR-2/R-20/NFR-7):
+/// hashes [`crate::theme_settings::ThemeSettings::view_fingerprint`] (never
+/// the ViewModel itself — building one is exactly the cost this exists to
+/// avoid) and compares it against `cache.theme_settings`. Returns `None` on
+/// an idempotent frame (no ViewModel built at all); `Some` on a real change,
+/// carrying the freshly built ViewModel — built here exactly once, never
+/// twice like the old hash-then-rebuild sequence. Also records the debug
+/// rebuild counter (NFR-7/AC-58) on every `Some`, so the whole "decide +
+/// build + count" sequence is unit-testable without a real `Window`
+/// (AC-26/AC-27/AC-58) — [`sync_theme_settings`] itself is left as a thin
+/// wrapper that only adds the final AppKit dispatch.
+pub(super) fn theme_settings_sync_decision(
+    cache: &mut NativeOverlayCache,
+    model: Option<(&crate::theme_settings::ThemeSettings, PaneRectPt)>,
+    colors: &OverlayColors,
+) -> Option<Option<(ThemeSettingsViewModel, PaneRectPt)>> {
+    let key = model.map(|(state, rect)| {
+        hash_u64(|h| {
+            state.view_fingerprint(h);
+            rect.hash_into(h);
+            colors.hash_into(h);
+        })
+    });
+    if cache.theme_settings == key {
+        return None;
+    }
+    cache.theme_settings = key;
+    #[cfg(debug_assertions)]
+    cache.record_theme_settings_rebuild();
+    Some(model.map(|(state, rect)| (theme_settings_view_model(state), rect)))
+}
+
 /// Sync the native theme-settings card (same contract as
 /// [`sync_command_palette`]).
 pub(crate) fn sync_theme_settings(
@@ -64,22 +99,10 @@ pub(crate) fn sync_theme_settings(
     model: Option<(&crate::theme_settings::ThemeSettings, PaneRectPt)>,
     colors: &OverlayColors,
 ) {
-    let hash = model.map(|(state, rect)| {
-        hash_u64(|h| {
-            theme_settings_view_model(state).hash(h);
-            rect.hash_into(h);
-            colors.hash_into(h);
-        })
-    });
-    if cache.theme_settings == hash {
+    let Some(vm) = theme_settings_sync_decision(cache, model, colors) else {
         return;
-    }
-    cache.theme_settings = hash;
-    imp::rebuild_theme_settings(
-        window,
-        model.map(|(s, r)| (theme_settings_view_model(s), r)),
-        colors,
-    );
+    };
+    imp::rebuild_theme_settings(window, vm, colors);
 }
 
 /// Sync the native confirm-dialog card (same contract as

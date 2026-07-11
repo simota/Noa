@@ -344,8 +344,8 @@ impl App {
             let toast_text = state
                 .resize_overlay
                 .as_ref()
-                .filter(|(_, until)| toast_now < *until)
-                .map(|(text, _)| text.clone());
+                .filter(|toast| toast_now < toast.until)
+                .map(|toast| toast.text.clone());
             crate::macos_overlay::sync_toast(
                 &state.window,
                 &mut state.native_overlays,
@@ -506,8 +506,8 @@ impl App {
         // `tick_transient_overlays`).
         let now = Instant::now();
         #[cfg(not(target_os = "macos"))]
-        if let Some((text, until)) = state.resize_overlay.clone()
-            && now < until
+        if let Some(toast) = state.resize_overlay.as_ref()
+            && now < toast.until
         {
             let surface_size = PixelSize {
                 w: state.surface_config.width,
@@ -518,7 +518,7 @@ impl App {
                 state.surface_config.format,
                 &view,
                 surface_size,
-                &text,
+                &toast.text,
                 state.window.scale_factor() as f32,
             );
         }

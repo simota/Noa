@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use super::super::*;
 use super::ActiveOverlay;
 use crate::theme_settings::{
-    RowDraft, RowEffect, SettingsRow, SettingsRowKind, ThemeSettings, ThemeSettingsInit,
-    ThemeSettingsMode,
+    RowDraft, RowEffect, SettingsRow, SettingsRowKind, ThemePairContext, ThemeSettings,
+    ThemeSettingsCarryover, ThemeSettingsInit, ThemeSettingsMode,
 };
 
 /// Enter's routing decision (Addendum D-3/FM-02): while R-5 search owns the
@@ -30,19 +30,23 @@ fn theme_settings_enter_action(search_active: bool) -> ThemeSettingsEnterAction 
     }
 }
 
-/// Tab's routing decision (R-5): toggles row search in Settings mode, or
-/// stays the pre-existing `toggle_section` no-op in Theme mode — Theme
-/// mode's Tab is deliberately untouched by R-5 (out of scope, R-8-adjacent).
+/// Tab's routing decision, reconciling the two feature streams that both
+/// claimed the key: in Settings mode it toggles row search (R-5); in Theme
+/// mode it reopens the session in the other mode (R-25). Theme mode has an
+/// always-visible filter row of its own, so there is no in-mode search to
+/// toggle there — its Tab instead hops to the Settings rows (Settings mode's
+/// Tab is spent on search, so the reverse hop is reached via the
+/// `OpenThemePicker` menu item / `cmd+shift+,`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ThemeSettingsTabAction {
     ToggleSearch,
-    ToggleSection,
+    ReopenOtherMode,
 }
 
 fn theme_settings_tab_action(mode: ThemeSettingsMode) -> ThemeSettingsTabAction {
     match mode {
         ThemeSettingsMode::Settings => ThemeSettingsTabAction::ToggleSearch,
-        ThemeSettingsMode::Theme => ThemeSettingsTabAction::ToggleSection,
+        ThemeSettingsMode::Theme => ThemeSettingsTabAction::ReopenOtherMode,
     }
 }
 
@@ -90,17 +94,86 @@ impl App {
         if self.active_overlay(window_id) != ActiveOverlay::None {
             return;
         }
-        // Only pass through a theme name that actually resolves — an
-        // invalid config value already fell back to the built-in default at
-        // startup (theme-selection.md R-3), and the overlay must not
-        // reproduce the invalid name (edge case in the locked spec's L2).
-        let current_theme = self
+        self.open_theme_settings_session(window_id, mode, None, Instant::now());
+    }
+
+    /// Tab (R-25): reopen the current session in the other
+    /// [`ThemeSettingsMode`], carrying its filter/highlight/row-editing
+    /// state across (see [`crate::theme_settings::ThemeSettingsCarryover`]).
+    /// A third transition distinct from Esc (revert) and Enter (commit) —
+    /// it neither writes config nor touches `gpu.preview_theme`/any
+    /// live-applied runtime value (AC-36): the new session simply reads the
+    /// same live `self`-state the old one would have (nothing changed it in
+    /// between), and the carried snapshot/rows keep everything else
+    /// bit-for-bit identical.
+    pub(in crate::app) fn tab_theme_settings(&mut self, window_id: WindowId) {
+        let Some(session) = self.theme_settings.as_ref() else {
+            return;
+        };
+        if session.window_id != window_id {
+            return;
+        }
+        let next_mode = match session.state.mode() {
+            ThemeSettingsMode::Theme => ThemeSettingsMode::Settings,
+            ThemeSettingsMode::Settings => ThemeSettingsMode::Theme,
+        };
+        let carryover = session.state.carryover();
+        // Reused verbatim (not reset to `Instant::now()`): this is what
+        // keeps a Tab hop from replaying the open fade-in on the wgpu path
+        // (ux.md §8) — by the time a user has interacted enough to press
+        // Tab, the original fade has already settled, so reusing its start
+        // instant just means the new session renders at full opacity from
+        // its very first frame instead of re-animating from zero.
+        let opened_at = session.opened_at;
+        self.open_theme_settings_session(window_id, next_mode, Some(carryover), opened_at);
+    }
+
+    /// The guard-free session-construction half of [`Self::open_theme_settings`]
+    /// / [`Self::tab_theme_settings`] — both call this once they've decided
+    /// it's safe (or intended) to replace whatever `self.theme_settings`
+    /// currently holds.
+    fn open_theme_settings_session(
+        &mut self,
+        window_id: WindowId,
+        mode: ThemeSettingsMode,
+        carryover: Option<ThemeSettingsCarryover>,
+        opened_at: Instant,
+    ) {
+        // FM-08: a later reopen (fresh open *or* Tab) invalidates any
+        // pending Undo toast — see `UndoPayload`'s doc comment for why this
+        // single clear is enough to satisfy the whole guard.
+        if let Some(state) = self.windows.get_mut(&window_id)
+            && matches!(
+                state.resize_overlay.as_ref().map(|toast| &toast.kind),
+                Some(ToastKind::Undo(_))
+            )
+        {
+            state.resize_overlay = None;
+        }
+        // FM-01: resolve `current_theme` the same pair-aware way
+        // `effective_theme_name` does — reading `self.config.theme` alone
+        // (the old behavior) is always empty under a `theme =
+        // light:X,dark:Y` config, since a pair's resolved name lives in
+        // `self.config.theme_appearance` instead. That emptiness fed a
+        // phantom "theme changed" diff into `commit_updates()` on every
+        // Settings-only commit under a pair config, silently overwriting it
+        // (R-34). `resolve_current_theme` also keeps the pre-existing
+        // catalog-validity filter (an invalid config value already fell
+        // back to the built-in default at startup, theme-selection.md R-3,
+        // and the overlay must not reproduce the invalid name).
+        let current_theme = resolve_current_theme(&self.config, self.system_appearance);
+        // R-34/ADR-4: the pair context `commit_updates` needs to rewrite
+        // only the active side on commit — `None` for a plain, non-paired
+        // `theme` directive (AC-51's unchanged single-name behavior).
+        let theme_pair = self
             .config
-            .theme
-            .as_deref()
-            .filter(|name| noa_theme::resolve(name).is_some())
-            .unwrap_or_default()
-            .to_string();
+            .theme_appearance
+            .as_ref()
+            .map(|pair| ThemePairContext {
+                active_is_light: self.system_appearance == winit::window::Theme::Light,
+                light: pair.light.clone(),
+                dark: pair.dark.clone(),
+            });
         let cursor_style = self
             .initial_cursor_style
             .map(cursor_shape_of)
@@ -119,9 +192,14 @@ impl App {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
         let available_font_families = noa_font::list_families().unwrap_or_default();
+        let (favorites, favorites_epoch) = self.theme_favorites.snapshot();
         let init = ThemeSettingsInit {
             mode,
             current_theme,
+            theme_pair,
+            carryover,
+            favorites,
+            favorites_epoch,
             font_size: self.runtime_font_size,
             cursor_style,
             background_opacity: self.config.background_opacity,
@@ -148,7 +226,7 @@ impl App {
         self.theme_settings = Some(ThemeSettingsSession {
             window_id,
             state: std::sync::Arc::new(ThemeSettings::open(init)),
-            opened_at: Instant::now(),
+            opened_at,
         });
         self.request_window_redraw(window_id);
     }
@@ -156,21 +234,22 @@ impl App {
     /// Drive the open theme-settings overlay from a keypress (mirrors
     /// [`Self::handle_command_palette_key`]): Escape cancels (reverts every
     /// live-previewed value and closes, see [`Self::close_theme_settings`]),
-    /// Enter commits (persists the touched rows and closes, see
     /// [`Self::commit_theme_settings`]) — unless R-5 search is active, in
     /// which case it confirms the highlighted row and stays open (Addendum
     /// D-3/FM-02: checked here, before ever falling through to
     /// `commit_theme_settings`). Tab toggles row search in Settings mode
-    /// (R-5) or stays the existing no-op in Theme mode (each session's
-    /// section is fixed by the mode it opened in, see
-    /// [`crate::theme_settings::ThemeSettingsMode`]). ↑↓ navigate (or, while
-    /// searching, move the search highlight). ←→ adjusts the focused
-    /// settings row. Delete / Cmd+Backspace resets the selected row to its
-    /// default (R-7); bare Backspace/printable text edit the theme filter,
-    /// a focused numeric row, or the search query. Every other resolved
-    /// keybind is swallowed (R-3 direction 2: no other overlay's shortcut
-    /// may leak through while this one owns the keyboard). Only called when
-    /// `self.theme_settings` targets `window_id` (checked by the caller).
+    /// (R-5); in Theme mode it reopens the session in the other
+    /// [`crate::theme_settings::ThemeSettingsMode`] (R-25, see
+    /// [`Self::tab_theme_settings`]) — each session's section is fixed by the
+    /// mode it opened in, and the two feature streams' Tab uses are reconciled
+    /// by [`theme_settings_tab_action`]. ↑↓ navigate (or, while searching,
+    /// move the search highlight). ←→ adjusts the focused settings row.
+    /// Delete / Cmd+Backspace resets the selected row to its default (R-7);
+    /// bare Backspace/printable text edit the theme filter, a focused numeric
+    /// row, or the search query. Every other resolved keybind is swallowed
+    /// (R-3 direction 2: no other overlay's shortcut may leak through while
+    /// this one owns the keyboard). Only called when `self.theme_settings`
+    /// targets `window_id` (checked by the caller).
     pub(in crate::app) fn handle_theme_settings_key(
         &mut self,
         window_id: WindowId,
@@ -192,8 +271,7 @@ impl App {
                 match theme_settings_enter_action(search_active) {
                     ThemeSettingsEnterAction::ConfirmSearch => {
                         if let Some(session) = self.theme_settings.as_mut() {
-                            std::sync::Arc::make_mut(&mut session.state)
-                                .confirm_settings_search();
+                            std::sync::Arc::make_mut(&mut session.state).confirm_settings_search();
                         }
                         self.request_window_redraw(window_id);
                     }
@@ -202,15 +280,24 @@ impl App {
                 return;
             }
             Key::Named(NamedKey::Tab) => {
-                if let Some(session) = self.theme_settings.as_mut() {
-                    let mode = session.state.mode();
-                    let state = std::sync::Arc::make_mut(&mut session.state);
-                    match theme_settings_tab_action(mode) {
-                        ThemeSettingsTabAction::ToggleSearch => state.toggle_settings_search(),
-                        ThemeSettingsTabAction::ToggleSection => state.toggle_section(),
+                let mode = self
+                    .theme_settings
+                    .as_ref()
+                    .map(|session| session.state.mode());
+                match mode.map(theme_settings_tab_action) {
+                    Some(ThemeSettingsTabAction::ToggleSearch) => {
+                        if let Some(session) = self.theme_settings.as_mut() {
+                            std::sync::Arc::make_mut(&mut session.state).toggle_settings_search();
+                        }
+                        self.request_window_redraw(window_id);
                     }
+                    // R-25: Theme-mode Tab reopens as a fresh session
+                    // (`tab_theme_settings` requests its own redraw).
+                    Some(ThemeSettingsTabAction::ReopenOtherMode) => {
+                        self.tab_theme_settings(window_id);
+                    }
+                    None => {}
                 }
-                self.request_window_redraw(window_id);
                 return;
             }
             Key::Named(NamedKey::ArrowUp) => {
@@ -246,12 +333,48 @@ impl App {
                     }
                     ThemeSettingsBackspaceAction::TextDelete => {
                         if let Some(session) = self.theme_settings.as_mut() {
-                            std::sync::Arc::make_mut(&mut session.state)
-                                .backspace(Instant::now());
+                            std::sync::Arc::make_mut(&mut session.state).backspace(Instant::now());
                         }
                         self.request_window_redraw(window_id);
                     }
                 }
+                return;
+            }
+            // R-29/R-30: ⌃F (favorite the highlighted theme), ⌃⇧F ("show
+            // favorites only" view toggle), ⌃D (All → Dark → Light cycle) —
+            // only meaningful in the Theme picker, so a Settings-mode
+            // session falls through and lets these resolve/swallow as any
+            // other keybind would (R-3 direction 2). Checked ahead of the
+            // generic `keybinds.resolve` below because none of these are
+            // `AppCommand`s — they exist only inside this modal.
+            Key::Character(c)
+                if c.eq_ignore_ascii_case("f")
+                    && self.modifiers.control_key()
+                    && !self.modifiers.super_key()
+                    && !self.modifiers.alt_key()
+                    && self.theme_settings_mode_is_theme(window_id) =>
+            {
+                if self.modifiers.shift_key() {
+                    if let Some(session) = self.theme_settings.as_mut() {
+                        std::sync::Arc::make_mut(&mut session.state).toggle_favorites_only();
+                    }
+                    self.after_theme_settings_navigation(window_id);
+                } else {
+                    self.toggle_theme_settings_favorite(window_id);
+                }
+                return;
+            }
+            Key::Character(c)
+                if c.eq_ignore_ascii_case("d")
+                    && self.modifiers.control_key()
+                    && !self.modifiers.super_key()
+                    && !self.modifiers.alt_key()
+                    && self.theme_settings_mode_is_theme(window_id) =>
+            {
+                if let Some(session) = self.theme_settings.as_mut() {
+                    std::sync::Arc::make_mut(&mut session.state).cycle_attribute_filter();
+                }
+                self.after_theme_settings_navigation(window_id);
                 return;
             }
             _ => {}
@@ -342,6 +465,58 @@ impl App {
         true
     }
 
+    /// Whether `window_id`'s open session (if any) is in
+    /// [`ThemeSettingsMode::Theme`] — the `⌃F`/`⌃⇧F`/`⌃D` gate.
+    fn theme_settings_mode_is_theme(&self, window_id: WindowId) -> bool {
+        self.theme_settings
+            .as_ref()
+            .filter(|session| session.window_id == window_id)
+            .is_some_and(|session| session.state.mode() == ThemeSettingsMode::Theme)
+    }
+
+    /// ⌃F (R-29): toggle the highlighted theme's favorited status. Persists
+    /// immediately to the on-disk favorites store (never deferred to
+    /// Enter/commit — favorites never touch that path at all, AC-40) and
+    /// mirrors the freshly updated set back into the session
+    /// (`ThemeSettings::set_favorites`). A write failure is never silent
+    /// (FM-09): logged, and surfaced as a one-line notice reusing the
+    /// overlay's existing `commit_error`-style footer slot — this isn't a
+    /// *commit* error, but it's the same "one line, danger-toned, in the
+    /// footer" contract the spec calls for, with zero new UI plumbing.
+    fn toggle_theme_settings_favorite(&mut self, window_id: WindowId) {
+        let Some(name) = self
+            .theme_settings
+            .as_ref()
+            .filter(|session| session.window_id == window_id)
+            .and_then(|session| session.state.highlighted_theme_name())
+        else {
+            return;
+        };
+        match self.theme_favorites.toggle(name) {
+            Ok((favorites, epoch)) => {
+                if let Some(session) = self
+                    .theme_settings
+                    .as_mut()
+                    .filter(|session| session.window_id == window_id)
+                {
+                    std::sync::Arc::make_mut(&mut session.state).set_favorites(favorites, epoch);
+                }
+            }
+            Err(err) => {
+                log::warn!("failed to save theme favorite {name:?}: {err}");
+                if let Some(session) = self
+                    .theme_settings
+                    .as_mut()
+                    .filter(|session| session.window_id == window_id)
+                {
+                    std::sync::Arc::make_mut(&mut session.state)
+                        .set_commit_error(format!("Failed to save favorite: {err}"));
+                }
+            }
+        }
+        self.request_window_redraw(window_id);
+    }
+
     /// ←→ on the focused settings row: applies the value change to the pure
     /// state machine, then applies whichever live [`RowEffect`] it reports
     /// (R-10) — font-size has none here, it always routes through the
@@ -394,6 +569,40 @@ impl App {
     pub(in crate::app) fn after_theme_settings_navigation(&mut self, window_id: WindowId) {
         self.sync_theme_settings_preview();
         self.request_window_redraw(window_id);
+    }
+
+    /// R-32: route a wheel/trackpad turn to the open theme-settings
+    /// overlay's highlight/selection (`ThemeSettings::apply_wheel`), the
+    /// same "`bool` = consumed" contract `Self::handle_sidebar_wheel` uses
+    /// — `App::on_mouse_wheel` checks this ahead of pane-scroll routing so
+    /// the event never reaches the terminal underneath while the overlay is
+    /// open, matching how every other theme-settings key is fully consumed
+    /// (R-3 direction 2). `true` (consumed) whenever the overlay owns
+    /// `window_id`'s keyboard, regardless of whether the accumulated delta
+    /// actually crossed the per-row threshold this call.
+    pub(in crate::app) fn handle_theme_settings_wheel(
+        &mut self,
+        window_id: WindowId,
+        delta: MouseScrollDelta,
+    ) -> bool {
+        let Some(session) = self
+            .theme_settings
+            .as_mut()
+            .filter(|session| session.window_id == window_id)
+        else {
+            return false;
+        };
+        // A `LineDelta` unit (one discrete wheel "click") steps exactly one
+        // row; a `PixelDelta` (trackpad) feeds its raw magnitude into the
+        // same threshold accumulator `apply_wheel` owns.
+        let delta_y = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y * crate::theme_settings::WHEEL_ROW_THRESHOLD,
+            MouseScrollDelta::PixelDelta(position) => position.y as f32,
+        };
+        if std::sync::Arc::make_mut(&mut session.state).apply_wheel(delta_y) {
+            self.after_theme_settings_navigation(window_id);
+        }
+        true
     }
 
     /// R-6: resolve the overlay's currently highlighted theme into
@@ -501,6 +710,19 @@ impl App {
             return;
         };
 
+        // R-31: snapshot the Undo toast's payload before anything else
+        // below can consume `session` — the pre-commit values/pair context
+        // (`ThemeSettings::pre_commit_snapshot` is read-only, no side
+        // effects) and the ux.md §9 microcopy, which differs by mode.
+        let (pre_commit_revert, pre_commit_theme_pair) = session.state.pre_commit_snapshot();
+        let undo_toast_text = match session.state.mode() {
+            ThemeSettingsMode::Theme => {
+                let name = session.state.highlighted_theme_name().unwrap_or("");
+                format!("Theme set to \"{name}\" \u{b7} \u{2318}Z to undo")
+            }
+            ThemeSettingsMode::Settings => "Settings saved \u{b7} \u{2318}Z to undo".to_string(),
+        };
+
         // The write already landed on disk; everything from here is an
         // in-memory swap that cannot itself fail, so there is no reachable
         // state where only one half of the commit applied.
@@ -512,8 +734,40 @@ impl App {
             crate::chrome::select_palette(gpu.theme.is_light());
             gpu.chrome_textures.reset();
         }
-        if let Some(name) = updates.iter().find(|(key, _)| key == "theme") {
-            self.config.theme = Some(name.1.clone());
+        if updates.iter().any(|(key, _)| key == "theme") {
+            // R-34/ADR-4 in-memory counterpart: a pair config's committed
+            // `updates` value is the whole `"light:X,dark:Y"` string (not a
+            // bare theme name — `noa_theme::resolve` couldn't look it up),
+            // so mirroring it into `self.config.theme` verbatim would both
+            // corrupt that field (its contract is a bare name) and, worse,
+            // leave `self.config.theme_appearance` stale — the very field
+            // `resolve_current_theme`/`effective_theme_name` actually read
+            // for a pair config, silently reverting a later reopen back to
+            // the pre-commit active theme. Update the correct field instead,
+            // from the *resolved* new name plus the pair context captured
+            // at open (`pre_commit_theme_pair`), not by reparsing the
+            // written string.
+            match &pre_commit_theme_pair {
+                Some(ctx) => {
+                    let new_name = session
+                        .state
+                        .highlighted_theme_name()
+                        .unwrap_or_default()
+                        .to_string();
+                    let (light, dark) = if ctx.active_is_light {
+                        (new_name, ctx.dark.clone())
+                    } else {
+                        (ctx.light.clone(), new_name)
+                    };
+                    self.config.theme_appearance =
+                        Some(noa_config::ThemeAppearancePair { light, dark });
+                }
+                None => {
+                    if let Some(name) = updates.iter().find(|(key, _)| key == "theme") {
+                        self.config.theme = Some(name.1.clone());
+                    }
+                }
+            }
         }
         // Font-size may still have an unfired debounce (Enter pressed within
         // the ~150ms window after the last ←→/digit edit) — finalize the
@@ -529,11 +783,123 @@ impl App {
         // already uses for opaque-startup opacity/blur. Deliberate deviation,
         // recorded for the acceptance check rather than silently dropped.
 
+        // R-31: the Undo toast — always shown on a successful commit
+        // (spec's literal "Enter確定成功直後に...表示する", regardless of
+        // whether anything actually differed from the pre-open snapshot).
+        // Uses the *same* single toast slot the resize overlay does
+        // (ADR-5's single-slot "newer replaces older" rule), so this both
+        // supersedes any resize toast currently showing and is itself
+        // superseded by the next one of either kind.
+        if let Some(state) = self.windows.get_mut(&window_id) {
+            state.resize_overlay = Some(Toast {
+                text: undo_toast_text,
+                until: Instant::now() + UNDO_TOAST_DURATION,
+                kind: ToastKind::Undo(Box::new(UndoPayload {
+                    revert: pre_commit_revert,
+                    theme_pair: pre_commit_theme_pair,
+                })),
+            });
+        }
+
         for id in commit_redraw_targets(&self.windows) {
             self.request_window_redraw(id);
         }
         // `session` (never put back into `self.theme_settings`) is dropped
         // here — the overlay is closed.
+    }
+
+    /// ⌘Z (R-31) — effective only once the overlay itself has closed (while
+    /// open, every key including this one is consumed by
+    /// `handle_theme_settings_key` instead, so the two can never race).
+    /// Re-commits the pending Undo toast's pre-commit snapshot through the
+    /// *same* `write_config_updates` call `commit_theme_settings` itself
+    /// uses (R-31: no new write path — [`crate::theme_settings::revert_updates`]
+    /// is only the pure "what to write" half), mirrors the same in-memory
+    /// swap, then clears the toast so a repeat press can't fire twice.
+    /// `false` (a silent no-op) when no Undo toast is currently showing for
+    /// `window_id`, or it already expired — "the toast is gone" *is* the
+    /// whole UI for "the undo window has closed" (FM-08, no separate modal).
+    pub(in crate::app) fn undo_theme_settings_commit(&mut self, window_id: WindowId) -> bool {
+        let now = Instant::now();
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return false;
+        };
+        let is_live_undo_toast = state
+            .resize_overlay
+            .as_ref()
+            .is_some_and(|toast| now < toast.until && matches!(toast.kind, ToastKind::Undo(_)));
+        if !is_live_undo_toast {
+            return false;
+        }
+        let Some(Toast {
+            kind: ToastKind::Undo(payload),
+            ..
+        }) = state.resize_overlay.take()
+        else {
+            unreachable!("is_live_undo_toast just confirmed this shape");
+        };
+
+        let Some(config_path) = noa_config::default_config_path() else {
+            return false;
+        };
+        let updates =
+            crate::theme_settings::revert_updates(&payload.revert, payload.theme_pair.as_ref());
+        if let Err(err) = noa_config::write_config_updates(&config_path, &updates) {
+            log::warn!("failed to undo theme-settings commit: {err}");
+            return false;
+        }
+
+        let overrides = self.theme_overrides();
+        let reverted_theme_name =
+            (!payload.revert.theme_name.is_empty()).then(|| payload.revert.theme_name.clone());
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.theme = crate::theme::resolve_theme_with_overrides(
+                reverted_theme_name.as_deref(),
+                &overrides,
+            );
+            gpu.preview_theme = None;
+            crate::chrome::select_palette(gpu.theme.is_light());
+            gpu.chrome_textures.reset();
+        }
+        match &payload.theme_pair {
+            Some(ctx) => {
+                self.config.theme_appearance = Some(noa_config::ThemeAppearancePair {
+                    light: ctx.light.clone(),
+                    dark: ctx.dark.clone(),
+                });
+            }
+            None => {
+                if let Some(name) = &reverted_theme_name {
+                    self.config.theme = Some(name.clone());
+                }
+            }
+        }
+        self.config.font_size = payload.revert.font_size;
+        self.config.background_opacity = payload.revert.background_opacity;
+        self.config.background_blur_radius = payload.revert.background_blur_radius;
+        self.config.background_image = (!payload.revert.background_image.is_empty())
+            .then(|| PathBuf::from(&payload.revert.background_image));
+        self.config.background_image_opacity = payload.revert.background_image_opacity;
+        self.config.background_image_position = payload.revert.background_image_position;
+        self.config.background_image_fit = payload.revert.background_image_fit;
+        self.config.background_image_repeat = payload.revert.background_image_repeat;
+        self.config.background_image_interval_secs = payload.revert.background_image_interval_secs;
+        self.config.cursor_style = Some(payload.revert.cursor_style);
+        sync_reverted_confirm_quit_and_quick_terminal_size(&mut self.config, &payload.revert);
+        self.apply_runtime_font_size(window_id, payload.revert.font_size);
+        self.apply_live_cursor_style(payload.revert.cursor_style);
+        self.apply_live_background_opacity(payload.revert.background_opacity);
+        self.apply_live_background_blur(
+            payload.revert.background_blur_radius,
+            payload.revert.background_opacity,
+        );
+        self.apply_live_sidebar_preview_lines(payload.revert.sidebar_preview_lines);
+        self.apply_reloaded_background_image();
+
+        for id in commit_redraw_targets(&self.windows) {
+            self.request_window_redraw(id);
+        }
+        true
     }
 
     /// Mirror the just-committed runtime rows (font-size, background-opacity,
@@ -736,6 +1102,43 @@ impl App {
     }
 }
 
+/// R-34/FM-01: `open_theme_settings`'s `current_theme` derivation — the
+/// same pair-aware resolution `effective_theme_name` uses (a `light:X,
+/// dark:Y` pair picks the active appearance side; otherwise the plain
+/// `theme` name), filtered through the catalog so an invalid config value
+/// never reaches the overlay. Standalone (rather than inlined) so AC-54 can
+/// assert it directly without building a full `App`.
+fn resolve_current_theme(config: &AppConfig, appearance: winit::window::Theme) -> String {
+    effective_theme_name(config, appearance)
+        .filter(|name| noa_theme::resolve(name).is_some())
+        .unwrap_or_default()
+}
+
+/// TSV2-1 (judge, CONFIRMED): [`sync_config_from_committed_live_rows`]
+/// mirrors `confirm-quit` and (via [`sync_quick_terminal_size_from_committed_rows`])
+/// `quick-terminal-size` into `self.config` on a successful commit, because
+/// both are read back out of `self.config` at runtime rather than applied
+/// live like the R-8 `is_live` rows — an Undo that only rewrote the config
+/// *file* left the running session's `self.config` still holding the
+/// committed (unwanted) value. Standalone (rather than inlined into
+/// [`App::undo_theme_settings_commit`]) so this mirror can be asserted
+/// directly without building a full `App`, matching
+/// `sync_quick_terminal_size_from_committed_rows`'s existing pattern.
+/// `window-padding-x/y`, `macos-titlebar-style`, and `font-family` are
+/// deliberately excluded here: `sync_config_from_committed_live_rows` never
+/// mirrors them into `self.config` either (they're commit-only rows whose
+/// effect is deferred to the next launch), so Undo keeps that exact same
+/// asymmetry — only [`crate::theme_settings::revert_updates`]'s file write
+/// covers them.
+fn sync_reverted_confirm_quit_and_quick_terminal_size(
+    config: &mut AppConfig,
+    revert: &crate::theme_settings::RevertValues,
+) {
+    config.confirm_quit = revert.confirm_quit;
+    config.quick_terminal_size =
+        quick_terminal_size_from_height_fraction(revert.quick_terminal_size);
+}
+
 fn sync_quick_terminal_size_from_committed_rows(
     config: &mut AppConfig,
     rows: &[SettingsRow; SettingsRowKind::COUNT],
@@ -831,17 +1234,19 @@ mod theme_settings_key_action_tests {
         );
     }
 
-    // R-5: Tab only ever toggles search in Settings mode; Theme mode keeps
-    // its pre-existing no-op (`toggle_section`) untouched.
+    // Reconciled Tab routing: Settings mode toggles search (R-5); Theme mode
+    // reopens in the other mode (R-25). `toggle_section` no longer exists —
+    // the branch that owned R-25 removed it — so Theme-mode Tab can no longer
+    // be a no-op.
     #[test]
-    fn tab_toggles_search_only_in_settings_mode() {
+    fn tab_toggles_search_in_settings_and_reopens_in_theme_mode() {
         assert_eq!(
             theme_settings_tab_action(ThemeSettingsMode::Settings),
             ThemeSettingsTabAction::ToggleSearch
         );
         assert_eq!(
             theme_settings_tab_action(ThemeSettingsMode::Theme),
-            ThemeSettingsTabAction::ToggleSection
+            ThemeSettingsTabAction::ReopenOtherMode
         );
     }
 
@@ -912,6 +1317,10 @@ mod commit_theme_settings_tests {
             cursor_style_blink: None,
             minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
             macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
+            theme_pair: None,
+            carryover: None,
+            favorites: std::sync::Arc::new(std::collections::HashSet::new()),
+            favorites_epoch: 0,
         });
         while SettingsRowKind::ALL[settings.selected_row()] != SettingsRowKind::QuickTerminalHeight
         {
@@ -933,6 +1342,56 @@ mod commit_theme_settings_tests {
         assert!(
             (quick_terminal_height_fraction(config.quick_terminal_size) - 0.45).abs() < 0.001,
             "committed quick terminal height should update AppConfig for the next toggle"
+        );
+    }
+
+    // TSV2-1 (judge, CONFIRMED): `confirm-quit` and `quick-terminal-size`
+    // are the two commit-only-in-the-R-8-sense rows that
+    // `sync_config_from_committed_live_rows` *does* mirror into
+    // `self.config` on commit (they're read back out of it at runtime,
+    // unlike font-family/window-padding/macos-titlebar-style) — Undo must
+    // mirror them back symmetrically, not just rewrite the file.
+    #[test]
+    fn undo_mirrors_confirm_quit_and_quick_terminal_size_back_into_app_config() {
+        let mut config = AppConfig::from_startup(
+            noa_config::StartupConfig::default(),
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
+        // Simulate the post-commit state a real session would have left
+        // `self.config` in: confirm-quit flipped off, quick-terminal grown.
+        config.confirm_quit = false;
+        config.quick_terminal_size = quick_terminal_size_from_height_fraction(0.9);
+
+        let revert = crate::theme_settings::RevertValues {
+            theme_name: String::new(),
+            font_size: 14.0,
+            cursor_style: noa_config::CursorShape::Block,
+            background_opacity: 1.0,
+            background_blur_radius: 0,
+            background_image: String::new(),
+            background_image_opacity: 1.0,
+            background_image_position: noa_config::BackgroundImagePosition::Center,
+            background_image_fit: noa_config::BackgroundImageFit::Contain,
+            background_image_repeat: false,
+            background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+            sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
+            quick_terminal_size: 0.4,
+            window_padding_x: 2.0,
+            window_padding_y: 2.0,
+            macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
+            confirm_quit: true,
+            font_family: "Menlo".to_string(),
+        };
+        sync_reverted_confirm_quit_and_quick_terminal_size(&mut config, &revert);
+
+        assert!(
+            config.confirm_quit,
+            "confirm-quit must revert to the pre-open value"
+        );
+        assert!(
+            (quick_terminal_height_fraction(config.quick_terminal_size) - 0.4).abs() < 0.001,
+            "quick-terminal-size must revert to the pre-open value"
         );
     }
 
@@ -984,6 +1443,10 @@ mod commit_theme_settings_tests {
             cursor_style_blink: None,
             minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
             macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
+            theme_pair: None,
+            carryover: None,
+            favorites: std::sync::Arc::new(std::collections::HashSet::new()),
+            favorites_epoch: 0,
         });
 
         assert_eq!(selected_background_image_text(&settings), None);
@@ -995,6 +1458,70 @@ mod commit_theme_settings_tests {
         assert_eq!(
             selected_background_image_text(&settings),
             Some("/tmp/wall.png")
+        );
+    }
+
+    // AC-54 (R-34, FM-01): opening under a `theme = light:X,dark:Y` config
+    // resolves `current_theme` to the *active* appearance side, never an
+    // empty string — the exact derivation `commit_updates` depends on to
+    // avoid a phantom theme diff (AC-55).
+    #[test]
+    fn resolve_current_theme_picks_the_active_pair_side() {
+        let light = noa_theme::THEMES[0].0.to_string();
+        let dark = noa_theme::THEMES[1].0.to_string();
+        let mut config = AppConfig::from_startup(
+            noa_config::StartupConfig::default(),
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
+        config.theme_appearance = Some(noa_config::ThemeAppearancePair {
+            light: light.clone(),
+            dark: dark.clone(),
+        });
+
+        assert_eq!(
+            resolve_current_theme(&config, winit::window::Theme::Light),
+            light
+        );
+        assert_eq!(
+            resolve_current_theme(&config, winit::window::Theme::Dark),
+            dark
+        );
+    }
+
+    // AC-51 regression guard at the derivation layer: a plain, non-paired
+    // `theme` config keeps resolving exactly as before.
+    #[test]
+    fn resolve_current_theme_keeps_single_name_behavior_when_not_a_pair() {
+        let name = noa_theme::THEMES[0].0.to_string();
+        let mut config = AppConfig::from_startup(
+            noa_config::StartupConfig::default(),
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
+        config.theme = Some(name.clone());
+
+        assert_eq!(
+            resolve_current_theme(&config, winit::window::Theme::Light),
+            name
+        );
+    }
+
+    // An unresolvable pair side (not in the 574-entry catalog) falls back
+    // to the empty string, same as the pre-existing single-name behavior —
+    // never a name the overlay can't look up.
+    #[test]
+    fn resolve_current_theme_falls_back_to_empty_for_an_unresolvable_name() {
+        let mut config = AppConfig::from_startup(
+            noa_config::StartupConfig::default(),
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
+        config.theme = Some("no such theme".to_string());
+
+        assert_eq!(
+            resolve_current_theme(&config, winit::window::Theme::Light),
+            ""
         );
     }
 }

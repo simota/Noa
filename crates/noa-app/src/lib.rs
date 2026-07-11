@@ -37,6 +37,7 @@ mod session_store;
 mod sidebar;
 pub mod split_tree;
 mod theme;
+mod theme_favorites;
 mod theme_settings;
 
 pub use app::AppConfig;

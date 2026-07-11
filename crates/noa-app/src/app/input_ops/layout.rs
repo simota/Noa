@@ -129,10 +129,11 @@ impl App {
                 noa_config::ResizeOverlay::AfterFirst => changed,
             };
             if show {
-                state.resize_overlay = Some((
-                    format!("{} × {}", grid.0, grid.1),
-                    Instant::now() + RESIZE_OVERLAY_DURATION,
-                ));
+                state.resize_overlay = Some(Toast {
+                    text: format!("{} × {}", grid.0, grid.1),
+                    until: Instant::now() + RESIZE_OVERLAY_DURATION,
+                    kind: ToastKind::Resize,
+                });
                 state.window.request_redraw();
             }
         }

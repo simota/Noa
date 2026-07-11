@@ -15,19 +15,27 @@
 //! (`app/input_ops.rs`) drives the GPU/window side effects that follow a
 //! successful write.
 
+mod rich;
 mod rows;
 mod sample;
 mod state;
 
+pub(crate) use rich::{
+    ATTRIBUTE_CHIP_HINT, Attribute, AttributeChipSegment, attribute_chip_segments, attribute_of,
+    contrast_label, favorites_chip_label, footer_text, match_count_label, sample_lines,
+};
 pub(crate) use rows::{
     Liveness, RestartReason, RevertValues, RowDraft, RowEffect, Section, SettingsRow,
-    SettingsRowKind, ThemeSettingsInit, ThemeSettingsMode, background_image_fit_value,
-    background_image_position_value, settings_row_display_value,
+    SettingsRowKind, ThemePairContext, ThemeSettingsCarryover, ThemeSettingsInit,
+    ThemeSettingsMode, background_image_fit_value, background_image_position_value,
+    settings_row_display_value,
 };
 pub(crate) use sample::{Swatch, sample_swatches};
 #[allow(unused_imports)]
 pub(crate) use state::ConfigWriteFn;
-pub(crate) use state::ThemeSettings;
+#[cfg(test)]
+pub(crate) use state::take_scan_count;
+pub(crate) use state::{ThemeSettings, WHEEL_ROW_THRESHOLD, revert_updates};
 
 #[cfg(test)]
 mod tests;

@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use super::*;
+use crate::theme_settings::{RevertValues, ThemePairContext};
 
 /// App-wide GPU and glyph state shared by every tab/window.
 pub(super) struct GpuState {
@@ -312,8 +313,12 @@ pub(super) struct WindowState {
     /// The focused pane's last laid-out grid size, for the resize-overlay
     /// change check (`resize-overlay = after-first` skips the first layout).
     pub(super) last_grid: Option<(u16, u16)>,
-    /// The live `cols × rows` resize toast: its text and hide deadline.
-    pub(super) resize_overlay: Option<(String, Instant)>,
+    /// The single transient-toast slot (R-31/ADR-5): the `cols × rows`
+    /// resize overlay and the theme-settings-v2 commit Undo toast share
+    /// this one slot, tagged by [`ToastKind`] — a new toast of either kind
+    /// always replaces whatever was showing (spec's documented edge case:
+    /// "a newer toast replaces an older one").
+    pub(super) resize_overlay: Option<Toast>,
     /// `visual-bell`: the full-window flash stays up until this instant.
     pub(super) bell_flash_until: Option<Instant>,
     /// Last-synced native (AppKit) overlay model hashes — palette, theme
@@ -333,6 +338,49 @@ pub(super) const RESIZE_OVERLAY_DURATION: Duration = Duration::from_millis(750);
 /// stays close to Ghostty's, long enough to keep a deep-scrollback reflow from
 /// running on every cell-width boundary.
 pub(super) const RESIZE_REFLOW_THROTTLE_INTERVAL: Duration = Duration::from_millis(80);
+
+/// How long the R-31 commit-Undo toast stays up. Deliberately longer than
+/// [`RESIZE_OVERLAY_DURATION`]'s 750ms: a resize toast is purely
+/// informational and can afford to be brief even during a rapid drag, but
+/// an Undo toast asks for a one-time decision (read → decide → press ⌘Z),
+/// which needs real time (ux.md §6's proposed 6s, macOS's own
+/// Mail-style-undo-toast convention).
+pub(super) const UNDO_TOAST_DURATION: Duration = Duration::from_secs(6);
+
+/// R-31/ADR-5: the transient-toast slot's contents — text, expiry, and
+/// which of the two toasts it is.
+pub(super) struct Toast {
+    pub(super) text: String,
+    pub(super) until: Instant,
+    pub(super) kind: ToastKind,
+}
+
+/// R-31/FM-08: an Undo toast's payload — the pre-commit snapshot to restore
+/// plus the pair context a pair-aware undo write needs (mirrors why
+/// `commit_updates` itself needs the pair context — undoing a pair commit
+/// must restore `light:X,dark:Y` syntax, not clobber it with a bare name).
+/// A deliberate widening of the spec's literal `ToastKind::Undo(Box<RevertValues>)`
+/// signature: `RevertValues` alone can't reconstruct pair syntax on its own,
+/// and losing that would silently reintroduce the exact bug R-34 exists to
+/// fix, just on the undo path instead of the commit path.
+///
+/// FM-08's "invalidate after a later commit/reopen" guard needs no extra
+/// field here: a later *commit* replaces this whole `Toast` outright (the
+/// single-slot "new toast replaces old" rule already gives every commit its
+/// own fresh, correct Undo payload), and a later *reopen*
+/// (`App::open_theme_settings_session`) clears the slot unconditionally
+/// before building the new session — so by the time `⌘Z` can fire, either
+/// this exact payload is still the right one, or the slot is empty/holds a
+/// different toast and `⌘Z` is correctly a no-op.
+pub(super) struct UndoPayload {
+    pub(super) revert: RevertValues,
+    pub(super) theme_pair: Option<ThemePairContext>,
+}
+
+pub(super) enum ToastKind {
+    Resize,
+    Undo(Box<UndoPayload>),
+}
 
 /// How long the `visual-bell` flash stays up.
 pub(super) const BELL_FLASH_DURATION: Duration = Duration::from_millis(150);
@@ -598,6 +646,10 @@ mod theme_settings_session_tests {
             cursor_style_blink: None,
             minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
             macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
+            theme_pair: None,
+            carryover: None,
+            favorites: std::sync::Arc::new(std::collections::HashSet::new()),
+            favorites_epoch: 0,
         }
     }
 
@@ -661,7 +713,11 @@ mod theme_settings_session_tests {
             "make_mut must fork rather than mutate through a still-shared Arc"
         );
         assert_eq!(session.state.selected_row(), 1);
-        assert_eq!(held_snapshot.selected_row(), 0, "the held snapshot is untouched");
+        assert_eq!(
+            held_snapshot.selected_row(),
+            0,
+            "the held snapshot is untouched"
+        );
     }
 
     // Radar edge case: the three tests above each prove a single fork in
@@ -677,9 +733,21 @@ mod theme_settings_session_tests {
         let snap_1 = std::sync::Arc::clone(&session.state);
         std::sync::Arc::make_mut(&mut session.state).move_down(); // forks again: selected_row = 2
 
-        assert_eq!(snap_0.selected_row(), 0, "first-generation snapshot stays frozen");
-        assert_eq!(snap_1.selected_row(), 1, "second-generation snapshot stays frozen");
-        assert_eq!(session.state.selected_row(), 2, "live state keeps advancing");
+        assert_eq!(
+            snap_0.selected_row(),
+            0,
+            "first-generation snapshot stays frozen"
+        );
+        assert_eq!(
+            snap_1.selected_row(),
+            1,
+            "second-generation snapshot stays frozen"
+        );
+        assert_eq!(
+            session.state.selected_row(),
+            2,
+            "live state keeps advancing"
+        );
         assert!(!std::sync::Arc::ptr_eq(&snap_0, &snap_1));
         assert!(!std::sync::Arc::ptr_eq(&snap_1, &session.state));
     }

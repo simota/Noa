@@ -28,6 +28,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
     match command {
         AppCommand::About => "About Noa",
         AppCommand::Preferences => "Open Preferences",
+        AppCommand::EditConfigFile => "Edit Config File\u{2026}",
         AppCommand::ReloadConfig => "Reload Configuration",
         AppCommand::Copy => "Copy to Clipboard",
         AppCommand::Paste => "Paste from Clipboard",
@@ -114,6 +115,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
     const ENTRIES: &[AppCommand] = &[
         AppCommand::About,
         AppCommand::Preferences,
+        AppCommand::EditConfigFile,
         AppCommand::OpenThemePicker,
         AppCommand::OpenSettings,
         AppCommand::ReloadConfig,
@@ -312,6 +314,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
     match command {
         AppCommand::About
         | AppCommand::Preferences
+        | AppCommand::EditConfigFile
         | AppCommand::OpenThemePicker
         | AppCommand::OpenSettings
         | AppCommand::ReloadConfig
@@ -587,6 +590,7 @@ mod tests {
         let mut commands = vec![
             AppCommand::About,
             AppCommand::Preferences,
+            AppCommand::EditConfigFile,
             AppCommand::OpenThemePicker,
             AppCommand::OpenSettings,
             AppCommand::ReloadConfig,

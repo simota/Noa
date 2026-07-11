@@ -1,4 +1,8 @@
 use super::super::*;
+// v3 paging pure fns: imported locally (rather than through app.rs's shared
+// `use crate::session_overview::{...}` block) to keep this file's diff
+// self-contained.
+use crate::session_overview::{WHEEL_PAGE_THRESHOLD, page_after_wheel, page_step};
 
 impl App {
     pub(in crate::app) fn focus_overview_tile_at_last_cursor(&mut self) {
@@ -9,18 +13,21 @@ impl App {
             return;
         };
 
-        let source_tile_ids = self.overview_source_tile_ids();
-        let Some(layout) = self.overview_layout(&source_tile_ids) else {
+        // v3 paging: hit-test against the current page's slice only — every
+        // tile on a page is live (no placeholders), so `layout.tiles` alone
+        // covers the whole grid.
+        let page_view = self.overview_page_view();
+        let Some(layout) = self.overview_layout(&page_view.slice) else {
             return;
         };
-        let Some(target) = overview_tile_target_at_point(&source_tile_ids, &layout.tiles, point)
+        let Some(target) = overview_tile_target_at_point(&page_view.slice, &layout.tiles, point)
         else {
             return;
         };
         // The clicked tile becomes the selection too, not just the focus
         // target — a click and an arrow-keyed Return should leave the
-        // Overview in the same selected state.
-        if let Some(index) = source_tile_ids.iter().position(|id| *id == target)
+        // Overview in the same selected state. The index is page-local.
+        if let Some(index) = page_view.slice.iter().position(|id| *id == target)
             && let Some(overview) = self.overview_window.as_mut()
         {
             overview.selected = index;
@@ -29,21 +36,16 @@ impl App {
     }
 
     /// The close-button (✕) target under the last cursor point, or `None`
-    /// (REQ-OV-13). Spans live tiles and placeholder rows — both carry a title
-    /// bar with a close button, and both map back to a live source pane.
+    /// (REQ-OV-13), hit-tested against the current page's tiles only (v3
+    /// paging — every page tile is live, so there is no separate placeholder
+    /// row to chain in anymore).
     pub(in crate::app) fn overview_close_target_at_last_cursor(&self) -> Option<OverviewTileId> {
         let overview = self.overview_window.as_ref()?;
         let point = overview.last_cursor_point?;
         let metrics = self.overview_metrics()?;
-        let source_tile_ids = self.overview_source_tile_ids();
-        let layout = self.overview_layout(&source_tile_ids)?;
-        let tile_rects: Vec<PaneRectApp> = layout
-            .tiles
-            .iter()
-            .chain(layout.placeholders.iter())
-            .copied()
-            .collect();
-        overview_close_target_at_point(&source_tile_ids, &tile_rects, point, metrics)
+        let page_view = self.overview_page_view();
+        let layout = self.overview_layout(&page_view.slice)?;
+        overview_close_target_at_point(&page_view.slice, &layout.tiles, point, metrics)
     }
 
     pub(in crate::app) fn focus_tile_from_overview(&mut self, tile_id: OverviewTileId) {
@@ -82,6 +84,8 @@ impl App {
                 OverviewAction::SwitchToLive(n) => self.switch_to_live_overview_tile(n),
                 OverviewAction::Dismiss => self.dismiss_or_clear_overview_search(),
                 OverviewAction::ToggleZoom => self.toggle_overview_zoom(),
+                OverviewAction::PageForward => self.step_overview_page(1),
+                OverviewAction::PageBack => self.step_overview_page(-1),
             }
             return;
         }
@@ -157,12 +161,14 @@ impl App {
         true
     }
 
-    /// Replace the search query, reset the selection to the first tile (a
-    /// query change re-orders the result set, REQ-OV-16 / palette R-7 parity),
-    /// and request a redraw.
+    /// Replace the search query, reset the page and selection to the first
+    /// tile (a query change re-orders and re-sizes the filtered result set,
+    /// REQ-OV-16 / palette R-7 parity / REQ-OV-20 v3 paging), and request a
+    /// redraw.
     pub(in crate::app) fn set_overview_search_query(&mut self, query: String) {
         if let Some(overview) = self.overview_window.as_mut() {
             overview.search_query = query;
+            overview.page = 0;
             overview.selected = 0;
         } else {
             return;
@@ -175,21 +181,86 @@ impl App {
         self.request_overview_redraw();
     }
 
-    /// Arrow-key Overview selection move (REQ-OV-15a).
+    /// Arrow-key Overview selection move (REQ-OV-15a), within the current
+    /// page's tiles only (v3 paging — arrows never cross a page boundary;
+    /// PageUp/PageDown/wheel do that instead).
     pub(in crate::app) fn step_overview_selection(&mut self, direction: Direction) {
-        let source_tile_ids = self.overview_source_tile_ids();
-        let Some(layout) = self.overview_layout(&source_tile_ids) else {
+        let page_view = self.overview_page_view();
+        let Some(layout) = self.overview_layout(&page_view.slice) else {
             return;
         };
         let Some(overview) = self.overview_window.as_mut() else {
             return;
         };
         overview.selected = move_overview_selection(
-            overview.selected,
+            page_view.selected_in_page,
             layout.cols,
-            source_tile_ids.len(),
+            page_view.slice.len(),
             direction,
         );
+        self.request_overview_redraw();
+    }
+
+    /// Flip the Overview to the next (`direction > 0`) or previous
+    /// (`direction < 0`) page (v3 paging, REQ-OV-18), clamped at the ends
+    /// (no wrap, `page_step`). A no-op when already at that end.
+    pub(in crate::app) fn step_overview_page(&mut self, direction: isize) {
+        let len = self.overview_source_tile_ids().len();
+        let Some(current_page) = self.overview_window.as_ref().map(|overview| overview.page)
+        else {
+            return;
+        };
+        let new_page = page_step(current_page, direction, len, OVERVIEW_GRID_CAP);
+        if new_page != current_page {
+            self.set_overview_page(new_page);
+        }
+    }
+
+    /// Route a host-window wheel/trackpad turn to Overview page navigation
+    /// (v3 paging, REQ-OV-18) via the accumulator-threshold seam
+    /// (`page_after_wheel`). No pty passthrough while the overlay owns the
+    /// window (REQ-OV-7) — the Overview has no scrollback of its own, so a
+    /// wheel turn always means "page", never "scroll". A discrete mouse-wheel
+    /// notch (`LineDelta`) is scaled to cross the threshold in one step, so
+    /// one notch flips exactly one page; a trackpad's `PixelDelta` stream
+    /// accumulates across calls like a continuous swipe.
+    pub(in crate::app) fn apply_overview_wheel(&mut self, delta: MouseScrollDelta) {
+        let delta_y = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y * WHEEL_PAGE_THRESHOLD,
+            MouseScrollDelta::PixelDelta(position) => position.y as f32,
+        };
+        let len = self.overview_source_tile_ids().len();
+        let Some((page, wheel_accum)) = self
+            .overview_window
+            .as_ref()
+            .map(|overview| (overview.page, overview.wheel_accum))
+        else {
+            return;
+        };
+        let (new_page, new_accum) =
+            page_after_wheel(page, wheel_accum, delta_y, len, OVERVIEW_GRID_CAP);
+        let page_changed = new_page != page;
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.wheel_accum = new_accum;
+        }
+        if page_changed {
+            self.set_overview_page(new_page);
+        }
+    }
+
+    /// Apply a page change: store it, reset the selection to the first tile
+    /// on the new page (mirrors the search-query-change reset, REQ-OV-20),
+    /// mark every source tile dirty so the newly visible page's tiles render
+    /// fresh mirrors rather than showing whatever tab last occupied that tile
+    /// texture slot's *stale* pooled frame, and request a redraw.
+    pub(in crate::app) fn set_overview_page(&mut self, page: usize) {
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.page = page;
+            overview.selected = 0;
+        } else {
+            return;
+        }
+        self.mark_all_overview_tiles_dirty();
         self.request_overview_redraw();
     }
 
@@ -208,7 +279,8 @@ impl App {
         }
     }
 
-    /// Recompute which tile (live or placeholder, in source order) the cursor
+    /// Recompute which tile of the current page (v3 paging — every page
+    /// tile is live, so there is no placeholder row to chain in) the cursor
     /// is over, and repaint on a change so the hover accent ring tracks the
     /// mouse. Pure math per mouse move; no GPU work unless it changed.
     pub(in crate::app) fn update_overview_hover(&mut self) {
@@ -216,14 +288,10 @@ impl App {
             return;
         };
         let point = overview.last_cursor_point;
-        let source_tile_ids = self.overview_source_tile_ids();
+        let page_view = self.overview_page_view();
         let hovered = point.and_then(|point| {
-            let layout = self.overview_layout(&source_tile_ids)?;
-            layout
-                .tiles
-                .iter()
-                .chain(layout.placeholders.iter())
-                .position(|rect| rect.contains(point))
+            let layout = self.overview_layout(&page_view.slice)?;
+            layout.tiles.iter().position(|rect| rect.contains(point))
         });
         if let Some(overview) = self.overview_window.as_mut()
             && overview.hovered != hovered
@@ -257,30 +325,26 @@ impl App {
     }
 
     /// Return activates the selected Overview tile (REQ-OV-15b). `selected`
-    /// indexes directly into the combined live + placeholder source order,
-    /// so a selected placeholder row resolves to its source pane exactly the
-    /// same way a selected live tile does.
+    /// indexes into the current page's tile slice (v3 paging — a page has
+    /// no placeholder rows, so every selectable index is a live tile).
     pub(in crate::app) fn activate_overview_selection(&mut self) {
-        let source_tile_ids = self.overview_source_tile_ids();
-        let Some(overview) = self.overview_window.as_ref() else {
-            return;
-        };
-        let Some(&target) = source_tile_ids.get(overview.selected) else {
+        let page_view = self.overview_page_view();
+        let Some(&target) = page_view.slice.get(page_view.selected_in_page) else {
             return;
         };
         self.focus_tile_from_overview(target);
     }
 
-    /// Cmd+`n` (1-indexed) jumps straight to the `n`-th live Overview tile
-    /// (REQ-OV-15c). Out-of-range `n` (beyond the live tile count) is a
-    /// no-op rather than a panic — there is no tile to switch to.
+    /// Cmd+`n` (1-indexed) jumps straight to the `n`-th live tile of the
+    /// *current page* (REQ-OV-15c, page-local per v3 paging). Out-of-range
+    /// `n` (beyond this page's tile count) is a no-op rather than a panic —
+    /// there is no tile to switch to.
     pub(in crate::app) fn switch_to_live_overview_tile(&mut self, n: usize) {
-        let source_tile_ids = self.overview_source_tile_ids();
-        let live_tile_count = OVERVIEW_GRID_CAP.min(source_tile_ids.len());
-        if n == 0 || n > live_tile_count {
+        let page_view = self.overview_page_view();
+        if n == 0 || n > page_view.slice.len() {
             return;
         }
-        let target = source_tile_ids[n - 1];
+        let target = page_view.slice[n - 1];
         if let Some(overview) = self.overview_window.as_mut() {
             overview.selected = n - 1;
         }
@@ -334,9 +398,17 @@ impl App {
                 }
                 true
             }
+            // v3 paging (REQ-OV-18): a wheel/trackpad turn flips pages
+            // instead of scrolling — no pty passthrough while the overlay
+            // owns the window (REQ-OV-7), and the Overview has no
+            // scrollback of its own.
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.apply_overview_wheel(*delta);
+                true
+            }
             // No pty passthrough while the overlay owns the window
-            // (REQ-OV-7): scroll and IME events die here.
-            WindowEvent::MouseWheel { .. } | WindowEvent::Ime(_) => true,
+            // (REQ-OV-7): IME events die here.
+            WindowEvent::Ime(_) => true,
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
                 true

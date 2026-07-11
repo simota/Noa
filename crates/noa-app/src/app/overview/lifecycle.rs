@@ -1,6 +1,10 @@
 use std::cell::RefCell;
 
 use super::super::*;
+// v3 paging pure fn: imported locally (rather than through app.rs's shared
+// `use crate::session_overview::{...}` block) to keep this file's diff
+// self-contained.
+use crate::session_overview::overview_wheel_accum_on_show;
 
 impl App {
     pub(in crate::app) fn toggle_tab_overview(&mut self) {
@@ -66,6 +70,8 @@ impl App {
                     label_renderer: None,
                     chrome_card: None,
                     selected: 0,
+                    page: 0,
+                    wheel_accum: 0.0,
                     hovered: None,
                     zoomed: false,
                     zoom_anim: None,
@@ -91,17 +97,39 @@ impl App {
             overview.zoomed = false;
             overview.zoom_anim = None;
         }
-        // REQ-OV-14: the focused pane's tile if it's live, else the first.
+        // REQ-OV-14 (v3 paging): jump straight to the page containing the
+        // focused pane's tile and select it page-locally, else page 0 /
+        // selection 0. `overview_initial_selection` with `live_tile_count =
+        // source_tile_ids.len()` (no cap) gives the focused tile's *global*
+        // index in the unpaged source order (or 0 when absent), which page
+        // math below turns into a page + page-local selection.
         let source_tile_ids = self.overview_source_tile_ids();
-        let live_tile_count = OVERVIEW_GRID_CAP.min(source_tile_ids.len());
         let focused_tile = self.focused.and_then(|window_id| {
             let state = self.windows.get(&window_id)?;
             Some(OverviewTileId::new(window_id, state.focused_pane))
         });
-        let selected =
-            overview_initial_selection(&source_tile_ids, live_tile_count, focused_tile.as_ref());
+        let global_index = overview_initial_selection(
+            &source_tile_ids,
+            source_tile_ids.len(),
+            focused_tile.as_ref(),
+        );
+        let (page, selected) = if source_tile_ids.is_empty() {
+            (0, 0)
+        } else {
+            (
+                global_index / OVERVIEW_GRID_CAP,
+                global_index % OVERVIEW_GRID_CAP,
+            )
+        };
         if let Some(overview) = self.overview_window.as_mut() {
+            overview.page = page;
             overview.selected = selected;
+            // A leftover accumulator from before the overlay was last hidden
+            // (re-host branch above never touches it, and `hide_tab_overview`
+            // doesn't either) must not survive into this show — otherwise a
+            // small scroll right after reopening could trigger a surprise
+            // immediate flip from residue the user never intended.
+            overview.wheel_accum = overview_wheel_accum_on_show();
         }
         if let Some(state) = self.windows.get(&host) {
             // The Overview keymap reads the host window's input, so the host

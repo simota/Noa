@@ -408,9 +408,17 @@ pub(super) struct OverviewWindowState {
     pub(super) label_renderer: Option<Renderer>,
     /// Rounded-card shader reused for overview chrome overlays.
     pub(super) chrome_card: Option<OverviewChromeCardPipeline>,
-    /// The currently selected tile (REQ-OV-14): an index directly into the
-    /// row-major source-tile order (`App::overview_source_tile_ids`).
+    /// The currently selected tile (REQ-OV-14): a page-local index into the
+    /// current page's tile slice (`App::overview_page_view`, v3 paging) —
+    /// not the unpaged full source-tile order.
     pub(super) selected: usize,
+    /// The current page (v3 paging, REQ-OV-18): a 0-indexed page over
+    /// `App::overview_source_tile_ids()`, clamped against its length by
+    /// `App::overview_page_view` on every read rather than written back here.
+    pub(super) page: usize,
+    /// Accumulated wheel/trackpad delta not yet large enough to flip a page
+    /// (v3 paging, REQ-OV-18); see `page_after_wheel`.
+    pub(super) wheel_accum: f32,
     /// The tile index currently under the mouse cursor, for hover feedback.
     pub(super) hovered: Option<usize>,
     /// Whether the selected tile is zoomed (Tab toggles).
@@ -446,6 +454,11 @@ pub(super) struct OverviewWindowState {
 pub(super) struct OverviewPillKey {
     pub(super) query: String,
     pub(super) live_tile_count: usize,
+    /// The current page (v3 paging, REQ-OV-19): folded into the key so a
+    /// page flip — which changes the hint bar's "Page p/N" segment even when
+    /// `query`/`live_tile_count`/`rect` are unchanged — invalidates the
+    /// cached pill texture.
+    pub(super) page: usize,
     pub(super) rect: PaneRectApp,
 }
 

@@ -1,4 +1,8 @@
 use super::super::*;
+// v3 paging pure fns: imported locally (rather than through app.rs's shared
+// `use crate::session_overview::{...}` block) to keep this file's diff
+// self-contained.
+use crate::session_overview::{clamp_overview_page, overview_page_count, overview_page_slice_range};
 
 impl App {
     /// REQ-OV-16: the "Search sessions" filter narrows the source set here,
@@ -137,6 +141,58 @@ impl App {
             metrics.outer_margin,
         ))
     }
+
+    /// The single paging seam (v3, REQ-OV-18/19/20): the current page's tile
+    /// slice, the (clamped) page index and total page count, and the
+    /// (clamped) page-local selection. Every interactive/render consumer that
+    /// used to walk the full `overview_source_tile_ids()` order now reads
+    /// this instead, so a page holds *only* live tiles (no placeholder rows —
+    /// v3 supersedes the v1/v2 overflow-placeholder degradation, see
+    /// `docs/specs/tab-overview.md` §v3).
+    ///
+    /// `overview_source_tile_ids()` stays the memoized, page-independent
+    /// source order (its cache key has no page in it, by design — a page
+    /// flip must not invalidate that memo). The stored `page`/`selected` are
+    /// clamped here against the *current* filtered length rather than
+    /// written back — clamping is idempotent and cheap (no `&mut self`
+    /// needed), and every mutating call site that changes `page` already
+    /// calls `clamp_overview_page` itself before storing.
+    pub(in crate::app) fn overview_page_view(&self) -> OverviewPageView {
+        let source_tile_ids = self.overview_source_tile_ids();
+        let len = source_tile_ids.len();
+        let page_count = overview_page_count(len, OVERVIEW_GRID_CAP);
+        let raw_page = self
+            .overview_window
+            .as_ref()
+            .map_or(0, |overview| overview.page);
+        let page = clamp_overview_page(raw_page, len, OVERVIEW_GRID_CAP);
+        let range = overview_page_slice_range(len, OVERVIEW_GRID_CAP, page);
+        let slice = source_tile_ids[range].to_vec();
+        let raw_selected = self
+            .overview_window
+            .as_ref()
+            .map_or(0, |overview| overview.selected);
+        let selected_in_page = raw_selected.min(slice.len().saturating_sub(1));
+        OverviewPageView {
+            slice,
+            page,
+            page_count,
+            selected_in_page,
+        }
+    }
+}
+
+/// Return value of [`App::overview_page_view`] — see its doc comment.
+pub(in crate::app) struct OverviewPageView {
+    /// The current page's tiles, in row-major source order — always ≤
+    /// `OVERVIEW_GRID_CAP` and always live (no placeholders).
+    pub(in crate::app) slice: Vec<OverviewTileId>,
+    /// The clamped 0-indexed current page.
+    pub(in crate::app) page: usize,
+    /// Total pages (`ceil(filtered_len / OVERVIEW_GRID_CAP)`, minimum 1).
+    pub(in crate::app) page_count: usize,
+    /// The clamped selection, indexing into `slice` (page-local).
+    pub(in crate::app) selected_in_page: usize,
 }
 
 /// Hit/miss rule for `App::overview_source_tile_ids`'s memo: the cached
@@ -198,5 +254,26 @@ mod tests {
         let reordered = [3, 2, 1];
         let hit = overview_source_tile_ids_cache_hit(&unfiltered, "a", &result, &reordered, "a");
         assert_eq!(hit, None);
+    }
+
+    // C1 (v3 paging): the memo key is `(unfiltered order, query)` only —
+    // `overview_source_tile_ids_cache_hit`'s signature has no page parameter
+    // at all, so a page flip (which touches neither the unfiltered order nor
+    // the query) structurally cannot invalidate this cache. This pins that
+    // down at the call-site level: identical `unfiltered`/`query` still hit
+    // no matter how many times `App::overview_page_view`'s page changed in
+    // between (`overview_page_view` reads the memoized result and slices it
+    // by page *after* this hit/miss decision, entirely outside this function).
+    #[test]
+    fn cache_hit_is_unaffected_by_page_flips_because_page_is_not_part_of_the_key() {
+        let unfiltered: Vec<u32> = (0..25).collect();
+        let result = unfiltered.clone();
+        for _ in 0..3 {
+            // Simulates repeated page flips (0 -> 1 -> 2 -> 0 -> ...)
+            // happening between calls: nothing here ever varies by page.
+            let hit =
+                overview_source_tile_ids_cache_hit(&unfiltered, "", &result, &unfiltered, "");
+            assert_eq!(hit, Some(result.as_slice()));
+        }
     }
 }

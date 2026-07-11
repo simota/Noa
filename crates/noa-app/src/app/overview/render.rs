@@ -445,6 +445,7 @@ impl App {
     pub(in crate::app) fn render_overview_search_texture(
         &mut self,
         live_tile_count: usize,
+        page: usize,
     ) -> Option<OverviewChromeTexture> {
         let metrics = self.overview_metrics()?;
         let chrome = self.overview_chrome()?;
@@ -459,6 +460,7 @@ impl App {
         let key = OverviewPillKey {
             query: query.clone(),
             live_tile_count,
+            page,
             rect,
         };
         if let Some(hit) = self
@@ -516,13 +518,18 @@ impl App {
     /// Render (or reuse from cache) the bottom hint bar (REQ-OV-17) as a
     /// pill-sized texture for compositing onto the surface. `None` when
     /// there is no usable hint band (a window too short to reserve one).
-    /// The `⌘1-N` range tracks the live tile count dynamically.
+    /// The `⌘1-N` range tracks the live tile count dynamically, and a
+    /// trailing "Page p/N" segment appears whenever `page_count > 1` (v3
+    /// paging, REQ-OV-19).
     ///
     /// Cached on `OverviewWindowState.hint_pill_cache` the same way as the
-    /// search pill (see `render_overview_search_texture`).
+    /// search pill (see `render_overview_search_texture`) — `page` is folded
+    /// into the shared [`OverviewPillKey`] so a page flip invalidates it.
     pub(in crate::app) fn render_overview_hint_texture(
         &mut self,
         live_tile_count: usize,
+        page: usize,
+        page_count: usize,
     ) -> Option<OverviewChromeTexture> {
         let metrics = self.overview_metrics()?;
         let chrome = self.overview_chrome()?;
@@ -537,6 +544,7 @@ impl App {
         let key = OverviewPillKey {
             query,
             live_tile_count,
+            page,
             rect,
         };
         if let Some(hit) = self
@@ -553,7 +561,7 @@ impl App {
             h: rect.h.max(1),
         };
         let (padding, grid_size) = self.overview_label_grid(band_size)?;
-        let text = overview_hint_bar_row(live_tile_count, grid_size.cols);
+        let text = overview_hint_bar_row(live_tile_count, page, page_count, grid_size.cols);
 
         let texture = self
             .gpu
@@ -591,16 +599,26 @@ impl App {
         Some(chrome_texture)
     }
 
-    /// Composite every live-mirror and placeholder tile onto the overview
-    /// surface as a rounded card (REQ-OV-12/14), then overlay the bottom hint
-    /// bar (REQ-OV-17), and present. Empty grid cells stay the backdrop color.
-    pub(in crate::app) fn present_overview_frame(&mut self, layout: &OverviewLayout) {
+    /// Composite every live tile of the current page onto the overview
+    /// surface as a rounded card (REQ-OV-12/14, v3 paging — a page never has
+    /// placeholder rows), then overlay the bottom hint bar (REQ-OV-17,
+    /// REQ-OV-19), and present. Empty grid cells stay the backdrop color.
+    /// `source_tile_ids` is the current page's tile slice, index-parallel
+    /// with `layout.tiles` (and thus with `tile_rects` below); `page`/
+    /// `page_count` drive the hint bar's "Page p/N" segment.
+    pub(in crate::app) fn present_overview_frame(
+        &mut self,
+        layout: &OverviewLayout,
+        source_tile_ids: &[OverviewTileId],
+        page: usize,
+        page_count: usize,
+    ) {
         // Render the hint band first (it borrows the label renderer / gpu
         // mutably); the returned texture is owned, so the borrows are released
         // before compositing.
         let live_count = layout.tiles.len();
-        let search_texture = self.render_overview_search_texture(live_count);
-        let hint_texture = self.render_overview_hint_texture(live_count);
+        let search_texture = self.render_overview_search_texture(live_count, page);
+        let hint_texture = self.render_overview_hint_texture(live_count, page, page_count);
         self.ensure_overview_chrome_card_pipeline();
         let Some(metrics) = self.overview_metrics() else {
             return;
@@ -633,11 +651,12 @@ impl App {
         let zoom_bounds = self.overview_chrome().map(|chrome| chrome.grid_bounds);
 
         // Which tiles carry a pending interaction request (FR-16), indexed by
-        // placement position (live tiles then placeholders, the same order as
-        // `tile_rects` below). Resolved before the gpu/overview borrows so the
-        // ring pass needs no `self` access.
-        let attention_tiles: Vec<bool> = self
-            .overview_source_tile_ids()
+        // placement position — index-parallel with `source_tile_ids` (the
+        // current page's slice) and thus with `tile_rects` below (v3 paging:
+        // a page has no placeholder rows, so the two orders coincide
+        // exactly). Resolved before the gpu/overview borrows so the ring
+        // pass needs no `self` access.
+        let attention_tiles: Vec<bool> = source_tile_ids
             .iter()
             .map(|id| {
                 let card_id = Self::session_card_id(id.window_id, id.pane_id);
@@ -902,24 +921,33 @@ impl App {
             return;
         }
 
-        let source_tile_ids = self.overview_source_tile_ids();
-        let Some(layout) = self.overview_layout(&source_tile_ids) else {
+        // v3 paging: every downstream consumer below works off the current
+        // page's tile slice (≤ OVERVIEW_GRID_CAP, always live — no
+        // placeholder rows), not the full unpaged source order. Tiles on
+        // other pages are simply not candidates for GPU work this frame.
+        let page_view = self.overview_page_view();
+        let Some(layout) = self.overview_layout(&page_view.slice) else {
             return;
         };
         // REQ-OV-14: keep the selection in range as source panes come and go.
         if let Some(overview) = self.overview_window.as_mut() {
             overview.selected = overview
                 .selected
-                .min(source_tile_ids.len().saturating_sub(1));
+                .min(page_view.slice.len().saturating_sub(1));
         }
         let now = Instant::now();
-        let due_tile_ids = self.due_overview_tile_ids(&source_tile_ids, now);
+        let due_tile_ids = self.due_overview_tile_ids(&page_view.slice, now);
 
         self.ensure_overview_thumbnails(&layout);
-        self.render_due_overview_tiles(&due_tile_ids, &source_tile_ids);
-        self.render_due_overview_title_bands(&due_tile_ids, &source_tile_ids, &layout);
-        self.render_overview_placeholder_labels(&source_tile_ids, &layout);
-        self.present_overview_frame(&layout);
+        self.render_due_overview_tiles(&due_tile_ids, &page_view.slice);
+        self.render_due_overview_title_bands(&due_tile_ids, &page_view.slice, &layout);
+        self.render_overview_placeholder_labels(&page_view.slice, &layout);
+        self.present_overview_frame(
+            &layout,
+            &page_view.slice,
+            page_view.page,
+            page_view.page_count,
+        );
 
         self.finish_overview_tile_renders(&due_tile_ids, now);
 
@@ -930,8 +958,10 @@ impl App {
         // redraw right away (Fix A): a due-but-capped tile (immediate), vs.
         // a tile that is merely inside its 10Hz throttle window (schedule
         // one delayed wake-up via `tick_overview_backlog` instead of
-        // spinning `present_overview_frame` until it's due).
-        let candidates = self.overview_tile_candidates(&source_tile_ids);
+        // spinning `present_overview_frame` until it's due). Scoped to the
+        // current page's slice, same as the due-selection above — a dirty
+        // tile on another page doesn't justify waking this page's frame.
+        let candidates = self.overview_tile_candidates(&page_view.slice);
         let decision =
             overview_backlog_decision(&candidates, now, OVERVIEW_TILE_MIN_RENDER_INTERVAL);
         if decision.request_immediate_redraw {
@@ -981,6 +1011,7 @@ mod tests {
         OverviewPillKey {
             query: query.to_string(),
             live_tile_count,
+            page: 0,
             rect: PaneRectApp::new(0, 0, 200, 32),
         }
     }
@@ -1014,6 +1045,20 @@ mod tests {
             ..pill_key("noa", 3)
         };
         let hit = overview_pill_cache_hit(cached.as_ref(), &resized);
+        assert_eq!(hit, None);
+    }
+
+    // C2 (v3 paging): a page flip must invalidate the cached pill texture —
+    // the hint pill's "Page p/N" segment changes even when `query` /
+    // `live_tile_count` / `rect` are all unchanged.
+    #[test]
+    fn pill_cache_misses_when_page_changes() {
+        let cached = Some((pill_key("noa", 3), "pill-texture"));
+        let flipped = OverviewPillKey {
+            page: 1,
+            ..pill_key("noa", 3)
+        };
+        let hit = overview_pill_cache_hit(cached.as_ref(), &flipped);
         assert_eq!(hit, None);
     }
 

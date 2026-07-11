@@ -400,3 +400,71 @@ Judge + Attest が FAIL を返した Run 1 の全指摘への対応(各1行)。
 | REQ-NF-13 | AC-NF-13 | MH |
 
 **Coverage: v2 追加 9/9 要件が ≥1 AC にトレース = 100%**(v2 追加 AC 総数 **16**、全 [MH])。v1 と合算した本ファイル全体のカバレッジ: 30/30 要件 = 100%、AC 総数 41。
+
+## v3 — Overflow Reachability (Paging)
+
+### Metadata (v3)
+- trigger: ユーザー指示(2026-07-11)。9 タブ上限を超えた場合、v1/v2 の title-only placeholder 行(REQ-OV-10、⚠F)ではフルタイル(ライブミラー)へ到達できない — 全タブを同等に監視ダッシュボードとして使えるようにするための到達性改善。
+- scope mode: **Standard 追記**(REQ-OV-18..20 の 3 functional + REQ-NF-14 の 1 non-functional = 4 要件)。
+- 継続方針: v1 の不変条件(等サイズ・行優先・非重複・重なりなし、REQ-OV-3)と `compute_overview_grid` のシグネチャ(REQ-OV-11 のガター/マージン拡張含む)は無改変。本節は「9 タブ超過時にどのタブ集合を `compute_overview_grid` へ渡すか」という一段上のページング層を追加するのみ — グリッド計算そのものは 1 ページ(≤9 タブ)を渡される限り従来どおり動く。
+- **上書きされる決定(supersede)**: REQ-OV-10(⚠F、title-only placeholder 行への退化)は v3 で**廃止**する — 9 タブ超過分はもはや placeholder 行に格納されず、追加ページとしてフルタイル(ライブミラー)で到達可能になる。v1 の Void CUT(90-102行)および v2 Non-Goals(313-317行)にあった「ページング / タイルナビゲーションは CUT/Non-Goal」の判断も v3 でユーザーが明示的に復活させ、上書きする。REQ-NF-8(VRAM 予算超過時の budget_exceeded 退化、AC-NF-08a)は**維持**する — ページングは「どのタブ集合を見せるか」の問題であり、1 ページ分(≤9)の描画資源が不足した場合の退化経路とは独立した関心事のため。
+- グラウンディング: 実装調査は `crates/noa-app/src/session_overview/{input.rs, text.rs}` と `crates/noa-app/src/app/{state.rs, overview/{layout.rs, interaction.rs, render.rs, lifecycle.rs}}` に基づく(2026-07-11)。
+
+### L0 — Vision delta (v3)
+- v1/v2 は 9 タブ超過分を「題名だけ見える・内容は見えない」placeholder 行に押し込めていた。10 タブ目以降を監視するには結局タブを手動で巡回するしかなく、「全タブの画面内容をタイル状に一覧表示し出しっぱなしで同時にライブ監視する」という L0 の JTBD(24-28行)が 9 タブを境に破綻していた。v3 はこれを解消し、**何ページに分かれていても全タブがフルタイルへ到達可能**にする。
+- 設計: 離散ページング。フィルタ後のタブ集合(`App::overview_source_tile_ids()`)を `OVERVIEW_GRID_CAP`(9)件ずつのページに分割し、現在ページのスライスだけを既存の `compute_overview_grid` へ渡す。**すべてのページはフルタイルのみで構成され、どのページにも placeholder 行は現れない**(REQ-OV-18)。
+
+### Non-Goals (v3)
+- 連続スクロール / アニメーション付きページ遷移(ページ切替は瞬時反映、v1/v2 の「トランジションなし」方針を継続)。
+- ページ番号への直接ジャンプ(例: 「3ページ目へ」コマンド)— PageUp/PageDown・ホイール・Cmd+[/Cmd+] による相対移動のみ。
+- io スレッド / `decide_overview_publish` の変更 — ページングはタブ集合の「どれを見せるか」を app 側で選ぶだけの層であり、REQ-NF-13(damage 非消費スナップショット publish)の配線には触れない。
+
+### SPECIFY — v3 L1/L2/L3
+
+検証タグ・優先度タグの凡例は本ファイル 118 行の SPECIFY 節を継承する([MH]/[NH]、[unit]/[headless]/[inspection]/[visual]/[manual])。
+
+#### L1 — Requirements (v3 追加分)
+
+##### Functional (REQ-OV-18..20)
+
+- **REQ-OV-18** [MH](REQ-OV-10/⚠F を上書き): フィルタ後のタブ集合を `OVERVIEW_GRID_CAP` 件ずつのページへ分割する(ページ数 = `ceil(filtered_len / OVERVIEW_GRID_CAP)`、最小 1 — 0 件でも「1/1 ページ」)。現在ページのスライス(`source_tile_ids[page*9 .. min(len, page*9+9)]`)だけを無改変の `compute_overview_grid` へ渡す。結果として**どのページも placeholder 行を持たない**(スライス長は常に ≤9 のため `compute_overview_grid` の overflow 判定に到達しない)。ページ送りは PageUp/PageDown キー、Cmd+[ / Cmd+] チョード、およびマウスホイール/トラックパッドの蓄積しきい値経由で行う(REQ-OV-15 のキーマップの一部として)。グリッド端と同様、ページ端でもクランプしラップしない。ページ送りは選択を先頭(index 0、ページローカル)へリセットする(REQ-OV-20 と対、search-reset 前例に整合)。⌘1-9(REQ-OV-15c)は**ページローカル**に解決する(現在ページのライブタイル N 番目)。
+- **REQ-OV-19** [MH]: 下部ヒントバー(REQ-OV-17)に、ページが 2 ページ以上あるときだけ "Page p/N" セグメントを追記する(`p` は 1-indexed の現在ページ、`N` は総ページ数)。1 ページのみの場合はヒントバーの文言を v1/v2 から一切変更しない(回帰なし)。
+- **REQ-OV-20** [MH](REQ-OV-16 の拡張): 検索クエリの変更はページを 0 へリセットする(既存の「選択を 0 へリセット」— REQ-OV-16 — と対で、フィルタ後のタブ数が変わるとページ構成そのものが変わるため)。
+
+##### Non-Functional (REQ-NF-14)
+
+- **REQ-NF-14** [MH](REQ-NF-1/REQ-NF-4/REQ-NF-5 の帰結): dirty-gate によるレンダ候補選定(`due_overview_tile_ids`)とバックログ判定(`overview_backlog_decision`)は**現在ページのスライスのみ**を対象とする — 非表示ページのタブは、実際にそのページへ切り替わるまで GPU レンダ候補にならない(REQ-NF-1 のタブ数非依存という目的をページング後も維持する形)。ページ送り自体は既存の `mark_all_overview_tiles_dirty` + 1 回の `request_overview_redraw()` で処理し(REQ-NF-12 の「due でないフレームで無条件 present しない」契約を再確認するだけで、新たな present 経路は追加しない)、io スレッドの publish 経路・`decide_overview_publish` は無改変(Non-Goals 参照)。
+
+> Must 比率メモ: v3 追加 4 要件すべて [MH]。9 タブ超過時の到達性はダッシュボードとしての実用性に直結し、[NH] 降格は縮退 UX(v1/v2 の既知の未到達領域)を追認するだけになるため、v1/v2 の全 [MH] 先例に整合させる。
+
+#### L2 — Detail (v3)
+
+- **paging seam**: `App::overview_page_view(&self) -> OverviewPageView { slice, page, page_count, selected_in_page }`(`app/overview/layout.rs`)。`App::overview_source_tile_ids()`(既存メモ、キーは `(unfiltered order, query)` のまま — **page はメモキーに含めない**)を呼び、`OverviewWindowState.page` を `clamp_overview_page` でクランプしてからスライスする。既存の全インタラクション/描画消費者(`focus_overview_tile_at_last_cursor`・`overview_close_target_at_last_cursor`・`step_overview_selection`・`activate_overview_selection`・`switch_to_live_overview_tile`・`update_overview_hover`・`redraw_overview`・`present_overview_frame`)はこのページスライスを読むよう repoint 済み。
+- **純関数**(`session_overview/input.rs`): `overview_page_count(len, page_size)` / `overview_page_slice_range(len, page_size, page)` / `clamp_overview_page(page, len, page_size)` / `page_step(page, direction, len, page_size)` / `page_after_wheel(page, wheel_accum, delta_y, len, page_size) -> (new_page, new_wheel_accum)`(蓄積しきい値 `WHEEL_PAGE_THRESHOLD`、コンパイル時定数・config ノブなし、⚠G 系の前例に整合)。
+- **状態**(`app/state.rs`): `OverviewWindowState` に `page: usize` と `wheel_accum: f32` を追加。`OverviewPillKey`(検索/ヒントピルの共有キャッシュキー)に `page: usize` を追加 — ヒントバーの "Page p/N" セグメントがページ送りだけで変わるため、キャッシュを正しく無効化する。
+- **入力**(`session_overview/input.rs`): `OverviewAction::{PageForward, PageBack}` を追加し、`overview_key_action` で PageUp/PageDown(無 Cmd)と Cmd+[ / Cmd+](既存 Cmd+digit と同じ「他修飾キーなし」規律)を解決する。
+- **ヒントバー**(`session_overview/text.rs`): `overview_hint_bar_text`/`_ascii`/`_compact`/`overview_hint_bar_row` が `page`/`page_count` を追加引数に取り、`page_count > 1` のときのみ "Page p/N" を追記する。
+- **spec 上の supersede**: REQ-OV-10/⚠F(title-only placeholder 行への退化)は v3 のページング層の下では到達しない経路になる — `compute_overview_grid` 自体は無改変のため、コード上は依然として overflow/placeholder のロジックを保持するが(v1 直呼び出しの回帰テストが引き続き検証する)、v3 のページ送り層を経由する限り常に `live_cap = min(len, 9) = len`(スライス長は常に ≤9)となり、`overflow` は発生しない。
+
+#### L3 — Acceptance Criteria (v3 追加分)
+
+- **AC-OV-18a** (REQ-OV-18) [MH] [unit] — Given `overview_page_count(len, page_size)`、When `len=0,9,10,25`(`page_size=9`)、Then それぞれ `1,1,2,3` を返す(0 件でも最小 1 ページ)。
+- **AC-OV-18b** (REQ-OV-18) [MH] [unit] — Given `overview_page_slice_range(len, page_size, page)` を `len` にわたる全ページで呼ぶ、When 結果の範囲を連結、Then `0..len` を過不足・重複なくちょうど1回ずつ覆う(スライス分割の非重複・非欠落)。
+- **AC-OV-18c** (REQ-OV-18) [MH] [unit] — Given `clamp_overview_page(page, len, page_size)`、When `page` が総ページ数を超える、Then 最終ページへクランプする。
+- **AC-OV-18d** (REQ-OV-18) [MH] [unit] — Given `page_step(page, direction, len, page_size)`、When 先頭ページで back / 最終ページで forward、Then クランプしラップしない。
+- **AC-OV-18e** (REQ-OV-18) [MH] [unit] — Given `page_after_wheel`、When 蓄積が `WHEEL_PAGE_THRESHOLD` 未満、Then ページ不変で蓄積のみ加算;When しきい値を跨ぐ、Then ちょうど 1 ページだけ送り、超過分を次回へ繰り越す(1 回の呼び出しでは巨大なデルタでも 1 ページしか送らない — トラックパッドの1ジェスチャで複数ページ飛ばない);When 端で跨ぐ、Then ページは動かず蓄積を 0 にリセットする(端に張り付いたスワイプが方向反転時に暴発しないため)。
+- **AC-OV-18f** (REQ-OV-18) [MH] [unit] — Given `App::overview_page_view()` が返す各ページのスライス、When `compute_overview_grid` へ渡す、Then 返る `OverviewLayout.placeholders` は常に空で `overflow` は常に `false`(どのページにも placeholder 行が現れない)。
+- **AC-OV-19** (REQ-OV-19) [MH] [unit] — Given `overview_hint_bar_text(n, page, page_count)`、When `page_count<=1`、Then v1/v2 と同一の文言(回帰);When `page_count>1`、Then 末尾に 1-indexed の "Page p/N" が付く。
+- **AC-OV-20** (REQ-OV-20) [MH] [unit] — Given 検索クエリの変更、When `set_overview_search_query` を評価、Then ページと選択の両方が 0 へリセットされる。
+- **AC-NF-14** (REQ-NF-14) [MH] [unit] — Given 複数ページにまたがるタブ集合、When 現在ページ以外のタブが dirty になった状態で `due_overview_tile_ids`/`overview_backlog_decision` を評価、Then 非表示ページのタブは候補に現れない(現在ページのスライスのみが対象)。
+
+### Traceability — v3 追加分(REQ ↔ AC)
+
+| REQ | AC | 優先度 |
+|---|---|---|
+| REQ-OV-18 | AC-OV-18a, AC-OV-18b, AC-OV-18c, AC-OV-18d, AC-OV-18e, AC-OV-18f | MH |
+| REQ-OV-19 | AC-OV-19 | MH |
+| REQ-OV-20 | AC-OV-20 | MH |
+| REQ-NF-14 | AC-NF-14 | MH |
+
+**Coverage: v3 追加 4/4 要件が ≥1 AC にトレース = 100%**(v3 追加 AC 総数 **9**、全 [MH])。v1+v2+v3 合算した本ファイル全体のカバレッジ: 34/34 要件 = 100%、AC 総数 50。

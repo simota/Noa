@@ -13,8 +13,10 @@ mod render;
 mod text;
 
 pub use input::{
-    OverviewAction, OverviewEscapeAction, move_overview_selection, overview_escape_action,
-    overview_initial_selection, overview_key_action, overview_tab_filter,
+    OverviewAction, OverviewEscapeAction, WHEEL_PAGE_THRESHOLD, clamp_overview_page,
+    move_overview_selection, overview_escape_action, overview_initial_selection,
+    overview_key_action, overview_page_count, overview_page_slice_range, overview_tab_filter,
+    overview_wheel_accum_on_show, page_after_wheel, page_step,
 };
 pub use layout::{
     OverviewChrome, OverviewLayout, compute_overview_grid, hit_test_overview_grid,
@@ -93,6 +95,23 @@ mod tests {
             assert_equal_tile_size(&layout.tiles);
             assert_row_major(&layout.tiles, expected_cols);
             assert_no_overlap(&layout.tiles);
+        }
+    }
+
+    // A5 guard (v3 paging): every page is fed at most `OVERVIEW_GRID_CAP`
+    // tiles (the page slice), so `compute_overview_grid` must never degrade
+    // to placeholders/overflow for any length in that range — a page has no
+    // placeholder rows by construction.
+    #[test]
+    fn compute_overview_grid_never_yields_placeholders_or_overflow_at_or_under_the_cap() {
+        for tab_count in 0..=OVERVIEW_GRID_CAP {
+            let layout = compute_overview_grid(tab_count, BOUNDS, OVERVIEW_GRID_CAP, 0, 0);
+            assert!(
+                layout.placeholders.is_empty(),
+                "placeholders for {tab_count}"
+            );
+            assert!(!layout.overflow, "overflow for {tab_count}");
+            assert_eq!(layout.tiles.len(), tab_count);
         }
     }
 
@@ -499,6 +518,160 @@ mod tests {
         assert_eq!(overview_initial_selection(&source_ids, 3, Some(&99)), 0);
     }
 
+    // --- v3 paging (REQ-OV-18/19/20) ----------------------------------------
+
+    #[test]
+    fn overview_page_count_computes_ceil_division_with_a_floor_of_one() {
+        assert_eq!(overview_page_count(0, 9), 1, "an empty source still has one page");
+        assert_eq!(overview_page_count(9, 9), 1);
+        assert_eq!(overview_page_count(10, 9), 2);
+        assert_eq!(overview_page_count(25, 9), 3);
+    }
+
+    #[test]
+    fn overview_page_slice_range_partitions_the_source_with_no_overlap_or_gap() {
+        let len = 25;
+        let page_size = 9;
+        let page_count = overview_page_count(len, page_size);
+
+        let mut covered = Vec::new();
+        for page in 0..page_count {
+            let range = overview_page_slice_range(len, page_size, page);
+            assert!(range.len() <= page_size, "page {page} exceeds page_size");
+            covered.extend(range);
+        }
+        covered.sort_unstable();
+        assert_eq!(
+            covered,
+            (0..len).collect::<Vec<_>>(),
+            "every source index must appear exactly once across all pages"
+        );
+    }
+
+    #[test]
+    fn clamp_overview_page_clamps_an_over_range_page_to_the_last_page() {
+        // 10 items at 9/page = pages [0, 1]; page 5 is past the end.
+        assert_eq!(clamp_overview_page(5, 10, 9), 1);
+        assert_eq!(clamp_overview_page(0, 10, 9), 0);
+        // An empty source still has exactly one (empty) page: page 0.
+        assert_eq!(clamp_overview_page(3, 0, 9), 0);
+    }
+
+    #[test]
+    fn page_step_clamps_at_both_ends_without_wrapping() {
+        // 25 items at 9/page = pages [0, 1, 2].
+        assert_eq!(page_step(0, -1, 25, 9), 0, "back from the first page stays put");
+        assert_eq!(page_step(2, 1, 25, 9), 2, "forward from the last page stays put");
+        assert_eq!(page_step(1, 1, 25, 9), 2);
+        assert_eq!(page_step(1, -1, 25, 9), 0);
+    }
+
+    #[test]
+    fn page_after_wheel_accumulates_below_threshold_without_flipping() {
+        let (page, accum) = page_after_wheel(0, 0.0, WHEEL_PAGE_THRESHOLD / 3.0, 25, 9);
+        assert_eq!(page, 0);
+        assert_eq!(accum, WHEEL_PAGE_THRESHOLD / 3.0);
+    }
+
+    // Sign convention (mirrors `mouse_wheel_viewport_scroll`'s
+    // `delta_y > 0.0 => Up`): a negative accumulated delta steps forward.
+    #[test]
+    fn page_after_wheel_flips_one_page_and_carries_the_remainder_on_crossing() {
+        let already = -(WHEEL_PAGE_THRESHOLD - 20.0);
+        let (page, accum) = page_after_wheel(0, already, -50.0, 25, 9);
+        assert_eq!(page, 1);
+        assert_eq!(accum, already - 50.0 + WHEEL_PAGE_THRESHOLD);
+    }
+
+    // Trackpad `PixelDelta` gestures can deliver one oversized sample; it must
+    // still flip only one page, never several, per call.
+    #[test]
+    fn page_after_wheel_never_flips_more_than_one_page_per_call() {
+        let (page, _) = page_after_wheel(0, 0.0, -(WHEEL_PAGE_THRESHOLD * 10.0), 25, 9);
+        assert_eq!(page, 1);
+    }
+
+    // Regression (Radar fix 2): the carried remainder after a flip must be
+    // bounded to a magnitude less than the threshold, or a single oversized
+    // sample (10x threshold here) leaves enough carry that the very next
+    // call — even with a near-zero delta and no further user input — flips
+    // again on its own.
+    #[test]
+    fn page_after_wheel_oversized_single_delta_does_not_cascade_into_a_second_flip() {
+        let (page, accum) = page_after_wheel(0, 0.0, -(WHEEL_PAGE_THRESHOLD * 10.0), 25, 9);
+        assert_eq!(page, 1, "first call: exactly one flip");
+        assert!(
+            accum.abs() < WHEEL_PAGE_THRESHOLD,
+            "carry must be bounded below the threshold, got {accum}"
+        );
+
+        let (page_again, _) = page_after_wheel(page, accum, -0.01, 25, 9);
+        assert_eq!(page_again, page, "second call: a tiny delta must not flip again");
+    }
+
+    #[test]
+    fn page_after_wheel_saturates_at_both_ends_and_resets_the_accumulator() {
+        // Already at page 0: crossing "back" again stays at 0, and the
+        // accumulator resets rather than carrying a remainder that would
+        // otherwise snap forward several pages the instant the user reverses
+        // direction.
+        let (page, accum) = page_after_wheel(0, 0.0, WHEEL_PAGE_THRESHOLD, 25, 9);
+        assert_eq!(page, 0);
+        assert_eq!(accum, 0.0);
+
+        // Already at the last page (index 2 of 3): crossing "forward" again
+        // stays put and likewise resets.
+        let (page, accum) = page_after_wheel(2, 0.0, -WHEEL_PAGE_THRESHOLD, 25, 9);
+        assert_eq!(page, 2);
+        assert_eq!(accum, 0.0);
+    }
+
+    // Regression (Radar fix 1): `App::show_tab_overview` assigns this seam's
+    // output — instead of a bare literal — in the same unconditional
+    // REQ-OV-14 block that resets `page` on every show, so any residue left
+    // over from before the overlay was last hidden (the re-host branch and
+    // `hide_tab_overview` both leave `wheel_accum` untouched on their own)
+    // can never survive into a reopen.
+    #[test]
+    fn overview_wheel_accum_always_resets_to_zero_on_show() {
+        assert_eq!(overview_wheel_accum_on_show(), 0.0);
+    }
+
+    #[test]
+    fn overview_key_action_resolves_page_navigation_keys() {
+        let no_mods = ModifiersState::empty();
+        assert_eq!(
+            overview_key_action(&Key::Named(NamedKey::PageDown), no_mods),
+            Some(OverviewAction::PageForward)
+        );
+        assert_eq!(
+            overview_key_action(&Key::Named(NamedKey::PageUp), no_mods),
+            Some(OverviewAction::PageBack)
+        );
+
+        let cmd = ModifiersState::SUPER;
+        assert_eq!(
+            overview_key_action(&Key::Character("]".into()), cmd),
+            Some(OverviewAction::PageForward)
+        );
+        assert_eq!(
+            overview_key_action(&Key::Character("[".into()), cmd),
+            Some(OverviewAction::PageBack)
+        );
+        // No Cmd held: not part of the Overview keymap (a plain `[`/`]`
+        // types into the "Search sessions" field instead).
+        assert_eq!(
+            overview_key_action(&Key::Character("]".into()), no_mods),
+            None
+        );
+        // A shifted combo does not misfire (mirrors the Cmd+digit modifier
+        // discipline tested above).
+        assert_eq!(
+            overview_key_action(&Key::Character("]".into()), cmd | ModifiersState::SHIFT),
+            None
+        );
+    }
+
     #[test]
     fn overview_key_action_resolves_arrows_return_and_escape() {
         let no_mods = ModifiersState::empty();
@@ -780,25 +953,49 @@ mod tests {
     #[test]
     fn hint_bar_text_substitutes_the_live_tile_count() {
         assert_eq!(
-            overview_hint_bar_text(6),
+            overview_hint_bar_text(6, 0, 1),
             "⌘1-6 to switch・↑↓←→ to navigate・Return to open・Tab to zoom・esc to close"
         );
         assert_eq!(
-            overview_hint_bar_text(9),
+            overview_hint_bar_text(9, 0, 1),
             "⌘1-9 to switch・↑↓←→ to navigate・Return to open・Tab to zoom・esc to close"
         );
         // Never renders "1-0": a zero-tile overview still shows "1-1".
         assert_eq!(
-            overview_hint_bar_text(0),
+            overview_hint_bar_text(0, 0, 1),
             "⌘1-1 to switch・↑↓←→ to navigate・Return to open・Tab to zoom・esc to close"
+        );
+    }
+
+    // v3 paging (REQ-OV-19): a single page (`page_count <= 1`) renders
+    // exactly as before paging existed; more than one page appends a
+    // trailing "Page p/N" segment, 1-indexed for display.
+    #[test]
+    fn hint_bar_text_appends_page_segment_only_when_there_is_more_than_one_page() {
+        assert_eq!(
+            overview_hint_bar_text(6, 0, 1),
+            "⌘1-6 to switch・↑↓←→ to navigate・Return to open・Tab to zoom・esc to close",
+            "a single page must render identically to pre-paging text"
+        );
+        assert_eq!(
+            overview_hint_bar_text(9, 0, 3),
+            "⌘1-9 to switch・↑↓←→ to navigate・Return to open・Tab to zoom・esc to close・Page 1/3"
+        );
+        assert_eq!(
+            overview_hint_bar_text(9, 2, 3),
+            "⌘1-9 to switch・↑↓←→ to navigate・Return to open・Tab to zoom・esc to close・Page 3/3"
         );
     }
 
     #[test]
     fn hint_bar_ascii_fallback_mirrors_the_unicode_range() {
         assert_eq!(
-            overview_hint_bar_text_ascii(6),
+            overview_hint_bar_text_ascii(6, 0, 1),
             "cmd+1-6 to switch / arrows to navigate / return to open / tab to zoom / esc to close"
+        );
+        assert_eq!(
+            overview_hint_bar_text_ascii(6, 1, 2),
+            "cmd+1-6 to switch / arrows to navigate / return to open / tab to zoom / esc to close / Page 2/2"
         );
     }
 
@@ -835,12 +1032,12 @@ mod tests {
     #[test]
     fn hint_bar_row_prefers_full_text_then_compact_and_never_overflows() {
         // Wide enough: the full sentence, centered.
-        let full = overview_hint_bar_row(6, 120);
+        let full = overview_hint_bar_row(6, 0, 1, 120);
         assert!(full.contains("to switch"));
         assert!(text_cell_width(&full) <= 120);
 
         // Too narrow for the full sentence (75 cells): the compact variant.
-        let compact = overview_hint_bar_row(6, 65);
+        let compact = overview_hint_bar_row(6, 0, 1, 65);
         assert!(compact.contains("⌘1-6 switch"));
         assert!(!compact.contains("to switch"));
         assert!(text_cell_width(&compact) <= 65);
@@ -848,9 +1045,26 @@ mod tests {
         // Narrower than even the compact variant: hard head-anchored clip —
         // the row feeds a single-row `Terminal`, where overflow wraps and
         // scrolls, leaving only the sentence's tail visible.
-        let clipped = overview_hint_bar_row(6, 10);
+        let clipped = overview_hint_bar_row(6, 0, 1, 10);
         assert!(clipped.starts_with("⌘1-6"));
         assert!(text_cell_width(&clipped) <= 10);
+    }
+
+    // v3 paging: the row-composing seam also carries the "Page p/N" segment
+    // through both the full and compact variants, still hard-clipped to `cols`.
+    #[test]
+    fn hint_bar_row_includes_page_segment_when_paged() {
+        let full = overview_hint_bar_row(6, 1, 2, 120);
+        assert!(full.contains("Page 2/2"));
+        assert!(text_cell_width(&full) <= 120);
+
+        // Narrow enough to force the compact variant (full+page is well over
+        // 75 cells) but still wide enough for compact+page (~70 cells) to
+        // survive the hard clip intact.
+        let compact = overview_hint_bar_row(6, 1, 2, 75);
+        assert!(!compact.contains("to switch"), "expected the compact variant");
+        assert!(compact.contains("Page 2/2"));
+        assert!(text_cell_width(&compact) <= 75);
     }
 
     #[test]

@@ -203,32 +203,68 @@ pub fn sanitize_placeholder_label(label: &str, max_cols: u16) -> String {
         .collect()
 }
 
+/// The "Page p/N" segment appended to the hint bar when the Overview spans
+/// more than one page (v3 paging, REQ-OV-19); `None` for a single page, so
+/// callers append nothing and the hint bar is unchanged from before paging
+/// existed. `page` is the 0-indexed current page; the segment displays it
+/// 1-indexed (`page + 1`) to match `⌘1-N`'s 1-indexed tile numbering.
+fn overview_page_segment(page: usize, page_count: usize) -> Option<String> {
+    (page_count > 1).then(|| format!("Page {}/{page_count}", page + 1))
+}
+
 /// Build the bottom hint-bar text (REQ-OV-17). `live_tile_count` is the number
-/// of live thumbnail tiles (`min(tab_count, cap)`); the `⌘1-N` range tracks it
-/// dynamically rather than hard-coding the mockup's "1-6".
+/// of live thumbnail tiles on the current page (`min(remaining_tabs, cap)`);
+/// the `⌘1-N` range tracks it dynamically rather than hard-coding the
+/// mockup's "1-6". `page`/`page_count` add a trailing "Page p/N" segment when
+/// the Overview spans more than one page (v3 paging, REQ-OV-19); a
+/// single-page Overview (`page_count <= 1`) renders exactly as before.
 ///
 /// NOTE (manual-verify): the `⌘`, arrow, and `・` glyphs depend on font
 /// fallback. If they render as tofu, swap to the ASCII form returned by
 /// [`overview_hint_bar_text_ascii`] (a compile-time swap at the one call site)
 /// and record the deviation.
-pub fn overview_hint_bar_text(live_tile_count: usize) -> String {
+pub fn overview_hint_bar_text(live_tile_count: usize, page: usize, page_count: usize) -> String {
     let n = live_tile_count.max(1);
-    format!("⌘1-{n} to switch・↑↓←→ to navigate・Return to open・Tab to zoom・esc to close")
+    let mut text =
+        format!("⌘1-{n} to switch・↑↓←→ to navigate・Return to open・Tab to zoom・esc to close");
+    if let Some(segment) = overview_page_segment(page, page_count) {
+        text.push('・');
+        text.push_str(&segment);
+    }
+    text
 }
 
 /// ASCII fallback for [`overview_hint_bar_text`] when the Unicode glyphs tofu.
-pub fn overview_hint_bar_text_ascii(live_tile_count: usize) -> String {
+pub fn overview_hint_bar_text_ascii(
+    live_tile_count: usize,
+    page: usize,
+    page_count: usize,
+) -> String {
     let n = live_tile_count.max(1);
-    format!(
+    let mut text = format!(
         "cmd+1-{n} to switch / arrows to navigate / return to open / tab to zoom / esc to close"
-    )
+    );
+    if let Some(segment) = overview_page_segment(page, page_count) {
+        text.push_str(" / ");
+        text.push_str(&segment);
+    }
+    text
 }
 
 /// Compact fallback for [`overview_hint_bar_text`] when the hint bar is too
 /// narrow for the full sentence: same key hints, connective words dropped.
-pub fn overview_hint_bar_text_compact(live_tile_count: usize) -> String {
+pub fn overview_hint_bar_text_compact(
+    live_tile_count: usize,
+    page: usize,
+    page_count: usize,
+) -> String {
     let n = live_tile_count.max(1);
-    format!("⌘1-{n} switch・↑↓←→ navigate・Return open・Tab zoom・esc close")
+    let mut text = format!("⌘1-{n} switch・↑↓←→ navigate・Return open・Tab zoom・esc close");
+    if let Some(segment) = overview_page_segment(page, page_count) {
+        text.push('・');
+        text.push_str(&segment);
+    }
+    text
 }
 
 /// Grid-cell width of `text` (the same `unicode-width` semantics `noa-grid`
@@ -258,14 +294,21 @@ fn clip_to_cols(text: &str, cols: usize) -> String {
 /// if it fits `cols`, otherwise the compact variant, centered and
 /// hard-clipped. The clip matters — the row is fed to a synthetic single-row
 /// `Terminal`, where overflow wraps-and-scrolls and would leave only the tail
-/// of the sentence visible.
-pub fn overview_hint_bar_row(live_tile_count: usize, cols: u16) -> String {
+/// of the sentence visible. `page`/`page_count` thread through to
+/// [`overview_hint_bar_text`]/[`overview_hint_bar_text_compact`] for the v3
+/// paging segment.
+pub fn overview_hint_bar_row(
+    live_tile_count: usize,
+    page: usize,
+    page_count: usize,
+    cols: u16,
+) -> String {
     let cols = cols as usize;
-    let full = overview_hint_bar_text(live_tile_count);
+    let full = overview_hint_bar_text(live_tile_count, page, page_count);
     let text = if text_cell_width(&full) <= cols {
         full
     } else {
-        overview_hint_bar_text_compact(live_tile_count)
+        overview_hint_bar_text_compact(live_tile_count, page, page_count)
     };
     clip_to_cols(&center_label(&text, cols as u16), cols)
 }

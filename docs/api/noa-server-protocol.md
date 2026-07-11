@@ -8,6 +8,7 @@
 - **WebSocket over TCP**: `ws://127.0.0.1:<server-port>/`(既定ポート `61771`)。TLS なし(loopback 限定 bind。リモートからは SSH/Tailscale 等のトンネル終端で到達させる)。
 - メッセージは WS テキストフレームの **JSON-RPC 2.0**。1 メッセージ ≤ 1 MiB、1 フレーム ≤ 256 KiB(超過で接続クローズ)。
 - 同時接続上限 32(超過 accept は即クローズ)。
+- **接続期限**: WS handshake は 5 秒以内、`noa.hello` の成功は接続から 10 秒以内。超過した接続はサーバー側でクローズされる。
 
 ## 2. JSON-RPC 規約
 

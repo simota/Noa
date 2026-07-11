@@ -109,7 +109,7 @@ ID(`windowGroupId`/`windowId`/`paneId`)は全て **10 進文字列**。
 | 症状 | 確認 |
 |------|------|
 | ポートが開かない | `server-enable` が true か / ログに `noa-ipc: failed to bind` がないか / `lsof -iTCP:61771` |
-| 接続即切断 | メッセージ/フレームサイズ上限(1MiB/256KiB)超過、または接続数 32 超過 |
+| 接続即切断 | メッセージ/フレームサイズ上限(1MiB/256KiB)超過、接続数 32 超過、または `noa.hello` を接続から 10 秒以内に完了していない(handshake 自体は 5 秒期限) |
 | 全メソッドが -32001 | `noa.hello` を先に送っているか / トークンがファイルと一致するか(`server-token` 設定時はそちらが優先) |
 | sendText が -32003 | `server-scopes` に `input` が明示列挙されているか(`control` では不可) |
 | stateChanged が来ない | `subscribe` の `events` に `state_changed` を含めたか / busy・attention・name 変化は即時、cwd・preview 変化は最大 500ms 遅延 |

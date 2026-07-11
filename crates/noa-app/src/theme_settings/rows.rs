@@ -257,6 +257,15 @@ pub(crate) struct RevertValues {
     pub(crate) background_image_interval_secs: u64,
     pub(crate) sidebar_preview_lines: usize,
     pub(crate) quick_terminal_size: f32,
+    /// TSV2-1: the commit-only rows (R-8) were previously left out of this
+    /// snapshot entirely, so [`super::revert_updates`] never wrote them
+    /// back on undo — commit and undo must cover the exact same key set,
+    /// not just the "live" subset.
+    pub(crate) window_padding_x: f32,
+    pub(crate) window_padding_y: f32,
+    pub(crate) macos_titlebar_style: MacosTitlebarStyle,
+    pub(crate) confirm_quit: bool,
+    pub(crate) font_family: String,
 }
 
 /// R-34/AC-49-51 (ADR-4): the config's pair-appearance context, resolved by

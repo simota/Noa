@@ -1550,6 +1550,11 @@ fn sample_revert(theme_name: &str) -> RevertValues {
         background_image_interval_secs: 30,
         sidebar_preview_lines: 3,
         quick_terminal_size: 0.4,
+        window_padding_x: 2.0,
+        window_padding_y: 2.0,
+        macos_titlebar_style: MacosTitlebarStyle::Native,
+        confirm_quit: true,
+        font_family: "Menlo".to_string(),
     }
 }
 
@@ -1573,6 +1578,61 @@ fn revert_updates_writes_every_snapshot_field_unconditionally() {
     assert_eq!(
         updates.iter().find(|(k, _)| k == "background-blur-radius"),
         Some(&("background-blur-radius".to_string(), "5".to_string()))
+    );
+}
+
+// TSV2-1 (judge, CONFIRMED): the 5 commit-only rows were missing from
+// `RevertValues`/`revert_updates` entirely, so a commit of any of
+// font-family / window-padding-x / window-padding-y / macos-titlebar-style
+// / confirm-quit followed by an Undo silently left the disk value at the
+// committed (unwanted) value instead of restoring the pre-open snapshot —
+// asymmetric with `commit_updates`, which does write all of them.
+#[test]
+fn revert_updates_restores_all_five_commit_only_rows() {
+    let updates = revert_updates(&sample_revert("3024 Day"), None);
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "font-family"),
+        Some(&("font-family".to_string(), "Menlo".to_string())),
+        "font-family must revert"
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "window-padding-x"),
+        Some(&("window-padding-x".to_string(), "2".to_string())),
+        "window-padding-x must revert"
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "window-padding-y"),
+        Some(&("window-padding-y".to_string(), "2".to_string())),
+        "window-padding-y must revert"
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "macos-titlebar-style"),
+        Some(&("macos-titlebar-style".to_string(), "native".to_string())),
+        "macos-titlebar-style must revert"
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "confirm-quit"),
+        Some(&("confirm-quit".to_string(), "true".to_string())),
+        "confirm-quit must revert"
+    );
+}
+
+// TSV2-1: `macos-titlebar-style`'s serializer must agree with
+// `commit_updates`'s for *both* variants, not just whichever one
+// `sample_revert` happens to use — a literal `"native"`/`"transparent"`
+// string mismatch between the two paths would silently corrupt the file on
+// undo even though this same test file's `commit_updates` tests pass.
+#[test]
+fn revert_updates_macos_titlebar_style_serialization_matches_commit_updates() {
+    let mut revert = sample_revert("3024 Day");
+    revert.macos_titlebar_style = MacosTitlebarStyle::Transparent;
+    let updates = revert_updates(&revert, None);
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "macos-titlebar-style"),
+        Some(&(
+            "macos-titlebar-style".to_string(),
+            "transparent".to_string()
+        ))
     );
 }
 

@@ -751,6 +751,7 @@ impl App {
         self.config.background_image_repeat = payload.revert.background_image_repeat;
         self.config.background_image_interval_secs = payload.revert.background_image_interval_secs;
         self.config.cursor_style = Some(payload.revert.cursor_style);
+        sync_reverted_confirm_quit_and_quick_terminal_size(&mut self.config, &payload.revert);
         self.apply_runtime_font_size(window_id, payload.revert.font_size);
         self.apply_live_cursor_style(payload.revert.cursor_style);
         self.apply_live_background_opacity(payload.revert.background_opacity);
@@ -979,6 +980,31 @@ fn resolve_current_theme(config: &AppConfig, appearance: winit::window::Theme) -
         .unwrap_or_default()
 }
 
+/// TSV2-1 (judge, CONFIRMED): [`sync_config_from_committed_live_rows`]
+/// mirrors `confirm-quit` and (via [`sync_quick_terminal_size_from_committed_rows`])
+/// `quick-terminal-size` into `self.config` on a successful commit, because
+/// both are read back out of `self.config` at runtime rather than applied
+/// live like the R-8 `is_live` rows — an Undo that only rewrote the config
+/// *file* left the running session's `self.config` still holding the
+/// committed (unwanted) value. Standalone (rather than inlined into
+/// [`App::undo_theme_settings_commit`]) so this mirror can be asserted
+/// directly without building a full `App`, matching
+/// `sync_quick_terminal_size_from_committed_rows`'s existing pattern.
+/// `window-padding-x/y`, `macos-titlebar-style`, and `font-family` are
+/// deliberately excluded here: `sync_config_from_committed_live_rows` never
+/// mirrors them into `self.config` either (they're commit-only rows whose
+/// effect is deferred to the next launch), so Undo keeps that exact same
+/// asymmetry — only [`crate::theme_settings::revert_updates`]'s file write
+/// covers them.
+fn sync_reverted_confirm_quit_and_quick_terminal_size(
+    config: &mut AppConfig,
+    revert: &crate::theme_settings::RevertValues,
+) {
+    config.confirm_quit = revert.confirm_quit;
+    config.quick_terminal_size =
+        quick_terminal_size_from_height_fraction(revert.quick_terminal_size);
+}
+
 fn sync_quick_terminal_size_from_committed_rows(
     config: &mut AppConfig,
     rows: &[SettingsRow; SettingsRowKind::COUNT],
@@ -1127,6 +1153,56 @@ mod commit_theme_settings_tests {
         assert!(
             (quick_terminal_height_fraction(config.quick_terminal_size) - 0.45).abs() < 0.001,
             "committed quick terminal height should update AppConfig for the next toggle"
+        );
+    }
+
+    // TSV2-1 (judge, CONFIRMED): `confirm-quit` and `quick-terminal-size`
+    // are the two commit-only-in-the-R-8-sense rows that
+    // `sync_config_from_committed_live_rows` *does* mirror into
+    // `self.config` on commit (they're read back out of it at runtime,
+    // unlike font-family/window-padding/macos-titlebar-style) — Undo must
+    // mirror them back symmetrically, not just rewrite the file.
+    #[test]
+    fn undo_mirrors_confirm_quit_and_quick_terminal_size_back_into_app_config() {
+        let mut config = AppConfig::from_startup(
+            noa_config::StartupConfig::default(),
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
+        // Simulate the post-commit state a real session would have left
+        // `self.config` in: confirm-quit flipped off, quick-terminal grown.
+        config.confirm_quit = false;
+        config.quick_terminal_size = quick_terminal_size_from_height_fraction(0.9);
+
+        let revert = crate::theme_settings::RevertValues {
+            theme_name: String::new(),
+            font_size: 14.0,
+            cursor_style: noa_config::CursorShape::Block,
+            background_opacity: 1.0,
+            background_blur_radius: 0,
+            background_image: String::new(),
+            background_image_opacity: 1.0,
+            background_image_position: noa_config::BackgroundImagePosition::Center,
+            background_image_fit: noa_config::BackgroundImageFit::Contain,
+            background_image_repeat: false,
+            background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
+            sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
+            quick_terminal_size: 0.4,
+            window_padding_x: 2.0,
+            window_padding_y: 2.0,
+            macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
+            confirm_quit: true,
+            font_family: "Menlo".to_string(),
+        };
+        sync_reverted_confirm_quit_and_quick_terminal_size(&mut config, &revert);
+
+        assert!(
+            config.confirm_quit,
+            "confirm-quit must revert to the pre-open value"
+        );
+        assert!(
+            (quick_terminal_height_fraction(config.quick_terminal_size) - 0.4).abs() < 0.001,
+            "quick-terminal-size must revert to the pre-open value"
         );
     }
 

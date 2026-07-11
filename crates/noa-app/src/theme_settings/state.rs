@@ -204,6 +204,11 @@ impl ThemeSettings {
                     background_image_interval_secs: init.background_image_interval_secs,
                     sidebar_preview_lines: init.sidebar_preview_lines,
                     quick_terminal_size: init.quick_terminal_size,
+                    window_padding_x: init.window_padding_x,
+                    window_padding_y: init.window_padding_y,
+                    macos_titlebar_style: init.macos_titlebar_style,
+                    confirm_quit: init.confirm_quit,
+                    font_family: init.font_family.clone(),
                 },
                 [
                     SettingsRow {
@@ -1440,6 +1445,23 @@ pub(crate) fn revert_updates(
         "quick-terminal-size".to_string(),
         format!("{:.2}", revert.quick_terminal_size),
     ));
+    // TSV2-1: the commit-only rows (R-8) must revert too — `commit_updates`
+    // writes them whenever `touched`, so an undo that skips them can leave
+    // the file at a value the user never asked to keep.
+    updates.push((
+        "window-padding-x".to_string(),
+        format!("{}", revert.window_padding_x),
+    ));
+    updates.push((
+        "window-padding-y".to_string(),
+        format!("{}", revert.window_padding_y),
+    ));
+    updates.push((
+        "macos-titlebar-style".to_string(),
+        macos_titlebar_style_config_value(revert.macos_titlebar_style).to_string(),
+    ));
+    updates.push(("confirm-quit".to_string(), revert.confirm_quit.to_string()));
+    updates.push(("font-family".to_string(), revert.font_family.clone()));
     updates
 }
 

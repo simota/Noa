@@ -1050,16 +1050,19 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                 if !attr_hint.is_null() {
                     let _: () = msg_send![effect, addSubview: attr_hint];
                 }
-                let favorites_w = 150.0;
+                // The chip's frame is right-aligned to the column boundary,
+                // but its left edge must never reach back into the `⌃D
+                // cycle` hint on a narrow card — clamp it to the hint's
+                // right edge so the two labels can't draw over each other.
+                let hint_end = pad + 3.0 * seg_w + 6.0 + 70.0;
+                let favorites_x = (col_split - pad - 150.0).max(hint_end + 8.0);
+                let favorites_w = (col_split - pad - favorites_x).max(0.0);
                 let favorites = make_label(
                     vm.favorites_chip,
                     system_font(11.5, WEIGHT_REGULAR),
                     if vm.favorites_only { accent } else { muted },
                     NSRect::new(
-                        NSPoint::new(
-                            col_split - pad - favorites_w,
-                            from_top(card_h, chip_row_y + 3.0, 14.0),
-                        ),
+                        NSPoint::new(favorites_x, from_top(card_h, chip_row_y + 3.0, 14.0)),
                         NSSize::new(favorites_w, 14.0),
                     ),
                 );

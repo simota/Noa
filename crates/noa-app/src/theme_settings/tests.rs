@@ -1373,3 +1373,362 @@ fn poll_reset_flash_clears_once_elapsed_and_reports_the_transition_once() {
         "already cleared: no further transition"
     );
 }
+
+// -----------------------------------------------------------------------
+// Radar (settings-panel-enrichment edge-case pass): the tests above cover
+// the AC-numbered happy paths; the tests below close boundary/branch gaps
+// the AC list didn't spell out (search × adjust/backspace interaction, the
+// restart_reason "reload-exempt" carve-out, Reset's opaque-startup gating,
+// and every RowDraft variant's default_for round-trip). New tests only.
+// -----------------------------------------------------------------------
+
+// R-7: `default_for` is the pure function every reset ultimately reads
+// from — this pins its literal output against noa-config's documented
+// defaults, independent of `reset_selected_row`'s own wiring (covered
+// separately below), so a mismatch between the two is caught even if the
+// match arms happened to agree with each other but not with the real
+// default.
+#[test]
+fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::FontSize),
+        RowDraft::FontSize(noa_config::DEFAULT_FONT_SIZE)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::BackgroundOpacity),
+        RowDraft::BackgroundOpacity(1.0)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::BackgroundBlurRadius),
+        RowDraft::BackgroundBlurRadius(0)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::BackgroundImage),
+        RowDraft::BackgroundImage(String::new())
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::BackgroundImageOpacity),
+        RowDraft::BackgroundImageOpacity(1.0)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::BackgroundImagePosition),
+        RowDraft::BackgroundImagePosition(BackgroundImagePosition::Center)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::BackgroundImageFit),
+        RowDraft::BackgroundImageFit(BackgroundImageFit::Contain)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::BackgroundImageRepeat),
+        RowDraft::BackgroundImageRepeat(false)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::BackgroundImageInterval),
+        RowDraft::BackgroundImageInterval(noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::CursorStyle),
+        RowDraft::CursorStyle(CursorShape::Block)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::FontFamily),
+        RowDraft::FontFamily(String::new())
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::WindowPadding),
+        RowDraft::WindowPadding(0.0, 0.0)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::MacosTitlebarStyle),
+        RowDraft::MacosTitlebarStyle(MacosTitlebarStyle::Native)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::SidebarPreviewLines),
+        RowDraft::SidebarPreviewLines(noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::QuickTerminalHeight),
+        RowDraft::QuickTerminalHeight(0.4)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ConfirmQuit),
+        RowDraft::ConfirmQuit(true)
+    );
+}
+
+// R-7/AC-18/AC-19: the state-machine half of the default_for round trip —
+// every one of the 16 row kinds, not just the 3 the AC-numbered tests
+// above happen to exercise (CursorStyle/FontSize/MacosTitlebarStyle),
+// resets to exactly `RowDraft::default_for(kind)` and marks touched.
+#[test]
+fn reset_selected_row_writes_default_for_and_marks_touched_for_every_row_kind() {
+    for kind in SettingsRowKind::ALL {
+        let mut settings = ThemeSettings::open(settings_init());
+        move_to_row(&mut settings, kind);
+
+        settings.reset_selected_row(Instant::now());
+
+        let idx = row_index(kind);
+        assert_eq!(
+            settings.rows()[idx].draft,
+            RowDraft::default_for(kind),
+            "{kind:?}"
+        );
+        assert!(settings.rows()[idx].touched, "{kind:?}");
+    }
+}
+
+// R-7: Reset's `RowEffect` for the two opaque-startup-sensitive rows must
+// respect the same `opaque_at_startup` gate `adjust` uses — untested by the
+// existing AC-18 cases (CursorStyle/FontSize never gate on this at all).
+#[test]
+fn reset_background_opacity_and_blur_effect_respects_opaque_startup_gating() {
+    let mut opaque = ThemeSettings::open(settings_init()); // opacity 1.0 = opaque
+    move_to_row(&mut opaque, SettingsRowKind::BackgroundOpacity);
+    opaque.adjust(-4, Instant::now());
+    assert_eq!(
+        opaque.reset_selected_row(Instant::now()),
+        RowEffect::None,
+        "opaque-at-startup must suppress the live effect even though the draft resets"
+    );
+    assert_eq!(
+        opaque.rows()[row_index(SettingsRowKind::BackgroundOpacity)].draft,
+        RowDraft::BackgroundOpacity(1.0)
+    );
+
+    move_to_row(&mut opaque, SettingsRowKind::BackgroundBlurRadius);
+    opaque.adjust(5, Instant::now());
+    assert_eq!(opaque.reset_selected_row(Instant::now()), RowEffect::None);
+
+    // Transparent startup: the same reset does report the live effect,
+    // proving the gate is conditional on `opaque_at_startup`, not an
+    // unconditional suppression for these two rows.
+    let mut transparent = ThemeSettings::open(transparent_init());
+    move_to_row(&mut transparent, SettingsRowKind::BackgroundOpacity);
+    transparent.adjust(-4, Instant::now());
+    assert_eq!(
+        transparent.reset_selected_row(Instant::now()),
+        RowEffect::Opacity(1.0)
+    );
+
+    move_to_row(&mut transparent, SettingsRowKind::BackgroundBlurRadius);
+    transparent.adjust(5, Instant::now());
+    assert_eq!(
+        transparent.reset_selected_row(Instant::now()),
+        RowEffect::Blur(0)
+    );
+}
+
+// R-7: the written config side of a reset — `commit_updates()` must carry
+// the just-reset default value for a touched row, not merely flip the
+// `touched` bit (which the AC-19 test already covers).
+#[test]
+fn commit_updates_includes_the_reset_default_value_for_a_touched_row() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+
+    settings.reset_selected_row(Instant::now());
+
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&("font-family".to_string(), String::new())),
+        "{updates:?}"
+    );
+}
+
+// R-1: `restart_reason`'s explicit exemption list (BackgroundImage and its
+// 5 sibling rows, plus ConfirmQuit/QuickTerminalHeight) never reports
+// `CommitOnly` even once touched — untested by name until now; the
+// existing `touched_commit_only_rows_show_restart_note` test only checks
+// these rows while they stay untouched (touching a *different* row,
+// FontFamily, in that test).
+#[test]
+fn restart_reason_never_reports_commit_only_for_the_reload_exempt_rows_even_when_touched() {
+    let mut settings = ThemeSettings::open(settings_init());
+
+    move_to_row(&mut settings, SettingsRowKind::BackgroundImage);
+    settings.push_text("/tmp/wall.png", Instant::now());
+    assert!(settings.rows()[row_index(SettingsRowKind::BackgroundImage)].touched);
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::BackgroundImage),
+        RestartReason::None
+    );
+
+    // BackgroundImageOpacity starts at 1.0 (its clamp ceiling) in
+    // `settings_init`, so `adjust(1, ..)` alone would clamp back to the
+    // same value and never flip `touched` — that row uses -1 instead, the
+    // rest use +1 (cycle/toggle rows change either direction).
+    let adjust_exempt = [
+        (SettingsRowKind::BackgroundImageOpacity, -1),
+        (SettingsRowKind::BackgroundImagePosition, 1),
+        (SettingsRowKind::BackgroundImageFit, 1),
+        (SettingsRowKind::BackgroundImageRepeat, 1),
+        (SettingsRowKind::BackgroundImageInterval, 1),
+        (SettingsRowKind::ConfirmQuit, 1),
+        (SettingsRowKind::QuickTerminalHeight, 1),
+    ];
+    for (kind, delta) in adjust_exempt {
+        move_to_row(&mut settings, kind);
+        settings.adjust(delta, Instant::now());
+        assert!(settings.rows()[row_index(kind)].touched, "{kind:?}");
+        assert_eq!(
+            settings.restart_reason(kind),
+            RestartReason::None,
+            "{kind:?} is exempt from the commit-only restart note"
+        );
+    }
+}
+
+// R-1/R-3: cross-checks the two independent signals against every row
+// under both opaque and transparent startup (32 combinations) — the
+// AC-numbered tests only exercise a handful of named rows; this closes the
+// remaining ones (the 8 background-image/misc rows, WindowPadding,
+// SidebarPreviewLines under opaque) with the documented invariant: a row
+// reads `Live` iff it's statically live AND not downgraded by an opaque
+// startup, `OnLaunch` otherwise (`OnSave` stays unconstructed pre-R-9).
+#[test]
+fn liveness_and_restart_reason_agree_on_every_row_under_opaque_and_transparent_startup() {
+    for init in [settings_init(), transparent_init()] {
+        let settings = ThemeSettings::open(init);
+        for kind in SettingsRowKind::ALL {
+            let liveness = settings.liveness(kind);
+            let reason = settings.restart_reason(kind);
+            let expect_live = kind.is_live() && reason != RestartReason::OpaqueStartup;
+            assert_eq!(
+                liveness == Liveness::Live,
+                expect_live,
+                "{kind:?}: liveness={liveness:?} reason={reason:?}"
+            );
+            if !expect_live {
+                assert_eq!(
+                    liveness,
+                    Liveness::OnLaunch,
+                    "{kind:?}: only Live/OnLaunch are constructed pre-R-9"
+                );
+            }
+        }
+    }
+}
+
+// R-5/Addendum D-3/FM-02: `adjust` must no-op while search owns the
+// keyboard, mirroring the guard `reset_selected_row` already has a test
+// for (`reset_is_a_no_op_while_search_is_active`) — untested for `adjust`
+// itself until now.
+#[test]
+fn adjust_is_a_no_op_while_search_is_active() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::CursorStyle);
+    settings.toggle_settings_search();
+    let before = settings.rows()[row_index(SettingsRowKind::CursorStyle)]
+        .draft
+        .clone();
+
+    let effect = settings.adjust(1, Instant::now());
+
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::CursorStyle)].draft,
+        before,
+        "adjust must no-op while search owns the keyboard"
+    );
+}
+
+// Addendum B: confirming a zero-match search must still exit cleanly
+// without panicking or mutating the selection — AC-14 only proves ↑↓ is a
+// no-op on zero matches, not that Enter/confirm is too.
+#[test]
+fn search_enter_with_zero_matches_exits_search_without_changing_selection() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+    settings.toggle_settings_search();
+    settings.push_text("zzzzzz", Instant::now());
+    assert_eq!(settings.settings_filtered_len(), 0);
+
+    settings.confirm_settings_search();
+
+    assert!(!settings.settings_search_active());
+    assert_eq!(
+        SettingsRowKind::ALL[settings.selected_row()],
+        SettingsRowKind::FontFamily,
+        "a zero-match confirm must leave the pre-search selection untouched"
+    );
+}
+
+// R-5: backspacing a search query all the way back to empty must restore
+// the full unfiltered row list, in `ALL` order — AC-15 only covers a query
+// that starts empty, not one that returns to empty via edits.
+#[test]
+fn search_backspace_to_empty_query_restores_every_row() {
+    let mut settings = ThemeSettings::open(settings_init());
+    settings.toggle_settings_search();
+    settings.push_text("cursor", Instant::now());
+    assert_eq!(settings.settings_filtered_len(), 1);
+
+    for _ in 0.."cursor".len() {
+        settings.backspace(Instant::now());
+    }
+
+    assert_eq!(settings.settings_filter(), "");
+    assert_eq!(settings.settings_filtered_len(), SettingsRowKind::COUNT);
+    for i in 0..SettingsRowKind::COUNT {
+        assert_eq!(settings.settings_filtered_row_index(i), Some(i));
+    }
+}
+
+// R-5 L2's open question, resolved for the other text-entry row type: the
+// existing `search_enter_and_exit_clear_in_progress_font_size_digit_entry`
+// only proves this for FontSize's digit buffer. BackgroundImage has its
+// own `background_image_text` buffer with the same "cleared means the next
+// keystroke replaces rather than resumes" contract (see
+// `push_background_image_text`'s empty-seed behavior, distinct from
+// `backspace`'s draft-seeded one).
+#[test]
+fn search_enter_and_exit_clear_in_progress_background_image_text_entry() {
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        background_image: "/tmp/old.png".to_string(),
+        ..settings_init()
+    });
+    move_to_row(&mut settings, SettingsRowKind::BackgroundImage);
+    settings.backspace(Instant::now()); // seeds the buffer from the draft: "/tmp/old.pn"
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::BackgroundImage)].draft,
+        RowDraft::BackgroundImage("/tmp/old.pn".to_string())
+    );
+
+    settings.toggle_settings_search();
+    settings.toggle_settings_search(); // back out, still on BackgroundImage
+
+    settings.push_text("X", Instant::now());
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::BackgroundImage)].draft,
+        RowDraft::BackgroundImage("X".to_string()),
+        "a cleared buffer means the next keystroke replaces the path, not resumes editing it"
+    );
+}
+
+// Addendum D-3/FM-06's compound test, for BackgroundImage: reset must clear
+// the in-progress text buffer exactly like it does for FontSize's digit
+// buffer (`reset_clears_in_progress_font_size_digit_entry`), so a stale
+// buffer can't resurrect the pre-reset path on the next keystroke.
+#[test]
+fn reset_clears_in_progress_background_image_text_entry() {
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        background_image: "/tmp/old.png".to_string(),
+        ..settings_init()
+    });
+    move_to_row(&mut settings, SettingsRowKind::BackgroundImage);
+    settings.backspace(Instant::now()); // "/tmp/old.pn", buffer seeded from the draft
+
+    settings.reset_selected_row(Instant::now());
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::BackgroundImage)].draft,
+        RowDraft::BackgroundImage(String::new())
+    );
+
+    settings.push_text("Y", Instant::now());
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::BackgroundImage)].draft,
+        RowDraft::BackgroundImage("Y".to_string()),
+        "derives from the post-reset draft, not a resumed stale buffer"
+    );
+}

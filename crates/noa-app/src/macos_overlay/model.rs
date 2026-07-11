@@ -385,4 +385,16 @@ mod tests {
         let (rows, _) = settings_rows_budget(16, 1000.0, 66.0, 23.0, 34.0, 19.0, 16.0, false);
         assert_eq!(rows, 16);
     }
+
+    // Radar edge case: the two tests above only exercise the shrink loop's
+    // extremes (fits everything, or bottoms out at the floor of 3). This
+    // pins a middle value — the AppKit floor pane (240.0) without search —
+    // to prove the decrement loop actually converges to the row count that
+    // fits, rather than always landing on one of the two extremes.
+    #[test]
+    fn settings_rows_budget_shrinks_partially_to_the_row_count_that_fits() {
+        let (rows, height) = settings_rows_budget(16, 240.0, 66.0, 23.0, 34.0, 19.0, 16.0, false);
+        assert_eq!(rows, 5, "must land strictly between the floor (3) and the full count (16)");
+        assert!(height <= 240.0);
+    }
 }

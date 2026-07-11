@@ -659,6 +659,26 @@ mod theme_settings_session_tests {
         assert_eq!(session.state.selected_row(), 1);
         assert_eq!(held_snapshot.selected_row(), 0, "the held snapshot is untouched");
     }
+
+    // Radar edge case: the three tests above each prove a single fork in
+    // isolation. This chains two fork cycles back to back and checks every
+    // generation's snapshot stays frozen at its own value — independence
+    // must hold across a sequence of mutations, not just once.
+    #[test]
+    fn sequential_snapshot_and_mutation_cycles_stay_independent() {
+        let mut session = session();
+
+        let snap_0 = std::sync::Arc::clone(&session.state); // selected_row = 0
+        std::sync::Arc::make_mut(&mut session.state).move_down(); // forks: selected_row = 1
+        let snap_1 = std::sync::Arc::clone(&session.state);
+        std::sync::Arc::make_mut(&mut session.state).move_down(); // forks again: selected_row = 2
+
+        assert_eq!(snap_0.selected_row(), 0, "first-generation snapshot stays frozen");
+        assert_eq!(snap_1.selected_row(), 1, "second-generation snapshot stays frozen");
+        assert_eq!(session.state.selected_row(), 2, "live state keeps advancing");
+        assert!(!std::sync::Arc::ptr_eq(&snap_0, &snap_1));
+        assert!(!std::sync::Arc::ptr_eq(&snap_1, &session.state));
+    }
 }
 
 #[derive(Clone)]

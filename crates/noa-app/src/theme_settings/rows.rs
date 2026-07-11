@@ -4,7 +4,7 @@ use noa_config::{BackgroundImageFit, BackgroundImagePosition, CursorShape, Macos
 /// section is fixed for its whole lifetime by [`ThemeSettingsMode`] — see
 /// that type's doc comment; kept as its own type because every existing
 /// navigation method already matches on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Section {
     ThemePicker,
     SettingsRows,

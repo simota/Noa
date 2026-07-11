@@ -28,6 +28,8 @@ pub(crate) use sample::{Swatch, sample_swatches};
 #[allow(unused_imports)]
 pub(crate) use state::ConfigWriteFn;
 pub(crate) use state::ThemeSettings;
+#[cfg(test)]
+pub(crate) use state::take_scan_count;
 
 #[cfg(test)]
 mod tests;

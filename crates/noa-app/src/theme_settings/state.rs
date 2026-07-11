@@ -1,5 +1,7 @@
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use noa_config::{BackgroundImageFit, BackgroundImagePosition, CursorShape, MacosTitlebarStyle};
@@ -69,20 +71,25 @@ struct ThemeMatch {
 /// no window/GPU binding of its own — that lives in the `App`-side session,
 /// mirroring [`crate::command_palette::CommandPalette`].
 ///
-/// `Clone` exists solely so `App::redraw` can snapshot it out early (like
+/// `Clone` exists so `App::redraw` can snapshot it out early (like
 /// [`crate::command_palette::CommandPalette`]'s render payload) without
 /// holding a live borrow of `App::theme_settings` across the redraw's later
-/// `&mut self` calls — the catalog-sized `filtered` list makes this a real
-/// (if small) per-frame allocation while the overlay is open, which is an
-/// accepted deviation for this increment rather than a proper zero-copy
-/// render-payload type (mirroring `command_palette_snapshot`'s approach)
-/// that a follow-up could still add if this ever shows up on a profile.
+/// `&mut self` calls. `filtered`/`available_font_families` are `Arc`-wrapped
+/// (ADR-1/R-19/AC-25) so this clone never deep-copies the catalog-sized
+/// match list — it shares the same allocation via a refcount bump, the same
+/// zero-copy effect a dedicated render-payload type would have had, without
+/// a second type or a second set of accessors for the two draw paths to
+/// agree on.
 #[derive(Clone)]
 pub(crate) struct ThemeSettings {
     mode: ThemeSettingsMode,
     section: Section,
     filter: String,
-    filtered: Vec<ThemeMatch>,
+    /// `Arc`-wrapped (ADR-1): always replaced wholesale on a real recompute
+    /// (`recompute_filtered`/`refilter`), never mutated in place — so
+    /// `Arc::as_ptr` identity doubles as an O(1) "did the result set
+    /// change" signal for [`Self::view_fingerprint`] (ADR-2).
+    filtered: Arc<Vec<ThemeMatch>>,
     /// Index into `filtered`, meaningless (and unused) while `filtered` is
     /// empty (AC-16: the picker stays empty without resetting anything).
     highlighted: usize,
@@ -105,7 +112,10 @@ pub(crate) struct ThemeSettings {
     /// window can't transition opaque<->transparent at runtime, so this
     /// never changes for the life of one overlay session.
     opaque_at_startup: bool,
-    available_font_families: Vec<String>,
+    /// `Arc`-wrapped for the same reason as `filtered` (ADR-1) — this list
+    /// never changes after `open()`, so every clone would otherwise
+    /// duplicate it for nothing.
+    available_font_families: Arc<Vec<String>>,
     /// R-12/AC-23: set by a failed [`Self::commit`] write, rendered as a
     /// one-line error in the existing overlay text style. `None` normally,
     /// and on every successful [`Self::commit`] (a stale error from an
@@ -204,7 +214,7 @@ impl ThemeSettings {
             mode: init.mode,
             section: init.mode.fixed_section(),
             filter: String::new(),
-            filtered: Vec::new(),
+            filtered: Arc::new(Vec::new()),
             highlighted: 0,
             highlight_moved: false,
             selected_row: 0,
@@ -214,7 +224,7 @@ impl ThemeSettings {
             font_size_digits: None,
             background_image_text: None,
             opaque_at_startup: init.background_opacity >= 1.0,
-            available_font_families: init.available_font_families,
+            available_font_families: Arc::new(init.available_font_families),
             commit_error: None,
         };
         settings.recompute_filtered();
@@ -388,8 +398,9 @@ impl ThemeSettings {
                 if filtered.is_empty() {
                     return;
                 }
+                let previous_filter = self.filter.clone();
                 self.filter.push_str(&filtered);
-                self.refilter_and_mark();
+                self.refilter_and_mark(&previous_filter);
             }
             Section::SettingsRows => match SettingsRowKind::ALL[self.selected_row] {
                 SettingsRowKind::FontSize => self.push_font_size_digits(text, now),
@@ -404,8 +415,9 @@ impl ThemeSettings {
     pub(crate) fn backspace(&mut self, now: Instant) {
         match self.section {
             Section::ThemePicker => {
+                let previous_filter = self.filter.clone();
                 if self.filter.pop().is_some() {
-                    self.refilter_and_mark();
+                    self.refilter_and_mark(&previous_filter);
                 }
             }
             Section::SettingsRows => match SettingsRowKind::ALL[self.selected_row] {
@@ -730,16 +742,35 @@ impl ThemeSettings {
         self.available_font_families[next].clone()
     }
 
+    /// Always a full 574-entry catalog rescan — used only by [`Self::open`],
+    /// where there is no previous `filtered` result set to narrow from.
     fn recompute_filtered(&mut self) {
-        self.filtered = filter_themes(&self.filter);
+        self.filtered = Arc::new(filter_themes(&self.filter));
         self.highlighted = 0;
     }
 
-    /// Re-filter from `self.filter` and mark the highlight moved — unless
-    /// the new filter matches nothing, in which case the picker stays empty
+    /// R-21/NFR-8 (ADR-3): re-filter from `self.filter` after it changed
+    /// from `previous_filter`, then mark the highlight moved — unless the
+    /// new filter matches nothing, in which case the picker stays empty
     /// without disturbing the last preview (AC-16).
-    fn refilter_and_mark(&mut self) {
-        self.recompute_filtered();
+    ///
+    /// A forward edit — `self.filter` strictly extends `previous_filter`
+    /// (typing ahead) — only rescans the *previous* `filtered` result set
+    /// (AC-28): a theme that didn't match the shorter filter can never
+    /// match a longer one that starts with it, so the full catalog needs no
+    /// second look. Anything else (Backspace breaking the prefix
+    /// relationship, a wholesale replace) falls back to a full rescan
+    /// (AC-29) — never a narrowed one, which could otherwise hide a theme
+    /// the new, unrelated filter should have matched.
+    fn refilter_and_mark(&mut self, previous_filter: &str) {
+        self.filtered = if self.filter.len() > previous_filter.len()
+            && self.filter.starts_with(previous_filter)
+        {
+            Arc::new(narrow_filtered(&self.filtered, &self.filter))
+        } else {
+            Arc::new(filter_themes(&self.filter))
+        };
+        self.highlighted = 0;
         if !self.filtered.is_empty() {
             self.highlight_moved = true;
         }
@@ -908,6 +939,59 @@ impl ThemeSettings {
             }
         }
     }
+
+    /// Cheap, allocation-free identity for
+    /// [`crate::macos_overlay::sync_theme_settings`]'s change-detection key
+    /// (ADR-2/R-20/NFR-7): every field that can influence
+    /// [`crate::macos_overlay::theme_settings_view_model`]'s output funnels
+    /// into this hash, so a caller can tell "did the ViewModel just become
+    /// stale" without ever constructing one. `filtered`/
+    /// `available_font_families` compare by `Arc` pointer identity (ADR-1
+    /// replaces the whole `Arc` on every real recompute, never mutates it
+    /// in place) rather than hashing every catalog entry.
+    ///
+    /// Whoever adds a mutator that changes what the ViewModel shows must
+    /// add the corresponding field here — AC-60's property test
+    /// (`every_mutator_that_changes_state_changes_the_fingerprint`) walks
+    /// every existing mutator and asserts this holds; extend it alongside
+    /// any new one.
+    pub(crate) fn view_fingerprint(&self, hasher: &mut impl Hasher) {
+        self.mode.hash(hasher);
+        self.section.hash(hasher);
+        self.filter.hash(hasher);
+        (Arc::as_ptr(&self.filtered) as usize).hash(hasher);
+        self.highlighted.hash(hasher);
+        self.highlight_moved.hash(hasher);
+        self.selected_row.hash(hasher);
+        for row in &self.rows {
+            std::mem::discriminant(&row.draft).hash(hasher);
+            hash_row_draft_value(&row.draft, hasher);
+            row.touched.hash(hasher);
+        }
+        self.commit_error.hash(hasher);
+        self.font_size_digits.hash(hasher);
+        self.background_image_text.hash(hasher);
+        self.opaque_at_startup.hash(hasher);
+        (Arc::as_ptr(&self.available_font_families) as usize).hash(hasher);
+    }
+
+    /// Test-only convenience over [`Self::view_fingerprint`] — a `u64`
+    /// digest instead of a raw hasher, so property tests can compare
+    /// before/after values with a plain `assert_ne!`.
+    #[cfg(test)]
+    pub(crate) fn view_fingerprint_u64(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.view_fingerprint(&mut hasher);
+        hasher.finish()
+    }
+
+    /// AC-25/ADR-1 (R-19): the `filtered` list's `Arc` strong count — a
+    /// test-only introspection hook proving `Clone` shares the catalog-sized
+    /// match list instead of deep-copying it.
+    #[cfg(test)]
+    pub(crate) fn filtered_arc_strong_count(&self) -> usize {
+        Arc::strong_count(&self.filtered)
+    }
 }
 
 /// `cursor-style` config value for `shape` (mirrors
@@ -932,6 +1016,38 @@ fn macos_titlebar_style_config_value(style: MacosTitlebarStyle) -> &'static str 
     }
 }
 
+/// [`ThemeSettings::view_fingerprint`]'s per-`RowDraft` half — the
+/// discriminant itself is hashed by the caller (once, per row), so this
+/// only needs each variant's inner value. `f32` fields go through
+/// `to_bits()` (floats aren't `Hash`); the `noa_config` enums without a
+/// `Hash` impl reuse their existing config-string serializers instead of
+/// adding one just for this.
+fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
+    match draft {
+        RowDraft::FontSize(v)
+        | RowDraft::BackgroundOpacity(v)
+        | RowDraft::BackgroundImageOpacity(v)
+        | RowDraft::QuickTerminalHeight(v) => v.to_bits().hash(hasher),
+        RowDraft::BackgroundBlurRadius(v) => v.hash(hasher),
+        RowDraft::BackgroundImage(s) | RowDraft::FontFamily(s) => s.hash(hasher),
+        RowDraft::BackgroundImagePosition(position) => {
+            background_image_position_value(*position).hash(hasher);
+        }
+        RowDraft::BackgroundImageFit(fit) => background_image_fit_value(*fit).hash(hasher),
+        RowDraft::BackgroundImageRepeat(v) | RowDraft::ConfirmQuit(v) => v.hash(hasher),
+        RowDraft::BackgroundImageInterval(v) => v.hash(hasher),
+        RowDraft::CursorStyle(shape) => cursor_shape_config_value(*shape).hash(hasher),
+        RowDraft::WindowPadding(x, y) => {
+            x.to_bits().hash(hasher);
+            y.to_bits().hash(hasher);
+        }
+        RowDraft::MacosTitlebarStyle(style) => {
+            macos_titlebar_style_config_value(*style).hash(hasher);
+        }
+        RowDraft::SidebarPreviewLines(v) => v.hash(hasher),
+    }
+}
+
 /// Cycle `current` to the next (`delta > 0`) or previous (`delta < 0`) value
 /// in `order`, wrapping. Falls back to `order[0]` if `current` isn't found
 /// (never happens in practice — every row's draft is always one of `order`'s
@@ -953,20 +1069,54 @@ fn adjust_background_image_interval(current: u64, delta: i32) -> u64 {
     next.max(noa_config::MIN_BACKGROUND_IMAGE_INTERVAL_SECS)
 }
 
-/// The full theme catalog fuzzy-filtered by `filter`, best match first,
-/// reusing [`fuzzy_match`] (no second matcher, per the contract). An empty
-/// filter matches every entry in catalog order (score 0, no highlight),
-/// mirroring [`crate::command_palette::command_palette_matches`]'s empty-query
-/// behavior.
-fn filter_themes(filter: &str) -> Vec<ThemeMatch> {
-    let mut matches: Vec<(i32, ThemeMatch)> = noa_theme::THEMES
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (name, _))| {
+// Test-only scan-scope instrumentation for AC-28/AC-29/NFR-8 (ADR-3):
+// `score_and_sort` records how many catalog *candidates* it visited
+// (before scoring), so a test can assert the first keystroke scans the
+// full 574-entry catalog while a forward-extension edit only rescans the
+// previous `filtered` result set, and a non-prefix edit falls back to a
+// full rescan again. Thread-local (not a shared static) so parallel test
+// threads never see each other's counts.
+#[cfg(test)]
+thread_local! {
+    static SCAN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_scan_count() -> usize {
+    SCAN_COUNT.with(|c| c.replace(0))
+}
+
+/// Fuzzy-score `indices` against `filter` (reusing [`fuzzy_match`] — no
+/// second matcher, per the contract), best match first. Shared by
+/// [`filter_themes`] (the full catalog) and [`narrow_filtered`] (a prior
+/// result set), so the scoring/sort logic lives in exactly one place.
+fn score_and_sort(filter: &str, indices: impl ExactSizeIterator<Item = usize>) -> Vec<ThemeMatch> {
+    #[cfg(test)]
+    SCAN_COUNT.with(|c| c.set(indices.len()));
+
+    let mut matches: Vec<(i32, ThemeMatch)> = indices
+        .filter_map(|index| {
+            let name = noa_theme::THEMES[index].0;
             fuzzy_match(filter, name)
                 .map(|(score, positions)| (score, ThemeMatch { index, positions }))
         })
         .collect();
     matches.sort_by_key(|b| std::cmp::Reverse(b.0));
     matches.into_iter().map(|(_, m)| m).collect()
+}
+
+/// The full theme catalog fuzzy-filtered by `filter`. An empty filter
+/// matches every entry in catalog order (score 0, no highlight), mirroring
+/// [`crate::command_palette::command_palette_matches`]'s empty-query
+/// behavior.
+fn filter_themes(filter: &str) -> Vec<ThemeMatch> {
+    score_and_sort(filter, 0..noa_theme::THEMES.len())
+}
+
+/// R-21/ADR-3: re-score only `prior`'s entries against `filter` — used when
+/// `filter` is a strict extension of the filter that produced `prior`
+/// (AC-28): a theme that didn't match the shorter filter can never match a
+/// longer one that starts with it.
+fn narrow_filtered(prior: &[ThemeMatch], filter: &str) -> Vec<ThemeMatch> {
+    score_and_sort(filter, prior.iter().map(|m| m.index))
 }

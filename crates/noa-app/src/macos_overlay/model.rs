@@ -30,6 +30,32 @@ pub(crate) struct NativeOverlayCache {
     pub(crate) confirm: Option<u64>,
     pub(crate) title_prompt: Option<u64>,
     pub(crate) toast: Option<u64>,
+    /// Debug-only instrumentation (NFR-7/AC-58, mirrors the app-wide
+    /// `ChromeTextures::record_rebuild`/`rebuild_count` pattern):
+    /// incremented once per real `sync_theme_settings` dispatch to
+    /// `imp::rebuild_theme_settings` (an actual `view_fingerprint` change),
+    /// never on an idempotent sync. Absent in release builds — it exists
+    /// only to be asserted on in tests.
+    #[cfg(debug_assertions)]
+    theme_settings_rebuild_count: std::sync::atomic::AtomicUsize,
+}
+
+impl NativeOverlayCache {
+    #[cfg(debug_assertions)]
+    pub(crate) fn record_theme_settings_rebuild(&self) {
+        self.theme_settings_rebuild_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Not yet read outside tests — mirrors `ChromeTextures::rebuild_count`,
+    /// which carries the same note (a future GUI-integrated assertion can
+    /// read this live).
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub(crate) fn theme_settings_rebuild_count(&self) -> usize {
+        self.theme_settings_rebuild_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// Key legend under the "Set Tab Title" prompt's input row (tab-title

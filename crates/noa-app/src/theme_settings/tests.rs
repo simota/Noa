@@ -979,3 +979,156 @@ fn preview_resolution_path_is_well_under_one_frame_budget() {
         "mean preview-resolution time {mean:?} exceeded the 16ms@60Hz budget"
     );
 }
+
+// ---------------------------------------------------------------------
+// theme-settings-v2: Stage A (performance, ADR-1/2/3)
+// ---------------------------------------------------------------------
+
+// AC-25/ADR-1 (R-19): `ThemeSettings::clone()` — the redraw snapshot path,
+// `App::redraw`'s `session.state.clone()` — must not deep-copy the
+// catalog-sized `filtered` list. It shares the same `Arc` allocation
+// instead, witnessed by the strong count rising on clone and falling back
+// on drop rather than a second allocation appearing.
+#[test]
+fn clone_shares_the_filtered_list_instead_of_deep_copying_it() {
+    let settings = ThemeSettings::open(init());
+    let before = settings.filtered_arc_strong_count();
+
+    let cloned = settings.clone();
+    assert_eq!(settings.filtered_arc_strong_count(), before + 1);
+
+    drop(cloned);
+    assert_eq!(settings.filtered_arc_strong_count(), before);
+}
+
+// AC-28/NFR-8 (R-21, ADR-3): a burst of prefix-extending keystrokes rescans
+// the full 574-entry catalog only on the first keystroke; every subsequent
+// forward-extension keystroke rescans just the previous `filtered` result
+// set.
+#[test]
+fn forward_filter_edits_never_rescan_the_full_catalog_after_the_first_keystroke() {
+    let mut settings = ThemeSettings::open(init());
+    take_scan_count(); // drain whatever `open()`'s initial recompute recorded
+
+    settings.push_text("3", Instant::now());
+    assert_eq!(
+        take_scan_count(),
+        noa_theme::THEMES.len(),
+        "the first keystroke has no previous result set to narrow from"
+    );
+
+    let after_3 = settings.filtered_len();
+    settings.push_text("0", Instant::now()); // "30" extends "3"
+    assert_eq!(
+        take_scan_count(),
+        after_3,
+        "a forward edit only rescans the previous filtered result set"
+    );
+
+    let after_30 = settings.filtered_len();
+    settings.push_text("2", Instant::now()); // "302" extends "30"
+    assert_eq!(take_scan_count(), after_30);
+}
+
+// AC-29 (R-21, ADR-3): Backspace breaks the prefix relationship, so the
+// next filter falls back to a full catalog rescan rather than narrowing —
+// narrowing here could hide a theme the shorter filter would have matched.
+#[test]
+fn backspace_falls_back_to_a_full_catalog_rescan() {
+    let mut settings = ThemeSettings::open(init());
+    settings.push_text("30", Instant::now());
+    take_scan_count();
+
+    settings.backspace(Instant::now()); // "3"
+    assert_eq!(
+        take_scan_count(),
+        noa_theme::THEMES.len(),
+        "backspace must fall back to a full rescan, not a narrowed one"
+    );
+}
+
+// AC-60/ADR-2 (FM-02): every mutator that can change what the ViewModel
+// shows must also change `view_fingerprint` — `sync_theme_settings`'s whole
+// "zero rebuilds on an idempotent frame" guarantee (AC-26) depends on this
+// holding for every mutator, present and future.
+#[test]
+fn every_mutator_that_changes_state_changes_the_fingerprint() {
+    // Theme mode: highlight navigation and filter edits.
+    let mut settings = ThemeSettings::open(init());
+    let fp0 = settings.view_fingerprint_u64();
+    settings.move_down();
+    let fp1 = settings.view_fingerprint_u64();
+    assert_ne!(fp0, fp1, "move_down");
+
+    settings.push_text("3", Instant::now());
+    let fp2 = settings.view_fingerprint_u64();
+    assert_ne!(fp1, fp2, "push_text (filter)");
+
+    settings.backspace(Instant::now());
+    let fp3 = settings.view_fingerprint_u64();
+    assert_ne!(fp2, fp3, "backspace (filter)");
+
+    // Settings mode: row navigation plus every row kind's value-changing
+    // mutator. `BackgroundOpacity`/`BackgroundImageOpacity` start at their
+    // 1.0 ceiling under `transparent_init()`'s 0.9 opacity only for the
+    // former — both get an explicit decrement so the edit always lands
+    // regardless of clamp direction, and `BackgroundImage` (a no-op under
+    // `adjust`, edited only via text entry) goes through `push_text`.
+    fn exercise(settings: &mut ThemeSettings, kind: SettingsRowKind, now: Instant) {
+        match kind {
+            SettingsRowKind::BackgroundImage => {
+                settings.push_text("x", now);
+            }
+            SettingsRowKind::BackgroundOpacity | SettingsRowKind::BackgroundImageOpacity => {
+                settings.adjust(-1, now);
+            }
+            _ => {
+                settings.adjust(1, now);
+            }
+        }
+    }
+
+    let mut settings = ThemeSettings::open(transparent_init());
+    for (i, kind) in SettingsRowKind::ALL.iter().enumerate() {
+        let before_nav = settings.view_fingerprint_u64();
+        move_to_row(&mut settings, *kind);
+        if i > 0 {
+            assert_ne!(
+                before_nav,
+                settings.view_fingerprint_u64(),
+                "move_to_row({kind:?})"
+            );
+        }
+
+        let before_edit = settings.view_fingerprint_u64();
+        exercise(&mut settings, *kind, Instant::now());
+        assert_ne!(
+            before_edit,
+            settings.view_fingerprint_u64(),
+            "mutator({kind:?})"
+        );
+    }
+
+    // Direct digit entry into the focused font-size row.
+    let mut settings = ThemeSettings::open(settings_init()); // row 0 = FontSize
+    let fp0 = settings.view_fingerprint_u64();
+    settings.push_text("2", Instant::now());
+    let fp1 = settings.view_fingerprint_u64();
+    assert_ne!(fp0, fp1, "push_text (font-size digits)");
+    settings.backspace(Instant::now());
+    let fp2 = settings.view_fingerprint_u64();
+    assert_ne!(fp1, fp2, "backspace (font-size digits)");
+
+    // `commit_error`: a failing commit must change the fingerprint (the
+    // footer's Danger/Muted tone depends on it) — isolated from every other
+    // mutator so this assertion can't pass "by accident" from an unrelated
+    // change.
+    let mut settings = ThemeSettings::open(settings_init());
+    let fp_before = settings.view_fingerprint_u64();
+    let mut writer = |_: &Path, _: &[(String, String)]| {
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+    };
+    let _ = settings.commit(Path::new("/nonexistent/noa/config"), &mut writer);
+    let fp_after = settings.view_fingerprint_u64();
+    assert_ne!(fp_before, fp_after, "commit_error");
+}

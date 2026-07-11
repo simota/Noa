@@ -1,5 +1,7 @@
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 /// Bytes read from the PTY master.
 ///
@@ -100,7 +102,6 @@ impl ReadBufferPool {
     pub(crate) fn take(&self) -> Vec<u8> {
         self.buffers
             .lock()
-            .unwrap()
             .pop()
             .unwrap_or_else(|| vec![0; self.chunk_size])
     }
@@ -112,7 +113,7 @@ impl ReadBufferPool {
         if buf.len() != self.chunk_size {
             buf.resize(self.chunk_size, 0);
         }
-        let mut buffers = self.buffers.lock().unwrap();
+        let mut buffers = self.buffers.lock();
         if buffers.len() < self.max_buffers {
             buffers.push(buf);
         }
@@ -120,7 +121,7 @@ impl ReadBufferPool {
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.buffers.lock().unwrap().len()
+        self.buffers.lock().len()
     }
 }
 

@@ -13,6 +13,7 @@ bytemuck.workspace = true
 log.workspace = true
 anyhow.workspace = true
 unicode-width.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true

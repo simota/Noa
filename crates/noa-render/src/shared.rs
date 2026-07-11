@@ -6,7 +6,9 @@
 //! [`PipelineCache`] hands out clones so a new tab's `Renderer` skips shader
 //! module + pipeline construction entirely after the first build per format.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use crate::background_image::BackgroundImagePipeline;
 use crate::image_layer::ImagePipeline;
@@ -276,7 +278,7 @@ impl SharedGlyphAtlases {
     /// guarded by the shared atlas identity/generation, so the first renderer
     /// drawing after a glyph mutation performs the write and the rest no-op.
     pub fn sync(&self, device: &wgpu::Device, queue: &wgpu::Queue, font: &FontGrid) -> u64 {
-        let mut state = self.state.lock().expect("glyph atlas mutex poisoned");
+        let mut state = self.state.lock();
         let mask_recreated = state.mask.sync(
             device,
             queue,
@@ -310,7 +312,7 @@ impl SharedGlyphAtlases {
     }
 
     pub(crate) fn views(&self) -> SharedGlyphAtlasViews {
-        let state = self.state.lock().expect("glyph atlas mutex poisoned");
+        let state = self.state.lock();
         SharedGlyphAtlasViews {
             mask: state.mask.view.clone(),
             color: state.color.view.clone(),
@@ -319,27 +321,27 @@ impl SharedGlyphAtlases {
     }
 
     pub fn texture_generation(&self) -> u64 {
-        let state = self.state.lock().expect("glyph atlas mutex poisoned");
+        let state = self.state.lock();
         state.texture_generation
     }
 
     pub fn mask_seen_identity(&self) -> u64 {
-        let state = self.state.lock().expect("glyph atlas mutex poisoned");
+        let state = self.state.lock();
         state.mask.seen_identity
     }
 
     pub fn mask_seen_generation(&self) -> u64 {
-        let state = self.state.lock().expect("glyph atlas mutex poisoned");
+        let state = self.state.lock();
         state.mask.seen_generation
     }
 
     pub fn color_seen_identity(&self) -> u64 {
-        let state = self.state.lock().expect("glyph atlas mutex poisoned");
+        let state = self.state.lock();
         state.color.seen_identity
     }
 
     pub fn color_seen_generation(&self) -> u64 {
-        let state = self.state.lock().expect("glyph atlas mutex poisoned");
+        let state = self.state.lock();
         state.color.seen_generation
     }
 }

@@ -1468,6 +1468,7 @@ dependencies = [
  "libc",
  "log",
  "noa-core",
+ "parking_lot",
  "portable-pty",
  "thiserror 2.0.18",
 ]
@@ -1483,6 +1484,7 @@ dependencies = [
  "noa-font",
  "noa-grid",
  "noa-vt",
+ "parking_lot",
  "pollster",
  "unicode-width",
  "wgpu",

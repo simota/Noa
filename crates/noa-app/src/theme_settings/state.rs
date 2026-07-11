@@ -329,6 +329,23 @@ impl ThemeSettings {
                 settings.highlighted = carry
                     .highlighted
                     .min(settings.filtered.len().saturating_sub(1));
+                // `highlight_moved` is deliberately *not* carried (stays
+                // the fresh-open default `false` set above, for every mode
+                // — including a Theme-mode destination). AC-36's actual
+                // guarantee is about runtime values (`gpu.preview_theme`,
+                // live font-size, etc.), and `App::tab_theme_settings`/
+                // `open_theme_settings_session` never touch those at all —
+                // so `gpu.preview_theme` already stays exactly what it was
+                // through any number of Tab hops without this flag's help.
+                // Carrying it would only matter for AC-56's opposite
+                // invariant ("Settings mode's `highlight_moved` is always
+                // false" — `sync_theme_settings_preview` has no mode check
+                // of its own and relies entirely on this), and multi-hop
+                // chains that pass back through Settings can't preserve
+                // "was it ever moved" through that leg anyway (Settings
+                // mode's own carryover legitimately reports `false`) — so
+                // there is no consistent semantics to carry here, only a
+                // guaranteed-safe default.
             }
             None => {
                 if let Some(pos) = settings
@@ -1147,7 +1164,19 @@ impl ThemeSettings {
     /// been active while the user changed something else.
     pub(crate) fn commit_updates(&self) -> Vec<(String, String)> {
         let mut updates = Vec::new();
-        if let Some(name) = self.highlighted_theme_name()
+        // R-25/FM-03 (AC-57): gated on `Section::ThemePicker`, not just "is
+        // `highlighted_theme_name` non-`None` and different from the
+        // snapshot" — a Settings-mode session's `filtered`/`highlighted`
+        // can carry a moved position from a *prior* Theme-mode session in
+        // the same Tab chain (R-25's carryover, for view continuity across
+        // the hop), but Settings mode can never itself change the theme
+        // (DEC-2 architecture), so that carried position must never be
+        // read as a pending theme diff here regardless of what it is.
+        // AC-56 pins the same invariant one layer up (`highlight_moved`
+        // stays false in Settings mode); this is the second, independent
+        // place a stray theme diff could otherwise leak from.
+        if self.section == Section::ThemePicker
+            && let Some(name) = self.highlighted_theme_name()
             && name != self.snapshot.theme_name
         {
             // R-34/ADR-4: a `light:X,dark:Y` pair config rewrites only the

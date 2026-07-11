@@ -1499,6 +1499,42 @@ fn apply_wheel_positive_delta_moves_up() {
     assert_eq!(settings.highlighted_index(), start - 1);
 }
 
+// AC-56 (FM-01 defense-in-depth, sharpened by the AC-57 integration test):
+// a Tab carryover never carries `highlight_moved` forward into *any* mode,
+// even from a Theme session that had genuinely moved its highlight. This is
+// a deliberately conservative choice, not an oversight: `highlight_moved`'s
+// only real job is gating whether the *next* navigation-triggered sync
+// resolves a preview (`App::sync_theme_settings_preview`), and
+// `App::tab_theme_settings`/`open_theme_settings_session` never touch
+// `gpu.preview_theme` at all — so AC-36's actual guarantee (runtime values
+// unchanged across Tab) already holds with no help from this flag. Carrying
+// it *would* additionally have to stay false through a Settings-mode leg
+// (AC-56) with no way to resurrect "was it ever moved" on the far side of
+// that leg — multi-hop carryover has no consistent semantics to give it, so
+// the safe, simple, always-false-on-open default applies uniformly.
+#[test]
+fn tab_carryover_never_carries_highlight_moved_into_either_mode() {
+    let mut theme = ThemeSettings::open(init());
+    theme.move_down();
+    assert!(theme.should_preview());
+
+    let carry = theme.carryover();
+    let settings = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Settings,
+        carryover: Some(carry),
+        ..init()
+    });
+    assert!(!settings.should_preview());
+
+    let carry_back = settings.carryover();
+    let theme_again = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Theme,
+        carryover: Some(carry_back),
+        ..init()
+    });
+    assert!(!theme_again.should_preview());
+}
+
 fn sample_revert(theme_name: &str) -> RevertValues {
     RevertValues {
         theme_name: theme_name.to_string(),
@@ -1754,4 +1790,141 @@ fn ac52_condition_change_to_zero_matches_keeps_ac16_empty_list_semantics() {
     settings.toggle_favorites_only(); // empty favorites set -> filtered becomes empty
     assert_eq!(settings.filtered_len(), 0);
     assert_eq!(settings.highlighted_theme_name(), None);
+}
+
+// AC-57 (FM-03, Stage E): pair config × Tab carryover × a favorites toggle
+// × commit, all in one editing task — the full v2 story exercised end to
+// end at the pure-state level (no `App` needed; every piece here is either
+// `ThemeSettings` itself or an injectable writer, per R-12/AC-8's existing
+// seam). Verifies:
+//   - a favorites-only view filter narrows correctly and never reaches
+//     `commit_updates()`'s output (AC-40's guarantee, replayed alongside
+//     everything else rather than in isolation);
+//   - Tab carries the new highlight across a Settings-mode round trip
+//     (R-25) while the pair's original snapshot (light:A,dark:B) — not
+//     anything touched mid-session — stays the Esc/commit-diff baseline
+//     (FM-04);
+//   - the final commit rewrites only the active (light) side of the pair,
+//     preserving the untouched dark side verbatim (R-34/ADR-4), and still
+//     carries no favorites-related key.
+#[test]
+fn ac57_pair_carryover_favorites_toggle_and_commit_integration() {
+    let light_a = noa_theme::THEMES[0].0.to_string();
+    let dark_b = noa_theme::THEMES[1].0.to_string();
+    let favorite_c = noa_theme::THEMES[2].0.to_string();
+    let new_light_d = noa_theme::THEMES[3].0.to_string();
+
+    let mut favorites = std::collections::HashSet::new();
+    favorites.insert(favorite_c.clone());
+
+    let mut theme = ThemeSettings::open(ThemeSettingsInit {
+        favorites: std::sync::Arc::new(favorites),
+        favorites_epoch: 1,
+        ..theme_pair_init(true, &light_a, &dark_b)
+    });
+
+    // Favorites-only narrows to exactly the favorited theme, and never
+    // leaks into commit_updates (AC-40, replayed here).
+    theme.toggle_favorites_only();
+    assert_eq!(theme.filtered_len(), 1);
+    assert_eq!(
+        theme.filtered_entry(0).map(|(name, _)| name),
+        Some(favorite_c.as_str())
+    );
+    assert!(
+        theme
+            .commit_updates()
+            .iter()
+            .all(|(k, _)| !k.contains("favorite"))
+    );
+    theme.toggle_favorites_only(); // back to the full catalog
+
+    // Move the highlight to the theme this task will actually commit.
+    let target_pos = (0..theme.filtered_len())
+        .find(|&i| theme.filtered_entry(i).map(|(name, _)| name) == Some(new_light_d.as_str()))
+        .expect("the fixture theme is in the catalog");
+    move_highlight_to(&mut theme, target_pos);
+    assert!(theme.should_preview());
+
+    // Tab to Settings and back — R-25's carryover must survive the round
+    // trip (AC-34/35) without disturbing the pair's original snapshot
+    // (FM-04): a later Esc from this chain would still revert to A/B, not
+    // to anything touched along the way.
+    let carry_to_settings = theme.carryover();
+    let settings = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Settings,
+        carryover: Some(carry_to_settings),
+        ..theme_pair_init(true, &light_a, &dark_b)
+    });
+    assert!(settings.commit_updates().is_empty());
+    // AC-56's invariant must hold even carried through Tab from a
+    // moved-highlight Theme session — this is the second bug this
+    // integration test caught (the first was `commit_updates`'s missing
+    // section gate above).
+    assert!(!settings.should_preview());
+    let carry_back = settings.carryover();
+    let mut theme_again = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Theme,
+        carryover: Some(carry_back),
+        ..theme_pair_init(true, &light_a, &dark_b)
+    });
+    assert_eq!(
+        theme_again.highlighted_theme_name(),
+        Some(new_light_d.as_str())
+    );
+    // `should_preview()` itself resets to false on every fresh open,
+    // carryover included (see `tab_carryover_never_carries_highlight_moved_into_either_mode`)
+    // — this doesn't weaken AC-36: `gpu.preview_theme` is an `App`-level
+    // value Tab never touches at all, so it stays whatever it already was
+    // regardless of this flag. What matters here is that the *highlighted
+    // position* survived the round trip (asserted above) — `commit_updates`
+    // reads that directly, not `should_preview()`.
+    assert!(!theme_again.should_preview());
+
+    // Commit: only the active (light) side changes; the dark side and the
+    // pair syntax itself survive untouched, and no favorites key leaks in.
+    let dir = std::env::temp_dir().join(format!(
+        "noa-theme-settings-ac57-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("config");
+    std::fs::write(
+        &config_path,
+        format!("theme = light:{light_a},dark:{dark_b}\n"),
+    )
+    .unwrap();
+
+    let mut writer =
+        |path: &Path, updates: &[(String, String)]| noa_config::write_config_updates(path, updates);
+    let updates = theme_again
+        .commit(&config_path, &mut writer)
+        .expect("commit should succeed");
+    assert!(updates.iter().all(|(k, _)| !k.contains("favorite")));
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "theme"),
+        Some(&(
+            "theme".to_string(),
+            format!("light:{new_light_d},dark:{dark_b}")
+        ))
+    );
+
+    let (overrides, diagnostics) = noa_config::load_overrides_from_path(&config_path).unwrap();
+    assert!(
+        diagnostics.is_empty(),
+        "committed config should still parse as a valid pair: {diagnostics:?}"
+    );
+    assert_eq!(
+        overrides.theme_appearance,
+        Some(noa_config::ThemeAppearancePair {
+            light: new_light_d,
+            dark: dark_b,
+        })
+    );
+
+    std::fs::remove_dir_all(dir).unwrap();
 }

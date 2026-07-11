@@ -182,10 +182,14 @@ impl RestartReason {
 /// R-3: the always-visible per-row classification badge, independent of
 /// `touched` (zero-lie display — every row shows this the instant the
 /// overlay opens). Three classes per Addendum D-1's FM-01 correction: `Live`
-/// applies as the user adjusts it, `OnSave` applies within a moment of the
-/// config write landing (the `ConfigWatcher` reload-applied keys — none of
-/// the current 16 rows are in this class yet, it exists so R-9's follow-up
-/// keys don't need a fourth badge type), `OnLaunch` needs a restart.
+/// applies as the user adjusts it; `OnSave` applies the moment the overlay
+/// is saved — both R-9's future `ConfigWatcher` reload-applied keys and (fix
+/// F1) the existing reload-exempt rows `App::commit_theme_settings` already
+/// re-applies inline on commit (`BackgroundImage` and its five siblings,
+/// `ConfirmQuit`, `QuickTerminalHeight` — see `ThemeSettings::liveness`'s
+/// doc for the exact list); `OnLaunch` needs a restart (the three genuinely
+/// persist-only rows:
+/// `FontFamily`/`WindowPadding`/`MacosTitlebarStyle`).
 /// [`ThemeSettings::liveness`] derives this from [`SettingsRowKind::is_live`]
 /// plus the same opaque-at-startup downgrade `restart_reason` uses (C-6:
 /// effective liveness, not the static classification — a live opacity/blur
@@ -193,9 +197,6 @@ impl RestartReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Liveness {
     Live,
-    /// Reserved for R-9's reload-applied keys (Addendum D-1) — no must-have
-    /// row derives this yet, so it's otherwise unconstructed until then.
-    #[allow(dead_code)]
     OnSave,
     OnLaunch,
 }

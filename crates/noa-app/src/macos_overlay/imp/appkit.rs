@@ -1114,13 +1114,24 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                     {
                         let row = &vm.rows[row_idx];
                         let y_top = rows_top + i as f64 * srow_h;
+                        // C-5: while flashing, every text color below is
+                        // forced to `fg` — the row's background becomes
+                        // `colors.accent`, and neither the badge's normal
+                        // `accent` color nor the label/value's normal
+                        // `accent`/`muted` choices are guaranteed to
+                        // contrast against an accent background (a theme's
+                        // accent is, in general, not its own foreground).
+                        // `fg` is the one color the theme guarantees
+                        // contrasts its surface, which is the closest
+                        // available guarantee here.
+                        let flashing = row.selected && vm.reset_flash;
                         if row.selected {
                             let bg = make_view(NSRect::new(
                                 NSPoint::new(pad - 8.0, from_top(card_h, y_top, srow_h)),
                                 NSSize::new(card_w - pad * 2.0 + 16.0, srow_h),
                             ));
                             if !bg.is_null() {
-                                let bg_color = if row.selected && vm.reset_flash {
+                                let bg_color = if flashing {
                                     colors.accent
                                 } else {
                                     colors.selected_bg
@@ -1133,7 +1144,7 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                         let label = make_label(
                             &row.label,
                             system_font(12.5, WEIGHT_REGULAR),
-                            if row.selected && vm.settings_focused {
+                            if row.selected && vm.settings_focused && !flashing {
                                 accent
                             } else {
                                 fg
@@ -1149,9 +1160,13 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                         // D-2 (authoritative, absolute pt): label x=20 w=170
                         // · badge x=196 w=44 (right edge 240) · value
                         // x=250 (pad+230, unchanged below).
-                        let badge_color = match row.liveness {
-                            Liveness::Live => accent,
-                            Liveness::OnSave | Liveness::OnLaunch => muted,
+                        let badge_color = if flashing {
+                            fg
+                        } else {
+                            match row.liveness {
+                                Liveness::Live => accent,
+                                Liveness::OnSave | Liveness::OnLaunch => muted,
+                            }
                         };
                         let badge = make_label(
                             row.liveness.badge_text(),
@@ -1174,7 +1189,7 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                         let value_label = make_label(
                             &value_text,
                             system_font(12.5, WEIGHT_REGULAR),
-                            if reason.is_some() { muted } else { fg },
+                            if reason.is_some() && !flashing { muted } else { fg },
                             NSRect::new(
                                 NSPoint::new(pad + 230.0, from_top(card_h, y_top + 4.0, 16.0)),
                                 NSSize::new(card_w - pad * 2.0 - 230.0, 16.0),

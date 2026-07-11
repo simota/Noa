@@ -8,6 +8,60 @@ use crate::theme_settings::{
     ThemeSettingsMode,
 };
 
+/// Enter's routing decision (Addendum D-3/FM-02): while R-5 search owns the
+/// keyboard, Enter confirms the highlight instead of falling through to the
+/// overlay's normal commit. A free function over the one flag that decides
+/// it — not `&ThemeSettings`/`&App` — so the routing itself is
+/// unit-testable without constructing a session (closing the gap the
+/// pure-state-level `confirm_settings_search_never_touches_commit_state`
+/// test could only approximate: this proves the *router* picks the right
+/// branch, not just that the state method itself is commit-safe).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThemeSettingsEnterAction {
+    ConfirmSearch,
+    Commit,
+}
+
+fn theme_settings_enter_action(search_active: bool) -> ThemeSettingsEnterAction {
+    if search_active {
+        ThemeSettingsEnterAction::ConfirmSearch
+    } else {
+        ThemeSettingsEnterAction::Commit
+    }
+}
+
+/// Tab's routing decision (R-5): toggles row search in Settings mode, or
+/// stays the pre-existing `toggle_section` no-op in Theme mode — Theme
+/// mode's Tab is deliberately untouched by R-5 (out of scope, R-8-adjacent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThemeSettingsTabAction {
+    ToggleSearch,
+    ToggleSection,
+}
+
+fn theme_settings_tab_action(mode: ThemeSettingsMode) -> ThemeSettingsTabAction {
+    match mode {
+        ThemeSettingsMode::Settings => ThemeSettingsTabAction::ToggleSearch,
+        ThemeSettingsMode::Theme => ThemeSettingsTabAction::ToggleSection,
+    }
+}
+
+/// Backspace's routing decision (C-4): Cmd+Backspace is the laptop-
+/// reachable Reset alias; bare Backspace stays text-delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThemeSettingsBackspaceAction {
+    Reset,
+    TextDelete,
+}
+
+fn theme_settings_backspace_action(cmd_held: bool) -> ThemeSettingsBackspaceAction {
+    if cmd_held {
+        ThemeSettingsBackspaceAction::Reset
+    } else {
+        ThemeSettingsBackspaceAction::TextDelete
+    }
+}
+
 fn cursor_shape_of(style: CursorStyle) -> noa_config::CursorShape {
     match style {
         CursorStyle::BlinkingBlock | CursorStyle::SteadyBlock => noa_config::CursorShape::Block,
@@ -127,27 +181,29 @@ impl App {
                 return;
             }
             Key::Named(NamedKey::Enter) => {
-                if self
+                let search_active = self
                     .theme_settings
                     .as_ref()
-                    .is_some_and(|session| session.state.settings_search_active())
-                {
-                    if let Some(session) = self.theme_settings.as_mut() {
-                        std::sync::Arc::make_mut(&mut session.state).confirm_settings_search();
+                    .is_some_and(|session| session.state.settings_search_active());
+                match theme_settings_enter_action(search_active) {
+                    ThemeSettingsEnterAction::ConfirmSearch => {
+                        if let Some(session) = self.theme_settings.as_mut() {
+                            std::sync::Arc::make_mut(&mut session.state)
+                                .confirm_settings_search();
+                        }
+                        self.request_window_redraw(window_id);
                     }
-                    self.request_window_redraw(window_id);
-                    return;
+                    ThemeSettingsEnterAction::Commit => self.commit_theme_settings(),
                 }
-                self.commit_theme_settings();
                 return;
             }
             Key::Named(NamedKey::Tab) => {
                 if let Some(session) = self.theme_settings.as_mut() {
+                    let mode = session.state.mode();
                     let state = std::sync::Arc::make_mut(&mut session.state);
-                    if state.mode() == ThemeSettingsMode::Settings {
-                        state.toggle_settings_search();
-                    } else {
-                        state.toggle_section();
+                    match theme_settings_tab_action(mode) {
+                        ThemeSettingsTabAction::ToggleSearch => state.toggle_settings_search(),
+                        ThemeSettingsTabAction::ToggleSection => state.toggle_section(),
                     }
                 }
                 self.request_window_redraw(window_id);
@@ -180,16 +236,18 @@ impl App {
                 return;
             }
             Key::Named(NamedKey::Backspace) => {
-                // C-4: Cmd+Backspace is a laptop-reachable Reset alias; bare
-                // Backspace stays text-delete (unchanged).
-                if self.modifiers.super_key() {
-                    self.reset_theme_settings_row(window_id);
-                    return;
+                match theme_settings_backspace_action(self.modifiers.super_key()) {
+                    ThemeSettingsBackspaceAction::Reset => {
+                        self.reset_theme_settings_row(window_id);
+                    }
+                    ThemeSettingsBackspaceAction::TextDelete => {
+                        if let Some(session) = self.theme_settings.as_mut() {
+                            std::sync::Arc::make_mut(&mut session.state)
+                                .backspace(Instant::now());
+                        }
+                        self.request_window_redraw(window_id);
+                    }
                 }
-                if let Some(session) = self.theme_settings.as_mut() {
-                    std::sync::Arc::make_mut(&mut session.state).backspace(Instant::now());
-                }
-                self.request_window_redraw(window_id);
                 return;
             }
             _ => {}
@@ -746,6 +804,55 @@ fn background_image_path_text_from_paste_contents(
 
 fn commit_redraw_targets<Id: Copy + Eq + std::hash::Hash, V>(windows: &HashMap<Id, V>) -> Vec<Id> {
     windows.keys().copied().collect()
+}
+
+#[cfg(test)]
+mod theme_settings_key_action_tests {
+    use super::*;
+
+    // Addendum D-3/FM-02: Enter routes to `ConfirmSearch` while search owns
+    // the keyboard, never falling through to `Commit` — this is the router-
+    // level half of the "Enter mid-search must NOT commit" guarantee; the
+    // pure-state half (confirming never touches commit machinery) is
+    // `theme_settings::tests::confirm_settings_search_never_touches_commit_state`.
+    #[test]
+    fn enter_confirms_search_when_active_and_commits_otherwise() {
+        assert_eq!(
+            theme_settings_enter_action(true),
+            ThemeSettingsEnterAction::ConfirmSearch
+        );
+        assert_eq!(
+            theme_settings_enter_action(false),
+            ThemeSettingsEnterAction::Commit
+        );
+    }
+
+    // R-5: Tab only ever toggles search in Settings mode; Theme mode keeps
+    // its pre-existing no-op (`toggle_section`) untouched.
+    #[test]
+    fn tab_toggles_search_only_in_settings_mode() {
+        assert_eq!(
+            theme_settings_tab_action(ThemeSettingsMode::Settings),
+            ThemeSettingsTabAction::ToggleSearch
+        );
+        assert_eq!(
+            theme_settings_tab_action(ThemeSettingsMode::Theme),
+            ThemeSettingsTabAction::ToggleSection
+        );
+    }
+
+    // C-4: Cmd+Backspace is the Reset alias; bare Backspace stays text-delete.
+    #[test]
+    fn cmd_backspace_resets_bare_backspace_deletes_text() {
+        assert_eq!(
+            theme_settings_backspace_action(true),
+            ThemeSettingsBackspaceAction::Reset
+        );
+        assert_eq!(
+            theme_settings_backspace_action(false),
+            ThemeSettingsBackspaceAction::TextDelete
+        );
+    }
 }
 
 #[cfg(test)]

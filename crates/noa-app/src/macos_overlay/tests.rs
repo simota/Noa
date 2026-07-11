@@ -43,8 +43,9 @@ fn transparent_settings_init() -> ThemeSettingsInit {
 }
 
 // AC-7: opening the overlay (nothing touched yet) already carries every
-// row's live/next-launch classification — zero-lie display from the first
-// frame.
+// row's live/next-launch/on-save classification — zero-lie display from
+// the first frame. Fix F1: only the three genuine persist-only rows read
+// `OnLaunch`; every other non-live row reads `OnSave`.
 #[test]
 fn view_model_rows_carry_liveness_before_anything_is_touched() {
     let state = ThemeSettings::open(transparent_settings_init());
@@ -54,8 +55,15 @@ fn view_model_rows_carry_liveness_before_anything_is_touched() {
     for (idx, kind) in crate::theme_settings::SettingsRowKind::ALL.iter().enumerate() {
         let expected = if kind.is_live() {
             Liveness::Live
-        } else {
+        } else if matches!(
+            kind,
+            crate::theme_settings::SettingsRowKind::FontFamily
+                | crate::theme_settings::SettingsRowKind::WindowPadding
+                | crate::theme_settings::SettingsRowKind::MacosTitlebarStyle
+        ) {
             Liveness::OnLaunch
+        } else {
+            Liveness::OnSave
         };
         assert_eq!(vm.rows[idx].liveness, expected, "{kind:?}");
     }

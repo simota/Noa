@@ -74,14 +74,17 @@ struct ThemeMatch {
 /// no window/GPU binding of its own — that lives in the `App`-side session,
 /// mirroring [`crate::command_palette::CommandPalette`].
 ///
-/// `Clone` exists solely so `App::redraw` can snapshot it out early (like
-/// [`crate::command_palette::CommandPalette`]'s render payload) without
-/// holding a live borrow of `App::theme_settings` across the redraw's later
-/// `&mut self` calls — the catalog-sized `filtered` list makes this a real
-/// (if small) per-frame allocation while the overlay is open, which is an
-/// accepted deviation for this increment rather than a proper zero-copy
-/// render-payload type (mirroring `command_palette_snapshot`'s approach)
-/// that a follow-up could still add if this ever shows up on a profile.
+/// `Clone` exists so `App`'s `ThemeSettingsSession.state` can wrap this in an
+/// `Arc` (settings-panel-enrichment R-4): `App::redraw` snapshots it out
+/// early with `Arc::clone` (a refcount bump, not a deep copy of the
+/// catalog-sized `filtered` list) instead of holding a live borrow of
+/// `App::theme_settings` across the redraw's later `&mut self` calls, and
+/// every mutating method is reached through `Arc::make_mut`, which only
+/// actually invokes this `Clone` impl on the rare turn a render snapshot is
+/// still alive when a mutation lands (verified never to allocate on the
+/// steady-state redraw path by
+/// `app::state::theme_settings_session_tests::consecutive_redraw_snapshots_share_the_same_allocation`,
+/// AC-9/NFR-1).
 #[derive(Clone)]
 pub(crate) struct ThemeSettings {
     mode: ThemeSettingsMode,
@@ -352,17 +355,7 @@ impl ThemeSettings {
                 RestartReason::None
             };
         }
-        if matches!(
-            row,
-            SettingsRowKind::BackgroundImage
-                | SettingsRowKind::BackgroundImageOpacity
-                | SettingsRowKind::BackgroundImagePosition
-                | SettingsRowKind::BackgroundImageFit
-                | SettingsRowKind::BackgroundImageRepeat
-                | SettingsRowKind::BackgroundImageInterval
-                | SettingsRowKind::ConfirmQuit
-                | SettingsRowKind::QuickTerminalHeight
-        ) {
+        if is_reload_exempt(row) {
             return RestartReason::None;
         }
         let index = SettingsRowKind::ALL
@@ -386,12 +379,18 @@ impl ThemeSettings {
         self.restart_reason(row) != RestartReason::None
     }
 
-    /// R-3: the always-visible live/next-launch badge for `row`, independent
-    /// of `touched` (never lies — this is the same value the instant the
-    /// overlay opens as after any amount of editing). C-6: a live-class row
-    /// downgraded by [`RestartReason::OpaqueStartup`] reports its *effective*
-    /// liveness (`OnLaunch`) for this session, not the static
-    /// [`SettingsRowKind::is_live`] classification.
+    /// R-3: the always-visible live/next-launch/on-save badge for `row`,
+    /// independent of `touched` (never lies — this is the same value the
+    /// instant the overlay opens as after any amount of editing). C-6: a
+    /// live-class row downgraded by [`RestartReason::OpaqueStartup`]
+    /// reports its *effective* liveness (`OnLaunch`) for this session, not
+    /// the static [`SettingsRowKind::is_live`] classification. A
+    /// reload-exempt row (fix F1) reports `OnSave`, not `OnLaunch` — it has
+    /// no live-preview-while-editing path, but `App::commit_theme_settings`
+    /// (`sync_config_from_committed_live_rows`) fully applies it the moment
+    /// it's saved, unlike a genuine restart-only row (`FontFamily`/
+    /// `WindowPadding`/`MacosTitlebarStyle`), which persists to config but
+    /// changes nothing this session.
     pub(crate) fn liveness(&self, row: SettingsRowKind) -> Liveness {
         if row.is_live() {
             if self.restart_reason(row) == RestartReason::OpaqueStartup {
@@ -399,9 +398,9 @@ impl ThemeSettings {
             } else {
                 Liveness::Live
             }
+        } else if is_reload_exempt(row) {
+            Liveness::OnSave
         } else {
-            // `OnSave` is reserved for the reload-applied keys R-9 adds
-            // (Addendum D-1) — none of the current 16 rows qualify yet.
             Liveness::OnLaunch
         }
     }
@@ -1111,6 +1110,22 @@ impl ThemeSettings {
                         cursor_shape_config_value(*shape).to_string(),
                     ));
                 }
+                // Fix F2: an empty name is `RowDraft::default_for`'s reset
+                // value (`StartupConfig::default().font.families` is empty
+                // — "no override configured", the same value
+                // `App::open_theme_settings` itself would have seeded from
+                // an empty `self.config.font.families`). Writing a bare
+                // `font-family = ` line would be a config value no parser
+                // reads as "no override" — it would instead try to resolve
+                // the literal empty string as a font. `write_config_updates`
+                // has no key-deletion primitive (`noa-config/src/writer.rs`
+                // only rewrites-in-place or appends), so a pre-existing
+                // `font-family = X` line in the file is left as-is rather
+                // than either deleting it or emitting an invalid value —
+                // the row still resets in memory and `touched` still marks
+                // the edit as intentional (AC-19), only the write is
+                // skipped.
+                RowDraft::FontFamily(name) if name.is_empty() => {}
                 RowDraft::FontFamily(name) => {
                     updates.push(("font-family".to_string(), name.clone()));
                 }
@@ -1167,6 +1182,31 @@ impl ThemeSettings {
             }
         }
     }
+}
+
+/// Fix F1: the non-live rows with no live-preview-while-editing path but a
+/// full runtime apply the moment they're saved (`Enter` →
+/// `App::commit_theme_settings`'s `sync_config_from_committed_live_rows`,
+/// which mirrors every one of these into `self.config`/re-applies it
+/// immediately) — distinct from a genuine restart-only row (`FontFamily`/
+/// `WindowPadding`/`MacosTitlebarStyle`, deliberately excluded from that
+/// same mirroring function, which persists to config but changes nothing
+/// this session). Shared by [`ThemeSettings::restart_reason`] (always
+/// `None` here — nothing to explain waiting on a restart) and
+/// [`ThemeSettings::liveness`] (badges these `OnSave`, not `OnLaunch`) so
+/// the two lists can never drift apart.
+fn is_reload_exempt(row: SettingsRowKind) -> bool {
+    matches!(
+        row,
+        SettingsRowKind::BackgroundImage
+            | SettingsRowKind::BackgroundImageOpacity
+            | SettingsRowKind::BackgroundImagePosition
+            | SettingsRowKind::BackgroundImageFit
+            | SettingsRowKind::BackgroundImageRepeat
+            | SettingsRowKind::BackgroundImageInterval
+            | SettingsRowKind::ConfirmQuit
+            | SettingsRowKind::QuickTerminalHeight
+    )
 }
 
 /// `cursor-style` config value for `shape` (mirrors

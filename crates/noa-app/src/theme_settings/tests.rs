@@ -1026,16 +1026,28 @@ fn restart_reason_touched_commit_only_row_reports_commit_only_and_differs_from_o
 }
 
 // AC-7 analog (state-level source of truth for the view-model's badge):
-// every row's `liveness()` matches its static `is_live()` classification
-// outside the opaque downgrade (a transparent-started session).
+// every live row's `liveness()` matches its static `is_live()`
+// classification outside the opaque downgrade (a transparent-started
+// session) — updated by fix F1: a non-live row is `OnSave` when it's one
+// of the reload-exempt rows `is_reload_exempt` names, `OnLaunch` only for
+// the three genuine persist-only rows (see
+// `liveness_reports_on_save_for_every_reload_exempt_row` for the full
+// enumeration this mirrors).
 #[test]
 fn liveness_matches_is_live_outside_the_opaque_downgrade() {
     let settings = ThemeSettings::open(transparent_init());
     for kind in SettingsRowKind::ALL {
         let expected = if kind.is_live() {
             Liveness::Live
-        } else {
+        } else if matches!(
+            kind,
+            SettingsRowKind::FontFamily
+                | SettingsRowKind::WindowPadding
+                | SettingsRowKind::MacosTitlebarStyle
+        ) {
             Liveness::OnLaunch
+        } else {
+            Liveness::OnSave
         };
         assert_eq!(settings.liveness(kind), expected, "{kind:?}");
     }
@@ -1521,17 +1533,66 @@ fn reset_background_opacity_and_blur_effect_respects_opaque_startup_gating() {
 
 // R-7: the written config side of a reset — `commit_updates()` must carry
 // the just-reset default value for a touched row, not merely flip the
-// `touched` bit (which the AC-19 test already covers).
+// `touched` bit (which the AC-19 test already covers). CursorStyle (not
+// FontFamily — see `commit_updates_skips_the_font_family_key_when_reset_to_the_empty_default`
+// just below) has a non-empty default, so this is the row that actually
+// proves a reset value round-trips into `commit_updates()`.
 #[test]
 fn commit_updates_includes_the_reset_default_value_for_a_touched_row() {
     let mut settings = ThemeSettings::open(settings_init());
-    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+    move_to_row(&mut settings, SettingsRowKind::CursorStyle);
+    settings.adjust(1, Instant::now()); // Block -> Bar, away from the default
 
     settings.reset_selected_row(Instant::now());
 
     let updates = settings.commit_updates();
     assert!(
-        updates.contains(&("font-family".to_string(), String::new())),
+        updates.contains(&("cursor-style".to_string(), "block".to_string())),
+        "{updates:?}"
+    );
+}
+
+// Fix F2: `RowDraft::default_for(FontFamily)` is the empty string
+// (`StartupConfig::default().font.families` is empty — "no override"), and
+// an empty `font-family = ` line isn't a valid "unset" signal to noa-config's
+// parser. `commit_updates()` must skip the key entirely for an empty
+// FontFamily draft, even though the row is touched (contrast with
+// `reset_marks_touched_even_when_the_default_equals_the_current_value`,
+// which proves `touched` itself is unaffected).
+#[test]
+fn commit_updates_skips_the_font_family_key_when_reset_to_the_empty_default() {
+    let mut settings = ThemeSettings::open(settings_init()); // font_family = "Menlo"
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+
+    settings.reset_selected_row(Instant::now());
+
+    assert!(settings.rows()[row_index(SettingsRowKind::FontFamily)].touched);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::FontFamily)].draft,
+        RowDraft::FontFamily(String::new())
+    );
+    let updates = settings.commit_updates();
+    assert!(
+        !updates.iter().any(|(key, _)| key == "font-family"),
+        "an empty FontFamily draft must never reach the config writer: {updates:?}"
+    );
+}
+
+// Fix F2 companion: a *non-empty* FontFamily edit (the ordinary cycle-
+// through-available-families path, not a reset) still writes normally —
+// the skip is specific to the empty-string reset value, not FontFamily in
+// general.
+#[test]
+fn commit_updates_still_writes_a_nonempty_font_family_edit() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+    settings.adjust(1, Instant::now()); // cycles to the next available family
+
+    let updates = settings.commit_updates();
+    assert!(
+        updates
+            .iter()
+            .any(|(key, value)| key == "font-family" && !value.is_empty()),
         "{updates:?}"
     );
 }
@@ -1585,7 +1646,16 @@ fn restart_reason_never_reports_commit_only_for_the_reload_exempt_rows_even_when
 // remaining ones (the 8 background-image/misc rows, WindowPadding,
 // SidebarPreviewLines under opaque) with the documented invariant: a row
 // reads `Live` iff it's statically live AND not downgraded by an opaque
-// startup, `OnLaunch` otherwise (`OnSave` stays unconstructed pre-R-9).
+// startup. Among the rest, `OnLaunch` covers two cases — an opaque-
+// downgraded live row (C-6: still needs a restart to preview, same as a
+// genuine restart-only row) and the three genuinely persist-only rows
+// (`FontFamily`/`WindowPadding`/`MacosTitlebarStyle`) — every other
+// non-live row reads `OnSave` (fix F1: these have no live-preview path,
+// but `commit_theme_settings` re-applies them the moment they're saved, so
+// `OnLaunch`'s "needs a restart" story never applied to them — this
+// replaces the original `... only Live/OnLaunch are constructed pre-R-9`
+// assumption, which encoded the pre-fix bug where every non-live row
+// collapsed to `OnLaunch`).
 #[test]
 fn liveness_and_restart_reason_agree_on_every_row_under_opaque_and_transparent_startup() {
     for init in [settings_init(), transparent_init()] {
@@ -1600,13 +1670,51 @@ fn liveness_and_restart_reason_agree_on_every_row_under_opaque_and_transparent_s
                 "{kind:?}: liveness={liveness:?} reason={reason:?}"
             );
             if !expect_live {
-                assert_eq!(
-                    liveness,
-                    Liveness::OnLaunch,
-                    "{kind:?}: only Live/OnLaunch are constructed pre-R-9"
-                );
+                let expect_on_launch = reason == RestartReason::OpaqueStartup
+                    || matches!(
+                        kind,
+                        SettingsRowKind::FontFamily
+                            | SettingsRowKind::WindowPadding
+                            | SettingsRowKind::MacosTitlebarStyle
+                    );
+                let expected = if expect_on_launch {
+                    Liveness::OnLaunch
+                } else {
+                    Liveness::OnSave
+                };
+                assert_eq!(liveness, expected, "{kind:?}: reason={reason:?}");
             }
         }
+    }
+}
+
+// Fix F1: the 8 reload-exempt rows badge `OnSave`, not `OnLaunch` — they
+// have no live-preview-while-editing path, but `commit_theme_settings`
+// fully applies them the instant the overlay saves (see
+// `restart_reason_never_reports_commit_only_for_the_reload_exempt_rows_even_when_touched`
+// for the matching `RestartReason::None` guarantee on the same row set).
+#[test]
+fn liveness_reports_on_save_for_every_reload_exempt_row() {
+    let settings = ThemeSettings::open(settings_init());
+    for kind in [
+        SettingsRowKind::BackgroundImage,
+        SettingsRowKind::BackgroundImageOpacity,
+        SettingsRowKind::BackgroundImagePosition,
+        SettingsRowKind::BackgroundImageFit,
+        SettingsRowKind::BackgroundImageRepeat,
+        SettingsRowKind::BackgroundImageInterval,
+        SettingsRowKind::ConfirmQuit,
+        SettingsRowKind::QuickTerminalHeight,
+    ] {
+        assert_eq!(settings.liveness(kind), Liveness::OnSave, "{kind:?}");
+    }
+    // The three genuine restart-only rows remain `OnLaunch`.
+    for kind in [
+        SettingsRowKind::FontFamily,
+        SettingsRowKind::WindowPadding,
+        SettingsRowKind::MacosTitlebarStyle,
+    ] {
+        assert_eq!(settings.liveness(kind), Liveness::OnLaunch, "{kind:?}");
     }
 }
 

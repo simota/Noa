@@ -899,6 +899,10 @@ fn settings_rows_overlay_text(
     // R-5: the search line, mirroring the Theme picker's own filter row
     // position (row `LIST_TOP_ROW - 1`) — hidden entirely while inactive.
     let search_active = state.settings_search_active();
+    // Fix F3/C-5 (mandatory): the same brief post-Reset highlight AppKit
+    // shows, propagated to the wgpu fallback so both surfaces carry the
+    // misfire-detection cue.
+    let reset_flash = state.reset_flash_active(std::time::Instant::now());
     if search_active {
         cup(&mut out, LIST_TOP_ROW - 1, LIST_COL);
         sgr_fg(&mut out, muted);
@@ -943,6 +947,7 @@ fn settings_rows_overlay_text(
                     i as u16,
                     muted,
                     accent,
+                    reset_flash,
                 );
             }
         }
@@ -967,6 +972,7 @@ fn settings_rows_overlay_text(
                 i,
                 muted,
                 accent,
+                reset_flash,
             );
         }
     }
@@ -1013,32 +1019,50 @@ fn write_settings_row(
     i: u16,
     muted: Rgb,
     accent: Rgb,
+    reset_flash: bool,
 ) {
+    // Fix F3/C-5 (mandatory): mirrors AppKit's flash — while flashing, skip
+    // every `sgr_fg` call below (leaving the terminal's default foreground)
+    // rather than the row's normal accent/muted colors, and paint the whole
+    // row's background `accent` instead. Neither the badge's normal accent
+    // color nor the value's muted color is guaranteed to contrast against
+    // an accent background, so the flash forgoes its usual coloring rather
+    // than risk invisible text; the background alone is enough of a cue.
+    let flashing = selected && reset_flash;
     cup(out, top_row + i, LIST_COL);
-    if selected {
+    if flashing {
+        sgr_bg(out, accent);
+    }
+    if selected && !flashing {
         sgr_fg(out, accent);
-        out.push('>');
-    } else {
-        out.push(' ');
+    }
+    out.push(if selected { '>' } else { ' ' });
+    if selected && !flashing {
+        sgr_reset(out);
     }
     out.push(' ');
-    sgr_reset(out);
     let editing = selected && !state.settings_search_active();
     let value = format_row_value(kind, &state.rows()[row_idx].draft, editing);
     let liveness = state.liveness(kind);
     let reason = state.restart_reason(kind).note().unwrap_or("");
-    sgr_fg(out, if liveness == Liveness::Live { accent } else { muted });
+    if !flashing {
+        sgr_fg(out, if liveness == Liveness::Live { accent } else { muted });
+    }
     let _ = write!(out, "{:<10}", liveness.badge_text());
-    sgr_reset(out);
+    if !flashing {
+        sgr_reset(out);
+    }
     let _ = write!(out, "{:<22}", kind.label());
     if reason.is_empty() {
         let _ = write!(out, "{value}");
     } else {
         let _ = write!(out, "{value} ");
-        sgr_fg(out, muted);
+        if !flashing {
+            sgr_fg(out, muted);
+        }
         let _ = write!(out, "{reason}");
-        sgr_reset(out);
     }
+    sgr_reset(out); // unconditional: also terminates a flashing row's `sgr_bg` so it never bleeds into the next `cup()`
 }
 
 /// One scrolled pane's scrollbar-thumb input: its screen rect and scroll

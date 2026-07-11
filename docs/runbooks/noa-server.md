@@ -100,6 +100,8 @@ ID(`windowGroupId`/`windowId`/`paneId`)は全て **10 進文字列**。
 - **ミューテーションのタイムアウト**: focus/newTab/split/close/sendText は main thread 往復で実行され、2 秒でタイムアウト(Internal error)。**タイムアウト後も遅延実行される可能性がある**(at-least-once)。エラー時に盲目的リトライすると二重実行になり得る点に注意。
 - **性能**: 端末側はクライアントを待たない設計(有界 try_send + drop-oldest)。stall したクライアントは通知を欠落する(`dropped:true`)だけで描画・pty には影響しない。
 - **接続上限**: 同時 32 接続。超過分は即クローズ。1 メッセージ 1MiB / 1 フレーム 256KiB 上限。
+- **config reload での反映**: `server-enable`/`server-port`/`server-token`/`server-scopes` の変更は config ファイル書き換え(500ms ポーリング)で即座に反映される — サーバーを再起動(既存接続は ~50ms 以内に自己終了)し、新しい設定で再バインドする。無効化した場合はそのまま起動しない。それ以外のキー(server 系以外)は再起動しない。**注意**: 再起動より前に spawn 済みのペインは、io スレッドが握っている出力プッシュ用ハンドルが旧サーバーの broadcaster のままなので、再起動後の `noa.output` を購読しているクライアントにはそのペインの出力が届かなくなる(接続の切断先が無くなるため無害な no-op になるだけで、クラッシュや pty 側への影響はない)。再起動後に spawn したペインは新サーバーへ正しくプッシュされる。影響を受けたペインへ出力を再度流したい場合はペインを開き直す。
+- **Quick Terminal は非対象**: サイドバー除外と同じ理由で、Quick Terminal のペインは `noa.listPanels` にも出力プッシュにも現れない(v1 の意図的な仕様)。
 
 ## 7. トラブルシューティング
 

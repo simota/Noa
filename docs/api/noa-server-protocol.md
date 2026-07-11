@@ -58,7 +58,7 @@ result: `{"protocolVersion":1,"grantedScopes":["read"],"serverVersion":"0.1.2"}`
 
 ### noa.listPanels — 要 read
 
-params: `{}` / result: `{"panels":[Panel]}`(全ウィンドウグループ配下の全パネル)
+params: `{}` / result: `{"panels":[Panel]}`(全ウィンドウグループ配下の全パネル。Quick Terminal のパネルはサイドバー同様に対象外)
 
 ### noa.getText — 要 read
 
@@ -111,7 +111,7 @@ params: `{"paneId":"1"}` / result: `{"ok":true}`
 | params | 型 | 必須 | 説明 |
 |--------|----|------|------|
 | `events` | (`"state_changed"` \| `"output"`)[] | ✓ | 購読するイベント種別 |
-| `paneIds` | string[] | — | 省略 = 全パネル |
+| `paneIds` | string[] | — | 省略 = 全パネル。指定時は `state_changed` / `output` 両方のイベントをこの集合にフィルタする |
 
 result: `{"subscriptionId":"1"}`
 
@@ -131,7 +131,7 @@ params: `{"subscriptionId":"1"}` / result: `{"ok":true}`
 {"jsonrpc":"2.0","method":"noa.stateChanged","params":{"panels":[Panel]}}
 ```
 
-パネルメタデータ変化時に**変化した/追加された Panel のみ**を配信。busy / attention / name の変化は即時、cwd / preview の変化は最大 500ms 遅延で反映。**パネル削除の通知は v1 には無い** — 既知 paneId への操作が `-32002` を返したら `noa.listPanels` で再同期すること。
+パネルメタデータ変化時に**変化した/追加された Panel のみ**を配信。busy / attention / name の変化は即時、cwd / preview の変化は最大 500ms 遅延で反映。**パネル削除の通知は v1 には無い** — 既知 paneId への操作が `-32002` を返したら `noa.listPanels` で再同期すること。`subscribe` の `paneIds` を指定した場合、この配列はその集合に含まれる Panel のみへフィルタされる(集合内の変化が 0 件なら通知自体を送らない)。オプションで `"dropped":true` が付くことがある(`output` と同じ、購読キュー溢れ時のマーカー — 後述)。
 
 ### noa.output
 
@@ -159,7 +159,7 @@ params: `{"subscriptionId":"1"}` / result: `{"ok":true}`
 }
 ```
 
-`branch` / `process` は不明時**キーごと省略**される。`preview` はサイドバー相当の末尾数行(色ラン付き)。
+`branch` / `process` は不明時**キーごと省略**される。`preview` はサイドバー相当の末尾数行(色ラン付き)。`preview` の各 `Row.row` は**絶対行番号ではなく** 0 始まりのプレビュー行インデックス(先頭行が 0)— `noa.getGrid` の `Row.row`(絶対行)とは意味が異なるので注意。
 
 ### Row / Span
 

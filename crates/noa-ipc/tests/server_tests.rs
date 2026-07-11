@@ -22,6 +22,8 @@ struct MockBackend {
     focused: Mutex<Vec<u64>>,
     grid_rows: Mutex<HashMap<u64, Vec<Row>>>,
     text: Mutex<HashMap<u64, String>>,
+    /// Panes that make `get_text` return `IpcError::Internal` (R-3 test).
+    internal_error_panes: Mutex<std::collections::HashSet<u64>>,
 }
 
 impl IpcBackend for MockBackend {
@@ -30,6 +32,9 @@ impl IpcBackend for MockBackend {
     }
 
     fn get_text(&self, pane: PaneRef, _source: TextSource, _max_bytes: usize) -> Result<TextResult, IpcError> {
+        if self.internal_error_panes.lock().unwrap().contains(&pane) {
+            return Err(IpcError::Internal("backend exploded".to_string()));
+        }
         if self.closed_panes.lock().unwrap().contains(&pane) {
             return Err(IpcError::PaneClosed);
         }
@@ -370,6 +375,72 @@ fn ac15_oversize_single_row_returns_32005() {
     send_rpc(&mut sock, 2, "noa.getGrid", json!({ "paneId": "1", "startRow": 0, "rowCount": 1 }));
     let resp = recv_json(&mut sock);
     assert_eq!(resp["error"]["code"], -32005);
+    let _ = sock.close(None);
+}
+
+// ---- R-3: backend Internal error surfaces as -32603 ----
+
+#[test]
+fn r3_backend_internal_error_maps_to_32603() {
+    let backend = Arc::new(MockBackend::default());
+    backend.internal_error_panes.lock().unwrap().insert(1);
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, 1, Some("tok"), &["read"]);
+
+    send_rpc(&mut sock, 2, "noa.getText", json!({ "paneId": "1", "source": "screen" }));
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32603);
+    let _ = sock.close(None);
+}
+
+// ---- R-5: JSON-RPC envelope validation ----
+
+#[test]
+fn r5_missing_jsonrpc_field_rejected() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+
+    // Pre-auth: `noa.hello` itself must be rejected without a valid `jsonrpc`.
+    let req = json!({ "id": 1, "method": "noa.hello", "params": { "protocolVersion": 1, "token": "tok", "scopes": ["read"] } });
+    sock.send(Message::Text(req.to_string())).unwrap();
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32600);
+
+    // Connection stays open: a compliant hello now succeeds.
+    let resp = hello(&mut sock, 2, 1, Some("tok"), &["read"]);
+    assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
+
+    // Post-auth: a subsequent method without `jsonrpc` is also rejected.
+    let req = json!({ "id": 3, "method": "noa.listPanels", "params": {} });
+    sock.send(Message::Text(req.to_string())).unwrap();
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32600);
+
+    // Connection still open after the rejection.
+    send_rpc(&mut sock, 4, "noa.listPanels", json!({}));
+    let resp = recv_json(&mut sock);
+    assert!(resp.get("result").is_some());
+    let _ = sock.close(None);
+}
+
+#[test]
+fn r5_wrong_jsonrpc_version_rejected() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, 1, Some("tok"), &["read"]);
+
+    let req = json!({ "jsonrpc": "1.0", "id": 2, "method": "noa.listPanels", "params": {} });
+    sock.send(Message::Text(req.to_string())).unwrap();
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32600);
+
+    // Connection stays open.
+    send_rpc(&mut sock, 3, "noa.listPanels", json!({}));
+    let resp = recv_json(&mut sock);
+    assert!(resp.get("result").is_some());
     let _ = sock.close(None);
 }
 

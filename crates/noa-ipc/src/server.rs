@@ -261,12 +261,21 @@ fn to_notification(item: QueuedNotification) -> Value {
 
 #[derive(Clone, Debug, serde::Deserialize)]
 struct RpcRequest {
+    /// Present so a missing `jsonrpc` field still parses (defaults to
+    /// `Value::Null`, which fails the `== "2.0"` check below) rather than
+    /// erroring out at `serde_json::from_str` with a generic parse error —
+    /// R-5 wants a missing field and a wrong version to both reach the same
+    /// -32600 `InvalidRequest` path with a specific message.
+    #[serde(default)]
+    jsonrpc: Value,
     #[serde(default)]
     id: Value,
     method: String,
     #[serde(default)]
     params: Value,
 }
+
+const JSONRPC_VERSION: &str = "2.0";
 
 struct RpcFail {
     code: ErrorCode,
@@ -328,6 +337,19 @@ fn dispatch(
         Err(_) => return Some(error_response(Value::Null, ErrorCode::ParseError, "parse error")),
     };
     let id = req.id.clone();
+
+    // R-5: reject anything but exactly "2.0" (missing counts as invalid)
+    // before any dispatch — including `noa.hello` itself (pre-auth) and
+    // every other method (post-auth). The connection stays open; only this
+    // one request is rejected, mirroring every other per-request error path
+    // here.
+    if req.jsonrpc.as_str() != Some(JSONRPC_VERSION) {
+        return Some(error_response(
+            id,
+            ErrorCode::InvalidRequest,
+            "missing or unsupported jsonrpc version, expected \"2.0\"",
+        ));
+    }
 
     if req.method == "noa.hello" {
         return Some(handle_hello(id, req.params, token, allowed_scopes, session));

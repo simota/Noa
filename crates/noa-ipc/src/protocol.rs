@@ -372,25 +372,42 @@ pub fn truncate_tail(text: &str, max_bytes: usize) -> (String, bool) {
     (text[idx..].to_string(), true)
 }
 
+/// Reserved headroom subtracted from `cap_bytes` before summing row sizes
+/// (R-4): `serde_json::to_vec(&row)` measures only each `Row` in isolation,
+/// so raw per-row summation ignores the `,` array separators between rows,
+/// `GetGridResult`'s sibling fields (`paneId`/`cols`/`startRow`/`hasMore`),
+/// and the JSON-RPC envelope (`jsonrpc`/`id`/`result`) wrapping the whole
+/// response — a response summed to exactly `cap_bytes` would then actually
+/// serialize larger. A fixed margin is simpler than measuring the full
+/// envelope per call and is generous relative to the envelope's real size
+/// (well under 200 bytes for these fields).
+const GRID_CAP_ENVELOPE_MARGIN: usize = 1024;
+
+/// Per-row overhead outside the row's own serialized bytes: the `,` array
+/// separator between consecutive rows (all but the first row in the array).
+const GRID_CAP_ROW_SEPARATOR: usize = 1;
+
 /// Caps a set of grid rows to a serialized-size budget (NFR-4 / AC-10 /
 /// AC-19), tail is dropped with `hasMore:true`. A single row that alone
-/// exceeds `cap_bytes` is rejected by the caller with
+/// exceeds the effective cap is rejected by the caller with
 /// [`crate::error::ErrorCode::PayloadTooLarge`] (this function reports that
 /// case by returning `Err(())`; the caller maps it to the wire error).
 pub fn cap_grid_rows(rows: Vec<Row>, cap_bytes: usize) -> Result<(Vec<Row>, bool), GridCapExceeded> {
+    let effective_cap = cap_bytes.saturating_sub(GRID_CAP_ENVELOPE_MARGIN);
     let mut out = Vec::with_capacity(rows.len());
     let mut total = 0usize;
     let mut has_more = false;
     for row in rows {
-        let size = serde_json::to_vec(&row).map(|v| v.len()).unwrap_or(0);
-        if size > cap_bytes {
+        let size = serde_json::to_vec(&row).map(|v| v.len()).unwrap_or(0)
+            + GRID_CAP_ROW_SEPARATOR;
+        if size > effective_cap {
             if out.is_empty() {
                 return Err(GridCapExceeded);
             }
             has_more = true;
             break;
         }
-        if total + size > cap_bytes {
+        if total + size > effective_cap {
             has_more = true;
             break;
         }
@@ -404,3 +421,65 @@ pub fn cap_grid_rows(rows: Vec<Row>, cap_bytes: usize) -> Result<(Vec<Row>, bool
 /// [`crate::error::ErrorCode::PayloadTooLarge`]).
 #[derive(Debug)]
 pub struct GridCapExceeded;
+
+#[cfg(test)]
+mod cap_grid_rows_tests {
+    use super::*;
+
+    fn small_row(i: u64) -> Row {
+        Row {
+            row: i,
+            spans: vec![Span { text: "x".repeat(64), fg: None, bg: None, attrs: None }],
+        }
+    }
+
+    /// Enough small rows to comfortably exceed any `cap_bytes` this module
+    /// tests with, so `has_more` is always true regardless of cap size.
+    const BOUNDARY_ROW_COUNT: u64 = 20_000;
+
+    /// R-4: raw per-row summation ignores the `,` array separators,
+    /// `GetGridResult`'s sibling fields, and the JSON-RPC envelope — so a
+    /// response summed to exactly `DEFAULT_GRID_CAP_BYTES` used to exceed it
+    /// once actually serialized. With many small rows landing right at the
+    /// boundary, the *fully serialized* JSON-RPC response must still fit
+    /// within the nominal cap.
+    fn assert_boundary_fits_in_cap(cap_bytes: usize) {
+        // Rows sized so ~cap_bytes/row_size of them land close to the cap,
+        // exercising the boundary rather than stopping far short of it.
+        let rows: Vec<Row> = (0..BOUNDARY_ROW_COUNT).map(small_row).collect();
+        let (capped, has_more) = cap_grid_rows(rows, cap_bytes).expect("no single row exceeds cap");
+        assert!(has_more, "test setup should produce more rows than fit");
+
+        let result = GetGridResult {
+            pane_id: WireId(1),
+            cols: 120,
+            start_row: 0,
+            rows: capped,
+            has_more,
+        };
+        let envelope = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "1",
+            "result": result,
+        });
+        let serialized = serde_json::to_vec(&envelope).unwrap();
+        assert!(
+            serialized.len() <= cap_bytes,
+            "serialized response {} bytes exceeds cap {cap_bytes} bytes",
+            serialized.len()
+        );
+    }
+
+    #[test]
+    fn serialized_response_fits_default_cap() {
+        assert_boundary_fits_in_cap(DEFAULT_GRID_CAP_BYTES);
+    }
+
+    #[test]
+    fn serialized_response_fits_small_cap() {
+        // A tighter cap exercises the boundary with fewer rows fitting,
+        // catching an off-by-one in the margin/separator accounting that a
+        // huge cap might absorb unnoticed.
+        assert_boundary_fits_in_cap(4096);
+    }
+}

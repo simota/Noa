@@ -16,6 +16,7 @@ pub enum ErrorCode {
     PaneClosed,
     PayloadTooLarge,
     VersionMismatch,
+    Internal,
 }
 
 impl ErrorCode {
@@ -25,6 +26,7 @@ impl ErrorCode {
             ErrorCode::InvalidRequest => -32600,
             ErrorCode::MethodNotFound => -32601,
             ErrorCode::InvalidParams => -32602,
+            ErrorCode::Internal => -32603,
             ErrorCode::Auth => -32001,
             ErrorCode::UnknownPane => -32002,
             ErrorCode::ScopeDenied => -32003,
@@ -68,7 +70,7 @@ impl IpcError {
             IpcError::UnknownPane => ErrorCode::UnknownPane,
             IpcError::PaneClosed => ErrorCode::PaneClosed,
             IpcError::PayloadTooLarge => ErrorCode::PayloadTooLarge,
-            IpcError::Internal(_) => ErrorCode::InvalidRequest,
+            IpcError::Internal(_) => ErrorCode::Internal,
         }
     }
 }

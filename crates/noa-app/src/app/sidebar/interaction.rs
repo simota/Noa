@@ -166,8 +166,7 @@ impl App {
                 let Some(session) = self.sidebar_rename.take() else {
                     return;
                 };
-                let name = session.buffer.trim().to_string();
-                if !name.is_empty() {
+                if let Some(name) = committed_rename_name(&session.buffer) {
                     self.session_store.apply(SessionDelta::Rename {
                         id: session.card,
                         name,
@@ -201,14 +200,12 @@ impl App {
     /// Append printable text to the open rename buffer (typed keys and
     /// committed IME compositions share this path).
     pub(in crate::app) fn push_sidebar_rename_text(&mut self, text: &str) {
-        let mut appended = false;
-        if let Some(session) = self.sidebar_rename.as_mut() {
-            for c in text.chars().filter(|c| !c.is_control()) {
-                session.buffer.push(c);
-                appended = true;
-            }
+        let sanitized = sanitize_rename_input(text);
+        if sanitized.is_empty() {
+            return;
         }
-        if appended {
+        if let Some(session) = self.sidebar_rename.as_mut() {
+            session.buffer.push_str(&sanitized);
             self.request_sidebar_redraw();
         }
     }
@@ -392,5 +389,58 @@ impl App {
         let py = pointer_y.clamp(0, u32::MAX as i64) as u32;
         let idx = metrics.drop_index(vp, ids.len(), state.sidebar_scroll, py);
         ids.get(idx).copied()
+    }
+}
+
+/// Strip control characters from a chunk of rename input (typed keys and
+/// committed IME compositions share this), yielding only the printable text to
+/// append to the buffer.
+fn sanitize_rename_input(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// The name a rename buffer commits to on Enter, or `None` when it is empty
+/// once trimmed — an all-whitespace buffer cancels rather than naming a card
+/// blank (FR-7).
+fn committed_rename_name(buffer: &str) -> Option<String> {
+    let name = buffer.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_rename_input_keeps_printable_text() {
+        assert_eq!(sanitize_rename_input("build"), "build");
+        assert_eq!(sanitize_rename_input("プロジェクト"), "プロジェクト");
+    }
+
+    #[test]
+    fn sanitize_rename_input_drops_control_characters() {
+        // Newline, tab, carriage return and NUL are all control chars.
+        assert_eq!(sanitize_rename_input("a\nb\tc\r"), "abc");
+        assert_eq!(sanitize_rename_input("\u{0}\u{7}"), "");
+    }
+
+    #[test]
+    fn sanitize_rename_input_preserves_interior_spaces() {
+        // A space is not a control char, so it survives; only the buffer's
+        // eventual trim (on commit) removes leading/trailing whitespace.
+        assert_eq!(sanitize_rename_input("my repo"), "my repo");
+    }
+
+    #[test]
+    fn committed_rename_name_trims_and_keeps_nonempty() {
+        assert_eq!(committed_rename_name("  build  "), Some("build".to_string()));
+        assert_eq!(committed_rename_name("build"), Some("build".to_string()));
+    }
+
+    #[test]
+    fn committed_rename_name_rejects_blank_buffer() {
+        assert_eq!(committed_rename_name(""), None);
+        assert_eq!(committed_rename_name("   "), None);
+        assert_eq!(committed_rename_name("\t\n"), None);
     }
 }

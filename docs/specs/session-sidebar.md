@@ -119,9 +119,9 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 - **FR-2 Card rendering**: 各カードは `●dot [icon] name … 相対updated-time` / `cwd … branch` / 実行中プロセス行(`✳ proc`=busy / `❯ shell`=idle) の3行構成で描画する（2026-07-05 ユーザー裁定: 最終出力2行プレビューをプロセス行に置換。preview 配管は store/io_thread に温存・描画のみ停止）。
 - **FR-3 Click-to-switch**: カードクリックで該当セッションの `{window_id, pane_id}` にウィンドウフォーカスを移す(A-flavor、active-swap しない)。
 - **FR-4 Toggle + resize**: hotkey/config でサイドバー可視性を**フォーカス中ウィンドウ単位**でトグルし、トグル時に grid-first リサイズ(grid → pty winsize)を**そのウィンドウの全 pane**（quick-terminal ウィンドウは対象外）に適用する。他ウィンドウの可視性・グリッドには影響しない。
-- **FR-5 Header bar**: サイドバー上部に実行状態ラベル（フォーカスセッションの実プロセス名 `✳ <proc>`、未検出時 Running/Idle）＋中央タイトル＋右端セッション名ピルを描画する。
+- **FR-5 Header bar**: ~~サイドバー上部に実行状態ラベル（フォーカスセッションの実プロセス名 `✳ <proc>`、未検出時 Running/Idle）＋中央タイトル＋右端セッション名ピルを描画する。~~（2026-07-11 追随: 実装から**削除済**。ターミナルタイトルバーと情報重複のため `SIDEBAR_HEADER_H = 0` に折り畳み — `sidebar.rs` の定数コメント参照。AC-7 は obsolete）
 - **FR-6 + button**: フォーカス中ウィンドウに新規タブを開き、cwd をアクティブセッションから継承する(既存 new-tab パス再利用)。
-- **FR-7 … menu**: カードごとに close アクションを提供し、rename は SessionStore の名前オーバーライドとして保持する。close は既存の close_pane/close_tab teardown パス（confirm ダイアログ・pty 終了・GC choke-point を含む）に委譲する — カードは per-pane（SessionCardId が pane_id を持つ）ため close_pane が正、最終 pane では close_tab へカスケード（Judge 裁定 2026-07-05）。rename の inline 入力 UI は v1 deferral（Open Question 5 参照。store 層 Rename は実装・テスト済 = AC-9）。
+- **FR-7 … menu**: カードごとに close アクションを提供し、rename は SessionStore の名前オーバーライドとして保持する。close は既存の close_pane/close_tab teardown パス（confirm ダイアログ・pty 終了・GC choke-point を含む）に委譲する — カードは per-pane（SessionCardId が pane_id を持つ）ため close_pane が正、最終 pane では close_tab へカスケード（Judge 裁定 2026-07-05）。rename の inline 入力 UI は**実装済**（2026-07-11 追随: `SidebarRenameSession` によるカード上インライン編集。Open Question 5 の deferral は解消）。
 - **FR-8 Git branch**: cwd に対する `git -C <cwd> branch --show-current` を throttled に取得し、結果を SessionStore に供給する。
 - **FR-9 Icon detection**: cwd のマーカー first-match でプロジェクトアイコンを判定する(`Cargo.toml`→rust, `package.json`→node, `*.tf`→terraform, `go.mod`→go, `pyproject.toml`→python, `.git`のみ→git, なし→folder)。
 - **FR-10 Updated-time**: 最終出力時刻を相対表示する("3分前"、24h 超は "昨日 23:47" 形式)。
@@ -161,7 +161,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 - **AC-4b (FR-3) [manual]**: カードクリックで対象ウィンドウがフォーカスされ、他ウィンドウの Terminal 内容が変化しない。
 - **AC-5 (FR-4)**: トグルでフォーカス中ウィンドウの全 pane grid が pty winsize 送信より先にリサイズされる — 既存 `pane_resize_batch_plan` テスト（`multi_pane_resize_batching_resizes_all_grids_before_pty_winsize_sends`, app/helpers/tests.rs:773）と同型で、サイドバー inset 適用時の順序をアサート。
 - **AC-6 (FR-4) [manual]**: トグルでサイドバー幅ぶんターミナル描画領域が狭まり、シェルが縮小後の列数にリフローする（`tput cols` で減少を確認）。
-- **AC-7 (FR-5) [manual]**: ヘッダーに `● Running`/`Idle`・中央タイトル・右端セッション名ピルが表示される。
+- **AC-7 (FR-5) [obsolete]**: ~~ヘッダーに `● Running`/`Idle`・中央タイトル・右端セッション名ピルが表示される。~~（FR-5 削除に伴い無効。2026-07-11）
 - **AC-8 (FR-6) [manual]**: + ボタンでフォーカス中ウィンドウに新規タブが開き、cwd がアクティブセッションを継承する。
 - **AC-9 (FR-7)**: rename アクション適用後、SessionCard.name がオーバーライド値になり、以降の Upsert で上書きされない(unit test)。
 - **AC-9b (FR-7) [manual]**: … メニューの close で該当セッションが終了しカードが消える。
@@ -212,7 +212,7 @@ noa の現行タブは macOS ネイティブタブで、一覧性は別ウィン
 2. **20件超のスケール対応** — repo-root/cwd グルーピング・折畳・未読バッジ（Slack 型 UI の生存条件、Flux 警告③）。v1 はスクロールのみ。
 3. **B-flavor active-swap** — 1ウィンドウ多重 Terminal での切替。切替ポリシーの内部シームに温存。
 4. **+ ボタンの新規ウィンドウ生成バリアント** — v1 は現ウィンドウ新規タブのみ。
-5. **… メニューの追加アクション**（複製・cwd コピー等）— v1 は close のみ。**rename の inline テキスト入力 UI も deferred**（サイドバーにテキスト入力サーフェスが無いため。store 層の Rename オーバーライドは実装・テスト済 AC-9。ヘッダー … は v1 no-op、クリックは consume）。
+5. **… メニューの追加アクション**（複製・cwd コピー等）— v1 は close / rename のみ。~~rename の inline テキスト入力 UI も deferred~~（**2026-07-11 解消**: `SidebarRenameSession` でインライン入力 UI 実装済。追加アクションは引き続き未実装）。
 6. **updated-time の絶対表示オプション** — v1 は相対表示固定。
 7. **AC-14 の統合テスト化** — `App` がユニットテスト不能なため、teardown サイト呼び出しの機械検証はハーネス導入待ち（現状は実装レビュー＋manual）。
 

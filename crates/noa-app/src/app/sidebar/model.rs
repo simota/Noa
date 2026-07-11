@@ -70,7 +70,7 @@ impl App {
         // backdrop.
         let now = crate::localtime::wall_clock_now();
         let now_instant = Instant::now();
-        let home = std::env::var("HOME").ok();
+        let home = home_dir();
         let theme = active_theme(&gpu.theme, &gpu.preview_theme);
         let palette = &theme.palette;
         let panel_bg = theme.default_bg;
@@ -95,7 +95,7 @@ impl App {
                 continue;
             };
             let tab_title = self.tab_title_override_for_card(&card_rects.id);
-            let lines: CardLines = card_lines(card, now, home.as_deref(), tab_title.as_deref());
+            let lines: CardLines = card_lines(card, now, home, tab_title.as_deref());
             let marker = self.attention_marker_visible(&card_rects.id);
             let renaming = self
                 .sidebar_rename
@@ -212,7 +212,7 @@ impl App {
             .and_then(|drag| {
                 let card = self.session_store.get(&drag.card)?;
                 let tab_title = self.tab_title_override_for_card(&drag.card);
-                let lines = card_lines(card, now, home.as_deref(), tab_title.as_deref());
+                let lines = card_lines(card, now, home, tab_title.as_deref());
                 let marker = self.attention_marker_visible(&drag.card);
                 let local = layout_metrics.card_local_rects(drag.card, card_w);
                 let mut card_runs = Vec::new();
@@ -278,6 +278,15 @@ impl App {
             background_opacity: self.config.background_opacity,
         })
     }
+}
+
+/// The viewer's home directory, resolved once and cached: it drives every
+/// card's cwd `~`-abbreviation and cannot change over the process lifetime, so
+/// re-reading `HOME` on every redraw (once per frame) is pure overhead.
+fn home_dir() -> Option<&'static str> {
+    static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| std::env::var("HOME").ok())
+        .as_deref()
 }
 
 /// Pixel → cell for a synthetic sidebar grid whose `Renderer` places cell (0,0)
@@ -514,5 +523,231 @@ fn emit_card_text(
             .map(|span| resolve_preview_color(span.fg, palette))
             .unwrap_or(chrome().dim_fg);
         out.extend(window_run(to_cell, *rect, text, fg, false));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session_store::{PreviewSpan, SessionStore, WallClock};
+    use noa_core::Color;
+
+    fn wall(hour: u32, minute: u32) -> WallClock {
+        WallClock {
+            year: 2026,
+            month: 7,
+            day: 8,
+            hour,
+            minute,
+        }
+    }
+
+    /// A 10x20-cell grid with no padding, so `px_to_cell(x, y)` is simply
+    /// `(x / 10, y / 20)` clamped into the grid — a stable fixture for the
+    /// positioning helpers.
+    fn cell_at() -> impl Fn(u32, u32) -> (u16, u16) {
+        move |x, y| px_to_cell(x, y, 0.0, 0.0, 10.0, 20.0, GridSize { cols: 100, rows: 100 })
+    }
+
+    #[test]
+    fn px_to_cell_maps_origin_and_rounds_to_nearest_cell() {
+        assert_eq!(px_to_cell(0, 0, 0.0, 0.0, 10.0, 20.0, GridSize { cols: 100, rows: 100 }), (0, 0));
+        // 24px / 10 = 2.4 → col 2; 30px / 20 = 1.5 → row 2 (round half up).
+        assert_eq!(px_to_cell(24, 30, 0.0, 0.0, 10.0, 20.0, GridSize { cols: 100, rows: 100 }), (2, 2));
+    }
+
+    #[test]
+    fn px_to_cell_applies_padding_origin() {
+        // With an 8px left pad, x=18 sits one cell past the padding origin.
+        assert_eq!(px_to_cell(18, 0, 8.0, 0.0, 10.0, 20.0, GridSize { cols: 100, rows: 100 }), (1, 0));
+    }
+
+    #[test]
+    fn px_to_cell_clamps_to_grid_bounds() {
+        let grid = GridSize { cols: 4, rows: 3 };
+        assert_eq!(px_to_cell(9999, 9999, 0.0, 0.0, 10.0, 20.0, grid), (3, 2));
+        // A negative logical position (x below the padding origin) clamps to 0.
+        assert_eq!(px_to_cell(0, 0, 50.0, 50.0, 10.0, 20.0, grid), (0, 0));
+    }
+
+    #[test]
+    fn window_run_rejects_empty_rect_or_text() {
+        let to_cell = cell_at();
+        assert!(window_run(&to_cell, SidebarRect::new(0, 0, 0, 20), "x".into(), Rgb::new(1, 2, 3), false).is_none());
+        assert!(window_run(&to_cell, SidebarRect::new(0, 0, 10, 0), "x".into(), Rgb::new(1, 2, 3), false).is_none());
+        assert!(window_run(&to_cell, SidebarRect::new(0, 0, 10, 20), String::new(), Rgb::new(1, 2, 3), false).is_none());
+    }
+
+    #[test]
+    fn window_run_positions_and_carries_style() {
+        let to_cell = cell_at();
+        let run = window_run(&to_cell, SidebarRect::new(20, 40, 30, 20), "hi".into(), Rgb::new(9, 8, 7), true).unwrap();
+        assert_eq!((run.col, run.row), (2, 2));
+        assert_eq!(run.text, "hi");
+        assert_eq!(run.fg, Rgb::new(9, 8, 7));
+        assert!(run.bold);
+        assert_eq!(run.bg, None);
+    }
+
+    #[test]
+    fn right_aligned_run_backs_off_by_display_width() {
+        let to_cell = cell_at();
+        // Rect spans cols [1, 6); "12分前" is 3 wide (2) + 2 ascii = width 8?
+        // Use a plain ASCII string for a deterministic width: "3m" → width 2.
+        let run = right_aligned_run(&to_cell, SidebarRect::new(10, 0, 50, 20), "3m".into(), Rgb::new(1, 1, 1)).unwrap();
+        // Right edge is col 6 (x=60), backed off by width 2 → col 4.
+        assert_eq!(run.col, 4);
+        assert_eq!(run.row, 0);
+    }
+
+    #[test]
+    fn right_aligned_run_counts_wide_chars_as_two() {
+        let to_cell = cell_at();
+        // "昨日" is two wide chars → display width 4.
+        let run = right_aligned_run(&to_cell, SidebarRect::new(0, 0, 100, 20), "昨日".into(), Rgb::new(1, 1, 1)).unwrap();
+        // Right edge col 10 (x=100) minus width 4 → col 6.
+        assert_eq!(run.col, 6);
+    }
+
+    #[test]
+    fn right_aligned_run_clamps_to_left_edge_when_too_wide() {
+        let to_cell = cell_at();
+        // A string wider than the rect can't push the column below the left edge.
+        let run = right_aligned_run(&to_cell, SidebarRect::new(20, 0, 20, 20), "wwwwwwww".into(), Rgb::new(1, 1, 1)).unwrap();
+        assert_eq!(run.col, 2); // left edge = x 20 → col 2
+    }
+
+    #[test]
+    fn right_aligned_run_rejects_empty() {
+        let to_cell = cell_at();
+        assert!(right_aligned_run(&to_cell, SidebarRect::new(0, 0, 0, 20), "x".into(), Rgb::new(1, 1, 1)).is_none());
+        assert!(right_aligned_run(&to_cell, SidebarRect::new(0, 0, 10, 20), String::new(), Rgb::new(1, 1, 1)).is_none());
+    }
+
+    #[test]
+    fn resolve_preview_color_maps_each_color_kind() {
+        let mut palette = [Rgb::new(0, 0, 0); 256];
+        palette[5] = Rgb::new(50, 60, 70);
+        assert_eq!(resolve_preview_color(Color::Default, &palette), chrome().dim_fg);
+        assert_eq!(resolve_preview_color(Color::Palette(5), &palette), Rgb::new(50, 60, 70));
+        assert_eq!(resolve_preview_color(Color::Rgb(Rgb::new(1, 2, 3)), &palette), Rgb::new(1, 2, 3));
+    }
+
+    #[test]
+    fn sgr_fg_emits_truecolor_escape() {
+        assert_eq!(sgr_fg(Rgb::new(10, 20, 30)), "\x1b[38;2;10;20;30m");
+    }
+
+    fn store_card(busy: bool, process: &str) -> SessionCard {
+        let mut store = SessionStore::new();
+        let id = SessionCardId::new(SessionWindowId(1), PaneId::new(0));
+        store.apply(SessionDelta::Upsert {
+            id,
+            seq: 1,
+            name: "build".to_string(),
+            cwd: "/Users/dev/proj".to_string(),
+            busy,
+            updated_at: wall(10, 0),
+            preview: Some(vec![vec![PreviewSpan {
+                text: "output".to_string(),
+                fg: Color::Default,
+            }]]),
+        });
+        store.apply(SessionDelta::Process {
+            id,
+            process: Some(process.to_string()),
+        });
+        store.get(&id).unwrap().clone()
+    }
+
+    /// Non-zero sub-rects so every run region emits; one preview row.
+    fn card_rects() -> CardRects {
+        CardRects {
+            id: SessionCardId::new(SessionWindowId(1), PaneId::new(0)),
+            bounds: SidebarRect::new(0, 0, 200, 120),
+            icon: SidebarRect::new(10, 0, 20, 20),
+            name_line: SidebarRect::new(30, 0, 120, 20),
+            meta: SidebarRect::new(10, 40, 180, 20),
+            preview: vec![SidebarRect::new(10, 60, 180, 20)],
+            updated: SidebarRect::new(120, 0, 60, 20),
+            dot: SidebarRect::new(0, 0, 10, 20),
+            menu_button: SidebarRect::new(180, 0, 20, 20),
+        }
+    }
+
+    #[test]
+    fn emit_card_text_emits_bold_name_run() {
+        let card = store_card(false, "cargo");
+        let lines = card_lines(&card, wall(10, 3), None, None);
+        let palette = [Rgb::new(0, 0, 0); 256];
+        let to_cell = cell_at();
+        let mut out = Vec::new();
+        emit_card_text(&mut out, &card_rects(), &card, &lines, &to_cell, false, &palette, None, false);
+
+        let name = out.iter().find(|r| r.text == "build").expect("name run");
+        assert!(name.bold, "the card name renders bold");
+        assert_eq!(name.fg, chrome().fg);
+    }
+
+    #[test]
+    fn emit_card_text_shows_updated_time_when_idle() {
+        let card = store_card(false, "cargo");
+        let lines = card_lines(&card, wall(10, 3), None, None);
+        assert!(!lines.updated.is_empty(), "idle card carries a relative time");
+        let palette = [Rgb::new(0, 0, 0); 256];
+        let to_cell = cell_at();
+        let mut out = Vec::new();
+        emit_card_text(&mut out, &card_rects(), &card, &lines, &to_cell, false, &palette, None, false);
+        assert!(
+            out.iter().any(|r| r.text == lines.updated),
+            "the updated-time run is emitted for an idle card"
+        );
+    }
+
+    #[test]
+    fn emit_card_text_hides_updated_time_when_busy() {
+        let card = store_card(true, "cargo");
+        let lines = card_lines(&card, wall(10, 3), None, None);
+        assert!(lines.updated.is_empty(), "a busy card has no relative time");
+        let palette = [Rgb::new(0, 0, 0); 256];
+        let to_cell = cell_at();
+        let mut out = Vec::new();
+        emit_card_text(&mut out, &card_rects(), &card, &lines, &to_cell, false, &palette, None, false);
+        // With an empty updated string, no right-aligned time run is produced.
+        assert!(
+            out.iter().all(|r| !r.text.is_empty()),
+            "no empty-text run is emitted"
+        );
+    }
+
+    #[test]
+    fn emit_card_text_renaming_replaces_name_with_caret_in_accent() {
+        let card = store_card(false, "cargo");
+        let lines = card_lines(&card, wall(10, 3), None, None);
+        let palette = [Rgb::new(0, 0, 0); 256];
+        let to_cell = cell_at();
+        let mut out = Vec::new();
+        emit_card_text(&mut out, &card_rects(), &card, &lines, &to_cell, false, &palette, Some("foo"), false);
+
+        let rename = out.iter().find(|r| r.text.starts_with("foo")).expect("rename run");
+        assert!(rename.text.contains('▏'), "the rename buffer shows a caret");
+        assert_eq!(rename.fg, chrome().accent);
+        assert!(out.iter().all(|r| r.text != "build"), "the original name is replaced");
+    }
+
+    #[test]
+    fn emit_card_text_menu_hint_emits_ellipsis_glyph() {
+        let card = store_card(false, "cargo");
+        let lines = card_lines(&card, wall(10, 3), None, None);
+        let palette = [Rgb::new(0, 0, 0); 256];
+        let to_cell = cell_at();
+
+        let mut with_hint = Vec::new();
+        emit_card_text(&mut with_hint, &card_rects(), &card, &lines, &to_cell, false, &palette, None, true);
+        assert!(with_hint.iter().any(|r| r.text == "⋯"), "menu hint shows the ⋯ glyph");
+
+        let mut without_hint = Vec::new();
+        emit_card_text(&mut without_hint, &card_rects(), &card, &lines, &to_cell, false, &palette, None, false);
+        assert!(without_hint.iter().all(|r| r.text != "⋯"), "no ⋯ glyph without the hint");
     }
 }

@@ -29,6 +29,10 @@ fn settings_init() -> ThemeSettingsInit {
         confirm_quit: true,
         font_family: "Menlo".to_string(),
         available_font_families: Vec::new(),
+        scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,
+        cursor_style_blink: None,
+        minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
+        macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
     }
 }
 
@@ -60,6 +64,7 @@ fn view_model_rows_carry_liveness_before_anything_is_touched() {
             crate::theme_settings::SettingsRowKind::FontFamily
                 | crate::theme_settings::SettingsRowKind::WindowPadding
                 | crate::theme_settings::SettingsRowKind::MacosTitlebarStyle
+                | crate::theme_settings::SettingsRowKind::MacosOptionAsAlt
         ) {
             Liveness::OnLaunch
         } else {
@@ -103,11 +108,12 @@ fn view_model_selected_description_matches_the_selected_row() {
 fn view_model_settings_visible_reflects_the_active_search_filter() {
     let mut state = ThemeSettings::open(settings_init());
     state.toggle_settings_search();
-    // "cursor" (not a shorter prefix): `fuzzy_match` is a subsequence
+    // "cursor style" (not a shorter prefix): `fuzzy_match` is a subsequence
     // matcher, and a shorter query also scatter-matches unrelated labels
     // (see `theme_settings::tests::search_filters_rows_by_label_fuzzy_match`'s
-    // comment) — this asserts the unambiguous single-match case.
-    state.push_text("cursor", std::time::Instant::now());
+    // comment, including R-9's "Cursor Blink" row) — this asserts the
+    // unambiguous single-match case.
+    state.push_text("cursor style", std::time::Instant::now());
     let vm = theme_settings_view_model(&state);
 
     assert_eq!(vm.settings_visible.len(), 1);
@@ -118,7 +124,7 @@ fn view_model_settings_visible_reflects_the_active_search_filter() {
     );
     assert!(vm.rows[row_idx].selected);
     assert!(vm.search_active);
-    assert_eq!(vm.search_query, "cursor");
+    assert_eq!(vm.search_query, "cursor style");
 }
 
 #[test]

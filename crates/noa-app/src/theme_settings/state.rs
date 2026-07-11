@@ -2,7 +2,9 @@ use std::io;
 use std::path::Path;
 use std::time::Instant;
 
-use noa_config::{BackgroundImageFit, BackgroundImagePosition, CursorShape, MacosTitlebarStyle};
+use noa_config::{
+    BackgroundImageFit, BackgroundImagePosition, CursorShape, MacosOptionAsAlt, MacosTitlebarStyle,
+};
 
 use crate::command_palette::fuzzy_match;
 use crate::debounce::Debouncer;
@@ -60,6 +62,18 @@ const SIDEBAR_PREVIEW_LINES_STEP: i32 = 1;
 const QUICK_TERMINAL_SIZE_STEP: f32 = 0.05;
 const QUICK_TERMINAL_SIZE_MIN: f32 = 0.1;
 const QUICK_TERMINAL_SIZE_MAX: f32 = 1.0;
+
+/// R-9: `scrollback-limit` step per ←→ press (1 MB), and a pragmatic UI
+/// ceiling (`noa-config` itself has no documented maximum — this only
+/// bounds how far repeated presses can push the *draft*, matching
+/// `FONT_SIZE_MIN`/`MAX`'s "bounds the draft only" role).
+const SCROLLBACK_LIMIT_STEP: usize = 1_000_000;
+const SCROLLBACK_LIMIT_MAX: usize = 1_000_000_000;
+/// `minimum-contrast` step per ←→ press, over its documented `1.0..=21.0`
+/// WCAG ratio range (`noa_config::parser::values::parse_minimum_contrast`).
+const MINIMUM_CONTRAST_STEP: f32 = 1.0;
+const MINIMUM_CONTRAST_MIN: f32 = 1.0;
+const MINIMUM_CONTRAST_MAX: f32 = 21.0;
 
 /// One theme catalog match: an index into `noa_theme::THEMES` plus the fuzzy
 /// match char positions (for highlight rendering), reusing
@@ -230,6 +244,22 @@ impl ThemeSettings {
             },
             SettingsRow {
                 draft: RowDraft::ConfirmQuit(init.confirm_quit),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::ScrollbackLimit(init.scrollback_limit),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::CursorStyleBlink(init.cursor_style_blink.unwrap_or(true)),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::MinimumContrast(init.minimum_contrast),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::MacosOptionAsAlt(init.macos_option_as_alt),
                 touched: false,
             },
         ];
@@ -823,6 +853,68 @@ impl ThemeSettings {
                 self.rows[idx].touched = true;
                 RowEffect::None
             }
+            // R-9: all four rows are persist-only (no runtime-apply path
+            // from this row directly — the reload-exempt three still show
+            // `Liveness::OnSave` because `ConfigWatcher` re-applies them
+            // after the commit lands, not because `adjust` does).
+            SettingsRowKind::ScrollbackLimit => {
+                let RowDraft::ScrollbackLimit(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let step = delta.unsigned_abs() as usize * SCROLLBACK_LIMIT_STEP;
+                let new = if delta.is_negative() {
+                    current.saturating_sub(step)
+                } else {
+                    current.saturating_add(step)
+                }
+                .min(SCROLLBACK_LIMIT_MAX);
+                if new != current {
+                    self.rows[idx].draft = RowDraft::ScrollbackLimit(new);
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
+            SettingsRowKind::CursorStyleBlink => {
+                let RowDraft::CursorStyleBlink(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = !current;
+                self.rows[idx].draft = RowDraft::CursorStyleBlink(new);
+                self.rows[idx].touched = true;
+                RowEffect::None
+            }
+            SettingsRowKind::MinimumContrast => {
+                let RowDraft::MinimumContrast(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = (current + delta as f32 * MINIMUM_CONTRAST_STEP)
+                    .clamp(MINIMUM_CONTRAST_MIN, MINIMUM_CONTRAST_MAX);
+                if (new - current).abs() > f32::EPSILON {
+                    self.rows[idx].draft = RowDraft::MinimumContrast(new);
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
+            SettingsRowKind::MacosOptionAsAlt => {
+                let RowDraft::MacosOptionAsAlt(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = cycle(
+                    &[
+                        MacosOptionAsAlt::None,
+                        MacosOptionAsAlt::Left,
+                        MacosOptionAsAlt::Right,
+                        MacosOptionAsAlt::Both,
+                    ],
+                    current,
+                    delta,
+                );
+                if new != current {
+                    self.rows[idx].draft = RowDraft::MacosOptionAsAlt(new);
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
         }
     }
 
@@ -1148,6 +1240,21 @@ impl ThemeSettings {
                 RowDraft::ConfirmQuit(confirm) => {
                     updates.push(("confirm-quit".to_string(), confirm.to_string()));
                 }
+                RowDraft::ScrollbackLimit(bytes) => {
+                    updates.push(("scrollback-limit".to_string(), bytes.to_string()));
+                }
+                RowDraft::CursorStyleBlink(blink) => {
+                    updates.push(("cursor-style-blink".to_string(), blink.to_string()));
+                }
+                RowDraft::MinimumContrast(v) => {
+                    updates.push(("minimum-contrast".to_string(), format!("{v}")));
+                }
+                RowDraft::MacosOptionAsAlt(mode) => {
+                    updates.push((
+                        "macos-option-as-alt".to_string(),
+                        macos_option_as_alt_config_value(*mode).to_string(),
+                    ));
+                }
             }
         }
         updates
@@ -1206,6 +1313,16 @@ fn is_reload_exempt(row: SettingsRowKind) -> bool {
             | SettingsRowKind::BackgroundImageInterval
             | SettingsRowKind::ConfirmQuit
             | SettingsRowKind::QuickTerminalHeight
+            // R-9/Addendum D-1's FM-01 correction: these three are picked up
+            // by `ConfigWatcher`'s 500ms poll (`app/config_reload.rs`'s
+            // `terminal_policy_inputs_changed`/`cursor_inputs_changed`/
+            // `theme_inputs_changed`) after any config write, including the
+            // Settings panel's own commit — `macos-option-as-alt` is
+            // deliberately absent (read only at pty spawn, genuinely
+            // persist-only).
+            | SettingsRowKind::ScrollbackLimit
+            | SettingsRowKind::CursorStyleBlink
+            | SettingsRowKind::MinimumContrast
     )
 }
 
@@ -1228,6 +1345,19 @@ fn macos_titlebar_style_config_value(style: MacosTitlebarStyle) -> &'static str 
     match style {
         MacosTitlebarStyle::Native => "native",
         MacosTitlebarStyle::Transparent => "transparent",
+    }
+}
+
+/// `macos-option-as-alt` config value for `mode` (inverse of
+/// `parse_macos_option_as_alt`; `"false"`/`"true"`/`"only-left"`/
+/// `"only-right"` are parse-only aliases — the write side always emits the
+/// canonical `"none"`/`"both"`/`"left"`/`"right"`).
+fn macos_option_as_alt_config_value(mode: MacosOptionAsAlt) -> &'static str {
+    match mode {
+        MacosOptionAsAlt::None => "none",
+        MacosOptionAsAlt::Left => "left",
+        MacosOptionAsAlt::Right => "right",
+        MacosOptionAsAlt::Both => "both",
     }
 }
 

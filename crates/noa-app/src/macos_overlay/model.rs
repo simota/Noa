@@ -119,6 +119,36 @@ impl OverlayColors {
             }
         }
     }
+
+    /// R-10: the WCAG 2.x contrast ratio between two `[f32; 4]` RGBA colors
+    /// (order-independent — always `lighter / darker`). A pure algebraic
+    /// check over already-resolved theme colors, no external crate: this is
+    /// a regression guard that the selected-row background/foreground and
+    /// accent/surface pairs stay legible if either token's *source* ever
+    /// changes, not a new tokenization (both call sites already go through
+    /// theme-derived tokens — `colors.selected_bg`/`accent:
+    /// Rgb`/`colors.surface_bg` — per the code audit in
+    /// `settings-panel-enrichment.md`'s R-10 section). Only exercised by
+    /// its own regression tests today (mirrors the `restart_note`/
+    /// `opaque_at_startup` `#[allow(dead_code)]` precedent elsewhere in
+    /// this crate) — no production call site needs it yet.
+    #[allow(dead_code)]
+    pub(crate) fn contrast_ratio(a: [f32; 4], b: [f32; 4]) -> f32 {
+        fn relative_luminance([r, g, b, _]: [f32; 4]) -> f32 {
+            fn channel(c: f32) -> f32 {
+                if c <= 0.03928 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            }
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        }
+        let la = relative_luminance(a);
+        let lb = relative_luminance(b);
+        let (lighter, darker) = if la > lb { (la, lb) } else { (lb, la) };
+        (lighter + 0.05) / (darker + 0.05)
+    }
 }
 
 /// Windowing shared with the wgpu path's policy: show up to `capacity` rows,
@@ -342,6 +372,61 @@ pub(crate) fn settings_rows_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // R-10: the selected-row background/foreground pair stays legible (WCAG
+    // AA Large Text floor, 3.0:1) for a real theme fixture — the same
+    // "3024 Day" fixture `theme_settings/tests.rs` already uses. Not
+    // exhaustive across every theme (Out-of-scope per R-10's spec text); a
+    // regression guard against `selected_bg`/`surface_fg` ever silently
+    // degrading to a low-contrast hardcoded value.
+    //
+    // `accent` is checked against a lower floor than `selected_bg` above:
+    // spot-checking 5 bundled themes found `selected_bg`/`surface_fg`
+    // consistently well clear of 3.0 (5.8-8.0:1), but `accent`/`surface_bg`
+    // ranges 2.3-4.9:1 — because `OverlayStyle::accent()`
+    // (`noa-render/src/theme.rs`) is `OVERLAY_ACCENT`, one fixed app-wide
+    // constant, tested here against each theme's own derived `surface_bg`,
+    // not a per-theme-tuned pair. "3024 Day" specifically measures 2.26:1,
+    // so a 3.0 floor on this pairing would fail on the very fixture R-10's
+    // spec text names — 2.0 is the honest regression floor for what this
+    // fixed constant currently achieves, not a new AA-compliance claim.
+    #[test]
+    fn selected_row_and_accent_colors_meet_the_contrast_floor_for_a_real_theme() {
+        let theme = crate::theme::resolve_theme(Some("3024 Day"));
+        let style = noa_render::OverlayStyle::from_theme(&theme);
+        let colors = OverlayColors::from_style(&style, crate::chrome::palette().dot_red);
+
+        const WCAG_AA_LARGE_TEXT_FLOOR: f32 = 3.0;
+        let selected_contrast =
+            OverlayColors::contrast_ratio(colors.selected_bg, colors.surface_fg);
+        assert!(
+            selected_contrast >= WCAG_AA_LARGE_TEXT_FLOOR,
+            "selected_bg vs surface_fg contrast {selected_contrast} is below the {WCAG_AA_LARGE_TEXT_FLOOR}:1 floor"
+        );
+
+        const ACCENT_CONTRAST_FLOOR: f32 = 2.0;
+        let accent_contrast = OverlayColors::contrast_ratio(colors.accent, colors.surface_bg);
+        assert!(
+            accent_contrast >= ACCENT_CONTRAST_FLOOR,
+            "accent vs surface_bg contrast {accent_contrast} is below the {ACCENT_CONTRAST_FLOOR}:1 regression floor"
+        );
+    }
+
+    // The contrast function itself, pinned against known extremes —
+    // black-on-white is the WCAG-canonical 21:1 maximum, and identical
+    // colors are always exactly 1:1 (zero contrast).
+    #[test]
+    fn contrast_ratio_matches_known_wcag_extremes() {
+        let black = [0.0, 0.0, 0.0, 1.0];
+        let white = [1.0, 1.0, 1.0, 1.0];
+        assert!((OverlayColors::contrast_ratio(black, white) - 21.0).abs() < 0.01);
+        assert!((OverlayColors::contrast_ratio(black, black) - 1.0).abs() < 0.01);
+        // Order-independent.
+        assert_eq!(
+            OverlayColors::contrast_ratio(black, white),
+            OverlayColors::contrast_ratio(white, black)
+        );
+    }
 
     // FM-04: at the smallest supported pane, the floor-of-3 row budget must
     // still fit `avail` with the description line (and, while searching,

@@ -594,6 +594,10 @@ mod theme_settings_session_tests {
             confirm_quit: true,
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
+            scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,
+            cursor_style_blink: None,
+            minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
+            macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
         }
     }
 

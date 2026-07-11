@@ -1,4 +1,7 @@
-use noa_config::{BackgroundImageFit, BackgroundImagePosition, CursorShape, MacosTitlebarStyle};
+use noa_config::{
+    BackgroundImageFit, BackgroundImagePosition, CursorShape, MacosOptionAsAlt,
+    MacosTitlebarStyle,
+};
 
 /// Which half of the (now-split) overlay owns ↑↓/←→ navigation. A session's
 /// section is fixed for its whole lifetime by [`ThemeSettingsMode`] — see
@@ -54,10 +57,25 @@ pub(crate) enum SettingsRowKind {
     SidebarPreviewLines,
     QuickTerminalHeight,
     ConfirmQuit,
+    /// R-9: `scrollback-limit`. `is_live() == false` (no runtime-apply path
+    /// from this row directly), but reload-exempt (`Liveness::OnSave`,
+    /// `RestartReason::None`) — `ConfigWatcher` re-applies it within 500ms
+    /// of the Settings panel's own commit (Addendum D-1/FM-01).
+    ScrollbackLimit,
+    /// R-9: `cursor-style-blink`. Same reload-exempt classification as
+    /// `ScrollbackLimit`.
+    CursorStyleBlink,
+    /// R-9: `minimum-contrast`. Same reload-exempt classification as
+    /// `ScrollbackLimit`.
+    MinimumContrast,
+    /// R-9: `macos-option-as-alt`. Genuinely persist-only (read only at pty
+    /// spawn) — `RestartReason::CommitOnly` once touched, `Liveness::OnLaunch`,
+    /// the same pattern as `FontFamily`/`WindowPadding`/`MacosTitlebarStyle`.
+    MacosOptionAsAlt,
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 16;
+    pub(crate) const COUNT: usize = 20;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -75,6 +93,10 @@ impl SettingsRowKind {
         Self::SidebarPreviewLines,
         Self::QuickTerminalHeight,
         Self::ConfirmQuit,
+        Self::ScrollbackLimit,
+        Self::CursorStyleBlink,
+        Self::MinimumContrast,
+        Self::MacosOptionAsAlt,
     ];
 
     /// R-8: the fixed live/commit-only classification, one row's kind at a
@@ -113,6 +135,10 @@ impl SettingsRowKind {
             Self::SidebarPreviewLines => "Sidebar Preview Lines",
             Self::QuickTerminalHeight => "Quick Terminal Height",
             Self::ConfirmQuit => "Confirm Quit",
+            Self::ScrollbackLimit => "Scrollback Limit",
+            Self::CursorStyleBlink => "Cursor Blink",
+            Self::MinimumContrast => "Minimum Contrast",
+            Self::MacosOptionAsAlt => "Option as Alt",
         }
     }
 
@@ -146,6 +172,16 @@ impl SettingsRowKind {
                 "Drop-down quick terminal's height as a fraction of the screen."
             }
             Self::ConfirmQuit => "Ask for confirmation before quitting the app.",
+            Self::ScrollbackLimit => {
+                "Total scrollback storage retained per pane, in bytes. Applies on save."
+            }
+            Self::CursorStyleBlink => "Whether the terminal cursor blinks. Applies on save.",
+            Self::MinimumContrast => {
+                "WCAG contrast-ratio floor for text against its background. Applies on save."
+            }
+            Self::MacosOptionAsAlt => {
+                "Which Option key(s) the macOS window layer rewrites as Alt. Applies on next launch."
+            }
         }
     }
 }
@@ -231,6 +267,14 @@ pub(crate) enum RowDraft {
     SidebarPreviewLines(usize),
     QuickTerminalHeight(f32),
     ConfirmQuit(bool),
+    ScrollbackLimit(usize),
+    /// Normalizes `noa_config::StartupConfig::cursor_style_blink`'s
+    /// `Option<bool>` (`None` = terminal default) to a plain `bool` the row
+    /// can display/adjust — the same `None -> true` fallback
+    /// `App::apply_live_cursor_style` already uses.
+    CursorStyleBlink(bool),
+    MinimumContrast(f32),
+    MacosOptionAsAlt(MacosOptionAsAlt),
 }
 
 impl RowDraft {
@@ -274,6 +318,16 @@ impl RowDraft {
                     "Off".to_string()
                 }
             }
+            RowDraft::ScrollbackLimit(bytes) => scrollback_limit_display_value(*bytes),
+            RowDraft::CursorStyleBlink(blink) => {
+                if *blink {
+                    "On".to_string()
+                } else {
+                    "Off".to_string()
+                }
+            }
+            RowDraft::MinimumContrast(v) => format!("{v:.1}"),
+            RowDraft::MacosOptionAsAlt(mode) => format!("{mode:?}"),
         }
     }
 
@@ -338,6 +392,12 @@ impl RowDraft {
                 RowDraft::QuickTerminalHeight(fraction)
             }
             SettingsRowKind::ConfirmQuit => RowDraft::ConfirmQuit(d.confirm_quit),
+            SettingsRowKind::ScrollbackLimit => RowDraft::ScrollbackLimit(d.scrollback_limit),
+            SettingsRowKind::CursorStyleBlink => {
+                RowDraft::CursorStyleBlink(d.cursor_style_blink.unwrap_or(true))
+            }
+            SettingsRowKind::MinimumContrast => RowDraft::MinimumContrast(d.minimum_contrast),
+            SettingsRowKind::MacosOptionAsAlt => RowDraft::MacosOptionAsAlt(d.macos_option_as_alt),
         }
     }
 }
@@ -439,6 +499,24 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) confirm_quit: bool,
     pub(crate) font_family: String,
     pub(crate) available_font_families: Vec<String>,
+    /// R-9.
+    pub(crate) scrollback_limit: usize,
+    pub(crate) cursor_style_blink: Option<bool>,
+    pub(crate) minimum_contrast: f32,
+    pub(crate) macos_option_as_alt: MacosOptionAsAlt,
+}
+
+/// `scrollback-limit`'s display value (E): the raw byte count is unwieldy
+/// UI text, so this shows whole megabytes (`0` displays as `Off`, matching
+/// `noa_config`'s own "`0` disables scrollback" documentation). The
+/// *written* config value (`commit_updates()`) is always the raw byte count
+/// — this formatting is display-only.
+fn scrollback_limit_display_value(bytes: usize) -> String {
+    if bytes == 0 {
+        "Off".to_string()
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    }
 }
 
 pub(crate) fn background_image_position_value(position: BackgroundImagePosition) -> &'static str {

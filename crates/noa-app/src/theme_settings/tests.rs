@@ -40,6 +40,10 @@ fn init() -> ThemeSettingsInit {
             "Monaco".to_string(),
             "Courier New".to_string(),
         ],
+        scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,
+        cursor_style_blink: None,
+        minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
+        macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
     }
 }
 
@@ -1044,6 +1048,7 @@ fn liveness_matches_is_live_outside_the_opaque_downgrade() {
             SettingsRowKind::FontFamily
                 | SettingsRowKind::WindowPadding
                 | SettingsRowKind::MacosTitlebarStyle
+                | SettingsRowKind::MacosOptionAsAlt
         ) {
             Liveness::OnLaunch
         } else {
@@ -1113,18 +1118,19 @@ fn tab_enters_settings_search() {
     assert!(settings.settings_search_active());
 }
 
-// AC-13: fuzzy-filtering by label, best match first. "cursor" (rather than
-// a shorter prefix like "curs") is chosen deliberately: `fuzzy_match` is a
-// subsequence matcher, and a shorter query also scatter-matches unrelated
-// labels (e.g. "curs" subsequence-matches "Background Blur Radius" too) —
-// this asserts the single, unambiguous match a real user query would
-// produce, not `fuzzy_match`'s own scoring order (already covered by its
-// existing test suite in `command_palette.rs`).
+// AC-13: fuzzy-filtering by label, best match first. "cursor style" (rather
+// than a shorter prefix like "curs" or "cursor") is chosen deliberately:
+// `fuzzy_match` is a subsequence matcher, and a shorter query also
+// scatter-matches unrelated labels ("curs" subsequence-matches "Background
+// Blur Radius" too; "cursor" also matches R-9's "Cursor Blink" row) — this
+// asserts the single, unambiguous match a real user query would produce,
+// not `fuzzy_match`'s own scoring order (already covered by its existing
+// test suite in `command_palette.rs`).
 #[test]
 fn search_filters_rows_by_label_fuzzy_match() {
     let mut settings = ThemeSettings::open(settings_init());
     settings.toggle_settings_search();
-    settings.push_text("cursor", Instant::now());
+    settings.push_text("cursor style", Instant::now());
     assert_eq!(settings.settings_filtered_len(), 1);
     let idx = settings.settings_filtered_row_index(0).unwrap();
     assert_eq!(SettingsRowKind::ALL[idx], SettingsRowKind::CursorStyle);
@@ -1161,7 +1167,7 @@ fn search_empty_query_shows_every_row_in_all_order() {
 fn search_enter_confirms_the_highlighted_row_and_exits_search() {
     let mut settings = ThemeSettings::open(settings_init());
     settings.toggle_settings_search();
-    settings.push_text("cursor", Instant::now());
+    settings.push_text("cursor style", Instant::now());
     assert_eq!(settings.settings_filtered_len(), 1);
 
     settings.confirm_settings_search();
@@ -1466,6 +1472,170 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
         RowDraft::default_for(SettingsRowKind::ConfirmQuit),
         RowDraft::ConfirmQuit(true)
     );
+    // R-9.
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ScrollbackLimit),
+        RowDraft::ScrollbackLimit(noa_config::DEFAULT_SCROLLBACK_LIMIT)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::CursorStyleBlink),
+        RowDraft::CursorStyleBlink(true)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::MinimumContrast),
+        RowDraft::MinimumContrast(noa_config::DEFAULT_MINIMUM_CONTRAST)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::MacosOptionAsAlt),
+        RowDraft::MacosOptionAsAlt(noa_config::MacosOptionAsAlt::None)
+    );
+}
+
+// R-9: `SettingsRowKind::COUNT` is type-enforced at 20 (16 + the 4 new
+// keys) via `ALL`'s array literal length — this pins the value so a future
+// accidental drop of an entry fails loudly instead of silently shrinking
+// the overlay.
+#[test]
+fn settings_row_kind_count_is_twenty_after_r9() {
+    assert_eq!(SettingsRowKind::COUNT, 20);
+    assert_eq!(SettingsRowKind::ALL.len(), 20);
+}
+
+// R-9's 6-point set, part 1/4 (scrollback-limit): ALL entry / label /
+// is_live / RowDraft variant / RowEffect+apply path / restart_reason
+// classification.
+#[test]
+fn scrollback_limit_row_is_persist_only_and_adjusts_in_one_mb_steps() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(SettingsRowKind::ALL.contains(&SettingsRowKind::ScrollbackLimit));
+    assert_eq!(SettingsRowKind::ScrollbackLimit.label(), "Scrollback Limit");
+    assert!(!SettingsRowKind::ScrollbackLimit.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::ScrollbackLimit);
+    let idx = row_index(SettingsRowKind::ScrollbackLimit);
+    let RowDraft::ScrollbackLimit(before) = settings.rows()[idx].draft else {
+        panic!("expected a ScrollbackLimit draft");
+    };
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None, "no runtime-apply path from this row");
+    let RowDraft::ScrollbackLimit(after) = settings.rows()[idx].draft else {
+        panic!("expected a ScrollbackLimit draft");
+    };
+    assert_eq!(after, before + 1_000_000);
+    assert!(settings.rows()[idx].touched);
+    // Reload-exempt (Addendum D-1): no restart note despite being touched.
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::ScrollbackLimit),
+        RestartReason::None
+    );
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&("scrollback-limit".to_string(), after.to_string())),
+        "{updates:?}"
+    );
+}
+
+// R-9's 6-point set, part 2/4 (cursor-style-blink): a plain bool toggle.
+#[test]
+fn cursor_style_blink_row_is_persist_only_and_toggles() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(SettingsRowKind::ALL.contains(&SettingsRowKind::CursorStyleBlink));
+    assert_eq!(SettingsRowKind::CursorStyleBlink.label(), "Cursor Blink");
+    assert!(!SettingsRowKind::CursorStyleBlink.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::CursorStyleBlink);
+    let idx = row_index(SettingsRowKind::CursorStyleBlink);
+    assert_eq!(settings.rows()[idx].draft, RowDraft::CursorStyleBlink(true));
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(settings.rows()[idx].draft, RowDraft::CursorStyleBlink(false));
+    assert!(settings.rows()[idx].touched);
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::CursorStyleBlink),
+        RestartReason::None
+    );
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&("cursor-style-blink".to_string(), "false".to_string())),
+        "{updates:?}"
+    );
+}
+
+// R-9's 6-point set, part 3/4 (minimum-contrast): steps within the
+// documented 1.0..=21.0 WCAG ratio range and clamps at both ends.
+#[test]
+fn minimum_contrast_row_is_persist_only_and_clamps_to_the_wcag_range() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(SettingsRowKind::ALL.contains(&SettingsRowKind::MinimumContrast));
+    assert_eq!(SettingsRowKind::MinimumContrast.label(), "Minimum Contrast");
+    assert!(!SettingsRowKind::MinimumContrast.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::MinimumContrast);
+    let idx = row_index(SettingsRowKind::MinimumContrast);
+    assert_eq!(settings.rows()[idx].draft, RowDraft::MinimumContrast(1.0));
+
+    // Below the floor clamps to 1.0 (a no-op from the default, so `touched`
+    // must stay false — mirrors every other clamped-at-the-floor row).
+    let effect = settings.adjust(-5, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(settings.rows()[idx].draft, RowDraft::MinimumContrast(1.0));
+    assert!(!settings.rows()[idx].touched);
+
+    settings.adjust(30, Instant::now()); // far past the ceiling
+    assert_eq!(settings.rows()[idx].draft, RowDraft::MinimumContrast(21.0));
+    assert!(settings.rows()[idx].touched);
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::MinimumContrast),
+        RestartReason::None
+    );
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&("minimum-contrast".to_string(), "21".to_string())),
+        "{updates:?}"
+    );
+}
+
+// R-9's 6-point set, part 4/4 (macos-option-as-alt): the genuinely
+// persist-only key — cycles through the 4 modes and, unlike its 3 siblings
+// above, DOES show a restart note once touched.
+#[test]
+fn macos_option_as_alt_row_is_genuinely_persist_only_and_cycles() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(SettingsRowKind::ALL.contains(&SettingsRowKind::MacosOptionAsAlt));
+    assert_eq!(SettingsRowKind::MacosOptionAsAlt.label(), "Option as Alt");
+    assert!(!SettingsRowKind::MacosOptionAsAlt.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::MacosOptionAsAlt);
+    let idx = row_index(SettingsRowKind::MacosOptionAsAlt);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::MacosOptionAsAlt(noa_config::MacosOptionAsAlt::None)
+    );
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::MacosOptionAsAlt),
+        RestartReason::None,
+        "untouched: no note yet"
+    );
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::MacosOptionAsAlt(noa_config::MacosOptionAsAlt::Left)
+    );
+    assert!(settings.rows()[idx].touched);
+    // Genuinely persist-only: touching it DOES show a restart note, unlike
+    // ScrollbackLimit/CursorStyleBlink/MinimumContrast above.
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::MacosOptionAsAlt),
+        RestartReason::CommitOnly
+    );
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&("macos-option-as-alt".to_string(), "left".to_string())),
+        "{updates:?}"
+    );
 }
 
 // R-7/AC-18/AC-19: the state-machine half of the default_for round trip —
@@ -1676,6 +1846,7 @@ fn liveness_and_restart_reason_agree_on_every_row_under_opaque_and_transparent_s
                         SettingsRowKind::FontFamily
                             | SettingsRowKind::WindowPadding
                             | SettingsRowKind::MacosTitlebarStyle
+                            | SettingsRowKind::MacosOptionAsAlt
                     );
                 let expected = if expect_on_launch {
                     Liveness::OnLaunch
@@ -1705,14 +1876,22 @@ fn liveness_reports_on_save_for_every_reload_exempt_row() {
         SettingsRowKind::BackgroundImageInterval,
         SettingsRowKind::ConfirmQuit,
         SettingsRowKind::QuickTerminalHeight,
+        // R-9 (Addendum D-1): the three reload-applied keys join the same
+        // OnSave class as the pre-existing 8.
+        SettingsRowKind::ScrollbackLimit,
+        SettingsRowKind::CursorStyleBlink,
+        SettingsRowKind::MinimumContrast,
     ] {
         assert_eq!(settings.liveness(kind), Liveness::OnSave, "{kind:?}");
     }
-    // The three genuine restart-only rows remain `OnLaunch`.
+    // The four genuine restart-only rows remain `OnLaunch` — R-9's
+    // `macos-option-as-alt` joins the pre-existing 3 (it's read only at pty
+    // spawn, unlike its 3 reload-applied siblings above).
     for kind in [
         SettingsRowKind::FontFamily,
         SettingsRowKind::WindowPadding,
         SettingsRowKind::MacosTitlebarStyle,
+        SettingsRowKind::MacosOptionAsAlt,
     ] {
         assert_eq!(settings.liveness(kind), Liveness::OnLaunch, "{kind:?}");
     }
@@ -1767,12 +1946,16 @@ fn search_enter_with_zero_matches_exits_search_without_changing_selection() {
 // that starts empty, not one that returns to empty via edits.
 #[test]
 fn search_backspace_to_empty_query_restores_every_row() {
+    // "cursor style" (not the shorter "cursor"): R-9 added a "Cursor Blink"
+    // row, which the shorter query also subsequence-matches (see
+    // `search_filters_rows_by_label_fuzzy_match`'s comment for the same
+    // reasoning against the pre-R-9 "Background Blur Radius" ambiguity).
     let mut settings = ThemeSettings::open(settings_init());
     settings.toggle_settings_search();
-    settings.push_text("cursor", Instant::now());
+    settings.push_text("cursor style", Instant::now());
     assert_eq!(settings.settings_filtered_len(), 1);
 
-    for _ in 0.."cursor".len() {
+    for _ in 0.."cursor style".len() {
         settings.backspace(Instant::now());
     }
 

@@ -140,6 +140,10 @@ impl App {
             confirm_quit: self.config.confirm_quit,
             font_family,
             available_font_families,
+            scrollback_limit: self.config.scrollback_limit,
+            cursor_style_blink: self.config.cursor_style_blink,
+            minimum_contrast: self.config.minimum_contrast,
+            macos_option_as_alt: self.config.macos_option_as_alt,
         };
         self.theme_settings = Some(ThemeSettingsSession {
             window_id,
@@ -904,6 +908,10 @@ mod commit_theme_settings_tests {
             confirm_quit: true,
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
+            scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,
+            cursor_style_blink: None,
+            minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
+            macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
         });
         while SettingsRowKind::ALL[settings.selected_row()] != SettingsRowKind::QuickTerminalHeight
         {
@@ -972,6 +980,10 @@ mod commit_theme_settings_tests {
             confirm_quit: true,
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
+            scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,
+            cursor_style_blink: None,
+            minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
+            macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
         });
 
         assert_eq!(selected_background_image_text(&settings), None);

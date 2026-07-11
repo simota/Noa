@@ -131,8 +131,7 @@ impl App {
         let padding_changed = previous.window_padding_x != applied.window_padding_x
             || previous.window_padding_y != applied.window_padding_y;
         let theme_changed = theme_inputs_changed(&previous, &applied);
-        let cursor_changed = previous.cursor_style != applied.cursor_style
-            || previous.cursor_style_blink != applied.cursor_style_blink;
+        let cursor_changed = cursor_inputs_changed(&previous, &applied);
         let background_image_changed = background_image_inputs_changed(&previous, &applied);
         let background_image_interval_changed =
             previous.background_image_interval_secs != applied.background_image_interval_secs;
@@ -454,6 +453,16 @@ fn background_image_inputs_changed(previous: &AppConfig, next: &AppConfig) -> bo
         || previous.background_image_repeat != next.background_image_repeat
 }
 
+/// R-9 (settings-panel-enrichment): also the reload-diff proof that
+/// `cursor-style-blink` is one of the three keys `ConfigWatcher` picks up
+/// within its 500ms poll after any config write — including the Settings
+/// panel's own commit — matching `terminal_policy_inputs_changed`'s and
+/// `theme_inputs_changed`'s role for `scrollback-limit`/`minimum-contrast`.
+fn cursor_inputs_changed(previous: &AppConfig, next: &AppConfig) -> bool {
+    previous.cursor_style != next.cursor_style
+        || previous.cursor_style_blink != next.cursor_style_blink
+}
+
 fn terminal_policy_inputs_changed(previous: &AppConfig, next: &AppConfig) -> bool {
     previous.clipboard_read != next.clipboard_read
         || previous.title_report != next.title_report
@@ -530,5 +539,51 @@ mod tests {
         image.background_image_opacity = 0.5;
         assert!(background_image_inputs_changed(&base, &image));
         assert!(!terminal_policy_inputs_changed(&base, &image));
+    }
+
+    // R-9/Addendum D-1's FM-01 test clause: `scrollback-limit`,
+    // `cursor-style-blink`, and `minimum-contrast` are each picked up by a
+    // reload-diff function (so `ConfigWatcher`'s 500ms poll re-applies them
+    // after the Settings panel's own commit, no restart needed — the badge
+    // classification this backs is `theme_settings::rows::Liveness::OnSave`,
+    // `RestartReason::None`), while `macos-option-as-alt` is picked up by
+    // none of them (it's read only at pty spawn, `RestartReason::CommitOnly`
+    // / `Liveness::OnLaunch`).
+    #[test]
+    fn scrollback_cursor_blink_and_contrast_are_reload_diffed_but_option_as_alt_is_not() {
+        let base = AppConfig::from_startup(
+            noa_config::StartupConfig::default(),
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
+
+        let mut scrollback = base.clone();
+        scrollback.scrollback_limit += 1;
+        assert!(terminal_policy_inputs_changed(&base, &scrollback));
+        assert!(!theme_inputs_changed(&base, &scrollback));
+        assert!(!cursor_inputs_changed(&base, &scrollback));
+
+        let mut blink = base.clone();
+        blink.cursor_style_blink = Some(!blink.cursor_style_blink.unwrap_or(true));
+        assert!(cursor_inputs_changed(&base, &blink));
+
+        let mut contrast = base.clone();
+        contrast.minimum_contrast += 1.0;
+        assert!(theme_inputs_changed(&base, &contrast));
+        assert!(!terminal_policy_inputs_changed(&base, &contrast));
+        assert!(!cursor_inputs_changed(&base, &contrast));
+
+        let mut option_as_alt = base.clone();
+        option_as_alt.macos_option_as_alt = match option_as_alt.macos_option_as_alt {
+            noa_config::MacosOptionAsAlt::None => noa_config::MacosOptionAsAlt::Both,
+            _ => noa_config::MacosOptionAsAlt::None,
+        };
+        assert!(
+            !theme_inputs_changed(&base, &option_as_alt),
+            "macos-option-as-alt must not be reload-diffed by any of these — it's read only at pty spawn"
+        );
+        assert!(!terminal_policy_inputs_changed(&base, &option_as_alt));
+        assert!(!cursor_inputs_changed(&base, &option_as_alt));
+        assert!(!background_image_inputs_changed(&base, &option_as_alt));
     }
 }

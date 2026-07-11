@@ -182,9 +182,23 @@ impl Broadcaster {
     pub fn broadcast_state_changed(&self, panels: Vec<Panel>) {
         let conns = self.conns.lock();
         for entry in conns.values() {
-            if entry.subs.iter().any(|s| s.events.contains(EventMask::STATE_CHANGED)) {
+            for sub in &entry.subs {
+                if !sub.events.contains(EventMask::STATE_CHANGED) {
+                    continue;
+                }
+                let filtered: Vec<Panel> = match &sub.pane_ids {
+                    Some(ids) => panels
+                        .iter()
+                        .filter(|panel| ids.contains(&panel.pane_id.0))
+                        .cloned()
+                        .collect(),
+                    None => panels.clone(),
+                };
+                if filtered.is_empty() {
+                    continue;
+                }
                 entry.queue.push(QueuedNotification::StateChanged {
-                    panels: panels.clone(),
+                    panels: filtered,
                     dropped: false,
                 });
             }
@@ -286,6 +300,68 @@ mod tests {
 
         b.broadcast_output(42, vec![]);
         assert_eq!(queue.len(), 1);
+    }
+
+    fn panel_with_id(pane_id: u64) -> Panel {
+        Panel {
+            window_group_id: 0.into(),
+            window_id: 0.into(),
+            pane_id: pane_id.into(),
+            name: String::new(),
+            cwd: String::new(),
+            branch: None,
+            process: None,
+            busy: false,
+            attention: false,
+            preview: vec![],
+        }
+    }
+
+    #[test]
+    fn state_changed_pane_filter_delivers_only_matching_panels() {
+        let b = Broadcaster::new();
+        let (conn_id, queue) = b.register_connection();
+        let mut ids = HashSet::new();
+        ids.insert(42u64);
+        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids));
+
+        b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(42)]);
+        let drained = queue.drain();
+        assert_eq!(drained.len(), 1);
+        match &drained[0] {
+            QueuedNotification::StateChanged { panels, .. } => {
+                assert_eq!(panels.len(), 1);
+                assert_eq!(panels[0].pane_id.0, 42);
+            }
+            _ => panic!("expected state changed"),
+        }
+    }
+
+    #[test]
+    fn state_changed_pane_filter_with_zero_matches_delivers_nothing() {
+        let b = Broadcaster::new();
+        let (conn_id, queue) = b.register_connection();
+        let mut ids = HashSet::new();
+        ids.insert(99u64);
+        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids));
+
+        b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(2)]);
+        assert_eq!(queue.len(), 0, "no panel matches the filter, so nothing is queued");
+    }
+
+    #[test]
+    fn state_changed_none_filter_delivers_all_panels() {
+        let b = Broadcaster::new();
+        let (conn_id, queue) = b.register_connection();
+        b.add_subscription(conn_id, EventMask::STATE_CHANGED, None);
+
+        b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(2)]);
+        let drained = queue.drain();
+        assert_eq!(drained.len(), 1);
+        match &drained[0] {
+            QueuedNotification::StateChanged { panels, .. } => assert_eq!(panels.len(), 2),
+            _ => panic!("expected state changed"),
+        }
     }
 
     #[test]

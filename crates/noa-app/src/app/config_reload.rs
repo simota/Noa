@@ -141,6 +141,7 @@ impl App {
         let sidebar_preview_changed =
             previous.sidebar_preview_lines != applied.sidebar_preview_lines;
         let keybinds_changed = previous.keybinds != applied.keybinds;
+        let server_restart = decide_server_restart(&previous, &applied);
         let quick_terminal_hotkey_changed =
             previous.quick_terminal_hotkey != applied.quick_terminal_hotkey;
         let sidebar_hotkey_changed = previous.sidebar_hotkey != applied.sidebar_hotkey;
@@ -180,6 +181,9 @@ impl App {
             self.sidebar_preview_lines_gate
                 .store(self.config.sidebar_preview_lines, Ordering::Relaxed);
             self.request_sidebar_redraw();
+        }
+        if server_restart == ServerRestartAction::Restart {
+            self.restart_ipc_server();
         }
         if keybinds_changed {
             let (keybinds, diagnostics) = KeybindEngine::from_config(&self.config.keybinds);
@@ -463,6 +467,29 @@ fn cursor_inputs_changed(previous: &AppConfig, next: &AppConfig) -> bool {
         || previous.cursor_style_blink != next.cursor_style_blink
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServerRestartAction {
+    None,
+    Restart,
+}
+
+/// Pure decision for the `noa-ipc` server's live-reload path (G-2): any
+/// change to the keys that shape how/whether the server runs
+/// (enable/port/token/scopes) requires tearing down the running
+/// `ServerHandle` and re-installing, since none of those are read again
+/// after `Server::start`.
+fn decide_server_restart(previous: &AppConfig, next: &AppConfig) -> ServerRestartAction {
+    if previous.server_enable != next.server_enable
+        || previous.server_port != next.server_port
+        || previous.server_token != next.server_token
+        || previous.server_scopes != next.server_scopes
+    {
+        ServerRestartAction::Restart
+    } else {
+        ServerRestartAction::None
+    }
+}
+
 fn terminal_policy_inputs_changed(previous: &AppConfig, next: &AppConfig) -> bool {
     previous.clipboard_read != next.clipboard_read
         || previous.title_report != next.title_report
@@ -585,5 +612,39 @@ mod tests {
         assert!(!terminal_policy_inputs_changed(&base, &option_as_alt));
         assert!(!cursor_inputs_changed(&base, &option_as_alt));
         assert!(!background_image_inputs_changed(&base, &option_as_alt));
+    }
+
+    #[test]
+    fn server_restart_is_decided_by_enable_port_token_and_scopes_only() {
+        let base = AppConfig::from_startup(
+            noa_config::StartupConfig::default(),
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
+        assert_eq!(decide_server_restart(&base, &base), ServerRestartAction::None);
+
+        let mut enabled = base.clone();
+        enabled.server_enable = !enabled.server_enable;
+        assert_eq!(decide_server_restart(&base, &enabled), ServerRestartAction::Restart);
+
+        let mut port = base.clone();
+        port.server_port = port.server_port.wrapping_add(1);
+        assert_eq!(decide_server_restart(&base, &port), ServerRestartAction::Restart);
+
+        let mut token = base.clone();
+        token.server_token = Some("changed".to_string());
+        assert_eq!(decide_server_restart(&base, &token), ServerRestartAction::Restart);
+
+        let mut scopes = base.clone();
+        scopes.server_scopes = format!("{}x", scopes.server_scopes);
+        assert_eq!(decide_server_restart(&base, &scopes), ServerRestartAction::Restart);
+
+        let mut unrelated = base.clone();
+        unrelated.font_size += 1.0;
+        assert_eq!(
+            decide_server_restart(&base, &unrelated),
+            ServerRestartAction::None,
+            "unrelated keys must not trigger a server restart"
+        );
     }
 }

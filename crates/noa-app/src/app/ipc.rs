@@ -68,6 +68,31 @@ impl App {
         }
     }
 
+    /// Tears down the running `noa-ipc` server (if any) and re-runs
+    /// `install_ipc_server_if_needed` against the just-reloaded config
+    /// (G-2: config reload's `server-enable`/`server-port`/`server-token`/
+    /// `server-scopes` keys otherwise have no live effect). Dropping
+    /// `ServerHandle` stops its accept loop and joins it, and every
+    /// in-flight connection thread self-terminates within its own ~50ms
+    /// read-timeout poll of the shared shutdown flag (`noa_ipc::server`).
+    ///
+    /// Panes spawned before this restart hold an `IpcOutputTap` built from
+    /// the *old* `Broadcaster` (io thread wiring, `ipc_output_tap` below).
+    /// That broadcaster keeps working as a value — its registry just has no
+    /// connections left once they all disconnect, so its `try_send`s become
+    /// permanent no-ops — but it can never reach the *new* server's
+    /// connections. Those panes' output silently stops reaching `noa.output`
+    /// subscribers until they're respawned; freshly spawned panes tap the
+    /// new server correctly. Swapping the old taps live isn't done here: it
+    /// would need every io thread to observe a hot-swappable broadcaster
+    /// handle, which is more machinery than a config-driven server restart
+    /// (an infrequent, deliberate action) justifies for v1.
+    pub(super) fn restart_ipc_server(&mut self) {
+        self.ipc_server = None;
+        self.ipc_install_attempted = false;
+        self.install_ipc_server_if_needed();
+    }
+
     /// Rebuild the IPC read snapshot (panels + pane-id registry + terminal
     /// handles) and broadcast a `state_changed` diff to subscribers (FR-16).
     /// Called from `about_to_wait`; a structural-signature change (F-5:
@@ -93,6 +118,7 @@ impl App {
 
         let mut panels = Vec::new();
         let mut terminals = HashMap::new();
+        let mut live_keys = HashSet::new();
         let previous_panels = {
             let mut shared = self.ipc_shared.lock();
             for (id, card) in self.session_store.ordered_cards() {
@@ -105,6 +131,7 @@ impl App {
                 }
                 let key = registry_key(id);
                 let ipc_id = shared.registry.mint(key.0, key.1);
+                live_keys.insert(key);
                 panels.push(card_to_panel(ipc_id, state.group.0, key.0, card));
                 if let Some(surface) = state.surfaces.get(&id.pane_id) {
                     terminals.insert(key, surface.terminal.clone());
@@ -112,6 +139,15 @@ impl App {
             }
             let previous = std::mem::replace(&mut shared.panels, panels.clone());
             shared.terminals = terminals;
+            // Closed panes never reappear under the same `(window_id,
+            // pane_id)` key (`WindowId`/`PaneId` are never reused), so
+            // pruning anything absent from this tick's live set is safe.
+            // A pane minted this same tick via `ipc_output_tap` (eager
+            // mint at spawn, before it lands in `session_store`) is always
+            // in `live_keys` too: spawn wiring inserts into
+            // `session_store`/`self.windows` synchronously before the
+            // event loop yields to the next `about_to_wait`.
+            shared.registry.prune(&live_keys);
             previous
         };
 

@@ -30,11 +30,13 @@ use crate::events::UserEvent;
 use crate::session_store::{PreviewLine, SessionCard, SessionCardId};
 
 /// Maps IPC-visible pane ids (minted, monotonic u64s — DEC-B) to/from the
-/// internal `(WindowId, PaneId)` address a caller resolves through `App`.
-/// Entries are never proactively removed: a pane that has since closed is
-/// caught by the liveness check every `AppIpcBackend` call already performs
-/// against `App`'s live window/pane set, so a stale registry entry only ever
-/// costs a `-32002 UnknownPane` — never a stale mutation.
+/// internal `(WindowId, PaneId)` address a caller resolves through `App`. A
+/// pane that has since closed is caught by the liveness check every
+/// `AppIpcBackend` call already performs against `App`'s live window/pane
+/// set, so a stale registry entry only ever costs a `-32002 UnknownPane` —
+/// never a stale mutation. `prune` additionally drops entries for panes gone
+/// from the current snapshot (`App::sync_ipc_snapshot`), since `WindowId`/
+/// `PaneId` are never reused and a closed pane's key can't reappear.
 #[derive(Default)]
 pub(crate) struct IpcRegistry {
     next_id: u64,
@@ -58,6 +60,18 @@ impl IpcRegistry {
 
     pub(crate) fn resolve(&self, ipc_id: u64) -> Option<(u64, u64)> {
         self.by_id.get(&ipc_id).copied()
+    }
+
+    /// Removes every entry whose `(window_id, pane_id)` key is absent from
+    /// `live_keys`.
+    pub(crate) fn prune(&mut self, live_keys: &std::collections::HashSet<(u64, u64)>) {
+        self.by_pane.retain(|key, id| {
+            let live = live_keys.contains(key);
+            if !live {
+                self.by_id.remove(id);
+            }
+            live
+        });
     }
 }
 
@@ -374,13 +388,20 @@ pub(crate) fn card_to_panel(
         process: card.process.clone(),
         busy: card.busy,
         attention: card.attention,
-        preview: card.preview.iter().map(preview_line_to_row).collect(),
+        preview: card
+            .preview
+            .iter()
+            .enumerate()
+            .map(|(row, line)| preview_line_to_row(row as u64, line))
+            .collect(),
     }
 }
 
-fn preview_line_to_row(line: &PreviewLine) -> WireRow {
+/// `row` is a 0-based index into `preview`'s lines, not an absolute grid
+/// row — previews are relative to the pane's most recent viewport.
+fn preview_line_to_row(row: u64, line: &PreviewLine) -> WireRow {
     WireRow {
-        row: 0,
+        row,
         spans: line
             .iter()
             .map(|span| Span {
@@ -417,6 +438,25 @@ mod tests {
 
         assert_eq!(registry.resolve(first), Some((10, 1)));
         assert_eq!(registry.resolve(999), None, "unminted id resolves to nothing");
+    }
+
+    #[test]
+    fn prune_drops_entries_absent_from_the_live_set_and_keeps_the_rest() {
+        let mut registry = IpcRegistry::default();
+        let closed = registry.mint(10, 1);
+        let kept = registry.mint(10, 2);
+
+        let mut live = std::collections::HashSet::new();
+        live.insert((10, 2));
+        registry.prune(&live);
+
+        assert_eq!(registry.resolve(closed), None, "pane absent from the live set is pruned");
+        assert_eq!(registry.resolve(kept), Some((10, 2)), "pane present in the live set survives");
+
+        // A closed pane's id never comes back, even if its key is minted
+        // again (fresh id, not a resurrection of the pruned one).
+        let reminted = registry.mint(10, 1);
+        assert_ne!(reminted, closed);
     }
 
     fn cell(ch: char, fg: Color) -> Cell {

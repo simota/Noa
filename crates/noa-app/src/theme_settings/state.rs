@@ -10,8 +10,9 @@ use crate::command_palette::fuzzy_match;
 use crate::debounce::Debouncer;
 
 use super::{
-    RevertValues, RowDraft, RowEffect, Section, SettingsRow, SettingsRowKind, ThemeSettingsInit,
-    ThemeSettingsMode, background_image_fit_value, background_image_position_value,
+    RevertValues, RowDraft, RowEffect, Section, SettingsRow, SettingsRowKind, ThemePairContext,
+    ThemeSettingsInit, ThemeSettingsMode, background_image_fit_value,
+    background_image_position_value,
 };
 
 /// The injectable config-writer seam [`ThemeSettings::commit`] takes
@@ -121,6 +122,10 @@ pub(crate) struct ThemeSettings {
     /// and on every successful [`Self::commit`] (a stale error from an
     /// earlier failed attempt must not survive a later success).
     commit_error: Option<String>,
+    /// R-34/ADR-4: `Some` when the config's `theme` directive is a
+    /// `light:X,dark:Y` pair — see [`ThemePairContext`]. Read only by
+    /// [`Self::commit_updates`]; never mutated after `open()`.
+    theme_pair: Option<ThemePairContext>,
 }
 
 impl ThemeSettings {
@@ -226,6 +231,7 @@ impl ThemeSettings {
             opaque_at_startup: init.background_opacity >= 1.0,
             available_font_families: Arc::new(init.available_font_families),
             commit_error: None,
+            theme_pair: init.theme_pair,
         };
         settings.recompute_filtered();
         if let Some(pos) = settings
@@ -839,7 +845,24 @@ impl ThemeSettings {
         if let Some(name) = self.highlighted_theme_name()
             && name != self.snapshot.theme_name
         {
-            updates.push(("theme".to_string(), name.to_string()));
+            // R-34/ADR-4: a `light:X,dark:Y` pair config rewrites only the
+            // currently active side, keeping the other side's value intact
+            // — never the bare single-name overwrite below, which would
+            // silently drop the pair syntax (AC-49/AC-50). `writer::
+            // apply_updates` itself needs no change for this: it just
+            // replaces the `theme` key's value verbatim, so handing it a
+            // pre-built `light:_,dark:_` string is enough (NFR-9).
+            match &self.theme_pair {
+                Some(ctx) => {
+                    let (light, dark) = if ctx.active_is_light {
+                        (name, ctx.dark.as_str())
+                    } else {
+                        (ctx.light.as_str(), name)
+                    };
+                    updates.push(("theme".to_string(), format!("light:{light},dark:{dark}")));
+                }
+                None => updates.push(("theme".to_string(), name.to_string())),
+            }
         }
         for row in &self.rows {
             if !row.touched {

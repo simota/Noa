@@ -45,6 +45,7 @@ fn test_theme_settings_init() -> ThemeSettingsInit {
         confirm_quit: true,
         font_family: "Menlo".to_string(),
         available_font_families: Vec::new(),
+        theme_pair: None,
     }
 }
 

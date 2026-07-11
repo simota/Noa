@@ -40,6 +40,22 @@ fn init() -> ThemeSettingsInit {
             "Monaco".to_string(),
             "Courier New".to_string(),
         ],
+        theme_pair: None,
+    }
+}
+
+/// R-34/ADR-4: an `init()` variant opened under a `theme = light:X,dark:Y`
+/// pair, with `current_theme` already resolved to the active side — mirrors
+/// what `App::open_theme_settings` hands `ThemeSettings::open` post-FM-01.
+fn theme_pair_init(active_is_light: bool, light: &str, dark: &str) -> ThemeSettingsInit {
+    ThemeSettingsInit {
+        current_theme: if active_is_light { light } else { dark }.to_string(),
+        theme_pair: Some(ThemePairContext {
+            active_is_light,
+            light: light.to_string(),
+            dark: dark.to_string(),
+        }),
+        ..init()
     }
 }
 
@@ -1131,4 +1147,159 @@ fn every_mutator_that_changes_state_changes_the_fingerprint() {
     let _ = settings.commit(Path::new("/nonexistent/noa/config"), &mut writer);
     let fp_after = settings.view_fingerprint_u64();
     assert_ne!(fp_before, fp_after, "commit_error");
+}
+
+// ---------------------------------------------------------------------
+// theme-settings-v2: Stage B (data safety, ADR-4/R-34)
+// ---------------------------------------------------------------------
+
+// AC-49/NFR-9 (R-34, ADR-4): committing a highlighted theme under a
+// `light:A,dark:B` pair with Light active rewrites only the light side,
+// keeping the dark side's value verbatim — never a bare `("theme", name)`
+// overwrite, which would silently drop the pair syntax.
+#[test]
+fn commit_updates_rewrites_only_the_active_side_of_a_theme_pair() {
+    let light = noa_theme::THEMES[0].0;
+    let dark = noa_theme::THEMES[1].0;
+    let target = noa_theme::THEMES[2].0;
+    let mut settings = ThemeSettings::open(theme_pair_init(true, light, dark));
+    while settings.highlighted_theme_name() != Some(target) {
+        settings.move_down();
+    }
+
+    let updates = settings.commit_updates();
+    let expected = format!("light:{target},dark:{dark}");
+    assert_eq!(
+        updates
+            .iter()
+            .find(|(k, _)| k == "theme")
+            .map(|(_, v)| v.as_str()),
+        Some(expected.as_str())
+    );
+    assert!(
+        !updates.iter().any(|(k, v)| k == "theme" && v == target),
+        "must never emit a bare single-name overwrite for a pair config"
+    );
+}
+
+// AC-50/NFR-9 (R-34, ADR-4) [integration]: AC-49's commit, written to an
+// actual file via the real `write_config_updates` writer, re-parses as a
+// valid `light:X,dark:Y` pair through noa-config's real public loader —
+// the light side holds the new value, the dark side is byte-identical to
+// what was on disk before the commit.
+#[test]
+fn ac50_committed_pair_round_trips_through_the_real_config_parser() {
+    let dir = std::env::temp_dir().join(format!(
+        "noa-theme-settings-ac50-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("config");
+    let light = noa_theme::THEMES[0].0;
+    let dark = noa_theme::THEMES[1].0;
+    let target = noa_theme::THEMES[2].0;
+    std::fs::write(&config_path, format!("theme = light:{light},dark:{dark}\n")).unwrap();
+
+    let mut settings = ThemeSettings::open(theme_pair_init(true, light, dark));
+    while settings.highlighted_theme_name() != Some(target) {
+        settings.move_down();
+    }
+    let mut writer =
+        |path: &Path, updates: &[(String, String)]| noa_config::write_config_updates(path, updates);
+    assert!(settings.commit(&config_path, &mut writer).is_some());
+
+    let (overrides, diagnostics) = noa_config::load_overrides_from_path(&config_path).unwrap();
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected diagnostics: {diagnostics:?}"
+    );
+    assert_eq!(
+        overrides.theme_appearance,
+        Some(noa_config::ThemeAppearancePair {
+            light: target.to_string(),
+            dark: dark.to_string(),
+        })
+    );
+
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+// AC-51 (R-34): unchanged behavior when `theme_pair` is `None` (a plain,
+// non-paired `theme = NAME` config) — the regression guard for ADR-4's
+// `else` branch.
+#[test]
+fn commit_updates_uses_the_plain_theme_key_when_not_a_pair() {
+    let mut settings = ThemeSettings::open(init()); // theme_pair: None
+    settings.move_down();
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "theme"),
+        Some(&(
+            "theme".to_string(),
+            settings.highlighted_theme_name().unwrap().to_string()
+        ))
+    );
+}
+
+// AC-55 (R-34): the pair-resolution fixture double of
+// `settings_mode_commit_updates_never_includes_a_theme_change` — a
+// Settings-mode session opened under a pair config (current_theme
+// correctly resolved to the active side, post-FM-01) must still never emit
+// a `theme` key when only a non-theme row is touched. Before FM-01, an
+// unresolved (empty) `current_theme` made this fire spuriously (`filtered`
+// never contains an empty-named theme, so `highlighted` never re-aligned
+// onto the snapshot).
+#[test]
+fn settings_mode_commit_updates_never_includes_a_theme_change_under_a_pair() {
+    let light = noa_theme::THEMES[0].0;
+    let dark = noa_theme::THEMES[1].0;
+
+    let settings = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Settings,
+        ..theme_pair_init(true, light, dark)
+    });
+    assert!(settings.commit_updates().is_empty());
+
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Settings,
+        ..theme_pair_init(true, light, dark)
+    });
+    settings.adjust(1, Instant::now()); // touches FontSize only
+
+    let updates = settings.commit_updates();
+    assert!(!updates.iter().any(|(k, _)| k == "theme"));
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "font-size"),
+        Some(&("font-size".to_string(), "14.5".to_string()))
+    );
+}
+
+// AC-56 (FM-01 defense-in-depth): `highlight_moved` can never become true
+// in Settings mode — the theme picker section doesn't exist in this
+// session at all, so `should_preview()` (which gates whether `App`
+// resolves a live preview) must stay false no matter what the user does.
+// This is why a Settings-mode session can never legitimately emit a
+// `theme` diff from highlight drift in the first place — FM-01's actual
+// bug was in `current_theme`'s derivation, not here, but this pins the
+// invariant down as a second line of defense.
+#[test]
+fn settings_mode_highlight_moved_is_always_false() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(!settings.should_preview());
+
+    for kind in SettingsRowKind::ALL {
+        move_to_row(&mut settings, kind);
+        settings.adjust(1, Instant::now());
+        assert!(
+            !settings.should_preview(),
+            "highlight_moved must stay false in Settings mode ({kind:?})"
+        );
+    }
+    settings.push_text("x", Instant::now());
+    settings.backspace(Instant::now());
+    assert!(!settings.should_preview());
 }

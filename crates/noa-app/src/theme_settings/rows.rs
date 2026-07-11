@@ -253,6 +253,22 @@ pub(crate) struct RevertValues {
     pub(crate) quick_terminal_size: f32,
 }
 
+/// R-34/AC-49-51 (ADR-4): the config's pair-appearance context, resolved by
+/// `App` from `self.config.theme_appearance` plus the live system
+/// appearance (the same resolution `effective_theme_name` uses) — `None`
+/// when the config's `theme` directive is a plain single name (no
+/// `light:X,dark:Y` pair), in which case [`super::ThemeSettings::commit_updates`]
+/// keeps its pre-existing single-name behavior unchanged (AC-51).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ThemePairContext {
+    /// Whether the *currently active* appearance side is `light` (vs
+    /// `dark`) — resolved once at open time, so a commit always rewrites
+    /// the side the user is actually looking at.
+    pub(crate) active_is_light: bool,
+    pub(crate) light: String,
+    pub(crate) dark: String,
+}
+
 /// Everything `App` must supply to open the overlay — the session's live
 /// values at the moment `cmd`+palette-entry is invoked, plus the font-family
 /// discovery list (queried once by `App` via `noa_font::list_families`, kept
@@ -263,6 +279,10 @@ pub(crate) struct ThemeSettingsInit {
     /// "Settings" rows) — fixed for the session's whole lifetime.
     pub(crate) mode: ThemeSettingsMode,
     pub(crate) current_theme: String,
+    /// `Some` when the config's `theme` directive is a `light:X,dark:Y`
+    /// pair (R-34) — `None` for a plain single-name `theme` (or none at
+    /// all).
+    pub(crate) theme_pair: Option<ThemePairContext>,
     pub(crate) font_size: f32,
     pub(crate) cursor_style: CursorShape,
     pub(crate) background_opacity: f32,

@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use super::super::*;
 use super::ActiveOverlay;
 use crate::theme_settings::{
-    RowDraft, RowEffect, SettingsRow, SettingsRowKind, ThemeSettings, ThemeSettingsInit,
-    ThemeSettingsMode,
+    RowDraft, RowEffect, SettingsRow, SettingsRowKind, ThemePairContext, ThemeSettings,
+    ThemeSettingsInit, ThemeSettingsMode,
 };
 
 fn cursor_shape_of(style: CursorStyle) -> noa_config::CursorShape {
@@ -36,17 +36,30 @@ impl App {
         if self.active_overlay(window_id) != ActiveOverlay::None {
             return;
         }
-        // Only pass through a theme name that actually resolves — an
-        // invalid config value already fell back to the built-in default at
-        // startup (theme-selection.md R-3), and the overlay must not
-        // reproduce the invalid name (edge case in the locked spec's L2).
-        let current_theme = self
+        // FM-01: resolve `current_theme` the same pair-aware way
+        // `effective_theme_name` does — reading `self.config.theme` alone
+        // (the old behavior) is always empty under a `theme =
+        // light:X,dark:Y` config, since a pair's resolved name lives in
+        // `self.config.theme_appearance` instead. That emptiness fed a
+        // phantom "theme changed" diff into `commit_updates()` on every
+        // Settings-only commit under a pair config, silently overwriting it
+        // (R-34). `resolve_current_theme` also keeps the pre-existing
+        // catalog-validity filter (an invalid config value already fell
+        // back to the built-in default at startup, theme-selection.md R-3,
+        // and the overlay must not reproduce the invalid name).
+        let current_theme = resolve_current_theme(&self.config, self.system_appearance);
+        // R-34/ADR-4: the pair context `commit_updates` needs to rewrite
+        // only the active side on commit — `None` for a plain, non-paired
+        // `theme` directive (AC-51's unchanged single-name behavior).
+        let theme_pair = self
             .config
-            .theme
-            .as_deref()
-            .filter(|name| noa_theme::resolve(name).is_some())
-            .unwrap_or_default()
-            .to_string();
+            .theme_appearance
+            .as_ref()
+            .map(|pair| ThemePairContext {
+                active_is_light: self.system_appearance == winit::window::Theme::Light,
+                light: pair.light.clone(),
+                dark: pair.dark.clone(),
+            });
         let cursor_style = self
             .initial_cursor_style
             .map(cursor_shape_of)
@@ -68,6 +81,7 @@ impl App {
         let init = ThemeSettingsInit {
             mode,
             current_theme,
+            theme_pair,
             font_size: self.runtime_font_size,
             cursor_style,
             background_opacity: self.config.background_opacity,
@@ -616,6 +630,18 @@ impl App {
     }
 }
 
+/// R-34/FM-01: `open_theme_settings`'s `current_theme` derivation — the
+/// same pair-aware resolution `effective_theme_name` uses (a `light:X,
+/// dark:Y` pair picks the active appearance side; otherwise the plain
+/// `theme` name), filtered through the catalog so an invalid config value
+/// never reaches the overlay. Standalone (rather than inlined) so AC-54 can
+/// assert it directly without building a full `App`.
+fn resolve_current_theme(config: &AppConfig, appearance: winit::window::Theme) -> String {
+    effective_theme_name(config, appearance)
+        .filter(|name| noa_theme::resolve(name).is_some())
+        .unwrap_or_default()
+}
+
 fn sync_quick_terminal_size_from_committed_rows(
     config: &mut AppConfig,
     rows: &[SettingsRow; SettingsRowKind::COUNT],
@@ -739,6 +765,7 @@ mod commit_theme_settings_tests {
             confirm_quit: true,
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
+            theme_pair: None,
         });
         while SettingsRowKind::ALL[settings.selected_row()] != SettingsRowKind::QuickTerminalHeight
         {
@@ -807,6 +834,7 @@ mod commit_theme_settings_tests {
             confirm_quit: true,
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
+            theme_pair: None,
         });
 
         assert_eq!(selected_background_image_text(&settings), None);
@@ -818,6 +846,70 @@ mod commit_theme_settings_tests {
         assert_eq!(
             selected_background_image_text(&settings),
             Some("/tmp/wall.png")
+        );
+    }
+
+    // AC-54 (R-34, FM-01): opening under a `theme = light:X,dark:Y` config
+    // resolves `current_theme` to the *active* appearance side, never an
+    // empty string — the exact derivation `commit_updates` depends on to
+    // avoid a phantom theme diff (AC-55).
+    #[test]
+    fn resolve_current_theme_picks_the_active_pair_side() {
+        let light = noa_theme::THEMES[0].0.to_string();
+        let dark = noa_theme::THEMES[1].0.to_string();
+        let mut config = AppConfig::from_startup(
+            noa_config::StartupConfig::default(),
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
+        config.theme_appearance = Some(noa_config::ThemeAppearancePair {
+            light: light.clone(),
+            dark: dark.clone(),
+        });
+
+        assert_eq!(
+            resolve_current_theme(&config, winit::window::Theme::Light),
+            light
+        );
+        assert_eq!(
+            resolve_current_theme(&config, winit::window::Theme::Dark),
+            dark
+        );
+    }
+
+    // AC-51 regression guard at the derivation layer: a plain, non-paired
+    // `theme` config keeps resolving exactly as before.
+    #[test]
+    fn resolve_current_theme_keeps_single_name_behavior_when_not_a_pair() {
+        let name = noa_theme::THEMES[0].0.to_string();
+        let mut config = AppConfig::from_startup(
+            noa_config::StartupConfig::default(),
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
+        config.theme = Some(name.clone());
+
+        assert_eq!(
+            resolve_current_theme(&config, winit::window::Theme::Light),
+            name
+        );
+    }
+
+    // An unresolvable pair side (not in the 574-entry catalog) falls back
+    // to the empty string, same as the pre-existing single-name behavior —
+    // never a name the overlay can't look up.
+    #[test]
+    fn resolve_current_theme_falls_back_to_empty_for_an_unresolvable_name() {
+        let mut config = AppConfig::from_startup(
+            noa_config::StartupConfig::default(),
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
+        config.theme = Some("no such theme".to_string());
+
+        assert_eq!(
+            resolve_current_theme(&config, winit::window::Theme::Light),
+            ""
         );
     }
 }

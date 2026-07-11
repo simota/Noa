@@ -163,6 +163,79 @@ fn ipc_output_is_none_when_nothing_changed_or_the_tap_is_inactive() {
     assert!(throttled.ipc_output.is_none());
 }
 
+/// R-1: a feed suppressed by the 16ms throttle gate must not be silently
+/// dropped — it owes a trailing flush, and once that deadline is reached
+/// (simulated here by calling `flush_pending_ipc_output` directly, exactly
+/// as `spawn`'s loop does when its owed deadline elapses) subscribers must
+/// still receive the burst's final rows.
+#[test]
+fn ipc_output_throttled_feed_eventually_flushes_the_final_rows() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = Vec::new();
+
+    // First feed pushes immediately and seeds the cache.
+    let first = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"one\r\ntwo\r\nthree",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(first.ipc_output.is_some());
+    assert!(first.ipc_output_publish_pending.is_none());
+
+    // A burst's tail lands inside the throttle window: no push now, but a
+    // trailing-flush deadline is owed instead of the diff being dropped.
+    let second = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"\x1b[Hedited",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(second.ipc_output.is_none(), "still inside the throttle window");
+    let deadline = second
+        .ipc_output_publish_pending
+        .expect("a suppressed push must owe a trailing flush");
+    assert!(deadline > Instant::now() - super::ipc_tap::OUTPUT_PUSH_MIN_INTERVAL);
+
+    // The owed deadline elapses with no further pty output — `spawn`'s loop
+    // would call `flush_pending_ipc_output` here; drive it directly.
+    let broadcaster = noa_ipc::push::Broadcaster::new();
+    let (conn_id, queue) = broadcaster.register_connection();
+    broadcaster
+        .add_subscription(conn_id, noa_ipc::push::EventMask::OUTPUT, None)
+        .expect("connection was just registered");
+    let tap = super::ipc_tap::IpcOutputTap { broadcaster, ipc_pane_id: 42 };
+
+    super::ipc_tap::flush_pending_ipc_output(&terminal, &tap, &mut last_ipc_push, &mut ipc_row_cache);
+
+    let notifications = queue.drain();
+    assert_eq!(notifications.len(), 1, "the trailing flush must push exactly one notification");
+    match &notifications[0] {
+        noa_ipc::push::QueuedNotification::Output { pane_id, lines, .. } => {
+            assert_eq!(*pane_id, 42);
+            assert_eq!(lines.len(), 1, "only the row edited during the throttle window");
+            assert_eq!(lines[0].row, 0);
+        }
+        other => panic!("expected an Output notification, got {other:?}"),
+    }
+}
+
 #[test]
 fn decide_sidebar_publish_throttles() {
     let now = Instant::now();

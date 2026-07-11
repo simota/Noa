@@ -23,7 +23,7 @@ use crate::split_tree::PaneId;
 use super::auto_approve::{
     AutoApproveCandidate, AutoApprovePublish, detect_auto_approve_candidate,
 };
-use super::ipc_tap::{decide_ipc_output_push, hash_wire_row_spans};
+use super::ipc_tap::{IpcOutputPushDecision, compute_ipc_row_diff, decide_ipc_output_push};
 use super::overview::{OverviewPublish, publish_overview_snapshot};
 use super::sidebar::{
     SidebarPublish, SidebarUpsert, decide_sidebar_publish, preview_rows, preview_spans,
@@ -70,6 +70,14 @@ pub(super) struct TerminalOutput {
     /// id) or the push is still within its throttle window; `Some(vec![])`
     /// never happens (an empty diff just stays `None`).
     pub(super) ipc_output: Option<Vec<noa_ipc::protocol::Row>>,
+    /// Trailing-flush deadline owed by this feed's throttled `noa.output`
+    /// push (R-1: mirrors `overview_publish_pending` — a burst's final feed
+    /// can land inside the 16ms throttle window and get silently skipped,
+    /// stranding subscribers on a stale mid-burst frame). Threaded back to
+    /// `spawn`'s loop the same way, so it wakes the thread within the
+    /// throttle window even with no further pty output. `None` when nothing
+    /// is owed (pushed now, or the tap is inactive).
+    pub(super) ipc_output_publish_pending: Option<Instant>,
 }
 
 #[cfg(test)]
@@ -161,27 +169,16 @@ pub(super) fn feed_terminal_batch<'a>(
     // hold — no second `Terminal` lock from the spawn loop. `ipc_active ==
     // false` (server disabled or this pane has no IPC id yet) costs one
     // bool check and nothing else.
-    let ipc_output = (ipc_active && decide_ipc_output_push(*last_ipc_push, Instant::now()))
-        .then(|| {
-            *last_ipc_push = Some(Instant::now());
-            let base = term.active().visible_row_base() as u64;
-            let rows = term.active().visible_rows();
-            if ipc_row_cache.len() != rows.len() {
-                ipc_row_cache.clear();
-                ipc_row_cache.resize(rows.len(), 0);
+    let (ipc_output, ipc_output_publish_pending) =
+        match decide_ipc_output_push(ipc_active, *last_ipc_push, Instant::now()) {
+            IpcOutputPushDecision::Skip => (None, None),
+            IpcOutputPushDecision::Push => {
+                *last_ipc_push = Some(Instant::now());
+                let diff = compute_ipc_row_diff(&term, ipc_row_cache);
+                (if diff.is_empty() { None } else { Some(diff) }, None)
             }
-            let mut diff = Vec::new();
-            for (i, row) in rows.iter().enumerate() {
-                let spans = crate::ipc_bridge::row_to_spans(row);
-                let hash = hash_wire_row_spans(&spans);
-                if ipc_row_cache[i] != hash {
-                    ipc_row_cache[i] = hash;
-                    diff.push(noa_ipc::protocol::Row { row: base + i as u64, spans });
-                }
-            }
-            diff
-        })
-        .filter(|diff: &Vec<noa_ipc::protocol::Row>| !diff.is_empty());
+            IpcOutputPushDecision::ScheduleTrailingFlush { deadline } => (None, Some(deadline)),
+        };
 
     let mut output = TerminalOutput {
         pending_writes: term.take_pending_writes(),
@@ -194,6 +191,7 @@ pub(super) fn feed_terminal_batch<'a>(
         auto_approve: auto_approve_candidate,
         sidebar_bell,
         ipc_output,
+        ipc_output_publish_pending,
     };
     drop(term);
     output.sidebar_upsert = sidebar_raw.map(|(name, cwd, busy, rows)| SidebarUpsert {

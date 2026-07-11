@@ -260,8 +260,16 @@ impl App {
                 Ok(IpcActionReply::NewPane(ipc_id))
             }
             IpcActionKind::ClosePane { pane } => {
+                // IPC control scope is authorized automation (spec: closePane
+                // closes immediately, no GUI confirmation) — go straight to
+                // the same force-close path the confirm dialog's own accept
+                // handler uses (`ConfirmAction::ClosePane` in
+                // `input_ops/clipboard_confirm.rs`), bypassing
+                // `request_close_pane`'s running-process dialog entirely so
+                // no dialog is ever opened and the pane is closed for real
+                // before this replies `Ok`.
                 let (window_id, pane_id) = self.resolve_ipc_pane(pane)?;
-                self.request_close_pane(event_loop, window_id, pane_id);
+                self.close_pane(event_loop, window_id, pane_id);
                 Ok(IpcActionReply::Ok)
             }
             IpcActionKind::SendText { pane, text } => {

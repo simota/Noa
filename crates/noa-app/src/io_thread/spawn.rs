@@ -30,7 +30,7 @@ use super::feed::{
     open_pty_capture,
 };
 use super::input_queue::PtyInput;
-use super::ipc_tap::IpcOutputTap;
+use super::ipc_tap::{IpcOutputTap, flush_pending_ipc_output};
 use super::overview::{OverviewPublish, flush_pending_overview_publish};
 use super::redraw::{RedrawDecision, RedrawFloor};
 use super::sidebar::SidebarPublish;
@@ -165,6 +165,12 @@ pub fn spawn(
         // lock hold it already extracts rows in, so `noa.output` only ever
         // carries rows whose content actually changed.
         let mut ipc_row_cache: Vec<u64> = Vec::new();
+        // Trailing-flush deadline owed by a throttled `noa.output` push
+        // (R-1), mirroring `publish_pending_at` above. `None` means nothing
+        // is owed and the select below blocks exactly as before this fix —
+        // an inactive tap, or a push that went out immediately, costs no
+        // extra wake-ups.
+        let mut ipc_publish_pending_at: Option<Instant> = None;
         // A deadline owed by a redraw currently withheld — by the window's
         // shared [`RedrawFloor`] or the synchronized-output (DECSET 2026)
         // cap. Bounds how long a fed-but-unpainted frame can sit (see
@@ -251,6 +257,7 @@ pub fn spawn(
                     auto_approve_rescan_at =
                         auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
                     publish_pending_at = output.overview_publish_pending;
+                    ipc_publish_pending_at = output.ipc_output_publish_pending;
                     let sidebar_bell = output.sidebar_bell;
                     let sidebar_upsert = output.sidebar_upsert.take();
                     let auto_approve_candidate = output.auto_approve.take();
@@ -372,6 +379,18 @@ pub fn spawn(
                 deadline_elapsed = true;
                 needs_redraw = true;
             }
+            if ipc_publish_pending_at.is_some_and(|deadline| now >= deadline) {
+                // The throttle window elapsed with no further pty output to
+                // re-trigger the per-feed push — flush now (R-1). Not a
+                // redraw-worthy event: `noa.output` is a side channel to IPC
+                // subscribers, not the on-screen frame, so this never sets
+                // `needs_redraw`.
+                if let Some(tap) = ipc.as_ref() {
+                    flush_pending_ipc_output(&terminal, tap, &mut last_ipc_push, &mut ipc_row_cache);
+                }
+                ipc_publish_pending_at = None;
+                deadline_elapsed = true;
+            }
             let mut redraw_claimed = false;
             if redraw_deadline.is_some_and(|deadline| now >= deadline) {
                 // A withheld redraw (floor or synchronized-output cap) came
@@ -427,15 +446,21 @@ pub fn spawn(
             }
 
             // Wake at whichever owed deadline comes first: an overview
-            // trailing flush (Fix B defect 1), a withheld redraw, or an
+            // trailing flush (Fix B defect 1), an IPC output trailing flush
+            // (R-1), a withheld redraw, or an
             // auto-approve stability rescan. `ready`/`ready_timeout` report
             // readiness without receiving; the fast-path drains above
             // complete the operation on the next iteration (a spurious
             // wake-up just loops back here).
-            let next_deadline = [publish_pending_at, redraw_deadline, auto_approve_rescan_at]
-                .into_iter()
-                .flatten()
-                .min();
+            let next_deadline = [
+                publish_pending_at,
+                redraw_deadline,
+                auto_approve_rescan_at,
+                ipc_publish_pending_at,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let mut sel = crossbeam_channel::Select::new();
             sel.recv(&shutdown_rx);
             sel.recv(pty.event_rx());

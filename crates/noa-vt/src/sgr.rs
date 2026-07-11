@@ -41,11 +41,22 @@ pub enum SgrAttr {
 /// Decode an SGR (`CSI … m`) sequence into a list of attribute changes.
 /// An empty parameter list means `SGR 0` (reset).
 pub fn parse_sgr(csi: &Csi) -> Vec<SgrAttr> {
+    let mut out = Vec::new();
+    parse_sgr_into(csi, &mut out);
+    out
+}
+
+/// Same decoding as [`parse_sgr`], but fills a caller-owned buffer instead of
+/// allocating one. `out` is cleared first; reusing the same `Vec` across
+/// calls (as [`crate::Stream`] does) keeps the hot SGR path allocation-free
+/// after warm-up.
+pub fn parse_sgr_into(csi: &Csi, out: &mut Vec<SgrAttr>) {
+    out.clear();
     let p = csi.params();
     if p.is_empty() {
-        return vec![SgrAttr::Reset];
+        out.push(SgrAttr::Reset);
+        return;
     }
-    let mut out = Vec::new();
     let mut i = 0;
     while i < p.len() {
         match p[i] {
@@ -118,7 +129,6 @@ pub fn parse_sgr(csi: &Csi) -> Vec<SgrAttr> {
         }
         i += 1;
     }
-    out
 }
 
 /// Parse an extended (38/48/58) color operand starting at index `i` (the

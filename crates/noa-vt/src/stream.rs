@@ -8,12 +8,15 @@ use crate::handler::{
     ModeRequest,
 };
 use crate::parser::Parser;
-use crate::sgr::parse_sgr;
+use crate::sgr::{SgrAttr, parse_sgr_into};
 
 /// Owns a [`Parser`] and drives a [`Handler`] from a byte stream.
 #[derive(Default)]
 pub struct Stream {
     parser: Parser,
+    /// Reused across `SGR` dispatches so the hot colored-output path doesn't
+    /// allocate a fresh `Vec` per escape sequence (see `parse_sgr_into`).
+    sgr_attrs: Vec<SgrAttr>,
 }
 
 impl Stream {
@@ -63,8 +66,9 @@ impl Stream {
                     }
                 }
             }
+            let sgr_attrs = &mut self.sgr_attrs;
             self.parser
-                .advance(bytes[i], &mut |action| dispatch(action, handler));
+                .advance(bytes[i], &mut |action| dispatch(action, handler, sgr_attrs));
             i += 1;
         }
     }
@@ -78,11 +82,11 @@ fn is_run_byte(b: u8) -> bool {
     b >= 0x20 && b != 0x7f
 }
 
-fn dispatch<H: Handler>(action: Action, h: &mut H) {
+fn dispatch<H: Handler>(action: Action, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) {
     match action {
         Action::Print(c) => h.print(c),
         Action::Execute(b) => h.execute_c0(b),
-        Action::CsiDispatch(csi) => dispatch_csi(&csi, h),
+        Action::CsiDispatch(csi) => dispatch_csi(&csi, h, sgr_attrs),
         Action::EscDispatch(esc) => dispatch_esc(&esc, h),
         Action::OscDispatch(data) => h.osc_dispatch(&data),
         Action::DcsDispatch(payload) => {
@@ -101,7 +105,7 @@ fn dispatch<H: Handler>(action: Action, h: &mut H) {
     }
 }
 
-fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
+fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) {
     let plain = csi.private == 0 && csi.intermediates().is_empty();
     match csi.final_byte {
         b'@' if plain => h.insert_blank_chars(csi.param(0, 1)),
@@ -134,7 +138,10 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H) {
             2 => EraseLine::Complete,
             _ => EraseLine::Right,
         }),
-        b'm' if plain => h.set_attributes(&parse_sgr(csi)),
+        b'm' if plain => {
+            parse_sgr_into(csi, sgr_attrs);
+            h.set_attributes(sgr_attrs);
+        }
         // XTMODKEYS `CSI > Pp ; Pv m` sets an xterm key-modifier resource;
         // `CSI > Pp m` (and bare `CSI > m`) resets it. Only modifyOtherKeys
         // (Pp=4) is tracked. Must not fall through to SGR: `CSI > 4;2 m`

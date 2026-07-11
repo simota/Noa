@@ -544,16 +544,23 @@ impl Parser {
         self.string_utf8_rem = 0;
         match new {
             State::Escape | State::CsiEntry => self.clear(),
+            // The buffer always arrives here at capacity 0 (drained by
+            // `mem::take` in `finish_dcs`/`finish_apc`, or freed on
+            // overflow), so `Vec::with_capacity` — not `clear()` — is what
+            // actually pre-sizes it. Shell integration sends OSC 133/7/2 on
+            // effectively every prompt, so this avoids re-growing from
+            // scratch each time without pinning capacity after a huge OSC52
+            // (that still drains via `mem::take`, never `clear()`).
             State::OscString => {
-                self.osc.clear();
+                self.osc = Vec::with_capacity(64);
                 self.osc_overflow = false;
             }
             State::DcsPassthrough => {
-                self.dcs.clear();
+                self.dcs = Vec::with_capacity(64);
                 self.dcs_overflow = false;
             }
             State::ApcString => {
-                self.apc.clear();
+                self.apc = Vec::with_capacity(64);
                 self.apc_overflow = false;
             }
             _ => {}

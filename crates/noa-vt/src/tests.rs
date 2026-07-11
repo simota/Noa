@@ -4,7 +4,7 @@
 use crate::action::Action;
 use crate::csi::{Csi, Esc};
 use crate::parser::Parser;
-use crate::sgr::{SgrAttr, parse_sgr};
+use crate::sgr::{SgrAttr, parse_sgr, parse_sgr_into};
 use noa_core::{Color, Rgb};
 
 /// Run the parser over `bytes` and collect every emitted action.
@@ -117,6 +117,35 @@ fn sgr_underline_styles_and_color() {
 fn sgr_colon_underline_does_not_consume_semicolon_params() {
     let csi = only_csi(b"\x1b[4;3m");
     assert_eq!(parse_sgr(&csi), vec![SgrAttr::Underline, SgrAttr::Italic]);
+}
+
+#[test]
+fn parse_sgr_into_reuses_buffer_with_identical_results() {
+    // A caller-owned buffer left dirty (and over-capacity) from a prior,
+    // longer SGR must end up identical to a fresh `parse_sgr` call — reuse
+    // must not leak stale entries or depend on starting empty.
+    let mut buf = vec![
+        SgrAttr::Bold,
+        SgrAttr::Italic,
+        SgrAttr::Underline,
+        SgrAttr::Reset,
+    ];
+
+    let reset = only_csi(b"\x1b[m");
+    parse_sgr_into(&reset, &mut buf);
+    assert_eq!(buf, parse_sgr(&reset));
+
+    let multi = only_csi(b"\x1b[21;4:3;58;2;10;20;30;59m");
+    parse_sgr_into(&multi, &mut buf);
+    assert_eq!(buf, parse_sgr(&multi));
+
+    let truecolor = only_csi(b"\x1b[38;2;10;20;30m");
+    parse_sgr_into(&truecolor, &mut buf);
+    assert_eq!(buf, parse_sgr(&truecolor));
+
+    let palette = only_csi(b"\x1b[38;5;196m");
+    parse_sgr_into(&palette, &mut buf);
+    assert_eq!(buf, parse_sgr(&palette));
 }
 
 #[test]

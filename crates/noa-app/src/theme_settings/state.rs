@@ -9,7 +9,7 @@ use crate::debounce::Debouncer;
 
 use super::{
     RevertValues, RowDraft, RowEffect, Section, SettingsRow, SettingsRowKind, ThemeSettingsInit,
-    background_image_fit_value, background_image_position_value,
+    ThemeSettingsMode, background_image_fit_value, background_image_position_value,
 };
 
 /// The injectable config-writer seam [`ThemeSettings::commit`] takes
@@ -79,6 +79,7 @@ struct ThemeMatch {
 /// that a follow-up could still add if this ever shows up on a profile.
 #[derive(Clone)]
 pub(crate) struct ThemeSettings {
+    mode: ThemeSettingsMode,
     section: Section,
     filter: String,
     filtered: Vec<ThemeMatch>,
@@ -200,7 +201,8 @@ impl ThemeSettings {
             },
         ];
         let mut settings = ThemeSettings {
-            section: Section::ThemePicker,
+            mode: init.mode,
+            section: init.mode.fixed_section(),
             filter: String::new(),
             filtered: Vec::new(),
             highlighted: 0,
@@ -230,13 +232,16 @@ impl ThemeSettings {
         self.section
     }
 
-    /// Tab: swap which half of the overlay owns ↑↓/←→ (R-2, AC-22).
-    pub(crate) fn toggle_section(&mut self) {
-        self.section = match self.section {
-            Section::ThemePicker => Section::SettingsRows,
-            Section::SettingsRows => Section::ThemePicker,
-        };
+    /// Which overlay this session is — "Theme" picker or "Settings" rows.
+    pub(crate) fn mode(&self) -> ThemeSettingsMode {
+        self.mode
     }
+
+    /// Tab (R-2, AC-22 historical): a no-op now that a session's section is
+    /// fixed for its whole lifetime by [`ThemeSettingsMode`] — the other
+    /// half of the old combined overlay doesn't exist in this session to
+    /// switch to.
+    pub(crate) fn toggle_section(&mut self) {}
 
     pub(crate) fn filter(&self) -> &str {
         &self.filter

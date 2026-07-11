@@ -6,8 +6,14 @@ use std::time::{Duration, Instant};
 
 const FONT_SIZE_MIN: f32 = 6.0;
 
+/// Opens in Theme mode by default. Row-editing tests go through
+/// [`settings_init`] instead, which starts them already on
+/// `Section::SettingsRows` — a session's section is fixed for its whole
+/// lifetime now (DEC-2), so there is no longer a `toggle_section` call that
+/// can move a Theme-mode session onto the rows.
 fn init() -> ThemeSettingsInit {
     ThemeSettingsInit {
+        mode: ThemeSettingsMode::Theme,
         current_theme: "3024 Day".to_string(),
         font_size: 14.0,
         cursor_style: CursorShape::Block,
@@ -44,17 +50,26 @@ fn assert_quick_terminal_height(draft: &RowDraft, expected: f32) {
     assert!((*actual - expected).abs() < 0.001, "got {actual}");
 }
 
-fn transparent_init() -> ThemeSettingsInit {
+fn settings_init() -> ThemeSettingsInit {
     ThemeSettingsInit {
-        background_opacity: 0.9,
+        mode: ThemeSettingsMode::Settings,
         ..init()
     }
 }
 
-fn move_to_row(settings: &mut ThemeSettings, row: SettingsRowKind) {
-    if settings.section() != Section::SettingsRows {
-        settings.toggle_section();
+fn transparent_init() -> ThemeSettingsInit {
+    ThemeSettingsInit {
+        background_opacity: 0.9,
+        ..settings_init()
     }
+}
+
+fn move_to_row(settings: &mut ThemeSettings, row: SettingsRowKind) {
+    assert_eq!(
+        settings.section(),
+        Section::SettingsRows,
+        "move_to_row requires a Settings-mode session"
+    );
     let target = row_index(row);
     while settings.selected_row() < target {
         settings.move_down();
@@ -109,49 +124,59 @@ fn open_highlights_current_theme_and_previews_nothing_until_moved() {
     assert_eq!(settings.section(), Section::ThemePicker);
 }
 
-// AC-22 (R-2): Tab toggles section; ↑↓ navigates only (theme highlight in
-// ThemePicker, row selection in SettingsRows); ←→ adjusts only the
-// focused settings row's value and is a no-op in ThemePicker.
+// DEC-2 (theme-settings-ui split): a Theme-mode session's section is
+// permanently `ThemePicker` — Tab has nothing to toggle to, and ←→ stays a
+// no-op since the settings rows don't exist in this session at all.
 #[test]
-fn tab_toggles_section_and_arrows_route_by_section() {
+fn theme_mode_session_never_reaches_settings_rows_and_tab_is_a_no_op() {
     let mut settings = ThemeSettings::open(init());
     assert_eq!(settings.section(), Section::ThemePicker);
 
-    // ←→ is a no-op while the theme list owns the section.
+    settings.toggle_section();
+    assert_eq!(
+        settings.section(),
+        Section::ThemePicker,
+        "Tab has nothing to toggle to in Theme mode"
+    );
+
+    // ←→ is a no-op while the theme list owns the (only) section.
     let effect = settings.adjust(1, Instant::now());
     assert_eq!(effect, RowEffect::None);
-    assert!(!settings.rows()[row_index(SettingsRowKind::CursorStyle)].touched);
+    assert!(settings.rows().iter().all(|row| !row.touched));
 
-    // ↑↓ moves the theme highlight, one step from wherever the initial
-    // highlight (the active theme's catalog position) landed.
+    // ↑↓ still navigates the theme highlight as before.
     let initial_highlight = settings.highlighted_index();
     settings.move_down();
     assert_eq!(settings.highlighted_index(), initial_highlight + 1);
     assert!(settings.should_preview());
+}
 
-    settings.toggle_section();
+// DEC-2: a Settings-mode session's section is permanently `SettingsRows` —
+// Tab has nothing to toggle to, and ↑↓ always navigates row selection, never
+// a (nonexistent) theme highlight.
+#[test]
+fn settings_mode_session_never_reaches_theme_picker_and_tab_is_a_no_op() {
+    let mut settings = ThemeSettings::open(settings_init());
     assert_eq!(settings.section(), Section::SettingsRows);
     assert_eq!(settings.selected_row(), 0);
 
-    // ↑↓ now moves row selection, not the (unaffected) theme highlight.
+    settings.toggle_section();
+    assert_eq!(
+        settings.section(),
+        Section::SettingsRows,
+        "Tab has nothing to toggle to in Settings mode"
+    );
+
     settings.move_down();
     settings.move_down();
     assert_eq!(settings.selected_row(), 2);
-    assert_eq!(
-        settings.highlighted_index(),
-        initial_highlight + 1,
-        "theme highlight untouched"
-    );
-
-    settings.toggle_section();
-    assert_eq!(settings.section(), Section::ThemePicker);
 }
 
 // AC-5 (R-8, R-10): adjusting the cursor-style row cycles it and reports
 // an immediate-apply effect.
 #[test]
 fn cursor_style_row_cycles_and_applies_immediately() {
-    let mut settings = ThemeSettings::open(init());
+    let mut settings = ThemeSettings::open(settings_init());
     move_to_row(&mut settings, SettingsRowKind::CursorStyle);
 
     let effect = settings.adjust(1, Instant::now());
@@ -175,13 +200,12 @@ fn cursor_style_row_cycles_and_applies_immediately() {
 // proceeds (the value can still be committed later).
 #[test]
 fn opaque_startup_disables_live_opacity_and_blur_but_keeps_draft() {
-    let mut settings = ThemeSettings::open(init()); // opacity 1.0 = opaque
+    let mut settings = ThemeSettings::open(settings_init()); // opacity 1.0 = opaque
     assert!(settings.opaque_at_startup());
     assert!(settings.restart_note(SettingsRowKind::BackgroundOpacity));
     assert!(settings.restart_note(SettingsRowKind::BackgroundBlurRadius));
     assert!(!settings.restart_note(SettingsRowKind::CursorStyle));
 
-    settings.toggle_section();
     settings.move_down(); // row 1: BackgroundOpacity
 
     let effect = settings.adjust(1, Instant::now());
@@ -195,7 +219,6 @@ fn opaque_startup_disables_live_opacity_and_blur_but_keeps_draft() {
     // A transparent start does apply live.
     let mut transparent = ThemeSettings::open(transparent_init());
     assert!(!transparent.opaque_at_startup());
-    transparent.toggle_section();
     transparent.move_down();
     let effect = transparent.adjust(1, Instant::now());
     assert_eq!(effect, RowEffect::Opacity(0.95));
@@ -243,7 +266,7 @@ fn touched_commit_only_rows_show_restart_note() {
 fn background_image_row_accepts_file_or_directory_path_text_and_commits() {
     let mut settings = ThemeSettings::open(ThemeSettingsInit {
         background_image: "/tmp/old-wallpaper.png".to_string(),
-        ..init()
+        ..settings_init()
     });
     move_to_row(&mut settings, SettingsRowKind::BackgroundImage);
 
@@ -275,7 +298,7 @@ fn background_image_row_accepts_file_or_directory_path_text_and_commits() {
 fn background_image_row_backspace_edits_the_existing_path() {
     let mut settings = ThemeSettings::open(ThemeSettingsInit {
         background_image: "/tmp/wall.png".to_string(),
-        ..init()
+        ..settings_init()
     });
     move_to_row(&mut settings, SettingsRowKind::BackgroundImage);
 
@@ -315,7 +338,7 @@ fn background_image_display_value_marks_editing_state() {
 
 #[test]
 fn background_image_option_rows_adjust_and_commit_canonical_values() {
-    let mut settings = ThemeSettings::open(init());
+    let mut settings = ThemeSettings::open(settings_init());
     let now = Instant::now();
 
     move_to_row(&mut settings, SettingsRowKind::BackgroundImageOpacity);
@@ -399,7 +422,6 @@ fn badge_tracks_preview_and_live_row_edits() {
 #[test]
 fn badge_visible_from_a_live_row_edit_alone() {
     let mut settings = ThemeSettings::open(transparent_init());
-    settings.toggle_section();
     settings.move_down(); // BackgroundOpacity row
     assert!(!settings.badge_visible());
     settings.adjust(1, Instant::now());
@@ -407,18 +429,26 @@ fn badge_visible_from_a_live_row_edit_alone() {
 }
 
 // touched-flag discipline: navigation alone (no value-changing key) must
-// never mark any row touched, live or commit-only.
+// never mark any row touched, live or commit-only — proven separately per
+// mode now that a session's section (and so what ↑↓ actually moves) is
+// fixed for its whole lifetime (DEC-2).
 #[test]
-fn navigation_alone_never_marks_a_row_touched() {
+fn theme_mode_navigation_alone_never_marks_a_row_touched() {
     let mut settings = ThemeSettings::open(init());
-    settings.move_up();
-    settings.move_down();
-    settings.toggle_section();
     for _ in 0..10 {
         settings.move_down();
         settings.move_up();
     }
-    settings.toggle_section();
+    assert!(settings.rows().iter().all(|row| !row.touched));
+}
+
+#[test]
+fn settings_mode_navigation_alone_never_marks_a_row_touched() {
+    let mut settings = ThemeSettings::open(settings_init());
+    for _ in 0..10 {
+        settings.move_down();
+        settings.move_up();
+    }
     assert!(settings.rows().iter().all(|row| !row.touched));
 }
 
@@ -447,8 +477,7 @@ fn zero_match_filter_keeps_previous_preview_state() {
 // value.
 #[test]
 fn font_size_row_debounces_a_burst_of_adjustments() {
-    let mut settings = ThemeSettings::open(init());
-    settings.toggle_section(); // row 0 = FontSize, already selected
+    let mut settings = ThemeSettings::open(settings_init()); // row 0 = FontSize, already selected
     let t0 = Instant::now();
 
     settings.adjust(1, t0); // 14.5
@@ -474,8 +503,7 @@ fn font_size_row_debounces_a_burst_of_adjustments() {
 // the font-size row directly, and Backspace edits the same buffer.
 #[test]
 fn font_size_row_accepts_direct_digit_entry() {
-    let mut settings = ThemeSettings::open(init());
-    settings.toggle_section();
+    let mut settings = ThemeSettings::open(settings_init());
     let now = Instant::now();
 
     settings.push_text("2", now);
@@ -490,16 +518,13 @@ fn font_size_row_accepts_direct_digit_entry() {
     );
 }
 
-// AC-8-partial (R-16): Esc reverts to the pre-open snapshot values and
-// cancels a pending font-size debounce so it can never fire afterward —
-// no writer/config call is involved at this layer at all (the pure
-// module has no way to reach one).
+// AC-8-partial (R-16), Theme mode: Esc reverts to the pre-open snapshot
+// values even after the highlight has drifted — no writer/config call is
+// involved at this layer at all (the pure module has no way to reach one).
 #[test]
-fn revert_returns_the_snapshot_and_cancels_pending_debounce() {
+fn theme_mode_revert_returns_the_pre_open_snapshot() {
     let mut settings = ThemeSettings::open(init());
     settings.move_down(); // preview drifted
-    settings.toggle_section();
-    settings.adjust(1, Instant::now()); // font-size debounce now pending
 
     let values = settings.revert();
     assert_eq!(values.theme_name, "3024 Day");
@@ -512,6 +537,20 @@ fn revert_returns_the_snapshot_and_cancels_pending_debounce() {
         noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES
     );
     assert_eq!(values.quick_terminal_size, 0.4);
+}
+
+// AC-8-partial (R-16), Settings mode: Esc cancels a pending font-size
+// debounce so it can never fire afterward.
+#[test]
+fn settings_mode_revert_cancels_pending_font_size_debounce() {
+    let mut settings = ThemeSettings::open(settings_init());
+    settings.adjust(1, Instant::now()); // font-size debounce now pending
+
+    let values = settings.revert();
+    assert_eq!(
+        values.font_size, 14.0,
+        "reports the pre-open snapshot, not the pending edit"
+    );
 
     // The pending font-size value must never fire after revert.
     assert_eq!(
@@ -525,7 +564,7 @@ fn revert_returns_the_snapshot_and_cancels_pending_debounce() {
 // touched correctly).
 #[test]
 fn font_family_and_titlebar_rows_cycle_and_wrap() {
-    let mut settings = ThemeSettings::open(init());
+    let mut settings = ThemeSettings::open(settings_init());
     move_to_row(&mut settings, SettingsRowKind::FontFamily);
     settings.adjust(1, Instant::now());
     assert_eq!(
@@ -553,7 +592,7 @@ fn font_family_and_titlebar_rows_cycle_and_wrap() {
 // documented single-row-two-values simplification).
 #[test]
 fn window_padding_row_adjusts_both_axes_together() {
-    let mut settings = ThemeSettings::open(init());
+    let mut settings = ThemeSettings::open(settings_init());
     move_to_row(&mut settings, SettingsRowKind::WindowPadding);
     settings.adjust(1, Instant::now());
     assert_eq!(
@@ -564,7 +603,7 @@ fn window_padding_row_adjusts_both_axes_together() {
 
 #[test]
 fn sidebar_preview_lines_row_adjusts_clamps_and_commits() {
-    let mut settings = ThemeSettings::open(init());
+    let mut settings = ThemeSettings::open(settings_init());
     move_to_row(&mut settings, SettingsRowKind::SidebarPreviewLines);
 
     let effect = settings.adjust(1, Instant::now());
@@ -599,7 +638,7 @@ fn sidebar_preview_lines_row_adjusts_clamps_and_commits() {
 
 #[test]
 fn quick_terminal_height_row_adjusts_clamps_and_commits() {
-    let mut settings = ThemeSettings::open(init());
+    let mut settings = ThemeSettings::open(settings_init());
     move_to_row(&mut settings, SettingsRowKind::QuickTerminalHeight);
 
     let effect = settings.adjust(1, Instant::now());
@@ -640,7 +679,7 @@ fn quick_terminal_height_row_adjusts_clamps_and_commits() {
 
 #[test]
 fn confirm_quit_row_toggles_and_commits_without_restart_note() {
-    let mut settings = ThemeSettings::open(init());
+    let mut settings = ThemeSettings::open(settings_init());
     move_to_row(&mut settings, SettingsRowKind::ConfirmQuit);
 
     let effect = settings.adjust(1, Instant::now());
@@ -658,21 +697,19 @@ fn confirm_quit_row_toggles_and_commits_without_restart_note() {
     );
 }
 
-// R-17/NFR-6 (commit_updates half of AC-14): an untouched row's draft can
-// equal the live session value even when that value came from a CLI
-// override — `commit_updates` must still omit it. Only a real edit
-// (`touched`) makes a row eligible for the update list; the theme
-// updates only when the highlight actually moved away from the snapshot.
+// R-17/NFR-6, Theme mode: `commit_updates` can only ever contain the
+// `theme` key now — the settings section doesn't exist in this mode, so no
+// row can ever become `touched` (an untouched row's draft can equal the
+// live session value even when that value came from a CLI override, but
+// `commit_updates` only ever reads touched rows either way).
 #[test]
-fn commit_updates_includes_only_the_changed_theme_and_touched_rows() {
+fn theme_mode_commit_updates_contains_only_the_changed_theme() {
     let settings = ThemeSettings::open(init());
-    // Nothing touched, highlight never moved: no updates at all.
+    // Highlight never moved: no updates at all.
     assert!(settings.commit_updates().is_empty());
 
     let mut settings = ThemeSettings::open(init());
     settings.move_down(); // theme highlight moves away from the snapshot
-    settings.toggle_section();
-    settings.adjust(1, Instant::now()); // touches row 0: FontSize 14.0 -> 14.5
 
     let updates = settings.commit_updates();
     assert_eq!(
@@ -683,6 +720,27 @@ fn commit_updates_includes_only_the_changed_theme_and_touched_rows() {
         settings.highlighted_theme_name(),
         "theme update carries the new highlight, not the snapshot"
     );
+    assert_eq!(updates.len(), 1, "Theme mode can never touch a row");
+}
+
+// R-17/NFR-6, Settings mode: `commit_updates` can only ever contain
+// touched-row keys — the theme picker doesn't exist in this mode, so the
+// highlighted theme can never drift from the snapshot. Only a real edit
+// (`touched`) makes a row eligible for the update list.
+#[test]
+fn settings_mode_commit_updates_never_includes_a_theme_change() {
+    let settings = ThemeSettings::open(settings_init());
+    // Nothing touched: no updates at all.
+    assert!(settings.commit_updates().is_empty());
+
+    let mut settings = ThemeSettings::open(settings_init());
+    settings.adjust(1, Instant::now()); // touches row 0: FontSize 14.0 -> 14.5
+
+    let updates = settings.commit_updates();
+    assert!(
+        !updates.iter().any(|(k, _)| k == "theme"),
+        "the theme picker doesn't exist in this mode"
+    );
     assert_eq!(
         updates.iter().find(|(k, _)| k == "font-size"),
         Some(&("font-size".to_string(), "14.5".to_string()))
@@ -691,7 +749,7 @@ fn commit_updates_includes_only_the_changed_theme_and_touched_rows() {
     // e.g. cursor-style's draft is a perfectly valid config value.
     assert!(!updates.iter().any(|(k, _)| k == "cursor-style"));
     assert!(!updates.iter().any(|(k, _)| k == "background-opacity"));
-    assert_eq!(updates.len(), 2, "theme + font-size only");
+    assert_eq!(updates.len(), 1, "font-size only");
 }
 
 // Re-highlighting back onto the snapshot theme must not emit a `theme`
@@ -710,7 +768,7 @@ fn commit_updates_omits_theme_when_highlight_returns_to_the_snapshot() {
 // touched flag.
 #[test]
 fn commit_updates_writes_both_padding_axes_from_one_row() {
-    let mut settings = ThemeSettings::open(init());
+    let mut settings = ThemeSettings::open(settings_init());
     move_to_row(&mut settings, SettingsRowKind::WindowPadding);
     settings.adjust(1, Instant::now());
     let updates = settings.commit_updates();
@@ -732,9 +790,7 @@ fn commit_updates_writes_both_padding_axes_from_one_row() {
 // theme/chrome swap either.
 #[test]
 fn commit_with_failing_writer_sets_error_and_changes_nothing_else() {
-    let mut settings = ThemeSettings::open(init());
-    settings.move_down();
-    settings.toggle_section();
+    let mut settings = ThemeSettings::open(settings_init());
     settings.adjust(1, Instant::now()); // touch FontSize
     let before_rows = settings.rows().clone();
     let before_highlighted = settings.highlighted_index();
@@ -767,8 +823,7 @@ fn commit_with_failing_writer_sets_error_and_changes_nothing_else() {
 // were passed to the writer.
 #[test]
 fn commit_success_clears_a_prior_error_and_returns_the_written_updates() {
-    let mut settings = ThemeSettings::open(init());
-    settings.toggle_section();
+    let mut settings = ThemeSettings::open(settings_init());
     settings.adjust(1, Instant::now()); // touch FontSize
 
     let mut fail_once = true;
@@ -800,9 +855,7 @@ fn commit_success_clears_a_prior_error_and_returns_the_written_updates() {
 // same edit sequence AC-23's failing-writer test exercises.
 #[test]
 fn esc_path_never_reaches_the_writer() {
-    let mut settings = ThemeSettings::open(init());
-    settings.move_down();
-    settings.toggle_section();
+    let mut settings = ThemeSettings::open(settings_init());
     settings.adjust(1, Instant::now());
 
     let calls = std::rc::Rc::new(std::cell::Cell::new(0));
@@ -848,7 +901,7 @@ fn ac14_cli_override_value_never_leaks_only_touched_rows_reach_disk() {
     // cursor-style.
     let mut untouched_session = ThemeSettings::open(ThemeSettingsInit {
         font_size: 20.0,
-        ..init()
+        ..settings_init()
     });
     move_to_row(&mut untouched_session, SettingsRowKind::CursorStyle);
     assert_eq!(
@@ -875,9 +928,8 @@ fn ac14_cli_override_value_never_leaks_only_touched_rows_reach_disk() {
     // new value must land, replacing X.
     let mut font_session = ThemeSettings::open(ThemeSettingsInit {
         font_size: 20.0,
-        ..init()
+        ..settings_init()
     });
-    font_session.toggle_section();
     font_session.adjust(2, Instant::now()); // 20.0 -> 21.0
     assert!(font_session.commit(&config_path, &mut writer).is_some());
 

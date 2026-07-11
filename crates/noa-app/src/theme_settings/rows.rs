@@ -1,11 +1,36 @@
 use noa_config::{BackgroundImageFit, BackgroundImagePosition, CursorShape, MacosTitlebarStyle};
 
-/// Which half of the overlay currently owns ↑↓/←→ navigation (R-2). Tab
-/// toggles between the two.
+/// Which half of the (now-split) overlay owns ↑↓/←→ navigation. A session's
+/// section is fixed for its whole lifetime by [`ThemeSettingsMode`] — see
+/// that type's doc comment; kept as its own type because every existing
+/// navigation method already matches on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Section {
     ThemePicker,
     SettingsRows,
+}
+
+/// Which overlay a session was opened as: the "Theme" picker or the
+/// "Settings" rows (theme-settings-ui split). Each mode pins
+/// [`ThemeSettings`]'s [`Section`] for the life of the session — Tab has
+/// nothing to toggle between anymore, since the other half doesn't exist in
+/// this session at all (`App::open_theme_settings` takes this as a
+/// parameter and opens one session per invocation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ThemeSettingsMode {
+    Theme,
+    Settings,
+}
+
+impl ThemeSettingsMode {
+    /// The [`Section`] a session opened in this mode is permanently fixed
+    /// to.
+    pub(crate) fn fixed_section(self) -> Section {
+        match self {
+            ThemeSettingsMode::Theme => Section::ThemePicker,
+            ThemeSettingsMode::Settings => Section::SettingsRows,
+        }
+    }
 }
 
 /// The fixed settings rows (SHAPE table), in display/array order.
@@ -234,6 +259,9 @@ pub(crate) struct RevertValues {
 /// out of this pure module so it stays deterministic/testable without
 /// font-kit).
 pub(crate) struct ThemeSettingsInit {
+    /// Which half of the split overlay this session is ("Theme" picker or
+    /// "Settings" rows) — fixed for the session's whole lifetime.
+    pub(crate) mode: ThemeSettingsMode,
     pub(crate) current_theme: String,
     pub(crate) font_size: f32,
     pub(crate) cursor_style: CursorShape,

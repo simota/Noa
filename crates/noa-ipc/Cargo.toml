@@ -1,0 +1,17 @@
+[package]
+name = "noa-ipc"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+tungstenite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+[dev-dependencies]

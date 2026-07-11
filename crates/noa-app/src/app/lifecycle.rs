@@ -401,7 +401,7 @@ impl App {
                 if let Some(command) = command.filter(|command| !command.is_empty()) {
                     let mut bytes = command.into_bytes();
                     bytes.push(b'\n');
-                    self.write_pty_bytes(window_id, &bytes);
+                    self.write_pty_bytes(window_id, bytes);
                 }
             }
             Err(err) => log::warn!("failed to spawn AppleScript tab: {err:#}"),

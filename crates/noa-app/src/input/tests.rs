@@ -6,6 +6,64 @@ use noa_grid::{
 use winit::event::Ime;
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
+/// Bolt perf harness (text-input hot path): per-keystroke encoding cost for
+/// the legacy and Kitty-protocol paths. `#[ignore]`d so `cargo test` stays
+/// fast; run explicitly with:
+/// `cargo test -p noa-app --offline input::tests::bench_encode_key_with_modes -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn bench_encode_key_with_modes() {
+    const ITERS: u32 = 200_000;
+
+    let printable = Key::Character("a".into());
+    let ctrl_c = Key::Character("c".into());
+    let arrow = Key::Named(NamedKey::ArrowRight);
+
+    let cases: &[(&str, &Key, Option<&str>, ModifiersState, u8)] = &[
+        ("legacy printable 'a'", &printable, Some("a"), ModifiersState::empty(), 0),
+        ("legacy ctrl+c", &ctrl_c, Some("c"), ModifiersState::CONTROL, 0),
+        ("legacy arrow-right", &arrow, None, ModifiersState::empty(), 0),
+        (
+            "kitty printable 'a'",
+            &printable,
+            Some("a"),
+            ModifiersState::empty(),
+            KITTY_DISAMBIGUATE,
+        ),
+        (
+            "kitty arrow-right",
+            &arrow,
+            None,
+            ModifiersState::empty(),
+            KITTY_DISAMBIGUATE,
+        ),
+    ];
+
+    for (label, key, text, mods, kitty_flags) in cases.iter().copied() {
+        let start = std::time::Instant::now();
+        for _ in 0..ITERS {
+            let _ = std::hint::black_box(encode_key_with_modes(
+                key,
+                Some(key),
+                Some(PhysicalKey::Code(KeyCode::KeyA)),
+                text,
+                mods,
+                true,
+                false,
+                false,
+                kitty_flags,
+                true,
+                false,
+            ));
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "bench_encode_key_with_modes[{label}]: {:.1} ns/op ({ITERS} iters, {elapsed:?} total)",
+            elapsed.as_nanos() as f64 / f64::from(ITERS)
+        );
+    }
+}
+
 #[test]
 fn paste_protection_flags_unbracketed_multiline_only() {
     // Newline outside bracketed paste can submit a command → unsafe.

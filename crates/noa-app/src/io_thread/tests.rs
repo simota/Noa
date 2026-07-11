@@ -836,6 +836,46 @@ fn input_overflow_past_byte_cap_is_dropped() {
     assert_eq!(queue.queue(input(b"y")), QueueInputResult::Queued);
 }
 
+// Regression guard for the `write_pty_bytes`/`write_pane_pty_bytes`/
+// `queue_pane_pty_bytes` signature change from `&[u8]` to
+// `impl Into<Box<[u8]>>` (double-copy elimination): every real caller shape
+// — an owned `Vec<u8>` from key/paste encoding, a `Box<[u8]>`, and the two
+// `&'static [u8]` literal callers (`focus_report_bytes`, `Signature::bytes`)
+// — must still enqueue byte-identical output through the same `.into()`
+// conversion those methods apply before calling `PtyInputQueue::queue`.
+#[test]
+fn queue_input_is_byte_identical_regardless_of_owned_source_type() {
+    fn convert(bytes: impl Into<Box<[u8]>>) -> Box<[u8]> {
+        bytes.into()
+    }
+
+    let (queue, rx) = input_channel();
+
+    let from_vec: Vec<u8> = b"vec-owned".to_vec();
+    let from_box: Box<[u8]> = b"box-owned".to_vec().into_boxed_slice();
+    let from_static: &'static [u8] = b"static-literal";
+
+    assert_eq!(
+        queue.queue(convert(from_vec.clone())),
+        QueueInputResult::Queued
+    );
+    assert_eq!(
+        queue.queue(convert(from_box.clone())),
+        QueueInputResult::Queued
+    );
+    assert_eq!(
+        queue.queue(convert(from_static)),
+        QueueInputResult::Queued
+    );
+
+    assert_eq!(rx.recv().expect("vec-sourced input").as_ref(), &from_vec[..]);
+    assert_eq!(rx.recv().expect("box-sourced input").as_ref(), &from_box[..]);
+    assert_eq!(
+        rx.recv().expect("static-sourced input").as_ref(),
+        from_static
+    );
+}
+
 // AC-18 (NFR-2): git must never be spawned on the io read loop — it lives
 // only in the dedicated `branch_poll` worker. Assert this module's source
 // never spawns `git` (nor any `Command`). The needles are assembled at
@@ -887,4 +927,90 @@ fn pane_io_thread_shutdown_joins_all_blocked_handles_within_timeout() {
         assert!(handle.shutdown_and_join_timeout(Duration::from_millis(500)));
         assert!(handle.join.is_none());
     }
+}
+
+/// Bolt perf harness (text-input hot path): enqueue+drain cost through
+/// [`PtyInputQueue`] for keystroke-sized (1-4 byte) writes — the shape the
+/// main thread pushes per key. `#[ignore]`d so `cargo test` stays fast; run
+/// explicitly with:
+/// `cargo test -p noa-app --offline io_thread::tests::bench_pty_input_queue_enqueue_drain -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn bench_pty_input_queue_enqueue_drain() {
+    const ITERS: u32 = 200_000;
+    let (queue, rx) = input_channel();
+
+    let start = Instant::now();
+    for _ in 0..ITERS {
+        // Mirrors `queue_pane_pty_bytes`'s current `bytes.to_vec().into_boxed_slice()`
+        // pattern for an already-owned single-keystroke buffer.
+        let owned: Vec<u8> = b"a".to_vec();
+        let boxed: PtyInput = std::hint::black_box(owned.as_slice()).to_vec().into_boxed_slice();
+        assert_eq!(queue.queue(boxed), QueueInputResult::Queued);
+        let _ = std::hint::black_box(rx.recv().unwrap());
+    }
+    let elapsed = start.elapsed();
+    eprintln!(
+        "bench_pty_input_queue_enqueue_drain: {:.1} ns/op ({ITERS} iters, {elapsed:?} total)",
+        elapsed.as_nanos() as f64 / f64::from(ITERS)
+    );
+}
+
+/// Bolt perf harness (text-input hot path, echo side): the io thread's
+/// per-feed cost for a typical single-character shell echo (`feed_terminal`
+/// under the terminal lock: VT parse + overview/sidebar/auto-approve
+/// bookkeeping). `#[ignore]`d so `cargo test` stays fast; run explicitly
+/// with:
+/// `cargo test -p noa-app --offline io_thread::tests::bench_feed_terminal_echo -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn bench_feed_terminal_echo() {
+    const ITERS: u32 = 50_000;
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(true);
+    let mut last_sidebar_publish = None;
+
+    // A plain typed-character echo, as a shell in cooked/raw echo mode sends
+    // it straight back (the common case on every keystroke).
+    let start = Instant::now();
+    for _ in 0..ITERS {
+        let _ = std::hint::black_box(feed_terminal(
+            &terminal,
+            &mut stream,
+            std::hint::black_box(b"a"),
+            &overview,
+            &mut last_overview_publish,
+            &sidebar,
+            &mut last_sidebar_publish,
+        ));
+    }
+    let elapsed = start.elapsed();
+    eprintln!(
+        "bench_feed_terminal_echo[plain char]: {:.1} ns/op ({ITERS} iters, {elapsed:?} total)",
+        elapsed.as_nanos() as f64 / f64::from(ITERS)
+    );
+
+    // A prompt-line rewrite, as line-editing programs (readline, Claude Code)
+    // send on many keystrokes: cursor reposition + SGR color + text.
+    let prompt_echo: &[u8] = b"\x1b[2K\x1b[1G\x1b[32m$ \x1b[0mecho hello world";
+    let start = Instant::now();
+    for _ in 0..ITERS {
+        let _ = std::hint::black_box(feed_terminal(
+            &terminal,
+            &mut stream,
+            std::hint::black_box(prompt_echo),
+            &overview,
+            &mut last_overview_publish,
+            &sidebar,
+            &mut last_sidebar_publish,
+        ));
+    }
+    let elapsed = start.elapsed();
+    eprintln!(
+        "bench_feed_terminal_echo[styled prompt line]: {:.1} ns/op ({ITERS} iters, {elapsed:?} total)",
+        elapsed.as_nanos() as f64 / f64::from(ITERS)
+    );
 }

@@ -184,7 +184,7 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(bytes) = input::applescript_input_bytes(&text, bracketed) {
                         self.mark_pane_paste_input(window_id, pane_id);
                         self.snap_pane_viewport_to_bottom(window_id, pane_id);
-                        self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+                        self.write_pane_pty_bytes(window_id, pane_id, bytes);
                     }
                 }
             }
@@ -569,7 +569,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // behavior).
                     self.mark_focused_pane_user_input(window_id);
                     self.snap_focused_viewport_to_bottom(window_id);
-                    self.write_pty_bytes(window_id, &bytes);
+                    self.write_pty_bytes(window_id, bytes);
                 }
             }
             _ => {}
@@ -854,7 +854,7 @@ impl App {
                 self.modifiers,
             ) {
                 self.mark_pane_user_input(window_id, pane_id);
-                self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+                self.write_pane_pty_bytes(window_id, pane_id, bytes);
             }
             return;
         }
@@ -1057,7 +1057,7 @@ impl App {
                     mouse::encode_mouse_input(format, tracking, button, state, cell, self.modifiers)
             {
                 self.mark_pane_user_input(window_id, pane_id);
-                self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+                self.write_pane_pty_bytes(window_id, pane_id, bytes);
             }
 
             if let Some(tab) = self.windows.get_mut(&window_id)
@@ -1162,7 +1162,7 @@ impl App {
             self.modifiers,
         ) {
             self.mark_pane_user_input(window_id, pane_id);
-            self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+            self.write_pane_pty_bytes(window_id, pane_id, bytes);
             return;
         }
 
@@ -1185,7 +1185,7 @@ impl App {
                 };
                 let bytes = mouse::alternate_scroll_bytes(up, rows, app_cursor_keys);
                 self.mark_pane_user_input(window_id, pane_id);
-                self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+                self.write_pane_pty_bytes(window_id, pane_id, bytes);
                 return;
             }
             self.scroll_mouse_wheel_viewport(window_id, pane_id, scroll);
@@ -1239,7 +1239,7 @@ impl App {
             // Committed IME text follows the prompt like typed keys do.
             self.mark_pane_user_input(window_id, pane_id);
             self.snap_focused_viewport_to_bottom(window_id);
-            self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+            self.write_pane_pty_bytes(window_id, pane_id, bytes);
         }
 
         // Pre-edit changes (Preedit/Enabled/Disabled) write no pty bytes and so

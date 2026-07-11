@@ -54,7 +54,7 @@ impl App {
         };
         let command = crate::app_actions::pager_shell_command(&path);
         match self.spawn_tab(event_loop, SpawnTarget::CurrentWindow) {
-            Ok(window_id) => self.write_pty_bytes(window_id, command.as_bytes()),
+            Ok(window_id) => self.write_pty_bytes(window_id, command.into_bytes()),
             Err(err) => log::warn!("failed to open pager tab for scrollback: {err:#}"),
         }
     }
@@ -212,7 +212,7 @@ impl App {
         }
     }
 
-    pub(in crate::app) fn write_pty_bytes(&self, window_id: WindowId, bytes: &[u8]) {
+    pub(in crate::app) fn write_pty_bytes(&self, window_id: WindowId, bytes: impl Into<Box<[u8]>>) {
         let Some(pane_id) = self.windows.get(&window_id).map(|state| state.focused_pane) else {
             return;
         };
@@ -223,22 +223,29 @@ impl App {
         &self,
         window_id: WindowId,
         pane_id: PaneId,
-        bytes: &[u8],
+        bytes: impl Into<Box<[u8]>>,
     ) {
+        // Convert once here so a caller's already-owned `Vec<u8>` (every
+        // production call site but two `'static` literals) moves straight
+        // into the boxed slice the queue wants, instead of being borrowed
+        // down to `&[u8]` and copied a second time in `queue_pane_pty_bytes`.
+        let bytes: Box<[u8]> = bytes.into();
+        let len = bytes.len();
         let result = self.queue_pane_pty_bytes(window_id, pane_id, bytes);
-        log_pty_input_result(result, bytes.len());
+        log_pty_input_result(result, len);
     }
 
     pub(in crate::app) fn queue_pane_pty_bytes(
         &self,
         window_id: WindowId,
         pane_id: PaneId,
-        bytes: &[u8],
+        bytes: impl Into<Box<[u8]>>,
     ) -> crate::io_thread::QueueInputResult {
-        if std::env::var_os("NOA_IME_TRACE").is_some() {
+        let bytes: Box<[u8]> = bytes.into();
+        if ime_trace_enabled() {
             eprintln!(
                 "[ime-trace] pty write: {:?}",
-                String::from_utf8_lossy(bytes)
+                String::from_utf8_lossy(&bytes)
             );
         }
         let Some(surface) = self
@@ -248,9 +255,7 @@ impl App {
         else {
             return crate::io_thread::QueueInputResult::Disconnected;
         };
-        surface
-            .pty_input_tx
-            .queue(bytes.to_vec().into_boxed_slice())
+        surface.pty_input_tx.queue(bytes)
     }
 
     pub(in crate::app) fn resolve_pane_command_target(
@@ -262,6 +267,15 @@ impl App {
         let pane_id = split_tree::resolve_pane_command_target(command, Some(state.focused_pane))?;
         state.contains_pane(pane_id).then_some((window_id, pane_id))
     }
+}
+
+/// `NOA_IME_TRACE` is a debug env var, read once and cached: `std::env::var_os`
+/// takes an internal lock and scans the process environment, which measures
+/// at ~150ns — non-trivial when `queue_pane_pty_bytes` runs on every single
+/// keystroke, paste chunk, and program write.
+fn ime_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("NOA_IME_TRACE").is_some())
 }
 
 fn log_pty_input_result(result: crate::io_thread::QueueInputResult, bytes_len: usize) {
@@ -279,5 +293,88 @@ fn log_pty_input_result(result: crate::io_thread::QueueInputResult, bytes_len: u
         crate::io_thread::QueueInputResult::Disconnected => {
             log::warn!("failed to queue pty input because the io thread is gone");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ime_trace_enabled;
+
+    // `ime_trace_enabled` caches its `std::env::var_os` read in a
+    // process-lifetime `OnceLock`. This only pins the caching contract
+    // (repeated calls agree with each other) rather than asserting a fixed
+    // `true`/`false`, since the env var's actual value depends on how the
+    // test binary was launched and no test in this codebase sets or clears
+    // `NOA_IME_TRACE` mid-process (confirmed by repo-wide grep) expecting a
+    // live re-read.
+    #[test]
+    fn ime_trace_enabled_is_stable_across_repeated_calls() {
+        let first = ime_trace_enabled();
+        for _ in 0..1000 {
+            assert_eq!(ime_trace_enabled(), first, "cached flag must not change mid-process");
+        }
+    }
+}
+
+/// Bolt perf harness (text-input hot path): isolates the two per-keystroke
+/// costs `queue_pane_pty_bytes` used to pay beyond the queue itself — a
+/// second heap copy of an already-owned buffer, and an uncached `getenv`
+/// lookup — without needing a full `App`/window/GPU fixture. `#[ignore]`d so
+/// `cargo test` stays fast; run explicitly with:
+/// `cargo test -p noa-app --offline app::input_ops::terminal::bench_tests -- --ignored --nocapture`
+#[cfg(test)]
+mod bench_tests {
+    const ITERS: u32 = 500_000;
+
+    #[test]
+    #[ignore]
+    fn bench_double_copy_vs_direct_move() {
+        // Before: caller already owns a `Vec<u8>` but the write path only
+        // took `&[u8]`, forcing `bytes.to_vec().into_boxed_slice()` — a
+        // second allocation + memcpy of a buffer already owned by the caller.
+        let start = std::time::Instant::now();
+        for _ in 0..ITERS {
+            let owned: Vec<u8> = std::hint::black_box(b"a".to_vec());
+            let borrowed: &[u8] = &owned;
+            let _: Box<[u8]> = std::hint::black_box(borrowed).to_vec().into_boxed_slice();
+        }
+        let via_borrow = start.elapsed();
+
+        // After: the same owned `Vec<u8>` moved directly into `Box<[u8]>`.
+        let start = std::time::Instant::now();
+        for _ in 0..ITERS {
+            let owned: Vec<u8> = std::hint::black_box(b"a".to_vec());
+            let _: Box<[u8]> = std::hint::black_box(owned).into_boxed_slice();
+        }
+        let via_move = start.elapsed();
+
+        eprintln!(
+            "bench_double_copy_vs_direct_move: via_borrow(to_vec+box)={:.1} ns/op, via_move(into_boxed_slice)={:.1} ns/op ({ITERS} iters)",
+            via_borrow.as_nanos() as f64 / f64::from(ITERS),
+            via_move.as_nanos() as f64 / f64::from(ITERS)
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_getenv_vs_cached_flag() {
+        let start = std::time::Instant::now();
+        for _ in 0..ITERS {
+            let _ = std::hint::black_box(std::env::var_os("NOA_IME_TRACE")).is_some();
+        }
+        let uncached = start.elapsed();
+
+        let cached = std::sync::OnceLock::<bool>::new();
+        let start = std::time::Instant::now();
+        for _ in 0..ITERS {
+            let _ = std::hint::black_box(*cached.get_or_init(|| std::env::var_os("NOA_IME_TRACE").is_some()));
+        }
+        let via_cache = start.elapsed();
+
+        eprintln!(
+            "bench_getenv_vs_cached_flag: uncached_var_os={:.1} ns/op, cached_oncelock={:.1} ns/op ({ITERS} iters)",
+            uncached.as_nanos() as f64 / f64::from(ITERS),
+            via_cache.as_nanos() as f64 / f64::from(ITERS)
+        );
     }
 }

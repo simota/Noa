@@ -104,7 +104,7 @@ impl App {
         if let Some(bytes) = input::encode_paste(text, bracketed_paste) {
             self.mark_pane_paste_input(window_id, pane_id);
             self.snap_pane_viewport_to_bottom(window_id, pane_id);
-            self.write_pane_pty_bytes(window_id, pane_id, &bytes);
+            self.write_pane_pty_bytes(window_id, pane_id, bytes);
         }
     }
 
@@ -133,7 +133,7 @@ impl App {
             }
         };
         let reply = Terminal::osc52_read_reply(target, &text);
-        self.write_pane_pty_bytes(window_id, pane_id, &reply);
+        self.write_pane_pty_bytes(window_id, pane_id, reply);
     }
 
     /// Raise a confirmation dialog before revealing the clipboard to a program

@@ -926,69 +926,73 @@ impl App {
         sync_quick_terminal_size_from_committed_rows(&mut self.config, rows);
         let mut reload_background_image = false;
         let mut reset_background_image_deadline = false;
-        for (kind, row) in SettingsRowKind::ALL.iter().zip(rows.iter()) {
+        // `rows[i].draft`'s variant always matches `SettingsRowKind::ALL[i]`
+        // (the `RowDraft` doc contract), so matching on the draft alone is
+        // enough — and, unlike a `(kind, draft)` tuple match, it stays
+        // exhaustive without a catch-all, so adding a settings row forces a
+        // mirror-or-skip decision here at compile time instead of panicking
+        // at commit time (the v0.1.1 Minimum Contrast crash).
+        for row in rows.iter() {
             if !row.touched {
                 continue;
             }
-            match (kind, &row.draft) {
-                (SettingsRowKind::FontSize, RowDraft::FontSize(v)) => self.config.font_size = *v,
-                (SettingsRowKind::BackgroundOpacity, RowDraft::BackgroundOpacity(v)) => {
+            match &row.draft {
+                RowDraft::FontSize(v) => self.config.font_size = *v,
+                RowDraft::BackgroundOpacity(v) => {
                     self.config.background_opacity = *v;
                 }
-                (SettingsRowKind::BackgroundBlurRadius, RowDraft::BackgroundBlurRadius(v)) => {
+                RowDraft::BackgroundBlurRadius(v) => {
                     self.config.background_blur_radius = *v;
                 }
-                (SettingsRowKind::BackgroundImage, RowDraft::BackgroundImage(v)) => {
+                RowDraft::BackgroundImage(v) => {
                     self.config.background_image =
                         (!v.is_empty()).then(|| PathBuf::from(v.as_str()));
                     reload_background_image = true;
                 }
-                (SettingsRowKind::BackgroundImageOpacity, RowDraft::BackgroundImageOpacity(v)) => {
+                RowDraft::BackgroundImageOpacity(v) => {
                     self.config.background_image_opacity = *v;
                     reload_background_image = true;
                 }
-                (
-                    SettingsRowKind::BackgroundImagePosition,
-                    RowDraft::BackgroundImagePosition(v),
-                ) => {
+                RowDraft::BackgroundImagePosition(v) => {
                     self.config.background_image_position = *v;
                     reload_background_image = true;
                 }
-                (SettingsRowKind::BackgroundImageFit, RowDraft::BackgroundImageFit(v)) => {
+                RowDraft::BackgroundImageFit(v) => {
                     self.config.background_image_fit = *v;
                     reload_background_image = true;
                 }
-                (SettingsRowKind::BackgroundImageRepeat, RowDraft::BackgroundImageRepeat(v)) => {
+                RowDraft::BackgroundImageRepeat(v) => {
                     self.config.background_image_repeat = *v;
                     reload_background_image = true;
                 }
-                (
-                    SettingsRowKind::BackgroundImageInterval,
-                    RowDraft::BackgroundImageInterval(v),
-                ) => {
+                RowDraft::BackgroundImageInterval(v) => {
                     self.config.background_image_interval_secs = *v;
                     reset_background_image_deadline = true;
                 }
-                (SettingsRowKind::CursorStyle, RowDraft::CursorStyle(v)) => {
+                RowDraft::CursorStyle(v) => {
                     self.config.cursor_style = Some(*v);
                 }
-                (SettingsRowKind::SidebarPreviewLines, RowDraft::SidebarPreviewLines(v)) => {
+                RowDraft::SidebarPreviewLines(v) => {
                     self.apply_live_sidebar_preview_lines(*v);
                 }
-                (SettingsRowKind::QuickTerminalHeight, RowDraft::QuickTerminalHeight(_)) => {}
-                (SettingsRowKind::ConfirmQuit, RowDraft::ConfirmQuit(v)) => {
+                RowDraft::QuickTerminalHeight(_) => {}
+                RowDraft::ConfirmQuit(v) => {
                     self.config.confirm_quit = *v;
                 }
                 // Commit-only rows: intentionally not mirrored (see the doc
                 // comment above).
-                (SettingsRowKind::FontFamily, RowDraft::FontFamily(_))
-                | (SettingsRowKind::WindowPadding, RowDraft::WindowPadding(_, _))
-                | (SettingsRowKind::MacosTitlebarStyle, RowDraft::MacosTitlebarStyle(_)) => {}
-                (kind, draft) => {
-                    unreachable!(
-                        "SettingsRowKind::ALL[i] must always match rows[i]'s draft variant, got {kind:?} with {draft:?}"
-                    )
-                }
+                RowDraft::FontFamily(_)
+                | RowDraft::WindowPadding(_, _)
+                | RowDraft::MacosTitlebarStyle(_) => {}
+                // Reload-applied rows: the ConfigWatcher picks the written
+                // values up and applies them via the reload path, which
+                // detects changes by diffing `self.config` (previous) against
+                // the re-parsed file (next) — mirroring here would erase that
+                // diff and make the reload skip the actual apply.
+                RowDraft::ScrollbackLimit(_)
+                | RowDraft::CursorStyleBlink(_)
+                | RowDraft::MinimumContrast(_)
+                | RowDraft::MacosOptionAsAlt(_) => {}
             }
         }
         if reload_background_image {

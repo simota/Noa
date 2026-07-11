@@ -6,12 +6,14 @@
 //! [`crossbeam_channel`] as [`PtyEvent`]s, and accepts input bytes / resizes.
 
 mod data;
+mod metrics;
 mod pty;
 mod reader;
 mod shell_integration;
 mod writer;
 
 pub use data::PtyData;
+pub use metrics::{PaneMetrics, ProcRecord, ProcSnapshot, foreground_tree};
 pub use pty::{ForegroundProcessProbe, Pty, PtyConfig};
 pub use writer::PtyWriter;
 

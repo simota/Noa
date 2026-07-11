@@ -73,6 +73,10 @@ pub(crate) fn build_overrides(
     let mut audible_bell_dock_bounce = None;
     let mut auto_approve = None;
     let mut keybinds = Vec::new();
+    let mut server_enable = None;
+    let mut server_port = None;
+    let mut server_token = None;
+    let mut server_scopes = None;
     let mut diagnostics = Vec::new();
     let mut window_pair_path = std::path::PathBuf::new();
 
@@ -327,6 +331,18 @@ pub(crate) fn build_overrides(
             "palette" => {
                 parse_palette_entry(path, directive, &mut diagnostics, &mut palette);
             }
+            "server-enable" => {
+                server_enable = parse_bool_directive(path, directive, &mut diagnostics);
+            }
+            "server-port" => {
+                server_port = parse_u16(path, directive, &mut diagnostics);
+            }
+            "server-token" => {
+                server_token = directive.value.clone();
+            }
+            "server-scopes" => {
+                server_scopes = directive.value.clone();
+            }
             unknown => {
                 diagnostics.push(unknown_key_diagnostic(path, unknown));
             }
@@ -398,6 +414,10 @@ pub(crate) fn build_overrides(
             audible_bell_dock_bounce,
             auto_approve,
             keybinds,
+            server_enable,
+            server_port,
+            server_token,
+            server_scopes,
         },
         diagnostics,
     )

@@ -1152,6 +1152,13 @@ fn raw_dimensions(cmd: &KittyGraphicsCommand) -> Result<(u32, u32), KittyError> 
     if cmd.width == 0 || cmd.height == 0 {
         return Err(KittyError::Invalid);
     }
+    // Must reject oversize dimensions *before* the caller (decode_to_rgba)
+    // computes `width * height * bpp`: unbounded s=/v= values overflow that
+    // multiplication (a debug-build panic reachable straight from pty bytes).
+    // Same bound `insert_rgba` enforces (~line 310).
+    if cmd.width > MAX_IMAGE_DIM || cmd.height > MAX_IMAGE_DIM {
+        return Err(KittyError::TooBig);
+    }
     Ok((cmd.width, cmd.height))
 }
 
@@ -1300,6 +1307,30 @@ mod tests {
             panic!()
         };
         assert_eq!(done.result, Err(KittyError::Invalid));
+    }
+
+    #[test]
+    fn huge_dimensions_reject_without_overflow() {
+        // Regression: raw_dimensions() only rejected zero width/height, so
+        // decode_to_rgba computed `width * height * bpp` *before* any
+        // MAX_IMAGE_DIM check. A crafted s=/v= near u32::MAX overflowed that
+        // usize multiplication and panicked in debug builds (overflow-checks
+        // on) — reachable straight from pty bytes with a tiny payload.
+        let mut store = ImageStore::new();
+        let cmd = direct("a=t,f=32,s=4294967295,v=4294967295,i=1", &[0u8; 4]);
+        let TransmitStep::Done(done) = store.transmit(&cmd) else {
+            panic!()
+        };
+        assert_eq!(done.result, Err(KittyError::TooBig));
+        assert!(store.get(1).is_none());
+
+        // Same guard for the RGB (f=24, ×3) decode path.
+        let cmd_rgb = direct("a=t,f=24,s=4294967295,v=4294967295,i=2", &[0u8; 3]);
+        let TransmitStep::Done(done_rgb) = store.transmit(&cmd_rgb) else {
+            panic!()
+        };
+        assert_eq!(done_rgb.result, Err(KittyError::TooBig));
+        assert!(store.get(2).is_none());
     }
 
     #[test]

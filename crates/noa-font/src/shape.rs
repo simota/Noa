@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 use rustybuzz::ttf_parser::Tag as HbTag;
 use rustybuzz::{
@@ -91,7 +92,12 @@ pub(crate) struct ShapeRunEntry {
     pub(crate) text: Vec<(char, Vec<char>)>,
     pub(crate) style: StyleKey,
     pub(crate) cfg_digest: u64,
-    pub(crate) glyphs: Vec<ShapedGlyph>,
+    /// `Rc`, not `Vec`: a cache hit in `FontGrid::shape_run` returns a clone
+    /// of this field on the hot path (every dirty row, every run, every
+    /// frame) — `Rc::clone` is a refcount bump, not a deep copy of the glyph
+    /// list. `FontGrid` is main-thread-only app state, so `Rc` (not `Arc`)
+    /// is correct.
+    pub(crate) glyphs: Rc<[ShapedGlyph]>,
     pub(crate) last_used: u64,
 }
 

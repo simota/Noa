@@ -20,8 +20,8 @@ fn ligature_shaped_glyph_emits_one_instance_and_covered_cell_emits_none() {
             combining: Vec::new(),
             style,
         }])
-        .into_iter()
-        .next()
+        .first()
+        .copied()
         .expect("shaping 'M' must yield a glyph");
 
     let run = ShapeRun {
@@ -96,8 +96,8 @@ fn combining_mark_glyph_is_positioned_by_shaped_offset_not_pen_bearing() {
             combining: Vec::new(),
             style,
         }])
-        .into_iter()
-        .next()
+        .first()
+        .copied()
         .expect("shaping 'M' must yield a glyph");
 
     let run = ShapeRun {

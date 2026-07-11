@@ -2,6 +2,7 @@
 //! packing together behind a per-`char` cache.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use etagere::AllocId;
@@ -377,11 +378,12 @@ impl FontGrid {
     /// Shape one already-segmented, single-face-resolvable run (segmentation
     /// happens render-side, before calling this — a run is guaranteed
     /// single-face by the caller). Internally memoized (REQ-SHAPE-5): an
-    /// unchanged run on a later call is a cache hit and does not re-invoke
-    /// `rustybuzz`.
-    pub fn shape_run(&mut self, cells: &[ShapeCell]) -> Vec<ShapedGlyph> {
+    /// unchanged run on a later call is a cache hit and returns a clone of
+    /// the cached `Rc` (refcount bump only, no glyph list deep copy) and
+    /// does not re-invoke `rustybuzz`.
+    pub fn shape_run(&mut self, cells: &[ShapeCell]) -> Rc<[ShapedGlyph]> {
         let Some(first) = cells.first() else {
-            return Vec::new();
+            return Rc::from([]);
         };
         let style = first.style;
         let cfg_digest = self.cfg_digest_for(style);
@@ -396,7 +398,7 @@ impl FontGrid {
         {
             entry.last_used = now;
             self.shape_cache_hits += 1;
-            return entry.glyphs.clone();
+            return Rc::clone(&entry.glyphs);
         }
 
         // Builtin runs (box-drawing/block/Powerline) bypass rustybuzz entirely:
@@ -418,8 +420,7 @@ impl FontGrid {
                     cluster: idx as u32,
                 })
                 .collect();
-            self.insert_shape_run(hash, cells, style, cfg_digest, glyphs.clone(), now);
-            return glyphs;
+            return self.insert_shape_run(hash, cells, style, cfg_digest, glyphs, now);
         }
 
         let face_id = self.resolve_face_for_style(first.ch, style);
@@ -434,8 +435,7 @@ impl FontGrid {
             &self.font_cfg,
         );
 
-        self.insert_shape_run(hash, cells, style, cfg_digest, glyphs.clone(), now);
-        glyphs
+        self.insert_shape_run(hash, cells, style, cfg_digest, glyphs, now)
     }
 
     fn cfg_digest_for(&self, style: StyleKey) -> u64 {
@@ -443,7 +443,10 @@ impl FontGrid {
     }
 
     /// Insert a shaped run into the memo cache (owned key text is built here,
-    /// on the miss path only), enforcing the LRU cap.
+    /// on the miss path only), enforcing the LRU cap. `glyphs` is converted
+    /// to an `Rc` once, here, at the miss path; the same `Rc` is stored in
+    /// the cache entry and returned to the caller, so the first caller after
+    /// a miss gets the glyph list for free (no extra clone).
     fn insert_shape_run(
         &mut self,
         hash: u64,
@@ -452,7 +455,7 @@ impl FontGrid {
         cfg_digest: u64,
         glyphs: Vec<ShapedGlyph>,
         now: u64,
-    ) {
+    ) -> Rc<[ShapedGlyph]> {
         if self.shape_cache_len >= SHAPE_CACHE_CAP {
             self.evict_lru_shape_run();
         }
@@ -460,6 +463,7 @@ impl FontGrid {
             .iter()
             .map(|cell| (cell.ch, cell.combining.clone()))
             .collect();
+        let glyphs: Rc<[ShapedGlyph]> = Rc::from(glyphs);
         self.shape_cache
             .entry(hash)
             .or_default()
@@ -467,10 +471,11 @@ impl FontGrid {
                 text,
                 style,
                 cfg_digest,
-                glyphs,
+                glyphs: Rc::clone(&glyphs),
                 last_used: now,
             });
         self.shape_cache_len += 1;
+        glyphs
     }
 
     /// Number of `shape_run` calls served from the shape cache (REQ-SHAPE-5

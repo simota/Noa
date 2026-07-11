@@ -217,12 +217,14 @@ impl App {
         // (`spawn_pane_surface` borrows `&self`). A rough grid/rect is fine —
         // `relayout_and_resize_window` fixes every pane's geometry below.
         let placeholder_grid = GridSize::new(self.config.cols, self.config.rows);
-        let Some((auto_approve_enabled, redraw_floor)) = self.windows.get(&window_id).map(|state| {
-            (
-                state.auto_approve_enabled.clone(),
-                state.redraw_floor.clone(),
-            )
-        }) else {
+        let Some((auto_approve_enabled, redraw_floor)) =
+            self.windows.get(&window_id).map(|state| {
+                (
+                    state.auto_approve_enabled.clone(),
+                    state.redraw_floor.clone(),
+                )
+            })
+        else {
             return;
         };
         let mut spawned = Vec::new();

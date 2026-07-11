@@ -522,7 +522,11 @@ mod tests {
 
     #[test]
     fn overview_page_count_computes_ceil_division_with_a_floor_of_one() {
-        assert_eq!(overview_page_count(0, 9), 1, "an empty source still has one page");
+        assert_eq!(
+            overview_page_count(0, 9),
+            1,
+            "an empty source still has one page"
+        );
         assert_eq!(overview_page_count(9, 9), 1);
         assert_eq!(overview_page_count(10, 9), 2);
         assert_eq!(overview_page_count(25, 9), 3);
@@ -560,8 +564,16 @@ mod tests {
     #[test]
     fn page_step_clamps_at_both_ends_without_wrapping() {
         // 25 items at 9/page = pages [0, 1, 2].
-        assert_eq!(page_step(0, -1, 25, 9), 0, "back from the first page stays put");
-        assert_eq!(page_step(2, 1, 25, 9), 2, "forward from the last page stays put");
+        assert_eq!(
+            page_step(0, -1, 25, 9),
+            0,
+            "back from the first page stays put"
+        );
+        assert_eq!(
+            page_step(2, 1, 25, 9),
+            2,
+            "forward from the last page stays put"
+        );
         assert_eq!(page_step(1, 1, 25, 9), 2);
         assert_eq!(page_step(1, -1, 25, 9), 0);
     }
@@ -606,7 +618,10 @@ mod tests {
         );
 
         let (page_again, _) = page_after_wheel(page, accum, -0.01, 25, 9);
-        assert_eq!(page_again, page, "second call: a tiny delta must not flip again");
+        assert_eq!(
+            page_again, page,
+            "second call: a tiny delta must not flip again"
+        );
     }
 
     #[test]
@@ -1062,7 +1077,10 @@ mod tests {
         // 75 cells) but still wide enough for compact+page (~70 cells) to
         // survive the hard clip intact.
         let compact = overview_hint_bar_row(6, 1, 2, 75);
-        assert!(!compact.contains("to switch"), "expected the compact variant");
+        assert!(
+            !compact.contains("to switch"),
+            "expected the compact variant"
+        );
         assert!(compact.contains("Page 2/2"));
         assert!(text_cell_width(&compact) <= 75);
     }

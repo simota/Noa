@@ -2,7 +2,9 @@ use super::super::*;
 // v3 paging pure fns: imported locally (rather than through app.rs's shared
 // `use crate::session_overview::{...}` block) to keep this file's diff
 // self-contained.
-use crate::session_overview::{clamp_overview_page, overview_page_count, overview_page_slice_range};
+use crate::session_overview::{
+    clamp_overview_page, overview_page_count, overview_page_slice_range,
+};
 
 impl App {
     /// REQ-OV-16: the "Search sessions" filter narrows the source set here,
@@ -271,8 +273,7 @@ mod tests {
         for _ in 0..3 {
             // Simulates repeated page flips (0 -> 1 -> 2 -> 0 -> ...)
             // happening between calls: nothing here ever varies by page.
-            let hit =
-                overview_source_tile_ids_cache_hit(&unfiltered, "", &result, &unfiltered, "");
+            let hit = overview_source_tile_ids_cache_hit(&unfiltered, "", &result, &unfiltered, "");
             assert_eq!(hit, Some(result.as_slice()));
         }
     }

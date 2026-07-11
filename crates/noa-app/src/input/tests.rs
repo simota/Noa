@@ -20,9 +20,27 @@ fn bench_encode_key_with_modes() {
     let arrow = Key::Named(NamedKey::ArrowRight);
 
     let cases: &[(&str, &Key, Option<&str>, ModifiersState, u8)] = &[
-        ("legacy printable 'a'", &printable, Some("a"), ModifiersState::empty(), 0),
-        ("legacy ctrl+c", &ctrl_c, Some("c"), ModifiersState::CONTROL, 0),
-        ("legacy arrow-right", &arrow, None, ModifiersState::empty(), 0),
+        (
+            "legacy printable 'a'",
+            &printable,
+            Some("a"),
+            ModifiersState::empty(),
+            0,
+        ),
+        (
+            "legacy ctrl+c",
+            &ctrl_c,
+            Some("c"),
+            ModifiersState::CONTROL,
+            0,
+        ),
+        (
+            "legacy arrow-right",
+            &arrow,
+            None,
+            ModifiersState::empty(),
+            0,
+        ),
         (
             "kitty printable 'a'",
             &printable,

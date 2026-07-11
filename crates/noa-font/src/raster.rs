@@ -260,8 +260,14 @@ pub fn rasterize_with_variations(
     {
         let scale = fit / advance;
         let scaled_px = px * scale;
-        let (scaled_image, scaled_advance) =
-            render_glyph_once(ctx, font, glyph_id, scaled_px, &normalized_coords, synthesis);
+        let (scaled_image, scaled_advance) = render_glyph_once(
+            ctx,
+            font,
+            glyph_id,
+            scaled_px,
+            &normalized_coords,
+            synthesis,
+        );
         // A shrunk render can only still resolve to an outline/alpha-bitmap
         // source (color strikes are picked by fixed-size `StrikeWith::BestFit`
         // regardless of `px`, and the un-scaled render above already proved

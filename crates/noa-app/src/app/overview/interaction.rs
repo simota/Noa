@@ -206,8 +206,7 @@ impl App {
     /// (no wrap, `page_step`). A no-op when already at that end.
     pub(in crate::app) fn step_overview_page(&mut self, direction: isize) {
         let len = self.overview_source_tile_ids().len();
-        let Some(current_page) = self.overview_window.as_ref().map(|overview| overview.page)
-        else {
+        let Some(current_page) = self.overview_window.as_ref().map(|overview| overview.page) else {
             return;
         };
         let new_page = page_step(current_page, direction, len, OVERVIEW_GRID_CAP);

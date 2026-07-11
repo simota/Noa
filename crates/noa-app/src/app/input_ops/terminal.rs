@@ -311,7 +311,11 @@ mod tests {
     fn ime_trace_enabled_is_stable_across_repeated_calls() {
         let first = ime_trace_enabled();
         for _ in 0..1000 {
-            assert_eq!(ime_trace_enabled(), first, "cached flag must not change mid-process");
+            assert_eq!(
+                ime_trace_enabled(),
+                first,
+                "cached flag must not change mid-process"
+            );
         }
     }
 }
@@ -367,7 +371,9 @@ mod bench_tests {
         let cached = std::sync::OnceLock::<bool>::new();
         let start = std::time::Instant::now();
         for _ in 0..ITERS {
-            let _ = std::hint::black_box(*cached.get_or_init(|| std::env::var_os("NOA_IME_TRACE").is_some()));
+            let _ = std::hint::black_box(
+                *cached.get_or_init(|| std::env::var_os("NOA_IME_TRACE").is_some()),
+            );
         }
         let via_cache = start.elapsed();
 

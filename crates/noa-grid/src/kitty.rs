@@ -474,10 +474,8 @@ impl ImageStore {
                 let _ = libc::shm_unlink(cname.as_ptr());
                 return Err(KittyError::NoEnt);
             }
-            let src = std::slice::from_raw_parts(
-                (ptr as *const u8).add(offset as usize),
-                want as usize,
-            );
+            let src =
+                std::slice::from_raw_parts((ptr as *const u8).add(offset as usize), want as usize);
             let out = src.to_vec();
             libc::munmap(ptr, map_len);
             let _ = libc::shm_unlink(cname.as_ptr());
@@ -1610,7 +1608,10 @@ mod tests {
         assert_eq!(done.result, Ok(1));
         let img = store.get(1).unwrap();
         assert_eq!(img.frame_count(), 2);
-        assert!(store.has_running_animation(), "2 frames auto-start playback");
+        assert!(
+            store.has_running_animation(),
+            "2 frames auto-start playback"
+        );
     }
 
     #[test]
@@ -1679,10 +1680,7 @@ mod tests {
         let frame = vec![100u8, 100, 100, 255, 200, 200, 200, 255];
         store.transmit(&direct("a=f,i=1,f=32,s=2,v=1,X=1", &frame));
         // a=c: copy frame 2 (c=2) onto frame 1 (r=1), overwrite (X=1).
-        assert_eq!(
-            store.compose(&direct("a=c,i=1,r=1,c=2,X=1", &[])),
-            Ok(())
-        );
+        assert_eq!(store.compose(&direct("a=c,i=1,r=1,c=2,X=1", &[])), Ok(()));
         assert_eq!(&*store.get(1).unwrap().frames[0].rgba, frame.as_slice());
     }
 
@@ -1708,9 +1706,10 @@ mod tests {
         // u32-addition bounds check; a hostile x= near u32::MAX must be rejected,
         // not wrapped into composite_rect's indexing.
         let mut store = store_with_base();
-        let TransmitStep::Done(done) =
-            store.transmit(&direct("a=f,i=1,f=32,s=1,v=1,x=4294967295", &[1u8, 2, 3, 4]))
-        else {
+        let TransmitStep::Done(done) = store.transmit(&direct(
+            "a=f,i=1,f=32,s=1,v=1,x=4294967295",
+            &[1u8, 2, 3, 4],
+        )) else {
             panic!("expected done");
         };
         assert_eq!(done.result, Err(KittyError::Invalid));

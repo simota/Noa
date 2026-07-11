@@ -730,7 +730,11 @@ fn draw_sidebar_cards(
         return;
     };
     let pipeline = &card_pipe.pipeline;
-    let accent_view = gpu.chrome_textures.sidebar_accent_tex.as_ref().map(|t| &t.2);
+    let accent_view = gpu
+        .chrome_textures
+        .sidebar_accent_tex
+        .as_ref()
+        .map(|t| &t.2);
     let card_size = PixelSize {
         w: model.card_w,
         h: model.card_h,

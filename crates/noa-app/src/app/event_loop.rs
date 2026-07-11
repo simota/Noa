@@ -671,11 +671,9 @@ impl App {
             .window
             .current_monitor()
             .and_then(|monitor| monitor.refresh_rate_millihertz());
-        state
-            .redraw_floor
-            .set_min_interval(crate::io_thread::redraw_floor_from_refresh_millihertz(
-                millihertz,
-            ));
+        state.redraw_floor.set_min_interval(
+            crate::io_thread::redraw_floor_from_refresh_millihertz(millihertz),
+        );
     }
 
     pub(super) fn on_scale_factor_changed(&mut self, window_id: WindowId, scale_factor: f64) {

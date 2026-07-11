@@ -863,13 +863,16 @@ fn queue_input_is_byte_identical_regardless_of_owned_source_type() {
         queue.queue(convert(from_box.clone())),
         QueueInputResult::Queued
     );
-    assert_eq!(
-        queue.queue(convert(from_static)),
-        QueueInputResult::Queued
-    );
+    assert_eq!(queue.queue(convert(from_static)), QueueInputResult::Queued);
 
-    assert_eq!(rx.recv().expect("vec-sourced input").as_ref(), &from_vec[..]);
-    assert_eq!(rx.recv().expect("box-sourced input").as_ref(), &from_box[..]);
+    assert_eq!(
+        rx.recv().expect("vec-sourced input").as_ref(),
+        &from_vec[..]
+    );
+    assert_eq!(
+        rx.recv().expect("box-sourced input").as_ref(),
+        &from_box[..]
+    );
     assert_eq!(
         rx.recv().expect("static-sourced input").as_ref(),
         from_static
@@ -945,7 +948,9 @@ fn bench_pty_input_queue_enqueue_drain() {
         // Mirrors `queue_pane_pty_bytes`'s current `bytes.to_vec().into_boxed_slice()`
         // pattern for an already-owned single-keystroke buffer.
         let owned: Vec<u8> = b"a".to_vec();
-        let boxed: PtyInput = std::hint::black_box(owned.as_slice()).to_vec().into_boxed_slice();
+        let boxed: PtyInput = std::hint::black_box(owned.as_slice())
+            .to_vec()
+            .into_boxed_slice();
         assert_eq!(queue.queue(boxed), QueueInputResult::Queued);
         let _ = std::hint::black_box(rx.recv().unwrap());
     }

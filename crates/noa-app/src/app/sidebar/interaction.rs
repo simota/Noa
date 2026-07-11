@@ -433,7 +433,10 @@ mod tests {
 
     #[test]
     fn committed_rename_name_trims_and_keeps_nonempty() {
-        assert_eq!(committed_rename_name("  build  "), Some("build".to_string()));
+        assert_eq!(
+            committed_rename_name("  build  "),
+            Some("build".to_string())
+        );
         assert_eq!(committed_rename_name("build"), Some("build".to_string()));
     }
 

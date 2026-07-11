@@ -68,6 +68,20 @@ impl Screen {
         self.rows_evicted
     }
 
+    /// Total addressable rows in this screen's session-absolute row space
+    /// (retained scrollback plus the live grid) — the coordinate space
+    /// `noa.getGrid` (noa-server spec L2 "Grid ペイロード") pages over.
+    pub fn total_rows(&self) -> usize {
+        self.scrollback.len() + self.grid.len()
+    }
+
+    /// A row in session-absolute space (`0` = oldest retained scrollback
+    /// row; `scrollback_len()..` is the live grid), for IPC grid paging.
+    /// `None` if `y` is out of range.
+    pub fn absolute_row(&self, y: usize) -> Option<Row> {
+        self.storage_row(y).map(std::borrow::Cow::into_owned)
+    }
+
     /// Scroll so the history row at `index` (into the current
     /// `scrollback + grid`, `0` = oldest retained row) becomes the top visible
     /// row, clamped to the scrollable range. Used by prompt-jump.
@@ -327,6 +341,77 @@ impl Screen {
         }
 
         if text.is_empty() { None } else { Some(text) }
+    }
+
+    /// Tail-bounded variant of [`Self::scrollback_text`] (noa-server spec
+    /// NFR-4 / FR-8): walks rows from the newest backward, accumulating only
+    /// an approximate byte length until roughly `max_bytes` (plus a small
+    /// margin for the trailing char-boundary trim below) are covered, then
+    /// builds the joined text forward from that point on — the full
+    /// scrollback is never materialized. Returns `(text, truncated)`.
+    pub fn scrollback_text_tail(&mut self, max_bytes: usize) -> Option<(String, bool)> {
+        if self.cols == 0 || !self.has_selectable_text() {
+            return None;
+        }
+        let scrollback_len = self.scrollback_len();
+        let total = scrollback_len + self.grid.len();
+        if total == 0 {
+            return None;
+        }
+        // Covers the char-boundary trim's worst case (dropping up to 3
+        // bytes of a multi-byte codepoint straddling the cut).
+        const TRIM_MARGIN: usize = 4;
+        let budget = max_bytes.saturating_add(TRIM_MARGIN);
+
+        let mut start = total;
+        let mut acc = 0usize;
+        while start > 0 && acc < budget {
+            start -= 1;
+            let Some(row) = self.storage_row(start) else {
+                break;
+            };
+            acc += Self::approx_row_len(&row);
+        }
+
+        let mut text = String::new();
+        let mut previous_wrapped = false;
+        let mut first_row = true;
+        if start < scrollback_len {
+            self.for_each_scrollback_row(start..scrollback_len, |_, row| {
+                Self::push_full_row_text(row, &mut text, &mut previous_wrapped, &mut first_row);
+            });
+            for row in &self.grid {
+                Self::push_full_row_text(row, &mut text, &mut previous_wrapped, &mut first_row);
+            }
+        } else {
+            for row in &self.grid[start - scrollback_len..] {
+                Self::push_full_row_text(row, &mut text, &mut previous_wrapped, &mut first_row);
+            }
+        }
+
+        if text.is_empty() {
+            return None;
+        }
+        let already_truncated = start > 0;
+        if text.len() <= max_bytes {
+            return Some((text, already_truncated));
+        }
+        let cut = text.len() - max_bytes;
+        let mut idx = cut;
+        while idx < text.len() && !text.is_char_boundary(idx) {
+            idx += 1;
+        }
+        Some((text[idx..].to_string(), true))
+    }
+
+    /// Approximate serialized byte length of one row's text plus its line
+    /// separator, for [`Self::scrollback_text_tail`]'s backward budget scan.
+    fn approx_row_len(row: &Row) -> usize {
+        let mut buf = String::new();
+        for cell in &row.cells {
+            cell.push_text_to(&mut buf);
+        }
+        buf.len() + 1
     }
 
     fn push_full_row_text(

@@ -198,6 +198,20 @@ impl Terminal {
         self.active().scrollback_len()
     }
 
+    /// Total addressable rows in the active screen's session-absolute row
+    /// space (retained scrollback plus the live grid), for IPC `getGrid`
+    /// paging (noa-server spec).
+    pub fn active_total_rows(&self) -> usize {
+        self.active().total_rows()
+    }
+
+    /// A row in the active screen's session-absolute space (`0` = oldest
+    /// retained scrollback row), for IPC `getGrid` paging. `None` if `y` is
+    /// out of range.
+    pub fn active_absolute_row(&self, y: usize) -> Option<crate::cell::Row> {
+        self.active().absolute_row(y)
+    }
+
     pub fn viewport_offset(&self) -> usize {
         self.active().viewport_offset()
     }
@@ -262,6 +276,12 @@ impl Terminal {
 
     pub fn scrollback_text(&mut self) -> Option<String> {
         self.active_mut().scrollback_text()
+    }
+
+    /// Tail-bounded scrollback text (noa-server spec NFR-4 / FR-8): see
+    /// [`crate::screen::Screen::scrollback_text_tail`].
+    pub fn scrollback_text_tail(&mut self, max_bytes: usize) -> Option<(String, bool)> {
+        self.active_mut().scrollback_text_tail(max_bytes)
     }
 
     pub fn set_search_query(&mut self, query: impl Into<String>) {

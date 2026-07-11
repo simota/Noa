@@ -864,10 +864,16 @@ impl ThemeSettings {
                 let step = delta.unsigned_abs() as usize * SCROLLBACK_LIMIT_STEP;
                 let new = if delta.is_negative() {
                     current.saturating_sub(step)
+                } else if current >= SCROLLBACK_LIMIT_MAX {
+                    // G2: a config-set value can start above the UI ceiling
+                    // (this row's own steps can never produce that, but a
+                    // hand-edited config file can) — clamping the increase
+                    // down to the ceiling would make the increase key
+                    // *decrease* the value, so it's a no-op instead.
+                    current
                 } else {
-                    current.saturating_add(step)
-                }
-                .min(SCROLLBACK_LIMIT_MAX);
+                    current.saturating_add(step).min(SCROLLBACK_LIMIT_MAX)
+                };
                 if new != current {
                     self.rows[idx].draft = RowDraft::ScrollbackLimit(new);
                     self.rows[idx].touched = true;
@@ -1026,7 +1032,19 @@ impl ThemeSettings {
         self.rows[idx].draft = default.clone();
         self.rows[idx].touched = true;
         self.clear_row_input_state();
-        self.reset_flash_until = Some(now + RESET_FLASH_DURATION);
+        // G1: `FontFamily`'s default is always the empty string (fix F2),
+        // which `commit_updates()` deliberately never writes (noa-config's
+        // writer has no key-deletion primitive, so an empty value would be
+        // an invalid `font-family = ` line rather than a meaningful
+        // "unset"). Flashing here would tell the user the reset "worked"
+        // for a save that will actually write nothing — so this one case
+        // skips the flash. Every other row's reset always writes on
+        // commit, so it keeps the flash.
+        let commits_nothing_on_save =
+            matches!(&self.rows[idx].draft, RowDraft::FontFamily(name) if name.is_empty());
+        if !commits_nothing_on_save {
+            self.reset_flash_until = Some(now + RESET_FLASH_DURATION);
+        }
         match (kind, default) {
             // Font-size never returns a live `RowEffect` directly — like
             // every other edit to this row, it always routes through the

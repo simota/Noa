@@ -1371,6 +1371,57 @@ fn reset_starts_a_brief_flash_that_expires() {
     assert!(!settings.reset_flash_active(now + Duration::from_secs(1)));
 }
 
+// G1: resetting FontFamily writes nothing on commit (its default is the
+// empty string, and `commit_updates()` deliberately skips an empty
+// FontFamily key — fix F2) — flashing anyway would be a false "it worked"
+// cue for a save that changes nothing on disk, so this one reset must not
+// start the flash.
+#[test]
+fn reset_font_family_does_not_start_a_flash_because_it_writes_nothing_on_commit() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+    let now = Instant::now();
+    assert!(!settings.reset_flash_active(now));
+
+    settings.reset_selected_row(now);
+
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::FontFamily)].draft,
+        RowDraft::FontFamily(String::new())
+    );
+    assert!(
+        settings.rows()[row_index(SettingsRowKind::FontFamily)].touched,
+        "the row itself still resets and marks touched — only the flash is suppressed"
+    );
+    assert!(
+        !settings.reset_flash_active(now),
+        "no misfire cue for a reset that writes nothing on commit"
+    );
+    let updates = settings.commit_updates();
+    assert!(!updates.iter().any(|(key, _)| key == "font-family"));
+}
+
+// G1 companion: every other row's reset still writes on commit, so it
+// keeps the flash — proving the suppression is specific to FontFamily's
+// empty-default case, not a general regression.
+#[test]
+fn reset_other_rows_still_start_a_flash() {
+    for kind in [
+        SettingsRowKind::CursorStyle,
+        SettingsRowKind::WindowPadding,
+        SettingsRowKind::MacosTitlebarStyle,
+        SettingsRowKind::ScrollbackLimit,
+    ] {
+        let mut settings = ThemeSettings::open(settings_init());
+        move_to_row(&mut settings, kind);
+        let now = Instant::now();
+
+        settings.reset_selected_row(now);
+
+        assert!(settings.reset_flash_active(now), "{kind:?}");
+    }
+}
+
 #[test]
 fn poll_reset_flash_clears_once_elapsed_and_reports_the_transition_once() {
     let mut settings = ThemeSettings::open(settings_init());
@@ -1533,6 +1584,46 @@ fn scrollback_limit_row_is_persist_only_and_adjusts_in_one_mb_steps() {
         updates.contains(&("scrollback-limit".to_string(), after.to_string())),
         "{updates:?}"
     );
+}
+
+// G2: a config-set `scrollback-limit` above the row's own 1GB UI ceiling
+// (this row's own `+` steps can never produce that, but a hand-edited
+// config file can) must not have the increase key silently *decrease* it
+// by clamping down to the ceiling — it's a no-op instead. The decrease key
+// still works normally from any starting point.
+#[test]
+fn scrollback_limit_increase_is_a_no_op_above_the_ceiling_but_decrease_still_works() {
+    let above_ceiling = 2_000_000_000_usize; // > SCROLLBACK_LIMIT_MAX (1GB)
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        scrollback_limit: above_ceiling,
+        ..settings_init()
+    });
+    move_to_row(&mut settings, SettingsRowKind::ScrollbackLimit);
+    let idx = row_index(SettingsRowKind::ScrollbackLimit);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ScrollbackLimit(above_ceiling)
+    );
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ScrollbackLimit(above_ceiling),
+        "the increase key must never decrease an already-above-ceiling value"
+    );
+    assert!(
+        !settings.rows()[idx].touched,
+        "a true no-op must not mark the row touched"
+    );
+
+    settings.adjust(-1, Instant::now());
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ScrollbackLimit(above_ceiling - 1_000_000),
+        "decrease still works normally from above the ceiling"
+    );
+    assert!(settings.rows()[idx].touched);
 }
 
 // R-9's 6-point set, part 2/4 (cursor-style-blink): a plain bool toggle.

@@ -11,8 +11,9 @@ use std::fmt::Write as _;
 use super::render::ensure_scratch;
 use super::*;
 use crate::theme_settings::{
-    RowDraft, SettingsRowKind, Swatch, ThemeSettings, ThemeSettingsMode, sample_swatches,
-    settings_row_display_value,
+    ATTRIBUTE_CHIP_HINT, RowDraft, SettingsRowKind, Swatch, ThemeSettings, ThemeSettingsMode,
+    attribute_chip_segments, contrast_label, favorites_chip_label, footer_text, match_count_label,
+    sample_lines, sample_swatches, settings_row_display_value,
 };
 
 /// Corner radius (logical px) of a modal overlay card (H) — the shared
@@ -593,8 +594,16 @@ const THEME_SETTINGS_ROWS: u16 = 25;
 const LIST_COL: u16 = 0;
 const LIST_WIDTH: u16 = 28;
 const SAMPLE_COL: u16 = LIST_WIDTH + 3;
-const LIST_TOP_ROW: u16 = 4;
-const LIST_ROWS: u16 = 8;
+const SAMPLE_LABEL_ROW: u16 = 2;
+const FILTER_ROW: u16 = 3;
+/// R-29/R-30 (ux.md §5 Open Question, resolved): the new favorites/attribute
+/// chip row sits directly above the list, absorbing one row from
+/// `LIST_ROWS` (8 → 7) rather than growing the fixed card height — keeps
+/// `THEME_SETTINGS_ROWS`/card-size stable (wgpu's fixed-grid degrade
+/// strategy; the native card grows its height instead, FM-06).
+const CHIP_ROW: u16 = 4;
+const LIST_TOP_ROW: u16 = 5;
+const LIST_ROWS: u16 = 7;
 
 /// Composite the open theme-settings overlay as a rounded modal card
 /// (theme-settings-ui R-2/R-5/R-7), mirroring
@@ -759,22 +768,75 @@ fn theme_picker_overlay_text(
         sgr_reset(&mut out);
     }
 
-    cup(&mut out, LIST_TOP_ROW - 2, SAMPLE_COL);
+    cup(&mut out, SAMPLE_LABEL_ROW, SAMPLE_COL);
     sgr_fg(&mut out, muted);
     out.push_str("Sample");
     sgr_reset(&mut out);
 
-    cup(&mut out, LIST_TOP_ROW - 1, LIST_COL);
+    let total = state.filtered_len();
+    let highlighted = state.highlighted_index();
+
+    // R-26: filter text (left) + live match count (right, within
+    // `LIST_WIDTH` — the same column budget the list itself uses).
+    let count_label = match_count_label(highlighted, total);
+    let filter_budget = (LIST_WIDTH as usize).saturating_sub(count_label.chars().count() + 2);
+    let filter_text: String = format!("/{}", state.filter())
+        .chars()
+        .take(filter_budget)
+        .collect();
+    cup(&mut out, FILTER_ROW, LIST_COL);
     sgr_fg(&mut out, muted);
-    let _ = write!(out, "/{}", state.filter());
+    out.push_str(&filter_text);
+    sgr_reset(&mut out);
+    let count_col = LIST_COL + LIST_WIDTH.saturating_sub(count_label.chars().count() as u16);
+    cup(&mut out, FILTER_ROW, count_col);
+    sgr_fg(&mut out, muted);
+    out.push_str(&count_label);
+    sgr_reset(&mut out);
+
+    // R-29/R-30 (ux.md §5): the attribute segments + their local `⌃D cycle`
+    // hint on the left; the favorites chip right-aligned to the card's full
+    // width (not `LIST_WIDTH` — the two chips together don't fit in the
+    // list column's 28 columns, so this row spans the whole card, the same
+    // way the row-0 save badge already does).
+    let mut chip_col = LIST_COL;
+    for segment in attribute_chip_segments(state.attribute_filter()) {
+        cup(&mut out, CHIP_ROW, chip_col);
+        if segment.active {
+            sgr_fg(&mut out, accent);
+            let text = format!("[{}]", segment.label);
+            out.push_str(&text);
+            chip_col += text.chars().count() as u16 + 1;
+        } else {
+            sgr_fg(&mut out, muted);
+            out.push_str(segment.label);
+            chip_col += segment.label.chars().count() as u16 + 1;
+        }
+        sgr_reset(&mut out);
+    }
+    cup(&mut out, CHIP_ROW, chip_col);
+    sgr_fg(&mut out, muted);
+    out.push_str(ATTRIBUTE_CHIP_HINT);
+    sgr_reset(&mut out);
+
+    let favorites_label = favorites_chip_label(state.favorites_only());
+    let favorites_col = cols.saturating_sub(favorites_label.chars().count() as u16 + 1);
+    cup(&mut out, CHIP_ROW, favorites_col);
+    sgr_fg(
+        &mut out,
+        if state.favorites_only() {
+            accent
+        } else {
+            muted
+        },
+    );
+    out.push_str(favorites_label);
     sgr_reset(&mut out);
 
     // The whole card (minus the footer hint line) is available to the
     // list now that there's no settings section to share it with.
     let hint_row = rows.saturating_sub(1);
     let list_rows = LIST_ROWS.min(hint_row.saturating_sub(LIST_TOP_ROW)).max(1);
-    let total = state.filtered_len();
-    let highlighted = state.highlighted_index();
     let offset = highlighted
         .saturating_sub(list_rows as usize / 2)
         .min(total.saturating_sub(list_rows as usize));
@@ -791,12 +853,23 @@ fn theme_picker_overlay_text(
             out.push(' ');
         }
         out.push(' ');
-        let truncated: String = name
-            .chars()
-            .take(LIST_WIDTH.saturating_sub(2) as usize)
-            .collect();
+        // R-29 (§4): a star only on favorited rows, right end of the row —
+        // the name budget shrinks by 2 to leave it room, never overlapping
+        // the fuzzy-highlighted name text at the row's left.
+        let is_favorite = state.is_favorite(name);
+        let name_budget = (LIST_WIDTH as usize)
+            .saturating_sub(2)
+            .saturating_sub(if is_favorite { 2 } else { 0 });
+        let truncated: String = name.chars().take(name_budget).collect();
         out.push_str(&truncated);
         sgr_reset(&mut out);
+        if is_favorite {
+            let star_col = LIST_COL + LIST_WIDTH - 1;
+            cup(&mut out, LIST_TOP_ROW + i, star_col);
+            sgr_fg(&mut out, accent);
+            out.push('\u{2605}');
+            sgr_reset(&mut out);
+        }
     }
 
     if let Some(theme_def) = state.highlighted_theme_name().and_then(noa_theme::resolve) {
@@ -850,23 +923,49 @@ fn theme_picker_overlay_text(
                 }
             }
         }
+
+        // R-33: representative sample text lines, below the truecolor ramp
+        // (ux.md §7's "color chip → text-in-context" ordering).
+        let sample_row_start = LIST_TOP_ROW + 4;
+        for (i, line) in sample_lines(theme_def).into_iter().enumerate() {
+            let row = sample_row_start + i as u16;
+            if row >= swatch_row_limit {
+                break;
+            }
+            cup(&mut out, row, SAMPLE_COL);
+            sgr_bg(&mut out, line.bg);
+            for span in &line.spans {
+                sgr_fg(&mut out, span.fg);
+                out.push_str(span.text);
+            }
+            sgr_reset(&mut out);
+        }
+
+        // R-27: contrast ratio, below the sample lines (ux.md §3's
+        // "abstract → concrete → summary number" ordering ends here).
+        let contrast_row = sample_row_start + 3;
+        if contrast_row < swatch_row_limit {
+            let (label, warn) = contrast_label(theme_def.default_fg, theme_def.default_bg);
+            cup(&mut out, contrast_row, SAMPLE_COL);
+            sgr_fg(&mut out, if warn { danger } else { muted });
+            out.push_str(&label);
+            sgr_reset(&mut out);
+        }
     }
 
     cup(&mut out, hint_row, LIST_COL);
     // A commit error (AC-23) takes over the hint line until the user
     // either retries (Enter) or backs out (Esc) — the overlay stays open
-    // specifically so this is visible.
-    if let Some(error) = state.commit_error() {
-        sgr_fg(&mut out, danger);
-        let truncated: String = error
-            .chars()
-            .take(cols.saturating_sub(LIST_COL) as usize)
-            .collect();
-        out.push_str(&truncated);
-    } else {
-        sgr_fg(&mut out, muted);
-        out.push_str("\u{2191}\u{2193} navigate   Esc cancel   Enter save");
-    }
+    // specifically so this is visible. `footer_text` is the single shared
+    // formatter both draw paths call (保全制約5/§0-2's grounding
+    // correction).
+    let (footer, is_error) = footer_text(state.mode(), state.commit_error());
+    sgr_fg(&mut out, if is_error { danger } else { muted });
+    let truncated: String = footer
+        .chars()
+        .take(cols.saturating_sub(LIST_COL) as usize)
+        .collect();
+    out.push_str(&truncated);
     sgr_reset(&mut out);
 
     out
@@ -929,19 +1028,17 @@ fn settings_rows_overlay_text(
     }
 
     cup(&mut out, hint_row, LIST_COL);
-    if let Some(error) = state.commit_error() {
-        sgr_fg(&mut out, danger);
-        let truncated: String = error
-            .chars()
-            .take(cols.saturating_sub(LIST_COL) as usize)
-            .collect();
-        out.push_str(&truncated);
-    } else {
-        sgr_fg(&mut out, muted);
-        out.push_str(
-            "\u{2191}\u{2193} navigate   \u{2190}\u{2192} adjust   Esc cancel   Enter save",
-        );
-    }
+    // `footer_text` is the single shared formatter both draw paths call
+    // (保全制約5/§0-2's grounding correction — the native path used to be
+    // mode-blind here while wgpu was already correct; both now go through
+    // one function).
+    let (footer, is_error) = footer_text(state.mode(), state.commit_error());
+    sgr_fg(&mut out, if is_error { danger } else { muted });
+    let truncated: String = footer
+        .chars()
+        .take(cols.saturating_sub(LIST_COL) as usize)
+        .collect();
+    out.push_str(&truncated);
     sgr_reset(&mut out);
 
     out

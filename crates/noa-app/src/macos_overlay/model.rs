@@ -170,6 +170,17 @@ pub(crate) enum Tone {
     Danger,
 }
 
+/// R-33: one representative sample text row, colors resolved to `u8` RGB
+/// triples like `ansi_swatches`/`semantic_swatches` already are (the
+/// established "native model stores plain RGB, not `noa_core::Rgb`"
+/// convention in this struct).
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct SampleLineModel {
+    /// (text, fg) runs, all on `bg`.
+    pub(crate) spans: Vec<(String, (u8, u8, u8))>,
+    pub(crate) bg: (u8, u8, u8),
+}
+
 /// A plain-data description of the theme-settings card, mirroring
 /// `theme_settings_overlay_text` (the wgpu path) so the two renderings show
 /// the same content. Structured instead of ANSI so the native layer can lay
@@ -184,13 +195,28 @@ pub(crate) struct ThemeSettingsViewModel {
     pub(crate) badge: Option<&'static str>,
     pub(crate) theme_section_focused: bool,
     pub(crate) filter: String,
-    /// Windowed theme list: (name, highlighted).
-    pub(crate) themes: Vec<(String, bool)>,
+    /// R-26: `"{n} / {m}"` / `"No matches"` — [`crate::theme_settings::match_count_label`].
+    pub(crate) match_count: String,
+    /// R-30: the All/Dark/Light chip row, one segment `active`.
+    pub(crate) attribute_segments: [crate::theme_settings::AttributeChipSegment; 3],
+    /// R-30: the attribute chip's local `⌃D cycle` hint text.
+    pub(crate) attribute_hint: &'static str,
+    /// R-29: the favorites chip's full label (already carries its `⌃⇧F`
+    /// local hint — [`crate::theme_settings::favorites_chip_label`]).
+    pub(crate) favorites_chip: &'static str,
+    pub(crate) favorites_only: bool,
+    /// Windowed theme list: (name, highlighted, favorited).
+    pub(crate) themes: Vec<(String, bool, bool)>,
     /// ANSI 16 sample swatches (rgb), in palette order.
     pub(crate) ansi_swatches: Vec<(u8, u8, u8)>,
     /// Semantic swatches (fg/bg/cursor/selection), in order.
     pub(crate) semantic_swatches: Vec<(u8, u8, u8)>,
     pub(crate) show_truecolor_ramp: bool,
+    /// R-33: 3 representative sample text rows.
+    pub(crate) sample_lines: Vec<SampleLineModel>,
+    /// R-27: `("Contrast 4.8:1", false)` or the low-contrast warning form —
+    /// [`crate::theme_settings::contrast_label`].
+    pub(crate) contrast: Option<(String, bool)>,
     pub(crate) settings_focused: bool,
     /// Settings rows: (label, value, restart_note, selected).
     pub(crate) rows: Vec<(String, String, bool, bool)>,
@@ -205,7 +231,9 @@ pub(crate) fn theme_settings_view_model(
     state: &crate::theme_settings::ThemeSettings,
 ) -> ThemeSettingsViewModel {
     use crate::theme_settings::{
-        Section, SettingsRowKind, Swatch, sample_swatches, settings_row_display_value,
+        ATTRIBUTE_CHIP_HINT, Section, SettingsRowKind, Swatch, attribute_chip_segments,
+        contrast_label, favorites_chip_label, footer_text, sample_lines, sample_swatches,
+        settings_row_display_value,
     };
 
     let total = state.filtered_len();
@@ -213,15 +241,21 @@ pub(crate) fn theme_settings_view_model(
     let (offset, shown) = overlay_scroll_window(total, highlighted, THEME_LIST_ROWS);
     let themes = (offset..offset + shown)
         .filter_map(|idx| {
-            state
-                .filtered_entry(idx)
-                .map(|(name, _)| (name.to_string(), idx == highlighted))
+            state.filtered_entry(idx).map(|(name, _)| {
+                (
+                    name.to_string(),
+                    idx == highlighted,
+                    state.is_favorite(name),
+                )
+            })
         })
         .collect();
 
     let mut ansi_swatches = Vec::new();
     let mut semantic_swatches = Vec::new();
     let mut show_truecolor_ramp = false;
+    let mut sample_line_models = Vec::new();
+    let mut contrast = None;
     if let Some(theme_def) = state.highlighted_theme_name().and_then(noa_theme::resolve) {
         for swatch in sample_swatches(theme_def) {
             match swatch {
@@ -235,6 +269,18 @@ pub(crate) fn theme_settings_view_model(
                 Swatch::Truecolor(_) => show_truecolor_ramp = true,
             }
         }
+        sample_line_models = sample_lines(theme_def)
+            .into_iter()
+            .map(|line| SampleLineModel {
+                spans: line
+                    .spans
+                    .into_iter()
+                    .map(|span| (span.text.to_string(), (span.fg.r, span.fg.g, span.fg.b)))
+                    .collect(),
+                bg: (line.bg.r, line.bg.g, line.bg.b),
+            })
+            .collect();
+        contrast = Some(contrast_label(theme_def.default_fg, theme_def.default_bg));
     }
 
     let rows = SettingsRowKind::ALL
@@ -252,14 +298,15 @@ pub(crate) fn theme_settings_view_model(
         })
         .collect();
 
-    let footer = match state.commit_error() {
-        Some(error) => (error.to_string(), Tone::Danger),
-        None => (
-            "\u{2191}\u{2193} navigate   \u{2190}\u{2192} adjust   Esc cancel   Enter save"
-                .to_string(),
-            Tone::Muted,
-        ),
-    };
+    let (footer_line, footer_is_error) = footer_text(state.mode(), state.commit_error());
+    let footer = (
+        footer_line,
+        if footer_is_error {
+            Tone::Danger
+        } else {
+            Tone::Muted
+        },
+    );
 
     ThemeSettingsViewModel {
         mode: state.mode(),
@@ -268,10 +315,17 @@ pub(crate) fn theme_settings_view_model(
             .then_some("Chrome/tabs update on Save"),
         theme_section_focused: state.section() == Section::ThemePicker,
         filter: state.filter().to_string(),
+        match_count: crate::theme_settings::match_count_label(highlighted, total),
+        attribute_segments: attribute_chip_segments(state.attribute_filter()),
+        attribute_hint: ATTRIBUTE_CHIP_HINT,
+        favorites_chip: favorites_chip_label(state.favorites_only()),
+        favorites_only: state.favorites_only(),
         themes,
         ansi_swatches,
         semantic_swatches,
         show_truecolor_ramp,
+        sample_lines: sample_line_models,
+        contrast,
         settings_focused: state.section() == Section::SettingsRows,
         rows,
         footer,

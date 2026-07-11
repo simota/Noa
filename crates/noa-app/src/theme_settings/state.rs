@@ -126,6 +126,12 @@ pub(crate) struct ThemeSettings {
     /// Text-entry buffer for `background-image`. `None` means the first typed
     /// printable character replaces the current path; after that, text appends.
     background_image_text: Option<String>,
+    /// R-28: fuzzy-search query buffer for the focused `FontFamily` row —
+    /// each edit resolves [`Self::filter_font_families`] and, on a match,
+    /// sets the row's draft to the best result (touched). `None` between
+    /// edits, reset on navigation like `font_size_digits`/
+    /// `background_image_text`.
+    font_family_query: Option<String>,
     /// R-11 gate: set once at open from the opacity at that moment. A
     /// window can't transition opaque<->transparent at runtime, so this
     /// never changes for the life of one overlay session.
@@ -296,6 +302,7 @@ impl ThemeSettings {
             font_size_debounce: Debouncer::new(FONT_SIZE_DEBOUNCE_WINDOW),
             font_size_digits: None,
             background_image_text: None,
+            font_family_query: None,
             opaque_at_startup,
             available_font_families: Arc::new(init.available_font_families),
             commit_error: None,
@@ -541,6 +548,7 @@ impl ThemeSettings {
             Section::SettingsRows => match SettingsRowKind::ALL[self.selected_row] {
                 SettingsRowKind::FontSize => self.push_font_size_digits(text, now),
                 SettingsRowKind::BackgroundImage => self.push_background_image_text(text),
+                SettingsRowKind::FontFamily => self.push_font_family_query(text),
                 _ => {}
             },
         }
@@ -579,6 +587,13 @@ impl ThemeSettings {
                     };
                     self.set_background_image_text(next);
                 }
+                SettingsRowKind::FontFamily => {
+                    if let Some(query) = &mut self.font_family_query {
+                        query.pop();
+                        let query = query.clone();
+                        self.apply_font_family_query(&query);
+                    }
+                }
                 _ => {}
             },
         }
@@ -587,6 +602,7 @@ impl ThemeSettings {
     fn clear_row_input_state(&mut self) {
         self.font_size_digits = None;
         self.background_image_text = None;
+        self.font_family_query = None;
     }
 
     fn push_font_size_digits(&mut self, text: &str, now: Instant) {
@@ -615,6 +631,38 @@ impl ThemeSettings {
             text.clone()
         };
         self.set_background_image_text(next);
+    }
+
+    fn push_font_family_query(&mut self, text: &str) {
+        let filtered: String = text.chars().filter(|c| !c.is_control()).collect();
+        if filtered.is_empty() {
+            return;
+        }
+        let query = {
+            let query = self.font_family_query.get_or_insert_with(String::new);
+            query.push_str(&filtered);
+            query.clone()
+        };
+        self.apply_font_family_query(&query);
+    }
+
+    /// R-28: resolve `query` via [`Self::filter_font_families`] and, on a
+    /// match, set the focused `FontFamily` row's draft to the best result
+    /// (touched) — an empty result set leaves the draft as it was (the last
+    /// good match, or the value the row opened with).
+    fn apply_font_family_query(&mut self, query: &str) {
+        let idx = self.selected_row;
+        if SettingsRowKind::ALL[idx] != SettingsRowKind::FontFamily {
+            return;
+        }
+        let Some(best) = self.filter_font_families(query).into_iter().next() else {
+            return;
+        };
+        if !matches!(&self.rows[idx].draft, RowDraft::FontFamily(current) if current == &best.name)
+        {
+            self.rows[idx].draft = RowDraft::FontFamily(best.name);
+            self.rows[idx].touched = true;
+        }
     }
 
     fn set_background_image_text(&mut self, value: String) {

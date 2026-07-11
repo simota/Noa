@@ -497,6 +497,58 @@ unsafe fn make_match_label(
     }
 }
 
+/// A label built from multiple differently-colored text runs concatenated
+/// together (R-33's sample line 2: `error`/`warning`/`info`/`ok` each in
+/// their own ANSI color) — the same `NSMutableAttributedString` per-range
+/// coloring [`make_match_label`] uses for fuzzy-highlight runs, generalized
+/// to caller-supplied spans instead of a fixed base/accent pair.
+unsafe fn make_spans_label(
+    spans: &[(&str, *mut AnyObject)],
+    font: *mut AnyObject,
+    frame: NSRect,
+) -> *mut AnyObject {
+    unsafe {
+        let text: String = spans.iter().map(|(t, _)| *t).collect();
+        let label = make_label(&text, font, std::ptr::null_mut(), frame);
+        if label.is_null() {
+            return label;
+        }
+        let Some(attr_class) = AnyClass::get(c"NSMutableAttributedString") else {
+            return label;
+        };
+        let string = NSString::from_str(&text);
+        let alloc: *mut AnyObject = msg_send![attr_class, alloc];
+        let attr: *mut AnyObject = msg_send![alloc, initWithString: &*string];
+        if attr.is_null() {
+            return label;
+        }
+        let font_key = NSString::from_str("NSFont");
+        let color_key = NSString::from_str("NSColor");
+        let full = NSRange {
+            location: 0,
+            length: text.encode_utf16().count(),
+        };
+        if !font.is_null() {
+            let _: () = msg_send![attr, addAttribute: &*font_key, value: font, range: full];
+        }
+        let mut offset = 0usize;
+        for (span_text, color) in spans {
+            let len = span_text.encode_utf16().count();
+            let range = NSRange {
+                location: offset,
+                length: len,
+            };
+            if !color.is_null() {
+                let _: () = msg_send![attr, addAttribute: &*color_key, value: *color, range: range];
+            }
+            offset += len;
+        }
+        let _: () = msg_send![label, setAttributedStringValue: attr];
+        release_owned(attr);
+        label
+    }
+}
+
 /// The full-pane modal root: scrim + identifier, added to the content
 /// view. Returns `(root, pane_h_pt)`; children are laid out in the root's
 /// unflipped coordinates via [`from_top`].
@@ -785,7 +837,15 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
         // count around the selection (min 3 rows) — the same degradation
         // policy the combined card used, so every row stays reachable.
         let pad = 20.0;
-        let list_top = 86.0;
+        // R-29/R-30 (ux.md §5): +20pt over the pre-v2 86.0 for the new
+        // favorites/attribute chip row — native grows the card height for
+        // it (FM-06's native degrade strategy) instead of shrinking the
+        // list, the opposite of the wgpu fixed-grid path's choice (§5 Open
+        // Question, resolved differently per path since one has a dynamic
+        // card height and the other doesn't). Settings mode is unaffected
+        // — it uses its own independent `settings_top`, not this constant.
+        let list_top = 106.0;
+        let chip_row_y = 84.0;
         let row_h = 24.0;
         let srow_h = 23.0;
         let settings_header_h = 20.0;
@@ -908,26 +968,105 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                 );
                 section_label("Sample", false, col_split + 12.0, 46.0, 120.0);
 
-                // Filter line.
+                // Filter line (left) + R-26 live match count (right).
+                let count_w = 70.0;
                 let filter = make_label(
                     &format!("/{}", vm.filter),
                     mono_digit_font(12.0),
                     muted,
                     NSRect::new(
                         NSPoint::new(pad, from_top(card_h, 64.0, 16.0)),
-                        NSSize::new(col_split - pad - 8.0, 16.0),
+                        NSSize::new(col_split - pad - 8.0 - count_w, 16.0),
                     ),
                 );
                 if !filter.is_null() {
                     let _: () = msg_send![effect, addSubview: filter];
                 }
+                let match_count = make_label(
+                    &vm.match_count,
+                    mono_digit_font(12.0),
+                    muted,
+                    NSRect::new(
+                        NSPoint::new(col_split - pad - count_w, from_top(card_h, 64.0, 16.0)),
+                        NSSize::new(count_w, 16.0),
+                    ),
+                );
+                if !match_count.is_null() {
+                    set_alignment(match_count, ALIGN_RIGHT);
+                    let _: () = msg_send![effect, addSubview: match_count];
+                }
+
+                // R-29/R-30 (ux.md §5): attribute segments + local `⌃D
+                // cycle` hint on the left, the favorites chip (its own
+                // local `⌃⇧F` hint already baked into the label, A-1)
+                // right-aligned near the column boundary.
+                let seg_w = 46.0;
+                for (i, segment) in vm.attribute_segments.iter().enumerate() {
+                    let x = pad + i as f64 * seg_w;
+                    if segment.active {
+                        let bg = make_view(NSRect::new(
+                            NSPoint::new(x, from_top(card_h, chip_row_y, 20.0)),
+                            NSSize::new(seg_w - 6.0, 20.0),
+                        ));
+                        if !bg.is_null() {
+                            tint_layer(bg, ns_color(colors.selected_bg, 1.0), 6.0);
+                            let _: () = msg_send![effect, addSubview: bg];
+                            release_owned(bg);
+                        }
+                    }
+                    let label = make_label(
+                        segment.label,
+                        system_font(11.5, WEIGHT_REGULAR),
+                        if segment.active { accent } else { muted },
+                        NSRect::new(
+                            NSPoint::new(x + 6.0, from_top(card_h, chip_row_y + 3.0, 14.0)),
+                            NSSize::new(seg_w - 12.0, 14.0),
+                        ),
+                    );
+                    if !label.is_null() {
+                        let _: () = msg_send![effect, addSubview: label];
+                    }
+                }
+                let attr_hint = make_label(
+                    vm.attribute_hint,
+                    system_font(10.5, WEIGHT_REGULAR),
+                    muted,
+                    NSRect::new(
+                        NSPoint::new(
+                            pad + 3.0 * seg_w + 6.0,
+                            from_top(card_h, chip_row_y + 3.0, 14.0),
+                        ),
+                        NSSize::new(70.0, 14.0),
+                    ),
+                );
+                if !attr_hint.is_null() {
+                    let _: () = msg_send![effect, addSubview: attr_hint];
+                }
+                let favorites_w = 150.0;
+                let favorites = make_label(
+                    vm.favorites_chip,
+                    system_font(11.5, WEIGHT_REGULAR),
+                    if vm.favorites_only { accent } else { muted },
+                    NSRect::new(
+                        NSPoint::new(
+                            col_split - pad - favorites_w,
+                            from_top(card_h, chip_row_y + 3.0, 14.0),
+                        ),
+                        NSSize::new(favorites_w, 14.0),
+                    ),
+                );
+                if !favorites.is_null() {
+                    set_alignment(favorites, ALIGN_RIGHT);
+                    let _: () = msg_send![effect, addSubview: favorites];
+                }
 
                 // Theme list rows, re-windowed around the highlight when the
                 // short-card policy shrank the list below the VM's window.
-                let theme_highlight = vm.themes.iter().position(|(_, h)| *h).unwrap_or(0);
+                let theme_highlight = vm.themes.iter().position(|(_, h, _)| *h).unwrap_or(0);
                 let (theme_off, theme_shown) =
                     overlay_scroll_window(vm.themes.len(), theme_highlight, list_rows);
-                for (i, (name, highlighted)) in vm.themes[theme_off..theme_off + theme_shown]
+                for (i, (name, highlighted, favorite)) in vm.themes
+                    [theme_off..theme_off + theme_shown]
                     .iter()
                     .enumerate()
                 {
@@ -943,6 +1082,11 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                             release_owned(bg);
                         }
                     }
+                    // R-29 (§4): a star only on favorited rows, at the row's
+                    // right end — the name label's width shrinks to leave
+                    // room, never overlapping the fuzzy-highlighted text at
+                    // its left.
+                    let star_w = if *favorite { 16.0 } else { 0.0 };
                     let label = make_label(
                         name,
                         system_font(
@@ -960,11 +1104,28 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                         },
                         NSRect::new(
                             NSPoint::new(pad, from_top(card_h, y_top + 4.0, 17.0)),
-                            NSSize::new(col_split - pad - 12.0, 17.0),
+                            NSSize::new(col_split - pad - 12.0 - star_w, 17.0),
                         ),
                     );
                     if !label.is_null() {
                         let _: () = msg_send![effect, addSubview: label];
+                    }
+                    if *favorite {
+                        let star = make_label(
+                            "\u{2605}",
+                            system_font(12.0, WEIGHT_REGULAR),
+                            accent,
+                            NSRect::new(
+                                NSPoint::new(
+                                    col_split - pad - star_w,
+                                    from_top(card_h, y_top + 4.0, 17.0),
+                                ),
+                                NSSize::new(star_w, 17.0),
+                            ),
+                        );
+                        if !star.is_null() {
+                            let _: () = msg_send![effect, addSubview: star];
+                        }
                     }
                 }
 
@@ -1016,6 +1177,7 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                         release_owned(square);
                     }
                 }
+                let mut ramp_bottom = semantic_top + sw;
                 if vm.show_truecolor_ramp && semantic_top + sw + gap + 4.0 + 10.0 <= swatch_limit {
                     let ramp_top = semantic_top + sw + gap + 4.0;
                     let ramp_w = 8.0 * (sw + gap) - gap;
@@ -1042,6 +1204,82 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                             let _: () = msg_send![effect, addSubview: square];
                             release_owned(square);
                         }
+                    }
+                    ramp_bottom = ramp_top + 10.0;
+                }
+
+                // R-33: representative sample text lines, below the
+                // truecolor ramp (ux.md §7's "color chip → text-in-context"
+                // ordering); R-27's contrast readout goes last (ux.md §3's
+                // "abstract → concrete → summary number" ordering).
+                let sample_line_h = 15.0;
+                let mut y = ramp_bottom + 8.0;
+                for line in &vm.sample_lines {
+                    if y + sample_line_h > swatch_limit {
+                        break;
+                    }
+                    let bg = make_view(NSRect::new(
+                        NSPoint::new(sample_x, from_top(card_h, y, sample_line_h)),
+                        NSSize::new(8.0 * (sw + gap) - gap, sample_line_h),
+                    ));
+                    if !bg.is_null() {
+                        let (br, bgc, bb) = line.bg;
+                        tint_layer(
+                            bg,
+                            ns_color(
+                                [
+                                    br as f32 / 255.0,
+                                    bgc as f32 / 255.0,
+                                    bb as f32 / 255.0,
+                                    1.0,
+                                ],
+                                1.0,
+                            ),
+                            3.0,
+                        );
+                        let _: () = msg_send![effect, addSubview: bg];
+                        release_owned(bg);
+                    }
+                    let spans: Vec<(&str, *mut AnyObject)> = line
+                        .spans
+                        .iter()
+                        .map(|(text, (r, g, b))| {
+                            (
+                                text.as_str(),
+                                ns_color(
+                                    [*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0],
+                                    1.0,
+                                ),
+                            )
+                        })
+                        .collect();
+                    let label = make_spans_label(
+                        &spans,
+                        system_font(11.0, WEIGHT_REGULAR),
+                        NSRect::new(
+                            NSPoint::new(sample_x + 4.0, from_top(card_h, y + 1.0, 13.0)),
+                            NSSize::new(8.0 * (sw + gap) - gap - 8.0, 13.0),
+                        ),
+                    );
+                    if !label.is_null() {
+                        let _: () = msg_send![effect, addSubview: label];
+                    }
+                    y += sample_line_h + 3.0;
+                }
+                if let Some((contrast_text, warn)) = &vm.contrast
+                    && y + sample_line_h <= swatch_limit
+                {
+                    let contrast_label_view = make_label(
+                        contrast_text,
+                        system_font(11.0, WEIGHT_REGULAR),
+                        if *warn { danger } else { muted },
+                        NSRect::new(
+                            NSPoint::new(sample_x, from_top(card_h, y + 1.0, 13.0)),
+                            NSSize::new(8.0 * (sw + gap) - gap, 13.0),
+                        ),
+                    );
+                    if !contrast_label_view.is_null() {
+                        let _: () = msg_send![effect, addSubview: contrast_label_view];
                     }
                 }
             }

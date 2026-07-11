@@ -1602,6 +1602,41 @@ fn filter_font_families_matches_command_palette_fuzzy_match_scoring() {
     }
 }
 
+// R-28: typing into the focused `FontFamily` row live-selects the best
+// fuzzy match, and Backspace re-resolves from the shortened query.
+#[test]
+fn font_family_row_typing_live_selects_the_best_fuzzy_match() {
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        available_font_families: vec![
+            "Menlo".to_string(),
+            "Monaco".to_string(),
+            "SF Mono".to_string(),
+        ],
+        ..settings_init()
+    });
+    move_to_row(&mut settings, SettingsRowKind::FontFamily);
+
+    settings.push_text("mono", Instant::now());
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::FontFamily)].draft,
+        RowDraft::FontFamily("Monaco".to_string())
+    );
+    assert!(settings.rows()[row_index(SettingsRowKind::FontFamily)].touched);
+
+    settings.push_text("c", Instant::now()); // "monoc" no longer matches "Monaco"
+    // no match for "monoc" in this fixture set — draft holds its last value
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::FontFamily)].draft,
+        RowDraft::FontFamily("Monaco".to_string())
+    );
+
+    settings.backspace(Instant::now()); // back to "mono"
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::FontFamily)].draft,
+        RowDraft::FontFamily("Monaco".to_string())
+    );
+}
+
 // AC-40 (R-29): favorites-only shows the intersection of the favorites set
 // and the fuzzy query, and `commit_updates()` never carries a
 // favorites-related key.

@@ -141,7 +141,7 @@ pub(crate) fn favorites_chip_label(favorites_only: bool) -> &'static str {
 pub(crate) const ATTRIBUTE_CHIP_HINT: &str = "\u{2303}D cycle";
 
 /// One segment of the All/Dark/Light attribute chip row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct AttributeChipSegment {
     pub(crate) label: &'static str,
     pub(crate) active: bool,

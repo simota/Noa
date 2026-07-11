@@ -413,9 +413,9 @@ mod palette_enter_decision_tests {
 
     #[test]
     fn selected_command_closes_palette_and_dispatches_it() {
-        let decision = palette_enter_decision(Some(AppCommand::OpenThemeSettings));
+        let decision = palette_enter_decision(Some(AppCommand::OpenThemePicker));
         assert!(decision.close_palette);
-        assert_eq!(decision.dispatch, Some(AppCommand::OpenThemeSettings));
+        assert_eq!(decision.dispatch, Some(AppCommand::OpenThemePicker));
     }
 
     #[test]
@@ -445,7 +445,7 @@ mod palette_enter_decision_tests {
     // ever creeps back in.
     #[test]
     fn palette_close_unblocks_dispatched_theme_settings_open() {
-        let decision = palette_enter_decision(Some(AppCommand::OpenThemeSettings));
+        let decision = palette_enter_decision(Some(AppCommand::OpenThemePicker));
         assert!(decision.close_palette);
         let palette_open_after_enter = !decision.close_palette;
         assert_eq!(

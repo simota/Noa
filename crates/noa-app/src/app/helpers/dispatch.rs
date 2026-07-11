@@ -265,7 +265,8 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::NewTab
         | AppCommand::NewWindow
         | AppCommand::ToggleCommandPalette
-        | AppCommand::OpenThemeSettings
+        | AppCommand::OpenThemePicker
+        | AppCommand::OpenSettings
         | AppCommand::ToggleFullscreen
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleSecureKeyboardEntry
@@ -323,7 +324,8 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         // The palette does not open while the overview is focused (v1, R-10):
         // Overview scope makes `ToggleCommandPalette` a no-op there (AC-15).
         AppCommand::ToggleCommandPalette
-        | AppCommand::OpenThemeSettings
+        | AppCommand::OpenThemePicker
+        | AppCommand::OpenSettings
         | AppCommand::Copy
         | AppCommand::Paste
         | AppCommand::SendSelectionToPane

@@ -488,7 +488,8 @@ fn action_names_map_to_commands() {
         AppCommand::PrevTab,
         AppCommand::CloseWindow,
         AppCommand::Quit,
-        AppCommand::OpenThemeSettings,
+        AppCommand::OpenThemePicker,
+        AppCommand::OpenSettings,
         AppCommand::ReloadConfig,
     ] {
         assert_eq!(
@@ -503,6 +504,13 @@ fn action_names_map_to_commands() {
     assert_eq!(
         AppCommand::from_action_name("tab-overview.toggle"),
         Some(AppCommand::ToggleTabOverview)
+    );
+    // DEC-1: the pre-split combined overlay's id keeps parsing, aliased to
+    // the theme-picker half (the old overlay opened focused on the picker).
+    assert_eq!(AppCommand::OpenThemePicker.action_name(), "theme.open");
+    assert_eq!(
+        AppCommand::from_action_name("theme-settings.open"),
+        Some(AppCommand::OpenThemePicker)
     );
     assert_eq!(AppCommand::from_action_name("nope"), None);
 }

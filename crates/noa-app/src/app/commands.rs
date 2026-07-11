@@ -1,6 +1,7 @@
 //! App command dispatch and app-scoped toggles.
 
 use super::*;
+use crate::theme_settings::ThemeSettingsMode;
 
 impl App {
     pub(in crate::app) fn command_is_enabled(
@@ -141,7 +142,8 @@ impl App {
             AppCommand::Search(action) => self.handle_search_action(action),
             AppCommand::ScrollViewport(scroll) => self.scroll_viewport(scroll),
             AppCommand::ToggleCommandPalette => self.toggle_command_palette(),
-            AppCommand::OpenThemeSettings => self.open_theme_settings(),
+            AppCommand::OpenThemePicker => self.open_theme_settings(ThemeSettingsMode::Theme),
+            AppCommand::OpenSettings => self.open_theme_settings(ThemeSettingsMode::Settings),
             AppCommand::ToggleFullscreen => self.toggle_fullscreen(),
             AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             AppCommand::ToggleSecureKeyboardEntry => self.toggle_secure_keyboard_entry(),

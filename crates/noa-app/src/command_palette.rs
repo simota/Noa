@@ -96,8 +96,10 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         // Deviation: the locked spec's literal label is Japanese
         // ("テーマ・設定を開く"), but every existing palette title is English
         // (this whole `match`) — following that established convention
-        // instead of the spec's literal text.
-        AppCommand::OpenThemeSettings => "Open Theme & Settings\u{2026}",
+        // instead of the spec's literal text. The combined overlay was
+        // later split into two separately-openable overlays.
+        AppCommand::OpenThemePicker => "Open Theme\u{2026}",
+        AppCommand::OpenSettings => "Open Settings\u{2026}",
     }
 }
 
@@ -112,7 +114,8 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
     const ENTRIES: &[AppCommand] = &[
         AppCommand::About,
         AppCommand::Preferences,
-        AppCommand::OpenThemeSettings,
+        AppCommand::OpenThemePicker,
+        AppCommand::OpenSettings,
         AppCommand::ReloadConfig,
         AppCommand::Copy,
         AppCommand::Paste,
@@ -309,7 +312,8 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
     match command {
         AppCommand::About
         | AppCommand::Preferences
-        | AppCommand::OpenThemeSettings
+        | AppCommand::OpenThemePicker
+        | AppCommand::OpenSettings
         | AppCommand::ReloadConfig
         | AppCommand::Quit => CommandCategory::Application,
         AppCommand::Copy
@@ -583,7 +587,8 @@ mod tests {
         let mut commands = vec![
             AppCommand::About,
             AppCommand::Preferences,
-            AppCommand::OpenThemeSettings,
+            AppCommand::OpenThemePicker,
+            AppCommand::OpenSettings,
             AppCommand::ReloadConfig,
             AppCommand::Copy,
             AppCommand::Paste,

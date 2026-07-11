@@ -46,11 +46,15 @@ pub enum AppCommand {
     ToggleSecureKeyboardEntry,
     ToggleSidebar,
     ToggleAutoApprove,
-    /// Open the theme-settings overlay (theme-settings-ui R-1). Reachable
+    /// Open the "Theme" picker half of the split theme-settings overlay
+    /// (theme-settings-ui R-1, later split into two overlays). Reachable
     /// only from the command palette — deliberately unbound in
     /// [`KeybindEngine::default`], so it carries no menu id either (mirrors
     /// `SelectTab`'s `menu_id() -> ""`).
-    OpenThemeSettings,
+    OpenThemePicker,
+    /// Open the "Settings" rows half of the split theme-settings overlay.
+    /// Same reachability as [`Self::OpenThemePicker`].
+    OpenSettings,
 }
 
 /// Terminal-state commands handled by noa instead of sending escape bytes.
@@ -209,7 +213,8 @@ impl AppCommand {
             AppCommand::ToggleFullscreen => Self::TOGGLE_FULLSCREEN_MENU_ID,
             AppCommand::CloseTab => Self::CLOSE_TAB_MENU_ID,
             AppCommand::SelectTab(_) => "",
-            AppCommand::OpenThemeSettings => "",
+            AppCommand::OpenThemePicker => "",
+            AppCommand::OpenSettings => "",
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
             AppCommand::SetTabTitle => Self::SET_TAB_TITLE_MENU_ID,
@@ -373,7 +378,8 @@ impl AppCommand {
             Self::ToggleSecureKeyboardEntry => "secure-keyboard-entry.toggle",
             Self::ToggleSidebar => "sidebar.toggle",
             Self::ToggleAutoApprove => "auto-approve.toggle",
-            Self::OpenThemeSettings => "theme-settings.open",
+            Self::OpenThemePicker => "theme.open",
+            Self::OpenSettings => "settings.open",
         }
     }
 
@@ -443,7 +449,8 @@ impl AppCommand {
             "secure-keyboard-entry.toggle" => Some(Self::ToggleSecureKeyboardEntry),
             "sidebar.toggle" => Some(Self::ToggleSidebar),
             "auto-approve.toggle" => Some(Self::ToggleAutoApprove),
-            "theme-settings.open" => Some(Self::OpenThemeSettings),
+            "theme.open" | "theme-settings.open" => Some(Self::OpenThemePicker),
+            "settings.open" => Some(Self::OpenSettings),
             _ => None,
         }
     }

@@ -5,6 +5,7 @@ use super::super::*;
 use super::ActiveOverlay;
 use crate::theme_settings::{
     RowDraft, RowEffect, SettingsRow, SettingsRowKind, ThemeSettings, ThemeSettingsInit,
+    ThemeSettingsMode,
 };
 
 fn cursor_shape_of(style: CursorStyle) -> noa_config::CursorShape {
@@ -21,7 +22,14 @@ fn cursor_shape_of(style: CursorStyle) -> noa_config::CursorShape {
 }
 
 impl App {
-    pub(in crate::app) fn open_theme_settings(&mut self) {
+    /// Open the split theme-settings overlay in `mode` — the "Theme" picker
+    /// (`AppCommand::OpenThemePicker`) or the "Settings" rows
+    /// (`AppCommand::OpenSettings`). Both commands share this one guard +
+    /// seed sequence; only the resulting session's fixed [`Section`][sec]
+    /// differs.
+    ///
+    /// [sec]: crate::theme_settings::Section
+    pub(in crate::app) fn open_theme_settings(&mut self, mode: ThemeSettingsMode) {
         let Some(window_id) = self.focused else {
             return;
         };
@@ -58,6 +66,7 @@ impl App {
             .unwrap_or_default();
         let available_font_families = noa_font::list_families().unwrap_or_default();
         let init = ThemeSettingsInit {
+            mode,
             current_theme,
             font_size: self.runtime_font_size,
             cursor_style,
@@ -90,8 +99,10 @@ impl App {
     /// [`Self::handle_command_palette_key`]): Escape cancels (reverts every
     /// live-previewed value and closes, see [`Self::close_theme_settings`]),
     /// Enter commits (persists the touched rows and closes, see
-    /// [`Self::commit_theme_settings`]), Tab toggles section, ↑↓ navigate,
-    /// ←→ adjusts the focused settings row, Backspace/printable text edit
+    /// [`Self::commit_theme_settings`]), Tab is a no-op (each session's
+    /// section is now fixed by the mode it opened in, see
+    /// [`crate::theme_settings::ThemeSettingsMode`]), ↑↓ navigate, ←→
+    /// adjusts the focused settings row, Backspace/printable text edit
     /// the theme filter or a focused numeric row. Every other resolved
     /// keybind is swallowed (R-3 direction 2: no other overlay's shortcut
     /// may leak through while this one owns the keyboard). Only called when
@@ -708,6 +719,7 @@ mod commit_theme_settings_tests {
     #[test]
     fn quick_terminal_size_syncs_from_committed_row_into_app_config() {
         let mut settings = ThemeSettings::open(ThemeSettingsInit {
+            mode: ThemeSettingsMode::Settings,
             current_theme: "3024 Day".to_string(),
             font_size: 14.0,
             cursor_style: noa_config::CursorShape::Block,
@@ -728,7 +740,6 @@ mod commit_theme_settings_tests {
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
         });
-        settings.toggle_section();
         while SettingsRowKind::ALL[settings.selected_row()] != SettingsRowKind::QuickTerminalHeight
         {
             settings.move_down();
@@ -776,6 +787,7 @@ mod commit_theme_settings_tests {
     #[test]
     fn selected_background_image_text_only_returns_when_row_is_selected() {
         let mut settings = ThemeSettings::open(ThemeSettingsInit {
+            mode: ThemeSettingsMode::Settings,
             current_theme: "3024 Day".to_string(),
             font_size: 14.0,
             cursor_style: noa_config::CursorShape::Block,
@@ -799,7 +811,6 @@ mod commit_theme_settings_tests {
 
         assert_eq!(selected_background_image_text(&settings), None);
 
-        settings.toggle_section();
         while SettingsRowKind::ALL[settings.selected_row()] != SettingsRowKind::BackgroundImage {
             settings.move_down();
         }

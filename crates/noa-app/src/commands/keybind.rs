@@ -315,7 +315,11 @@ fn ghostty_action_alias(action: &str) -> Option<AppCommand> {
         "toggle_secure_keyboard_entry" => Some(AppCommand::ToggleSecureKeyboardEntry),
         "toggle_sidebar" => Some(AppCommand::ToggleSidebar),
         "toggle_auto_approve" => Some(AppCommand::ToggleAutoApprove),
-        "open_theme_settings" => Some(AppCommand::OpenThemeSettings),
+        // Legacy: the combined overlay's Ghostty-style action name. Kept as
+        // an alias for `OpenThemePicker` (the theme-picker half) so existing
+        // user keybind configs keep working after the split (DEC-1).
+        "open_theme_settings" | "open_theme" => Some(AppCommand::OpenThemePicker),
+        "open_settings" => Some(AppCommand::OpenSettings),
         _ => action
             .strip_prefix("goto_tab:")
             .and_then(|index| index.parse::<usize>().ok())
@@ -423,6 +427,32 @@ mod tests {
                     "cmd+grave".to_string(),
                     AppCommand::ToggleQuickTerminal.action_name()
                 )]
+            );
+        }
+    }
+
+    // DEC-1: a config keybind still using the pre-split combined overlay's
+    // action name (Ghostty-style `open_theme_settings`, or its dotted
+    // `theme-settings.open` id) keeps binding — to the theme-picker half,
+    // since that's what the old combined overlay opened focused on.
+    #[test]
+    fn legacy_combined_overlay_action_names_alias_to_open_theme_picker() {
+        for action in ["open_theme_settings", "theme-settings.open"] {
+            let (engine, diagnostics) = KeybindEngine::from_config(&[
+                KeybindConfig::Clear,
+                KeybindConfig::Bind {
+                    trigger: "cmd+shift+t".to_string(),
+                    action: action.to_string(),
+                },
+            ]);
+            assert!(diagnostics.is_empty(), "{action}: {diagnostics:?}");
+            assert_eq!(
+                engine.resolve(
+                    &Key::Character("t".into()),
+                    ModifiersState::SUPER | ModifiersState::SHIFT
+                ),
+                Some(AppCommand::OpenThemePicker),
+                "{action} should still bind"
             );
         }
     }

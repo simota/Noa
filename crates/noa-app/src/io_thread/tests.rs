@@ -402,6 +402,109 @@ fn unsynchronized_redraws_are_floored_to_the_min_interval() {
     );
 }
 
+// FIX 1: the redraw floor should track a window's actual monitor refresh
+// rate instead of a hardcoded 120Hz assumption, so 60Hz displays don't earn
+// ~2x more redraw wakes than frames they can show.
+#[test]
+fn redraw_floor_from_refresh_millihertz_derives_the_period_and_clamps() {
+    // 120Hz → ~8.33ms, not the old flat 8ms constant.
+    assert_eq!(
+        redraw_floor_from_refresh_millihertz(Some(120_000)),
+        Duration::from_nanos(1_000_000_000_000 / 120_000)
+    );
+    // 60Hz → ~16.67ms: the case this fix targets.
+    assert_eq!(
+        redraw_floor_from_refresh_millihertz(Some(60_000)),
+        Duration::from_nanos(1_000_000_000_000 / 60_000)
+    );
+    // Unknown or nonsensical (0Hz) rates fall back to the pre-fix constant.
+    assert_eq!(
+        redraw_floor_from_refresh_millihertz(None),
+        REDRAW_MIN_INTERVAL
+    );
+    assert_eq!(
+        redraw_floor_from_refresh_millihertz(Some(0)),
+        REDRAW_MIN_INTERVAL
+    );
+    // Implausibly high/low reported rates clamp instead of producing a floor
+    // that busy-loops or visibly stalls the io thread.
+    assert_eq!(
+        redraw_floor_from_refresh_millihertz(Some(10_000_000)),
+        Duration::from_millis(4)
+    );
+    assert_eq!(
+        redraw_floor_from_refresh_millihertz(Some(1)),
+        Duration::from_millis(33)
+    );
+}
+
+// FIX 2: an N-pane split must not earn N floored redraw wakes per floor
+// window — every pane in a window shares one `RedrawFloor` clock.
+#[test]
+fn redraw_floor_decide_is_shared_across_clones_of_the_same_window() {
+    let floor = RedrawFloor::new(Duration::from_millis(10));
+    let pane_a = floor.clone();
+    let pane_b = floor.clone();
+
+    let t0 = Instant::now();
+    // Pane A's batch is the window's first-ever paint: draws now.
+    assert_eq!(pane_a.decide(false, t0), RedrawDecision::Now);
+    // Pane B, in the same window, asks moments later — inside the floor
+    // window A just recorded, so it must suppress rather than wake again.
+    let t1 = t0 + Duration::from_millis(2);
+    assert_eq!(
+        pane_b.decide(false, t1),
+        RedrawDecision::Suppress {
+            deadline: t0 + Duration::from_millis(10)
+        }
+    );
+}
+
+// A pane's `set_min_interval` (main thread, FIX 1) must be visible to every
+// clone sharing the window (FIX 2's whole point).
+#[test]
+fn redraw_floor_set_min_interval_is_visible_to_every_clone() {
+    let floor = RedrawFloor::new(Duration::from_millis(10));
+    let other_pane = floor.clone();
+    floor.set_min_interval(Duration::from_millis(20));
+
+    let t0 = Instant::now();
+    assert_eq!(other_pane.decide(false, t0), RedrawDecision::Now);
+    let t1 = t0 + Duration::from_millis(15);
+    assert_eq!(
+        other_pane.decide(false, t1),
+        RedrawDecision::Suppress {
+            deadline: t0 + Duration::from_millis(20)
+        },
+        "the widened interval set on one clone must apply to another"
+    );
+}
+
+// Every pane suppressed within the same floor window computes the identical
+// shared deadline; without a winner-take-all guard they'd all fire their
+// owed redraw in the same tick. `claim_deadline` must let exactly one pane
+// through per deadline.
+#[test]
+fn redraw_floor_claim_deadline_lets_only_one_pane_through() {
+    let floor = RedrawFloor::new(Duration::from_millis(10));
+    let pane_a = floor.clone();
+    let pane_b = floor.clone();
+    let pane_c = floor.clone();
+
+    let deadline = Instant::now();
+    assert!(pane_a.claim_deadline(deadline), "first claim wins");
+    assert!(
+        !pane_b.claim_deadline(deadline),
+        "same instant already claimed"
+    );
+    assert!(
+        !pane_c.claim_deadline(deadline),
+        "same instant already claimed"
+    );
+    // A genuinely later redraw can still be claimed afterward.
+    assert!(pane_b.claim_deadline(deadline + Duration::from_millis(1)));
+}
+
 #[test]
 fn feed_terminal_does_not_publish_an_overview_snapshot_while_the_gate_is_off() {
     let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));

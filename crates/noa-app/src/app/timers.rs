@@ -238,11 +238,14 @@ impl App {
         for (window_id, state) in &self.windows {
             let mut changed = false;
             for surface in state.surfaces.values() {
-                let mut term = surface.terminal.lock();
-                if !term.has_kitty_animation() {
+                // Cheap atomic poll before locking: the common case is no
+                // animation anywhere, and this skips the terminal lock
+                // entirely for it instead of taking it just to ask.
+                if !surface.kitty_animation_flag.load(Ordering::Relaxed) {
                     continue;
                 }
                 any_running = true;
+                let mut term = surface.terminal.lock();
                 let tick = term.advance_kitty_animations(now_ms);
                 changed |= tick.changed;
                 if let Some(w) = tick.next_wake {

@@ -7,6 +7,8 @@ mod kitty_graphics;
 mod reports;
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crate::cell::{Hyperlink, HyperlinkId};
 use crate::charset::CharsetState;
@@ -318,6 +320,15 @@ impl Terminal {
     /// Whether any stored image is currently animating (drives redraw scheduling).
     pub fn has_kitty_animation(&self) -> bool {
         self.kitty_images.has_running_animation()
+    }
+
+    /// A cheap `Arc` clone of a flag mirroring [`Self::has_kitty_animation`],
+    /// meant to be fetched once per pane (at surface creation) and polled via
+    /// `AtomicBool::load` from then on — the app layer's idle-animation timer
+    /// uses this to skip locking a terminal that isn't animating, instead of
+    /// locking every pane every tick just to ask.
+    pub fn kitty_animation_flag(&self) -> Arc<AtomicBool> {
+        self.kitty_images.animation_flag()
     }
 
     pub fn select_all(&mut self) {

@@ -8,7 +8,7 @@ impl App {
         let Some(gpu) = self.gpu.as_ref() else {
             return;
         };
-        let Some((focused_pane, new_pane, focused_rect, auto_approve_enabled)) =
+        let Some((focused_pane, new_pane, focused_rect, auto_approve_enabled, redraw_floor)) =
             self.windows.get_mut(&window_id).and_then(|state| {
                 let focused_rect = state.focused_surface()?.rect;
                 if !can_create_split_in_direction(state.pane_count(), focused_rect, direction)
@@ -25,6 +25,7 @@ impl App {
                     new_pane,
                     focused_rect,
                     state.auto_approve_enabled.clone(),
+                    state.redraw_floor.clone(),
                 ))
             })
         else {
@@ -40,6 +41,7 @@ impl App {
             focused_rect,
             inherited_cwd,
             auto_approve_enabled,
+            redraw_floor,
         ) {
             Ok(surface) => surface,
             Err(err) => {

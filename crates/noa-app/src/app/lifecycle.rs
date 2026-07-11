@@ -305,6 +305,17 @@ impl App {
         let auto_approve_enabled = Arc::new(AtomicBool::new(
             self.config.auto_approve && self.window_sidebar_eligible(window_id),
         ));
+        // One redraw-floor clock per window (tab), shared by every pane's io
+        // thread it spawns — see `RedrawFloor`. Seeded from this window's
+        // actual monitor refresh rate; `on_scale_factor_changed`/window-move
+        // handling keeps it current if the window migrates monitors.
+        let redraw_floor = crate::io_thread::RedrawFloor::new(
+            crate::io_thread::redraw_floor_from_refresh_millihertz(
+                window
+                    .current_monitor()
+                    .and_then(|monitor| monitor.refresh_rate_millihertz()),
+            ),
+        );
         let initial_surface = self.spawn_pane_surface(
             window_id,
             initial_pane,
@@ -312,6 +323,7 @@ impl App {
             initial_rect,
             inherited_cwd,
             auto_approve_enabled.clone(),
+            redraw_floor.clone(),
         )?;
         let mut surfaces = HashMap::new();
         surfaces.insert(initial_pane, initial_surface);
@@ -338,6 +350,7 @@ impl App {
                 proxy_icon_cwd: None,
                 last_touchpad_stage: 0,
                 auto_approve_enabled,
+                redraw_floor,
                 sidebar_scroll: 0,
                 sidebar_button_hover: false,
                 sidebar_card_hover: None,
@@ -465,6 +478,7 @@ impl App {
         self.pane_cwd(window_id, pane_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_pane_surface(
         &self,
         window_id: WindowId,
@@ -473,6 +487,7 @@ impl App {
         rect: PaneRectApp,
         cwd: Option<String>,
         auto_approve_enabled: Arc<AtomicBool>,
+        redraw_floor: crate::io_thread::RedrawFloor,
     ) -> anyhow::Result<Surface> {
         let pty_config = PtyConfig {
             size: grid_size,
@@ -512,6 +527,11 @@ impl App {
                 apply_palette_overrides(gpu.theme.palette, &self.config.palette),
             );
         }
+        // Grabbed before the terminal moves behind the shared lock: a cheap
+        // `Arc` clone the app layer holds so the idle-animation timer can
+        // poll it without locking the terminal at all (see `Surface::
+        // kitty_animation_flag`).
+        let kitty_animation_flag = terminal.kitty_animation_flag();
         let terminal = Arc::new(Mutex::new(terminal));
         let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
         let (pty_input_tx, pty_input_rx) = crate::io_thread::input_channel();
@@ -543,6 +563,7 @@ impl App {
             overview_publish,
             sidebar_publish,
             auto_approve,
+            redraw_floor,
         );
 
         Ok(Surface {
@@ -562,6 +583,7 @@ impl App {
             hover_link: None,
             overview_snapshot,
             snapshot_recycle: noa_render::FrameSnapshotRecycle::default(),
+            kitty_animation_flag,
         })
     }
 

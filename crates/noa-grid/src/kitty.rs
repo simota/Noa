@@ -12,6 +12,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use noa_vt::{KittyAction, KittyCompression, KittyFormat, KittyGraphicsCommand, KittyMedium};
 
@@ -189,6 +190,11 @@ pub struct ImageStore {
     next_epoch: u64,
     next_seq: u64,
     transfer: Option<PendingTransfer>,
+    /// Mirrors [`Self::has_running_animation`], refreshed by
+    /// [`Self::sync_animation_flag`]. Handed out via [`Self::animation_flag`]
+    /// so `noa-app` can poll for "any pane animating" without locking the
+    /// terminal at all in the common no-animation case.
+    animation_flag: Arc<AtomicBool>,
 }
 
 impl Default for ImageStore {
@@ -201,6 +207,7 @@ impl Default for ImageStore {
             next_epoch: 0,
             next_seq: 0,
             transfer: None,
+            animation_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -632,6 +639,7 @@ impl ImageStore {
     /// not in `referenced` (no visible placement) are dropped first, oldest by
     /// `seq`; then, if still over budget, the oldest overall.
     pub fn enforce_quota(&mut self, referenced: &HashSet<u32>) {
+        let mut evicted_any = false;
         while self.total_bytes > self.byte_limit {
             let victim = self
                 .images
@@ -648,9 +656,18 @@ impl ImageStore {
             match victim {
                 Some(id) => {
                     self.remove(id);
+                    evicted_any = true;
                 }
                 None => break,
             }
+        }
+        if evicted_any {
+            // Eviction can drop a running animation without any
+            // `Anim.running` transition (the image just stops existing), and
+            // is reachable from callers other than `Terminal::kitty_graphics`
+            // (`set_byte_limit`, SIXEL ingestion) that don't already resync —
+            // centralize it here so none of them need to remember to.
+            self.sync_animation_flag();
         }
     }
 
@@ -920,6 +937,11 @@ impl ImageStore {
                 changed = true;
             }
         }
+        // A loop reaching its `loops_remaining` cap flips `running` to false
+        // above; sync here so the flag drops as soon as the last animation
+        // finishes naturally, rather than waiting for the next graphics
+        // command.
+        self.sync_animation_flag();
         AnimationTick { changed, next_wake }
     }
 
@@ -928,6 +950,22 @@ impl ImageStore {
         self.images
             .iter()
             .any(|img| img.anim.running && img.frames.len() >= 2)
+    }
+
+    /// A cheap clone of the flag mirroring [`Self::has_running_animation`].
+    /// Cloned once by `noa-app` at surface creation, not re-fetched per poll.
+    pub fn animation_flag(&self) -> Arc<AtomicBool> {
+        self.animation_flag.clone()
+    }
+
+    /// Refresh the shared flag to the current aggregate animation state.
+    /// Called after any operation that could start, stop, or remove an
+    /// animated image — `Terminal::kitty_graphics` (the single dispatch
+    /// point for every Kitty graphics command) and [`Self::advance_animations`]
+    /// cover every mutation site, so the flag can't go stale.
+    pub(crate) fn sync_animation_flag(&self) {
+        self.animation_flag
+            .store(self.has_running_animation(), Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -1697,6 +1735,53 @@ mod tests {
         assert_eq!(store.get(1).unwrap().anim.current, 2);
         // Frame 2's 100ms gap means the next flip is due at 140ms.
         assert_eq!(t1.next_wake, Some(140));
+    }
+
+    #[test]
+    fn advance_animations_clears_flag_when_a_loop_finishes() {
+        // FIX 3 (noa-app idle-animation timer): `sync_animation_flag` must
+        // fire from inside `advance_animations` itself, not just from the
+        // `Terminal::kitty_graphics` dispatch choke point — otherwise the
+        // flag stays stuck `true` after the last loop plays out and nothing
+        // else happens to clear it.
+        let mut store = store_with_base();
+        let frame = vec![1u8, 2, 3, 255, 4, 5, 6, 255];
+        store.transmit(&direct("a=f,i=1,f=32,s=2,v=1,X=1", &frame));
+        // v=2 → loops_remaining = Some(1): one more full loop, then stop.
+        store.animate(&direct("a=a,i=1,v=2", &[])).unwrap();
+        store.sync_animation_flag();
+        assert!(store.animation_flag().load(Ordering::Relaxed));
+
+        // A single call walks forward frame-by-frame across every gap that
+        // has elapsed (a long stall crosses multiple), so one huge jump is
+        // enough to exhaust the remaining loop and stop.
+        store.advance_animations(0); // seeds the clock
+        store.advance_animations(10_000);
+        assert!(!store.has_running_animation());
+        assert!(
+            !store.animation_flag().load(Ordering::Relaxed),
+            "advance_animations must resync the flag itself"
+        );
+    }
+
+    #[test]
+    fn enforce_quota_clears_flag_when_it_evicts_the_animated_image() {
+        // Eviction can drop a running animation without any `Anim.running`
+        // transition — the image just stops existing — and is reachable
+        // outside `Terminal::kitty_graphics` (`set_byte_limit`, SIXEL
+        // ingestion), so `enforce_quota` must resync on its own.
+        let mut store = store_with_base();
+        let frame = vec![1u8, 2, 3, 255, 4, 5, 6, 255];
+        store.transmit(&direct("a=f,i=1,f=32,s=2,v=1,X=1", &frame));
+        store.sync_animation_flag();
+        assert!(store.animation_flag().load(Ordering::Relaxed));
+
+        store.set_byte_limit(0); // evicts everything
+        assert!(store.len() == 0);
+        assert!(
+            !store.animation_flag().load(Ordering::Relaxed),
+            "evicting the only (animated) image must clear the flag"
+        );
     }
 
     #[test]

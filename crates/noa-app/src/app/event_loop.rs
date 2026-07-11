@@ -287,6 +287,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.on_scale_factor_changed(window_id, scale_factor)
             }
+            // A dragged-across-monitors window can land on a different
+            // refresh rate without a scale-factor change (e.g. two Retina
+            // displays at 60Hz and 120Hz) — re-derive the redraw floor here
+            // too (FIX 1).
+            WindowEvent::Moved(_) => self.refresh_redraw_floor(window_id),
             WindowEvent::Resized(size) => self.on_resize(window_id, size),
             WindowEvent::ThemeChanged(theme) => self.on_system_appearance_changed(theme),
             WindowEvent::Focused(true) => {
@@ -653,7 +658,28 @@ impl App {
         self.paste_file_paths_to_pane(window_id, pane_id, &paths);
     }
 
+    /// Re-derive this window's redraw floor from its current monitor's
+    /// actual refresh rate (FIX 1: a fixed 120Hz-derived floor on a 60Hz
+    /// display causes ~2x more full redraw cycles than frames the display
+    /// can show). Called on window creation and whenever the window might
+    /// have changed monitors.
+    pub(super) fn refresh_redraw_floor(&mut self, window_id: WindowId) {
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
+        let millihertz = state
+            .window
+            .current_monitor()
+            .and_then(|monitor| monitor.refresh_rate_millihertz());
+        state
+            .redraw_floor
+            .set_min_interval(crate::io_thread::redraw_floor_from_refresh_millihertz(
+                millihertz,
+            ));
+    }
+
     pub(super) fn on_scale_factor_changed(&mut self, window_id: WindowId, scale_factor: f64) {
+        self.refresh_redraw_floor(window_id);
         // #TODO(agent): the FontGrid is app-wide, so on a mixed-DPI setup
         // every other window keeps rasterizing at this window's scale factor
         // (correct metrics, non-crisp glyphs). The complete fix is a

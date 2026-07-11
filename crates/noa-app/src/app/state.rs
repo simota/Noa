@@ -273,6 +273,12 @@ pub(super) struct WindowState {
     /// Per-tab opt-in for agent CLI prompt auto approval. Split panes in the
     /// same native tab share this flag with their io threads.
     pub(super) auto_approve_enabled: Arc<AtomicBool>,
+    /// This tab's shared redraw-floor clock (`RedrawFloor`), handed to every
+    /// pane's io thread it spawns so an N-pane split earns at most one
+    /// floored redraw wake per floor window instead of one per pane. Its
+    /// interval is refreshed from the window's monitor refresh rate on
+    /// creation and on monitor changes.
+    pub(super) redraw_floor: crate::io_thread::RedrawFloor,
     /// Vertical scroll offset (px) of the sidebar card list (FR-15), clamped to
     /// `[0, content_h - viewport_h]` when consumed by the layout.
     pub(super) sidebar_scroll: u32,
@@ -659,6 +665,12 @@ pub(super) struct Surface {
     /// each redraw so `FrameSnapshot::from_terminal_recycle` can reuse row/cell
     /// allocations and skip clean-row copies when the viewport is unchanged.
     pub(super) snapshot_recycle: noa_render::FrameSnapshotRecycle,
+    /// Mirrors `Terminal::has_kitty_animation` without needing the terminal
+    /// lock to read it: cloned once from `Terminal::kitty_animation_flag` at
+    /// surface creation, kept in sync by `noa-grid` on every Kitty graphics
+    /// command and animation tick. Lets the idle-animation timer
+    /// (`tick_kitty_animations`) skip locking panes with nothing running.
+    pub(super) kitty_animation_flag: Arc<AtomicBool>,
 }
 
 impl WindowState {

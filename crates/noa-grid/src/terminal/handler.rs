@@ -555,6 +555,11 @@ impl Handler for Terminal {
             KittyAction::Put => self.kitty_put(&cmd),
             KittyAction::Delete => self.kitty_delete(&cmd),
         }
+        // This is the sole entry point for every Kitty graphics action, so
+        // resyncing the shared animation flag once here (rather than at each
+        // `ImageStore` mutation site — transmit/animate/compose/delete all
+        // funnel through the match above) can't miss a state change.
+        self.kitty_images.sync_animation_flag();
     }
 
     fn set_scroll_region(&mut self, top: u16, bottom: u16) {

@@ -103,6 +103,45 @@ fn kitty_transmit_and_display_creates_placement_and_moves_cursor() {
     assert_eq!((t.primary.cursor.x, t.primary.cursor.y), (3, 1));
 }
 
+// noa-app's idle-animation timer polls `Terminal::kitty_animation_flag`
+// instead of locking the terminal to call `has_kitty_animation` — this
+// exercises the flag through the same VT-dispatch path the app relies on
+// (`Terminal::kitty_graphics` resyncs it once per command; see
+// `ImageStore::sync_animation_flag`).
+#[test]
+fn kitty_animation_flag_tracks_running_animation_through_vt_dispatch() {
+    let mut t = kitty_terminal();
+    let flag = t.kitty_animation_flag();
+    assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+
+    // Base image only: no animation yet.
+    feed(
+        &mut t,
+        &kitty_apc(
+            "a=t,f=32,s=2,v=1,i=1",
+            &[10, 20, 30, 255, 40, 50, 60, 255],
+        ),
+    );
+    assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+
+    // A second frame auto-starts playback.
+    feed(
+        &mut t,
+        &kitty_apc("a=f,i=1,f=32,s=2,v=1,X=1", &[1, 2, 3, 255, 4, 5, 6, 255]),
+    );
+    assert!(
+        flag.load(std::sync::atomic::Ordering::Relaxed),
+        "2nd frame auto-starts playback"
+    );
+
+    // `a=a,s=1` stops it explicitly.
+    feed(&mut t, &kitty_apc("a=a,i=1,s=1", &[]));
+    assert!(
+        !flag.load(std::sync::atomic::Ordering::Relaxed),
+        "explicit stop clears the flag"
+    );
+}
+
 #[test]
 fn kitty_placement_count_is_hard_capped() {
     let mut t = kitty_terminal();

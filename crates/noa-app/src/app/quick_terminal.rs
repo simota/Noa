@@ -788,6 +788,13 @@ impl App {
         let metrics = self.gpu.as_ref()?.font.metrics();
         let grid = grid_size_for_pane_rect(initial_rect, metrics, self.padding);
         let auto_approve_enabled = Arc::new(AtomicBool::new(false));
+        let redraw_floor = crate::io_thread::RedrawFloor::new(
+            crate::io_thread::redraw_floor_from_refresh_millihertz(
+                window
+                    .current_monitor()
+                    .and_then(|monitor| monitor.refresh_rate_millihertz()),
+            ),
+        );
         let initial_surface = self
             .spawn_pane_surface(
                 window_id,
@@ -796,6 +803,7 @@ impl App {
                 initial_rect,
                 None,
                 auto_approve_enabled.clone(),
+                redraw_floor.clone(),
             )
             .ok()?;
         let mut surfaces = HashMap::new();
@@ -824,6 +832,7 @@ impl App {
                 proxy_icon_cwd: None,
                 last_touchpad_stage: 0,
                 auto_approve_enabled,
+                redraw_floor,
                 sidebar_scroll: 0,
                 sidebar_button_hover: false,
                 sidebar_card_hover: None,

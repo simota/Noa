@@ -31,7 +31,7 @@ use super::feed::{
 };
 use super::input_queue::PtyInput;
 use super::overview::{OverviewPublish, flush_pending_overview_publish};
-use super::redraw::{RedrawDecision, decide_redraw};
+use super::redraw::{RedrawDecision, RedrawFloor};
 use super::sidebar::SidebarPublish;
 
 /// Which window/pane's `UserEvent`s this io thread posts back to the main
@@ -104,6 +104,7 @@ pub fn spawn(
     overview: OverviewPublish,
     sidebar: SidebarPublish,
     auto_approve: AutoApprovePublish,
+    redraw_floor: RedrawFloor,
 ) -> IoThreadHandle {
     let IoThreadTarget { window_id, pane_id } = target;
     // The GUI-agnostic card key for every sidebar delta this thread posts. The
@@ -130,13 +131,13 @@ pub fn spawn(
         // it lets the timeout arm be added only when something is owed,
         // instead of a constant poll interval.
         let mut publish_pending_at: Option<Instant> = None;
-        // When the io thread last asked the main thread to repaint, and a
-        // deadline owed by a redraw currently withheld — by the
-        // [`REDRAW_MIN_INTERVAL`] floor or the synchronized-output (DECSET
-        // 2026) cap. Together they bound how long a fed-but-unpainted frame
-        // can sit (see [`decide_redraw`]); `None` deadline means nothing is
-        // owed and the select below blocks exactly as before.
-        let mut last_redraw_at: Option<Instant> = None;
+        // A deadline owed by a redraw currently withheld — by the window's
+        // shared [`RedrawFloor`] or the synchronized-output (DECSET 2026)
+        // cap. Bounds how long a fed-but-unpainted frame can sit (see
+        // [`RedrawFloor::decide`]); "when this pane last repainted" itself
+        // now lives on `redraw_floor`, shared with every other pane in the
+        // window, rather than as a local here. `None` deadline means nothing
+        // is owed and the select below blocks exactly as before.
         let mut redraw_deadline: Option<Instant> = None;
         let mut auto_approve_rescan_at: Option<Instant> = None;
         loop {
@@ -255,8 +256,7 @@ pub fn spawn(
                     if !output.pending_writes.is_empty() {
                         write_pty_bytes(&writer, &output.pending_writes);
                     }
-                    let redraw =
-                        decide_redraw(output.synchronized_output, last_redraw_at, Instant::now());
+                    let redraw = redraw_floor.decide(output.synchronized_output, Instant::now());
                     for text in output.pending_clipboard_writes {
                         let _ = proxy.send_event(UserEvent::ClipboardWrite {
                             window_id,
@@ -282,7 +282,6 @@ pub fn spawn(
                     match redraw {
                         RedrawDecision::Now => {
                             redraw_deadline = None;
-                            last_redraw_at = Some(Instant::now());
                             if proxy
                                 .send_event(UserEvent::Redraw(window_id, pane_id))
                                 .is_err()
@@ -328,12 +327,20 @@ pub fn spawn(
                 deadline_elapsed = true;
                 needs_redraw = true;
             }
+            let mut redraw_claimed = false;
             if redraw_deadline.is_some_and(|deadline| now >= deadline) {
                 // A withheld redraw (floor or synchronized-output cap) came
                 // due — force the repaint so the stale frame can't persist.
+                // Every pane suppressed within the same floor window shares
+                // this exact deadline (it's derived from the same window
+                // clock), so `claim_deadline` picks a single winner instead
+                // of every pane firing its own wake in the same tick.
                 redraw_deadline = None;
                 deadline_elapsed = true;
-                needs_redraw = true;
+                if redraw_floor.claim_deadline(now) {
+                    needs_redraw = true;
+                    redraw_claimed = true;
+                }
             }
             if auto_approve_rescan_at.is_some_and(|deadline| now >= deadline) {
                 deadline_elapsed = true;
@@ -358,9 +365,12 @@ pub fn spawn(
             }
             if deadline_elapsed {
                 if needs_redraw {
-                    // Either deadline means the frame the main thread holds
-                    // is stale; a single redraw covers both.
-                    last_redraw_at = Some(now);
+                    if !redraw_claimed {
+                        // Owed by the publish-pending flush, not the shared
+                        // floor deadline — still a real paint, so keep the
+                        // window's clock in sync for other panes.
+                        redraw_floor.record(now);
+                    }
                     if proxy
                         .send_event(UserEvent::Redraw(window_id, pane_id))
                         .is_err()

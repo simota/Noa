@@ -501,6 +501,31 @@ impl App {
         })
     }
 
+    /// Fire any window's due grid-reflow throttle (item 1) and report the
+    /// earliest pending trailing wake-up. Each window's `resize_throttle`
+    /// coalesced its mid-drag relayouts; this delivers the trailing apply —
+    /// including the final authoritative size once the drag stops — via the
+    /// same `about_to_wait` + `WaitUntil` mechanism the other ticks use. The
+    /// apply reflows the grid (grid-first) and sends the pty winsize; a pane
+    /// that closed mid-drag is skipped inside `apply_pane_grid_resize`, and a
+    /// window with nothing pending schedules no wake-up (no busy-polling).
+    pub(super) fn tick_resize_throttle(&mut self) -> Option<Instant> {
+        let now = Instant::now();
+        let mut next: Option<Instant> = None;
+        for state in self.windows.values_mut() {
+            if let Some(targets) = state.resize_throttle.poll(now) {
+                apply_pane_grid_resize(state, &targets);
+                // The reflowed grid must repaint; the surface/rects were
+                // already live, so this shows the freshly reflowed content.
+                state.window.request_redraw();
+            }
+            if let Some(deadline) = state.resize_throttle.next_deadline() {
+                next = Some(next.map_or(deadline, |n| n.min(deadline)));
+            }
+        }
+        next
+    }
+
     /// Wake the Session Overview once the earliest throttle-blocked dirty tile
     /// becomes due.
     pub(super) fn tick_overview_backlog(&mut self) -> Option<Instant> {

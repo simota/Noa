@@ -358,6 +358,7 @@ impl App {
                 sidebar_drag: None,
                 link_click_in_flight: false,
                 file_drop: FileDropState::default(),
+                resize_throttle: crate::debounce::Throttle::new(RESIZE_REFLOW_THROTTLE_INTERVAL),
                 last_grid: None,
                 resize_overlay: None,
                 bell_flash_until: None,

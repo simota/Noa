@@ -300,6 +300,15 @@ pub(super) struct WindowState {
     /// multi-file drops as one event per path, so this lets us paste the
     /// hovered batch once instead of duplicating paths on drop.
     pub(super) file_drop: FileDropState,
+    /// Leading+trailing throttle for this window's grid reflow + pty winsize
+    /// (item 1). A continuous drag-resize relayouts on every cell-width
+    /// boundary; without this, each would run `Terminal::resize`'s two-pass
+    /// scrollback reflow under the terminal lock, freezing both the main and io
+    /// threads on deep scrollback. The first size applies live; the rest
+    /// coalesce to ~one per interval, and the final size always lands via
+    /// `App::tick_resize_throttle`. Only the reflow + winsize are throttled —
+    /// pane rects and pixel metrics stay live (see `apply_pane_layout_live`).
+    pub(super) resize_throttle: crate::debounce::Throttle<Vec<(PaneId, GridSize)>>,
     /// The focused pane's last laid-out grid size, for the resize-overlay
     /// change check (`resize-overlay = after-first` skips the first layout).
     pub(super) last_grid: Option<(u16, u16)>,
@@ -316,6 +325,14 @@ pub(super) struct WindowState {
 /// How long the `cols × rows` resize toast stays up after the last grid
 /// change (Ghostty's `resize-overlay-duration` default).
 pub(super) const RESIZE_OVERLAY_DURATION: Duration = Duration::from_millis(750);
+
+/// Coalescing interval for the grid-reflow throttle (`WindowState::
+/// resize_throttle`). At most one scrollback reflow + pty winsize per this
+/// window during a continuous drag-resize; the leading and trailing edges
+/// still fire. Chosen in the ~75-90ms band: short enough that live-resize feel
+/// stays close to Ghostty's, long enough to keep a deep-scrollback reflow from
+/// running on every cell-width boundary.
+pub(super) const RESIZE_REFLOW_THROTTLE_INTERVAL: Duration = Duration::from_millis(80);
 
 /// How long the `visual-bell` flash stays up.
 pub(super) const BELL_FLASH_DURATION: Duration = Duration::from_millis(150);

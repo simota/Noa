@@ -93,7 +93,23 @@ impl App {
         let Some(state) = self.windows.get_mut(&window_id) else {
             return;
         };
-        apply_pane_resize_batch(state, &targets, metrics, padding);
+        // Live half runs every relayout: pane rects + pixel metrics track the
+        // window size frame-by-frame (no letterboxing during a drag).
+        apply_pane_layout_live(state, &targets, metrics, padding);
+        // Throttled half: the scrollback-walking grid reflow + pty winsize.
+        // Item 1 — during a continuous resize this coalesces to at most one
+        // apply per interval instead of firing on every cell-width boundary
+        // (which blocks the main thread AND the io thread on deep scrollback).
+        // The leading edge (first resize, or first after a quiet gap) applies
+        // immediately for live Ghostty-style feedback; trailing applies (and
+        // the final authoritative size) land via `App::tick_resize_throttle`.
+        let grid_targets: Vec<(PaneId, GridSize)> = targets
+            .iter()
+            .map(|(pane_id, _, grid_size)| (*pane_id, *grid_size))
+            .collect();
+        if let Some(to_apply) = state.resize_throttle.submit(grid_targets, Instant::now()) {
+            apply_pane_grid_resize(state, &to_apply);
+        }
 
         // Resize overlay (Ghostty `resize-overlay`): surface the focused
         // pane's new `cols × rows` as a transient toast when the grid

@@ -74,17 +74,47 @@ pub(crate) fn pixel_metrics_for_pane(
     (cell_w_px, cell_h_px, text_area_w_px, text_area_h_px)
 }
 
-pub(crate) fn apply_pane_resize_batch(
+/// The live half of a relayout, run on every call (never throttled): update
+/// each pane's pixel `rect` and its terminal's pixel metrics (for XTWINOPS
+/// reports). Keeping this live means the wgpu surface, the pane viewport rects,
+/// and pixel metrics all track the window size frame-by-frame during a drag, so
+/// the reflow-throttled grid never letterboxes into black bands — the surface
+/// is always sized and cleared to the terminal background. The expensive part
+/// (scrollback reflow + pty winsize) is [`apply_pane_grid_resize`], gated by
+/// `WindowState::resize_throttle`.
+pub(crate) fn apply_pane_layout_live(
     state: &mut WindowState,
     targets: &[(PaneId, PaneRectApp, GridSize)],
     metrics: noa_font::Metrics,
     padding: GridPadding,
 ) {
-    let plan = pane_resize_batch_plan(
-        targets
-            .iter()
-            .map(|(pane_id, _, grid_size)| (*pane_id, *grid_size)),
-    );
+    for (pane_id, rect, _grid_size) in targets {
+        let Some(surface) = state.surfaces.get_mut(pane_id) else {
+            continue;
+        };
+        surface.rect = *rect;
+        let (cw, ch, taw, tah) = pixel_metrics_for_pane(*rect, metrics, padding);
+        // Cheap store under the lock (four u32s) — deliberately NOT the
+        // scrollback-walking `terminal.resize`, which the throttle defers.
+        surface.terminal.lock().set_pixel_metrics(cw, ch, taw, tah);
+    }
+}
+
+/// The throttled half of a relayout: reflow each changed pane's terminal grid,
+/// then send the new pty winsize. Runs on the leading edge and every trailing
+/// edge of `WindowState::resize_throttle`, never once per drag frame.
+///
+/// Grid-first (CLAUDE.md): every changed pane's grid is reflowed *before* any
+/// pty winsize goes out, on every coalesced apply — so the shell's SIGWINCH
+/// repaint never lands in a stale grid. Grid resize and pty winsize are driven
+/// from the *same* `targets`, so they can never diverge, and intermediate
+/// (skipped) sizes reach neither — no SIGWINCH storm into a grid we didn't
+/// reflow. A pane that closed mid-drag is simply absent from `surfaces` and
+/// skipped; a dropped `resize_tx` is ignored (no panic).
+pub(crate) fn apply_pane_grid_resize(state: &mut WindowState, targets: &[(PaneId, GridSize)]) {
+    // Grid-first ordering (all `GridResize` actions before any `PtyResize`) is
+    // built and invariant-tested by `pane_resize_batch_plan`.
+    let plan = pane_resize_batch_plan(targets.iter().copied());
 
     // Panes whose grid actually changes, captured before any mutation. A
     // same-size `Terminal::resize` is NOT a no-op (it resets the scroll
@@ -93,13 +123,13 @@ pub(crate) fn apply_pane_resize_batch(
     // left completely untouched.
     let changed: std::collections::HashSet<PaneId> = targets
         .iter()
-        .filter(|(pane_id, _, grid_size)| {
+        .filter(|(pane_id, grid_size)| {
             state
                 .surfaces
                 .get(pane_id)
                 .is_some_and(|surface| surface.grid_size != *grid_size)
         })
-        .map(|(pane_id, _, _)| *pane_id)
+        .map(|(pane_id, _)| *pane_id)
         .collect();
 
     for action in &plan {
@@ -109,21 +139,12 @@ pub(crate) fn apply_pane_resize_batch(
         let Some(surface) = state.surfaces.get_mut(&pane_id) else {
             continue;
         };
-        let rect = targets
-            .iter()
-            .find(|(target, _, _)| *target == pane_id)
-            .map(|(_, rect, _)| *rect);
-        if let Some(rect) = rect {
-            surface.rect = rect;
-        }
+        // Kept in lockstep with the terminal grid (throttled together): it is
+        // read for mouse→cell mapping and scroll snapshots, which must agree
+        // with the grid actually reflowed here, not the live pixel rect.
         surface.grid_size = grid_size;
-        let mut terminal = surface.terminal.lock();
         if changed.contains(&pane_id) {
-            terminal.resize(grid_size);
-        }
-        if let Some(rect) = rect {
-            let (cw, ch, taw, tah) = pixel_metrics_for_pane(rect, metrics, padding);
-            terminal.set_pixel_metrics(cw, ch, taw, tah);
+            surface.terminal.lock().resize(grid_size);
         }
     }
 

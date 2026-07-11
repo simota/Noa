@@ -66,6 +66,92 @@ impl<T> Debouncer<T> {
     }
 }
 
+/// A leading+trailing throttle: unlike [`Debouncer`] (which only ever fires the
+/// *last* value once a burst quiets), this fires the *first* value in a burst
+/// immediately, then coalesces the rest to at most one fire per `interval`, and
+/// always delivers the final submitted value on a trailing fire once the burst
+/// stops. It exists for continuous window resize (grid reflow item 1): the first
+/// drag size must apply live (Ghostty parity), intermediate sizes coalesce so a
+/// deep-scrollback reflow can't run on every cell-width boundary, and the final
+/// authoritative size must always land.
+///
+/// Pure state machine like [`Debouncer`]: the caller supplies `now` on every
+/// call, so it is deterministic and unit-testable without a real clock. Wired as
+/// `WindowState::resize_throttle`, `submit`ted from `relayout_and_resize_window`
+/// and `poll`ed from `App::tick_resize_throttle` (pumped in `about_to_wait`).
+#[derive(Clone)]
+pub struct Throttle<T> {
+    interval: Duration,
+    /// When a value was last fired (leading or trailing), or `None` before the
+    /// first fire ever. Drives both the leading-edge readiness check and the
+    /// trailing-fire deadline.
+    last_fire: Option<Instant>,
+    /// The most recent submitted value that has not yet fired, coalesced across
+    /// a burst (only the latest is kept). `None` between bursts and right after
+    /// any fire. Non-`None` implies `last_fire` is `Some` (a pending value is
+    /// only stored when a leading fire already happened this interval).
+    pending: Option<T>,
+}
+
+impl<T> Throttle<T> {
+    /// A throttle that fires at most once per `interval`, on the leading edge
+    /// and then on trailing edges.
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_fire: None,
+            pending: None,
+        }
+    }
+
+    /// Submit a value. On the leading edge — the first submit ever, or the
+    /// first after `interval` of quiet — it fires immediately and the value is
+    /// returned (`Some`) for the caller to apply now. Otherwise it is coalesced
+    /// into the pending slot (replacing any earlier not-yet-fired value) and
+    /// `None` is returned; it will fire from [`Self::poll`] once `interval`
+    /// since the last fire elapses.
+    #[must_use]
+    pub fn submit(&mut self, value: T, now: Instant) -> Option<T> {
+        let ready = match self.last_fire {
+            None => true,
+            Some(last) => now.duration_since(last) >= self.interval,
+        };
+        if ready {
+            self.last_fire = Some(now);
+            self.pending = None;
+            Some(value)
+        } else {
+            self.pending = Some(value);
+            None
+        }
+    }
+
+    /// Fire the coalesced pending value if `interval` since the last fire has
+    /// elapsed as of `now`, returning it (`Some`) for the caller to apply.
+    /// Returns `None` while still inside the interval or when nothing is
+    /// pending. Always delivers the *final* submitted value of a burst — a
+    /// caller that keeps polling until [`Self::next_deadline`] is `None` can
+    /// never drop the authoritative last size.
+    #[must_use]
+    pub fn poll(&mut self, now: Instant) -> Option<T> {
+        let last = self.last_fire?;
+        self.pending.as_ref()?;
+        if now.duration_since(last) < self.interval {
+            return None;
+        }
+        self.last_fire = Some(now);
+        self.pending.take()
+    }
+
+    /// The next instant [`Self::poll`] should be attempted — `last_fire +
+    /// interval` while a value is pending, else `None` (nothing to fire, so no
+    /// wake-up needs scheduling).
+    pub fn next_deadline(&self) -> Option<Instant> {
+        let last = self.last_fire?;
+        self.pending.as_ref().map(|_| last + self.interval)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +225,125 @@ mod tests {
     fn cancel_on_empty_debouncer_is_a_no_op() {
         let mut debouncer: Debouncer<u32> = Debouncer::new(WINDOW);
         assert!(!debouncer.cancel());
+    }
+}
+
+#[cfg(test)]
+mod throttle_tests {
+    use super::*;
+
+    const INTERVAL: Duration = Duration::from_millis(80);
+
+    // Leading edge: the very first submit fires immediately (a drag's first
+    // size applies live, not after a delay).
+    #[test]
+    fn first_submit_fires_immediately() {
+        let mut throttle: Throttle<u32> = Throttle::new(INTERVAL);
+        let t0 = Instant::now();
+        assert_eq!(throttle.submit(1, t0), Some(1));
+        // Nothing pending after a leading fire, so no wake-up is scheduled.
+        assert_eq!(throttle.next_deadline(), None);
+    }
+
+    // Mid-drag: submits within the interval after the leading fire are
+    // coalesced (return None, don't fire), and only the latest is retained —
+    // the deep-scrollback reflow can't run on every cell-width boundary.
+    #[test]
+    fn mid_drag_submits_coalesce_and_keep_only_the_latest() {
+        let mut throttle: Throttle<u32> = Throttle::new(INTERVAL);
+        let t0 = Instant::now();
+        assert_eq!(throttle.submit(1, t0), Some(1));
+
+        assert_eq!(throttle.submit(2, t0 + Duration::from_millis(10)), None);
+        assert_eq!(throttle.submit(3, t0 + Duration::from_millis(20)), None);
+        assert_eq!(throttle.submit(4, t0 + Duration::from_millis(30)), None);
+
+        // A wake-up is now scheduled one interval after the leading fire.
+        assert_eq!(throttle.next_deadline(), Some(t0 + INTERVAL));
+        // Still inside the interval: nothing fires yet.
+        assert_eq!(throttle.poll(t0 + Duration::from_millis(40)), None);
+        // At the interval boundary the *latest* coalesced value (4) fires —
+        // not the leading value (1) or any middle one (2, 3).
+        assert_eq!(throttle.poll(t0 + INTERVAL), Some(4));
+    }
+
+    // Trailing: once the drag stops, the final submitted size is always
+    // delivered by a later poll, even though it was coalesced.
+    #[test]
+    fn trailing_poll_always_delivers_the_final_value() {
+        let mut throttle: Throttle<u32> = Throttle::new(INTERVAL);
+        let t0 = Instant::now();
+        assert_eq!(throttle.submit(1, t0), Some(1));
+        // Final drag size, submitted while still inside the interval.
+        assert_eq!(throttle.submit(99, t0 + Duration::from_millis(50)), None);
+        // The drag has ended; no further submits arrive. The trailing fire
+        // still delivers 99 at the interval boundary.
+        assert!(throttle.next_deadline().is_some());
+        assert_eq!(throttle.poll(t0 + INTERVAL), Some(99));
+        // Drained: nothing left pending, no wake-up scheduled.
+        assert_eq!(throttle.next_deadline(), None);
+        assert_eq!(throttle.poll(t0 + INTERVAL * 2), None);
+    }
+
+    // A sustained drag (submit every 10ms for ~200ms) fires roughly once per
+    // interval — bounded reflow frequency — while the last size still lands.
+    #[test]
+    fn sustained_drag_fires_about_once_per_interval() {
+        let mut throttle: Throttle<u32> = Throttle::new(INTERVAL);
+        let t0 = Instant::now();
+        let mut fires = Vec::new();
+
+        // 21 frames, 10ms apart (0..=200ms). Each frame submits, then a poll
+        // models the event loop's `about_to_wait` pass at the same instant.
+        for step in 0..=20u32 {
+            let now = t0 + Duration::from_millis(u64::from(step) * 10);
+            if let Some(v) = throttle.submit(step, now) {
+                fires.push(v);
+            }
+            if let Some(v) = throttle.poll(now) {
+                fires.push(v);
+            }
+        }
+        // Drain the trailing fire after the drag stops.
+        if let Some(deadline) = throttle.next_deadline()
+            && let Some(v) = throttle.poll(deadline)
+        {
+            fires.push(v);
+        }
+
+        // Leading (frame 0) + one fire per ~80ms across 200ms ≈ 3-4 total —
+        // far fewer than the 21 submits, so the reflow is bounded.
+        assert!(
+            (2..=4).contains(&fires.len()),
+            "expected ~1 fire per interval, got {fires:?}"
+        );
+        assert_eq!(fires.first(), Some(&0), "leading value fires first");
+        assert_eq!(
+            fires.last(),
+            Some(&20),
+            "final submitted value must always be delivered"
+        );
+    }
+
+    // After the interval elapses with no activity, the next submit is a fresh
+    // leading edge (fires immediately) rather than being coalesced.
+    #[test]
+    fn submit_after_quiet_period_fires_leading_again() {
+        let mut throttle: Throttle<u32> = Throttle::new(INTERVAL);
+        let t0 = Instant::now();
+        assert_eq!(throttle.submit(1, t0), Some(1));
+        // Well past the interval, nothing pending in between.
+        let t1 = t0 + INTERVAL + Duration::from_millis(500);
+        assert_eq!(throttle.submit(2, t1), Some(2));
+    }
+
+    // An idle throttle (no submits, or fully drained) schedules no wake-up and
+    // yields nothing to poll — no busy-polling.
+    #[test]
+    fn idle_throttle_is_quiet() {
+        let mut throttle: Throttle<u32> = Throttle::new(INTERVAL);
+        let t0 = Instant::now();
+        assert_eq!(throttle.next_deadline(), None);
+        assert_eq!(throttle.poll(t0), None);
     }
 }

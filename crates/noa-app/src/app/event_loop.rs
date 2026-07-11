@@ -595,6 +595,7 @@ impl ApplicationHandler<UserEvent> for App {
         // more urgent one from the others — this pass sets it exactly once,
         // at the earliest across them.
         let blink_deadline = self.tick_cursor_blink();
+        let resize_throttle_deadline = self.tick_resize_throttle();
         let overview_deadline = self.tick_overview_backlog();
         let quick_terminal_deadline = self.tick_quick_terminal();
         let attention_deadline = self.tick_attention_blink();
@@ -607,6 +608,7 @@ impl ApplicationHandler<UserEvent> for App {
         let kitty_anim_deadline = self.tick_kitty_animations();
         let deadline = [
             blink_deadline,
+            resize_throttle_deadline,
             overview_deadline,
             quick_terminal_deadline,
             attention_deadline,

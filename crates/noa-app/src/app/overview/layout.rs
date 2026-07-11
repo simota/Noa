@@ -125,7 +125,15 @@ impl App {
         let host = self.overview_host()?;
         let state = self.windows.get(&host)?;
         let metrics = OverviewMetrics::new(state.window.scale_factor() as f32);
-        let bounds = pane_bounds_for_size(state.window.inner_size());
+        // The Overview is a full-window overlay (no sidebar inset), but its top
+        // chrome must still clear the transparent titlebar / native tab bar, or
+        // the search band renders under it. Reuse the same titlebar + content
+        // margin insets as the normal pane path (`window_pane_bounds`).
+        let bounds = content_inset_bounds(
+            pane_bounds_for_size(state.window.inner_size()),
+            self.window_titlebar_inset_px(host),
+            self.window_content_margin_px(host),
+        );
         Some(overview_chrome_bands(bounds, metrics))
     }
 

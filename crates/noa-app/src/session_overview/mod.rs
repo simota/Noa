@@ -956,6 +956,35 @@ mod tests {
     }
 
     #[test]
+    fn chrome_bands_stack_below_a_nonzero_bounds_origin() {
+        // With a top-chrome inset applied (`bounds.y != 0`, so the overlay
+        // clears the native tab bar), every band must start at or below
+        // `bounds.y` — the search band pins to the inset top, not to y=0.
+        let bounds = TileRect::new(12, 40, 800, 560);
+        let chrome = overview_chrome_bands(bounds, OverviewMetrics::new(1.0));
+
+        assert_eq!(
+            chrome.search_band,
+            TileRect::new(12, 40, 800, OVERVIEW_SEARCH_BAND_H)
+        );
+        assert_eq!(chrome.grid_bounds.x, 12);
+        assert_eq!(chrome.grid_bounds.y, 40 + OVERVIEW_SEARCH_BAND_H);
+        assert_eq!(
+            chrome.hint_band,
+            TileRect::new(12, 600 - OVERVIEW_HINT_BAND_H, 800, OVERVIEW_HINT_BAND_H)
+        );
+        // Bands stay ordered and none rise above the inset origin.
+        assert!(chrome.search_band.y >= bounds.y);
+        assert!(chrome.grid_bounds.y >= chrome.search_band.y + chrome.search_band.h);
+        assert!(chrome.hint_band.y >= chrome.grid_bounds.y + chrome.grid_bounds.h);
+        // The three bands still exactly tile the bounds vertically.
+        assert_eq!(
+            chrome.search_band.h + chrome.grid_bounds.h + chrome.hint_band.h,
+            bounds.h
+        );
+    }
+
+    #[test]
     fn chrome_bands_clamp_without_underflow_in_a_short_window() {
         // Window shorter than the search band alone: grid + hint collapse to
         // zero height, nothing underflows.

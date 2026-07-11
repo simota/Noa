@@ -106,6 +106,8 @@ result: `{"paneId":"8"}` — 生成ペイン id。
 
 params: `{"paneId":"1"}` / result: `{"ok":true}`
 
+`control` スコープは認可済み自動化とみなされ、実行中プロセスがあっても GUI の確認ダイアログを経由せず即座にペインを閉じる(通常の cmd+w 等が出す確認ダイアログはスキップされる)。`ok:true` はクローズが実際にディスパッチされた後にのみ返る。
+
 ### noa.subscribe — 要 read
 
 | params | 型 | 必須 | 説明 |

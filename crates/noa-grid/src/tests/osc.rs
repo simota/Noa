@@ -138,7 +138,10 @@ fn hostname_matches_local_accepts_case_insensitive_full_or_short_label_shapes() 
     assert!(hostname_matches_local("", "SG-H-0001"));
     assert!(hostname_matches_local("localhost", "SG-H-0001"));
     assert!(!hostname_matches_local("evil-remote-host", "SG-H-0001"));
-    assert!(!hostname_matches_local("sg-h-0002.local", "SG-H-0001.local"));
+    assert!(!hostname_matches_local(
+        "sg-h-0002.local",
+        "SG-H-0001.local"
+    ));
 }
 
 #[test]

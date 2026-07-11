@@ -184,10 +184,10 @@ pub(crate) fn footer_text(
     }
     let hint = match mode {
         super::ThemeSettingsMode::Theme => {
-            "\u{2191}\u{2193} Navigate   \u{21e5} Settings   \u{2303}F Favorite   \u{23ce} Save   Esc Cancel"
+            "\u{2191}\u{2193} Navigate   \u{21e5} Filter   \u{21e7}\u{21e5} Settings   \u{2303}F Favorite   \u{23ce} Save   Esc Cancel"
         }
         super::ThemeSettingsMode::Settings => {
-            "\u{2191}\u{2193} Navigate   \u{21e5} Theme   \u{2190}\u{2192} Adjust   \u{23ce} Save   Esc Cancel"
+            "\u{2191}\u{2193} Navigate   \u{21e5} Search   \u{2190}\u{2192} Adjust   \u{23ce} Save   Esc Cancel"
         }
     };
     (hint.to_string(), false)

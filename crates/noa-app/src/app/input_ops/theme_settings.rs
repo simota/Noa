@@ -30,23 +30,23 @@ fn theme_settings_enter_action(search_active: bool) -> ThemeSettingsEnterAction 
     }
 }
 
-/// Tab's routing decision, reconciling the two feature streams that both
-/// claimed the key: in Settings mode it toggles row search (R-5); in Theme
-/// mode it reopens the session in the other mode (R-25). Theme mode has an
-/// always-visible filter row of its own, so there is no in-mode search to
-/// toggle there — its Tab instead hops to the Settings rows (Settings mode's
-/// Tab is spent on search, so the reverse hop is reached via the
-/// `OpenThemePicker` menu item / `cmd+shift+,`).
+/// Tab's routing decision, reconciling the feature streams that claimed the
+/// key: in Settings mode it toggles row search (R-5); in Theme mode a bare
+/// Tab cycles the All/Dark/Light attribute filter (same as `⌃D`) and only
+/// Shift+Tab keeps R-25's hop to the Settings rows — the picker's most
+/// frequent Tab press is the filter switch, not the mode change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ThemeSettingsTabAction {
     ToggleSearch,
     ReopenOtherMode,
+    CycleAttribute,
 }
 
-fn theme_settings_tab_action(mode: ThemeSettingsMode) -> ThemeSettingsTabAction {
+fn theme_settings_tab_action(mode: ThemeSettingsMode, shift: bool) -> ThemeSettingsTabAction {
     match mode {
         ThemeSettingsMode::Settings => ThemeSettingsTabAction::ToggleSearch,
-        ThemeSettingsMode::Theme => ThemeSettingsTabAction::ReopenOtherMode,
+        ThemeSettingsMode::Theme if shift => ThemeSettingsTabAction::ReopenOtherMode,
+        ThemeSettingsMode::Theme => ThemeSettingsTabAction::CycleAttribute,
     }
 }
 
@@ -97,7 +97,7 @@ impl App {
         self.open_theme_settings_session(window_id, mode, None, Instant::now());
     }
 
-    /// Tab (R-25): reopen the current session in the other
+    /// Shift+Tab (R-25): reopen the current session in the other
     /// [`ThemeSettingsMode`], carrying its filter/highlight/row-editing
     /// state across (see [`crate::theme_settings::ThemeSettingsCarryover`]).
     /// A third transition distinct from Esc (revert) and Enter (commit) —
@@ -238,10 +238,11 @@ impl App {
     /// which case it confirms the highlighted row and stays open (Addendum
     /// D-3/FM-02: checked here, before ever falling through to
     /// `commit_theme_settings`). Tab toggles row search in Settings mode
-    /// (R-5); in Theme mode it reopens the session in the other
+    /// (R-5); in Theme mode a bare Tab cycles the All/Dark/Light attribute
+    /// filter and Shift+Tab reopens the session in the other
     /// [`crate::theme_settings::ThemeSettingsMode`] (R-25, see
     /// [`Self::tab_theme_settings`]) — each session's section is fixed by the
-    /// mode it opened in, and the two feature streams' Tab uses are reconciled
+    /// mode it opened in, and the feature streams' Tab uses are reconciled
     /// by [`theme_settings_tab_action`]. ↑↓ navigate (or, while searching,
     /// move the search highlight). ←→ adjusts the focused settings row.
     /// Delete / Cmd+Backspace resets the selected row to its default (R-7);
@@ -284,17 +285,23 @@ impl App {
                     .theme_settings
                     .as_ref()
                     .map(|session| session.state.mode());
-                match mode.map(theme_settings_tab_action) {
+                match mode.map(|mode| theme_settings_tab_action(mode, self.modifiers.shift_key())) {
                     Some(ThemeSettingsTabAction::ToggleSearch) => {
                         if let Some(session) = self.theme_settings.as_mut() {
                             std::sync::Arc::make_mut(&mut session.state).toggle_settings_search();
                         }
                         self.request_window_redraw(window_id);
                     }
-                    // R-25: Theme-mode Tab reopens as a fresh session
+                    // R-25: Theme-mode Shift+Tab reopens as a fresh session
                     // (`tab_theme_settings` requests its own redraw).
                     Some(ThemeSettingsTabAction::ReopenOtherMode) => {
                         self.tab_theme_settings(window_id);
+                    }
+                    Some(ThemeSettingsTabAction::CycleAttribute) => {
+                        if let Some(session) = self.theme_settings.as_mut() {
+                            std::sync::Arc::make_mut(&mut session.state).cycle_attribute_filter();
+                        }
+                        self.after_theme_settings_navigation(window_id);
                     }
                     None => {}
                 }
@@ -1234,18 +1241,25 @@ mod theme_settings_key_action_tests {
         );
     }
 
-    // Reconciled Tab routing: Settings mode toggles search (R-5); Theme mode
-    // reopens in the other mode (R-25). `toggle_section` no longer exists —
-    // the branch that owned R-25 removed it — so Theme-mode Tab can no longer
-    // be a no-op.
+    // Reconciled Tab routing: Settings mode toggles search (R-5, with or
+    // without Shift); Theme mode's bare Tab cycles the attribute filter and
+    // Shift+Tab keeps R-25's hop to the other mode.
     #[test]
-    fn tab_toggles_search_in_settings_and_reopens_in_theme_mode() {
+    fn tab_toggles_search_in_settings_cycles_filter_and_shift_reopens_in_theme_mode() {
         assert_eq!(
-            theme_settings_tab_action(ThemeSettingsMode::Settings),
+            theme_settings_tab_action(ThemeSettingsMode::Settings, false),
             ThemeSettingsTabAction::ToggleSearch
         );
         assert_eq!(
-            theme_settings_tab_action(ThemeSettingsMode::Theme),
+            theme_settings_tab_action(ThemeSettingsMode::Settings, true),
+            ThemeSettingsTabAction::ToggleSearch
+        );
+        assert_eq!(
+            theme_settings_tab_action(ThemeSettingsMode::Theme, false),
+            ThemeSettingsTabAction::CycleAttribute
+        );
+        assert_eq!(
+            theme_settings_tab_action(ThemeSettingsMode::Theme, true),
             ThemeSettingsTabAction::ReopenOtherMode
         );
     }

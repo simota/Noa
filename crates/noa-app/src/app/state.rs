@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use super::*;
+use crate::theme_settings::{RevertValues, ThemePairContext};
 
 /// App-wide GPU and glyph state shared by every tab/window.
 pub(super) struct GpuState {
@@ -303,8 +304,12 @@ pub(super) struct WindowState {
     /// The focused pane's last laid-out grid size, for the resize-overlay
     /// change check (`resize-overlay = after-first` skips the first layout).
     pub(super) last_grid: Option<(u16, u16)>,
-    /// The live `cols × rows` resize toast: its text and hide deadline.
-    pub(super) resize_overlay: Option<(String, Instant)>,
+    /// The single transient-toast slot (R-31/ADR-5): the `cols × rows`
+    /// resize overlay and the theme-settings-v2 commit Undo toast share
+    /// this one slot, tagged by [`ToastKind`] — a new toast of either kind
+    /// always replaces whatever was showing (spec's documented edge case:
+    /// "a newer toast replaces an older one").
+    pub(super) resize_overlay: Option<Toast>,
     /// `visual-bell`: the full-window flash stays up until this instant.
     pub(super) bell_flash_until: Option<Instant>,
     /// Last-synced native (AppKit) overlay model hashes — palette, theme
@@ -316,6 +321,49 @@ pub(super) struct WindowState {
 /// How long the `cols × rows` resize toast stays up after the last grid
 /// change (Ghostty's `resize-overlay-duration` default).
 pub(super) const RESIZE_OVERLAY_DURATION: Duration = Duration::from_millis(750);
+
+/// How long the R-31 commit-Undo toast stays up. Deliberately longer than
+/// [`RESIZE_OVERLAY_DURATION`]'s 750ms: a resize toast is purely
+/// informational and can afford to be brief even during a rapid drag, but
+/// an Undo toast asks for a one-time decision (read → decide → press ⌘Z),
+/// which needs real time (ux.md §6's proposed 6s, macOS's own
+/// Mail-style-undo-toast convention).
+pub(super) const UNDO_TOAST_DURATION: Duration = Duration::from_secs(6);
+
+/// R-31/ADR-5: the transient-toast slot's contents — text, expiry, and
+/// which of the two toasts it is.
+pub(super) struct Toast {
+    pub(super) text: String,
+    pub(super) until: Instant,
+    pub(super) kind: ToastKind,
+}
+
+/// R-31/FM-08: an Undo toast's payload — the pre-commit snapshot to restore
+/// plus the pair context a pair-aware undo write needs (mirrors why
+/// `commit_updates` itself needs the pair context — undoing a pair commit
+/// must restore `light:X,dark:Y` syntax, not clobber it with a bare name).
+/// A deliberate widening of the spec's literal `ToastKind::Undo(Box<RevertValues>)`
+/// signature: `RevertValues` alone can't reconstruct pair syntax on its own,
+/// and losing that would silently reintroduce the exact bug R-34 exists to
+/// fix, just on the undo path instead of the commit path.
+///
+/// FM-08's "invalidate after a later commit/reopen" guard needs no extra
+/// field here: a later *commit* replaces this whole `Toast` outright (the
+/// single-slot "new toast replaces old" rule already gives every commit its
+/// own fresh, correct Undo payload), and a later *reopen*
+/// (`App::open_theme_settings_session`) clears the slot unconditionally
+/// before building the new session — so by the time `⌘Z` can fire, either
+/// this exact payload is still the right one, or the slot is empty/holds a
+/// different toast and `⌘Z` is correctly a no-op.
+pub(super) struct UndoPayload {
+    pub(super) revert: RevertValues,
+    pub(super) theme_pair: Option<ThemePairContext>,
+}
+
+pub(super) enum ToastKind {
+    Resize,
+    Undo(Box<UndoPayload>),
+}
 
 /// How long the `visual-bell` flash stays up.
 pub(super) const BELL_FLASH_DURATION: Duration = Duration::from_millis(150);

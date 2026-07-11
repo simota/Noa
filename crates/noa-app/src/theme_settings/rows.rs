@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use noa_config::{BackgroundImageFit, BackgroundImagePosition, CursorShape, MacosTitlebarStyle};
 
 /// Which half of the (now-split) overlay owns ↑↓/←→ navigation. A session's
@@ -321,6 +324,11 @@ pub(crate) struct ThemeSettingsInit {
     /// existing session in the other mode (R-25) — `None` for every other
     /// open path (palette entry, menu item, keybind).
     pub(crate) carryover: Option<ThemeSettingsCarryover>,
+    /// R-29/ADR-5: the App-owned favorites store's current set, mirrored
+    /// read-only into this session (see [`super::ThemeSettings::set_favorites`]
+    /// for how a later `⌃F` toggle round-trips back in).
+    pub(crate) favorites: Arc<HashSet<String>>,
+    pub(crate) favorites_epoch: u64,
     pub(crate) font_size: f32,
     pub(crate) cursor_style: CursorShape,
     pub(crate) background_opacity: f32,

@@ -449,11 +449,12 @@ impl App {
         let now = Instant::now();
         let mut next: Option<Instant> = None;
         for state in self.windows.values_mut() {
-            if let Some((_, until)) = state.resize_overlay {
-                if now >= until {
+            if let Some(toast) = &state.resize_overlay {
+                if now >= toast.until {
                     state.resize_overlay = None;
                     state.window.request_redraw();
                 } else {
+                    let until = toast.until;
                     next = Some(next.map_or(until, |n| n.min(until)));
                 }
             }

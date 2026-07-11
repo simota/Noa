@@ -116,7 +116,11 @@ fn contrast_fg(bg: Rgb) -> Rgb {
 }
 
 /// WCAG relative luminance (0.0 = black .. 1.0 = white) of an sRGB color.
-fn relative_luminance(c: Rgb) -> f32 {
+/// `pub(crate)` (ADR-5/R-30) so `theme_settings::rich::attribute_of` can
+/// reuse this exact luminance math for its Light/Dark classification instead
+/// of adding a second implementation — `noa-render` stays untouched either
+/// way (this lives in `noa-app`, not the renderer).
+pub(crate) fn relative_luminance(c: Rgb) -> f32 {
     let lin = |v: u8| {
         let v = f32::from(v) / 255.0;
         if v <= 0.04045 {

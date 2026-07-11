@@ -42,6 +42,8 @@ fn init() -> ThemeSettingsInit {
         ],
         theme_pair: None,
         carryover: None,
+        favorites: std::sync::Arc::new(std::collections::HashSet::new()),
+        favorites_epoch: 0,
     }
 }
 
@@ -92,6 +94,24 @@ fn move_to_row(settings: &mut ThemeSettings, row: SettingsRowKind) {
         settings.move_down();
     }
     while settings.selected_row() > target {
+        settings.move_up();
+    }
+}
+
+/// Navigate the Theme-mode highlight to `pos` and guarantee
+/// `highlight_moved` becomes true — a plain `move_down` loop is a no-op
+/// (and so never flips `highlight_moved`) when `pos` is already the
+/// initial highlight (e.g. `open()` auto-positioned it there), so this
+/// "wiggles" once in that case without changing the final position.
+fn move_highlight_to(settings: &mut ThemeSettings, pos: usize) {
+    while settings.highlighted_index() < pos {
+        settings.move_down();
+    }
+    while settings.highlighted_index() > pos {
+        settings.move_up();
+    }
+    if !settings.should_preview() {
+        settings.move_down();
         settings.move_up();
     }
 }
@@ -1266,6 +1286,23 @@ fn every_mutator_that_changes_state_changes_the_fingerprint() {
     let _ = settings.commit(Path::new("/nonexistent/noa/config"), &mut writer);
     let fp_after = settings.view_fingerprint_u64();
     assert_ne!(fp_before, fp_after, "commit_error");
+
+    // R-29/R-30 (AC-60 extension): the favorites/attribute mutators.
+    let mut settings = ThemeSettings::open(init());
+    let fp0 = settings.view_fingerprint_u64();
+    settings.toggle_favorites_only();
+    let fp1 = settings.view_fingerprint_u64();
+    assert_ne!(fp0, fp1, "toggle_favorites_only");
+
+    settings.cycle_attribute_filter();
+    let fp2 = settings.view_fingerprint_u64();
+    assert_ne!(fp1, fp2, "cycle_attribute_filter");
+
+    let mut favorites = std::collections::HashSet::new();
+    favorites.insert("3024 Day".to_string());
+    settings.set_favorites(std::sync::Arc::new(favorites), 1);
+    let fp3 = settings.view_fingerprint_u64();
+    assert_ne!(fp2, fp3, "set_favorites");
 }
 
 // ---------------------------------------------------------------------
@@ -1421,4 +1458,265 @@ fn settings_mode_highlight_moved_is_always_false() {
     settings.push_text("x", Instant::now());
     settings.backspace(Instant::now());
     assert!(!settings.should_preview());
+}
+
+// AC-46 (R-32): wheel deltas accumulate and step by exactly one row per
+// threshold crossing — sub-threshold deltas move nothing, the carry
+// survives across calls, and a single oversized delta still steps only
+// once.
+#[test]
+fn apply_wheel_accumulates_and_steps_one_row_per_threshold_crossing() {
+    let mut settings = ThemeSettings::open(init());
+    let start = settings.highlighted_index();
+
+    assert!(
+        !settings.apply_wheel(-10.0),
+        "sub-threshold delta moves nothing"
+    );
+    assert_eq!(settings.highlighted_index(), start);
+
+    assert!(
+        settings.apply_wheel(-35.0),
+        "the accumulated -45 crosses -40"
+    );
+    assert_eq!(settings.highlighted_index(), start + 1);
+
+    // A single oversized delta still steps only once (never cascades).
+    let before = settings.highlighted_index();
+    assert!(settings.apply_wheel(-400.0));
+    assert_eq!(settings.highlighted_index(), before + 1);
+}
+
+// AC-45/46 (R-32): a positive (scroll-up) delta moves the highlight up.
+#[test]
+fn apply_wheel_positive_delta_moves_up() {
+    let mut settings = ThemeSettings::open(init());
+    settings.move_down();
+    settings.move_down();
+    let start = settings.highlighted_index();
+
+    assert!(settings.apply_wheel(45.0));
+    assert_eq!(settings.highlighted_index(), start - 1);
+}
+
+fn sample_revert(theme_name: &str) -> RevertValues {
+    RevertValues {
+        theme_name: theme_name.to_string(),
+        font_size: 16.0,
+        cursor_style: CursorShape::Bar,
+        background_opacity: 0.8,
+        background_blur_radius: 5,
+        background_image: "/tmp/wall.png".to_string(),
+        background_image_opacity: 0.5,
+        background_image_position: BackgroundImagePosition::Center,
+        background_image_fit: BackgroundImageFit::Cover,
+        background_image_repeat: true,
+        background_image_interval_secs: 30,
+        sidebar_preview_lines: 3,
+        quick_terminal_size: 0.4,
+    }
+}
+
+// AC-44 (R-31): `revert_updates` writes every snapshot field unconditionally
+// (an absolute restore, not a touched-gated diff).
+#[test]
+fn revert_updates_writes_every_snapshot_field_unconditionally() {
+    let updates = revert_updates(&sample_revert("3024 Day"), None);
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "theme"),
+        Some(&("theme".to_string(), "3024 Day".to_string()))
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "font-size"),
+        Some(&("font-size".to_string(), "16".to_string()))
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "cursor-style"),
+        Some(&("cursor-style".to_string(), "bar".to_string()))
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "background-blur-radius"),
+        Some(&("background-blur-radius".to_string(), "5".to_string()))
+    );
+}
+
+// AC-44/R-34: an Undo of a pair-config commit must restore pair syntax, not
+// clobber it with a bare name — the same guarantee `commit_updates` gives
+// on the forward path.
+#[test]
+fn revert_updates_preserves_pair_syntax_when_undoing_a_pair_commit() {
+    let pair = ThemePairContext {
+        active_is_light: true,
+        light: "A".to_string(),
+        dark: "B".to_string(),
+    };
+    let updates = revert_updates(&sample_revert("A"), Some(&pair));
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "theme"),
+        Some(&("theme".to_string(), "light:A,dark:B".to_string()))
+    );
+}
+
+// FM-01-adjacent: an unresolvable original theme (empty name) never writes
+// an empty `theme` value.
+#[test]
+fn revert_updates_omits_theme_key_when_snapshot_theme_name_is_empty() {
+    let updates = revert_updates(&sample_revert(""), None);
+    assert!(updates.iter().all(|(k, _)| k != "theme"));
+}
+
+// AC-39 (R-28): `filter_font_families` produces exactly the same
+// scoring/highlight positions `command_palette::fuzzy_match` would for each
+// family name — proof no second matcher exists.
+#[test]
+fn filter_font_families_matches_command_palette_fuzzy_match_scoring() {
+    let settings = ThemeSettings::open(ThemeSettingsInit {
+        available_font_families: vec![
+            "Menlo".to_string(),
+            "Monaco".to_string(),
+            "Courier New".to_string(),
+            "SF Mono".to_string(),
+        ],
+        ..init()
+    });
+
+    let results = settings.filter_font_families("mo");
+    let mut expected: Vec<(i32, String, Vec<usize>)> = [
+        "Menlo".to_string(),
+        "Monaco".to_string(),
+        "Courier New".to_string(),
+        "SF Mono".to_string(),
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        crate::command_palette::fuzzy_match("mo", &name)
+            .map(|(score, positions)| (score, name, positions))
+    })
+    .collect();
+    expected.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
+
+    assert_eq!(results.len(), expected.len());
+    for (result, (_, name, positions)) in results.iter().zip(expected.iter()) {
+        assert_eq!(&result.name, name);
+        assert_eq!(&result.positions, positions);
+    }
+}
+
+// AC-40 (R-29): favorites-only shows the intersection of the favorites set
+// and the fuzzy query, and `commit_updates()` never carries a
+// favorites-related key.
+#[test]
+fn favorites_only_filter_shows_only_the_favorited_theme_and_never_leaks_into_commit_updates() {
+    let mut favorites = std::collections::HashSet::new();
+    let theme_a = noa_theme::THEMES[10].0.to_string();
+    favorites.insert(theme_a.clone());
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        favorites: std::sync::Arc::new(favorites),
+        favorites_epoch: 1,
+        ..init()
+    });
+
+    settings.toggle_favorites_only();
+    assert!(settings.favorites_only());
+    assert_eq!(settings.filtered_len(), 1);
+    assert_eq!(
+        settings.filtered_entry(0).map(|(name, _)| name),
+        Some(theme_a.as_str())
+    );
+
+    let updates = settings.commit_updates();
+    assert!(
+        updates.iter().all(|(k, _)| !k.contains("favorite")),
+        "commit_updates must never carry a favorites-related key: {updates:?}"
+    );
+}
+
+// AC-42 (R-30): the attribute filter excludes the opposite polarity and
+// restores the full catalog when cycled back to "All".
+#[test]
+fn attribute_filter_excludes_the_opposite_polarity() {
+    let light_theme = noa_theme::resolve("3024 Day").expect("bundled theme exists");
+    let dark_theme = noa_theme::resolve("3024 Night").expect("bundled theme exists");
+    assert_eq!(attribute_of(light_theme), Attribute::Light);
+    assert_eq!(attribute_of(dark_theme), Attribute::Dark);
+
+    let mut settings = ThemeSettings::open(init());
+    let total = settings.filtered_len();
+
+    settings.cycle_attribute_filter(); // All -> Dark
+    assert_eq!(settings.attribute_filter(), Some(Attribute::Dark));
+    let dark_names: Vec<&str> = (0..settings.filtered_len())
+        .filter_map(|i| settings.filtered_entry(i).map(|(name, _)| name))
+        .collect();
+    assert!(!dark_names.contains(&"3024 Day"));
+    assert!(dark_names.contains(&"3024 Night"));
+
+    settings.cycle_attribute_filter(); // Dark -> Light
+    assert_eq!(settings.attribute_filter(), Some(Attribute::Light));
+    let light_names: Vec<&str> = (0..settings.filtered_len())
+        .filter_map(|i| settings.filtered_entry(i).map(|(name, _)| name))
+        .collect();
+    assert!(!light_names.contains(&"3024 Night"));
+    assert!(light_names.contains(&"3024 Day"));
+
+    settings.cycle_attribute_filter(); // Light -> All
+    assert_eq!(settings.attribute_filter(), None);
+    assert_eq!(settings.filtered_len(), total);
+}
+
+// AC-52a (Addendum A-2): a highlighted theme that survives a condition
+// change keeps tracking it, and the preview does not reset.
+#[test]
+fn ac52_condition_change_tracks_a_surviving_highlight_without_resetting_preview() {
+    let mut favorites = std::collections::HashSet::new();
+    favorites.insert("3024 Day".to_string());
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        favorites: std::sync::Arc::new(favorites),
+        favorites_epoch: 1,
+        ..init()
+    });
+    let target_pos = (0..settings.filtered_len())
+        .find(|&i| settings.filtered_entry(i).map(|(name, _)| name) == Some("3024 Day"))
+        .expect("3024 Day is in the catalog");
+    move_highlight_to(&mut settings, target_pos);
+    assert!(settings.should_preview());
+
+    settings.toggle_favorites_only(); // "3024 Day" survives (it's favorited)
+    assert_eq!(settings.highlighted_theme_name(), Some("3024 Day"));
+    assert!(
+        settings.should_preview(),
+        "a still-present highlight must not reset highlight_moved"
+    );
+}
+
+// AC-52b (Addendum A-2): a highlighted theme excluded by a condition change
+// jumps to index 0 without firing a new preview.
+#[test]
+fn ac52_condition_change_resets_highlight_moved_when_the_highlight_is_excluded() {
+    let mut settings = ThemeSettings::open(init());
+    let target_pos = (0..settings.filtered_len())
+        .find(|&i| settings.filtered_entry(i).map(|(name, _)| name) == Some("3024 Day"))
+        .expect("3024 Day is in the catalog");
+    move_highlight_to(&mut settings, target_pos);
+    assert!(settings.should_preview());
+
+    settings.cycle_attribute_filter(); // All -> Dark: excludes the Light "3024 Day"
+    assert_eq!(settings.highlighted_index(), 0);
+    assert!(
+        !settings.should_preview(),
+        "excluding the highlighted theme must reset highlight_moved (AC-52b)"
+    );
+}
+
+// AC-52c (Addendum A-2): a condition change that empties the list keeps
+// AC-16's existing "list empty, last preview stands" semantics.
+#[test]
+fn ac52_condition_change_to_zero_matches_keeps_ac16_empty_list_semantics() {
+    let mut settings = ThemeSettings::open(init()); // no favorites configured
+    settings.move_down();
+    assert!(settings.should_preview());
+
+    settings.toggle_favorites_only(); // empty favorites set -> filtered becomes empty
+    assert_eq!(settings.filtered_len(), 0);
+    assert_eq!(settings.highlighted_theme_name(), None);
 }

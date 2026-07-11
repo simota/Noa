@@ -81,6 +81,17 @@ impl App {
         carryover: Option<ThemeSettingsCarryover>,
         opened_at: Instant,
     ) {
+        // FM-08: a later reopen (fresh open *or* Tab) invalidates any
+        // pending Undo toast — see `UndoPayload`'s doc comment for why this
+        // single clear is enough to satisfy the whole guard.
+        if let Some(state) = self.windows.get_mut(&window_id)
+            && matches!(
+                state.resize_overlay.as_ref().map(|toast| &toast.kind),
+                Some(ToastKind::Undo(_))
+            )
+        {
+            state.resize_overlay = None;
+        }
         // FM-01: resolve `current_theme` the same pair-aware way
         // `effective_theme_name` does — reading `self.config.theme` alone
         // (the old behavior) is always empty under a `theme =
@@ -123,11 +134,14 @@ impl App {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
         let available_font_families = noa_font::list_families().unwrap_or_default();
+        let (favorites, favorites_epoch) = self.theme_favorites.snapshot();
         let init = ThemeSettingsInit {
             mode,
             current_theme,
             theme_pair,
             carryover,
+            favorites,
+            favorites_epoch,
             font_size: self.runtime_font_size,
             cursor_style,
             background_opacity: self.config.background_opacity,
@@ -212,6 +226,43 @@ impl App {
                     session.state.backspace(Instant::now());
                 }
                 self.request_window_redraw(window_id);
+                return;
+            }
+            // R-29/R-30: ⌃F (favorite the highlighted theme), ⌃⇧F ("show
+            // favorites only" view toggle), ⌃D (All → Dark → Light cycle) —
+            // only meaningful in the Theme picker, so a Settings-mode
+            // session falls through and lets these resolve/swallow as any
+            // other keybind would (R-3 direction 2). Checked ahead of the
+            // generic `keybinds.resolve` below because none of these are
+            // `AppCommand`s — they exist only inside this modal.
+            Key::Character(c)
+                if c.eq_ignore_ascii_case("f")
+                    && self.modifiers.control_key()
+                    && !self.modifiers.super_key()
+                    && !self.modifiers.alt_key()
+                    && self.theme_settings_mode_is_theme(window_id) =>
+            {
+                if self.modifiers.shift_key() {
+                    if let Some(session) = self.theme_settings.as_mut() {
+                        session.state.toggle_favorites_only();
+                    }
+                    self.after_theme_settings_navigation(window_id);
+                } else {
+                    self.toggle_theme_settings_favorite(window_id);
+                }
+                return;
+            }
+            Key::Character(c)
+                if c.eq_ignore_ascii_case("d")
+                    && self.modifiers.control_key()
+                    && !self.modifiers.super_key()
+                    && !self.modifiers.alt_key()
+                    && self.theme_settings_mode_is_theme(window_id) =>
+            {
+                if let Some(session) = self.theme_settings.as_mut() {
+                    session.state.cycle_attribute_filter();
+                }
+                self.after_theme_settings_navigation(window_id);
                 return;
             }
             _ => {}
@@ -302,6 +353,59 @@ impl App {
         true
     }
 
+    /// Whether `window_id`'s open session (if any) is in
+    /// [`ThemeSettingsMode::Theme`] — the `⌃F`/`⌃⇧F`/`⌃D` gate.
+    fn theme_settings_mode_is_theme(&self, window_id: WindowId) -> bool {
+        self.theme_settings
+            .as_ref()
+            .filter(|session| session.window_id == window_id)
+            .is_some_and(|session| session.state.mode() == ThemeSettingsMode::Theme)
+    }
+
+    /// ⌃F (R-29): toggle the highlighted theme's favorited status. Persists
+    /// immediately to the on-disk favorites store (never deferred to
+    /// Enter/commit — favorites never touch that path at all, AC-40) and
+    /// mirrors the freshly updated set back into the session
+    /// (`ThemeSettings::set_favorites`). A write failure is never silent
+    /// (FM-09): logged, and surfaced as a one-line notice reusing the
+    /// overlay's existing `commit_error`-style footer slot — this isn't a
+    /// *commit* error, but it's the same "one line, danger-toned, in the
+    /// footer" contract the spec calls for, with zero new UI plumbing.
+    fn toggle_theme_settings_favorite(&mut self, window_id: WindowId) {
+        let Some(name) = self
+            .theme_settings
+            .as_ref()
+            .filter(|session| session.window_id == window_id)
+            .and_then(|session| session.state.highlighted_theme_name())
+        else {
+            return;
+        };
+        match self.theme_favorites.toggle(name) {
+            Ok((favorites, epoch)) => {
+                if let Some(session) = self
+                    .theme_settings
+                    .as_mut()
+                    .filter(|session| session.window_id == window_id)
+                {
+                    session.state.set_favorites(favorites, epoch);
+                }
+            }
+            Err(err) => {
+                log::warn!("failed to save theme favorite {name:?}: {err}");
+                if let Some(session) = self
+                    .theme_settings
+                    .as_mut()
+                    .filter(|session| session.window_id == window_id)
+                {
+                    session
+                        .state
+                        .set_commit_error(format!("Failed to save favorite: {err}"));
+                }
+            }
+        }
+        self.request_window_redraw(window_id);
+    }
+
     /// ←→ on the focused settings row: applies the value change to the pure
     /// state machine, then applies whichever live [`RowEffect`] it reports
     /// (R-10) — font-size has none here, it always routes through the
@@ -332,6 +436,40 @@ impl App {
     pub(in crate::app) fn after_theme_settings_navigation(&mut self, window_id: WindowId) {
         self.sync_theme_settings_preview();
         self.request_window_redraw(window_id);
+    }
+
+    /// R-32: route a wheel/trackpad turn to the open theme-settings
+    /// overlay's highlight/selection (`ThemeSettings::apply_wheel`), the
+    /// same "`bool` = consumed" contract `Self::handle_sidebar_wheel` uses
+    /// — `App::on_mouse_wheel` checks this ahead of pane-scroll routing so
+    /// the event never reaches the terminal underneath while the overlay is
+    /// open, matching how every other theme-settings key is fully consumed
+    /// (R-3 direction 2). `true` (consumed) whenever the overlay owns
+    /// `window_id`'s keyboard, regardless of whether the accumulated delta
+    /// actually crossed the per-row threshold this call.
+    pub(in crate::app) fn handle_theme_settings_wheel(
+        &mut self,
+        window_id: WindowId,
+        delta: MouseScrollDelta,
+    ) -> bool {
+        let Some(session) = self
+            .theme_settings
+            .as_mut()
+            .filter(|session| session.window_id == window_id)
+        else {
+            return false;
+        };
+        // A `LineDelta` unit (one discrete wheel "click") steps exactly one
+        // row; a `PixelDelta` (trackpad) feeds its raw magnitude into the
+        // same threshold accumulator `apply_wheel` owns.
+        let delta_y = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y * crate::theme_settings::WHEEL_ROW_THRESHOLD,
+            MouseScrollDelta::PixelDelta(position) => position.y as f32,
+        };
+        if session.state.apply_wheel(delta_y) {
+            self.after_theme_settings_navigation(window_id);
+        }
+        true
     }
 
     /// R-6: resolve the overlay's currently highlighted theme into
@@ -438,6 +576,19 @@ impl App {
             return;
         };
 
+        // R-31: snapshot the Undo toast's payload before anything else
+        // below can consume `session` — the pre-commit values/pair context
+        // (`ThemeSettings::pre_commit_snapshot` is read-only, no side
+        // effects) and the ux.md §9 microcopy, which differs by mode.
+        let (pre_commit_revert, pre_commit_theme_pair) = session.state.pre_commit_snapshot();
+        let undo_toast_text = match session.state.mode() {
+            ThemeSettingsMode::Theme => {
+                let name = session.state.highlighted_theme_name().unwrap_or("");
+                format!("Theme set to \"{name}\" \u{b7} \u{2318}Z to undo")
+            }
+            ThemeSettingsMode::Settings => "Settings saved \u{b7} \u{2318}Z to undo".to_string(),
+        };
+
         // The write already landed on disk; everything from here is an
         // in-memory swap that cannot itself fail, so there is no reachable
         // state where only one half of the commit applied.
@@ -449,8 +600,40 @@ impl App {
             crate::chrome::select_palette(gpu.theme.is_light());
             gpu.chrome_textures.reset();
         }
-        if let Some(name) = updates.iter().find(|(key, _)| key == "theme") {
-            self.config.theme = Some(name.1.clone());
+        if updates.iter().any(|(key, _)| key == "theme") {
+            // R-34/ADR-4 in-memory counterpart: a pair config's committed
+            // `updates` value is the whole `"light:X,dark:Y"` string (not a
+            // bare theme name — `noa_theme::resolve` couldn't look it up),
+            // so mirroring it into `self.config.theme` verbatim would both
+            // corrupt that field (its contract is a bare name) and, worse,
+            // leave `self.config.theme_appearance` stale — the very field
+            // `resolve_current_theme`/`effective_theme_name` actually read
+            // for a pair config, silently reverting a later reopen back to
+            // the pre-commit active theme. Update the correct field instead,
+            // from the *resolved* new name plus the pair context captured
+            // at open (`pre_commit_theme_pair`), not by reparsing the
+            // written string.
+            match &pre_commit_theme_pair {
+                Some(ctx) => {
+                    let new_name = session
+                        .state
+                        .highlighted_theme_name()
+                        .unwrap_or_default()
+                        .to_string();
+                    let (light, dark) = if ctx.active_is_light {
+                        (new_name, ctx.dark.clone())
+                    } else {
+                        (ctx.light.clone(), new_name)
+                    };
+                    self.config.theme_appearance =
+                        Some(noa_config::ThemeAppearancePair { light, dark });
+                }
+                None => {
+                    if let Some(name) = updates.iter().find(|(key, _)| key == "theme") {
+                        self.config.theme = Some(name.1.clone());
+                    }
+                }
+            }
         }
         // Font-size may still have an unfired debounce (Enter pressed within
         // the ~150ms window after the last ←→/digit edit) — finalize the
@@ -466,11 +649,122 @@ impl App {
         // already uses for opaque-startup opacity/blur. Deliberate deviation,
         // recorded for the acceptance check rather than silently dropped.
 
+        // R-31: the Undo toast — always shown on a successful commit
+        // (spec's literal "Enter確定成功直後に...表示する", regardless of
+        // whether anything actually differed from the pre-open snapshot).
+        // Uses the *same* single toast slot the resize overlay does
+        // (ADR-5's single-slot "newer replaces older" rule), so this both
+        // supersedes any resize toast currently showing and is itself
+        // superseded by the next one of either kind.
+        if let Some(state) = self.windows.get_mut(&window_id) {
+            state.resize_overlay = Some(Toast {
+                text: undo_toast_text,
+                until: Instant::now() + UNDO_TOAST_DURATION,
+                kind: ToastKind::Undo(Box::new(UndoPayload {
+                    revert: pre_commit_revert,
+                    theme_pair: pre_commit_theme_pair,
+                })),
+            });
+        }
+
         for id in commit_redraw_targets(&self.windows) {
             self.request_window_redraw(id);
         }
         // `session` (never put back into `self.theme_settings`) is dropped
         // here — the overlay is closed.
+    }
+
+    /// ⌘Z (R-31) — effective only once the overlay itself has closed (while
+    /// open, every key including this one is consumed by
+    /// `handle_theme_settings_key` instead, so the two can never race).
+    /// Re-commits the pending Undo toast's pre-commit snapshot through the
+    /// *same* `write_config_updates` call `commit_theme_settings` itself
+    /// uses (R-31: no new write path — [`crate::theme_settings::revert_updates`]
+    /// is only the pure "what to write" half), mirrors the same in-memory
+    /// swap, then clears the toast so a repeat press can't fire twice.
+    /// `false` (a silent no-op) when no Undo toast is currently showing for
+    /// `window_id`, or it already expired — "the toast is gone" *is* the
+    /// whole UI for "the undo window has closed" (FM-08, no separate modal).
+    pub(in crate::app) fn undo_theme_settings_commit(&mut self, window_id: WindowId) -> bool {
+        let now = Instant::now();
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return false;
+        };
+        let is_live_undo_toast = state
+            .resize_overlay
+            .as_ref()
+            .is_some_and(|toast| now < toast.until && matches!(toast.kind, ToastKind::Undo(_)));
+        if !is_live_undo_toast {
+            return false;
+        }
+        let Some(Toast {
+            kind: ToastKind::Undo(payload),
+            ..
+        }) = state.resize_overlay.take()
+        else {
+            unreachable!("is_live_undo_toast just confirmed this shape");
+        };
+
+        let Some(config_path) = noa_config::default_config_path() else {
+            return false;
+        };
+        let updates =
+            crate::theme_settings::revert_updates(&payload.revert, payload.theme_pair.as_ref());
+        if let Err(err) = noa_config::write_config_updates(&config_path, &updates) {
+            log::warn!("failed to undo theme-settings commit: {err}");
+            return false;
+        }
+
+        let overrides = self.theme_overrides();
+        let reverted_theme_name =
+            (!payload.revert.theme_name.is_empty()).then(|| payload.revert.theme_name.clone());
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.theme = crate::theme::resolve_theme_with_overrides(
+                reverted_theme_name.as_deref(),
+                &overrides,
+            );
+            gpu.preview_theme = None;
+            crate::chrome::select_palette(gpu.theme.is_light());
+            gpu.chrome_textures.reset();
+        }
+        match &payload.theme_pair {
+            Some(ctx) => {
+                self.config.theme_appearance = Some(noa_config::ThemeAppearancePair {
+                    light: ctx.light.clone(),
+                    dark: ctx.dark.clone(),
+                });
+            }
+            None => {
+                if let Some(name) = &reverted_theme_name {
+                    self.config.theme = Some(name.clone());
+                }
+            }
+        }
+        self.config.font_size = payload.revert.font_size;
+        self.config.background_opacity = payload.revert.background_opacity;
+        self.config.background_blur_radius = payload.revert.background_blur_radius;
+        self.config.background_image = (!payload.revert.background_image.is_empty())
+            .then(|| PathBuf::from(&payload.revert.background_image));
+        self.config.background_image_opacity = payload.revert.background_image_opacity;
+        self.config.background_image_position = payload.revert.background_image_position;
+        self.config.background_image_fit = payload.revert.background_image_fit;
+        self.config.background_image_repeat = payload.revert.background_image_repeat;
+        self.config.background_image_interval_secs = payload.revert.background_image_interval_secs;
+        self.config.cursor_style = Some(payload.revert.cursor_style);
+        self.apply_runtime_font_size(window_id, payload.revert.font_size);
+        self.apply_live_cursor_style(payload.revert.cursor_style);
+        self.apply_live_background_opacity(payload.revert.background_opacity);
+        self.apply_live_background_blur(
+            payload.revert.background_blur_radius,
+            payload.revert.background_opacity,
+        );
+        self.apply_live_sidebar_preview_lines(payload.revert.sidebar_preview_lines);
+        self.apply_reloaded_background_image();
+
+        for id in commit_redraw_targets(&self.windows) {
+            self.request_window_redraw(id);
+        }
+        true
     }
 
     /// Mirror the just-committed runtime rows (font-size, background-opacity,
@@ -810,6 +1104,8 @@ mod commit_theme_settings_tests {
             available_font_families: Vec::new(),
             theme_pair: None,
             carryover: None,
+            favorites: std::sync::Arc::new(std::collections::HashSet::new()),
+            favorites_epoch: 0,
         });
         while SettingsRowKind::ALL[settings.selected_row()] != SettingsRowKind::QuickTerminalHeight
         {
@@ -880,6 +1176,8 @@ mod commit_theme_settings_tests {
             available_font_families: Vec::new(),
             theme_pair: None,
             carryover: None,
+            favorites: std::sync::Arc::new(std::collections::HashSet::new()),
+            favorites_epoch: 0,
         });
 
         assert_eq!(selected_background_image_text(&settings), None);

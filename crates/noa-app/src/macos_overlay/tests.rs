@@ -47,6 +47,8 @@ fn test_theme_settings_init() -> ThemeSettingsInit {
         available_font_families: Vec::new(),
         theme_pair: None,
         carryover: None,
+        favorites: std::sync::Arc::new(std::collections::HashSet::new()),
+        favorites_epoch: 0,
     }
 }
 

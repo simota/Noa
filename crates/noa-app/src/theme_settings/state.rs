@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::Path;
@@ -10,9 +11,9 @@ use crate::command_palette::fuzzy_match;
 use crate::debounce::Debouncer;
 
 use super::{
-    RevertValues, RowDraft, RowEffect, Section, SettingsRow, SettingsRowKind, ThemePairContext,
-    ThemeSettingsCarryover, ThemeSettingsInit, ThemeSettingsMode, background_image_fit_value,
-    background_image_position_value,
+    Attribute, RevertValues, RowDraft, RowEffect, Section, SettingsRow, SettingsRowKind,
+    ThemePairContext, ThemeSettingsCarryover, ThemeSettingsInit, ThemeSettingsMode, attribute_of,
+    background_image_fit_value, background_image_position_value,
 };
 
 /// The injectable config-writer seam [`ThemeSettings::commit`] takes
@@ -25,6 +26,13 @@ pub(crate) type ConfigWriteFn<'a> = dyn FnMut(&Path, &[(String, String)]) -> io:
 /// digit keystrokes fires once, `apply_runtime_font_size` runs on the final
 /// value.
 const FONT_SIZE_DEBOUNCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// R-32/FM-07: wheel/trackpad delta magnitude needed to move
+/// [`ThemeSettings::apply_wheel`]'s highlight/selection by one row — its
+/// own dedicated constant, deliberately not
+/// `crate::session_overview::WHEEL_PAGE_THRESHOLD` (that one paginates a
+/// whole grid of Overview tiles per crossing; this steps a single list row).
+pub(crate) const WHEEL_ROW_THRESHOLD: f32 = 40.0;
 
 /// Font-size step per ←→ press. Mirrors the coarser `cmd+=`/`cmd+-` step
 /// (`app/helpers.rs`'s runtime font actions use whole points); this row uses
@@ -66,6 +74,15 @@ const QUICK_TERMINAL_SIZE_MAX: f32 = 1.0;
 struct ThemeMatch {
     index: usize,
     positions: Vec<usize>,
+}
+
+/// R-28: one fuzzy match of a font-family query against
+/// `available_font_families` — [`ThemeSettings::filter_font_families`]'s
+/// result type, the `FontFamily` row's analog of [`ThemeMatch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FontMatch {
+    pub(crate) name: String,
+    pub(crate) positions: Vec<usize>,
 }
 
 /// The open theme-settings overlay's editable state (R-2..R-11, R-16). Holds
@@ -126,6 +143,28 @@ pub(crate) struct ThemeSettings {
     /// `light:X,dark:Y` pair — see [`ThemePairContext`]. Read only by
     /// [`Self::commit_updates`]; never mutated after `open()`.
     theme_pair: Option<ThemePairContext>,
+    /// R-29/ADR-5: the App-owned favorites set, mirrored in here read-only
+    /// — this session never mutates the store itself (`App::commit`-style
+    /// commit-only-writer pattern); a `⌃F` toggle round-trips through
+    /// `App` (which persists it) and comes back via [`Self::set_favorites`].
+    /// Never consulted by [`Self::commit_updates`] (AC-40).
+    favorites: Arc<HashSet<String>>,
+    /// Bumped by [`Self::set_favorites`] on every real change — part of
+    /// [`Self::view_fingerprint`] since the `Arc` pointer alone can't tell
+    /// "the *set* changed" apart from "a fresh clone of the same contents"
+    /// the way `filtered`'s all-or-nothing replacement does.
+    favorites_epoch: u64,
+    /// R-29 (⌃⇧F): the "show only favorites" *view* filter — narrows
+    /// `filtered` alongside the fuzzy text query; never touches
+    /// `commit_updates()` (AC-40).
+    favorites_only: bool,
+    /// R-30 (⌃D): the light/dark attribute view filter — same "narrows
+    /// `filtered`, never reaches `commit_updates()`" contract as
+    /// `favorites_only`.
+    attribute_filter: Option<Attribute>,
+    /// R-32: sub-threshold wheel/trackpad delta accumulated since the last
+    /// row step — see [`Self::apply_wheel`].
+    wheel_accum: f32,
 }
 
 impl ThemeSettings {
@@ -261,6 +300,16 @@ impl ThemeSettings {
             available_font_families: Arc::new(init.available_font_families),
             commit_error: None,
             theme_pair: init.theme_pair,
+            favorites: init.favorites,
+            favorites_epoch: init.favorites_epoch,
+            // Deliberately not carried across a Tab hop (unlike
+            // filter/highlighted/selected_row/rows/snapshot) — these are
+            // view filters scoped to "what am I looking at right now", not
+            // part of the editing task's persistent state, so each fresh
+            // Theme-mode open starts from "All"/unfiltered.
+            favorites_only: false,
+            attribute_filter: None,
+            wheel_accum: 0.0,
         };
         settings.recompute_filtered();
         match &init.carryover {
@@ -443,6 +492,36 @@ impl ThemeSettings {
                 }
             }
         }
+    }
+
+    /// R-32: accumulate one wheel/trackpad `delta_y` and step the current
+    /// section's highlight/selection by at most one row — the same
+    /// bounded-remainder accumulation pattern
+    /// `session_overview::page_after_wheel` uses (crossing the threshold
+    /// steps by exactly one, the excess carries forward, clamping resets
+    /// the accumulator instead of building up latent scroll), adapted from
+    /// "one page" to "one row" and using its own dedicated threshold
+    /// (FM-07: never `session_overview::WHEEL_PAGE_THRESHOLD` — that
+    /// constant paginates a grid of Overview tiles, an unrelated unit).
+    /// Positive `delta_y` (scroll up) moves up; negative moves down.
+    /// Returns whether a step actually happened, so `App` knows whether to
+    /// resync the preview/redraw.
+    pub(crate) fn apply_wheel(&mut self, delta_y: f32) -> bool {
+        let accum = self.wheel_accum + delta_y;
+        if accum.abs() < WHEEL_ROW_THRESHOLD {
+            self.wheel_accum = accum;
+            return false;
+        }
+        let before = (self.highlighted, self.selected_row);
+        if accum > 0.0 {
+            self.move_up();
+        } else {
+            self.move_down();
+        }
+        let moved = before != (self.highlighted, self.selected_row);
+        let carry = accum % WHEEL_ROW_THRESHOLD;
+        self.wheel_accum = if moved { carry } else { 0.0 };
+        moved
     }
 
     /// Printable text: fuzzy-filters the theme picker, or feeds direct digit
@@ -799,10 +878,41 @@ impl ThemeSettings {
         self.available_font_families[next].clone()
     }
 
+    /// R-28: fuzzy-filter `available_font_families` by `query`, best match
+    /// first — reuses [`fuzzy_match`] (AC-39: no second matcher, same
+    /// scoring/highlight-position contract as the theme picker/command
+    /// palette). Read-only: [`Self::cycle_font_family`]'s ←→ full-list
+    /// cycling is unchanged by this — `FontFamily` stays a commit-only row
+    /// (`SettingsRowKind::is_live() == false`).
+    pub(crate) fn filter_font_families(&self, query: &str) -> Vec<FontMatch> {
+        let mut matches: Vec<(i32, FontMatch)> = self
+            .available_font_families
+            .iter()
+            .filter_map(|name| {
+                fuzzy_match(query, name).map(|(score, positions)| {
+                    (
+                        score,
+                        FontMatch {
+                            name: name.clone(),
+                            positions,
+                        },
+                    )
+                })
+            })
+            .collect();
+        matches.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        matches.into_iter().map(|(_, m)| m).collect()
+    }
+
     /// Always a full 574-entry catalog rescan — used only by [`Self::open`],
     /// where there is no previous `filtered` result set to narrow from.
     fn recompute_filtered(&mut self) {
-        self.filtered = Arc::new(filter_themes(&self.filter));
+        self.filtered = Arc::new(filter_themes(
+            &self.filter,
+            &self.favorites,
+            self.favorites_only,
+            self.attribute_filter,
+        ));
         self.highlighted = 0;
     }
 
@@ -823,14 +933,110 @@ impl ThemeSettings {
         self.filtered = if self.filter.len() > previous_filter.len()
             && self.filter.starts_with(previous_filter)
         {
-            Arc::new(narrow_filtered(&self.filtered, &self.filter))
+            Arc::new(narrow_filtered(
+                &self.filtered,
+                &self.filter,
+                &self.favorites,
+                self.favorites_only,
+                self.attribute_filter,
+            ))
         } else {
-            Arc::new(filter_themes(&self.filter))
+            Arc::new(filter_themes(
+                &self.filter,
+                &self.favorites,
+                self.favorites_only,
+                self.attribute_filter,
+            ))
         };
         self.highlighted = 0;
         if !self.filtered.is_empty() {
             self.highlight_moved = true;
         }
+    }
+
+    /// R-29/R-30/AC-52 (Addendum A-2): re-run the fuzzy filter after a
+    /// favorites/attribute *condition* changed (⌃⇧F, ⌃D, or an externally
+    /// refreshed favorites set via [`Self::set_favorites`]) — always a full
+    /// rescan, never [`narrow_filtered`]'s prefix-narrowing: a condition
+    /// change can both re-admit a previously-excluded entry and exclude a
+    /// previously-included one, which narrowing's "the prior set is a
+    /// superset of the answer" assumption doesn't hold for.
+    ///
+    /// Three-way highlight contract: (a) the highlighted theme is still
+    /// present in the new set → track it there, `preview_theme` stays
+    /// whatever it was; (b) excluded but the list is non-empty → jump to
+    /// index 0 *without* firing a new preview (`highlight_moved` reset, so
+    /// `App` won't resolve a new `preview_theme` until the user explicitly
+    /// navigates — flipping a filter must never change what's previewed by
+    /// itself); (c) empty → AC-16's existing "list empty, last preview
+    /// stands" behavior falls out for free (nothing to highlight either
+    /// way).
+    fn recompute_after_condition_change(&mut self) {
+        let previously_highlighted = self
+            .filtered
+            .get(self.highlighted)
+            .map(|m| noa_theme::THEMES[m.index].0);
+        self.filtered = Arc::new(filter_themes(
+            &self.filter,
+            &self.favorites,
+            self.favorites_only,
+            self.attribute_filter,
+        ));
+        match previously_highlighted.and_then(|name| {
+            self.filtered
+                .iter()
+                .position(|m| noa_theme::THEMES[m.index].0 == name)
+        }) {
+            Some(pos) => self.highlighted = pos,
+            None => {
+                self.highlighted = 0;
+                self.highlight_moved = false;
+            }
+        }
+    }
+
+    /// R-29 (⌃⇧F): toggle the "show only favorites" view filter (§4/§5
+    /// chip). Never touches `commit_updates()`'s output (AC-40).
+    pub(crate) fn toggle_favorites_only(&mut self) {
+        self.favorites_only = !self.favorites_only;
+        self.recompute_after_condition_change();
+    }
+
+    pub(crate) fn favorites_only(&self) -> bool {
+        self.favorites_only
+    }
+
+    /// R-30 (⌃D): cycle All → Dark → Light → All (ux.md §5).
+    pub(crate) fn cycle_attribute_filter(&mut self) {
+        self.attribute_filter = match self.attribute_filter {
+            None => Some(Attribute::Dark),
+            Some(Attribute::Dark) => Some(Attribute::Light),
+            Some(Attribute::Light) => None,
+        };
+        self.recompute_after_condition_change();
+    }
+
+    pub(crate) fn attribute_filter(&self) -> Option<Attribute> {
+        self.attribute_filter
+    }
+
+    /// R-29 (§4): whether `name` is currently favorited — drives the ★
+    /// marker in both draw paths.
+    pub(crate) fn is_favorite(&self, name: &str) -> bool {
+        self.favorites.contains(name)
+    }
+
+    /// R-29/ADR-5: `App` calls this after it has persisted a `⌃F` toggle to
+    /// the on-disk favorites store — this session never writes the store
+    /// itself, only mirrors the freshly updated `Arc`+epoch (the same
+    /// "swap in a new immutable snapshot" pattern [`Self::recompute_filtered`]
+    /// already uses for `filtered`) and re-runs the condition-change
+    /// contract (a `favorites_only` view might now include/exclude the
+    /// just-toggled theme).
+    pub(crate) fn set_favorites(&mut self, favorites: Arc<HashSet<String>>, epoch: u64) {
+        self.favorites = favorites;
+        self.favorites_epoch = epoch;
+        self.recompute_after_condition_change();
     }
 
     /// The live `background-opacity` draft (row 1), for `App` to re-apply
@@ -1014,6 +1220,19 @@ impl ThemeSettings {
         }
     }
 
+    /// R-31: the snapshot a just-succeeded [`Self::commit`] should hand
+    /// `App` for its Undo toast — `self.snapshot` itself (the values active
+    /// before *this whole session* started, R-16's revert target), plus the
+    /// pair context a pair-aware undo write needs to restore
+    /// `light:X,dark:Y` syntax instead of clobbering it with a bare name
+    /// (the same reason [`Self::commit_updates`] needs it). Read-only, no
+    /// side effects — unlike [`Self::revert`], which also cancels the
+    /// font-size debounce (correct for an Esc that closes the session, not
+    /// for this, called right after a *successful* commit).
+    pub(crate) fn pre_commit_snapshot(&self) -> (RevertValues, Option<ThemePairContext>) {
+        (self.snapshot.clone(), self.theme_pair.clone())
+    }
+
     /// Cheap, allocation-free identity for
     /// [`crate::macos_overlay::sync_theme_settings`]'s change-detection key
     /// (ADR-2/R-20/NFR-7): every field that can influence
@@ -1047,6 +1266,9 @@ impl ThemeSettings {
         self.background_image_text.hash(hasher);
         self.opaque_at_startup.hash(hasher);
         (Arc::as_ptr(&self.available_font_families) as usize).hash(hasher);
+        self.favorites_epoch.hash(hasher);
+        self.favorites_only.hash(hasher);
+        self.attribute_filter.hash(hasher);
     }
 
     /// Test-only convenience over [`Self::view_fingerprint`] — a `u64`
@@ -1066,6 +1288,82 @@ impl ThemeSettings {
     pub(crate) fn filtered_arc_strong_count(&self) -> usize {
         Arc::strong_count(&self.filtered)
     }
+}
+
+/// R-31 (AC-44): the config `key = value` pairs that restore `revert` —
+/// mirrors [`ThemeSettings::commit_updates`]'s per-field formatting, but
+/// unconditional (every field the snapshot tracks is rewritten, not just
+/// touched ones) since Undo means "go back to exactly this snapshot", not
+/// "persist an edit". `App`'s Undo path hands this straight to the *same*
+/// `write_config_updates` closure `commit_theme_settings` itself uses (R-31:
+/// no new write path) — this function is only the pure "what to write"
+/// half. An empty `revert.theme_name` (no theme was ever resolvable —
+/// FM-01's guard) omits the `theme` key entirely rather than writing an
+/// empty value.
+pub(crate) fn revert_updates(
+    revert: &RevertValues,
+    theme_pair: Option<&ThemePairContext>,
+) -> Vec<(String, String)> {
+    let mut updates = Vec::new();
+    if !revert.theme_name.is_empty() {
+        match theme_pair {
+            Some(ctx) => {
+                let (light, dark) = if ctx.active_is_light {
+                    (revert.theme_name.as_str(), ctx.dark.as_str())
+                } else {
+                    (ctx.light.as_str(), revert.theme_name.as_str())
+                };
+                updates.push(("theme".to_string(), format!("light:{light},dark:{dark}")));
+            }
+            None => updates.push(("theme".to_string(), revert.theme_name.clone())),
+        }
+    }
+    updates.push(("font-size".to_string(), format!("{}", revert.font_size)));
+    updates.push((
+        "background-opacity".to_string(),
+        format!("{:.2}", revert.background_opacity),
+    ));
+    updates.push((
+        "background-blur-radius".to_string(),
+        revert.background_blur_radius.to_string(),
+    ));
+    updates.push((
+        "background-image".to_string(),
+        revert.background_image.clone(),
+    ));
+    updates.push((
+        "background-image-opacity".to_string(),
+        format!("{:.2}", revert.background_image_opacity),
+    ));
+    updates.push((
+        "background-image-position".to_string(),
+        background_image_position_value(revert.background_image_position).to_string(),
+    ));
+    updates.push((
+        "background-image-fit".to_string(),
+        background_image_fit_value(revert.background_image_fit).to_string(),
+    ));
+    updates.push((
+        "background-image-repeat".to_string(),
+        revert.background_image_repeat.to_string(),
+    ));
+    updates.push((
+        "background-image-interval".to_string(),
+        revert.background_image_interval_secs.to_string(),
+    ));
+    updates.push((
+        "cursor-style".to_string(),
+        cursor_shape_config_value(revert.cursor_style).to_string(),
+    ));
+    updates.push((
+        "sidebar-preview-lines".to_string(),
+        revert.sidebar_preview_lines.to_string(),
+    ));
+    updates.push((
+        "quick-terminal-size".to_string(),
+        format!("{:.2}", revert.quick_terminal_size),
+    ));
+    updates
 }
 
 /// `cursor-style` config value for `shape` (mirrors
@@ -1179,18 +1477,67 @@ fn score_and_sort(filter: &str, indices: impl ExactSizeIterator<Item = usize>) -
     matches.into_iter().map(|(_, m)| m).collect()
 }
 
-/// The full theme catalog fuzzy-filtered by `filter`. An empty filter
-/// matches every entry in catalog order (score 0, no highlight), mirroring
+/// R-29/R-30: whether catalog entry `index` survives the current
+/// favorites-only / attribute view filters — applied *before* fuzzy scoring
+/// in both [`filter_themes`] and [`narrow_filtered`], so those conditions
+/// narrow the same candidate set the fuzzy text query then scores (and the
+/// AC-28/29 scan-count instrumentation reflects the post-condition
+/// candidate count, not the raw 574). A no-op predicate (always `true`) when
+/// neither condition is active, which is every existing call site before
+/// this increment — preserves their exact prior scan counts.
+fn matches_conditions(
+    index: usize,
+    favorites: &HashSet<String>,
+    favorites_only: bool,
+    attribute_filter: Option<Attribute>,
+) -> bool {
+    if favorites_only && !favorites.contains(noa_theme::THEMES[index].0) {
+        return false;
+    }
+    if let Some(attr) = attribute_filter
+        && attribute_of(&noa_theme::THEMES[index].1) != attr
+    {
+        return false;
+    }
+    true
+}
+
+/// The full theme catalog fuzzy-filtered by `filter`, narrowed first by the
+/// favorites/attribute view conditions (R-29/R-30). An empty filter matches
+/// every surviving entry in catalog order (score 0, no highlight), mirroring
 /// [`crate::command_palette::command_palette_matches`]'s empty-query
 /// behavior.
-fn filter_themes(filter: &str) -> Vec<ThemeMatch> {
-    score_and_sort(filter, 0..noa_theme::THEMES.len())
+fn filter_themes(
+    filter: &str,
+    favorites: &HashSet<String>,
+    favorites_only: bool,
+    attribute_filter: Option<Attribute>,
+) -> Vec<ThemeMatch> {
+    let candidates: Vec<usize> = (0..noa_theme::THEMES.len())
+        .filter(|&index| matches_conditions(index, favorites, favorites_only, attribute_filter))
+        .collect();
+    score_and_sort(filter, candidates.into_iter())
 }
 
 /// R-21/ADR-3: re-score only `prior`'s entries against `filter` — used when
 /// `filter` is a strict extension of the filter that produced `prior`
 /// (AC-28): a theme that didn't match the shorter filter can never match a
-/// longer one that starts with it.
-fn narrow_filtered(prior: &[ThemeMatch], filter: &str) -> Vec<ThemeMatch> {
-    score_and_sort(filter, prior.iter().map(|m| m.index))
+/// longer one that starts with it. Re-applies the same view conditions
+/// `prior` was already built under (a no-op filter in practice, since
+/// conditions never change between two calls this narrows between — only
+/// [`ThemeSettings::recompute_after_condition_change`]'s full rescan runs
+/// when they do), keeping this and [`filter_themes`] symmetric.
+fn narrow_filtered(
+    prior: &[ThemeMatch],
+    filter: &str,
+    favorites: &HashSet<String>,
+    favorites_only: bool,
+    attribute_filter: Option<Attribute>,
+) -> Vec<ThemeMatch> {
+    let candidates: Vec<usize> = prior
+        .iter()
+        .map(|m| m.index)
+        .filter(|&index| matches_conditions(index, favorites, favorites_only, attribute_filter))
+        .collect();
+    score_and_sort(filter, candidates.into_iter())
 }

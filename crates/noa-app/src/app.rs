@@ -222,6 +222,10 @@ pub struct App {
     /// [`ThemeSettingsSession`]. Mutually exclusive with `command_palette`
     /// and `search_prompt` (R-3, `App::active_overlay`).
     theme_settings: Option<ThemeSettingsSession>,
+    /// R-29/ADR-5: the theme-settings-v2 favorites store — lazily loaded,
+    /// mirrored read-only into each `ThemeSettings` session and updated
+    /// (persisted immediately) by a `⌃F` toggle.
+    theme_favorites: crate::theme_favorites::ThemeFavorites,
     /// The open confirmation dialog (paste protection / clipboard-read), if
     /// any — see [`ConfirmDialogSession`].
     confirm_dialog: Option<ConfirmDialogSession>,
@@ -387,6 +391,7 @@ impl App {
             command_palette: None,
             send_selection_picker: None,
             theme_settings: None,
+            theme_favorites: crate::theme_favorites::ThemeFavorites::new(),
             confirm_dialog: None,
             sidebar_rename: None,
             tab_title_prompt: None,

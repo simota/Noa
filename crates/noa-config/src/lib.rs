@@ -993,6 +993,18 @@ pub fn legacy_toml_config_path_in(config_dir: &Path) -> PathBuf {
     config_dir.join("noa").join("config.toml")
 }
 
+/// Path to the theme-settings-v2 favorites file (R-29/ADR-5): a plain
+/// newline-delimited list of favorited theme names, living beside the
+/// config file (a UI preference, not session topology — so it survives
+/// `window-save-state = never`, unlike `session_state_path`).
+pub fn theme_favorites_path() -> Option<PathBuf> {
+    xdg_config_dir().map(|path| theme_favorites_path_in(&path))
+}
+
+pub fn theme_favorites_path_in(config_dir: &Path) -> PathBuf {
+    config_dir.join("noa").join("theme-favorites")
+}
+
 /// Path to the persisted session-state file
 /// (`<data-dir>/noa/session.json`; on macOS `<data-dir>` is
 /// `~/Library/Application Support`). Holds the window/tab/split topology and

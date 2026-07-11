@@ -52,8 +52,30 @@ pub(crate) struct IoThreadHandle {
 impl IoThreadHandle {
     const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
+    /// Signal shutdown and reap the io thread off the caller (Item 6): a pty
+    /// write stuck mid-syscall could otherwise freeze the caller — the main
+    /// thread on every pane close — for up to `JOIN_TIMEOUT`, and a
+    /// window/app close that tears down N panes in one sweep multiplies
+    /// that. The wait + join is handed to a detached reaper thread instead;
+    /// `Pty::drop` already kills the child process as soon as the io
+    /// thread's closure returns and drops its owned `Pty`, independent of
+    /// whether this join ever completes, so detaching changes nothing about
+    /// shutdown correctness — including at final process exit (`Drop for
+    /// App`), where the OS reclaims any still-running reaper along with
+    /// everything else.
+    ///
+    /// Accepted risk: a reaping thread outlives the pane/window it belonged
+    /// to by construction. If the OS ever reused this pane's `WindowId` for
+    /// a brand-new window before the old io thread noticed `shutdown_rx` and
+    /// exited, that stale thread's `PtyExit`/`Redraw` would carry the reused
+    /// id. `contains_pane` guards on every late `UserEvent` make this
+    /// harmless in practice (the new window's pane 1 has a different
+    /// `PaneId`, which is per-window monotonic with no reuse until a u64
+    /// wrap), so no generation counter is added here.
     pub(crate) fn shutdown_and_join(mut self) {
-        let _ = self.shutdown_and_join_timeout(Self::JOIN_TIMEOUT);
+        std::thread::spawn(move || {
+            let _ = self.shutdown_and_join_timeout(Self::JOIN_TIMEOUT);
+        });
     }
 
     pub(super) fn shutdown_and_join_timeout(&mut self, timeout: Duration) -> bool {

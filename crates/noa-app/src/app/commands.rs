@@ -66,10 +66,14 @@ impl App {
             AppCommand::Preferences => crate::app_actions::open_config_file(),
             AppCommand::ReloadConfig => self.reload_config_from_disk(),
             AppCommand::NewTab => {
-                let _ = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow);
+                if let Err(err) = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow) {
+                    log::warn!("failed to spawn new tab: {err:#}");
+                }
             }
             AppCommand::NewWindow => {
-                let _ = self.spawn_tab(event_loop, SpawnTarget::NewWindow);
+                if let Err(err) = self.spawn_tab(event_loop, SpawnTarget::NewWindow) {
+                    log::warn!("failed to spawn new window: {err:#}");
+                }
             }
             AppCommand::NewSplitLeft => {
                 if let Some(window_id) = self.focused {

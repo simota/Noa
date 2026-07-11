@@ -19,8 +19,15 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // Restore may have found no session, an empty one, or failed every
         // spawn — always guarantee at least one window.
-        if self.windows.is_empty() {
-            let _ = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow);
+        if self.windows.is_empty()
+            && let Err(err) = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow)
+        {
+            // No window exists and the fallback spawn also failed: the app
+            // would otherwise sit invisible with zero windows and never
+            // become reachable. Fail loudly and exit rather than hang.
+            log::error!("failed to spawn initial window: {err:#}");
+            eprintln!("noa: failed to spawn initial window: {err:#}");
+            event_loop.exit();
         }
     }
 

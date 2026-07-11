@@ -932,6 +932,30 @@ fn pane_io_thread_shutdown_joins_all_blocked_handles_within_timeout() {
     }
 }
 
+// Item 6: the caller (the main thread on every pane close) must never block
+// on the join. The io thread here only honors shutdown after outlasting a
+// generous "caller must already have returned" budget, proving
+// `shutdown_and_join` handed the wait off to a reaper instead of blocking.
+#[test]
+fn shutdown_and_join_does_not_block_the_caller() {
+    let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
+    let join = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = shutdown_rx.recv();
+    });
+    let handle = IoThreadHandle {
+        shutdown_tx,
+        join: Some(join),
+    };
+
+    let start = Instant::now();
+    handle.shutdown_and_join();
+    assert!(
+        start.elapsed() < Duration::from_millis(100),
+        "shutdown_and_join must not block the caller on the io thread's join"
+    );
+}
+
 /// Bolt perf harness (text-input hot path): enqueue+drain cost through
 /// [`PtyInputQueue`] for keystroke-sized (1-4 byte) writes — the shape the
 /// main thread pushes per key. `#[ignore]`d so `cargo test` stays fast; run

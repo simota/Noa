@@ -112,6 +112,89 @@ fn overview_card_pipeline_composites_tiles_without_validation_error() {
     );
 }
 
+/// Bolt perf item 3: `draw_texture_cards` pools its per-card uniform buffer +
+/// bind group by sampled `TextureView` identity instead of allocating fresh
+/// ones every call. Composite the *same* view three times (as a
+/// hover-only Overview redraw would re-draw the same tiles every frame) and
+/// assert the pool never grows past one entry, then draw a second, distinct
+/// view and assert it grows to exactly two — proving both reuse and that a
+/// genuinely new card still gets pooled.
+#[test]
+fn overview_card_pipeline_pools_repeated_texture_views() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping overview card pool test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let (tile_a_tex, tile_a_view) = render_target(&device, 40, 30);
+    let (tile_b_tex, tile_b_view) = render_target(&device, 40, 30);
+    let _ = (&tile_a_tex, &tile_b_tex);
+
+    let card = CardPipeline::new(&device, format, wgpu::BlendState::ALPHA_BLENDING);
+    let style = CardStyle {
+        background: [0.0; 4],
+        border_color: [0.3, 0.32, 0.38, 1.0],
+        focus_color: [0.078, 0.635, 1.0, 1.0],
+        corner_radius: 4.0,
+        border_width: 1.0,
+        focus_width: 2.0,
+        focus_glow_width: 4.0,
+    };
+    let surface_size = PixelSize { w: 120, h: 90 };
+    let (target_tex, target_view) = render_target(&device, surface_size.w, surface_size.h);
+    let _ = &target_tex;
+    fn placement(view: &wgpu::TextureView) -> CardTexturePlacement<'_> {
+        CardTexturePlacement {
+            texture_view: view,
+            x: 10,
+            y: 10,
+            w: 40,
+            h: 30,
+            selected: false,
+        }
+    }
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    for _ in 0..3 {
+        card.overlay_texture_cards(
+            &device,
+            &queue,
+            &target_view,
+            surface_size,
+            &style,
+            &[placement(&tile_a_view)],
+        );
+    }
+    assert_eq!(
+        card.card_pool_len_for_test(),
+        1,
+        "redrawing the same texture view repeatedly must reuse one pooled card, not allocate one per draw"
+    );
+
+    card.overlay_texture_cards(
+        &device,
+        &queue,
+        &target_view,
+        surface_size,
+        &style,
+        &[placement(&tile_b_view)],
+    );
+    assert_eq!(
+        card.card_pool_len_for_test(),
+        2,
+        "a genuinely new texture view must still get its own pooled card"
+    );
+
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll device after pooled card composite");
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error while exercising the card pool: {err:?}"
+    );
+}
+
 /// The session sidebar composites its rasterized band texture onto a window
 /// surface with `CardPipeline::overlay_texture_cards` (flat: corner_radius 0,
 /// border_width 0) — the same shader/uniform path as overview cards but the

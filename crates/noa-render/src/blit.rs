@@ -6,6 +6,9 @@
 //! with a border / focus ring (REQ-OV-12/14, v2 mockup parity), replacing the
 //! earlier plain `copy_texture_to_texture`, which could not mask corners.
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+
 use noa_core::PixelSize;
 
 use crate::renderer::Renderer;
@@ -262,10 +265,39 @@ struct CardUniformsRaw {
     _padding: [f32; 2],
 }
 
+/// One pooled card's GPU resources, keyed by the sampled texture view's
+/// identity (see [`CardPipeline::draw_texture_cards`]). `last_used` is a
+/// pool-local logical clock for LRU eviction.
+struct PooledCard {
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    last_used: u64,
+}
+
+/// Cap on the number of distinct (texture-view-keyed) card resources one
+/// `CardPipeline` retains. In steady state the pool holds one entry per tile
+/// / pill actually drawn (a handful), but a search query mints a new pill
+/// texture per keystroke (REQ-OV-16) — bound the pool so a long typing burst
+/// can't grow it without limit; least-recently-used entries (typically old
+/// query rasters no longer drawn) are evicted first.
+const CARD_POOL_CAP: usize = 32;
+
 pub struct CardPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// Per-card uniform buffer + bind group, reused across frames when the
+    /// same sampled `TextureView` is drawn again — a hover-only Overview
+    /// redraw re-composites the same tiles/pills every frame, so without
+    /// this every one of those cards would allocate a fresh buffer and bind
+    /// group each frame purely to re-submit unchanged (or trivially
+    /// updated) uniforms. `RefCell` because the pool is populated from
+    /// `draw_texture_cards(&self, ...)`, which many call sites invoke
+    /// through a shared `&CardPipeline`.
+    pool: RefCell<HashMap<wgpu::TextureView, PooledCard>>,
+    /// Logical clock incremented once per `draw_texture_cards` call, used to
+    /// stamp `PooledCard::last_used` for LRU eviction.
+    pool_clock: Cell<u64>,
 }
 
 impl CardPipeline {
@@ -392,6 +424,8 @@ impl CardPipeline {
             pipeline,
             bind_group_layout,
             sampler,
+            pool: RefCell::new(HashMap::new()),
+            pool_clock: Cell::new(0),
         }
     }
 
@@ -445,6 +479,23 @@ impl CardPipeline {
         );
     }
 
+    /// Draw every placement as a rounded card, reusing a pooled uniform
+    /// buffer + bind group per distinct sampled `TextureView` instead of
+    /// allocating fresh ones every call (see [`CardPipeline::pool`]). A
+    /// placement whose view is already pooled just gets its uniforms
+    /// rewritten via `queue.write_buffer` — no `create_buffer` /
+    /// `create_bind_group`; a placement drawn for the first time (or whose
+    /// pool entry was evicted) still allocates exactly as before.
+    ///
+    /// The pool is keyed purely by texture-view identity, not by call site
+    /// or slot position: this same `CardPipeline` instance is shared across
+    /// several logically distinct draws per frame (search pill, hint pill,
+    /// hover ring, zoom ring, per-tile attention rings), so a position-based
+    /// key would collide between them. Two placements that happen to share
+    /// one view within a single call share one pool entry and are drawn
+    /// with whichever uniforms were written last — fine today (every real
+    /// caller passes one placement per distinct view per call) but worth
+    /// knowing if that ever changes.
     #[allow(clippy::too_many_arguments)]
     fn draw_texture_cards(
         &self,
@@ -458,10 +509,10 @@ impl CardPipeline {
         opacity: f32,
     ) {
         let surface = [surface_size.w.max(1) as f32, surface_size.h.max(1) as f32];
+        let clock = self.pool_clock.get().wrapping_add(1);
+        self.pool_clock.set(clock);
 
-        // Each card needs its own uniform buffer + bind group live for the
-        // whole pass, so build them up front and hold them until submit.
-        let mut resources = Vec::with_capacity(placements.len());
+        let mut pool = self.pool.borrow_mut();
         for placement in placements {
             let (border_color, border_width, glow_width) = if placement.selected {
                 (style.focus_color, style.focus_width, style.focus_glow_width)
@@ -486,6 +537,13 @@ impl CardPipeline {
                 opacity: opacity.clamp(0.0, 1.0),
                 _padding: [0.0; 2],
             };
+
+            if let Some(pooled) = pool.get_mut(placement.texture_view) {
+                queue.write_buffer(&pooled.buffer, 0, bytemuck::bytes_of(&uniforms));
+                pooled.last_used = clock;
+                continue;
+            }
+
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("noa-overview-card-uniform"),
                 size: std::mem::size_of::<CardUniformsRaw>() as u64,
@@ -511,7 +569,23 @@ impl CardPipeline {
                     },
                 ],
             });
-            resources.push((buffer, bind_group));
+
+            if pool.len() >= CARD_POOL_CAP
+                && let Some(lru_key) = pool
+                    .iter()
+                    .min_by_key(|(_, pooled)| pooled.last_used)
+                    .map(|(key, _)| key.clone())
+            {
+                pool.remove(&lru_key);
+            }
+            pool.insert(
+                placement.texture_view.clone(),
+                PooledCard {
+                    buffer,
+                    bind_group,
+                    last_used: clock,
+                },
+            );
         }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -537,12 +611,22 @@ impl CardPipeline {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
-            for (_buffer, bind_group) in &resources {
-                pass.set_bind_group(0, bind_group, &[]);
+            for placement in placements {
+                let pooled = pool
+                    .get(placement.texture_view)
+                    .expect("pool entry inserted or refreshed above for every placement");
+                pass.set_bind_group(0, &pooled.bind_group, &[]);
                 pass.draw(0..6, 0..1);
             }
         }
         queue.submit(Some(encoder.finish()));
+    }
+
+    /// Distinct texture views currently pooled — a headless-GPU-test probe
+    /// for the reuse behavior in `draw_texture_cards` (redrawing the same
+    /// view should not grow this).
+    pub fn card_pool_len_for_test(&self) -> usize {
+        self.pool.borrow().len()
     }
 }
 
@@ -681,11 +765,15 @@ impl OverviewThumbnailResources {
     /// second time outside [`composite_cards`](Self::composite_cards) — the
     /// overview uses this for the hover accent ring and the Tab quick-look
     /// zoom overlay.
+    ///
+    /// Clones the tile's one stored `TextureView` rather than calling
+    /// `create_view` again: `wgpu::TextureView` is `Eq`/`Hash` by resource
+    /// identity, and two independently-created views of the same texture do
+    /// NOT compare equal, so a fresh view every call would defeat
+    /// `CardPipeline`'s per-view bind-group pool (every hover/zoom redraw
+    /// would look like a brand-new texture).
     pub fn tile_texture_view(&self, tile_index: usize) -> Option<wgpu::TextureView> {
-        self.tiles.get(tile_index).map(|tile| {
-            tile.texture
-                .create_view(&wgpu::TextureViewDescriptor::default())
-        })
+        self.tiles.get(tile_index).map(|tile| tile.view.clone())
     }
 
     /// A view of the title-band texture for `tile_index`, for the app's label

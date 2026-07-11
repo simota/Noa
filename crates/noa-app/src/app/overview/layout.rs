@@ -1,6 +1,22 @@
 use super::super::*;
 
 impl App {
+    /// REQ-OV-16: the "Search sessions" filter narrows the source set here,
+    /// the single seam every downstream consumer (redraw / hit-test / nav /
+    /// Cmd+N / title bars / placeholders) reads, so the whole Overview sees
+    /// one filtered order. This runs on every redraw — including a pure
+    /// hover repaint that changes nothing about the tab/pane set — and with
+    /// a live query it reformats and clones every tab's title to filter, so
+    /// the result is memoized on `OverviewWindowState.source_tile_ids_cache`.
+    ///
+    /// The memo key is the *unfiltered* order itself (cheap: `WindowId` /
+    /// `PaneId` pairs, no strings) plus the query string, compared against
+    /// what produced the cached result — a hit requires both to match
+    /// exactly, so any tab/pane add, remove, or reorder (which changes the
+    /// unfiltered order) or query edit invalidates it for free; there is no
+    /// separate "did anything change" signal to keep in sync and risk
+    /// getting wrong. An empty query is the identity (short-circuited to
+    /// skip both the filter and the cache on the common path).
     pub(in crate::app) fn overview_source_tile_ids(&self) -> Vec<OverviewTileId> {
         let ordered = overview_tile_source_order(
             &self.window_order,
@@ -11,17 +27,26 @@ impl App {
         .into_iter()
         .map(|(window_id, pane_id)| OverviewTileId::new(window_id, pane_id))
         .collect::<Vec<_>>();
-        // REQ-OV-16: the "Search sessions" filter narrows the source set here, the
-        // single seam every downstream consumer (redraw / hit-test / nav /
-        // Cmd+N / title bars / placeholders) reads, so the whole Overview sees
-        // one filtered order. An empty query is the identity (short-circuited
-        // to skip cloning titles on the common path).
         let query = self
             .overview_window
             .as_ref()
             .map_or("", |overview| overview.search_query.as_str());
         if query.is_empty() {
             return ordered;
+        }
+        if let Some(overview) = self.overview_window.as_ref() {
+            let cache = overview.source_tile_ids_cache.borrow();
+            if let Some(cached) = cache.as_ref()
+                && let Some(hit) = overview_source_tile_ids_cache_hit(
+                    &cached.unfiltered,
+                    &cached.query,
+                    &cached.result,
+                    &ordered,
+                    query,
+                )
+            {
+                return hit.to_vec();
+            }
         }
         let titles: Vec<(OverviewTileId, String)> = ordered
             .iter()
@@ -30,7 +55,15 @@ impl App {
                 (*id, title)
             })
             .collect();
-        overview_tab_filter(query, &titles)
+        let result = overview_tab_filter(query, &titles);
+        if let Some(overview) = self.overview_window.as_ref() {
+            *overview.source_tile_ids_cache.borrow_mut() = Some(OverviewSourceTileIdsCache {
+                unfiltered: ordered,
+                query: query.to_string(),
+                result: result.clone(),
+            });
+        }
+        result
     }
 
     pub(in crate::app) fn overview_pane_ids_for_window(&self, window_id: WindowId) -> Vec<PaneId> {
@@ -103,5 +136,67 @@ impl App {
             metrics.tile_gutter,
             metrics.outer_margin,
         ))
+    }
+}
+
+/// Hit/miss rule for `App::overview_source_tile_ids`'s memo: the cached
+/// filtered `result` is reusable only if the unfiltered order it was
+/// computed from and the query both match the current call exactly.
+/// Generic over the ordered element type so the rule is unit-testable
+/// without constructing `OverviewTileId`s, which wrap a live
+/// `winit::window::WindowId` that isn't constructible outside a real window.
+fn overview_source_tile_ids_cache_hit<'a, T: PartialEq>(
+    cached_unfiltered: &[T],
+    cached_query: &str,
+    cached_result: &'a [T],
+    ordered: &[T],
+    query: &str,
+) -> Option<&'a [T]> {
+    (cached_unfiltered == ordered && cached_query == query).then_some(cached_result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overview_source_tile_ids_cache_hit;
+
+    #[test]
+    fn cache_hits_when_order_and_query_are_unchanged() {
+        let unfiltered = [1, 2, 3];
+        let result = [1, 3];
+        let hit = overview_source_tile_ids_cache_hit(&unfiltered, "a", &result, &unfiltered, "a");
+        assert_eq!(hit, Some(result.as_slice()));
+    }
+
+    #[test]
+    fn cache_misses_when_query_changes() {
+        let unfiltered = [1, 2, 3];
+        let result = [1, 3];
+        let hit = overview_source_tile_ids_cache_hit(&unfiltered, "a", &result, &unfiltered, "ab");
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn cache_misses_when_a_tile_is_added_or_removed() {
+        let unfiltered = [1, 2, 3];
+        let result = [1, 3];
+        let grown = [1, 2, 3, 4];
+        assert_eq!(
+            overview_source_tile_ids_cache_hit(&unfiltered, "a", &result, &grown, "a"),
+            None
+        );
+        let shrunk = [1, 2];
+        assert_eq!(
+            overview_source_tile_ids_cache_hit(&unfiltered, "a", &result, &shrunk, "a"),
+            None
+        );
+    }
+
+    #[test]
+    fn cache_misses_when_tiles_reorder_with_the_same_members() {
+        let unfiltered = [1, 2, 3];
+        let result = [1, 3];
+        let reordered = [3, 2, 1];
+        let hit = overview_source_tile_ids_cache_hit(&unfiltered, "a", &result, &reordered, "a");
+        assert_eq!(hit, None);
     }
 }

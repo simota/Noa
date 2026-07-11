@@ -301,47 +301,18 @@ impl App {
         }
     }
 
-    /// Render `title` into `tile_index`'s dedicated title-band texture via the
-    /// shared label `Renderer`, then stamp it onto the top `OVERVIEW_TITLE_BAR_H`
-    /// rows of the tile (REQ-OV-12). The band is cleared to a distinct
-    /// title-bar color (`set_clear_color` after `rebuild_cells`) so it reads as
-    /// a band separate from the card face. Shared by live and placeholder
-    /// tiles. `badge` prepends the dim `⌘n` switch number, `dot` colors the
-    /// label's `● ` needs-user prefix, and `query`'s first match inside the
-    /// label is accent-highlighted (REQ-OV-15c/16, sidebar-parity dots).
-    pub(in crate::app) fn render_tile_title_band(
-        &mut self,
-        tile_index: usize,
-        title: &str,
-        badge: Option<usize>,
-        dot: Option<noa_core::Rgb>,
-        query: &str,
-    ) {
-        self.ensure_overview_label_renderer();
-        let Some(metrics) = self.overview_metrics() else {
-            return;
-        };
-        let Some(gpu) = self.gpu.as_mut() else {
-            return;
-        };
-        let Some(overview) = self.overview_window.as_mut() else {
-            return;
-        };
-        let (Some(label_renderer), Some(thumbnails)) = (
-            overview.label_renderer.as_mut(),
-            overview.thumbnails.as_mut(),
-        ) else {
-            return;
-        };
-        let tile_w = thumbnails.tile_size().w;
-        let bar_h = thumbnails.title_bar_h();
-        if tile_w == 0 || bar_h == 0 {
-            return;
-        }
-        let band_size = PixelSize {
-            w: tile_w.max(1),
-            h: bar_h.max(1),
-        };
+    /// Column/row grid a `band_size`-sized chrome/tile-title raster resolves
+    /// to in the shared label `Renderer`'s (smaller, denser sidebar) font —
+    /// shared by the tile title band, search pill, and hint pill so each
+    /// caller's text truncation (`sanitize_placeholder_label`, the `..._row`
+    /// helpers' own clipping) uses the exact column count the label renderer
+    /// will actually draw into.
+    pub(in crate::app) fn overview_label_grid(
+        &self,
+        band_size: PixelSize,
+    ) -> Option<(GridPadding, GridSize)> {
+        let metrics = self.overview_metrics()?;
+        let gpu = self.gpu.as_ref()?;
         let padding = overview_label_padding(
             band_size.h,
             gpu.sidebar_font.metrics().cell_h,
@@ -352,12 +323,32 @@ impl App {
             gpu.sidebar_font.metrics(),
             padding,
         );
-        let sanitized = sanitize_placeholder_label(title, grid_size.cols);
-        // REQ-OV-13: the centered title plus a close glyph in the last column,
-        // with inline SGR styling (badge / dot / search highlight).
-        let text = title_bar_row_ansi(&sanitized, grid_size.cols, badge, dot, query);
+        Some((padding, grid_size))
+    }
 
-        let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
+    /// Shared text-to-texture raster core (REQ-OV-12/16/17): feeds
+    /// `text` — already ANSI-styled and column-clipped by the caller against
+    /// `overview_label_grid`'s `cols` — through a one-row scratch `Terminal`,
+    /// then draws it with the shared label `Renderer` into `target`. Every
+    /// overview text raster (tile title band, search pill, hint pill)
+    /// funnels through this single point, so the search/hint pill cache
+    /// (`render_overview_search_texture` / `render_overview_hint_texture`)
+    /// has one raster implementation to keep in sync instead of three.
+    pub(in crate::app) fn draw_overview_label(
+        &mut self,
+        band_size: PixelSize,
+        padding: GridPadding,
+        cols: u16,
+        clear_color: [f32; 4],
+        text: &str,
+        target: &wgpu::TextureView,
+    ) -> Option<()> {
+        self.ensure_overview_label_renderer();
+        let gpu = self.gpu.as_mut()?;
+        let overview = self.overview_window.as_mut()?;
+        let label_renderer = overview.label_renderer.as_mut()?;
+
+        let mut term = Terminal::new(GridSize::new(cols, 1));
         Stream::new().feed(text.as_bytes(), &mut term);
         let mut snapshot = FrameSnapshot::from_terminal(&mut term);
         snapshot.cursor.visible = false;
@@ -370,25 +361,91 @@ impl App {
             active_theme(&gpu.theme, &gpu.preview_theme),
         );
         // After `rebuild_cells` (which resets it from the snapshot bg) so the
-        // band gets its distinct title-bar color, not the terminal default.
-        label_renderer.set_clear_color(overview_title_bar_color());
+        // target gets its own distinct backdrop, not the terminal default.
+        label_renderer.set_clear_color(clear_color);
         label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.sidebar_font);
-
-        let Some(view) = thumbnails.title_texture_view(tile_index) else {
-            return;
-        };
-        label_renderer.draw(&gpu.device, &gpu.queue, &view);
-        thumbnails.stamp_title_band(&gpu.device, &gpu.queue, tile_index);
+        label_renderer.draw(&gpu.device, &gpu.queue, target);
+        Some(())
     }
 
-    /// Render the top "Search sessions" field (REQ-OV-16) into a fresh pill-sized
-    /// texture and return it for compositing into the reserved top search band.
-    /// Shows the live query, or the placeholder while it is empty. `None` when
-    /// there is no usable search band (a window too short to reserve one).
+    /// Render `title` into `tile_index`'s dedicated title-band texture via the
+    /// shared label `Renderer`, then stamp it onto the top `OVERVIEW_TITLE_BAR_H`
+    /// rows of the tile (REQ-OV-12). The band is cleared to a distinct
+    /// title-bar color so it reads as a band separate from the card face.
+    /// Shared by live and placeholder tiles. `badge` prepends the dim `⌘n`
+    /// switch number, `dot` colors the label's `● ` needs-user prefix, and
+    /// `query`'s first match inside the label is accent-highlighted
+    /// (REQ-OV-15c/16, sidebar-parity dots). Not cached: the caller
+    /// (`render_due_overview_title_bands` / `render_overview_placeholder_labels`)
+    /// already only invokes this for tiles that are due this frame.
+    pub(in crate::app) fn render_tile_title_band(
+        &mut self,
+        tile_index: usize,
+        title: &str,
+        badge: Option<usize>,
+        dot: Option<noa_core::Rgb>,
+        query: &str,
+    ) {
+        let Some((band_size, view)) = self.overview_window.as_ref().and_then(|overview| {
+            let thumbnails = overview.thumbnails.as_ref()?;
+            let tile_w = thumbnails.tile_size().w;
+            let bar_h = thumbnails.title_bar_h();
+            if tile_w == 0 || bar_h == 0 {
+                return None;
+            }
+            let band_size = PixelSize {
+                w: tile_w.max(1),
+                h: bar_h.max(1),
+            };
+            let view = thumbnails.title_texture_view(tile_index)?;
+            Some((band_size, view))
+        }) else {
+            return;
+        };
+        let Some((padding, grid_size)) = self.overview_label_grid(band_size) else {
+            return;
+        };
+        let sanitized = sanitize_placeholder_label(title, grid_size.cols);
+        // REQ-OV-13: the centered title plus a close glyph in the last column,
+        // with inline SGR styling (badge / dot / search highlight).
+        let text = title_bar_row_ansi(&sanitized, grid_size.cols, badge, dot, query);
+        if self
+            .draw_overview_label(
+                band_size,
+                padding,
+                grid_size.cols,
+                overview_title_bar_color(),
+                &text,
+                &view,
+            )
+            .is_none()
+        {
+            return;
+        }
+        if let (Some(gpu), Some(thumbnails)) = (
+            self.gpu.as_ref(),
+            self.overview_window
+                .as_ref()
+                .and_then(|overview| overview.thumbnails.as_ref()),
+        ) {
+            thumbnails.stamp_title_band(&gpu.device, &gpu.queue, tile_index);
+        }
+    }
+
+    /// Render (or reuse from cache) the top "Search sessions" field
+    /// (REQ-OV-16) as a pill-sized texture for compositing into the reserved
+    /// top search band. Shows the live query, or the placeholder while it is
+    /// empty. `None` when there is no usable search band (a window too short
+    /// to reserve one).
+    ///
+    /// Cached on `OverviewWindowState.search_pill_cache`, keyed by
+    /// `OverviewPillKey` (query text, live tile count, rect) — a hover-only
+    /// redraw changes none of these, so it reuses the last raster instead of
+    /// minting a fresh GPU texture every frame.
     pub(in crate::app) fn render_overview_search_texture(
         &mut self,
+        live_tile_count: usize,
     ) -> Option<OverviewChromeTexture> {
-        let format = self.overview_host_surface_config()?.format;
         let metrics = self.overview_metrics()?;
         let chrome = self.overview_chrome()?;
         let rect = overview_search_field_rect(chrome.search_band, metrics);
@@ -399,135 +456,139 @@ impl App {
             .overview_window
             .as_ref()
             .map_or(String::new(), |overview| overview.search_query.clone());
-        self.ensure_overview_label_renderer();
-        let gpu = self.gpu.as_mut()?;
-        let overview = self.overview_window.as_mut()?;
-        let label_renderer = overview.label_renderer.as_mut()?;
+        let key = OverviewPillKey {
+            query: query.clone(),
+            live_tile_count,
+            rect,
+        };
+        if let Some(hit) = self
+            .overview_window
+            .as_ref()
+            .and_then(|overview| overview_pill_cache_hit(overview.search_pill_cache.as_ref(), &key))
+        {
+            return Some(hit.clone());
+        }
 
+        let format = self.overview_host_surface_config()?.format;
         let band_size = PixelSize {
             w: rect.w.max(1),
             h: rect.h.max(1),
         };
-        let search_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("noa-overview-search-pill"),
-            size: wgpu::Extent3d {
-                width: band_size.w,
-                height: band_size.h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = search_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let padding = overview_label_padding(
-            band_size.h,
-            gpu.sidebar_font.metrics().cell_h,
-            metrics.scale(),
-        );
-        let grid_size = grid_size_for_pane_rect(
-            PaneRectApp::new(0, 0, band_size.w, band_size.h),
-            gpu.sidebar_font.metrics(),
-            padding,
-        );
+        let (padding, grid_size) = self.overview_label_grid(band_size)?;
         let text = overview_search_field_row(&query, grid_size.cols);
-        let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
-        Stream::new().feed(text.as_bytes(), &mut term);
-        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
-        snapshot.cursor.visible = false;
 
-        label_renderer.resize(band_size);
-        label_renderer.set_grid_padding(padding);
-        label_renderer.rebuild_cells(
-            &snapshot,
-            &mut gpu.sidebar_font,
-            active_theme(&gpu.theme, &gpu.preview_theme),
-        );
-        label_renderer.set_clear_color(overview_chrome_pill_color());
-        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.sidebar_font);
-        label_renderer.draw(&gpu.device, &gpu.queue, &view);
+        let texture = self
+            .gpu
+            .as_ref()?
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("noa-overview-search-pill"),
+                size: wgpu::Extent3d {
+                    width: band_size.w,
+                    height: band_size.h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.draw_overview_label(
+            band_size,
+            padding,
+            grid_size.cols,
+            overview_chrome_pill_color(),
+            &text,
+            &view,
+        )?;
 
-        Some(OverviewChromeTexture {
-            texture: search_texture,
-            rect,
-        })
+        let chrome_texture = OverviewChromeTexture { view, rect };
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.search_pill_cache = Some((key, chrome_texture.clone()));
+        }
+        Some(chrome_texture)
     }
 
-    /// Render the bottom hint bar (REQ-OV-17) into a fresh pill-sized texture
-    /// and return it for compositing onto the surface. `None` when there is no
-    /// usable hint band (a window too short to reserve one). The `⌘1-N` range
-    /// tracks the live tile count dynamically.
+    /// Render (or reuse from cache) the bottom hint bar (REQ-OV-17) as a
+    /// pill-sized texture for compositing onto the surface. `None` when
+    /// there is no usable hint band (a window too short to reserve one).
+    /// The `⌘1-N` range tracks the live tile count dynamically.
+    ///
+    /// Cached on `OverviewWindowState.hint_pill_cache` the same way as the
+    /// search pill (see `render_overview_search_texture`).
     pub(in crate::app) fn render_overview_hint_texture(
         &mut self,
         live_tile_count: usize,
     ) -> Option<OverviewChromeTexture> {
-        let format = self.overview_host_surface_config()?.format;
         let metrics = self.overview_metrics()?;
         let chrome = self.overview_chrome()?;
         let rect = overview_hint_bar_rect(chrome.hint_band, metrics);
         if rect.w == 0 || rect.h == 0 {
             return None;
         }
-        self.ensure_overview_label_renderer();
-        let gpu = self.gpu.as_mut()?;
-        let overview = self.overview_window.as_mut()?;
-        let label_renderer = overview.label_renderer.as_mut()?;
+        let query = self
+            .overview_window
+            .as_ref()
+            .map_or(String::new(), |overview| overview.search_query.clone());
+        let key = OverviewPillKey {
+            query,
+            live_tile_count,
+            rect,
+        };
+        if let Some(hit) = self
+            .overview_window
+            .as_ref()
+            .and_then(|overview| overview_pill_cache_hit(overview.hint_pill_cache.as_ref(), &key))
+        {
+            return Some(hit.clone());
+        }
 
+        let format = self.overview_host_surface_config()?.format;
         let band_size = PixelSize {
             w: rect.w.max(1),
             h: rect.h.max(1),
         };
-        let hint_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("noa-overview-hint-pill"),
-            size: wgpu::Extent3d {
-                width: band_size.w,
-                height: band_size.h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = hint_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let padding = overview_label_padding(
-            band_size.h,
-            gpu.sidebar_font.metrics().cell_h,
-            metrics.scale(),
-        );
-        let grid_size = grid_size_for_pane_rect(
-            PaneRectApp::new(0, 0, band_size.w, band_size.h),
-            gpu.sidebar_font.metrics(),
-            padding,
-        );
+        let (padding, grid_size) = self.overview_label_grid(band_size)?;
         let text = overview_hint_bar_row(live_tile_count, grid_size.cols);
-        let mut term = Terminal::new(GridSize::new(grid_size.cols, 1));
-        Stream::new().feed(text.as_bytes(), &mut term);
-        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
-        snapshot.cursor.visible = false;
 
-        label_renderer.resize(band_size);
-        label_renderer.set_grid_padding(padding);
-        label_renderer.rebuild_cells(
-            &snapshot,
-            &mut gpu.sidebar_font,
-            active_theme(&gpu.theme, &gpu.preview_theme),
-        );
-        label_renderer.set_clear_color(overview_chrome_pill_color());
-        label_renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.sidebar_font);
-        label_renderer.draw(&gpu.device, &gpu.queue, &view);
+        let texture = self
+            .gpu
+            .as_ref()?
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("noa-overview-hint-pill"),
+                size: wgpu::Extent3d {
+                    width: band_size.w,
+                    height: band_size.h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.draw_overview_label(
+            band_size,
+            padding,
+            grid_size.cols,
+            overview_chrome_pill_color(),
+            &text,
+            &view,
+        )?;
 
-        Some(OverviewChromeTexture {
-            texture: hint_texture,
-            rect,
-        })
+        let chrome_texture = OverviewChromeTexture { view, rect };
+        if let Some(overview) = self.overview_window.as_mut() {
+            overview.hint_pill_cache = Some((key, chrome_texture.clone()));
+        }
+        Some(chrome_texture)
     }
 
     /// Composite every live-mirror and placeholder tile onto the overview
@@ -538,7 +599,7 @@ impl App {
         // mutably); the returned texture is owned, so the borrows are released
         // before compositing.
         let live_count = layout.tiles.len();
-        let search_texture = self.render_overview_search_texture();
+        let search_texture = self.render_overview_search_texture(live_count);
         let hint_texture = self.render_overview_hint_texture(live_count);
         self.ensure_overview_chrome_card_pipeline();
         let Some(metrics) = self.overview_metrics() else {
@@ -664,20 +725,15 @@ impl App {
         // Overlay the search and hint pills with the same rounded-card shader
         // as tiles, but without clearing the already-composited frame.
         if let Some(chrome_card) = overview.chrome_card.as_ref() {
-            let search_view = search_texture.as_ref().map(|chrome| {
-                chrome
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default())
-            });
-            let hint_view = hint_texture.as_ref().map(|chrome| {
-                chrome
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default())
-            });
+            // `chrome.view` is the one view cached alongside its texture
+            // (`OverviewChromeTexture`) — reusing it (rather than calling
+            // `create_view` again here) keeps its identity stable across
+            // cache-hit frames, which is what lets `CardPipeline`'s
+            // per-view bind-group pool skip re-creating GPU resources.
             let mut placements = Vec::new();
-            if let (Some(chrome), Some(view)) = (search_texture.as_ref(), search_view.as_ref()) {
+            if let Some(chrome) = search_texture.as_ref() {
                 placements.push(CardTexturePlacement {
-                    texture_view: view,
+                    texture_view: &chrome.view,
                     x: chrome.rect.x,
                     y: chrome.rect.y,
                     w: chrome.rect.w,
@@ -685,9 +741,9 @@ impl App {
                     selected: false,
                 });
             }
-            if let (Some(chrome), Some(view)) = (hint_texture.as_ref(), hint_view.as_ref()) {
+            if let Some(chrome) = hint_texture.as_ref() {
                 placements.push(CardTexturePlacement {
-                    texture_view: view,
+                    texture_view: &chrome.view,
                     x: chrome.rect.x,
                     y: chrome.rect.y,
                     w: chrome.rect.w,
@@ -896,6 +952,19 @@ fn overview_attention_ring_visible(
     attention && index != selected && hovered != Some(index)
 }
 
+/// Hit/miss rule for the search/hint pill cache
+/// (`render_overview_search_texture` / `render_overview_hint_texture`): the
+/// cached value is reusable only if its key matches the current call's
+/// exactly. Generic over the cached value type so it's unit-testable without
+/// a `wgpu::TextureView`, which needs a live `Device` to construct.
+fn overview_pill_cache_hit<'a, V>(
+    cached: Option<&'a (OverviewPillKey, V)>,
+    key: &OverviewPillKey,
+) -> Option<&'a V> {
+    let (cached_key, value) = cached?;
+    (cached_key == key).then_some(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,5 +975,51 @@ mod tests {
         assert!(!overview_attention_ring_visible(true, 2, 2, None));
         assert!(!overview_attention_ring_visible(true, 2, 0, Some(2)));
         assert!(!overview_attention_ring_visible(false, 2, 0, None));
+    }
+
+    fn pill_key(query: &str, live_tile_count: usize) -> OverviewPillKey {
+        OverviewPillKey {
+            query: query.to_string(),
+            live_tile_count,
+            rect: PaneRectApp::new(0, 0, 200, 32),
+        }
+    }
+
+    #[test]
+    fn pill_cache_hits_when_key_is_unchanged() {
+        let cached = Some((pill_key("noa", 3), "pill-texture"));
+        let hit = overview_pill_cache_hit(cached.as_ref(), &pill_key("noa", 3));
+        assert_eq!(hit, Some(&"pill-texture"));
+    }
+
+    #[test]
+    fn pill_cache_misses_when_query_changes() {
+        let cached = Some((pill_key("noa", 3), "pill-texture"));
+        let hit = overview_pill_cache_hit(cached.as_ref(), &pill_key("noab", 3));
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn pill_cache_misses_when_live_tile_count_changes() {
+        let cached = Some((pill_key("noa", 3), "pill-texture"));
+        let hit = overview_pill_cache_hit(cached.as_ref(), &pill_key("noa", 4));
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn pill_cache_misses_when_rect_changes() {
+        let cached = Some((pill_key("noa", 3), "pill-texture"));
+        let resized = OverviewPillKey {
+            rect: PaneRectApp::new(0, 0, 260, 32),
+            ..pill_key("noa", 3)
+        };
+        let hit = overview_pill_cache_hit(cached.as_ref(), &resized);
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn pill_cache_misses_when_nothing_cached_yet() {
+        let hit = overview_pill_cache_hit(None::<&(OverviewPillKey, &str)>, &pill_key("noa", 3));
+        assert_eq!(hit, None);
     }
 }

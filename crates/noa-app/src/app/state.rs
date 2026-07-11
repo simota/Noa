@@ -4,6 +4,7 @@
 //! on app construction, rendering, and lifecycle methods while preserving the
 //! existing sibling-module access pattern.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 use super::*;
@@ -412,6 +413,43 @@ pub(super) struct OverviewWindowState {
     pub(super) zoom_anim: Option<OverviewZoomAnim>,
     /// The live "Search sessions" filter query (REQ-OV-16).
     pub(super) search_query: String,
+    /// Last-rendered search pill (REQ-OV-16), keyed by the query text and the
+    /// pill's own rect so a hover-only redraw (query and window size both
+    /// unchanged) reuses the texture instead of re-rasterizing it.
+    pub(super) search_pill_cache: Option<(OverviewPillKey, OverviewChromeTexture)>,
+    /// Last-rendered hint bar (REQ-OV-17), keyed by the live tile count (the
+    /// `⌘1-N` range it displays) and its rect.
+    pub(super) hint_pill_cache: Option<(OverviewPillKey, OverviewChromeTexture)>,
+    /// Memoized `App::overview_source_tile_ids()` (REQ-OV-16): that call runs
+    /// on every redraw including pure hover repaints, and with a live search
+    /// query it reformats and clones every tab title to filter. `RefCell`
+    /// because the memo must stay behind `&self` — several read-only call
+    /// sites (e.g. `overview_close_target_at_last_cursor`) call it without a
+    /// mutable borrow.
+    pub(super) source_tile_ids_cache: RefCell<Option<OverviewSourceTileIdsCache>>,
+}
+
+/// Cache key shared by the search and hint pills: both are small ANSI text
+/// rasters keyed by "what text/count they show" plus the rect they're sized
+/// for (a host-window resize must not stretch a stale-resolution texture
+/// indefinitely). `query`/`live_tile_count` are read by only one pill each,
+/// but folding them into one key type keeps the two cache slots symmetric —
+/// harmless over-invalidation (e.g. the hint pill's key also shifts when the
+/// query changes) is preferable to a subtler per-field mismatch bug.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct OverviewPillKey {
+    pub(super) query: String,
+    pub(super) live_tile_count: usize,
+    pub(super) rect: PaneRectApp,
+}
+
+/// The unfiltered tab/pane order `overview_source_tile_ids` last computed,
+/// the query it was filtered with, and the resulting (possibly filtered)
+/// order — see `overview_source_tile_ids_cache_hit` for the hit/miss rule.
+pub(super) struct OverviewSourceTileIdsCache {
+    pub(super) unfiltered: Vec<OverviewTileId>,
+    pub(super) query: String,
+    pub(super) result: Vec<OverviewTileId>,
 }
 
 /// One in-flight quick-look zoom transition on the overview's selected tile.
@@ -427,8 +465,15 @@ pub(super) struct OverviewChromeCardPipeline {
     pub(super) pipeline: CardPipeline,
 }
 
+/// `view` is the one `TextureView` created for the backing texture (which it
+/// keeps alive on its own — `wgpu::TextureView` holds its own `Texture`
+/// clone internally) and cloned out on every read (`wgpu::TextureView` is
+/// `Eq`/`Hash` by resource identity) — callers must reuse this clone rather
+/// than calling `create_view` again, or `CardPipeline`'s per-view bind-group
+/// pool cache-misses on every frame.
+#[derive(Clone)]
 pub(super) struct OverviewChromeTexture {
-    pub(super) texture: wgpu::Texture,
+    pub(super) view: wgpu::TextureView,
     pub(super) rect: PaneRectApp,
 }
 

@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use super::super::*;
 
 impl App {
@@ -68,6 +70,9 @@ impl App {
                     zoomed: false,
                     zoom_anim: None,
                     search_query: String::new(),
+                    search_pill_cache: None,
+                    hint_pill_cache: None,
+                    source_tile_ids_cache: RefCell::new(None),
                 });
             }
         }
@@ -145,6 +150,9 @@ impl App {
             overview.thumbnails = None;
             overview.label_renderer = None;
             overview.chrome_card = None;
+            overview.search_pill_cache = None;
+            overview.hint_pill_cache = None;
+            overview.source_tile_ids_cache = RefCell::new(None);
         }
         for state in self.windows.values() {
             for surface in state.surfaces.values() {

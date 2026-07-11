@@ -2449,6 +2449,28 @@ fn every_mutator_that_changes_state_changes_the_fingerprint() {
     settings.set_favorites(std::sync::Arc::new(favorites), 1);
     let fp3 = settings.view_fingerprint_u64();
     assert_ne!(fp2, fp3, "set_favorites");
+
+    // R-5 (AC-60 extension): the search sub-state mutators — the native
+    // ViewModel renders the query line, filtered subset, and search
+    // highlight, so every one of these must move the fingerprint or the
+    // native panel freezes mid-search.
+    let mut settings = ThemeSettings::open(settings_init());
+    let fp0 = settings.view_fingerprint_u64();
+    settings.toggle_settings_search();
+    let fp1 = settings.view_fingerprint_u64();
+    assert_ne!(fp0, fp1, "toggle_settings_search (enter)");
+
+    settings.move_down();
+    let fp2 = settings.view_fingerprint_u64();
+    assert_ne!(fp1, fp2, "move_down (search highlight)");
+
+    settings.push_text("font", Instant::now());
+    let fp3 = settings.view_fingerprint_u64();
+    assert_ne!(fp2, fp3, "push_text (search query)");
+
+    settings.confirm_settings_search();
+    let fp4 = settings.view_fingerprint_u64();
+    assert_ne!(fp3, fp4, "confirm_settings_search");
 }
 
 // ---------------------------------------------------------------------

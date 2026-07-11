@@ -1746,6 +1746,14 @@ impl ThemeSettings {
             row.touched.hash(hasher);
         }
         self.commit_error.hash(hasher);
+        // R-5 search sub-state: the ViewModel renders the query line, the
+        // filtered row subset, and the search highlight, so all of them
+        // must funnel in — omitting them freezes the native panel across
+        // every search interaction (Tab toggle, ↑↓, typing).
+        self.settings_search_active.hash(hasher);
+        self.settings_filter.hash(hasher);
+        self.settings_filtered.hash(hasher);
+        self.settings_highlight.hash(hasher);
         self.font_size_digits.hash(hasher);
         self.background_image_text.hash(hasher);
         self.opaque_at_startup.hash(hasher);

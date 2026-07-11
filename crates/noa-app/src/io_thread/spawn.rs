@@ -164,7 +164,7 @@ pub fn spawn(
         // index) — `feed_terminal_batch` diffs against this under the same
         // lock hold it already extracts rows in, so `noa.output` only ever
         // carries rows whose content actually changed.
-        let mut ipc_row_cache: Vec<u64> = Vec::new();
+        let mut ipc_row_cache = super::ipc_tap::IpcRowCache::default();
         // Trailing-flush deadline owed by a throttled `noa.output` push
         // (R-1), mirroring `publish_pending_at` above. `None` means nothing
         // is owed and the select below blocks exactly as before this fix —

@@ -23,7 +23,7 @@ use crate::split_tree::PaneId;
 use super::auto_approve::{
     AutoApproveCandidate, AutoApprovePublish, detect_auto_approve_candidate,
 };
-use super::ipc_tap::{IpcOutputPushDecision, compute_ipc_row_diff, decide_ipc_output_push};
+use super::ipc_tap::{IpcOutputPushDecision, IpcRowCache, compute_ipc_row_diff, decide_ipc_output_push};
 use super::overview::{OverviewPublish, publish_overview_snapshot};
 use super::sidebar::{
     SidebarPublish, SidebarUpsert, decide_sidebar_publish, preview_rows, preview_spans,
@@ -97,7 +97,7 @@ pub(super) fn feed_terminal(
     };
     let mut auto_approve_state = AutoApproveState::default();
     let mut last_ipc_push = None;
-    let mut ipc_row_cache = Vec::new();
+    let mut ipc_row_cache = IpcRowCache::default();
     feed_terminal_batch(
         terminal,
         stream,
@@ -129,7 +129,7 @@ pub(super) fn feed_terminal_batch<'a>(
     auto_approve_state: &mut AutoApproveState,
     ipc_active: bool,
     last_ipc_push: &mut Option<Instant>,
-    ipc_row_cache: &mut Vec<u64>,
+    ipc_row_cache: &mut IpcRowCache,
 ) -> TerminalOutput {
     let mut term = terminal.lock();
     stream.feed(first, &mut *term);

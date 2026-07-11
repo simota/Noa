@@ -61,26 +61,47 @@ pub(super) fn decide_ipc_output_push(
     }
 }
 
-/// Diff the pane's current visible rows against `ipc_row_cache` (F-6),
-/// returning only rows whose content hash changed since the last diff and
-/// updating the cache in place. Shared by the normal per-feed push
-/// (`feed_terminal_batch`) and the trailing-flush path
-/// (`flush_pending_ipc_output`) so both compute the diff identically under
-/// a `Terminal` lock hold rather than one of them caching a possibly-stale
-/// snapshot.
-pub(super) fn compute_ipc_row_diff(term: &Terminal, ipc_row_cache: &mut Vec<u64>) -> Vec<Row> {
+/// Per-pane cache of last-sent viewport row content hashes (F-6), keyed by
+/// viewport slot (`visible_rows()` index), plus the absolute row `base`
+/// (`visible_row_base()`) those hashes were computed against.
+///
+/// The `base` is required, not just the hashes: `compute_ipc_row_diff`
+/// diffs by *slot*, and when the viewport's base shifts (scrollback growth
+/// pushes every visible row down by N), identical content can land in the
+/// same slot it occupied before the shift. Without tracking the base, that
+/// slot's hash would still match and the diff would wrongly suppress a row
+/// whose absolute index (`Row.row`) the client needs updated (R-3).
+#[derive(Default)]
+pub(super) struct IpcRowCache {
+    hashes: Vec<u64>,
+    base: Option<u64>,
+}
+
+/// Diff the pane's current visible rows against `cache` (F-6), returning
+/// only rows whose content hash changed since the last diff (or whose slot's
+/// absolute row index moved, R-3) and updating the cache in place. Shared by
+/// the normal per-feed push (`feed_terminal_batch`) and the trailing-flush
+/// path (`flush_pending_ipc_output`) so both compute the diff identically
+/// under a `Terminal` lock hold rather than one of them caching a
+/// possibly-stale snapshot.
+pub(super) fn compute_ipc_row_diff(term: &Terminal, cache: &mut IpcRowCache) -> Vec<Row> {
     let base = term.active().visible_row_base() as u64;
     let rows = term.active().visible_rows();
-    if ipc_row_cache.len() != rows.len() {
-        ipc_row_cache.clear();
-        ipc_row_cache.resize(rows.len(), 0);
+    if cache.hashes.len() != rows.len() || cache.base != Some(base) {
+        // A viewport resize (length change) or a scroll (base change) both
+        // invalidate every cached slot: a resize because slot indices no
+        // longer mean the same thing, a scroll because a slot's absolute
+        // row index (R-3) needs resending even if its content is unchanged.
+        cache.hashes.clear();
+        cache.hashes.resize(rows.len(), 0);
     }
+    cache.base = Some(base);
     let mut diff = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         let spans = crate::ipc_bridge::row_to_spans(row);
         let hash = hash_wire_row_spans(&spans);
-        if ipc_row_cache[i] != hash {
-            ipc_row_cache[i] = hash;
+        if cache.hashes[i] != hash {
+            cache.hashes[i] = hash;
             diff.push(Row { row: base + i as u64, spans });
         }
     }
@@ -98,7 +119,7 @@ pub(super) fn flush_pending_ipc_output(
     terminal: &Arc<Mutex<Terminal>>,
     tap: &IpcOutputTap,
     last_ipc_push: &mut Option<Instant>,
-    ipc_row_cache: &mut Vec<u64>,
+    ipc_row_cache: &mut IpcRowCache,
 ) {
     let now = Instant::now();
     let diff = {

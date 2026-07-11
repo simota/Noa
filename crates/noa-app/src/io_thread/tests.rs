@@ -27,7 +27,7 @@ fn feed_terminal_ipc(
     sidebar: &SidebarPublish,
     last_sidebar_publish: &mut Option<Instant>,
     last_ipc_push: &mut Option<Instant>,
-    ipc_row_cache: &mut Vec<u64>,
+    ipc_row_cache: &mut IpcRowCache,
 ) -> TerminalOutput {
     let auto_approve = AutoApprovePublish {
         enabled: Arc::new(AtomicBool::new(false)),
@@ -62,7 +62,7 @@ fn ipc_output_first_feed_sends_the_full_viewport_as_a_diff() {
     let sidebar = test_sidebar_publish(false);
     let mut last_sidebar_publish = None;
     let mut last_ipc_push = None;
-    let mut ipc_row_cache = Vec::new();
+    let mut ipc_row_cache = IpcRowCache::default();
 
     let output = feed_terminal_ipc(
         &terminal,
@@ -89,7 +89,7 @@ fn ipc_output_only_diffs_rows_whose_content_actually_changed() {
     let sidebar = test_sidebar_publish(false);
     let mut last_sidebar_publish = None;
     let mut last_ipc_push = None;
-    let mut ipc_row_cache = Vec::new();
+    let mut ipc_row_cache = IpcRowCache::default();
 
     // First feed seeds the cache with all four rows.
     let first = feed_terminal_ipc(
@@ -124,6 +124,60 @@ fn ipc_output_only_diffs_rows_whose_content_actually_changed() {
     assert_eq!(rows[0].row, 0);
 }
 
+/// R-3: when the viewport's absolute base shifts (scrollback growth), a
+/// slot whose *content* happens to be unchanged must still be resent — its
+/// absolute row number moved, and a hash-only cache keyed purely by slot
+/// would wrongly suppress it, leaving the client's row indices stale.
+#[test]
+fn ipc_output_resends_every_row_when_the_viewport_base_shifts_even_with_identical_content() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+
+    // Fill all four viewport rows with identical content; base is 0.
+    let first = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"same\r\nsame\r\nsame\r\nsame",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    let first_rows = first.ipc_output.expect("first feed sends a diff");
+    assert_eq!(first_rows.len(), 4);
+    assert_eq!(first_rows.iter().map(|r| r.row).collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+
+    // One more identical line scrolls the viewport by exactly one row: every
+    // visible slot still holds "same" content, but the absolute row base
+    // moved from 0 to 1. Past the throttle window so the push isn't
+    // suppressed for an unrelated reason.
+    last_ipc_push = Some(Instant::now() - super::ipc_tap::OUTPUT_PUSH_MIN_INTERVAL);
+    let second = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"\r\nsame",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    let second_rows = second
+        .ipc_output
+        .expect("a base shift must resend rows even though their content is unchanged");
+    assert_eq!(second_rows.len(), 4, "the whole viewport resends with fresh absolute indices");
+    assert_eq!(second_rows.iter().map(|r| r.row).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+}
+
 #[test]
 fn ipc_output_is_none_when_nothing_changed_or_the_tap_is_inactive() {
     let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
@@ -148,7 +202,7 @@ fn ipc_output_is_none_when_nothing_changed_or_the_tap_is_inactive() {
     // Tap active but still inside the throttle window: no push at all, not
     // even an empty one.
     let mut last_ipc_push = Some(Instant::now());
-    let mut ipc_row_cache = Vec::new();
+    let mut ipc_row_cache = IpcRowCache::default();
     let throttled = feed_terminal_ipc(
         &terminal,
         &mut stream,
@@ -177,7 +231,7 @@ fn ipc_output_throttled_feed_eventually_flushes_the_final_rows() {
     let sidebar = test_sidebar_publish(false);
     let mut last_sidebar_publish = None;
     let mut last_ipc_push = None;
-    let mut ipc_row_cache = Vec::new();
+    let mut ipc_row_cache = IpcRowCache::default();
 
     // First feed pushes immediately and seeds the cache.
     let first = feed_terminal_ipc(

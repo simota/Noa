@@ -398,10 +398,15 @@ fn emit_card_text(
     renaming: Option<&str>,
     menu_hint: bool,
 ) {
+    // The status dot is nf-fa-circle (U+F111), not `●` (U+25CF): the project
+    // icon next to it is a Nerd Font glyph whose optical center sits at the
+    // cell's vertical center, while `●` sits on the text baseline (~1.5px
+    // lower at 14px) — drawing the dot from the same Nerd Font keeps the two
+    // glyphs on the name row vertically aligned.
     out.extend(window_run(
         to_cell,
         rects.dot,
-        "●".to_string(),
+        "\u{f111}".to_string(),
         status_dot_rgb(effective_status_dot(card, attention_marker)),
         false,
     ));

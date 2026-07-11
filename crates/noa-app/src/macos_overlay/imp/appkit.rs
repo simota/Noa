@@ -64,17 +64,17 @@ fn content_view(window: &Window) -> *mut AnyObject {
     appkit.ns_view.as_ptr().cast::<AnyObject>()
 }
 
-/// Remove the subview of `view` carrying `identifier`, if present.
+/// The subview of `view` carrying `identifier`, or null.
 ///
 /// SAFETY (all helpers below): `view` is winit's live `NSView` and every
 /// call happens on the main thread (the redraw path); every selector is
 /// documented AppKit API and every object pointer is nil-checked.
-unsafe fn remove_subview(view: *mut AnyObject, identifier: &str) {
+unsafe fn find_subview(view: *mut AnyObject, identifier: &str) -> *mut AnyObject {
     let identifier = NSString::from_str(identifier);
     unsafe {
         let subviews: *mut AnyObject = msg_send![view, subviews];
         if subviews.is_null() {
-            return;
+            return std::ptr::null_mut();
         }
         let count: usize = msg_send![subviews, count];
         for i in 0..count {
@@ -86,9 +86,62 @@ unsafe fn remove_subview(view: *mut AnyObject, identifier: &str) {
             if !ident.is_null() {
                 let same: bool = msg_send![ident, isEqualToString: &*identifier];
                 if same {
-                    let _: () = msg_send![subview, removeFromSuperview];
-                    return;
+                    return subview;
                 }
+            }
+        }
+        std::ptr::null_mut()
+    }
+}
+
+/// Remove the subview of `view` carrying `identifier`, if present.
+unsafe fn remove_subview(view: *mut AnyObject, identifier: &str) {
+    unsafe {
+        let subview = find_subview(view, identifier);
+        if !subview.is_null() {
+            let _: () = msg_send![subview, removeFromSuperview];
+        }
+    }
+}
+
+/// `view`'s first subview, or null. Used to walk the fixed `root -> host ->
+/// effect -> wash` chain a persistent card is built from.
+unsafe fn first_subview(view: *mut AnyObject) -> *mut AnyObject {
+    unsafe {
+        if view.is_null() {
+            return std::ptr::null_mut();
+        }
+        let subviews: *mut AnyObject = msg_send![view, subviews];
+        if subviews.is_null() {
+            return std::ptr::null_mut();
+        }
+        let count: usize = msg_send![subviews, count];
+        if count == 0 {
+            return std::ptr::null_mut();
+        }
+        msg_send![subviews, objectAtIndex: 0usize]
+    }
+}
+
+/// Strip every content subview added to `effect` after the persistent color
+/// wash (always index 0 — see [`make_card`]), leaving the blur view and its
+/// wash mounted. Content-only syncs call this instead of tearing the card
+/// down, so the `NSVisualEffectView` never re-materializes.
+unsafe fn clear_content_subviews(effect: *mut AnyObject) {
+    unsafe {
+        let subviews: *mut AnyObject = msg_send![effect, subviews];
+        if subviews.is_null() {
+            return;
+        }
+        let count: usize = msg_send![subviews, count];
+        // Snapshot the pointers first: removeFromSuperview mutates the live
+        // `subviews` array out from under an in-progress index walk.
+        let children: Vec<*mut AnyObject> = (0..count)
+            .map(|i| msg_send![subviews, objectAtIndex: i])
+            .collect();
+        for child in children.into_iter().skip(1) {
+            if !child.is_null() {
+                let _: () = msg_send![child, removeFromSuperview];
             }
         }
     }
@@ -215,9 +268,35 @@ unsafe fn make_card(
         let _: () = msg_send![effect, setWantsLayer: true];
         let effect_layer: *mut AnyObject = msg_send![effect, layer];
         if !effect_layer.is_null() {
-            let _: () = msg_send![effect_layer, setCornerRadius: radius];
             let _: () = msg_send![effect_layer, setMasksToBounds: true];
             let _: () = msg_send![effect_layer, setBorderWidth: 1.0_f64];
+        }
+        // A translucent wash of the theme surface over the blur, pulling
+        // the material toward the terminal theme. Structural (created once,
+        // tinted by `update_card_colors` below and again on every reuse).
+        let wash = make_view(bounds);
+        if !wash.is_null() {
+            let _: () = msg_send![wash, setAutoresizingMask: (1usize << 1) | (1usize << 4)];
+            let _: () = msg_send![effect, addSubview: wash];
+            release_owned(wash);
+        }
+        let _: () = msg_send![host, addSubview: effect];
+        release_owned(effect);
+        update_card_colors(effect, colors, radius);
+        (host, effect)
+    }
+}
+
+/// Refresh an existing card's theme-dependent styling in place: border
+/// color, vibrant appearance, and the color wash's tint. Called both right
+/// after [`make_card`] builds a fresh card and whenever [`card_for`] reuses
+/// one, so a live theme-settings preview (which restyles the card on every
+/// selection change) never needs to tear down the `NSVisualEffectView`.
+unsafe fn update_card_colors(effect: *mut AnyObject, colors: &OverlayColors, radius: f64) {
+    unsafe {
+        let effect_layer: *mut AnyObject = msg_send![effect, layer];
+        if !effect_layer.is_null() {
+            let _: () = msg_send![effect_layer, setCornerRadius: radius];
             let border = ns_color(colors.border, 0.55);
             if !border.is_null() {
                 let cg: *mut crate::macos_overlay::cg::CGColor = msg_send![border, CGColor];
@@ -238,18 +317,68 @@ unsafe fn make_card(
                 let _: () = msg_send![effect, setAppearance: appearance];
             }
         }
-        // A translucent wash of the theme surface over the blur, pulling
-        // the material toward the terminal theme.
-        let wash = make_view(bounds);
+        let wash = first_subview(effect);
         if !wash.is_null() {
             tint_layer(wash, ns_color(colors.surface_bg, 0.55), radius);
-            let _: () = msg_send![wash, setAutoresizingMask: (1usize << 1) | (1usize << 4)];
-            let _: () = msg_send![effect, addSubview: wash];
-            release_owned(wash);
         }
-        let _: () = msg_send![host, addSubview: effect];
-        release_owned(effect);
-        (host, effect)
+    }
+}
+
+/// The persistent card mounted at `identifier`: if one is already in the
+/// view tree, its frame and colors are refreshed in place and its content
+/// (everything added to the returned `effect` view after the wash) is
+/// stripped, keeping the `NSVisualEffectView` itself alive. Otherwise a
+/// fresh card is built via [`make_modal_root`] + [`make_card`].
+///
+/// This is what makes content-only syncs (typing a query, moving the
+/// selection, a live theme preview) cheap and flicker-free: only labels are
+/// destroyed and recreated, never the blur view that caused a one-frame
+/// vibrancy pop each time it was re-materialized. Callers add content
+/// subviews to the returned `effect`; a null `root`/`effect` means
+/// allocation failed and the caller should bail.
+#[allow(clippy::too_many_arguments)]
+unsafe fn card_for(
+    view: *mut AnyObject,
+    identifier: &str,
+    pane: PaneRectPt,
+    scrim: bool,
+    card_frame: NSRect,
+    material: isize,
+    colors: &OverlayColors,
+    radius: f64,
+) -> (*mut AnyObject, *mut AnyObject) {
+    unsafe {
+        let root = find_subview(view, identifier);
+        if !root.is_null() {
+            let host = first_subview(root);
+            let effect = first_subview(host);
+            if !host.is_null() && !effect.is_null() {
+                let _: () = msg_send![root, setFrame: frame_in_view(view, pane)];
+                if scrim {
+                    tint_layer(root, ns_color([0.0, 0.0, 0.0, 1.0], SCRIM_ALPHA), 0.0);
+                }
+                let _: () = msg_send![host, setFrame: card_frame];
+                let bounds = NSRect::new(NSPoint::new(0.0, 0.0), card_frame.size);
+                let _: () = msg_send![effect, setFrame: bounds];
+                update_card_colors(effect, colors, radius);
+                clear_content_subviews(effect);
+                return (root, effect);
+            }
+            // Hierarchy doesn't match the `root -> host -> effect` shape we
+            // build below (shouldn't happen) — discard and rebuild fresh.
+            let _: () = msg_send![root, removeFromSuperview];
+        }
+        let root = make_modal_root(view, identifier, pane, scrim);
+        if root.is_null() {
+            return (std::ptr::null_mut(), std::ptr::null_mut());
+        }
+        let (host, effect) = make_card(card_frame, material, colors, radius);
+        if host.is_null() || effect.is_null() {
+            return (root, std::ptr::null_mut());
+        }
+        let _: () = msg_send![root, addSubview: host];
+        release_owned(host);
+        (root, effect)
     }
 }
 
@@ -407,14 +536,10 @@ pub(in crate::macos_overlay) fn rebuild_palette(
         return;
     }
     unsafe {
-        remove_subview(view, ID_PALETTE);
         let Some((snap, pane)) = model else {
+            remove_subview(view, ID_PALETTE);
             return;
         };
-        let root = make_modal_root(view, ID_PALETTE, pane, true);
-        if root.is_null() {
-            return;
-        }
 
         // Window capacity bounded by the pane height so the list never
         // runs past the card's bottom edge on a short pane.
@@ -444,12 +569,19 @@ pub(in crate::macos_overlay) fn rebuild_palette(
             NSPoint::new(card_x, from_top(pane.h, card_y_top, card_h)),
             NSSize::new(card_w, card_h),
         );
-        let (host, effect) = make_card(card_frame, MATERIAL_POPOVER, colors, CARD_RADIUS);
-        if host.is_null() || effect.is_null() {
+        let (root, effect) = card_for(
+            view,
+            ID_PALETTE,
+            pane,
+            true,
+            card_frame,
+            MATERIAL_POPOVER,
+            colors,
+            CARD_RADIUS,
+        );
+        if root.is_null() || effect.is_null() {
             return;
         }
-        let _: () = msg_send![root, addSubview: host];
-        release_owned(host);
 
         let fg = ns_color(colors.surface_fg, 1.0);
         let muted = ns_color(colors.muted, 1.0);
@@ -639,14 +771,10 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
         return;
     }
     unsafe {
-        remove_subview(view, ID_THEME);
         let Some((vm, pane)) = model else {
+            remove_subview(view, ID_THEME);
             return;
         };
-        let root = make_modal_root(view, ID_THEME, pane, true);
-        if root.is_null() {
-            return;
-        }
 
         let card_w = 660.0_f64.min(pane.w - 32.0).max(320.0);
         // The card height is content-driven: title block + theme list +
@@ -687,12 +815,19 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
             ),
             NSSize::new(card_w, card_h),
         );
-        let (host, effect) = make_card(card_frame, MATERIAL_POPOVER, colors, CARD_RADIUS);
-        if host.is_null() || effect.is_null() {
+        let (root, effect) = card_for(
+            view,
+            ID_THEME,
+            pane,
+            true,
+            card_frame,
+            MATERIAL_POPOVER,
+            colors,
+            CARD_RADIUS,
+        );
+        if root.is_null() || effect.is_null() {
             return;
         }
-        let _: () = msg_send![root, addSubview: host];
-        release_owned(host);
 
         let fg = ns_color(colors.surface_fg, 1.0);
         let muted = ns_color(colors.muted, 1.0);
@@ -996,14 +1131,10 @@ pub(in crate::macos_overlay) fn rebuild_confirm(
         return;
     }
     unsafe {
-        remove_subview(view, ID_CONFIRM);
         let Some((snap, pane)) = model else {
+            remove_subview(view, ID_CONFIRM);
             return;
         };
-        let root = make_modal_root(view, ID_CONFIRM, pane, true);
-        if root.is_null() {
-            return;
-        }
 
         let card_w = 420.0_f64.min(pane.w - 32.0).max(240.0);
         let card_h = 84.0;
@@ -1014,12 +1145,19 @@ pub(in crate::macos_overlay) fn rebuild_confirm(
             ),
             NSSize::new(card_w, card_h),
         );
-        let (host, effect) = make_card(card_frame, MATERIAL_POPOVER, colors, CARD_RADIUS);
-        if host.is_null() || effect.is_null() {
+        let (root, effect) = card_for(
+            view,
+            ID_CONFIRM,
+            pane,
+            true,
+            card_frame,
+            MATERIAL_POPOVER,
+            colors,
+            CARD_RADIUS,
+        );
+        if root.is_null() || effect.is_null() {
             return;
         }
-        let _: () = msg_send![root, addSubview: host];
-        release_owned(host);
 
         let message = make_label(
             &snap.message,
@@ -1064,14 +1202,10 @@ pub(in crate::macos_overlay) fn rebuild_title_prompt(
         return;
     }
     unsafe {
-        remove_subview(view, ID_TITLE_PROMPT);
         let Some((input, pane)) = model else {
+            remove_subview(view, ID_TITLE_PROMPT);
             return;
         };
-        let root = make_modal_root(view, ID_TITLE_PROMPT, pane, true);
-        if root.is_null() {
-            return;
-        }
 
         let card_w = 420.0_f64.min(pane.w - 32.0).max(240.0);
         let card_h = 104.0;
@@ -1082,12 +1216,19 @@ pub(in crate::macos_overlay) fn rebuild_title_prompt(
             ),
             NSSize::new(card_w, card_h),
         );
-        let (host, effect) = make_card(card_frame, MATERIAL_POPOVER, colors, CARD_RADIUS);
-        if host.is_null() || effect.is_null() {
+        let (root, effect) = card_for(
+            view,
+            ID_TITLE_PROMPT,
+            pane,
+            true,
+            card_frame,
+            MATERIAL_POPOVER,
+            colors,
+            CARD_RADIUS,
+        );
+        if root.is_null() || effect.is_null() {
             return;
         }
-        let _: () = msg_send![root, addSubview: host];
-        release_owned(host);
 
         let title = make_label(
             "Set Tab Title",
@@ -1151,8 +1292,8 @@ pub(in crate::macos_overlay) fn rebuild_toast(
         return;
     }
     unsafe {
-        remove_subview(view, ID_TOAST);
         let Some(text) = text else {
+            remove_subview(view, ID_TOAST);
             return;
         };
         let bounds: NSRect = msg_send![view, bounds];
@@ -1164,18 +1305,23 @@ pub(in crate::macos_overlay) fn rebuild_toast(
             w: pill_w,
             h: pill_h,
         };
-        // No scrim: the toast is informational, not modal.
-        let root = make_modal_root(view, ID_TOAST, pane, false);
-        if root.is_null() {
-            return;
-        }
         let card_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(pill_w, pill_h));
-        let (host, effect) = make_card(card_frame, MATERIAL_HUD_WINDOW, colors, pill_h / 2.0);
-        if host.is_null() || effect.is_null() {
+        // No scrim: the toast is informational, not modal. Reused in place
+        // like the other cards, so the pill's text updating during a
+        // window-resize drag doesn't re-pop the blur every frame.
+        let (root, effect) = card_for(
+            view,
+            ID_TOAST,
+            pane,
+            false,
+            card_frame,
+            MATERIAL_HUD_WINDOW,
+            colors,
+            pill_h / 2.0,
+        );
+        if root.is_null() || effect.is_null() {
             return;
         }
-        let _: () = msg_send![root, addSubview: host];
-        release_owned(host);
 
         let label = make_label(
             text,

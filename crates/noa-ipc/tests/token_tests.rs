@@ -58,3 +58,33 @@ fn configured_token_skips_file_io() {
     assert_eq!(token, "explicit-token");
     assert!(!path.exists());
 }
+
+// ---- R-1: an empty/blank configured token is treated as absent ----
+
+#[test]
+fn empty_configured_token_falls_back_to_generated_file_token() {
+    let dir = std::env::temp_dir().join(format!("noa-ipc-token-test-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("server-token");
+    let _ = std::fs::remove_file(&path);
+
+    let token = load_or_create_token(&path, Some("")).unwrap();
+    assert!(!token.is_empty(), "an empty configured token must never become the live token");
+    assert!(path.exists(), "an empty configured token must fall through to the file provisioning path");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn whitespace_only_configured_token_falls_back_to_generated_file_token() {
+    let dir = std::env::temp_dir().join(format!("noa-ipc-token-test-blank-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("server-token");
+    let _ = std::fs::remove_file(&path);
+
+    let token = load_or_create_token(&path, Some("   \t")).unwrap();
+    assert!(!token.is_empty());
+    assert!(path.exists());
+
+    std::fs::remove_dir_all(&dir).ok();
+}

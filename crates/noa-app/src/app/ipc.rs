@@ -56,6 +56,7 @@ impl App {
             port: self.config.server_port,
             token,
             allowed_scopes,
+            hello_deadline: noa_ipc::ServerConfig::DEFAULT_HELLO_DEADLINE,
         };
         match noa_ipc::Server::start(config, std::sync::Arc::new(backend)) {
             Ok(handle) => {

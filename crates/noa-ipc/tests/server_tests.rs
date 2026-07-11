@@ -87,8 +87,29 @@ impl IpcBackend for MockBackend {
 }
 
 fn start_test_server(backend: Arc<MockBackend>, token: &str, scopes: ScopeSet) -> noa_ipc::ServerHandle {
-    Server::start(ServerConfig { port: 0, token: token.to_string(), allowed_scopes: scopes }, backend)
-        .expect("server should bind an ephemeral loopback port")
+    Server::start(
+        ServerConfig {
+            port: 0,
+            token: token.to_string(),
+            allowed_scopes: scopes,
+            hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+        },
+        backend,
+    )
+    .expect("server should bind an ephemeral loopback port")
+}
+
+fn start_test_server_with_hello_deadline(
+    backend: Arc<MockBackend>,
+    token: &str,
+    scopes: ScopeSet,
+    hello_deadline: Duration,
+) -> noa_ipc::ServerHandle {
+    Server::start(
+        ServerConfig { port: 0, token: token.to_string(), allowed_scopes: scopes, hello_deadline },
+        backend,
+    )
+    .expect("server should bind an ephemeral loopback port")
 }
 
 type Sock = WebSocket<MaybeTlsStream<std::net::TcpStream>>;
@@ -441,6 +462,135 @@ fn r5_wrong_jsonrpc_version_rejected() {
     send_rpc(&mut sock, 3, "noa.listPanels", json!({}));
     let resp = recv_json(&mut sock);
     assert!(resp.get("result").is_some());
+    let _ = sock.close(None);
+}
+
+// ---- R-1: Server::start refuses an empty configured token ----
+
+#[test]
+fn server_start_refuses_empty_token() {
+    let backend = Arc::new(MockBackend::default());
+    let result = Server::start(
+        ServerConfig {
+            port: 0,
+            token: String::new(),
+            allowed_scopes: ScopeSet::default_read_only(),
+            hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+        },
+        backend,
+    );
+    assert!(result.is_err(), "an empty token must never be accepted as a live server config");
+}
+
+#[test]
+fn server_start_refuses_whitespace_only_token() {
+    let backend = Arc::new(MockBackend::default());
+    let result = Server::start(
+        ServerConfig {
+            port: 0,
+            token: "   ".to_string(),
+            allowed_scopes: ScopeSet::default_read_only(),
+            hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+        },
+        backend,
+    );
+    assert!(result.is_err());
+}
+
+// ---- R-2: unauthenticated connections cannot hold a slot forever ----
+
+#[test]
+fn r2_connection_without_hello_is_closed_after_the_hello_deadline() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server_with_hello_deadline(
+        backend,
+        "tok",
+        ScopeSet::default_read_only(),
+        Duration::from_millis(200),
+    );
+    let mut sock = connect_plain(handle.port());
+    // Complete the WS handshake (implicit in `connect_plain`) but never send
+    // `noa.hello`. Past the shortened deadline the server must close the
+    // connection on its own rather than waiting on the client forever.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let result = loop {
+        match sock.read() {
+            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {
+                assert!(std::time::Instant::now() < deadline, "server never closed the idle connection");
+                continue;
+            }
+            other => break other,
+        }
+    };
+    assert!(result.is_err(), "connection past its hello deadline must be closed, got {result:?}");
+}
+
+#[test]
+fn r2_slot_freed_by_a_reaped_connection_is_available_to_a_new_client() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server_with_hello_deadline(
+        backend,
+        "tok",
+        ScopeSet::default_read_only(),
+        Duration::from_millis(150),
+    );
+
+    // Open a connection and never send hello; let it sit past the deadline
+    // so the server reaps it and frees its slot.
+    let mut stalled = connect_plain(handle.port());
+    std::thread::sleep(Duration::from_millis(400));
+    // Drain until the socket reports the server-initiated close (R-2's
+    // "socket reads EOF/close" acceptance bar).
+    let closed = loop {
+        match stalled.read() {
+            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
+            other => break other,
+        }
+    };
+    assert!(closed.is_err(), "the stalled connection's socket must observe the close");
+
+    // A fresh connection can still complete a full hello -> request
+    // round-trip, proving the server isn't wedged (and, if this were run at
+    // MAX_CONNECTIONS, that the reaped slot was released).
+    let mut fresh = connect_plain(handle.port());
+    let resp = hello(&mut fresh, 1, 1, Some("tok"), &["read"]);
+    assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
+    let _ = fresh.close(None);
+}
+
+// ---- R-4: parse error (-32700) vs invalid request (-32600) ----
+
+#[test]
+fn r4_malformed_json_is_parse_error() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+
+    sock.send(Message::Text("not json".to_string())).unwrap();
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32700);
+
+    // Connection stays open.
+    let resp = hello(&mut sock, 1, 1, Some("tok"), &["read"]);
+    assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
+    let _ = sock.close(None);
+}
+
+#[test]
+fn r4_well_formed_json_that_is_not_a_valid_request_is_invalid_request() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+
+    for malformed in [json!([]), json!({}), json!({ "method": 1 })] {
+        sock.send(Message::Text(malformed.to_string())).unwrap();
+        let resp = recv_json(&mut sock);
+        assert_eq!(resp["error"]["code"], -32600, "malformed request {malformed} should be -32600");
+    }
+
+    // Connection stays open after every rejection.
+    let resp = hello(&mut sock, 1, 1, Some("tok"), &["read"]);
+    assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
     let _ = sock.close(None);
 }
 

@@ -120,13 +120,21 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Loads the server's bearer token, or provisions one on first run (FR-3).
 ///
-/// - `configured` (config `server-token`) short-circuits: no file I/O.
+/// - `configured` (config `server-token`) short-circuits: no file I/O — but
+///   only when non-empty after trimming. A blank `server-token = ""` (or
+///   whitespace-only) is treated as *absent*, not as a valid empty bearer
+///   token that anyone could authenticate with (R-1): it falls through to
+///   the file load/create path below, with a warning so a misconfigured
+///   config doesn't silently drop the auth requirement.
 /// - Otherwise reads `path`; if missing or empty, generates 32 random bytes
 ///   (hex-encoded) and writes them to `path` with `0600` permissions,
 ///   creating parent directories as needed.
 pub fn load_or_create_token(path: &Path, configured: Option<&str>) -> io::Result<String> {
     if let Some(token) = configured {
-        return Ok(token.to_string());
+        if !token.trim().is_empty() {
+            return Ok(token.to_string());
+        }
+        log::warn!("noa-ipc: server-token is empty; falling back to generated token file");
     }
     if let Ok(existing) = fs::read_to_string(path) {
         let trimmed = existing.trim();

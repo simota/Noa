@@ -179,32 +179,38 @@ impl Broadcaster {
         }
     }
 
+    /// Enqueues at most one `noa.stateChanged` per connection per broadcast
+    /// (R-5): a connection with two or more overlapping `state_changed`
+    /// subscriptions previously got one notification per matching
+    /// subscription — duplicates that inflate queue pressure and can each
+    /// individually evict older, unrelated entries. The union of panels
+    /// matched by any of the connection's subscriptions is computed once
+    /// and sent as a single notification, preserving `panels`' input order;
+    /// a connection whose union is empty gets nothing, exactly as before.
     pub fn broadcast_state_changed(&self, panels: Vec<Panel>) {
         let conns = self.conns.lock();
         for entry in conns.values() {
-            for sub in &entry.subs {
-                if !sub.events.contains(EventMask::STATE_CHANGED) {
-                    continue;
-                }
-                let filtered: Vec<Panel> = match &sub.pane_ids {
-                    Some(ids) => panels
-                        .iter()
-                        .filter(|panel| ids.contains(&panel.pane_id.0))
-                        .cloned()
-                        .collect(),
-                    None => panels.clone(),
-                };
-                if filtered.is_empty() {
-                    continue;
-                }
-                entry.queue.push(QueuedNotification::StateChanged {
-                    panels: filtered,
-                    dropped: false,
-                });
+            let matched: Vec<Panel> = panels
+                .iter()
+                .filter(|panel| {
+                    entry.subs.iter().any(|sub| {
+                        sub.events.contains(EventMask::STATE_CHANGED)
+                            && sub.pane_ids.as_ref().is_none_or(|ids| ids.contains(&panel.pane_id.0))
+                    })
+                })
+                .cloned()
+                .collect();
+            if matched.is_empty() {
+                continue;
             }
+            entry.queue.push(QueuedNotification::StateChanged { panels: matched, dropped: false });
         }
     }
 
+    /// Enqueues at most one `noa.output` per connection per broadcast (R-5,
+    /// same defect and fix as `broadcast_state_changed`: overlapping
+    /// `output` subscriptions on one connection that both match `pane_id`
+    /// previously each pushed their own copy of the same `lines`).
     pub fn broadcast_output(&self, pane_id: u64, lines: Vec<Row>) {
         let conns = self.conns.lock();
         for entry in conns.values() {
@@ -362,6 +368,68 @@ mod tests {
             QueuedNotification::StateChanged { panels, .. } => assert_eq!(panels.len(), 2),
             _ => panic!("expected state changed"),
         }
+    }
+
+    // ---- R-5: overlapping subscriptions on one connection consolidate ----
+
+    #[test]
+    fn overlapping_state_changed_subscriptions_on_one_connection_deliver_one_notification_with_the_union() {
+        let b = Broadcaster::new();
+        let (conn_id, queue) = b.register_connection();
+        let mut ids_a = HashSet::new();
+        ids_a.insert(1u64);
+        let mut ids_b = HashSet::new();
+        ids_b.insert(1u64);
+        ids_b.insert(2u64);
+        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids_a));
+        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids_b));
+
+        b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(2), panel_with_id(3)]);
+        let drained = queue.drain();
+        assert_eq!(drained.len(), 1, "two overlapping subscriptions must not each enqueue their own copy");
+        match &drained[0] {
+            QueuedNotification::StateChanged { panels, .. } => {
+                let ids: Vec<u64> = panels.iter().map(|p| p.pane_id.0).collect();
+                assert_eq!(ids, vec![1, 2], "the union of both subscriptions' matches, in input order");
+            }
+            _ => panic!("expected state changed"),
+        }
+    }
+
+    #[test]
+    fn disjoint_state_changed_subscriptions_on_one_connection_deliver_one_notification_with_both_panels() {
+        let b = Broadcaster::new();
+        let (conn_id, queue) = b.register_connection();
+        let mut ids_a = HashSet::new();
+        ids_a.insert(1u64);
+        let mut ids_b = HashSet::new();
+        ids_b.insert(2u64);
+        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids_a));
+        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids_b));
+
+        b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(2)]);
+        let drained = queue.drain();
+        assert_eq!(drained.len(), 1);
+        match &drained[0] {
+            QueuedNotification::StateChanged { panels, .. } => {
+                let ids: Vec<u64> = panels.iter().map(|p| p.pane_id.0).collect();
+                assert_eq!(ids, vec![1, 2]);
+            }
+            _ => panic!("expected state changed"),
+        }
+    }
+
+    #[test]
+    fn overlapping_output_subscriptions_on_one_connection_deliver_one_notification() {
+        let b = Broadcaster::new();
+        let (conn_id, queue) = b.register_connection();
+        let mut ids_a = HashSet::new();
+        ids_a.insert(42u64);
+        b.add_subscription(conn_id, EventMask::OUTPUT, Some(ids_a));
+        b.add_subscription(conn_id, EventMask::OUTPUT, None); // matches everything, including 42
+
+        b.broadcast_output(42, vec![]);
+        assert_eq!(queue.len(), 1, "two overlapping output subscriptions must not each enqueue their own copy");
     }
 
     #[test]

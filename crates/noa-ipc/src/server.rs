@@ -8,7 +8,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tungstenite::Message;
@@ -26,6 +26,13 @@ const MAX_CONNECTIONS: usize = 32;
 /// under this) and far below tungstenite's 64 MiB/16 MiB defaults.
 const MAX_WS_MESSAGE_SIZE: usize = 1024 * 1024;
 const MAX_WS_FRAME_SIZE: usize = 256 * 1024;
+
+/// Read/write timeout applied to the raw `TcpStream` *before* the WS
+/// handshake begins (R-2): a client that opens a socket and then stalls
+/// (never completes the handshake) would otherwise occupy a connection slot
+/// forever, since `tungstenite::accept_hdr_with_config` blocks on a
+/// handshake read with no deadline of its own.
+const HANDSHAKE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn connection_ws_config() -> WebSocketConfig {
     #[allow(deprecated)]
@@ -52,6 +59,15 @@ pub struct ServerConfig {
     pub port: u16,
     pub token: String,
     pub allowed_scopes: ScopeSet,
+    /// How long an accepted, WS-handshaked connection may go without
+    /// completing `noa.hello` before it's closed and its slot reclaimed
+    /// (R-2). Defaults to [`ServerConfig::DEFAULT_HELLO_DEADLINE`]; tests
+    /// shorten this to make the deadline observable without a real wait.
+    pub hello_deadline: Duration,
+}
+
+impl ServerConfig {
+    pub const DEFAULT_HELLO_DEADLINE: Duration = Duration::from_secs(10);
 }
 
 /// A handle to a running server. Dropping it stops the accept loop and
@@ -88,6 +104,15 @@ impl Server {
     /// Binds `127.0.0.1:<port>` only (FR-2) and starts the accept loop.
     /// Never binds a non-loopback interface.
     pub fn start(config: ServerConfig, backend: Arc<dyn IpcBackend>) -> io::Result<ServerHandle> {
+        if config.token.trim().is_empty() {
+            // Defense in depth alongside `auth::load_or_create_token`'s
+            // empty-token fallback (R-1): no call path can ever start a
+            // server that authenticates every bearer with "".
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "server token must not be empty",
+            ));
+        }
         let listener = TcpListener::bind(("127.0.0.1", config.port))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
@@ -96,6 +121,7 @@ impl Server {
         let broadcaster = Broadcaster::new();
         let token = Arc::new(config.token);
         let allowed_scopes = config.allowed_scopes;
+        let hello_deadline = config.hello_deadline;
         let connection_count = Arc::new(AtomicUsize::new(0));
 
         let shutdown_loop = shutdown.clone();
@@ -122,6 +148,7 @@ impl Server {
                                 backend,
                                 token,
                                 allowed_scopes,
+                                hello_deadline,
                                 broadcaster,
                                 shutdown_conn,
                             ) {
@@ -157,11 +184,18 @@ fn handle_connection(
     backend: Arc<dyn IpcBackend>,
     token: Arc<String>,
     allowed_scopes: ScopeSet,
+    hello_deadline: Duration,
     broadcaster: Broadcaster,
     shutdown: Arc<AtomicBool>,
 ) -> io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_nodelay(true).ok();
+    // R-2: bound the handshake itself. Without this, a client that opens a
+    // socket and never sends the WS upgrade request blocks this thread's
+    // `accept_hdr_with_config` call forever, holding one of the 32
+    // connection slots permanently.
+    stream.set_read_timeout(Some(HANDSHAKE_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(HANDSHAKE_IO_TIMEOUT))?;
 
     let header_authed = Arc::new(AtomicBool::new(false));
     let header_authed_cb = header_authed.clone();
@@ -180,6 +214,7 @@ fn handle_connection(
     let mut ws = tungstenite::accept_hdr_with_config(stream, callback, Some(connection_ws_config()))
         .map_err(|err| io::Error::other(err.to_string()))?;
     ws.get_mut().set_read_timeout(Some(Duration::from_millis(50)))?;
+    ws.get_mut().set_write_timeout(None)?;
 
     let (conn_id, queue) = broadcaster.register_connection();
     let mut session = Session {
@@ -188,7 +223,20 @@ fn handle_connection(
         granted_scopes: ScopeSet::empty(),
     };
 
-    let result = run_connection_loop(&mut ws, &backend, &token, allowed_scopes, &broadcaster, conn_id, &queue, &mut session, &shutdown);
+    let connected_at = Instant::now();
+    let result = run_connection_loop(
+        &mut ws,
+        &backend,
+        &token,
+        allowed_scopes,
+        &broadcaster,
+        conn_id,
+        &queue,
+        &mut session,
+        &shutdown,
+        connected_at,
+        hello_deadline,
+    );
 
     broadcaster.unregister_connection(conn_id);
     result
@@ -205,6 +253,8 @@ fn run_connection_loop(
     queue: &Arc<PushQueue>,
     session: &mut Session,
     shutdown: &Arc<AtomicBool>,
+    connected_at: Instant,
+    hello_deadline: Duration,
 ) -> io::Result<()> {
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -230,6 +280,14 @@ fn run_connection_loop(
             Err(tungstenite::Error::Io(err))
                 if err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::TimedOut =>
             {
+                // R-2: an unauthenticated connection (hello not yet
+                // completed) that has sat idle past `hello_deadline` since
+                // the WS handshake finished is closed here, freeing its
+                // connection slot. Once `hello_done`, no overall deadline
+                // applies — this 50ms poll only ever checks `shutdown`.
+                if !session.hello_done && connected_at.elapsed() >= hello_deadline {
+                    return Ok(());
+                }
                 continue;
             }
             Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => return Ok(()),
@@ -332,9 +390,20 @@ fn dispatch(
     conn_id: u64,
     session: &mut Session,
 ) -> Option<String> {
-    let req: RpcRequest = match serde_json::from_str(raw) {
-        Ok(r) => r,
+    // R-4: syntactically-invalid JSON is -32700 ParseError; syntactically
+    // valid JSON that isn't a well-formed request object (not an object at
+    // all, a batch array, or missing/wrong-typed `method`) is -32600
+    // InvalidRequest. Two stages so each gets its own code instead of both
+    // collapsing into ParseError via a single `from_str::<RpcRequest>`.
+    let value: Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
         Err(_) => return Some(error_response(Value::Null, ErrorCode::ParseError, "parse error")),
+    };
+    let req: RpcRequest = match serde_json::from_value(value) {
+        Ok(r) => r,
+        Err(_) => {
+            return Some(error_response(Value::Null, ErrorCode::InvalidRequest, "invalid request"));
+        }
     };
     let id = req.id.clone();
 

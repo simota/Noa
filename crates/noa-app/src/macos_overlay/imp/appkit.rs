@@ -414,6 +414,28 @@ unsafe fn make_label(
     }
 }
 
+/// Measured width of `text` in `font` as an NSTextField label (cell padding
+/// included) — what a frame must be at least this wide to render without
+/// tail truncation. Uses a throwaway autoreleased label + `sizeToFit`.
+unsafe fn label_width(text: &str, font: *mut AnyObject) -> f64 {
+    let Some(class) = AnyClass::get(c"NSTextField") else {
+        return 0.0;
+    };
+    let string = NSString::from_str(text);
+    unsafe {
+        let label: *mut AnyObject = msg_send![class, labelWithString: &*string];
+        if label.is_null() {
+            return 0.0;
+        }
+        if !font.is_null() {
+            let _: () = msg_send![label, setFont: font];
+        }
+        let _: () = msg_send![label, sizeToFit];
+        let frame: NSRect = msg_send![label, frame];
+        frame.size.width
+    }
+}
+
 unsafe fn set_alignment(label: *mut AnyObject, alignment: isize) {
     if !label.is_null() {
         unsafe {
@@ -1008,13 +1030,22 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                 // cycle` hint on the left, the favorites chip (its own
                 // local `⌃⇧F` hint already baked into the label, A-1)
                 // right-aligned near the column boundary.
-                let seg_w = 46.0;
-                for (i, segment) in vm.attribute_segments.iter().enumerate() {
-                    let x = pad + i as f64 * seg_w;
+                // Everything on this row is sized from measured text, not
+                // fixed slots — the left column (col_split - pad wide, ~284pt
+                // at the full 660pt card) has no room to spare: measured, the
+                // three segments + `⌃D cycle` + the full favorites chip come
+                // within ~10pt of filling it, so a fixed-width layout either
+                // overlaps or ellipsizes ("☆ F…").
+                let seg_font = system_font(11.5, WEIGHT_REGULAR);
+                let hint_font = system_font(10.5, WEIGHT_REGULAR);
+                let mut seg_x = pad;
+                for segment in vm.attribute_segments.iter() {
+                    let text_w = label_width(segment.label, seg_font);
+                    let seg_w = text_w + 12.0;
                     if segment.active {
                         let bg = make_view(NSRect::new(
-                            NSPoint::new(x, from_top(card_h, chip_row_y, 20.0)),
-                            NSSize::new(seg_w - 6.0, 20.0),
+                            NSPoint::new(seg_x, from_top(card_h, chip_row_y, 20.0)),
+                            NSSize::new(seg_w, 20.0),
                         ));
                         if !bg.is_null() {
                             tint_layer(bg, ns_color(colors.selected_bg, 1.0), 6.0);
@@ -1024,42 +1055,55 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                     }
                     let label = make_label(
                         segment.label,
-                        system_font(11.5, WEIGHT_REGULAR),
+                        seg_font,
                         if segment.active { accent } else { muted },
                         NSRect::new(
-                            NSPoint::new(x + 6.0, from_top(card_h, chip_row_y + 3.0, 14.0)),
-                            NSSize::new(seg_w - 12.0, 14.0),
+                            NSPoint::new(seg_x + 6.0, from_top(card_h, chip_row_y + 3.0, 14.0)),
+                            NSSize::new(text_w, 14.0),
                         ),
                     );
                     if !label.is_null() {
                         let _: () = msg_send![effect, addSubview: label];
                     }
+                    seg_x += seg_w;
                 }
+                let hint_w = label_width(vm.attribute_hint, hint_font);
                 let attr_hint = make_label(
                     vm.attribute_hint,
-                    system_font(10.5, WEIGHT_REGULAR),
+                    hint_font,
                     muted,
                     NSRect::new(
-                        NSPoint::new(
-                            pad + 3.0 * seg_w + 6.0,
-                            from_top(card_h, chip_row_y + 3.0, 14.0),
-                        ),
-                        NSSize::new(70.0, 14.0),
+                        NSPoint::new(seg_x + 6.0, from_top(card_h, chip_row_y + 3.0, 14.0)),
+                        NSSize::new(hint_w, 14.0),
                     ),
                 );
                 if !attr_hint.is_null() {
                     let _: () = msg_send![effect, addSubview: attr_hint];
                 }
-                // The chip's frame is right-aligned to the column boundary,
-                // but its left edge must never reach back into the `⌃D
-                // cycle` hint on a narrow card — clamp it to the hint's
-                // right edge so the two labels can't draw over each other.
-                let hint_end = pad + 3.0 * seg_w + 6.0 + 70.0;
-                let favorites_x = (col_split - pad - 150.0).max(hint_end + 8.0);
-                let favorites_w = (col_split - pad - favorites_x).max(0.0);
+                // The favorites chip right-aligns to just short of the sample
+                // column (the SAMPLE header sits at col_split + 12, so
+                // col_split - 8 still leaves a 20pt gutter), and must never
+                // reach back into the `⌃D cycle` hint. It renders at the
+                // hint's 10.5pt — the full "☆ Favorites ⌃⇧F" doesn't fit the
+                // remaining span at 11.5pt — and when even that can't fit
+                // (narrow card), drops its "⌃⇧F" suffix rather than
+                // ellipsizing mid-word.
+                let hint_end = seg_x + 6.0 + hint_w;
+                let chip_right = col_split - 8.0;
+                let chip_min_x = hint_end + 8.0;
+                let full_w = label_width(vm.favorites_chip, hint_font);
+                let chip_text = if chip_right - full_w >= chip_min_x {
+                    vm.favorites_chip
+                } else {
+                    vm.favorites_chip
+                        .trim_end_matches("\u{2303}\u{21e7}F")
+                        .trim_end()
+                };
+                let favorites_x = (chip_right - label_width(chip_text, hint_font)).max(chip_min_x);
+                let favorites_w = (chip_right - favorites_x).max(0.0);
                 let favorites = make_label(
-                    vm.favorites_chip,
-                    system_font(11.5, WEIGHT_REGULAR),
+                    chip_text,
+                    hint_font,
                     if vm.favorites_only { accent } else { muted },
                     NSRect::new(
                         NSPoint::new(favorites_x, from_top(card_h, chip_row_y + 3.0, 14.0)),
@@ -1399,8 +1443,14 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                             let _: () = msg_send![effect, addSubview: label];
                         }
                         // D-2 (authoritative, absolute pt): label x=20 w=170
-                        // · badge x=196 w=44 (right edge 240) · value
-                        // x=250 (pad+230, unchanged below).
+                        // · badge x=172 w=70 (right edge 242) · value
+                        // x=250 (pad+230, unchanged below). The badge is
+                        // right-aligned, so its wide frame only grows into
+                        // the label gap (longest label, "Background Blur
+                        // Radius", measures 144pt → ends at x=164); an
+                        // NSTextField needs 64pt for "ON LAUNCH" at 9.5pt
+                        // semibold (sizeToFit, cell padding included), so
+                        // anything narrower ellipsizes to "ON L…".
                         let badge_color = if flashing {
                             fg
                         } else {
@@ -1414,8 +1464,8 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                             system_font(9.5, WEIGHT_SEMIBOLD),
                             badge_color,
                             NSRect::new(
-                                NSPoint::new(196.0, from_top(card_h, y_top + 4.0, 14.0)),
-                                NSSize::new(44.0, 14.0),
+                                NSPoint::new(172.0, from_top(card_h, y_top + 4.0, 14.0)),
+                                NSSize::new(70.0, 14.0),
                             ),
                         );
                         if !badge.is_null() {

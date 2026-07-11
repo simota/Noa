@@ -11,7 +11,7 @@ use crate::debounce::Debouncer;
 
 use super::{
     RevertValues, RowDraft, RowEffect, Section, SettingsRow, SettingsRowKind, ThemePairContext,
-    ThemeSettingsInit, ThemeSettingsMode, background_image_fit_value,
+    ThemeSettingsCarryover, ThemeSettingsInit, ThemeSettingsMode, background_image_fit_value,
     background_image_position_value,
 };
 
@@ -134,114 +134,171 @@ impl ThemeSettings {
     /// active theme (SHAPE), every settings row seeded from `init`'s live
     /// values with `touched = false`.
     pub(crate) fn open(init: ThemeSettingsInit) -> Self {
-        let snapshot = RevertValues {
-            theme_name: init.current_theme.clone(),
-            font_size: init.font_size,
-            cursor_style: init.cursor_style,
-            background_opacity: init.background_opacity,
-            background_blur_radius: init.background_blur_radius,
-            background_image: init.background_image.clone(),
-            background_image_opacity: init.background_image_opacity,
-            background_image_position: init.background_image_position,
-            background_image_fit: init.background_image_fit,
-            background_image_repeat: init.background_image_repeat,
-            background_image_interval_secs: init.background_image_interval_secs,
-            sidebar_preview_lines: init.sidebar_preview_lines,
-            quick_terminal_size: init.quick_terminal_size,
+        let (snapshot, rows, opaque_at_startup) = match &init.carryover {
+            // R-25/FM-04: a Tab reopen carries the whole-editing-task
+            // snapshot/rows/opacity-gate forward untouched rather than
+            // re-deriving them from `init`'s live values — see
+            // `ThemeSettingsCarryover`'s doc comment for why.
+            Some(carry) => (
+                carry.snapshot.clone(),
+                carry.rows.clone(),
+                carry.opaque_at_startup,
+            ),
+            None => (
+                RevertValues {
+                    theme_name: init.current_theme.clone(),
+                    font_size: init.font_size,
+                    cursor_style: init.cursor_style,
+                    background_opacity: init.background_opacity,
+                    background_blur_radius: init.background_blur_radius,
+                    background_image: init.background_image.clone(),
+                    background_image_opacity: init.background_image_opacity,
+                    background_image_position: init.background_image_position,
+                    background_image_fit: init.background_image_fit,
+                    background_image_repeat: init.background_image_repeat,
+                    background_image_interval_secs: init.background_image_interval_secs,
+                    sidebar_preview_lines: init.sidebar_preview_lines,
+                    quick_terminal_size: init.quick_terminal_size,
+                },
+                [
+                    SettingsRow {
+                        draft: RowDraft::FontSize(init.font_size),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::BackgroundOpacity(init.background_opacity),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::BackgroundBlurRadius(init.background_blur_radius),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::BackgroundImage(init.background_image.clone()),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::BackgroundImageOpacity(init.background_image_opacity),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::BackgroundImagePosition(init.background_image_position),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::BackgroundImageFit(init.background_image_fit),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::BackgroundImageRepeat(init.background_image_repeat),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::BackgroundImageInterval(
+                            init.background_image_interval_secs,
+                        ),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::CursorStyle(init.cursor_style),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::FontFamily(init.font_family.clone()),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::WindowPadding(
+                            init.window_padding_x,
+                            init.window_padding_y,
+                        ),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::MacosTitlebarStyle(init.macos_titlebar_style),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::SidebarPreviewLines(init.sidebar_preview_lines),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::QuickTerminalHeight(init.quick_terminal_size),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ConfirmQuit(init.confirm_quit),
+                        touched: false,
+                    },
+                ],
+                init.background_opacity >= 1.0,
+            ),
         };
-        let rows = [
-            SettingsRow {
-                draft: RowDraft::FontSize(init.font_size),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::BackgroundOpacity(init.background_opacity),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::BackgroundBlurRadius(init.background_blur_radius),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::BackgroundImage(init.background_image),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::BackgroundImageOpacity(init.background_image_opacity),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::BackgroundImagePosition(init.background_image_position),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::BackgroundImageFit(init.background_image_fit),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::BackgroundImageRepeat(init.background_image_repeat),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::BackgroundImageInterval(init.background_image_interval_secs),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::CursorStyle(init.cursor_style),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::FontFamily(init.font_family),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::WindowPadding(init.window_padding_x, init.window_padding_y),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::MacosTitlebarStyle(init.macos_titlebar_style),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::SidebarPreviewLines(init.sidebar_preview_lines),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::QuickTerminalHeight(init.quick_terminal_size),
-                touched: false,
-            },
-            SettingsRow {
-                draft: RowDraft::ConfirmQuit(init.confirm_quit),
-                touched: false,
-            },
-        ];
+        let filter = init
+            .carryover
+            .as_ref()
+            .map(|carry| carry.filter.clone())
+            .unwrap_or_default();
+        let selected_row = init
+            .carryover
+            .as_ref()
+            .map(|carry| carry.selected_row.min(SettingsRowKind::COUNT - 1))
+            .unwrap_or(0);
         let mut settings = ThemeSettings {
             mode: init.mode,
             section: init.mode.fixed_section(),
-            filter: String::new(),
+            filter,
             filtered: Arc::new(Vec::new()),
             highlighted: 0,
             highlight_moved: false,
-            selected_row: 0,
+            selected_row,
             rows,
             snapshot,
             font_size_debounce: Debouncer::new(FONT_SIZE_DEBOUNCE_WINDOW),
             font_size_digits: None,
             background_image_text: None,
-            opaque_at_startup: init.background_opacity >= 1.0,
+            opaque_at_startup,
             available_font_families: Arc::new(init.available_font_families),
             commit_error: None,
             theme_pair: init.theme_pair,
         };
         settings.recompute_filtered();
-        if let Some(pos) = settings
-            .filtered
-            .iter()
-            .position(|m| noa_theme::THEMES[m.index].0 == settings.snapshot.theme_name)
-        {
-            settings.highlighted = pos;
+        match &init.carryover {
+            // R-25 (AC-34): restore the carried highlight rather than
+            // re-locating the live-active theme — the filter (and so the
+            // `filtered` result set) is carried too, so the same index is
+            // still meaningful; clamp defensively in case the set somehow
+            // came back shorter.
+            Some(carry) => {
+                settings.highlighted = carry
+                    .highlighted
+                    .min(settings.filtered.len().saturating_sub(1));
+            }
+            None => {
+                if let Some(pos) = settings
+                    .filtered
+                    .iter()
+                    .position(|m| noa_theme::THEMES[m.index].0 == settings.snapshot.theme_name)
+                {
+                    settings.highlighted = pos;
+                }
+            }
         }
         settings
+    }
+
+    /// R-25: the carryover payload for a Tab-driven reopen into the other
+    /// mode — see [`ThemeSettingsCarryover`]'s doc comment for what each
+    /// field means and why it's carried instead of re-derived.
+    pub(crate) fn carryover(&self) -> ThemeSettingsCarryover {
+        ThemeSettingsCarryover {
+            filter: self.filter.clone(),
+            highlighted: self.highlighted,
+            selected_row: self.selected_row,
+            rows: self.rows.clone(),
+            snapshot: self.snapshot.clone(),
+            opaque_at_startup: self.opaque_at_startup,
+        }
     }
 
     pub(crate) fn section(&self) -> Section {
@@ -252,12 +309,6 @@ impl ThemeSettings {
     pub(crate) fn mode(&self) -> ThemeSettingsMode {
         self.mode
     }
-
-    /// Tab (R-2, AC-22 historical): a no-op now that a session's section is
-    /// fixed for its whole lifetime by [`ThemeSettingsMode`] — the other
-    /// half of the old combined overlay doesn't exist in this session to
-    /// switch to.
-    pub(crate) fn toggle_section(&mut self) {}
 
     pub(crate) fn filter(&self) -> &str {
         &self.filter

@@ -46,6 +46,7 @@ fn test_theme_settings_init() -> ThemeSettingsInit {
         font_family: "Menlo".to_string(),
         available_font_families: Vec::new(),
         theme_pair: None,
+        carryover: None,
     }
 }
 

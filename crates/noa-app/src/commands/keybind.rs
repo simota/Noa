@@ -146,6 +146,9 @@ impl Default for KeybindEngine {
             ("cmd+ctrl+f", AppCommand::ToggleFullscreen),
             ("cmd+shift+p", AppCommand::ToggleCommandPalette),
             ("cmd+shift+s", AppCommand::ToggleSidebar),
+            // R-24: default chord for the theme picker half of the split
+            // overlay (verified unused in this list before adding it).
+            ("cmd+shift+,", AppCommand::OpenThemePicker),
         ];
         let bindings = specs
             .into_iter()
@@ -429,6 +432,20 @@ mod tests {
                 )]
             );
         }
+    }
+
+    // AC-33 (R-24): the default engine resolves `cmd+shift+,` to
+    // `OpenThemePicker`.
+    #[test]
+    fn default_engine_binds_cmd_shift_comma_to_open_theme_picker() {
+        let engine = KeybindEngine::default();
+        assert_eq!(
+            engine.resolve(
+                &Key::Character(",".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::OpenThemePicker)
+        );
     }
 
     // DEC-1: a config keybind still using the pre-split combined overlay's

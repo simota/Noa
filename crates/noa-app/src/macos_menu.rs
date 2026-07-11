@@ -100,6 +100,22 @@ impl MacosMenu {
             preferences_enabled,
             Some(preferences_accelerator),
         );
+        let (edit_config_command, edit_config_label, edit_config_enabled, edit_config_accelerator) =
+            edit_config_file_menu_item_spec();
+        let edit_config_file = MenuItem::with_id(
+            edit_config_command.menu_id(),
+            edit_config_label,
+            edit_config_enabled,
+            edit_config_accelerator,
+        );
+        let (open_theme_command, open_theme_label, open_theme_enabled, open_theme_accelerator) =
+            open_theme_picker_menu_item_spec();
+        let open_theme_picker = MenuItem::with_id(
+            open_theme_command.menu_id(),
+            open_theme_label,
+            open_theme_enabled,
+            Some(open_theme_accelerator),
+        );
         let (fullscreen_command, fullscreen_label, fullscreen_enabled, fullscreen_accelerator) =
             fullscreen_menu_item_spec();
         let secure_keyboard_entry = CheckMenuItem::with_id(
@@ -328,6 +344,7 @@ impl MacosMenu {
                     true,
                     Some(cmd_shift_accelerator(Code::KeyP)),
                 ),
+                &open_theme_picker,
                 &quick_terminal,
                 &MenuItem::with_id(
                     AppCommand::ToggleSidebar.menu_id(),
@@ -387,6 +404,7 @@ impl MacosMenu {
             &about,
             &separator_one,
             &preferences,
+            &edit_config_file,
             &separator_secure,
             &secure_keyboard_entry,
             &separator_two,
@@ -554,6 +572,31 @@ fn preferences_menu_item_spec() -> (AppCommand, &'static str, bool, Accelerator)
         "Settings...",
         true,
         cmd_accelerator(Code::Comma),
+    )
+}
+
+/// R-23: `EditConfigFile`'s menu item spec — same "identity + label +
+/// enabled" shape as [`preferences_menu_item_spec`], but no accelerator (the
+/// spec deliberately leaves this unbound: Cmd+, now means something
+/// different post-R-22, so no chord should collide with a user's muscle
+/// memory here — reachable via the menu item or a config keybind only).
+fn edit_config_file_menu_item_spec() -> (AppCommand, &'static str, bool, Option<Accelerator>) {
+    (
+        AppCommand::EditConfigFile,
+        "Edit Config File...",
+        true,
+        None,
+    )
+}
+
+/// R-24: `OpenThemePicker`'s menu item spec — default `cmd+shift+,`
+/// (verified unused in [`KeybindEngine::default`]'s existing chord set).
+fn open_theme_picker_menu_item_spec() -> (AppCommand, &'static str, bool, Accelerator) {
+    (
+        AppCommand::OpenThemePicker,
+        "Open Theme...",
+        true,
+        cmd_shift_accelerator(Code::Comma),
     )
 }
 
@@ -745,6 +788,32 @@ mod tests {
         assert_eq!(label, "Toggle Full Screen");
         assert!(enabled);
         assert_eq!(accelerator, cmd_ctrl_accelerator(Code::KeyF));
+    }
+
+    // AC-32 (R-23): `EditConfigFile`'s menu item spec round-trips its id and
+    // carries no accelerator (Cmd+, now means something else post-R-22).
+    #[test]
+    fn edit_config_file_menu_item_is_enabled_and_has_no_accelerator() {
+        let (command, label, enabled, accelerator) = edit_config_file_menu_item_spec();
+
+        assert_eq!(command, AppCommand::EditConfigFile);
+        assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+        assert_eq!(label, "Edit Config File...");
+        assert!(enabled);
+        assert_eq!(accelerator, None);
+    }
+
+    // AC-33 (R-24) at the menu layer: `OpenThemePicker`'s menu item spec
+    // round-trips its id and carries the `cmd+shift+,` accelerator.
+    #[test]
+    fn open_theme_picker_menu_item_is_enabled_and_routes_to_open_theme_picker() {
+        let (command, label, enabled, accelerator) = open_theme_picker_menu_item_spec();
+
+        assert_eq!(command, AppCommand::OpenThemePicker);
+        assert_eq!(AppCommand::from_menu_id(command.menu_id()), Some(command));
+        assert_eq!(label, "Open Theme...");
+        assert!(enabled);
+        assert_eq!(accelerator, cmd_shift_accelerator(Code::Comma));
     }
 
     #[test]

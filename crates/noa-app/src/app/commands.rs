@@ -63,7 +63,13 @@ impl App {
         }
         match command {
             AppCommand::About => crate::app_actions::show_about(),
-            AppCommand::Preferences => crate::app_actions::open_config_file(),
+            // R-22: Cmd+, now opens the GUI settings overlay instead of the
+            // raw config file — the menu item id/accelerator are unchanged
+            // (AC-31), only this dispatch target moves.
+            AppCommand::Preferences => self.open_theme_settings(ThemeSettingsMode::Settings),
+            // R-23: the pre-R-22 behavior, kept reachable under its own
+            // command identity.
+            AppCommand::EditConfigFile => crate::app_actions::open_config_file(),
             AppCommand::ReloadConfig => self.reload_config_from_disk(),
             AppCommand::NewTab => {
                 let _ = self.spawn_tab(event_loop, SpawnTarget::CurrentWindow);

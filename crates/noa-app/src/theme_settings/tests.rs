@@ -41,6 +41,7 @@ fn init() -> ThemeSettingsInit {
             "Courier New".to_string(),
         ],
         theme_pair: None,
+        carryover: None,
     }
 }
 
@@ -141,19 +142,15 @@ fn open_highlights_current_theme_and_previews_nothing_until_moved() {
 }
 
 // DEC-2 (theme-settings-ui split): a Theme-mode session's section is
-// permanently `ThemePicker` — Tab has nothing to toggle to, and ←→ stays a
-// no-op since the settings rows don't exist in this session at all.
+// permanently `ThemePicker` for its whole lifetime — there is no method
+// that mutates it after `open()` (R-25's Tab reopens a fresh session in the
+// other mode at the `App` layer instead of toggling this session's section
+// in place; see `open_theme_settings_session`/`tab_theme_settings`). ←→
+// stays a no-op since the settings rows don't exist in this session at all.
 #[test]
-fn theme_mode_session_never_reaches_settings_rows_and_tab_is_a_no_op() {
+fn theme_mode_session_never_reaches_settings_rows() {
     let mut settings = ThemeSettings::open(init());
     assert_eq!(settings.section(), Section::ThemePicker);
-
-    settings.toggle_section();
-    assert_eq!(
-        settings.section(),
-        Section::ThemePicker,
-        "Tab has nothing to toggle to in Theme mode"
-    );
 
     // ←→ is a no-op while the theme list owns the (only) section.
     let effect = settings.adjust(1, Instant::now());
@@ -168,24 +165,146 @@ fn theme_mode_session_never_reaches_settings_rows_and_tab_is_a_no_op() {
 }
 
 // DEC-2: a Settings-mode session's section is permanently `SettingsRows` —
-// Tab has nothing to toggle to, and ↑↓ always navigates row selection, never
-// a (nonexistent) theme highlight.
+// ↑↓ always navigates row selection, never a (nonexistent) theme highlight.
 #[test]
-fn settings_mode_session_never_reaches_theme_picker_and_tab_is_a_no_op() {
+fn settings_mode_session_never_reaches_theme_picker() {
     let mut settings = ThemeSettings::open(settings_init());
     assert_eq!(settings.section(), Section::SettingsRows);
     assert_eq!(settings.selected_row(), 0);
 
-    settings.toggle_section();
-    assert_eq!(
-        settings.section(),
-        Section::SettingsRows,
-        "Tab has nothing to toggle to in Settings mode"
-    );
-
     settings.move_down();
     settings.move_down();
     assert_eq!(settings.selected_row(), 2);
+}
+
+// AC-34 (R-25): a Tab-driven mode switch carries the theme picker's filter
+// text across — Settings has no filter concept of its own (nothing renders
+// or edits it there), but the field survives the hop because `carryover()`
+// always captures it regardless of which mode is currently open, so a
+// second Tab back to Theme finds it restored.
+#[test]
+fn tab_carryover_restores_the_theme_filter_after_a_settings_round_trip() {
+    let mut theme = ThemeSettings::open(init());
+    theme.push_text("abc", Instant::now());
+    assert_eq!(theme.filter(), "abc");
+
+    let carry = theme.carryover();
+    let settings = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Settings,
+        carryover: Some(carry),
+        ..init()
+    });
+    assert_eq!(settings.section(), Section::SettingsRows);
+
+    let carry_back = settings.carryover();
+    let theme_again = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Theme,
+        carryover: Some(carry_back),
+        ..init()
+    });
+    assert_eq!(theme_again.filter(), "abc");
+}
+
+// AC-35 (R-25): a Settings-mode `selected_row` survives a Theme round trip
+// the same way the picker's filter does.
+#[test]
+fn tab_carryover_restores_the_settings_selected_row_after_a_theme_round_trip() {
+    let mut settings = ThemeSettings::open(settings_init());
+    for _ in 0..5 {
+        settings.move_down();
+    }
+    assert_eq!(settings.selected_row(), 5);
+
+    let carry = settings.carryover();
+    let theme = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Theme,
+        carryover: Some(carry),
+        ..init()
+    });
+
+    let carry_back = theme.carryover();
+    let settings_again = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Settings,
+        carryover: Some(carry_back),
+        ..init()
+    });
+    assert_eq!(settings_again.selected_row(), 5);
+}
+
+// AC-36 (R-25): a row touched and live-applied in one mode must still show
+// as touched (and keep its edited value) after a Tab hop away and back —
+// otherwise a value already live on screen would silently never reach
+// `commit_updates()`'s output because the freshly reopened session would
+// reseed every row as untouched. Deliberately hands the intermediate
+// `ThemeSettingsInit` a *different* `font_size` than the touched draft to
+// prove the carryover path ignores `init`'s live fields in favor of the
+// carried rows (the real `App::tab_theme_settings` never lets these two
+// diverge — this only isolates the pure state machine's contract).
+#[test]
+fn tab_carryover_preserves_row_values_and_touched_flags_across_the_hop() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::FontSize);
+    settings.adjust(4, Instant::now());
+    let touched_draft = settings.rows()[row_index(SettingsRowKind::FontSize)]
+        .draft
+        .clone();
+    assert!(settings.rows()[row_index(SettingsRowKind::FontSize)].touched);
+
+    let carry = settings.carryover();
+    let theme = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Theme,
+        font_size: 99.0,
+        carryover: Some(carry),
+        ..init()
+    });
+
+    let carry_back = theme.carryover();
+    let settings_again = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Settings,
+        font_size: 99.0,
+        carryover: Some(carry_back),
+        ..init()
+    });
+    assert_eq!(
+        settings_again.rows()[row_index(SettingsRowKind::FontSize)].draft,
+        touched_draft
+    );
+    assert!(settings_again.rows()[row_index(SettingsRowKind::FontSize)].touched);
+}
+
+// AC-59 (FM-04): Esc after *multiple* Tab round trips reverts to the very
+// first `open()`'s snapshot, not to whichever mode happened to be open most
+// recently — even when the theme highlight kept changing along the way.
+#[test]
+fn esc_after_multiple_tab_hops_reverts_to_the_first_open_snapshot() {
+    let mut theme = ThemeSettings::open(init());
+    let original_theme_name = init().current_theme;
+    theme.move_down();
+    assert_ne!(
+        theme.highlighted_theme_name(),
+        Some(original_theme_name.as_str()),
+        "test setup should actually move the highlight off the original theme"
+    );
+
+    let carry1 = theme.carryover();
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Settings,
+        carryover: Some(carry1),
+        ..init()
+    });
+    move_to_row(&mut settings, SettingsRowKind::FontSize);
+    settings.adjust(2, Instant::now());
+
+    let carry2 = settings.carryover();
+    let mut theme_again = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Theme,
+        carryover: Some(carry2),
+        ..init()
+    });
+    theme_again.move_down();
+
+    let reverted = theme_again.revert();
+    assert_eq!(reverted.theme_name, original_theme_name);
 }
 
 // AC-5 (R-8, R-10): adjusting the cursor-style row cycles it and reports

@@ -12,10 +12,13 @@ pub(crate) enum Section {
 
 /// Which overlay a session was opened as: the "Theme" picker or the
 /// "Settings" rows (theme-settings-ui split). Each mode pins
-/// [`ThemeSettings`]'s [`Section`] for the life of the session — Tab has
-/// nothing to toggle between anymore, since the other half doesn't exist in
-/// this session at all (`App::open_theme_settings` takes this as a
-/// parameter and opens one session per invocation).
+/// [`ThemeSettings`]'s [`Section`] for the life of the session — the other
+/// half's `Section` doesn't exist in this session at all
+/// (`App::open_theme_settings` takes this as a parameter and opens one
+/// session per invocation). R-25's Tab doesn't mutate a session's `Section`
+/// in place either: it reopens a *new* session in the other mode, carrying
+/// editing state across (`App::tab_theme_settings`,
+/// [`super::ThemeSettingsCarryover`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ThemeSettingsMode {
     Theme,
@@ -269,6 +272,37 @@ pub(crate) struct ThemePairContext {
     pub(crate) dark: String,
 }
 
+/// R-25/FM-04: what a Tab-driven mode switch carries into the freshly
+/// reopened session, so Tab reads as "change this session's view" rather
+/// than "open a fresh modal" (the architectural premise the whole feature
+/// rests on — see [`ThemeSettingsMode`]'s doc comment on the mode-per-
+/// session split).
+///
+/// Carrying the *whole* `rows` array (not just the picker's filter/
+/// highlighted or the rows section's `selected_row`) is deliberate: a row
+/// edited and live-applied in one mode (e.g. font-size in `Settings`) must
+/// still show as `touched` if the user Tabs to `Theme` and back before
+/// pressing Enter — otherwise that already-live-applied value would
+/// silently never reach `commit_updates()`'s output because the freshly
+/// reopened session would reseed every row as untouched. Cloning `rows`
+/// (values *and* touched flags) sidesteps that gap entirely instead of
+/// re-deriving fresh rows from `App`'s current live config each hop.
+///
+/// `snapshot`/`opaque_at_startup` are carried rather than recomputed for
+/// the same reason: they describe the state the *whole* editing task
+/// (however many Tab hops it spans) started from, not just the state of
+/// whichever mode happened to be open most recently. Carrying `snapshot`
+/// specifically is what makes repeated Tab round-trips followed by Esc
+/// revert to the *first* open, not the most recent reopen (FM-04/AC-59).
+pub(crate) struct ThemeSettingsCarryover {
+    pub(crate) filter: String,
+    pub(crate) highlighted: usize,
+    pub(crate) selected_row: usize,
+    pub(crate) rows: [SettingsRow; SettingsRowKind::COUNT],
+    pub(crate) snapshot: RevertValues,
+    pub(crate) opaque_at_startup: bool,
+}
+
 /// Everything `App` must supply to open the overlay — the session's live
 /// values at the moment `cmd`+palette-entry is invoked, plus the font-family
 /// discovery list (queried once by `App` via `noa_font::list_families`, kept
@@ -283,6 +317,10 @@ pub(crate) struct ThemeSettingsInit {
     /// pair (R-34) — `None` for a plain single-name `theme` (or none at
     /// all).
     pub(crate) theme_pair: Option<ThemePairContext>,
+    /// `Some` when this session is opening as the Tab-driven reopen of an
+    /// existing session in the other mode (R-25) — `None` for every other
+    /// open path (palette entry, menu item, keybind).
+    pub(crate) carryover: Option<ThemeSettingsCarryover>,
     pub(crate) font_size: f32,
     pub(crate) cursor_style: CursorShape,
     pub(crate) background_opacity: f32,

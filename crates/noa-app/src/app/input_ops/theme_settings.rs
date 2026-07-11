@@ -5,7 +5,7 @@ use super::super::*;
 use super::ActiveOverlay;
 use crate::theme_settings::{
     RowDraft, RowEffect, SettingsRow, SettingsRowKind, ThemePairContext, ThemeSettings,
-    ThemeSettingsInit, ThemeSettingsMode,
+    ThemeSettingsCarryover, ThemeSettingsInit, ThemeSettingsMode,
 };
 
 fn cursor_shape_of(style: CursorStyle) -> noa_config::CursorShape {
@@ -36,6 +36,51 @@ impl App {
         if self.active_overlay(window_id) != ActiveOverlay::None {
             return;
         }
+        self.open_theme_settings_session(window_id, mode, None, Instant::now());
+    }
+
+    /// Tab (R-25): reopen the current session in the other
+    /// [`ThemeSettingsMode`], carrying its filter/highlight/row-editing
+    /// state across (see [`crate::theme_settings::ThemeSettingsCarryover`]).
+    /// A third transition distinct from Esc (revert) and Enter (commit) —
+    /// it neither writes config nor touches `gpu.preview_theme`/any
+    /// live-applied runtime value (AC-36): the new session simply reads the
+    /// same live `self`-state the old one would have (nothing changed it in
+    /// between), and the carried snapshot/rows keep everything else
+    /// bit-for-bit identical.
+    pub(in crate::app) fn tab_theme_settings(&mut self, window_id: WindowId) {
+        let Some(session) = self.theme_settings.as_ref() else {
+            return;
+        };
+        if session.window_id != window_id {
+            return;
+        }
+        let next_mode = match session.state.mode() {
+            ThemeSettingsMode::Theme => ThemeSettingsMode::Settings,
+            ThemeSettingsMode::Settings => ThemeSettingsMode::Theme,
+        };
+        let carryover = session.state.carryover();
+        // Reused verbatim (not reset to `Instant::now()`): this is what
+        // keeps a Tab hop from replaying the open fade-in on the wgpu path
+        // (ux.md §8) — by the time a user has interacted enough to press
+        // Tab, the original fade has already settled, so reusing its start
+        // instant just means the new session renders at full opacity from
+        // its very first frame instead of re-animating from zero.
+        let opened_at = session.opened_at;
+        self.open_theme_settings_session(window_id, next_mode, Some(carryover), opened_at);
+    }
+
+    /// The guard-free session-construction half of [`Self::open_theme_settings`]
+    /// / [`Self::tab_theme_settings`] — both call this once they've decided
+    /// it's safe (or intended) to replace whatever `self.theme_settings`
+    /// currently holds.
+    fn open_theme_settings_session(
+        &mut self,
+        window_id: WindowId,
+        mode: ThemeSettingsMode,
+        carryover: Option<ThemeSettingsCarryover>,
+        opened_at: Instant,
+    ) {
         // FM-01: resolve `current_theme` the same pair-aware way
         // `effective_theme_name` does — reading `self.config.theme` alone
         // (the old behavior) is always empty under a `theme =
@@ -82,6 +127,7 @@ impl App {
             mode,
             current_theme,
             theme_pair,
+            carryover,
             font_size: self.runtime_font_size,
             cursor_style,
             background_opacity: self.config.background_opacity,
@@ -104,7 +150,7 @@ impl App {
         self.theme_settings = Some(ThemeSettingsSession {
             window_id,
             state: ThemeSettings::open(init),
-            opened_at: Instant::now(),
+            opened_at,
         });
         self.request_window_redraw(window_id);
     }
@@ -113,14 +159,14 @@ impl App {
     /// [`Self::handle_command_palette_key`]): Escape cancels (reverts every
     /// live-previewed value and closes, see [`Self::close_theme_settings`]),
     /// Enter commits (persists the touched rows and closes, see
-    /// [`Self::commit_theme_settings`]), Tab is a no-op (each session's
-    /// section is now fixed by the mode it opened in, see
-    /// [`crate::theme_settings::ThemeSettingsMode`]), ↑↓ navigate, ←→
-    /// adjusts the focused settings row, Backspace/printable text edit
-    /// the theme filter or a focused numeric row. Every other resolved
-    /// keybind is swallowed (R-3 direction 2: no other overlay's shortcut
-    /// may leak through while this one owns the keyboard). Only called when
-    /// `self.theme_settings` targets `window_id` (checked by the caller).
+    /// [`Self::commit_theme_settings`]), Tab reopens the session in the
+    /// other [`crate::theme_settings::ThemeSettingsMode`] (R-25, see
+    /// [`Self::tab_theme_settings`]), ↑↓ navigate, ←→ adjusts the focused
+    /// settings row, Backspace/printable text edit the theme filter or a
+    /// focused numeric row. Every other resolved keybind is swallowed (R-3
+    /// direction 2: no other overlay's shortcut may leak through while this
+    /// one owns the keyboard). Only called when `self.theme_settings`
+    /// targets `window_id` (checked by the caller).
     pub(in crate::app) fn handle_theme_settings_key(
         &mut self,
         window_id: WindowId,
@@ -136,10 +182,7 @@ impl App {
                 return;
             }
             Key::Named(NamedKey::Tab) => {
-                if let Some(session) = self.theme_settings.as_mut() {
-                    session.state.toggle_section();
-                }
-                self.request_window_redraw(window_id);
+                self.tab_theme_settings(window_id);
                 return;
             }
             Key::Named(NamedKey::ArrowUp) => {
@@ -766,6 +809,7 @@ mod commit_theme_settings_tests {
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
             theme_pair: None,
+            carryover: None,
         });
         while SettingsRowKind::ALL[settings.selected_row()] != SettingsRowKind::QuickTerminalHeight
         {
@@ -835,6 +879,7 @@ mod commit_theme_settings_tests {
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
             theme_pair: None,
+            carryover: None,
         });
 
         assert_eq!(selected_background_image_text(&settings), None);

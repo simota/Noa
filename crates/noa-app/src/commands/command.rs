@@ -9,6 +9,12 @@ use winit::keyboard::{Key, ModifiersState};
 pub enum AppCommand {
     About,
     Preferences,
+    /// R-23: the pre-R-22 behavior of `Preferences` (open the raw config
+    /// file in the user's external editor), kept reachable as its own
+    /// command once `Preferences` itself is redirected to the GUI settings
+    /// overlay (`open_config_file()`, same as before — no behavior change,
+    /// just a new command identity so both are independently reachable).
+    EditConfigFile,
     ReloadConfig,
     Copy,
     Paste,
@@ -100,6 +106,8 @@ pub enum ViewportScroll {
 impl AppCommand {
     pub(crate) const ABOUT_MENU_ID: &'static str = "noa.app.about";
     pub(crate) const PREFERENCES_MENU_ID: &'static str = "noa.app.preferences";
+    pub(crate) const EDIT_CONFIG_FILE_MENU_ID: &'static str = "noa.app.edit-config-file";
+    pub(crate) const OPEN_THEME_PICKER_MENU_ID: &'static str = "noa.app.open-theme-picker";
     pub(crate) const COPY_MENU_ID: &'static str = "noa.edit.copy";
     pub(crate) const PASTE_MENU_ID: &'static str = "noa.edit.paste";
     pub(crate) const SEND_SELECTION_TO_PANE_MENU_ID: &'static str =
@@ -163,6 +171,7 @@ impl AppCommand {
         match self {
             AppCommand::About => Self::ABOUT_MENU_ID,
             AppCommand::Preferences => Self::PREFERENCES_MENU_ID,
+            AppCommand::EditConfigFile => Self::EDIT_CONFIG_FILE_MENU_ID,
             AppCommand::ReloadConfig => "",
             AppCommand::Copy => Self::COPY_MENU_ID,
             AppCommand::Paste => Self::PASTE_MENU_ID,
@@ -213,7 +222,12 @@ impl AppCommand {
             AppCommand::ToggleFullscreen => Self::TOGGLE_FULLSCREEN_MENU_ID,
             AppCommand::CloseTab => Self::CLOSE_TAB_MENU_ID,
             AppCommand::SelectTab(_) => "",
-            AppCommand::OpenThemePicker => "",
+            AppCommand::OpenThemePicker => Self::OPEN_THEME_PICKER_MENU_ID,
+            // R-24: `OpenSettings` deliberately keeps `menu_id() -> ""` —
+            // it has no menu item of its own (reachable via `Preferences`'s
+            // Cmd+, once R-22 redirects that to `ThemeSettingsMode::Settings`,
+            // see the spec's Open Questions on why no separate chord/item is
+            // added here).
             AppCommand::OpenSettings => "",
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
@@ -232,6 +246,8 @@ impl AppCommand {
         match id {
             Self::ABOUT_MENU_ID => Some(Self::About),
             Self::PREFERENCES_MENU_ID => Some(Self::Preferences),
+            Self::EDIT_CONFIG_FILE_MENU_ID => Some(Self::EditConfigFile),
+            Self::OPEN_THEME_PICKER_MENU_ID => Some(Self::OpenThemePicker),
             Self::COPY_MENU_ID => Some(Self::Copy),
             Self::PASTE_MENU_ID => Some(Self::Paste),
             Self::SEND_SELECTION_TO_PANE_MENU_ID => Some(Self::SendSelectionToPane),
@@ -313,6 +329,7 @@ impl AppCommand {
         match self {
             Self::About => "about",
             Self::Preferences => "preferences",
+            Self::EditConfigFile => "preferences.edit-config-file",
             Self::ReloadConfig => "config.reload",
             Self::Copy => "copy",
             Self::Paste => "paste",
@@ -387,6 +404,7 @@ impl AppCommand {
         match name {
             "about" => Some(Self::About),
             "preferences" => Some(Self::Preferences),
+            "preferences.edit-config-file" => Some(Self::EditConfigFile),
             "config.reload" => Some(Self::ReloadConfig),
             "copy" => Some(Self::Copy),
             "paste" => Some(Self::Paste),

@@ -21,7 +21,7 @@ mod state;
 
 pub(crate) use rows::{
     RevertValues, RowDraft, RowEffect, Section, SettingsRow, SettingsRowKind, ThemePairContext,
-    ThemeSettingsInit, ThemeSettingsMode, background_image_fit_value,
+    ThemeSettingsCarryover, ThemeSettingsInit, ThemeSettingsMode, background_image_fit_value,
     background_image_position_value, settings_row_display_value,
 };
 pub(crate) use sample::{Swatch, sample_swatches};

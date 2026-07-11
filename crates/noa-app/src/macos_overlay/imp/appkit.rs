@@ -1,6 +1,7 @@
 use crate::macos_overlay::model::{
     OverlayColors, PaneRectPt, ThemeSettingsViewModel, Tone, overlay_scroll_window,
 };
+use crate::theme_settings::ThemeSettingsMode;
 use noa_render::{CommandPaletteSnapshot, ConfirmDialogSnapshot, PaletteRow};
 use objc2::msg_send;
 use objc2::rc::Retained;
@@ -777,37 +778,44 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
         };
 
         let card_w = 660.0_f64.min(pane.w - 32.0).max(320.0);
-        // The card height is content-driven: title block + theme list +
-        // settings section + footer. When the pane is short, first shrink
-        // the theme list (min 3 rows), then window the settings rows
-        // around the selection — the same degradation policy as the wgpu
-        // card, so every settings row stays reachable.
+        // The card height is content-driven: title block + exactly one
+        // section (the theme list+sample pane in Theme mode, the settings
+        // rows in Settings mode — a session never shows both, DEC-2) +
+        // footer. When the pane is short, shrink that one section's row
+        // count around the selection (min 3 rows) — the same degradation
+        // policy the combined card used, so every row stays reachable.
         let pad = 20.0;
         let list_top = 86.0;
         let row_h = 24.0;
         let srow_h = 23.0;
         let settings_header_h = 20.0;
-        let section_gap = 18.0;
         let footer_h = 34.0;
         let avail = (pane.h - 24.0).max(240.0);
         let settings_total = vm.rows.len();
-        let needed = |list_rows: usize, settings_rows: usize| {
-            list_top
-                + list_rows as f64 * row_h
-                + section_gap
-                + settings_header_h
-                + settings_rows as f64 * srow_h
-                + footer_h
+        // Settings mode has no filter line/theme list above it, so its
+        // section header sits where the "Theme"/"Sample" column headers
+        // otherwise would (y=46); rows start directly below the header.
+        let settings_top = 46.0 + settings_header_h;
+
+        let (list_rows, settings_rows, card_h) = match vm.mode {
+            ThemeSettingsMode::Theme => {
+                let needed = |list_rows: usize| list_top + list_rows as f64 * row_h + footer_h;
+                let mut list_rows = vm.themes.len().max(1);
+                while needed(list_rows) > avail && list_rows > 3 {
+                    list_rows -= 1;
+                }
+                (list_rows, 0usize, needed(list_rows).min(avail))
+            }
+            ThemeSettingsMode::Settings => {
+                let needed =
+                    |settings_rows: usize| settings_top + settings_rows as f64 * srow_h + footer_h;
+                let mut settings_rows = settings_total;
+                while needed(settings_rows) > avail && settings_rows > 3 {
+                    settings_rows -= 1;
+                }
+                (0usize, settings_rows, needed(settings_rows).min(avail))
+            }
         };
-        let mut list_rows = vm.themes.len().max(1);
-        let mut settings_rows = settings_total;
-        while needed(list_rows, settings_rows) > avail && list_rows > 3 {
-            list_rows -= 1;
-        }
-        while needed(list_rows, settings_rows) > avail && settings_rows > 3 {
-            settings_rows -= 1;
-        }
-        let card_h = needed(list_rows, settings_rows).min(avail);
         let card_frame = NSRect::new(
             NSPoint::new(
                 (pane.w - card_w) / 2.0,
@@ -835,8 +843,12 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
         let danger = ns_color(colors.danger, 1.0);
 
         // Title row + save badge.
+        let title_text = match vm.mode {
+            ThemeSettingsMode::Theme => "Theme",
+            ThemeSettingsMode::Settings => "Settings",
+        };
         let title = make_label(
-            "Theme & Settings",
+            title_text,
             system_font(15.0, WEIGHT_SEMIBOLD),
             fg,
             NSRect::new(
@@ -863,8 +875,6 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
             }
         }
 
-        // Left column: theme list. Right column: sample swatches.
-        let col_split = card_w * 0.46;
         let section_label = |text: &str, focused: bool, x: f64, y_top: f64, w: f64| {
             let color = if focused { accent } else { muted };
             let label = make_label(
@@ -880,220 +890,230 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
                 let _: () = msg_send![effect, addSubview: label];
             }
         };
-        section_label(
-            if vm.theme_section_focused {
-                "Theme \u{25cf}"
-            } else {
-                "Theme"
-            },
-            vm.theme_section_focused,
-            pad,
-            46.0,
-            col_split - pad,
-        );
-        section_label("Sample", false, col_split + 12.0, 46.0, 120.0);
 
-        // Filter line.
-        let filter = make_label(
-            &format!("/{}", vm.filter),
-            mono_digit_font(12.0),
-            muted,
-            NSRect::new(
-                NSPoint::new(pad, from_top(card_h, 64.0, 16.0)),
-                NSSize::new(col_split - pad - 8.0, 16.0),
-            ),
-        );
-        if !filter.is_null() {
-            let _: () = msg_send![effect, addSubview: filter];
-        }
-
-        // Theme list rows, re-windowed around the highlight when the
-        // short-card policy shrank the list below the VM's window.
-        let theme_highlight = vm.themes.iter().position(|(_, h)| *h).unwrap_or(0);
-        let (theme_off, theme_shown) =
-            overlay_scroll_window(vm.themes.len(), theme_highlight, list_rows);
-        for (i, (name, highlighted)) in vm.themes[theme_off..theme_off + theme_shown]
-            .iter()
-            .enumerate()
-        {
-            let y_top = list_top + i as f64 * row_h;
-            if *highlighted {
-                let bg = make_view(NSRect::new(
-                    NSPoint::new(pad - 8.0, from_top(card_h, y_top, row_h)),
-                    NSSize::new(col_split - pad, row_h),
-                ));
-                if !bg.is_null() {
-                    tint_layer(bg, ns_color(colors.selected_bg, 1.0), 6.0);
-                    let _: () = msg_send![effect, addSubview: bg];
-                    release_owned(bg);
-                }
-            }
-            let label = make_label(
-                name,
-                system_font(
-                    13.0,
-                    if *highlighted {
-                        WEIGHT_MEDIUM
+        match vm.mode {
+            ThemeSettingsMode::Theme => {
+                // Left column: theme list. Right column: sample swatches.
+                let col_split = card_w * 0.46;
+                section_label(
+                    if vm.theme_section_focused {
+                        "Theme \u{25cf}"
                     } else {
-                        WEIGHT_REGULAR
+                        "Theme"
                     },
-                ),
-                if *highlighted && vm.theme_section_focused {
-                    accent
-                } else {
-                    fg
-                },
-                NSRect::new(
-                    NSPoint::new(pad, from_top(card_h, y_top + 4.0, 17.0)),
-                    NSSize::new(col_split - pad - 12.0, 17.0),
-                ),
-            );
-            if !label.is_null() {
-                let _: () = msg_send![effect, addSubview: label];
-            }
-        }
+                    vm.theme_section_focused,
+                    pad,
+                    46.0,
+                    col_split - pad,
+                );
+                section_label("Sample", false, col_split + 12.0, 46.0, 120.0);
 
-        // Sample swatches: ANSI 8x2 grid, semantic row, truecolor ramp.
-        // On short cards the settings section climbs up into the sample
-        // area; drop any swatch row that would cross into it (same rule
-        // as the wgpu card).
-        let sw = 18.0;
-        let gap = 4.0;
-        let sample_x = col_split + 12.0;
-        let swatch_limit = list_top + list_rows as f64 * row_h;
-        for (i, &(r, g, b)) in vm.ansi_swatches.iter().enumerate() {
-            let row = i / 8;
-            let col = i % 8;
-            let y_top = list_top + row as f64 * (sw + gap);
-            if y_top + sw > swatch_limit {
-                continue;
-            }
-            let square = make_view(NSRect::new(
-                NSPoint::new(
-                    sample_x + col as f64 * (sw + gap),
-                    from_top(card_h, y_top, sw),
-                ),
-                NSSize::new(sw, sw),
-            ));
-            if !square.is_null() {
-                let color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
-                tint_layer(square, ns_color(color, 1.0), 4.0);
-                let _: () = msg_send![effect, addSubview: square];
-                release_owned(square);
-            }
-        }
-        let semantic_top = list_top + 2.0 * (sw + gap) + 4.0;
-        for (i, &(r, g, b)) in vm.semantic_swatches.iter().enumerate() {
-            if semantic_top + sw > swatch_limit {
-                break;
-            }
-            let w = 2.0 * sw + gap;
-            let square = make_view(NSRect::new(
-                NSPoint::new(
-                    sample_x + i as f64 * (w + gap),
-                    from_top(card_h, semantic_top, sw),
-                ),
-                NSSize::new(w, sw),
-            ));
-            if !square.is_null() {
-                let color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
-                tint_layer(square, ns_color(color, 1.0), 4.0);
-                let _: () = msg_send![effect, addSubview: square];
-                release_owned(square);
-            }
-        }
-        if vm.show_truecolor_ramp && semantic_top + sw + gap + 4.0 + 10.0 <= swatch_limit {
-            let ramp_top = semantic_top + sw + gap + 4.0;
-            let ramp_w = 8.0 * (sw + gap) - gap;
-            let steps = 16;
-            let step_w = ramp_w / steps as f64;
-            for step in 0..steps {
-                let t = step as f32 / (steps - 1) as f32;
-                let span = (0xe0 - 0x20) as f32 / 255.0;
-                let r = 0x20 as f32 / 255.0 + t * span;
-                let b = 0xe0 as f32 / 255.0 - t * span;
-                let square = make_view(NSRect::new(
-                    NSPoint::new(
-                        sample_x + step as f64 * step_w,
-                        from_top(card_h, ramp_top, 10.0),
+                // Filter line.
+                let filter = make_label(
+                    &format!("/{}", vm.filter),
+                    mono_digit_font(12.0),
+                    muted,
+                    NSRect::new(
+                        NSPoint::new(pad, from_top(card_h, 64.0, 16.0)),
+                        NSSize::new(col_split - pad - 8.0, 16.0),
                     ),
-                    NSSize::new(step_w + 0.5, 10.0),
-                ));
-                if !square.is_null() {
-                    tint_layer(square, ns_color([r, 0x60 as f32 / 255.0, b, 1.0], 1.0), 0.0);
-                    let _: () = msg_send![effect, addSubview: square];
-                    release_owned(square);
+                );
+                if !filter.is_null() {
+                    let _: () = msg_send![effect, addSubview: filter];
                 }
-            }
-        }
 
-        // Settings section, windowed around the selection when the
-        // short-card policy cut it down.
-        let settings_top = list_top + list_rows as f64 * row_h + section_gap;
-        section_label(
-            if vm.settings_focused {
-                "Settings \u{25cf}"
-            } else {
-                "Settings"
-            },
-            vm.settings_focused,
-            pad,
-            settings_top,
-            200.0,
-        );
-        let rows_top = settings_top + settings_header_h;
-        let settings_sel = vm.rows.iter().position(|r| r.3).unwrap_or(0);
-        let (settings_off, settings_shown) =
-            overlay_scroll_window(settings_total, settings_sel, settings_rows);
-        for (i, (label_text, value, restart, selected)) in vm.rows
-            [settings_off..settings_off + settings_shown]
-            .iter()
-            .enumerate()
-        {
-            let y_top = rows_top + i as f64 * srow_h;
-            if *selected {
-                let bg = make_view(NSRect::new(
-                    NSPoint::new(pad - 8.0, from_top(card_h, y_top, srow_h)),
-                    NSSize::new(card_w - pad * 2.0 + 16.0, srow_h),
-                ));
-                if !bg.is_null() {
-                    tint_layer(bg, ns_color(colors.selected_bg, 1.0), 6.0);
-                    let _: () = msg_send![effect, addSubview: bg];
-                    release_owned(bg);
+                // Theme list rows, re-windowed around the highlight when the
+                // short-card policy shrank the list below the VM's window.
+                let theme_highlight = vm.themes.iter().position(|(_, h)| *h).unwrap_or(0);
+                let (theme_off, theme_shown) =
+                    overlay_scroll_window(vm.themes.len(), theme_highlight, list_rows);
+                for (i, (name, highlighted)) in vm.themes[theme_off..theme_off + theme_shown]
+                    .iter()
+                    .enumerate()
+                {
+                    let y_top = list_top + i as f64 * row_h;
+                    if *highlighted {
+                        let bg = make_view(NSRect::new(
+                            NSPoint::new(pad - 8.0, from_top(card_h, y_top, row_h)),
+                            NSSize::new(col_split - pad, row_h),
+                        ));
+                        if !bg.is_null() {
+                            tint_layer(bg, ns_color(colors.selected_bg, 1.0), 6.0);
+                            let _: () = msg_send![effect, addSubview: bg];
+                            release_owned(bg);
+                        }
+                    }
+                    let label = make_label(
+                        name,
+                        system_font(
+                            13.0,
+                            if *highlighted {
+                                WEIGHT_MEDIUM
+                            } else {
+                                WEIGHT_REGULAR
+                            },
+                        ),
+                        if *highlighted && vm.theme_section_focused {
+                            accent
+                        } else {
+                            fg
+                        },
+                        NSRect::new(
+                            NSPoint::new(pad, from_top(card_h, y_top + 4.0, 17.0)),
+                            NSSize::new(col_split - pad - 12.0, 17.0),
+                        ),
+                    );
+                    if !label.is_null() {
+                        let _: () = msg_send![effect, addSubview: label];
+                    }
+                }
+
+                // Sample swatches: ANSI 8x2 grid, semantic row, truecolor
+                // ramp. On short cards the list shrinks first; drop any
+                // swatch row that would cross past its bottom.
+                let sw = 18.0;
+                let gap = 4.0;
+                let sample_x = col_split + 12.0;
+                let swatch_limit = list_top + list_rows as f64 * row_h;
+                for (i, &(r, g, b)) in vm.ansi_swatches.iter().enumerate() {
+                    let row = i / 8;
+                    let col = i % 8;
+                    let y_top = list_top + row as f64 * (sw + gap);
+                    if y_top + sw > swatch_limit {
+                        continue;
+                    }
+                    let square = make_view(NSRect::new(
+                        NSPoint::new(
+                            sample_x + col as f64 * (sw + gap),
+                            from_top(card_h, y_top, sw),
+                        ),
+                        NSSize::new(sw, sw),
+                    ));
+                    if !square.is_null() {
+                        let color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
+                        tint_layer(square, ns_color(color, 1.0), 4.0);
+                        let _: () = msg_send![effect, addSubview: square];
+                        release_owned(square);
+                    }
+                }
+                let semantic_top = list_top + 2.0 * (sw + gap) + 4.0;
+                for (i, &(r, g, b)) in vm.semantic_swatches.iter().enumerate() {
+                    if semantic_top + sw > swatch_limit {
+                        break;
+                    }
+                    let w = 2.0 * sw + gap;
+                    let square = make_view(NSRect::new(
+                        NSPoint::new(
+                            sample_x + i as f64 * (w + gap),
+                            from_top(card_h, semantic_top, sw),
+                        ),
+                        NSSize::new(w, sw),
+                    ));
+                    if !square.is_null() {
+                        let color = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
+                        tint_layer(square, ns_color(color, 1.0), 4.0);
+                        let _: () = msg_send![effect, addSubview: square];
+                        release_owned(square);
+                    }
+                }
+                if vm.show_truecolor_ramp && semantic_top + sw + gap + 4.0 + 10.0 <= swatch_limit {
+                    let ramp_top = semantic_top + sw + gap + 4.0;
+                    let ramp_w = 8.0 * (sw + gap) - gap;
+                    let steps = 16;
+                    let step_w = ramp_w / steps as f64;
+                    for step in 0..steps {
+                        let t = step as f32 / (steps - 1) as f32;
+                        let span = (0xe0 - 0x20) as f32 / 255.0;
+                        let r = 0x20 as f32 / 255.0 + t * span;
+                        let b = 0xe0 as f32 / 255.0 - t * span;
+                        let square = make_view(NSRect::new(
+                            NSPoint::new(
+                                sample_x + step as f64 * step_w,
+                                from_top(card_h, ramp_top, 10.0),
+                            ),
+                            NSSize::new(step_w + 0.5, 10.0),
+                        ));
+                        if !square.is_null() {
+                            tint_layer(
+                                square,
+                                ns_color([r, 0x60 as f32 / 255.0, b, 1.0], 1.0),
+                                0.0,
+                            );
+                            let _: () = msg_send![effect, addSubview: square];
+                            release_owned(square);
+                        }
+                    }
                 }
             }
-            let label = make_label(
-                label_text,
-                system_font(12.5, WEIGHT_REGULAR),
-                if *selected && vm.settings_focused {
-                    accent
-                } else {
-                    fg
-                },
-                NSRect::new(
-                    NSPoint::new(pad, from_top(card_h, y_top + 4.0, 16.0)),
-                    NSSize::new(220.0, 16.0),
-                ),
-            );
-            if !label.is_null() {
-                let _: () = msg_send![effect, addSubview: label];
-            }
-            let value_text = if *restart {
-                format!("{value}  (restart to apply)")
-            } else {
-                value.clone()
-            };
-            let value_label = make_label(
-                &value_text,
-                system_font(12.5, WEIGHT_REGULAR),
-                if *restart { muted } else { fg },
-                NSRect::new(
-                    NSPoint::new(pad + 230.0, from_top(card_h, y_top + 4.0, 16.0)),
-                    NSSize::new(card_w - pad * 2.0 - 230.0, 16.0),
-                ),
-            );
-            if !value_label.is_null() {
-                let _: () = msg_send![effect, addSubview: value_label];
+            ThemeSettingsMode::Settings => {
+                // Full-width rows, windowed around the selection when the
+                // short-card policy cut the visible count down.
+                section_label(
+                    if vm.settings_focused {
+                        "Settings \u{25cf}"
+                    } else {
+                        "Settings"
+                    },
+                    vm.settings_focused,
+                    pad,
+                    46.0,
+                    200.0,
+                );
+                let rows_top = settings_top;
+                let settings_sel = vm.rows.iter().position(|r| r.3).unwrap_or(0);
+                let (settings_off, settings_shown) =
+                    overlay_scroll_window(settings_total, settings_sel, settings_rows);
+                for (i, (label_text, value, restart, selected)) in vm.rows
+                    [settings_off..settings_off + settings_shown]
+                    .iter()
+                    .enumerate()
+                {
+                    let y_top = rows_top + i as f64 * srow_h;
+                    if *selected {
+                        let bg = make_view(NSRect::new(
+                            NSPoint::new(pad - 8.0, from_top(card_h, y_top, srow_h)),
+                            NSSize::new(card_w - pad * 2.0 + 16.0, srow_h),
+                        ));
+                        if !bg.is_null() {
+                            tint_layer(bg, ns_color(colors.selected_bg, 1.0), 6.0);
+                            let _: () = msg_send![effect, addSubview: bg];
+                            release_owned(bg);
+                        }
+                    }
+                    let label = make_label(
+                        label_text,
+                        system_font(12.5, WEIGHT_REGULAR),
+                        if *selected && vm.settings_focused {
+                            accent
+                        } else {
+                            fg
+                        },
+                        NSRect::new(
+                            NSPoint::new(pad, from_top(card_h, y_top + 4.0, 16.0)),
+                            NSSize::new(220.0, 16.0),
+                        ),
+                    );
+                    if !label.is_null() {
+                        let _: () = msg_send![effect, addSubview: label];
+                    }
+                    let value_text = if *restart {
+                        format!("{value}  (restart to apply)")
+                    } else {
+                        value.clone()
+                    };
+                    let value_label = make_label(
+                        &value_text,
+                        system_font(12.5, WEIGHT_REGULAR),
+                        if *restart { muted } else { fg },
+                        NSRect::new(
+                            NSPoint::new(pad + 230.0, from_top(card_h, y_top + 4.0, 16.0)),
+                            NSSize::new(card_w - pad * 2.0 - 230.0, 16.0),
+                        ),
+                    );
+                    if !value_label.is_null() {
+                        let _: () = msg_send![effect, addSubview: value_label];
+                    }
+                }
             }
         }
 

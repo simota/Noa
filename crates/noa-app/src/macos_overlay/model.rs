@@ -150,6 +150,11 @@ pub(crate) enum Tone {
 /// out real labels/swatches.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct ThemeSettingsViewModel {
+    /// Which overlay this is — "Theme" picker or "Settings" rows. The
+    /// picker fields (`filter`/`themes`/`*_swatches`) are only meaningful
+    /// (and only rendered) in [`crate::theme_settings::ThemeSettingsMode::Theme`];
+    /// `rows` only in `Settings`.
+    pub(crate) mode: crate::theme_settings::ThemeSettingsMode,
     pub(crate) badge: Option<&'static str>,
     pub(crate) theme_section_focused: bool,
     pub(crate) filter: String,
@@ -224,13 +229,14 @@ pub(crate) fn theme_settings_view_model(
     let footer = match state.commit_error() {
         Some(error) => (error.to_string(), Tone::Danger),
         None => (
-            "Tab switch section   \u{2191}\u{2193} navigate   \u{2190}\u{2192} adjust   Esc cancel   Enter save"
+            "\u{2191}\u{2193} navigate   \u{2190}\u{2192} adjust   Esc cancel   Enter save"
                 .to_string(),
             Tone::Muted,
         ),
     };
 
     ThemeSettingsViewModel {
+        mode: state.mode(),
         badge: state
             .badge_visible()
             .then_some("Chrome/tabs update on Save"),

@@ -438,6 +438,45 @@ fn osc52_default_limit_accepts_multi_kilobyte_payloads() {
 }
 
 #[test]
+fn osc52_flood_within_one_feed_keeps_only_the_last_write() {
+    // Many OSC 52 writes delivered in a single feed (mirrors a large pty
+    // batch coalescing tens of thousands of minimal writes): only the final
+    // one should survive the queue, so the app layer never issues more than
+    // one pasteboard syscall per drained batch.
+    let mut bytes = Vec::new();
+    for i in 0..500 {
+        bytes.extend_from_slice(format!("\x1b]52;c;{}\x07", encode(&format!("n{i}"))).as_bytes());
+    }
+    let mut t = run(&bytes);
+    assert_eq!(t.take_pending_clipboard_writes(), vec!["n499".to_string()]);
+
+    fn encode(s: &str) -> String {
+        let mut out = Vec::new();
+        crate::osc::encode_base64(s.as_bytes(), &mut out);
+        String::from_utf8(out).unwrap()
+    }
+}
+
+#[test]
+fn osc52_flood_does_not_affect_read_requests() {
+    // Reads must never be coalesced away — each one owes its requester a pty
+    // reply. Interleave writes and reads and confirm every read survives.
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    t.osc52_policy.allow_read = true;
+    let mut s = Stream::new();
+    s.feed(b"\x1b]52;c;aGVsbG8=\x07", &mut t);
+    s.feed(b"\x1b]52;c;?\x07", &mut t);
+    s.feed(b"\x1b]52;c;d29ybGQ=\x07", &mut t);
+    s.feed(b"\x1b]52;p;?\x07", &mut t);
+
+    assert_eq!(t.take_pending_clipboard_writes(), vec!["world".to_string()]);
+    assert_eq!(
+        t.take_pending_clipboard_reads(),
+        vec!["c".to_string(), "p".to_string()]
+    );
+}
+
+#[test]
 fn osc52_policy_can_disable_writes_and_limit_payloads() {
     let mut t = Terminal::new(GridSize::new(80, 24));
     t.osc52_policy.allow_write = false;

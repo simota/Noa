@@ -300,7 +300,16 @@ pub(crate) fn handle_clipboard_osc(
     let Ok(text) = String::from_utf8(decoded) else {
         return true;
     };
-    pending_clipboard_writes.push(text);
+    // Last-write-wins: the app layer forwards each queued write as its own
+    // pasteboard syscall, and macOS has a single system clipboard (`p`/`s`
+    // already converge onto it above), so a flood of writes within one drain
+    // batch only needs to keep the final one. Replacing in place instead of
+    // pushing keeps the queue at length <= 1 rather than growing unbounded.
+    if let Some(last) = pending_clipboard_writes.last_mut() {
+        *last = text;
+    } else {
+        pending_clipboard_writes.push(text);
+    }
     true
 }
 

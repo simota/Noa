@@ -100,6 +100,7 @@ ID(`windowGroupId`/`windowId`/`paneId`)は全て **10 進文字列**。
 補足:
 - `getText` の `source`: `screen` = 可視画面のみ / `scrollback` = scrollback+可視画面全体。`maxBytes`(既定 256KiB、サーバー側上限 1MiB クランプ)超過は**末尾優先**で切り詰め、`truncated:true`。
 - `getGrid`: 行 0 = scrollback 最古行の絶対座標。1 リクエスト最大 2048 行 + 応答 256KiB 上限。切れた場合 `hasMore:true` → `startRow` を進めて続きを取得。
+- `sendText` の `paste`(省略可、既定 `true`): `false` で bracketed paste ラップなしの生注入。単独 Enter を送るなら `{"text":"\r","paste":false}`。
 - `newTab` の `windowId`: ネイティブウィンドウ id・ウィンドウグループ id のどちらでも解決される。省略時はアクティブウィンドウ。
 - `split` の `direction`: `horizontal` = 左右分割 / `vertical` = 上下分割。
 - 通知: `noa.stateChanged`(変化した Panel のみ)/ `noa.output`(変化行のみの色ラン付き差分、≥16ms 合流)。購読チャネル溢れ時は古いものから破棄され、次通知に `dropped:true`。

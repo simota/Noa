@@ -86,9 +86,12 @@ result: `{"paneId":"1","cols":80,"startRow":0,"rows":[Row],"hasMore":false}`
 
 ### noa.sendText — 要 input
 
-params: `{"paneId":"1","text":"ls\n"}` / result: `{"ok":true}`
+params: `{"paneId":"1","text":"ls\n","paste":true}` / result: `{"ok":true}`
 
-UTF-8 テキストを対象パネルの pty へ注入する。改行を送るには `\n` を含める。パネルが bracketed paste モード中は自動的に paste としてラップされる。
+UTF-8 テキストを対象パネルの pty へ注入する。改行を送るには `\n` を含める。
+
+- `paste`(省略可。既定 `true`): パネルが bracketed paste モード中は自動的に paste としてラップされる、既存の挙動。
+- `paste:false`: bracketed paste ラップなしの生注入。`text` の UTF-8 バイト列がそのまま pty に書き込まれる。単独の Enter を送りたい場合は `{"text":"\r","paste":false}`(TUI アプリへのキー入力エミュレーション用途)。
 
 ### noa.focusPane — 要 control
 

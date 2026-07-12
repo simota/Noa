@@ -85,6 +85,17 @@ const MINIMUM_CONTRAST_STEP: f32 = 1.0;
 const MINIMUM_CONTRAST_MIN: f32 = 1.0;
 const MINIMUM_CONTRAST_MAX: f32 = 21.0;
 
+/// `server-port` step per ←→ press, clamped to the documented valid TCP
+/// range (`noa_config`'s `server_port` doc comment excludes the reserved
+/// `0..1024` range).
+const SERVER_PORT_STEP: i32 = 1;
+const SERVER_PORT_MIN: u16 = 1024;
+const SERVER_PORT_MAX: u16 = 65535;
+/// `server-scopes` cycle presets, in ←→ order — the same 4 combinations
+/// `docs/specs/noa-server.md`'s scope table documents as meaningful
+/// (control/input are each additive over `read`).
+const SERVER_SCOPES_PRESETS: [&str; 4] = ["read", "read,control", "read,input", "read,control,input"];
+
 /// One theme catalog match: an index into `noa_theme::THEMES` plus the fuzzy
 /// match char positions (for highlight rendering), reusing
 /// [`crate::command_palette::fuzzy_match`] rather than a second matcher.
@@ -344,6 +355,18 @@ impl ThemeSettings {
                     },
                     SettingsRow {
                         draft: RowDraft::MacosOptionAsAlt(init.macos_option_as_alt),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ServerEnable(init.server_enable),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ServerPort(init.server_port),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ServerScopes(init.server_scopes.clone()),
                         touched: false,
                     },
                 ],
@@ -1142,6 +1165,44 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
+            SettingsRowKind::ServerEnable => {
+                let RowDraft::ServerEnable(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = !current;
+                self.rows[idx].draft = RowDraft::ServerEnable(new);
+                self.rows[idx].touched = true;
+                RowEffect::None
+            }
+            SettingsRowKind::ServerPort => {
+                let RowDraft::ServerPort(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = (current as i32 + delta * SERVER_PORT_STEP)
+                    .clamp(SERVER_PORT_MIN as i32, SERVER_PORT_MAX as i32) as u16;
+                if new != current {
+                    self.rows[idx].draft = RowDraft::ServerPort(new);
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
+            // A hand-edited config's `server-scopes` doesn't have to be one
+            // of `SERVER_SCOPES_PRESETS` — `cycle`'s shared not-found
+            // fallback treats it as sitting at preset index 0 and steps
+            // from there, so the first ←→ press from an off-preset value
+            // always lands on a real preset instead of panicking or
+            // getting stuck.
+            SettingsRowKind::ServerScopes => {
+                let RowDraft::ServerScopes(current) = &self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = cycle(&SERVER_SCOPES_PRESETS, current.as_str(), delta);
+                if new != current.as_str() {
+                    self.rows[idx].draft = RowDraft::ServerScopes(new.to_string());
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
         }
     }
 
@@ -1669,6 +1730,15 @@ impl ThemeSettings {
                         macos_option_as_alt_config_value(*mode).to_string(),
                     ));
                 }
+                RowDraft::ServerEnable(enabled) => {
+                    updates.push(("server-enable".to_string(), enabled.to_string()));
+                }
+                RowDraft::ServerPort(port) => {
+                    updates.push(("server-port".to_string(), port.to_string()));
+                }
+                RowDraft::ServerScopes(scopes) => {
+                    updates.push(("server-scopes".to_string(), scopes.clone()));
+                }
             }
         }
         updates
@@ -1907,6 +1977,16 @@ fn is_reload_exempt(row: SettingsRowKind) -> bool {
             | SettingsRowKind::ScrollbackLimit
             | SettingsRowKind::CursorStyleBlink
             | SettingsRowKind::MinimumContrast
+            // `server-enable`/`server-port`/`server-scopes`: same
+            // `ConfigWatcher`-picked-up shape as the three above —
+            // `app/config_reload.rs`'s `decide_server_restart` diffs the
+            // whole reloaded config unconditionally (not gated by this
+            // list), so `App::restart_ipc_server` fires within one poll
+            // tick of the panel's commit regardless; this list only decides
+            // whether these rows badge `OnSave` (here) or `OnLaunch`.
+            | SettingsRowKind::ServerEnable
+            | SettingsRowKind::ServerPort
+            | SettingsRowKind::ServerScopes
     )
 }
 
@@ -1978,6 +2058,9 @@ fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
         RowDraft::CursorStyleBlink(v) => v.hash(hasher),
         RowDraft::MinimumContrast(v) => v.to_bits().hash(hasher),
         RowDraft::MacosOptionAsAlt(mode) => macos_option_as_alt_config_value(*mode).hash(hasher),
+        RowDraft::ServerEnable(v) => v.hash(hasher),
+        RowDraft::ServerPort(v) => v.hash(hasher),
+        RowDraft::ServerScopes(s) => s.hash(hasher),
     }
 }
 

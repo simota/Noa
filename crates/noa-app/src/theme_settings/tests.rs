@@ -44,6 +44,9 @@ fn init() -> ThemeSettingsInit {
         cursor_style_blink: None,
         minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
         macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
+        server_enable: false,
+        server_port: noa_config::DEFAULT_SERVER_PORT,
+        server_scopes: "read".to_string(),
         theme_pair: None,
         carryover: None,
         favorites: std::sync::Arc::new(std::collections::HashSet::new()),
@@ -1699,16 +1702,28 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
         RowDraft::default_for(SettingsRowKind::MacosOptionAsAlt),
         RowDraft::MacosOptionAsAlt(noa_config::MacosOptionAsAlt::None)
     );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ServerEnable),
+        RowDraft::ServerEnable(false)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ServerPort),
+        RowDraft::ServerPort(noa_config::DEFAULT_SERVER_PORT)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ServerScopes),
+        RowDraft::ServerScopes("read".to_string())
+    );
 }
 
 // R-9: `SettingsRowKind::COUNT` is type-enforced at 20 (16 + the 4 new
 // keys) via `ALL`'s array literal length — this pins the value so a future
 // accidental drop of an entry fails loudly instead of silently shrinking
-// the overlay.
+// the overlay. The server-settings-panel-row addition brings it to 23 (+3).
 #[test]
-fn settings_row_kind_count_is_twenty_after_r9() {
-    assert_eq!(SettingsRowKind::COUNT, 20);
-    assert_eq!(SettingsRowKind::ALL.len(), 20);
+fn settings_row_kind_count_is_twenty_three_after_server_rows() {
+    assert_eq!(SettingsRowKind::COUNT, 23);
+    assert_eq!(SettingsRowKind::ALL.len(), 23);
 }
 
 // R-9's 6-point set, part 1/4 (scrollback-limit): ALL entry / label /
@@ -1893,6 +1908,172 @@ fn macos_option_as_alt_row_is_genuinely_persist_only_and_cycles() {
         updates.contains(&("macos-option-as-alt".to_string(), "left".to_string())),
         "{updates:?}"
     );
+}
+
+// Server settings panel rows, part 1/3 (server-enable): reload-exempt
+// (ConfigWatcher's poll picks it up and restarts the server), so no restart
+// note despite being touched — same shape as ScrollbackLimit/
+// CursorStyleBlink/MinimumContrast above.
+#[test]
+fn server_enable_row_toggles_and_is_reload_exempt() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(SettingsRowKind::ALL.contains(&SettingsRowKind::ServerEnable));
+    assert_eq!(SettingsRowKind::ServerEnable.label(), "Server");
+    assert!(!SettingsRowKind::ServerEnable.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::ServerEnable);
+    let idx = row_index(SettingsRowKind::ServerEnable);
+    assert_eq!(settings.rows()[idx].draft, RowDraft::ServerEnable(false));
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(settings.rows()[idx].draft, RowDraft::ServerEnable(true));
+    assert!(settings.rows()[idx].touched);
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::ServerEnable),
+        RestartReason::None
+    );
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&("server-enable".to_string(), "true".to_string())),
+        "{updates:?}"
+    );
+}
+
+// Server settings panel rows, part 2/3 (server-port): steps by 1 and
+// clamps to the documented 1024..=65535 valid TCP range.
+#[test]
+fn server_port_row_steps_by_one_and_clamps_to_the_valid_port_range() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert_eq!(SettingsRowKind::ServerPort.label(), "Server Port");
+    assert!(!SettingsRowKind::ServerPort.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::ServerPort);
+    let idx = row_index(SettingsRowKind::ServerPort);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerPort(noa_config::DEFAULT_SERVER_PORT)
+    );
+
+    settings.adjust(1, Instant::now());
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerPort(noa_config::DEFAULT_SERVER_PORT + 1)
+    );
+    assert!(settings.rows()[idx].touched);
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::ServerPort),
+        RestartReason::None
+    );
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&(
+            "server-port".to_string(),
+            (noa_config::DEFAULT_SERVER_PORT + 1).to_string()
+        )),
+        "{updates:?}"
+    );
+
+    // Clamp at the floor: a session started right at 1024 must not step
+    // below it.
+    let mut floor = ThemeSettings::open(ThemeSettingsInit {
+        server_port: 1024,
+        ..settings_init()
+    });
+    move_to_row(&mut floor, SettingsRowKind::ServerPort);
+    let idx = row_index(SettingsRowKind::ServerPort);
+    floor.adjust(-1, Instant::now());
+    assert_eq!(floor.rows()[idx].draft, RowDraft::ServerPort(1024));
+    assert!(!floor.rows()[idx].touched, "a floor clamp is a true no-op");
+
+    // Clamp at the ceiling: a session started right at 65535 must not step
+    // above it.
+    let mut ceiling = ThemeSettings::open(ThemeSettingsInit {
+        server_port: 65535,
+        ..settings_init()
+    });
+    move_to_row(&mut ceiling, SettingsRowKind::ServerPort);
+    ceiling.adjust(1, Instant::now());
+    assert_eq!(ceiling.rows()[idx].draft, RowDraft::ServerPort(65535));
+    assert!(
+        !ceiling.rows()[idx].touched,
+        "a ceiling clamp is a true no-op"
+    );
+}
+
+// Server settings panel rows, part 3/3 (server-scopes): cycles through the
+// 4 documented presets both directions, and a non-preset config value
+// (e.g. hand-edited "input,read") falls back to the first preset ("read")
+// on the first press rather than panicking or getting stuck.
+#[test]
+fn server_scopes_row_cycles_presets_and_falls_back_from_a_non_preset_value() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert_eq!(SettingsRowKind::ServerScopes.label(), "Server Scopes");
+    assert!(!SettingsRowKind::ServerScopes.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::ServerScopes);
+    let idx = row_index(SettingsRowKind::ServerScopes);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerScopes("read".to_string())
+    );
+
+    let forward = ["read,control", "read,input", "read,control,input", "read"];
+    for expected in forward {
+        settings.adjust(1, Instant::now());
+        assert_eq!(
+            settings.rows()[idx].draft,
+            RowDraft::ServerScopes(expected.to_string())
+        );
+    }
+    assert!(settings.rows()[idx].touched);
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::ServerScopes),
+        RestartReason::None
+    );
+
+    let backward = [
+        "read,control,input",
+        "read,input",
+        "read,control",
+        "read",
+    ];
+    for expected in backward {
+        settings.adjust(-1, Instant::now());
+        assert_eq!(
+            settings.rows()[idx].draft,
+            RowDraft::ServerScopes(expected.to_string())
+        );
+    }
+
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&("server-scopes".to_string(), "read".to_string())),
+        "{updates:?}"
+    );
+
+    // Non-preset fallback: a hand-edited config value that isn't one of the
+    // 4 cycle presets doesn't panic or get stuck — `cycle`'s shared
+    // not-found fallback (`state.rs`) treats it as sitting at preset index 0
+    // ("read") and steps from there, landing on a real preset immediately
+    // (index 1, "read,control", for a `+1` press) rather than requiring two
+    // presses to reach a known state.
+    let mut off_preset = ThemeSettings::open(ThemeSettingsInit {
+        server_scopes: "input,read".to_string(),
+        ..settings_init()
+    });
+    move_to_row(&mut off_preset, SettingsRowKind::ServerScopes);
+    let idx = row_index(SettingsRowKind::ServerScopes);
+    assert_eq!(
+        off_preset.rows()[idx].draft,
+        RowDraft::ServerScopes("input,read".to_string())
+    );
+    off_preset.adjust(1, Instant::now());
+    assert_eq!(
+        off_preset.rows()[idx].draft,
+        RowDraft::ServerScopes("read,control".to_string())
+    );
+    assert!(off_preset.rows()[idx].touched);
 }
 
 // R-7/AC-18/AC-19: the state-machine half of the default_for round trip —
@@ -2138,6 +2319,9 @@ fn liveness_reports_on_save_for_every_reload_exempt_row() {
         SettingsRowKind::ScrollbackLimit,
         SettingsRowKind::CursorStyleBlink,
         SettingsRowKind::MinimumContrast,
+        SettingsRowKind::ServerEnable,
+        SettingsRowKind::ServerPort,
+        SettingsRowKind::ServerScopes,
     ] {
         assert_eq!(settings.liveness(kind), Liveness::OnSave, "{kind:?}");
     }

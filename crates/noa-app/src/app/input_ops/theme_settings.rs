@@ -222,6 +222,9 @@ impl App {
             cursor_style_blink: self.config.cursor_style_blink,
             minimum_contrast: self.config.minimum_contrast,
             macos_option_as_alt: self.config.macos_option_as_alt,
+            server_enable: self.config.server_enable,
+            server_port: self.config.server_port,
+            server_scopes: self.config.server_scopes.clone(),
         };
         self.theme_settings = Some(ThemeSettingsSession {
             window_id,
@@ -992,7 +995,10 @@ impl App {
                 RowDraft::ScrollbackLimit(_)
                 | RowDraft::CursorStyleBlink(_)
                 | RowDraft::MinimumContrast(_)
-                | RowDraft::MacosOptionAsAlt(_) => {}
+                | RowDraft::MacosOptionAsAlt(_)
+                | RowDraft::ServerEnable(_)
+                | RowDraft::ServerPort(_)
+                | RowDraft::ServerScopes(_) => {}
             }
         }
         if reload_background_image {
@@ -1335,6 +1341,9 @@ mod commit_theme_settings_tests {
             cursor_style_blink: None,
             minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
             macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
+            server_enable: false,
+            server_port: noa_config::DEFAULT_SERVER_PORT,
+            server_scopes: "read".to_string(),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),
@@ -1461,6 +1470,9 @@ mod commit_theme_settings_tests {
             cursor_style_blink: None,
             minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
             macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
+            server_enable: false,
+            server_port: noa_config::DEFAULT_SERVER_PORT,
+            server_scopes: "read".to_string(),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),

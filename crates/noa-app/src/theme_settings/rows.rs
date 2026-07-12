@@ -77,10 +77,24 @@ pub(crate) enum SettingsRowKind {
     /// spawn) — `RestartReason::CommitOnly` once touched, `Liveness::OnLaunch`,
     /// the same pattern as `FontFamily`/`WindowPadding`/`MacosTitlebarStyle`.
     MacosOptionAsAlt,
+    /// `server-enable`. Reload-exempt like `ScrollbackLimit`/
+    /// `CursorStyleBlink`/`MinimumContrast`: `ConfigWatcher`'s reload path
+    /// (not this row's `adjust`) picks up the written value and calls
+    /// `App::restart_ipc_server` via `decide_server_restart` — that decision
+    /// diffs the whole reloaded config unconditionally, so it fires whether
+    /// or not this row is in the reload-exempt set; the set here only
+    /// controls the badge/restart-note text (`Liveness::OnSave`,
+    /// `RestartReason::None`). `server-token` is deliberately NOT a row here
+    /// (it's a secret, managed via the token file, not the Settings panel).
+    ServerEnable,
+    /// `server-port`. Same reload-exempt classification as `ServerEnable`.
+    ServerPort,
+    /// `server-scopes`. Same reload-exempt classification as `ServerEnable`.
+    ServerScopes,
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 20;
+    pub(crate) const COUNT: usize = 23;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -102,6 +116,9 @@ impl SettingsRowKind {
         Self::CursorStyleBlink,
         Self::MinimumContrast,
         Self::MacosOptionAsAlt,
+        Self::ServerEnable,
+        Self::ServerPort,
+        Self::ServerScopes,
     ];
 
     /// R-8: the fixed live/commit-only classification, one row's kind at a
@@ -144,6 +161,9 @@ impl SettingsRowKind {
             Self::CursorStyleBlink => "Cursor Blink",
             Self::MinimumContrast => "Minimum Contrast",
             Self::MacosOptionAsAlt => "Option as Alt",
+            Self::ServerEnable => "Server",
+            Self::ServerPort => "Server Port",
+            Self::ServerScopes => "Server Scopes",
         }
     }
 
@@ -186,6 +206,15 @@ impl SettingsRowKind {
             }
             Self::MacosOptionAsAlt => {
                 "Which Option key(s) the macOS window layer rewrites as Alt. Applies on next launch."
+            }
+            Self::ServerEnable => {
+                "Enable the local JSON-RPC control server (127.0.0.1). Applies on save."
+            }
+            Self::ServerPort => {
+                "TCP port the local control server binds to (default 61771). Applies on save."
+            }
+            Self::ServerScopes => {
+                "Scopes grantable to clients. control=window ops, input=send text. Applies on save."
             }
         }
     }
@@ -280,6 +309,15 @@ pub(crate) enum RowDraft {
     CursorStyleBlink(bool),
     MinimumContrast(f32),
     MacosOptionAsAlt(MacosOptionAsAlt),
+    ServerEnable(bool),
+    ServerPort(u16),
+    /// One of `SERVER_SCOPES_PRESETS` (`state.rs`), stored as the literal
+    /// config string rather than an enum — a hand-edited config's
+    /// `server-scopes` value doesn't have to be one of the 4 cycle presets
+    /// (`adjust`'s cycle handles that: see its doc comment), and keeping the
+    /// draft a plain `String` lets an off-preset value display and commit
+    /// unchanged until the user actually cycles it.
+    ServerScopes(String),
 }
 
 impl RowDraft {
@@ -333,6 +371,15 @@ impl RowDraft {
             }
             RowDraft::MinimumContrast(v) => format!("{v:.1}"),
             RowDraft::MacosOptionAsAlt(mode) => format!("{mode:?}"),
+            RowDraft::ServerEnable(enabled) => {
+                if *enabled {
+                    "On".to_string()
+                } else {
+                    "Off".to_string()
+                }
+            }
+            RowDraft::ServerPort(port) => port.to_string(),
+            RowDraft::ServerScopes(scopes) => scopes.clone(),
         }
     }
 
@@ -403,6 +450,9 @@ impl RowDraft {
             }
             SettingsRowKind::MinimumContrast => RowDraft::MinimumContrast(d.minimum_contrast),
             SettingsRowKind::MacosOptionAsAlt => RowDraft::MacosOptionAsAlt(d.macos_option_as_alt),
+            SettingsRowKind::ServerEnable => RowDraft::ServerEnable(d.server_enable),
+            SettingsRowKind::ServerPort => RowDraft::ServerPort(d.server_port),
+            SettingsRowKind::ServerScopes => RowDraft::ServerScopes(d.server_scopes),
         }
     }
 }
@@ -578,6 +628,9 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) cursor_style_blink: Option<bool>,
     pub(crate) minimum_contrast: f32,
     pub(crate) macos_option_as_alt: MacosOptionAsAlt,
+    pub(crate) server_enable: bool,
+    pub(crate) server_port: u16,
+    pub(crate) server_scopes: String,
 }
 
 /// `scrollback-limit`'s display value (E): the raw byte count is unwieldy

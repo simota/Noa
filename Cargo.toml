@@ -44,9 +44,11 @@ crossbeam-channel = "0.5"
 parking_lot       = "0.12"
 unicode-width     = "0.2"
 
-# ── image decoding (Kitty graphics: PNG + zlib) ────────────────────
-png    = "0.18"
-flate2 = "1"
+# ── image decoding (Kitty graphics: PNG + zlib; background-image: JPEG/WebP) ──
+png        = "0.18"
+flate2     = "1"
+zune-jpeg  = "0.5"
+image-webp = "0.2"
 
 # ── ergonomics ─────────────────────────────────────────────────────
 bitflags   = "2"

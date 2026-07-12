@@ -96,6 +96,9 @@ const SERVER_PORT_MAX: u16 = 65535;
 /// `docs/specs/noa-server.md`'s scope table documents as meaningful
 /// (control/input are each additive over `read`).
 const SERVER_SCOPES_PRESETS: [&str; 4] = ["read", "read,control", "read,input", "read,control,input"];
+/// `server-bind` cycle presets, in ←→ order (v2 LAN opt-in): loopback-only
+/// (the default) and `0.0.0.0` (all interfaces, LAN-exposed).
+const SERVER_BIND_PRESETS: [&str; 2] = ["127.0.0.1", "0.0.0.0"];
 
 /// One theme catalog match: an index into `noa_theme::THEMES` plus the fuzzy
 /// match char positions (for highlight rendering), reusing
@@ -368,6 +371,10 @@ impl ThemeSettings {
                     },
                     SettingsRow {
                         draft: RowDraft::ServerPort(init.server_port),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ServerBind(init.server_bind.clone()),
                         touched: false,
                     },
                     SettingsRow {
@@ -1199,6 +1206,21 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
+            // Mirrors `ServerScopes`'s off-preset fallback below: a
+            // hand-edited `server-bind` doesn't have to be `127.0.0.1` or
+            // `0.0.0.0` — `cycle`'s shared not-found fallback treats it as
+            // sitting at preset index 0 and steps from there.
+            SettingsRowKind::ServerBind => {
+                let RowDraft::ServerBind(current) = &self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = cycle(&SERVER_BIND_PRESETS, current.as_str(), delta);
+                if new != current.as_str() {
+                    self.rows[idx].draft = RowDraft::ServerBind(new.to_string());
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
             // A hand-edited config's `server-scopes` doesn't have to be one
             // of `SERVER_SCOPES_PRESETS` — `cycle`'s shared not-found
             // fallback treats it as sitting at preset index 0 and steps
@@ -1797,6 +1819,9 @@ impl ThemeSettings {
                 RowDraft::ServerPort(port) => {
                     updates.push(("server-port".to_string(), port.to_string()));
                 }
+                RowDraft::ServerBind(bind_addr) => {
+                    updates.push(("server-bind".to_string(), bind_addr.clone()));
+                }
                 RowDraft::ServerScopes(scopes) => {
                     updates.push(("server-scopes".to_string(), scopes.clone()));
                 }
@@ -2055,6 +2080,7 @@ fn is_reload_exempt(row: SettingsRowKind) -> bool {
             // whether these rows badge `OnSave` (here) or `OnLaunch`.
             | SettingsRowKind::ServerEnable
             | SettingsRowKind::ServerPort
+            | SettingsRowKind::ServerBind
             | SettingsRowKind::ServerScopes
     )
 }
@@ -2128,7 +2154,9 @@ fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
         RowDraft::MinimumContrast(v) => v.to_bits().hash(hasher),
         RowDraft::MacosOptionAsAlt(mode) => macos_option_as_alt_config_value(*mode).hash(hasher),
         RowDraft::ServerEnable(v) => v.hash(hasher),
-        RowDraft::ServerStatus(s) | RowDraft::ServerScopes(s) => s.hash(hasher),
+        RowDraft::ServerStatus(s) | RowDraft::ServerScopes(s) | RowDraft::ServerBind(s) => {
+            s.hash(hasher)
+        }
         RowDraft::ServerPort(v) => v.hash(hasher),
         RowDraft::ServerTokenCopy(status) => (*status as u8).hash(hasher),
     }

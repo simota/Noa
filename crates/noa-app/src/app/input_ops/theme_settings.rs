@@ -225,6 +225,7 @@ impl App {
             macos_option_as_alt: self.config.macos_option_as_alt,
             server_enable: self.config.server_enable,
             server_port: self.config.server_port,
+            server_bind: self.config.server_bind.clone(),
             server_scopes: self.config.server_scopes.clone(),
             server_status: self.server_status_display(),
         };
@@ -1041,6 +1042,7 @@ impl App {
                 | RowDraft::MacosOptionAsAlt(_)
                 | RowDraft::ServerEnable(_)
                 | RowDraft::ServerPort(_)
+                | RowDraft::ServerBind(_)
                 | RowDraft::ServerScopes(_) => {}
                 // `ServerTokenCopy`/`ServerStatus` never set `touched`
                 // (`ThemeSettings::adjust`/`reset_selected_row` both no-op
@@ -1434,6 +1436,7 @@ mod commit_theme_settings_tests {
             macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
             server_enable: false,
             server_port: noa_config::DEFAULT_SERVER_PORT,
+            server_bind: noa_config::DEFAULT_SERVER_BIND.to_string(),
             server_scopes: "read".to_string(),
             server_status: "Stopped".to_string(),
             theme_pair: None,
@@ -1564,6 +1567,7 @@ mod commit_theme_settings_tests {
             macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
             server_enable: false,
             server_port: noa_config::DEFAULT_SERVER_PORT,
+            server_bind: noa_config::DEFAULT_SERVER_BIND.to_string(),
             server_scopes: "read".to_string(),
             server_status: "Stopped".to_string(),
             theme_pair: None,

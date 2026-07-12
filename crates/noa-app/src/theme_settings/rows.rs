@@ -100,6 +100,13 @@ pub(crate) enum SettingsRowKind {
     ServerStatus,
     /// `server-port`. Same reload-exempt classification as `ServerEnable`.
     ServerPort,
+    /// `server-bind`: the interface address the server binds (v2 LAN
+    /// opt-in). Same reload-exempt classification as `ServerEnable`/
+    /// `ServerPort`/`ServerScopes` — a bind-address change needs
+    /// `App::restart_ipc_server` to actually rebind, picked up by
+    /// `decide_server_restart` unconditionally regardless of this row's
+    /// badge classification.
+    ServerBind,
     /// `server-scopes`. Same reload-exempt classification as `ServerEnable`.
     ServerScopes,
     /// Not a config key at all — an action row (R-2 "no per-row adjust
@@ -117,7 +124,7 @@ pub(crate) enum SettingsRowKind {
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 25;
+    pub(crate) const COUNT: usize = 26;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -142,6 +149,7 @@ impl SettingsRowKind {
         Self::ServerEnable,
         Self::ServerStatus,
         Self::ServerPort,
+        Self::ServerBind,
         Self::ServerScopes,
         Self::ServerTokenCopy,
     ];
@@ -195,6 +203,7 @@ impl SettingsRowKind {
             Self::ServerEnable => "Server",
             Self::ServerStatus => "Server Status",
             Self::ServerPort => "Server Port",
+            Self::ServerBind => "Server Bind",
             Self::ServerScopes => "Server Scopes",
             Self::ServerTokenCopy => "Server Token",
         }
@@ -246,6 +255,9 @@ impl SettingsRowKind {
             Self::ServerStatus => "Current state of the control server. Read-only.",
             Self::ServerPort => {
                 "TCP port the local control server binds to (default 61771). Applies on save."
+            }
+            Self::ServerBind => {
+                "Interface the control server binds to. 127.0.0.1=local only, 0.0.0.0=LAN-exposed (no TLS). Applies on save."
             }
             Self::ServerScopes => {
                 "Scopes grantable to clients. control=window ops, input=send text. Applies on save."
@@ -356,6 +368,13 @@ pub(crate) enum RowDraft {
     /// this session is open.
     ServerStatus(String),
     ServerPort(u16),
+    /// One of `SERVER_BIND_PRESETS` (`state.rs`), stored as the literal
+    /// config string rather than an enum — mirrors `ServerScopes`'s
+    /// off-preset handling: a hand-edited `server-bind` value doesn't have
+    /// to be one of the 2 cycle presets, and keeping the draft a plain
+    /// `String` lets an off-preset value display and commit unchanged until
+    /// the user actually cycles it.
+    ServerBind(String),
     /// One of `SERVER_SCOPES_PRESETS` (`state.rs`), stored as the literal
     /// config string rather than an enum — a hand-edited config's
     /// `server-scopes` value doesn't have to be one of the 4 cycle presets
@@ -442,6 +461,7 @@ impl RowDraft {
             }
             RowDraft::ServerStatus(status) => status.clone(),
             RowDraft::ServerPort(port) => port.to_string(),
+            RowDraft::ServerBind(bind_addr) => bind_addr.clone(),
             RowDraft::ServerScopes(scopes) => scopes.clone(),
             RowDraft::ServerTokenCopy(status) => match status {
                 TokenCopyStatus::Idle => "Copy to clipboard".to_string(),
@@ -528,6 +548,7 @@ impl RowDraft {
                 RowDraft::ServerStatus(format_server_status(None, None))
             }
             SettingsRowKind::ServerPort => RowDraft::ServerPort(d.server_port),
+            SettingsRowKind::ServerBind => RowDraft::ServerBind(d.server_bind),
             SettingsRowKind::ServerScopes => RowDraft::ServerScopes(d.server_scopes),
             SettingsRowKind::ServerTokenCopy => RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
         }
@@ -712,6 +733,7 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) macos_option_as_alt: MacosOptionAsAlt,
     pub(crate) server_enable: bool,
     pub(crate) server_port: u16,
+    pub(crate) server_bind: String,
     pub(crate) server_scopes: String,
     /// [`SettingsRowKind::ServerStatus`]'s seed text (E) — `App` builds this
     /// with [`format_server_status`] from its live `ipc_server`/
@@ -731,9 +753,14 @@ pub(crate) struct ThemeSettingsInit {
 /// accidentally desync a "yes it's running, and also here's the stale error
 /// from before" state from this function's perspective — `running.is_some()`
 /// always wins.
-pub(crate) fn format_server_status(running: Option<(u16, usize)>, last_error: Option<&str>) -> String {
+pub(crate) fn format_server_status(
+    running: Option<(String, u16, usize)>,
+    last_error: Option<&str>,
+) -> String {
     match running {
-        Some((port, clients)) => format!("Running (127.0.0.1:{port}, {clients} client(s))"),
+        Some((bind_addr, port, clients)) => {
+            format!("Running ({bind_addr}:{port}, {clients} client(s))")
+        }
         None => match last_error {
             Some(reason) => format!("Bind failed: {reason}"),
             None => "Stopped".to_string(),

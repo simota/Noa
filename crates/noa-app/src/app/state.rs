@@ -660,6 +660,7 @@ mod theme_settings_session_tests {
             macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
             server_enable: false,
             server_port: noa_config::DEFAULT_SERVER_PORT,
+            server_bind: noa_config::DEFAULT_SERVER_BIND.to_string(),
             server_scopes: "read".to_string(),
             server_status: "Stopped".to_string(),
             theme_pair: None,

@@ -46,6 +46,7 @@ fn init() -> ThemeSettingsInit {
         macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
         server_enable: false,
         server_port: noa_config::DEFAULT_SERVER_PORT,
+        server_bind: noa_config::DEFAULT_SERVER_BIND.to_string(),
         server_scopes: "read".to_string(),
         server_status: "Stopped".to_string(),
         theme_pair: None,
@@ -1729,12 +1730,13 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
 // keys) via `ALL`'s array literal length — this pins the value so a future
 // accidental drop of an entry fails loudly instead of silently shrinking
 // the overlay. The server-settings-panel-row addition brings it to 23 (+3),
-// the token-copy action row brings it to 24 (+1), and the read-only status
-// row (settings-panel-server-status) brings it to 25 (+1).
+// the token-copy action row brings it to 24 (+1), the read-only status row
+// (settings-panel-server-status) brings it to 25 (+1), and the LAN bind-
+// address row (server-bind) brings it to 26 (+1).
 #[test]
-fn settings_row_kind_count_is_twenty_five_after_server_status_row() {
-    assert_eq!(SettingsRowKind::COUNT, 25);
-    assert_eq!(SettingsRowKind::ALL.len(), 25);
+fn settings_row_kind_count_is_twenty_six_after_server_bind_row() {
+    assert_eq!(SettingsRowKind::COUNT, 26);
+    assert_eq!(SettingsRowKind::ALL.len(), 26);
 }
 
 // settings-panel-server-status: the status row is read-only (mirrors
@@ -1790,11 +1792,11 @@ fn server_status_row_is_read_only_and_never_committed() {
 #[test]
 fn format_server_status_covers_all_three_states() {
     assert_eq!(
-        format_server_status(Some((61771, 0)), None),
+        format_server_status(Some(("127.0.0.1".to_string(), 61771, 0)), None),
         "Running (127.0.0.1:61771, 0 client(s))"
     );
     assert_eq!(
-        format_server_status(Some((8080, 3)), None),
+        format_server_status(Some(("127.0.0.1".to_string(), 8080, 3)), None),
         "Running (127.0.0.1:8080, 3 client(s))"
     );
     assert_eq!(format_server_status(None, None), "Stopped");
@@ -1804,8 +1806,18 @@ fn format_server_status_covers_all_three_states() {
     );
     // `running` always wins over a stale `last_error`.
     assert_eq!(
-        format_server_status(Some((61771, 1)), Some("stale error")),
+        format_server_status(Some(("127.0.0.1".to_string(), 61771, 1)), Some("stale error")),
         "Running (127.0.0.1:61771, 1 client(s))"
+    );
+}
+
+// The bind-address interpolation is real, not hardcoded to loopback — a
+// `server-bind = 0.0.0.0` LAN opt-in must show up in the status row too.
+#[test]
+fn format_server_status_interpolates_a_non_loopback_bind_address() {
+    assert_eq!(
+        format_server_status(Some(("0.0.0.0".to_string(), 61771, 2)), None),
+        "Running (0.0.0.0:61771, 2 client(s))"
     );
 }
 
@@ -2218,6 +2230,78 @@ fn server_scopes_row_cycles_presets_and_falls_back_from_a_non_preset_value() {
     assert_eq!(
         off_preset.rows()[idx].draft,
         RowDraft::ServerScopes("read,control".to_string())
+    );
+    assert!(off_preset.rows()[idx].touched);
+}
+
+// server-bind (v2 LAN opt-in): the 2-preset cycle mirrors `ServerScopes`'s
+// shape exactly — placed immediately after `ServerPort` in row order, same
+// off-preset fallback semantics, same `ON SAVE`/reload-exempt treatment,
+// same `commit_updates` write-back.
+#[test]
+fn server_bind_row_cycles_loopback_and_all_interfaces_and_falls_back_from_a_non_preset_value() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert_eq!(SettingsRowKind::ServerBind.label(), "Server Bind");
+    assert!(!SettingsRowKind::ServerBind.is_live());
+    assert_eq!(
+        row_index(SettingsRowKind::ServerBind),
+        row_index(SettingsRowKind::ServerPort) + 1,
+        "ServerBind must sit immediately after ServerPort in row order"
+    );
+
+    move_to_row(&mut settings, SettingsRowKind::ServerBind);
+    let idx = row_index(SettingsRowKind::ServerBind);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerBind("127.0.0.1".to_string())
+    );
+
+    settings.adjust(1, Instant::now());
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerBind("0.0.0.0".to_string())
+    );
+    assert!(settings.rows()[idx].touched);
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::ServerBind),
+        RestartReason::None
+    );
+
+    settings.adjust(1, Instant::now());
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerBind("127.0.0.1".to_string())
+    );
+
+    settings.adjust(-1, Instant::now());
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerBind("0.0.0.0".to_string())
+    );
+
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&("server-bind".to_string(), "0.0.0.0".to_string())),
+        "{updates:?}"
+    );
+
+    // Non-preset fallback: a hand-edited config value that isn't one of the
+    // 2 cycle presets displays as-is and the first ←→ press lands on a real
+    // preset (index 0 fallback, then +1) instead of panicking or sticking.
+    let mut off_preset = ThemeSettings::open(ThemeSettingsInit {
+        server_bind: "192.168.1.50".to_string(),
+        ..settings_init()
+    });
+    move_to_row(&mut off_preset, SettingsRowKind::ServerBind);
+    let idx = row_index(SettingsRowKind::ServerBind);
+    assert_eq!(
+        off_preset.rows()[idx].draft,
+        RowDraft::ServerBind("192.168.1.50".to_string())
+    );
+    off_preset.adjust(1, Instant::now());
+    assert_eq!(
+        off_preset.rows()[idx].draft,
+        RowDraft::ServerBind("0.0.0.0".to_string())
     );
     assert!(off_preset.rows()[idx].touched);
 }

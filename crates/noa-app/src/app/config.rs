@@ -814,11 +814,35 @@ fn decode_image_rgba(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
     }
 }
 
+/// Cap on the decoded RGBA8 size, mirroring the `png` crate's default
+/// allocation limit so JPEG/WebP keep the "decode failure never aborts the
+/// process" contract (`png::Limits::default()` is 64 MiB).
+const MAX_DECODED_RGBA_BYTES: usize = 64 * 1024 * 1024;
+
+/// Reject dimensions whose straight-RGBA8 buffer would exceed
+/// [`MAX_DECODED_RGBA_BYTES`], before any allocation happens.
+fn check_decoded_size(width: u32, height: u32) -> anyhow::Result<()> {
+    let rgba_bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4));
+    match rgba_bytes {
+        Some(bytes) if bytes <= MAX_DECODED_RGBA_BYTES => Ok(()),
+        _ => anyhow::bail!(
+            "image {width}x{height} exceeds the {} MiB decode limit",
+            MAX_DECODED_RGBA_BYTES / (1024 * 1024)
+        ),
+    }
+}
+
 /// Decode a JPEG byte buffer to straight RGBA8. JPEG carries no alpha channel,
 /// so alpha is filled with `0xff`. Grayscale JPEGs (1 output channel) are
 /// expanded to RGB; RGB (3 channels) is the common case.
 fn decode_jpeg_rgba(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
     let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(bytes));
+    decoder.decode_headers()?;
+    if let Some(info) = decoder.info() {
+        check_decoded_size(u32::from(info.width), u32::from(info.height))?;
+    }
     let pixels = decoder.decode()?;
     let info = decoder
         .info()
@@ -857,6 +881,7 @@ fn decode_jpeg_rgba(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
 fn decode_webp_rgba(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
     let mut decoder = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
     let (width, height) = decoder.dimensions();
+    check_decoded_size(width, height)?;
     let has_alpha = decoder.has_alpha();
     let buf_size = decoder
         .output_buffer_size()
@@ -1300,6 +1325,17 @@ mod tests {
                 "{rejected} should be rejected"
             );
         }
+    }
+
+    // The decode-size gate accepts up to exactly 64 MiB of RGBA8 and rejects
+    // anything larger (including dimension products that overflow usize).
+    #[test]
+    fn decoded_size_gate_caps_at_64_mib_rgba() {
+        assert!(check_decoded_size(1, 1).is_ok());
+        // 4096 * 4096 * 4 == 64 MiB exactly.
+        assert!(check_decoded_size(4096, 4096).is_ok());
+        assert!(check_decoded_size(4097, 4096).is_err());
+        assert!(check_decoded_size(u32::MAX, u32::MAX).is_err());
     }
 
     #[test]

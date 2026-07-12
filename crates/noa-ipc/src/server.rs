@@ -557,6 +557,21 @@ fn dispatch(
     };
     let id = req.id.clone();
 
+    // R-3: the public spec pins `id` to `number | string` (§2 JSON-RPC
+    // 規約). Anything else — missing (defaults to `Value::Null` above),
+    // `null`, an object, an array, or a bool — must fail closed with
+    // -32600 InvalidRequest before dispatch, including side-effecting
+    // methods like `sendText`/`closePane`; echo `id: null` since the
+    // offending id itself isn't a valid response id. Checked before
+    // `noa.hello` too, so a bad id can't even complete auth.
+    if !matches!(id, Value::Number(_) | Value::String(_)) {
+        return Some(error_response(
+            Value::Null,
+            ErrorCode::InvalidRequest,
+            "id must be a number or string",
+        ));
+    }
+
     // R-5: reject anything but exactly "2.0" (missing counts as invalid)
     // before any dispatch — including `noa.hello` itself (pre-auth) and
     // every other method (post-auth). The connection stays open; only this
@@ -661,7 +676,12 @@ fn handle_hello(id: Value, params: Value, token: &str, allowed_scopes: ScopeSet,
 
 fn handle_get_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
     let p: GetTextParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
-    let max_bytes = p.max_bytes.unwrap_or(DEFAULT_TEXT_MAX_BYTES);
+    // R-1: clamp, don't reject — an over-large maxBytes is capped to
+    // MAX_TEXT_MAX_BYTES before it ever reaches the backend, so an
+    // authenticated client can't force an unbounded scrollback walk under
+    // the terminal lock (NFR-4). Tail-truncation + `truncated: true` below
+    // already communicates that the response is partial.
+    let max_bytes = p.max_bytes.unwrap_or(DEFAULT_TEXT_MAX_BYTES).min(MAX_TEXT_MAX_BYTES);
     let backend_result = backend.get_text(p.pane_id.0, p.source, max_bytes)?;
     let (text, truncated_here) = truncate_tail(&backend_result.text, max_bytes);
     let result = GetTextResult { pane_id: p.pane_id, text, truncated: truncated_here || backend_result.truncated };

@@ -24,6 +24,10 @@ struct MockBackend {
     text: Mutex<HashMap<u64, String>>,
     /// Panes that make `get_text` return `IpcError::Internal` (R-3 test).
     internal_error_panes: Mutex<std::collections::HashSet<u64>>,
+    /// Every `max_bytes` the server actually passed down to `get_text`,
+    /// in call order (fix-pass-5 R-1: asserts the server clamps before
+    /// calling the backend, not after).
+    requested_max_bytes: Mutex<Vec<usize>>,
 }
 
 impl IpcBackend for MockBackend {
@@ -31,7 +35,8 @@ impl IpcBackend for MockBackend {
         self.panels.lock().unwrap().clone()
     }
 
-    fn get_text(&self, pane: PaneRef, _source: TextSource, _max_bytes: usize) -> Result<TextResult, IpcError> {
+    fn get_text(&self, pane: PaneRef, _source: TextSource, max_bytes: usize) -> Result<TextResult, IpcError> {
+        self.requested_max_bytes.lock().unwrap().push(max_bytes);
         if self.internal_error_panes.lock().unwrap().contains(&pane) {
             return Err(IpcError::Internal("backend exploded".to_string()));
         }
@@ -910,4 +915,98 @@ fn f3_oversized_message_closes_the_connection() {
         }
     };
     assert!(result.is_err(), "oversized message should close the connection, got {result:?}");
+}
+
+// ---- fix-pass-5 R-1: getText maxBytes is clamped server-side before the
+// backend call (NFR-4: no unbounded scrollback walk under the terminal lock
+// just because an authenticated client asked for a huge maxBytes) ----
+
+#[test]
+fn fix5_r1_get_text_max_bytes_is_clamped_before_backend_call() {
+    let backend = Arc::new(MockBackend::default());
+    backend.text.lock().unwrap().insert(1, "x".repeat(10));
+    let handle = start_test_server(backend.clone(), "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, 1, Some("tok"), &["read"]);
+
+    send_rpc(&mut sock, 2, "noa.getText", json!({ "paneId": "1", "source": "screen", "maxBytes": 50 * 1024 * 1024 }));
+    let resp = recv_json(&mut sock);
+    assert!(resp.get("result").is_some(), "clamped request still succeeds: {resp:?}");
+
+    let seen = backend.requested_max_bytes.lock().unwrap().clone();
+    assert_eq!(seen, vec![noa_ipc::protocol::MAX_TEXT_MAX_BYTES], "backend must only ever see the clamped cap");
+    let _ = sock.close(None);
+}
+
+#[test]
+fn fix5_r1_get_text_max_bytes_under_cap_passes_through_unclamped() {
+    let backend = Arc::new(MockBackend::default());
+    backend.text.lock().unwrap().insert(1, "x".repeat(10));
+    let handle = start_test_server(backend.clone(), "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, 1, Some("tok"), &["read"]);
+
+    send_rpc(&mut sock, 2, "noa.getText", json!({ "paneId": "1", "source": "screen", "maxBytes": 100 }));
+    let resp = recv_json(&mut sock);
+    assert!(resp.get("result").is_some());
+
+    let seen = backend.requested_max_bytes.lock().unwrap().clone();
+    assert_eq!(seen, vec![100], "a request already under the cap is passed through unmodified");
+    let _ = sock.close(None);
+}
+
+// ---- fix-pass-5 R-3: `id` must be a JSON number or string; anything else
+// (missing/null/object/array/bool) is -32600 before dispatch, including
+// side-effecting methods, both pre- and post-auth ----
+
+#[test]
+fn fix5_r3_missing_id_rejected_pre_and_post_auth() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+
+    let req = json!({ "jsonrpc": "2.0", "method": "noa.hello", "params": { "protocolVersion": 1, "token": "tok", "scopes": ["read"] } });
+    sock.send(Message::Text(req.to_string())).unwrap();
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32600);
+    assert_eq!(resp["id"], Value::Null);
+
+    hello(&mut sock, 1, 1, Some("tok"), &["read"]);
+
+    let req = json!({ "jsonrpc": "2.0", "method": "noa.listPanels", "params": {} });
+    sock.send(Message::Text(req.to_string())).unwrap();
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32600);
+
+    send_rpc(&mut sock, 3, "noa.listPanels", json!({}));
+    let resp = recv_json(&mut sock);
+    assert!(resp.get("result").is_some(), "connection stays open after rejection: {resp:?}");
+    let _ = sock.close(None);
+}
+
+#[test]
+fn fix5_r3_invalid_id_types_rejected_without_backend_side_effect() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend.clone(), "tok", ScopeSet::parse_list("read,input"));
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, 1, Some("tok"), &["read", "input"]);
+
+    for bad_id in [Value::Null, json!({}), json!([]), json!(true)] {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": bad_id,
+            "method": "noa.sendText",
+            "params": { "paneId": "1", "text": "should not be sent" },
+        });
+        sock.send(Message::Text(req.to_string())).unwrap();
+        let resp = recv_json(&mut sock);
+        assert_eq!(resp["error"]["code"], -32600, "bad id {bad_id:?} must be rejected: {resp:?}");
+    }
+    assert!(backend.sent_text.lock().unwrap().is_empty(), "no side-effecting method may dispatch with an invalid id");
+
+    // Connection still serves a valid follow-up.
+    send_rpc(&mut sock, 99, "noa.listPanels", json!({}));
+    let resp = recv_json(&mut sock);
+    assert!(resp.get("result").is_some(), "connection stays open: {resp:?}");
+    let _ = sock.close(None);
 }

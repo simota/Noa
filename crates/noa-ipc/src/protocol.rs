@@ -16,6 +16,13 @@ pub const PROTOCOL_VERSION: u64 = 1;
 /// Default `getText` response cap, in UTF-8 bytes (FR-8).
 pub const DEFAULT_TEXT_MAX_BYTES: usize = 256 * 1024;
 
+/// Hard ceiling on a client-requested `getText` `maxBytes`, in UTF-8 bytes
+/// (NFR-4). A client-supplied `maxBytes` larger than this is clamped down to
+/// it before the request ever reaches the backend, so an authenticated
+/// client can't force an unbounded scrollback walk under the terminal lock
+/// by simply asking for a huge `maxBytes`.
+pub const MAX_TEXT_MAX_BYTES: usize = 1024 * 1024;
+
 /// Default `getGrid` response cap, in serialized bytes (FR-9 / NFR-4).
 pub const DEFAULT_GRID_CAP_BYTES: usize = 256 * 1024;
 

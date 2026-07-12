@@ -594,7 +594,7 @@ impl BackgroundImageSlideshow {
         }
         if !self.candidates.is_empty() {
             log::warn!(
-                "background-image: no PNG candidates in the configured directory could be decoded; disabling background image"
+                "background-image: no image candidates in the configured directory could be decoded; disabling background image"
             );
         }
         self.rotation_exhausted = true;

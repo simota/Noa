@@ -43,7 +43,10 @@ pub(super) fn rebuild_cell_instances(
     let mut glyph_rows = Vec::with_capacity(snap.rows.len());
     let mut deco_rows = Vec::with_capacity(snap.rows.len());
     for (row_idx, row) in snap.rows.iter().enumerate() {
-        let (bg, glyph, deco) = rebuild_row_instances(
+        let mut bg = Vec::new();
+        let mut glyph = Vec::new();
+        let mut deco = Vec::new();
+        rebuild_row_instances(
             row_idx as u16,
             row,
             snap,
@@ -51,6 +54,11 @@ pub(super) fn rebuild_cell_instances(
             theme,
             target_format_is_srgb,
             metrics,
+            RowInstanceBuffers {
+                bg: &mut bg,
+                glyph: &mut glyph,
+                decoration: &mut deco,
+            },
         );
         bg_rows.push(bg);
         glyph_rows.push(glyph);
@@ -67,11 +75,26 @@ pub(super) fn rebuild_cell_instances(
     (clear_color, (metrics.cell_w, metrics.cell_h))
 }
 
+/// The three parallel output bands [`rebuild_row_instances`] fills in place,
+/// grouped into one param so the caller's `PaneRenderCache` row slots (or a
+/// scratch `Vec` in tests) pass as a single unit instead of three positional
+/// `&mut Vec` args.
+pub(super) struct RowInstanceBuffers<'a> {
+    pub(super) bg: &'a mut Vec<CellInstance>,
+    pub(super) glyph: &'a mut Vec<CellInstance>,
+    pub(super) decoration: &'a mut Vec<CellInstance>,
+}
+
 /// Build one row's background / glyph / decoration instance segments. Pure
 /// function of `(y, row, snap, ...)` — no cross-row state — which is what
 /// makes per-row caching in [`PaneRenderCache`] safe: a clean row's segments
 /// from a previous frame are byte-identical to what this function would
 /// produce again, because nothing here reaches outside the row.
+///
+/// Genuine 8-way arity, not accidental sprawl: 5 read-only rendering inputs
+/// plus the row index, plus one grouped in/out param standing in for the
+/// pass's 3 independent output bands (`RowInstanceBuffers`).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn rebuild_row_instances(
     y: u16,
     row: &Row,
@@ -80,10 +103,20 @@ pub(super) fn rebuild_row_instances(
     theme: &Theme,
     target_format_is_srgb: bool,
     metrics: Metrics,
-) -> (Vec<CellInstance>, Vec<CellInstance>, Vec<CellInstance>) {
-    let mut bg_instances = Vec::new();
-    let mut glyph_instances = Vec::new();
-    let mut decoration_instances = Vec::new();
+    out: RowInstanceBuffers<'_>,
+) {
+    // In/out Vec params (not return-by-value): the caller owns the
+    // allocation across frames (`PaneRenderCache`'s per-row slots), so a
+    // dirty row reuses last frame's capacity instead of starting every
+    // rebuild from a fresh zero-capacity `Vec`.
+    let RowInstanceBuffers {
+        bg: bg_instances,
+        glyph: glyph_instances,
+        decoration: decoration_instances,
+    } = out;
+    bg_instances.clear();
+    glyph_instances.clear();
+    decoration_instances.clear();
     let mut segment_cells = Vec::with_capacity(row.cells.len());
 
     // Cursor shape only depends on pane-wide snapshot state (position,
@@ -186,7 +219,7 @@ pub(super) fn rebuild_row_instances(
                 text_color
             };
             push_cell_decorations(
-                &mut decoration_instances,
+                decoration_instances,
                 x,
                 y,
                 cell.attrs,
@@ -196,7 +229,7 @@ pub(super) fn rebuild_row_instances(
             );
             if is_hover_link_cell(snap, cell, x, y) {
                 push_hover_link_underline(
-                    &mut decoration_instances,
+                    decoration_instances,
                     x,
                     y,
                     to_u8_color(text_color),
@@ -216,7 +249,7 @@ pub(super) fn rebuild_row_instances(
                 target_format_is_srgb,
             );
             push_cursor_decorations(
-                &mut decoration_instances,
+                decoration_instances,
                 x,
                 y,
                 cursor_visual,
@@ -265,10 +298,8 @@ pub(super) fn rebuild_row_instances(
     // bearing (REQ-SHAPE-4).
     for run in segment_row(font, &segment_cells) {
         let shaped = font.shape_run(&run.cells);
-        emit_run_glyph_instances(&mut glyph_instances, font, &run, &shaped, y, metrics);
+        emit_run_glyph_instances(glyph_instances, font, &run, &shaped, y, metrics);
     }
-
-    (bg_instances, glyph_instances, decoration_instances)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -554,7 +585,7 @@ pub(super) fn rebuild_pane_cached(
         let mut rebuilt_rows_this_pass = 0_u64;
         for (row_idx, row) in snap.rows.iter().enumerate() {
             if dirty.get(row_idx).copied().unwrap_or(true) {
-                let (bg, glyph, deco) = rebuild_row_instances(
+                rebuild_row_instances(
                     row_idx as u16,
                     row,
                     snap,
@@ -562,10 +593,12 @@ pub(super) fn rebuild_pane_cached(
                     theme,
                     target_format_is_srgb,
                     metrics,
+                    RowInstanceBuffers {
+                        bg: &mut cache.bg[row_idx],
+                        glyph: &mut cache.glyph[row_idx],
+                        decoration: &mut cache.deco[row_idx],
+                    },
                 );
-                cache.bg[row_idx] = bg;
-                cache.glyph[row_idx] = glyph;
-                cache.deco[row_idx] = deco;
                 rows_rebuilt += 1;
                 rebuilt_rows_this_pass += 1;
             }

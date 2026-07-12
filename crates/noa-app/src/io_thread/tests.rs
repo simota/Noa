@@ -767,6 +767,191 @@ fn feed_terminal_preserves_utf8_split_across_pty_reads() {
     );
 }
 
+/// Guards the chunked-lock feed path (`feed_chunk_fair`, used internally by
+/// `feed_terminal_batch`): splitting a batch across many separate
+/// lock/unlock cycles — one per simulated `noa-pty` `READ_CHUNK` (64 KiB),
+/// well past the old single-lock-covers-the-whole-batch model — must still
+/// parse to the exact same `Terminal` state as feeding the identical bytes
+/// as one unsplit chunk. The parser state (`Stream`) lives outside the
+/// mutex, so relocking mid-parse must be invisible to the parse result; this
+/// pins that invariant down with a batch comfortably past
+/// `PTY_DATA_DRAIN_BYTE_LIMIT` (1 MiB), with a UTF-8 scalar and a CSI escape
+/// sequence deliberately straddling two of the chunk boundaries so the
+/// carried-over parser state at a lock boundary is actually exercised.
+#[test]
+fn feed_terminal_batch_chunked_locking_matches_single_lock_result() {
+    const CHUNK: usize = 64 * 1024;
+
+    let mut bytes = Vec::new();
+    while bytes.len() < CHUNK - 1 {
+        bytes.push(b'a' + (bytes.len() % 26) as u8);
+    }
+    // This 3-byte UTF-8 scalar straddles the chunk 0/1 boundary.
+    bytes.extend_from_slice("日".as_bytes());
+    while bytes.len() < 2 * CHUNK - 2 {
+        bytes.push(b'a' + (bytes.len() % 26) as u8);
+    }
+    // This 5-byte CSI sequence straddles the chunk 1/2 boundary.
+    bytes.extend_from_slice(b"\x1b[35m");
+    bytes.extend_from_slice(b"styled\x1b[0m");
+    // Pad well past `PTY_DATA_DRAIN_BYTE_LIMIT` (1 MiB) with CRLF-terminated
+    // lines so cursor/scrollback state is nontrivial, not just one long row.
+    while bytes.len() < 17 * CHUNK {
+        bytes.extend_from_slice(b"the quick brown fox jumps\r\n");
+    }
+    assert!(bytes.len() > PTY_DATA_DRAIN_BYTE_LIMIT);
+
+    let chunks: Vec<&[u8]> = bytes.chunks(CHUNK).collect();
+    let (&first, rest) = chunks.split_first().expect("at least one chunk");
+
+    // "Unsplit": the whole batch fed as a single chunk (`rest` empty) — one
+    // lock hold end to end, byte-for-byte the pre-chunking model.
+    let single_terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut single_stream = noa_vt::Stream::new();
+    feed_terminal(
+        &single_terminal,
+        &mut single_stream,
+        &bytes,
+        &test_overview_publish(),
+        &mut None,
+        &test_sidebar_publish(false),
+        &mut None,
+    );
+
+    // "Chunked": the real drain path — one `feed_chunk_fair` lock/unlock per
+    // 64 KiB chunk, same as a real sustained-flood batch.
+    let chunked_terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut chunked_stream = noa_vt::Stream::new();
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        )),
+    };
+    feed_terminal_batch(
+        &chunked_terminal,
+        &mut chunked_stream,
+        first,
+        rest.iter().copied(),
+        &test_overview_publish(),
+        &mut None,
+        &test_sidebar_publish(false),
+        &mut None,
+        &auto_approve,
+        &mut crate::auto_approve::AutoApproveState::default(),
+        false,
+        &mut None,
+        &mut IpcRowCache::default(),
+    );
+
+    let single = single_terminal.lock();
+    let chunked = chunked_terminal.lock();
+    let single_grid: Vec<Vec<noa_grid::Cell>> = single
+        .primary
+        .grid
+        .iter()
+        .map(|row| row.cells.clone())
+        .collect();
+    let chunked_grid: Vec<Vec<noa_grid::Cell>> = chunked
+        .primary
+        .grid
+        .iter()
+        .map(|row| row.cells.clone())
+        .collect();
+    assert_eq!(
+        single_grid, chunked_grid,
+        "chunked-lock feed must parse to the identical grid content as a single-lock feed"
+    );
+    assert_eq!(single.primary.cursor.x, chunked.primary.cursor.x);
+    assert_eq!(single.primary.cursor.y, chunked.primary.cursor.y);
+    assert_eq!(
+        single.primary.cursor.pending_wrap,
+        chunked.primary.cursor.pending_wrap
+    );
+}
+
+/// Same invariant as
+/// `feed_terminal_batch_chunked_locking_matches_single_lock_result`, but for
+/// the two dispatch kinds that test doesn't touch: OSC (title) and DCS
+/// (DECRQSS). Both accumulate into a side buffer distinct from the grid
+/// (`Terminal::title`, `Terminal::pending_writes`) up to their string
+/// terminator, so a relock that clobbered or restarted that accumulator
+/// between chunks — rather than just corrupting a grid cell — could easily
+/// go unnoticed by a grid-only equivalence check.
+#[test]
+fn feed_terminal_batch_chunked_locking_matches_single_lock_for_osc_and_dcs() {
+    const CHUNK: usize = 64 * 1024;
+
+    let mut bytes = Vec::new();
+    while bytes.len() < CHUNK - 4 {
+        bytes.push(b'x');
+    }
+    // This OSC 2 (title) sequence straddles the chunk 0/1 boundary.
+    bytes.extend_from_slice(b"\x1b]2;chunked-title\x07");
+    while bytes.len() < 2 * CHUNK - 3 {
+        bytes.push(b'y');
+    }
+    // This DECRQSS (DCS) query straddles the chunk 1/2 boundary.
+    bytes.extend_from_slice(b"\x1bP$qm\x1b\\");
+    while bytes.len() < 3 * CHUNK {
+        bytes.push(b'z');
+    }
+
+    let single_terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut single_stream = noa_vt::Stream::new();
+    feed_terminal(
+        &single_terminal,
+        &mut single_stream,
+        &bytes,
+        &test_overview_publish(),
+        &mut None,
+        &test_sidebar_publish(false),
+        &mut None,
+    );
+
+    let chunked_terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut chunked_stream = noa_vt::Stream::new();
+    let chunks: Vec<&[u8]> = bytes.chunks(CHUNK).collect();
+    let (&first, rest) = chunks.split_first().expect("at least one chunk");
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        )),
+    };
+    feed_terminal_batch(
+        &chunked_terminal,
+        &mut chunked_stream,
+        first,
+        rest.iter().copied(),
+        &test_overview_publish(),
+        &mut None,
+        &test_sidebar_publish(false),
+        &mut None,
+        &auto_approve,
+        &mut crate::auto_approve::AutoApproveState::default(),
+        false,
+        &mut None,
+        &mut IpcRowCache::default(),
+    );
+
+    let mut single = single_terminal.lock();
+    let mut chunked = chunked_terminal.lock();
+    assert_eq!(
+        single.title, "chunked-title",
+        "sanity: the OSC straddling the boundary must still be recognized"
+    );
+    assert_eq!(
+        single.title, chunked.title,
+        "an OSC straddling a chunk boundary must set the same title on both paths"
+    );
+    assert_eq!(
+        single.take_pending_writes(),
+        chunked.take_pending_writes(),
+        "a DECRQSS DCS straddling a chunk boundary must queue the same reply on both paths"
+    );
+}
+
 // FR-A4: the bell is drained regardless of sidebar visibility, so an agent
 // session's bell can escalate to an attention request even when the sidebar
 // is hidden (the main thread does the agent-vs-generic classification).
@@ -1567,5 +1752,77 @@ fn bench_feed_terminal_echo() {
     eprintln!(
         "bench_feed_terminal_echo[styled prompt line]: {:.1} ns/op ({ITERS} iters, {elapsed:?} total)",
         elapsed.as_nanos() as f64 / f64::from(ITERS)
+    );
+}
+
+/// Bolt perf harness (io-lock chunking): measures `feed_terminal_batch`'s
+/// per-call cost for a large multi-chunk drain — 16 chunks of 64 KiB (1 MiB,
+/// matching `PTY_DATA_DRAIN_BYTE_LIMIT`), the sustained-flood case the
+/// chunked-lock change (`feed_chunk_fair`) targets. `feed_terminal_batch`'s
+/// public signature is unchanged by that change, so this same bench runs
+/// unmodified against either the chunked-lock or the pre-change
+/// single-lock-per-batch implementation — diff the two with `git stash`
+/// (same tree, same path) rather than a worktree compare. `#[ignore]`d so
+/// `cargo test` stays fast; run explicitly with:
+/// `cargo test -p noa-app --offline io_thread::tests::bench_feed_terminal_batch_large_flood -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn bench_feed_terminal_batch_large_flood() {
+    const ITERS: u32 = 200;
+    const CHUNK: usize = 64 * 1024;
+    const NUM_CHUNKS: usize = 16; // 1 MiB, matching PTY_DATA_DRAIN_BYTE_LIMIT
+
+    let mut line = Vec::new();
+    while line.len() < CHUNK {
+        line.extend_from_slice(b"the quick brown fox jumps over the lazy dog\r\n");
+    }
+    line.truncate(CHUNK);
+    let full: Vec<u8> = std::iter::repeat_n(line.iter().copied(), NUM_CHUNKS)
+        .flatten()
+        .collect();
+    let chunks: Vec<&[u8]> = full.chunks(CHUNK).collect();
+    let (&first, rest) = chunks.split_first().expect("at least one chunk");
+
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(true);
+    let mut last_sidebar_publish = None;
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        )),
+    };
+    let mut auto_approve_state = crate::auto_approve::AutoApproveState::default();
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+
+    let start = Instant::now();
+    for _ in 0..ITERS {
+        let _ = std::hint::black_box(feed_terminal_batch(
+            &terminal,
+            &mut stream,
+            std::hint::black_box(first),
+            rest.iter().copied(),
+            &overview,
+            &mut last_overview_publish,
+            &sidebar,
+            &mut last_sidebar_publish,
+            &auto_approve,
+            &mut auto_approve_state,
+            false,
+            &mut last_ipc_push,
+            &mut ipc_row_cache,
+        ));
+    }
+    let elapsed = start.elapsed();
+    let total_bytes = u64::from(ITERS) * full.len() as u64;
+    eprintln!(
+        "bench_feed_terminal_batch_large_flood: {:.1} us/call, {:.1} MB/s ({ITERS} iters x {} bytes, {elapsed:?} total)",
+        elapsed.as_micros() as f64 / f64::from(ITERS),
+        (total_bytes as f64 / elapsed.as_secs_f64()) / 1e6,
+        full.len(),
     );
 }

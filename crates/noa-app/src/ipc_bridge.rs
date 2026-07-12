@@ -203,24 +203,7 @@ impl IpcBackend for AppIpcBackend {
             .ok_or(IpcError::PaneClosed)?;
         let mut terminal = terminal.lock();
         let (text, truncated) = match source {
-            TextSource::Screen => {
-                let text = terminal.active().visible_rows().iter().fold(
-                    String::new(),
-                    |mut out, row| {
-                        for cell in &row.cells {
-                            cell.push_text_to(&mut out);
-                        }
-                        if !row.wrapped {
-                            while out.ends_with(' ') {
-                                out.pop();
-                            }
-                            out.push('\n');
-                        }
-                        out
-                    },
-                );
-                (text, false)
-            }
+            TextSource::Screen => (screen_text(&terminal.active().visible_rows()), false),
             // Walks rows from the tail under the lock rather than
             // materializing the full `scrollback_text()` and truncating
             // after the fact (F-1 / NFR-4).
@@ -291,6 +274,28 @@ impl IpcBackend for AppIpcBackend {
     fn close_pane(&self, pane: PaneRef) -> Result<(), IpcError> {
         self.submit(IpcActionKind::ClosePane { pane }).map(|_| ())
     }
+}
+
+/// Join visible screen rows into `noa.getText(source: "screen")` plain text
+/// (R-2). Trailing spaces are trimmed per unwrapped row — a soft-wrapped
+/// row is full width, so its trailing spaces are real content continued on
+/// the next row and must survive the join (mirrors `noa-grid`'s
+/// `push_selected_row_text`). The trim tracks each row's own start offset
+/// so it can never eat into a preceding wrapped row's real trailing spaces.
+fn screen_text(rows: &[GridRow]) -> String {
+    rows.iter().fold(String::new(), |mut out, row| {
+        let before_len = out.len();
+        for cell in &row.cells {
+            cell.push_text_to(&mut out);
+        }
+        if !row.wrapped {
+            while out.len() > before_len && out.ends_with(' ') {
+                out.pop();
+            }
+            out.push('\n');
+        }
+        out
+    })
 }
 
 /// Coalesce a grid row's cells into color/attr runs (mirrors
@@ -480,6 +485,22 @@ mod tests {
         assert_eq!(spans[0].fg, None, "Color::Default omits the wire fg field");
         assert_eq!(spans[1].text, "c");
         assert_eq!(spans[1].fg, Some(SpanColor::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn screen_text_preserves_wrapped_row_trailing_spaces() {
+        // R-2: a wrapped row's real trailing spaces must survive even when
+        // the row after it is blank and unwrapped — the trim on the blank
+        // row must not reach back across the row boundary into the wrapped
+        // row's content.
+        let wrapped = GridRow {
+            cells: vec![cell('a', Color::Default), cell(' ', Color::Default), cell(' ', Color::Default)],
+            wrapped: true,
+            dirty: false,
+        };
+        let blank = GridRow { cells: vec![cell(' ', Color::Default)], wrapped: false, dirty: false };
+        let text = screen_text(&[wrapped, blank]);
+        assert_eq!(text, "a  \n", "wrapped row's trailing spaces survive; only the blank row's own space is trimmed");
     }
 
     #[test]

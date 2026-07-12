@@ -118,6 +118,8 @@ params: `{"paneId":"1"}` / result: `{"ok":true}`
 
 result: `{"subscriptionId":"1"}`
 
+接続ごとに最大 16 件まで(`unsubscribe` されたぶんは即座に枠が空く)。超過した `subscribe` 呼び出しは接続を切らずに `-32005`("subscription limit exceeded")を返す。
+
 ### noa.unsubscribe — 要 read
 
 params: `{"subscriptionId":"1"}` / result: `{"ok":true}`

@@ -8,7 +8,7 @@ use std::time::Duration;
 use noa_ipc::backend::{GridResult, IpcBackend, PaneRef, TextResult, WindowRef};
 use noa_ipc::error::IpcError;
 use noa_ipc::protocol::{Panel, Row, SplitDirection, TextSource, WireId};
-use noa_ipc::{ScopeSet, Server, ServerConfig};
+use noa_ipc::{Broadcaster, ScopeSet, Server, ServerConfig};
 use serde_json::{Value, json};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::stream::MaybeTlsStream;
@@ -95,6 +95,26 @@ fn start_test_server(backend: Arc<MockBackend>, token: &str, scopes: ScopeSet) -
             hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
         },
         backend,
+        Broadcaster::new(),
+    )
+    .expect("server should bind an ephemeral loopback port")
+}
+
+fn start_test_server_with_broadcaster(
+    backend: Arc<MockBackend>,
+    token: &str,
+    scopes: ScopeSet,
+    broadcaster: Broadcaster,
+) -> noa_ipc::ServerHandle {
+    Server::start(
+        ServerConfig {
+            port: 0,
+            token: token.to_string(),
+            allowed_scopes: scopes,
+            hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+        },
+        backend,
+        broadcaster,
     )
     .expect("server should bind an ephemeral loopback port")
 }
@@ -108,6 +128,7 @@ fn start_test_server_with_hello_deadline(
     Server::start(
         ServerConfig { port: 0, token: token.to_string(), allowed_scopes: scopes, hello_deadline },
         backend,
+        Broadcaster::new(),
     )
     .expect("server should bind an ephemeral loopback port")
 }
@@ -478,6 +499,7 @@ fn server_start_refuses_empty_token() {
             hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
         },
         backend,
+        Broadcaster::new(),
     );
     assert!(result.is_err(), "an empty token must never be accepted as a live server config");
 }
@@ -493,6 +515,7 @@ fn server_start_refuses_whitespace_only_token() {
             hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
         },
         backend,
+        Broadcaster::new(),
     );
     assert!(result.is_err());
 }
@@ -657,6 +680,58 @@ fn subscribe_delivers_state_changed_and_unsubscribe_stops_it() {
     let resp = recv_json(&mut sock);
     assert!(resp.get("result").is_some());
     let _ = sock.close(None);
+}
+
+// ---- one Broadcaster survives a server restart (config-reload) ----
+
+#[test]
+fn broadcaster_survives_a_server_restart_and_leaves_no_stale_connections() {
+    let broadcaster = Broadcaster::new();
+
+    let backend_a = Arc::new(MockBackend::default());
+    let handle_a =
+        start_test_server_with_broadcaster(backend_a, "tok", ScopeSet::default_read_only(), broadcaster.clone());
+    let mut sock_a = connect_plain(handle_a.port());
+    hello(&mut sock_a, 1, 1, Some("tok"), &["read"]);
+    send_rpc(&mut sock_a, 2, "noa.subscribe", json!({ "events": ["output"] }));
+    let resp = recv_json(&mut sock_a);
+    assert!(resp.get("result").is_some());
+    assert_eq!(broadcaster.connection_count(), 1);
+
+    // Simulate `restart_ipc_server`: drop the old server (closes its
+    // listener + connections) and start a fresh one bound to a new
+    // ephemeral port, reusing the *same* broadcaster (the fix under test).
+    drop(handle_a);
+    let _ = sock_a.close(None);
+
+    let backend_b = Arc::new(MockBackend::default());
+    let handle_b =
+        start_test_server_with_broadcaster(backend_b, "tok", ScopeSet::default_read_only(), broadcaster.clone());
+    let mut sock_b = connect_plain(handle_b.port());
+    hello(&mut sock_b, 1, 1, Some("tok"), &["read"]);
+    send_rpc(&mut sock_b, 2, "noa.subscribe", json!({ "events": ["output"] }));
+    let resp = recv_json(&mut sock_b);
+    assert!(resp.get("result").is_some());
+
+    // The old connection from server A must have unregistered itself by
+    // now (its thread self-terminates once the listener/socket is torn
+    // down), leaving exactly the one live connection from server B.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while broadcaster.connection_count() > 1 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(broadcaster.connection_count(), 1, "no stale connection entries from the old server");
+
+    // A broadcast on the shared broadcaster reaches the new server's
+    // subscriber — this is the actual bug: pre-restart panes push into the
+    // same broadcaster the new server's connections are registered on.
+    broadcaster.broadcast_output(7, vec![]);
+    std::thread::sleep(Duration::from_millis(150));
+    let notif = recv_json(&mut sock_b);
+    assert_eq!(notif["method"], "noa.output");
+    assert_eq!(notif["params"]["paneId"], "7");
+
+    let _ = sock_b.close(None);
 }
 
 // ---- F-3: bounded WS message size ----

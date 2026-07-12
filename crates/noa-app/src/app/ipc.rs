@@ -58,7 +58,7 @@ impl App {
             allowed_scopes,
             hello_deadline: noa_ipc::ServerConfig::DEFAULT_HELLO_DEADLINE,
         };
-        match noa_ipc::Server::start(config, std::sync::Arc::new(backend)) {
+        match noa_ipc::Server::start(config, std::sync::Arc::new(backend), self.ipc_broadcaster.clone()) {
             Ok(handle) => {
                 log::info!("noa-ipc: listening on 127.0.0.1:{}", handle.port());
                 self.ipc_server = Some(handle);
@@ -77,17 +77,9 @@ impl App {
     /// in-flight connection thread self-terminates within its own ~50ms
     /// read-timeout poll of the shared shutdown flag (`noa_ipc::server`).
     ///
-    /// Panes spawned before this restart hold an `IpcOutputTap` built from
-    /// the *old* `Broadcaster` (io thread wiring, `ipc_output_tap` below).
-    /// That broadcaster keeps working as a value — its registry just has no
-    /// connections left once they all disconnect, so its `try_send`s become
-    /// permanent no-ops — but it can never reach the *new* server's
-    /// connections. Those panes' output silently stops reaching `noa.output`
-    /// subscribers until they're respawned; freshly spawned panes tap the
-    /// new server correctly. Swapping the old taps live isn't done here: it
-    /// would need every io thread to observe a hot-swappable broadcaster
-    /// handle, which is more machinery than a config-driven server restart
-    /// (an infrequent, deliberate action) justifies for v1.
+    /// `self.ipc_broadcaster` outlives this restart (`ipc.rs`'s field doc),
+    /// so panes spawned before the restart keep pushing to whichever server
+    /// currently owns the broadcaster's connections — no respawn needed.
     pub(super) fn restart_ipc_server(&mut self) {
         self.ipc_server = None;
         self.ipc_install_attempted = false;
@@ -103,9 +95,9 @@ impl App {
     /// Gated on the server actually running so a disabled server costs
     /// nothing (spec "Zero overhead when disabled").
     pub(super) fn sync_ipc_snapshot(&mut self) {
-        let Some(handle) = self.ipc_server.as_ref() else {
+        if self.ipc_server.is_none() {
             return;
-        };
+        }
 
         let sig = self.ipc_structural_signature();
         let due = self
@@ -166,8 +158,7 @@ impl App {
             .cloned()
             .collect();
         if !changed.is_empty() {
-            let broadcaster = handle.broadcaster();
-            broadcaster.broadcast_state_changed(changed);
+            self.ipc_broadcaster.broadcast_state_changed(changed);
         }
     }
 
@@ -342,9 +333,9 @@ impl App {
         window_id: WindowId,
         pane_id: PaneId,
     ) -> Option<crate::io_thread::IpcOutputTap> {
-        let handle = self.ipc_server.as_ref()?;
+        self.ipc_server.as_ref()?;
         let ipc_pane_id = self.mint_ipc_pane(window_id, pane_id);
-        Some(crate::io_thread::IpcOutputTap { broadcaster: handle.broadcaster(), ipc_pane_id })
+        Some(crate::io_thread::IpcOutputTap { broadcaster: self.ipc_broadcaster.clone(), ipc_pane_id })
     }
 
     fn mint_ipc_pane(&self, window_id: WindowId, pane_id: PaneId) -> u64 {

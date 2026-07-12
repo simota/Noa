@@ -160,6 +160,14 @@ impl Broadcaster {
         self.conns.lock().remove(&conn_id);
     }
 
+    /// Number of currently-registered connections. Exposed for tests
+    /// verifying that a server restart which reuses this `Broadcaster`
+    /// leaves no stale connection entries behind once every connection from
+    /// the old server has torn down.
+    pub fn connection_count(&self) -> usize {
+        self.conns.lock().len()
+    }
+
     pub fn add_subscription(
         &self,
         conn_id: u64,

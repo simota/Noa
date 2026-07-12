@@ -103,7 +103,18 @@ pub struct Server;
 impl Server {
     /// Binds `127.0.0.1:<port>` only (FR-2) and starts the accept loop.
     /// Never binds a non-loopback interface.
-    pub fn start(config: ServerConfig, backend: Arc<dyn IpcBackend>) -> io::Result<ServerHandle> {
+    ///
+    /// `broadcaster` is supplied by the caller rather than created here so a
+    /// long-lived registry can outlive any one `Server::start`/`ServerHandle`
+    /// drop cycle (e.g. `noa-app`'s config-reload server restart): panes
+    /// wired to the same `Broadcaster` before a restart keep pushing to
+    /// whichever server currently owns its connections, without needing to
+    /// be re-wired.
+    pub fn start(
+        config: ServerConfig,
+        backend: Arc<dyn IpcBackend>,
+        broadcaster: Broadcaster,
+    ) -> io::Result<ServerHandle> {
         if config.token.trim().is_empty() {
             // Defense in depth alongside `auth::load_or_create_token`'s
             // empty-token fallback (R-1): no call path can ever start a
@@ -118,7 +129,6 @@ impl Server {
         let port = listener.local_addr()?.port();
 
         let shutdown = Arc::new(AtomicBool::new(false));
-        let broadcaster = Broadcaster::new();
         let token = Arc::new(config.token);
         let allowed_scopes = config.allowed_scopes;
         let hello_deadline = config.hello_deadline;

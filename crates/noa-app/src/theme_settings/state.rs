@@ -15,7 +15,8 @@ use crate::debounce::Debouncer;
 use super::{
     Attribute, Liveness, RestartReason, RevertValues, RowDraft, RowEffect, Section, SettingsRow,
     SettingsRowKind, ThemePairContext, ThemeSettingsCarryover, ThemeSettingsInit,
-    ThemeSettingsMode, attribute_of, background_image_fit_value, background_image_position_value,
+    ThemeSettingsMode, TokenCopyStatus, attribute_of, background_image_fit_value,
+    background_image_position_value,
 };
 
 /// The injectable config-writer seam [`ThemeSettings::commit`] takes
@@ -84,6 +85,21 @@ const SCROLLBACK_LIMIT_MAX: usize = 1_000_000_000;
 const MINIMUM_CONTRAST_STEP: f32 = 1.0;
 const MINIMUM_CONTRAST_MIN: f32 = 1.0;
 const MINIMUM_CONTRAST_MAX: f32 = 21.0;
+
+/// `server-port` step per ←→ press, clamped to the documented valid TCP
+/// range (`noa_config`'s `server_port` doc comment excludes the reserved
+/// `0..1024` range).
+const SERVER_PORT_STEP: i32 = 1;
+const SERVER_PORT_MIN: u16 = 1024;
+const SERVER_PORT_MAX: u16 = 65535;
+/// `server-scopes` cycle presets, in ←→ order — the same 4 combinations
+/// `docs/specs/noa-server.md`'s scope table documents as meaningful
+/// (control/input are each additive over `read`).
+const SERVER_SCOPES_PRESETS: [&str; 4] =
+    ["read", "read,control", "read,input", "read,control,input"];
+/// `server-bind` cycle presets, in ←→ order (v2 LAN opt-in): loopback-only
+/// (the default) and `0.0.0.0` (all interfaces, LAN-exposed).
+const SERVER_BIND_PRESETS: [&str; 2] = ["127.0.0.1", "0.0.0.0"];
 
 /// One theme catalog match: an index into `noa_theme::THEMES` plus the fuzzy
 /// match char positions (for highlight rendering), reusing
@@ -344,6 +360,30 @@ impl ThemeSettings {
                     },
                     SettingsRow {
                         draft: RowDraft::MacosOptionAsAlt(init.macos_option_as_alt),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ServerEnable(init.server_enable),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ServerStatus(init.server_status.clone()),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ServerPort(init.server_port),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ServerBind(init.server_bind.clone()),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ServerScopes(init.server_scopes.clone()),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
                         touched: false,
                     },
                 ],
@@ -1142,6 +1182,69 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
+            SettingsRowKind::ServerEnable => {
+                let RowDraft::ServerEnable(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = !current;
+                self.rows[idx].draft = RowDraft::ServerEnable(new);
+                self.rows[idx].touched = true;
+                RowEffect::None
+            }
+            // Read-only display row (mirrors `ServerTokenCopy`'s "no value
+            // to adjust" no-op, see `SettingsRowKind::ServerStatus`'s doc
+            // comment): ←→ does nothing, never sets `touched`.
+            SettingsRowKind::ServerStatus => RowEffect::None,
+            SettingsRowKind::ServerPort => {
+                let RowDraft::ServerPort(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = (current as i32 + delta * SERVER_PORT_STEP)
+                    .clamp(SERVER_PORT_MIN as i32, SERVER_PORT_MAX as i32)
+                    as u16;
+                if new != current {
+                    self.rows[idx].draft = RowDraft::ServerPort(new);
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
+            // Mirrors `ServerScopes`'s off-preset fallback below: a
+            // hand-edited `server-bind` doesn't have to be `127.0.0.1` or
+            // `0.0.0.0` — `cycle`'s shared not-found fallback treats it as
+            // sitting at preset index 0 and steps from there.
+            SettingsRowKind::ServerBind => {
+                let RowDraft::ServerBind(current) = &self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = cycle(&SERVER_BIND_PRESETS, current.as_str(), delta);
+                if new != current.as_str() {
+                    self.rows[idx].draft = RowDraft::ServerBind(new.to_string());
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
+            // A hand-edited config's `server-scopes` doesn't have to be one
+            // of `SERVER_SCOPES_PRESETS` — `cycle`'s shared not-found
+            // fallback treats it as sitting at preset index 0 and steps
+            // from there, so the first ←→ press from an off-preset value
+            // always lands on a real preset instead of panicking or
+            // getting stuck.
+            SettingsRowKind::ServerScopes => {
+                let RowDraft::ServerScopes(current) = &self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = cycle(&SERVER_SCOPES_PRESETS, current.as_str(), delta);
+                if new != current.as_str() {
+                    self.rows[idx].draft = RowDraft::ServerScopes(new.to_string());
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
+            // Action row (R-2's exception, see `SettingsRowKind::ServerTokenCopy`'s
+            // doc comment): never sets `touched` and never rewrites its own
+            // draft here — `App` performs the actual clipboard write and
+            // reports the outcome back through `set_server_token_copy_status`.
+            SettingsRowKind::ServerTokenCopy => RowEffect::CopyServerToken,
         }
     }
 
@@ -1282,6 +1385,17 @@ impl ThemeSettings {
         }
         let idx = self.selected_row;
         let kind = SettingsRowKind::ALL[idx];
+        // `ServerTokenCopy`/`ServerStatus` hold no persisted value —
+        // Delete/⌘Backspace resetting either to a default and marking it
+        // `touched` would falsely surface a "changes pending" badge for a
+        // row `commit_updates` never writes anyway. Treat reset as a no-op
+        // here, same as each row's `adjust` never marking `touched`.
+        if matches!(
+            kind,
+            SettingsRowKind::ServerTokenCopy | SettingsRowKind::ServerStatus
+        ) {
+            return RowEffect::None;
+        }
         let default = RowDraft::default_for(kind);
         self.rows[idx].draft = default.clone();
         self.rows[idx].touched = true;
@@ -1513,6 +1627,38 @@ impl ThemeSettings {
         self.snapshot.clone()
     }
 
+    /// `App`'s callback after handling [`RowEffect::CopyServerToken`]:
+    /// record whether the clipboard write actually succeeded, without ever
+    /// routing the token itself back through the pure state machine. A
+    /// no-op if the session has since navigated off the row or closed
+    /// (`self.rows` no longer holding a `ServerTokenCopy` draft can't
+    /// happen in practice — the kind is fixed per index — but this stays a
+    /// plain index write rather than asserting, matching the rest of this
+    /// module's no-panic style).
+    pub(crate) fn set_server_token_copy_status(&mut self, status: TokenCopyStatus) {
+        let index = SettingsRowKind::ALL
+            .iter()
+            .position(|kind| *kind == SettingsRowKind::ServerTokenCopy)
+            .expect("SettingsRowKind::ALL contains ServerTokenCopy");
+        self.rows[index].draft = RowDraft::ServerTokenCopy(status);
+    }
+
+    /// Refresh the `ServerStatus` row's display text — `App` calls this
+    /// whenever it re-runs `install_ipc_server_if_needed`/
+    /// `restart_ipc_server` while this session happens to be open (config
+    /// reload's `server-enable`/`server-port`/`server-scopes` diff, or the
+    /// panel's own commit landing through that same reload path), so a
+    /// toggle reflects in the row within one `ConfigWatcher` poll tick
+    /// instead of needing the panel reopened. Never marks `touched` — same
+    /// no-value-to-save contract as [`Self::set_server_token_copy_status`].
+    pub(crate) fn set_server_status(&mut self, status: String) {
+        let index = SettingsRowKind::ALL
+            .iter()
+            .position(|kind| *kind == SettingsRowKind::ServerStatus)
+            .expect("SettingsRowKind::ALL contains ServerStatus");
+        self.rows[index].draft = RowDraft::ServerStatus(status);
+    }
+
     /// The current error text set by a failed [`Self::commit`], if any
     /// (AC-23) — `App`'s render path shows this in place of the normal
     /// keybind hint line.
@@ -1669,6 +1815,26 @@ impl ThemeSettings {
                         macos_option_as_alt_config_value(*mode).to_string(),
                     ));
                 }
+                RowDraft::ServerEnable(enabled) => {
+                    updates.push(("server-enable".to_string(), enabled.to_string()));
+                }
+                RowDraft::ServerPort(port) => {
+                    updates.push(("server-port".to_string(), port.to_string()));
+                }
+                RowDraft::ServerBind(bind_addr) => {
+                    updates.push(("server-bind".to_string(), bind_addr.clone()));
+                }
+                RowDraft::ServerScopes(scopes) => {
+                    updates.push(("server-scopes".to_string(), scopes.clone()));
+                }
+                // Never touched (`adjust`/`reset_selected_row` both no-op
+                // this kind), so this arm is unreachable in practice — kept
+                // explicit rather than folded into a wildcard so a future
+                // `RowDraft` variant can't silently skip a real config write
+                // by landing here instead.
+                RowDraft::ServerTokenCopy(_) => {}
+                // Same "never touched" contract as `ServerTokenCopy` above.
+                RowDraft::ServerStatus(_) => {}
             }
         }
         updates
@@ -1907,6 +2073,17 @@ fn is_reload_exempt(row: SettingsRowKind) -> bool {
             | SettingsRowKind::ScrollbackLimit
             | SettingsRowKind::CursorStyleBlink
             | SettingsRowKind::MinimumContrast
+            // `server-enable`/`server-port`/`server-scopes`: same
+            // `ConfigWatcher`-picked-up shape as the three above —
+            // `app/config_reload.rs`'s `decide_server_restart` diffs the
+            // whole reloaded config unconditionally (not gated by this
+            // list), so `App::restart_ipc_server` fires within one poll
+            // tick of the panel's commit regardless; this list only decides
+            // whether these rows badge `OnSave` (here) or `OnLaunch`.
+            | SettingsRowKind::ServerEnable
+            | SettingsRowKind::ServerPort
+            | SettingsRowKind::ServerBind
+            | SettingsRowKind::ServerScopes
     )
 }
 
@@ -1978,6 +2155,12 @@ fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
         RowDraft::CursorStyleBlink(v) => v.hash(hasher),
         RowDraft::MinimumContrast(v) => v.to_bits().hash(hasher),
         RowDraft::MacosOptionAsAlt(mode) => macos_option_as_alt_config_value(*mode).hash(hasher),
+        RowDraft::ServerEnable(v) => v.hash(hasher),
+        RowDraft::ServerStatus(s) | RowDraft::ServerScopes(s) | RowDraft::ServerBind(s) => {
+            s.hash(hasher)
+        }
+        RowDraft::ServerPort(v) => v.hash(hasher),
+        RowDraft::ServerTokenCopy(status) => (*status as u8).hash(hasher),
     }
 }
 

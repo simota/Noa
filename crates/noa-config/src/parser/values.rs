@@ -30,6 +30,22 @@ pub(super) fn parse_u16(
     Some(parsed)
 }
 
+/// Parse and validate an IP address directive (`server-bind`), returning the
+/// original string (not a re-serialized form) on success so hand-edited
+/// config values round-trip verbatim.
+pub(super) fn parse_ip_addr_string(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<String> {
+    let value = directive.value.as_deref()?;
+    if value.parse::<std::net::IpAddr>().is_err() {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(value.to_string())
+}
+
 /// Parse a non-negative integer byte count (`scrollback-limit`). `0` is valid
 /// and disables scrollback; a negative or non-numeric value diagnoses.
 pub(super) fn parse_usize(

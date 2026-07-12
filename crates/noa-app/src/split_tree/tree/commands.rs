@@ -48,6 +48,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::ToggleCommandPalette
         | AppCommand::OpenThemePicker
         | AppCommand::OpenSettings
+        | AppCommand::ToggleProcessMonitor
         | AppCommand::ToggleFullscreen
         | AppCommand::ToggleQuickTerminal
         | AppCommand::ToggleSecureKeyboardEntry

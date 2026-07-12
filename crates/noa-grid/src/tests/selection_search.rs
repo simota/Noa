@@ -28,6 +28,44 @@ fn scrollback_text_uses_selection_copy_wrapping_rules() {
 }
 
 #[test]
+fn scrollback_text_tail_matches_full_text_when_budget_covers_everything() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+
+    let (text, truncated) = t.scrollback_text_tail(1024).expect("has text");
+    assert_eq!(text, "A\nB\nC\nD");
+    assert!(!truncated);
+}
+
+#[test]
+fn scrollback_text_tail_keeps_only_the_tail_under_a_small_budget() {
+    let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
+
+    let (text, truncated) = t.scrollback_text_tail(1).expect("has text");
+    assert!(truncated);
+    // Tail-priority: the very last byte survives, never the head.
+    assert_eq!(text, "D");
+    assert!(text.len() <= 1);
+}
+
+#[test]
+fn scrollback_text_tail_never_walks_past_the_budget_boundary() {
+    // A long scrollback where only the newest few rows should be visited —
+    // this doesn't assert on internals, just that the tail-bounded result
+    // agrees with a full-text truncation for a mid-size budget (NFR-4: no
+    // full-scrollback materialization, but the observable text must match).
+    let mut lines: Vec<u8> = Vec::new();
+    for i in 0..200u32 {
+        lines.extend_from_slice(format!("line{i}\r\n").as_bytes());
+    }
+    let mut t = run_size(10, 3, &lines);
+
+    let full = t.scrollback_text().expect("has text");
+    let (tail, truncated) = t.scrollback_text_tail(40).expect("has text");
+    assert!(truncated);
+    assert!(full.ends_with(&tail), "tail-bounded text must be a true suffix of the full text");
+}
+
+#[test]
 fn select_all_alternate_selects_visible_grid_only() {
     let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD\x1b[?1049hX\r\nY\r\nZ");
     let primary_scrollback_len = t.primary.scrollback_len();
@@ -397,6 +435,29 @@ fn resize_shrink_rows_moves_top_drained_primary_rows_to_scrollback() {
     assert_eq!(rows_text(&rows, 0, 1), "A");
     assert_eq!(rows_text(&rows, 1, 1), "B");
     assert_eq!(rows_text(&rows, 2, 1), "C");
+}
+
+#[test]
+fn active_absolute_row_spans_scrollback_then_live_grid() {
+    // 5 rows scrollback + a 3-row live grid = 8 addressable rows (IPC
+    // `getGrid` paging, noa-server spec L2 "Grid ペイロード").
+    let mut t = run_size(5, 5, b"\x1b[5;1HE");
+    t.primary.grid[0].cells[0].ch = 'A';
+    t.primary.grid[1].cells[0].ch = 'B';
+    t.primary.grid[2].cells[0].ch = 'C';
+    t.resize(GridSize::new(5, 3));
+    let sb_len = t.scrollback_len();
+    assert_eq!(sb_len, 2);
+
+    assert_eq!(t.active_total_rows(), sb_len + 3);
+
+    let row0 = t.active_absolute_row(0).expect("oldest scrollback row");
+    assert_eq!(row0.cells[0].ch, 'A');
+    let live_row = t
+        .active_absolute_row(sb_len)
+        .expect("first live-grid row");
+    assert_eq!(live_row.cells[0].ch, 'C');
+    assert!(t.active_absolute_row(t.active_total_rows()).is_none());
 }
 
 // ── paged scrollback: byte-limited storage across page boundaries ──────────

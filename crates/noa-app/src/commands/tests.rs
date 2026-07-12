@@ -490,6 +490,7 @@ fn action_names_map_to_commands() {
         AppCommand::Quit,
         AppCommand::OpenThemePicker,
         AppCommand::OpenSettings,
+        AppCommand::ToggleProcessMonitor,
         AppCommand::ReloadConfig,
     ] {
         assert_eq!(

@@ -613,6 +613,18 @@ pub(super) struct ThemeSettingsSession {
     pub(super) opened_at: Instant,
 }
 
+/// An open process-monitor overlay (panel-metrics-view FR-1), bound to the
+/// window it was opened from. A single app-wide overlay, mirroring
+/// [`ThemeSettingsSession`]/[`CommandPaletteSession`] — mutually exclusive
+/// with both (R-3, `App::active_overlay`).
+pub(super) struct ProcessMonitorSession {
+    pub(super) window_id: WindowId,
+    pub(super) state: crate::process_monitor::ProcessMonitor,
+    /// When the overlay opened, driving the same brief fade-in the palette /
+    /// theme-settings overlays use ([`crate::anim::DUR_FAST`]).
+    pub(super) opened_at: Instant,
+}
+
 #[cfg(test)]
 mod theme_settings_session_tests {
     use super::ThemeSettingsSession;
@@ -646,6 +658,11 @@ mod theme_settings_session_tests {
             cursor_style_blink: None,
             minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
             macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
+            server_enable: false,
+            server_port: noa_config::DEFAULT_SERVER_PORT,
+            server_bind: noa_config::DEFAULT_SERVER_BIND.to_string(),
+            server_scopes: "read".to_string(),
+            server_status: "Stopped".to_string(),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),

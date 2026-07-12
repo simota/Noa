@@ -7,6 +7,7 @@ pub(in crate::app) enum ActiveOverlay {
     SendSelectionPicker,
     Search,
     ThemeSettings,
+    ProcessMonitor,
 }
 
 /// The R-3 exclusion gate every one of the three overlay open-paths
@@ -20,6 +21,7 @@ fn active_overlay_gate(
     send_selection_picker_open: bool,
     search_open: bool,
     theme_settings_open: bool,
+    process_monitor_open: bool,
 ) -> ActiveOverlay {
     if command_palette_open {
         ActiveOverlay::CommandPalette
@@ -29,6 +31,8 @@ fn active_overlay_gate(
         ActiveOverlay::Search
     } else if theme_settings_open {
         ActiveOverlay::ThemeSettings
+    } else if process_monitor_open {
+        ActiveOverlay::ProcessMonitor
     } else {
         ActiveOverlay::None
     }
@@ -356,6 +360,9 @@ impl App {
             self.theme_settings
                 .as_ref()
                 .is_some_and(|s| s.window_id == window_id),
+            self.process_monitor
+                .as_ref()
+                .is_some_and(|s| s.window_id == window_id),
         )
     }
 }
@@ -370,7 +377,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn command_palette_open_refuses_theme_settings() {
         assert_eq!(
-            active_overlay_gate(true, false, false, false),
+            active_overlay_gate(true, false, false, false, false),
             ActiveOverlay::CommandPalette
         );
     }
@@ -378,7 +385,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn send_selection_picker_refuses_other_overlays() {
         assert_eq!(
-            active_overlay_gate(false, true, false, false),
+            active_overlay_gate(false, true, false, false, false),
             ActiveOverlay::SendSelectionPicker
         );
     }
@@ -390,7 +397,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn theme_settings_open_refuses_palette_and_search() {
         assert_eq!(
-            active_overlay_gate(false, false, false, true),
+            active_overlay_gate(false, false, false, true, false),
             ActiveOverlay::ThemeSettings
         );
     }
@@ -401,8 +408,19 @@ mod active_overlay_gate_tests {
     #[test]
     fn search_open_refuses_theme_settings() {
         assert_eq!(
-            active_overlay_gate(false, false, true, false),
+            active_overlay_gate(false, false, true, false, false),
             ActiveOverlay::Search
+        );
+    }
+
+    // AC-1/AC-7 (panel-metrics-view R-3): with the process monitor open, the
+    // gate reports `ProcessMonitor` (non-`None`), so every other overlay's
+    // own guard refuses to open alongside it.
+    #[test]
+    fn process_monitor_open_refuses_other_overlays() {
+        assert_eq!(
+            active_overlay_gate(false, false, false, false, true),
+            ActiveOverlay::ProcessMonitor
         );
     }
 }
@@ -449,7 +467,7 @@ mod palette_enter_decision_tests {
         assert!(decision.close_palette);
         let palette_open_after_enter = !decision.close_palette;
         assert_eq!(
-            active_overlay_gate(palette_open_after_enter, false, false, false),
+            active_overlay_gate(palette_open_after_enter, false, false, false, false),
             ActiveOverlay::None
         );
     }

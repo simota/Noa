@@ -44,6 +44,11 @@ fn init() -> ThemeSettingsInit {
         cursor_style_blink: None,
         minimum_contrast: noa_config::DEFAULT_MINIMUM_CONTRAST,
         macos_option_as_alt: noa_config::MacosOptionAsAlt::None,
+        server_enable: false,
+        server_port: noa_config::DEFAULT_SERVER_PORT,
+        server_bind: noa_config::DEFAULT_SERVER_BIND.to_string(),
+        server_scopes: "read".to_string(),
+        server_status: "Stopped".to_string(),
         theme_pair: None,
         carryover: None,
         favorites: std::sync::Arc::new(std::collections::HashSet::new()),
@@ -1699,16 +1704,191 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
         RowDraft::default_for(SettingsRowKind::MacosOptionAsAlt),
         RowDraft::MacosOptionAsAlt(noa_config::MacosOptionAsAlt::None)
     );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ServerEnable),
+        RowDraft::ServerEnable(false)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ServerPort),
+        RowDraft::ServerPort(noa_config::DEFAULT_SERVER_PORT)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ServerScopes),
+        RowDraft::ServerScopes("read".to_string())
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ServerTokenCopy),
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Idle)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ServerStatus),
+        RowDraft::ServerStatus("Stopped".to_string())
+    );
 }
 
 // R-9: `SettingsRowKind::COUNT` is type-enforced at 20 (16 + the 4 new
 // keys) via `ALL`'s array literal length — this pins the value so a future
 // accidental drop of an entry fails loudly instead of silently shrinking
-// the overlay.
+// the overlay. The server-settings-panel-row addition brings it to 23 (+3),
+// the token-copy action row brings it to 24 (+1), the read-only status row
+// (settings-panel-server-status) brings it to 25 (+1), and the LAN bind-
+// address row (server-bind) brings it to 26 (+1).
 #[test]
-fn settings_row_kind_count_is_twenty_after_r9() {
-    assert_eq!(SettingsRowKind::COUNT, 20);
-    assert_eq!(SettingsRowKind::ALL.len(), 20);
+fn settings_row_kind_count_is_twenty_six_after_server_bind_row() {
+    assert_eq!(SettingsRowKind::COUNT, 26);
+    assert_eq!(SettingsRowKind::ALL.len(), 26);
+}
+
+// settings-panel-server-status: the status row is read-only (mirrors
+// `ServerTokenCopy`'s "no value" contract) — `adjust`/`reset_selected_row`
+// never touch it, `commit_updates` never writes it, and `App`'s out-of-band
+// `set_server_status` is the only thing that ever changes its draft.
+#[test]
+fn server_status_row_is_read_only_and_never_committed() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(SettingsRowKind::ALL.contains(&SettingsRowKind::ServerStatus));
+    assert_eq!(SettingsRowKind::ServerStatus.label(), "Server Status");
+    assert!(SettingsRowKind::ServerStatus.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::ServerStatus);
+    let idx = row_index(SettingsRowKind::ServerStatus);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerStatus("Stopped".to_string())
+    );
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert!(!settings.rows()[idx].touched);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerStatus("Stopped".to_string()),
+        "adjust must not change a read-only row's draft"
+    );
+
+    let reset_effect = settings.reset_selected_row(Instant::now());
+    assert_eq!(reset_effect, RowEffect::None);
+    assert!(!settings.rows()[idx].touched);
+
+    settings.set_server_status("Running (127.0.0.1:61771, 2 client(s))".to_string());
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerStatus("Running (127.0.0.1:61771, 2 client(s))".to_string())
+    );
+    assert!(
+        !settings.rows()[idx].touched,
+        "App's out-of-band refresh must never mark the row touched"
+    );
+
+    let updates = settings.commit_updates();
+    assert!(
+        !updates
+            .iter()
+            .any(|(key, _)| key.starts_with("server-status")),
+        "{updates:?}"
+    );
+}
+
+// settings-panel-server-status: the pure formatting function backing the
+// row's display text, covering all three states.
+#[test]
+fn format_server_status_covers_all_three_states() {
+    assert_eq!(
+        format_server_status(Some(("127.0.0.1".to_string(), 61771, 0)), None),
+        "Running (127.0.0.1:61771, 0 client(s))"
+    );
+    assert_eq!(
+        format_server_status(Some(("127.0.0.1".to_string(), 8080, 3)), None),
+        "Running (127.0.0.1:8080, 3 client(s))"
+    );
+    assert_eq!(format_server_status(None, None), "Stopped");
+    assert_eq!(
+        format_server_status(None, Some("address already in use")),
+        "Bind failed: address already in use"
+    );
+    // `running` always wins over a stale `last_error`.
+    assert_eq!(
+        format_server_status(
+            Some(("127.0.0.1".to_string(), 61771, 1)),
+            Some("stale error")
+        ),
+        "Running (127.0.0.1:61771, 1 client(s))"
+    );
+}
+
+// The bind-address interpolation is real, not hardcoded to loopback — a
+// `server-bind = 0.0.0.0` LAN opt-in must show up in the status row too.
+#[test]
+fn format_server_status_interpolates_a_non_loopback_bind_address() {
+    assert_eq!(
+        format_server_status(Some(("0.0.0.0".to_string(), 61771, 2)), None),
+        "Running (0.0.0.0:61771, 2 client(s))"
+    );
+}
+
+// The token-copy row: an action row, not a value row (see its doc comment
+// on `SettingsRowKind::ServerTokenCopy`). `adjust` must report the
+// `CopyServerToken` effect for `App` to act on, without ever marking the
+// row `touched` — `commit_updates` must stay empty of any server-token
+// entry regardless of how many times the row is activated.
+#[test]
+fn server_token_copy_row_reports_effect_without_touching_or_committing() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(SettingsRowKind::ALL.contains(&SettingsRowKind::ServerTokenCopy));
+    assert_eq!(SettingsRowKind::ServerTokenCopy.label(), "Server Token");
+    assert!(SettingsRowKind::ServerTokenCopy.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::ServerTokenCopy);
+    let idx = row_index(SettingsRowKind::ServerTokenCopy);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Idle)
+    );
+    assert_eq!(
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Idle).display_value(),
+        "Copy to clipboard"
+    );
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::CopyServerToken);
+    assert!(
+        !settings.rows()[idx].touched,
+        "an action row must never be marked touched"
+    );
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
+        "adjust alone doesn't flip display state — only App's reported outcome does"
+    );
+
+    // `App`'s reported outcome flips the display state; still never touched.
+    settings.set_server_token_copy_status(TokenCopyStatus::Copied);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Copied)
+    );
+    assert_eq!(
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Copied).display_value(),
+        "Copied \u{2713}"
+    );
+    assert!(!settings.rows()[idx].touched);
+    assert_eq!(
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Failed).display_value(),
+        "Copy failed"
+    );
+
+    let updates = settings.commit_updates();
+    assert!(
+        !updates
+            .iter()
+            .any(|(key, _)| key.starts_with("server-token")),
+        "{updates:?}"
+    );
+
+    // Delete/⌘Backspace is a no-op on this row (no value to reset).
+    let reset_effect = settings.reset_selected_row(Instant::now());
+    assert_eq!(reset_effect, RowEffect::None);
+    assert!(!settings.rows()[idx].touched);
 }
 
 // R-9's 6-point set, part 1/4 (scrollback-limit): ALL entry / label /
@@ -1895,10 +2075,247 @@ fn macos_option_as_alt_row_is_genuinely_persist_only_and_cycles() {
     );
 }
 
+// Server settings panel rows, part 1/3 (server-enable): reload-exempt
+// (ConfigWatcher's poll picks it up and restarts the server), so no restart
+// note despite being touched — same shape as ScrollbackLimit/
+// CursorStyleBlink/MinimumContrast above.
+#[test]
+fn server_enable_row_toggles_and_is_reload_exempt() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(SettingsRowKind::ALL.contains(&SettingsRowKind::ServerEnable));
+    assert_eq!(SettingsRowKind::ServerEnable.label(), "Server");
+    assert!(!SettingsRowKind::ServerEnable.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::ServerEnable);
+    let idx = row_index(SettingsRowKind::ServerEnable);
+    assert_eq!(settings.rows()[idx].draft, RowDraft::ServerEnable(false));
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(settings.rows()[idx].draft, RowDraft::ServerEnable(true));
+    assert!(settings.rows()[idx].touched);
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::ServerEnable),
+        RestartReason::None
+    );
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&("server-enable".to_string(), "true".to_string())),
+        "{updates:?}"
+    );
+}
+
+// Server settings panel rows, part 2/3 (server-port): steps by 1 and
+// clamps to the documented 1024..=65535 valid TCP range.
+#[test]
+fn server_port_row_steps_by_one_and_clamps_to_the_valid_port_range() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert_eq!(SettingsRowKind::ServerPort.label(), "Server Port");
+    assert!(!SettingsRowKind::ServerPort.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::ServerPort);
+    let idx = row_index(SettingsRowKind::ServerPort);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerPort(noa_config::DEFAULT_SERVER_PORT)
+    );
+
+    settings.adjust(1, Instant::now());
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerPort(noa_config::DEFAULT_SERVER_PORT + 1)
+    );
+    assert!(settings.rows()[idx].touched);
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::ServerPort),
+        RestartReason::None
+    );
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&(
+            "server-port".to_string(),
+            (noa_config::DEFAULT_SERVER_PORT + 1).to_string()
+        )),
+        "{updates:?}"
+    );
+
+    // Clamp at the floor: a session started right at 1024 must not step
+    // below it.
+    let mut floor = ThemeSettings::open(ThemeSettingsInit {
+        server_port: 1024,
+        ..settings_init()
+    });
+    move_to_row(&mut floor, SettingsRowKind::ServerPort);
+    let idx = row_index(SettingsRowKind::ServerPort);
+    floor.adjust(-1, Instant::now());
+    assert_eq!(floor.rows()[idx].draft, RowDraft::ServerPort(1024));
+    assert!(!floor.rows()[idx].touched, "a floor clamp is a true no-op");
+
+    // Clamp at the ceiling: a session started right at 65535 must not step
+    // above it.
+    let mut ceiling = ThemeSettings::open(ThemeSettingsInit {
+        server_port: 65535,
+        ..settings_init()
+    });
+    move_to_row(&mut ceiling, SettingsRowKind::ServerPort);
+    ceiling.adjust(1, Instant::now());
+    assert_eq!(ceiling.rows()[idx].draft, RowDraft::ServerPort(65535));
+    assert!(
+        !ceiling.rows()[idx].touched,
+        "a ceiling clamp is a true no-op"
+    );
+}
+
+// Server settings panel rows, part 3/3 (server-scopes): cycles through the
+// 4 documented presets both directions, and a non-preset config value
+// (e.g. hand-edited "input,read") falls back to the first preset ("read")
+// on the first press rather than panicking or getting stuck.
+#[test]
+fn server_scopes_row_cycles_presets_and_falls_back_from_a_non_preset_value() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert_eq!(SettingsRowKind::ServerScopes.label(), "Server Scopes");
+    assert!(!SettingsRowKind::ServerScopes.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::ServerScopes);
+    let idx = row_index(SettingsRowKind::ServerScopes);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerScopes("read".to_string())
+    );
+
+    let forward = ["read,control", "read,input", "read,control,input", "read"];
+    for expected in forward {
+        settings.adjust(1, Instant::now());
+        assert_eq!(
+            settings.rows()[idx].draft,
+            RowDraft::ServerScopes(expected.to_string())
+        );
+    }
+    assert!(settings.rows()[idx].touched);
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::ServerScopes),
+        RestartReason::None
+    );
+
+    let backward = ["read,control,input", "read,input", "read,control", "read"];
+    for expected in backward {
+        settings.adjust(-1, Instant::now());
+        assert_eq!(
+            settings.rows()[idx].draft,
+            RowDraft::ServerScopes(expected.to_string())
+        );
+    }
+
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&("server-scopes".to_string(), "read".to_string())),
+        "{updates:?}"
+    );
+
+    // Non-preset fallback: a hand-edited config value that isn't one of the
+    // 4 cycle presets doesn't panic or get stuck — `cycle`'s shared
+    // not-found fallback (`state.rs`) treats it as sitting at preset index 0
+    // ("read") and steps from there, landing on a real preset immediately
+    // (index 1, "read,control", for a `+1` press) rather than requiring two
+    // presses to reach a known state.
+    let mut off_preset = ThemeSettings::open(ThemeSettingsInit {
+        server_scopes: "input,read".to_string(),
+        ..settings_init()
+    });
+    move_to_row(&mut off_preset, SettingsRowKind::ServerScopes);
+    let idx = row_index(SettingsRowKind::ServerScopes);
+    assert_eq!(
+        off_preset.rows()[idx].draft,
+        RowDraft::ServerScopes("input,read".to_string())
+    );
+    off_preset.adjust(1, Instant::now());
+    assert_eq!(
+        off_preset.rows()[idx].draft,
+        RowDraft::ServerScopes("read,control".to_string())
+    );
+    assert!(off_preset.rows()[idx].touched);
+}
+
+// server-bind (v2 LAN opt-in): the 2-preset cycle mirrors `ServerScopes`'s
+// shape exactly — placed immediately after `ServerPort` in row order, same
+// off-preset fallback semantics, same `ON SAVE`/reload-exempt treatment,
+// same `commit_updates` write-back.
+#[test]
+fn server_bind_row_cycles_loopback_and_all_interfaces_and_falls_back_from_a_non_preset_value() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert_eq!(SettingsRowKind::ServerBind.label(), "Server Bind");
+    assert!(!SettingsRowKind::ServerBind.is_live());
+    assert_eq!(
+        row_index(SettingsRowKind::ServerBind),
+        row_index(SettingsRowKind::ServerPort) + 1,
+        "ServerBind must sit immediately after ServerPort in row order"
+    );
+
+    move_to_row(&mut settings, SettingsRowKind::ServerBind);
+    let idx = row_index(SettingsRowKind::ServerBind);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerBind("127.0.0.1".to_string())
+    );
+
+    settings.adjust(1, Instant::now());
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerBind("0.0.0.0".to_string())
+    );
+    assert!(settings.rows()[idx].touched);
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::ServerBind),
+        RestartReason::None
+    );
+
+    settings.adjust(1, Instant::now());
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerBind("127.0.0.1".to_string())
+    );
+
+    settings.adjust(-1, Instant::now());
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerBind("0.0.0.0".to_string())
+    );
+
+    let updates = settings.commit_updates();
+    assert!(
+        updates.contains(&("server-bind".to_string(), "0.0.0.0".to_string())),
+        "{updates:?}"
+    );
+
+    // Non-preset fallback: a hand-edited config value that isn't one of the
+    // 2 cycle presets displays as-is and the first ←→ press lands on a real
+    // preset (index 0 fallback, then +1) instead of panicking or sticking.
+    let mut off_preset = ThemeSettings::open(ThemeSettingsInit {
+        server_bind: "192.168.1.50".to_string(),
+        ..settings_init()
+    });
+    move_to_row(&mut off_preset, SettingsRowKind::ServerBind);
+    let idx = row_index(SettingsRowKind::ServerBind);
+    assert_eq!(
+        off_preset.rows()[idx].draft,
+        RowDraft::ServerBind("192.168.1.50".to_string())
+    );
+    off_preset.adjust(1, Instant::now());
+    assert_eq!(
+        off_preset.rows()[idx].draft,
+        RowDraft::ServerBind("0.0.0.0".to_string())
+    );
+    assert!(off_preset.rows()[idx].touched);
+}
+
 // R-7/AC-18/AC-19: the state-machine half of the default_for round trip —
 // every one of the 16 row kinds, not just the 3 the AC-numbered tests
 // above happen to exercise (CursorStyle/FontSize/MacosTitlebarStyle),
 // resets to exactly `RowDraft::default_for(kind)` and marks touched.
+// `ServerTokenCopy`/`ServerStatus` are the deliberate exceptions (see their
+// doc comments on `SettingsRowKind`): an action row and a read-only display
+// row, neither with a persisted value, so reset stays a no-op for both
+// instead.
 #[test]
 fn reset_selected_row_writes_default_for_and_marks_touched_for_every_row_kind() {
     for kind in SettingsRowKind::ALL {
@@ -1908,6 +2325,18 @@ fn reset_selected_row_writes_default_for_and_marks_touched_for_every_row_kind() 
         settings.reset_selected_row(Instant::now());
 
         let idx = row_index(kind);
+        if matches!(
+            kind,
+            SettingsRowKind::ServerTokenCopy | SettingsRowKind::ServerStatus
+        ) {
+            assert_eq!(
+                settings.rows()[idx].draft,
+                RowDraft::default_for(kind),
+                "{kind:?}"
+            );
+            assert!(!settings.rows()[idx].touched, "{kind:?}");
+            continue;
+        }
         assert_eq!(
             settings.rows()[idx].draft,
             RowDraft::default_for(kind),
@@ -2138,6 +2567,9 @@ fn liveness_reports_on_save_for_every_reload_exempt_row() {
         SettingsRowKind::ScrollbackLimit,
         SettingsRowKind::CursorStyleBlink,
         SettingsRowKind::MinimumContrast,
+        SettingsRowKind::ServerEnable,
+        SettingsRowKind::ServerPort,
+        SettingsRowKind::ServerScopes,
     ] {
         assert_eq!(settings.liveness(kind), Liveness::OnSave, "{kind:?}");
     }
@@ -2382,6 +2814,18 @@ fn every_mutator_that_changes_state_changes_the_fingerprint() {
             }
             SettingsRowKind::BackgroundOpacity | SettingsRowKind::BackgroundImageOpacity => {
                 settings.adjust(-1, now);
+            }
+            // `adjust` alone never changes this row's draft (see its doc
+            // comment on `SettingsRowKind::ServerTokenCopy`) — the
+            // fingerprint-relevant mutator is `App`'s reported outcome.
+            SettingsRowKind::ServerTokenCopy => {
+                settings.set_server_token_copy_status(TokenCopyStatus::Copied);
+            }
+            // Same shape as `ServerTokenCopy` above, but for the read-only
+            // status row's own out-of-band refresh (see its doc comment on
+            // `SettingsRowKind::ServerStatus`).
+            SettingsRowKind::ServerStatus => {
+                settings.set_server_status("Running (127.0.0.1:61771, 1 client(s))".to_string());
             }
             _ => {
                 settings.adjust(1, now);

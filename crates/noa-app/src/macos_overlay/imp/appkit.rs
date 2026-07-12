@@ -1,5 +1,6 @@
 use crate::macos_overlay::model::{
-    OverlayColors, PaneRectPt, ThemeSettingsViewModel, Tone, overlay_scroll_window,
+    OverlayColors, PaneRectPt, ProcessMonitorViewModel, ThemeSettingsViewModel, Tone,
+    overlay_scroll_window,
 };
 use crate::theme_settings::{Liveness, ThemeSettingsMode};
 use noa_render::{CommandPaletteSnapshot, ConfirmDialogSnapshot, PaletteRow};
@@ -27,6 +28,7 @@ const WEIGHT_SEMIBOLD: f64 = 0.3;
 
 const ID_PALETTE: &str = "noa.native-overlay.palette";
 const ID_THEME: &str = "noa.native-overlay.theme-settings";
+const ID_PROCESS_MONITOR: &str = "noa.native-overlay.process-monitor";
 const ID_CONFIRM: &str = "noa.native-overlay.confirm";
 const ID_TITLE_PROMPT: &str = "noa.native-overlay.title-prompt";
 const ID_TOAST: &str = "noa.native-overlay.toast";
@@ -195,6 +197,15 @@ unsafe fn mono_digit_font(size: f64) -> *mut AnyObject {
         return std::ptr::null_mut();
     };
     unsafe { msg_send![class, monospacedDigitSystemFontOfSize: size, weight: WEIGHT_REGULAR] }
+}
+
+/// A true fixed-pitch system font (SF Mono), for the process-monitor table
+/// where every row's columns must line up.
+unsafe fn monospace_font(size: f64) -> *mut AnyObject {
+    let Some(class) = AnyClass::get(c"NSFont") else {
+        return std::ptr::null_mut();
+    };
+    unsafe { msg_send![class, monospacedSystemFontOfSize: size, weight: WEIGHT_REGULAR] }
 }
 
 /// A plain layer-backed `NSView`.
@@ -1528,6 +1539,215 @@ pub(in crate::macos_overlay) fn rebuild_theme_settings(
         );
         if !footer.is_null() {
             let _: () = msg_send![effect, addSubview: footer];
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// process monitor (panel-metrics-view)
+// -----------------------------------------------------------------------
+
+/// Column x-offsets (points, relative to the card's left padding) for the
+/// process-monitor table — process name / CPU / memory / process count /
+/// elapsed / location, matching the wgpu path's header order.
+const PM_COL_PROCESS_X: f64 = 0.0;
+const PM_COL_CPU_X: f64 = 150.0;
+const PM_COL_MEM_X: f64 = 210.0;
+const PM_COL_PROC_X: f64 = 290.0;
+const PM_COL_ELAPSED_X: f64 = 330.0;
+const PM_COL_LOCATION_X: f64 = 410.0;
+const PM_ROW_H: f64 = 20.0;
+
+pub(in crate::macos_overlay) fn rebuild_process_monitor(
+    window: &Window,
+    model: Option<(ProcessMonitorViewModel, PaneRectPt)>,
+    colors: &OverlayColors,
+) {
+    let view = content_view(window);
+    if view.is_null() {
+        return;
+    }
+    unsafe {
+        let Some((vm, pane)) = model else {
+            remove_subview(view, ID_PROCESS_MONITOR);
+            return;
+        };
+
+        let pad = 20.0;
+        let card_w = (PM_COL_LOCATION_X + 180.0 + pad * 2.0)
+            .min(pane.w - 32.0)
+            .max(320.0);
+        let title_h = 24.0;
+        let hint_h = 16.0;
+        let header_h = 20.0;
+        let footer_gap = 12.0;
+        let rows_h = vm.rows.len().max(1) as f64 * PM_ROW_H;
+        let card_h = (pad * 2.0 + title_h + hint_h + header_h + rows_h + footer_gap)
+            .min((pane.h - 24.0).max(160.0));
+
+        let card_frame = NSRect::new(
+            NSPoint::new(
+                (pane.w - card_w) / 2.0,
+                from_top(pane.h, (pane.h - card_h) / 2.0, card_h),
+            ),
+            NSSize::new(card_w, card_h),
+        );
+        let (root, effect) = card_for(
+            view,
+            ID_PROCESS_MONITOR,
+            pane,
+            true,
+            card_frame,
+            MATERIAL_POPOVER,
+            colors,
+            CARD_RADIUS,
+        );
+        if root.is_null() || effect.is_null() {
+            return;
+        }
+
+        let fg = ns_color(colors.surface_fg, 1.0);
+        let muted = ns_color(colors.muted, 1.0);
+        let accent = ns_color(colors.accent, 1.0);
+
+        let title_text = format!("Process Monitor \u{b7} sort: {}", vm.sort_label);
+        let title = make_label(
+            &title_text,
+            system_font(15.0, WEIGHT_SEMIBOLD),
+            fg,
+            NSRect::new(
+                NSPoint::new(pad, from_top(card_h, 16.0, 20.0)),
+                NSSize::new(card_w - pad * 2.0, 20.0),
+            ),
+        );
+        if !title.is_null() {
+            let _: () = msg_send![effect, addSubview: title];
+        }
+        let hint = make_label(
+            "\u{2191}\u{2193} select \u{b7} Enter jump \u{b7} s sort \u{b7} Esc close",
+            system_font(11.0, WEIGHT_REGULAR),
+            muted,
+            NSRect::new(
+                NSPoint::new(pad, from_top(card_h, 16.0 + title_h, hint_h)),
+                NSSize::new(card_w - pad * 2.0, hint_h),
+            ),
+        );
+        if !hint.is_null() {
+            let _: () = msg_send![effect, addSubview: hint];
+        }
+
+        let header_y = 16.0 + title_h + hint_h;
+        let mono_header = system_font(11.0, WEIGHT_SEMIBOLD);
+        for (label, x, w, align) in [
+            (
+                "PROCESS",
+                PM_COL_PROCESS_X,
+                PM_COL_CPU_X - PM_COL_PROCESS_X,
+                ALIGN_LEFT,
+            ),
+            (
+                "CPU",
+                PM_COL_CPU_X,
+                PM_COL_MEM_X - PM_COL_CPU_X,
+                ALIGN_RIGHT,
+            ),
+            (
+                "MEM",
+                PM_COL_MEM_X,
+                PM_COL_PROC_X - PM_COL_MEM_X,
+                ALIGN_RIGHT,
+            ),
+            (
+                "N",
+                PM_COL_PROC_X,
+                PM_COL_ELAPSED_X - PM_COL_PROC_X,
+                ALIGN_RIGHT,
+            ),
+            (
+                "ELAPSED",
+                PM_COL_ELAPSED_X,
+                PM_COL_LOCATION_X - PM_COL_ELAPSED_X,
+                ALIGN_RIGHT,
+            ),
+            (
+                "LOCATION",
+                PM_COL_LOCATION_X,
+                card_w - pad * 2.0 - PM_COL_LOCATION_X,
+                ALIGN_LEFT,
+            ),
+        ] {
+            let field = make_label(
+                label,
+                mono_header,
+                muted,
+                NSRect::new(
+                    NSPoint::new(pad + x, from_top(card_h, header_y, header_h)),
+                    NSSize::new(w, header_h),
+                ),
+            );
+            if !field.is_null() {
+                set_alignment(field, align);
+                let _: () = msg_send![effect, addSubview: field];
+            }
+        }
+
+        let rows_top = header_y + header_h;
+        let row_font = monospace_font(12.0);
+        for (i, row) in vm.rows.iter().enumerate() {
+            let y = rows_top + i as f64 * PM_ROW_H;
+            let text_color = if row.selected { accent } else { fg };
+            for (text, x, w, align) in [
+                (
+                    row.process.as_str(),
+                    PM_COL_PROCESS_X,
+                    PM_COL_CPU_X - PM_COL_PROCESS_X,
+                    ALIGN_LEFT,
+                ),
+                (
+                    row.cpu.as_str(),
+                    PM_COL_CPU_X,
+                    PM_COL_MEM_X - PM_COL_CPU_X,
+                    ALIGN_RIGHT,
+                ),
+                (
+                    row.mem.as_str(),
+                    PM_COL_MEM_X,
+                    PM_COL_PROC_X - PM_COL_MEM_X,
+                    ALIGN_RIGHT,
+                ),
+                (
+                    row.proc_count.as_str(),
+                    PM_COL_PROC_X,
+                    PM_COL_ELAPSED_X - PM_COL_PROC_X,
+                    ALIGN_RIGHT,
+                ),
+                (
+                    row.elapsed.as_str(),
+                    PM_COL_ELAPSED_X,
+                    PM_COL_LOCATION_X - PM_COL_ELAPSED_X,
+                    ALIGN_RIGHT,
+                ),
+                (
+                    row.location.as_str(),
+                    PM_COL_LOCATION_X,
+                    card_w - pad * 2.0 - PM_COL_LOCATION_X,
+                    ALIGN_LEFT,
+                ),
+            ] {
+                let field = make_label(
+                    text,
+                    row_font,
+                    text_color,
+                    NSRect::new(
+                        NSPoint::new(pad + x, from_top(card_h, y, PM_ROW_H)),
+                        NSSize::new(w, PM_ROW_H),
+                    ),
+                );
+                if !field.is_null() {
+                    set_alignment(field, align);
+                    let _: () = msg_send![effect, addSubview: field];
+                }
+            }
         }
     }
 }

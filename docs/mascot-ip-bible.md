@@ -9,15 +9,18 @@ model. Character-first, terminal-independent.
 
 ## 1. Noa — Character Profile
 
+> Canonical quick sheet: **`mascot-profile.md`**. This section is the in-bible copy;
+> if they drift, `mascot-profile.md` wins for identity.
+
 **Essence (one line)**: a low-key girl who rebuilds things her own way, and quietly
 means every bit of it.
 
 | Field | Canon |
 |-------|-------|
-| Build | Petite, short, youthful; jet-black bob, blunt bangs |
+| Build | Petite; 148 cm; youthful; jet-black bob, blunt bangs; default ~5.5 heads tall (balanced, slightly smaller head) |
 | Register | Introverted, deadpan, few words — but a sharp, dry wit when she does speak |
 | Core | Strong-willed, own-pace, unfawning; **soft and loyal underneath** |
-| Signature look | Oversized black hoodie, single warm-orange `#E8A33D` accent |
+| Signature look | Very oversized black hoodie (dress-like) with a `>▮` chest emblem, black crew socks + chunky black sneakers with orange accents, single warm-orange `#E8A33D`; white die-cut sticker outline |
 | Companion | Ember, her ghost sprite (see §2) — almost always with her |
 
 **Speech style** (for captions / voice / VTuber): short flat lines, trailing "…",
@@ -56,8 +59,19 @@ reacting so Noa doesn't have to — the duo dynamic is the heart of the IP.
   with emotion (and on Halloween).
 - **Name meaning**: a warm coal that flares with feeling — ties directly to Noa's
   `#E8A33D` accent, so the duo shares one light.
-- **Visual rules**: small, round, soft edges; a faint warm-orange inner glow ties
-  it to Noa's accent; simplest possible face (two dots + mood).
+- **Visual rules**: small, chubby and extra-plump (**~1 head tall, ~as wide as
+  tall**); a **smooth rounded dome top, a wavy / scalloped hem with soft points and
+  one longer tail flicking to one side, small stubby side nubs**; **body pure white**
+  (`#F7F7F2`) with soft light-grey lower shading; the same **white die-cut sticker
+  outline** as Noa; face = **two big round black eyes with tiny white catchlights +
+  a small oval mouth + tiny rosy cheek blushes**, low-set — soft and endearing
+  (cute, faintly worried, never blank). A faint warm glow may **flare only with strong emotion**
+  (or on Halloween) — it must never tint the white body orange; in dark / orange-lit
+  scenes (e.g. wallpaper) render pure white. The `#E8A33D` accent stays Noa's.
+- **Size / placement**: ~1 head tall; floats upright at Noa's side, chest–shoulder
+  height, with a clear gap; faces forward with a gentle hover / bob.
+- **Pronoun / voice**: *it*; **non-verbal** — communicates only through motion,
+  glow, and face. Noa speaks; Ember emotes.
 
 > **Name locked (2026-07-10): Ember.** The named duo unlocks duo-content, plush
 > merch, and collab framing — an Ember plush is the recommended first goods lead (§5).
@@ -125,7 +139,7 @@ mirror-opposite of Noa's warm-orange scruff, flat vector / cel-shaded, 4k
 
 ---
 
-## 5. Format & Media Expansion (展開) Roadmap
+## 5. Format & Media Expansion Roadmap
 
 | Format | Premise / hook | Effort |
 |--------|----------------|--------|
@@ -143,7 +157,7 @@ quarterly merch/outfit drop. Consistent duo presence in every piece.
 
 ## 6. Brand Guardrails (one place, so nothing drifts)
 
-1. **Silhouette**: petite, black bob + blunt bangs, oversized black hoodie.
+1. **Silhouette**: petite ~5.5 heads (balanced), black bob + blunt bangs, very oversized hoodie (dress-like), black crew socks + chunky orange-accented sneakers.
 2. **Color**: Noa = single `#E8A33D` orange, always. Cast get their own single accent.
 3. **Register**: deadpan default; warmth leaks through action, never gushes.
 4. **Duo**: Ember appears in nearly every piece; it carries the emotion.

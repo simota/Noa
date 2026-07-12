@@ -64,6 +64,11 @@ pub enum AppCommand {
     /// deliberately unbound (no accelerator), so it carries no keybind, only
     /// [`Self::OPEN_SETTINGS_MENU_ID`].
     OpenSettings,
+    /// Open/close the process-monitor overlay (`docs/specs/panel-metrics-view.md`
+    /// FR-1). Reachable only from the command palette — no default keybind
+    /// (v1 scope: Open Questions), so it carries no menu id either (mirrors
+    /// `SelectTab`'s `menu_id() -> ""`).
+    ToggleProcessMonitor,
 }
 
 /// Terminal-state commands handled by noa instead of sending escape bytes.
@@ -228,6 +233,7 @@ impl AppCommand {
             AppCommand::SelectTab(_) => "",
             AppCommand::OpenThemePicker => Self::OPEN_THEME_PICKER_MENU_ID,
             AppCommand::OpenSettings => Self::OPEN_SETTINGS_MENU_ID,
+            AppCommand::ToggleProcessMonitor => "",
             AppCommand::NextTab => Self::NEXT_TAB_MENU_ID,
             AppCommand::PrevTab => Self::PREV_TAB_MENU_ID,
             AppCommand::SetTabTitle => Self::SET_TAB_TITLE_MENU_ID,
@@ -397,6 +403,7 @@ impl AppCommand {
             Self::ToggleAutoApprove => "auto-approve.toggle",
             Self::OpenThemePicker => "theme.open",
             Self::OpenSettings => "settings.open",
+            Self::ToggleProcessMonitor => "process-monitor.toggle",
         }
     }
 
@@ -469,6 +476,7 @@ impl AppCommand {
             "auto-approve.toggle" => Some(Self::ToggleAutoApprove),
             "theme.open" | "theme-settings.open" => Some(Self::OpenThemePicker),
             "settings.open" => Some(Self::OpenSettings),
+            "process-monitor.toggle" => Some(Self::ToggleProcessMonitor),
             _ => None,
         }
     }

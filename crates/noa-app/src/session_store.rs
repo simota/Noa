@@ -148,6 +148,12 @@ pub struct SessionCard {
     /// e.g. `zsh` / `cargo` / `claude`. `None` until the session-metadata worker
     /// resolves it, or where detection is unavailable (non-macOS, NFR-5).
     pub process: Option<String>,
+    /// This pane's foreground-process-tree metrics (panel-metrics-view
+    /// FR-4/FR-7). `None` until the process-monitor overlay is open and the
+    /// branch-poll metrics tick has posted at least one sample for it, and
+    /// cleared again by [`SessionStore::clear_all_metrics`] on overlay close
+    /// so a reopen never flashes stale numbers.
+    pub metrics: Option<noa_pty::PaneMetrics>,
     pub updated_at: WallClock,
     /// Last-output preview lines (capped by `sidebar-preview-lines`; FR-2),
     /// each carrying its color runs so the sidebar renders output in its
@@ -216,6 +222,14 @@ pub enum SessionDelta {
         id: SessionCardId,
         process: Option<String>,
     },
+    /// Update a pane's foreground-process-tree metrics (panel-metrics-view
+    /// FR-4/FR-7, branch-poll metrics tick). Posted once per tick while the
+    /// process-monitor overlay is open; `None` when the tick could not
+    /// resolve a tree for this pane (FR-8, e.g. no foreground group).
+    Metrics {
+        id: SessionCardId,
+        metrics: Option<noa_pty::PaneMetrics>,
+    },
 }
 
 impl SessionDelta {
@@ -228,7 +242,8 @@ impl SessionDelta {
             | SessionDelta::Rename { id, .. }
             | SessionDelta::Bell { id }
             | SessionDelta::Attention { id }
-            | SessionDelta::Process { id, .. } => *id,
+            | SessionDelta::Process { id, .. }
+            | SessionDelta::Metrics { id, .. } => *id,
         }
     }
 }
@@ -541,6 +556,7 @@ impl SessionStore {
                                 auto_approve_enabled: false,
                                 auto_approve_audit: VecDeque::new(),
                                 process: None,
+                                metrics: None,
                                 updated_at,
                                 preview: preview.unwrap_or_default(),
                                 seq,
@@ -584,6 +600,21 @@ impl SessionStore {
                     card.process = process;
                 }
             }
+            SessionDelta::Metrics { id, metrics } => {
+                if let Some(card) = self.cards.get_mut(&id) {
+                    card.metrics = metrics;
+                }
+            }
+        }
+    }
+
+    /// Clear every card's metrics (panel-metrics-view: process-monitor
+    /// overlay close). Called from the overlay's single close choke point so
+    /// a reopen never briefly shows the previous session's stale numbers
+    /// before the first fresh tick lands.
+    pub fn clear_all_metrics(&mut self) {
+        for card in self.cards.values_mut() {
+            card.metrics = None;
         }
     }
 
@@ -932,6 +963,7 @@ mod tests {
             auto_approve_enabled: false,
             auto_approve_audit: VecDeque::new(),
             process: None,
+            metrics: None,
             updated_at: wall(10, 0),
             preview: Vec::new(),
             seq: 1,

@@ -213,6 +213,18 @@ impl Drop for Pty {
 pub struct ForegroundProcessProbe {
     #[cfg(unix)]
     fd: std::os::fd::OwnedFd,
+    /// Foreground-tree CPU-time diff state for [`Self::poll_metrics`]
+    /// (panel-metrics-view FR-4): the previous tick's summed tree CPU time
+    /// and when it was sampled, so CPU% is the delta over elapsed wall time
+    /// (1 core = 100%, ASSUME-1). `None` until a first sample lands, which is
+    /// exactly when `poll_metrics` reports `cpu_permille: None` (FR-8).
+    /// `prev_pgid` pins the sample to the foreground group it measured: a
+    /// job switch between ticks (different pgid) resets to first-sample
+    /// semantics instead of diffing across two unrelated trees (which would
+    /// read as a bogus spike or 0%).
+    prev_pgid: Option<u32>,
+    prev_cpu_ns: Option<u64>,
+    prev_sampled_at: Option<std::time::Instant>,
 }
 
 impl ForegroundProcessProbe {
@@ -229,7 +241,12 @@ impl ForegroundProcessProbe {
         }
         // SAFETY: `dup` is a fresh, exclusively-owned fd from `libc::dup`.
         let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(dup) };
-        Some(Self { fd })
+        Some(Self {
+            fd,
+            prev_pgid: None,
+            prev_cpu_ns: None,
+            prev_sampled_at: None,
+        })
     }
 
     #[cfg(not(unix))]
@@ -253,6 +270,86 @@ impl ForegroundProcessProbe {
         {
             None
         }
+    }
+
+    /// Poll the tty's foreground process-group *tree* metrics
+    /// (panel-metrics-view FR-4/FR-7/FR-8): CPU% (1 core = 100%, `None`
+    /// before this probe's first sample), summed physical-footprint memory,
+    /// process count, and the tree's start time. `snap` is a whole-process
+    /// snapshot the caller captures once per tick and shares across every
+    /// pane's probe (NFR-2) — this call makes no syscalls of its own beyond
+    /// `tcgetpgrp` and one `proc_pid_rusage` per tree member. `None` when
+    /// there is no foreground group (session ended) or off macOS (FR-8,
+    /// AC-15).
+    pub fn poll_metrics(&mut self, snap: &crate::ProcSnapshot) -> Option<crate::PaneMetrics> {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::fd::AsRawFd;
+            let pgid = unsafe { libc::tcgetpgrp(self.fd.as_raw_fd()) };
+            if pgid <= 0 {
+                self.reset_cpu_diff();
+                return None;
+            }
+            let pgid = pgid as u32;
+            // A foreground job switch since the last tick: the stored CPU sum
+            // belongs to a different tree, so drop back to first-sample
+            // semantics (`cpu_permille: None`) rather than diffing across it.
+            if self.prev_pgid != Some(pgid) {
+                self.reset_cpu_diff();
+            }
+            let tree = crate::foreground_tree(pgid, &snap.procs);
+            if tree.is_empty() {
+                self.reset_cpu_diff();
+                return None;
+            }
+
+            let mut cpu_ns_total: u64 = 0;
+            let mut mem_bytes: u64 = 0;
+            for &pid in &tree {
+                // A pid that vanished between the snapshot and this rusage
+                // call contributes 0 rather than aborting the tree sum (FR-8).
+                if let Some((cpu_ns, footprint)) = crate::metrics::rusage_ns_and_footprint(pid) {
+                    cpu_ns_total = cpu_ns_total.saturating_add(cpu_ns);
+                    mem_bytes = mem_bytes.saturating_add(footprint);
+                }
+            }
+
+            let now = std::time::Instant::now();
+            let cpu_permille = match (self.prev_cpu_ns, self.prev_sampled_at) {
+                (Some(prev_ns), Some(prev_at)) => {
+                    let elapsed_ns = now.duration_since(prev_at).as_nanos();
+                    (elapsed_ns > 0).then(|| {
+                        let delta_ns = cpu_ns_total.saturating_sub(prev_ns) as u128;
+                        ((delta_ns * 1000) / elapsed_ns) as u32
+                    })
+                }
+                _ => None,
+            };
+            self.prev_pgid = Some(pgid);
+            self.prev_cpu_ns = Some(cpu_ns_total);
+            self.prev_sampled_at = Some(now);
+
+            let started_at = crate::metrics::tree_started_at(pgid, &snap.procs, &tree);
+            Some(crate::PaneMetrics {
+                cpu_permille,
+                mem_bytes,
+                proc_count: tree.len() as u32,
+                started_at,
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
+
+    /// Drop the CPU-diff state back to first-sample semantics (no foreground
+    /// group, an empty tree, or a foreground job switch).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn reset_cpu_diff(&mut self) {
+        self.prev_pgid = None;
+        self.prev_cpu_ns = None;
+        self.prev_sampled_at = None;
     }
 }
 

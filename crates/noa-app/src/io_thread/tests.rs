@@ -14,6 +14,532 @@ fn test_sidebar_publish(visible: bool) -> SidebarPublish {
     }
 }
 
+/// Drives `feed_terminal_batch` directly (not through the `feed_terminal`
+/// test wrapper, which always passes `ipc_active: false`) — for F-6's row
+/// diff behavior.
+#[allow(clippy::too_many_arguments)]
+fn feed_terminal_ipc(
+    terminal: &Arc<Mutex<Terminal>>,
+    stream: &mut noa_vt::Stream,
+    bytes: &[u8],
+    overview: &OverviewPublish,
+    last_overview_publish: &mut Option<Instant>,
+    sidebar: &SidebarPublish,
+    last_sidebar_publish: &mut Option<Instant>,
+    last_ipc_push: &mut Option<Instant>,
+    ipc_row_cache: &mut IpcRowCache,
+) -> TerminalOutput {
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        )),
+    };
+    let mut auto_approve_state = crate::auto_approve::AutoApproveState::default();
+    feed_terminal_batch(
+        terminal,
+        stream,
+        bytes,
+        std::iter::empty::<&[u8]>(),
+        overview,
+        last_overview_publish,
+        sidebar,
+        last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        true,
+        last_ipc_push,
+        ipc_row_cache,
+    )
+}
+
+// ---- F-6: IPC output row diff ----
+
+#[test]
+fn ipc_output_first_feed_sends_the_full_viewport_as_a_diff() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+
+    let output = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"hello",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+
+    let rows = output.ipc_output.expect("first feed sends a diff");
+    assert_eq!(rows.len(), 4, "every viewport row is new on the first push");
+}
+
+#[test]
+fn ipc_output_only_diffs_rows_whose_content_actually_changed() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+
+    // First feed seeds the cache with all four rows.
+    let first = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"one\r\ntwo\r\nthree",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(first.ipc_output.is_some());
+
+    // Past the throttle window, only row 0 (cursor still at row 0) actually
+    // changes.
+    last_ipc_push = Some(Instant::now() - super::ipc_tap::OUTPUT_PUSH_MIN_INTERVAL);
+    let second = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"\x1b[Hedited",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    let rows = second.ipc_output.expect("changed content produces a diff");
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the row that actually changed is resent"
+    );
+    assert_eq!(rows[0].row, 0);
+}
+
+/// R-3: when the viewport's absolute base shifts (scrollback growth), a
+/// slot whose *content* happens to be unchanged must still be resent — its
+/// absolute row number moved, and a hash-only cache keyed purely by slot
+/// would wrongly suppress it, leaving the client's row indices stale.
+#[test]
+fn ipc_output_resends_every_row_when_the_viewport_base_shifts_even_with_identical_content() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+
+    // Fill all four viewport rows with identical content; base is 0.
+    let first = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"same\r\nsame\r\nsame\r\nsame",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    let first_rows = first.ipc_output.expect("first feed sends a diff");
+    assert_eq!(first_rows.len(), 4);
+    assert_eq!(
+        first_rows.iter().map(|r| r.row).collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+
+    // One more identical line scrolls the viewport by exactly one row: every
+    // visible slot still holds "same" content, but the absolute row base
+    // moved from 0 to 1. Past the throttle window so the push isn't
+    // suppressed for an unrelated reason.
+    last_ipc_push = Some(Instant::now() - super::ipc_tap::OUTPUT_PUSH_MIN_INTERVAL);
+    let second = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"\r\nsame",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    let second_rows = second
+        .ipc_output
+        .expect("a base shift must resend rows even though their content is unchanged");
+    assert_eq!(
+        second_rows.len(),
+        4,
+        "the whole viewport resends with fresh absolute indices"
+    );
+    assert_eq!(
+        second_rows.iter().map(|r| r.row).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+}
+
+#[test]
+fn ipc_output_is_none_when_nothing_changed_or_the_tap_is_inactive() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+
+    // Tap inactive: `feed_terminal` always passes `ipc_active: false`.
+    let inactive = feed_terminal(
+        &terminal,
+        &mut stream,
+        b"hello",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+    );
+    assert!(inactive.ipc_output.is_none());
+
+    // Tap active but still inside the throttle window: no push at all, not
+    // even an empty one.
+    let mut last_ipc_push = Some(Instant::now());
+    let mut ipc_row_cache = IpcRowCache::default();
+    let throttled = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"more",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(throttled.ipc_output.is_none());
+}
+
+/// R-3: every spawned pane now carries an `IpcOutputTap` unconditionally
+/// (see `App::ipc_output_tap`) — the zero-work gate moved from "does a tap
+/// exist" to `Broadcaster::has_output_subscriber_for(pane_id)`. A tap wired
+/// to a real `Broadcaster` with zero output subscriptions must still drive
+/// `feed_terminal_batch`'s `ipc_active` to `false`, so `ipc_output` stays
+/// `None` and no per-feed row diff is computed.
+#[test]
+fn tap_present_but_no_output_subscriber_keeps_ipc_output_none() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+
+    let broadcaster = noa_ipc::push::Broadcaster::new();
+    let tap = IpcOutputTap {
+        broadcaster: broadcaster.clone(),
+        ipc_pane_id: 7,
+    };
+    assert!(
+        !tap.broadcaster.has_output_subscriber_for(tap.ipc_pane_id),
+        "no connection has subscribed yet"
+    );
+
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        )),
+    };
+    let mut auto_approve_state = crate::auto_approve::AutoApproveState::default();
+    let output = feed_terminal_batch(
+        &terminal,
+        &mut stream,
+        b"hello",
+        std::iter::empty::<&[u8]>(),
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        tap.broadcaster.has_output_subscriber_for(tap.ipc_pane_id),
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(
+        output.ipc_output.is_none(),
+        "a tap with zero output subscribers must do zero row-diff work"
+    );
+
+    // Once a connection subscribes, the same tap's broadcaster reports it —
+    // proving the gate really does track subscriptions, not the tap.
+    let (conn_id, _queue) = broadcaster.register_connection();
+    let _ = broadcaster.add_subscription(conn_id, noa_ipc::push::EventMask::OUTPUT, None);
+    assert!(tap.broadcaster.has_output_subscriber_for(tap.ipc_pane_id));
+}
+
+/// R-3: narrowing the gate to `has_output_subscriber_for(pane_id)` (rather
+/// than the server-wide `has_output_subscribers()`) means a client that only
+/// subscribed to pane A must not force pane B's io thread to do row-diff
+/// work too — one client watching one pane must not tax every other
+/// producing pane in the process.
+#[test]
+fn output_subscriber_for_one_pane_does_not_gate_open_for_another_pane() {
+    let broadcaster = noa_ipc::push::Broadcaster::new();
+    let (conn_id, _queue) = broadcaster.register_connection();
+    let mut only_pane_a = std::collections::HashSet::new();
+    only_pane_a.insert(1u64);
+    let _ =
+        broadcaster.add_subscription(conn_id, noa_ipc::push::EventMask::OUTPUT, Some(only_pane_a));
+
+    assert!(
+        broadcaster.has_output_subscriber_for(1),
+        "pane 1 has a matching subscription"
+    );
+    assert!(
+        !broadcaster.has_output_subscriber_for(2),
+        "pane 2 has no matching subscription"
+    );
+
+    // Pane 2's feed does zero row-diff work: `ipc_output` stays `None` even
+    // though pane 1's subscriber exists and `has_output_subscribers()` (the
+    // old, server-wide gate) would have reported `true`.
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        )),
+    };
+    let mut auto_approve_state = crate::auto_approve::AutoApproveState::default();
+    let output = feed_terminal_batch(
+        &terminal,
+        &mut stream,
+        b"hello",
+        std::iter::empty::<&[u8]>(),
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        broadcaster.has_output_subscriber_for(2),
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(
+        output.ipc_output.is_none(),
+        "pane 2 has no subscriber, so no diff is computed"
+    );
+}
+
+/// R-3: while a pane's gate is closed (no matching subscriber), the row-hash
+/// cache is reset every feed (`decide_ipc_output_push`'s `Skip` arm) so it
+/// can't hold stale hashes from before the pane went quiet. If a subscriber
+/// appears later, the first push after the gate reopens must be a full
+/// resend of the viewport, not a diff against an ancient cache.
+#[test]
+fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_none() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        )),
+    };
+    let mut auto_approve_state = crate::auto_approve::AutoApproveState::default();
+
+    // Gate open: first feed sends the full viewport and seeds the cache.
+    let first = feed_terminal_batch(
+        &terminal,
+        &mut stream,
+        b"one\r\ntwo\r\nthree",
+        std::iter::empty::<&[u8]>(),
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        true,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert_eq!(first.ipc_output.expect("first feed sends a diff").len(), 4);
+
+    // Gate closes (subscriber went away) — content still changes underneath,
+    // but nothing is pushed and the cache is reset, not left stale.
+    let closed = feed_terminal_batch(
+        &terminal,
+        &mut stream,
+        b"\r\nfour",
+        std::iter::empty::<&[u8]>(),
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        false,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(
+        closed.ipc_output.is_none(),
+        "gate is closed, nothing is pushed"
+    );
+
+    // Gate reopens: a new subscriber wants the pane's current state, which
+    // it has never seen — this must be a full resend, not a diff against the
+    // stale pre-close cache.
+    last_ipc_push = Some(Instant::now() - super::ipc_tap::OUTPUT_PUSH_MIN_INTERVAL);
+    let reopened = feed_terminal_batch(
+        &terminal,
+        &mut stream,
+        b"",
+        std::iter::empty::<&[u8]>(),
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        true,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    let rows = reopened
+        .ipc_output
+        .expect("gate reopening must produce a push");
+    assert_eq!(
+        rows.len(),
+        4,
+        "the full viewport resends, not just rows changed since the gate closed"
+    );
+}
+
+/// R-1: a feed suppressed by the 16ms throttle gate must not be silently
+/// dropped — it owes a trailing flush, and once that deadline is reached
+/// (simulated here by calling `flush_pending_ipc_output` directly, exactly
+/// as `spawn`'s loop does when its owed deadline elapses) subscribers must
+/// still receive the burst's final rows.
+#[test]
+fn ipc_output_throttled_feed_eventually_flushes_the_final_rows() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+
+    // First feed pushes immediately and seeds the cache.
+    let first = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"one\r\ntwo\r\nthree",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(first.ipc_output.is_some());
+    assert!(first.ipc_output_publish_pending.is_none());
+
+    // A burst's tail lands inside the throttle window: no push now, but a
+    // trailing-flush deadline is owed instead of the diff being dropped.
+    let second = feed_terminal_ipc(
+        &terminal,
+        &mut stream,
+        b"\x1b[Hedited",
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(
+        second.ipc_output.is_none(),
+        "still inside the throttle window"
+    );
+    let deadline = second
+        .ipc_output_publish_pending
+        .expect("a suppressed push must owe a trailing flush");
+    assert!(deadline > Instant::now() - super::ipc_tap::OUTPUT_PUSH_MIN_INTERVAL);
+
+    // The owed deadline elapses with no further pty output — `spawn`'s loop
+    // would call `flush_pending_ipc_output` here; drive it directly.
+    let broadcaster = noa_ipc::push::Broadcaster::new();
+    let (conn_id, queue) = broadcaster.register_connection();
+    broadcaster
+        .add_subscription(conn_id, noa_ipc::push::EventMask::OUTPUT, None)
+        .expect("connection was just registered");
+    let tap = super::ipc_tap::IpcOutputTap {
+        broadcaster,
+        ipc_pane_id: 42,
+    };
+
+    super::ipc_tap::flush_pending_ipc_output(
+        &terminal,
+        &tap,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+
+    let notifications = queue.drain();
+    assert_eq!(
+        notifications.len(),
+        1,
+        "the trailing flush must push exactly one notification"
+    );
+    match &notifications[0] {
+        noa_ipc::push::QueuedNotification::Output { pane_id, lines, .. } => {
+            assert_eq!(*pane_id, 42);
+            assert_eq!(
+                lines.len(),
+                1,
+                "only the row edited during the throttle window"
+            );
+            assert_eq!(lines[0].row, 0);
+        }
+        other => panic!("expected an Output notification, got {other:?}"),
+    }
+}
+
 #[test]
 fn decide_sidebar_publish_throttles() {
     let now = Instant::now();

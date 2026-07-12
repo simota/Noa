@@ -7,6 +7,8 @@ worldview, daily life, hobbies, her ghost companion, seasons, and merch.
 
 ## Character Pillars (keep the IP consistent)
 
+> Full canonical profile: **`mascot-profile.md`**.
+
 1. **Low-key & her own pace** — introverted, deadpan, few words.
 2. **Soft underneath** — genuinely kind once you get past the flat face.
 3. **The ghost companion** — **Ember**, a mutual, devoted duo (profile: `mascot-ip-bible.md` §2).
@@ -20,9 +22,10 @@ worldview, daily life, hobbies, her ghost companion, seasons, and merch.
 ```
 full-body character illustration of a petite short girl, sleek jet-black bob cut
 with blunt bangs, oversized black hoodie, a single warm signature-orange (#E8A33D)
-accent (drawstrings / hairclip / earbud cord), a small round ghost sprite as her
-companion, introverted deadpan-but-secretly-warm presence, strong-willed direct
-gaze, flat vector / clean cel-shaded style, crisp outlines, sticker-ready, 4k
+accent (drawstrings / hairclip / earbud cord), a small chubby round pure-white ghost
+sprite (Ember, big round eyes with tiny catchlights and tiny rosy cheeks, cute) as
+her companion, introverted, cool and self-possessed at her own pace,
+deadpan-but-secretly-warm, strong-willed unfawning direct gaze, flat vector / clean cel-shaded style, crisp outlines, sticker-ready, 4k
 ```
 
 > Difference from `mascot-prompts.md`: the chest cursor emblem, code motifs, and
@@ -32,11 +35,34 @@ gaze, flat vector / clean cel-shaded style, crisp outlines, sticker-ready, 4k
 > color even without the terminal. The "ghost sprite" in every prompt below is
 > **Ember**, her named companion (character profile: `mascot-ip-bible.md` §2).
 
-## Negative Prompt (shared)
+## What to avoid (negative guidance)
+
+**Primary generator = GPT-Image-2** — no negative-prompt field; fold these in as
+"do not / avoid …" sentences. The token block is for Stable Diffusion / Midjourney.
+(Terminal-independent line: **no chest emblem** here.)
+
+### Avoid — phrase as instructions (GPT-Image-2)
+
+- Keep her **petite, ~5 heads tall** — not a tall / adult / mature woman.
+- Eyes **large but flat and deadpan, with a quiet strong-willed gaze** — not sparkly
+  moe eyes, no winking (a single small catchlight is fine).
+- Exactly **one orange (`#E8A33D`) accent**; the base outfit stays black — no second
+  colour, no patterns.
+- **Ember is pure white** — never orange / tinted; a chubby cute ghost (big round
+  eyes with tiny catchlights + a small oval mouth + tiny rosy cheeks), not scary, no
+  hands, **one ghost only**.
+- Flat cel-shaded and clean; **always SFW** (she reads young) — no sexualised or
+  revealing framing.
+
+### Negative prompt — token style (SD / Midjourney)
 
 ```
-tall, realistic photo, cluttered background, extra fingers, deformed hands,
-lowres, blurry, watermark, jpeg artifacts, multiple accent colors
+tall, adult, mature woman, elongated body, sparkly huge moe eyes, heavy eyelashes,
+winking, multiple accent colors, rainbow, patterned clothes, text, letters,
+watermark, orange ghost, tinted ghost, glowing-orange ghost, scary ghost,
+big-eyed ghost, multiple ghosts, ghost with hands, cluttered background, 3d render,
+realistic, photorealistic, extra fingers, deformed hands, bad anatomy, lowres,
+blurry, jpeg artifacts, sexualized, revealing
 ```
 
 ---

@@ -27,6 +27,7 @@ pub(crate) mod cg {
 pub(crate) struct NativeOverlayCache {
     pub(crate) palette: Option<u64>,
     pub(crate) theme_settings: Option<u64>,
+    pub(crate) process_monitor: Option<u64>,
     pub(crate) confirm: Option<u64>,
     pub(crate) title_prompt: Option<u64>,
     pub(crate) toast: Option<u64>,
@@ -456,6 +457,65 @@ pub(crate) fn settings_rows_budget(
         rows -= 1;
     }
     (rows, needed(rows).min(avail))
+}
+
+/// One process-monitor row's plain-data display strings (panel-metrics-view
+/// FR-3), already formatted through `process_monitor`'s pure formatters —
+/// the native layer only lays labels out, it never re-derives a value.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct ProcessMonitorRowView {
+    pub(crate) process: String,
+    pub(crate) cpu: String,
+    pub(crate) mem: String,
+    pub(crate) proc_count: String,
+    pub(crate) elapsed: String,
+    pub(crate) location: String,
+    pub(crate) selected: bool,
+}
+
+/// A plain-data description of the process-monitor card (panel-metrics-view),
+/// mirroring `ThemeSettingsViewModel` — structured instead of ANSI so the
+/// native layer can lay out real columns.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct ProcessMonitorViewModel {
+    pub(crate) sort_label: &'static str,
+    pub(crate) rows: Vec<ProcessMonitorRowView>,
+}
+
+/// Rows the native card shows at once, matching the wgpu path's card height
+/// budget closely enough for the two renderings to look equivalent.
+const PROCESS_MONITOR_LIST_ROWS: usize = 10;
+
+pub(crate) fn process_monitor_view_model(
+    monitor: &crate::process_monitor::ProcessMonitor,
+) -> ProcessMonitorViewModel {
+    use crate::process_monitor::{
+        format_cpu, format_elapsed, format_mem, format_proc_count, format_process, sort_label,
+    };
+
+    let now = std::time::SystemTime::now();
+    let (offset, shown) = overlay_scroll_window(
+        monitor.rows().len(),
+        monitor.selected(),
+        PROCESS_MONITOR_LIST_ROWS,
+    );
+    let rows = monitor.rows()[offset..offset + shown]
+        .iter()
+        .enumerate()
+        .map(|(i, row)| ProcessMonitorRowView {
+            process: format_process(row.process.as_deref()).to_string(),
+            cpu: format_cpu(row.cpu_permille),
+            mem: format_mem(row.mem_bytes),
+            proc_count: format_proc_count(row.proc_count),
+            elapsed: format_elapsed(row.started_at, now),
+            location: row.location.clone(),
+            selected: offset + i == monitor.selected(),
+        })
+        .collect();
+    ProcessMonitorViewModel {
+        sort_label: sort_label(monitor.sort()),
+        rows,
+    }
 }
 
 #[cfg(test)]

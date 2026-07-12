@@ -90,7 +90,14 @@ impl App {
             _ => None,
         };
         let pane_id = delta.id().pane_id;
+        // panel-metrics-view FR-7: a metrics tick refreshes the open
+        // process-monitor overlay's rows (checked before `apply` moves the
+        // delta) — a no-op when the overlay is closed.
+        let is_metrics_delta = matches!(delta, SessionDelta::Metrics { .. });
         self.session_store.apply(delta);
+        if is_metrics_delta {
+            self.refresh_process_monitor();
+        }
         if let Some(session_window_id) = upsert_window
             && let Some(state) = self.windows.get(&WindowId::from(session_window_id.0))
         {

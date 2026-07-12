@@ -77,10 +77,54 @@ pub(crate) enum SettingsRowKind {
     /// spawn) — `RestartReason::CommitOnly` once touched, `Liveness::OnLaunch`,
     /// the same pattern as `FontFamily`/`WindowPadding`/`MacosTitlebarStyle`.
     MacosOptionAsAlt,
+    /// `server-enable`. Reload-exempt like `ScrollbackLimit`/
+    /// `CursorStyleBlink`/`MinimumContrast`: `ConfigWatcher`'s reload path
+    /// (not this row's `adjust`) picks up the written value and calls
+    /// `App::restart_ipc_server` via `decide_server_restart` — that decision
+    /// diffs the whole reloaded config unconditionally, so it fires whether
+    /// or not this row is in the reload-exempt set; the set here only
+    /// controls the badge/restart-note text (`Liveness::OnSave`,
+    /// `RestartReason::None`). `server-token` is deliberately NOT a row here
+    /// (it's a secret, managed via the token file, not the Settings panel).
+    ServerEnable,
+    /// Not a config key — a read-only display row (like `ServerTokenCopy`,
+    /// R-2's exception) showing the control server's current running state:
+    /// listening address + client count, `Stopped`, or a bind-failure
+    /// reason. `is_live() == true` and badges `LIVE` for the same reason
+    /// `ServerTokenCopy` does — there is nothing to save, only a display
+    /// `App` refreshes whenever it re-runs `install_ipc_server_if_needed`/
+    /// `restart_ipc_server` on an open session (see
+    /// `App::refresh_theme_settings_server_status`). Deliberately excluded
+    /// from `adjust`/`reset_selected_row`/`commit_updates` reaching a
+    /// config write, mirroring `ServerTokenCopy`.
+    ServerStatus,
+    /// `server-port`. Same reload-exempt classification as `ServerEnable`.
+    ServerPort,
+    /// `server-bind`: the interface address the server binds (v2 LAN
+    /// opt-in). Same reload-exempt classification as `ServerEnable`/
+    /// `ServerPort`/`ServerScopes` — a bind-address change needs
+    /// `App::restart_ipc_server` to actually rebind, picked up by
+    /// `decide_server_restart` unconditionally regardless of this row's
+    /// badge classification.
+    ServerBind,
+    /// `server-scopes`. Same reload-exempt classification as `ServerEnable`.
+    ServerScopes,
+    /// Not a config key at all — an action row (R-2 "no per-row adjust
+    /// side effect" is the exception here, not the rule) that copies the
+    /// server's bearer token to the system clipboard without ever
+    /// rendering it on screen. `is_live() == true`: pressing ←/→ (or
+    /// Enter) applies immediately with nothing to save, so it badges
+    /// `LIVE` — accurate (it *is* immediate) and, unlike `OnSave`, doesn't
+    /// imply a config write is pending. Deliberately excluded from
+    /// [`RowDraft::default_for`]'s reset semantics reaching `commit_updates`
+    /// (see [`super::state`]'s `reset_selected_row`, which no-ops this kind)
+    /// since there is no "value" to reset — only a transient copy-status
+    /// display.
+    ServerTokenCopy,
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 20;
+    pub(crate) const COUNT: usize = 26;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -102,10 +146,20 @@ impl SettingsRowKind {
         Self::CursorStyleBlink,
         Self::MinimumContrast,
         Self::MacosOptionAsAlt,
+        Self::ServerEnable,
+        Self::ServerStatus,
+        Self::ServerPort,
+        Self::ServerBind,
+        Self::ServerScopes,
+        Self::ServerTokenCopy,
     ];
 
     /// R-8: the fixed live/commit-only classification, one row's kind at a
-    /// time — never toggled at runtime.
+    /// time — never toggled at runtime. `ServerTokenCopy` counts as live
+    /// too: it has no config value to save, only an immediate clipboard
+    /// side effect (see its doc comment). `ServerStatus` counts as live for
+    /// the same reason: no config value, only a display `App` refreshes
+    /// out-of-band (see its doc comment).
     pub(crate) fn is_live(self) -> bool {
         matches!(
             self,
@@ -114,6 +168,8 @@ impl SettingsRowKind {
                 | Self::BackgroundBlurRadius
                 | Self::CursorStyle
                 | Self::SidebarPreviewLines
+                | Self::ServerTokenCopy
+                | Self::ServerStatus
         )
     }
 
@@ -144,6 +200,12 @@ impl SettingsRowKind {
             Self::CursorStyleBlink => "Cursor Blink",
             Self::MinimumContrast => "Minimum Contrast",
             Self::MacosOptionAsAlt => "Option as Alt",
+            Self::ServerEnable => "Server",
+            Self::ServerStatus => "Server Status",
+            Self::ServerPort => "Server Port",
+            Self::ServerBind => "Server Bind",
+            Self::ServerScopes => "Server Scopes",
+            Self::ServerTokenCopy => "Server Token",
         }
     }
 
@@ -186,6 +248,22 @@ impl SettingsRowKind {
             }
             Self::MacosOptionAsAlt => {
                 "Which Option key(s) the macOS window layer rewrites as Alt. Applies on next launch."
+            }
+            Self::ServerEnable => {
+                "Enable the local JSON-RPC control server (127.0.0.1). Applies on save."
+            }
+            Self::ServerStatus => "Current state of the control server. Read-only.",
+            Self::ServerPort => {
+                "TCP port the local control server binds to (default 61771). Applies on save."
+            }
+            Self::ServerBind => {
+                "Interface the control server binds to. 127.0.0.1=local only, 0.0.0.0=LAN-exposed (no TLS). Applies on save."
+            }
+            Self::ServerScopes => {
+                "Scopes grantable to clients. control=window ops, input=send text. Applies on save."
+            }
+            Self::ServerTokenCopy => {
+                "Copy the bearer token to the clipboard. The token is never displayed."
             }
         }
     }
@@ -280,6 +358,47 @@ pub(crate) enum RowDraft {
     CursorStyleBlink(bool),
     MinimumContrast(f32),
     MacosOptionAsAlt(MacosOptionAsAlt),
+    ServerEnable(bool),
+    /// [`SettingsRowKind::ServerStatus`]'s display text — one of
+    /// [`format_server_status`]'s three shapes. Never persisted, never part
+    /// of [`ThemeSettings::commit_updates`]'s output, same as
+    /// `ServerTokenCopy`. Set at open from `App`'s live server state and
+    /// refreshed by [`ThemeSettings::set_server_status`] whenever `App`
+    /// re-runs `install_ipc_server_if_needed`/`restart_ipc_server` while
+    /// this session is open.
+    ServerStatus(String),
+    ServerPort(u16),
+    /// One of `SERVER_BIND_PRESETS` (`state.rs`), stored as the literal
+    /// config string rather than an enum — mirrors `ServerScopes`'s
+    /// off-preset handling: a hand-edited `server-bind` value doesn't have
+    /// to be one of the 2 cycle presets, and keeping the draft a plain
+    /// `String` lets an off-preset value display and commit unchanged until
+    /// the user actually cycles it.
+    ServerBind(String),
+    /// One of `SERVER_SCOPES_PRESETS` (`state.rs`), stored as the literal
+    /// config string rather than an enum — a hand-edited config's
+    /// `server-scopes` value doesn't have to be one of the 4 cycle presets
+    /// (`adjust`'s cycle handles that: see its doc comment), and keeping the
+    /// draft a plain `String` lets an off-preset value display and commit
+    /// unchanged until the user actually cycles it.
+    ServerScopes(String),
+    /// [`SettingsRowKind::ServerTokenCopy`]'s transient display state —
+    /// never persisted, never part of [`ThemeSettings::commit_updates`]'s
+    /// output. Set by [`ThemeSettings::set_server_token_copy_status`] after
+    /// `App` actually performs (or fails) the clipboard write outside the
+    /// pure state machine.
+    ServerTokenCopy(TokenCopyStatus),
+}
+
+/// [`RowDraft::ServerTokenCopy`]'s three faces — deliberately holds no
+/// token bytes anywhere, only which of the three fixed strings to show
+/// (security requirement: the token itself must never reach a `Debug`,
+/// `display_value`, or log line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenCopyStatus {
+    Idle,
+    Copied,
+    Failed,
 }
 
 impl RowDraft {
@@ -333,6 +452,22 @@ impl RowDraft {
             }
             RowDraft::MinimumContrast(v) => format!("{v:.1}"),
             RowDraft::MacosOptionAsAlt(mode) => format!("{mode:?}"),
+            RowDraft::ServerEnable(enabled) => {
+                if *enabled {
+                    "On".to_string()
+                } else {
+                    "Off".to_string()
+                }
+            }
+            RowDraft::ServerStatus(status) => status.clone(),
+            RowDraft::ServerPort(port) => port.to_string(),
+            RowDraft::ServerBind(bind_addr) => bind_addr.clone(),
+            RowDraft::ServerScopes(scopes) => scopes.clone(),
+            RowDraft::ServerTokenCopy(status) => match status {
+                TokenCopyStatus::Idle => "Copy to clipboard".to_string(),
+                TokenCopyStatus::Copied => "Copied \u{2713}".to_string(),
+                TokenCopyStatus::Failed => "Copy failed".to_string(),
+            },
         }
     }
 
@@ -403,6 +538,19 @@ impl RowDraft {
             }
             SettingsRowKind::MinimumContrast => RowDraft::MinimumContrast(d.minimum_contrast),
             SettingsRowKind::MacosOptionAsAlt => RowDraft::MacosOptionAsAlt(d.macos_option_as_alt),
+            SettingsRowKind::ServerEnable => RowDraft::ServerEnable(d.server_enable),
+            // Unreachable in practice — `reset_selected_row` no-ops this
+            // kind exactly like `ServerTokenCopy` (there is no "default" for
+            // a live display), but `default_for` is a total match, so this
+            // needs a value. `format_server_status(None, None)` ("Stopped")
+            // is as reasonable a placeholder as any.
+            SettingsRowKind::ServerStatus => {
+                RowDraft::ServerStatus(format_server_status(None, None))
+            }
+            SettingsRowKind::ServerPort => RowDraft::ServerPort(d.server_port),
+            SettingsRowKind::ServerBind => RowDraft::ServerBind(d.server_bind),
+            SettingsRowKind::ServerScopes => RowDraft::ServerScopes(d.server_scopes),
+            SettingsRowKind::ServerTokenCopy => RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
         }
     }
 }
@@ -454,6 +602,11 @@ pub(crate) enum RowEffect {
     Blur(u16),
     /// Sidebar card preview line count changed and should apply immediately.
     SidebarPreviewLines(usize),
+    /// The server-token row was activated; `App` must resolve the token
+    /// (config override, else the token file) and write it to the system
+    /// clipboard outside the pure state machine, then report the result
+    /// back via [`super::ThemeSettings::set_server_token_copy_status`].
+    CopyServerToken,
 }
 
 /// The pre-open snapshot every value reverts to on Esc (R-16). Also doubles
@@ -578,6 +731,41 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) cursor_style_blink: Option<bool>,
     pub(crate) minimum_contrast: f32,
     pub(crate) macos_option_as_alt: MacosOptionAsAlt,
+    pub(crate) server_enable: bool,
+    pub(crate) server_port: u16,
+    pub(crate) server_bind: String,
+    pub(crate) server_scopes: String,
+    /// [`SettingsRowKind::ServerStatus`]'s seed text (E) — `App` builds this
+    /// with [`format_server_status`] from its live `ipc_server`/
+    /// `ipc_broadcaster`/`ipc_last_error` state rather than this pure module
+    /// taking those `noa-ipc` types directly (keeps `noa_ipc` out of
+    /// `theme_settings`'s dependency surface).
+    pub(crate) server_status: String,
+}
+
+/// [`SettingsRowKind::ServerStatus`]'s display text (E) for a given
+/// server-state snapshot: `running` is `Some((port, client_count))` while
+/// the control server is bound, `None` while stopped/disabled/failed to
+/// bind; `last_error` is the short reason a bind attempt failed, if any —
+/// mutually exclusive with `running` in practice (`App` clears it on a
+/// successful start and passes `None` while `running` is `Some`), but this
+/// takes both independently rather than an enum so callers can't
+/// accidentally desync a "yes it's running, and also here's the stale error
+/// from before" state from this function's perspective — `running.is_some()`
+/// always wins.
+pub(crate) fn format_server_status(
+    running: Option<(String, u16, usize)>,
+    last_error: Option<&str>,
+) -> String {
+    match running {
+        Some((bind_addr, port, clients)) => {
+            format!("Running ({bind_addr}:{port}, {clients} client(s))")
+        }
+        None => match last_error {
+            Some(reason) => format!("Bind failed: {reason}"),
+            None => "Stopped".to_string(),
+        },
+    }
 }
 
 /// `scrollback-limit`'s display value (E): the raw byte count is unwieldy

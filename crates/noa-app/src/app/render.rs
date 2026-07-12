@@ -46,6 +46,16 @@ impl App {
             .as_ref()
             .filter(|session| session.window_id == window_id)
             .map(|session| (std::sync::Arc::clone(&session.state), session.opened_at));
+        // Same for the process-monitor overlay (panel-metrics-view), mutually
+        // exclusive with the palette/theme-settings (R-3). Not `Arc`-shared
+        // like theme-settings' state — the row list is small (pane count),
+        // so a plain clone here is cheap and avoids adding `Arc` machinery
+        // for a read-only, low-cardinality snapshot.
+        let process_monitor_card = self
+            .process_monitor
+            .as_ref()
+            .filter(|session| session.window_id == window_id)
+            .map(|session| (session.state.clone(), session.opened_at));
         // Same for the confirm dialog: composited as its own modal card after
         // the panes (and above the palette — it blocks input), not inline in
         // the pane cell pass.
@@ -328,6 +338,14 @@ impl App {
                     .and_then(|(ts, _)| focused_rect.map(|r| (ts.as_ref(), r))),
                 &colors,
             );
+            crate::macos_overlay::sync_process_monitor(
+                &state.window,
+                &mut state.native_overlays,
+                process_monitor_card
+                    .as_ref()
+                    .and_then(|(pm, _)| focused_rect.map(|r| (pm, r))),
+                &colors,
+            );
             crate::macos_overlay::sync_confirm_dialog(
                 &state.window,
                 &mut state.native_overlays,
@@ -435,6 +453,37 @@ impl App {
                 &view,
                 surface_size,
                 theme_settings,
+                render_pane_rect(*rect),
+                snapshot.cols,
+                snapshot.rows_n,
+                padding,
+                state.window.scale_factor() as f32,
+                fade.progress(now),
+            );
+            if !fade.done(now) {
+                state.window.request_redraw();
+            }
+        }
+        // The process-monitor overlay composites at the same tier as the
+        // palette/theme-settings (mutually exclusive, R-3) — same fade-in.
+        #[cfg(not(target_os = "macos"))]
+        if let Some((monitor, opened_at)) = process_monitor_card.as_ref()
+            && let Some((_, rect, snapshot)) = snapshots
+                .iter()
+                .find(|(pane_id, _, _)| *pane_id == state.focused_pane)
+        {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            let fade = crate::anim::Tween::new(*opened_at, crate::anim::DUR_FAST);
+            let now = Instant::now();
+            sidebar::draw_process_monitor_card(
+                gpu,
+                state.surface_config.format,
+                &view,
+                surface_size,
+                monitor,
                 render_pane_rect(*rect),
                 snapshot.cols,
                 snapshot.rows_n,

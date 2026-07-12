@@ -698,6 +698,199 @@ pub(in crate::app) fn draw_theme_settings_card(
     );
 }
 
+/// Card size (cells) for the process-monitor overlay (panel-metrics-view):
+/// wide enough for the process/CPU/mem/proc/elapsed/location columns.
+const PROCESS_MONITOR_COLS: u16 = 72;
+const PROCESS_MONITOR_ROWS: u16 = 20;
+
+/// Draw the process-monitor overlay's card (off-macOS wgpu path; native
+/// AppKit renders its own on macOS, `macos_overlay::sync_process_monitor`).
+/// Mirrors [`draw_theme_settings_card`]: build the whole card as one
+/// ANSI-escaped string, feed it through a synthetic [`Terminal`], and
+/// rasterize via the shared modal-card scratch texture.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::app) fn draw_process_monitor_card(
+    gpu: &mut GpuState,
+    surface_format: wgpu::TextureFormat,
+    view: &wgpu::TextureView,
+    surface_size: PixelSize,
+    monitor: &crate::process_monitor::ProcessMonitor,
+    pane_rect: PaneRect,
+    pane_cols: u16,
+    pane_rows: u16,
+    _padding: GridPadding,
+    scale: f32,
+    opacity: f32,
+) {
+    let cols = PROCESS_MONITOR_COLS
+        .min(pane_cols.saturating_sub(4))
+        .max(20);
+    let rows = PROCESS_MONITOR_ROWS
+        .min(pane_rows.saturating_sub(4))
+        .max(10);
+    let metrics = gpu.font.metrics();
+    let (interior, block_px) = modal_block_geometry(metrics, cols, rows);
+    ensure_overlay_card_gpu(gpu, surface_format, interior);
+    if ensure_scratch(
+        &mut gpu.chrome_textures.palette_scratch,
+        &gpu.device,
+        block_px,
+        surface_format,
+        "noa-process-monitor",
+    ) {
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
+    }
+    ensure_scrim(gpu);
+    if gpu.palette_renderer.is_none()
+        || gpu.palette_card.is_none()
+        || gpu.chrome_textures.palette_scratch.is_none()
+    {
+        return;
+    }
+
+    let theme = active_theme(&gpu.theme, &gpu.preview_theme);
+    let style = OverlayStyle::from_theme(theme);
+    {
+        let text = process_monitor_overlay_text(
+            monitor,
+            cols,
+            rows,
+            rgb_from_rgba(style.muted_fg()),
+            rgb_from_rgba(style.accent()),
+        );
+        let fg = rgb_from_rgba(style.surface_fg());
+        let bg = rgb_from_rgba(style.surface_bg());
+        let mut term = Terminal::new(GridSize::new(cols, rows));
+        term.set_base_colors(fg, bg, fg, theme.palette);
+        let mut stream = Stream::new();
+        stream.feed(text.as_bytes(), &mut term);
+        let mut snapshot = FrameSnapshot::from_terminal(&mut term);
+        snapshot.cursor.visible = false;
+        let scratch_view = &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2;
+        let renderer = gpu.palette_renderer.as_mut().unwrap();
+        renderer.resize(block_px);
+        renderer.set_clear_color(style.surface_bg());
+        renderer.rebuild_cells(&snapshot, &mut gpu.font, theme);
+        renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        renderer.draw(&gpu.device, &gpu.queue, scratch_view);
+    }
+
+    let x = pane_rect.x + pane_rect.w.saturating_sub(block_px.w) / 2;
+    let y = pane_rect.y + pane_rect.h.saturating_sub(block_px.h) / 2;
+    composite_modal_card(
+        gpu,
+        view,
+        surface_size,
+        pane_rect,
+        x,
+        y,
+        block_px,
+        style.border(),
+        scale,
+        opacity,
+    );
+}
+
+/// Fixed-width column layout for one process-monitor row (matches the
+/// header). Truncates `location` rather than wrapping, so a long tab/pane
+/// label never overflows into the next column.
+fn process_monitor_row_line(
+    process: &str,
+    cpu: &str,
+    mem: &str,
+    proc_count: &str,
+    elapsed: &str,
+    location: &str,
+    location_width: usize,
+) -> String {
+    let location: String = location.chars().take(location_width).collect();
+    format!(
+        "{process:<14.14}{cpu:>7}{mem:>10}{proc_count:>5}{elapsed:>10}  {location:<width$}",
+        width = location_width
+    )
+}
+
+/// Build the process-monitor card's whole content as one ANSI-escaped
+/// string (mirrors `theme_settings_overlay_text`): a title, a header row,
+/// then one row per pane (sorted/selected per `monitor`'s pure state),
+/// highlighting the selected row and truncating to `rows` so the fixed-grid
+/// wgpu degrade never overflows the card.
+fn process_monitor_overlay_text(
+    monitor: &crate::process_monitor::ProcessMonitor,
+    cols: u16,
+    rows: u16,
+    muted: Rgb,
+    accent: Rgb,
+) -> String {
+    use crate::process_monitor::{
+        format_cpu, format_elapsed, format_mem, format_proc_count, format_process, sort_label,
+    };
+
+    let mut out = String::new();
+    out.push_str("\x1b[?7l");
+    cup(&mut out, 0, 1);
+    sgr_fg(&mut out, accent);
+    let _ = write!(
+        out,
+        "Process Monitor \u{b7} sort: {}",
+        sort_label(monitor.sort())
+    );
+    sgr_reset(&mut out);
+    cup(&mut out, 1, 1);
+    sgr_fg(&mut out, muted);
+    out.push_str("\u{2191}\u{2193} select \u{b7} Enter jump \u{b7} s sort \u{b7} Esc close");
+    sgr_reset(&mut out);
+
+    let location_width = (cols as usize).saturating_sub(46).max(8);
+    let header_row = 3;
+    cup(&mut out, header_row, 1);
+    sgr_fg(&mut out, muted);
+    out.push_str(&process_monitor_row_line(
+        "PROCESS",
+        "CPU",
+        "MEM",
+        "N",
+        "ELAPSED",
+        "LOCATION",
+        location_width,
+    ));
+    sgr_reset(&mut out);
+
+    let now = std::time::SystemTime::now();
+    let first_row = header_row + 1;
+    let visible_rows = rows.saturating_sub(first_row + 1) as usize;
+    // Selection-centered window (same policy as the native card, MINOR-5):
+    // the selected row must stay inside the visible slice even when the pane
+    // list overflows the card.
+    let (offset, shown) = crate::process_monitor::visible_window(
+        monitor.rows().len(),
+        monitor.selected(),
+        visible_rows,
+    );
+    for (i, row) in monitor.rows()[offset..offset + shown].iter().enumerate() {
+        let r = first_row + i as u16;
+        let selected = offset + i == monitor.selected();
+        cup(&mut out, r, 1);
+        if selected {
+            sgr_bg(&mut out, accent);
+        }
+        out.push_str(&process_monitor_row_line(
+            format_process(row.process.as_deref()),
+            &format_cpu(row.cpu_permille),
+            &format_mem(row.mem_bytes),
+            &format_proc_count(row.proc_count),
+            &format_elapsed(row.started_at, now),
+            &row.location,
+            location_width,
+        ));
+        if selected {
+            sgr_reset(&mut out);
+        }
+    }
+    out
+}
+
 fn cup(out: &mut String, row: u16, col: u16) {
     let _ = write!(out, "\x1b[{};{}H", row + 1, col + 1);
 }

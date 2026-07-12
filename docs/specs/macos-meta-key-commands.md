@@ -13,12 +13,12 @@
 
 ### Problem
 
-`noa` の macOS ユーザーは、`Cmd+K` で端末をクリアするような標準的なメタキー操作を、PTY に誤って文字入力として送らず、アプリ層の明示的なコマンドとして使いたい。既存の `AppCommand` / `KeybindEngine` / macOS menu 経路を拡張し、フォーカス中タブだけに作用し、画面・スクロールバック・検索・選択・リセットの意味を混同しない仕様にする。
+macOS users of `noa` want to use standard meta-key operations, such as clearing the terminal with `Cmd+K`, as explicit app-layer commands rather than having them accidentally sent to the PTY as text input. This spec extends the existing `AppCommand` / `KeybindEngine` / macOS menu paths so that behavior targets only the focused tab and does not conflate the meanings of screen, scrollback, search, selection, and reset.
 
 ### Audience
 
-- macOS で `noa` を日常利用する terminal ユーザー。
-- `noa-app` のアプリコマンド、キーバインド、メニュー、端末状態操作を拡張する contributor。
+- Terminal users who use `noa` daily on macOS.
+- Contributors extending `noa-app`'s app commands, keybindings, menus, and terminal state operations.
 
 ### Job To Be Done
 
@@ -26,40 +26,40 @@ When `noa` is focused on macOS, users should be able to invoke familiar Command-
 
 ### Success Definition
 
-`Cmd+K` などの標準ショートカットがテスト可能な `AppCommand` として定義され、メニュー・キーバインド・端末状態更新が同じルートで一貫して動く。デフォルトの `Cmd+K` は PTY へ `Ctrl+L` を送らず、アプリ側でフォーカス中タブの表示と scrollback をクリアする。
+Standard shortcuts such as `Cmd+K` are defined as testable `AppCommand`s, and menu items, keybindings, and terminal state updates all work consistently through the same route. The default `Cmd+K` does not send `Ctrl+L` to the PTY; instead, the app side clears the focused tab's display and scrollback.
 
 ## Reuse And Constraints
 
-- `AppCommand` は app-level command の中心として既に存在し、menu ID、action name、keybind との往復マッピングを持つ。
-- `KeybindEngine` は `cmd`, `command`, `super`, `meta` を同じ modifier として parse できる。
-- `KeybindEngine::default()` は `Cmd+Q/T/W/1..9/C/V/F/G/Shift+G` と scrollback navigation を登録済みだが、`Cmd+K` は未登録。
-- `WindowEvent::KeyboardInput` は keybind 解決後に `handle_app_command` へ合流し、未登録の `Cmd` combo は PTY に送らず握りつぶす。
-- `macos_menu.rs` は `muda` で native menu を構築し、menu selection を `UserEvent::AppCommand` として同じ command handler へ流せる。
-- `Terminal` は selection/search/viewport scroll の public API を持つが、app command から直接呼べる clear screen / clear scrollback / reset terminal API はまだない。
-- VT/grid には `CSI 3 J` 相当の scrollback erase と `Terminal::full_reset` の内部処理があるが、どちらも app-facing command としては露出していない。
-- 既存 `macOS App Menus` spec では clear/reset/font-size などの terminal actions は backing behavior ができるまで deferred とされていた。本 spec はその backing behavior を定義する。
-- `keybind` config key は Ghostty config spec で list 型として認識されるが、v1 では値を保持せず warn する対象であり、runtime configurable keybind は本 spec の前提にしない。
+- `AppCommand` already exists as the center of app-level commands, with round-trip mapping to menu IDs, action names, and keybindings.
+- `KeybindEngine` can parse `cmd`, `command`, `super`, and `meta` as the same modifier.
+- `KeybindEngine::default()` already registers `Cmd+Q/T/W/1..9/C/V/F/G/Shift+G` and scrollback navigation, but `Cmd+K` is not registered.
+- `WindowEvent::KeyboardInput` merges into `handle_app_command` after keybind resolution; unregistered `Cmd` combos are swallowed rather than sent to the PTY.
+- `macos_menu.rs` builds the native menu with `muda` and can route menu selections into the same command handler as `UserEvent::AppCommand`.
+- `Terminal` has a public API for selection/search/viewport scroll, but there is not yet a clear screen / clear scrollback / reset terminal API that an app command can call directly.
+- VT/grid has internal handling for `CSI 3 J`-equivalent scrollback erase and `Terminal::full_reset`, but neither is exposed as an app-facing command.
+- The existing `macOS App Menus` spec deferred terminal actions such as clear/reset/font-size until backing behavior was available. This spec defines that backing behavior.
+- The `keybind` config key is recognized as a list type in the Ghostty config spec, but in v1 it does not persist a value and only triggers a warning; runtime configurable keybinds are not assumed by this spec.
 
 ## Candidate Directions
 
-- **A. Focused Cmd+K Clear** — v1 は `Cmd+K` だけを追加する。`AppCommand::ClearTerminal` のような単一 command を作り、フォーカス中タブの visible screen と scrollback を app 側で消す。menu item は `Edit` または `View` に `Clear` として追加する。最小で早いが、「など一般的な機能」の広がりは後続 spec に回る。
-- **B. Clear / Reset Command Suite** — `Cmd+K` を中心に、clear screen + scrollback、clear scrollback only、reset terminal を action として分ける。default shortcut は `Cmd+K` のみ、他は menu item から開始して accidental destructive shortcut を避ける。既存の deferred terminal actions を解禁する最初のまとまりとして自然だが、reset の意味論を明確にする必要がある。
-- **C. Common macOS Terminal Commands Pack** — `Cmd+K` clear に加えて、`Cmd+A` select all、`Cmd++` / `Cmd+-` / `Cmd+0` font-size controls、既存 `Cmd+F/G/Shift+G` search route の整理まで含める。ユーザー体験は最もまとまるが、Terminal API、font grid / atlas / renderer resize、search UI placeholder など複数領域に広がる。
-- **D. Configurable Keybind Foundation First** — `keybind = ...` config の保持・読み込み・action registry 連携を先に作り、`Cmd+K` は default keybind の一例にする。Ghostty config 資産との整合は強いが、ユーザーが今欲しい clear behavior より基盤作りが先行し、scope が大きい。
-- **E. Shell-Compatible Clear** — `Cmd+K` で app state を直接触らず、PTY に `Ctrl+L` 相当を送る。shell/editor の挙動に任せられるため実装は軽いが、scrollback は消えず、full-screen app で意味が変わり、現在の「Cmd combo は shell input にしない」設計とも衝突する。
+- **A. Focused Cmd+K Clear** — v1 adds only `Cmd+K`. A single command such as `AppCommand::ClearTerminal` clears the focused tab's visible screen and scrollback on the app side. The menu item is added as `Clear` under `Edit` or `View`. Minimal and fast, but the "and other common features" scope is pushed to a follow-up spec.
+- **B. Clear / Reset Command Suite** — Centered on `Cmd+K`, this splits clear screen + scrollback, clear scrollback only, and reset terminal into separate actions. Only `Cmd+K` gets a default shortcut; the others start as menu items to avoid accidental destructive shortcuts. This is a natural first batch for unlocking the existing deferred terminal actions, but reset semantics need to be clarified.
+- **C. Common macOS Terminal Commands Pack** — In addition to `Cmd+K` clear, this includes `Cmd+A` select all, `Cmd++` / `Cmd+-` / `Cmd+0` font-size controls, and cleanup of the existing `Cmd+F/G/Shift+G` search route. The user experience is the most cohesive, but it spans multiple areas: the Terminal API, font grid / atlas / renderer resize, and the search UI placeholder.
+- **D. Configurable Keybind Foundation First** — Builds persistence, loading, and action-registry integration for the `keybind = ...` config first, with `Cmd+K` as one example of a default keybind. This aligns strongly with existing Ghostty config assets, but foundation work would precede the clear behavior users want now, and the scope is large.
+- **E. Shell-Compatible Clear** — `Cmd+K` does not touch app state directly; instead it sends the equivalent of `Ctrl+L` to the PTY. This is a lightweight implementation since it defers to shell/editor behavior, but scrollback is not cleared, the meaning changes in full-screen apps, and it conflicts with the current design where `Cmd` combos are never sent as shell input.
 
 Selected direction: **C. Common macOS Terminal Commands Pack**.
 
-Checkpoint result: ユーザー裁定により、`Cmd+K` clear だけでなく、`Cmd+A` select all、`Cmd++` / `Cmd+-` / `Cmd+0` font-size controls、既存 search route の整理まで含める。
+Checkpoint result: Per the user's decision, scope includes not only `Cmd+K` clear but also `Cmd+A` select all, `Cmd++` / `Cmd+-` / `Cmd+0` font-size controls, and cleanup of the existing search route.
 
-Convergence decision: C は仕様対象として採用する。ただし実装は単一の大きな変更ではなく、clear command、select all、font-size controls、search route cleanup の独立したスライスに分ける。検索プロンプトの新規 UI と runtime configurable keybind は本 spec では扱わない。
+Convergence decision: C is adopted as the spec target. However, implementation is split into independent slices — clear command, select all, font-size controls, and search route cleanup — rather than one large change. A new search prompt UI and runtime configurable keybinds are out of scope for this spec.
 
 ## Challenge Notes
 
-- Magi: **conditional approve**. C は macOS terminal としての期待値に合うが、完了条件を `Cmd+K`、`Cmd+A`、`Cmd++` / `Cmd+-` / `Cmd+0`、search route cleanup に固定する必要がある。font-size は grid/window resize と絡むため受け入れ条件を明文化する。
-- Void: **simplify pressure**. 最小価値は `Cmd+K` clear と search placeholder cleanup。`Cmd+A` と font-size は保持コストが高いので、C に含める場合も独立スライスとして扱い、runtime configurable keybind は除外する。
-- Ripple: **medium-high impact**. C 全体の推定影響は 8-10 files / 250-450 LOC 程度。最大リスクは font-size controls で、`FontGrid`、renderer atlas、grid resize、PTY winsize、複数タブ共有挙動に波及する。分割実装が必須。
-- Nexus ruling: ユーザー指定に従って C まで含める。リスクは「除外」ではなく「仕様内の段階化」と「AC 分離」で管理する。
+- Magi: **conditional approve**. C matches expectations for a macOS terminal, but completion criteria must be pinned to `Cmd+K`, `Cmd+A`, `Cmd++` / `Cmd+-` / `Cmd+0`, and search route cleanup. Because font-size interacts with grid/window resize, acceptance criteria must be spelled out explicitly.
+- Void: **simplify pressure**. The minimum value is `Cmd+K` clear and search placeholder cleanup. `Cmd+A` and font-size have higher maintenance cost, so even if included in C they should be treated as independent slices, and runtime configurable keybinds should be excluded.
+- Ripple: **medium-high impact**. The estimated impact of all of C is roughly 8-10 files / 250-450 LOC. The highest risk is font-size controls, which ripple into `FontGrid`, the renderer atlas, grid resize, PTY winsize, and shared behavior across multiple tabs. Split implementation is required.
+- Nexus ruling: Include up through C per the user's directive. Risk is managed not by "exclusion" but by "staging within the spec" and "AC separation."
 
 ## Shape Proposal
 
@@ -69,33 +69,33 @@ Common macOS Terminal Commands Pack.
 
 ### Target Persona
 
-macOS で `noa` を日常利用し、Terminal.app / iTerm2 / Ghostty に近い Command-key 操作を期待する terminal user。
+A terminal user who uses `noa` daily on macOS and expects Command-key operations close to Terminal.app / iTerm2 / Ghostty.
 
 ### Proposed Solution
 
-既存の `AppCommand` / `KeybindEngine` / native menu / `handle_app_command` 経路を拡張し、標準的な macOS terminal 操作を PTY input ではなく app command として扱う。各 command はフォーカス中タブを対象にし、端末状態の変更は `noa-grid` の public API を通して行う。
+Extend the existing `AppCommand` / `KeybindEngine` / native menu / `handle_app_command` paths so standard macOS terminal operations are treated as app commands rather than PTY input. Each command targets the focused tab, and terminal state changes go through `noa-grid`'s public API.
 
 ### In Scope
 
-- `Cmd+K` を default keybind として追加し、フォーカス中タブの main screen 表示と scrollback を app 側で clear する。
-- `Clear Scrollback` を menu-only command として追加する。`Cmd+K` は clear screen + scrollback、menu-only clear scrollback は scrollback だけを消す。
-- `Cmd+A` を terminal select all として追加する。main screen では scrollback + live grid 全体、alt screen では visible alt screen のみを対象にする。
-- `Cmd++` / `Cmd+-` / `Cmd+0` を font-size increase/decrease/reset として追加する。v1 は shared `GpuState.font` に合わせて app/session-wide に作用する。
-- `Cmd+F` / `Cmd+G` / `Cmd+Shift+G` の search command route を整理し、未実装 UI が有効 command として見える状態を避ける。
-- Native menu selection と keybind は同じ `AppCommand` に合流する。
+- Add `Cmd+K` as a default keybind that clears the focused tab's main screen display and scrollback on the app side.
+- Add `Clear Scrollback` as a menu-only command. `Cmd+K` clears screen + scrollback; the menu-only clear scrollback clears only scrollback.
+- Add `Cmd+A` as terminal select all. On the main screen it targets scrollback plus the full live grid; on the alt screen it targets only the visible alt screen.
+- Add `Cmd++` / `Cmd+-` / `Cmd+0` as font-size increase/decrease/reset. In v1 this acts app/session-wide, matching the shared `GpuState.font`.
+- Clean up the `Cmd+F` / `Cmd+G` / `Cmd+Shift+G` search command route to avoid unimplemented UI appearing as an enabled command.
+- Native menu selection and keybindings merge into the same `AppCommand`.
 
 ### Out Of Scope
 
-- Runtime configurable keybind (`keybind = ...`) の保持・解釈・UI。
-- 新しい検索プロンプト UI または検索入力 overlay。
-- `Cmd+K` で PTY に `Ctrl+L` を送る shell-compatible clear。
-- `Reset Terminal` の実装。破壊的で意味論が広いため、別 spec へ延期する。
-- Per-tab font-size state。v1 は app/session-wide font size に限定する。
-- Cross-platform shortcut parity。macOS-first の Command-key 仕様に限定する。
+- Persistence, interpretation, and UI for runtime configurable keybinds (`keybind = ...`).
+- A new search prompt UI or search input overlay.
+- Shell-compatible clear that sends `Ctrl+L` to the PTY on `Cmd+K`.
+- Implementation of `Reset Terminal`. Deferred to a separate spec because it is destructive and has broad semantics.
+- Per-tab font-size state. v1 is limited to app/session-wide font size.
+- Cross-platform shortcut parity. Limited to a macOS-first Command-key spec.
 
 ### Priority And Sequencing
 
-ICE は実装順を決めるための相対スコアであり、スコアが低い項目も C の in-scope から外さない。
+ICE is a relative score used to determine implementation order; low-scoring items are not excluded from C's in-scope set.
 
 | Slice | Impact | Confidence | Ease | ICE | Sequencing |
 |-------|-------:|-----------:|-----:|----:|------------|
@@ -600,7 +600,7 @@ Out of scope:
 
 ## Considered But Rejected
 
-- **A. Focused Cmd+K Clear** — rejected as too narrow for the requested "など一般的な機能"; kept as the first implementation slice inside C.
+- **A. Focused Cmd+K Clear** — rejected as too narrow for the requested "and other common features"; kept as the first implementation slice inside C.
 - **B. Clear / Reset Command Suite** — rejected as the sole direction because it does not cover select-all, font-size, and search command expectations; clear command semantics remain part of C.
 - **D. Configurable Keybind Foundation First** — rejected because `keybind` config is intentionally recognized-but-unimplemented in the Ghostty config spec, and would make this feature a configuration-platform project.
 - **E. Shell-Compatible Clear** — rejected because sending `Ctrl+L` to the PTY would not clear scrollback, would vary by foreground program, and would conflict with the current app-command handling of unknown `Cmd` combos.

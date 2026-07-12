@@ -1,9 +1,9 @@
-# Spec: ライブ壁紙機能 (live-wallpaper)
+# Spec: Live Wallpaper Feature (live-wallpaper)
 
 ## Metadata
 
 - slug: `live-wallpaper`
-- title: ライブ壁紙機能 (Live Wallpaper)
+- title: Live Wallpaper Feature (Live Wallpaper)
 - status: `locked`
 - owner: simota
 - audience: Noa implementers, reviewers, and QA
@@ -104,7 +104,7 @@ legibility.
 
 The user confirmed the v1 direction:
 
-> `background-image` にディレクトリを指定し、その中の `*.png` を一定時間で切り替えて表示するシンプルなライブ壁紙。
+> Point `background-image` at a directory and display a simple live wallpaper that switches among the `*.png` files inside it at a fixed interval.
 
 ## Assumption Ledger
 

@@ -48,7 +48,7 @@
 keys everything by `WindowId` (app.rs:56-97), `UserEvent` carries only a
 `WindowId` (events.rs:8-18), and the renderer always draws one full-surface
 pass (renderer.rs:117-162). Users cannot split a tab into multiple panes,
-each running its own shell session — Ghostty parity plan Phase 4's 分割
+each running its own shell session — Ghostty parity plan Phase 4's split
 item (ghostty-parity-plan.md:109-110) and the item tabs explicitly
 deferred (tabs.md:66-68, 347-348: "Surface" reserved for splits).
 

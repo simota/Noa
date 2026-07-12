@@ -3,155 +3,156 @@
 ## Metadata
 
 - slug: `kitty-graphics`
-- title: Kitty graphics protocol（画像転送・表示・削除・Unicode placeholder）
-- status: `implemented`（Phase 5 / Wave4）
+- title: Kitty graphics protocol (image transfer, display, deletion, Unicode placeholder)
+- status: `implemented` (Phase 5 / Wave4)
 - owner: simota
 - Ghostty analog: `terminal/kitty/graphics_*.zig`, `terminal/kitty/graphics_unicode.zig`
-- 上流仕様: <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
+- Upstream spec: <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
 
-端末に画像を転送・表示するプロトコル。`kitten icat` / `timg -pk` / `notcurses` 等が使う。
-制御データは APC（`ESC _ G <control> ; <base64 payload> ESC \`）に乗る。
+A protocol for transferring and displaying images in the terminal. Used by `kitten icat` / `timg -pk` / `notcurses` and similar clients.
+Control data rides on an APC (`ESC _ G <control> ; <base64 payload> ESC \`).
 
-## アーキテクチャ（層の分担）
+## Architecture (layer responsibilities)
 
 ```
 pty bytes
   └ noa-vt   Parser: ESC _ → APC bounded capture(≤1 MiB) → Action::ApcDispatch
-      └ Stream: 先頭 'G' → kitty_graphics::parse → Handler::kitty_graphics(KittyGraphicsCommand)
+      └ Stream: leading 'G' → kitty_graphics::parse → Handler::kitty_graphics(KittyGraphicsCommand)
           └ noa-grid Terminal:
-                kitty::ImageStore   — 画像データ（画面横断・グローバル quota）
-                Screen::kitty_placements — placement（画面ごと・alt 分離）
-                応答 → pending_writes（既存の pty writer 経路）
-              └ FrameSnapshot: 可視 placement + 参照画像を投影
-                  └ noa-render image_layer: id→wgpu テクスチャキャッシュ + z 3 帯域描画
+                kitty::ImageStore   — image data (cross-screen, global quota)
+                Screen::kitty_placements — placements (per-screen, alt separated)
+                responses → pending_writes (existing pty writer path)
+              └ FrameSnapshot: projects visible placements + referenced images
+                  └ noa-render image_layer: id→wgpu texture cache + z 3-band drawing
 ```
 
-- 制御データ解析は **noa-vt**（`kitty_graphics.rs`、`sgr.rs` と同格の純関数）。
-- 画像デコード・状態・応答は **noa-grid**（`kitty.rs` / `terminal.rs`）。
-- 投影と描画は **noa-render**（`snapshot.rs` / `image_layer.rs` / `shaders/image.wgsl`）。
+- Control-data parsing is in **noa-vt** (`kitty_graphics.rs`, a pure-function module on par with `sgr.rs`).
+- Image decoding, state, and responses are in **noa-grid** (`kitty.rs` / `terminal.rs`).
+- Projection and rendering are in **noa-render** (`snapshot.rs` / `image_layer.rs` / `shaders/image.wgsl`).
 
-## 対応範囲
+## Coverage
 
-### アクション（`a=`）
+### Actions (`a=`)
 
-| 値 | 意味 | 対応 |
+| Value | Meaning | Supported |
 |---|---|---|
-| `t` | 転送のみ | ✅ |
-| `T` | 転送して即表示 | ✅ |
-| `p` | 転送済み画像を表示（put） | ✅ |
-| `d` | 画像/placement の削除 | ✅（下記削除指定子） |
-| `q` | クエリ（保存せず検証のみ応答） | ✅ |
-| `f` / `a` / `c` | アニメーションフレーム/制御 | ❌ `EUNSUPPORTED` |
+| `t` | Transfer only | ✅ |
+| `T` | Transfer and display immediately | ✅ |
+| `p` | Display an already-transferred image (put) | ✅ |
+| `d` | Delete image/placement | ✅ (see delete specifiers below) |
+| `q` | Query (validate only, no storage, respond) | ✅ |
+| `f` / `a` / `c` | Animation frame/control | ❌ `EUNSUPPORTED` |
 
-### フォーマット（`f=`）
+### Format (`f=`)
 
-- `f=24`（RGB, 3 byte/px）→ RGBA へ展開。
-- `f=32`（RGBA, 4 byte/px、既定）。
-- `f=100`（PNG）→ `png` crate。RGB/RGBA/グレースケール/グレースケール+α を RGBA8 へ正規化。
-  16bit サンプルは上位バイトへ丸め。**パレット PNG は非対応**（`EBADPNG`）。
+- `f=24` (RGB, 3 bytes/px) → expanded to RGBA.
+- `f=32` (RGBA, 4 bytes/px, default).
+- `f=100` (PNG) → via the `png` crate. RGB/RGBA/grayscale/grayscale+alpha are normalized to RGBA8.
+  16-bit samples are rounded to the high byte. **Palette PNGs are not supported** (`EBADPNG`).
 
-### 媒体（`t=`）
+### Medium (`t=`)
 
-- `t=d`（direct、既定）: payload = base64 の画像バイト。`o=z`（zlib）解凍対応。
-- `t=f`（file）: payload = base64 の**絶対パス**。`canonicalize` → regular file → `S=`/`O=` で部分読み出し。
-- `t=t`（temp file）: `t=f` に加え、canonical path が temp ディレクトリ（`$TMPDIR` / `/tmp` /
-  `/dev/shm` / `/var/tmp`）配下、またはパスに `tty-graphics-protocol` を含む場合のみ受理し、
-  読了後に best-effort で削除。条件を満たさなければ `EINVAL`。
-- `t=s`（POSIX 共有メモリ）: ❌ `EUNSUPPORTED`。
+- `t=d` (direct, default): payload = base64-encoded image bytes. `o=z` (zlib) decompression is supported.
+- `t=f` (file): payload = base64-encoded **absolute path**. `canonicalize` → must be a regular file → partial read via `S=`/`O=`.
+- `t=t` (temp file): in addition to `t=f`, accepted only if the canonical path is under a temp directory
+  (`$TMPDIR` / `/tmp` / `/dev/shm` / `/var/tmp`), or the path contains `tty-graphics-protocol`;
+  deleted best-effort after reading. Returns `EINVAL` if the condition is not met.
+- `t=s` (POSIX shared memory): ❌ `EUNSUPPORTED`.
 
-### チャンク転送（`m=1`）
+### Chunked transfer (`m=1`)
 
-同時 1 本（kitty 仕様）。最初のチャンクの制御データが最終判断を駆動し、継続チャンクは
-payload のみ連結。進行中に別の graphics コマンドが来たら転送を破棄して新コマンドを処理。
-`full_reset`（RIS）でも破棄。
+Only one transfer in flight at a time (per the kitty spec). The first chunk's control data drives the final
+decision, and continuation chunks only concatenate the payload. If another graphics command arrives mid-transfer,
+the transfer is discarded and the new command is processed. `full_reset` (RIS) also discards it.
 
-### ID 割り当てと応答
+### ID assignment and responses
 
-- `i=` 指定 → その id（上書き転送は epoch++ でテクスチャキャッシュ無効化）。
-- `i=0, I=n` → 自動採番し、応答に採番した id を反映。
-- `i=0 ∧ I=0` → 自動採番するが**一切応答しない**（kitty 挙動）。
-- 応答形式: `ESC _ G i=<id>[,I=<n>][,p=<pid>] ; OK ESC \` / エラーは `; E<code>:<message>`。
-- 抑制: `q=1` は OK を抑制、`q=2` はエラーも抑制。
+- `i=` specified → uses that id (overwriting transfer bumps the epoch to invalidate the texture cache).
+- `i=0, I=n` → auto-assigns an id and reflects the assigned id in the response.
+- `i=0 ∧ I=0` → auto-assigns an id but **sends no response at all** (kitty behavior).
+- Response format: `ESC _ G i=<id>[,I=<n>][,p=<pid>] ; OK ESC \` / errors are `; E<code>:<message>`.
+- Suppression: `q=1` suppresses OK; `q=2` also suppresses errors.
 
-### 表示（placement）
+### Display (placement)
 
-- `c=`/`r=` でセルスケーリング、無指定なら `ceil(表示px / cellpx)`。
-- `x,y,w,h` で画像クロップ、`X=`/`Y=` で開始セル内 px オフセット。
-- `z=` で z-index（下記帯域）。`C=1` でカーソル非移動。
-- placement のアンカーは**セッション絶対行**（shell marks と同方式）。通常スクロールは無変換で追従、
-  scrollback から落ちた分は snapshot 生成時に遅延掃除。リージョンスクロール/IL/DL は
-  交差 placement を削除する v1 近似。
+- `c=`/`r=` scale by cell; if unspecified, uses `ceil(display px / cell px)`.
+- `x,y,w,h` crops the image; `X=`/`Y=` offsets the pixel position within the starting cell.
+- `z=` sets the z-index (see bands below). `C=1` disables cursor movement.
+- Placement anchors are **session-absolute rows** (the same approach as shell marks). Normal scrolling follows
+  without transformation; rows dropped from scrollback are lazily cleaned up during snapshot generation.
+  Region scroll / IL / DL delete intersecting placements as a v1 approximation.
 
-### 削除（`a=d`, `d=`）
+### Deletion (`a=d`, `d=`)
 
-`a`(全) / `i`(id) / `n`(番号) / `c`(カーソル) / `p`(セル) / `q`(セル+z) / `r`(id 範囲) /
-`x`(列) / `y`(行) / `z`(z) に対応。大文字指定子は、その画像を参照する placement が全画面から
-消えた時点で画像データも解放。`d=f`/`F`（アニメ）は `EUNSUPPORTED`。
-`ED 2`（画面消去）は交差 placement を削除、RIS は全消去。
+Supports `a`(all) / `i`(id) / `n`(number) / `c`(cursor) / `p`(cell) / `q`(cell+z) / `r`(id range) /
+`x`(column) / `y`(row) / `z`(z). Uppercase specifiers also free the image data once no placement
+referencing that image remains on any screen. `d=f`/`F` (animation) is `EUNSUPPORTED`.
+`ED 2` (screen erase) deletes intersecting placements; RIS deletes everything.
 
-### Unicode placeholder（`U=1`）
+### Unicode placeholder (`U=1`)
 
-`U=1` の placement は仮想 placement として保存のみ（直接描画しない）。クライアントは基底スカラ
-`U+10EEEE` のセルを印字し、セルのスタイルに描画位置を埋め込む:
+A placement with `U=1` is stored as a virtual placement only (not drawn directly). The client prints cells with
+the base scalar `U+10EEEE` and embeds the drawing position in the cell style:
 
-- **前景色** → image id の下位ビット（`Palette(n)`→8bit、`Rgb`→24bit）。
-- **第 1 結合発音記号** → 画像の行。
-- **第 2 結合発音記号** → 画像の列。
-- **第 3 結合発音記号** → image id の最上位バイト。
-- **下線色** → placement id（省略時 0）。
+- **Foreground color** → low bits of the image id (`Palette(n)` → 8 bits, `Rgb` → 24 bits).
+- **1st combining diacritic** → image row.
+- **2nd combining diacritic** → image column.
+- **3rd combining diacritic** → high byte of the image id.
+- **Underline color** → placement id (0 if omitted).
 
-行/列/最上位バイトの省略時は同一画面行の直前セルから推論（行と最上位バイトは踏襲、列は +1）。
-行/列の対応表は kitty の `rowcolumn-diacritics`（結合クラス 230・分解写像なしの 297 個、
-Unicode 6.0.0 由来）をコードポイント昇順のソート済み配列として埋め込み、二分探索で値へ写像
-（`crates/noa-grid/src/kitty_placeholder.rs`）。同一 (image id, placement id, 画像行) の連続列ランを
-1 クワッドに融合し、仮想 placement の rows×cols 仮想グリッドに対する src 部分矩形を算出。
-placeholder セルはグリフ描画から除外され、画像だけが見える。
+If row/column/high byte are omitted, they are inferred from the immediately preceding cell on the same screen row
+(row and high byte carry over, column is +1). The row/column mapping table embeds kitty's
+`rowcolumn-diacritics` (combining class 230, no decomposition mapping, 297 entries, from Unicode 6.0.0) as a
+sorted array in ascending codepoint order, mapped to values via binary search
+(`crates/noa-grid/src/kitty_placeholder.rs`). Consecutive column runs sharing the same (image id, placement id,
+image row) are merged into a single quad, and the src sub-rectangle against the virtual placement's rows×cols
+virtual grid is computed. Placeholder cells are excluded from glyph rendering, so only the image is visible.
 
-## z 帯域描画
+## Z-band drawing
 
-同一 render pass 内で cell パスに割り込み、placement の `z` で 3 帯域に分けて合成する:
+Within the same render pass, drawing interleaves with the cell pass, compositing placements into 3 bands by `z`:
 
-1. `z < -2^30` — セル背景より**下**。
-2. cell 背景パス。
-3. `-2^30 ≤ z < 0` — 背景の上・テキストの下。
-4. cell グリフ/装飾パス。
-5. `z ≥ 0` — テキストの**上**（ただし UI オーバーレイより下）。
+1. `z < -2^30` — **below** the cell background.
+2. cell background pass.
+3. `-2^30 ≤ z < 0` — above the background, below the text.
+4. cell glyph/decoration pass.
+5. `z ≥ 0` — **above** the text (but below UI overlays).
 
-## quota
+## Quota
 
-- 単一画像の寸法上限 `MAX_IMAGE_DIM = 10_000`（幅・高さ各、Ghostty 準拠）。超過 → `EFBIG`。
-- 合計デコード RGBA 上限 `TOTAL_BYTES_LIMIT = 320 MB`（kitty/Ghostty 既定）。超過時は可視 placement を
-  持たない画像から seq 昇順に破棄、足りなければ最古から破棄。
-- renderer 側テクスチャキャッシュは別途 512 MB / 300 フレーム LRU。
-- `o=z` の inflate 後サイズも単体上限でガード（zip bomb 抑止）。APC capture は 1 MiB 上限、
-  超過は破棄せず `truncated` フラグ付きで dispatch し `EFBIG` 応答。
+- Per-image dimension cap `MAX_IMAGE_DIM = 10_000` (width and height each, matching Ghostty). Exceeding it → `EFBIG`.
+- Total decoded RGBA cap `TOTAL_BYTES_LIMIT = 320 MB` (kitty/Ghostty default). When exceeded, images without
+  visible placements are evicted first in ascending seq order, then the oldest images if that's not enough.
+- The renderer-side texture cache has a separate 512 MB / 300-frame LRU.
+- The post-inflate size of `o=z` is also guarded by the single-image cap (to prevent zip bombs). APC capture is
+  capped at 1 MiB; on overflow it is not discarded but dispatched with a `truncated` flag and responded to with `EFBIG`.
 
-## 非対応（応答コード）
+## Unsupported (response codes)
 
-| 機能 | 応答 |
+| Feature | Response |
 |---|---|
-| アニメーション（`a=f`/`a`/`c`、`d=f`/`F`） | `EUNSUPPORTED` |
-| 共有メモリ（`t=s`） | `EUNSUPPORTED` |
-| パレット PNG | `EBADPNG` |
+| Animation (`a=f`/`a`/`c`, `d=f`/`F`) | `EUNSUPPORTED` |
+| Shared memory (`t=s`) | `EUNSUPPORTED` |
+| Palette PNG | `EBADPNG` |
 
-エラーコード一覧: `EINVAL`（不正要求）/ `EFBIG`（過大・truncated）/ `ENODATA`（サイズ不一致）/
-`EBADPNG` / `ENOENT`（ファイル未検出）/ `EUNSUPPORTED`。
+Error code list: `EINVAL` (invalid request) / `EFBIG` (too large / truncated) / `ENODATA` (size mismatch) /
+`EBADPNG` / `ENOENT` (file not found) / `EUNSUPPORTED`.
 
-## 実機確認手順
+## Manual verification steps
 
 ```bash
-kitten icat --detect-support        # 対応検出（応答が返ること）
-kitten icat path/to/image.png       # 画像表示
-kitten icat --clear                 # 全消去
-# スクロール追従: icat 後に出力を流し、画像が本文と共に上へ流れること
-tmux new; kitten icat image.png     # tmux 内（passthrough 設定時）
-timg -pk image.png                  # 別クライアントでの表示
+kitten icat --detect-support        # detect support (should get a response)
+kitten icat path/to/image.png       # display an image
+kitten icat --clear                 # clear everything
+# scroll follow: after icat, stream output and confirm the image scrolls up with the text
+tmux new; kitten icat image.png     # inside tmux (with passthrough configured)
+timg -pk image.png                  # display with a different client
 ```
 
-Unicode placeholder は `kitten icat --unicode-placeholder image.png` で確認。
+Unicode placeholder can be verified with `kitten icat --unicode-placeholder image.png`.
 
-## 未確定点（kitty 実機と要突き合わせ）
+## Open items (need cross-checking against real kitty)
 
-- 画像表示後のカーソル最終位置（右端到達時の pending_wrap 扱い）。
-- リージョンスクロール時の画像移動規則（v1 は交差 placement 削除で近似）。
-- `ED 2`/`EL` と画像の関係（本実装は Ghostty パリティ）。
+- Final cursor position after displaying an image (pending_wrap handling when reaching the right edge).
+- Image movement rules during region scroll (v1 approximates by deleting intersecting placements).
+- The relationship between `ED 2`/`EL` and images (this implementation follows Ghostty parity).

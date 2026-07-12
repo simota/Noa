@@ -1,237 +1,237 @@
-# Spec: テーマライブプレビュー + 設定変更UI (theme-settings-ui)
+# Spec: Theme Live Preview + Settings UI (theme-settings-ui)
 
 ## Metadata
 
 - **slug:** theme-settings-ui
-- **title:** テーマライブプレビュー + 設定変更UI (Theme Live Preview + Settings UI)
-- **status:** **locked**(サインオフ 2026-07-06)
+- **title:** Theme Live Preview + Settings UI (Theme Live Preview + Settings UI)
+- **status:** **locked** (sign-off 2026-07-06)
 - **owner:** simota
-- **build-path:** **apex(一気通貫)** — 詳細は末尾「Build-path decision」
-- **recipe:** /nexus spec — FRAME ✓ / EXPAND ✓ / CHALLENGE ✓ / SHAPE ✓ / SPECIFY ✓ / Quality Gate PASS(Judge 再検査済) / LOCK ✓
-- **upstream:** `theme-selection.md`(locked — テーマカタログ・起動時適用)、`ghostty-config.md`(locked — config形式・writer方式の準拠先)
+- **build-path:** **apex (single continuous run)** — see "Build-path decision" at the end for details
+- **recipe:** /nexus spec — FRAME ✓ / EXPAND ✓ / CHALLENGE ✓ / SHAPE ✓ / SPECIFY ✓ / Quality Gate PASS (re-inspected by Judge) / LOCK ✓
+- **upstream:** `theme-selection.md` (locked — theme catalog, applied at startup), `ghostty-config.md` (locked — config format and writer approach to conform to)
 
 ## L0 — Vision
 
-- **問題:** noaは574個のGhostty互換テーマ(`noa-theme`)と設定ファイル基盤(`noa-config`, `~/.config/noa/config`)を持つが、設定変更の手段は「外部エディタでファイル編集→再起動」しかない。テーマは`GpuState`初期化時に一度だけ解決され、実行時に切り替える経路が存在しない。
-- **提供価値:** アプリ内の汎用設定UI(テーマ・フォント・透過等)を新設。テーマピッカーは一覧+サンプルペイン+実画面への即時反映のライブプレビューを提供。確定時に`~/.config/noa/config`へ書き戻す。
-- **対象:** noaユーザー本人(単一ユーザー・ローカルアプリ)。
-- **成功definition:** 再起動なしでテーマを閲覧・試用・確定でき、確定値が次回起動でも有効(config書き戻し)。
+- **Problem:** noa has 574 Ghostty-compatible themes (`noa-theme`) and a config file foundation (`noa-config`, `~/.config/noa/config`), but the only way to change settings is "edit the file in an external editor → restart." The theme is resolved once at `GpuState` initialization, and there is no path to switch it at runtime.
+- **Value delivered:** Introduce a general-purpose in-app settings UI (theme, font, transparency, etc.). The theme picker offers a live preview with a list + sample pane + immediate reflection onto the actual screen. On commit, it writes back to `~/.config/noa/config`.
+- **Target:** The noa user themselves (single-user, local app).
+- **Definition of success:** The user can browse, try, and commit a theme without restarting, and the committed value remains in effect on the next launch (config write-back).
 
-## FRAME — 再利用資産と制約 (Lensスキャン確定)
+## FRAME — Reusable assets and constraints (Lens scan finalized)
 
-### 再利用資産
-- `noa-theme`: 574 Ghostty互換テーマのコンパイル時カタログ (`ThemeDef`, `resolve(name)` バイナリサーチ)
-- `noa-config`: `~/.config/noa/config` key=value パーサ、`theme`キー対応済、CLI > file > default のマージ、Ghostty configの一回性import
+### Reusable assets
+- `noa-theme`: compile-time catalog of 574 Ghostty-compatible themes (`ThemeDef`, binary-search `resolve(name)`)
+- `noa-config`: `~/.config/noa/config` key=value parser, already supports the `theme` key, CLI > file > default merge, one-shot Ghostty config import
 - `noa-app/src/theme.rs`: `resolve_theme_with_overrides(name, &ThemeOverrides)` → `noa_render::Theme`
-- `noa-render/src/theme.rs`: `OverlayStyle::from_theme()` — モーダルUI用パレット導出(オンデマンド計算なのでテーマ切替に自動追従)
-- OSC 4/10/11 動的カラー経路: `TerminalColors` → `Theme::resolve_with_colors` 毎フレーム解決 — ライブプレビューの相乗り先候補
-- UIコンテナ前例: command_palette (ファジーリストカード) / tab_overview・overview (独立ウィンドウ型オーバーレイ)
+- `noa-render/src/theme.rs`: `OverlayStyle::from_theme()` — derives the modal UI palette (computed on demand, so it automatically follows theme switches)
+- OSC 4/10/11 dynamic color path: `TerminalColors` → `Theme::resolve_with_colors` resolved every frame — a candidate to piggyback the live preview on
+- UI container precedents: command_palette (fuzzy list card) / tab_overview, overview (independent window-style overlay)
 
-### 技術制約
-1. `gpu.theme` は起動時一度きり代入 (`noa-app/src/app.rs:922-942`) — 更新経路の新設が必要
-2. `chrome::ACTIVE_PALETTE` が `OnceLock` 単一書込 (`noa-app/src/chrome.rs:129-147`) — 可変化必須
-3. サイドバー/パレットのGPUテクスチャ群がテーマ色焼き込み済み (`app.rs:943-954`) — テーマ切替時に再構築必要
-4. configファイル監視は存在しない — 「ライブプレビュー(セッション内)」と「永続化(config書込)」は別メカニズムとして設計する
-5. 574テーマカタログは `&'static` — ピッカー一覧には十分、ユーザー定義テーマは別経路(今回out-of-scope)
-6. `minimum_contrast`・検索ハイライト・`OverlayStyle` はテーマから導出 — 再解決の一括実行で追従させ、個別パッチ禁止
+### Technical constraints
+1. `gpu.theme` is assigned exactly once at startup (`noa-app/src/app.rs:922-942`) — a new update path is required
+2. `chrome::ACTIVE_PALETTE` is a single-write `OnceLock` (`noa-app/src/chrome.rs:129-147`) — must be made mutable
+3. The sidebar/palette GPU texture set has theme colors baked in (`app.rs:943-954`) — must be rebuilt on theme switch
+4. There is no config file watcher — "live preview (in-session)" and "persistence (config write)" must be designed as separate mechanisms
+5. The 574-theme catalog is `&'static` — sufficient for the picker list, but user-defined themes need a separate path (out of scope this time)
+6. `minimum_contrast`, search highlighting, and `OverlayStyle` are all derived from the theme — keep them in sync via a single bulk re-resolve; individual patching is prohibited
 
-## ヒアリング確定事項 (FRAME)
+## Findings confirmed during hearing (FRAME)
 
-- スコープ: **汎用設定UI** (テーマ中心だがフォント・透過等の主要設定も一覧・変更可能)
-- テーマ源: Ghostty同梱互換 (= 既存の`noa-theme` 574テーマをそのまま使用)
-- プレビューUX: **両方** — 一覧+サンプルペイン+選択中テーマの実画面即時反映 (Esc復帰/Enter確定)
-- 永続化: **設定ファイル書き戻し** (`~/.config/noa/config` の該当キー更新、起動時読込)
+- Scope: **general-purpose settings UI** (theme-centric, but also lists/changes major settings such as font and transparency)
+- Theme source: Ghostty-bundled compatible set (= use the existing `noa-theme` 574-theme catalog as-is)
+- Preview UX: **both** — list + sample pane + immediate reflection of the selected theme onto the real screen (Esc to revert / Enter to commit)
+- Persistence: **write-back to the config file** (update the relevant key in `~/.config/noa/config`, loaded on startup)
 
-## Out-of-scope (FRAME確定)
+## Out-of-scope (finalized in FRAME)
 
-- config リロードキーバインド (Ghostty cmd+shift+, 相当)
-- `theme = light:X,dark:Y` 自動切替構文
-- ユーザー定義テーマファイル (`~/.config/noa/themes/`)
-- configファイル監視(外部編集の自動反映)
+- Config reload keybinding (equivalent of Ghostty's cmd+shift+,)
+- `theme = light:X,dark:Y` auto-switch syntax
+- User-defined theme files (`~/.config/noa/themes/`)
+- Config file watching (auto-reflecting external edits)
 
-## EXPAND — 候補方向 (実施済・ユーザー反応済)
+## EXPAND — Candidate directions (completed, with user feedback)
 
-- **候補1: OSCオーバーライド相乗りプレビュー** ← ユーザー選択(主軸)。ウィンドウ内オーバーレイ(コマンドパレット様式)。プレビューは既存OSC 4/10/11動的カラー経路に全パレット注入(本文ライブ、クロムは確定時のみ)。設定項目は同オーバーレイ内第2セクション。
-- 候補2: 独立設定ウィンドウ+分離プレビュー(overview前例・専用ミニターミナル) — 不採用
-- 候補3: 実セッション完全ライブスワップ(ハイライト毎にテクスチャ再構築) — 不採用
-- 候補4: A/Bルーレット比較(2分割ペア比較) — 不採用
-- Flux提案「おすすめ〜20キュレーション」「永続化=副作用(Enter即書込)」 — どちらも不採用。**フラット574一覧+明示的な保存操作**とする。
+- **Candidate 1: OSC-override-piggybacked preview** ← chosen by the user (primary direction). An in-window overlay (command-palette style). The preview injects the full palette into the existing OSC 4/10/11 dynamic color path (body text is live, chrome only updates on commit). Settings items form a second section within the same overlay.
+- Candidate 2: independent settings window with a separate preview (overview precedent — a dedicated mini-terminal) — rejected
+- Candidate 3: fully live swap of the actual session (rebuilding textures on every highlight change) — rejected
+- Candidate 4: A/B roulette comparison (side-by-side pair comparison) — rejected
+- Flux's proposal of "a curated top-20 list" and "persistence as a side effect (write immediately on Enter)" — both rejected. Go with a **flat list of all 574 + an explicit save action**.
 
-## CHALLENGE — 選定 (完了・ユーザー裁定済)
+## CHALLENGE — Selection (complete, ruled on by the user)
 
-**確定方向: 候補1改 — ウィンドウ内オーバーレイ + `preview_theme` 差替プレビュー + Enter確定書込**
+**Finalized direction: Candidate 1, revised — in-window overlay + `preview_theme` swap-in preview + Enter-to-commit write**
 
-ユーザー裁定 (2026-07-06):
-1. **サンプルペイン: 残す** (Magi裁定採用) — 16 ANSI色+truecolor固定見本。空画面でも全色確認可能
-2. **設定v1範囲: やや広め** — ライブ適用4行 (font-size / background-opacity / background-blur-radius / cursor-style。opacityとblurは概念上ペア) + 確定時のみ適用の追加行 (font-family, window-padding 等) も一覧に並べる
-3. **保存: Enter確定=適用+config書込の単一ジェスチャ**、Escで全取消。Save専用ボタンなし
-4. **プレビュー機構: `preview_theme: Option<Theme>` をdraw時に`gpu.theme`の代わりに参照** (TerminalColors注入は不採用) — 選択色・検索色・OverlayStyleまで全プレビュー、ターミナル状態無汚染
+User ruling (2026-07-06):
+1. **Sample pane: keep it** (Magi's ruling adopted) — fixed swatches for the 16 ANSI colors + truecolor. All colors can be checked even on a blank screen
+2. **v1 settings scope: somewhat broad** — 4 live-apply rows (font-size / background-opacity / background-blur-radius / cursor-style; opacity and blur are conceptually paired) plus additional rows that apply only on commit (font-family, window-padding, etc.) are also listed
+3. **Save: Enter-to-commit is a single gesture that applies + writes to config**, Esc discards everything. No dedicated Save button
+4. **Preview mechanism: `preview_theme: Option<Theme>` is referenced in place of `gpu.theme` at draw time** (TerminalColors injection rejected) — previews everything down to selection color, search color, and OverlayStyle, with no contamination of terminal state
 
-Magi裁定 (採用):
-- プレビュー中はオーバーレイに「クロム/タブはSaveで更新」バッジを表示 (クロムdimming等のGPU工事はしない)
-- クロム更新の再起動送りは否決 — 確定時ワンショット完全スワップ (OnceLock→可変化 + Optionテクスチャ約12個をNoneリセット→lazy-init自動再構築)
-- ライブ/確定のみの線引きは「毎フレーム解決可能か」の機構基準: opacity・cursorは即時、font-sizeはdebounce(~150ms)、font-familyは確定のみ
+Magi's ruling (adopted):
+- While previewing, the overlay shows a "chrome/tabs update on Save" badge (no GPU work such as chrome dimming)
+- Deferring the chrome update to a restart was rejected — commit performs a one-shot full swap (OnceLock → made mutable + resetting roughly 12 Option textures to None → auto-rebuild via lazy-init)
+- The line between live and commit-only is drawn on a mechanical basis of "can it be resolved every frame": opacity/cursor are immediate, font-size is debounced (~150ms), font-family is commit-only
 
-Ripple実現性検証 (要点):
-- `preview_theme`差替: `Theme`は毎フレーム`resolve_with_colors`で参照されるため差替は低リスク。焼込クロムのみ非対象
-- 確定スワップ爆発半径: ~3ファイル (`chrome.rs`/`app.rs`/`app/state.rs`)、MEDIUM
-- **config書込は新規工事**: `noa-config`は現状パース専用。locked spec `ghostty-config.md`に従いGhostty流 line-oriented `key = value` 形式(TOML廃止済)。コメント・未知キー保持のsurgical更新が必要
-- font-sizeライブ適用は既存`runtime_font_size`経路 (`app/input_ops.rs:30-70`) 再利用
-- **background-opacityの不透明→透明遷移は不可** (winitウィンドウ生成時固定) — SPECIFYで扱い決定要
-- CLIフラグ(--font-size等)と書込値の優先関係は製品判断が必要 — SPECIFYで決定要
+Ripple feasibility check (key points):
+- `preview_theme` swap-in: since `Theme` is referenced every frame via `resolve_with_colors`, swapping it in is low risk. Only baked-in chrome is out of scope
+- Blast radius of the commit swap: ~3 files (`chrome.rs` / `app.rs` / `app/state.rs`), MEDIUM
+- **Config write is new work**: `noa-config` is currently parse-only. Per the locked spec `ghostty-config.md`, it must follow Ghostty's line-oriented `key = value` format (TOML has been dropped). A surgical update that preserves comments and unknown keys is required
+- Live application of font-size can reuse the existing `runtime_font_size` path (`app/input_ops.rs:30-70`)
+- **The opaque→transparent transition for background-opacity is not possible** (fixed at winit window creation) — needs a decision in SPECIFY
+- The priority relationship between CLI flags (--font-size, etc.) and the written value needs a product decision — needs a decision in SPECIFY
 
 ### Considered but rejected
-- 候補2 独立設定ウィンドウ+分離プレビュー — 「実画面即時反映」を満たさない・スワップ経路2系統化
-- 候補3 ハイライト毎の完全ライブスワップ — テクスチャ再構築のスクラブ速度性能が未検証でリスクがライブセッション直撃
-- 候補4 A/Bペア比較 — レンダ工数大・汎用設定に一般化不可
-- TerminalColors注入プレビュー — 選択色・検索色非対象、プログラムOSC状態との衝突ケア必要 (preview_theme差替が優位)
-- キュレーション済み〜20テーマ既定表示 — ユーザー不採用 (フラット574一覧+fuzzy検索)
-- 永続化=副作用(kitty流) — ユーザー不採用 (Enter明示確定)
-- クロム更新の再起動送り — Magi否決 (Save直後の半適用状態は不具合に見える)
-- 関連: 既存locked spec `theme-selection.md` (カタログ・起動時適用は実装済の土台)。同specの範囲外だった「一覧確認・試着 (JTBD-3, v1 DEFER)」を本specが引き受ける
+- Candidate 2, independent settings window with separate preview — fails to satisfy "immediate reflection onto the real screen"; would create two separate swap paths
+- Candidate 3, fully live swap on every highlight — the scrub-speed performance of texture rebuilds is unverified and the risk hits the live session directly
+- Candidate 4, A/B pair comparison — high rendering cost, does not generalize to general settings
+- TerminalColors injection preview — does not cover selection color or search color, and requires care around conflicts with program OSC state (`preview_theme` swap-in is superior)
+- Showing a curated top-~20 theme list by default — rejected by the user (flat list of 574 + fuzzy search)
+- Persistence as a side effect (kitty-style) — rejected by the user (explicit Enter-to-commit)
+- Deferring the chrome update to a restart — rejected by Magi (a half-applied state right after Save looks like a bug)
+- Related: the existing locked spec `theme-selection.md` (the catalog and startup application are an already-implemented foundation). This spec takes over "browsing/trying on (JTBD-3, v1 DEFER)," which was out of scope for that spec
 
-## SHAPE — 提案 (承認済 2026-07-06、全件推奨デフォルト採用)
+## SHAPE — Proposal (approved 2026-07-06, all recommended defaults adopted)
 
 ### Proposed solution
-- **起動トリガー:** コマンドパレット新規エントリ「テーマ・設定を開く」。既存⌘,(外部エディタでconfig)は変更せず並存。
-- **レイアウト:** command_palette様式のウィンドウ内オーバーレイ。第1セクション=テーマピッカー(左: fuzzy検索付き574件フラット一覧 / 右: 16 ANSI+truecolor固定サンプルペイン)。第2セクション=設定rows(同オーバーレイ内下部、スクロール)。
-- **キー操作:** ↑↓行選択、文字入力で型フィルタ、Tabでテーマ/設定セクションフォーカス切替、数値行は←→or直接入力。Enter確定、Escで全プレビュー取消・復帰。
-- **プレビュー機構:** `preview_theme: Option<Theme>`をdraw時に`gpu.theme`の代わりに参照。本文・選択色・検索色・OverlayStyle全対象。設定行は毎フレーム解決可否で即時/デバウンス/確定のみに分岐。プレビュー中は「クロム/タブはSaveで更新」バッジ表示。
-- **Enter確定シーケンス:** ①クロム完全スワップ(`ACTIVE_PALETTE`可変化+焼込テクスチャ約12個Noneリセット→lazy-init再構築) ②config surgical書込(ghostty-config形式、変更キー行のみ置換、コメント・未知キー・他行保持)。単一ジェスチャで両方実行、半端な適用状態を作らない。
+- **Launch trigger:** a new command palette entry "Open Theme & Settings." The existing ⌘, (external editor for config) is left unchanged and coexists.
+- **Layout:** an in-window overlay in command_palette style. Section 1 = theme picker (left: flat list of 574 with fuzzy search / right: fixed sample pane for 16 ANSI + truecolor). Section 2 = settings rows (below, in the same overlay, scrollable).
+- **Key operations:** ↑↓ to select a row, typing to type-filter, Tab to switch focus between the theme/settings sections, numeric rows use ←→ or direct input. Enter to commit, Esc to discard all preview state and revert.
+- **Preview mechanism:** `preview_theme: Option<Theme>` is referenced in place of `gpu.theme` at draw time. Covers body text, selection color, search color, and OverlayStyle. Settings rows branch into immediate/debounced/commit-only based on whether they can be resolved every frame. While previewing, a "chrome/tabs update on Save" badge is shown.
+- **Enter-to-commit sequence:** ① full chrome swap (`ACTIVE_PALETTE` made mutable and swapped to the new theme value; roughly 12 baked-in textures reset to None → rebuilt via lazy-init) ② surgical config write (ghostty-config format, replacing only the changed key lines, preserving comments, unknown keys, and other lines). Both run as a single gesture, never leaving a half-applied state.
 
-### Settings rows (v1, 計7行 — 確定)
-| キー | ウィジェット | ライブ | 備考 |
+### Settings rows (v1, 7 rows total — finalized)
+| Key | Widget | Live | Notes |
 |---|---|---|---|
-| font-size | 数値インライン(←→/直接入力) | live debounce ~150ms | 適用は既存`runtime_font_size`経路(app/input_ops.rs:30-70)を呼ぶ。debounce自体は新規の小規模タイマー状態機械(GPU呼出から分離した純ロジック) |
-| background-opacity | 数値(0.0–1.0) | live即時(透明起動時のみ) | blur-radiusと対 |
-| background-blur-radius | 数値 | live即時(同条件) | opacity=1.0時は無効化表示 |
-| cursor-style | サイクル行(block/bar/underline) | live即時 | 既存カーソルモード切替流用 |
-| font-family | サイクル行(fuzzy無し — 改訂 2026-07-06) | 確定のみ(永続化のみ・次回起動反映) | フォント再構築コスト高 |
-| window-padding-x/y | 数値(2キー1行、両軸同時ステップ — 改訂 2026-07-06) | 確定のみ(同上) | グリッド再計算を伴う |
-| macos-titlebar-style | サイクル行 | 確定のみ(同上) | ウィンドウchrome再構築を伴う |
+| font-size | inline numeric (←→ / direct input) | live, debounce ~150ms | Applied via the existing `runtime_font_size` path (app/input_ops.rs:30-70). The debounce itself is a new small timer state machine (pure logic decoupled from GPU calls) |
+| background-opacity | numeric (0.0–1.0) | live, immediate (only when launched transparent) | paired with blur-radius |
+| background-blur-radius | numeric | live, immediate (same condition) | disabled display when opacity=1.0 |
+| cursor-style | cycle row (block/bar/underline) | live, immediate | reuses the existing cursor mode switch |
+| font-family | cycle row (no fuzzy — revised 2026-07-06) | commit-only (persisted only, applied on next launch) | rebuilding the font is expensive |
+| window-padding-x/y | numeric (2 keys in 1 row, both axes step together — revised 2026-07-06) | commit-only (same as above) | involves grid recalculation |
+| macos-titlebar-style | cycle row | commit-only (same as above) | involves rebuilding the window chrome |
 
-### 確定済み判断 (旧Open questions、全件推奨採用)
-1. CLIフラグはセッション限定オーバーライド。設定UI確定時のconfig書込はCLI値を上書き反映しない(既存優先モデル維持)
-2. 不透明(opacity=1.0)起動時: opacity/blur行の編集・書込は可、プレビューなし+「再起動後に反映」ノート表示
-3. 確定は全ウィンドウへ即時伝播(プロセス単一状態の自然な帰結。SPECIFYで実現性検証)
-4. サンプルペインは左リスト+右サンプルの横並び
-5. 設定rowsはv1で7行固定。追加要望は別増分
-6. surgical書込はghostty-config import writer(`build_import_output`)の「元行テキスト保持+対象キー行のみ置換」方式踏襲、新規パーサー機構なし
+### Finalized decisions (formerly Open Questions, all recommended options adopted)
+1. CLI flags are session-only overrides. When the settings UI commits a config write, it does not overwrite it with the CLI value (preserves the existing precedence model)
+2. When launched opaque (opacity=1.0): editing/writing the opacity/blur rows is allowed, but no preview — show a "takes effect after restart" note
+3. Commit propagates immediately to all windows (a natural consequence of single-process state; feasibility to be verified in SPECIFY)
+4. The sample pane is laid out as list on the left, sample on the right
+5. Settings rows are fixed at 7 for v1; additional requests go into a separate increment
+6. Surgical write follows the same approach as the ghostty-config import writer (`build_import_output`) — "preserve original line text, replace only the target key's line" — no new parser mechanism
 
 ### Assumptions
-- オーバーレイは単一ウィンドウで開く。確定スワップはプロセス単一状態のため他ウィンドウへ自動伝播
-- font-family一覧は既存font-kit discoveryをそのまま使用、テーマ一覧と同じfuzzy検索UX
-- opaque→transparentのランタイム遷移は不可(winitウィンドウ生成時固定)という既存制約は変更しない
+- The overlay opens on a single window. Commit swap propagates automatically to other windows because it is single-process state
+- The font-family list uses the existing font-kit discovery as-is, with the same fuzzy-search UX as the theme list
+- The existing constraint that runtime opaque→transparent transition is not possible (fixed at winit window creation) is unchanged
 
 ## L1 — Requirements
 
-### オーバーレイ起動・構成
-- **R-1**: コマンドパレットに新規エントリ「テーマ・設定を開く」を追加し、単一ウィンドウ内オーバーレイを開く。パレットのエントリ選択はパレットを同期的に閉じてからコマンドをディスパッチする(既存パレット挙動を踏襲)ため、R-3の相互排他と起動導線は矛盾しない。既存⌘,(外部エディタ起動)は変更せず並存する。
-- **R-2**: オーバーレイは command_palette 様式(独立ウィンドウではない)。第1セクション=テーマピッカー(左:574件フラット一覧+fuzzy検索/右:サンプルペイン)、第2セクション=設定rows(スクロール)。Tab で2セクション間のフォーカスを切替える。キー操作モデルは全行で統一: ↑↓=行選択(値調整には使わない)、←→=フォーカス行の値調整(数値行のステップ増減・サイクル行の巡回)、数値行は直接入力も可。
-- **R-3**: 他のオーバーレイ(コマンドパレット・検索)が開いている間はテーマ・設定オーバーレイを開始できない(相互排他)。逆に本オーバーレイが開いている間は他オーバーレイの起動ショートカットを無視する。
+### Overlay launch and composition
+- **R-1**: Add a new command palette entry "Open Theme & Settings" that opens a single in-window overlay. Since selecting a palette entry synchronously closes the palette before dispatching the command (existing palette behavior), this does not conflict with the mutual exclusion in R-3 or the launch path. The existing ⌘, (launch external editor) is left unchanged and coexists.
+- **R-2**: The overlay is in command_palette style (not an independent window). Section 1 = theme picker (left: flat list of 574 + fuzzy search / right: sample pane), Section 2 = settings rows (scrollable). Tab switches focus between the two sections. The key-operation model is unified across all rows: ↑↓ = select row (not used for value adjustment), ←→ = adjust the value of the focused row (step increment/decrement for numeric rows, cycle for cycle rows); numeric rows also accept direct input.
+- **R-3**: The theme & settings overlay cannot be started while another overlay (command palette, search) is open (mutual exclusion). Conversely, while this overlay is open, launch shortcuts for other overlays are ignored.
 
-### テーマピッカー・プレビュー
-- **R-4**: 574件フラット一覧を表示し、文字入力でリアルタイム fuzzy フィルタする(キュレーション表示なし)。
-- **R-5**: サンプルペインは16 ANSI色+truecolor固定見本を常時表示する(空画面でも全色確認可能)。
-- **R-6**: 一覧でのハイライト変更を `preview_theme: Option<Theme>` に反映し、本文・選択色・検索色・`OverlayStyle` の全てが次フレームまでに切り替わる。ターミナルの実状態(`TerminalColors`)は無汚染のまま維持する。
-- **R-7**: プレビュー中はオーバーレイ内に「クロム/タブはSaveで更新」バッジを表示する(クロム自体の外観は変更しない)。
+### Theme picker / preview
+- **R-4**: Display the flat list of 574 entries, with real-time fuzzy filtering as the user types (no curated display).
+- **R-5**: The sample pane always shows fixed swatches for the 16 ANSI colors + truecolor (all colors can be checked even on a blank screen).
+- **R-6**: Reflect list highlight changes into `preview_theme: Option<Theme>`, so that body text, selection color, search color, and `OverlayStyle` all switch by the next frame. The terminal's actual state (`TerminalColors`) remains uncontaminated.
+- **R-7**: While previewing, show a "chrome/tabs update on Save" badge within the overlay (the chrome's own appearance does not change).
 
-### 設定rows(v1, 7行固定)
-- **R-8**: font-size / background-opacity / background-blur-radius / cursor-style の4行はライブプレビュー対象。font-family / window-padding-x,y / macos-titlebar-style の3行は**確定時にconfigへ永続化のみ行い、反映は次回起動時**とする(改訂 2026-07-06、ユーザー裁定 — ランタイム適用経路が存在しないため)。この3行がtouchedの場合、R-11と同じ「再起動後に反映」ノートを行に表示する。各行の分類はウィジェット単位で固定し、実行時に切替不可とする。
-- **R-9**: font-size 行は ~150ms のデバウンスを経て既存 `runtime_font_size` 経路(`noa-app/src/app/input_ops.rs:30-70`)を呼び出して適用する。デバウンスは新規の小規模タイマー状態機械として実装し(既存コードにデバウンス機構は存在しない)、GPU呼出から分離した純ロジックとして単体テスト可能にする。
-- **R-10**: background-opacity/background-blur-radius は即時反映(opaque起動時を除く)。cursor-style は即時反映。
-- **R-11**: 不透明(opacity=1.0)で起動した場合、opacity/blur行は編集・確定時の書込みは可能だがプレビューは行わず、「再起動後に反映」の注記を行に表示する(opaque→transparent のランタイム遷移不可という既存制約はそのまま)。
+### Settings rows (v1, 7 rows fixed)
+- **R-8**: The 4 rows font-size / background-opacity / background-blur-radius / cursor-style are subject to live preview. The 3 rows font-family / window-padding-x,y / macos-titlebar-style **only persist to config on commit, taking effect on the next launch** (revised 2026-07-06, user ruling — because no runtime application path exists). When any of these 3 rows is touched, show the same "takes effect after restart" note as in R-11 on that row. Each row's classification is fixed per widget and cannot be switched at runtime.
+- **R-9**: The font-size row applies via the existing `runtime_font_size` path (`noa-app/src/app/input_ops.rs:30-70`) after a ~150ms debounce. The debounce is implemented as a new small timer state machine (no debounce mechanism currently exists in the codebase), as pure logic decoupled from GPU calls, unit-testable.
+- **R-10**: background-opacity / background-blur-radius apply immediately (except when launched opaque). cursor-style applies immediately.
+- **R-11**: When launched opaque (opacity=1.0), the opacity/blur rows can still be edited and written on commit, but are not previewed; show a "takes effect after restart" note on the row (the existing constraint that opaque→transparent runtime transition is impossible remains unchanged).
 
-### 確定シーケンス(commit)
-- **R-12**: Enter は「config書込み」→「クロム完全スワップ」の順で単一ジェスチャとして実行する。書込み(失敗しうる唯一の段)が先: 書込みが失敗した場合はクロムスワップを行わず、プレビュー状態を維持したままオーバーレイ内にエラーを表示する。書込み成功後のクロムスワップはインメモリ操作のみで実質失敗しないため、「片方のみ適用された中間状態」は構造的に発生しない。
-- **R-13**: クロムスワップは `chrome::ACTIVE_PALETTE` を可変化した上で新テーマ値へ差し替え、焼込済みGPUテクスチャ群(`app.rs:943-954`、約12個)を `None` にリセットして次回描画時の lazy-init で再構築させる。
-- **R-14**: config書込みは `~/.config/noa/config`(ghostty-config形式)に対し、変更のあった行のみをテキスト置換し、コメント・未知キー・他キーの行および元の行順を保持する(surgical update)。書込みはテンポラリファイル+rename により原子的に行う。
-- **R-15**: config ファイルが存在しない場合、新規作成して確定した設定値のみを書き込む(既存キーが無いため全行が新規追加行になる)。
-- **R-16**: Esc は `preview_theme` を `None` に戻し、設定rowsの編集下書き(draft値)を破棄して、オーバーレイを開く直前の状態に完全復帰する。config書込みは一切行わない。
+### Commit sequence
+- **R-12**: Enter executes, as a single gesture, "config write" → "full chrome swap," in that order. The write (the only step that can fail) comes first: if the write fails, the chrome swap is skipped, the preview state is retained, and an error is shown within the overlay. Because the chrome swap after a successful write is an in-memory-only operation that effectively cannot fail, a "half-applied" intermediate state cannot structurally occur.
+- **R-13**: The chrome swap makes `chrome::ACTIVE_PALETTE` mutable and swaps in the new theme value, resets the baked-in GPU texture set (`app.rs:943-954`, roughly 12 of them) to `None`, and lets lazy-init rebuild them on the next draw.
+- **R-14**: The config write replaces, in `~/.config/noa/config` (ghostty-config format), only the text of lines that changed, preserving comments, unknown keys, other key lines, and the original line order (surgical update). The write is performed atomically via a temp file + rename.
+- **R-15**: If the config file does not exist, create it and write only the committed setting values (since no existing keys exist, all lines become newly appended lines).
+- **R-16**: Esc resets `preview_theme` to `None`, discards the draft values of the settings rows, and fully restores the state to what it was immediately before the overlay was opened. No config write occurs.
 
-### 優先順位・伝播
-- **R-17**: CLIフラグ(`--font-size` 等)によるセッション限定オーバーライドは、確定時の config 書込み値には反映しない(書込み値は常にオーバーレイ操作前の config 値+今回の変更分のみ)。既存の CLI > file > default モデルは変更しない。
-- **R-18**: 確定(commit)はプロセス内の全ウィンドウ状態を走査して各ウィンドウに再描画(`request_redraw`)を要求し、各ウィンドウの次回描画フレームで新テーマ・新設定が反映される(バックグラウンドウィンドウが古いクロムのまま放置されない)。
+### Priority / propagation
+- **R-17**: Session-only overrides from CLI flags (`--font-size` etc.) are not reflected in the config value written on commit (the written value is always the config value before the overlay operation plus this round's changes only). The existing CLI > file > default model is unchanged.
+- **R-18**: On commit, walk all in-process window states and request a redraw (`request_redraw`) for each, so the new theme/settings are reflected on each window's next draw frame (no background window is left with stale chrome).
 
-### 非機能要件
-- **NFR-1(プレビュー遅延)**: ハイライト変更(テーマ一覧・cursor-style・opacity/blur)からの反映は次フレーム描画までに完了する。プレビュー解決+再描画要求の処理は1フレームバジェット(60Hz基準で約16ms)以内に収まること。
-- **NFR-2(スクラブ性能)**: 一覧ハイライトのスクラブ中および font-size デバウンス待機中に、GPUテクスチャの再構築(atlas/焼込テクスチャの再生成)を発生させない。テクスチャ再構築はEnter確定時の一度のみ。
-- **NFR-3(書込み原子性)**: config書込みはテンポラリファイル+rename方式とし、書込み途中でのプロセス終了・クラッシュがconfigファイルを破損させない。
-- **NFR-4(config欠如時の継続性)**: config ファイルが存在しない状態からの確定は失敗せず、新規ファイルを作成する。
-- **NFR-5(surgical性)**: 書込み後、変更対象キー以外の行(コメント・未知キー・キー順)は書込み前後でバイト単位一致する。
-- **NFR-6(CLI非汚染)**: CLIオーバーライドが有効なセッションでオーバーレイを確定しても、config書込み値にCLI由来の値が混入しない。
+### Non-functional requirements
+- **NFR-1 (preview latency)**: Highlight changes (theme list, cursor-style, opacity/blur) are reflected by the next draw frame. Preview resolution + redraw request processing must complete within a single frame budget (roughly 16ms at 60Hz).
+- **NFR-2 (scrub performance)**: While scrubbing through the list highlight or waiting on the font-size debounce, GPU texture rebuilds (regenerating atlas/baked-in textures) must not occur. Texture rebuild happens exactly once, on Enter-to-commit.
+- **NFR-3 (write atomicity)**: Config writes use a temp file + rename, so a process termination or crash mid-write does not corrupt the config file.
+- **NFR-4 (continuity when config is absent)**: A commit from a state with no config file present does not fail; it creates a new file.
+- **NFR-5 (surgicality)**: After the write, lines other than the changed keys (comments, unknown keys, key order) are byte-for-byte identical before and after the write.
+- **NFR-6 (CLI non-contamination)**: Committing the overlay in a session with an active CLI override does not let the CLI-derived value leak into the written config value.
 
 ## L2 — Detail
 
-### noa-app(主変更点)
-- 新規モジュール(例 `noa-app/src/theme_settings.rs` 相当)にオーバーレイ状態を保持: `preview_theme: Option<Theme>`、設定rows の draft 値(font_size/opacity/blur/cursor_style は即時反映用、font_family/padding/titlebar は確定のみのdraft保持用)。
-- draw経路: 現在 `GpuState.theme`(`app.rs:922-942`で起動時一度だけ代入)を直接参照している箇所を、`preview_theme.as_ref().unwrap_or(&gpu.theme)` を経由する解決関数に差し替える。`Theme::resolve_with_colors` 呼び出し(OSC動的色との合成、毎フレーム実行)はこの解決後の `Theme` を受け取るだけで変更不要。
-- `chrome::ACTIVE_PALETTE`(`chrome.rs:129-147`、現状 `OnceLock` 単一書込)を可変な保持(`RwLock`/`Mutex` 等)に変更し、確定時に差し替え可能にする。差し替えロジックは `chrome.rs` 単体で `GpuState` 不要のユニットテスト対象(AC-9)。
-- 焼込テクスチャ約12個(`app.rs:943-954` の `Option` フィールド群)は、リセット可能なサブ構造体(例 `ChromeTextures`)に集約し `reset()` メソッドを与える。`Option` を `None` に戻す操作は純粋なため、この構造はGPUデバイスなしでユニットテスト可能(AC-20)。lazy-init 再構築は既存の draw 経路がそのまま担う。
-- サブ構造体には debug ビルド限定の再構築カウンタ(`AtomicUsize` 等)を持たせ、lazy-init 実行回数を計測可能にする(NFR-2/AC-18 の検証手段。既存コードに計測フックが無いことをGateで確認済みのため、これは実装の納品物)。
-- 確定時の順序(R-12): (1) `noa-config` 新設 writer による config書込み — 失敗時はここで中断しエラー表示、(2) 書込み成功後に `ACTIVE_PALETTE` 差し替え + `ChromeTextures::reset()` + `gpu.theme` 更新、(3) 全ウィンドウ走査で `request_redraw`(R-18)。単一関数内で同期実行する。
-- font-size のデバウンスは新規の小規模タイマー状態機械(入力: タイムスタンプ付き値変更列 → 出力: 発火すべき最終値)として GPU 呼出から分離したモジュールに実装し、発火時に既存 `runtime_font_size` 経路(`app/input_ops.rs:30-70`)を呼び出す。
-- 各タブ/ウィンドウの `Terminal` 生成箇所には手を入れない(`preview_theme` は grid の `TerminalColors` に注入しない — 確定裁定4)。
+### noa-app (main changes)
+- A new module (e.g. `noa-app/src/theme_settings.rs`) holds the overlay state: `preview_theme: Option<Theme>`, draft values for the settings rows (font_size/opacity/blur/cursor_style for immediate application; font_family/padding/titlebar as commit-only draft holders).
+- Draw path: replace direct references to `GpuState.theme` (currently assigned once at startup in `app.rs:922-942`) with a resolver function that goes through `preview_theme.as_ref().unwrap_or(&gpu.theme)`. The `Theme::resolve_with_colors` call (composited with OSC dynamic colors, run every frame) just receives the resolved `Theme` and needs no change.
+- Change `chrome::ACTIVE_PALETTE` (`chrome.rs:129-147`, currently a single-write `OnceLock`) to a mutable holder (`RwLock`/`Mutex`, etc.) so it can be swapped on commit. The swap logic is unit-testable in `chrome.rs` alone, without needing `GpuState` (AC-9).
+- Consolidate the roughly 12 baked-in textures (the `Option` field group in `app.rs:943-954`) into a resettable substructure (e.g. `ChromeTextures`) with a `reset()` method. Since resetting `Option` fields to `None` is a pure operation, this structure is unit-testable without a GPU device (AC-20). The existing draw path continues to handle lazy-init rebuilding.
+- Give the substructure a debug-build-only rebuild counter (e.g. `AtomicUsize`) so the number of lazy-init rebuilds can be measured (the verification mechanism for NFR-2/AC-18; confirmed at the Gate that no such measurement hook exists in the current code, so this is a deliverable of the implementation).
+- Commit ordering (R-12): (1) config write via the new `noa-config` writer — on failure, abort here and show an error, (2) after a successful write, swap `ACTIVE_PALETTE` + `ChromeTextures::reset()` + update `gpu.theme`, (3) walk all windows and call `request_redraw` (R-18). Executed synchronously within a single function.
+- The font-size debounce is implemented as a new small timer state machine (input: a timestamped sequence of value changes → output: the final value that should fire) in a module decoupled from GPU calls, calling the existing `runtime_font_size` path (`app/input_ops.rs:30-70`) when it fires.
+- No changes to where each tab/window's `Terminal` is created (`preview_theme` is not injected into the grid's `TerminalColors` — per ruling 4).
 
-### noa-config(新規: writer)
-- 新規モジュール `src/writer.rs`(仮)。ghostty-config 増分の `parser.rs`(`parse_directives` → 行番号付き `Directive`)を再利用し、`build_import_output`(`import.rs`)と同型の「純粋関数(文字列処理)+ I/Oの薄いラッパー」構成を踏襲するが、機能は逆方向: 既存configの生テキストを読み、変更対象キーに対応する `Directive.line` の行だけを新しい `key = value` 行に置換し、他の全行(コメント・未知キー・list型キー行含む)を元のテキストのまま保持する。対象キーが元テキストに存在しない場合は末尾に新規行として追記する。
-- I/O部はテンポラリファイル書込み+`rename`で原子性を担保する(NFR-3)。書込み先は `default_config_path()`(ghostty-config スペック定義済み、`<config_dir>/noa/config`)。
-- config ファイル自体が存在しない場合は空文字列を入力として同じ置換ロジックを通す(全行が新規追記になる、NFR-4)。
-- CLI由来の値は本 writer の入力に含めない(呼び出し元の `noa-app` がオーバーレイのdraft値のみを渡す、R-17/NFR-6)。
+### noa-config (new: writer)
+- New module `src/writer.rs` (tentative name). Reuses the ghostty-config-era `parser.rs` (`parse_directives` → line-numbered `Directive`), and follows the same "pure function (string processing) + thin I/O wrapper" structure as `build_import_output` (`import.rs`), but works in the reverse direction: it reads the existing config's raw text and, for the key(s) being changed, replaces only the line at the corresponding `Directive.line` with a new `key = value` line, while preserving every other line (comments, unknown keys, list-type key lines included) exactly as in the original text. If a target key does not exist in the original text, it is appended as a new line at the end.
+- The I/O layer guarantees atomicity via a temp-file write + `rename` (NFR-3). The write target is `default_config_path()` (as defined in the ghostty-config spec, `<config_dir>/noa/config`).
+- If the config file itself does not exist, feed an empty string through the same replacement logic as input (all lines become new appends, NFR-4).
+- CLI-derived values are never included in this writer's input (the caller, `noa-app`, passes only the overlay's draft values, R-17/NFR-6).
 
 ### noa-render
-- 変更なし。`OverlayStyle::from_theme()` はオンデマンド計算のため、`noa-app` 側が渡す `Theme` が差し替われば自動追従する(既存資産の再利用のみ)。
+- No changes. `OverlayStyle::from_theme()` is computed on demand, so it automatically follows whenever `noa-app` passes in a swapped `Theme` (pure reuse of an existing asset).
 
-### エッジケース
-- **fuzzy検索が空一致**: 一覧を空表示にし、サンプルペインは直前にハイライトしていたテーマ(またはオーバーレイを開いた時点のアクティブテーマ)を保持したままにする。`preview_theme` を勝手に `None` へ戻さない。
-- **config に存在しないテーマ名で起動している状態でオーバーレイを開く**: 既存の起動時フォールバック(デフォルトテーマ+warn、`theme-selection.md` R-3)で解決済みのテーマがアクティブテーマとして表示される。オーバーレイ内では不正名を再現しない。
-- **config に CLI オーバーライドが効いている状態で開く**: ピッカー/設定rowsの初期選択はセッション中のアクティブ値(CLI由来含む)を表示するが、確定時のconfig書込みはCLI由来の値を書かない(R-17)。
-- **font-size のデバウンス中に Esc**: デバウンスタイマーを破棄し(未発火の値変更は捨てる)、既に発火済みの変更があれば `runtime_font_size` をオーバーレイを開いた時点の値へ戻す。
-- **他オーバーレイが開いている間の起動要求**: R-3により起動要求自体を無視する(エラー表示なし、無音で無視)。
+### Edge cases
+- **Fuzzy search yields zero matches**: show an empty list, and keep the sample pane showing the previously highlighted theme (or the active theme at the moment the overlay was opened). Do not reset `preview_theme` to `None` on its own.
+- **Opening the overlay while running with a theme name not present in config**: the existing startup fallback (default theme + warn, `theme-selection.md` R-3) has already resolved an active theme, and that is what is shown. The overlay does not reproduce the invalid name.
+- **Opening while a CLI override is in effect on top of config**: the picker/settings rows' initial selection shows the session's active value (including CLI-derived ones), but the config write on commit does not write the CLI-derived value (R-17).
+- **Esc during the font-size debounce**: discard the debounce timer (any unfired value change is dropped), and if a change has already fired, restore `runtime_font_size` to the value it had when the overlay was opened.
+- **A launch request while another overlay is open**: per R-3, the launch request itself is simply ignored (no error shown, silently ignored).
 
 ## L3 — Acceptance Criteria
 
-検証手段の凡例: [unit]=GPU不要のユニットテスト / [integration]=tempdir等を使う結合テスト / [code-review]=実装検査 / [GUI目視]=手動確認。
+Legend for verification method: [unit] = GPU-free unit test / [integration] = integration test using e.g. a tempdir / [code-review] = implementation inspection / [GUI visual check] = manual verification.
 
-### 起動・レイアウト
-- **AC-21 (R-1)** [unit]: Given コマンドパレットで「テーマ・設定を開く」を選択する。When コマンドディスパッチ後の状態を検査する。Then パレットは閉じており、テーマ・設定オーバーレイが開いている。
-- **AC-22 (R-2)** [unit]: Given オーバーレイが開いている。When Tab を押す。Then フォーカスセクションがテーマピッカー⇄設定rowsで切り替わる。また設定rowsフォーカス中、↑↓は行選択を移動し、←→はフォーカス行の値を変更する(キールーティングの状態機械テスト)。
-- **AC-17 (R-3)** [unit]: Given コマンドパレットが開いている。When テーマ・設定オーバーレイの起動を要求する。Then 何も起きない(オーバーレイが開かない)。
+### Launch / layout
+- **AC-21 (R-1)** [unit]: Given selecting "Open Theme & Settings" in the command palette. When inspecting state after the command dispatch. Then the palette is closed and the theme & settings overlay is open.
+- **AC-22 (R-2)** [unit]: Given the overlay is open. When Tab is pressed. Then the focused section toggles between theme picker ⇄ settings rows. Also, while settings rows are focused, ↑↓ moves the row selection and ←→ changes the value of the focused row (a state-machine test of key routing).
+- **AC-17 (R-3)** [unit]: Given the command palette is open. When requesting the theme & settings overlay to open. Then nothing happens (the overlay does not open).
 
-### プレビュー
-- **AC-1 (R-6)** [unit]: Given `preview_theme` に別テーマを設定する。When 解決関数(`preview_theme.as_ref().unwrap_or(&gpu.theme)` 相当)の出力を `resolve_with_colors` に通して検査する。Then (a)本文デフォルトfg/bg (b)選択色 (c)検索ハイライト色 (d)`OverlayStyle::from_theme` 出力、の4点がそれぞれ新テーマの値に一致する(描画ループ不要、リゾルバ直接呼び出し)。
-- **AC-2 (R-6)** [unit]: Given `preview_theme` が `Some` の状態。When `TerminalColors` の内部状態を検査する。Then プレビュー前と一致し変更されていない(無汚染性)。
-- **AC-3 (R-5)** [unit]: サンプルペインの表示データが16 ANSI色全て+truecolor見本を含むことをデータ構造レベルで検証する。実際のグリフ描画は確定前後のGUI目視スポットチェックで補完(任意)。
-- **AC-4 (R-7)**: (a) [unit] `preview_theme.is_some()` のときバッジ表示フラグが立ち、`None` で消えること。(b) [GUI目視] プレビュー中にクロム自体の外観が確定まで変化しないこと。
+### Preview
+- **AC-1 (R-6)** [unit]: Given setting `preview_theme` to a different theme. When passing the resolver function's output (equivalent to `preview_theme.as_ref().unwrap_or(&gpu.theme)`) through `resolve_with_colors` and inspecting it. Then all four of (a) default body fg/bg (b) selection color (c) search highlight color (d) `OverlayStyle::from_theme` output match the new theme's values (no draw loop needed, resolver called directly).
+- **AC-2 (R-6)** [unit]: Given `preview_theme` is `Some`. When inspecting `TerminalColors`' internal state. Then it is unchanged from before the preview (no contamination).
+- **AC-3 (R-5)** [unit]: Verify at the data-structure level that the sample pane's display data includes all 16 ANSI colors plus the truecolor sample. Actual glyph rendering is supplemented (optionally) by a GUI visual spot check before/after commit.
+- **AC-4 (R-7)**: (a) [unit] The badge display flag is set when `preview_theme.is_some()` and clears when `None`. (b) [GUI visual check] The chrome's own appearance does not change during preview, until commit.
 
-### 設定rows
-- **AC-5 (R-8, R-10)** [unit]: Given cursor-style行の値を変更する。When オーバーレイ状態を検査する。Then カーソル描画モード(enum)が即時に新値へ切り替わっている。
-- **AC-6 (R-9)** [unit]: Given デバウンスタイマー状態機械にタイムスタンプ付きの値変更列(間隔<150ms)を入力する。When 150ms経過をシミュレートする。Then 発火は1回のみで、最後の値が出力される(GPU呼出から分離した純ロジックのテスト)。
-- **AC-7 (R-11)**: (a) [unit] opacity=1.0起動状態でopacity/blur行を編集したとき、プレビュー適用フラグが立たず「再起動後に反映」注記フラグが立つこと。(b) [GUI目視] 実画面でプレビューが起きないこと。書込み自体はAC-11系で検証。
+### Settings rows
+- **AC-5 (R-8, R-10)** [unit]: Given changing the value of the cursor-style row. When inspecting overlay state. Then the cursor draw mode (enum) has switched to the new value immediately.
+- **AC-6 (R-9)** [unit]: Given feeding a timestamped sequence of value changes (intervals < 150ms) into the debounce timer state machine. When simulating 150ms elapsing. Then it fires exactly once, outputting the last value (a test of pure logic decoupled from GPU calls).
+- **AC-7 (R-11)**: (a) [unit] When editing the opacity/blur rows while launched with opacity=1.0, the preview-apply flag does not get set and the "takes effect after restart" note flag is set. (b) [GUI visual check] No preview occurs on the real screen. The write itself is verified by the AC-11 series.
 
-### 確定(commit)・Esc
-- **AC-8 (R-16)** [unit]: Given `preview_theme=Some` かつ設定rows draft が変更済み。When Esc を押す。Then `preview_theme` が `None` に戻り、draft値が破棄され、config書込み(注入したモックwriter)の呼び出し回数が0である。
-- **AC-9 (R-13)** [unit]: `chrome.rs` 単体で、可変化した `ACTIVE_PALETTE` を新パレットに差し替え、読み出しが新値を返すこと(`GpuState` 不要)。
-- **AC-20 (R-13)** [unit]: `ChromeTextures::reset()` を呼ぶと全 `Option` フィールドが `None` になること(GPUデバイス不要の純粋操作)。
-- **AC-23 (R-12)** [unit]: Given 注入したモックwriterが書込み失敗を返す。When Enter確定を実行する。Then クロムスワップ・`gpu.theme` 更新は実行されず、`preview_theme` は維持され、エラー表示フラグが立つ。
-- **AC-10 (R-12)** [code-review]: commit関数がconfig書込み成功→クロムスワップ→再描画要求を単一関数内で同期実行し、途中でフレーム描画が割り込める構造になっていないことを実装検査で確認する(+任意のGUI目視スポットチェック)。
+### Commit / Esc
+- **AC-8 (R-16)** [unit]: Given `preview_theme=Some` and settings-row drafts have been changed. When Esc is pressed. Then `preview_theme` reverts to `None`, the draft values are discarded, and the injected mock writer's config write call count is 0.
+- **AC-9 (R-13)** [unit]: In `chrome.rs` alone, swap the made-mutable `ACTIVE_PALETTE` to a new palette, and reads return the new value (no `GpuState` needed).
+- **AC-20 (R-13)** [unit]: Calling `ChromeTextures::reset()` sets all `Option` fields to `None` (a pure operation, no GPU device needed).
+- **AC-23 (R-12)** [unit]: Given an injected mock writer that returns a write failure. When executing Enter-to-commit. Then the chrome swap and `gpu.theme` update do not run, `preview_theme` is retained, and the error-display flag is set.
+- **AC-10 (R-12)** [code-review]: Confirm by implementation inspection that the commit function synchronously executes config write success → chrome swap → redraw request within a single function, with no structure that allows a frame draw to interleave partway through (plus an optional GUI visual spot check).
 
-### config書込み
-- **AC-11 (R-14, NFR-5)** [unit]: Given コメント・未知キー・複数の既存キーを含むconfigテキスト。When 1キーだけを変更してwriterを通す。Then 出力は変更キーの行以外が入力とバイト単位で完全一致する(純関数のラウンドトリップテスト、`build_import_output` テスト群と同型)。
-- **AC-12 (R-15, NFR-4)** [integration]: Given tempdir上にconfigファイルが存在しない状態。When 設定を1件変更して確定する。Then 新規ファイルが作成され、変更した値が書き込まれ、処理が失敗しない。
-- **AC-13 (NFR-3)** [code-review]: テンポラリファイル書込み後に `rename` で置換しており、書込み途中状態が外部から観測できない設計であることを確認する(前例: `noa-app/src/session.rs:347-354`)。
-- **AC-14 (R-17, NFR-6)** [integration]: Given `--font-size` CLIフラグ有効セッション相当の状態で別の値を設定rowで確定する。When 出力configを検査する。Then CLI由来の値ではなく、設定rowで確定した値が書かれている。
+### Config write
+- **AC-11 (R-14, NFR-5)** [unit]: Given config text containing comments, unknown keys, and multiple existing keys. When running it through the writer changing only one key. Then the output is byte-for-byte identical to the input except for the changed key's line (a pure-function round-trip test, of the same shape as the `build_import_output` test suite).
+- **AC-12 (R-15, NFR-4)** [integration]: Given no config file exists in a tempdir. When changing one setting and committing. Then a new file is created, the changed value is written, and the process does not fail.
+- **AC-13 (NFR-3)** [code-review]: Confirm the design writes to a temp file and then replaces it via `rename`, such that an in-progress write state is never observable externally (precedent: `noa-app/src/session.rs:347-354`).
+- **AC-14 (R-17, NFR-6)** [integration]: Given a state equivalent to a session with the `--font-size` CLI flag active, committing a different value via the settings row. When inspecting the output config. Then it contains the value committed via the settings row, not the CLI-derived value.
 
-### 伝播・エッジケース
-- **AC-24 (R-18)** [unit]: Given 複数ウィンドウ状態(モック)。When commitを実行する。Then 全ウィンドウに対して再描画要求が発行されている(呼び出し記録の検証)。
-- **AC-15 (R-18)** [GUI目視]: 複数ウィンドウを開いた状態で1ウィンドウのオーバーレイから確定し、全ウィンドウのクロム/本文が新テーマ・新設定に切り替わることを最終確認する。
-- **AC-16 (R-4)** [unit]: Given fuzzy検索で一致0件になる文字列を入力する。When 一覧を確認する。Then 一覧は空だが `preview_theme` は直前の値を維持している。
+### Propagation / edge cases
+- **AC-24 (R-18)** [unit]: Given multiple (mocked) window states. When executing commit. Then a redraw request has been issued for every window (verified via call records).
+- **AC-15 (R-18)** [GUI visual check]: With multiple windows open, commit from one window's overlay and do a final check that every window's chrome/body switches to the new theme and settings.
+- **AC-16 (R-4)** [unit]: Given entering a fuzzy search string with zero matches. When checking the list. Then the list is empty but `preview_theme` retains its previous value.
 
-### 性能
-- **AC-18 (NFR-2)** [unit]: Given debug再構築カウンタ(L2で規定した納品物)を持つ `ChromeTextures`。When テーマ一覧の連続ハイライト10件以上をシミュレートする。Then カウンタは0のまま、Enter確定後の次回描画で初めて一括再構築される(カウンタ増分が確定1回分のみ)。
-- **AC-19 (NFR-1)**: (a) [unit] プレビュー解決+再描画要求の処理が1フレームバジェット(約16ms@60Hz)以内で完了する計時テスト。(b) [GUI目視] 体感遅延がないことの確認(補助)。
+### Performance
+- **AC-18 (NFR-2)** [unit]: Given a `ChromeTextures` with the debug rebuild counter (deliverable specified in L2). When simulating 10+ consecutive highlight changes in the theme list. Then the counter stays at 0, and only after Enter-to-commit does the next draw perform the bulk rebuild for the first time (the counter increments by exactly one commit's worth).
+- **AC-19 (NFR-1)**: (a) [unit] A timed test confirming preview resolution + redraw request processing completes within a single frame budget (roughly 16ms @ 60Hz). (b) [GUI visual check] Confirming (as a supplement) that there is no perceptible lag.
 
-### トレーサビリティ
+### Traceability
 
 | Requirement | AC |
 |---|---|
@@ -260,20 +260,20 @@ Ripple実現性検証 (要点):
 | NFR-5 | AC-11 |
 | NFR-6 | AC-14 |
 
-全 18 R + 6 NFR に各 ≥1 AC、計24 AC(AC-1〜24)。[GUI目視] を主検証とするのは AC-15 のみ、補助目視は AC-3/4b/7b/10/19b。
+All 18 R + 6 NFR have ≥1 AC each, 24 ACs total (AC-1 through 24). [GUI visual check] is the primary verification method only for AC-15; supplementary visual checks appear in AC-3/4b/7b/10/19b.
 
-## 改訂履歴
+## Revision history
 
-- **2026-07-06 (実装時改訂、ユーザーサインオフ済)**: (1) R-8 — 確定のみ3行は「確定時適用」から「永続化のみ・次回起動反映+再起動ノート表示」へ改訂(ランタイム適用経路が未実装のため)。(2) font-family行のfuzzyサブフィルタを削除(単純サイクル)。(3) window-padding x/y独立編集を両軸同時ステップに簡略化。(2)(3)の元仕様は将来増分候補としてOpen Questionsに記載。
+- **2026-07-06 (revised during implementation, signed off by the user)**: (1) R-8 — revised the 3 commit-only rows from "applied on commit" to "persisted only, applied on next launch + restart note shown" (because the runtime-application path is not yet implemented). (2) Removed the fuzzy sub-filter for the font-family row (simple cycle instead). (3) Simplified window-padding x/y independent editing to a single combined-axis step. The original specs for (2) and (3) are recorded in Open Questions as candidates for a future increment.
 
 ## Open Questions / Deferred Decisions
 
-- **将来増分候補 (2026-07-06 実装時に簡略化)**: font-family行のfuzzy検索サブフィルタ / window-padding x/yの行内独立編集 / 確定のみ3行のランタイム適用(font-family=FontGrid再構築, padding=合成resize, titlebar=AppKit呼出)。
+- **Future increment candidates (simplified during 2026-07-06 implementation)**: fuzzy-search sub-filter for the font-family row / independent in-row editing of window-padding x/y / runtime application of the 3 commit-only rows (font-family = FontGrid rebuild, padding = compositing resize, titlebar = AppKit call).
 
-- **Ghostty忠実度ポジショニング**: 本機能はGhosttyに存在しないnoa独自拡張であり、`theme-selection.md` L0の忠実度原則(「GUIテーマエディタ等Ghosttyに無い機能は対象外」)の明示的な例外。UI表層はGhostty観測挙動の複製対象(Parity Map)に含めない。
-- **AC-19(a) 計時テストのCI耐性**: 16ms@60Hzはローカル実行基準。CI環境でflakyな場合は閾値緩和またはskipを許容する(実装時判断)。
-- **将来増分候補(out-of-scope確定分)**: configリロードキーバインド(cmd+shift+,相当)/ `theme = light:X,dark:Y` 自動切替 / ユーザー定義テーマ(`~/.config/noa/themes/`)/ configファイル監視。設定rowsの追加要望も別増分でレビュー(確定裁定5)。
+- **Ghostty fidelity positioning**: this feature is a noa-specific extension not present in Ghostty, and is an explicit exception to the fidelity principle in `theme-selection.md` L0 ("GUI theme editors and other features not present in Ghostty are out of scope"). The UI surface is not included in the Parity Map (the set of Ghostty observable behaviors to replicate).
+- **CI robustness of the AC-19(a) timing test**: 16ms@60Hz is a local-execution baseline. If it is flaky in the CI environment, relaxing the threshold or allowing a skip is acceptable (implementation-time judgment call).
+- **Future increment candidates (confirmed out-of-scope)**: config reload keybinding (equivalent of cmd+shift+,) / `theme = light:X,dark:Y` auto-switch / user-defined themes (`~/.config/noa/themes/`) / config file watching. Additional requests for settings rows are also reviewed as separate increments (per finalized ruling 5).
 
 ## Build-path decision
 
-**apex(一気通貫)** — サインオフ時選択(2026-07-06)。`/nexus apex` に本specを入力として渡し、設計→リスクゲート→実装ループ→L3 AC検証→出荷を同席の単一ランで実行する。L3のAC-1〜24(トレーサビリティ表付き)が検証契約。フォールバック: `/nexus feature`(監督付き単一ビルド)。
+**apex (single continuous run)** — chosen at sign-off (2026-07-06). This spec is fed as input to `/nexus apex`, running design → risk gate → implementation loop → L3 AC verification → shipping in a single supervised run. L3's AC-1 through 24 (with the traceability table) form the verification contract. Fallback: `/nexus feature` (supervised single build).

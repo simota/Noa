@@ -1,215 +1,215 @@
-# Spec: Settingsパネル リッチ化・最適化 (settings-panel-enrichment)
+# Spec: Settings Panel Enrichment & Optimization (settings-panel-enrichment)
 
 ## Metadata
 
 - **slug:** settings-panel-enrichment
-- **title:** Settingsパネル リッチ化・最適化 (Settings Panel Enrichment & Optimization)
-- **status:** **draft**(magi評決スコープB+確定 2026-07-11、本spec本体は未サインオフ)
+- **title:** Settings Panel Enrichment & Optimization
+- **status:** **draft** (magi verdict scope B+ finalized 2026-07-11; the spec body itself is not yet signed off)
 - **owner:** simota
-- **scope mode:** **Standard**(要件10件[must 8 + nice 2] + NFR 3件、中複雑度 — Accordテンプレート選定基準に合致)
-- **upstream:** `theme-settings-ui.md`(locked — オーバーレイの起動導線・プレビュー機構・commitシーケンス・config書込みの土台。本specはその上に「情報設計の質」を追加する増分で、upstreamの決定を再審議しない)
-- **traceability:** 10 R + 3 NFR = 13項目、各項目に1〜3 ACを付与、全項目カバー(100%、Standard最低ライン85%を超過)
+- **scope mode:** **Standard** (10 requirements [8 must + 2 nice] + 3 NFRs, medium complexity — matches the Accord template selection criteria)
+- **upstream:** `theme-settings-ui.md` (locked — the foundation for the overlay's launch entry point, preview mechanism, commit sequence, and config writes. This spec is an increment on top of it that adds "quality of information design" and does not re-litigate upstream decisions)
+- **traceability:** 10 R + 3 NFR = 13 items, each with 1-3 ACs, full coverage across all items (100%, exceeding the Standard scope's 85% floor)
 
 ## L0 — Vision
 
-`noa`のSettingsオーバーレイ(`crates/noa-app/src/theme_settings/`)は`theme-settings-ui.md`により実装済みで、16設定行のライブ/次回起動プレビュー・574テーマのfuzzy検索・surgicalなconfig書込みまで機能する。しかし「リッチ化」とはビジュアル装飾ではなく **情報設計の質** — ユーザーが今どの行が即時反映されどれが次回起動待ちなのかを常に正しく知り(嘘表示ゼロ)、16行の中から目的の設定を素早く見つけ、その意味を確認し、誤って変えた値を安全に既定へ戻せること — と定義する。同時に、既存実装には「毎フレームのフルクローン」という具体的なパフォーマンス債務(`theme_settings/state.rs:68-79`のdoc commentが明示)が残っており、これを解消する。
+`noa`'s Settings overlay (`crates/noa-app/src/theme_settings/`) is already implemented per `theme-settings-ui.md`, and functions with live/next-launch preview across 16 settings rows, fuzzy search across 574 themes, and surgical config writes. However, "enrichment" here is defined not as visual decoration but as **quality of information design** — the user should always know, with zero misleading display, which rows take effect immediately and which are waiting for next launch; be able to quickly find the setting they want among the 16 rows; confirm what it means; and safely reset an accidentally changed value back to default. At the same time, the existing implementation carries a concrete performance debt — "a full clone every frame" (explicitly noted in the doc comment at `theme_settings/state.rs:68-79`) — which this spec resolves.
 
-magi評決(2026-07-11、再審議禁止)により採用スコープは **B+**: must-have 8件 + nice-to-have 2件(must全緑後のみ着手)。本specはそのmagi評決を、実装コードの直接監査によって具体化・裏取りしたものである。監査の結果、magi評決が「未実装」と想定していた項目のうち複数が**部分的に、あるいは異なる形で既に実装済み**であることが判明した(下記「コード監査の結果」参照)。本specの各要件は、この監査結果を反映して磨き直したものであり、magiのCritical#1/#2の意図を変更するものではない。
+Per the magi verdict (2026-07-11, not to be re-litigated), the adopted scope is **B+**: 8 must-have items + 2 nice-to-have items (the nice-to-haves start only after all musts are green). This spec concretizes and substantiates that magi verdict through a direct audit of the implementation code. The audit found that several items the magi verdict assumed were "unimplemented" are actually **already implemented, partially or in a different form** (see "Code audit results" below). Each requirement in this spec has been refined to reflect that audit, without altering the intent of magi's Critical#1/#2.
 
-### コード監査の結果(magi評決との差分)
+### Code audit results (delta from the magi verdict)
 
-| magi項目 | 想定 | 監査結果 | specでの扱い |
+| magi item | assumption | audit result | how this spec handles it |
 |---|---|---|---|
-| Critical#1(opaque restart note) | 未実装 | **部分実装済み**: `ThemeSettings::restart_note()`(`theme_settings/state.rs:306-332`)がopaque-at-startup時のopacity/blur行と、touched済みcommit-only行の両方を`bool`で検出している。ただし表示文言は両ケースとも同一の`"(restart to apply)"`(`app/sidebar/palette.rs:923-924`, `macos_overlay/imp/appkit.rs:1099-1100`)で、理由の区別がない | R-1: 検出ロジックは流用し、理由提示(reason)を追加する差分に絞る |
-| Critical#2(メニュー項目追加) | 未実装 | **部分実装済み**: `AppCommand::OpenSettings`は既に存在し`open_theme_settings(Settings mode)`に配線済み(`app/commands.rs:146`)だが、`menu_id()`が空文字列(`commands/command.rs:217`)でネイティブメニューに未登録。一方、既存の"Settings..."(⌘,)メニュー項目は`AppCommand::Preferences`で外部エディタ起動(`open_config_file()`, `app/commands.rs:66`)に配線されており、これは`theme-settings-ui.md` R-1の意図的な決定("既存⌘,は変更せず並存")だった | R-2: 新規メニュー項目を追加して`OpenSettings`を配線する。既存⌘,には触れない(locked upstream決定の維持) |
-| Must#3(全行バッジ) | 未実装 | **未実装(想定通り)**: `restart_note()`は`touched`済みでない限りcommit-only行に何も表示しない — 未編集時、commit-only行はlive行と見分けがつかない | R-3として新規実装 |
-| Must#4(per-frameクローン) | 未実装 | **想定通り未解消**: `app/render.rs:48`で`session.state.clone()`が確認された。`state.rs:68-79`のdoc commentが「filteredフィールド(最大574件)込みの許容済み債務」と明記 | R-4として新規実装(`Arc`+`make_mut`方式) |
-| Must#5(fuzzy検索) | 未実装 | **未実装(想定通り)**: Settingsモードの`push_text`は`FontSize`/`BackgroundImage`行の直接入力のみ処理し、行一覧のフィルタは存在しない | R-5として新規実装 |
-| Must#6(説明文) | 未実装 | **未実装(想定通り)**: `SettingsRowKind`に説明文の関数がない | R-6として新規実装 |
-| Must#7(Reset) | 未実装 | **未実装(想定通り)**: リセット操作は存在しない | R-7として新規実装 |
-| Must#8(既存回帰ゼロ) | ハードゲート | 既存テスト`theme_settings/tests.rs`(981行) + `app/input_ops/theme_settings.rs`内テストの現状を確認済み | R-8としてハードゲート化 |
-| Nice#9(C安全4キー) | 未実装 | `scrollback_limit`/`cursor_style_blink`/`minimum_contrast`/`macos_option_as_alt`は全て`StartupConfig`の実在フィールド(`noa-config/src/lib.rs:611-625`) | R-9として新規実装(must全緑後) |
-| Nice#10(コントラストトークン化) | 想定: ハードコード色の移行 | **監査の結果、移行対象がほぼ存在しない**: AppKit側の選択行背景は既に`colors.selected_bg`(`OverlayColors`由来、`macos_overlay/imp/appkit.rs:941,1114`)を使用、wgpu側の選択行前景も`accent: Rgb`引数(呼び出し元でテーマ由来に解決済み)を使用。ハードコードRGBリテラルは発見されなかった | R-10として範囲を再定義: 既存トークン経路をリグレッション防止する検証テストの追加に絞る |
+| Critical#1 (opaque restart note) | unimplemented | **partially implemented**: `ThemeSettings::restart_note()` (`theme_settings/state.rs:306-332`) already detects both the opacity/blur row case at opaque-at-startup and the touched commit-only-row case, both as a `bool`. However, both cases display the same string, `"(restart to apply)"` (`app/sidebar/palette.rs:923-924`, `macos_overlay/imp/appkit.rs:1099-1100`), with no distinction between the reasons | R-1: reuse the detection logic; scope the diff to adding reason presentation |
+| Critical#2 (menu item addition) | unimplemented | **partially implemented**: `AppCommand::OpenSettings` already exists and is wired to `open_theme_settings(Settings mode)` (`app/commands.rs:146`), but `menu_id()` returns an empty string (`commands/command.rs:217`), so it isn't registered in the native menu. Meanwhile, the existing "Settings..." (⌘,) menu item is wired to `AppCommand::Preferences`, which launches the external editor (`open_config_file()`, `app/commands.rs:66`) — this was a deliberate decision in `theme-settings-ui.md` R-1 ("keep the existing ⌘, unchanged and let it coexist") | R-2: add a new menu item and wire up `OpenSettings`. Leave the existing ⌘, untouched (preserving the locked upstream decision) |
+| Must#3 (badges on all rows) | unimplemented | **unimplemented (as expected)**: `restart_note()` shows nothing for commit-only rows unless `touched` — before any edit, commit-only rows are indistinguishable from live rows | new implementation as R-3 |
+| Must#4 (per-frame clone) | unimplemented | **unresolved, as expected**: `session.state.clone()` confirmed at `app/render.rs:48`. The doc comment at `state.rs:68-79` explicitly notes this as "accepted debt, including the filtered field (up to 574 entries)" | new implementation as R-4 (`Arc` + `make_mut` approach) |
+| Must#5 (fuzzy search) | unimplemented | **unimplemented (as expected)**: in Settings mode, `push_text` only handles direct digit/path entry for the `FontSize`/`BackgroundImage` rows; there is no filter over the row list | new implementation as R-5 |
+| Must#6 (descriptions) | unimplemented | **unimplemented (as expected)**: `SettingsRowKind` has no description function | new implementation as R-6 |
+| Must#7 (Reset) | unimplemented | **unimplemented (as expected)**: no reset operation exists | new implementation as R-7 |
+| Must#8 (zero existing regressions) | hard gate | confirmed current state of the existing `theme_settings/tests.rs` (981 lines) + tests within `app/input_ops/theme_settings.rs` | hard-gated as R-8 |
+| Nice#9 (4 C-safe keys) | unimplemented | `scrollback_limit`/`cursor_style_blink`/`minimum_contrast`/`macos_option_as_alt` are all real fields of `StartupConfig` (`noa-config/src/lib.rs:611-625`) | new implementation as R-9 (after all musts are green) |
+| Nice#10 (tokenizing contrast) | assumed: migrate hardcoded colors | **audit found almost nothing to migrate**: the AppKit-side selected-row background already uses `colors.selected_bg` (from `OverlayColors`, `macos_overlay/imp/appkit.rs:941,1114`), and the wgpu-side selected-row foreground already uses the `accent: Rgb` argument (resolved from the theme at the call site). No hardcoded RGB literals were found | redefine the scope for R-10: limited to adding regression tests that guard the existing token paths |
 
-## Out-of-scope(スコープ境界、magi確定・再審議禁止)
+## Out of scope (scope boundary, finalized by magi, not to be re-litigated)
 
-- テーマのlight/darkペア対応(`theme = light:X,dark:Y`)
-- Settingsオーバーレイ内のセクション見出し追加
-- マウス操作対応(クリック選択・スクロールドラッグ等)
-- VoiceOver/アクセシビリティツリー対応
-- 透過方式の変更(`background_opacity`のwinit生成時固定制約、ALPHA_REPLACE経路 — マゼンタ縞RCA[`noa-nativetab-magenta`メモリ参照]の再燃を避けるため一切変更しない)
-- 既存⌘,("Settings...")メニュー項目の配線変更
-- `theme-settings-ui.md`のプレビュー機構・commitシーケンス・config書込みフォーマットの変更
+- Theme light/dark pairing (`theme = light:X,dark:Y`)
+- Adding section headings inside the Settings overlay
+- Mouse operation support (click-to-select, scroll-drag, etc.)
+- VoiceOver / accessibility tree support
+- Changing the transparency mechanism (the winit-creation-time fixed constraint on `background_opacity`, the ALPHA_REPLACE path — leave entirely unchanged to avoid reigniting the magenta-stripe RCA [see `[[noa-nativetab-magenta]]` memory])
+- Changing the wiring of the existing ⌘, ("Settings...") menu item
+- Changing the preview mechanism, commit sequence, or config write format from `theme-settings-ui.md`
 
-### 失敗条件(magi確定、ハードゲート)
+### Failure conditions (finalized by magi, hard gate)
 
-- F1: 既存16行のいずれかの挙動が退行する
-- F2: 透過方式・マゼンタ縞系の不具合を再誘発する
-- F3: 上記Out-of-scope項目のいずれかに着手する
-- F4: 検索(R-5)・Reset(R-7)・説明文(R-6)のいずれかが部分実装のまま完了扱いになる
-- F5: must-have(R-1〜R-8)が全緑になる前にnice-to-have(R-9, R-10)に着手する
+- F1: any of the existing 16 rows' behavior regresses
+- F2: reintroduces a transparency-mechanism or magenta-stripe-family bug
+- F3: work begins on any of the out-of-scope items above
+- F4: any of search (R-5), Reset (R-7), or descriptions (R-6) is marked complete while only partially implemented
+- F5: work begins on the nice-to-haves (R-9, R-10) before the must-haves (R-1 through R-8) are all green
 
 ## L1 — Requirements
 
-### Must-have(magi Critical/必須、8件)
+### Must-have (magi Critical/required, 8 items)
 
-- **R-1(理由提示付きrestartノート)**: `ThemeSettings::restart_note(kind) -> bool`(`theme_settings/state.rs:306-332`)を、理由を区別する型(例: `RestartReason::None | RestartReason::OpaqueStartup | RestartReason::CommitOnly`)に置き換える。opaque起動時のopacity/blur行と、touched済みcommit-only行(font-family等)は異なる文言で表示する。透過方式そのものは変更しない(Out-of-scope)。
-- **R-2(ネイティブメニュー項目)**: `AppCommand::OpenSettings`(既存、`app/commands.rs:146`で`open_theme_settings(Settings mode)`に配線済み)に非空の`menu_id()`を与え、`macos_menu.rs`のネイティブメニューに新規項目として追加する。既存の⌘,/"Settings..."(`AppCommand::Preferences`→`open_config_file()`)は一切変更しない。
-- **R-3(全行常時バッジ)**: `SettingsRowKind::is_live()`(既存、静的分類)から導出する「Live」/「Next launch」バッジを、`touched`状態に関わらず全16(nice#9採用後20)行に常時表示する。R-1の理由付きノートとは独立した信号として両立させる(嘘表示ゼロ — 未編集のcommit-only行が一見live行と区別つかない現状を解消)。
-- **R-4(per-frameクローン解消)**: `app/render.rs:48`の`session.state.clone()`(`ThemeSettings`のフルクローン、`filtered: Vec<ThemeMatch>`最大574件込み)を除去する。`ThemeSettingsSession.state`を`Arc<ThemeSettings>`化し、描画パスは`Arc::clone`(参照カウント増分のみ)、変更系メソッドは`Arc::make_mut`経由で呼び出す。
-- **R-5(設定行fuzzy検索)**: `command_palette::fuzzy_match`を転用し、Settingsモードの16(20)行をラベルでfuzzy検索できるようにする。空クエリ=全行表示、非マッチ=0件表示。
-- **R-6(選択行の説明文)**: `SettingsRowKind`の全kindに静的な1行説明文を追加し、現在選択中の行についてビュー上に表示する(AppKitカード・wgpuテキストカード両方)。
-- **R-7(Reset to Default)**: 選択中の行を`noa_config::StartupConfig::default()`由来の既定値へ、行単位でリセットする操作を追加する。
-- **R-8(既存回帰ゼロ、ハードゲート)**: 既存16行の値・キー操作・commit/revert・restart-note検出ロジックの外部観測可能な挙動を一切変えない。`theme_settings/tests.rs`(981行)と`app/input_ops/theme_settings.rs`内の既存テストは全て無改変のまま緑を維持する。
+- **R-1 (restart note with reason)**: Replace `ThemeSettings::restart_note(kind) -> bool` (`theme_settings/state.rs:306-332`) with a type that distinguishes the reason (e.g., `RestartReason::None | RestartReason::OpaqueStartup | RestartReason::CommitOnly`). Display distinct copy for the opacity/blur row at opaque startup versus a touched commit-only row (e.g., font-family). Do not change the transparency mechanism itself (out of scope).
+- **R-2 (native menu item)**: Give `AppCommand::OpenSettings` (existing, already wired to `open_theme_settings(Settings mode)` at `app/commands.rs:146`) a non-empty `menu_id()`, and add it as a new item in the native menu in `macos_menu.rs`. Do not change the existing ⌘,/"Settings..." (`AppCommand::Preferences` → `open_config_file()`) in any way.
+- **R-3 (always-on badges for all rows)**: Derive "Live"/"Next launch" badges from `SettingsRowKind::is_live()` (existing, static classification) and display them at all times on all 16 rows (20 after nice#9 is adopted), regardless of `touched` state. Keep this as a signal independent of R-1's reason-annotated note, so both coexist (zero misleading display — resolving the current issue where an unedited commit-only row is indistinguishable from a live row at a glance).
+- **R-4 (eliminate per-frame clone)**: Remove `session.state.clone()` (a full clone of `ThemeSettings`, including `filtered: Vec<ThemeMatch>` up to 574 entries) at `app/render.rs:48`. Make `ThemeSettingsSession.state` an `Arc<ThemeSettings>`; the render path uses `Arc::clone` (a refcount bump only), and mutating methods go through `Arc::make_mut`.
+- **R-5 (fuzzy search over settings rows)**: Repurpose `command_palette::fuzzy_match` to fuzzy-search the 16 (20) Settings-mode rows by label. Empty query shows all rows; no matches shows zero rows.
+- **R-6 (description for the selected row)**: Add a static one-line description to every `SettingsRowKind`, and display it in the view for the currently selected row (both the AppKit card and the wgpu text card).
+- **R-7 (Reset to Default)**: Add an operation to reset the currently selected row, per-row, to the default value derived from `noa_config::StartupConfig::default()`.
+- **R-8 (zero existing regressions, hard gate)**: Do not change the externally observable behavior of the existing 16 rows' values, key operations, commit/revert, or restart-note detection logic in any way. All existing tests in `theme_settings/tests.rs` (981 lines) and `app/input_ops/theme_settings.rs` must stay green without modification.
 
-### Nice-to-have(must全緑後のみ、2件)
+### Nice-to-have (only after all musts are green, 2 items)
 
-- **R-9(C安全4キー解放)**: `scrollback-limit` / `cursor-style-blink` / `minimum-contrast` / `macos-option-as-alt`(全て`StartupConfig`の実在フィールド)を新規行として追加する。各行はR-2〜R-6の「5点セット」(`RowDraft`変体・`is_live()`分類・`commit_updates()`マッピング・ラベル・説明文)を備える。`SettingsRowKind::COUNT`は16→20。
-- **R-10(選択行コントラストの回帰防止)**: コード監査により、選択行の背景色(`OverlayColors::selected_bg`)・前景色(`accent: Rgb`)は両レンダーパス(AppKit/wgpu)で既に既存UIトークン経由であることを確認した。移行対象コードが存在しないため、本要件は「既存トークン経路が将来ハードコード値に退行しないことを保証するコントラスト比検証テストの追加」に再定義する。
+- **R-9 (unlock 4 C-safe keys)**: Add `scrollback-limit` / `cursor-style-blink` / `minimum-contrast` / `macos-option-as-alt` (all real fields of `StartupConfig`) as new rows. Each row includes the "5-piece set" from R-2 through R-6 (a `RowDraft` variant, `is_live()` classification, `commit_updates()` mapping, label, and description). `SettingsRowKind::COUNT` goes from 16 to 20.
+- **R-10 (regression protection for selected-row contrast)**: The code audit confirmed that the selected row's background color (`OverlayColors::selected_bg`) and foreground color (`accent: Rgb`) already go through existing UI tokens in both render paths (AppKit/wgpu). Since there is no code left to migrate, this requirement is redefined as "add contrast-ratio regression tests that guarantee the existing token paths never regress to hardcoded values in the future."
 
-### 非機能要件(NFR)
+### Non-functional requirements (NFR)
 
-- **NFR-1(アロケーション)**: 入力なし(選択・編集が発生しない)フレーム間の連続redrawで、`ThemeSettings`の深いクローンが発生しないこと(R-4に直結)。
-- **NFR-2(60fps非劣化)**: 設定行fuzzy検索(R-5、最大20行)は既存の574テーマfuzzy検索と同一の`fuzzy_match`を使い、テキスト入力イベント発生時のみ再計算する(既存の`refilter_and_mark`と同じトリガ規律)。アイドル時の毎フレーム再計算を発生させない。
-- **NFR-3(config writer非拡張)**: R-1/R-3/R-6/R-7/R-9のいずれも、`noa_config::write_config_updates`(既存、`theme-settings-ui.md` R-14で導入済み)以外の新規config書込み経路を作らない。
+- **NFR-1 (allocation)**: Across consecutive redraws between frames with no input (no selection or edit occurring), no deep clone of `ThemeSettings` may occur (directly tied to R-4).
+- **NFR-2 (no 60fps degradation)**: The settings-row fuzzy search (R-5, up to 20 rows) uses the same `fuzzy_match` as the existing 574-theme fuzzy search, and recomputes only on text-input events (the same trigger discipline as the existing `refilter_and_mark`). It must not introduce a per-frame recompute path while idle.
+- **NFR-3 (no config-writer expansion)**: None of R-1/R-3/R-6/R-7/R-9 may introduce a new config write path other than `noa_config::write_config_updates` (existing, introduced in `theme-settings-ui.md` R-14).
 
 ## L2 — Detail
 
-### R-1: 理由提示付きrestartノート
+### R-1: Restart note with reason
 
-- 対象ファイル: `crates/noa-app/src/theme_settings/state.rs`(`restart_note`メソッド)、`crates/noa-app/src/macos_overlay/model.rs`(`ThemeSettingsViewModel::rows`タプル)、`crates/noa-app/src/app/sidebar/palette.rs:923-924`、`crates/noa-app/src/macos_overlay/imp/appkit.rs:1099-1100`。
-- `restart_note(kind: SettingsRowKind) -> bool`を`restart_reason(kind: SettingsRowKind) -> RestartReason`に置き換える。既存の判定条件(opaque_at_startup && Opacity/BlurRadius、または非live行のtouched)はロジックとしてそのまま流用し、戻り値の型だけを`bool`から3値enumへ広げる。
-- `ThemeSettingsViewModel::rows`タプルの3要素目(現状`bool`)を`RestartReason`(または表示済み文言`Option<&'static str>`)に変更する。両レンダーパスの文言分岐先(`app/sidebar/palette.rs:923-924`、`appkit.rs:1099-1100`)を、`RestartReason::OpaqueStartup`用と`RestartReason::CommitOnly`用の2文言に分岐させる。
-- 文言例(実装時に確定): `CommitOnly` → `"(restart to apply)"`(既存文言を維持)、`OpaqueStartup` → `"(opaque at launch — restart to preview)"`のような、なぜ次回起動待ちなのかを言い分ける文言。
-- 透過方式・`opaque_at_startup`判定・`background_opacity >= 1.0`の閾値そのものは一切変更しない。
+- Target files: `crates/noa-app/src/theme_settings/state.rs` (`restart_note` method), `crates/noa-app/src/macos_overlay/model.rs` (`ThemeSettingsViewModel::rows` tuple), `crates/noa-app/src/app/sidebar/palette.rs:923-924`, `crates/noa-app/src/macos_overlay/imp/appkit.rs:1099-1100`.
+- Replace `restart_note(kind: SettingsRowKind) -> bool` with `restart_reason(kind: SettingsRowKind) -> RestartReason`. Reuse the existing condition logic as-is (opaque_at_startup && Opacity/BlurRadius, or a non-live row being touched); only widen the return type from `bool` to a 3-value enum.
+- Change the third element of the `ThemeSettingsViewModel::rows` tuple (currently `bool`) to `RestartReason` (or already-resolved copy, `Option<&'static str>`). Branch the copy at both render-path sites (`app/sidebar/palette.rs:923-924`, `appkit.rs:1099-1100`) into two strings, one for `RestartReason::OpaqueStartup` and one for `RestartReason::CommitOnly`.
+- Example copy (to be finalized at implementation time): `CommitOnly` → `"(restart to apply)"` (keep the existing string), `OpaqueStartup` → something like `"(opaque at launch — restart to preview)"`, explaining why it's waiting for next launch.
+- Do not change the transparency mechanism, the `opaque_at_startup` determination, or the `background_opacity >= 1.0` threshold itself.
 
-### R-2: ネイティブメニュー項目
+### R-2: Native menu item
 
-- 対象ファイル: `crates/noa-app/src/commands/command.rs`(`menu_id()`関数、`OPEN_SETTINGS_MENU_ID`定数追加、`from_menu_id`への追加)、`crates/noa-app/src/macos_menu.rs`(`MacosMenu::install`)。
-- `AppCommand::OpenSettings`に`OPEN_SETTINGS_MENU_ID`定数(他の`*_MENU_ID`定数と同じ命名規則)を割り当て、`menu_id()`の`AppCommand::OpenSettings => ""`を実IDに差し替える。`from_menu_id`の逆引きにも追加する。
-- 新規`MenuItem`を構築し、`view_menu`(`macos_menu.rs`の"Command Palette"/"Session Overview"項目が並ぶブロック)に追加する。ラベルは既存のコマンドパレット表記("Open Settings…")と揃える。既存"Settings..."(⌘,)との混同を避けるため、アクセラレータは割り当てない(コマンドパレットからの既存導線と同じく無キーバインド)。
-- `AppCommand::Preferences`のmenu_id・ラベル・アクセラレータ(⌘,)・`open_config_file()`への配線は一切変更しない — `theme-settings-ui.md` R-1の"既存⌘,は変更せず並存"という決定の維持。
-- テストパターンは既存の`preferences_menu_item_spec`/`fullscreen_menu_item_spec`(`macos_menu.rs`末尾の`#[cfg(test)] mod tests`)を踏襲する — ウィンドウ/GPU不要のプレーンな関数として`open_settings_menu_item_spec()`相当を切り出し、単体テスト可能にする。
+- Target files: `crates/noa-app/src/commands/command.rs` (`menu_id()` function, add `OPEN_SETTINGS_MENU_ID` constant, add to `from_menu_id`), `crates/noa-app/src/macos_menu.rs` (`MacosMenu::install`).
+- Assign `AppCommand::OpenSettings` a `OPEN_SETTINGS_MENU_ID` constant (same naming convention as the other `*_MENU_ID` constants), and replace `AppCommand::OpenSettings => ""` in `menu_id()` with the real ID. Also add it to the reverse lookup in `from_menu_id`.
+- Build a new `MenuItem` and add it to `view_menu` (the block in `macos_menu.rs` where the "Command Palette"/"Session Overview" items live). Match the label wording used in the command palette ("Open Settings…"). To avoid confusion with the existing "Settings..." (⌘,), assign no accelerator (unbound, same as the existing command-palette entry point).
+- Do not change `AppCommand::Preferences`'s menu_id, label, accelerator (⌘,), or wiring to `open_config_file()` in any way — preserving `theme-settings-ui.md` R-1's decision that "the existing ⌘, stays unchanged and coexists."
+- Follow the existing test patterns `preferences_menu_item_spec`/`fullscreen_menu_item_spec` (in the `#[cfg(test)] mod tests` at the end of `macos_menu.rs`) — extract an `open_settings_menu_item_spec()`-equivalent as a plain, window/GPU-free function, unit-testable.
 
-### R-3: 全行常時バッジ
+### R-3: Always-on badges for all rows
 
-- 対象ファイル: `theme_settings/state.rs`、`macos_overlay/model.rs`(`ThemeSettingsViewModel`)。
-- `SettingsRowKind::is_live()`(既存、静的)をそのまま参照元として使う — 新しい分類ロジックは作らない。
-- `ThemeSettingsViewModel::rows`タプルに、R-1の`RestartReason`とは別に、`live: bool`(= `kind.is_live()`)フィールドを追加する。両者は独立して描画する: `live`は行を選択していなくても常時見えるバッジ(例: 行末に小さく"Live"/"Restart"のラベル)、`RestartReason`はR-1の「(restart to apply)」系の補足文言(touched後にのみ意味を持つ)。
-- 「嘘表示ゼロ」の要件は、`live`バッジが`touched`の値に一切依存しないことで満たす — オーバーレイを開いた直後、まだ何も編集していない状態でも全20行の分類が見える。
+- Target files: `theme_settings/state.rs`, `macos_overlay/model.rs` (`ThemeSettingsViewModel`).
+- Use `SettingsRowKind::is_live()` (existing, static) directly as the source of truth — do not build new classification logic.
+- Add a `live: bool` field (= `kind.is_live()`) to the `ThemeSettingsViewModel::rows` tuple, separate from R-1's `RestartReason`. Draw both independently: `live` is a badge visible at all times, even without selecting the row (e.g., a small "Live"/"Restart" label at the row's end), while `RestartReason` is R-1's supplementary "(restart to apply)"-style copy (meaningful only once touched).
+- Satisfy the "zero misleading display" requirement by ensuring the `live` badge never depends on the `touched` value — all 20 rows' classification is visible immediately after opening the overlay, even before anything has been edited.
 
-### R-4: per-frameクローン解消
+### R-4: Eliminate per-frame clone
 
-- 対象ファイル: `crates/noa-app/src/app/state.rs`(`ThemeSettingsSession`定義、`app/state.rs:537`)、`crates/noa-app/src/app/render.rs:44-48`、`crates/noa-app/src/app/input_ops/theme_settings.rs`(全ての`session.state.xxx_mut`相当の変更系呼び出し)、`crates/noa-app/src/app/sidebar/palette.rs`(`draw_theme_settings_card`/`theme_settings_overlay_text`の`state: &ThemeSettings`引数)、`crates/noa-app/src/macos_overlay/mod.rs`(`sync_theme_settings`の`&ThemeSettings`引数)。
-- `ThemeSettingsSession.state: ThemeSettings`を`state: Arc<ThemeSettings>`に変更する。
-- `render.rs:48`の`session.state.clone()`(深いクローン)を`Arc::clone(&session.state)`(参照カウント増分のみ)に置き換える。`sidebar::draw_theme_settings_card`・`macos_overlay::sync_theme_settings`は既に`&ThemeSettings`を受け取るシグネチャなので、`Arc<ThemeSettings>`から`&ThemeSettings`への参照解決(Derefまたは明示的`&*`)以外の変更は不要。
-- 変更系メソッド(`move_up`/`move_down`/`adjust`/`push_text`/`backspace`/`commit`/`revert`等、`input_ops/theme_settings.rs`から呼ばれる箇所)の呼び出し元を`Arc::make_mut(&mut session.state)`経由に変える。single-threadなwinitイベントループ上では、`redraw()`が取得した`Arc`クローンは同フレーム内で破棄され、次のキー入力までに参照カウントは1に戻るため、`make_mut`の実クローン分岐はほぼ発火しない(redraw自身は`session.state`を変更しないため、レンダリングとミューテーションが同一Arcを同時に握ることが構造的にない)。
-- なぜ`Arc<ThemeSettings>`全体の共有か(view-modelへの分離ではなく): wgpu側の`theme_picker_overlay_text`/`settings_rows_overlay_text`(`app/sidebar/palette.rs`)は、ペイン実サイズに応じた可変windowing(`THEME_SETTINGS_COLS`/`ROWS`をペインの実colsRowsでクランプ)を行うため、AppKit側の固定8行windowing用`ThemeSettingsViewModel`(`macos_overlay/model.rs`)をそのまま両パスの共通スナップショット型として転用できない(windowingの粒度が異なる)。したがって"軽量view-model型への分離"ではなく"Arc共有+make_mut"を採用する(タスク提示の2候補のうち後者)。
+- Target files: `crates/noa-app/src/app/state.rs` (`ThemeSettingsSession` definition, `app/state.rs:537`), `crates/noa-app/src/app/render.rs:44-48`, `crates/noa-app/src/app/input_ops/theme_settings.rs` (all mutating call sites equivalent to `session.state.xxx_mut`), `crates/noa-app/src/app/sidebar/palette.rs` (the `state: &ThemeSettings` argument of `draw_theme_settings_card`/`theme_settings_overlay_text`), `crates/noa-app/src/macos_overlay/mod.rs` (the `&ThemeSettings` argument of `sync_theme_settings`).
+- Change `ThemeSettingsSession.state: ThemeSettings` to `state: Arc<ThemeSettings>`.
+- Replace `session.state.clone()` (the deep clone) at `render.rs:48` with `Arc::clone(&session.state)` (a refcount bump only). Since `sidebar::draw_theme_settings_card` and `macos_overlay::sync_theme_settings` already take `&ThemeSettings`, no change is needed beyond resolving the reference from `Arc<ThemeSettings>` to `&ThemeSettings` (Deref or an explicit `&*`).
+- Route the call sites of mutating methods (`move_up`/`move_down`/`adjust`/`push_text`/`backspace`/`commit`/`revert`, etc., called from `input_ops/theme_settings.rs`) through `Arc::make_mut(&mut session.state)`. On the single-threaded winit event loop, the `Arc` clone taken by `redraw()` is dropped within the same frame, and the refcount returns to 1 before the next keypress, so `make_mut`'s actual-clone branch almost never fires (redraw itself never mutates `session.state`, so rendering and mutation structurally never hold the same `Arc` at once).
+- Why share the entire `Arc<ThemeSettings>` (rather than splitting off a view-model): the wgpu-side `theme_picker_overlay_text`/`settings_rows_overlay_text` (`app/sidebar/palette.rs`) perform variable windowing sized to the actual pane (clamping `THEME_SETTINGS_COLS`/`ROWS` to the pane's real cols/rows), so the AppKit-side fixed-8-row windowing `ThemeSettingsViewModel` (`macos_overlay/model.rs`) cannot be reused as-is as a common snapshot type for both paths (the windowing granularity differs). Therefore this spec adopts "Arc sharing + make_mut" rather than "split into a lightweight view-model type" (the latter of the two candidates presented in the task).
 
-### R-5: 設定行fuzzy検索
+### R-5: Fuzzy search over settings rows
 
-- 対象ファイル: `theme_settings/state.rs`(`ThemeSettings`構造体・`push_text`/`backspace`)、`app/input_ops/theme_settings.rs`(Tabキーの扱い)。
-- `Section::SettingsRows`専用の新規フィールド`settings_search_active: bool`と`settings_filter: String`、`settings_filtered: Vec<usize>`(`SettingsRowKind::ALL`へのインデックス、`ThemeMatch`と同型のスコア付けで並べる)を追加する。
-- **検索の起動/終了ジェスチャー**: 現在`Section::SettingsRows`では`Tab`キーが`toggle_section()`(DEC-2により空実装の死んだコード経路、`state.rs:240-244`のdoc comment参照)を呼ぶだけで何もしない。この死んだフックを再利用し、`ThemeSettingsMode::Settings`セッション限定で`Tab`を「検索モードのトグル」に転用する(Themeモードの`Tab`は変更しない — Themeモードには元々セクション切替の意味しかなく、本specの対象外)。
-- **検索有効時の入力ルーティング**: `push_text`/`backspace`は、`settings_search_active == true`の間、現在選択中の行の種類(`FontSize`の桁入力、`BackgroundImage`のパス入力)に関わらず`settings_filter`への追記/削除を優先する。検索終了(再度Tab、またはEnter)で通常の行編集入力ルーティングに戻る。
-- 空クエリは`SettingsRowKind::ALL`を元の表示順で全件表示(`fuzzy_match`の空クエリ挙動、`command_palette_matches`/`filter_themes`と同じ扱いを踏襲)。非マッチは0件表示とし、`ThemePicker`の`filtered.is_empty()`ガード(`move_up`/`move_down`, `state.rs:347-379`)と同じパターンで、空リスト時の`move_up`/`move_down`をno-opにする。
-- 検索を抜けた時点の選択行は、その時点でハイライトされていたフィルタ結果の実行を選択する(コマンドパレットの確定操作と同じ考え方)。
+- Target files: `theme_settings/state.rs` (`ThemeSettings` struct, `push_text`/`backspace`), `app/input_ops/theme_settings.rs` (Tab key handling).
+- Add new fields specific to `Section::SettingsRows`: `settings_search_active: bool`, `settings_filter: String`, and `settings_filtered: Vec<usize>` (indices into `SettingsRowKind::ALL`, ordered with the same scoring as `ThemeMatch`).
+- **Search enter/exit gesture**: currently in `Section::SettingsRows`, the `Tab` key merely calls `toggle_section()` (a dead code path that's a no-op due to DEC-2, see the doc comment at `state.rs:240-244`). Reuse this dead hook and repurpose `Tab`, only within a `ThemeSettingsMode::Settings` session, as "toggle search mode" (leave Theme mode's `Tab` unchanged — it only ever meant section switching there, and is out of scope for this spec).
+- **Input routing while search is active**: while `settings_search_active == true`, `push_text`/`backspace` prioritize appending to/deleting from `settings_filter`, regardless of the currently selected row's kind (digit entry for `FontSize`, path entry for `BackgroundImage`). Exiting search (Tab again, or Enter) returns to normal row-edit input routing.
+- An empty query shows all of `SettingsRowKind::ALL` in original display order (following the same empty-query behavior as `fuzzy_match`, `command_palette_matches`/`filter_themes`). No matches shows zero rows, and — following the same pattern as `ThemePicker`'s `filtered.is_empty()` guard (`move_up`/`move_down`, `state.rs:347-379`) — makes `move_up`/`move_down` a no-op when the list is empty.
+- On exiting search, select whichever filtered-result row was highlighted at that moment (the same approach as the command palette's confirm operation).
 
-### R-6: 選択行の説明文
+### R-6: Description for the selected row
 
-- 対象ファイル: `theme_settings/rows.rs`(`SettingsRowKind`)、`macos_overlay/model.rs`(`ThemeSettingsViewModel`)、`app/sidebar/palette.rs`(wgpuテキストカード)、`macos_overlay/imp/appkit.rs`(AppKitカード)。
-- `SettingsRowKind::description(self) -> &'static str`を`label()`(`rows.rs:98-118`)と同じ形の静的match関数として追加する。全20 kind(R-9採用後)に1行の英語説明文を与える。
-- `ThemeSettingsViewModel`に`selected_description: &'static str`フィールドを追加し、`theme_settings_view_model()`内で`SettingsRowKind::ALL[state.selected_row()].description()`から導出する。
-- 両レンダーパスで、選択行の直下(または footer 領域の上)に1行追加する。カードの縦幅が最小化(既存メモリ「theme-settings-ui spec」の"カード縦幅縮退min3"制約)に触れる場合は、既存の`overlay_scroll_window`の表示行数と共存できるよう、説明文表示を優先してテーマリストや行リストの表示件数を1行分減らす(既存の`THEME_SETTINGS_ROWS`/`THEME_LIST_ROWS`定数調整で吸収する)。
+- Target files: `theme_settings/rows.rs` (`SettingsRowKind`), `macos_overlay/model.rs` (`ThemeSettingsViewModel`), `app/sidebar/palette.rs` (wgpu text card), `macos_overlay/imp/appkit.rs` (AppKit card).
+- Add `SettingsRowKind::description(self) -> &'static str` as a static match function shaped like `label()` (`rows.rs:98-118`). Give all 20 kinds (after R-9 is adopted) a one-line English description.
+- Add a `selected_description: &'static str` field to `ThemeSettingsViewModel`, derived in `theme_settings_view_model()` from `SettingsRowKind::ALL[state.selected_row()].description()`.
+- Add one line directly below the selected row (or above the footer area) in both render paths. If this touches the card's minimized vertical-height floor (the existing "card min-3 row-count shrink" constraint from the `theme-settings-ui spec` memory), absorb it by prioritizing the description display and reducing the theme-list or row-list display count by one line, coexisting with the existing `overlay_scroll_window` display row count (via the existing `THEME_SETTINGS_ROWS`/`THEME_LIST_ROWS` constant adjustment).
 
 ### R-7: Reset to Default
 
-- 対象ファイル: `theme_settings/state.rs`(`ThemeSettings::reset_selected_row`新設)、`theme_settings/rows.rs`(`RowDraft::default_for(kind) -> RowDraft`新設)、`app/input_ops/theme_settings.rs`(Deleteキーのハンドリング)。
-- 既定値ソースは`noa_config::StartupConfig::default()`(`noa-config/src/lib.rs:590-649`、実装確認済み)。`ThemeSettingsInit`が`StartupConfig`の各フィールドから初期値を組み立てているのと対称的に、`RowDraft::default_for(kind: SettingsRowKind) -> RowDraft`は`StartupConfig::default()`の対応フィールドから`RowDraft`を組み立てる純粋関数として`rows.rs`に追加する(`ThemeSettingsInit`組み立てロジックと二重管理にならないよう、`open_theme_settings`側の初期値マッピングと`default_for`は共通の変換関数を参照する設計にする — 実装時に`app/input_ops/theme_settings.rs:open_theme_settings`のフィールドマッピングと突き合わせて整合させる)。
-- `ThemeSettings::reset_selected_row(&mut self, now: Instant) -> RowEffect`: 選択中の行の`draft`を`RowDraft::default_for(kind)`に置き換え、`touched = true`にする(既定値がsnapshotと異なる場合のみcommit時に書き込まれる、既存の`commit_updates()`のtouchedゲートをそのまま利用)。live行(`FontSize`/`BackgroundOpacity`/`BackgroundBlurRadius`/`CursorStyle`/`SidebarPreviewLines`)は`adjust()`と同じ`RowEffect`を返し、`app/input_ops/theme_settings.rs`の`adjust_theme_settings_row`と同じ適用パスに合流させる。
-- **キーバインディング**: `Backspace`は既に`FontSize`桁入力/`BackgroundImage`パス入力の削除に使われているため衝突を避け、`NamedKey::Delete`(フォワードデリート、`Backspace`とは別の物理キー、`winit::keyboard::NamedKey`に実在)を新規に割り当てる(`handle_theme_settings_key`の先頭match、`Escape`/`Enter`/`Tab`と同列に追加)。誤操作時はEsc(既存のR-16セッション全体revert)で復帰できるため、追加の確認ダイアログは設けない(可逆な操作、Ambiguous+reversibleの原則で確認なしをデフォルトとする)。
-- FontSizeのデバウンス中(R-9既存のデバウンサ)にResetが押された場合は、`set_font_size`と同じデバウンス提出経路を通す(直接値を書くのではなくデバウンサへ提出し、既存のR-9(旧spec)のfont-size取り扱いと一貫させる)。
+- Target files: `theme_settings/state.rs` (new `ThemeSettings::reset_selected_row`), `theme_settings/rows.rs` (new `RowDraft::default_for(kind) -> RowDraft`), `app/input_ops/theme_settings.rs` (Delete key handling).
+- Default value source: `noa_config::StartupConfig::default()` (`noa-config/src/lib.rs:590-649`, confirmed to exist). Symmetric with how `ThemeSettingsInit` assembles initial values from `StartupConfig`'s fields, add `RowDraft::default_for(kind: SettingsRowKind) -> RowDraft` to `rows.rs` as a pure function that assembles a `RowDraft` from the corresponding field of `StartupConfig::default()` (to avoid duplicate maintenance against the `ThemeSettingsInit` assembly logic, design `open_theme_settings`'s initial-value mapping and `default_for` to reference a shared conversion function — reconcile against the field mapping in `app/input_ops/theme_settings.rs:open_theme_settings` at implementation time).
+- `ThemeSettings::reset_selected_row(&mut self, now: Instant) -> RowEffect`: replace the selected row's `draft` with `RowDraft::default_for(kind)` and set `touched = true` (written on commit only if the default differs from the snapshot, reusing the existing `touched` gate in `commit_updates()`). For live rows (`FontSize`/`BackgroundOpacity`/`BackgroundBlurRadius`/`CursorStyle`/`SidebarPreviewLines`), return the same `RowEffect` as `adjust()`, joining the same apply path as `adjust_theme_settings_row` in `app/input_ops/theme_settings.rs`.
+- **Key binding**: since `Backspace` is already used for digit entry in `FontSize`/path entry in `BackgroundImage`, avoid a conflict and assign `NamedKey::Delete` (forward delete, a physical key distinct from `Backspace`, present in `winit::keyboard::NamedKey`) for Reset (added to the top-level match in `handle_theme_settings_key`, alongside `Escape`/`Enter`/`Tab`). No confirmation dialog is added, since Esc (the existing R-16 whole-session revert) already provides recovery from a mistaken press (a reversible operation — defaulting to no confirmation per the Ambiguous+reversible principle).
+- If Reset is pressed while a FontSize debounce (the existing R-9 debouncer) is in flight, route it through the same debounce-submission path as `set_font_size` (submit to the debouncer rather than writing the value directly, staying consistent with the existing R-9 (old spec) font-size handling).
 
-### R-8: 既存回帰ゼロ(ハードゲート)
+### R-8: Zero existing regressions (hard gate)
 
-- 新規コードの追加は既存の公開メソッドのシグネチャ・戻り値の意味を変えない形で行う(R-1のみ`restart_note`の戻り値型を`bool`→enumに変更するため、この1メソッドの型変更は許容された変更として明記し、呼び出し元3箇所[`state.rs`内部, `model.rs`, 両レンダーパス]を全て追従させる)。
-- `theme_settings/tests.rs`(981行)と`app/input_ops/theme_settings.rs`内の`#[cfg(test)] mod commit_theme_settings_tests`の既存テスト関数は、アサーション本文を一切変更せずに緑を維持する。新規テストは追加のみ。
-- `cargo test -p noa-app`をゲートとする。
+- Add new code without changing the signature or return-value meaning of any existing public method (R-1 is the sole exception, changing `restart_note`'s return type from `bool` to an enum; this single method's type change is explicitly called out as an accepted change, and all 3 call sites [inside `state.rs`, `model.rs`, and both render paths] must be updated to follow).
+- The existing test functions in `theme_settings/tests.rs` (981 lines) and `#[cfg(test)] mod commit_theme_settings_tests` in `app/input_ops/theme_settings.rs` must stay green with zero changes to their assertion bodies. New tests may only be added.
+- `cargo test -p noa-app` is the gate.
 
-### R-9: C安全4キー解放(must全緑後)
+### R-9: Unlock 4 C-safe keys (after all musts are green)
 
-- 対象4キー: `scrollback-limit`(`StartupConfig::scrollback_limit`, `DEFAULT_SCROLLBACK_LIMIT`)、`cursor-style-blink`(`cursor_style_blink: Option<bool>`)、`minimum-contrast`(`minimum_contrast`, `DEFAULT_MINIMUM_CONTRAST`)、`macos-option-as-alt`(`macos_option_as_alt: MacosOptionAsAlt`)。全て`noa-config/src/lib.rs:590-649`の`StartupConfig::default()`に実在するフィールドであることを確認済み。
-- 各行は`RowDraft`新variant・`SettingsRowKind`新variant・`label()`/`description()`(R-6)エントリ・`is_live() == false`(「C安全」= ランタイム適用経路が存在しないため、既存の`FontFamily`/`WindowPadding`/`MacosTitlebarStyle`と同じ"persist-only、次回起動反映"パターンを踏襲、`commit_theme_settings`のコメントが明記する既存の設計判断と一貫)・`commit_updates()`での対応config keyへのマッピングを備える。
-- `SettingsRowKind::COUNT`が16→20になることに伴い、`ALL`配列・`rows`配列・全ての`SettingsRowKind::ALL[idx]`前提コードを機械的に追従させる(既存の16行分の実装パターンの反復であり、新規の設計判断は伴わない)。
-- ランタイム適用(live化)は本specのスコープ外 — 将来増分候補として明示する(下記Open Questions)。
+- The 4 target keys: `scrollback-limit` (`StartupConfig::scrollback_limit`, `DEFAULT_SCROLLBACK_LIMIT`), `cursor-style-blink` (`cursor_style_blink: Option<bool>`), `minimum-contrast` (`minimum_contrast`, `DEFAULT_MINIMUM_CONTRAST`), `macos-option-as-alt` (`macos_option_as_alt: MacosOptionAsAlt`). All confirmed to exist as real fields in `StartupConfig::default()` at `noa-config/src/lib.rs:590-649`.
+- Each row has a new `RowDraft` variant, a new `SettingsRowKind` variant, a `label()`/`description()` (R-6) entry, `is_live() == false` (the "C-safe" designation means no runtime-apply path exists, following the same "persist-only, applies on next launch" pattern as the existing `FontFamily`/`WindowPadding`/`MacosTitlebarStyle`, consistent with the existing design decision documented in `commit_theme_settings`'s comment), and a mapping in `commit_updates()` to the corresponding config key.
+- With `SettingsRowKind::COUNT` going from 16 to 20, mechanically update the `ALL` array, the `rows` array, and all code assuming `SettingsRowKind::ALL[idx]` (a repetition of the existing 16-row implementation pattern, involving no new design decisions).
+- Runtime application (making them live) is out of scope for this spec — explicitly noted as a future increment candidate (see Open Questions below).
 
-### R-10: 選択行コントラストの回帰防止
+### R-10: Regression protection for selected-row contrast
 
-- 対象ファイル: `macos_overlay/model.rs`(`OverlayColors`)。
-- WCAG相対輝度式(外部crate不要、`[f32;4]`のRGBA成分に対する純粋な算術)を使い、既存テスト内に`OverlayColors::selected_bg` vs `surface_fg`、および`accent` vs `surface_bg`のコントラスト比が最低ライン(例: 3.0:1、UI装飾要素向けのWCAG AA Large Text相当)を満たすことを検証するunit testを追加する。
-- 検証対象のテーマ/カラーフィクスチャは、既存テストが既に使っているもの(例: `theme_settings/tests.rs`の`"3024 Day"`)を再利用し、light/darkペアの網羅的なマトリクス検証は行わない(Out-of-scope)。
-- 本要件は新規のトークン化作業ではなく、既存のトークン経由経路(`colors.selected_bg`, `accent: Rgb`)が将来ハードコード値へ退行しないことを保証するリグレッションガードとして位置づける。
+- Target file: `macos_overlay/model.rs` (`OverlayColors`).
+- Using the WCAG relative-luminance formula (no external crate needed, pure arithmetic over `[f32;4]` RGBA components), add unit tests within the existing test suite verifying that the contrast ratio between `OverlayColors::selected_bg` vs `surface_fg`, and between `accent` vs `surface_bg`, meets a minimum floor (e.g., 3.0:1, equivalent to WCAG AA Large Text for UI decoration elements).
+- Reuse theme/color fixtures already used by the existing tests for verification (e.g., `"3024 Day"` in `theme_settings/tests.rs`); do not perform exhaustive light/dark-pair matrix verification (out of scope).
+- Position this requirement not as new tokenization work but as a regression guard ensuring the existing token-based paths (`colors.selected_bg`, `accent: Rgb`) never regress to hardcoded values in the future.
 
-## エッジケース・未検証事項(明示)
+## Edge cases / unverified items (explicit)
 
-- **検索とselected_row/font_size_digits/background_image_textの相互作用**: R-5で検索モードに入った際、`FontSize`行が編集途中(`font_size_digits: Some(..)`)だった場合の扱い(検索開始時に未確定の桁入力を確定させるか破棄するか)は未確定。実装時に`clear_row_input_state()`(既存、`state.rs:439-442`)の呼び出しタイミングと合わせて決定する。
-- **検索終了時のindex安定性**: `settings_filtered`が絞られた状態から全件表示に戻したとき、`selected_row`(`SettingsRowKind::ALL`への生インデックス)が検索前の行を指し続けるか、検索結果内での相対位置を保つかは未確定。コマンドパレットの確定挙動との整合を実装時に確認する。
-- **R-9の4行のランタイム適用**: 本specでは全てpersist-only(次回起動反映)とするが、`cursor-style-blink`は既存のlive`CursorStyle`行と密接に関連するため、将来`apply_live_cursor_style`の`blinking`引数(現状`initial_cursor_style`から静的導出、`app/input_ops/theme_settings.rs:518-528`)と統合してlive化できる可能性がある — 本spec範囲外の将来増分候補として記録する。
-- **R-1文言の最終テキスト**: 実装時のコピーレビュー対象とし、本specでは意味(理由の区別)のみを契約する。
+- **Interaction between search and selected_row/font_size_digits/background_image_text**: it's undecided how to handle the `FontSize` row being mid-edit (`font_size_digits: Some(..)`) when entering search mode via R-5 (whether to commit or discard the unconfirmed digit entry when search starts). Decide at implementation time, together with the call timing of `clear_row_input_state()` (existing, `state.rs:439-442`).
+- **Index stability when exiting search**: when returning from a filtered `settings_filtered` state to showing all rows, it's undecided whether `selected_row` (a raw index into `SettingsRowKind::ALL`) keeps pointing at the pre-search row or preserves its relative position within the search results. Confirm consistency with the command palette's confirm behavior at implementation time.
+- **Runtime application of R-9's 4 rows**: this spec treats all of them as persist-only (applied on next launch), but since `cursor-style-blink` is closely related to the existing live `CursorStyle` row, there may be a future opportunity to integrate it with `apply_live_cursor_style`'s `blinking` argument (currently statically derived from `initial_cursor_style`, `app/input_ops/theme_settings.rs:518-528`) and make it live — recorded as a future increment candidate outside this spec's scope.
+- **Final text of R-1's copy**: subject to copy review at implementation time; this spec only contracts the meaning (distinguishing the reason).
 
 ## L3 — Acceptance Criteria
 
-検証手段の凡例: [unit]=GPU不要のユニットテスト / [integration]=結合テスト / [code-review]=実装検査 / [GUI目視]=手動確認。
+Verification-method legend: [unit] = GPU-free unit test / [integration] = integration test / [code-review] = implementation inspection / [manual-visual] = manual confirmation.
 
-### R-1(理由提示付きrestartノート)
-- **AC-1** [unit]: Given opaque起動(`opaque_at_startup=true`)で`BackgroundOpacity`行が未編集。When `restart_reason(BackgroundOpacity)`を呼ぶ。Then `RestartReason::OpaqueStartup`を返す。
-- **AC-2** [unit]: Given `FontFamily`行(commit-only)がtouched済み。When `restart_reason(FontFamily)`を呼ぶ。Then `RestartReason::CommitOnly`を返し、AC-1のケースとは異なるvariantである。
-- **AC-3** [GUI目視]: opaque起動セッションのopacity/blur行が、他のcommit-only行の"(restart to apply)"とは異なる文言を表示する。
+### R-1 (restart note with reason)
+- **AC-1** [unit]: Given opaque startup (`opaque_at_startup=true`) with the `BackgroundOpacity` row unedited. When calling `restart_reason(BackgroundOpacity)`. Then it returns `RestartReason::OpaqueStartup`.
+- **AC-2** [unit]: Given the `FontFamily` row (commit-only) has been touched. When calling `restart_reason(FontFamily)`. Then it returns `RestartReason::CommitOnly`, a different variant from AC-1's case.
+- **AC-3** [manual-visual]: An opaque-startup session's opacity/blur row displays copy distinct from other commit-only rows' "(restart to apply)".
 
-### R-2(ネイティブメニュー項目)
-- **AC-4** [unit]: `AppCommand::OpenSettings.menu_id()`が非空文字列を返し、`AppCommand::from_menu_id`がそれを`OpenSettings`へ逆変換する(既存`preferences_menu_item_spec`テストと同型のウィンドウ不要テスト)。
-- **AC-5** [code-review]: `AppCommand::Preferences`のmenu_id・ラベル・アクセラレータ・`open_config_file()`への配線に差分がないことを diff で確認する。
-- **AC-6** [GUI目視]: 新規メニュー項目がSettingsオーバーレイ(Settingsモード)を開き、外部エディタは起動しない。
+### R-2 (native menu item)
+- **AC-4** [unit]: `AppCommand::OpenSettings.menu_id()` returns a non-empty string, and `AppCommand::from_menu_id` reverses it back to `OpenSettings` (a window-free test of the same shape as the existing `preferences_menu_item_spec` test).
+- **AC-5** [code-review]: Confirm via diff that `AppCommand::Preferences`'s menu_id, label, accelerator, and wiring to `open_config_file()` show no changes.
+- **AC-6** [manual-visual]: The new menu item opens the Settings overlay (Settings mode), and does not launch the external editor.
 
-### R-3(全行常時バッジ)
-- **AC-7** [unit]: Given オーバーレイを開いた直後(全行`touched=false`)。When view modelを構築する。Then 全20行の`live`フィールドが`SettingsRowKind::is_live()`の値と1件ずつ一致する。
-- **AC-8** [unit]: Given live行を編集する。When view modelを再構築する。Then その行の`live`フィールドは`true`のまま変化しない(R-1の`RestartReason`とは独立)。
+### R-3 (always-on badges for all rows)
+- **AC-7** [unit]: Given the overlay was just opened (all rows `touched=false`). When building the view model. Then all 20 rows' `live` field matches `SettingsRowKind::is_live()`'s value, one for one.
+- **AC-8** [unit]: Given editing a live row. When rebuilding the view model. Then that row's `live` field remains `true`, unchanged (independent of R-1's `RestartReason`).
 
-### R-4(per-frameクローン解消)
-- **AC-9** [unit]: Given セッションが開いていて、2回連続で`redraw`相当の読み取り専用スナップショット取得(`Arc::clone`)を行い、その間に変更系メソッドを呼ばない。When 2つの`Arc`ポインタを`Arc::ptr_eq`で比較する。Then 一致する(深いクローンが発生していない)。
-- **AC-10** [unit]: Given 直前のスナップショット`Arc`がスコープを抜けて破棄された後。When `move_down`等の変更系メソッドを呼ぶ。Then 既存の(R-8で凍結された)全ての振る舞いテストが変更なしで緑のまま通る(`Arc::make_mut`経由でも意味論が変わらないことの回帰証明)。
-- **AC-11** [code-review]: `app/render.rs`の`theme_settings_card`構築コードに`.clone()`(`ThemeSettings`本体に対する)が存在しないことを確認する。
+### R-4 (eliminate per-frame clone)
+- **AC-9** [unit]: Given a session is open, and two consecutive redraw-equivalent read-only snapshot fetches (`Arc::clone`) occur without any mutating method being called in between. When comparing the two `Arc` pointers with `Arc::ptr_eq`. Then they are equal (no deep clone occurred).
+- **AC-10** [unit]: Given the prior snapshot `Arc` has gone out of scope and been dropped. When calling a mutating method such as `move_down`. Then all existing (R-8-frozen) behavior tests still pass unchanged (regression proof that semantics are unchanged even via `Arc::make_mut`).
+- **AC-11** [code-review]: Confirm that the `theme_settings_card` construction code in `app/render.rs` contains no `.clone()` on the `ThemeSettings` value itself.
 
-### R-5(設定行fuzzy検索)
-- **AC-12** [unit]: Given Settingsモードで`Tab`を押す。When 状態を検査する。Then `settings_search_active`が`true`になる。
-- **AC-13** [unit]: Given 検索有効状態で"curs"を入力する。When `settings_filtered`を検査する。Then ラベルに"curs"がfuzzyマッチする行のみが、スコア降順で並ぶ。
-- **AC-14** [unit]: Given 検索クエリが0件マッチになる。When 一覧を確認する。Then 一覧は空だが、`move_up`/`move_down`はpanicしない(no-op)。
-- **AC-15** [unit]: Given 空クエリ。When `settings_filtered`を検査する。Then `SettingsRowKind::ALL`と同じ順序で全20件を含む。
+### R-5 (fuzzy search over settings rows)
+- **AC-12** [unit]: Given pressing `Tab` in Settings mode. When inspecting state. Then `settings_search_active` becomes `true`.
+- **AC-13** [unit]: Given search is active and typing "curs". When inspecting `settings_filtered`. Then only rows whose label fuzzy-matches "curs" appear, sorted by descending score.
+- **AC-14** [unit]: Given a search query with zero matches. When inspecting the list. Then the list is empty, but `move_up`/`move_down` do not panic (no-op).
+- **AC-15** [unit]: Given an empty query. When inspecting `settings_filtered`. Then it contains all 20 entries, in the same order as `SettingsRowKind::ALL`.
 
-### R-6(選択行の説明文)
-- **AC-16** [unit]: `SettingsRowKind::ALL`の全kindについて、`description()`が空文字列でなく、`label()`とも異なる文字列を返す。
-- **AC-17** [unit]: `theme_settings_view_model()`が返す`selected_description`が、常に`SettingsRowKind::ALL[state.selected_row()].description()`と一致する。
+### R-6 (description for the selected row)
+- **AC-16** [unit]: For every kind in `SettingsRowKind::ALL`, `description()` returns a non-empty string that also differs from `label()`.
+- **AC-17** [unit]: The `selected_description` returned by `theme_settings_view_model()` always matches `SettingsRowKind::ALL[state.selected_row()].description()`.
 
-### R-7(Reset to Default)
-- **AC-18** [unit]: Given `FontSize`行(live)を既定値から変更済み。When `Delete`キー相当の操作(`reset_selected_row`)を実行する。Then 行の`draft`が`StartupConfig::default().font_size`相当の値に戻り、`touched=true`になり、対応する`RowEffect`がライブ適用のために返る。
-- **AC-19** [unit]: Given `FontFamily`行(commit-only)が未編集。When Resetを実行する。Then `draft`が既定値になり`touched=true`になる(値が既存のsnapshotと同じ場合でも`touched`は立つ — 明示的なリセット操作の意図を保持するため)。
+### R-7 (Reset to Default)
+- **AC-18** [unit]: Given the `FontSize` row (live) has been changed from its default. When executing the `Delete`-key-equivalent operation (`reset_selected_row`). Then the row's `draft` reverts to the value equivalent to `StartupConfig::default().font_size`, `touched=true` is set, and the corresponding `RowEffect` is returned for live application.
+- **AC-19** [unit]: Given the `FontFamily` row (commit-only) is unedited. When executing Reset. Then `draft` becomes the default value and `touched=true` is set (touched is set even if the value equals the existing snapshot — to preserve the intent of an explicit reset operation).
 
-### R-8(既存回帰ゼロ、ハードゲート)
-- **AC-20** [unit/integration]: `cargo test -p noa-app`実行時、`theme_settings::tests`および`app::input_ops::theme_settings::commit_theme_settings_tests`配下の既存テスト関数(981行分)が、アサーション本文の変更なしに全て通過する。
+### R-8 (zero existing regressions, hard gate)
+- **AC-20** [unit/integration]: When running `cargo test -p noa-app`, all existing test functions under `theme_settings::tests` and `app::input_ops::theme_settings::commit_theme_settings_tests` (981 lines' worth) pass with no changes to their assertion bodies.
 
-### R-9(C安全4キー解放)
-- **AC-21** [unit]: 新規4行それぞれについて、`RowDraft`variant・`is_live() == false`・`commit_updates()`が対応するconfig key(`scrollback-limit`/`cursor-style-blink`/`minimum-contrast`/`macos-option-as-alt`)へマッピングされることを確認する。
-- **AC-22** [unit]: `SettingsRowKind::COUNT == 20`であり、既存の`SettingsRowKind::ALL[i]`不変条件(`rows[i]`のdraft variantと一致)が20行全てで成り立つ。
+### R-9 (unlock 4 C-safe keys)
+- **AC-21** [unit]: For each of the 4 new rows, confirm the `RowDraft` variant, `is_live() == false`, and that `commit_updates()` maps to the corresponding config key (`scrollback-limit`/`cursor-style-blink`/`minimum-contrast`/`macos-option-as-alt`).
+- **AC-22** [unit]: `SettingsRowKind::COUNT == 20`, and the existing `SettingsRowKind::ALL[i]` invariant (matching `rows[i]`'s draft variant) holds for all 20 rows.
 
-### R-10(選択行コントラストの回帰防止)
-- **AC-23** [unit]: 既存テストフィクスチャのテーマ(例: "3024 Day")から導出した`OverlayColors`について、`selected_bg` vs `surface_fg`、`accent` vs `surface_bg`のWCAG相対輝度コントラスト比が、いずれも定めた最低ライン以上であることを検証する。
+### R-10 (regression protection for selected-row contrast)
+- **AC-23** [unit]: For `OverlayColors` derived from an existing test fixture theme (e.g., "3024 Day"), verify that the WCAG relative-luminance contrast ratios of `selected_bg` vs `surface_fg` and `accent` vs `surface_bg` both meet or exceed the defined minimum floor.
 
 ### NFR
-- **AC-24(NFR-1)** [unit]: AC-9と同一(アロケーション非発生の直接証明)。
-- **AC-25(NFR-2)** [code-review]: 設定行fuzzy検索の再計算が、テキスト入力イベント発生時にのみトリガされ(既存`refilter_and_mark`と同じ規律)、アイドル時の毎フレーム再計算経路を持たないことをコードレビューで確認する。
-- **AC-26(NFR-3)** [code-review]: R-1/R-3/R-6/R-7/R-9のいずれのdiffにも、`noa_config::write_config_updates`以外の新規config書込み関数が追加されていないことを確認する。
+- **AC-24 (NFR-1)** [unit]: Same as AC-9 (direct proof that no allocation occurs).
+- **AC-25 (NFR-2)** [code-review]: Confirm via code review that settings-row fuzzy-search recomputation is triggered only by text-input events (the same discipline as the existing `refilter_and_mark`), and that no per-frame recompute path exists while idle.
+- **AC-26 (NFR-3)** [code-review]: Confirm that none of the diffs for R-1/R-3/R-6/R-7/R-9 add any new config-write function other than `noa_config::write_config_updates`.
 
-### トレーサビリティ
+### Traceability
 
 | Requirement | AC |
 |---|---|
@@ -227,7 +227,7 @@ magi評決(2026-07-11、再審議禁止)により採用スコープは **B+**: m
 | NFR-2 | AC-25 |
 | NFR-3 | AC-26 |
 
-全 10 R + 3 NFR = 13項目、各項目に最低1 ACが対応し、計26 AC(AC-1〜26)。トレーサビリティ完全性 **100%**(Standardスコープ最低ライン85%を超過)。[GUI目視]はAC-3/AC-6のみ、他24件はunit/integration/code-reviewで自動的または実装検査で検証可能。
+10 R + 3 NFR = 13 items total, each covered by at least one AC, for 26 ACs total (AC-1 through 26). Traceability completeness is **100%** (exceeding the Standard scope's 85% floor). Only AC-3/AC-6 are [manual-visual]; the other 24 are verifiable automatically via unit/integration tests or through implementation inspection.
 
 ## L4 — Reversibility / Learning / Disqualification
 
@@ -235,66 +235,66 @@ magi評決(2026-07-11、再審議禁止)により採用スコープは **B+**: m
 L4:
   reversibility:
     classification: HIGH
-    # 全10要件は単一クレート(noa-app)内の追加的変更で、config形式・DB・公開APIの変更を伴わない。
-    # R-4(Arc化)のみ内部型シグネチャ変更を伴うが、`ThemeSettingsSession`はnoa-app内部プライベート型で外部境界を跨がない。
-    revert_procedure: "該当コミット群をrevertするか、featureブランチを一括破棄する。config書式・既存の16行の意味論には触れないため、ユーザーのconfigファイルへの影響はゼロ。"
-    revert_time_estimate: "minutes(git revert 1コマンド相当)"
-    revert_blast_radius: "Settingsオーバーレイのみ。ターミナル本体機能・他オーバーレイ(コマンドパレット・overview等)には波及しない(R-3非機能要件の相互排他ガードは既存のまま)。"
+    # All 10 requirements are additive changes within a single crate (noa-app), with no change to config format, DB, or public API.
+    # Only R-4 (Arc conversion) involves an internal type signature change, but `ThemeSettingsSession` is a private internal type within noa-app that crosses no external boundary.
+    revert_procedure: "Revert the relevant commits, or discard the feature branch wholesale. Since neither the config format nor the semantics of the existing 16 rows are touched, there is zero impact on the user's config file."
+    revert_time_estimate: "minutes (equivalent to a single git revert command)"
+    revert_blast_radius: "Settings overlay only. Does not propagate to the core terminal functionality or other overlays (command palette, overview, etc.) (the R-3 non-functional requirement's mutual-exclusion guard remains as-is)."
 
   learning:
-    hypothesis: "Settingsオーバーレイの各行にlive/next-launch分類バッジと説明文を常時表示し、fuzzy検索とReset操作を追加することで、誤操作からの回復と目的の設定への到達が容易になる。"
+    hypothesis: "Always displaying a live/next-launch classification badge and description on every row of the Settings overlay, and adding fuzzy search plus a Reset operation, makes it easier to recover from mistakes and reach the desired setting."
     success_threshold:
-      metric: "既存テストスイート(theme_settings::tests, 981行)の無改変通過率"
+      metric: "Pass rate of the existing test suite (theme_settings::tests, 981 lines) with zero modification"
       value: 100
-      window: "実装完了時点(CI一回)"
+      window: "At implementation completion (one CI run)"
     fail_threshold:
-      metric: "既存テストの改変または失敗件数"
+      metric: "Number of existing tests modified or failing"
       value: 1
-      window: "実装完了時点(CI一回)"
+      window: "At implementation completion (one CI run)"
     learning_capture_plan:
-      win_capture: "実装完了後、cargo test -p noa-app の結果とGUI目視スポットチェック(AC-3, AC-6)をコミットメッセージ/PR説明に記録する。"
-      loss_capture: "F1〜F5いずれかの失敗条件に抵触した場合、該当要件を該当PRから切り離し、原因をこのspecのOpen Questionsへ追記する。"
-      decision_horizon: "実装ループ完了時(本specはapex/featureいずれかのbuild-pathで単一ランを想定)"
+      win_capture: "After implementation completes, record the results of cargo test -p noa-app and manual spot-checks (AC-3, AC-6) in the commit message / PR description."
+      loss_capture: "If any of failure conditions F1-F5 is triggered, split the offending requirement out of the PR and append the cause to this spec's Open Questions."
+      decision_horizon: "At completion of the implementation loop (this spec assumes a single run on either the apex or feature build-path)"
 
   disqualification:
     conditions:
       - id: DISQ-001
-        description: "既存16行の値・キー操作・commit/revert挙動のいずれかが変わる(F1)"
-        check: "AC-20(cargo test -p noa-app 既存テスト無改変通過)"
+        description: "Any of the existing 16 rows' values, key operations, or commit/revert behavior changes (F1)"
+        check: "AC-20 (cargo test -p noa-app existing tests pass unmodified)"
         on_trigger: REJECT
       - id: DISQ-002
-        description: "透過方式(ALPHA_REPLACE経路)またはopaque判定ロジックに変更が入る(F2)"
-        check: "code-review — R-1のdiffが`restart_reason`の戻り値型のみに限定されていることを確認"
+        description: "A change is introduced to the transparency mechanism (ALPHA_REPLACE path) or the opaque determination logic (F2)"
+        check: "code-review — confirm R-1's diff is limited to restart_reason's return type"
         on_trigger: REJECT
       - id: DISQ-003
-        description: "Out-of-scope項目(light/darkペア・セクション見出し・マウス操作・VoiceOver・既存⌘,配線)のいずれかに着手する(F3)"
-        check: "code-review — diffの対象ファイル一覧を本specのL2記載ファイルと突き合わせる"
+        description: "Work begins on any out-of-scope item (light/dark pairing, section headings, mouse operation, VoiceOver, existing ⌘, wiring) (F3)"
+        check: "code-review — cross-check the diff's target file list against this spec's L2 file list"
         on_trigger: REJECT
       - id: DISQ-004
-        description: "R-5/R-6/R-7が部分実装のまま完了扱いになる(F4)"
-        check: "AC-12〜15(R-5), AC-16〜17(R-6), AC-18〜19(R-7) 全緑"
+        description: "R-5/R-6/R-7 is marked complete while only partially implemented (F4)"
+        check: "AC-12 through 15 (R-5), AC-16-17 (R-6), AC-18-19 (R-7) all green"
         on_trigger: REJECT
       - id: DISQ-005
-        description: "R-1〜R-8のいずれかが未緑のままR-9/R-10に着手する(F5)"
-        check: "実装順序のcode-review — コミット履歴でR-9/R-10着手コミットがR-1〜R-8全緑コミットより後であることを確認"
+        description: "Work begins on R-9/R-10 before R-1 through R-8 are all green (F5)"
+        check: "code-review of implementation order — confirm via commit history that the R-9/R-10 start commit comes after the R-1-R-8-all-green commit"
         on_trigger: REJECT
 ```
 
 ## Meta
 
-- **status:** draft(spec本体はサインオフ待ち。magi評決スコープは確定・再審議禁止)
+- **status:** draft (spec body pending sign-off. magi verdict scope is finalized and not to be re-litigated)
 - **version:** 1.0
-- **authored by:** Accord agent(コード監査込み、2026-07-11)。L3は磨き直しのみで正式なThree Amigosレビュー(product/dev/QA)は未実施 — 実装着手前に人間レビューを推奨する。
-- **reviews:** 未実施
-- **upstream lock:** `theme-settings-ui.md`(locked) — 本specはその上に増分し、upstreamのR/AC/L2決定を変更しない。
-- **next:** atlas + vision による並行設計(magi評決の"Next"指示どおり)。両agentは本specのL2(特にR-4のArc設計、R-5の検索状態機械)を実装設計の起点として参照すること。
+- **authored by:** Accord agent (including code audit, 2026-07-11). L3 is a refinement pass only — a formal Three Amigos review (product/dev/QA) has not been performed — a human review is recommended before implementation begins.
+- **reviews:** none performed
+- **upstream lock:** `theme-settings-ui.md` (locked) — this spec increments on top of it and does not change upstream's R/AC/L2 decisions.
+- **next:** parallel design by atlas + vision (per the magi verdict's "Next" instruction). Both agents should reference this spec's L2 (particularly R-4's Arc design and R-5's search state machine) as the starting point for implementation design.
 
 ## Open Questions / Deferred Decisions
 
-- R-9の4行のうちどれか(特に`cursor-style-blink`)を将来live化する場合の設計(既存`apply_live_cursor_style`の`blinking`引数との統合方法)。
-- R-5の検索終了時のindex安定性(検索前の行 vs フィルタ結果内の相対位置)。
-- R-1の最終表示文言(意味の契約のみ本specで固定、コピーは実装時レビュー)。
-- R-6の説明文が既存の"カード縦幅縮退min3"制約(`theme-settings-ui spec`メモリ参照)とどう共存するか、`THEME_SETTINGS_ROWS`/`THEME_LIST_ROWS`の調整幅。
+- The design for eventually making one of R-9's 4 rows live (particularly `cursor-style-blink`), and how to integrate it with the existing `apply_live_cursor_style`'s `blinking` argument.
+- Index stability when exiting R-5's search (pre-search row vs. relative position within filtered results).
+- R-1's final display copy (only the meaning is fixed by this spec; the copy is reviewed at implementation time).
+- How R-6's description coexists with the existing "card min-3 row-count shrink" constraint (see the `theme-settings-ui spec` memory), and the adjustment range for `THEME_SETTINGS_ROWS`/`THEME_LIST_ROWS`.
 
 ---
 
@@ -358,3 +358,5 @@ label x=20 w=170 · badge x=196 w=44 (right edge 240, right-aligned) · value co
 6. (FM-08) `RestartReason` derives `Clone, Copy, Debug, PartialEq, Eq, Hash` (view-model cache dedup).
 7. (Atlas invariant) Render path never stores its `Arc<ThemeSettings>` clone back into `self` across turns — code-review gate.
 8. (Ripple C-1) `app/timers.rs:490-501` is the 9th `Arc::make_mut` site; `macos_overlay/sync.rs` unchanged. (ime.rs:92 also touches the session — audit it during implementation.)
+</content>
+</invoke>

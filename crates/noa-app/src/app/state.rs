@@ -661,6 +661,7 @@ mod theme_settings_session_tests {
             server_enable: false,
             server_port: noa_config::DEFAULT_SERVER_PORT,
             server_scopes: "read".to_string(),
+            server_status: "Stopped".to_string(),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),

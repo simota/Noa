@@ -28,11 +28,19 @@ impl App {
         }
         self.ipc_install_attempted = true;
         if !self.config.server_enable {
+            // Disabled is not a failure — clear any stale error from a
+            // previous enabled-but-failed-to-bind session so the Settings
+            // panel's status row reads plain "Stopped", not a leftover
+            // bind-failure reason (settings-panel-server-status).
+            self.ipc_last_error = None;
+            self.refresh_theme_settings_server_status();
             return;
         }
 
         let Some(token_path) = noa_config::server_token_path() else {
             log::warn!("noa-ipc: cannot resolve token path, server not started");
+            self.ipc_last_error = Some("cannot resolve token path".to_string());
+            self.refresh_theme_settings_server_status();
             return;
         };
         let token = match noa_ipc::load_or_create_token(
@@ -42,6 +50,8 @@ impl App {
             Ok(token) => token,
             Err(err) => {
                 log::warn!("noa-ipc: failed to load/create token: {err}");
+                self.ipc_last_error = Some(format!("failed to load token: {err}"));
+                self.refresh_theme_settings_server_status();
                 return;
             }
         };
@@ -63,11 +73,54 @@ impl App {
             Ok(handle) => {
                 log::info!("noa-ipc: listening on 127.0.0.1:{}", handle.port());
                 self.ipc_server = Some(handle);
+                self.ipc_last_error = None;
             }
             Err(err) => {
                 log::warn!("noa-ipc: failed to bind 127.0.0.1:{}: {err}", self.config.server_port);
+                self.ipc_last_error = Some(format!("failed to bind 127.0.0.1:{}: {err}", self.config.server_port));
             }
         }
+        self.refresh_theme_settings_server_status();
+    }
+
+    /// settings-panel-server-status: the `ServerStatus` row's display text
+    /// for the server's *current* live state — running (with client count),
+    /// stopped, or the last bind failure. A pure formatting call over
+    /// `self.ipc_server`/`self.ipc_broadcaster`/`self.ipc_last_error`, kept
+    /// as its own method so both `open_theme_settings_session` (seeding a
+    /// freshly opened row) and [`Self::refresh_theme_settings_server_status`]
+    /// (pushing an update into an already-open one) compute it identically.
+    pub(super) fn server_status_display(&self) -> String {
+        let running = self
+            .ipc_server
+            .as_ref()
+            .map(|handle| (handle.port(), self.ipc_broadcaster.connection_count()));
+        crate::theme_settings::format_server_status(running, self.ipc_last_error.as_deref())
+    }
+
+    /// settings-panel-server-status (liveness, R-3/AC-4a-equivalent): push a
+    /// fresh `ServerStatus` row value into the open Settings panel, if any
+    /// is open. The render path (wgpu overlay text + the native macOS card)
+    /// only ever reads `ThemeSettings`/`RowDraft` — it has no `&App`
+    /// reference — so a toggle's effect can't be picked up by simply
+    /// re-rendering; this out-of-band push is the mechanism instead. Called
+    /// from every branch of [`Self::install_ipc_server_if_needed`] (which
+    /// [`Self::restart_ipc_server`] always re-runs), so a `server-enable`/
+    /// `server-port`/`server-scopes` edit reflects in an already-open panel
+    /// within one `ConfigWatcher` poll tick (~500ms) of the panel's own
+    /// commit landing — no reopen needed. A no-op while no panel is open
+    /// (the common case: this fires on every server (re)install, most of
+    /// which happen before any Settings session exists).
+    pub(super) fn refresh_theme_settings_server_status(&mut self) {
+        if self.theme_settings.is_none() {
+            return;
+        }
+        let status = self.server_status_display();
+        let session = self
+            .theme_settings
+            .as_mut()
+            .expect("checked Some above");
+        std::sync::Arc::make_mut(&mut session.state).set_server_status(status);
     }
 
     /// Tears down the running `noa-ipc` server (if any) and re-runs

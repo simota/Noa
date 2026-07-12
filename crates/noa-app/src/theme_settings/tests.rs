@@ -47,6 +47,7 @@ fn init() -> ThemeSettingsInit {
         server_enable: false,
         server_port: noa_config::DEFAULT_SERVER_PORT,
         server_scopes: "read".to_string(),
+        server_status: "Stopped".to_string(),
         theme_pair: None,
         carryover: None,
         favorites: std::sync::Arc::new(std::collections::HashSet::new()),
@@ -1718,17 +1719,94 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
         RowDraft::default_for(SettingsRowKind::ServerTokenCopy),
         RowDraft::ServerTokenCopy(TokenCopyStatus::Idle)
     );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ServerStatus),
+        RowDraft::ServerStatus("Stopped".to_string())
+    );
 }
 
 // R-9: `SettingsRowKind::COUNT` is type-enforced at 20 (16 + the 4 new
 // keys) via `ALL`'s array literal length — this pins the value so a future
 // accidental drop of an entry fails loudly instead of silently shrinking
 // the overlay. The server-settings-panel-row addition brings it to 23 (+3),
-// and the token-copy action row brings it to 24 (+1).
+// the token-copy action row brings it to 24 (+1), and the read-only status
+// row (settings-panel-server-status) brings it to 25 (+1).
 #[test]
-fn settings_row_kind_count_is_twenty_four_after_server_token_copy_row() {
-    assert_eq!(SettingsRowKind::COUNT, 24);
-    assert_eq!(SettingsRowKind::ALL.len(), 24);
+fn settings_row_kind_count_is_twenty_five_after_server_status_row() {
+    assert_eq!(SettingsRowKind::COUNT, 25);
+    assert_eq!(SettingsRowKind::ALL.len(), 25);
+}
+
+// settings-panel-server-status: the status row is read-only (mirrors
+// `ServerTokenCopy`'s "no value" contract) — `adjust`/`reset_selected_row`
+// never touch it, `commit_updates` never writes it, and `App`'s out-of-band
+// `set_server_status` is the only thing that ever changes its draft.
+#[test]
+fn server_status_row_is_read_only_and_never_committed() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(SettingsRowKind::ALL.contains(&SettingsRowKind::ServerStatus));
+    assert_eq!(SettingsRowKind::ServerStatus.label(), "Server Status");
+    assert!(SettingsRowKind::ServerStatus.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::ServerStatus);
+    let idx = row_index(SettingsRowKind::ServerStatus);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerStatus("Stopped".to_string())
+    );
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert!(!settings.rows()[idx].touched);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerStatus("Stopped".to_string()),
+        "adjust must not change a read-only row's draft"
+    );
+
+    let reset_effect = settings.reset_selected_row(Instant::now());
+    assert_eq!(reset_effect, RowEffect::None);
+    assert!(!settings.rows()[idx].touched);
+
+    settings.set_server_status("Running (127.0.0.1:61771, 2 client(s))".to_string());
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerStatus("Running (127.0.0.1:61771, 2 client(s))".to_string())
+    );
+    assert!(
+        !settings.rows()[idx].touched,
+        "App's out-of-band refresh must never mark the row touched"
+    );
+
+    let updates = settings.commit_updates();
+    assert!(
+        !updates.iter().any(|(key, _)| key.starts_with("server-status")),
+        "{updates:?}"
+    );
+}
+
+// settings-panel-server-status: the pure formatting function backing the
+// row's display text, covering all three states.
+#[test]
+fn format_server_status_covers_all_three_states() {
+    assert_eq!(
+        format_server_status(Some((61771, 0)), None),
+        "Running (127.0.0.1:61771, 0 client(s))"
+    );
+    assert_eq!(
+        format_server_status(Some((8080, 3)), None),
+        "Running (127.0.0.1:8080, 3 client(s))"
+    );
+    assert_eq!(format_server_status(None, None), "Stopped");
+    assert_eq!(
+        format_server_status(None, Some("address already in use")),
+        "Bind failed: address already in use"
+    );
+    // `running` always wins over a stale `last_error`.
+    assert_eq!(
+        format_server_status(Some((61771, 1)), Some("stale error")),
+        "Running (127.0.0.1:61771, 1 client(s))"
+    );
 }
 
 // The token-copy row: an action row, not a value row (see its doc comment
@@ -2148,9 +2226,10 @@ fn server_scopes_row_cycles_presets_and_falls_back_from_a_non_preset_value() {
 // every one of the 16 row kinds, not just the 3 the AC-numbered tests
 // above happen to exercise (CursorStyle/FontSize/MacosTitlebarStyle),
 // resets to exactly `RowDraft::default_for(kind)` and marks touched.
-// `ServerTokenCopy` is the one deliberate exception (see its doc comment on
-// `SettingsRowKind`): an action row with no persisted value, so reset stays
-// a no-op there instead.
+// `ServerTokenCopy`/`ServerStatus` are the deliberate exceptions (see their
+// doc comments on `SettingsRowKind`): an action row and a read-only display
+// row, neither with a persisted value, so reset stays a no-op for both
+// instead.
 #[test]
 fn reset_selected_row_writes_default_for_and_marks_touched_for_every_row_kind() {
     for kind in SettingsRowKind::ALL {
@@ -2160,7 +2239,10 @@ fn reset_selected_row_writes_default_for_and_marks_touched_for_every_row_kind() 
         settings.reset_selected_row(Instant::now());
 
         let idx = row_index(kind);
-        if kind == SettingsRowKind::ServerTokenCopy {
+        if matches!(
+            kind,
+            SettingsRowKind::ServerTokenCopy | SettingsRowKind::ServerStatus
+        ) {
             assert_eq!(
                 settings.rows()[idx].draft,
                 RowDraft::default_for(kind),
@@ -2652,6 +2734,12 @@ fn every_mutator_that_changes_state_changes_the_fingerprint() {
             // fingerprint-relevant mutator is `App`'s reported outcome.
             SettingsRowKind::ServerTokenCopy => {
                 settings.set_server_token_copy_status(TokenCopyStatus::Copied);
+            }
+            // Same shape as `ServerTokenCopy` above, but for the read-only
+            // status row's own out-of-band refresh (see its doc comment on
+            // `SettingsRowKind::ServerStatus`).
+            SettingsRowKind::ServerStatus => {
+                settings.set_server_status("Running (127.0.0.1:61771, 1 client(s))".to_string());
             }
             _ => {
                 settings.adjust(1, now);

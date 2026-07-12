@@ -226,6 +226,7 @@ impl App {
             server_enable: self.config.server_enable,
             server_port: self.config.server_port,
             server_scopes: self.config.server_scopes.clone(),
+            server_status: self.server_status_display(),
         };
         self.theme_settings = Some(ThemeSettingsSession {
             window_id,
@@ -1041,13 +1042,13 @@ impl App {
                 | RowDraft::ServerEnable(_)
                 | RowDraft::ServerPort(_)
                 | RowDraft::ServerScopes(_) => {}
-                // `ServerTokenCopy` never sets `touched`
+                // `ServerTokenCopy`/`ServerStatus` never set `touched`
                 // (`ThemeSettings::adjust`/`reset_selected_row` both no-op
-                // it), so this loop can't actually reach here — kept
+                // both), so this loop can't actually reach here — kept
                 // explicit rather than folded into the arm above so a
                 // future variant can't silently start skipping a real
                 // config mirror.
-                RowDraft::ServerTokenCopy(_) => {}
+                RowDraft::ServerTokenCopy(_) | RowDraft::ServerStatus(_) => {}
             }
         }
         if reload_background_image {
@@ -1434,6 +1435,7 @@ mod commit_theme_settings_tests {
             server_enable: false,
             server_port: noa_config::DEFAULT_SERVER_PORT,
             server_scopes: "read".to_string(),
+            server_status: "Stopped".to_string(),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),
@@ -1563,6 +1565,7 @@ mod commit_theme_settings_tests {
             server_enable: false,
             server_port: noa_config::DEFAULT_SERVER_PORT,
             server_scopes: "read".to_string(),
+            server_status: "Stopped".to_string(),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),

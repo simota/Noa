@@ -28,7 +28,7 @@ pub(crate) use rows::{
     Liveness, RestartReason, RevertValues, RowDraft, RowEffect, Section, SettingsRow,
     SettingsRowKind, ThemePairContext, ThemeSettingsCarryover, ThemeSettingsInit,
     ThemeSettingsMode, TokenCopyStatus, background_image_fit_value,
-    background_image_position_value, settings_row_display_value,
+    background_image_position_value, format_server_status, settings_row_display_value,
 };
 pub(crate) use sample::{Swatch, sample_swatches};
 #[allow(unused_imports)]

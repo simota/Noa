@@ -363,6 +363,15 @@ pub struct App {
     /// When the IPC snapshot was last rebuilt, for the coarse time-based
     /// refresh (mirrors `applescript_snapshot_at`).
     ipc_snapshot_at: Option<Instant>,
+    /// The short reason the last `install_ipc_server_if_needed` bind attempt
+    /// failed (settings-panel-server-status), or `None` while the server is
+    /// running, stopped-because-disabled, or has never failed to bind. Never
+    /// holds the token itself — only a bind/token-path failure message, and
+    /// `noa_ipc::load_or_create_token`'s error text never includes the
+    /// token value it failed to load/create. Read by
+    /// [`Self::server_status_display`], the Settings panel's read-only
+    /// `ServerStatus` row.
+    ipc_last_error: Option<String>,
 }
 
 impl App {
@@ -461,6 +470,7 @@ impl App {
             ipc_install_attempted: false,
             ipc_snapshot_sig: 0,
             ipc_snapshot_at: None,
+            ipc_last_error: None,
         }
     }
 

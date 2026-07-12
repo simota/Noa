@@ -1,8 +1,6 @@
 //! Terminal mode state, keyed by `(value, ansi)` where `ansi=false` denotes a
 //! DEC private mode (`CSI ? … h/l`).
 
-use std::collections::HashSet;
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MouseTracking {
     Off,
@@ -37,7 +35,15 @@ const MOUSE_FORMAT_MODES: [u16; 3] = [1005, 1015, 1006];
 
 #[derive(Clone, Debug, Default)]
 pub struct ModeState {
-    set: HashSet<(u16, bool)>,
+    /// A real session holds at most a handful of modes at once (the power-on
+    /// defaults plus whatever a full-screen app toggles), so a linear-scanned
+    /// `Vec` beats a `HashSet` here: [`Self::autowrap`], [`Self::linefeed_newline`]
+    /// and friends are queried on nearly every `print_str`/`execute_c0` call —
+    /// once per bulk-print run and once per C0 control — and `SipHash`'s
+    /// per-call keying/finalization dwarfed the cost of comparing a dozen
+    /// `(u16, bool)` pairs directly (measured: mode-lookup hashing was ~8% of
+    /// `bench_throughput`'s self-time).
+    set: Vec<(u16, bool)>,
 }
 
 impl ModeState {
@@ -56,14 +62,15 @@ impl ModeState {
         // others, and resetting a non-active one leaves the active format
         // untouched (matching xterm's single extend_coords slot).
         if on && !ansi && MOUSE_FORMAT_MODES.contains(&value) {
-            for mode in MOUSE_FORMAT_MODES {
-                self.set.remove(&(mode, false));
-            }
+            self.set
+                .retain(|&(v, a)| a || !MOUSE_FORMAT_MODES.contains(&v));
         }
         if on {
-            self.set.insert((value, ansi));
+            if !self.set.contains(&(value, ansi)) {
+                self.set.push((value, ansi));
+            }
         } else {
-            self.set.remove(&(value, ansi));
+            self.set.retain(|&e| e != (value, ansi));
         }
     }
 

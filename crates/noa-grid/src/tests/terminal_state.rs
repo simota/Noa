@@ -671,6 +671,59 @@ fn decrqm_reports_mouse_tracking_and_format_modes() {
 }
 
 #[test]
+fn ansi_and_dec_private_mode_20_are_independent() {
+    // ANSI mode 20 (`CSI 20 h`, no `?`) is LNM. DEC private mode 20
+    // (`CSI ? 20 h`) is a distinct `ModeState` key even though the numeric
+    // value matches — the `ansi` flag must be honored, not just the value.
+    let t = run(b"\x1b[?20h");
+    assert!(!t.modes.linefeed_newline());
+
+    let t = run(b"\x1b[20h");
+    assert!(t.modes.linefeed_newline());
+
+    // Setting the private-mode-20 variant must not also flip the ANSI one.
+    let t = run(b"\x1b[?20h\x1b[20$p");
+    assert!(!t.modes.linefeed_newline());
+    assert_eq!(t.pending_writes, b"\x1b[20;2$y");
+}
+
+#[test]
+fn double_set_is_idempotent_and_single_reset_clears_it() {
+    // Setting the same DEC private mode twice must not require two resets
+    // to clear it — `ModeState` de-duplicates on insert, so a single `l`
+    // fully resets it regardless of how many times `h` was seen.
+    let t = run(b"\x1b[?2027h\x1b[?2027h");
+    assert!(t.modes.grapheme_clustering());
+
+    let t = run(b"\x1b[?2027h\x1b[?2027h\x1b[?2027l");
+    assert!(!t.modes.grapheme_clustering());
+}
+
+#[test]
+fn many_distinct_modes_coexist_without_cross_contamination() {
+    // Realistic session cardinality (~15 modes touched at once, matching
+    // the linear-scan cardinality assumption documented on `ModeState`):
+    // every named accessor must report independently once they're all set
+    // together, and modes never touched must stay at their own default.
+    let t = run(
+        b"\x1b[?1h\x1b[?9h\x1b[?66h\x1b[?69h\x1b[?1004h\x1b[?2004h\x1b[?2026h\x1b[?2027h\x1b[20h",
+    );
+    assert!(t.modes.app_cursor_keys());
+    assert_eq!(t.modes.mouse_tracking(), crate::modes::MouseTracking::X10);
+    assert!(t.modes.app_keypad());
+    assert!(t.modes.left_right_margin());
+    assert!(t.modes.focus_reporting());
+    assert!(t.modes.bracketed_paste());
+    assert!(t.modes.synchronized_output());
+    assert!(t.modes.grapheme_clustering());
+    assert!(t.modes.linefeed_newline());
+
+    // Never touched: stays at its power-on default, undisturbed by the crowd.
+    assert_eq!(t.modes.mouse_format(), crate::modes::MouseFormat::Legacy);
+    assert!(t.modes.cursor_visible());
+}
+
+#[test]
 fn focus_reporting_and_synchronized_output_modes_toggle_and_reset() {
     let t = run(b"\x1b[?1004h\x1b[?2026h\x1b[?1004$p\x1b[?2026$p");
 

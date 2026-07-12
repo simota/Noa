@@ -1,17 +1,20 @@
-# Noa キーボードショートカット一覧
+# Noa Keyboard Shortcut Reference
 
-Noa が処理するキーボードショートカットの全数リファレンス(シェル側のキーは含まない)。
-既定値の実装源は `crates/noa-app/src/commands/keybind.rs` の `KeybindEngine::default()`。
-config の `keybind =` はこの既定表に順番に適用される。有効なバインド一覧は CLI からも確認できる:
+A complete reference of the keyboard shortcuts Noa handles (excludes
+shell-side keys). The default bindings are implemented at
+`KeybindEngine::default()` in `crates/noa-app/src/commands/keybind.rs`.
+Config `keybind =` entries are applied on top of this default table in
+order. The list of active bindings can also be checked from the CLI:
 
 ```bash
 noa +list-keybinds
 ```
 
-## config の `keybind =`
+## Config `keybind =`
 
-`keybind = <chord>=<action>` で既定表へ追加または上書きできる。同じ chord は後勝ち。
-`keybind = <chord>=unbind` はその chord を解除し、`keybind = clear` はそれ以前の全バインドを消去する。
+`keybind = <chord>=<action>` adds to or overrides the default table.
+The same chord takes the later entry. `keybind = <chord>=unbind` clears
+that chord, and `keybind = clear` clears all bindings defined before it.
 
 ```text
 keybind = cmd+i=prompt_surface_title
@@ -19,207 +22,224 @@ keybind = cmd+t=unbind
 keybind = cmd+shift+n=tab.new
 ```
 
-`<chord>` は `+` 区切り。修飾キー別名は `cmd`/`command`/`super`/`meta`、`ctrl`/`control`、`alt`/`option`、`shift`。キーは単一文字、`plus`、`arrowup`/`up` 等の矢印(短縮別名可)、`pageup`、`pagedown`、`home`、`end`、`enter`/`return`、`grave`/`backtick`(`` ` ``)を受け付ける。
+`<chord>` is `+`-separated. Modifier aliases are `cmd`/`command`/`super`/`meta`,
+`ctrl`/`control`, `alt`/`option`, `shift`. Keys accept a single character,
+`plus`, arrow keys such as `arrowup`/`up` (short aliases allowed),
+`pageup`, `pagedown`, `home`, `end`, `enter`/`return`, and
+`grave`/`backtick` (`` ` ``).
 
-`<action>` は下の「canonical action 一覧」にある名前を使う。`noa +list-keybinds` は現在有効な
-バインドだけを表示するため、既定で未バインドの action は出力しない。互換入力として
-`new_tab`、`prompt_surface_title`、`toggle_quick_terminal` など一部の Ghostty 風 action 名も
-受け付ける。
+`<action>` uses a name from the "canonical action list" below.
+`noa +list-keybinds` only shows currently active bindings, so actions
+that are unbound by default aren't printed. Some Ghostty-style action
+names — such as `new_tab`, `prompt_surface_title`,
+`toggle_quick_terminal` — are also accepted as compatible input.
 
-### canonical action 一覧
+### Canonical Action List
 
-| カテゴリ | action |
+| Category | Action |
 |---|---|
-| アプリ | `about`, `preferences`, `config.reload`, `app.quit` |
-| 編集 | `copy`, `paste`, `pane.send-selection` |
-| 端末 | `terminal.clear`, `terminal.clear-scrollback`, `terminal.select-all`, `terminal.export-scrollback`, `terminal.pipe-scrollback-to-pager` |
-| フォント | `font-size.increase`, `font-size.decrease`, `font-size.reset` |
-| 検索 | `search.find`, `search.next`, `search.previous`, `search.clear` |
-| スクロール | `scroll.line-up`, `scroll.line-down`, `scroll.page-up`, `scroll.page-down`, `scroll.top`, `scroll.bottom`, `scroll.prev-prompt`, `scroll.next-prompt` |
-| タブ | `tab.new`, `tab.close`, `tab.next`, `tab.previous`, `tab.set-title`, `tab.select-1` … `tab.select-9` |
-| ウィンドウ | `window.new`, `window.close`, `fullscreen.toggle` |
-| 分割 | `split.new-left`, `split.new-right`, `split.new-up`, `split.new-down`, `split.focus-left`, `split.focus-right`, `split.focus-up`, `split.focus-down`, `split.resize-left`, `split.resize-right`, `split.resize-up`, `split.resize-down`, `split.equalize`, `split.toggle-zoom` |
+| App | `about`, `preferences`, `config.reload`, `app.quit` |
+| Edit | `copy`, `paste`, `pane.send-selection` |
+| Terminal | `terminal.clear`, `terminal.clear-scrollback`, `terminal.select-all`, `terminal.export-scrollback`, `terminal.pipe-scrollback-to-pager` |
+| Font | `font-size.increase`, `font-size.decrease`, `font-size.reset` |
+| Search | `search.find`, `search.next`, `search.previous`, `search.clear` |
+| Scroll | `scroll.line-up`, `scroll.line-down`, `scroll.page-up`, `scroll.page-down`, `scroll.top`, `scroll.bottom`, `scroll.prev-prompt`, `scroll.next-prompt` |
+| Tab | `tab.new`, `tab.close`, `tab.next`, `tab.previous`, `tab.set-title`, `tab.select-1` … `tab.select-9` |
+| Window | `window.new`, `window.close`, `fullscreen.toggle` |
+| Split | `split.new-left`, `split.new-right`, `split.new-up`, `split.new-down`, `split.focus-left`, `split.focus-right`, `split.focus-up`, `split.focus-down`, `split.resize-left`, `split.resize-right`, `split.resize-up`, `split.resize-down`, `split.equalize`, `split.toggle-zoom` |
 | UI | `session-overview.toggle`, `command-palette.toggle`, `quick-terminal.toggle`, `secure-keyboard-entry.toggle`, `sidebar.toggle`, `auto-approve.toggle`, `theme-settings.open` |
 
-`tab-overview.toggle` も `session-overview.toggle` の互換名として受け付ける。入力に `_` が
-含まれる場合は `-` に置き換えた名前も照合される。Ghostty 風 alias の完全な対応表は
-`crates/noa-app/src/commands/keybind.rs` の `ghostty_action_alias` が真実源。
+`tab-overview.toggle` is also accepted as a compatible name for
+`session-overview.toggle`. If the input contains `_`, the name with `-`
+substituted is also matched. The full Ghostty-style alias table is
+sourced from `ghostty_action_alias` in
+`crates/noa-app/src/commands/keybind.rs`.
 
-## グローバル(ターミナルフォーカス時)
+## Global (While Terminal Is Focused)
 
-### アプリ / ウィンドウ / タブ
+### App / Window / Tab
 
-| キー | アクション |
+| Key | Action |
 |---|---|
-| ⌘Q | 終了 |
-| ⌘T | 新規タブ |
-| ⌘N | 新規ウィンドウ |
-| ⌘W | タブを閉じる |
-| ⌘⇧W | ウィンドウを閉じる |
-| ⌘⌃F | フルスクリーン切替 |
-| ⌘1 〜 ⌘9 | タブ 1〜9 を選択 |
-| ⌘⇧] | 次のタブ |
-| ⌘⇧[ | 前のタブ |
+| ⌘Q | Quit |
+| ⌘T | New tab |
+| ⌘N | New window |
+| ⌘W | Close tab |
+| ⌘⇧W | Close window |
+| ⌘⌃F | Toggle fullscreen |
+| ⌘1 – ⌘9 | Select tab 1-9 |
+| ⌘⇧] | Next tab |
+| ⌘⇧[ | Previous tab |
 
-### 分割ペイン(Splits)
+### Splits
 
-| キー | アクション |
+| Key | Action |
 |---|---|
-| ⌘D | 右にペイン追加 |
-| ⌘⇧D | 下にペイン追加 |
-| ⌘⌃← / → / ↑ / ↓ | 分割フォーカス移動 |
-| ⌘⌥← / → / ↑ / ↓ | 分割フォーカス移動(別名) |
-| ⌘⌃⇧← / → / ↑ / ↓ | 分割リサイズ |
-| ⌘⌃= | 分割を均等化 |
-| ⌘⇧Enter | 分割ズームのトグル |
+| ⌘D | Add pane to the right |
+| ⌘⇧D | Add pane below |
+| ⌘⌃← / → / ↑ / ↓ | Move split focus |
+| ⌘⌥← / → / ↑ / ↓ | Move split focus (alias) |
+| ⌘⌃⇧← / → / ↑ / ↓ | Resize split |
+| ⌘⌃= | Equalize splits |
+| ⌘⇧Enter | Toggle split zoom |
 
-Add Pane Left / Add Pane Up はデフォルトキーバインドなし。コマンドパレットまたは右クリックコンテキストメニューから実行できる。
-ペイン追加は各行/列最大3枚、1タブあたり最大9ペインまで。上限到達時の追加は no-op。
-コマンドパレットと右クリックコンテキストメニューでは、これ以上作成できない Add Pane 方向は disabled になる。
-分割系はメニューにはなく、キーバインドと右クリックコンテキストメニュー(Add Pane Left / Add Pane Right / Add Pane Up / Add Pane Down / Equalize Splits / Toggle Split Zoom)からのみ到達可能。
+Add Pane Left / Add Pane Up have no default keybinding. They can be run
+from the command palette or the right-click context menu. Panes can be
+added up to 3 per row/column, up to 9 panes per tab maximum. Adding a
+pane past the limit is a no-op. In the command palette and right-click
+context menu, Add Pane directions that can no longer be created are
+disabled. Split actions have no menu entry and are only reachable via
+keybindings and the right-click context menu (Add Pane Left / Add Pane
+Right / Add Pane Up / Add Pane Down / Equalize Splits / Toggle Split
+Zoom).
 
-### 編集 / 端末 / フォント
+### Edit / Terminal / Font
 
-| キー | アクション |
+| Key | Action |
 |---|---|
-| ⌘C | コピー |
-| ⌘V | ペースト |
-| ⌘⇧M | 選択範囲をペインへ送信 |
-| ⌘A | すべて選択 |
-| ⌘K | 画面クリア |
-| ⌘= / ⌘⇧+ | フォント拡大 |
-| ⌘- | フォント縮小 |
-| ⌘0 | フォントサイズをリセット |
+| ⌘C | Copy |
+| ⌘V | Paste |
+| ⌘⇧M | Send selection to pane |
+| ⌘A | Select all |
+| ⌘K | Clear screen |
+| ⌘= / ⌘⇧+ | Increase font size |
+| ⌘- | Decrease font size |
+| ⌘0 | Reset font size |
 
-### 検索
+### Search
 
-| キー | アクション |
+| Key | Action |
 |---|---|
-| ⌘F | 検索プロンプトを開く |
-| ⌘G | 次を検索 |
-| ⌘⇧G | 前を検索 |
+| ⌘F | Open search prompt |
+| ⌘G | Find next |
+| ⌘⇧G | Find previous |
 
-⌘⇧F は将来用に意図的に未割り当て。
+⌘⇧F is intentionally left unassigned for future use.
 
-### スクロール(ビューポート操作、pty へは送らない)
+### Scroll (Viewport Manipulation, Not Sent to pty)
 
-| キー | アクション |
+| Key | Action |
 |---|---|
-| ⇧↑ / ⇧↓ | 1 行スクロール |
-| ⇧PageUp / ⇧PageDown | 1 ページスクロール |
-| ⇧Home / ⇧End | 先頭 / 末尾へ |
-| ⌘↑ / ⌘↓ | 前 / 次のプロンプトへジャンプ(シェル統合 OSC 133 が前提) |
+| ⇧↑ / ⇧↓ | Scroll 1 line |
+| ⇧PageUp / ⇧PageDown | Scroll 1 page |
+| ⇧Home / ⇧End | Jump to top / bottom |
+| ⌘↑ / ⌘↓ | Jump to previous / next prompt (requires shell integration OSC 133) |
 
-Shift 単独スクロールは他の修飾キーが付くと発動しない。
+Shift-only scroll does not trigger if another modifier is also held.
 
-### オーバーレイ起動
+### Overlay Launchers
 
-| キー | アクション |
+| Key | Action |
 |---|---|
-| ⌘⇧O | セッションオーバービュー(タブ俯瞰)のトグル |
-| ⌘⇧P | コマンドパレットのトグル |
-| ⌘⇧S | サイドバーのトグル |
+| ⌘⇧O | Toggle Session Overview (tab overview) |
+| ⌘⇧P | Toggle command palette |
+| ⌘⇧S | Toggle sidebar |
 
-既定キーバインドがない action もコマンドパレット / メニューから実行できる。主なものは
-Reload Configuration、Clear Scrollback、Toggle Quick Terminal、Secure Keyboard Entry、About、
-Open Preferences、Open Theme & Settings、Export Scrollback、Pipe Scrollback to Pager、
-Toggle Auto Approve、Set Tab Title。
+Actions with no default keybinding can also be run from the command
+palette / menu. Notable ones include Reload Configuration, Clear
+Scrollback, Toggle Quick Terminal, Secure Keyboard Entry, About, Open
+Preferences, Open Theme & Settings, Export Scrollback, Pipe Scrollback
+to Pager, Toggle Auto Approve, Set Tab Title.
 
-> 未バインドの ⌘ 併用キーは pty へ漏らさず握り潰される。
+> Unbound ⌘-combination keys are swallowed and never leak to the pty.
 
-## グローバルシステムホットキー
+## Global System Hotkeys
 
-Carbon `RegisterEventHotKey` によるシステム全域ホットキー。アプリが非フォーカスでも発火する。config で変更可能。
+System-wide hotkeys via Carbon `RegisterEventHotKey`. These fire even
+when the app isn't focused. Configurable via config.
 
-| config キー | 既定値 | アクション |
+| Config key | Default | Action |
 |---|---|---|
-| `quick-terminal-hotkey` | `cmd+grave`(⌘`) | Quick Terminal のトグル |
-| `sidebar-hotkey` | なし(無効) | サイドバーのトグル |
+| `quick-terminal-hotkey` | `cmd+grave` (⌘`) | Toggle Quick Terminal |
+| `sidebar-hotkey` | none (disabled) | Toggle sidebar |
 
-構文は `+` 区切りのチョード(例: `cmd+shift+t`)。修飾キー別名:
-`cmd`/`command`/`super`/`meta`、`ctrl`/`control`、`alt`/`option`、`shift`。
-キーは英字、数字、および次の token を受け付ける。
+The syntax is a `+`-separated chord (e.g. `cmd+shift+t`). Modifier
+aliases: `cmd`/`command`/`super`/`meta`, `ctrl`/`control`, `alt`/`option`,
+`shift`. Keys accept letters, digits, and the following tokens.
 
-- 記号: `=`/`equal`, `-`/`minus`, `[`/`leftbracket`, `]`/`rightbracket`,
+- Symbols: `=`/`equal`, `-`/`minus`, `[`/`leftbracket`, `]`/`rightbracket`,
   `;`/`semicolon`, `,`/`comma`, `.`/`period`, `/`/`slash`
-- 基本キー: `enter`/`return`, `tab`, `space`, `escape`/`esc`
-- backtick: `grave`, `backtick`, `` ` ``
-- backslash: `backslash` または `\`。ANSI `\` と JIS `¥` / `ろ` を同時登録
-- JIS 個別指定: `yen`/`jis-yen`/`intl-yen`,
-  `underscore`/`jis-underscore`/`intl-ro` (`_` と `-` の別名も可)
+- Basic keys: `enter`/`return`, `tab`, `space`, `escape`/`esc`
+- Backtick: `grave`, `backtick`, `` ` ``
+- Backslash: `backslash` or `\`. Registers both ANSI `\` and JIS `¥` / `ろ`
+  simultaneously
+- JIS-specific: `yen`/`jis-yen`/`intl-yen`,
+  `underscore`/`jis-underscore`/`intl-ro` (aliases for `_` and `-` also work)
 
-in-app の `keybind` と異なり、global hotkey は矢印、`PageUp` / `PageDown`、`Home` / `End`
-を受け付けない。`none` / `off` / `false` / 空値で hotkey を無効化できる。
+Unlike in-app `keybind`, global hotkeys don't accept arrow keys,
+`PageUp` / `PageDown`, or `Home` / `End`. A hotkey can be disabled with
+`none` / `off` / `false` / an empty value.
 
-## オーバーレイ内のキー操作
+## Key Handling Within Overlays
 
-各オーバーレイはモーダルで、表示中のキー入力は pty に到達しない。
+Each overlay is modal — while it's shown, key input never reaches the
+pty.
 
-### 検索プロンプト(⌘F)
+### Search Prompt (⌘F)
 
-| キー | 動作 |
+| Key | Behavior |
 |---|---|
-| Escape | 閉じてクエリをクリア |
-| Enter / ⇧Enter | 開いたまま次 / 前のマッチへ移動 |
-| ⌘G / ⌘⇧G | 開いたまま次 / 前へ |
-| ⌘F(再押下) | 閉じる(ハイライトとアクティブマッチは維持) |
-| Backspace | 1 文字削除 |
-| 印字文字 | クエリに追記 |
+| Escape | Close and clear the query |
+| Enter / ⇧Enter | Move to next / previous match while staying open |
+| ⌘G / ⌘⇧G | Next / previous while staying open |
+| ⌘F (press again) | Close (keeps highlight and active match) |
+| Backspace | Delete 1 character |
+| Printable characters | Append to query |
 
-### コマンドパレット(⌘⇧P)
+### Command Palette (⌘⇧P)
 
-| キー | 動作 |
+| Key | Behavior |
 |---|---|
-| Escape | 実行せず閉じる |
-| Enter | 選択中のコマンドを実行 |
-| ↑ / ↓ | 選択移動 |
-| ⌘⇧P | 閉じる(トグル) |
-| 印字文字 | クエリに追記(サブシーケンス絞り込み) |
+| Escape | Close without executing |
+| Enter | Run the selected command |
+| ↑ / ↓ | Move selection |
+| ⌘⇧P | Close (toggle) |
+| Printable characters | Append to query (subsequence filtering) |
 
-### セッションオーバービュー(⌘⇧O)
+### Session Overview (⌘⇧O)
 
-| キー | 動作 |
+| Key | Behavior |
 |---|---|
-| ← / → / ↑ / ↓ | タイル選択の移動 |
-| Enter | 選択タブを開く |
-| Escape | 2 段階: 検索クエリがあればクリア、なければ閉じる |
-| Tab | quick-look ズームのトグル |
-| ⌘1 〜 ⌘9 | タブへ即切替 |
-| 印字文字 | 検索クエリに追記 |
+| ← / → / ↑ / ↓ | Move tile selection |
+| Enter | Open the selected tab |
+| Escape | Two stages: clears the search query if one exists, otherwise closes |
+| Tab | Toggle quick-look zoom |
+| ⌘1 – ⌘9 | Switch directly to a tab |
+| Printable characters | Append to search query |
 
-### 確認ダイアログ(ペースト保護 / OSC 52 / クローズ確認)
+### Confirmation Dialogs (Paste Protection / OSC 52 / Close Confirmation)
 
-| キー | 動作 |
+| Key | Behavior |
 |---|---|
-| Enter / y | 確定・実行 |
-| Escape / n | キャンセル |
+| Enter / y | Confirm / execute |
+| Escape / n | Cancel |
 
-### サイドバーのインラインリネーム
+### Sidebar Inline Rename
 
-| キー | 動作 |
+| Key | Behavior |
 |---|---|
-| Enter | 確定(空文字はキャンセル扱い) |
-| Escape | キャンセル |
+| Enter | Confirm (empty string is treated as cancel) |
+| Escape | Cancel |
 
-## マウス + 修飾キー
+## Mouse + Modifiers
 
-| 操作 | 動作 |
+| Action | Behavior |
 |---|---|
-| ⇧ + クリック / ドラッグ / ホイール | マウストラッキングモードをバイパスしてローカル選択 / スクロール |
-| ⌘ + ホバー | リンク(OSC 8 / 自動検出 URL)上でポインタ化 + 下線 |
-| ⌘ + 左クリック | ホバー中のリンクを開く |
-| 左ダブルクリック | 単語選択 |
-| 左トリプルクリック | 行選択 |
-| 右クリック | ペインをフォーカスし分割コンテキストメニューを表示 |
+| ⇧ + click / drag / wheel | Bypasses mouse tracking mode for local selection / scroll |
+| ⌘ + hover | Pointer + underline over a link (OSC 8 / auto-detected URL) |
+| ⌘ + left click | Open the hovered link |
+| Left double-click | Select word |
+| Left triple-click | Select line |
+| Right click | Focus the pane and show the split context menu |
 
-## 主要ソース
+## Primary Sources
 
-- `crates/noa-app/src/commands/keybind.rs` — `KeybindEngine`・既定バインド・config適用(真実源)
-- `crates/noa-app/src/commands/command.rs` — `AppCommand`・action名の相互変換
-- `crates/noa-app/src/commands/key_token.rs` — チョードパーサー・キー別名
-- `crates/noa-app/src/commands.rs` — 上記モジュールのfacade / re-export
-- `crates/noa-app/src/macos_menu.rs` — メニューアクセラレータ + コンテキストメニュー
-- `crates/noa-app/src/app/event_loop.rs` — キー / マウスのルーティング
-- `crates/noa-app/src/app/input_ops.rs` — 検索プロンプト / コマンドパレット / 確認ダイアログ
-- `crates/noa-app/src/macos_hotkey.rs` — グローバルホットキー
-- `docs/CONFIGURATION.md` — config キー・値・既定値の全数リファレンス
+- `crates/noa-app/src/commands/keybind.rs` — `KeybindEngine`, default bindings, config application (source of truth)
+- `crates/noa-app/src/commands/command.rs` — `AppCommand`, action name conversion
+- `crates/noa-app/src/commands/key_token.rs` — chord parser, key aliases
+- `crates/noa-app/src/commands.rs` — facade / re-export of the above modules
+- `crates/noa-app/src/macos_menu.rs` — menu accelerators + context menu
+- `crates/noa-app/src/app/event_loop.rs` — key / mouse routing
+- `crates/noa-app/src/app/input_ops.rs` — search prompt / command palette / confirmation dialogs
+- `crates/noa-app/src/macos_hotkey.rs` — global hotkeys
+- `docs/CONFIGURATION.md` — complete reference of config keys, values, and defaults

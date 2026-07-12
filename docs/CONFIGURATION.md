@@ -1,16 +1,16 @@
-# Noa 設定リファレンス
+# Noa Configuration Reference
 
-この文書は、現在の `noa-config` 実装が受け付ける config キー、値、既定値のリファレンス。
-キーバインドの既定表と action 名は [KEYBINDINGS.md](KEYBINDINGS.md) を参照。
+This document is a reference for the config keys, values, and defaults accepted by the current `noa-config` implementation.
+See [KEYBINDINGS.md](KEYBINDINGS.md) for the default keybinding table and action names.
 
-## 読み込み場所と書式
+## Load location and format
 
-Noa は起動時に `$XDG_CONFIG_HOME/noa/config` を読み込む。`XDG_CONFIG_HOME` が未設定なら
-`~/.config/noa/config` を使う。旧 `config.toml` は内容を読み込まず、移行警告だけを表示する。
+Noa reads `$XDG_CONFIG_HOME/noa/config` at startup. If `XDG_CONFIG_HOME` is unset, it falls back to
+`~/.config/noa/config`. The old `config.toml` is not read for content — only a migration warning is shown.
 
-書式は Ghostty 互換の行指向 `key = value`。空行と、行頭の空白を除いて `#` で始まる行は
-無視される。値全体を二重引用符で囲むことはできるが、エスケープシーケンスや行末コメントは
-解釈しない。
+The format is Ghostty-compatible line-oriented `key = value`. Blank lines and lines starting with `#`
+(after leading whitespace is stripped) are ignored. The entire value can be wrapped in double quotes, but
+escape sequences and trailing comments are not interpreted.
 
 ```conf
 # Window size is measured in terminal cells.
@@ -21,54 +21,54 @@ font-size = 15
 theme = "Catppuccin Mocha"
 ```
 
-同じ scalar キーが複数回現れた場合は最後の行が優先される。`font-family*`、
-`font-feature`、`font-variation*`、`keybind` は繰り返し可能で、記述順に蓄積される。
-CLI オプションは config ファイルより優先される。
+If the same scalar key appears more than once, the last occurrence wins. `font-family*`,
+`font-feature`, `font-variation*`, and `keybind` are repeatable and accumulate in the order they appear.
+CLI options take precedence over the config file.
 
-現在の解決済み設定は次のコマンドで確認できる。
+You can inspect the currently resolved configuration with:
 
 ```bash
 noa +show-config
 ```
 
-現時点の `+show-config` は `background-image*` と `resize-overlay` を出力しないため、
-それらは config ファイルの値を直接確認する。
+At present, `+show-config` does not print `background-image*` or `resize-overlay`, so check those
+values directly in the config file.
 
-## ウィンドウとセッション
+## Window and session
 
-| キー | 許容値 | 既定値 | 説明 |
+| Key | Accepted values | Default | Description |
 |---|---|---|---|
-| `window-width` | `0..=65535` の整数 | `80` | 列数。config では `window-height` と同時指定が必要で、解決時に最小 `10` へ切り上げる |
-| `window-height` | `0..=65535` の整数 | `24` | 行数。config では `window-width` と同時指定が必要で、解決時に最小 `4` へ切り上げる |
-| `window-padding-x` | `0` 以上の有限小数 | 未指定 | 左右 padding。未指定時は左 `24`、右 `16` physical px |
-| `window-padding-y` | `0` 以上の有限小数 | 未指定 | 上下 padding。未指定時は上 `0`、下 `16` physical px |
-| `window-save-state` | `default`, `never`, `always` | `default` | `default` と `always` は保存・復元し、`never` は無効化する |
-| `confirm-quit` | `true`, `false` | `true` | アプリ終了前の確認 |
-| `resize-overlay` | `after-first`, `always`, `never` | `after-first` | リサイズ時の `cols × rows` 表示。`after-first` は初回レイアウトだけ除外 |
+| `window-width` | integer `0..=65535` | `80` | Number of columns. Must be specified together with `window-height` in the config; rounded up to a minimum of `10` at resolution time |
+| `window-height` | integer `0..=65535` | `24` | Number of rows. Must be specified together with `window-width` in the config; rounded up to a minimum of `4` at resolution time |
+| `window-padding-x` | finite decimal `>= 0` | unspecified | Left/right padding. When unspecified, defaults to `24` physical px on the left and `16` on the right |
+| `window-padding-y` | finite decimal `>= 0` | unspecified | Top/bottom padding. When unspecified, defaults to `0` physical px on top and `16` on the bottom |
+| `window-save-state` | `default`, `never`, `always` | `default` | `default` and `always` save/restore; `never` disables it |
+| `confirm-quit` | `true`, `false` | `true` | Confirm before quitting the app |
+| `resize-overlay` | `after-first`, `always`, `never` | `after-first` | Display of `cols × rows` during resize. `after-first` excludes only the initial layout |
 
-`window-width` と `window-height` の片方だけを config に書いた場合は両方とも無視され、診断が
-表示される。CLI の `--cols` / `--rows` はそれぞれ単独指定できる。
+If only one of `window-width` or `window-height` is set in the config, both are ignored and a diagnostic
+is shown. The CLI flags `--cols` / `--rows` can each be specified independently.
 
-## フォント
+## Fonts
 
-| キー | 許容値 | 既定値 | 説明 |
+| Key | Accepted values | Default | Description |
 |---|---|---|---|
-| `font-size` | `0` より大きい有限小数 | `14` | フォントサイズ |
-| `font-family` | 空でない family 名 | 未指定 | 通常体の優先順。未指定時は macOS の `Menlo` を優先する platform fallback |
-| `font-family-bold` | 空でない family 名 | 未指定 | bold 専用 family の優先順 |
-| `font-family-italic` | 空でない family 名 | 未指定 | italic 専用 family の優先順 |
-| `font-family-bold-italic` | 空でない family 名 | 未指定 | bold italic 専用 family の優先順 |
-| `font-feature` | 4 文字 ASCII tag、または `-` + tag | なし | 例: `calt`, `liga`, `-dlig`。繰り返し可能 |
-| `font-variation` | `<4文字ASCII axis>=<有限小数>` | なし | 例: `wght=650`。繰り返し可能 |
-| `font-variation-bold` | 同上 | なし | bold 用 variable-font axis |
-| `font-variation-italic` | 同上 | なし | italic 用 variable-font axis |
-| `font-variation-bold-italic` | 同上 | なし | bold italic 用 variable-font axis |
-| `font-synthetic-style` | `true`, `false`, `no-bold`, `no-italic` | `true` 相当 | synthetic bold / italic の許可 |
-| `font-thicken` | `true`, `false` | `true` | グリフの stem thickening |
-| `font-thicken-strength` | `0..=255` の整数 | `255` | thickening 強度。`0` は効果なし |
-| `alpha-blending` | `native`, `linear`, `linear-corrected` | `native` | `linear` 系は認識するが診断を表示し、現在は `native` にフォールバック |
+| `font-size` | finite decimal `> 0` | `14` | Font size |
+| `font-family` | non-empty family name | unspecified | Priority order for the regular face. When unspecified, uses a platform fallback that prefers macOS's `Menlo` |
+| `font-family-bold` | non-empty family name | unspecified | Priority order for the bold-specific family |
+| `font-family-italic` | non-empty family name | unspecified | Priority order for the italic-specific family |
+| `font-family-bold-italic` | non-empty family name | unspecified | Priority order for the bold-italic-specific family |
+| `font-feature` | 4-character ASCII tag, or `-` + tag | none | e.g. `calt`, `liga`, `-dlig`. Repeatable |
+| `font-variation` | `<4-char ASCII axis>=<finite decimal>` | none | e.g. `wght=650`. Repeatable |
+| `font-variation-bold` | same as above | none | Variable-font axis for bold |
+| `font-variation-italic` | same as above | none | Variable-font axis for italic |
+| `font-variation-bold-italic` | same as above | none | Variable-font axis for bold italic |
+| `font-synthetic-style` | `true`, `false`, `no-bold`, `no-italic` | equivalent to `true` | Whether synthetic bold/italic is allowed |
+| `font-thicken` | `true`, `false` | `true` | Stem thickening of glyphs |
+| `font-thicken-strength` | integer `0..=255` | `255` | Thickening strength. `0` has no effect |
+| `alpha-blending` | `native`, `linear`, `linear-corrected` | `native` | `linear` variants are recognized but show a diagnostic and currently fall back to `native` |
 
-family、feature、variation の各キーは複数行書ける。通常体の例:
+The family, feature, and variation keys can each be written on multiple lines. Example for the regular face:
 
 ```conf
 font-family = Fira Code
@@ -78,82 +78,82 @@ font-feature = -dlig
 font-variation = wght=550
 ```
 
-## テーマ、色、カーソル
+## Theme, colors, cursor
 
-| キー | 許容値 | 既定値 | 説明 |
+| Key | Accepted values | Default | Description |
 |---|---|---|---|
-| `theme` | 同梱テーマ名 1 個 | 未指定 | `crates/noa-theme/vendor/themes/` の `.conf` を除いた名前。`light:...` / `dark:...` のペア指定は未対応 |
-| `background` | `#RRGGBB` または `RRGGBB` | テーマ値 | 背景色 override |
-| `foreground` | `#RRGGBB` または `RRGGBB` | テーマ値 | 前景色 override |
-| `cursor-color` | `#RRGGBB` または `RRGGBB` | テーマ値 | カーソル色 override |
-| `selection-foreground` | `#RRGGBB` または `RRGGBB` | テーマ値 | 選択文字色 override |
-| `selection-background` | `#RRGGBB` または `RRGGBB` | テーマ値 | 選択背景色 override |
-| `minimum-contrast` | `1.0..=21.0` の有限小数 | `1.0` | WCAG コントラスト比の下限。`1.0` は補正なし |
-| `cursor-style` | `block`, `bar`, `underline` | blinking block | `block_hollow` は認識するが未対応として無視 |
-| `cursor-style-blink` | `true`, `false` | `true` 相当 | カーソル点滅。shape だけ指定した場合も点滅する |
-| `background-opacity` | 有限小数 | `1.0` | `0.0..=1.0` へ clamp |
-| `background-blur-radius` | `true`, `false`, 非負整数 | `0` | macOS blur。`true` は `20`、`false` は `0`、整数は `0..=64` へ clamp |
+| `theme` | one bundled theme name | unspecified | Name of a `.conf` file under `crates/noa-theme/vendor/themes/`, minus the extension. Paired `light:...` / `dark:...` specification is not yet supported |
+| `background` | `#RRGGBB` or `RRGGBB` | theme value | Background color override |
+| `foreground` | `#RRGGBB` or `RRGGBB` | theme value | Foreground color override |
+| `cursor-color` | `#RRGGBB` or `RRGGBB` | theme value | Cursor color override |
+| `selection-foreground` | `#RRGGBB` or `RRGGBB` | theme value | Selected text color override |
+| `selection-background` | `#RRGGBB` or `RRGGBB` | theme value | Selected background color override |
+| `minimum-contrast` | finite decimal `1.0..=21.0` | `1.0` | Lower bound of the WCAG contrast ratio. `1.0` means no correction |
+| `cursor-style` | `block`, `bar`, `underline` | blinking block | `block_hollow` is recognized but ignored as unsupported |
+| `cursor-style-blink` | `true`, `false` | equivalent to `true` | Cursor blinking. It also blinks when only the shape is specified |
+| `background-opacity` | finite decimal | `1.0` | Clamped to `0.0..=1.0` |
+| `background-blur-radius` | `true`, `false`, non-negative integer | `0` | macOS blur. `true` maps to `20`, `false` to `0`; integers are clamped to `0..=64` |
 
-テーマ一覧は `noa +list-themes` で確認できる。
+The list of themes can be inspected with `noa +list-themes`.
 
-## 背景画像
+## Background image
 
-| キー | 許容値 | 既定値 | 説明 |
+| Key | Accepted values | Default | Description |
 |---|---|---|---|
-| `background-image` | `noa`、PNG ファイル、ディレクトリのパス | なし | `noa` はアプリ同梱壁紙、パスは `~` を展開する。ディレクトリの場合は直下の PNG を名前順にローテーション |
-| `background-image-opacity` | 有限小数 | `1.0` | `0.0..=1.0` へ clamp。ウィンドウの opacity とは独立 |
-| `background-image-position` | `top-left`, `top-center`, `top-right`, `center-left`, `center`, `center-right`, `bottom-left`, `bottom-center`, `bottom-right` | `center` | 配置または crop の anchor |
-| `background-image-fit` | `none`, `contain`, `cover`, `stretch` | `contain` | 拡大縮小方法 |
-| `background-image-repeat` | `true`, `false` | `false` | 画像を tile 表示 |
-| `background-image-interval` | 正の整数秒 | `30` | ディレクトリの切替間隔。`1..=4` は `5` 秒へ切り上げる |
+| `background-image` | `noa`, a PNG file path, or a directory path | none | `noa` selects the bundled wallpaper; paths expand `~`. For a directory, the PNG files directly inside it are rotated in name order |
+| `background-image-opacity` | finite decimal | `1.0` | Clamped to `0.0..=1.0`. Independent of window opacity |
+| `background-image-position` | `top-left`, `top-center`, `top-right`, `center-left`, `center`, `center-right`, `bottom-left`, `bottom-center`, `bottom-right` | `center` | Placement or crop anchor |
+| `background-image-fit` | `none`, `contain`, `cover`, `stretch` | `contain` | Scaling method |
+| `background-image-repeat` | `true`, `false` | `false` | Tile the image |
+| `background-image-interval` | positive integer seconds | `30` | Interval for switching within a directory. Values `1..=4` are rounded up to `5` seconds |
 
-未指定または空の `background-image` は背景画像を表示しない。完全一致の `noa` を指定した場合
-だけアプリ同梱壁紙を使用する。画像デコードは PNG のみ対応する。ファイルがない、PNG でない、
-デコードできない場合は診断を表示して背景画像を無効化する。
+An unspecified or empty `background-image` shows no background image. Only an exact match of `noa`
+uses the bundled wallpaper. Only PNG image decoding is supported. If the file is missing, is not a PNG,
+or fails to decode, a diagnostic is shown and the background image is disabled.
 
-## 端末、クリップボード、ベル
+## Terminal, clipboard, bell
 
-| キー | 許容値 | 既定値 | 説明 |
+| Key | Accepted values | Default | Description |
 |---|---|---|---|
-| `scrollback-limit` | `0` 以上の整数 | `10000000` | scrollback の総 byte 数。`0` は無効化 |
-| `clipboard-read` | `deny` / `false`, `ask`, `allow` / `true` | `ask` | OSC 52 clipboard read の policy |
-| `clipboard-paste-protection` | `true`, `false` | `true` | コマンド実行につながり得る paste の確認 |
-| `title-report` | `true`, `false` | `false` | `CSI 21 t` による window title 応答を許可 |
-| `visual-bell` | `true`, `false` | `false` | BEL 時にウィンドウを flash |
-| `audible-bell` | `true`, `false` | `false` | BEL 時に platform sound を再生 |
-| `audible-bell-when-unfocused` | `true`, `false` | `false` | audible bell を非フォーカス時だけ鳴らす |
-| `audible-bell-dock-bounce` | `true`, `false` | `false` | 非フォーカス時の audible BEL で Dock attention。macOS のみ |
-| `auto-approve` | `true`, `false` | `false` | 新規 tab の agent CLI auto approval 初期値 |
+| `scrollback-limit` | integer `>= 0` | `10000000` | Total byte count for scrollback. `0` disables it |
+| `clipboard-read` | `deny` / `false`, `ask`, `allow` / `true` | `ask` | Policy for OSC 52 clipboard read |
+| `clipboard-paste-protection` | `true`, `false` | `true` | Confirmation for pastes that could trigger command execution |
+| `title-report` | `true`, `false` | `false` | Allow window title responses via `CSI 21 t` |
+| `visual-bell` | `true`, `false` | `false` | Flash the window on BEL |
+| `audible-bell` | `true`, `false` | `false` | Play a platform sound on BEL |
+| `audible-bell-when-unfocused` | `true`, `false` | `false` | Only sound the audible bell when unfocused |
+| `audible-bell-dock-bounce` | `true`, `false` | `false` | Trigger Dock attention on an unfocused audible BEL. macOS only |
+| `auto-approve` | `true`, `false` | `false` | Initial value for agent CLI auto approval in new tabs |
 
-## Quick Terminal とサイドバー
+## Quick Terminal and sidebar
 
-| キー | 許容値 | 既定値 | 説明 |
+| Key | Accepted values | Default | Description |
 |---|---|---|---|
-| `quick-terminal-hotkey` | global hotkey chord、または `none` / `off` / `false` | `cmd+grave` | Quick Terminal の system-wide hotkey。空値も無効化 |
-| `quick-terminal-size` | 正の有限小数、または百分率 | `0.4` | 画面高に対する比率。`0.1..=1.0` へ clamp。例: `40%` |
-| `quick-terminal-autohide` | `true`, `false` | `true` | focus を失ったとき自動で隠す |
-| `sidebar-enabled` | `true`, `false` | `false` | 新規 window の sidebar 初期表示 |
-| `sidebar-width` | `0` 以上の有限小数 | `360` | sidebar 幅 (points) |
-| `sidebar-hotkey` | global hotkey chord、または `none` / `off` / `false` | なし | Sidebar の system-wide hotkey。空値も無効化 |
-| `sidebar-preview-lines` | `0..=20` の整数 | `5` | card に表示する末尾行数。`0` は preview なし |
+| `quick-terminal-hotkey` | global hotkey chord, or `none` / `off` / `false` | `cmd+grave` | System-wide hotkey for the Quick Terminal. An empty value also disables it |
+| `quick-terminal-size` | positive finite decimal, or percentage | `0.4` | Ratio relative to screen height. Clamped to `0.1..=1.0`. e.g. `40%` |
+| `quick-terminal-autohide` | `true`, `false` | `true` | Automatically hide when focus is lost |
+| `sidebar-enabled` | `true`, `false` | `false` | Initial sidebar visibility for new windows |
+| `sidebar-width` | finite decimal `>= 0` | `360` | Sidebar width (points) |
+| `sidebar-hotkey` | global hotkey chord, or `none` / `off` / `false` | none | System-wide hotkey for the sidebar. An empty value also disables it |
+| `sidebar-preview-lines` | integer `0..=20` | `5` | Number of trailing lines shown in a card. `0` means no preview |
 
-global hotkey chord の構文と対応キーは [KEYBINDINGS.md](KEYBINDINGS.md#グローバルシステムホットキー)
-を参照。
+See [KEYBINDINGS.md](KEYBINDINGS.md#global-system-hotkeys) for the syntax of global hotkey chords and
+the corresponding keys.
 
 ## macOS
 
-| キー | 許容値 | 既定値 | 説明 |
+| Key | Accepted values | Default | Description |
 |---|---|---|---|
-| `macos-option-as-alt` | `false` / `none`, `true` / `both`, `left` / `only-left`, `right` / `only-right` | `false` | Option キーを terminal Alt として扱う範囲 |
-| `macos-titlebar-style` | `native` / `tabs`, `transparent` | `native` | 通常 terminal window の titlebar |
-| `macos-non-native-fullscreen` | `true`, `false` | `false` | native fullscreen Space の代わりに borderless fullscreen を使う |
-| `macos-titlebar-proxy-icon` | `visible` / `true`, `hidden` / `false` | `visible` | titlebar に focus 中 pane の OSC 7 pwd を proxy icon として表示するか |
+| `macos-option-as-alt` | `false` / `none`, `true` / `both`, `left` / `only-left`, `right` / `only-right` | `false` | Scope in which the Option key is treated as terminal Alt |
+| `macos-titlebar-style` | `native` / `tabs`, `transparent` | `native` | Titlebar style for regular terminal windows |
+| `macos-non-native-fullscreen` | `true`, `false` | `false` | Use borderless fullscreen instead of a native fullscreen Space |
+| `macos-titlebar-proxy-icon` | `visible` / `true`, `hidden` / `false` | `visible` | Whether to show the focused pane's OSC 7 pwd as a proxy icon in the titlebar |
 
-macOS 以外では macOS 専用の表示・window 動作は no-op になる。
+On non-macOS platforms, macOS-specific display and window behaviors are no-ops.
 
-## キーバインド
+## Keybindings
 
-`keybind` は繰り返し可能で、上から順番に既定バインドへ適用される。
+`keybind` is repeatable, and entries are applied to the default bindings in order from top to bottom.
 
 ```conf
 keybind = cmd+i=tab.set-title
@@ -162,23 +162,23 @@ keybind = clear
 keybind = cmd+shift+n=tab.new
 ```
 
-- `keybind = <chord>=<action>`: chord を追加または上書き
-- `keybind = <chord>=unbind`: chord を解除
-- `keybind = clear`: その時点までの既定・追加バインドをすべて削除
+- `keybind = <chord>=<action>`: adds or overrides a chord
+- `keybind = <chord>=unbind`: unbinds a chord
+- `keybind = clear`: removes all default and added bindings up to that point
 
-chord の構文、全 canonical action、既定バインドは [KEYBINDINGS.md](KEYBINDINGS.md) を参照。
+See [KEYBINDINGS.md](KEYBINDINGS.md) for chord syntax, the full list of canonical actions, and the default bindings.
 
-## 認識するが未対応のキー
+## Recognized but unsupported keys
 
-| キー | 現在の動作 |
+| Key | Current behavior |
 |---|---|
-| `palette` | 診断を表示して無視。palette override は未実装 |
-| `config-file` | 診断を表示して無視。config include は未実装 |
+| `palette` | Shows a diagnostic and is ignored. Palette override is not implemented |
+| `config-file` | Shows a diagnostic and is ignored. Config include is not implemented |
 
-未知のキーと不正な値は診断を表示し、その override を適用しない。
+Unknown keys and invalid values show a diagnostic, and that override is not applied.
 
-## Ghostty config のインポート
+## Importing a Ghostty config
 
-`noa --import-ghostty-config` は Ghostty の候補 config を読み、Noa がインポート対象として認識する
-行を `$XDG_CONFIG_HOME/noa/config` へコピーする。対象ファイルが既に存在する場合は上書きしない。
-未対応行は削除せず `# ` でコメントアウトする。
+`noa --import-ghostty-config` reads Ghostty's candidate config and copies the lines that Noa recognizes
+as importable into `$XDG_CONFIG_HOME/noa/config`. If the target file already exists, it is not overwritten.
+Unsupported lines are not removed — they are commented out with `# `.

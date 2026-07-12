@@ -1,193 +1,228 @@
-# Ghostty パリティ実装計画
+# Ghostty Parity Implementation Plan
 
-> **⚠️ アーカイブ（inc-1/inc-2 時点の歴史的計画文書）。**
-> 本書は 2026-07-02 の棚卸しに基づく計画スナップショットであり、以後同期されていない。
-> Phase 2 以降のギャップ記述（装飾描画・プロトコル・タブ/分割/検索/テーマ/背景 opacity 等の「未実装」）は
-> **現在ほぼ実装済みで内容が古い**。実装状況の最新情報は `README.md` の Status / Roadmap を参照。
+> **⚠️ Archived (historical plan document as of inc-1/inc-2).**
+> This document is a plan snapshot based on the 2026-07-02 inventory and has not been kept in sync since.
+> The gap descriptions from Phase 2 onward (decoration rendering, protocols, tabs/splits/search/themes/background
+> opacity, etc., listed as "not implemented") are **mostly implemented by now, and the content is stale**.
+> For the latest implementation status, see the Status / Roadmap sections in `README.md`.
 
-作成: 2026-07-02。inc-1 完了・inc-2 ほぼ完了時点の機能棚卸し（全クレート精査、テスト約182本）に基づく、
-「Ghostty レベル」到達までのフェーズ計画。README の Roadmap (inc 2–6) を実測ギャップで具体化したもの。
+Written 2026-07-02. A phased plan to reach "Ghostty-level" parity, based on a feature inventory taken
+after inc-1 was complete and inc-2 was nearly complete (a full review of every crate, ~182 tests). It
+turns the README's Roadmap (inc 2–6) into concrete phases based on measured gaps.
 
-## 現在地（要約）
+## Current state (summary)
 
-**堅実に動いている**: CSI 編集系ほぼ全部 / SGR 16・256・truecolor / alt screen / DECSTBM /
-DECSC・DECRC / bracketed paste / SGR マウス報告 / ワイド文字 / リサイズ・リフロー（カーソルアンカー保持）/
-ページ化 scrollback（バイト量上限 `scrollback-limit`）+ 選択 + 検索エンジン / OSC 0・2・4・10-12・52 / DA・DSR 応答 / クリップボード /
-IME preedit / ネイティブメニュー / コード内キーバインドエンジン / headless GPU 回帰テスト。
+**Working solidly**: nearly all CSI editing sequences / SGR 16-color, 256-color, truecolor / alt screen /
+DECSTBM / DECSC・DECRC / bracketed paste / SGR mouse reporting / wide characters / resize & reflow (cursor
+anchor preserved) / paged scrollback (byte-size cap via `scrollback-limit`) + selection + search engine /
+OSC 0・2・4・10-12・52 / DA・DSR responses / clipboard / IME preedit / native menu / in-code keybinding
+engine / headless GPU regression tests.
 
-**主要ギャップ**（監査 + 棚卸しより）:
+**Major gaps** (from audit + inventory):
 
-1. 装飾描画 — 下線が一切描かれない（属性は保持済み）、取消線なし、bold/italic フェイスなし、
-   min-contrast 未使用、罫線合成なし、カラー絵文字なし、リガチャなし。
-2. プロトコル — DECSCUSR / focus 1004 / sync 2026 / レガシーマウスエンコード / DCS(DECRQSS,XTGETTCAP) /
-   OSC 8・7・133 / Kitty keyboard / Kitty graphics / grapheme clustering(2027) が未実装。
-3. UX — タブ / 分割 / 検索プロンプト UI / URL クリック / ベル / ウィンドウタイトル反映 /
-   実行時フォントサイズ変更 / フルスクリーン / マルチウィンドウ / テーマ選択 / 背景 opacity が未実装。
-4. 品質負債 — 監査 P1〜P3（修飾キーエンコード、結合文字破棄、毎フレーム全コピー、release profile 未設定等）。
+1. Decoration rendering — no underlines drawn at all (the attribute is retained), no strikethrough, no
+   bold/italic faces, no minimum-contrast, no box-drawing composition, no color emoji, no ligatures.
+2. Protocols — DECSCUSR / focus 1004 / sync 2026 / legacy mouse encodings / DCS (DECRQSS, XTGETTCAP) /
+   OSC 8・7・133 / Kitty keyboard / Kitty graphics / grapheme clustering (2027) not implemented.
+3. UX — tabs / splits / search prompt UI / URL clicking / bell / window title reflection / runtime font
+   size change / fullscreen / multi-window / theme selection / background opacity not implemented.
+4. Quality debt — audit items P1–P3 (modifier key encoding, combining-character loss, full copy every
+   frame, no release profile configured, etc.).
 
-Sixel は Ghostty 本体も非対応のため **パリティ対象外**。Noa では CLI ツール互換のため、
-既存 Kitty graphics 画像経路を再利用する独自対応として実装済み。
+Sixel is **out of parity scope**, since Ghostty itself doesn't support it. For CLI tool compatibility,
+Noa instead implements it as a custom addition that reuses the existing Kitty graphics image pipeline.
 
 ---
 
-## Phase 0 — 監査負債の完済（P1〜P3）
+## Phase 0 — Pay down the audit debt (P1–P3)
 
-先行理由: 以降の全フェーズが触る箇所（input.rs / snapshot / parser / app.rs）の既知バグ・性能欠陥を
-先に潰さないと、上に積む機能が全部再修正になる。`.nexus/loops/noa-critical/backlog.md` の P1〜P3 が単一真実源。
+Rationale for going first: this phase touches the areas every later phase also touches (input.rs /
+snapshot / parser / app.rs). Unless the known bugs and performance flaws there are fixed first, every
+feature built on top would need rework. `.nexus/loops/noa-critical/backlog.md`'s P1–P3 is the single
+source of truth.
 
-- **P1 correctness (8件)**: 修飾キーエンコード欠落 / 結合文字・ZWJ 破棄 / CUU・CUD margin クランプ /
-  UI スレッド blocking write + unbounded channel / overlong UTF-8 / DECSTBM 不正 region /
-  scale factor 変更時の再計算 / Surface Lost 後の redraw。
-- **P2 performance (5件)**: FrameSnapshot の dirty-row diff 化 / CSI Vec clone 除去 /
-  FontRef 再パース除去 / `[profile.release]` (lto, codegen-units=1) / Redraw coalesce。
-- **P3 (4件)**: 8-bit ST / PtyEvent::Error 表面化 / 初期化 expect() / JoinHandle 等。
+- **P1 correctness (8 items)**: missing modifier-key encoding / combining characters & ZWJ dropped /
+  CUU・CUD margin clamping / UI-thread blocking write + unbounded channel / overlong UTF-8 /
+  invalid DECSTBM region / recompute on scale-factor change / redraw after Surface Lost.
+- **P2 performance (5 items)**: dirty-row diffing for FrameSnapshot / eliminate CSI Vec clone /
+  eliminate FontRef re-parsing / `[profile.release]` (lto, codegen-units=1) / redraw coalescing.
+- **P3 (4 items)**: 8-bit ST / surface PtyEvent::Error / init-time expect() / JoinHandle, etc.
 
-修飾キーエンコード（P1-2）はここで **Ghostty 互換の完全版** にする: Shift/Alt/Ctrl+矢印
-(`CSI 1;m A`)、F1–F12、Home/End/PgUp/PgDn/Insert/Delete、Alt-as-Esc prefix、xterm modifyOtherKeys 相当の
-既定挙動。Phase 4 の Kitty keyboard の土台になる。
+Modifier-key encoding (P1-2) is brought here to **full Ghostty-compatible parity**: Shift/Alt/Ctrl+arrow
+(`CSI 1;m A`), F1–F12, Home/End/PgUp/PgDn/Insert/Delete, Alt-as-Esc prefix, and default behavior
+equivalent to xterm's modifyOtherKeys. This becomes the foundation for Kitty keyboard in Phase 4.
 
-検証: 既存 verify.sh 方式の後続ループ（`noa-p1-fidelity` / `noa-perf`）。各項目回帰テスト必須。
+Verification: follow-on loops using the existing verify.sh approach (`noa-p1-fidelity` / `noa-perf`).
+A regression test is required for each item.
 
-## Phase 1 — VT 忠実度の完成（グリッドまで）
+## Phase 1 — Complete VT fidelity (up through the grid)
 
-Ghostty との「エスケープシーケンス互換」を宣言できる状態にする。全て noa-vt / noa-grid 中心で
-GUI 非依存 → ユニットテストで完結。
+Reach a state where "escape-sequence compatibility" with Ghostty can be declared. Everything centers on
+noa-vt / noa-grid, GUI-agnostic → self-contained via unit tests.
 
-- **DECSCUSR** (`CSI Ps SP q`): カーソル形状 6 種を `Terminal` 状態に保持（描画は Phase 2）。
-- **SGR 完備**: 21 二重下線 / 4:x 下線スタイル（curly 等）/ 58・59 下線色。`CellAttrs` 拡張。
-- **モード**: 1004 focus 報告（winit Focused → CSI I/O）、2026 synchronized output
-  （BSU/ESU で snapshot 更新を保留）、2027 grapheme clustering。
-- **結合文字・ZWJ**: セルを grapheme cluster 単位に（P1-3 の本修正）。絵文字 ZWJ 列・VS16 の幅判定を
-  Ghostty の `grapheme.zig` 挙動に合わせる。
-- **マウス**: X10/UTF-8(1005)/urxvt(1015) レガシーエンコード追加（現状 SGR のみ）。
-- **DCS 基盤 + DECRQSS / XTGETTCAP**: parser の DcsPassthrough を Handler 経路に昇格。
-- **BEL**: Handler に bell イベント（鳴らすのは Phase 3 の UX 側）。
-- **OSC 8 / 7 / 133**: グリッド側の状態保持（ハイパーリンク ID をセル属性に、cwd・プロンプトマークを
-  Terminal に）。UI 反映は Phase 3。
-- **2026-07-03 実装済み**: DECSCUSR / DECSLRM / keypad modes / cursor style state、SGR 21・4:x・58/59 と
-  装飾描画、OSC 8/7/133 の状態保持、bounded DCS + DECRQSS/XTGETTCAP/XTVERSION/DECRQM、DECSET
-  1004 focus reporting、DECSET 2026 synchronized output。
-- **パリティハーネス新設**: esctest2 / vttest を CI 外部オラクルとして流す薄いランナー +
-  「同一バイト列 → Ghostty と noa のスクリーンダンプ比較」fixture 形式を `tests/parity/` に確立。
-  以降のフェーズの受け入れ基準を「ハーネス緑」に統一する。
+- **DECSCUSR** (`CSI Ps SP q`): hold the 6 cursor shapes in `Terminal` state (rendering comes in Phase 2).
+- **Full SGR support**: 21 double underline / 4:x underline styles (curly, etc.) / 58・59 underline
+  color. Extend `CellAttrs`.
+- **Modes**: 1004 focus reporting (winit Focused → CSI I/O), 2026 synchronized output (defer snapshot
+  updates between BSU/ESU), 2027 grapheme clustering.
+- **Combining characters & ZWJ**: switch cells to grapheme-cluster granularity (the real fix for P1-3).
+  Match Ghostty's `grapheme.zig` behavior for width determination of emoji ZWJ sequences and VS16.
+- **Mouse**: add X10/UTF-8(1005)/urxvt(1015) legacy encodings (currently SGR only).
+- **DCS foundation + DECRQSS / XTGETTCAP**: promote the parser's DcsPassthrough to a Handler-level path.
+- **BEL**: a bell event on the Handler (actually ringing it is Phase 3's UX responsibility).
+- **OSC 8 / 7 / 133**: state retention on the grid side (hyperlink IDs as cell attributes, cwd and
+  prompt marks on `Terminal`). UI reflection comes in Phase 3.
+- **Implemented as of 2026-07-03**: DECSCUSR / DECSLRM / keypad modes / cursor style state, SGR
+  21・4:x・58/59 and their decoration rendering, OSC 8/7/133 state retention, bounded DCS +
+  DECRQSS/XTGETTCAP/XTVERSION/DECRQM, DECSET 1004 focus reporting, DECSET 2026 synchronized output.
+- **New parity harness**: establish a thin runner that feeds esctest2 / vttest as an external CI oracle,
+  plus a "same byte stream → compare screen dumps between Ghostty and noa" fixture format, in
+  `tests/parity/`. Later phases' acceptance criteria are unified around "harness green."
 
-## Phase 2 — 描画を Ghostty 品質に
+## Phase 2 — Bring rendering up to Ghostty quality
 
-「見た目が Ghostty」の核。noa-font / noa-render 中心。
+The core of "looks like Ghostty." Centers on noa-font / noa-render.
 
-- **下線ジオメトリ**: single/double/curly/dotted/dashed + 下線色。Ghostty 同様シェーダ/専用 quad で合成
-  （フォントメトリクスの underline position/thickness 使用）。取消線・overline も同時に。
-- **カーソル形状描画**: DECSCUSR の block/bar/underline + blink。非フォーカス時は中抜き枠（Ghostty 挙動）。
-- **bold / italic**: font-kit で weight/style 別フェイスを解決、無ければ合成（embolden / oblique）。
-  `GlyphKey` に style 軸を追加。
-- **罫線・ブロック要素の手続き合成**: U+2500–259F, U+E0B0– (Powerline) をフォントを介さず描画
-  （Ghostty の `sprite/` 相当）。Nerd Font アイコンのセル内センタリング調整もここ。
-- **カラー絵文字**: sbix/CBDT を swash でラスタ → RGBA アトラス（既存 R8 と 2 枚持ち）。
-- **シェーピング/リガチャ**: swash shaper で行単位シェーピング（`=>` 等の合字、既定 ON・設定で OFF）。
-  セル→グリフのマッピングを 1:1 から m:n に一般化する、このフェーズ最大の構造変更。
-- **minimum-contrast**: `minimum-contrast` 設定を公開済み。CPU 側の色解決で文字・下線・カーソル色を背景との WCAG コントラスト比に引き上げる。
-- **背景 opacity**: サーフェス α + clear color α、`background-opacity` 設定。
-- 検証: pipeline.rs 拡張 + スナップショット画像比較（wgpu offscreen readback）を導入し、
-  Ghostty と同一コマンドのスクリーンショット目視パリティをチェックリスト化。
+- **Underline geometry**: single/double/curly/dotted/dashed + underline color. Composited via a
+  shader/dedicated quad, same as Ghostty (using the font metrics' underline position/thickness).
+  Strikethrough and overline at the same time.
+- **Cursor shape rendering**: DECSCUSR's block/bar/underline + blink. A hollow outline when unfocused
+  (Ghostty's behavior).
+- **Bold / italic**: resolve weight/style-specific faces via font-kit, synthesizing (embolden / oblique)
+  when unavailable. Add a style axis to `GlyphKey`.
+- **Procedural composition of box-drawing/block elements**: render U+2500–259F, U+E0B0– (Powerline)
+  without going through the font (Ghostty's `sprite/` equivalent). Also handles centering adjustments
+  for Nerd Font icons within a cell.
+- **Color emoji**: rasterize sbix/CBDT via swash → RGBA atlas (kept as a second atlas alongside the
+  existing R8 one).
+- **Shaping/ligatures**: per-line shaping via the swash shaper (ligatures like `=>`, on by default,
+  configurable off). This phase's biggest structural change — generalizing the cell→glyph mapping from
+  1:1 to m:n.
+- **minimum-contrast**: the `minimum-contrast` setting is already exposed. CPU-side color resolution
+  boosts text/underline/cursor color to meet a WCAG contrast ratio against the background.
+- **Background opacity**: surface alpha + clear color alpha, driven by the `background-opacity` setting.
+- Verification: extend pipeline.rs with snapshot image comparison (wgpu offscreen readback), and turn
+  visual parity checks against Ghostty screenshots of the same commands into a checklist.
 
-## Phase 3 — スクロールバック基盤・リンク・検索 UI・設定（≒ inc 3）
+## Phase 3 — Scrollback foundation, links, search UI, config (≈ inc 3)
 
-- **ページ化 scrollback**（実装済み）: `VecDeque<Row>` 行クローン方式 → 64KiB 目標ページ +
-  **インターン化スタイル**（page-local style table、Ghostty の PageList/style set 相当）。
-  上限を行数でなくバイト量で設定（`scrollback-limit`、既定 10MB、0=無効、ページ粒度 eviction）。
-  アクティブ画面は非ページのまま（scrollback は push 後不変なので refcount 不要）。列変更リサイズは
-  ストリーミングリフローで再パックし一時メモリスパイクを回避。`crates/noa-grid/src/scrollback.rs`。
-- **OSC 8 ハイパーリンク UI + URL 自動検出**: hover 下線、Cmd+クリックで `open`。
-  正規表現 URL matcher は Ghostty の `link` 設定互換の形に。
-- **検索 UI**: エンジンは実装済 → オーバーレイ入力プロンプト、マッチ件数、n/N 移動、
-  Cmd+F バインド。
-- **設定システム拡張**: 現行 3 キー (cols/rows/font_size) → Ghostty の config 体系に寄せる:
-  `font-family` / `font-size` / `theme` / `background-opacity` / `cursor-style` / `keybind` /
-  `scrollback-limit` / `copy-on-select` / `mouse-hide-while-typing` 等。実装済みのキーバインドエンジンを
-  config から公開。リロード（Cmd+Shift+,）対応。
-- **UX 小物の完済**: ウィンドウタイトル OSC 反映 / ベル（audio + Dock attention）/ copy-on-select /
-  ホイールでのローカル scrollback スクロール / 実行時フォントサイズ変更 (Cmd+±/0) / フルスクリーン。
+- **Paged scrollback** (implemented): replace the `VecDeque<Row>` per-row-clone approach with 64KiB
+  target pages + **interned styles** (a page-local style table, equivalent to Ghostty's PageList/style
+  set). Cap set by byte size rather than row count (`scrollback-limit`, default 10MB, 0 = disabled,
+  page-granularity eviction). The active screen stays unpaged (scrollback is immutable after push, so no
+  refcounting is needed). Column-change resizes are repacked via streaming reflow to avoid a temporary
+  memory spike. `crates/noa-grid/src/scrollback.rs`.
+- **OSC 8 hyperlink UI + URL auto-detection**: hover underline, Cmd+click to `open`. The regex URL
+  matcher should be compatible with Ghostty's `link` setting format.
+- **Search UI**: the engine is already implemented → add an overlay input prompt, match count, n/N
+  navigation, Cmd+F binding.
+- **Config system expansion**: move from the current 3 keys (cols/rows/font_size) toward Ghostty's config
+  system: `font-family` / `font-size` / `theme` / `background-opacity` / `cursor-style` / `keybind` /
+  `scrollback-limit` / `copy-on-select` / `mouse-hide-while-typing`, etc. Expose the already-implemented
+  keybinding engine through config. Support reload (Cmd+Shift+,).
+- **Finish small UX items**: reflect window title via OSC / bell (audio + Dock attention) /
+  copy-on-select / local scrollback scrolling via wheel / runtime font size change (Cmd+±/0) /
+  fullscreen.
 
-## Phase 4 — タブ・分割・テーマ（≒ inc 4）
+## Phase 4 — Tabs, splits, themes (≈ inc 4)
 
-アーキテクチャ影響が最大のフェーズ。`Arc<Mutex<Terminal>>` 1 個 + io thread 1 本の現行構造を
-**Surface 多重化**（Ghostty の Surface/apprt 分離相当）に再編する。
+The phase with the biggest architectural impact. Reorganizes the current structure — a single
+`Arc<Mutex<Terminal>>` plus one io thread — into **Surface multiplexing** (equivalent to Ghostty's
+Surface/apprt split).
 
-- **Surface 抽象**: {Terminal, Pty, io thread, renderer state} を Surface としてカプセル化し、
-  1 ウィンドウ N Surface に。フォーカス管理・タイトル・通知を Surface 単位に。
-- **タブ**: macOS ネイティブタブ（winit の tabbing identifier）優先で Ghostty と同じ操作感
-  (Cmd+T/W, Cmd+1..9, Cmd+Shift+[])。
-- **分割**: split tree（Ghostty の SplitTree 相当の再帰レイアウト）、Cmd+D / Cmd+Shift+D、
-  フォーカス移動 (Cmd+Opt+矢印)、リサイズ、zoom (Cmd+Shift+Enter)。renderer は viewport 分割描画に対応。
-- **マルチウィンドウ**: winit 複数 Window + per-window surface tree。
-- **テーマ集**: Ghostty が同梱する iTerm2-Color-Schemes 由来 ~460 テーマをビルド時取り込み、
-  `theme = <name>` で選択 + ライト/ダーク自動切替。
-- **フォント設定**: `font-family` フォールバックチェーン設定化、`font-feature`、`font-style` 上書き。
+- **Surface abstraction**: encapsulate {Terminal, Pty, io thread, renderer state} as a Surface, so one
+  window can hold N Surfaces. Manage focus, title, and notifications per Surface.
+- **Tabs**: prefer native macOS tabs (winit's tabbing identifier) for the same feel as Ghostty
+  (Cmd+T/W, Cmd+1..9, Cmd+Shift+[]).
+- **Splits**: a split tree (a recursive layout equivalent to Ghostty's SplitTree), Cmd+D / Cmd+Shift+D,
+  focus movement (Cmd+Opt+arrow), resizing, zoom (Cmd+Shift+Enter). The renderer supports split-viewport
+  rendering.
+- **Multi-window**: multiple winit Windows + a per-window surface tree.
+- **Theme catalog**: bundle the ~460 themes from the iTerm2-Color-Schemes set that Ghostty ships, chosen
+  at build time; select via `theme = <name>` + automatic light/dark switching.
+- **Font settings**: make the `font-family` fallback chain configurable, plus `font-feature` and
+  `font-style` overrides.
 
-## Phase 5 — モダンプロトコル（≒ inc 5）
+## Phase 5 — Modern protocols (≈ inc 5)
 
-- **Kitty keyboard protocol**: progressive enhancement 全フラグ（disambiguate / report events /
-  alternate keys / report all keys as escapes / associated text)。Phase 0 の xterm 完全版が土台。
-- **Kitty graphics protocol**: APC 経路新設、画像デコード（png）、GPU テクスチャ管理、
-  placement/削除/z-index、Unicode placeholder。renderer に画像レイヤ追加。**実装済み** —
-  `docs/specs/kitty-graphics.md` 参照。
-- **シェル統合**: OSC 133 (prompt mark → prompt jump (Cmd+↑/↓)、コマンド終了通知)、OSC 7 (cwd →
-  新タブ/分割の cwd 継承、タイトル表示)。zsh/bash/fish 用統合スクリプト同梱 + 自動注入
-  (Ghostty の shell-integration 相当)。
-- **DCS 続き**: XTVERSION、DECRQM 応答完備。
-- 検証: kitty 公式テストスイート・notcurses デモ・`kitten icat` 実写確認をパリティチェックに追加。
+- **Kitty keyboard protocol**: all progressive-enhancement flags (disambiguate / report events /
+  alternate keys / report all keys as escapes / associated text). Built on top of Phase 0's full xterm
+  implementation.
+- **Kitty graphics protocol**: new APC pathway, image decoding (PNG), GPU texture management,
+  placement/deletion/z-index, Unicode placeholders. Adds an image layer to the renderer. **Implemented** —
+  see `docs/specs/kitty-graphics.md`.
+- **Shell integration**: OSC 133 (prompt marks → prompt jump (Cmd+↑/↓), command-finish notification),
+  OSC 7 (cwd → cwd inheritance for new tabs/splits, title display). Bundle integration scripts for
+  zsh/bash/fish + auto-injection (equivalent to Ghostty's shell-integration).
+- **Remaining DCS work**: complete XTVERSION and DECRQM responses.
+- Verification: add the official kitty test suite, notcurses demos, and live `kitten icat` checks to the
+  parity checklist.
 
-## Phase 6 — macOS ネイティブ磨き（≒ inc 6）
+## Phase 6 — macOS native polish (≈ inc 6)
 
-- クイックターミナル（グローバルホットキー + 上端スライドイン、NSPanel 相当）。**実装済み** — 下記「クイックターミナル」節を参照。
-- コマンドパレット (Cmd+Shift+P、実装済みコマンド機構を列挙 UI 化)。
-- 背景ブラー（private API `CGSSetWindowBackgroundBlurRadius` — Ghostty 同等）。
-- セッション復元（ウィンドウ/タブ/分割トポロジ + cwd を再現。Ghostty 同様コンテンツは復元しない）。
-- Secure Keyboard Entry、タイトルバースタイル (`macos-titlebar-style`)、Option-as-Alt 設定、
-  通知 (OSC 9 / 777)。**実装済み**: `macos-titlebar-style` は `native`/`tabs`/`transparent`/`hidden`、
-  `macos-option-as-alt` は `false`/`true`/`left`/`right` を受け付ける。
-- `noa +list-themes` / `+list-keybinds` 等の CLI アクション。
+- Quick Terminal (global hotkey + top-edge slide-in, equivalent to an NSPanel). **Implemented** — see the
+  "Quick Terminal" section below.
+- Command palette (Cmd+Shift+P, turning the already-implemented command mechanism into a list UI).
+- Background blur (private API `CGSSetWindowBackgroundBlurRadius` — equivalent to Ghostty).
+- Session restore (reproduce window/tab/split topology + cwd. Like Ghostty, content is not restored).
+- Secure Keyboard Entry, titlebar style (`macos-titlebar-style`), Option-as-Alt setting,
+  notifications (OSC 9 / 777). **Implemented**: `macos-titlebar-style` accepts
+  `native`/`tabs`/`transparent`/`hidden`, `macos-option-as-alt` accepts `false`/`true`/`left`/`right`.
+- CLI actions such as `noa +list-themes` / `+list-keybinds`.
 
-### クイックターミナル（実装ノート）
+### Quick Terminal (implementation notes)
 
-グローバルホットキーで画面上端からスライドインするドロップダウン端末。
+A dropdown terminal that slides in from the top of the screen via a global hotkey.
 
-**設定キー**（`noa-config`）:
+**Config keys** (`noa-config`):
 
-| キー | 型 | 既定 | 意味 |
+| Key | Type | Default | Meaning |
 |---|---|---|---|
-| `quick-terminal-hotkey` | 文字列 | `cmd+grave` | トグル用グローバルホットキー。`cmd+grave` 形式（アプリ内キーバインドと同表記）。`grave` / `backtick` / `` ` `` は同義。`backslash` は ANSI `\` と JIS `¥` / `ろ` の両方を登録する。`none` / `off` / 空値ならホットキー登録を行わない。 |
-| `quick-terminal-size` | 分数 or `%` | `0.4` | 画面高に対するパネル高の割合。`0.4` または `40%`。`0.1..=1.0` にクランプ。 |
-| `quick-terminal-autohide` | bool | `true` | フォーカスを失ったら自動的に隠す。 |
+| `quick-terminal-hotkey` | string | `cmd+grave` | Global hotkey for toggling. Uses `cmd+grave`-style syntax (same notation as in-app keybindings). `grave` / `backtick` / `` ` `` are synonyms. `backslash` registers both the ANSI `\` and the JIS `¥` / `ろ` variants. `none` / `off` / an empty value skips hotkey registration. |
+| `quick-terminal-size` | fraction or `%` | `0.4` | Panel height as a fraction of screen height. `0.4` or `40%`. Clamped to `0.1..=1.0`. |
+| `quick-terminal-autohide` | bool | `true` | Automatically hide when focus is lost. |
 
-**挙動**: 画面上端いっぱいの幅 × `quick-terminal-size` の高さ。トグルで ~200ms の上端スライドイン/アウト（`ease_out_cubic`、`about_to_wait` の `WaitUntil` タイマー駆動でウィンドウ位置を毎フレーム補間）。`View > Quick Terminal` メニューとコマンドパレットからもトグル可能。セッション復元の対象外（`window_order` に含めないことで自動的に除外）。
+**Behavior**: full screen width × `quick-terminal-size` height. Toggling produces a ~200ms slide-in/out
+from the top edge (`ease_out_cubic`, driven by `about_to_wait`'s `WaitUntil` timer, interpolating window
+position every frame). Also toggleable from the `View > Quick Terminal` menu and the command palette.
+Excluded from session restore (automatically, by being left out of `window_order`).
 
-**Ghostty との差分**:
-- ホットキー表現: Ghostty は `keybind = global:<chord>=toggle_quick_terminal`。noa は専用キー `quick-terminal-hotkey` を採用（noa のキーバインドは現状ファイル設定不可のため）。
-- グローバルホットキーは Carbon `RegisterEventHotKey`（アクセシビリティ権限不要。`CGEventTap` を避ける理由）。
-- 位置は上端固定（Ghostty の `quick-terminal-position` top/bottom/left/right/center は未対応）。`quick-terminal-space-behavior` も未対応。
-- winit で真の `NSPanel` は生成できないため、装飾なし `NSWindow` を `setLevel: floating` + `collectionBehavior: canJoinAllSpaces | fullScreenAuxiliary` で近似。
-- 既定サイズは 40%（Ghostty 既定は 25%）。
+**Differences from Ghostty**:
+- Hotkey representation: Ghostty uses `keybind = global:<chord>=toggle_quick_terminal`. Noa uses a
+  dedicated `quick-terminal-hotkey` key instead (since noa's keybindings currently can't be configured
+  from a file).
+- The global hotkey uses Carbon `RegisterEventHotKey` (no accessibility permission needed — this is why
+  `CGEventTap` is avoided).
+- The position is fixed to the top edge (Ghostty's `quick-terminal-position` top/bottom/left/right/center
+  is not supported). `quick-terminal-space-behavior` is also not supported.
+- Since winit cannot create a true `NSPanel`, an undecorated `NSWindow` is approximated with
+  `setLevel: floating` + `collectionBehavior: canJoinAllSpaces | fullScreenAuxiliary`.
+- The default size is 40% (Ghostty's default is 25%).
 
-**実機確認手順**（GUI 起動が必要なため未自動化）:
-1. `~/.config/noa/config` に `quick-terminal-hotkey = cmd+grave` を記述して `cargo run -p noa`。
-2. 任意のアプリ最前面で `Cmd+\`` → 上端からスライドインし、フォーカスが移る。
-3. 再度同じホットキーまたはフォーカスを外す（autohide）→ スライドアウトして隠れる。
-4. 別 Space / フルスクリーンアプリ上でも出現することを確認。
-5. ドロップダウン内でシェルを `exit` → ウィンドウが破棄され、次回トグルで再生成される。
+**Manual verification steps** (not automated, since it requires a GUI launch):
+1. Add `quick-terminal-hotkey = cmd+grave` to `~/.config/noa/config` and run `cargo run -p noa`.
+2. With any app in the foreground, press `Cmd+\`` → the terminal slides in from the top edge and gains
+   focus.
+3. Press the same hotkey again, or move focus away (autohide) → it slides out and hides.
+4. Confirm it also appears on a different Space / over a fullscreen app.
+5. Run `exit` in the shell inside the dropdown → the window is destroyed and recreated on the next
+   toggle.
 
 ---
 
-## 横断事項
+## Cross-cutting items
 
-- **パリティハーネス**（Phase 1 で新設）を全フェーズの受け入れゲートに。5 次元 Parity Map の
-  「Behavioral / Feature」は CI 化、「Visual」はスクリーンショット比較チェックリスト。
-- **CI**: GitHub Actions で `build / clippy -D warnings / test --workspace` + macOS ランナー。
-  現状 CI が無いので Phase 0 と同時に導入。
-- **ループ運用**: 各フェーズを `.nexus/loops/noa-<phase>/` の後続ループに分割
-  （goal.md に AC、backlog.md にタスク、verify.sh に機械ゲート — noa-critical と同型）。
-- **推定規模**: Phase 0: 小〜中 / 1: 中 / 2: 大（シェーピング m:n 化が山） / 3: 中〜大（ページ化） /
-  4: 大（Surface 再編）/ 5: 大（Kitty graphics）/ 6: 中。
-- **順序の根拠**: 負債→意味論→見た目→基盤→UX 大物→プロトコル→磨き。各フェーズは前フェーズの
-  構造変更（grapheme セル、m:n グリフ、Surface 抽象）に依存するため入れ替え不可が基本。
-  例外として Phase 3 の UX 小物と Phase 2 は並行可。
+- Make the **parity harness** (introduced in Phase 1) the acceptance gate for every phase. The
+  "Behavioral / Feature" dimensions of the 5-axis Parity Map become CI-checked; "Visual" becomes a
+  screenshot-comparison checklist.
+- **CI**: introduce GitHub Actions running `build / clippy -D warnings / test --workspace` plus a macOS
+  runner, alongside Phase 0, since there is currently no CI.
+- **Loop operations**: split each phase into follow-on loops under `.nexus/loops/noa-<phase>/` (AC in
+  goal.md, tasks in backlog.md, a machine gate in verify.sh — same shape as noa-critical).
+- **Estimated size**: Phase 0: small–medium / 1: medium / 2: large (the m:n shaping conversion is the
+  main hurdle) / 3: medium–large (paging) / 4: large (Surface reorganization) / 5: large (Kitty
+  graphics) / 6: medium.
+- **Rationale for the ordering**: debt → semantics → visuals → foundation → major UX → protocols →
+  polish. Each phase generally depends on the structural changes of the previous one (grapheme cells,
+  m:n glyphs, the Surface abstraction), so reordering isn't really possible. The exception is that
+  Phase 3's small UX items and Phase 2 can proceed in parallel.

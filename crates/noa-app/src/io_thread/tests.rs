@@ -217,6 +217,56 @@ fn ipc_output_is_none_when_nothing_changed_or_the_tap_is_inactive() {
     assert!(throttled.ipc_output.is_none());
 }
 
+/// R-3: every spawned pane now carries an `IpcOutputTap` unconditionally
+/// (see `App::ipc_output_tap`) — the zero-work gate moved from "does a tap
+/// exist" to `Broadcaster::has_output_subscribers()`. A tap wired to a real
+/// `Broadcaster` with zero output subscriptions must still drive
+/// `feed_terminal_batch`'s `ipc_active` to `false`, so `ipc_output` stays
+/// `None` and no per-feed row diff is computed.
+#[test]
+fn tap_present_but_no_output_subscriber_keeps_ipc_output_none() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+
+    let broadcaster = noa_ipc::push::Broadcaster::new();
+    let tap = IpcOutputTap { broadcaster: broadcaster.clone(), ipc_pane_id: 7 };
+    assert!(!tap.broadcaster.has_output_subscribers(), "no connection has subscribed yet");
+
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(crate::auto_approve::AutoApproveInputGuards::default())),
+    };
+    let mut auto_approve_state = crate::auto_approve::AutoApproveState::default();
+    let output = feed_terminal_batch(
+        &terminal,
+        &mut stream,
+        b"hello",
+        std::iter::empty::<&[u8]>(),
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        tap.broadcaster.has_output_subscribers(),
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(output.ipc_output.is_none(), "a tap with zero output subscribers must do zero row-diff work");
+
+    // Once a connection subscribes, the same tap's broadcaster reports it —
+    // proving the gate really does track subscriptions, not the tap.
+    let (conn_id, _queue) = broadcaster.register_connection();
+    broadcaster.add_subscription(conn_id, noa_ipc::push::EventMask::OUTPUT, None);
+    assert!(tap.broadcaster.has_output_subscribers());
+}
+
 /// R-1: a feed suppressed by the 16ms throttle gate must not be silently
 /// dropped — it owes a trailing flush, and once that deadline is reached
 /// (simulated here by calling `flush_pending_ipc_output` directly, exactly

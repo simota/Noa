@@ -57,6 +57,7 @@ impl App {
             token,
             allowed_scopes,
             hello_deadline: noa_ipc::ServerConfig::DEFAULT_HELLO_DEADLINE,
+            handshake_timeout: noa_ipc::ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT,
         };
         match noa_ipc::Server::start(config, std::sync::Arc::new(backend), self.ipc_broadcaster.clone()) {
             Ok(handle) => {
@@ -322,20 +323,25 @@ impl App {
         }
     }
 
-    /// The IPC output-push handle a newly spawned pane's io thread should
-    /// carry (FR-17), or `None` when the server isn't running — the io
-    /// thread then does no extra work per feed (spec "Zero overhead when
-    /// disabled"). Mints the pane's IPC id eagerly (rather than waiting for
-    /// the next `sync_ipc_snapshot` tick) so output can push from the pane's
-    /// very first byte.
-    pub(super) fn ipc_output_tap(
-        &self,
-        window_id: WindowId,
-        pane_id: PaneId,
-    ) -> Option<crate::io_thread::IpcOutputTap> {
-        self.ipc_server.as_ref()?;
+    /// The IPC output-push handle every newly spawned pane's io thread
+    /// carries (FR-17), unconditionally — even when the `noa-ipc` server
+    /// isn't running yet. Mints the pane's IPC id eagerly (rather than
+    /// waiting for the next `sync_ipc_snapshot` tick) so output can push
+    /// from the pane's very first byte once someone does subscribe.
+    ///
+    /// R-3: this used to return `None` while the server was disabled, and
+    /// that `Option` was baked into the pane's io thread once at spawn —
+    /// enabling the server later via config reload left every
+    /// already-spawned pane permanently silent, since nothing ever re-wired
+    /// it. Handing out a tap unconditionally fixes that; the actual "is
+    /// this worth doing" gate has moved to
+    /// `Broadcaster::has_output_subscribers()`, consulted per feed in
+    /// `feed_terminal_batch` — a running-but-unsubscribed server now also
+    /// costs zero per-feed work, which the old tap-presence gate couldn't
+    /// express (a running server always had *a* tap, subscribed or not).
+    pub(super) fn ipc_output_tap(&self, window_id: WindowId, pane_id: PaneId) -> crate::io_thread::IpcOutputTap {
         let ipc_pane_id = self.mint_ipc_pane(window_id, pane_id);
-        Some(crate::io_thread::IpcOutputTap { broadcaster: self.ipc_broadcaster.clone(), ipc_pane_id })
+        crate::io_thread::IpcOutputTap { broadcaster: self.ipc_broadcaster.clone(), ipc_pane_id }
     }
 
     fn mint_ipc_pane(&self, window_id: WindowId, pane_id: PaneId) -> u64 {

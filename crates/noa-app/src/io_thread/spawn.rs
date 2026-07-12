@@ -128,7 +128,7 @@ pub fn spawn(
     sidebar: SidebarPublish,
     auto_approve: AutoApprovePublish,
     redraw_floor: RedrawFloor,
-    ipc: Option<IpcOutputTap>,
+    ipc: IpcOutputTap,
 ) -> IoThreadHandle {
     let IoThreadTarget { window_id, pane_id } = target;
     // The GUI-agnostic card key for every sidebar delta this thread posts. The
@@ -156,8 +156,10 @@ pub fn spawn(
         // instead of a constant poll interval.
         let mut publish_pending_at: Option<Instant> = None;
         // Last `noa.output` push instant for this pane (FR-17), `None` when
-        // no server is running (`ipc` is `None`) — the throttle gate is then
-        // never consulted, so a disabled server costs nothing per feed.
+        // nobody currently subscribes to this pane's output (R-3:
+        // `ipc.broadcaster.has_output_subscribers()`) — the throttle gate is
+        // then never consulted, so an unsubscribed-to pane costs nothing per
+        // feed regardless of whether the server is running at all.
         let mut last_ipc_push: Option<Instant> = None;
         // Per-pane, lock-free-after-extraction cache of last-sent viewport
         // row content hashes (F-6), keyed by viewport slot (`visible_rows()`
@@ -250,7 +252,7 @@ pub fn spawn(
                         &mut last_sidebar_publish,
                         &auto_approve,
                         &mut auto_approve_state,
-                        ipc.is_some(),
+                        ipc.broadcaster.has_output_subscribers(),
                         &mut last_ipc_push,
                         &mut ipc_row_cache,
                     );
@@ -300,10 +302,11 @@ pub fn spawn(
                     // Row diff already extracted inside `feed_terminal_batch`
                     // under its one `Terminal` lock hold (F-6) — no second
                     // lock here, just handing the diff to the broadcaster.
-                    if let Some(rows) = output.ipc_output.take()
-                        && let Some(tap) = ipc.as_ref()
-                    {
-                        tap.broadcaster.broadcast_output(tap.ipc_pane_id, rows);
+                    // `feed_terminal_batch` only ever produces `Some` here
+                    // when `has_output_subscribers()` was true, so this
+                    // `broadcast_output` never fires into an empty room.
+                    if let Some(rows) = output.ipc_output.take() {
+                        ipc.broadcaster.broadcast_output(ipc.ipc_pane_id, rows);
                     }
                     if !output.pending_writes.is_empty() {
                         write_pty_bytes(&writer, &output.pending_writes);
@@ -385,9 +388,7 @@ pub fn spawn(
                 // redraw-worthy event: `noa.output` is a side channel to IPC
                 // subscribers, not the on-screen frame, so this never sets
                 // `needs_redraw`.
-                if let Some(tap) = ipc.as_ref() {
-                    flush_pending_ipc_output(&terminal, tap, &mut last_ipc_push, &mut ipc_row_cache);
-                }
+                flush_pending_ipc_output(&terminal, &ipc, &mut last_ipc_push, &mut ipc_row_cache);
                 ipc_publish_pending_at = None;
                 deadline_elapsed = true;
             }

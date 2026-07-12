@@ -66,9 +66,10 @@ pub(super) struct TerminalOutput {
     /// viewport rows whose content hash changed since the last push,
     /// carrying their absolute row indices. Extracted under this same
     /// `Terminal` lock hold — no second lock in the spawn loop. `None` when
-    /// the IPC tap is inactive (server disabled, or this pane has no IPC
-    /// id) or the push is still within its throttle window; `Some(vec![])`
-    /// never happens (an empty diff just stays `None`).
+    /// nobody currently subscribes to `Output` (R-3:
+    /// `Broadcaster::has_output_subscribers()`) or the push is still within
+    /// its throttle window; `Some(vec![])` never happens (an empty diff just
+    /// stays `None`).
     pub(super) ipc_output: Option<Vec<noa_ipc::protocol::Row>>,
     /// Trailing-flush deadline owed by this feed's throttled `noa.output`
     /// push (R-1: mirrors `overview_publish_pending` — a burst's final feed
@@ -167,8 +168,10 @@ pub(super) fn feed_terminal_batch<'a>(
 
     // IPC output row diff (FR-17 / F-6): extracted under this same lock
     // hold — no second `Terminal` lock from the spawn loop. `ipc_active ==
-    // false` (server disabled or this pane has no IPC id yet) costs one
-    // bool check and nothing else.
+    // false` (R-3: `Broadcaster::has_output_subscribers()` — server
+    // disabled, running with no output subscribers, or this pane's rows
+    // just aren't wanted by any of them) costs one bool check and nothing
+    // else.
     let (ipc_output, ipc_output_publish_pending) =
         match decide_ipc_output_push(ipc_active, *last_ipc_push, Instant::now()) {
             IpcOutputPushDecision::Skip => (None, None),

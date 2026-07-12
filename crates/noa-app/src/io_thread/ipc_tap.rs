@@ -1,9 +1,11 @@
 //! IPC output push tap (noa-server spec FR-17 / NFR-2): lets a pane's io
 //! thread hand its trailing viewport rows to a subscribed `noa-ipc` client
 //! without ever blocking on it. `broadcast_output` is `try_send`-only and
-//! never blocks (see `noa_ipc::push::Broadcaster`); `None` here (server
-//! disabled, or the pane hasn't been registered with an IPC id yet) costs
-//! nothing beyond the `Option` check.
+//! never blocks (see `noa_ipc::push::Broadcaster`). Every pane's io thread
+//! carries one of these unconditionally (R-3) — the zero-overhead-when-
+//! nobody's-listening gate is `Broadcaster::has_output_subscribers()`,
+//! consulted per feed via `decide_ipc_output_push`'s `active` param, not the
+//! tap's presence.
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -18,8 +20,9 @@ use noa_ipc::protocol::{Row, Span, SpanColor};
 /// coalesce at this cadence (spec NFR-4 "dirty 合流 ≥16ms").
 pub(crate) const OUTPUT_PUSH_MIN_INTERVAL: Duration = Duration::from_millis(16);
 
-/// Per-pane handle an io thread pushes output through, if the `noa-ipc`
-/// server is running and this pane has been minted an IPC id.
+/// Per-pane handle an io thread pushes output through. Every pane carries
+/// one (R-3) — whether it's ever actually used is gated per feed on
+/// `broadcaster.has_output_subscribers()`, not on whether this tap exists.
 #[derive(Clone)]
 pub(crate) struct IpcOutputTap {
     pub(crate) broadcaster: noa_ipc::Broadcaster,
@@ -39,9 +42,9 @@ pub(super) enum IpcOutputPushDecision {
 }
 
 /// Pure throttle decision, mirroring `overview::decide_overview_publish`'s
-/// now-as-param shape. `active` folds in the `ipc_active` gate (server
-/// disabled, or this pane has no IPC id yet) so a disabled tap costs one
-/// bool check and nothing else — same as before this decision type existed.
+/// now-as-param shape. `active` is `broadcaster.has_output_subscribers()`
+/// (R-3) — nobody subscribed to `Output` on any connection costs one bool
+/// check and nothing else, same as a fully disabled server used to.
 pub(super) fn decide_ipc_output_push(
     active: bool,
     last_push: Option<Instant>,

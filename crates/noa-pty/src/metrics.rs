@@ -267,7 +267,10 @@ mod macos {
         }
         let raw = info.ri_user_time.saturating_add(info.ri_system_time);
         let (numer, denom) = timebase();
-        Some((super::mach_ticks_to_ns(raw, numer, denom), info.ri_phys_footprint))
+        Some((
+            super::mach_ticks_to_ns(raw, numer, denom),
+            info.ri_phys_footprint,
+        ))
     }
 }
 

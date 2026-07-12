@@ -622,27 +622,45 @@ mod tests {
             false,
             noa_config::ConfigOverrides::default(),
         );
-        assert_eq!(decide_server_restart(&base, &base), ServerRestartAction::None);
+        assert_eq!(
+            decide_server_restart(&base, &base),
+            ServerRestartAction::None
+        );
 
         let mut enabled = base.clone();
         enabled.server_enable = !enabled.server_enable;
-        assert_eq!(decide_server_restart(&base, &enabled), ServerRestartAction::Restart);
+        assert_eq!(
+            decide_server_restart(&base, &enabled),
+            ServerRestartAction::Restart
+        );
 
         let mut port = base.clone();
         port.server_port = port.server_port.wrapping_add(1);
-        assert_eq!(decide_server_restart(&base, &port), ServerRestartAction::Restart);
+        assert_eq!(
+            decide_server_restart(&base, &port),
+            ServerRestartAction::Restart
+        );
 
         let mut bind = base.clone();
         bind.server_bind = "0.0.0.0".to_string();
-        assert_eq!(decide_server_restart(&base, &bind), ServerRestartAction::Restart);
+        assert_eq!(
+            decide_server_restart(&base, &bind),
+            ServerRestartAction::Restart
+        );
 
         let mut token = base.clone();
         token.server_token = Some("changed".to_string());
-        assert_eq!(decide_server_restart(&base, &token), ServerRestartAction::Restart);
+        assert_eq!(
+            decide_server_restart(&base, &token),
+            ServerRestartAction::Restart
+        );
 
         let mut scopes = base.clone();
         scopes.server_scopes = format!("{}x", scopes.server_scopes);
-        assert_eq!(decide_server_restart(&base, &scopes), ServerRestartAction::Restart);
+        assert_eq!(
+            decide_server_restart(&base, &scopes),
+            ServerRestartAction::Restart
+        );
 
         let mut unrelated = base.clone();
         unrelated.font_size += 1.0;

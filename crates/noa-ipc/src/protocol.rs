@@ -5,8 +5,8 @@
 //! (`windowGroupId`/`windowId`/`paneId`/`subscriptionId`) are u64 internally
 //! but always decimal strings on the wire (JS safe-integer limits).
 
-use serde::{Deserialize, Serialize};
 use serde::de::{self, Visitor};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Current protocol major version (additive-only; a major bump is reserved
@@ -105,7 +105,9 @@ mod hex_color {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(d)?;
-        let s = s.strip_prefix('#').ok_or_else(|| D::Error::custom("expected #rrggbb"))?;
+        let s = s
+            .strip_prefix('#')
+            .ok_or_else(|| D::Error::custom("expected #rrggbb"))?;
         if s.len() != 6 {
             return Err(D::Error::custom("expected #rrggbb"));
         }
@@ -406,14 +408,16 @@ const GRID_CAP_ROW_SEPARATOR: usize = 1;
 /// exceeds the effective cap is rejected by the caller with
 /// [`crate::error::ErrorCode::PayloadTooLarge`] (this function reports that
 /// case by returning `Err(())`; the caller maps it to the wire error).
-pub fn cap_grid_rows(rows: Vec<Row>, cap_bytes: usize) -> Result<(Vec<Row>, bool), GridCapExceeded> {
+pub fn cap_grid_rows(
+    rows: Vec<Row>,
+    cap_bytes: usize,
+) -> Result<(Vec<Row>, bool), GridCapExceeded> {
     let effective_cap = cap_bytes.saturating_sub(GRID_CAP_ENVELOPE_MARGIN);
     let mut out = Vec::with_capacity(rows.len());
     let mut total = 0usize;
     let mut has_more = false;
     for row in rows {
-        let size = serde_json::to_vec(&row).map(|v| v.len()).unwrap_or(0)
-            + GRID_CAP_ROW_SEPARATOR;
+        let size = serde_json::to_vec(&row).map(|v| v.len()).unwrap_or(0) + GRID_CAP_ROW_SEPARATOR;
         if size > effective_cap {
             if out.is_empty() {
                 return Err(GridCapExceeded);
@@ -443,7 +447,12 @@ mod cap_grid_rows_tests {
     fn small_row(i: u64) -> Row {
         Row {
             row: i,
-            spans: vec![Span { text: "x".repeat(64), fg: None, bg: None, attrs: None }],
+            spans: vec![Span {
+                text: "x".repeat(64),
+                fg: None,
+                bg: None,
+                attrs: None,
+            }],
         }
     }
 

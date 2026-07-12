@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -179,7 +179,8 @@ impl Server {
         let hello_deadline = config.hello_deadline;
         let handshake_timeout = config.handshake_timeout;
         let connection_count = Arc::new(AtomicUsize::new(0));
-        let per_ip_counts: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+        let per_ip_counts: Arc<Mutex<HashMap<IpAddr, usize>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let shutdown_loop = shutdown.clone();
         let broadcaster_loop = broadcaster.clone();
@@ -254,7 +255,13 @@ impl Server {
             }
         });
 
-        Ok(ServerHandle { port, bind_addr, shutdown, broadcaster, accept_thread: Some(accept_thread) })
+        Ok(ServerHandle {
+            port,
+            bind_addr,
+            shutdown,
+            broadcaster,
+            accept_thread: Some(accept_thread),
+        })
     }
 }
 
@@ -339,13 +346,21 @@ struct DeadlineStream {
 
 impl DeadlineStream {
     fn new_handshake(inner: TcpStream, timeout: Duration) -> Self {
-        DeadlineStream { inner, mode: StreamMode::Handshake { deadline: Instant::now() + timeout } }
+        DeadlineStream {
+            inner,
+            mode: StreamMode::Handshake {
+                deadline: Instant::now() + timeout,
+            },
+        }
     }
 
     fn arm_handshake(&self, deadline: Instant) -> io::Result<()> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "handshake deadline exceeded"));
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "handshake deadline exceeded",
+            ));
         }
         let bound = remaining.min(HANDSHAKE_IO_TIMEOUT);
         self.inner.set_read_timeout(Some(bound))?;
@@ -358,7 +373,8 @@ impl DeadlineStream {
     /// immediately after `accept_hdr_with_config` returns successfully.
     fn mark_connected(&mut self) -> io::Result<()> {
         self.mode = StreamMode::Connected;
-        self.inner.set_read_timeout(Some(Duration::from_millis(50)))?;
+        self.inner
+            .set_read_timeout(Some(Duration::from_millis(50)))?;
         // R-4: a bounded write timeout for the connection's whole life, not
         // just the handshake — see `WRITE_TIMEOUT`'s doc comment.
         self.inner.set_write_timeout(Some(WRITE_TIMEOUT))?;
@@ -466,8 +482,12 @@ fn handle_connection(
     // `DeadlineStream`, not just a per-read idle timeout — see its doc
     // comment for why that distinction matters against a slowloris client.
     let deadline_stream = DeadlineStream::new_handshake(stream, handshake_timeout);
-    let mut ws = tungstenite::accept_hdr_with_config(deadline_stream, callback, Some(connection_ws_config()))
-        .map_err(|err| io::Error::other(err.to_string()))?;
+    let mut ws = tungstenite::accept_hdr_with_config(
+        deadline_stream,
+        callback,
+        Some(connection_ws_config()),
+    )
+    .map_err(|err| io::Error::other(err.to_string()))?;
     ws.get_mut().mark_connected()?;
 
     let (conn_id, queue) = broadcaster.register_connection();
@@ -533,7 +553,15 @@ fn run_connection_loop(
 
         match ws.read() {
             Ok(Message::Text(text)) => {
-                if let Some(response) = dispatch(&text, backend, token, allowed_scopes, broadcaster, conn_id, session) {
+                if let Some(response) = dispatch(
+                    &text,
+                    backend,
+                    token,
+                    allowed_scopes,
+                    broadcaster,
+                    conn_id,
+                    session,
+                ) {
                     ws.send(Message::Text(response)).map_err(ws_err_to_io)?;
                 }
             }
@@ -543,14 +571,17 @@ fn run_connection_loop(
             Ok(Message::Close(_)) => return Ok(()),
             Ok(_) => {}
             Err(tungstenite::Error::Io(err))
-                if err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::TimedOut =>
+                if err.kind() == io::ErrorKind::WouldBlock
+                    || err.kind() == io::ErrorKind::TimedOut =>
             {
                 // Plain 50ms read-poll timeout (or a write timing out, R-4) —
                 // the hello-deadline check now lives at the top of the loop,
                 // so this arm only needs to keep polling.
                 continue;
             }
-            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => return Ok(()),
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                return Ok(());
+            }
             Err(err) => return Err(ws_err_to_io(err)),
         }
     }
@@ -567,7 +598,11 @@ fn to_notification(item: QueuedNotification) -> Value {
             "method": "noa.stateChanged",
             "params": StateChangedParams { panels, dropped },
         }),
-        QueuedNotification::Output { pane_id, lines, dropped } => serde_json::json!({
+        QueuedNotification::Output {
+            pane_id,
+            lines,
+            dropped,
+        } => serde_json::json!({
             "jsonrpc": "2.0",
             "method": "noa.output",
             "params": OutputParams { pane_id: WireId(pane_id), lines, dropped },
@@ -602,7 +637,10 @@ struct RpcFail {
 
 impl RpcFail {
     fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        RpcFail { code, message: message.into() }
+        RpcFail {
+            code,
+            message: message.into(),
+        }
     }
 
     fn invalid_params() -> Self {
@@ -633,7 +671,10 @@ fn require_scope(session: &Session, scope: Scope) -> Result<(), RpcFail> {
     if session.granted_scopes.contains(scope) {
         Ok(())
     } else {
-        Err(RpcFail::new(ErrorCode::ScopeDenied, format!("missing scope: {}", scope.as_str())))
+        Err(RpcFail::new(
+            ErrorCode::ScopeDenied,
+            format!("missing scope: {}", scope.as_str()),
+        ))
     }
 }
 
@@ -657,12 +698,22 @@ fn dispatch(
     // collapsing into ParseError via a single `from_str::<RpcRequest>`.
     let value: Value = match serde_json::from_str(raw) {
         Ok(v) => v,
-        Err(_) => return Some(error_response(Value::Null, ErrorCode::ParseError, "parse error")),
+        Err(_) => {
+            return Some(error_response(
+                Value::Null,
+                ErrorCode::ParseError,
+                "parse error",
+            ));
+        }
     };
     let req: RpcRequest = match serde_json::from_value(value) {
         Ok(r) => r,
         Err(_) => {
-            return Some(error_response(Value::Null, ErrorCode::InvalidRequest, "invalid request"));
+            return Some(error_response(
+                Value::Null,
+                ErrorCode::InvalidRequest,
+                "invalid request",
+            ));
         }
     };
     let id = req.id.clone();
@@ -700,14 +751,21 @@ fn dispatch(
     }
 
     if !session.hello_done {
-        return Some(error_response(id, ErrorCode::Auth, "noa.hello required before other methods"));
+        return Some(error_response(
+            id,
+            ErrorCode::Auth,
+            "noa.hello required before other methods",
+        ));
     }
 
     let outcome = (|| -> Result<Value, RpcFail> {
         match req.method.as_str() {
             "noa.listPanels" => {
                 require_scope(session, Scope::Read)?;
-                Ok(serde_json::to_value(ListPanelsResult { panels: backend.list_panels() }).unwrap())
+                Ok(serde_json::to_value(ListPanelsResult {
+                    panels: backend.list_panels(),
+                })
+                .unwrap())
             }
             "noa.getText" => {
                 require_scope(session, Scope::Read)?;
@@ -745,7 +803,10 @@ fn dispatch(
                 require_scope(session, Scope::Read)?;
                 handle_unsubscribe(broadcaster, conn_id, req.params)
             }
-            _ => Err(RpcFail::new(ErrorCode::MethodNotFound, format!("unknown method: {}", req.method))),
+            _ => Err(RpcFail::new(
+                ErrorCode::MethodNotFound,
+                format!("unknown method: {}", req.method),
+            )),
         }
     })();
 
@@ -755,7 +816,13 @@ fn dispatch(
     })
 }
 
-fn handle_hello(id: Value, params: Value, token: &str, allowed_scopes: ScopeSet, session: &mut Session) -> String {
+fn handle_hello(
+    id: Value,
+    params: Value,
+    token: &str,
+    allowed_scopes: ScopeSet,
+    session: &mut Session,
+) -> String {
     let hello: HelloParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => return error_response(id, ErrorCode::InvalidParams, "invalid params"),
@@ -791,10 +858,17 @@ fn handle_get_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value
     // authenticated client can't force an unbounded scrollback walk under
     // the terminal lock (NFR-4). Tail-truncation + `truncated: true` below
     // already communicates that the response is partial.
-    let max_bytes = p.max_bytes.unwrap_or(DEFAULT_TEXT_MAX_BYTES).min(MAX_TEXT_MAX_BYTES);
+    let max_bytes = p
+        .max_bytes
+        .unwrap_or(DEFAULT_TEXT_MAX_BYTES)
+        .min(MAX_TEXT_MAX_BYTES);
     let backend_result = backend.get_text(p.pane_id.0, p.source, max_bytes)?;
     let (text, truncated_here) = truncate_tail(&backend_result.text, max_bytes);
-    let result = GetTextResult { pane_id: p.pane_id, text, truncated: truncated_here || backend_result.truncated };
+    let result = GetTextResult {
+        pane_id: p.pane_id,
+        text,
+        truncated: truncated_here || backend_result.truncated,
+    };
     Ok(serde_json::to_value(result).unwrap())
 }
 
@@ -802,15 +876,24 @@ fn handle_get_grid(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value
     let p: GetGridParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     let backend_result = backend.get_grid(p.pane_id.0, p.start_row, p.row_count)?;
     let backend_has_more = backend_result.has_more;
-    let (rows, has_more) = cap_grid_rows(backend_result.rows, DEFAULT_GRID_CAP_BYTES)
-        .map_err(|GridCapExceeded| RpcFail::new(ErrorCode::PayloadTooLarge, "row exceeds response cap"))?;
+    let (rows, has_more) =
+        cap_grid_rows(backend_result.rows, DEFAULT_GRID_CAP_BYTES).map_err(|GridCapExceeded| {
+            RpcFail::new(ErrorCode::PayloadTooLarge, "row exceeds response cap")
+        })?;
     let has_more = has_more || backend_has_more;
-    let result = GetGridResult { pane_id: p.pane_id, cols: backend_result.cols, start_row: p.start_row, rows, has_more };
+    let result = GetGridResult {
+        pane_id: p.pane_id,
+        cols: backend_result.cols,
+        start_row: p.start_row,
+        rows,
+        has_more,
+    };
     Ok(serde_json::to_value(result).unwrap())
 }
 
 fn handle_send_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
-    let p: SendTextParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
+    let p: SendTextParams =
+        serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     backend.send_text(p.pane_id.0, &p.text, p.paste.unwrap_or(true))?;
     Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
@@ -824,13 +907,19 @@ fn handle_focus_pane(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Val
 fn handle_new_tab(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
     let p: NewTabParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     let pane_id = backend.new_tab(p.window_id.map(|w| w.0))?;
-    Ok(serde_json::to_value(PaneIdResult { pane_id: WireId(pane_id) }).unwrap())
+    Ok(serde_json::to_value(PaneIdResult {
+        pane_id: WireId(pane_id),
+    })
+    .unwrap())
 }
 
 fn handle_split(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
     let p: SplitParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     let pane_id = backend.split(p.pane_id.0, p.direction)?;
-    Ok(serde_json::to_value(PaneIdResult { pane_id: WireId(pane_id) }).unwrap())
+    Ok(serde_json::to_value(PaneIdResult {
+        pane_id: WireId(pane_id),
+    })
+    .unwrap())
 }
 
 fn handle_close_pane(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
@@ -839,25 +928,42 @@ fn handle_close_pane(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Val
     Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
 
-fn handle_subscribe(broadcaster: &Broadcaster, conn_id: u64, params: Value) -> Result<Value, RpcFail> {
-    let p: SubscribeParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
+fn handle_subscribe(
+    broadcaster: &Broadcaster,
+    conn_id: u64,
+    params: Value,
+) -> Result<Value, RpcFail> {
+    let p: SubscribeParams =
+        serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     let mask = EventMask::from_events(&p.events);
-    let pane_ids = p.pane_ids.map(|ids| ids.into_iter().map(|id| id.0).collect::<HashSet<u64>>());
-    let sub_id = broadcaster.add_subscription(conn_id, mask, pane_ids).map_err(|err| match err {
-        AddSubscriptionError::ConnectionNotFound => {
-            RpcFail::new(ErrorCode::InvalidRequest, "connection not registered")
-        }
-        // R-2: cap on subscriptions per connection — the connection stays
-        // open, this one `noa.subscribe` call just fails.
-        AddSubscriptionError::LimitExceeded => {
-            RpcFail::new(ErrorCode::PayloadTooLarge, "subscription limit exceeded")
-        }
-    })?;
-    Ok(serde_json::to_value(SubscribeResult { subscription_id: WireId(sub_id) }).unwrap())
+    let pane_ids = p
+        .pane_ids
+        .map(|ids| ids.into_iter().map(|id| id.0).collect::<HashSet<u64>>());
+    let sub_id = broadcaster
+        .add_subscription(conn_id, mask, pane_ids)
+        .map_err(|err| match err {
+            AddSubscriptionError::ConnectionNotFound => {
+                RpcFail::new(ErrorCode::InvalidRequest, "connection not registered")
+            }
+            // R-2: cap on subscriptions per connection — the connection stays
+            // open, this one `noa.subscribe` call just fails.
+            AddSubscriptionError::LimitExceeded => {
+                RpcFail::new(ErrorCode::PayloadTooLarge, "subscription limit exceeded")
+            }
+        })?;
+    Ok(serde_json::to_value(SubscribeResult {
+        subscription_id: WireId(sub_id),
+    })
+    .unwrap())
 }
 
-fn handle_unsubscribe(broadcaster: &Broadcaster, conn_id: u64, params: Value) -> Result<Value, RpcFail> {
-    let p: UnsubscribeParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
+fn handle_unsubscribe(
+    broadcaster: &Broadcaster,
+    conn_id: u64,
+    params: Value,
+) -> Result<Value, RpcFail> {
+    let p: UnsubscribeParams =
+        serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     broadcaster.remove_subscription(conn_id, p.subscription_id.0);
     Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
@@ -897,12 +1003,15 @@ mod tests {
     }
 
     #[test]
-    fn deadline_stream_arms_the_socket_timeout_to_the_remaining_deadline_capped_by_handshake_io_timeout() {
+    fn deadline_stream_arms_the_socket_timeout_to_the_remaining_deadline_capped_by_handshake_io_timeout()
+     {
         let (_client, server) = tcp_pair();
         let stream = DeadlineStream::new_handshake(server, Duration::from_millis(50));
         // Plenty of deadline left, but the per-call bound is still capped at
         // `HANDSHAKE_IO_TIMEOUT`, never the other way around.
-        stream.arm_handshake(Instant::now() + Duration::from_secs(60)).unwrap();
+        stream
+            .arm_handshake(Instant::now() + Duration::from_secs(60))
+            .unwrap();
         let bound = stream.inner.read_timeout().unwrap().unwrap();
         assert!(bound <= HANDSHAKE_IO_TIMEOUT);
     }
@@ -914,7 +1023,10 @@ mod tests {
         let (_client, server) = tcp_pair();
         let mut stream = DeadlineStream::new_handshake(server, Duration::from_secs(5));
         stream.mark_connected().unwrap();
-        assert_eq!(stream.inner.read_timeout().unwrap(), Some(Duration::from_millis(50)));
+        assert_eq!(
+            stream.inner.read_timeout().unwrap(),
+            Some(Duration::from_millis(50))
+        );
         assert_eq!(stream.inner.write_timeout().unwrap(), Some(WRITE_TIMEOUT));
     }
 
@@ -995,7 +1107,10 @@ mod tests {
         assert!(matches!(reserve_ip_slot(&counts, hog), IpSlot::Rejected));
 
         let other: IpAddr = "192.168.1.51".parse().unwrap();
-        assert!(matches!(reserve_ip_slot(&counts, other), IpSlot::Reserved(_)));
+        assert!(matches!(
+            reserve_ip_slot(&counts, other),
+            IpSlot::Reserved(_)
+        ));
     }
 
     #[test]
@@ -1004,6 +1119,9 @@ mod tests {
         let ip: IpAddr = "10.0.0.9".parse().unwrap();
         assert!(matches!(reserve_ip_slot(&counts, ip), IpSlot::Reserved(_)));
         release_ip_slot(&counts, ip);
-        assert!(counts.lock().unwrap().is_empty(), "no idle per-IP entry should linger");
+        assert!(
+            counts.lock().unwrap().is_empty(),
+            "no idle per-IP entry should linger"
+        );
     }
 }

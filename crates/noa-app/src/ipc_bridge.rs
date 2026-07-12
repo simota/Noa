@@ -102,11 +102,24 @@ pub(crate) struct PendingIpcAction {
 /// `sendText`), re-validated and executed on the main thread through the
 /// same internal methods the existing `UserEvent` arms already call.
 pub(crate) enum IpcActionKind {
-    FocusPane { pane: PaneRef },
-    NewTab { window: Option<WindowRef> },
-    Split { pane: PaneRef, direction: SplitDirection },
-    ClosePane { pane: PaneRef },
-    SendText { pane: PaneRef, text: String, paste: bool },
+    FocusPane {
+        pane: PaneRef,
+    },
+    NewTab {
+        window: Option<WindowRef>,
+    },
+    Split {
+        pane: PaneRef,
+        direction: SplitDirection,
+    },
+    ClosePane {
+        pane: PaneRef,
+    },
+    SendText {
+        pane: PaneRef,
+        text: String,
+        paste: bool,
+    },
 }
 
 pub(crate) enum IpcActionReply {
@@ -207,14 +220,17 @@ impl IpcBackend for AppIpcBackend {
             // Walks rows from the tail under the lock rather than
             // materializing the full `scrollback_text()` and truncating
             // after the fact (F-1 / NFR-4).
-            TextSource::Scrollback => terminal
-                .scrollback_text_tail(max_bytes)
-                .unwrap_or_default(),
+            TextSource::Scrollback => terminal.scrollback_text_tail(max_bytes).unwrap_or_default(),
         };
         Ok(TextResult { text, truncated })
     }
 
-    fn get_grid(&self, pane: PaneRef, start_row: u64, row_count: u64) -> Result<GridResult, IpcError> {
+    fn get_grid(
+        &self,
+        pane: PaneRef,
+        start_row: u64,
+        row_count: u64,
+    ) -> Result<GridResult, IpcError> {
         let key = self.resolve_pane(pane)?;
         let terminal = self
             .shared
@@ -239,15 +255,26 @@ impl IpcBackend for AppIpcBackend {
         let mut y = start_row;
         while y < end {
             if let Some(grid_row) = terminal.active_absolute_row(y as usize) {
-                rows.push(WireRow { row: y, spans: row_to_spans(&grid_row) });
+                rows.push(WireRow {
+                    row: y,
+                    spans: row_to_spans(&grid_row),
+                });
             }
             y += 1;
         }
-        Ok(GridResult { cols, rows, has_more })
+        Ok(GridResult {
+            cols,
+            rows,
+            has_more,
+        })
     }
 
     fn send_text(&self, pane: PaneRef, text: &str, paste: bool) -> Result<(), IpcError> {
-        match self.submit(IpcActionKind::SendText { pane, text: text.to_string(), paste })? {
+        match self.submit(IpcActionKind::SendText {
+            pane,
+            text: text.to_string(),
+            paste,
+        })? {
             IpcActionReply::Ok => Ok(()),
             IpcActionReply::NewPane(_) => Ok(()),
         }
@@ -319,7 +346,12 @@ pub(crate) fn row_to_spans(row: &GridRow) -> Vec<Span> {
         } else {
             let mut text = String::new();
             cell.push_text_to(&mut text);
-            spans.push(Span { text, fg, bg, attrs });
+            spans.push(Span {
+                text,
+                fg,
+                bg,
+                attrs,
+            });
         }
     }
     spans
@@ -436,13 +468,20 @@ mod tests {
         let mut registry = IpcRegistry::default();
         let first = registry.mint(10, 1);
         let second = registry.mint(10, 1);
-        assert_eq!(first, second, "minting the same pane twice returns the same id");
+        assert_eq!(
+            first, second,
+            "minting the same pane twice returns the same id"
+        );
 
         let third = registry.mint(10, 2);
         assert_ne!(first, third);
 
         assert_eq!(registry.resolve(first), Some((10, 1)));
-        assert_eq!(registry.resolve(999), None, "unminted id resolves to nothing");
+        assert_eq!(
+            registry.resolve(999),
+            None,
+            "unminted id resolves to nothing"
+        );
     }
 
     #[test]
@@ -455,8 +494,16 @@ mod tests {
         live.insert((10, 2));
         registry.prune(&live);
 
-        assert_eq!(registry.resolve(closed), None, "pane absent from the live set is pruned");
-        assert_eq!(registry.resolve(kept), Some((10, 2)), "pane present in the live set survives");
+        assert_eq!(
+            registry.resolve(closed),
+            None,
+            "pane absent from the live set is pruned"
+        );
+        assert_eq!(
+            registry.resolve(kept),
+            Some((10, 2)),
+            "pane present in the live set survives"
+        );
 
         // A closed pane's id never comes back, even if its key is minted
         // again (fresh id, not a resurrection of the pruned one).
@@ -465,7 +512,11 @@ mod tests {
     }
 
     fn cell(ch: char, fg: Color) -> Cell {
-        Cell { ch, fg, ..Cell::default() }
+        Cell {
+            ch,
+            fg,
+            ..Cell::default()
+        }
     }
 
     #[test]
@@ -480,7 +531,11 @@ mod tests {
             dirty: false,
         };
         let spans = row_to_spans(&row);
-        assert_eq!(spans.len(), 2, "adjacent same-style cells fold into one span");
+        assert_eq!(
+            spans.len(),
+            2,
+            "adjacent same-style cells fold into one span"
+        );
         assert_eq!(spans[0].text, "ab");
         assert_eq!(spans[0].fg, None, "Color::Default omits the wire fg field");
         assert_eq!(spans[1].text, "c");
@@ -494,13 +549,24 @@ mod tests {
         // row must not reach back across the row boundary into the wrapped
         // row's content.
         let wrapped = GridRow {
-            cells: vec![cell('a', Color::Default), cell(' ', Color::Default), cell(' ', Color::Default)],
+            cells: vec![
+                cell('a', Color::Default),
+                cell(' ', Color::Default),
+                cell(' ', Color::Default),
+            ],
             wrapped: true,
             dirty: false,
         };
-        let blank = GridRow { cells: vec![cell(' ', Color::Default)], wrapped: false, dirty: false };
+        let blank = GridRow {
+            cells: vec![cell(' ', Color::Default)],
+            wrapped: false,
+            dirty: false,
+        };
         let text = screen_text(&[wrapped, blank]);
-        assert_eq!(text, "a  \n", "wrapped row's trailing spaces survive; only the blank row's own space is trimmed");
+        assert_eq!(
+            text, "a  \n",
+            "wrapped row's trailing spaces survive; only the blank row's own space is trimmed"
+        );
     }
 
     #[test]

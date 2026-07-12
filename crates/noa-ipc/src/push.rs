@@ -51,8 +51,15 @@ impl EventMask {
 /// A queued notification, pre-serialization.
 #[derive(Clone, Debug)]
 pub enum QueuedNotification {
-    StateChanged { panels: Vec<Panel>, dropped: bool },
-    Output { pane_id: u64, lines: Vec<Row>, dropped: bool },
+    StateChanged {
+        panels: Vec<Panel>,
+        dropped: bool,
+    },
+    Output {
+        pane_id: u64,
+        lines: Vec<Row>,
+        dropped: bool,
+    },
 }
 
 struct QueueInner {
@@ -74,7 +81,10 @@ pub struct PushQueue {
 impl PushQueue {
     fn new(cap: usize) -> Self {
         PushQueue {
-            inner: Mutex::new(QueueInner { items: VecDeque::with_capacity(cap), dropped_pending: false }),
+            inner: Mutex::new(QueueInner {
+                items: VecDeque::with_capacity(cap),
+                dropped_pending: false,
+            }),
             cap,
         }
     }
@@ -95,9 +105,14 @@ impl PushQueue {
     pub fn drain(&self) -> Vec<QueuedNotification> {
         let mut guard = self.inner.lock();
         let mut out: Vec<QueuedNotification> = guard.items.drain(..).collect();
-        if guard.dropped_pending && let Some(idx) = out.iter().rposition(|n| {
-            matches!(n, QueuedNotification::Output { .. } | QueuedNotification::StateChanged { .. })
-        }) {
+        if guard.dropped_pending
+            && let Some(idx) = out.iter().rposition(|n| {
+                matches!(
+                    n,
+                    QueuedNotification::Output { .. } | QueuedNotification::StateChanged { .. }
+                )
+            })
+        {
             match &mut out[idx] {
                 QueuedNotification::Output { dropped, .. } => *dropped = true,
                 QueuedNotification::StateChanged { dropped, .. } => *dropped = true,
@@ -180,7 +195,13 @@ impl Broadcaster {
     pub fn register_connection(&self) -> (u64, Arc<PushQueue>) {
         let id = self.next_conn_id.fetch_add(1, Ordering::SeqCst);
         let queue = Arc::new(PushQueue::new(DEFAULT_QUEUE_CAP));
-        self.conns.lock().insert(id, ConnEntry { queue: queue.clone(), subs: Vec::new() });
+        self.conns.lock().insert(
+            id,
+            ConnEntry {
+                queue: queue.clone(),
+                subs: Vec::new(),
+            },
+        );
         (id, queue)
     }
 
@@ -190,9 +211,14 @@ impl Broadcaster {
         // unsubscribing would leave the gate permanently open (or, on a
         // shared count, over-counted forever).
         if let Some(entry) = self.conns.lock().remove(&conn_id) {
-            let removed_output_subs = entry.subs.iter().filter(|s| s.events.contains(EventMask::OUTPUT)).count();
+            let removed_output_subs = entry
+                .subs
+                .iter()
+                .filter(|s| s.events.contains(EventMask::OUTPUT))
+                .count();
             if removed_output_subs > 0 {
-                self.output_subscribers.fetch_sub(removed_output_subs, Ordering::Relaxed);
+                self.output_subscribers
+                    .fetch_sub(removed_output_subs, Ordering::Relaxed);
             }
         }
     }
@@ -254,12 +280,18 @@ impl Broadcaster {
         pane_ids: Option<HashSet<u64>>,
     ) -> Result<u64, AddSubscriptionError> {
         let mut conns = self.conns.lock();
-        let entry = conns.get_mut(&conn_id).ok_or(AddSubscriptionError::ConnectionNotFound)?;
+        let entry = conns
+            .get_mut(&conn_id)
+            .ok_or(AddSubscriptionError::ConnectionNotFound)?;
         if entry.subs.len() >= MAX_SUBSCRIPTIONS_PER_CONNECTION {
             return Err(AddSubscriptionError::LimitExceeded);
         }
         let sub_id = self.next_sub_id.fetch_add(1, Ordering::SeqCst);
-        entry.subs.push(SubFilter { subscription_id: sub_id, events, pane_ids });
+        entry.subs.push(SubFilter {
+            subscription_id: sub_id,
+            events,
+            pane_ids,
+        });
         drop(conns);
         if events.contains(EventMask::OUTPUT) {
             self.output_subscribers.fetch_add(1, Ordering::Relaxed);
@@ -269,9 +301,13 @@ impl Broadcaster {
 
     pub fn remove_subscription(&self, conn_id: u64, subscription_id: u64) {
         let mut conns = self.conns.lock();
-        let Some(entry) = conns.get_mut(&conn_id) else { return };
-        let had_output =
-            entry.subs.iter().any(|s| s.subscription_id == subscription_id && s.events.contains(EventMask::OUTPUT));
+        let Some(entry) = conns.get_mut(&conn_id) else {
+            return;
+        };
+        let had_output = entry
+            .subs
+            .iter()
+            .any(|s| s.subscription_id == subscription_id && s.events.contains(EventMask::OUTPUT));
         entry.subs.retain(|s| s.subscription_id != subscription_id);
         drop(conns);
         if had_output {
@@ -295,7 +331,10 @@ impl Broadcaster {
                 .filter(|panel| {
                     entry.subs.iter().any(|sub| {
                         sub.events.contains(EventMask::STATE_CHANGED)
-                            && sub.pane_ids.as_ref().is_none_or(|ids| ids.contains(&panel.pane_id.0))
+                            && sub
+                                .pane_ids
+                                .as_ref()
+                                .is_none_or(|ids| ids.contains(&panel.pane_id.0))
                     })
                 })
                 .cloned()
@@ -303,7 +342,10 @@ impl Broadcaster {
             if matched.is_empty() {
                 continue;
             }
-            entry.queue.push(QueuedNotification::StateChanged { panels: matched, dropped: false });
+            entry.queue.push(QueuedNotification::StateChanged {
+                panels: matched,
+                dropped: false,
+            });
         }
     }
 
@@ -337,7 +379,11 @@ mod tests {
     fn push_never_blocks_and_drops_oldest() {
         let q = PushQueue::new(4);
         for i in 0..10u64 {
-            q.push(QueuedNotification::Output { pane_id: 1, lines: vec![], dropped: false });
+            q.push(QueuedNotification::Output {
+                pane_id: 1,
+                lines: vec![],
+                dropped: false,
+            });
             let _ = i;
         }
         assert_eq!(q.len(), 4);
@@ -354,11 +400,16 @@ mod tests {
     fn dropped_marker_can_tag_a_state_changed_entry_too() {
         let q = PushQueue::new(4);
         for _ in 0..10 {
-            q.push(QueuedNotification::StateChanged { panels: vec![], dropped: false });
+            q.push(QueuedNotification::StateChanged {
+                panels: vec![],
+                dropped: false,
+            });
         }
         let drained = q.drain();
         match drained.last().unwrap() {
-            QueuedNotification::StateChanged { dropped, .. } => assert!(*dropped, "F-5: dropped must also surface on stateChanged"),
+            QueuedNotification::StateChanged { dropped, .. } => {
+                assert!(*dropped, "F-5: dropped must also surface on stateChanged")
+            }
             _ => panic!("expected state changed"),
         }
     }
@@ -372,9 +423,18 @@ mod tests {
         // of pure `StateChanged` entries would leave `dropped_pending` set
         // until a later `Output` arrived).
         let q = PushQueue::new(2);
-        q.push(QueuedNotification::StateChanged { panels: vec![], dropped: false });
-        q.push(QueuedNotification::StateChanged { panels: vec![], dropped: false });
-        q.push(QueuedNotification::StateChanged { panels: vec![], dropped: false }); // evicts oldest
+        q.push(QueuedNotification::StateChanged {
+            panels: vec![],
+            dropped: false,
+        });
+        q.push(QueuedNotification::StateChanged {
+            panels: vec![],
+            dropped: false,
+        });
+        q.push(QueuedNotification::StateChanged {
+            panels: vec![],
+            dropped: false,
+        }); // evicts oldest
         let drained = q.drain();
         match drained.last().unwrap() {
             QueuedNotification::StateChanged { dropped, .. } => assert!(*dropped),
@@ -383,9 +443,21 @@ mod tests {
 
         // A later, unrelated overflow of a different kind is independently
         // tagged too.
-        q.push(QueuedNotification::Output { pane_id: 1, lines: vec![], dropped: false });
-        q.push(QueuedNotification::Output { pane_id: 1, lines: vec![], dropped: false });
-        q.push(QueuedNotification::Output { pane_id: 1, lines: vec![], dropped: false }); // evicts oldest
+        q.push(QueuedNotification::Output {
+            pane_id: 1,
+            lines: vec![],
+            dropped: false,
+        });
+        q.push(QueuedNotification::Output {
+            pane_id: 1,
+            lines: vec![],
+            dropped: false,
+        });
+        q.push(QueuedNotification::Output {
+            pane_id: 1,
+            lines: vec![],
+            dropped: false,
+        }); // evicts oldest
         let second = q.drain();
         match second.last().unwrap() {
             QueuedNotification::Output { dropped, .. } => assert!(*dropped),
@@ -452,7 +524,11 @@ mod tests {
         let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids));
 
         b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(2)]);
-        assert_eq!(queue.len(), 0, "no panel matches the filter, so nothing is queued");
+        assert_eq!(
+            queue.len(),
+            0,
+            "no panel matches the filter, so nothing is queued"
+        );
     }
 
     #[test]
@@ -473,7 +549,8 @@ mod tests {
     // ---- R-5: overlapping subscriptions on one connection consolidate ----
 
     #[test]
-    fn overlapping_state_changed_subscriptions_on_one_connection_deliver_one_notification_with_the_union() {
+    fn overlapping_state_changed_subscriptions_on_one_connection_deliver_one_notification_with_the_union()
+     {
         let b = Broadcaster::new();
         let (conn_id, queue) = b.register_connection();
         let mut ids_a = HashSet::new();
@@ -486,18 +563,27 @@ mod tests {
 
         b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(2), panel_with_id(3)]);
         let drained = queue.drain();
-        assert_eq!(drained.len(), 1, "two overlapping subscriptions must not each enqueue their own copy");
+        assert_eq!(
+            drained.len(),
+            1,
+            "two overlapping subscriptions must not each enqueue their own copy"
+        );
         match &drained[0] {
             QueuedNotification::StateChanged { panels, .. } => {
                 let ids: Vec<u64> = panels.iter().map(|p| p.pane_id.0).collect();
-                assert_eq!(ids, vec![1, 2], "the union of both subscriptions' matches, in input order");
+                assert_eq!(
+                    ids,
+                    vec![1, 2],
+                    "the union of both subscriptions' matches, in input order"
+                );
             }
             _ => panic!("expected state changed"),
         }
     }
 
     #[test]
-    fn disjoint_state_changed_subscriptions_on_one_connection_deliver_one_notification_with_both_panels() {
+    fn disjoint_state_changed_subscriptions_on_one_connection_deliver_one_notification_with_both_panels()
+     {
         let b = Broadcaster::new();
         let (conn_id, queue) = b.register_connection();
         let mut ids_a = HashSet::new();
@@ -529,7 +615,11 @@ mod tests {
         let _ = b.add_subscription(conn_id, EventMask::OUTPUT, None); // matches everything, including 42
 
         b.broadcast_output(42, vec![]);
-        assert_eq!(queue.len(), 1, "two overlapping output subscriptions must not each enqueue their own copy");
+        assert_eq!(
+            queue.len(),
+            1,
+            "two overlapping output subscriptions must not each enqueue their own copy"
+        );
     }
 
     #[test]
@@ -549,7 +639,10 @@ mod tests {
         let b = Broadcaster::new();
         assert!(!b.has_output_subscribers());
         let (conn_id, _queue) = b.register_connection();
-        assert!(!b.has_output_subscribers(), "a connection with no subscriptions is not an output subscriber");
+        assert!(
+            !b.has_output_subscribers(),
+            "a connection with no subscriptions is not an output subscriber"
+        );
         // A state_changed-only subscription must not flip the output gate.
         let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, None);
         assert!(!b.has_output_subscribers());
@@ -559,23 +652,35 @@ mod tests {
     fn has_output_subscribers_flips_true_on_subscribe_and_false_again_on_unsubscribe() {
         let b = Broadcaster::new();
         let (conn_id, _queue) = b.register_connection();
-        let sub_id = b.add_subscription(conn_id, EventMask::OUTPUT, None).unwrap();
+        let sub_id = b
+            .add_subscription(conn_id, EventMask::OUTPUT, None)
+            .unwrap();
         assert!(b.has_output_subscribers());
 
         b.remove_subscription(conn_id, sub_id);
-        assert!(!b.has_output_subscribers(), "the only output subscription was removed");
+        assert!(
+            !b.has_output_subscribers(),
+            "the only output subscription was removed"
+        );
     }
 
     #[test]
     fn has_output_subscribers_stays_true_while_any_overlapping_subscription_remains() {
         let b = Broadcaster::new();
         let (conn_id, _queue) = b.register_connection();
-        let sub_a = b.add_subscription(conn_id, EventMask::OUTPUT, None).unwrap();
-        let _sub_b = b.add_subscription(conn_id, EventMask::OUTPUT, None).unwrap();
+        let sub_a = b
+            .add_subscription(conn_id, EventMask::OUTPUT, None)
+            .unwrap();
+        let _sub_b = b
+            .add_subscription(conn_id, EventMask::OUTPUT, None)
+            .unwrap();
         assert!(b.has_output_subscribers());
 
         b.remove_subscription(conn_id, sub_a);
-        assert!(b.has_output_subscribers(), "one output subscription is still live");
+        assert!(
+            b.has_output_subscribers(),
+            "one output subscription is still live"
+        );
     }
 
     #[test]
@@ -588,7 +693,10 @@ mod tests {
         // The connection drops without ever calling `noa.unsubscribe` —
         // mirrors a client that just closes its socket.
         b.unregister_connection(conn_id);
-        assert!(!b.has_output_subscribers(), "the connection's own output subscriptions must go with it");
+        assert!(
+            !b.has_output_subscribers(),
+            "the connection's own output subscriptions must go with it"
+        );
     }
 
     #[test]
@@ -601,7 +709,10 @@ mod tests {
 
         let _ = b.add_subscription(conn_b, EventMask::OUTPUT, None);
         b.unregister_connection(conn_a);
-        assert!(b.has_output_subscribers(), "conn_b's output subscription is still live");
+        assert!(
+            b.has_output_subscribers(),
+            "conn_b's output subscription is still live"
+        );
 
         b.unregister_connection(conn_b);
         assert!(!b.has_output_subscribers());
@@ -615,7 +726,9 @@ mod tests {
         let (conn_id, _queue) = b.register_connection();
         for i in 0..MAX_SUBSCRIPTIONS_PER_CONNECTION {
             b.add_subscription(conn_id, EventMask::STATE_CHANGED, None)
-                .unwrap_or_else(|_| panic!("subscription {i} of {MAX_SUBSCRIPTIONS_PER_CONNECTION} must succeed"));
+                .unwrap_or_else(|_| {
+                    panic!("subscription {i} of {MAX_SUBSCRIPTIONS_PER_CONNECTION} must succeed")
+                });
         }
         assert_eq!(
             b.add_subscription(conn_id, EventMask::STATE_CHANGED, None),
@@ -629,15 +742,23 @@ mod tests {
         let b = Broadcaster::new();
         let (conn_id, queue) = b.register_connection();
         for _ in 0..MAX_SUBSCRIPTIONS_PER_CONNECTION {
-            b.add_subscription(conn_id, EventMask::STATE_CHANGED, None).unwrap();
+            b.add_subscription(conn_id, EventMask::STATE_CHANGED, None)
+                .unwrap();
         }
-        assert!(b.add_subscription(conn_id, EventMask::STATE_CHANGED, None).is_err());
+        assert!(
+            b.add_subscription(conn_id, EventMask::STATE_CHANGED, None)
+                .is_err()
+        );
 
         // The connection itself is still registered and its existing
         // subscriptions still deliver — a rejected `noa.subscribe` call must
         // not tear anything down.
         b.broadcast_state_changed(vec![panel_with_id(1)]);
-        assert_eq!(queue.len(), 1, "existing subscriptions keep working after a rejected one");
+        assert_eq!(
+            queue.len(),
+            1,
+            "existing subscriptions keep working after a rejected one"
+        );
     }
 
     #[test]
@@ -646,13 +767,20 @@ mod tests {
         let (conn_id, _queue) = b.register_connection();
         let mut sub_ids = Vec::new();
         for _ in 0..MAX_SUBSCRIPTIONS_PER_CONNECTION {
-            sub_ids.push(b.add_subscription(conn_id, EventMask::STATE_CHANGED, None).unwrap());
+            sub_ids.push(
+                b.add_subscription(conn_id, EventMask::STATE_CHANGED, None)
+                    .unwrap(),
+            );
         }
-        assert!(b.add_subscription(conn_id, EventMask::STATE_CHANGED, None).is_err());
+        assert!(
+            b.add_subscription(conn_id, EventMask::STATE_CHANGED, None)
+                .is_err()
+        );
 
         b.remove_subscription(conn_id, sub_ids[0]);
         assert!(
-            b.add_subscription(conn_id, EventMask::STATE_CHANGED, None).is_ok(),
+            b.add_subscription(conn_id, EventMask::STATE_CHANGED, None)
+                .is_ok(),
             "unsubscribing must free a slot for a new subscription"
         );
     }
@@ -674,7 +802,10 @@ mod tests {
         assert!(!b.has_output_subscriber_for(1));
         let (conn_id, _queue) = b.register_connection();
         let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, None);
-        assert!(!b.has_output_subscriber_for(1), "a state_changed-only subscription must not open the output gate");
+        assert!(
+            !b.has_output_subscriber_for(1),
+            "a state_changed-only subscription must not open the output gate"
+        );
     }
 
     #[test]
@@ -686,7 +817,10 @@ mod tests {
         let _ = b.add_subscription(conn_id, EventMask::OUTPUT, Some(ids));
 
         assert!(b.has_output_subscriber_for(42));
-        assert!(!b.has_output_subscriber_for(1), "pane 1 was never subscribed to");
+        assert!(
+            !b.has_output_subscriber_for(1),
+            "pane 1 was never subscribed to"
+        );
     }
 
     #[test]

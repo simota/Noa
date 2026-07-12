@@ -54,7 +54,10 @@ impl App {
     /// every `SessionDelta::Metrics` apply while open, `sidebar/state.rs`). A
     /// no-op when the overlay is closed.
     pub(in crate::app) fn refresh_process_monitor(&mut self) {
-        let Some(window_id) = self.process_monitor.as_ref().map(|session| session.window_id)
+        let Some(window_id) = self
+            .process_monitor
+            .as_ref()
+            .map(|session| session.window_id)
         else {
             return;
         };
@@ -145,7 +148,11 @@ impl App {
             return;
         };
         let target_window_id = WindowId::from(card_id.window_id.0);
-        if let Some(window) = self.windows.get(&target_window_id).map(|s| s.window.clone()) {
+        if let Some(window) = self
+            .windows
+            .get(&target_window_id)
+            .map(|s| s.window.clone())
+        {
             self.focus_pane(target_window_id, card_id.pane_id);
             self.focused = Some(target_window_id);
             window.focus_window();

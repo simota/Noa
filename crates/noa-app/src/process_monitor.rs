@@ -105,9 +105,8 @@ fn cmp_none_last<T: PartialOrd>(a: Option<&T>, b: Option<&T>, desc: bool) -> Ord
 /// active key keep their prior relative order.
 fn sort_rows(rows: &mut [MonitorRow], sort: SortKey) {
     match sort {
-        SortKey::CpuDesc => {
-            rows.sort_by(|a, b| cmp_none_last(a.cpu_permille.as_ref(), b.cpu_permille.as_ref(), true))
-        }
+        SortKey::CpuDesc => rows
+            .sort_by(|a, b| cmp_none_last(a.cpu_permille.as_ref(), b.cpu_permille.as_ref(), true)),
         SortKey::MemDesc => {
             rows.sort_by(|a, b| cmp_none_last(a.mem_bytes.as_ref(), b.mem_bytes.as_ref(), true))
         }
@@ -464,10 +463,7 @@ mod tests {
         assert_eq!(format_cpu(None), "\u{2014}");
         assert_eq!(format_mem(None), "\u{2014}");
         assert_eq!(format_proc_count(None), "\u{2014}");
-        assert_eq!(
-            format_elapsed(None, SystemTime::UNIX_EPOCH),
-            "\u{2014}"
-        );
+        assert_eq!(format_elapsed(None, SystemTime::UNIX_EPOCH), "\u{2014}");
         assert_eq!(format_process(None), "\u{2014}");
     }
 

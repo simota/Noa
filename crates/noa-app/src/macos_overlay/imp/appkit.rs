@@ -1639,12 +1639,42 @@ pub(in crate::macos_overlay) fn rebuild_process_monitor(
         let header_y = 16.0 + title_h + hint_h;
         let mono_header = system_font(11.0, WEIGHT_SEMIBOLD);
         for (label, x, w, align) in [
-            ("PROCESS", PM_COL_PROCESS_X, PM_COL_CPU_X - PM_COL_PROCESS_X, ALIGN_LEFT),
-            ("CPU", PM_COL_CPU_X, PM_COL_MEM_X - PM_COL_CPU_X, ALIGN_RIGHT),
-            ("MEM", PM_COL_MEM_X, PM_COL_PROC_X - PM_COL_MEM_X, ALIGN_RIGHT),
-            ("N", PM_COL_PROC_X, PM_COL_ELAPSED_X - PM_COL_PROC_X, ALIGN_RIGHT),
-            ("ELAPSED", PM_COL_ELAPSED_X, PM_COL_LOCATION_X - PM_COL_ELAPSED_X, ALIGN_RIGHT),
-            ("LOCATION", PM_COL_LOCATION_X, card_w - pad * 2.0 - PM_COL_LOCATION_X, ALIGN_LEFT),
+            (
+                "PROCESS",
+                PM_COL_PROCESS_X,
+                PM_COL_CPU_X - PM_COL_PROCESS_X,
+                ALIGN_LEFT,
+            ),
+            (
+                "CPU",
+                PM_COL_CPU_X,
+                PM_COL_MEM_X - PM_COL_CPU_X,
+                ALIGN_RIGHT,
+            ),
+            (
+                "MEM",
+                PM_COL_MEM_X,
+                PM_COL_PROC_X - PM_COL_MEM_X,
+                ALIGN_RIGHT,
+            ),
+            (
+                "N",
+                PM_COL_PROC_X,
+                PM_COL_ELAPSED_X - PM_COL_PROC_X,
+                ALIGN_RIGHT,
+            ),
+            (
+                "ELAPSED",
+                PM_COL_ELAPSED_X,
+                PM_COL_LOCATION_X - PM_COL_ELAPSED_X,
+                ALIGN_RIGHT,
+            ),
+            (
+                "LOCATION",
+                PM_COL_LOCATION_X,
+                card_w - pad * 2.0 - PM_COL_LOCATION_X,
+                ALIGN_LEFT,
+            ),
         ] {
             let field = make_label(
                 label,

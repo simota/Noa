@@ -35,7 +35,12 @@ impl IpcBackend for MockBackend {
         self.panels.lock().unwrap().clone()
     }
 
-    fn get_text(&self, pane: PaneRef, _source: TextSource, max_bytes: usize) -> Result<TextResult, IpcError> {
+    fn get_text(
+        &self,
+        pane: PaneRef,
+        _source: TextSource,
+        max_bytes: usize,
+    ) -> Result<TextResult, IpcError> {
         self.requested_max_bytes.lock().unwrap().push(max_bytes);
         if self.internal_error_panes.lock().unwrap().contains(&pane) {
             return Err(IpcError::Internal("backend exploded".to_string()));
@@ -44,25 +49,46 @@ impl IpcBackend for MockBackend {
             return Err(IpcError::PaneClosed);
         }
         match self.text.lock().unwrap().get(&pane) {
-            Some(text) => Ok(TextResult { text: text.clone(), truncated: false }),
+            Some(text) => Ok(TextResult {
+                text: text.clone(),
+                truncated: false,
+            }),
             None => Err(IpcError::UnknownPane),
         }
     }
 
-    fn get_grid(&self, pane: PaneRef, start_row: u64, row_count: u64) -> Result<GridResult, IpcError> {
-        let rows = self.grid_rows.lock().unwrap().get(&pane).cloned().ok_or(IpcError::UnknownPane)?;
+    fn get_grid(
+        &self,
+        pane: PaneRef,
+        start_row: u64,
+        row_count: u64,
+    ) -> Result<GridResult, IpcError> {
+        let rows = self
+            .grid_rows
+            .lock()
+            .unwrap()
+            .get(&pane)
+            .cloned()
+            .ok_or(IpcError::UnknownPane)?;
         let rows: Vec<Row> = rows
             .into_iter()
             .filter(|r| r.row >= start_row && r.row < start_row + row_count)
             .collect();
-        Ok(GridResult { cols: 80, rows, has_more: false })
+        Ok(GridResult {
+            cols: 80,
+            rows,
+            has_more: false,
+        })
     }
 
     fn send_text(&self, pane: PaneRef, text: &str, paste: bool) -> Result<(), IpcError> {
         if self.closed_panes.lock().unwrap().contains(&pane) {
             return Err(IpcError::PaneClosed);
         }
-        self.sent_text.lock().unwrap().push((pane, text.to_string(), paste));
+        self.sent_text
+            .lock()
+            .unwrap()
+            .push((pane, text.to_string(), paste));
         Ok(())
     }
 
@@ -91,7 +117,11 @@ impl IpcBackend for MockBackend {
     }
 }
 
-fn start_test_server(backend: Arc<MockBackend>, token: &str, scopes: ScopeSet) -> noa_ipc::ServerHandle {
+fn start_test_server(
+    backend: Arc<MockBackend>,
+    token: &str,
+    scopes: ScopeSet,
+) -> noa_ipc::ServerHandle {
     Server::start(
         ServerConfig {
             port: 0,
@@ -203,8 +233,19 @@ fn recv_json(sock: &mut Sock) -> Value {
     }
 }
 
-fn hello(sock: &mut Sock, id: i64, protocol_version: u64, token: Option<&str>, scopes: &[&str]) -> Value {
-    send_rpc(sock, id, "noa.hello", json!({ "protocolVersion": protocol_version, "token": token, "scopes": scopes }));
+fn hello(
+    sock: &mut Sock,
+    id: i64,
+    protocol_version: u64,
+    token: Option<&str>,
+    scopes: &[&str],
+) -> Value {
+    send_rpc(
+        sock,
+        id,
+        "noa.hello",
+        json!({ "protocolVersion": protocol_version, "token": token, "scopes": scopes }),
+    );
     recv_json(sock)
 }
 
@@ -213,7 +254,11 @@ fn hello(sock: &mut Sock, id: i64, protocol_version: u64, token: Option<&str>, s
 #[test]
 fn ac4_missing_token_rejected() {
     let backend = Arc::new(MockBackend::default());
-    let handle = start_test_server(backend.clone(), "secret-token", ScopeSet::default_read_only());
+    let handle = start_test_server(
+        backend.clone(),
+        "secret-token",
+        ScopeSet::default_read_only(),
+    );
     let mut sock = connect_plain(handle.port());
 
     let resp = hello(&mut sock, 1, 1, None, &["read"]);
@@ -242,12 +287,21 @@ fn ac4_wrong_token_rejected() {
 #[test]
 fn ac5_read_only_client_cannot_send_text_or_focus() {
     let backend = Arc::new(MockBackend::default());
-    let handle = start_test_server(backend.clone(), "tok", ScopeSet::from_strings(["read", "control", "input"]));
+    let handle = start_test_server(
+        backend.clone(),
+        "tok",
+        ScopeSet::from_strings(["read", "control", "input"]),
+    );
     let mut sock = connect_plain(handle.port());
     let resp = hello(&mut sock, 1, 1, Some("tok"), &["read"]);
     assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
 
-    send_rpc(&mut sock, 2, "noa.sendText", json!({ "paneId": "1", "text": "hi" }));
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.sendText",
+        json!({ "paneId": "1", "text": "hi" }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["error"]["code"], -32003);
     assert!(backend.sent_text.lock().unwrap().is_empty());
@@ -263,11 +317,20 @@ fn ac5_read_only_client_cannot_send_text_or_focus() {
 #[test]
 fn ac6_control_without_input_cannot_send_text() {
     let backend = Arc::new(MockBackend::default());
-    let handle = start_test_server(backend, "tok", ScopeSet::from_strings(["read", "control", "input"]));
+    let handle = start_test_server(
+        backend,
+        "tok",
+        ScopeSet::from_strings(["read", "control", "input"]),
+    );
     let mut sock = connect_plain(handle.port());
     hello(&mut sock, 1, 1, Some("tok"), &["read", "control"]);
 
-    send_rpc(&mut sock, 2, "noa.sendText", json!({ "paneId": "1", "text": "hi" }));
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.sendText",
+        json!({ "paneId": "1", "text": "hi" }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["error"]["code"], -32003);
     let _ = sock.close(None);
@@ -337,7 +400,10 @@ fn ac21_unknown_method_then_connection_still_works() {
 
     send_rpc(&mut sock, 3, "noa.listPanels", json!({}));
     let resp = recv_json(&mut sock);
-    assert!(resp.get("result").is_some(), "connection must still serve requests: {resp:?}");
+    assert!(
+        resp.get("result").is_some(),
+        "connection must still serve requests: {resp:?}"
+    );
     let _ = sock.close(None);
 }
 
@@ -362,7 +428,12 @@ fn ac9_get_text_over_the_wire_truncates_and_flags() {
     let mut sock = connect_plain(handle.port());
     hello(&mut sock, 1, 1, Some("tok"), &["read"]);
 
-    send_rpc(&mut sock, 2, "noa.getText", json!({ "paneId": "1", "source": "screen", "maxBytes": 100 }));
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.getText",
+        json!({ "paneId": "1", "source": "screen", "maxBytes": 100 }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["result"]["truncated"], true);
     assert_eq!(resp["result"]["text"].as_str().unwrap().len(), 100);
@@ -374,13 +445,23 @@ fn ac9_get_text_over_the_wire_truncates_and_flags() {
 #[test]
 fn ac10_get_grid_returns_range_only_rows() {
     let backend = Arc::new(MockBackend::default());
-    let rows: Vec<Row> = (0..50).map(|i| Row { row: i, spans: vec![] }).collect();
+    let rows: Vec<Row> = (0..50)
+        .map(|i| Row {
+            row: i,
+            spans: vec![],
+        })
+        .collect();
     backend.grid_rows.lock().unwrap().insert(1, rows);
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
     hello(&mut sock, 1, 1, Some("tok"), &["read"]);
 
-    send_rpc(&mut sock, 2, "noa.getGrid", json!({ "paneId": "1", "startRow": 10, "rowCount": 5 }));
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.getGrid",
+        json!({ "paneId": "1", "startRow": 10, "rowCount": 5 }),
+    );
     let resp = recv_json(&mut sock);
     let rows = resp["result"]["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 5);
@@ -394,14 +475,27 @@ fn ac10_get_grid_has_more_when_capped() {
     let backend = Arc::new(MockBackend::default());
     let big_text = "y".repeat(5000);
     let rows: Vec<Row> = (0..200)
-        .map(|i| Row { row: i, spans: vec![noa_ipc::protocol::Span { text: big_text.clone(), fg: None, bg: None, attrs: None }] })
+        .map(|i| Row {
+            row: i,
+            spans: vec![noa_ipc::protocol::Span {
+                text: big_text.clone(),
+                fg: None,
+                bg: None,
+                attrs: None,
+            }],
+        })
         .collect();
     backend.grid_rows.lock().unwrap().insert(1, rows);
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
     hello(&mut sock, 1, 1, Some("tok"), &["read"]);
 
-    send_rpc(&mut sock, 2, "noa.getGrid", json!({ "paneId": "1", "startRow": 0, "rowCount": 200 }));
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.getGrid",
+        json!({ "paneId": "1", "startRow": 0, "rowCount": 200 }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["result"]["hasMore"], true);
     let rows = resp["result"]["rows"].as_array().unwrap();
@@ -418,7 +512,12 @@ fn ac15_unknown_pane_returns_32002() {
     let mut sock = connect_plain(handle.port());
     hello(&mut sock, 1, 1, Some("tok"), &["read"]);
 
-    send_rpc(&mut sock, 2, "noa.getText", json!({ "paneId": "999", "source": "screen" }));
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.getText",
+        json!({ "paneId": "999", "source": "screen" }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["error"]["code"], -32002);
     let _ = sock.close(None);
@@ -442,16 +541,28 @@ fn ac15_pane_closed_returns_32004() {
 fn ac15_oversize_single_row_returns_32005() {
     let backend = Arc::new(MockBackend::default());
     let huge = "z".repeat(300 * 1024);
-    backend
-        .grid_rows
-        .lock()
-        .unwrap()
-        .insert(1, vec![Row { row: 0, spans: vec![noa_ipc::protocol::Span { text: huge, fg: None, bg: None, attrs: None }] }]);
+    backend.grid_rows.lock().unwrap().insert(
+        1,
+        vec![Row {
+            row: 0,
+            spans: vec![noa_ipc::protocol::Span {
+                text: huge,
+                fg: None,
+                bg: None,
+                attrs: None,
+            }],
+        }],
+    );
     let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
     let mut sock = connect_plain(handle.port());
     hello(&mut sock, 1, 1, Some("tok"), &["read"]);
 
-    send_rpc(&mut sock, 2, "noa.getGrid", json!({ "paneId": "1", "startRow": 0, "rowCount": 1 }));
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.getGrid",
+        json!({ "paneId": "1", "startRow": 0, "rowCount": 1 }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["error"]["code"], -32005);
     let _ = sock.close(None);
@@ -467,7 +578,12 @@ fn r3_backend_internal_error_maps_to_32603() {
     let mut sock = connect_plain(handle.port());
     hello(&mut sock, 1, 1, Some("tok"), &["read"]);
 
-    send_rpc(&mut sock, 2, "noa.getText", json!({ "paneId": "1", "source": "screen" }));
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.getText",
+        json!({ "paneId": "1", "source": "screen" }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["error"]["code"], -32603);
     let _ = sock.close(None);
@@ -540,7 +656,10 @@ fn server_start_refuses_empty_token() {
         backend,
         Broadcaster::new(),
     );
-    assert!(result.is_err(), "an empty token must never be accepted as a live server config");
+    assert!(
+        result.is_err(),
+        "an empty token must never be accepted as a live server config"
+    );
 }
 
 #[test]
@@ -579,7 +698,10 @@ fn bind_addr_explicit_loopback_still_works() {
         Broadcaster::new(),
     )
     .expect("explicit loopback bind should still succeed");
-    assert_eq!(handle.bind_addr(), std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    assert_eq!(
+        handle.bind_addr(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    );
 
     let mut sock = connect_plain(handle.port());
     let resp = hello(&mut sock, 1, 1, Some("tok"), &["read"]);
@@ -605,7 +727,10 @@ fn bind_addr_inaddr_any_is_reachable_via_loopback() {
         Broadcaster::new(),
     )
     .expect("0.0.0.0 bind should succeed");
-    assert_eq!(handle.bind_addr(), std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    assert_eq!(
+        handle.bind_addr(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    );
 
     let mut sock = connect_plain(handle.port());
     let resp = hello(&mut sock, 1, 1, Some("tok"), &["read"]);
@@ -632,13 +757,19 @@ fn r2_connection_without_hello_is_closed_after_the_hello_deadline() {
     let result = loop {
         match sock.read() {
             Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {
-                assert!(std::time::Instant::now() < deadline, "server never closed the idle connection");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "server never closed the idle connection"
+                );
                 continue;
             }
             other => break other,
         }
     };
-    assert!(result.is_err(), "connection past its hello deadline must be closed, got {result:?}");
+    assert!(
+        result.is_err(),
+        "connection past its hello deadline must be closed, got {result:?}"
+    );
 }
 
 #[test]
@@ -663,7 +794,10 @@ fn r2_slot_freed_by_a_reaped_connection_is_available_to_a_new_client() {
             other => break other,
         }
     };
-    assert!(closed.is_err(), "the stalled connection's socket must observe the close");
+    assert!(
+        closed.is_err(),
+        "the stalled connection's socket must observe the close"
+    );
 
     // A fresh connection can still complete a full hello -> request
     // round-trip, proving the server isn't wedged (and, if this were run at
@@ -695,7 +829,10 @@ fn unauthenticated_client_spamming_requests_is_still_disconnected_at_the_hello_d
     // be the *only* place checking the hello deadline.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let closed = loop {
-        assert!(std::time::Instant::now() < deadline, "server never closed the spamming connection");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "server never closed the spamming connection"
+        );
         send_rpc(&mut sock, 1, "noa.listPanels", json!({}));
         match sock.read() {
             Ok(Message::Text(_)) | Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
@@ -748,7 +885,10 @@ fn slowloris_handshake_is_closed_by_the_absolute_handshake_deadline() {
         let mut buf = [0u8; 16];
         match std::io::Read::read(&mut raw, &mut buf) {
             Ok(0) => {} // EOF: server closed the stalled handshake cleanly.
-            Ok(n) => panic!("expected the handshake to be abandoned, got {n} bytes: {:?}", &buf[..n]),
+            Ok(n) => panic!(
+                "expected the handshake to be abandoned, got {n} bytes: {:?}",
+                &buf[..n]
+            ),
             Err(err) => panic!("expected a clean close within the absolute deadline, got {err}"),
         }
     }
@@ -781,7 +921,10 @@ fn r4_well_formed_json_that_is_not_a_valid_request_is_invalid_request() {
     for malformed in [json!([]), json!({}), json!({ "method": 1 })] {
         sock.send(Message::Text(malformed.to_string())).unwrap();
         let resp = recv_json(&mut sock);
-        assert_eq!(resp["error"]["code"], -32600, "malformed request {malformed} should be -32600");
+        assert_eq!(
+            resp["error"]["code"], -32600,
+            "malformed request {malformed} should be -32600"
+        );
     }
 
     // Connection stays open after every rejection.
@@ -819,9 +962,17 @@ fn subscribe_delivers_state_changed_and_unsubscribe_stops_it() {
     let mut sock = connect_plain(handle.port());
     hello(&mut sock, 1, 1, Some("tok"), &["read"]);
 
-    send_rpc(&mut sock, 2, "noa.subscribe", json!({ "events": ["state_changed"] }));
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.subscribe",
+        json!({ "events": ["state_changed"] }),
+    );
     let resp = recv_json(&mut sock);
-    let sub_id = resp["result"]["subscriptionId"].as_str().unwrap().to_string();
+    let sub_id = resp["result"]["subscriptionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let panel = Panel {
         window_group_id: WireId(1),
@@ -842,7 +993,12 @@ fn subscribe_delivers_state_changed_and_unsubscribe_stops_it() {
     let notif = recv_json(&mut sock);
     assert_eq!(notif["method"], "noa.stateChanged");
 
-    send_rpc(&mut sock, 3, "noa.unsubscribe", json!({ "subscriptionId": sub_id }));
+    send_rpc(
+        &mut sock,
+        3,
+        "noa.unsubscribe",
+        json!({ "subscriptionId": sub_id }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["result"]["ok"], true);
 
@@ -866,7 +1022,12 @@ fn subscribe_beyond_the_per_connection_cap_returns_32005_and_unsubscribing_frees
 
     let mut sub_ids = Vec::new();
     for i in 0..16 {
-        send_rpc(&mut sock, 2 + i, "noa.subscribe", json!({ "events": ["state_changed"] }));
+        send_rpc(
+            &mut sock,
+            2 + i,
+            "noa.subscribe",
+            json!({ "events": ["state_changed"] }),
+        );
         let resp = recv_json(&mut sock);
         let sub_id = resp["result"]["subscriptionId"]
             .as_str()
@@ -877,23 +1038,44 @@ fn subscribe_beyond_the_per_connection_cap_returns_32005_and_unsubscribing_frees
 
     // The 17th subscription on the same connection is rejected — the
     // connection itself stays open (a subsequent request still round-trips).
-    send_rpc(&mut sock, 100, "noa.subscribe", json!({ "events": ["state_changed"] }));
+    send_rpc(
+        &mut sock,
+        100,
+        "noa.subscribe",
+        json!({ "events": ["state_changed"] }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["error"]["code"], -32005);
     assert_eq!(resp["error"]["message"], "subscription limit exceeded");
 
     send_rpc(&mut sock, 101, "noa.listPanels", json!({}));
     let resp = recv_json(&mut sock);
-    assert!(resp.get("result").is_some(), "the connection must still be usable after a rejected subscribe");
+    assert!(
+        resp.get("result").is_some(),
+        "the connection must still be usable after a rejected subscribe"
+    );
 
     // Unsubscribing one of the 16 frees a slot for a new subscription.
-    send_rpc(&mut sock, 102, "noa.unsubscribe", json!({ "subscriptionId": sub_ids[0] }));
+    send_rpc(
+        &mut sock,
+        102,
+        "noa.unsubscribe",
+        json!({ "subscriptionId": sub_ids[0] }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["result"]["ok"], true);
 
-    send_rpc(&mut sock, 103, "noa.subscribe", json!({ "events": ["state_changed"] }));
+    send_rpc(
+        &mut sock,
+        103,
+        "noa.subscribe",
+        json!({ "events": ["state_changed"] }),
+    );
     let resp = recv_json(&mut sock);
-    assert!(resp["result"]["subscriptionId"].is_string(), "a freed slot allows a new subscription");
+    assert!(
+        resp["result"]["subscriptionId"].is_string(),
+        "a freed slot allows a new subscription"
+    );
 
     let _ = sock.close(None);
 }
@@ -905,11 +1087,20 @@ fn broadcaster_survives_a_server_restart_and_leaves_no_stale_connections() {
     let broadcaster = Broadcaster::new();
 
     let backend_a = Arc::new(MockBackend::default());
-    let handle_a =
-        start_test_server_with_broadcaster(backend_a, "tok", ScopeSet::default_read_only(), broadcaster.clone());
+    let handle_a = start_test_server_with_broadcaster(
+        backend_a,
+        "tok",
+        ScopeSet::default_read_only(),
+        broadcaster.clone(),
+    );
     let mut sock_a = connect_plain(handle_a.port());
     hello(&mut sock_a, 1, 1, Some("tok"), &["read"]);
-    send_rpc(&mut sock_a, 2, "noa.subscribe", json!({ "events": ["output"] }));
+    send_rpc(
+        &mut sock_a,
+        2,
+        "noa.subscribe",
+        json!({ "events": ["output"] }),
+    );
     let resp = recv_json(&mut sock_a);
     assert!(resp.get("result").is_some());
     assert_eq!(broadcaster.connection_count(), 1);
@@ -921,11 +1112,20 @@ fn broadcaster_survives_a_server_restart_and_leaves_no_stale_connections() {
     let _ = sock_a.close(None);
 
     let backend_b = Arc::new(MockBackend::default());
-    let handle_b =
-        start_test_server_with_broadcaster(backend_b, "tok", ScopeSet::default_read_only(), broadcaster.clone());
+    let handle_b = start_test_server_with_broadcaster(
+        backend_b,
+        "tok",
+        ScopeSet::default_read_only(),
+        broadcaster.clone(),
+    );
     let mut sock_b = connect_plain(handle_b.port());
     hello(&mut sock_b, 1, 1, Some("tok"), &["read"]);
-    send_rpc(&mut sock_b, 2, "noa.subscribe", json!({ "events": ["output"] }));
+    send_rpc(
+        &mut sock_b,
+        2,
+        "noa.subscribe",
+        json!({ "events": ["output"] }),
+    );
     let resp = recv_json(&mut sock_b);
     assert!(resp.get("result").is_some());
 
@@ -936,7 +1136,11 @@ fn broadcaster_survives_a_server_restart_and_leaves_no_stale_connections() {
     while broadcaster.connection_count() > 1 && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(broadcaster.connection_count(), 1, "no stale connection entries from the old server");
+    assert_eq!(
+        broadcaster.connection_count(),
+        1,
+        "no stale connection entries from the old server"
+    );
 
     // A broadcast on the shared broadcaster reaches the new server's
     // subscriber — this is the actual bug: pre-restart panes push into the
@@ -972,7 +1176,10 @@ fn f3_oversized_message_closes_the_connection() {
             other => break other,
         }
     };
-    assert!(result.is_err(), "oversized message should close the connection, got {result:?}");
+    assert!(
+        result.is_err(),
+        "oversized message should close the connection, got {result:?}"
+    );
 }
 
 // ---- sendText paste param: omitted/true means the existing bracketed-paste
@@ -981,26 +1188,49 @@ fn f3_oversized_message_closes_the_connection() {
 #[test]
 fn send_text_paste_param_reaches_backend() {
     let backend = Arc::new(MockBackend::default());
-    let handle = start_test_server(backend.clone(), "tok", ScopeSet::from_strings(["read", "control", "input"]));
+    let handle = start_test_server(
+        backend.clone(),
+        "tok",
+        ScopeSet::from_strings(["read", "control", "input"]),
+    );
     let mut sock = connect_plain(handle.port());
     hello(&mut sock, 1, 1, Some("tok"), &["read", "control", "input"]);
 
-    send_rpc(&mut sock, 2, "noa.sendText", json!({ "paneId": "1", "text": "hi", "paste": false }));
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.sendText",
+        json!({ "paneId": "1", "text": "hi", "paste": false }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["result"]["ok"], json!(true));
 
-    send_rpc(&mut sock, 3, "noa.sendText", json!({ "paneId": "1", "text": "ho" }));
+    send_rpc(
+        &mut sock,
+        3,
+        "noa.sendText",
+        json!({ "paneId": "1", "text": "ho" }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["result"]["ok"], json!(true));
 
-    send_rpc(&mut sock, 4, "noa.sendText", json!({ "paneId": "1", "text": "he", "paste": true, "unexpectedField": 1 }));
+    send_rpc(
+        &mut sock,
+        4,
+        "noa.sendText",
+        json!({ "paneId": "1", "text": "he", "paste": true, "unexpectedField": 1 }),
+    );
     let resp = recv_json(&mut sock);
     assert_eq!(resp["result"]["ok"], json!(true));
 
     let sent = backend.sent_text.lock().unwrap();
     assert_eq!(
         *sent,
-        vec![(1, "hi".to_string(), false), (1, "ho".to_string(), true), (1, "he".to_string(), true)]
+        vec![
+            (1, "hi".to_string(), false),
+            (1, "ho".to_string(), true),
+            (1, "he".to_string(), true)
+        ]
     );
     let _ = sock.close(None);
 }
@@ -1017,12 +1247,24 @@ fn fix5_r1_get_text_max_bytes_is_clamped_before_backend_call() {
     let mut sock = connect_plain(handle.port());
     hello(&mut sock, 1, 1, Some("tok"), &["read"]);
 
-    send_rpc(&mut sock, 2, "noa.getText", json!({ "paneId": "1", "source": "screen", "maxBytes": 50 * 1024 * 1024 }));
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.getText",
+        json!({ "paneId": "1", "source": "screen", "maxBytes": 50 * 1024 * 1024 }),
+    );
     let resp = recv_json(&mut sock);
-    assert!(resp.get("result").is_some(), "clamped request still succeeds: {resp:?}");
+    assert!(
+        resp.get("result").is_some(),
+        "clamped request still succeeds: {resp:?}"
+    );
 
     let seen = backend.requested_max_bytes.lock().unwrap().clone();
-    assert_eq!(seen, vec![noa_ipc::protocol::MAX_TEXT_MAX_BYTES], "backend must only ever see the clamped cap");
+    assert_eq!(
+        seen,
+        vec![noa_ipc::protocol::MAX_TEXT_MAX_BYTES],
+        "backend must only ever see the clamped cap"
+    );
     let _ = sock.close(None);
 }
 
@@ -1034,12 +1276,21 @@ fn fix5_r1_get_text_max_bytes_under_cap_passes_through_unclamped() {
     let mut sock = connect_plain(handle.port());
     hello(&mut sock, 1, 1, Some("tok"), &["read"]);
 
-    send_rpc(&mut sock, 2, "noa.getText", json!({ "paneId": "1", "source": "screen", "maxBytes": 100 }));
+    send_rpc(
+        &mut sock,
+        2,
+        "noa.getText",
+        json!({ "paneId": "1", "source": "screen", "maxBytes": 100 }),
+    );
     let resp = recv_json(&mut sock);
     assert!(resp.get("result").is_some());
 
     let seen = backend.requested_max_bytes.lock().unwrap().clone();
-    assert_eq!(seen, vec![100], "a request already under the cap is passed through unmodified");
+    assert_eq!(
+        seen,
+        vec![100],
+        "a request already under the cap is passed through unmodified"
+    );
     let _ = sock.close(None);
 }
 
@@ -1068,7 +1319,10 @@ fn fix5_r3_missing_id_rejected_pre_and_post_auth() {
 
     send_rpc(&mut sock, 3, "noa.listPanels", json!({}));
     let resp = recv_json(&mut sock);
-    assert!(resp.get("result").is_some(), "connection stays open after rejection: {resp:?}");
+    assert!(
+        resp.get("result").is_some(),
+        "connection stays open after rejection: {resp:?}"
+    );
     let _ = sock.close(None);
 }
 
@@ -1088,13 +1342,22 @@ fn fix5_r3_invalid_id_types_rejected_without_backend_side_effect() {
         });
         sock.send(Message::Text(req.to_string())).unwrap();
         let resp = recv_json(&mut sock);
-        assert_eq!(resp["error"]["code"], -32600, "bad id {bad_id:?} must be rejected: {resp:?}");
+        assert_eq!(
+            resp["error"]["code"], -32600,
+            "bad id {bad_id:?} must be rejected: {resp:?}"
+        );
     }
-    assert!(backend.sent_text.lock().unwrap().is_empty(), "no side-effecting method may dispatch with an invalid id");
+    assert!(
+        backend.sent_text.lock().unwrap().is_empty(),
+        "no side-effecting method may dispatch with an invalid id"
+    );
 
     // Connection still serves a valid follow-up.
     send_rpc(&mut sock, 99, "noa.listPanels", json!({}));
     let resp = recv_json(&mut sock);
-    assert!(resp.get("result").is_some(), "connection stays open: {resp:?}");
+    assert!(
+        resp.get("result").is_some(),
+        "connection stays open: {resp:?}"
+    );
     let _ = sock.close(None);
 }

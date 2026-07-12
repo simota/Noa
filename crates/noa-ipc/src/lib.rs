@@ -26,8 +26,8 @@ pub use auth::{Scope, ScopeSet, constant_time_eq, load_or_create_token};
 pub use backend::{GridResult, IpcBackend, PaneRef, TextResult, WindowRef};
 pub use error::{ErrorCode, IpcError};
 pub use protocol::{
-    Attr, EventKind, Panel, Row, Span, SpanColor, SplitDirection, TextSource, WireId,
-    PROTOCOL_VERSION,
+    Attr, EventKind, PROTOCOL_VERSION, Panel, Row, Span, SpanColor, SplitDirection, TextSource,
+    WireId,
 };
 pub use push::{Broadcaster, EventMask, PushQueue};
 pub use server::{Server, ServerConfig, ServerHandle};

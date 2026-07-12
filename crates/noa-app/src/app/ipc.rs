@@ -43,18 +43,16 @@ impl App {
             self.refresh_theme_settings_server_status();
             return;
         };
-        let token = match noa_ipc::load_or_create_token(
-            &token_path,
-            self.config.server_token.as_deref(),
-        ) {
-            Ok(token) => token,
-            Err(err) => {
-                log::warn!("noa-ipc: failed to load/create token: {err}");
-                self.ipc_last_error = Some(format!("failed to load token: {err}"));
-                self.refresh_theme_settings_server_status();
-                return;
-            }
-        };
+        let token =
+            match noa_ipc::load_or_create_token(&token_path, self.config.server_token.as_deref()) {
+                Ok(token) => token,
+                Err(err) => {
+                    log::warn!("noa-ipc: failed to load/create token: {err}");
+                    self.ipc_last_error = Some(format!("failed to load token: {err}"));
+                    self.refresh_theme_settings_server_status();
+                    return;
+                }
+            };
         let allowed_scopes = noa_ipc::ScopeSet::parse_list(&self.config.server_scopes);
         // noa-config already validates `server-bind` parses as an IP address
         // (falling back to the loopback default on a bad value), so this
@@ -80,9 +78,17 @@ impl App {
             hello_deadline: noa_ipc::ServerConfig::DEFAULT_HELLO_DEADLINE,
             handshake_timeout: noa_ipc::ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT,
         };
-        match noa_ipc::Server::start(config, std::sync::Arc::new(backend), self.ipc_broadcaster.clone()) {
+        match noa_ipc::Server::start(
+            config,
+            std::sync::Arc::new(backend),
+            self.ipc_broadcaster.clone(),
+        ) {
             Ok(handle) => {
-                log::info!("noa-ipc: listening on {}:{}", handle.bind_addr(), handle.port());
+                log::info!(
+                    "noa-ipc: listening on {}:{}",
+                    handle.bind_addr(),
+                    handle.port()
+                );
                 if !handle.bind_addr().is_loopback() {
                     log::warn!(
                         "noa-server listening on a non-loopback address ({}) — LAN-exposed; token auth still required",
@@ -93,8 +99,14 @@ impl App {
                 self.ipc_last_error = None;
             }
             Err(err) => {
-                log::warn!("noa-ipc: failed to bind {bind_addr}:{}: {err}", self.config.server_port);
-                self.ipc_last_error = Some(format!("failed to bind {bind_addr}:{}: {err}", self.config.server_port));
+                log::warn!(
+                    "noa-ipc: failed to bind {bind_addr}:{}: {err}",
+                    self.config.server_port
+                );
+                self.ipc_last_error = Some(format!(
+                    "failed to bind {bind_addr}:{}: {err}",
+                    self.config.server_port
+                ));
             }
         }
         self.refresh_theme_settings_server_status();
@@ -109,7 +121,11 @@ impl App {
     /// (pushing an update into an already-open one) compute it identically.
     pub(super) fn server_status_display(&self) -> String {
         let running = self.ipc_server.as_ref().map(|handle| {
-            (handle.bind_addr().to_string(), handle.port(), self.ipc_broadcaster.connection_count())
+            (
+                handle.bind_addr().to_string(),
+                handle.port(),
+                self.ipc_broadcaster.connection_count(),
+            )
         });
         crate::theme_settings::format_server_status(running, self.ipc_last_error.as_deref())
     }
@@ -132,10 +148,7 @@ impl App {
             return;
         }
         let status = self.server_status_display();
-        let session = self
-            .theme_settings
-            .as_mut()
-            .expect("checked Some above");
+        let session = self.theme_settings.as_mut().expect("checked Some above");
         std::sync::Arc::make_mut(&mut session.state).set_server_status(status);
     }
 
@@ -307,7 +320,9 @@ impl App {
                     .windows
                     .get(&new_window_id)
                     .map(|state| state.focused_pane)
-                    .ok_or_else(|| noa_ipc::IpcError::Internal("new tab has no pane".to_string()))?;
+                    .ok_or_else(|| {
+                        noa_ipc::IpcError::Internal("new tab has no pane".to_string())
+                    })?;
                 let ipc_id = self.mint_ipc_pane(new_window_id, pane_id);
                 Ok(IpcActionReply::NewPane(ipc_id))
             }
@@ -324,7 +339,9 @@ impl App {
                     .get(&window_id)
                     .map(|state| state.focused_pane)
                     .filter(|pane| *pane != pane_id)
-                    .ok_or_else(|| noa_ipc::IpcError::Internal("split did not create a pane".to_string()))?;
+                    .ok_or_else(|| {
+                        noa_ipc::IpcError::Internal("split did not create a pane".to_string())
+                    })?;
                 let ipc_id = self.mint_ipc_pane(window_id, new_pane);
                 Ok(IpcActionReply::NewPane(ipc_id))
             }
@@ -429,9 +446,16 @@ impl App {
     /// express (a running server always had *a* tap, subscribed or not); and
     /// a server with subscribers elsewhere but none for this particular pane
     /// costs zero too.
-    pub(super) fn ipc_output_tap(&self, window_id: WindowId, pane_id: PaneId) -> crate::io_thread::IpcOutputTap {
+    pub(super) fn ipc_output_tap(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) -> crate::io_thread::IpcOutputTap {
         let ipc_pane_id = self.mint_ipc_pane(window_id, pane_id);
-        crate::io_thread::IpcOutputTap { broadcaster: self.ipc_broadcaster.clone(), ipc_pane_id }
+        crate::io_thread::IpcOutputTap {
+            broadcaster: self.ipc_broadcaster.clone(),
+            ipc_pane_id,
+        }
     }
 
     fn mint_ipc_pane(&self, window_id: WindowId, pane_id: PaneId) -> u64 {

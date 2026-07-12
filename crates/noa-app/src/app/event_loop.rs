@@ -242,9 +242,7 @@ impl ApplicationHandler<UserEvent> for App {
                 cwd,
                 command,
             } => self.spawn_applescript_tab(event_loop, window_target, cwd, command),
-            UserEvent::IpcAction { request_id } => {
-                self.handle_ipc_action(event_loop, request_id)
-            }
+            UserEvent::IpcAction { request_id } => self.handle_ipc_action(event_loop, request_id),
             UserEvent::PtyExit(window_id, pane_id) => {
                 // The quick terminal isn't a saved/tabbed window, so its shell
                 // exiting tears the whole drop-down down rather than routing

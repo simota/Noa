@@ -804,7 +804,10 @@ fn raw_input_bytes_writes_text_unwrapped() {
     assert_eq!(raw_input_bytes("echo hi\n"), Some(b"echo hi\n".to_vec()));
     // Unlike encode_paste, embedded bracket markers are left alone — this is
     // keyboard-like input, not a paste, so nothing sanitizes them.
-    assert_eq!(raw_input_bytes("a\x1b[201~b"), Some(b"a\x1b[201~b".to_vec()));
+    assert_eq!(
+        raw_input_bytes("a\x1b[201~b"),
+        Some(b"a\x1b[201~b".to_vec())
+    );
     assert_eq!(raw_input_bytes(""), None);
 }
 

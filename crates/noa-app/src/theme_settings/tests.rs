@@ -1782,7 +1782,9 @@ fn server_status_row_is_read_only_and_never_committed() {
 
     let updates = settings.commit_updates();
     assert!(
-        !updates.iter().any(|(key, _)| key.starts_with("server-status")),
+        !updates
+            .iter()
+            .any(|(key, _)| key.starts_with("server-status")),
         "{updates:?}"
     );
 }
@@ -1806,7 +1808,10 @@ fn format_server_status_covers_all_three_states() {
     );
     // `running` always wins over a stale `last_error`.
     assert_eq!(
-        format_server_status(Some(("127.0.0.1".to_string(), 61771, 1)), Some("stale error")),
+        format_server_status(
+            Some(("127.0.0.1".to_string(), 61771, 1)),
+            Some("stale error")
+        ),
         "Running (127.0.0.1:61771, 1 client(s))"
     );
 }
@@ -1874,7 +1879,9 @@ fn server_token_copy_row_reports_effect_without_touching_or_committing() {
 
     let updates = settings.commit_updates();
     assert!(
-        !updates.iter().any(|(key, _)| key.starts_with("server-token")),
+        !updates
+            .iter()
+            .any(|(key, _)| key.starts_with("server-token")),
         "{updates:?}"
     );
 
@@ -2190,12 +2197,7 @@ fn server_scopes_row_cycles_presets_and_falls_back_from_a_non_preset_value() {
         RestartReason::None
     );
 
-    let backward = [
-        "read,control,input",
-        "read,input",
-        "read,control",
-        "read",
-    ];
+    let backward = ["read,control,input", "read,input", "read,control", "read"];
     for expected in backward {
         settings.adjust(-1, Instant::now());
         assert_eq!(

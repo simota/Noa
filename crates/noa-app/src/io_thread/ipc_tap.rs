@@ -125,7 +125,10 @@ pub(super) fn compute_ipc_row_diff(term: &Terminal, cache: &mut IpcRowCache) -> 
         let hash = hash_wire_row_spans(&spans);
         if cache.hashes[i] != hash {
             cache.hashes[i] = hash;
-            diff.push(Row { row: base + i as u64, spans });
+            diff.push(Row {
+                row: base + i as u64,
+                spans,
+            });
         }
     }
     diff

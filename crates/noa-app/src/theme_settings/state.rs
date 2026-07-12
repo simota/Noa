@@ -95,7 +95,8 @@ const SERVER_PORT_MAX: u16 = 65535;
 /// `server-scopes` cycle presets, in ←→ order — the same 4 combinations
 /// `docs/specs/noa-server.md`'s scope table documents as meaningful
 /// (control/input are each additive over `read`).
-const SERVER_SCOPES_PRESETS: [&str; 4] = ["read", "read,control", "read,input", "read,control,input"];
+const SERVER_SCOPES_PRESETS: [&str; 4] =
+    ["read", "read,control", "read,input", "read,control,input"];
 /// `server-bind` cycle presets, in ←→ order (v2 LAN opt-in): loopback-only
 /// (the default) and `0.0.0.0` (all interfaces, LAN-exposed).
 const SERVER_BIND_PRESETS: [&str; 2] = ["127.0.0.1", "0.0.0.0"];
@@ -1199,7 +1200,8 @@ impl ThemeSettings {
                     return RowEffect::None;
                 };
                 let new = (current as i32 + delta * SERVER_PORT_STEP)
-                    .clamp(SERVER_PORT_MIN as i32, SERVER_PORT_MAX as i32) as u16;
+                    .clamp(SERVER_PORT_MIN as i32, SERVER_PORT_MAX as i32)
+                    as u16;
                 if new != current {
                     self.rows[idx].draft = RowDraft::ServerPort(new);
                     self.rows[idx].touched = true;

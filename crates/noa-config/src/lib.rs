@@ -1559,8 +1559,7 @@ font-size = 15.5
 
     #[test]
     fn server_bind_rejects_invalid_ip_and_falls_back_to_loopback_default() {
-        let (overrides, diagnostics) =
-            parse_overrides(test_path(), "server-bind = not-an-ip");
+        let (overrides, diagnostics) = parse_overrides(test_path(), "server-bind = not-an-ip");
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(overrides.server_bind, None);
 

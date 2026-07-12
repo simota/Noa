@@ -280,7 +280,8 @@ fn worker_loop(
             {
                 break; // event loop gone
             }
-            if metrics_deadline(metrics_active, next_metrics_at).is_some_and(|deadline| deadline <= now)
+            if metrics_deadline(metrics_active, next_metrics_at)
+                .is_some_and(|deadline| deadline <= now)
                 && !tick_metrics(&mut probes, proxy, now, &mut next_metrics_at)
             {
                 break; // event loop gone
@@ -370,7 +371,10 @@ fn tick_metrics(
     *next_metrics_at = Some(now + METRICS_POLL_INTERVAL);
     for (id, metrics) in results {
         if proxy
-            .send_event(UserEvent::SessionDelta(SessionDelta::Metrics { id, metrics }))
+            .send_event(UserEvent::SessionDelta(SessionDelta::Metrics {
+                id,
+                metrics,
+            }))
             .is_err()
         {
             return false;

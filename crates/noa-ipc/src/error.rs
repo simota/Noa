@@ -46,7 +46,10 @@ pub struct JsonRpcError {
 
 impl JsonRpcError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        JsonRpcError { code: code.code(), message: message.into() }
+        JsonRpcError {
+            code: code.code(),
+            message: message.into(),
+        }
     }
 }
 

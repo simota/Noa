@@ -494,8 +494,11 @@ pub(crate) fn process_monitor_view_model(
     };
 
     let now = std::time::SystemTime::now();
-    let (offset, shown) =
-        overlay_scroll_window(monitor.rows().len(), monitor.selected(), PROCESS_MONITOR_LIST_ROWS);
+    let (offset, shown) = overlay_scroll_window(
+        monitor.rows().len(),
+        monitor.selected(),
+        PROCESS_MONITOR_LIST_ROWS,
+    );
     let rows = monitor.rows()[offset..offset + shown]
         .iter()
         .enumerate()

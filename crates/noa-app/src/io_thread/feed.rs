@@ -23,7 +23,9 @@ use crate::split_tree::PaneId;
 use super::auto_approve::{
     AutoApproveCandidate, AutoApprovePublish, detect_auto_approve_candidate,
 };
-use super::ipc_tap::{IpcOutputPushDecision, IpcRowCache, compute_ipc_row_diff, decide_ipc_output_push};
+use super::ipc_tap::{
+    IpcOutputPushDecision, IpcRowCache, compute_ipc_row_diff, decide_ipc_output_push,
+};
 use super::overview::{OverviewPublish, publish_overview_snapshot};
 use super::sidebar::{
     SidebarPublish, SidebarUpsert, decide_sidebar_publish, preview_rows, preview_spans,

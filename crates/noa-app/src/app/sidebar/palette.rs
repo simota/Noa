@@ -831,7 +831,11 @@ fn process_monitor_overlay_text(
     out.push_str("\x1b[?7l");
     cup(&mut out, 0, 1);
     sgr_fg(&mut out, accent);
-    let _ = write!(out, "Process Monitor \u{b7} sort: {}", sort_label(monitor.sort()));
+    let _ = write!(
+        out,
+        "Process Monitor \u{b7} sort: {}",
+        sort_label(monitor.sort())
+    );
     sgr_reset(&mut out);
     cup(&mut out, 1, 1);
     sgr_fg(&mut out, muted);
@@ -859,8 +863,11 @@ fn process_monitor_overlay_text(
     // Selection-centered window (same policy as the native card, MINOR-5):
     // the selected row must stay inside the visible slice even when the pane
     // list overflows the card.
-    let (offset, shown) =
-        crate::process_monitor::visible_window(monitor.rows().len(), monitor.selected(), visible_rows);
+    let (offset, shown) = crate::process_monitor::visible_window(
+        monitor.rows().len(),
+        monitor.selected(),
+        visible_rows,
+    );
     for (i, row) in monitor.rows()[offset..offset + shown].iter().enumerate() {
         let r = first_row + i as u16;
         let selected = offset + i == monitor.selected();

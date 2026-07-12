@@ -1313,7 +1313,9 @@ mod tests {
 
     #[test]
     fn supported_image_extensions_are_case_insensitive() {
-        for accepted in ["a.png", "b.PNG", "c.jpg", "d.JPG", "e.jpeg", "f.webp", "g.WEBP"] {
+        for accepted in [
+            "a.png", "b.PNG", "c.jpg", "d.JPG", "e.jpeg", "f.webp", "g.WEBP",
+        ] {
             assert!(
                 has_supported_image_extension(Path::new(accepted)),
                 "{accepted} should be accepted"

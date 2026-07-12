@@ -9,7 +9,7 @@
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::protocol::{EventKind, Panel, Row};
 
@@ -130,6 +130,17 @@ pub struct Broadcaster {
     conns: Arc<Mutex<HashMap<u64, ConnEntry>>>,
     next_conn_id: Arc<AtomicU64>,
     next_sub_id: Arc<AtomicU64>,
+    /// Count of live subscriptions (across every connection) whose
+    /// `events` include `OUTPUT` (R-3). Maintained on every
+    /// `add_subscription`/`remove_subscription`/`unregister_connection`
+    /// call — a pane's io thread hot path reads only this atomic
+    /// (`has_output_subscribers`) instead of walking `conns`, so "server
+    /// running but nobody subscribed to output" costs one relaxed load, the
+    /// same as "server not running" used to. `Relaxed` because this is a
+    /// hint for skipping work, not something correctness depends on: a
+    /// stale `0` just delays a push by one throttle window; a stale nonzero
+    /// just costs one wasted diff computation.
+    output_subscribers: Arc<AtomicUsize>,
 }
 
 impl Default for Broadcaster {
@@ -144,6 +155,7 @@ impl Broadcaster {
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn_id: Arc::new(AtomicU64::new(1)),
             next_sub_id: Arc::new(AtomicU64::new(1)),
+            output_subscribers: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -157,7 +169,16 @@ impl Broadcaster {
     }
 
     pub fn unregister_connection(&self, conn_id: u64) {
-        self.conns.lock().remove(&conn_id);
+        // R-3: a dropped connection's own output subscriptions go with it —
+        // without this, a subscriber that disconnects without explicitly
+        // unsubscribing would leave the gate permanently open (or, on a
+        // shared count, over-counted forever).
+        if let Some(entry) = self.conns.lock().remove(&conn_id) {
+            let removed_output_subs = entry.subs.iter().filter(|s| s.events.contains(EventMask::OUTPUT)).count();
+            if removed_output_subs > 0 {
+                self.output_subscribers.fetch_sub(removed_output_subs, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Number of currently-registered connections. Exposed for tests
@@ -166,6 +187,17 @@ impl Broadcaster {
     /// the old server has torn down.
     pub fn connection_count(&self) -> usize {
         self.conns.lock().len()
+    }
+
+    /// Whether at least one live subscription (on any connection) includes
+    /// `EventKind::Output` (R-3). A pane's io thread consults this instead
+    /// of whether a tap exists at all: every spawned pane now always
+    /// carries a tap (so a server enabled after spawn, or a config-reload
+    /// restart, doesn't leave pre-existing panes permanently silent — see
+    /// `noa-app`'s `ipc_output_tap`), and this atomic is what actually gates
+    /// the per-feed row-diff work down to zero when nobody is listening.
+    pub fn has_output_subscribers(&self) -> bool {
+        self.output_subscribers.load(Ordering::Relaxed) > 0
     }
 
     pub fn add_subscription(
@@ -178,12 +210,22 @@ impl Broadcaster {
         let mut conns = self.conns.lock();
         let entry = conns.get_mut(&conn_id)?;
         entry.subs.push(SubFilter { subscription_id: sub_id, events, pane_ids });
+        drop(conns);
+        if events.contains(EventMask::OUTPUT) {
+            self.output_subscribers.fetch_add(1, Ordering::Relaxed);
+        }
         Some(sub_id)
     }
 
     pub fn remove_subscription(&self, conn_id: u64, subscription_id: u64) {
-        if let Some(entry) = self.conns.lock().get_mut(&conn_id) {
-            entry.subs.retain(|s| s.subscription_id != subscription_id);
+        let mut conns = self.conns.lock();
+        let Some(entry) = conns.get_mut(&conn_id) else { return };
+        let had_output =
+            entry.subs.iter().any(|s| s.subscription_id == subscription_id && s.events.contains(EventMask::OUTPUT));
+        entry.subs.retain(|s| s.subscription_id != subscription_id);
+        drop(conns);
+        if had_output {
+            self.output_subscribers.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
@@ -448,5 +490,70 @@ mod tests {
         b.unregister_connection(conn_id);
         b.broadcast_state_changed(vec![]);
         assert_eq!(queue.len(), 0);
+    }
+
+    // ---- R-3: has_output_subscribers() gate ----
+
+    #[test]
+    fn has_output_subscribers_is_false_with_no_subscriptions_at_all() {
+        let b = Broadcaster::new();
+        assert!(!b.has_output_subscribers());
+        let (conn_id, _queue) = b.register_connection();
+        assert!(!b.has_output_subscribers(), "a connection with no subscriptions is not an output subscriber");
+        // A state_changed-only subscription must not flip the output gate.
+        b.add_subscription(conn_id, EventMask::STATE_CHANGED, None);
+        assert!(!b.has_output_subscribers());
+    }
+
+    #[test]
+    fn has_output_subscribers_flips_true_on_subscribe_and_false_again_on_unsubscribe() {
+        let b = Broadcaster::new();
+        let (conn_id, _queue) = b.register_connection();
+        let sub_id = b.add_subscription(conn_id, EventMask::OUTPUT, None).unwrap();
+        assert!(b.has_output_subscribers());
+
+        b.remove_subscription(conn_id, sub_id);
+        assert!(!b.has_output_subscribers(), "the only output subscription was removed");
+    }
+
+    #[test]
+    fn has_output_subscribers_stays_true_while_any_overlapping_subscription_remains() {
+        let b = Broadcaster::new();
+        let (conn_id, _queue) = b.register_connection();
+        let sub_a = b.add_subscription(conn_id, EventMask::OUTPUT, None).unwrap();
+        let _sub_b = b.add_subscription(conn_id, EventMask::OUTPUT, None).unwrap();
+        assert!(b.has_output_subscribers());
+
+        b.remove_subscription(conn_id, sub_a);
+        assert!(b.has_output_subscribers(), "one output subscription is still live");
+    }
+
+    #[test]
+    fn has_output_subscribers_flips_false_when_the_subscribing_connection_drops() {
+        let b = Broadcaster::new();
+        let (conn_id, _queue) = b.register_connection();
+        b.add_subscription(conn_id, EventMask::OUTPUT, None);
+        assert!(b.has_output_subscribers());
+
+        // The connection drops without ever calling `noa.unsubscribe` —
+        // mirrors a client that just closes its socket.
+        b.unregister_connection(conn_id);
+        assert!(!b.has_output_subscribers(), "the connection's own output subscriptions must go with it");
+    }
+
+    #[test]
+    fn has_output_subscribers_reflects_the_union_across_multiple_connections() {
+        let b = Broadcaster::new();
+        let (conn_a, _queue_a) = b.register_connection();
+        let (conn_b, _queue_b) = b.register_connection();
+        b.add_subscription(conn_a, EventMask::OUTPUT, None);
+        assert!(b.has_output_subscribers());
+
+        b.add_subscription(conn_b, EventMask::OUTPUT, None);
+        b.unregister_connection(conn_a);
+        assert!(b.has_output_subscribers(), "conn_b's output subscription is still live");
+
+        b.unregister_connection(conn_b);
+        assert!(!b.has_output_subscribers());
     }
 }

@@ -27,12 +27,19 @@ const MAX_CONNECTIONS: usize = 32;
 const MAX_WS_MESSAGE_SIZE: usize = 1024 * 1024;
 const MAX_WS_FRAME_SIZE: usize = 256 * 1024;
 
-/// Read/write timeout applied to the raw `TcpStream` *before* the WS
-/// handshake begins (R-2): a client that opens a socket and then stalls
-/// (never completes the handshake) would otherwise occupy a connection slot
-/// forever, since `tungstenite::accept_hdr_with_config` blocks on a
-/// handshake read with no deadline of its own.
+/// Per-read/write idle bound during the WS handshake — the ceiling any one
+/// `DeadlineStream` read/write call is ever given, even when more of the
+/// absolute handshake deadline (R-2) remains.
 const HANDSHAKE_IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Write timeout applied to the raw `TcpStream` for the entire lifetime of a
+/// connection *after* the WS handshake completes (R-4): without this, a
+/// subscriber that stops reading while the server keeps pushing
+/// notifications blocks this thread's `ws.send` forever once the kernel's
+/// TCP send buffer fills — the thread never reaches its shutdown-flag poll
+/// again, and its connection slot + broadcaster registration leak for the
+/// life of the process.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn connection_ws_config() -> WebSocketConfig {
     #[allow(deprecated)]
@@ -61,13 +68,23 @@ pub struct ServerConfig {
     pub allowed_scopes: ScopeSet,
     /// How long an accepted, WS-handshaked connection may go without
     /// completing `noa.hello` before it's closed and its slot reclaimed
-    /// (R-2). Defaults to [`ServerConfig::DEFAULT_HELLO_DEADLINE`]; tests
+    /// (R-1). Defaults to [`ServerConfig::DEFAULT_HELLO_DEADLINE`]; tests
     /// shorten this to make the deadline observable without a real wait.
     pub hello_deadline: Duration,
+    /// Absolute wall-clock bound on completing the WS handshake itself
+    /// (R-2): a slowloris that keeps feeding the raw TCP stream a few bytes
+    /// every `HANDSHAKE_IO_TIMEOUT` would otherwise stall
+    /// `accept_hdr_with_config` indefinitely, since a per-read idle timeout
+    /// alone never expires as long as *some* byte arrives before each read
+    /// times out. Defaults to [`ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT`];
+    /// tests shorten this to make the deadline observable without a real
+    /// wait.
+    pub handshake_timeout: Duration,
 }
 
 impl ServerConfig {
     pub const DEFAULT_HELLO_DEADLINE: Duration = Duration::from_secs(10);
+    pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 }
 
 /// A handle to a running server. Dropping it stops the accept loop and
@@ -132,6 +149,7 @@ impl Server {
         let token = Arc::new(config.token);
         let allowed_scopes = config.allowed_scopes;
         let hello_deadline = config.hello_deadline;
+        let handshake_timeout = config.handshake_timeout;
         let connection_count = Arc::new(AtomicUsize::new(0));
 
         let shutdown_loop = shutdown.clone();
@@ -153,18 +171,27 @@ impl Server {
                         let shutdown_conn = shutdown_loop.clone();
                         let connection_count = connection_count.clone();
                         thread::spawn(move || {
+                            // R-4: `handle_connection` owns a `ConnectionGuard`
+                            // that decrements `connection_count` and
+                            // unregisters the broadcaster connection on every
+                            // exit path — normal return, `?`-propagated I/O
+                            // error, *and* an unwinding panic (this crate
+                            // doesn't set `panic = "abort"`, so the guard's
+                            // `Drop` still runs). No cleanup happens out here
+                            // anymore.
                             if let Err(err) = handle_connection(
                                 stream,
                                 backend,
                                 token,
                                 allowed_scopes,
                                 hello_deadline,
+                                handshake_timeout,
                                 broadcaster,
                                 shutdown_conn,
+                                connection_count,
                             ) {
                                 log::debug!("noa-ipc: connection ended: {err}");
                             }
-                            connection_count.fetch_sub(1, Ordering::SeqCst);
                         });
                     }
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -189,23 +216,127 @@ struct Session {
     granted_scopes: ScopeSet,
 }
 
+/// Where a [`DeadlineStream`] is in its lifecycle: bounded by an absolute
+/// wall-clock deadline during the WS handshake (R-2), or past it and running
+/// under the normal fixed read-poll/write-timeout pair (R-4).
+enum StreamMode {
+    Handshake { deadline: Instant },
+    Connected,
+}
+
+/// Wraps the raw `TcpStream` so every read/write during the WS handshake is
+/// bounded by an *absolute* deadline (R-2), not just a per-call idle timeout.
+/// A per-call idle timeout alone never expires as long as some byte arrives
+/// before each individual read/write times out — a slowloris client that
+/// trickles the HTTP upgrade one byte at a time, each within
+/// `HANDSHAKE_IO_TIMEOUT`, would hold the connection (and its slot) open
+/// indefinitely. Each read/write here first computes the time remaining
+/// until `deadline`, fails fast with `TimedOut` once none is left, and
+/// otherwise arms the socket's timeout to `min(remaining, HANDSHAKE_IO_TIMEOUT)`
+/// before delegating.
+///
+/// After a successful handshake, [`DeadlineStream::mark_connected`] switches
+/// this to a plain pass-through with the connection's normal fixed
+/// read-poll (50ms) and write (`WRITE_TIMEOUT`, R-4) timeouts, set once
+/// rather than recomputed per call.
+struct DeadlineStream {
+    inner: TcpStream,
+    mode: StreamMode,
+}
+
+impl DeadlineStream {
+    fn new_handshake(inner: TcpStream, timeout: Duration) -> Self {
+        DeadlineStream { inner, mode: StreamMode::Handshake { deadline: Instant::now() + timeout } }
+    }
+
+    fn arm_handshake(&self, deadline: Instant) -> io::Result<()> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "handshake deadline exceeded"));
+        }
+        let bound = remaining.min(HANDSHAKE_IO_TIMEOUT);
+        self.inner.set_read_timeout(Some(bound))?;
+        self.inner.set_write_timeout(Some(bound))?;
+        Ok(())
+    }
+
+    /// Switches this stream from the handshake's absolute-deadline mode to
+    /// the connection's normal steady-state timeouts. Called once,
+    /// immediately after `accept_hdr_with_config` returns successfully.
+    fn mark_connected(&mut self) -> io::Result<()> {
+        self.mode = StreamMode::Connected;
+        self.inner.set_read_timeout(Some(Duration::from_millis(50)))?;
+        // R-4: a bounded write timeout for the connection's whole life, not
+        // just the handshake — see `WRITE_TIMEOUT`'s doc comment.
+        self.inner.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        Ok(())
+    }
+}
+
+impl io::Read for DeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let StreamMode::Handshake { deadline } = self.mode {
+            self.arm_handshake(deadline)?;
+        }
+        self.inner.read(buf)
+    }
+}
+
+impl io::Write for DeadlineStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let StreamMode::Handshake { deadline } = self.mode {
+            self.arm_handshake(deadline)?;
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Guarantees the two pieces of shared state a connection thread touches —
+/// the accept loop's `connection_count` and the `Broadcaster`'s connection
+/// registry — are released on *every* exit path out of `handle_connection`,
+/// including an unwinding panic (R-4 audit): normal return, any `?`-
+/// propagated I/O error, the hello-deadline close, the shutdown-flag close,
+/// and a write-timeout/error. Constructed at the very top of
+/// `handle_connection` (before the slot could otherwise be "half-owned")
+/// with `conn_id: None`, then updated once `register_connection` succeeds;
+/// `Drop` only unregisters a `Some` id, so a connection that never gets past
+/// the handshake still frees its `connection_count` slot without touching a
+/// broadcaster entry that was never created.
+struct ConnectionGuard {
+    broadcaster: Broadcaster,
+    conn_id: Option<u64>,
+    connection_count: Arc<AtomicUsize>,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        if let Some(conn_id) = self.conn_id {
+            self.broadcaster.unregister_connection(conn_id);
+        }
+        self.connection_count.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_connection(
     stream: TcpStream,
     backend: Arc<dyn IpcBackend>,
     token: Arc<String>,
     allowed_scopes: ScopeSet,
     hello_deadline: Duration,
+    handshake_timeout: Duration,
     broadcaster: Broadcaster,
     shutdown: Arc<AtomicBool>,
+    connection_count: Arc<AtomicUsize>,
 ) -> io::Result<()> {
+    let mut guard = ConnectionGuard { broadcaster: broadcaster.clone(), conn_id: None, connection_count };
+
     stream.set_nonblocking(false)?;
     stream.set_nodelay(true).ok();
-    // R-2: bound the handshake itself. Without this, a client that opens a
-    // socket and never sends the WS upgrade request blocks this thread's
-    // `accept_hdr_with_config` call forever, holding one of the 32
-    // connection slots permanently.
-    stream.set_read_timeout(Some(HANDSHAKE_IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(HANDSHAKE_IO_TIMEOUT))?;
 
     let header_authed = Arc::new(AtomicBool::new(false));
     let header_authed_cb = header_authed.clone();
@@ -221,12 +352,16 @@ fn handle_connection(
         Ok(response)
     };
 
-    let mut ws = tungstenite::accept_hdr_with_config(stream, callback, Some(connection_ws_config()))
+    // R-2: the handshake itself is now bounded by an absolute deadline via
+    // `DeadlineStream`, not just a per-read idle timeout — see its doc
+    // comment for why that distinction matters against a slowloris client.
+    let deadline_stream = DeadlineStream::new_handshake(stream, handshake_timeout);
+    let mut ws = tungstenite::accept_hdr_with_config(deadline_stream, callback, Some(connection_ws_config()))
         .map_err(|err| io::Error::other(err.to_string()))?;
-    ws.get_mut().set_read_timeout(Some(Duration::from_millis(50)))?;
-    ws.get_mut().set_write_timeout(None)?;
+    ws.get_mut().mark_connected()?;
 
     let (conn_id, queue) = broadcaster.register_connection();
+    guard.conn_id = Some(conn_id);
     let mut session = Session {
         hello_done: false,
         header_authed: header_authed.load(Ordering::SeqCst),
@@ -234,7 +369,7 @@ fn handle_connection(
     };
 
     let connected_at = Instant::now();
-    let result = run_connection_loop(
+    run_connection_loop(
         &mut ws,
         &backend,
         &token,
@@ -246,15 +381,16 @@ fn handle_connection(
         &shutdown,
         connected_at,
         hello_deadline,
-    );
-
-    broadcaster.unregister_connection(conn_id);
-    result
+    )
+    // `guard` drops here on every path above (including the `?`s earlier in
+    // this function and any error `run_connection_loop` returns),
+    // unregistering the broadcaster connection and decrementing
+    // `connection_count`.
 }
 
 #[allow(clippy::too_many_arguments)]
 fn run_connection_loop(
-    ws: &mut tungstenite::WebSocket<TcpStream>,
+    ws: &mut tungstenite::WebSocket<DeadlineStream>,
     backend: &Arc<dyn IpcBackend>,
     token: &str,
     allowed_scopes: ScopeSet,
@@ -268,6 +404,15 @@ fn run_connection_loop(
 ) -> io::Result<()> {
     loop {
         if shutdown.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        // R-1: checked at the top of *every* iteration, before any read is
+        // attempted — not just inside the read-timeout branch below. An
+        // unauthenticated client that keeps sending well-formed
+        // (non-`noa.hello`) requests fast enough that `ws.read()` always
+        // returns `Ok` before the 50ms poll ever times out previously never
+        // hit this check at all.
+        if !session.hello_done && connected_at.elapsed() >= hello_deadline {
             return Ok(());
         }
 
@@ -290,14 +435,9 @@ fn run_connection_loop(
             Err(tungstenite::Error::Io(err))
                 if err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::TimedOut =>
             {
-                // R-2: an unauthenticated connection (hello not yet
-                // completed) that has sat idle past `hello_deadline` since
-                // the WS handshake finished is closed here, freeing its
-                // connection slot. Once `hello_done`, no overall deadline
-                // applies — this 50ms poll only ever checks `shutdown`.
-                if !session.hello_done && connected_at.elapsed() >= hello_deadline {
-                    return Ok(());
-                }
+                // Plain 50ms read-poll timeout (or a write timing out, R-4) —
+                // the hello-deadline check now lives at the top of the loop,
+                // so this arm only needs to keep polling.
                 continue;
             }
             Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => return Ok(()),
@@ -583,4 +723,92 @@ fn handle_unsubscribe(broadcaster: &Broadcaster, conn_id: u64, params: Value) ->
     let p: UnsubscribeParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     broadcaster.remove_subscription(conn_id, p.subscription_id.0);
     Ok(serde_json::to_value(OkResult::ok()).unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    // ---- R-2: DeadlineStream enforces an absolute handshake deadline ----
+
+    #[test]
+    fn deadline_stream_read_fails_fast_once_the_absolute_deadline_has_passed() {
+        let (_client, server) = tcp_pair();
+        let mut stream = DeadlineStream::new_handshake(server, Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(20));
+        let mut buf = [0u8; 8];
+        let err = io::Read::read(&mut stream, &mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn deadline_stream_write_fails_fast_once_the_absolute_deadline_has_passed() {
+        let (_client, server) = tcp_pair();
+        let mut stream = DeadlineStream::new_handshake(server, Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(20));
+        let err = io::Write::write(&mut stream, b"x").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn deadline_stream_arms_the_socket_timeout_to_the_remaining_deadline_capped_by_handshake_io_timeout() {
+        let (_client, server) = tcp_pair();
+        let stream = DeadlineStream::new_handshake(server, Duration::from_millis(50));
+        // Plenty of deadline left, but the per-call bound is still capped at
+        // `HANDSHAKE_IO_TIMEOUT`, never the other way around.
+        stream.arm_handshake(Instant::now() + Duration::from_secs(60)).unwrap();
+        let bound = stream.inner.read_timeout().unwrap().unwrap();
+        assert!(bound <= HANDSHAKE_IO_TIMEOUT);
+    }
+
+    // ---- R-4: post-handshake timeouts + exit-path cleanup guarantee ----
+
+    #[test]
+    fn deadline_stream_mark_connected_applies_the_steady_state_timeouts() {
+        let (_client, server) = tcp_pair();
+        let mut stream = DeadlineStream::new_handshake(server, Duration::from_secs(5));
+        stream.mark_connected().unwrap();
+        assert_eq!(stream.inner.read_timeout().unwrap(), Some(Duration::from_millis(50)));
+        assert_eq!(stream.inner.write_timeout().unwrap(), Some(WRITE_TIMEOUT));
+    }
+
+    #[test]
+    fn connection_guard_decrements_connection_count_on_drop_even_with_no_registered_conn_id() {
+        // Covers an exit path before `register_connection` ever ran (e.g. an
+        // I/O error during the handshake) — the accept loop's slot must
+        // still be freed even though there's no broadcaster entry to remove.
+        let broadcaster = Broadcaster::new();
+        let connection_count = Arc::new(AtomicUsize::new(1));
+        {
+            let _guard =
+                ConnectionGuard { broadcaster: broadcaster.clone(), conn_id: None, connection_count: connection_count.clone() };
+        }
+        assert_eq!(connection_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn connection_guard_unregisters_the_broadcaster_connection_on_drop() {
+        let broadcaster = Broadcaster::new();
+        let (conn_id, _queue) = broadcaster.register_connection();
+        assert_eq!(broadcaster.connection_count(), 1);
+        let connection_count = Arc::new(AtomicUsize::new(1));
+        {
+            let _guard = ConnectionGuard {
+                broadcaster: broadcaster.clone(),
+                conn_id: Some(conn_id),
+                connection_count: connection_count.clone(),
+            };
+        }
+        assert_eq!(broadcaster.connection_count(), 0);
+        assert_eq!(connection_count.load(Ordering::SeqCst), 0);
+    }
 }

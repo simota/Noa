@@ -93,6 +93,7 @@ fn start_test_server(backend: Arc<MockBackend>, token: &str, scopes: ScopeSet) -
             token: token.to_string(),
             allowed_scopes: scopes,
             hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+            handshake_timeout: ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT,
         },
         backend,
         Broadcaster::new(),
@@ -112,6 +113,7 @@ fn start_test_server_with_broadcaster(
             token: token.to_string(),
             allowed_scopes: scopes,
             hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+            handshake_timeout: ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT,
         },
         backend,
         broadcaster,
@@ -126,7 +128,33 @@ fn start_test_server_with_hello_deadline(
     hello_deadline: Duration,
 ) -> noa_ipc::ServerHandle {
     Server::start(
-        ServerConfig { port: 0, token: token.to_string(), allowed_scopes: scopes, hello_deadline },
+        ServerConfig {
+            port: 0,
+            token: token.to_string(),
+            allowed_scopes: scopes,
+            hello_deadline,
+            handshake_timeout: ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT,
+        },
+        backend,
+        Broadcaster::new(),
+    )
+    .expect("server should bind an ephemeral loopback port")
+}
+
+fn start_test_server_with_handshake_timeout(
+    backend: Arc<MockBackend>,
+    token: &str,
+    scopes: ScopeSet,
+    handshake_timeout: Duration,
+) -> noa_ipc::ServerHandle {
+    Server::start(
+        ServerConfig {
+            port: 0,
+            token: token.to_string(),
+            allowed_scopes: scopes,
+            hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+            handshake_timeout,
+        },
         backend,
         Broadcaster::new(),
     )
@@ -497,6 +525,7 @@ fn server_start_refuses_empty_token() {
             token: String::new(),
             allowed_scopes: ScopeSet::default_read_only(),
             hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+            handshake_timeout: ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT,
         },
         backend,
         Broadcaster::new(),
@@ -513,6 +542,7 @@ fn server_start_refuses_whitespace_only_token() {
             token: "   ".to_string(),
             allowed_scopes: ScopeSet::default_read_only(),
             hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+            handshake_timeout: ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT,
         },
         backend,
         Broadcaster::new(),
@@ -579,6 +609,86 @@ fn r2_slot_freed_by_a_reaped_connection_is_available_to_a_new_client() {
     let resp = hello(&mut fresh, 1, 1, Some("tok"), &["read"]);
     assert_eq!(resp["result"]["grantedScopes"], json!(["read"]));
     let _ = fresh.close(None);
+}
+
+// ---- fix-pass-3 R-1: hello deadline is checked every loop iteration, not
+// only inside the read-timeout branch ----
+
+#[test]
+fn unauthenticated_client_spamming_requests_is_still_disconnected_at_the_hello_deadline() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server_with_hello_deadline(
+        backend,
+        "tok",
+        ScopeSet::default_read_only(),
+        Duration::from_millis(100),
+    );
+    let mut sock = connect_plain(handle.port());
+
+    // Round-trip a valid-JSON, non-`noa.hello` request as fast as this
+    // thread can manage — well under the server's 50ms read-poll interval —
+    // so `ws.read()` on the server side keeps returning `Ok` immediately
+    // instead of ever falling into the old read-timeout branch that used to
+    // be the *only* place checking the hello deadline.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let closed = loop {
+        assert!(std::time::Instant::now() < deadline, "server never closed the spamming connection");
+        send_rpc(&mut sock, 1, "noa.listPanels", json!({}));
+        match sock.read() {
+            Ok(Message::Text(_)) | Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
+            other => break other,
+        }
+    };
+    assert!(
+        closed.is_err(),
+        "an unauthenticated client that never stops sending requests must still be disconnected \
+         once past the hello deadline, got {closed:?}"
+    );
+}
+
+// ---- fix-pass-3 R-2: the WS handshake itself is bounded by an absolute
+// deadline, not just a per-read idle timeout ----
+
+#[test]
+fn slowloris_handshake_is_closed_by_the_absolute_handshake_deadline() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server_with_handshake_timeout(
+        backend,
+        "tok",
+        ScopeSet::default_read_only(),
+        Duration::from_millis(150),
+    );
+
+    let mut raw = std::net::TcpStream::connect(("127.0.0.1", handle.port())).expect("tcp connect");
+    raw.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        handle.port()
+    );
+
+    // Trickle the upgrade request one byte at a time. Each gap (30ms) is
+    // comfortably under `HANDSHAKE_IO_TIMEOUT` (5s), so a per-read idle
+    // timeout alone would never fire here — only the absolute deadline
+    // (R-2, shortened to 150ms above) can close this connection.
+    let mut write_failed = false;
+    for byte in request.as_bytes() {
+        if std::io::Write::write_all(&mut raw, std::slice::from_ref(byte)).is_err() {
+            write_failed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+
+    if !write_failed {
+        let mut buf = [0u8; 16];
+        match std::io::Read::read(&mut raw, &mut buf) {
+            Ok(0) => {} // EOF: server closed the stalled handshake cleanly.
+            Ok(n) => panic!("expected the handshake to be abandoned, got {n} bytes: {:?}", &buf[..n]),
+            Err(err) => panic!("expected a clean close within the absolute deadline, got {err}"),
+        }
+    }
 }
 
 // ---- R-4: parse error (-32700) vs invalid request (-32600) ----

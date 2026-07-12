@@ -1,29 +1,29 @@
 # Terminal IO Throughput Benchmark
 
-このプロジェクトは、各種ターミナルエミュレータ（Ghostty, Alacritty, Kitty, Warp, iTerm2 等）の I/O スループットおよびレンダリングパフォーマンスを測定するためのベンチマーク環境です。
+This project is a benchmark environment for measuring I/O throughput and rendering performance across various terminal emulators (Ghostty, Alacritty, Kitty, Warp, iTerm2, etc.).
 
-## ベンチマークデータについて
-- `150MB_ascii.txt`: ASCII文字のみで構成された150MBのテキストファイル。
-- `150MB_unicode.txt`: 日本語、英語、韓国語、中国語、ロシア語、絵文字、およびCSI（制御シーケンス）文字が混在した150MBのテキストファイル。
+## About the benchmark data
+- `150MB_ascii.txt`: a 150MB text file consisting solely of ASCII characters.
+- `150MB_unicode.txt`: a 150MB text file mixing Japanese, English, Korean, Chinese, Russian, emoji, and CSI (control sequence) characters.
 
-## クイックスタート
+## Quick start
 
-### 1. ベンチマークデータの生成
-Python 3 を使用して、150MBのテスト用テキストファイル2点を生成します。
+### 1. Generate benchmark data
+Use Python 3 to generate the two 150MB test text files.
 
 ```bash
 python3 generate_data.py
 ```
 
-### 2. ベンチマークの実行
-ターミナルの描画速度を計測するため、出力をリダイレクトせずに直接ターミナルに流します。
+### 2. Run the benchmark
+To measure the terminal's rendering speed, the output is streamed directly to the terminal without redirection.
 
 ```bash
 chmod +x run_benchmark.sh
 ./run_benchmark.sh
 ```
 
-手動で個別に計測する場合は以下を実行してください。
+To measure manually and individually, run the following:
 ```bash
 time cat 150MB_ascii.txt
 time cat 150MB_unicode.txt

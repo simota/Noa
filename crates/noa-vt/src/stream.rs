@@ -28,9 +28,11 @@ impl Stream {
     pub fn feed<H: Handler>(&mut self, bytes: &[u8], handler: &mut H) {
         let mut i = 0;
         // Cached exclusive end of the printable run containing `i` (bytes in
-        // `i..run_end` are all `is_run_byte`). Caching it across DFA detours
-        // for invalid UTF-8 keeps the run scan linear even on hostile input.
+        // `i..run_end` are all `is_run_byte`), plus whether that whole run is
+        // pure ASCII. Caching both across DFA detours for invalid UTF-8 keeps
+        // the run scan linear even on hostile input.
         let mut run_end = 0;
+        let mut run_ascii = false;
         while i < bytes.len() {
             // Fast path: in plain ground state every byte until the next C0
             // control (ESC included) is print data, so the dominant
@@ -39,10 +41,20 @@ impl Stream {
             // entirely (Ghostty analog: `stream.zig`'s ground scan).
             if is_run_byte(bytes[i]) && self.parser.in_ground_plain() {
                 if run_end <= i {
-                    run_end = bytes[i..]
-                        .iter()
-                        .position(|&b| !is_run_byte(b))
-                        .map_or(bytes.len(), |off| i + off);
+                    let (end, ascii) = scan_run(&bytes[i..]);
+                    run_end = i + end;
+                    run_ascii = ascii;
+                }
+                if run_ascii {
+                    // SAFETY: `scan_run` only sets `ascii` when every byte in
+                    // `bytes[i..run_end]` is `< 0x80`, which is always valid
+                    // single-byte-per-scalar UTF-8, so skipping the redundant
+                    // `from_utf8` re-scan of a range we already proved ASCII
+                    // is sound.
+                    let text = unsafe { core::str::from_utf8_unchecked(&bytes[i..run_end]) };
+                    handler.print_str(text);
+                    i = run_end;
+                    continue;
                 }
                 match core::str::from_utf8(&bytes[i..run_end]) {
                     Ok(text) => {
@@ -80,6 +92,59 @@ impl Stream {
 #[inline]
 fn is_run_byte(b: u8) -> bool {
     b >= 0x20 && b != 0x7f
+}
+
+/// Every byte repeated into all 8 lanes of a `u64`, so a single `u64`
+/// arithmetic op tests all 8 bytes of a word at once (word-at-a-time / SWAR).
+const ONES: u64 = 0x0101_0101_0101_0101;
+/// The high bit of every lane — where the byte-wise comparison tricks below
+/// park their "matched" flag.
+const HIGH: u64 = 0x8080_8080_8080_8080;
+
+/// Scan the printable run starting at `bytes[0]` (caller guarantees
+/// `bytes[0]` itself is a run byte). Returns `(run_end, ascii)`: `run_end` is
+/// the exclusive offset of the first non-run byte (control byte, `DEL`, or
+/// end of slice) — identical to
+/// `bytes.iter().position(|&b| !is_run_byte(b)).unwrap_or(bytes.len())`, and
+/// `ascii` is `true` iff every byte in `bytes[..run_end]` is `< 0x80`.
+///
+/// Merges what used to be two separate linear passes (the boundary search,
+/// then a `from_utf8` re-validation of the same range) into one, and
+/// processes 8 bytes at a time via SWAR bit tricks instead of a per-byte
+/// closure. See "Bit Twiddling Hacks" (Sean Eron Anderson),
+/// "Determine if a word has a byte less than n" / "...has a byte equal to n",
+/// for the `haslessthan`/`haszero` formulas used below.
+#[inline]
+pub(crate) fn scan_run(bytes: &[u8]) -> (usize, bool) {
+    let len = bytes.len();
+    let mut i = 0;
+    let mut nonascii = false;
+    while i + 8 <= len {
+        let chunk = u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
+        // haslessthan(chunk, 0x20): each lane's HIGH bit set iff that byte < 0x20.
+        let lt20 = chunk.wrapping_sub(ONES * 0x20) & !chunk & HIGH;
+        // haszero(chunk ^ 0x7f): each lane's HIGH bit set iff that byte == 0x7f.
+        let xor7f = chunk ^ (ONES * 0x7f);
+        let eq7f = xor7f.wrapping_sub(ONES) & !xor7f & HIGH;
+        let boundary = lt20 | eq7f;
+        if boundary != 0 {
+            // Lowest set lane == first (lowest-address) boundary byte, since
+            // `from_le_bytes` maps byte k to bits [8k, 8k+8) and each lane's
+            // flag lives at bit 8k+7.
+            let lane = (boundary.trailing_zeros() / 8) as usize;
+            for &b in &bytes[i..i + lane] {
+                nonascii |= b >= 0x80;
+            }
+            return (i + lane, !nonascii);
+        }
+        nonascii |= chunk & HIGH != 0;
+        i += 8;
+    }
+    while i < len && is_run_byte(bytes[i]) {
+        nonascii |= bytes[i] >= 0x80;
+        i += 1;
+    }
+    (i, !nonascii)
 }
 
 fn dispatch<H: Handler>(action: Action, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) {

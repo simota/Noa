@@ -16,6 +16,7 @@
 - 成功応答: `{"jsonrpc":"2.0","id":<echo>,"result":{...}}` / 失敗: `{"jsonrpc":"2.0","id":<echo>,"error":{"code":...,"message":"..."}}`
 - サーバー→クライアント通知は `id` なし: `{"jsonrpc":"2.0","method":"noa.stateChanged","params":{...}}`
 - **前方互換 (additive-only)**: 既知メソッドの未知フィールドはエラーにならず無視される。未知メソッドは `-32601` を返すが**接続は維持される**。破壊的変更時のみ `protocolVersion` の major が上がる。クライアントは未知フィールド・未知通知を無視するよう実装すること。
+- `id` は仕様上 `number | string` のみ。それ以外の `id`(欠落・`null`・オブジェクト・配列・真偽値)は `noa.hello` を含む**全メソッドで** `-32600` `InvalidRequest` となり dispatch されない(副作用のあるメソッドも実行されない)。接続は維持される。
 
 ### ID 表現
 
@@ -67,7 +68,7 @@ params: `{}` / result: `{"panels":[Panel]}`(全ウィンドウグループ配下
 |--------|----|------|------|
 | `paneId` | string | ✓ | |
 | `source` | `"screen"` \| `"scrollback"` | ✓ | screen=可視画面のみ / scrollback=scrollback+可視画面の全体 |
-| `maxBytes` | number | — (既定 262144) | UTF-8 バイト上限 |
+| `maxBytes` | number | — (既定 262144) | UTF-8 バイト上限。サーバー側で **1 MiB (1048576 バイト) にクランプ**される(それ以上を要求してもリジェクトはされない) |
 
 result: `{"paneId":"1","text":"..."}` — 上限超過時は**末尾優先**で切り詰められ `"truncated":true` が付く(`truncated` は true のときのみ出現)。
 

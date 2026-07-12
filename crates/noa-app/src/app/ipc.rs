@@ -295,7 +295,14 @@ impl App {
                 }
                 let new_window_id = self
                     .spawn_tab(event_loop, SpawnTarget::CurrentWindow)
-                    .map_err(|err| noa_ipc::IpcError::Internal(err.to_string()))?;
+                    .map_err(|err| {
+                        // Don't echo the raw spawn error to the client — it can
+                        // carry local shell/filesystem detail (a failed execve
+                        // path, etc.). Log the specifics server-side; the client
+                        // gets a generic Internal error.
+                        log::warn!("noa-ipc: newTab spawn failed: {err}");
+                        noa_ipc::IpcError::Internal("failed to spawn tab".to_string())
+                    })?;
                 let pane_id = self
                     .windows
                     .get(&new_window_id)

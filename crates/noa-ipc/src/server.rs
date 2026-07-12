@@ -2,10 +2,10 @@
 //! sync tungstenite + thread-per-connection + crossbeam, no async runtime —
 //! NFR-3).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
-use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::net::{IpAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -19,6 +19,20 @@ use tungstenite::protocol::WebSocketConfig;
 /// (Omen ④) closes excess accepts immediately rather than spawning an
 /// unbounded number of connection threads.
 const MAX_CONNECTIONS: usize = 32;
+
+/// Per-remote-source-IP cap on concurrent connections, a subset of the global
+/// [`MAX_CONNECTIONS`] budget (LAN-exposure hardening). On a non-loopback
+/// (`server-bind = 0.0.0.0`) server, a single remote host — authenticated or
+/// not — otherwise races the whole 32-slot pool to exhaustion by opening
+/// connections faster than the hello deadline reclaims them, denying every
+/// other client. Capping per source IP keeps one host from monopolizing the
+/// pool; a well-behaved client needs only one connection.
+///
+/// Loopback peers are deliberately exempt (see the accept loop): there every
+/// local client shares `127.0.0.1`, so a per-IP cap couldn't tell a hostile
+/// local script from a legitimate one and would only shrink the usable pool
+/// for the default loopback-only deployment.
+const MAX_CONNECTIONS_PER_REMOTE_IP: usize = 8;
 
 /// Bounds on a single incoming WebSocket frame/message (F-3 / DoS bound),
 /// well above the largest legitimate request (`noa.sendText`'s text isn't
@@ -165,13 +179,14 @@ impl Server {
         let hello_deadline = config.hello_deadline;
         let handshake_timeout = config.handshake_timeout;
         let connection_count = Arc::new(AtomicUsize::new(0));
+        let per_ip_counts: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
 
         let shutdown_loop = shutdown.clone();
         let broadcaster_loop = broadcaster.clone();
         let accept_thread = thread::spawn(move || {
             while !shutdown_loop.load(Ordering::SeqCst) {
                 match listener.accept() {
-                    Ok((stream, _addr)) => {
+                    Ok((stream, addr)) => {
                         // Refuse excess connections by closing immediately
                         // rather than spawning a thread for them (F-3).
                         if connection_count.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
@@ -179,11 +194,29 @@ impl Server {
                             drop(stream);
                             continue;
                         }
+                        // Per-remote-IP cap (LAN-exposure hardening): keep a
+                        // single non-loopback source from racing the whole
+                        // pool to exhaustion. Loopback peers are exempt — a
+                        // per-IP cap there would just shrink the default
+                        // deployment's usable pool without isolating anything.
+                        // `ip_slot` is `Some` only for a peer that consumed a
+                        // per-IP slot, so the `ConnectionGuard` releases
+                        // exactly what was reserved on every exit path.
+                        let ip_slot = match reserve_ip_slot(&per_ip_counts, addr.ip()) {
+                            IpSlot::Exempt => None,
+                            IpSlot::Reserved(ip) => Some(ip),
+                            IpSlot::Rejected => {
+                                connection_count.fetch_sub(1, Ordering::SeqCst);
+                                drop(stream);
+                                continue;
+                            }
+                        };
                         let backend = backend.clone();
                         let token = token.clone();
                         let broadcaster = broadcaster_loop.clone();
                         let shutdown_conn = shutdown_loop.clone();
                         let connection_count = connection_count.clone();
+                        let per_ip_counts = per_ip_counts.clone();
                         thread::spawn(move || {
                             // R-4: `handle_connection` owns a `ConnectionGuard`
                             // that decrements `connection_count` and
@@ -203,6 +236,8 @@ impl Server {
                                 broadcaster,
                                 shutdown_conn,
                                 connection_count,
+                                per_ip_counts,
+                                ip_slot,
                             ) {
                                 log::debug!("noa-ipc: connection ended: {err}");
                             }
@@ -220,6 +255,50 @@ impl Server {
         });
 
         Ok(ServerHandle { port, bind_addr, shutdown, broadcaster, accept_thread: Some(accept_thread) })
+    }
+}
+
+/// Outcome of reserving a per-remote-IP connection slot in the accept loop.
+enum IpSlot {
+    /// Loopback peer — no per-IP accounting applies (see
+    /// [`MAX_CONNECTIONS_PER_REMOTE_IP`]).
+    Exempt,
+    /// A non-loopback peer under its per-IP cap; the reserved slot must be
+    /// released on connection teardown.
+    Reserved(IpAddr),
+    /// A non-loopback peer already at [`MAX_CONNECTIONS_PER_REMOTE_IP`] — the
+    /// accept loop closes the stream immediately.
+    Rejected,
+}
+
+/// Reserves a per-IP connection slot for `ip`, returning whether the accept
+/// loop may proceed. Loopback is exempt; a non-loopback peer is admitted only
+/// while it holds fewer than [`MAX_CONNECTIONS_PER_REMOTE_IP`] live
+/// connections, incrementing its count on success. Released by
+/// [`release_ip_slot`] (via `ConnectionGuard`) on teardown.
+fn reserve_ip_slot(counts: &Mutex<HashMap<IpAddr, usize>>, ip: IpAddr) -> IpSlot {
+    if ip.is_loopback() {
+        return IpSlot::Exempt;
+    }
+    let mut counts = counts.lock().unwrap();
+    let count = counts.entry(ip).or_insert(0);
+    if *count >= MAX_CONNECTIONS_PER_REMOTE_IP {
+        return IpSlot::Rejected;
+    }
+    *count += 1;
+    IpSlot::Reserved(ip)
+}
+
+/// Releases a per-IP slot previously reserved by [`reserve_ip_slot`], removing
+/// the map entry once its last connection is gone so an idle server holds no
+/// per-IP bookkeeping.
+fn release_ip_slot(counts: &Mutex<HashMap<IpAddr, usize>>, ip: IpAddr) {
+    let mut counts = counts.lock().unwrap();
+    if let Some(count) = counts.get_mut(&ip) {
+        *count -= 1;
+        if *count == 0 {
+            counts.remove(&ip);
+        }
     }
 }
 
@@ -324,12 +403,21 @@ struct ConnectionGuard {
     broadcaster: Broadcaster,
     conn_id: Option<u64>,
     connection_count: Arc<AtomicUsize>,
+    /// The per-IP slot this connection reserved, if any (`None` for loopback
+    /// peers, which don't consume one). Released alongside the global count so
+    /// a per-IP slot never leaks on any exit path — the same guarantee the
+    /// `connection_count` decrement already gives (R-4 audit).
+    per_ip_counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    ip_slot: Option<IpAddr>,
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         if let Some(conn_id) = self.conn_id {
             self.broadcaster.unregister_connection(conn_id);
+        }
+        if let Some(ip) = self.ip_slot {
+            release_ip_slot(&self.per_ip_counts, ip);
         }
         self.connection_count.fetch_sub(1, Ordering::SeqCst);
     }
@@ -346,8 +434,16 @@ fn handle_connection(
     broadcaster: Broadcaster,
     shutdown: Arc<AtomicBool>,
     connection_count: Arc<AtomicUsize>,
+    per_ip_counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    ip_slot: Option<IpAddr>,
 ) -> io::Result<()> {
-    let mut guard = ConnectionGuard { broadcaster: broadcaster.clone(), conn_id: None, connection_count };
+    let mut guard = ConnectionGuard {
+        broadcaster: broadcaster.clone(),
+        conn_id: None,
+        connection_count,
+        per_ip_counts,
+        ip_slot,
+    };
 
     stream.set_nonblocking(false)?;
     stream.set_nodelay(true).ok();
@@ -830,8 +926,13 @@ mod tests {
         let broadcaster = Broadcaster::new();
         let connection_count = Arc::new(AtomicUsize::new(1));
         {
-            let _guard =
-                ConnectionGuard { broadcaster: broadcaster.clone(), conn_id: None, connection_count: connection_count.clone() };
+            let _guard = ConnectionGuard {
+                broadcaster: broadcaster.clone(),
+                conn_id: None,
+                connection_count: connection_count.clone(),
+                per_ip_counts: Arc::new(Mutex::new(HashMap::new())),
+                ip_slot: None,
+            };
         }
         assert_eq!(connection_count.load(Ordering::SeqCst), 0);
     }
@@ -847,9 +948,62 @@ mod tests {
                 broadcaster: broadcaster.clone(),
                 conn_id: Some(conn_id),
                 connection_count: connection_count.clone(),
+                per_ip_counts: Arc::new(Mutex::new(HashMap::new())),
+                ip_slot: None,
             };
         }
         assert_eq!(broadcaster.connection_count(), 0);
         assert_eq!(connection_count.load(Ordering::SeqCst), 0);
+    }
+
+    // ---- per-remote-IP connection cap (LAN-exposure hardening) ----
+
+    #[test]
+    fn loopback_peers_are_exempt_from_the_per_ip_cap() {
+        let counts = Mutex::new(HashMap::new());
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        // Far more than the cap — every one is admitted and nothing is
+        // recorded, so the default loopback deployment keeps the full pool.
+        for _ in 0..MAX_CONNECTIONS_PER_REMOTE_IP * 4 {
+            assert!(matches!(reserve_ip_slot(&counts, ip), IpSlot::Exempt));
+        }
+        assert!(counts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_non_loopback_source_is_capped_and_a_released_slot_is_reusable() {
+        let counts = Mutex::new(HashMap::new());
+        let ip: IpAddr = "192.168.1.50".parse().unwrap();
+        for _ in 0..MAX_CONNECTIONS_PER_REMOTE_IP {
+            assert!(matches!(reserve_ip_slot(&counts, ip), IpSlot::Reserved(_)));
+        }
+        // The (cap + 1)-th concurrent connection from the same host is refused.
+        assert!(matches!(reserve_ip_slot(&counts, ip), IpSlot::Rejected));
+
+        // Freeing one slot lets the host connect again.
+        release_ip_slot(&counts, ip);
+        assert!(matches!(reserve_ip_slot(&counts, ip), IpSlot::Reserved(_)));
+    }
+
+    #[test]
+    fn one_source_hitting_its_cap_does_not_block_a_different_source() {
+        let counts = Mutex::new(HashMap::new());
+        let hog: IpAddr = "192.168.1.50".parse().unwrap();
+        for _ in 0..MAX_CONNECTIONS_PER_REMOTE_IP {
+            let _ = reserve_ip_slot(&counts, hog);
+        }
+        assert!(matches!(reserve_ip_slot(&counts, hog), IpSlot::Rejected));
+
+        let other: IpAddr = "192.168.1.51".parse().unwrap();
+        assert!(matches!(reserve_ip_slot(&counts, other), IpSlot::Reserved(_)));
+    }
+
+    #[test]
+    fn releasing_the_last_slot_removes_the_ip_bookkeeping_entry() {
+        let counts = Mutex::new(HashMap::new());
+        let ip: IpAddr = "10.0.0.9".parse().unwrap();
+        assert!(matches!(reserve_ip_slot(&counts, ip), IpSlot::Reserved(_)));
+        release_ip_slot(&counts, ip);
+        assert!(counts.lock().unwrap().is_empty(), "no idle per-IP entry should linger");
     }
 }

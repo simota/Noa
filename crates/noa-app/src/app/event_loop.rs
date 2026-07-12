@@ -335,6 +335,36 @@ impl ApplicationHandler<UserEvent> for App {
                     self.os_focused = None;
                 }
                 self.finish_active_split_drag(window_id);
+                // A live composition left open across a focus loss otherwise
+                // keeps `keyboard_preedit_should_swallow_key` swallowing every
+                // key once focus returns, until the IME happens to emit
+                // another event — same failure shape `focus_switch_plan`
+                // guards against for intra-window pane switches.
+                let modal_had_preedit = self
+                    .modal_preedit
+                    .as_ref()
+                    .is_some_and(|preedit| preedit.window_id == window_id);
+                if modal_had_preedit {
+                    self.modal_preedit = None;
+                }
+                if let Some(state) = self.windows.get_mut(&window_id) {
+                    let mut had_preedit = modal_had_preedit;
+                    if let Some(surface) = state.focused_surface_mut()
+                        && surface.ime_state.preedit_active()
+                    {
+                        had_preedit = true;
+                        surface.ime_state.commit_preedit();
+                        surface.auto_approve_guards.lock().ime_preedit_active = false;
+                    }
+                    // The OS-level composition session survives the local
+                    // clear (see focus_pane); toggling IME off/on discards
+                    // the marked text so refocus starts clean instead of
+                    // replaying the stale composition.
+                    if had_preedit {
+                        state.window.set_ime_allowed(false);
+                        state.window.set_ime_allowed(true);
+                    }
+                }
                 self.report_focus_event(window_id, false);
                 // Release Secure Keyboard Entry while backgrounded so it never
                 // blocks key input to the rest of the system; a matching

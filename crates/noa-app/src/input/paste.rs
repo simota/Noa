@@ -33,7 +33,28 @@ pub(crate) const APPLESCRIPT_INPUT_TEXT_CAP: usize = 8 * 1024 * 1024;
 /// [`APPLESCRIPT_INPUT_TEXT_CAP`] on a UTF-8 boundary. Pure and unit-tested so
 /// the byte-level contract can be verified without an Apple Event.
 pub(crate) fn applescript_input_bytes(text: &str, bracketed_paste: bool) -> Option<Vec<u8>> {
-    let capped = if text.len() > APPLESCRIPT_INPUT_TEXT_CAP {
+    encode_paste(cap_input_text(text), bracketed_paste)
+}
+
+/// Encode `noa.sendText`'s `paste: false` payload for the pty (noa-server
+/// sendText paste param): the UTF-8 bytes of `text` written as-is, bypassing
+/// `encode_paste` entirely — no bracketed-paste wrap, no stripping of
+/// embedded `ESC[200~`/`ESC[201~` markers. This is keyboard-like injection
+/// (e.g. a lone "\r" acts as Enter for the running app), not a paste, so it
+/// gets none of paste's framing or sanitization. Still capped to
+/// [`APPLESCRIPT_INPUT_TEXT_CAP`] on a UTF-8 boundary, matching the paste
+/// path's bound on how much one RPC call can queue to the pty.
+pub(crate) fn raw_input_bytes(text: &str) -> Option<Vec<u8>> {
+    let capped = cap_input_text(text);
+    if capped.is_empty() {
+        None
+    } else {
+        Some(capped.as_bytes().to_vec())
+    }
+}
+
+fn cap_input_text(text: &str) -> &str {
+    if text.len() > APPLESCRIPT_INPUT_TEXT_CAP {
         let mut end = APPLESCRIPT_INPUT_TEXT_CAP;
         while end > 0 && !text.is_char_boundary(end) {
             end -= 1;
@@ -41,8 +62,7 @@ pub(crate) fn applescript_input_bytes(text: &str, bracketed_paste: bool) -> Opti
         &text[..end]
     } else {
         text
-    };
-    encode_paste(capped, bracketed_paste)
+    }
 }
 
 /// Whether a paste should be confirmed before being sent

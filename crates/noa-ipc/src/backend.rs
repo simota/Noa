@@ -55,7 +55,10 @@ pub trait IpcBackend: Send + Sync + 'static {
         row_count: u64,
     ) -> Result<GridResult, IpcError>;
 
-    fn send_text(&self, pane: PaneRef, text: &str) -> Result<(), IpcError>;
+    /// `paste`: `true` sends `text` through the bracketed-paste-aware
+    /// encoding (the default); `false` writes `text`'s UTF-8 bytes to the
+    /// pty as-is (see [`crate::protocol::SendTextParams::paste`]).
+    fn send_text(&self, pane: PaneRef, text: &str, paste: bool) -> Result<(), IpcError>;
 
     fn focus_pane(&self, pane: PaneRef) -> Result<(), IpcError>;
 

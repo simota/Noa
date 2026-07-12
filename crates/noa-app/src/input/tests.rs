@@ -795,6 +795,30 @@ fn applescript_input_caps_oversized_payload_on_char_boundary() {
     assert_eq!(bytes.len(), cap - 1);
 }
 
+// noa-server sendText paste:false: bytes pass through untouched, unlike the
+// paste path which strips embedded bracket markers and can wrap in ESC[200~.
+#[test]
+fn raw_input_bytes_writes_text_unwrapped() {
+    use super::paste::raw_input_bytes;
+    assert_eq!(raw_input_bytes("\r"), Some(b"\r".to_vec()));
+    assert_eq!(raw_input_bytes("echo hi\n"), Some(b"echo hi\n".to_vec()));
+    // Unlike encode_paste, embedded bracket markers are left alone — this is
+    // keyboard-like input, not a paste, so nothing sanitizes them.
+    assert_eq!(raw_input_bytes("a\x1b[201~b"), Some(b"a\x1b[201~b".to_vec()));
+    assert_eq!(raw_input_bytes(""), None);
+}
+
+#[test]
+fn raw_input_bytes_caps_oversized_payload_on_char_boundary() {
+    use super::paste::raw_input_bytes;
+    let cap = super::paste::APPLESCRIPT_INPUT_TEXT_CAP;
+    let text = "a".repeat(cap - 1) + "あ";
+    let bytes = raw_input_bytes(&text).expect("non-empty");
+    assert!(bytes.len() <= cap);
+    assert!(std::str::from_utf8(&bytes).is_ok());
+    assert_eq!(bytes.len(), cap - 1);
+}
+
 // ── Kitty keyboard protocol encoding ───────────────────────────────
 
 /// Encode a press with the given Kitty flags (no physical key, not repeat).

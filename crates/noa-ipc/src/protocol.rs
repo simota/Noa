@@ -273,6 +273,13 @@ pub struct GetGridResult {
 pub struct SendTextParams {
     pub pane_id: WireId,
     pub text: String,
+    /// Omitted or `true`: the existing behavior — `text` goes through the
+    /// same bracketed-paste-aware encoding as an AppleScript `input text` or
+    /// a clipboard paste. `false`: raw injection — `text`'s UTF-8 bytes are
+    /// written to the pty as-is, bypassing the bracketed-paste wrap, so a
+    /// lone `"\r"` acts as Enter for the running app (e.g. scripting a TUI).
+    #[serde(default)]
+    pub paste: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]

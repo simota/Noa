@@ -701,7 +701,7 @@ fn handle_get_grid(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value
 
 fn handle_send_text(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
     let p: SendTextParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
-    backend.send_text(p.pane_id.0, &p.text)?;
+    backend.send_text(p.pane_id.0, &p.text, p.paste.unwrap_or(true))?;
     Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
 

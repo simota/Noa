@@ -318,11 +318,23 @@ impl App {
                 self.close_pane(event_loop, window_id, pane_id);
                 Ok(IpcActionReply::Ok)
             }
-            IpcActionKind::SendText { pane, text } => {
+            IpcActionKind::SendText { pane, text, paste } => {
                 let (window_id, pane_id) = self.resolve_ipc_pane(pane)?;
-                let bracketed = self.bracketed_paste(window_id, pane_id);
-                if let Some(bytes) = input::applescript_input_bytes(&text, bracketed) {
-                    self.mark_pane_paste_input(window_id, pane_id);
+                let bytes = if paste {
+                    let bracketed = self.bracketed_paste(window_id, pane_id);
+                    input::applescript_input_bytes(&text, bracketed)
+                } else {
+                    // Raw injection (noa.sendText paste:false): keyboard-like
+                    // input, not a paste, so skip the bracketed-paste wrap
+                    // and don't mark_pane_paste_input — that flag feeds the
+                    // auto-approve guard's paste heuristics, which don't
+                    // apply here.
+                    input::raw_input_bytes(&text)
+                };
+                if let Some(bytes) = bytes {
+                    if paste {
+                        self.mark_pane_paste_input(window_id, pane_id);
+                    }
                     self.snap_pane_viewport_to_bottom(window_id, pane_id);
                     self.write_pane_pty_bytes(window_id, pane_id, bytes);
                 }

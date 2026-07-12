@@ -106,7 +106,7 @@ pub(crate) enum IpcActionKind {
     NewTab { window: Option<WindowRef> },
     Split { pane: PaneRef, direction: SplitDirection },
     ClosePane { pane: PaneRef },
-    SendText { pane: PaneRef, text: String },
+    SendText { pane: PaneRef, text: String, paste: bool },
 }
 
 pub(crate) enum IpcActionReply {
@@ -246,8 +246,8 @@ impl IpcBackend for AppIpcBackend {
         Ok(GridResult { cols, rows, has_more })
     }
 
-    fn send_text(&self, pane: PaneRef, text: &str) -> Result<(), IpcError> {
-        match self.submit(IpcActionKind::SendText { pane, text: text.to_string() })? {
+    fn send_text(&self, pane: PaneRef, text: &str, paste: bool) -> Result<(), IpcError> {
+        match self.submit(IpcActionKind::SendText { pane, text: text.to_string(), paste })? {
             IpcActionReply::Ok => Ok(()),
             IpcActionReply::NewPane(_) => Ok(()),
         }

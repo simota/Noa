@@ -18,7 +18,7 @@ use tungstenite::{Message, WebSocket};
 struct MockBackend {
     panels: Mutex<Vec<Panel>>,
     closed_panes: Mutex<std::collections::HashSet<u64>>,
-    sent_text: Mutex<Vec<(u64, String)>>,
+    sent_text: Mutex<Vec<(u64, String, bool)>>,
     focused: Mutex<Vec<u64>>,
     grid_rows: Mutex<HashMap<u64, Vec<Row>>>,
     text: Mutex<HashMap<u64, String>>,
@@ -58,11 +58,11 @@ impl IpcBackend for MockBackend {
         Ok(GridResult { cols: 80, rows, has_more: false })
     }
 
-    fn send_text(&self, pane: PaneRef, text: &str) -> Result<(), IpcError> {
+    fn send_text(&self, pane: PaneRef, text: &str, paste: bool) -> Result<(), IpcError> {
         if self.closed_panes.lock().unwrap().contains(&pane) {
             return Err(IpcError::PaneClosed);
         }
-        self.sent_text.lock().unwrap().push((pane, text.to_string()));
+        self.sent_text.lock().unwrap().push((pane, text.to_string(), paste));
         Ok(())
     }
 
@@ -915,6 +915,36 @@ fn f3_oversized_message_closes_the_connection() {
         }
     };
     assert!(result.is_err(), "oversized message should close the connection, got {result:?}");
+}
+
+// ---- sendText paste param: omitted/true means the existing bracketed-paste
+// path, false is raw injection. Extra unknown fields stay ignored (F-1). ----
+
+#[test]
+fn send_text_paste_param_reaches_backend() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend.clone(), "tok", ScopeSet::from_strings(["read", "control", "input"]));
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, 1, Some("tok"), &["read", "control", "input"]);
+
+    send_rpc(&mut sock, 2, "noa.sendText", json!({ "paneId": "1", "text": "hi", "paste": false }));
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["result"]["ok"], json!(true));
+
+    send_rpc(&mut sock, 3, "noa.sendText", json!({ "paneId": "1", "text": "ho" }));
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["result"]["ok"], json!(true));
+
+    send_rpc(&mut sock, 4, "noa.sendText", json!({ "paneId": "1", "text": "he", "paste": true, "unexpectedField": 1 }));
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["result"]["ok"], json!(true));
+
+    let sent = backend.sent_text.lock().unwrap();
+    assert_eq!(
+        *sent,
+        vec![(1, "hi".to_string(), false), (1, "ho".to_string(), true), (1, "he".to_string(), true)]
+    );
+    let _ = sock.close(None);
 }
 
 // ---- fix-pass-5 R-1: getText maxBytes is clamped server-side before the

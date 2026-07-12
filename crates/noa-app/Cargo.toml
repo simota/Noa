@@ -25,6 +25,8 @@ anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
 png.workspace = true
+zune-jpeg.workspace = true
+image-webp.workspace = true
 dirs.workspace = true
 unicode-width.workspace = true
 

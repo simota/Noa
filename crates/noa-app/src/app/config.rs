@@ -652,7 +652,7 @@ fn collect_background_image_candidates(dir: &Path) -> Vec<PathBuf> {
             continue;
         };
         let path = entry.path();
-        if !has_png_extension(&path) {
+        if !has_supported_image_extension(&path) {
             continue;
         }
         if path.metadata().is_ok_and(|metadata| metadata.is_file()) {
@@ -663,10 +663,14 @@ fn collect_background_image_candidates(dir: &Path) -> Vec<PathBuf> {
     candidates
 }
 
-fn has_png_extension(path: &Path) -> bool {
+fn has_supported_image_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+        .is_some_and(|extension| {
+            ["png", "jpg", "jpeg", "webp"]
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
+        })
 }
 
 fn background_image_is_visible(image: &noa_render::BackgroundImage) -> bool {
@@ -674,9 +678,9 @@ fn background_image_is_visible(image: &noa_render::BackgroundImage) -> bool {
 }
 
 /// Decode the configured static background image once at startup into a
-/// render-ready [`noa_render::BackgroundImage`]. PNG-only (spec scope): a
-/// missing file, a non-PNG/undecodable file, or a zero-sized image logs a
-/// diagnostic and returns `None`, disabling the image while the terminal
+/// render-ready [`noa_render::BackgroundImage`]. Supports PNG, JPEG, and WebP:
+/// a missing file, an undecodable/unsupported file, or a zero-sized image logs
+/// a diagnostic and returns `None`, disabling the image while the terminal
 /// launches normally. Never panics.
 fn decode_background_image_at(
     path: &std::path::Path,
@@ -695,9 +699,9 @@ fn decode_background_image_at(
     )
 }
 
-/// Read + PNG-decode one slideshow candidate. Split out so the failure paths
-/// are unit-testable without constructing a whole [`AppConfig`]. Every failure
-/// logs a diagnostic and returns `None` — never panics.
+/// Read + decode one slideshow candidate (PNG/JPEG/WebP). Split out so the
+/// failure paths are unit-testable without constructing a whole [`AppConfig`].
+/// Every failure logs a diagnostic and returns `None` — never panics.
 fn decode_background_image_candidate_at(
     path: &std::path::Path,
     fit: noa_render::BackgroundImageFit,
@@ -750,12 +754,12 @@ fn decode_background_image_with_context(
             return None;
         }
     };
-    let (width, height, rgba) = match decode_png_rgba(&bytes) {
+    let (width, height, rgba) = match decode_image_rgba(&bytes) {
         Ok(decoded) => decoded,
         Err(error) => {
             log::warn!(
-                "background-image: cannot decode {} as PNG: {error}; {} \
-                 (only PNG is supported)",
+                "background-image: cannot decode {}: {error}; {} \
+                 (supported formats: PNG, JPEG, WebP)",
                 resolved.display(),
                 context.action()
             );
@@ -790,6 +794,83 @@ fn expand_tilde(path: &std::path::Path) -> std::path::PathBuf {
         return home.join(rest);
     }
     path.to_path_buf()
+}
+
+/// Decode an image byte buffer to straight RGBA8 `(width, height, rgba)`,
+/// dispatching on the leading magic bytes. Supports PNG, JPEG, and WebP; any
+/// other signature is rejected with a diagnostic error.
+fn decode_image_rgba(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+    const PNG_MAGIC: &[u8] = &[0x89, 0x50, 0x4E, 0x47];
+    const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8, 0xFF];
+
+    if bytes.starts_with(PNG_MAGIC) {
+        decode_png_rgba(bytes)
+    } else if bytes.starts_with(JPEG_MAGIC) {
+        decode_jpeg_rgba(bytes)
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        decode_webp_rgba(bytes)
+    } else {
+        anyhow::bail!("unrecognized image format (expected PNG, JPEG, or WebP)");
+    }
+}
+
+/// Decode a JPEG byte buffer to straight RGBA8. JPEG carries no alpha channel,
+/// so alpha is filled with `0xff`. Grayscale JPEGs (1 output channel) are
+/// expanded to RGB; RGB (3 channels) is the common case.
+fn decode_jpeg_rgba(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+    let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(bytes));
+    let pixels = decoder.decode()?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| anyhow::anyhow!("JPEG header decode produced no image info"))?;
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    let pixel_count = (width as usize) * (height as usize);
+    if pixel_count == 0 {
+        return Ok((width, height, Vec::new()));
+    }
+    let channels = pixels.len() / pixel_count;
+    let mut rgba = Vec::with_capacity(pixel_count * 4);
+    match channels {
+        1 => {
+            for &g in &pixels {
+                rgba.extend_from_slice(&[g, g, g, 0xff]);
+            }
+        }
+        3 => {
+            for chunk in pixels.chunks_exact(3) {
+                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 0xff]);
+            }
+        }
+        4 => {
+            for chunk in pixels.chunks_exact(4) {
+                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 0xff]);
+            }
+        }
+        other => anyhow::bail!("unsupported JPEG channel count: {other}"),
+    }
+    Ok((width, height, rgba))
+}
+
+/// Decode a WebP byte buffer to straight RGBA8. `image-webp` yields RGB8 when
+/// the image has no alpha and RGBA8 when it does; RGB is expanded with an
+/// opaque alpha.
+fn decode_webp_rgba(bytes: &[u8]) -> anyhow::Result<(u32, u32, Vec<u8>)> {
+    let mut decoder = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes))?;
+    let (width, height) = decoder.dimensions();
+    let has_alpha = decoder.has_alpha();
+    let buf_size = decoder
+        .output_buffer_size()
+        .ok_or_else(|| anyhow::anyhow!("WebP image too large"))?;
+    let mut buf = vec![0u8; buf_size];
+    decoder.read_image(&mut buf)?;
+    if has_alpha {
+        return Ok((width, height, buf));
+    }
+    let mut rgba = Vec::with_capacity((width as usize) * (height as usize) * 4);
+    for chunk in buf.chunks_exact(3) {
+        rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 0xff]);
+    }
+    Ok((width, height, rgba))
 }
 
 /// Decode a PNG byte buffer to straight RGBA8 `(width, height, rgba)`. Mirrors
@@ -915,6 +996,33 @@ mod tests {
     fn write_1x1_png(path: &std::path::Path) {
         write_1x1_png_with_rgba(path, [10, 20, 30, 255]);
     }
+
+    // A minimal baseline 1x1 grayscale JPEG (mid-gray). JPEG has no encoder in
+    // our dependency set, so the fixture is embedded verbatim.
+    const JPEG_1X1_GRAY: &[u8] = &[
+        255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 219, 0, 67,
+        0, 8, 6, 6, 7, 6, 5, 8, 7, 7, 7, 9, 9, 8, 10, 12, 20, 13, 12, 11, 11, 12, 25, 18, 19, 15,
+        20, 29, 26, 31, 30, 29, 26, 28, 28, 32, 36, 46, 39, 32, 34, 44, 35, 28, 28, 40, 55, 41, 44,
+        48, 49, 52, 52, 52, 31, 39, 57, 61, 56, 50, 60, 46, 51, 52, 50, 255, 192, 0, 11, 8, 0, 1,
+        0, 1, 1, 1, 17, 0, 255, 196, 0, 31, 0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 196, 0, 181, 16, 0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4,
+        4, 0, 0, 1, 125, 1, 2, 3, 0, 4, 17, 5, 18, 33, 49, 65, 6, 19, 81, 97, 7, 34, 113, 20, 50,
+        129, 145, 161, 8, 35, 66, 177, 193, 21, 82, 209, 240, 36, 51, 98, 114, 130, 9, 10, 22, 23,
+        24, 25, 26, 37, 38, 39, 40, 41, 42, 52, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73,
+        74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105, 106, 115, 116, 117,
+        118, 119, 120, 121, 122, 131, 132, 133, 134, 135, 136, 137, 138, 146, 147, 148, 149, 150,
+        151, 152, 153, 154, 162, 163, 164, 165, 166, 167, 168, 169, 170, 178, 179, 180, 181, 182,
+        183, 184, 185, 186, 194, 195, 196, 197, 198, 199, 200, 201, 202, 210, 211, 212, 213, 214,
+        215, 216, 217, 218, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 241, 242, 243, 244,
+        245, 246, 247, 248, 249, 250, 255, 218, 0, 8, 1, 1, 0, 0, 63, 0, 43, 255, 217,
+    ];
+
+    // A minimal lossless 1x1 WebP (VP8L) carrying RGBA (1, 2, 3, 255). WebP
+    // roundtrips exactly under lossless encoding.
+    const WEBP_1X1_RGBA: &[u8] = &[
+        82, 73, 70, 70, 32, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 76, 20, 0, 0, 0, 47, 0, 0, 0, 0,
+        7, 80, 129, 84, 8, 32, 0, 10, 154, 254, 199, 136, 136, 254, 7,
+    ];
 
     fn test_background_params() -> BackgroundImageParams {
         BackgroundImageParams {
@@ -1138,6 +1246,60 @@ mod tests {
         );
         assert!(image.repeat);
         assert_eq!(image.opacity, 1.0);
+    }
+
+    // A valid JPEG decodes to an opaque RGBA `BackgroundImage`.
+    #[test]
+    fn decode_valid_jpeg_returns_image() {
+        let path = temp_path("wall.jpg");
+        std::fs::write(&path, JPEG_1X1_GRAY).unwrap();
+        let image = decode_background_image_at(
+            &path,
+            noa_render::BackgroundImageFit::Cover,
+            noa_render::BackgroundImagePosition::Center,
+            false,
+            1.0,
+        )
+        .expect("valid JPEG decodes");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((image.width, image.height), (1, 1));
+        assert_eq!(image.rgba.len(), 4);
+        // JPEG carries no alpha -> opaque.
+        assert_eq!(image.rgba[3], 0xff);
+    }
+
+    // A valid lossless WebP decodes to its exact RGBA payload.
+    #[test]
+    fn decode_valid_webp_returns_image() {
+        let path = temp_path("wall.webp");
+        std::fs::write(&path, WEBP_1X1_RGBA).unwrap();
+        let image = decode_background_image_at(
+            &path,
+            noa_render::BackgroundImageFit::Cover,
+            noa_render::BackgroundImagePosition::Center,
+            false,
+            1.0,
+        )
+        .expect("valid WebP decodes");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!((image.width, image.height), (1, 1));
+        assert_eq!(&*image.rgba, &[1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn supported_image_extensions_are_case_insensitive() {
+        for accepted in ["a.png", "b.PNG", "c.jpg", "d.JPG", "e.jpeg", "f.webp", "g.WEBP"] {
+            assert!(
+                has_supported_image_extension(Path::new(accepted)),
+                "{accepted} should be accepted"
+            );
+        }
+        for rejected in ["h.gif", "i.bmp", "j.txt", "noextension"] {
+            assert!(
+                !has_supported_image_extension(Path::new(rejected)),
+                "{rejected} should be rejected"
+            );
+        }
     }
 
     #[test]

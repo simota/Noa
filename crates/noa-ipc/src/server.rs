@@ -57,7 +57,7 @@ use crate::auth::{Scope, ScopeSet, constant_time_eq};
 use crate::backend::IpcBackend;
 use crate::error::{ErrorCode, IpcError};
 use crate::protocol::*;
-use crate::push::{Broadcaster, EventMask, PushQueue, QueuedNotification};
+use crate::push::{AddSubscriptionError, Broadcaster, EventMask, PushQueue, QueuedNotification};
 
 /// Server startup configuration (spec §L2 "Config キー").
 pub struct ServerConfig {
@@ -713,9 +713,16 @@ fn handle_subscribe(broadcaster: &Broadcaster, conn_id: u64, params: Value) -> R
     let p: SubscribeParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     let mask = EventMask::from_events(&p.events);
     let pane_ids = p.pane_ids.map(|ids| ids.into_iter().map(|id| id.0).collect::<HashSet<u64>>());
-    let sub_id = broadcaster
-        .add_subscription(conn_id, mask, pane_ids)
-        .ok_or_else(|| RpcFail::new(ErrorCode::InvalidRequest, "connection not registered"))?;
+    let sub_id = broadcaster.add_subscription(conn_id, mask, pane_ids).map_err(|err| match err {
+        AddSubscriptionError::ConnectionNotFound => {
+            RpcFail::new(ErrorCode::InvalidRequest, "connection not registered")
+        }
+        // R-2: cap on subscriptions per connection — the connection stays
+        // open, this one `noa.subscribe` call just fails.
+        AddSubscriptionError::LimitExceeded => {
+            RpcFail::new(ErrorCode::PayloadTooLarge, "subscription limit exceeded")
+        }
+    })?;
     Ok(serde_json::to_value(SubscribeResult { subscription_id: WireId(sub_id) }).unwrap())
 }
 

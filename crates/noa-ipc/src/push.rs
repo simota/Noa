@@ -15,6 +15,12 @@ use crate::protocol::{EventKind, Panel, Row};
 
 const DEFAULT_QUEUE_CAP: usize = 256;
 
+/// Hard cap on live subscriptions per connection (R-2). Without this, a
+/// client that repeatedly calls `noa.subscribe` without ever unsubscribing
+/// grows `ConnEntry::subs` without bound — cheap for an attacker, unbounded
+/// memory for the server.
+const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 16;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EventMask(u8);
 
@@ -112,6 +118,16 @@ impl PushQueue {
     }
 }
 
+/// Failure modes for [`Broadcaster::add_subscription`] (R-2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddSubscriptionError {
+    /// `conn_id` isn't (or is no longer) a registered connection.
+    ConnectionNotFound,
+    /// The connection already holds `MAX_SUBSCRIPTIONS_PER_CONNECTION`
+    /// subscriptions.
+    LimitExceeded,
+}
+
 struct SubFilter {
     subscription_id: u64,
     events: EventMask,
@@ -200,21 +216,55 @@ impl Broadcaster {
         self.output_subscribers.load(Ordering::Relaxed) > 0
     }
 
+    /// Whether at least one live subscription would receive `noa.output`
+    /// notifications for `pane_id` specifically (R-3). `has_output_subscribers`
+    /// is global — it forces every producing pane's io thread to pay for
+    /// span-conversion + row hashing each throttle window even when only one
+    /// pane out of many is actually subscribed to. This narrows the gate to
+    /// the pane in question: the atomic fast path still short-circuits to
+    /// `false` for "nobody subscribed to output at all" without locking; only
+    /// when at least one output subscription exists anywhere do we take the
+    /// `conns` lock and check whether any of them matches this pane
+    /// (`pane_ids: None` subscriptions match every pane). That lock is taken
+    /// at most once per pane per throttle window (16ms), not per byte, so
+    /// it's cheap relative to the per-byte parsing/hashing work it gates.
+    pub fn has_output_subscriber_for(&self, pane_id: u64) -> bool {
+        if self.output_subscribers.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
+        let conns = self.conns.lock();
+        conns.values().any(|entry| {
+            entry.subs.iter().any(|s| {
+                s.events.contains(EventMask::OUTPUT)
+                    && s.pane_ids.as_ref().is_none_or(|ids| ids.contains(&pane_id))
+            })
+        })
+    }
+
+    /// Registers a subscription filter on `conn_id`.
+    ///
+    /// Returns `Err(AddSubscriptionError::ConnectionNotFound)` if `conn_id`
+    /// isn't registered, or `Err(AddSubscriptionError::LimitExceeded)` if
+    /// the connection already holds `MAX_SUBSCRIPTIONS_PER_CONNECTION`
+    /// subscriptions (R-2) — the connection itself stays open either way.
     pub fn add_subscription(
         &self,
         conn_id: u64,
         events: EventMask,
         pane_ids: Option<HashSet<u64>>,
-    ) -> Option<u64> {
-        let sub_id = self.next_sub_id.fetch_add(1, Ordering::SeqCst);
+    ) -> Result<u64, AddSubscriptionError> {
         let mut conns = self.conns.lock();
-        let entry = conns.get_mut(&conn_id)?;
+        let entry = conns.get_mut(&conn_id).ok_or(AddSubscriptionError::ConnectionNotFound)?;
+        if entry.subs.len() >= MAX_SUBSCRIPTIONS_PER_CONNECTION {
+            return Err(AddSubscriptionError::LimitExceeded);
+        }
+        let sub_id = self.next_sub_id.fetch_add(1, Ordering::SeqCst);
         entry.subs.push(SubFilter { subscription_id: sub_id, events, pane_ids });
         drop(conns);
         if events.contains(EventMask::OUTPUT) {
             self.output_subscribers.fetch_add(1, Ordering::Relaxed);
         }
-        Some(sub_id)
+        Ok(sub_id)
     }
 
     pub fn remove_subscription(&self, conn_id: u64, subscription_id: u64) {
@@ -349,7 +399,7 @@ mod tests {
         let (conn_id, queue) = b.register_connection();
         let mut ids = HashSet::new();
         ids.insert(42u64);
-        b.add_subscription(conn_id, EventMask::OUTPUT, Some(ids));
+        let _ = b.add_subscription(conn_id, EventMask::OUTPUT, Some(ids));
 
         b.broadcast_output(1, vec![]);
         assert_eq!(queue.len(), 0, "non-matching pane must not enqueue");
@@ -379,7 +429,7 @@ mod tests {
         let (conn_id, queue) = b.register_connection();
         let mut ids = HashSet::new();
         ids.insert(42u64);
-        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids));
+        let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids));
 
         b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(42)]);
         let drained = queue.drain();
@@ -399,7 +449,7 @@ mod tests {
         let (conn_id, queue) = b.register_connection();
         let mut ids = HashSet::new();
         ids.insert(99u64);
-        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids));
+        let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids));
 
         b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(2)]);
         assert_eq!(queue.len(), 0, "no panel matches the filter, so nothing is queued");
@@ -409,7 +459,7 @@ mod tests {
     fn state_changed_none_filter_delivers_all_panels() {
         let b = Broadcaster::new();
         let (conn_id, queue) = b.register_connection();
-        b.add_subscription(conn_id, EventMask::STATE_CHANGED, None);
+        let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, None);
 
         b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(2)]);
         let drained = queue.drain();
@@ -431,8 +481,8 @@ mod tests {
         let mut ids_b = HashSet::new();
         ids_b.insert(1u64);
         ids_b.insert(2u64);
-        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids_a));
-        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids_b));
+        let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids_a));
+        let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids_b));
 
         b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(2), panel_with_id(3)]);
         let drained = queue.drain();
@@ -454,8 +504,8 @@ mod tests {
         ids_a.insert(1u64);
         let mut ids_b = HashSet::new();
         ids_b.insert(2u64);
-        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids_a));
-        b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids_b));
+        let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids_a));
+        let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, Some(ids_b));
 
         b.broadcast_state_changed(vec![panel_with_id(1), panel_with_id(2)]);
         let drained = queue.drain();
@@ -475,8 +525,8 @@ mod tests {
         let (conn_id, queue) = b.register_connection();
         let mut ids_a = HashSet::new();
         ids_a.insert(42u64);
-        b.add_subscription(conn_id, EventMask::OUTPUT, Some(ids_a));
-        b.add_subscription(conn_id, EventMask::OUTPUT, None); // matches everything, including 42
+        let _ = b.add_subscription(conn_id, EventMask::OUTPUT, Some(ids_a));
+        let _ = b.add_subscription(conn_id, EventMask::OUTPUT, None); // matches everything, including 42
 
         b.broadcast_output(42, vec![]);
         assert_eq!(queue.len(), 1, "two overlapping output subscriptions must not each enqueue their own copy");
@@ -486,7 +536,7 @@ mod tests {
     fn unregister_drops_future_broadcasts() {
         let b = Broadcaster::new();
         let (conn_id, queue) = b.register_connection();
-        b.add_subscription(conn_id, EventMask::STATE_CHANGED, None);
+        let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, None);
         b.unregister_connection(conn_id);
         b.broadcast_state_changed(vec![]);
         assert_eq!(queue.len(), 0);
@@ -501,7 +551,7 @@ mod tests {
         let (conn_id, _queue) = b.register_connection();
         assert!(!b.has_output_subscribers(), "a connection with no subscriptions is not an output subscriber");
         // A state_changed-only subscription must not flip the output gate.
-        b.add_subscription(conn_id, EventMask::STATE_CHANGED, None);
+        let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, None);
         assert!(!b.has_output_subscribers());
     }
 
@@ -532,7 +582,7 @@ mod tests {
     fn has_output_subscribers_flips_false_when_the_subscribing_connection_drops() {
         let b = Broadcaster::new();
         let (conn_id, _queue) = b.register_connection();
-        b.add_subscription(conn_id, EventMask::OUTPUT, None);
+        let _ = b.add_subscription(conn_id, EventMask::OUTPUT, None);
         assert!(b.has_output_subscribers());
 
         // The connection drops without ever calling `noa.unsubscribe` —
@@ -546,14 +596,106 @@ mod tests {
         let b = Broadcaster::new();
         let (conn_a, _queue_a) = b.register_connection();
         let (conn_b, _queue_b) = b.register_connection();
-        b.add_subscription(conn_a, EventMask::OUTPUT, None);
+        let _ = b.add_subscription(conn_a, EventMask::OUTPUT, None);
         assert!(b.has_output_subscribers());
 
-        b.add_subscription(conn_b, EventMask::OUTPUT, None);
+        let _ = b.add_subscription(conn_b, EventMask::OUTPUT, None);
         b.unregister_connection(conn_a);
         assert!(b.has_output_subscribers(), "conn_b's output subscription is still live");
 
         b.unregister_connection(conn_b);
         assert!(!b.has_output_subscribers());
+    }
+
+    // ---- R-2: per-connection subscription cap ----
+
+    #[test]
+    fn add_subscription_up_to_the_cap_succeeds_the_next_one_fails() {
+        let b = Broadcaster::new();
+        let (conn_id, _queue) = b.register_connection();
+        for i in 0..MAX_SUBSCRIPTIONS_PER_CONNECTION {
+            b.add_subscription(conn_id, EventMask::STATE_CHANGED, None)
+                .unwrap_or_else(|_| panic!("subscription {i} of {MAX_SUBSCRIPTIONS_PER_CONNECTION} must succeed"));
+        }
+        assert_eq!(
+            b.add_subscription(conn_id, EventMask::STATE_CHANGED, None),
+            Err(AddSubscriptionError::LimitExceeded),
+            "the (MAX_SUBSCRIPTIONS_PER_CONNECTION + 1)-th subscription must be rejected"
+        );
+    }
+
+    #[test]
+    fn add_subscription_limit_exceeded_leaves_the_connection_usable() {
+        let b = Broadcaster::new();
+        let (conn_id, queue) = b.register_connection();
+        for _ in 0..MAX_SUBSCRIPTIONS_PER_CONNECTION {
+            b.add_subscription(conn_id, EventMask::STATE_CHANGED, None).unwrap();
+        }
+        assert!(b.add_subscription(conn_id, EventMask::STATE_CHANGED, None).is_err());
+
+        // The connection itself is still registered and its existing
+        // subscriptions still deliver — a rejected `noa.subscribe` call must
+        // not tear anything down.
+        b.broadcast_state_changed(vec![panel_with_id(1)]);
+        assert_eq!(queue.len(), 1, "existing subscriptions keep working after a rejected one");
+    }
+
+    #[test]
+    fn unsubscribe_frees_a_slot_at_the_cap() {
+        let b = Broadcaster::new();
+        let (conn_id, _queue) = b.register_connection();
+        let mut sub_ids = Vec::new();
+        for _ in 0..MAX_SUBSCRIPTIONS_PER_CONNECTION {
+            sub_ids.push(b.add_subscription(conn_id, EventMask::STATE_CHANGED, None).unwrap());
+        }
+        assert!(b.add_subscription(conn_id, EventMask::STATE_CHANGED, None).is_err());
+
+        b.remove_subscription(conn_id, sub_ids[0]);
+        assert!(
+            b.add_subscription(conn_id, EventMask::STATE_CHANGED, None).is_ok(),
+            "unsubscribing must free a slot for a new subscription"
+        );
+    }
+
+    #[test]
+    fn add_subscription_on_unregistered_connection_is_a_distinct_error_from_the_limit() {
+        let b = Broadcaster::new();
+        assert_eq!(
+            b.add_subscription(999, EventMask::STATE_CHANGED, None),
+            Err(AddSubscriptionError::ConnectionNotFound)
+        );
+    }
+
+    // ---- R-3: has_output_subscriber_for(pane_id) narrows the gate per-pane ----
+
+    #[test]
+    fn has_output_subscriber_for_is_false_for_every_pane_with_no_subscriptions() {
+        let b = Broadcaster::new();
+        assert!(!b.has_output_subscriber_for(1));
+        let (conn_id, _queue) = b.register_connection();
+        let _ = b.add_subscription(conn_id, EventMask::STATE_CHANGED, None);
+        assert!(!b.has_output_subscriber_for(1), "a state_changed-only subscription must not open the output gate");
+    }
+
+    #[test]
+    fn has_output_subscriber_for_matches_only_the_subscribed_pane() {
+        let b = Broadcaster::new();
+        let (conn_id, _queue) = b.register_connection();
+        let mut ids = HashSet::new();
+        ids.insert(42u64);
+        let _ = b.add_subscription(conn_id, EventMask::OUTPUT, Some(ids));
+
+        assert!(b.has_output_subscriber_for(42));
+        assert!(!b.has_output_subscriber_for(1), "pane 1 was never subscribed to");
+    }
+
+    #[test]
+    fn has_output_subscriber_for_matches_every_pane_with_a_none_filter() {
+        let b = Broadcaster::new();
+        let (conn_id, _queue) = b.register_connection();
+        let _ = b.add_subscription(conn_id, EventMask::OUTPUT, None);
+
+        assert!(b.has_output_subscriber_for(1));
+        assert!(b.has_output_subscriber_for(999));
     }
 }

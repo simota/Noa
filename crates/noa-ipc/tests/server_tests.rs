@@ -792,6 +792,49 @@ fn subscribe_delivers_state_changed_and_unsubscribe_stops_it() {
     let _ = sock.close(None);
 }
 
+// ---- R-2: per-connection subscription cap ----
+
+#[test]
+fn subscribe_beyond_the_per_connection_cap_returns_32005_and_unsubscribing_frees_a_slot() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = start_test_server(backend, "tok", ScopeSet::default_read_only());
+    let mut sock = connect_plain(handle.port());
+    hello(&mut sock, 1, 1, Some("tok"), &["read"]);
+
+    let mut sub_ids = Vec::new();
+    for i in 0..16 {
+        send_rpc(&mut sock, 2 + i, "noa.subscribe", json!({ "events": ["state_changed"] }));
+        let resp = recv_json(&mut sock);
+        let sub_id = resp["result"]["subscriptionId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("subscription {i} of 16 should succeed, got {resp:?}"))
+            .to_string();
+        sub_ids.push(sub_id);
+    }
+
+    // The 17th subscription on the same connection is rejected — the
+    // connection itself stays open (a subsequent request still round-trips).
+    send_rpc(&mut sock, 100, "noa.subscribe", json!({ "events": ["state_changed"] }));
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["error"]["code"], -32005);
+    assert_eq!(resp["error"]["message"], "subscription limit exceeded");
+
+    send_rpc(&mut sock, 101, "noa.listPanels", json!({}));
+    let resp = recv_json(&mut sock);
+    assert!(resp.get("result").is_some(), "the connection must still be usable after a rejected subscribe");
+
+    // Unsubscribing one of the 16 frees a slot for a new subscription.
+    send_rpc(&mut sock, 102, "noa.unsubscribe", json!({ "subscriptionId": sub_ids[0] }));
+    let resp = recv_json(&mut sock);
+    assert_eq!(resp["result"]["ok"], true);
+
+    send_rpc(&mut sock, 103, "noa.subscribe", json!({ "events": ["state_changed"] }));
+    let resp = recv_json(&mut sock);
+    assert!(resp["result"]["subscriptionId"].is_string(), "a freed slot allows a new subscription");
+
+    let _ = sock.close(None);
+}
+
 // ---- one Broadcaster survives a server restart (config-reload) ----
 
 #[test]

@@ -142,12 +142,21 @@ pub fn load_or_create_token(path: &Path, configured: Option<&str>) -> io::Result
             repair_token_file_permissions(path);
             return Ok(trimmed.to_string());
         }
+        // R-1: the file exists but is empty, so we fall through to
+        // regenerate into it below. `OpenOptions::mode(0o600)` in
+        // `write_token_file` only applies at file *creation*; an existing
+        // file (e.g. left at 0644 by a restrictive umask never being in
+        // effect) keeps its old mode across a truncate+write. Repair perms
+        // now so the freshly generated secret is never written into a
+        // world/group-readable file, even momentarily.
+        repair_token_file_permissions(path);
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let token = generate_token();
     write_token_file(path, &token)?;
+    repair_token_file_permissions(path);
     Ok(token)
 }
 

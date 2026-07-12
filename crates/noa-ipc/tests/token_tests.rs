@@ -47,6 +47,37 @@ fn repairs_overly_permissive_existing_token_file() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// ---- R-1: an empty existing token file must not keep lax permissions ----
+
+#[cfg(unix)]
+#[test]
+fn regenerating_into_an_empty_0644_token_file_repairs_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("noa-ipc-token-test-empty-perms-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("server-token");
+    // An empty file, deliberately left at a lax mode (e.g. as if written by
+    // a process with a permissive umask, or copied from elsewhere) —
+    // `write_token_file`'s `OpenOptions::mode(0o600)` only applies at
+    // *creation*, so truncating and rewriting this existing file would
+    // otherwise leave the freshly generated secret sitting in a
+    // group/other-readable file.
+    std::fs::write(&path, "").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let token = load_or_create_token(&path, None).unwrap();
+    assert!(!token.is_empty(), "an empty existing file must still trigger regeneration");
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the regenerated token file must not keep the old lax mode");
+
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(on_disk.trim(), token, "the file must contain the returned token");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn configured_token_skips_file_io() {
     let dir = std::env::temp_dir().join(format!("noa-ipc-token-test-configured-{}", std::process::id()));

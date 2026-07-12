@@ -93,3 +93,4 @@ include!("vt_sequences.rs");
 include!("kitty_graphics.rs");
 include!("bulk_print.rs");
 include!("print_overwrite.rs");
+include!("erase_set_from.rs");

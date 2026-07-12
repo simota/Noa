@@ -161,6 +161,24 @@ fn ime_commit_emits_text_without_leaking_preedit() {
 }
 
 #[test]
+fn ime_commit_preedit_clears_composition_without_encoding_it() {
+    // Mirrors the focus-loss path (`WindowEvent::Focused(false)`): unlike
+    // `Ime::Commit`, there is no committed text to encode — only the
+    // half-typed composition is discarded so it doesn't keep swallowing
+    // keys via `keyboard_preedit_should_swallow_key` once focus returns.
+    let mut state = ImeState::default();
+
+    state.handle_event(&Ime::Preedit("にほん".into(), Some((0, 9))));
+    assert!(state.preedit_active());
+
+    state.commit_preedit();
+
+    assert!(!state.preedit_active());
+    assert_eq!(state.preedit_text(), "");
+    assert_eq!(state.preedit_cursor(), None);
+}
+
+#[test]
 fn ime_preedit_retains_text_and_cursor_range() {
     let mut state = ImeState::default();
 

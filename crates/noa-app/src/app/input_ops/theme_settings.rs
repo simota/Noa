@@ -1,11 +1,12 @@
 use std::collections::HashMap;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use super::super::*;
 use super::ActiveOverlay;
 use crate::theme_settings::{
     RowDraft, RowEffect, SettingsRow, SettingsRowKind, ThemePairContext, ThemeSettings,
-    ThemeSettingsCarryover, ThemeSettingsInit, ThemeSettingsMode,
+    ThemeSettingsCarryover, ThemeSettingsInit, ThemeSettingsMode, TokenCopyStatus,
 };
 
 /// Enter's routing decision (Addendum D-3/FM-02): while R-5 search owns the
@@ -571,7 +572,48 @@ impl App {
                 self.apply_live_background_blur(radius, opacity);
             }
             RowEffect::SidebarPreviewLines(lines) => self.apply_live_sidebar_preview_lines(lines),
+            RowEffect::CopyServerToken => self.copy_server_token_to_clipboard(),
         }
+    }
+
+    /// [`RowEffect::CopyServerToken`]'s side effect: resolve the server's
+    /// bearer token (config override, else the on-disk token file — same
+    /// precedence `install_ipc_server_if_needed` uses, via the same
+    /// [`noa_ipc::load_or_create_token`] call) and write it to the system
+    /// clipboard, never logging or displaying the token itself. Reports the
+    /// outcome back into the row's transient display state; a `Some`
+    /// session-mismatch can't happen here (this only runs from
+    /// `apply_theme_settings_row_effect`, itself only reachable while a
+    /// session is open) but is handled as a silent no-op rather than
+    /// assumed, matching this module's existing style.
+    fn copy_server_token_to_clipboard(&mut self) {
+        let status = match self.resolve_server_token() {
+            Ok(token) => match self.clipboard.set_text(&token) {
+                Ok(()) => TokenCopyStatus::Copied,
+                Err(err) => {
+                    log::warn!("failed to copy server token to clipboard: {err}");
+                    TokenCopyStatus::Failed
+                }
+            },
+            Err(err) => {
+                log::warn!("failed to resolve server token for clipboard copy: {err}");
+                TokenCopyStatus::Failed
+            }
+        };
+        if let Some(session) = self.theme_settings.as_mut() {
+            std::sync::Arc::make_mut(&mut session.state).set_server_token_copy_status(status);
+        }
+    }
+
+    /// The same config-value-wins-over-file precedence
+    /// `App::install_ipc_server_if_needed` (`app/ipc.rs`) already applies —
+    /// reused verbatim via [`noa_ipc::load_or_create_token`] rather than
+    /// reimplemented, so the two call sites can never drift on which token
+    /// a client would actually need to authenticate.
+    fn resolve_server_token(&self) -> io::Result<String> {
+        let token_path = noa_config::server_token_path()
+            .ok_or_else(|| io::Error::other("could not resolve the server token path"))?;
+        noa_ipc::load_or_create_token(&token_path, self.config.server_token.as_deref())
     }
 
     /// After a key that may have moved the theme-list highlight (arrows,
@@ -999,6 +1041,13 @@ impl App {
                 | RowDraft::ServerEnable(_)
                 | RowDraft::ServerPort(_)
                 | RowDraft::ServerScopes(_) => {}
+                // `ServerTokenCopy` never sets `touched`
+                // (`ThemeSettings::adjust`/`reset_selected_row` both no-op
+                // it), so this loop can't actually reach here — kept
+                // explicit rather than folded into the arm above so a
+                // future variant can't silently start skipping a real
+                // config mirror.
+                RowDraft::ServerTokenCopy(_) => {}
             }
         }
         if reload_background_image {
@@ -1312,6 +1361,47 @@ mod commit_theme_settings_tests {
     fn commit_redraw_targets_empty_when_no_windows_open() {
         let windows: HashMap<u32, ()> = HashMap::new();
         assert!(commit_redraw_targets(&windows).is_empty());
+    }
+
+    // `App::resolve_server_token` is a thin wrapper (no logic of its own
+    // beyond resolving the token path) around
+    // `noa_ipc::load_or_create_token` — the same call
+    // `App::install_ipc_server_if_needed` (`app/ipc.rs`) already uses, so
+    // this proves the precedence headlessly against the real function
+    // rather than a hand-duplicated copy that could drift from it: an
+    // explicit configured value always wins and never touches the file;
+    // with no configured value, the file is read (creating it on first
+    // use) and a second call returns the same token.
+    #[test]
+    fn server_token_precedence_matches_the_ipc_server_startup_path() {
+        let path = std::env::temp_dir().join(format!(
+            "noa-server-token-copy-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let configured = noa_ipc::load_or_create_token(&path, Some("configured-token")).unwrap();
+        assert_eq!(configured, "configured-token");
+        assert!(
+            !path.exists(),
+            "a configured token must short-circuit before any file I/O"
+        );
+
+        let from_file = noa_ipc::load_or_create_token(&path, None).unwrap();
+        assert!(!from_file.is_empty());
+        assert!(path.exists());
+
+        let from_file_again = noa_ipc::load_or_create_token(&path, None).unwrap();
+        assert_eq!(
+            from_file, from_file_again,
+            "re-reading must not regenerate the token"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

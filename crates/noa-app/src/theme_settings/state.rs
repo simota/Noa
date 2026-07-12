@@ -15,7 +15,8 @@ use crate::debounce::Debouncer;
 use super::{
     Attribute, Liveness, RestartReason, RevertValues, RowDraft, RowEffect, Section, SettingsRow,
     SettingsRowKind, ThemePairContext, ThemeSettingsCarryover, ThemeSettingsInit,
-    ThemeSettingsMode, attribute_of, background_image_fit_value, background_image_position_value,
+    ThemeSettingsMode, TokenCopyStatus, attribute_of, background_image_fit_value,
+    background_image_position_value,
 };
 
 /// The injectable config-writer seam [`ThemeSettings::commit`] takes
@@ -367,6 +368,10 @@ impl ThemeSettings {
                     },
                     SettingsRow {
                         draft: RowDraft::ServerScopes(init.server_scopes.clone()),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
                         touched: false,
                     },
                 ],
@@ -1203,6 +1208,11 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
+            // Action row (R-2's exception, see `SettingsRowKind::ServerTokenCopy`'s
+            // doc comment): never sets `touched` and never rewrites its own
+            // draft here — `App` performs the actual clipboard write and
+            // reports the outcome back through `set_server_token_copy_status`.
+            SettingsRowKind::ServerTokenCopy => RowEffect::CopyServerToken,
         }
     }
 
@@ -1343,6 +1353,14 @@ impl ThemeSettings {
         }
         let idx = self.selected_row;
         let kind = SettingsRowKind::ALL[idx];
+        // `ServerTokenCopy` holds no persisted value — Delete/⌘Backspace
+        // resetting it to `Idle` and marking it `touched` would falsely
+        // surface a "changes pending" badge for a row `commit_updates`
+        // never writes anyway. Treat reset as a no-op here, same as this
+        // row's `adjust` never marking `touched`.
+        if kind == SettingsRowKind::ServerTokenCopy {
+            return RowEffect::None;
+        }
         let default = RowDraft::default_for(kind);
         self.rows[idx].draft = default.clone();
         self.rows[idx].touched = true;
@@ -1574,6 +1592,22 @@ impl ThemeSettings {
         self.snapshot.clone()
     }
 
+    /// `App`'s callback after handling [`RowEffect::CopyServerToken`]:
+    /// record whether the clipboard write actually succeeded, without ever
+    /// routing the token itself back through the pure state machine. A
+    /// no-op if the session has since navigated off the row or closed
+    /// (`self.rows` no longer holding a `ServerTokenCopy` draft can't
+    /// happen in practice — the kind is fixed per index — but this stays a
+    /// plain index write rather than asserting, matching the rest of this
+    /// module's no-panic style).
+    pub(crate) fn set_server_token_copy_status(&mut self, status: TokenCopyStatus) {
+        let index = SettingsRowKind::ALL
+            .iter()
+            .position(|kind| *kind == SettingsRowKind::ServerTokenCopy)
+            .expect("SettingsRowKind::ALL contains ServerTokenCopy");
+        self.rows[index].draft = RowDraft::ServerTokenCopy(status);
+    }
+
     /// The current error text set by a failed [`Self::commit`], if any
     /// (AC-23) — `App`'s render path shows this in place of the normal
     /// keybind hint line.
@@ -1739,6 +1773,12 @@ impl ThemeSettings {
                 RowDraft::ServerScopes(scopes) => {
                     updates.push(("server-scopes".to_string(), scopes.clone()));
                 }
+                // Never touched (`adjust`/`reset_selected_row` both no-op
+                // this kind), so this arm is unreachable in practice — kept
+                // explicit rather than folded into a wildcard so a future
+                // `RowDraft` variant can't silently skip a real config write
+                // by landing here instead.
+                RowDraft::ServerTokenCopy(_) => {}
             }
         }
         updates
@@ -2061,6 +2101,7 @@ fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
         RowDraft::ServerEnable(v) => v.hash(hasher),
         RowDraft::ServerPort(v) => v.hash(hasher),
         RowDraft::ServerScopes(s) => s.hash(hasher),
+        RowDraft::ServerTokenCopy(status) => (*status as u8).hash(hasher),
     }
 }
 

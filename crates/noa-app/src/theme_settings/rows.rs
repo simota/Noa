@@ -91,10 +91,22 @@ pub(crate) enum SettingsRowKind {
     ServerPort,
     /// `server-scopes`. Same reload-exempt classification as `ServerEnable`.
     ServerScopes,
+    /// Not a config key at all — an action row (R-2 "no per-row adjust
+    /// side effect" is the exception here, not the rule) that copies the
+    /// server's bearer token to the system clipboard without ever
+    /// rendering it on screen. `is_live() == true`: pressing ←/→ (or
+    /// Enter) applies immediately with nothing to save, so it badges
+    /// `LIVE` — accurate (it *is* immediate) and, unlike `OnSave`, doesn't
+    /// imply a config write is pending. Deliberately excluded from
+    /// [`RowDraft::default_for`]'s reset semantics reaching `commit_updates`
+    /// (see [`super::state`]'s `reset_selected_row`, which no-ops this kind)
+    /// since there is no "value" to reset — only a transient copy-status
+    /// display.
+    ServerTokenCopy,
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 23;
+    pub(crate) const COUNT: usize = 24;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -119,10 +131,13 @@ impl SettingsRowKind {
         Self::ServerEnable,
         Self::ServerPort,
         Self::ServerScopes,
+        Self::ServerTokenCopy,
     ];
 
     /// R-8: the fixed live/commit-only classification, one row's kind at a
-    /// time — never toggled at runtime.
+    /// time — never toggled at runtime. `ServerTokenCopy` counts as live
+    /// too: it has no config value to save, only an immediate clipboard
+    /// side effect (see its doc comment).
     pub(crate) fn is_live(self) -> bool {
         matches!(
             self,
@@ -131,6 +146,7 @@ impl SettingsRowKind {
                 | Self::BackgroundBlurRadius
                 | Self::CursorStyle
                 | Self::SidebarPreviewLines
+                | Self::ServerTokenCopy
         )
     }
 
@@ -164,6 +180,7 @@ impl SettingsRowKind {
             Self::ServerEnable => "Server",
             Self::ServerPort => "Server Port",
             Self::ServerScopes => "Server Scopes",
+            Self::ServerTokenCopy => "Server Token",
         }
     }
 
@@ -215,6 +232,9 @@ impl SettingsRowKind {
             }
             Self::ServerScopes => {
                 "Scopes grantable to clients. control=window ops, input=send text. Applies on save."
+            }
+            Self::ServerTokenCopy => {
+                "Copy the bearer token to the clipboard. The token is never displayed."
             }
         }
     }
@@ -318,6 +338,23 @@ pub(crate) enum RowDraft {
     /// draft a plain `String` lets an off-preset value display and commit
     /// unchanged until the user actually cycles it.
     ServerScopes(String),
+    /// [`SettingsRowKind::ServerTokenCopy`]'s transient display state —
+    /// never persisted, never part of [`ThemeSettings::commit_updates`]'s
+    /// output. Set by [`ThemeSettings::set_server_token_copy_status`] after
+    /// `App` actually performs (or fails) the clipboard write outside the
+    /// pure state machine.
+    ServerTokenCopy(TokenCopyStatus),
+}
+
+/// [`RowDraft::ServerTokenCopy`]'s three faces — deliberately holds no
+/// token bytes anywhere, only which of the three fixed strings to show
+/// (security requirement: the token itself must never reach a `Debug`,
+/// `display_value`, or log line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenCopyStatus {
+    Idle,
+    Copied,
+    Failed,
 }
 
 impl RowDraft {
@@ -380,6 +417,11 @@ impl RowDraft {
             }
             RowDraft::ServerPort(port) => port.to_string(),
             RowDraft::ServerScopes(scopes) => scopes.clone(),
+            RowDraft::ServerTokenCopy(status) => match status {
+                TokenCopyStatus::Idle => "Copy to clipboard".to_string(),
+                TokenCopyStatus::Copied => "Copied \u{2713}".to_string(),
+                TokenCopyStatus::Failed => "Copy failed".to_string(),
+            },
         }
     }
 
@@ -453,6 +495,7 @@ impl RowDraft {
             SettingsRowKind::ServerEnable => RowDraft::ServerEnable(d.server_enable),
             SettingsRowKind::ServerPort => RowDraft::ServerPort(d.server_port),
             SettingsRowKind::ServerScopes => RowDraft::ServerScopes(d.server_scopes),
+            SettingsRowKind::ServerTokenCopy => RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
         }
     }
 }
@@ -504,6 +547,11 @@ pub(crate) enum RowEffect {
     Blur(u16),
     /// Sidebar card preview line count changed and should apply immediately.
     SidebarPreviewLines(usize),
+    /// The server-token row was activated; `App` must resolve the token
+    /// (config override, else the token file) and write it to the system
+    /// clipboard outside the pure state machine, then report the result
+    /// back via [`super::ThemeSettings::set_server_token_copy_status`].
+    CopyServerToken,
 }
 
 /// The pre-open snapshot every value reverts to on Esc (R-16). Also doubles

@@ -1714,16 +1714,84 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
         RowDraft::default_for(SettingsRowKind::ServerScopes),
         RowDraft::ServerScopes("read".to_string())
     );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::ServerTokenCopy),
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Idle)
+    );
 }
 
 // R-9: `SettingsRowKind::COUNT` is type-enforced at 20 (16 + the 4 new
 // keys) via `ALL`'s array literal length — this pins the value so a future
 // accidental drop of an entry fails loudly instead of silently shrinking
-// the overlay. The server-settings-panel-row addition brings it to 23 (+3).
+// the overlay. The server-settings-panel-row addition brings it to 23 (+3),
+// and the token-copy action row brings it to 24 (+1).
 #[test]
-fn settings_row_kind_count_is_twenty_three_after_server_rows() {
-    assert_eq!(SettingsRowKind::COUNT, 23);
-    assert_eq!(SettingsRowKind::ALL.len(), 23);
+fn settings_row_kind_count_is_twenty_four_after_server_token_copy_row() {
+    assert_eq!(SettingsRowKind::COUNT, 24);
+    assert_eq!(SettingsRowKind::ALL.len(), 24);
+}
+
+// The token-copy row: an action row, not a value row (see its doc comment
+// on `SettingsRowKind::ServerTokenCopy`). `adjust` must report the
+// `CopyServerToken` effect for `App` to act on, without ever marking the
+// row `touched` — `commit_updates` must stay empty of any server-token
+// entry regardless of how many times the row is activated.
+#[test]
+fn server_token_copy_row_reports_effect_without_touching_or_committing() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(SettingsRowKind::ALL.contains(&SettingsRowKind::ServerTokenCopy));
+    assert_eq!(SettingsRowKind::ServerTokenCopy.label(), "Server Token");
+    assert!(SettingsRowKind::ServerTokenCopy.is_live());
+
+    move_to_row(&mut settings, SettingsRowKind::ServerTokenCopy);
+    let idx = row_index(SettingsRowKind::ServerTokenCopy);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Idle)
+    );
+    assert_eq!(
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Idle).display_value(),
+        "Copy to clipboard"
+    );
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::CopyServerToken);
+    assert!(
+        !settings.rows()[idx].touched,
+        "an action row must never be marked touched"
+    );
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
+        "adjust alone doesn't flip display state — only App's reported outcome does"
+    );
+
+    // `App`'s reported outcome flips the display state; still never touched.
+    settings.set_server_token_copy_status(TokenCopyStatus::Copied);
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Copied)
+    );
+    assert_eq!(
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Copied).display_value(),
+        "Copied \u{2713}"
+    );
+    assert!(!settings.rows()[idx].touched);
+    assert_eq!(
+        RowDraft::ServerTokenCopy(TokenCopyStatus::Failed).display_value(),
+        "Copy failed"
+    );
+
+    let updates = settings.commit_updates();
+    assert!(
+        !updates.iter().any(|(key, _)| key.starts_with("server-token")),
+        "{updates:?}"
+    );
+
+    // Delete/⌘Backspace is a no-op on this row (no value to reset).
+    let reset_effect = settings.reset_selected_row(Instant::now());
+    assert_eq!(reset_effect, RowEffect::None);
+    assert!(!settings.rows()[idx].touched);
 }
 
 // R-9's 6-point set, part 1/4 (scrollback-limit): ALL entry / label /
@@ -2080,6 +2148,9 @@ fn server_scopes_row_cycles_presets_and_falls_back_from_a_non_preset_value() {
 // every one of the 16 row kinds, not just the 3 the AC-numbered tests
 // above happen to exercise (CursorStyle/FontSize/MacosTitlebarStyle),
 // resets to exactly `RowDraft::default_for(kind)` and marks touched.
+// `ServerTokenCopy` is the one deliberate exception (see its doc comment on
+// `SettingsRowKind`): an action row with no persisted value, so reset stays
+// a no-op there instead.
 #[test]
 fn reset_selected_row_writes_default_for_and_marks_touched_for_every_row_kind() {
     for kind in SettingsRowKind::ALL {
@@ -2089,6 +2160,15 @@ fn reset_selected_row_writes_default_for_and_marks_touched_for_every_row_kind() 
         settings.reset_selected_row(Instant::now());
 
         let idx = row_index(kind);
+        if kind == SettingsRowKind::ServerTokenCopy {
+            assert_eq!(
+                settings.rows()[idx].draft,
+                RowDraft::default_for(kind),
+                "{kind:?}"
+            );
+            assert!(!settings.rows()[idx].touched, "{kind:?}");
+            continue;
+        }
         assert_eq!(
             settings.rows()[idx].draft,
             RowDraft::default_for(kind),
@@ -2566,6 +2646,12 @@ fn every_mutator_that_changes_state_changes_the_fingerprint() {
             }
             SettingsRowKind::BackgroundOpacity | SettingsRowKind::BackgroundImageOpacity => {
                 settings.adjust(-1, now);
+            }
+            // `adjust` alone never changes this row's draft (see its doc
+            // comment on `SettingsRowKind::ServerTokenCopy`) — the
+            // fingerprint-relevant mutator is `App`'s reported outcome.
+            SettingsRowKind::ServerTokenCopy => {
+                settings.set_server_token_copy_status(TokenCopyStatus::Copied);
             }
             _ => {
                 settings.adjust(1, now);

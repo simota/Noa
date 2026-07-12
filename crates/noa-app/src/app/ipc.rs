@@ -335,10 +335,12 @@ impl App {
     /// already-spawned pane permanently silent, since nothing ever re-wired
     /// it. Handing out a tap unconditionally fixes that; the actual "is
     /// this worth doing" gate has moved to
-    /// `Broadcaster::has_output_subscribers()`, consulted per feed in
-    /// `feed_terminal_batch` — a running-but-unsubscribed server now also
+    /// `Broadcaster::has_output_subscriber_for(pane_id)`, consulted per feed
+    /// in `feed_terminal_batch` — a running-but-unsubscribed server now also
     /// costs zero per-feed work, which the old tap-presence gate couldn't
-    /// express (a running server always had *a* tap, subscribed or not).
+    /// express (a running server always had *a* tap, subscribed or not); and
+    /// a server with subscribers elsewhere but none for this particular pane
+    /// costs zero too.
     pub(super) fn ipc_output_tap(&self, window_id: WindowId, pane_id: PaneId) -> crate::io_thread::IpcOutputTap {
         let ipc_pane_id = self.mint_ipc_pane(window_id, pane_id);
         crate::io_thread::IpcOutputTap { broadcaster: self.ipc_broadcaster.clone(), ipc_pane_id }

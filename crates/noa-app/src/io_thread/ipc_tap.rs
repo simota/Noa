@@ -3,9 +3,12 @@
 //! without ever blocking on it. `broadcast_output` is `try_send`-only and
 //! never blocks (see `noa_ipc::push::Broadcaster`). Every pane's io thread
 //! carries one of these unconditionally (R-3) — the zero-overhead-when-
-//! nobody's-listening gate is `Broadcaster::has_output_subscribers()`,
+//! nobody's-listening gate is `Broadcaster::has_output_subscriber_for(pane_id)`,
 //! consulted per feed via `decide_ipc_output_push`'s `active` param, not the
-//! tap's presence.
+//! tap's presence. Narrowing the gate per-pane (rather than server-wide)
+//! matters once any client subscribes to output at all: without it, one
+//! client watching a single pane would force every other producing pane to
+//! pay the span-conversion + row-hash cost each throttle window too.
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -22,7 +25,8 @@ pub(crate) const OUTPUT_PUSH_MIN_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Per-pane handle an io thread pushes output through. Every pane carries
 /// one (R-3) — whether it's ever actually used is gated per feed on
-/// `broadcaster.has_output_subscribers()`, not on whether this tap exists.
+/// `broadcaster.has_output_subscriber_for(ipc_pane_id)`, not on whether this
+/// tap exists.
 #[derive(Clone)]
 pub(crate) struct IpcOutputTap {
     pub(crate) broadcaster: noa_ipc::Broadcaster,
@@ -42,9 +46,10 @@ pub(super) enum IpcOutputPushDecision {
 }
 
 /// Pure throttle decision, mirroring `overview::decide_overview_publish`'s
-/// now-as-param shape. `active` is `broadcaster.has_output_subscribers()`
-/// (R-3) — nobody subscribed to `Output` on any connection costs one bool
-/// check and nothing else, same as a fully disabled server used to.
+/// now-as-param shape. `active` is
+/// `broadcaster.has_output_subscriber_for(pane_id)` (R-3) — nobody
+/// subscribed to `Output` for this pane specifically costs one bool check
+/// and nothing else, same as a fully disabled server used to.
 pub(super) fn decide_ipc_output_push(
     active: bool,
     last_push: Option<Instant>,
@@ -78,6 +83,21 @@ pub(super) fn decide_ipc_output_push(
 pub(super) struct IpcRowCache {
     hashes: Vec<u64>,
     base: Option<u64>,
+}
+
+impl IpcRowCache {
+    /// Drops every cached hash (R-3: per-pane subscriber gating). While a
+    /// pane has no matching output subscriber the gate keeps this cache
+    /// untouched, so a subscriber that appears later would otherwise diff
+    /// against hashes computed the last time *some other* client was
+    /// subscribed — potentially long stale, and wrongly suppressing rows the
+    /// new subscriber has never actually seen. Called every feed the gate is
+    /// closed, so the next feed it's open again starts from an empty cache
+    /// and `compute_ipc_row_diff` resends the full viewport.
+    pub(super) fn reset(&mut self) {
+        self.hashes.clear();
+        self.base = None;
+    }
 }
 
 /// Diff the pane's current visible rows against `cache` (F-6), returning

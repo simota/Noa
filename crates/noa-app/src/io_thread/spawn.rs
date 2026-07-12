@@ -156,10 +156,11 @@ pub fn spawn(
         // instead of a constant poll interval.
         let mut publish_pending_at: Option<Instant> = None;
         // Last `noa.output` push instant for this pane (FR-17), `None` when
-        // nobody currently subscribes to this pane's output (R-3:
-        // `ipc.broadcaster.has_output_subscribers()`) — the throttle gate is
-        // then never consulted, so an unsubscribed-to pane costs nothing per
-        // feed regardless of whether the server is running at all.
+        // nobody currently subscribes to this pane's output specifically
+        // (R-3: `ipc.broadcaster.has_output_subscriber_for(ipc.ipc_pane_id)`)
+        // — the throttle gate is then never consulted, so a pane no
+        // subscriber wants costs nothing per feed regardless of whether the
+        // server is running, or other panes are being watched, at all.
         let mut last_ipc_push: Option<Instant> = None;
         // Per-pane, lock-free-after-extraction cache of last-sent viewport
         // row content hashes (F-6), keyed by viewport slot (`visible_rows()`
@@ -252,7 +253,7 @@ pub fn spawn(
                         &mut last_sidebar_publish,
                         &auto_approve,
                         &mut auto_approve_state,
-                        ipc.broadcaster.has_output_subscribers(),
+                        ipc.broadcaster.has_output_subscriber_for(ipc.ipc_pane_id),
                         &mut last_ipc_push,
                         &mut ipc_row_cache,
                     );
@@ -303,8 +304,9 @@ pub fn spawn(
                     // under its one `Terminal` lock hold (F-6) — no second
                     // lock here, just handing the diff to the broadcaster.
                     // `feed_terminal_batch` only ever produces `Some` here
-                    // when `has_output_subscribers()` was true, so this
-                    // `broadcast_output` never fires into an empty room.
+                    // when `has_output_subscriber_for(ipc.ipc_pane_id)` was
+                    // true, so this `broadcast_output` never fires into an
+                    // empty room.
                     if let Some(rows) = output.ipc_output.take() {
                         ipc.broadcaster.broadcast_output(ipc.ipc_pane_id, rows);
                     }

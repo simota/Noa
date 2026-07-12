@@ -219,8 +219,8 @@ fn ipc_output_is_none_when_nothing_changed_or_the_tap_is_inactive() {
 
 /// R-3: every spawned pane now carries an `IpcOutputTap` unconditionally
 /// (see `App::ipc_output_tap`) — the zero-work gate moved from "does a tap
-/// exist" to `Broadcaster::has_output_subscribers()`. A tap wired to a real
-/// `Broadcaster` with zero output subscriptions must still drive
+/// exist" to `Broadcaster::has_output_subscriber_for(pane_id)`. A tap wired
+/// to a real `Broadcaster` with zero output subscriptions must still drive
 /// `feed_terminal_batch`'s `ipc_active` to `false`, so `ipc_output` stays
 /// `None` and no per-feed row diff is computed.
 #[test]
@@ -236,7 +236,7 @@ fn tap_present_but_no_output_subscriber_keeps_ipc_output_none() {
 
     let broadcaster = noa_ipc::push::Broadcaster::new();
     let tap = IpcOutputTap { broadcaster: broadcaster.clone(), ipc_pane_id: 7 };
-    assert!(!tap.broadcaster.has_output_subscribers(), "no connection has subscribed yet");
+    assert!(!tap.broadcaster.has_output_subscriber_for(tap.ipc_pane_id), "no connection has subscribed yet");
 
     let auto_approve = AutoApprovePublish {
         enabled: Arc::new(AtomicBool::new(false)),
@@ -254,7 +254,7 @@ fn tap_present_but_no_output_subscriber_keeps_ipc_output_none() {
         &mut last_sidebar_publish,
         &auto_approve,
         &mut auto_approve_state,
-        tap.broadcaster.has_output_subscribers(),
+        tap.broadcaster.has_output_subscriber_for(tap.ipc_pane_id),
         &mut last_ipc_push,
         &mut ipc_row_cache,
     );
@@ -263,8 +263,139 @@ fn tap_present_but_no_output_subscriber_keeps_ipc_output_none() {
     // Once a connection subscribes, the same tap's broadcaster reports it —
     // proving the gate really does track subscriptions, not the tap.
     let (conn_id, _queue) = broadcaster.register_connection();
-    broadcaster.add_subscription(conn_id, noa_ipc::push::EventMask::OUTPUT, None);
-    assert!(tap.broadcaster.has_output_subscribers());
+    let _ = broadcaster.add_subscription(conn_id, noa_ipc::push::EventMask::OUTPUT, None);
+    assert!(tap.broadcaster.has_output_subscriber_for(tap.ipc_pane_id));
+}
+
+/// R-3: narrowing the gate to `has_output_subscriber_for(pane_id)` (rather
+/// than the server-wide `has_output_subscribers()`) means a client that only
+/// subscribed to pane A must not force pane B's io thread to do row-diff
+/// work too — one client watching one pane must not tax every other
+/// producing pane in the process.
+#[test]
+fn output_subscriber_for_one_pane_does_not_gate_open_for_another_pane() {
+    let broadcaster = noa_ipc::push::Broadcaster::new();
+    let (conn_id, _queue) = broadcaster.register_connection();
+    let mut only_pane_a = std::collections::HashSet::new();
+    only_pane_a.insert(1u64);
+    let _ = broadcaster.add_subscription(conn_id, noa_ipc::push::EventMask::OUTPUT, Some(only_pane_a));
+
+    assert!(broadcaster.has_output_subscriber_for(1), "pane 1 has a matching subscription");
+    assert!(!broadcaster.has_output_subscriber_for(2), "pane 2 has no matching subscription");
+
+    // Pane 2's feed does zero row-diff work: `ipc_output` stays `None` even
+    // though pane 1's subscriber exists and `has_output_subscribers()` (the
+    // old, server-wide gate) would have reported `true`.
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(crate::auto_approve::AutoApproveInputGuards::default())),
+    };
+    let mut auto_approve_state = crate::auto_approve::AutoApproveState::default();
+    let output = feed_terminal_batch(
+        &terminal,
+        &mut stream,
+        b"hello",
+        std::iter::empty::<&[u8]>(),
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        broadcaster.has_output_subscriber_for(2),
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(output.ipc_output.is_none(), "pane 2 has no subscriber, so no diff is computed");
+}
+
+/// R-3: while a pane's gate is closed (no matching subscriber), the row-hash
+/// cache is reset every feed (`decide_ipc_output_push`'s `Skip` arm) so it
+/// can't hold stale hashes from before the pane went quiet. If a subscriber
+/// appears later, the first push after the gate reopens must be a full
+/// resend of the viewport, not a diff against an ancient cache.
+#[test]
+fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_none() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+    let sidebar = test_sidebar_publish(false);
+    let mut last_sidebar_publish = None;
+    let mut last_ipc_push = None;
+    let mut ipc_row_cache = IpcRowCache::default();
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(crate::auto_approve::AutoApproveInputGuards::default())),
+    };
+    let mut auto_approve_state = crate::auto_approve::AutoApproveState::default();
+
+    // Gate open: first feed sends the full viewport and seeds the cache.
+    let first = feed_terminal_batch(
+        &terminal,
+        &mut stream,
+        b"one\r\ntwo\r\nthree",
+        std::iter::empty::<&[u8]>(),
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        true,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert_eq!(first.ipc_output.expect("first feed sends a diff").len(), 4);
+
+    // Gate closes (subscriber went away) — content still changes underneath,
+    // but nothing is pushed and the cache is reset, not left stale.
+    let closed = feed_terminal_batch(
+        &terminal,
+        &mut stream,
+        b"\r\nfour",
+        std::iter::empty::<&[u8]>(),
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        false,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    assert!(closed.ipc_output.is_none(), "gate is closed, nothing is pushed");
+
+    // Gate reopens: a new subscriber wants the pane's current state, which
+    // it has never seen — this must be a full resend, not a diff against the
+    // stale pre-close cache.
+    last_ipc_push = Some(Instant::now() - super::ipc_tap::OUTPUT_PUSH_MIN_INTERVAL);
+    let reopened = feed_terminal_batch(
+        &terminal,
+        &mut stream,
+        b"",
+        std::iter::empty::<&[u8]>(),
+        &overview,
+        &mut last_overview_publish,
+        &sidebar,
+        &mut last_sidebar_publish,
+        &auto_approve,
+        &mut auto_approve_state,
+        true,
+        &mut last_ipc_push,
+        &mut ipc_row_cache,
+    );
+    let rows = reopened.ipc_output.expect("gate reopening must produce a push");
+    assert_eq!(rows.len(), 4, "the full viewport resends, not just rows changed since the gate closed");
 }
 
 /// R-1: a feed suppressed by the 16ms throttle gate must not be silently

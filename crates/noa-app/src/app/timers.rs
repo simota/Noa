@@ -3,6 +3,21 @@
 
 use super::*;
 
+/// Whether cached cursor state (see `Surface::cursor_blink_state`) is
+/// currently blink-eligible: visible, at the live viewport (not scrolled into
+/// scrollback), and rendered in one of the `Blinking*` DECSCUSR styles.
+fn cursor_blink_state_wants_blink(cached: &CursorBlinkState) -> bool {
+    cached.visible
+        && cached.at_live_viewport
+        && matches!(
+            cached.style,
+            CursorStyle::BlinkingBlock
+                | CursorStyle::BlinkingUnderline
+                | CursorStyle::BlinkingBar
+                | CursorStyle::BlinkingBlockHollow
+        )
+}
+
 fn cursor_blink_focus_gate<Window: Copy + PartialEq>(
     sticky_focused: Option<Window>,
     os_focused: Option<Window>,
@@ -50,7 +65,11 @@ fn live_wallpaper_fade_progress(
 }
 
 impl App {
-    /// Whether the focused pane has a displayable `Blinking*` cursor.
+    /// Whether the focused pane has a displayable `Blinking*` cursor. Reads
+    /// `Surface::cursor_blink_state` — refreshed by `redraw` under the
+    /// terminal lock it already takes per pane — instead of locking the
+    /// terminal here: this runs on every blink-interval wake, and `redraw`
+    /// already pays for the read this tick would otherwise duplicate.
     fn focused_cursor_wants_blink(&self) -> bool {
         let Some(window_id) = self.focused else {
             return false;
@@ -64,17 +83,7 @@ impl App {
         let Some(surface) = state.focused_surface() else {
             return false;
         };
-        let terminal = surface.terminal.lock();
-        let cursor = terminal.active().cursor;
-        cursor.visible
-            && terminal.viewport_offset() == 0
-            && matches!(
-                cursor.style,
-                CursorStyle::BlinkingBlock
-                    | CursorStyle::BlinkingUnderline
-                    | CursorStyle::BlinkingBar
-                    | CursorStyle::BlinkingBlockHollow
-            )
+        cursor_blink_state_wants_blink(&surface.cursor_blink_state)
     }
 
     pub(super) fn reset_cursor_blink_phase(&mut self) {
@@ -557,10 +566,74 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        LIVE_WALLPAPER_FADE_DURATION, cursor_blink_focus_gate, live_wallpaper_fade_progress,
-        live_wallpaper_timer_step,
+        LIVE_WALLPAPER_FADE_DURATION, cursor_blink_focus_gate, cursor_blink_state_wants_blink,
+        live_wallpaper_fade_progress, live_wallpaper_timer_step,
     };
+    use crate::app::state::CursorBlinkState;
+    use noa_grid::CursorStyle;
     use std::time::{Duration, Instant};
+
+    /// `tick_cursor_blink` reads this cache instead of locking the terminal
+    /// (see `Surface::cursor_blink_state`), so the gate it feeds must react
+    /// to every field the old locked read checked: visibility, viewport
+    /// position, and DECSCUSR style — a stale-cache bug here would silently
+    /// keep (or stop) blinking regardless of the pane's real state.
+    #[test]
+    fn cursor_blink_state_wants_blink_checks_visibility_viewport_and_style() {
+        let blinking_and_live = CursorBlinkState {
+            visible: true,
+            style: CursorStyle::BlinkingBar,
+            at_live_viewport: true,
+        };
+        assert!(cursor_blink_state_wants_blink(&blinking_and_live));
+
+        assert!(
+            !cursor_blink_state_wants_blink(&CursorBlinkState {
+                visible: false,
+                ..blinking_and_live
+            }),
+            "an invisible cursor must never blink even if the style is Blinking*"
+        );
+        assert!(
+            !cursor_blink_state_wants_blink(&CursorBlinkState {
+                at_live_viewport: false,
+                ..blinking_and_live
+            }),
+            "scrolled into scrollback must not blink the (not-drawn) live cursor"
+        );
+        assert!(
+            !cursor_blink_state_wants_blink(&CursorBlinkState {
+                style: CursorStyle::SteadyBar,
+                ..blinking_and_live
+            }),
+            "a Steady* style must never blink regardless of visibility/viewport"
+        );
+    }
+
+    /// `Surface::cursor_blink_state` is refreshed only inside `redraw`, which
+    /// returns before reaching the per-pane cache refresh while
+    /// `state.occluded` is true (see `redraw`'s early `if state.occluded {
+    /// return; }` in `render.rs`). So on re-occlusion the cache can still say
+    /// "blink-eligible" from just before the window was hidden.
+    /// `focused_cursor_wants_blink` combines `cursor_blink_focus_gate` with
+    /// this cache, and must not blink on a stale cache alone — occlusion has
+    /// to independently veto it regardless of what the cache says.
+    #[test]
+    fn occluded_window_suppresses_blink_even_with_a_stale_blink_eligible_cache() {
+        let stale_cache_says_blink = CursorBlinkState {
+            visible: true,
+            style: CursorStyle::BlinkingBlock,
+            at_live_viewport: true,
+        };
+        assert!(
+            cursor_blink_state_wants_blink(&stale_cache_says_blink),
+            "test setup: the cache alone must read as blink-eligible"
+        );
+        assert!(
+            !cursor_blink_focus_gate(Some(1_u8), Some(1_u8), 1_u8, true),
+            "occlusion must veto blink regardless of a stale blink-eligible cache"
+        );
+    }
 
     #[test]
     fn cursor_blink_focus_gate_requires_real_os_focus_and_visibility() {

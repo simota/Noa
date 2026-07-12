@@ -136,6 +136,15 @@ impl App {
                 continue;
             };
             let mut term = surface.terminal.lock();
+            // Refresh the lock-free cursor-blink cache (see
+            // `Surface::cursor_blink_state`) while the lock is already held,
+            // so `tick_cursor_blink`'s per-wake gate never needs its own.
+            let cursor = term.active().cursor;
+            surface.cursor_blink_state = CursorBlinkState {
+                visible: cursor.visible,
+                style: cursor.style,
+                at_live_viewport: term.viewport_offset() == 0,
+            };
             if pane_id == state.focused_pane {
                 title = resolved_tab_title(title_override.as_deref(), &term.title);
                 focused_cwd_update = proxy_icon_update(&state.proxy_icon_cwd, term.cwd.as_deref());

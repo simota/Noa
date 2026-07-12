@@ -912,6 +912,23 @@ pub(super) struct Surface {
     /// command and animation tick. Lets the idle-animation timer
     /// (`tick_kitty_animations`) skip locking panes with nothing running.
     pub(super) kitty_animation_flag: Arc<AtomicBool>,
+    /// Cursor blink-relevant state captured under the terminal lock `redraw`
+    /// already takes per visible pane, so `tick_cursor_blink`'s per-wake gate
+    /// (`focused_cursor_wants_blink`) can read it without a second, dedicated
+    /// terminal lock on every timer wake — same no-lock-on-poll pattern as
+    /// `kitty_animation_flag` above. One redraw stale at worst: any change
+    /// that flips blink eligibility (style, visibility, viewport scroll) is
+    /// itself driven by a pty write or user action that already requests a
+    /// redraw, so the cache catches up on the very next frame.
+    pub(super) cursor_blink_state: CursorBlinkState,
+}
+
+/// See `Surface::cursor_blink_state`.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct CursorBlinkState {
+    pub(super) visible: bool,
+    pub(super) style: CursorStyle,
+    pub(super) at_live_viewport: bool,
 }
 
 impl WindowState {

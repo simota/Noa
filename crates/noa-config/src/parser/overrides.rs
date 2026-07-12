@@ -75,6 +75,7 @@ pub(crate) fn build_overrides(
     let mut keybinds = Vec::new();
     let mut server_enable = None;
     let mut server_port = None;
+    let mut server_bind = None;
     let mut server_token = None;
     let mut server_scopes = None;
     let mut diagnostics = Vec::new();
@@ -337,6 +338,9 @@ pub(crate) fn build_overrides(
             "server-port" => {
                 server_port = parse_u16(path, directive, &mut diagnostics);
             }
+            "server-bind" => {
+                server_bind = parse_ip_addr_string(path, directive, &mut diagnostics);
+            }
             "server-token" => {
                 server_token = directive.value.clone();
             }
@@ -416,6 +420,7 @@ pub(crate) fn build_overrides(
             keybinds,
             server_enable,
             server_port,
+            server_bind,
             server_token,
             server_scopes,
         },

@@ -53,6 +53,10 @@ pub const DEFAULT_SIDEBAR_PREVIEW_LINES: usize = 5;
 pub const MAX_SIDEBAR_PREVIEW_LINES: usize = 20;
 /// `server-port` default (noa-server spec DEC-3: fixed value, no discovery).
 pub const DEFAULT_SERVER_PORT: u16 = 61771;
+/// Default bind address for the `noa-server` socket: loopback-only. LAN
+/// exposure is opt-in via `server-bind` (noa-server spec v2 — LAN opt-in
+/// was deferred from the locked v1 spec's FR-2/DEC-3 area).
+pub const DEFAULT_SERVER_BIND: &str = "127.0.0.1";
 /// `background-image-interval` default: rotate directory-backed background
 /// images every 30 seconds.
 pub const DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS: u64 = 30;
@@ -594,6 +598,12 @@ pub struct StartupConfig {
     /// `server-port`: loopback TCP port the server binds (FR-2). Default
     /// [`DEFAULT_SERVER_PORT`].
     pub server_port: u16,
+    /// `server-bind`: interface address the server binds (v2 of the
+    /// noa-server spec — LAN opt-in was out-of-scope for the locked v1 spec's
+    /// FR-2/DEC-3 area, which fixed `127.0.0.1`-only). Default
+    /// [`DEFAULT_SERVER_BIND`] (loopback); set e.g. `0.0.0.0` to opt into
+    /// LAN exposure. Token auth (FR-3) is required either way.
+    pub server_bind: String,
     /// `server-token`: bearer token override (FR-3). When set, no token file
     /// is generated/read; the configured value is used verbatim. Default
     /// `None` (auto-generate and persist to the token file).
@@ -662,6 +672,7 @@ impl Default for StartupConfig {
             keybinds: Vec::new(),
             server_enable: false,
             server_port: DEFAULT_SERVER_PORT,
+            server_bind: DEFAULT_SERVER_BIND.to_string(),
             server_token: None,
             server_scopes: "read".to_string(),
         }
@@ -727,6 +738,7 @@ pub struct ConfigOverrides {
     pub keybinds: Vec<KeybindConfig>,
     pub server_enable: Option<bool>,
     pub server_port: Option<u16>,
+    pub server_bind: Option<String>,
     pub server_token: Option<String>,
     pub server_scopes: Option<String>,
 }
@@ -842,6 +854,7 @@ impl ConfigOverrides {
             keybinds,
             server_enable: higher_priority.server_enable.or(self.server_enable),
             server_port: higher_priority.server_port.or(self.server_port),
+            server_bind: higher_priority.server_bind.or(self.server_bind),
             server_token: higher_priority.server_token.or(self.server_token),
             server_scopes: higher_priority.server_scopes.or(self.server_scopes),
         }
@@ -945,6 +958,7 @@ impl ConfigOverrides {
             keybinds,
             server_enable: self.server_enable.unwrap_or(base.server_enable),
             server_port: self.server_port.unwrap_or(base.server_port),
+            server_bind: self.server_bind.unwrap_or(base.server_bind),
             server_token: self.server_token.or(base.server_token),
             server_scopes: self.server_scopes.unwrap_or(base.server_scopes),
         }
@@ -1167,6 +1181,7 @@ mod tests {
                 keybinds: Vec::new(),
                 server_enable: false,
                 server_port: DEFAULT_SERVER_PORT,
+                server_bind: DEFAULT_SERVER_BIND.to_string(),
                 server_token: None,
                 server_scopes: "read".to_string(),
             }
@@ -1519,24 +1534,38 @@ font-size = 15.5
         let default = ConfigOverrides::default().apply_to(StartupConfig::default());
         assert!(!default.server_enable);
         assert_eq!(default.server_port, DEFAULT_SERVER_PORT);
+        assert_eq!(default.server_bind, DEFAULT_SERVER_BIND);
         assert_eq!(default.server_token, None);
         assert_eq!(default.server_scopes, "read");
 
         let (overrides, diagnostics) = parse_overrides(
             test_path(),
-            "server-enable = true\nserver-port = 9999\nserver-token = abc123\nserver-scopes = read,control",
+            "server-enable = true\nserver-port = 9999\nserver-bind = 0.0.0.0\nserver-token = abc123\nserver-scopes = read,control",
         );
         assert!(diagnostics.is_empty());
         assert_eq!(overrides.server_enable, Some(true));
         assert_eq!(overrides.server_port, Some(9999));
+        assert_eq!(overrides.server_bind, Some("0.0.0.0".to_string()));
         assert_eq!(overrides.server_token, Some("abc123".to_string()));
         assert_eq!(overrides.server_scopes, Some("read,control".to_string()));
 
         let resolved = overrides.apply_to(StartupConfig::default());
         assert!(resolved.server_enable);
         assert_eq!(resolved.server_port, 9999);
+        assert_eq!(resolved.server_bind, "0.0.0.0");
         assert_eq!(resolved.server_token.as_deref(), Some("abc123"));
         assert_eq!(resolved.server_scopes, "read,control");
+    }
+
+    #[test]
+    fn server_bind_rejects_invalid_ip_and_falls_back_to_loopback_default() {
+        let (overrides, diagnostics) =
+            parse_overrides(test_path(), "server-bind = not-an-ip");
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(overrides.server_bind, None);
+
+        let resolved = overrides.apply_to(StartupConfig::default());
+        assert_eq!(resolved.server_bind, DEFAULT_SERVER_BIND);
     }
 
     #[test]

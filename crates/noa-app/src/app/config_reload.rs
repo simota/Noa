@@ -475,12 +475,13 @@ pub(super) enum ServerRestartAction {
 
 /// Pure decision for the `noa-ipc` server's live-reload path (G-2): any
 /// change to the keys that shape how/whether the server runs
-/// (enable/port/token/scopes) requires tearing down the running
+/// (enable/port/bind/token/scopes) requires tearing down the running
 /// `ServerHandle` and re-installing, since none of those are read again
 /// after `Server::start`.
 fn decide_server_restart(previous: &AppConfig, next: &AppConfig) -> ServerRestartAction {
     if previous.server_enable != next.server_enable
         || previous.server_port != next.server_port
+        || previous.server_bind != next.server_bind
         || previous.server_token != next.server_token
         || previous.server_scopes != next.server_scopes
     {
@@ -615,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn server_restart_is_decided_by_enable_port_token_and_scopes_only() {
+    fn server_restart_is_decided_by_enable_port_bind_token_and_scopes_only() {
         let base = AppConfig::from_startup(
             noa_config::StartupConfig::default(),
             false,
@@ -630,6 +631,10 @@ mod tests {
         let mut port = base.clone();
         port.server_port = port.server_port.wrapping_add(1);
         assert_eq!(decide_server_restart(&base, &port), ServerRestartAction::Restart);
+
+        let mut bind = base.clone();
+        bind.server_bind = "0.0.0.0".to_string();
+        assert_eq!(decide_server_restart(&base, &bind), ServerRestartAction::Restart);
 
         let mut token = base.clone();
         token.server_token = Some("changed".to_string());

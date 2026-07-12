@@ -64,6 +64,11 @@ pub struct ServerConfig {
     /// `0` binds an OS-assigned ephemeral port (tests use this; production
     /// uses config `server-port`, default `61771`).
     pub port: u16,
+    /// Interface address to bind (v2 LAN opt-in). Production uses config
+    /// `server-bind`, default [`ServerConfig::DEFAULT_BIND_ADDR`] (loopback
+    /// only, matching the locked v1 spec's FR-2). Token auth (FR-3) applies
+    /// unconditionally regardless of bind address.
+    pub bind_addr: std::net::IpAddr,
     pub token: String,
     pub allowed_scopes: ScopeSet,
     /// How long an accepted, WS-handshaked connection may go without
@@ -85,12 +90,15 @@ pub struct ServerConfig {
 impl ServerConfig {
     pub const DEFAULT_HELLO_DEADLINE: Duration = Duration::from_secs(10);
     pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+    pub const DEFAULT_BIND_ADDR: std::net::IpAddr =
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 }
 
 /// A handle to a running server. Dropping it stops the accept loop and
 /// closes the listener.
 pub struct ServerHandle {
     port: u16,
+    bind_addr: std::net::IpAddr,
     shutdown: Arc<AtomicBool>,
     broadcaster: Broadcaster,
     accept_thread: Option<JoinHandle<()>>,
@@ -99,6 +107,10 @@ pub struct ServerHandle {
 impl ServerHandle {
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    pub fn bind_addr(&self) -> std::net::IpAddr {
+        self.bind_addr
     }
 
     pub fn broadcaster(&self) -> Broadcaster {
@@ -118,8 +130,9 @@ impl Drop for ServerHandle {
 pub struct Server;
 
 impl Server {
-    /// Binds `127.0.0.1:<port>` only (FR-2) and starts the accept loop.
-    /// Never binds a non-loopback interface.
+    /// Binds `<bind_addr>:<port>` and starts the accept loop. Defaults to
+    /// `127.0.0.1` only (FR-2); binds a non-loopback interface only when the
+    /// caller opts in via `config.bind_addr` (v2 LAN opt-in, `server-bind`).
     ///
     /// `broadcaster` is supplied by the caller rather than created here so a
     /// long-lived registry can outlive any one `Server::start`/`ServerHandle`
@@ -141,7 +154,8 @@ impl Server {
                 "server token must not be empty",
             ));
         }
-        let listener = TcpListener::bind(("127.0.0.1", config.port))?;
+        let bind_addr = config.bind_addr;
+        let listener = TcpListener::bind((bind_addr, config.port))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
 
@@ -205,7 +219,7 @@ impl Server {
             }
         });
 
-        Ok(ServerHandle { port, shutdown, broadcaster, accept_thread: Some(accept_thread) })
+        Ok(ServerHandle { port, bind_addr, shutdown, broadcaster, accept_thread: Some(accept_thread) })
     }
 }
 

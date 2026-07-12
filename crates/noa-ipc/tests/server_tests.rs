@@ -95,6 +95,7 @@ fn start_test_server(backend: Arc<MockBackend>, token: &str, scopes: ScopeSet) -
     Server::start(
         ServerConfig {
             port: 0,
+            bind_addr: ServerConfig::DEFAULT_BIND_ADDR,
             token: token.to_string(),
             allowed_scopes: scopes,
             hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
@@ -115,6 +116,7 @@ fn start_test_server_with_broadcaster(
     Server::start(
         ServerConfig {
             port: 0,
+            bind_addr: ServerConfig::DEFAULT_BIND_ADDR,
             token: token.to_string(),
             allowed_scopes: scopes,
             hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
@@ -135,6 +137,7 @@ fn start_test_server_with_hello_deadline(
     Server::start(
         ServerConfig {
             port: 0,
+            bind_addr: ServerConfig::DEFAULT_BIND_ADDR,
             token: token.to_string(),
             allowed_scopes: scopes,
             hello_deadline,
@@ -155,6 +158,7 @@ fn start_test_server_with_handshake_timeout(
     Server::start(
         ServerConfig {
             port: 0,
+            bind_addr: ServerConfig::DEFAULT_BIND_ADDR,
             token: token.to_string(),
             allowed_scopes: scopes,
             hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
@@ -527,6 +531,7 @@ fn server_start_refuses_empty_token() {
     let result = Server::start(
         ServerConfig {
             port: 0,
+            bind_addr: ServerConfig::DEFAULT_BIND_ADDR,
             token: String::new(),
             allowed_scopes: ScopeSet::default_read_only(),
             hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
@@ -544,6 +549,7 @@ fn server_start_refuses_whitespace_only_token() {
     let result = Server::start(
         ServerConfig {
             port: 0,
+            bind_addr: ServerConfig::DEFAULT_BIND_ADDR,
             token: "   ".to_string(),
             allowed_scopes: ScopeSet::default_read_only(),
             hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
@@ -553,6 +559,58 @@ fn server_start_refuses_whitespace_only_token() {
         Broadcaster::new(),
     );
     assert!(result.is_err());
+}
+
+// ---- v2 LAN opt-in: `ServerConfig::bind_addr` (server-bind) ----
+
+#[test]
+fn bind_addr_explicit_loopback_still_works() {
+    let backend = Arc::new(MockBackend::default());
+    let handle = Server::start(
+        ServerConfig {
+            port: 0,
+            bind_addr: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            token: "tok".to_string(),
+            allowed_scopes: ScopeSet::default_read_only(),
+            hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+            handshake_timeout: ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT,
+        },
+        backend,
+        Broadcaster::new(),
+    )
+    .expect("explicit loopback bind should still succeed");
+    assert_eq!(handle.bind_addr(), std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+
+    let mut sock = connect_plain(handle.port());
+    let resp = hello(&mut sock, 1, 1, Some("tok"), &["read"]);
+    assert!(resp.get("result").is_some());
+    let _ = sock.close(None);
+}
+
+#[test]
+fn bind_addr_inaddr_any_is_reachable_via_loopback() {
+    // Lightweight proof of INADDR_ANY reachability: bind `0.0.0.0` and
+    // connect through `127.0.0.1` (a real LAN test isn't practical in CI).
+    let backend = Arc::new(MockBackend::default());
+    let handle = Server::start(
+        ServerConfig {
+            port: 0,
+            bind_addr: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            token: "tok".to_string(),
+            allowed_scopes: ScopeSet::default_read_only(),
+            hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+            handshake_timeout: ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT,
+        },
+        backend,
+        Broadcaster::new(),
+    )
+    .expect("0.0.0.0 bind should succeed");
+    assert_eq!(handle.bind_addr(), std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+
+    let mut sock = connect_plain(handle.port());
+    let resp = hello(&mut sock, 1, 1, Some("tok"), &["read"]);
+    assert!(resp.get("result").is_some());
+    let _ = sock.close(None);
 }
 
 // ---- R-2: unauthenticated connections cannot hold a slot forever ----

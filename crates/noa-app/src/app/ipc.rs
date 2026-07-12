@@ -56,6 +56,16 @@ impl App {
             }
         };
         let allowed_scopes = noa_ipc::ScopeSet::parse_list(&self.config.server_scopes);
+        // noa-config already validates `server-bind` parses as an IP address
+        // (falling back to the loopback default on a bad value), so this
+        // `.parse()` cannot fail in practice; the `unwrap_or` is defense in
+        // depth only, matching this call site's existing bind-failure
+        // handling rather than trusting a single validation layer.
+        let bind_addr: std::net::IpAddr = self
+            .config
+            .server_bind
+            .parse()
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
         let backend = AppIpcBackend {
             shared: self.ipc_shared.clone(),
             proxy: self.proxy.clone(),
@@ -64,6 +74,7 @@ impl App {
         };
         let config = noa_ipc::ServerConfig {
             port: self.config.server_port,
+            bind_addr,
             token,
             allowed_scopes,
             hello_deadline: noa_ipc::ServerConfig::DEFAULT_HELLO_DEADLINE,
@@ -71,13 +82,19 @@ impl App {
         };
         match noa_ipc::Server::start(config, std::sync::Arc::new(backend), self.ipc_broadcaster.clone()) {
             Ok(handle) => {
-                log::info!("noa-ipc: listening on 127.0.0.1:{}", handle.port());
+                log::info!("noa-ipc: listening on {}:{}", handle.bind_addr(), handle.port());
+                if !handle.bind_addr().is_loopback() {
+                    log::warn!(
+                        "noa-server listening on a non-loopback address ({}) — LAN-exposed; token auth still required",
+                        handle.bind_addr()
+                    );
+                }
                 self.ipc_server = Some(handle);
                 self.ipc_last_error = None;
             }
             Err(err) => {
-                log::warn!("noa-ipc: failed to bind 127.0.0.1:{}: {err}", self.config.server_port);
-                self.ipc_last_error = Some(format!("failed to bind 127.0.0.1:{}: {err}", self.config.server_port));
+                log::warn!("noa-ipc: failed to bind {bind_addr}:{}: {err}", self.config.server_port);
+                self.ipc_last_error = Some(format!("failed to bind {bind_addr}:{}: {err}", self.config.server_port));
             }
         }
         self.refresh_theme_settings_server_status();
@@ -91,10 +108,9 @@ impl App {
     /// freshly opened row) and [`Self::refresh_theme_settings_server_status`]
     /// (pushing an update into an already-open one) compute it identically.
     pub(super) fn server_status_display(&self) -> String {
-        let running = self
-            .ipc_server
-            .as_ref()
-            .map(|handle| (handle.port(), self.ipc_broadcaster.connection_count()));
+        let running = self.ipc_server.as_ref().map(|handle| {
+            (handle.bind_addr().to_string(), handle.port(), self.ipc_broadcaster.connection_count())
+        });
         crate::theme_settings::format_server_status(running, self.ipc_last_error.as_deref())
     }
 

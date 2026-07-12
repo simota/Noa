@@ -171,6 +171,9 @@ pub struct AppConfig {
     pub server_enable: bool,
     /// `server-port`: loopback TCP port the server binds (FR-2).
     pub server_port: u16,
+    /// `server-bind`: interface address the server binds (v2 LAN opt-in).
+    /// Default `127.0.0.1` (loopback); e.g. `0.0.0.0` opts into LAN exposure.
+    pub server_bind: String,
     /// `server-token`: bearer token override (FR-3). `None` auto-generates
     /// and persists one to the token file.
     pub server_token: Option<String>,
@@ -243,6 +246,7 @@ impl AppConfig {
             keybinds: config.keybinds,
             server_enable: config.server_enable,
             server_port: config.server_port,
+            server_bind: config.server_bind,
             server_token: config.server_token,
             server_scopes: config.server_scopes,
         }

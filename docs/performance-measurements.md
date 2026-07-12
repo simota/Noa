@@ -1,103 +1,108 @@
 # Performance Measurement Workloads
 
-`docs/performance-resource-optimization-matrix.md` の共通測定ログ。
+Shared measurement log for
+`docs/performance-resource-optimization-matrix.md`.
 
 ## Result Format
 
-各 workload の下に、必要に応じて以下を追記する。
+Under each workload, add the following as needed.
 
-- 日付、commit、machine、macOS version、display scale。
-- 実行コマンドまたは手動手順。
-- before / after 値。片方しか無い場合はその理由。
-- ばらつき、skip した手順、見た目の回帰有無。
+- Date, commit, machine, macOS version, display scale.
+- Command run or manual procedure.
+- Before / after values. If only one is available, state why.
+- Variance, skipped steps, any visible regressions.
 
 ## Workloads
 
 ### W1: Background Idle Cursor Blink
 
-目的: background / occluded window が cursor blink だけで wake しないことを確認する。
+Goal: confirm that a background / occluded window doesn't wake solely
+for cursor blink.
 
-手順:
+Procedure:
 
-1. idle shell 1 pane で `noa` を起動する。
-2. cursor style は blinking のままにする。
-3. foreground で 60 秒測る。
-4. app を background にして 60 秒測る。
-5. window を occlude して 60 秒測る。
+1. Start `noa` with 1 idle shell pane.
+2. Keep the cursor style as blinking.
+3. Measure 60 seconds in the foreground.
+4. Background the app and measure 60 seconds.
+5. Occlude the window and measure 60 seconds.
 
-記録:
+Record:
 
-- wakeups/sec。
-- redraw requests/sec。
-- main-thread CPU。
-- focus 復帰後に cursor blink が即時再開するか。
+- Wakeups/sec.
+- Redraw requests/sec.
+- Main-thread CPU.
+- Whether cursor blink resumes immediately after focus returns.
 
 ### W2: Dirty-Row Snapshot Copy
 
-目的: clean 行が多い frame で row clone と terminal lock time が下がることを確認する。
+Goal: confirm row clone and terminal-lock time drop on frames with many
+clean rows.
 
-手順:
+Procedure:
 
-1. `200x50` で `noa` を起動する。
-2. 1 行だけ更新する command を流す。
-3. 連続 scroll output を流す。
-4. selection / search highlight ありで繰り返す。
+1. Start `noa` at `200x50`.
+2. Run a command that updates only 1 row.
+3. Run continuous scroll output.
+4. Repeat with selection / search highlight active.
 
-記録:
+Record:
 
-- terminal lock hold time。
-- copied row/cell count。
-- frame time。
-- visible rendering regression。
+- Terminal-lock hold time.
+- Copied row/cell count.
+- Frame time.
+- Visible rendering regressions.
 
 ### W3: Session Overview With Active Output
 
-目的: source pane が出力中でも overview peek-slot reuse が効くことを確認する。
+Goal: confirm overview peek-slot reuse works even while the source pane
+is producing output.
 
-手順:
+Procedure:
 
-1. 4 tab 以上を開く。
-2. source tab の 1 pane で continuous output を流す。
-3. Session Overview を 60 秒表示し続ける。
-4. source tab が occluded の状態でも繰り返す。
+1. Open 4 or more tabs.
+2. Run continuous output on 1 pane of the source tab.
+3. Keep Session Overview visible for 60 seconds.
+4. Repeat with the source tab occluded.
 
-記録:
+Record:
 
-- overview publish allocation count/bytes。
-- source terminal lock time。
-- tile update cadence と visible staleness。
+- Overview publish allocation count/bytes.
+- Source terminal lock time.
+- Tile update cadence and visible staleness.
 
 ### W4: Bulk PTY Output
 
-目的: sustained output で PTY read-buffer reuse が効くことを確認する。
+Goal: confirm PTY read-buffer reuse works under sustained output.
 
-手順:
+Procedure:
 
-1. single pane で large stdout workload を流す。
-2. UI が即時 drain できない状態でも繰り返す。
-3. EOF/error、receiver dropped の経路が clean exit することを確認する。
+1. Run a large stdout workload on a single pane.
+2. Repeat while the UI can't drain immediately.
+3. Confirm EOF/error and receiver-dropped paths exit cleanly.
 
-記録:
+Record:
 
-- `Box<[u8]>` allocation count/bytes。
-- throughput。
-- burst 後に pool が保持する buffer bytes の peak。
+- `Box<[u8]>` allocation count/bytes.
+- Throughput.
+- Peak buffer bytes retained by the pool after a burst.
 
 ### W5: Many-Pane Idle Process Polling
 
-目的: idle multi-pane session で adaptive foreground-process polling が効くことを確認する。
+Goal: confirm adaptive foreground-process polling works for an idle
+multi-pane session.
 
-手順:
+Procedure:
 
-1. 1 / 10 / 50 idle pane を作る。
-2. 各 scenario を最低 60 秒測る。
-3. 1 pane で agent-like foreground process を start/stop する。
+1. Create 1 / 10 / 50 idle panes.
+2. Measure each scenario for at least 60 seconds.
+3. Start/stop an agent-like foreground process on 1 pane.
 
-記録:
+Record:
 
-- foreground process polls/sec。
-- wakeups/sec。
-- process name と attention state が更新されるまでの遅延。
+- Foreground process polls/sec.
+- Wakeups/sec.
+- Delay until process name and attention state update.
 
 #### 2026-07-09 ID5 policy check
 
@@ -125,22 +130,23 @@ main-thread CPU still need an app-level idle run.
 
 ### W6: Occluded High-Resolution Surface Memory
 
-目的: occluded surface reconfiguration で GPU memory が下がり、reveal が壊れないことを確認する。
+Goal: confirm GPU memory drops on occluded surface reconfiguration
+without breaking reveal.
 
-手順:
+Procedure:
 
-1. high-resolution display または scaled high-DPI window を使う。
-2. native tab を複数開く。
-3. visible 状態の GPU memory を測る。
-4. source tab をすべて occlude して再測定する。
-5. reveal、resize、scale factor change、Session Overview open を実行する。
+1. Use a high-resolution display or a scaled high-DPI window.
+2. Open multiple native tabs.
+3. Measure GPU memory while visible.
+4. Occlude all source tabs and remeasure.
+5. Perform reveal, resize, scale factor change, and Session Overview open.
 
-記録:
+Record:
 
-- occlusion 前、中、reveal 後の GPU memory。
-- reveal latency。
-- Surface lost/outdated error。
-- resize、scale factor change、overview rendering 後の visual correctness。
+- GPU memory before, during, and after occlusion/reveal.
+- Reveal latency.
+- Surface lost/outdated errors.
+- Visual correctness after resize, scale factor change, and overview rendering.
 
 #### 2026-07-09 ID6 unit coverage check
 
@@ -168,7 +174,8 @@ factor/overview visual run is recorded.
 
 ### W7: Cell Layout Retained Size
 
-目的: `Cell` retained size が下がり、明確な throughput regression がないことを確認する。
+Goal: confirm `Cell` retained size drops with no clear throughput
+regression.
 
 Commands:
 
@@ -179,12 +186,12 @@ cargo test -p noa-grid --release bulk_print_throughput_probe -- --ignored --noca
 cargo test -p noa-grid --release bench_push_throughput_and_memory_bound -- --ignored --nocapture
 ```
 
-記録:
+Record:
 
-- `std::mem::size_of::<Cell>()`。
-- bulk print と scrollback push の rows/sec。
-- retained scrollback bytes。
-- 保存済み baseline と比べた allocation または wall-clock regression の有無。
+- `std::mem::size_of::<Cell>()`.
+- Bulk print and scrollback push rows/sec.
+- Retained scrollback bytes.
+- Whether there's an allocation or wall-clock regression against the saved baseline.
 
 #### 2026-07-09 ID7 comparison
 

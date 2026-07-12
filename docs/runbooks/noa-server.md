@@ -1,112 +1,122 @@
-# noa-server 運用 Runbook
+# noa-server Operations Runbook
 
-対象: `noa-ipc` — JSON-RPC 2.0 over WebSocket サーバー(仕様: `docs/specs/noa-server.md`)。
-クライアントから稼働中の noa に接続し、パネル一覧・テキスト/グリッド取得・操作・入力・リアルタイム購読を行う。
+Target: `noa-ipc` — a JSON-RPC 2.0 over WebSocket server (spec: `docs/specs/noa-server.md`).
+Lets a client connect to a running noa instance to list panels, fetch text/grid, perform operations, send input, and subscribe in real time.
 
-## 1. 有効化
+## 1. Enabling it
 
-デフォルトでは**完全に無効**(ポートを一切開かない)。`~/.config/noa/config`(または `$XDG_CONFIG_HOME/noa/config`)に:
+**Fully disabled by default** (no port is opened at all). In `~/.config/noa/config`
+(or `$XDG_CONFIG_HOME/noa/config`):
 
 ```
 server-enable = true
-# 以下は省略可(デフォルト値)
+# The following can be omitted (default values)
 server-port = 61771
 server-bind = 127.0.0.1
 server-scopes = read
 ```
 
-| キー | 型 / デフォルト | 意味 |
+| Key | Type / default | Meaning |
 |------|----------------|------|
-| `server-enable` | bool / `false` | サーバー起動ゲート(FR-1) |
-| `server-port` | u16 / `61771` | bind ポート(FR-2) |
-| `server-bind` | IP アドレス文字列 / `127.0.0.1` | bind するインターフェース。既定は loopback 限定。`0.0.0.0` 等を指定すると LAN 上の他ホストからも直接到達できる(v2 の opt-in。詳細は本節末の「LAN 公開手順」) |
-| `server-token` | string / なし | 認証トークンの明示指定。設定時はトークンファイルを生成・読取しない |
-| `server-scopes` | csv / `read` | 付与可能スコープの上限。`read,control,input` の部分集合。`control`(focus/tab/split/close)と `input`(sendText)は**明示列挙時のみ**付与可能 |
+| `server-enable` | bool / `false` | Server startup gate (FR-1) |
+| `server-port` | u16 / `61771` | Bind port (FR-2) |
+| `server-bind` | IP address string / `127.0.0.1` | Interface to bind. Loopback-only by default. Specifying e.g. `0.0.0.0` allows direct reachability from other hosts on the LAN (v2 opt-in; see "LAN exposure procedure" at the end of this section for details) |
+| `server-token` | string / none | Explicit auth token override. When set, the token file is neither generated nor read |
+| `server-scopes` | csv / `read` | Upper bound on scopes that can be granted. A subset of `read,control,input`. `control` (focus/tab/split/close) and `input` (sendText) can only be granted when **explicitly listed** |
 
-再起動して有効化を確認:
+Restart and confirm it's enabled:
 
 ```sh
-lsof -nP -iTCP:61771 -sTCP:LISTEN   # noa が 127.0.0.1:61771 で LISTEN していれば OK
+lsof -nP -iTCP:61771 -sTCP:LISTEN   # OK if noa is LISTENing on 127.0.0.1:61771
 ```
 
-bind 失敗(ポート衝突等)ではアプリは落ちず、警告ログのみ:
-`noa-ipc: failed to bind <server-bind>:<port>: <err>`。
+On a bind failure (e.g. port conflict), the app does not crash — it only logs a warning:
+`noa-ipc: failed to bind <server-bind>:<port>: <err>`.
 
-設定ファイルの直接編集に代えて、Settings パネル(`⌘,` などから開く Settings モード)からも
-`server-enable`/`server-port`/`server-bind`/`server-scopes` を操作できる。パネル上の行名は「Server」
-「Server Port」「Server Bind」(Server Port の直後)「Server Scopes」で、いずれも Save 適用(ON SAVE
-バッジ)——保存すると `ConfigWatcher` がファイル変更を検知し、1 秒以内にサーバーを再起動/停止/再bind
-する。「Server Bind」行は `←`/`→` で `127.0.0.1` ⇔ `0.0.0.0` の2値をトグルする(手編集した config の
-値がこの2値のどちらでもない場合は、その値をそのまま表示しつつ次の ←/→ で2値のどちらかへ着地する)。
-`server-token` の値自体はシークレットのため意図的にパネルへ出していない(§2 の「Server Token」行はコ
-ピー専用で、値は一切表示しない)。
+Instead of editing the config file directly, `server-enable`/`server-port`/`server-bind`/`server-scopes`
+can also be controlled from the Settings panel (opened via `⌘,` or similar, Settings mode). The row names
+in the panel are "Server", "Server Port", "Server Bind" (right after Server Port), and "Server Scopes",
+all applied via Save (ON SAVE badge) — once saved, `ConfigWatcher` detects the file change and
+restarts/stops/rebinds the server within 1 second. The "Server Bind" row toggles between the two values
+`127.0.0.1` and `0.0.0.0` with `←`/`→` (if the config was hand-edited to a value that is neither of these
+two, that value is shown as-is, and the next ←/→ lands on one of the two values). The `server-token`
+value itself is intentionally not exposed in the panel since it's a secret (the "Server Token" row in §2
+is copy-only and never displays the value).
 
-「Server」行の直後には読み取り専用の「Server Status」行があり、サーバーの現在状態を
-`Running (<bind>:<port>, <N> client(s))` / `Stopped` / `Bind failed: <reason>` の3形式で表示する
-(値の編集・Reset は無効、Save 対象外、常に LIVE バッジ)。パネルの描画パスは `App` の生存状態を
-直接参照できないため、この行はセッションが開いている間 `App` が `install_ipc_server_if_needed`/
-`restart_ipc_server` を再実行するたびに(config reload の `server-enable`/`server-port`/
-`server-bind`/`server-scopes` 変更を検知した際を含む)明示的に書き戻す方式——パネル上のトグルを保存
-してから実際の表示更新まで、`ConfigWatcher` の 500ms ポーリング1周分以内に反映される。
+Right after the "Server" row is a read-only "Server Status" row showing the server's current state as one
+of three forms: `Running (<bind>:<port>, <N> client(s))` / `Stopped` / `Bind failed: <reason>`
+(editing/Reset disabled, not subject to Save, always the LIVE badge). Because the panel's render path
+cannot directly reference `App`'s live state, this row is written back explicitly every time `App`
+re-runs `install_ipc_server_if_needed`/`restart_ipc_server` while a session is open (including when it
+detects a config reload change to `server-enable`/`server-port`/`server-bind`/`server-scopes`) — from
+saving a toggle in the panel to the actual display update, this lands within one cycle of
+`ConfigWatcher`'s 500ms poll.
 
-### LAN 公開手順
+### LAN exposure procedure
 
-既定の loopback 限定 bind を、同一 LAN 上の他ホストから直接到達できるよう opt-in で広げる手順。
-**TLS は無いため、信頼できるネットワーク(自宅 LAN 等)でのみ使うこと**。信頼できないネットワーク
-(公衆 Wi-Fi・オフィス共有ネットワーク等)では従来どおり SSH ポートフォワード/Tailscale 等のトンネ
-ル経由にすること — トークン認証だけでは平文通信そのものは守れない。
+Steps to opt into widening the default loopback-only bind so other hosts on the same LAN can reach it
+directly. **There is no TLS, so only use this on a trusted network (e.g. your home LAN)**. On an
+untrusted network (public Wi-Fi, a shared office network, etc.), continue to reach it via an SSH port
+forward, Tailscale, or a similar tunnel as before — token auth alone does not protect the plaintext
+communication itself.
 
-1. `~/.config/noa/config` に `server-bind = 0.0.0.0`(または特定インターフェースの IP)を追記(Settings
-   パネルの「Server Bind」行から `←`/`→` で切り替えても同じ)。
-2. noa を再起動、または `server-enable` が既に true なら config 保存後 1 秒以内に自動で再bindされる。
-3. bind を確認:
+1. Add `server-bind = 0.0.0.0` (or the IP of a specific interface) to `~/.config/noa/config` (equivalent
+   to toggling it via `←`/`→` on the "Server Bind" row in the Settings panel).
+2. Restart noa, or if `server-enable` is already true, it will auto-rebind within 1 second of saving the
+   config.
+3. Confirm the bind:
    ```sh
-   lsof -nP -iTCP:61771 -sTCP:LISTEN   # ADDRESS が *:61771 になっていれば 0.0.0.0 bind 成功
+   lsof -nP -iTCP:61771 -sTCP:LISTEN   # if ADDRESS is *:61771, the 0.0.0.0 bind succeeded
    ```
-4. クライアント側から LAN IP で接続(トークンは loopback 時と同じものを使う):
+4. Connect from a client using the LAN IP (use the same token as for loopback):
    ```sh
    websocat ws://<LAN-IP>:61771/
    ```
-5. 不要になったら `server-bind` を消す(または `127.0.0.1` に戻す)— デフォルトへ復帰する。
+5. When no longer needed, remove `server-bind` (or set it back to `127.0.0.1`) to revert to the default.
 
 
 
-## 2. トークン
+## 2. Token
 
-- `server-token` 未設定なら初回起動時に自動生成: **`~/.config/noa/server-token`**(権限 0600、hex 64 文字)。
-- 権限が 0600 より緩いファイルを検出すると自動修復(chmod 0600 + 警告ログ)。
-- 回転(v1): ファイルを削除して noa を再起動 → 新トークン生成。接続中クライアントには影響しない(認証は接続確立時のみ)。
+- If `server-token` is unset, one is auto-generated on first startup: **`~/.config/noa/server-token`**
+  (permissions 0600, 64 hex characters).
+- If a file with permissions looser than 0600 is detected, it is auto-repaired (chmod 0600 + warning log).
+- Rotation (v1): delete the file and restart noa → a new token is generated. Connected clients are
+  unaffected (authentication happens only at connection establishment).
 
 ```sh
 TOKEN=$(cat ~/.config/noa/server-token)
 ```
 
-Settings パネル(Settings モード)の「Server Token」行(Server Scopes の直後)は、`←`/`→` または
-`Enter` で押すたびに今使われるトークン——`server-token` が設定されていればその値、なければ
-上記のファイル(未作成なら自動生成)——をクリップボードへコピーする。値自体は画面に一切表示せず、
-行の表示は「Copy to clipboard」→「Copied ✓」(失敗時は「Copy failed」)の3状態のみ。値を持たない
-アクション行のため Save 対象外で、常に LIVE バッジ(押した瞬間に完了、保存不要)。
+The "Server Token" row (right after Server Scopes) in the Settings panel (Settings mode) copies the
+token currently in use — the `server-token` value if set, otherwise the file above (auto-generated if
+not yet created) — to the clipboard each time you press `←`/`→` or `Enter`. The value itself is never
+shown on screen; the row display cycles through three states only: "Copy to clipboard" → "Copied ✓"
+(or "Copy failed" on failure). Since it's an action row with no value, it is not subject to Save and
+always shows the LIVE badge (completes the instant you press it, no save needed).
 
-## 3. 接続と handshake
+## 3. Connection and handshake
 
-認証は 2 方式(どちらか):
-1. WS upgrade 時の `Authorization: Bearer <token>` ヘッダ
-2. 接続直後の `noa.hello` の `params.token`
+Two authentication methods (either one):
+1. An `Authorization: Bearer <token>` header at WS upgrade time
+2. `params.token` in `noa.hello` right after connecting
 
-いずれの場合も**最初に `noa.hello` が必須**(他メソッドは `-32001`)。`protocolVersion` は現行 `1`(major 不一致は `-32006`)。
+Either way, **`noa.hello` must come first** (other methods return `-32001`). `protocolVersion` is
+currently `1` (a major version mismatch returns `-32006`).
 
 ```sh
-# websocat (brew install websocat) での対話例
+# Example interaction with websocat (brew install websocat)
 websocat ws://127.0.0.1:61771/
 {"jsonrpc":"2.0","id":1,"method":"noa.hello","params":{"protocolVersion":1,"token":"<TOKEN>","scopes":["read","control","input"]}}
 # → {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"grantedScopes":["read"],"serverVersion":"0.1.2"}}
 ```
 
-`grantedScopes` = 要求スコープ ∩ `server-scopes`。デフォルト設定では `control`/`input` を要求しても `["read"]` しか返らない(AC-20)。
+`grantedScopes` = requested scopes ∩ `server-scopes`. With the default settings, requesting
+`control`/`input` still only returns `["read"]` (AC-20).
 
-## 4. メソッド早見表
+## 4. Method quick reference
 
-ID(`windowGroupId`/`windowId`/`paneId`)は全て **10 進文字列**。
+IDs (`windowGroupId`/`windowId`/`paneId`) are always **decimal strings**.
 
 ```json
 {"jsonrpc":"2.0","id":2,"method":"noa.listPanels","params":{}}
@@ -121,54 +131,86 @@ ID(`windowGroupId`/`windowId`/`paneId`)は全て **10 進文字列**。
 {"jsonrpc":"2.0","id":11,"method":"noa.unsubscribe","params":{"subscriptionId":"..."}}
 ```
 
-補足:
-- `getText` の `source`: `screen` = 可視画面のみ / `scrollback` = scrollback+可視画面全体。`maxBytes`(既定 256KiB、サーバー側上限 1MiB クランプ)超過は**末尾優先**で切り詰め、`truncated:true`。
-- `getGrid`: 行 0 = scrollback 最古行の絶対座標。1 リクエスト最大 2048 行 + 応答 256KiB 上限。切れた場合 `hasMore:true` → `startRow` を進めて続きを取得。
-- `sendText` の `paste`(省略可、既定 `true`): `false` で bracketed paste ラップなしの生注入。単独 Enter を送るなら `{"text":"\r","paste":false}`。
-- `newTab` の `windowId`: ネイティブウィンドウ id・ウィンドウグループ id のどちらでも解決される。省略時はアクティブウィンドウ。
-- `split` の `direction`: `horizontal` = 左右分割 / `vertical` = 上下分割。
-- 通知: `noa.stateChanged`(変化した Panel のみ)/ `noa.output`(変化行のみの色ラン付き差分、≥16ms 合流)。購読チャネル溢れ時は古いものから破棄され、次通知に `dropped:true`。
+Notes:
+- `getText`'s `source`: `screen` = visible screen only / `scrollback` = the full scrollback + visible
+  screen. Exceeding `maxBytes` (default 256KiB, server-side cap clamped to 1MiB) truncates
+  **preferring the tail**, with `truncated:true`.
+- `getGrid`: row 0 is the absolute coordinate of the oldest scrollback row. Max 2048 rows per request +
+  256KiB response cap. If truncated, `hasMore:true` — advance `startRow` to fetch the rest.
+- `sendText`'s `paste` (optional, default `true`): `false` injects raw text without bracketed-paste
+  wrapping. To send a bare Enter, use `{"text":"\r","paste":false}`.
+- `newTab`'s `windowId`: resolves against either a native window id or a window group id. If omitted,
+  defaults to the active window.
+- `split`'s `direction`: `horizontal` = left/right split / `vertical` = top/bottom split.
+- Notifications: `noa.stateChanged` (only changed panels) / `noa.output` (a color-run diff of only the
+  changed lines, coalesced at ≥16ms). On subscription channel overflow, the oldest notifications are
+  dropped, and the next notification carries `dropped:true`.
 
-## 5. エラーコード
+## 5. Error codes
 
-| code | 意味 | 主な対処 |
+| code | Meaning | Primary remedy |
 |------|------|---------|
-| `-32001` | 認証失敗 / hello 前のメソッド呼出 | トークン確認・先に `noa.hello` |
-| `-32002` | 不明な paneId/windowId | `noa.listPanels` で再取得(パネルは閉じられると消える) |
-| `-32003` | スコープ不足 | `server-scopes` に必要スコープを追加して noa 再起動 + hello で要求 |
-| `-32004` | 実行中にパネル消滅 | リトライ不要、対象喪失 |
-| `-32005` | ペイロード超過 | `maxBytes`/`rowCount` を下げる |
-| `-32006` | protocolVersion major 不一致 | クライアント更新 |
-| `-32601` | 未知メソッド | 接続は維持される(additive-only 互換動作) |
+| `-32001` | Auth failure / method called before hello | Verify the token; send `noa.hello` first |
+| `-32002` | Unknown paneId/windowId | Re-fetch with `noa.listPanels` (panels disappear when closed) |
+| `-32003` | Insufficient scope | Add the required scope to `server-scopes`, restart noa, and request it via hello |
+| `-32004` | Panel disappeared mid-execution | No retry needed, target is gone |
+| `-32005` | Payload too large | Lower `maxBytes`/`rowCount` |
+| `-32006` | protocolVersion major mismatch | Update the client |
+| `-32601` | Unknown method | Connection is kept alive (additive-only compatible behavior) |
 
-## 6. 運用上の注意
+## 6. Operational notes
 
-- **露出範囲**: 既定は `127.0.0.1` 限定 bind。`server-bind`(例 `0.0.0.0`)で LAN 直 bind への opt-in が可能(v2、本節冒頭「LAN 公開手順」参照)——ただし TLS は依然として無いため平文通信になる点は変わらない。信頼できないネットワークからのリモート(iOS 等)アクセスは、LAN bind を使わず従来どおり SSH ポートフォワード / Tailscale 等のトンネル経由で到達させること。
-- **変異系スコープは opt-in**: 自動化エージェントに渡すトークンの権限は `server-scopes` で最小化する(閲覧のみなら `read` のまま)。
-- **ミューテーションのタイムアウト**: focus/newTab/split/close/sendText は main thread 往復で実行され、2 秒でタイムアウト(Internal error)。**タイムアウト後も遅延実行される可能性がある**(at-least-once)。エラー時に盲目的リトライすると二重実行になり得る点に注意。
-- **性能**: 端末側はクライアントを待たない設計(有界 try_send + drop-oldest)。stall したクライアントは通知を欠落する(`dropped:true`)だけで描画・pty には影響しない。
-- **接続上限**: 同時 32 接続。超過分は即クローズ。1 メッセージ 1MiB / 1 フレーム 256KiB 上限。購読上限 16/接続(`noa.subscribe` 超過は接続を切らず `-32005`)。
-- **config reload での反映**: `server-enable`/`server-port`/`server-bind`/`server-token`/`server-scopes` の変更は config ファイル書き換え(500ms ポーリング)で即座に反映される — サーバーを再起動(既存接続は ~50ms 以内に自己終了)し、新しい設定で再バインドする。無効化した場合はそのまま起動しない。それ以外のキー(server 系以外)は再起動しない。broadcaster はアプリのライフタイムで 1 つだけ保持され、サーバー再起動をまたいで使い回されるため、再起動より前に spawn 済みのペインの出力プッシュも、再起動後の `noa.output` 購読者へ引き続き届く(ペインの開き直しは不要)。**サーバーがずっと無効だった状態から `server-enable` を有効化した場合も同様**: 既に開いていたペインは無効な間もそれぞれ出力プッシュ用のタップを保持しており(タップの有無ではなく購読者の有無でゲートされる)、有効化後にクライアントが `noa.subscribe` で `output` を購読すれば、その場で開き直しなしに配信対象になる。
-- **Quick Terminal は非対象**: サイドバー除外と同じ理由で、Quick Terminal のペインは `noa.listPanels` にも出力プッシュにも現れない(v1 の意図的な仕様)。
-- **closePane は確認をスキップする**: `noa.closePane` は `control` スコープ = 認可済み自動化とみなし、実行中プロセスがあっても GUI の確認ダイアログを出さず即座にペインを閉じる(cmd+w 等の通常操作が出す確認ダイアログとは異なる)。誤ったペイン id を渡すと確認なしで作業中プロセスごと閉じるため、自動化側で対象 id の妥当性を確認してから呼ぶこと。
+- **Exposure scope**: bound to `127.0.0.1` only by default. `server-bind` (e.g. `0.0.0.0`) allows
+  opting into a direct LAN bind (v2, see "LAN exposure procedure" at the start of this section) — but
+  note that there is still no TLS, so communication remains plaintext. For remote access from an
+  untrusted network (e.g. iOS), continue to reach it via an SSH port forward / Tailscale / similar
+  tunnel rather than a LAN bind.
+- **Mutating scopes are opt-in**: minimize the permissions of tokens handed to automation agents via
+  `server-scopes` (keep `read` only if just browsing).
+- **Mutation timeouts**: focus/newTab/split/close/sendText execute via a main-thread round trip and time
+  out after 2 seconds (Internal error). **They may still execute with delay after the timeout**
+  (at-least-once). Blindly retrying on error can result in double execution.
+- **Performance**: the terminal side is designed to never block on a client (bounded try_send +
+  drop-oldest). A stalled client only misses notifications (`dropped:true`) — it does not affect
+  rendering or the pty.
+- **Connection limits**: 32 concurrent connections. Excess connections are closed immediately. 1MiB per
+  message / 256KiB per frame cap. 16 subscriptions per connection (exceeding `noa.subscribe` returns
+  `-32005` without closing the connection).
+- **Effect of config reload**: changes to `server-enable`/`server-port`/`server-bind`/`server-token`/
+  `server-scopes` take effect immediately on config file rewrite (500ms polling) — the server restarts
+  (existing connections self-terminate within ~50ms) and rebinds with the new settings. If disabled, it
+  simply does not start. Other (non-server) keys do not trigger a restart. The broadcaster is held once
+  for the app's lifetime and reused across server restarts, so output pushes for panes spawned before a
+  restart still reach `noa.output` subscribers after the restart (no need to reopen the pane).
+  **The same applies when enabling `server-enable` after the server had been disabled the whole time**:
+  already-open panes keep their output-push tap even while disabled (gating is by subscriber presence,
+  not tap presence), so once enabled, a client subscribing to `output` via `noa.subscribe` starts
+  receiving delivery immediately without reopening the pane.
+- **Quick Terminal is excluded**: for the same reason it's excluded from the sidebar, Quick Terminal
+  panes never appear in `noa.listPanels` or in output pushes (an intentional v1 spec).
+- **closePane skips confirmation**: `noa.closePane` treats the `control` scope as authorized automation
+  and closes the pane immediately without the GUI confirmation dialog, even if a process is running
+  (unlike the confirmation dialog shown by normal operations like cmd+w). Passing the wrong pane id
+  closes it — and any running process — without confirmation, so validate the target id on the
+  automation side before calling it.
 
-## 7. トラブルシューティング
+## 7. Troubleshooting
 
-| 症状 | 確認 |
+| Symptom | Check |
 |------|------|
-| ポートが開かない | `server-enable` が true か / ログに `noa-ipc: failed to bind` がないか / `lsof -iTCP:61771` |
-| 接続即切断 | メッセージ/フレームサイズ上限(1MiB/256KiB)超過、接続数 32 超過、または `noa.hello` を接続から 10 秒以内に完了していない(handshake 自体は 5 秒期限) |
-| 全メソッドが -32001 | `noa.hello` を先に送っているか / トークンがファイルと一致するか(`server-token` 設定時はそちらが優先) |
-| sendText が -32003 | `server-scopes` に `input` が明示列挙されているか(`control` では不可) |
-| stateChanged が来ない | `subscribe` の `events` に `state_changed` を含めたか / busy・attention・name 変化は即時、cwd・preview 変化は最大 500ms 遅延 |
-| LAN から繋がらない | `server-bind` がまだ `127.0.0.1`(既定)のままになっていないか(§1「LAN 公開手順」参照)/ macOS のファイアウォールが接続をブロックしていないか(システム設定 → ネットワーク → ファイアウォール、または `noa` アプリの着信接続許可を確認) |
-| 開発時: テストが PermissionDenied | `cargo test -p noa-ipc` の TCP テストはサンドボックス内では loopback bind 不可 → サンドボックス無効で実行(noa-pty と同様) |
+| Port doesn't open | Is `server-enable` true? / does the log show `noa-ipc: failed to bind`? / `lsof -iTCP:61771` |
+| Connection closes immediately | Message/frame size cap exceeded (1MiB/256KiB), connection count exceeds 32, or `noa.hello` wasn't completed within 10 seconds of connecting (the handshake itself has a 5-second deadline) |
+| All methods return -32001 | Is `noa.hello` sent first? / does the token match the file? (if `server-token` is set, it takes priority) |
+| sendText returns -32003 | Is `input` explicitly listed in `server-scopes`? (`control` is not sufficient) |
+| stateChanged never arrives | Does `subscribe`'s `events` include `state_changed`? / busy, attention, and name changes are immediate; cwd and preview changes can lag up to 500ms |
+| Can't connect from the LAN | Is `server-bind` still `127.0.0.1` (the default)? (see "LAN exposure procedure" in §1) / is the macOS firewall blocking the connection? (check System Settings → Network → Firewall, or allow incoming connections for the `noa` app) |
+| During development: tests fail with PermissionDenied | The TCP tests in `cargo test -p noa-ipc` cannot bind loopback inside the sandbox → run with the sandbox disabled (same as noa-pty) |
 
-## 8. 動作確認スモーク(手動)
+## 8. Manual smoke test
 
 ```sh
-# 1. config に server-enable=true を追記して noa を起動
-lsof -nP -iTCP:61771 -sTCP:LISTEN                      # LISTEN 確認
+# 1. Add server-enable=true to the config and start noa
+lsof -nP -iTCP:61771 -sTCP:LISTEN                      # confirm LISTEN
 TOKEN=$(cat ~/.config/noa/server-token)
 websocat ws://127.0.0.1:61771/ <<EOF
 {"jsonrpc":"2.0","id":1,"method":"noa.hello","params":{"protocolVersion":1,"token":"$TOKEN","scopes":["read"]}}
@@ -176,4 +218,4 @@ websocat ws://127.0.0.1:61771/ <<EOF
 EOF
 ```
 
-`server-enable = false` に戻して再起動 → `lsof` で LISTEN が消えることも確認(FR-1)。
+Set `server-enable = false` again and restart → also confirm that LISTEN disappears from `lsof` (FR-1).

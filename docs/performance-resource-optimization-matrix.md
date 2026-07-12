@@ -1,27 +1,29 @@
-# CPU/メモリ改善候補マトリックス
+# CPU/Memory Optimization Candidate Matrix
 
 ## Title
 
-`noa` CPU/メモリ改善候補マトリックス
+`noa` CPU/Memory Optimization Candidate Matrix
 
 ## Purpose
 
-CPU使用率・メモリ使用率の改善候補を、期待効果、影響範囲、実装リスクで
-並べ、最初に実測・実装する対象を選びやすくする。
+Rank CPU/memory usage optimization candidates by expected payoff, blast
+radius, and implementation risk, to make it easy to pick what to measure
+and implement first.
 
 ## Target
 
-`noa-app`, `noa-grid`, `noa-render`, `noa-pty`, `noa-font` を触る
-メンテナ。
+Maintainers who touch `noa-app`, `noa-grid`, `noa-render`, `noa-pty`,
+`noa-font`.
 
 ## Format
 
-Mermaid `quadrantChart`、Markdown 表、ASCII fallback。
+Mermaid `quadrantChart`, Markdown table, ASCII fallback.
 
 ## Abstraction
 
-プロファイル取得前の計画ビュー。定量値はソース構造と既知定数からの概算で、
-実測値ではない。
+This is a planning view produced before profiling. The quantitative
+values are estimates derived from source structure and known constants,
+not measured values.
 
 ## Diagram Code
 
@@ -46,180 +48,238 @@ quadrantChart
 ## ASCII Fallback
 
 ```text
-期待効果
-高    | [1] カーソル点滅gate       [2] dirty行snapshot copy       [7] Cell layout縮小
-      | [4] PTY reader buffer再利用 [3] overview peek再利用        [6] occluded surface解放
-中    | [5] process poll backoff
-低    |
+Expected payoff
+High  | [1] Cursor blink gate       [2] Dirty-row snapshot copy      [7] Cell layout shrink
+      | [4] PTY reader buffer reuse [3] Overview peek reuse          [6] Occluded surface release
+Mid   | [5] Process poll backoff
+Low   |
       +------------------------------------------------------------------------------------------
-        低リスク                         中リスク                         高リスク
+        Low risk                        Medium risk                      High risk
 ```
 
 ## Legend
 
-| ID | 候補 |
+| ID | Candidate |
 | --- | --- |
-| 1 | OS focus / occlusion によるカーソル点滅 gate |
-| 2 | dirty 行だけの visible snapshot copy |
-| 3 | overview `FrameSnapshot::peek` の再利用バッファ化 |
-| 4 | PTY reader の buffer reuse / pooling |
-| 5 | foreground process polling の backoff |
-| 6 | occluded window surface の release / unconfigure |
+| 1 | Cursor blink gate driven by OS focus / occlusion |
+| 2 | Visible snapshot copy limited to dirty rows only |
+| 3 | Reusable buffer for overview `FrameSnapshot::peek` |
+| 4 | PTY reader buffer reuse / pooling |
+| 5 | Backoff for foreground process polling |
+| 6 | Release / unconfigure occluded window surfaces |
 | 7 | `Cell` layout compaction |
 
-リスク尺度:
+Risk scale:
 
-- 低: 局所変更で、挙動契約が明確。テスト範囲も小さい。
-- 中: hot path のデータフローや cache 挙動を変える。焦点を絞ったテストが必要。
-- 高: 表現、所有権、GPU lifecycle、または広い不変条件を変える。
+- Low: A localized change with a clear behavioral contract. Small test surface.
+- Medium: Changes hot-path data flow or cache behavior. Needs focused testing.
+- High: Changes representation, ownership, GPU lifecycle, or a wide invariant.
 
-効果尺度:
+Payoff scale:
 
-- 高: idle/background CPU、大量出力CPU、GPUメモリ、memory bandwidth のいずれかに
-  目に見える影響が出る可能性が高い。
-- 中: workload 依存だが、狙った scenario では測定可能。
-- 低: 上位候補のボトルネックを否定した後で扱う程度。
+- High: Likely to have a visible impact on at least one of idle/background
+  CPU, high-volume-output CPU, GPU memory, or memory bandwidth.
+- Medium: Workload-dependent, but measurable in a targeted scenario.
+- Low: Worth addressing only after ruling out higher-priority bottlenecks.
 
 ## Matrix
 
-| ID | 項目 | 効果: 定量 | 効果: 定性 | 影響範囲 | リスク |
+| ID | Item | Effect: Quantitative | Effect: Qualitative | Blast Radius | Risk |
 | --- | --- | --- | --- | --- | --- |
-| 1 | OS focus が無い状態でも cursor blink が継続する | sticky focused window あたり最大 600ms ごとに 1 wake/redraw request。約 1.67Hz。terminal lock と GPU present が乗る可能性がある。 | background/idle 時の無駄な wake と描画を消せる。最も低リスクな CPU 改善候補。 | `noa-app` timer loop と focused pane cursor redraw。 | 低。unfocused pane の hollow cursor と、focus/input 復帰時の blink 再開を保つ必要がある。 |
-| 2 | visible snapshot が clean 行も毎 frame 全コピーする | 200 x 50 grid、`Cell <= 64B` なら live cell copy は pane/snapshot あたり約 640KiB。row/vector overhead を含めるとさらに増える。複数 pane や高 redraw rate で memory bandwidth 圧になる。 | 変更行が少ない frame の terminal lock 時間と steady memcpy を減らせる。 | `noa-grid::Screen`, `noa-render::FrameSnapshot`, renderer row-cache invalidation。 | 中。scrollback viewport、resize、row-base shift、selection/search invalidation、初回 snapshot を壊さない設計が必要。 |
-| 3 | overview `FrameSnapshot::peek` が visible rows を deep clone する | ID 2 と同じ visible-grid 規模の copy が overview publish ごとに発生。overview visible かつ tile throttle 10Hz で制限される。 | Session Overview を開いたまま active output するケースの lock time と allocation/copy cost を下げられる。 | `noa-app` IO thread overview publish path と `noa-render::FrameSnapshot::peek`。 | 中。`Arc<FrameSnapshot>` publish-slot semantics があるため、単純な in-place mutation は危険。scratch/double-buffer 所有権が必要になりそう。 |
-| 4 | PTY reader が read ごとに `Box<[u8]>` を確保する | read ごとに最大 64KiB を allocate/copy。PTY event queue は 1024 events で bounded なので、queued payload は概算で最大 64MiB + overhead。 | bulk output 時の allocator churn を減らし、throughput 改善も期待できる。 | `noa-pty` reader と `PtyEvent::Data` ownership model。API を保てれば downstream IO thread は小変更で済む。 | 中低。pooling は bounded にしないと burst 後に 64KiB buffer を多数保持して逆効果になり得る。 |
-| 5 | foreground process name polling が固定 1秒間隔で走る | pane あたり約 1 probe/sec。50 panes なら idle でも約 50 foreground-process polls/sec。 | 多 pane idle session の wakeup/syscall を減らせる。 | `noa-app::branch_poll` worker、session metadata、agent-bell process classification。 | 中。polling は意図的に sidebar visibility で止めていない。focus、output、process change、pane lifecycle で backoff reset が必要。 |
-| 6 | occluded window が configured surface を保持し続ける | 3840 x 2160 RGBA texture は約 31.6MiB。double/triple buffering なら tab あたり概算 63-95MiB 級。ただし実際の Metal/wgpu residency は要測定。 | 高解像度・多 tab 利用で GPU memory footprint を減らせる可能性がある。 | `WindowState` surface lifecycle、resize/reconfigure path、macOS tab occlusion、overview host assumptions。 | 高。wgpu 27 は public API として明確な `Surface::unconfigure` が見当たらない。`Option<Surface>` 化や recreate/configure sequencing が必要になり得る。 |
-| 7 | `Cell` が combining text と hyperlink index を広い inline layout で持つ | 64B から 48B 程度に縮められれば live cell あたり 16B 削減。200 x 50 grid で live grid または snapshot copy あたり約 160KiB 削減。pane/snapshot 数に乗算で効く。packed scrollback は既に 8B/cell なので主対象外。 | hot terminal state と snapshot copy 全体の retained size を構造的に下げられる。 | `noa-grid::Cell`、row clone/reuse、renderer/search/url/scrollback materialization。 | 高。`String` は現在 `clone_from` で buffer reuse できる。`Option<Box<str>>` は size を下げても churn を増やす可能性がある。`Option<u32>` は niche 型、例: `Option<NonZeroU32>`、でないと期待通り詰まらない可能性がある。 |
+| 1 | Cursor blink keeps running even without OS focus | Up to 1 wake/redraw request every 600ms per sticky-focused window, roughly 1.67Hz. This can carry a terminal lock and a GPU present along with it. | Removes wasted wakes and redraws during background/idle time. The lowest-risk CPU optimization candidate. | `noa-app` timer loop and focused-pane cursor redraw. | Low. Must preserve the hollow cursor for unfocused panes and resume blinking on focus/input return. |
+| 2 | The visible snapshot fully copies clean rows every frame | With a 200 x 50 grid and `Cell <= 64B`, the live cell copy is roughly 640KiB per pane/snapshot. Row/vector overhead adds more on top. Becomes memory-bandwidth pressure with multiple panes or a high redraw rate. | Reduces terminal-lock hold time and steady-state memcpy on frames with few changed rows. | `noa-grid::Screen`, `noa-render::FrameSnapshot`, renderer row-cache invalidation. | Medium. Must not break scrollback viewport, resize, row-base shift, selection/search invalidation, or the initial snapshot. |
+| 3 | Overview `FrameSnapshot::peek` deep-clones visible rows | Same visible-grid-scale copy as ID 2, happening on every overview publish. Bounded by overview visibility and a 10Hz tile throttle. | Lowers lock time and allocation/copy cost while Session Overview stays open during active output. | `noa-app` IO thread overview publish path and `noa-render::FrameSnapshot::peek`. | Medium. Publish-slot `Arc<FrameSnapshot>` ownership semantics make naive in-place mutation risky; a scratch/double-buffer ownership model is likely needed. |
+| 4 | PTY reader allocates a `Box<[u8]>` on every read | Up to 64KiB allocated/copied per read. The PTY event queue is bounded at 1024 events, so queued payload is roughly bounded at 64MiB + overhead at most. | Reduces allocator churn on bulk output and could also improve throughput. | `noa-pty` reader and `PtyEvent::Data` ownership model. Downstream IO thread changes should be small if the API is preserved. | Medium-low. Pooling must be bounded, or it could hold onto many 64KiB buffers after a burst and become counterproductive. |
+| 5 | Foreground process name polling runs on a fixed 1-second interval | Roughly 1 probe/sec per pane. With 50 panes, that's about 50 foreground-process polls/sec even at idle. | Reduces wakeups/syscalls for idle sessions with many panes. | `noa-app::branch_poll` worker, session metadata, agent-bell process classification. | Medium. Polling is intentionally not stopped by sidebar visibility. Backoff must reset on focus, output, process change, and pane lifecycle events. |
+| 6 | Occluded windows keep holding a configured surface | A 3840 x 2160 RGBA texture is about 31.6MiB. With double/triple buffering that's roughly 63-95MiB class per tab, though actual Metal/wgpu residency needs measurement. | Could reduce GPU memory footprint for high-resolution, multi-tab usage. | `WindowState` surface lifecycle, resize/reconfigure path, macOS tab occlusion, overview host assumptions. | High. wgpu 27 has no clear public `Surface::unconfigure` API. May require an `Option<Surface>` model or recreate/configure sequencing. |
+| 7 | `Cell` holds combining text and hyperlink index in a wide inline layout | Shrinking from 64B to roughly 48B saves 16B per live cell. On a 200 x 50 grid that's about 160KiB saved per live grid or snapshot copy, multiplied across pane/snapshot count. Packed scrollback is already 8B/cell, so it's mostly out of scope. | Structurally lowers retained size across hot terminal state and snapshot copies. | `noa-grid::Cell`, row clone/reuse, renderer/search/url/scrollback materialization. | High. `String` currently supports buffer reuse via `clone_from`. `Option<Box<str>>` shrinks size but may increase churn. `Option<u32>` needs a niche type — e.g. `Option<NonZeroU32>` — to pack as expected. |
 
 ## Recommended Order
 
-1. ID 1 を最初に実装・検証する。
-   - 局所的で、background idle CPU への仮説が明確。
-   - 受け入れ指標: backgrounded app が cursor blink だけの理由で
-     blink interval ごとに wake しない。
+1. Implement and validate ID 1 first.
+   - Localized, with a clear hypothesis about background idle CPU.
+   - Acceptance criterion: a backgrounded app does not wake every blink
+     interval solely for cursor blink.
 
-2. 次に ID 2 と ID 4 を測定する。
-   - ID 2 は render path の memory bandwidth と lock hold time が対象。
-   - ID 4 は bulk PTY output の allocator churn が対象。
+2. Next, measure ID 2 and ID 4.
+   - ID 2 targets render-path memory bandwidth and lock hold time.
+   - ID 4 targets allocator churn on bulk PTY output.
 
-3. Session Overview を active output 中によく使うなら ID 3 の優先度を上げる。
-   - そうでなければ ID 2 の後でよい。どちらも snapshot copy に触るが、
-     ID 2 は主描画経路に効く。
+3. Raise ID 3's priority if Session Overview is commonly used during
+   active output.
+   - Otherwise it can follow ID 2. Both touch snapshot copying, but
+     ID 2 affects the primary rendering path.
 
-4. ID 5 は多 pane idle 最適化として扱う。
-   - 1, 10, 50 pane の idle scenario で検証する。
+4. Treat ID 5 as a many-pane idle optimization.
+   - Validate against idle scenarios with 1, 10, and 50 panes.
 
-5. ID 6 と ID 7 は quick fix ではなく、実測付き design change として扱う。
-   - どちらも memory 効果は大きい可能性があるが、lifecycle または
-     data representation の不変条件に触る。
+5. Treat ID 6 and ID 7 as design changes requiring measurement, not
+   quick fixes.
+   - Both may have a large memory payoff, but touch lifecycle or data
+     representation invariants.
 
-## 対応チェックリスト
+## Implementation Checklist
 
-### 共通準備
+### Common Prep
 
-- [x] `IMPL-PERF-000`: 対象 workload を決める。
-  - 例: background idle、bulk PTY output、Session Overview + active output、
-    many-pane idle、高解像度多 tab。
-  - `docs/performance-measurements.md` に W1-W7 として定義した。
-- [ ] `IMPL-PERF-001`: 変更前 baseline を保存する。
-  - CPU: wakeup 数、redraw request 数、frame time、main-thread CPU。
-  - メモリ: RSS、GPU memory、allocation count、allocation bytes。
-- [x] `IMPL-PERF-002`: 変更ごとの測定コマンド、手順、結果メモの置き場所を決める。
-  - 測定手順と結果メモの追記先は `docs/performance-measurements.md`。
-- [x] `IMPL-PERF-003`: `cargo fmt --all` と対象 crate の test 範囲を確認する。
+- [x] `IMPL-PERF-000`: Decide on target workloads.
+  - E.g. background idle, bulk PTY output, Session Overview + active
+    output, many-pane idle, high-resolution multi-tab.
+  - Defined as W1-W7 in `docs/performance-measurements.md`.
+- [ ] `IMPL-PERF-001`: Save a pre-change baseline.
+  - CPU: wakeup count, redraw request count, frame time, main-thread CPU.
+  - Memory: RSS, GPU memory, allocation count, allocation bytes.
+- [x] `IMPL-PERF-002`: Decide where to record the measurement command,
+  procedure, and results for each change.
+  - Measurement procedures and results go into
+    `docs/performance-measurements.md`.
+- [x] `IMPL-PERF-003`: Verify `cargo fmt --all` and the relevant crate's
+  test scope.
 
 ### ID 1: Cursor blink OS focus gate
 
-- [ ] `IMPL-PERF-101`: `tick_cursor_blink` の現状 baseline を取る。
-  - backgrounded app で 600ms 周期の wake/redraw が残るか確認する。
-- [x] `IMPL-PERF-102`: `focused_cursor_wants_blink` に `os_focused` と `occluded` の gate を追加する。
-- [x] `IMPL-PERF-103`: OS focus 復帰、window focus 切替、occluded 復帰で cursor 表示が破綻しないことを確認する。
-- [ ] `IMPL-PERF-104`: backgrounded app が cursor blink だけで wake しないことを確認する。
-- [x] `IMPL-PERF-105`: 関連 unit test を追加または既存 test を更新する。
+- [ ] `IMPL-PERF-101`: Capture the current baseline for
+  `tick_cursor_blink`.
+  - Confirm whether the 600ms-cycle wake/redraw persists for a
+    backgrounded app.
+- [x] `IMPL-PERF-102`: Add `os_focused` and `occluded` gates to
+  `focused_cursor_wants_blink`.
+- [x] `IMPL-PERF-103`: Confirm cursor display doesn't break across OS
+  focus return, window focus switching, and occlusion return.
+- [ ] `IMPL-PERF-104`: Confirm a backgrounded app doesn't wake solely
+  for cursor blink.
+- [x] `IMPL-PERF-105`: Add or update relevant unit tests.
 
 ### ID 2: Dirty-row-only visible snapshot copy
 
-- [ ] `IMPL-PERF-201`: 1行更新、連続 scroll、selection/search ありの baseline を取る。
-- [x] `IMPL-PERF-202`: `FrameSnapshot` の rows reuse 前提と row-base 変化時の invalidation 条件を整理する。
-- [x] `IMPL-PERF-203`: clean 行 copy を避ける最小設計を決める。
-  - 前回 snapshot row を保持するか、dirty mask と renderer cache だけで十分かを判断する。
-- [x] `IMPL-PERF-204`: scrollback viewport、resize、alt screen、search/selection の回帰 test を追加する。
-- [ ] `IMPL-PERF-205`: terminal lock hold time と copy bytes が baseline より下がることを確認する。
+- [ ] `IMPL-PERF-201`: Capture baselines for single-row updates,
+  continuous scroll, and with selection/search active.
+- [x] `IMPL-PERF-202`: Clarify `FrameSnapshot`'s row-reuse assumptions
+  and the invalidation conditions on row-base changes.
+- [x] `IMPL-PERF-203`: Decide the minimal design that avoids copying
+  clean rows.
+  - Decide whether to keep the previous snapshot's rows, or whether a
+    dirty mask plus renderer cache is sufficient.
+- [x] `IMPL-PERF-204`: Add regression tests for scrollback viewport,
+  resize, alt screen, and search/selection.
+- [ ] `IMPL-PERF-205`: Confirm terminal-lock hold time and copy bytes
+  drop below baseline.
 
 ### ID 3: Overview `FrameSnapshot::peek` reuse
 
-- [ ] `IMPL-PERF-301`: Session Overview visible + active output の baseline を取る。
-- [x] `IMPL-PERF-302`: publish-slot の `Arc<FrameSnapshot>` 所有権を壊さない reuse 方式を選ぶ。
-  - 候補: io thread 内 scratch buffer、double buffer、または `peek_into` + publish clone 境界。
-- [x] `IMPL-PERF-303`: overview が source tab を直接 lock しない要件を維持する。
-- [x] `IMPL-PERF-304`: overview tile 更新、occluded source tab、trailing flush の test を通す。
-- [ ] `IMPL-PERF-305`: overview publish 時の allocation/copy が baseline より下がることを確認する。
+- [ ] `IMPL-PERF-301`: Capture the baseline for Session Overview
+  visible + active output.
+- [x] `IMPL-PERF-302`: Choose a reuse approach that doesn't break the
+  publish-slot `Arc<FrameSnapshot>` ownership.
+  - Candidates: an in-thread scratch buffer on the IO thread, double
+    buffering, or a `peek_into` + publish-clone boundary.
+- [x] `IMPL-PERF-303`: Preserve the requirement that overview never
+  locks the source tab directly.
+- [x] `IMPL-PERF-304`: Pass tests for overview tile updates, occluded
+  source tab, and trailing flush.
+- [ ] `IMPL-PERF-305`: Confirm allocation/copy on overview publish drops
+  below baseline.
 
 ### ID 4: PTY reader buffer reuse / pooling
 
-- [ ] `IMPL-PERF-401`: bulk output で `Box<[u8]>` allocation count/bytes の baseline を取る。
-- [x] `IMPL-PERF-402`: buffer reuse の上限を決める。
-  - burst 後に 64KiB buffer が大量常駐しないことを完了条件に含める。
-- [x] `IMPL-PERF-403`: `PtyEvent::Data` の所有権 model を維持するか、変更範囲を明示する。
-- [x] `IMPL-PERF-404`: EOF/error、receiver dropped、bounded queue full の挙動を確認する。
-- [ ] `IMPL-PERF-405`: bulk output throughput と allocation churn が baseline より改善することを確認する。
+- [ ] `IMPL-PERF-401`: Capture baseline `Box<[u8]>` allocation
+  count/bytes for bulk output.
+- [x] `IMPL-PERF-402`: Decide the upper bound for buffer reuse.
+  - Completion criterion includes not retaining many 64KiB buffers
+    after a burst.
+- [x] `IMPL-PERF-403`: Preserve the `PtyEvent::Data` ownership model, or
+  clearly document the scope of any change.
+- [x] `IMPL-PERF-404`: Confirm behavior for EOF/error, receiver
+  dropped, and bounded-queue-full.
+- [ ] `IMPL-PERF-405`: Confirm bulk-output throughput and allocation
+  churn improve over baseline.
 
 ### ID 5: Foreground process polling backoff
 
-- [ ] `IMPL-PERF-501`: 1/10/50 pane idle で poll 回数、CPU、wakeup の baseline を取る。
-- [x] `IMPL-PERF-502`: process name が安定した pane の backoff policy を決める。
-  - reset trigger: process name 変化、pane spawn/exit、probe register。
-- [x] `IMPL-PERF-503`: agent-bell / attention escalation の遅延許容を明記する。
-- [x] `IMPL-PERF-504`: process 表示更新と attention 判定の回帰 test を追加する。
-- [ ] `IMPL-PERF-505`: many-pane idle で poll 回数と wakeup が baseline より下がることを確認する。
-  - 2026-07-09: `process_poll` unit test と W5 log で stable poll count は 75% 減を確認。wakeup/sec は実機 idle run 待ち。
+- [ ] `IMPL-PERF-501`: Capture baseline poll count, CPU, and wakeups for
+  1/10/50-pane idle.
+- [x] `IMPL-PERF-502`: Decide the backoff policy for panes with a
+  stable process name.
+  - Reset triggers: process name change, pane spawn/exit, probe
+    register.
+- [x] `IMPL-PERF-503`: Document the acceptable delay for agent-bell /
+  attention escalation.
+- [x] `IMPL-PERF-504`: Add regression tests for process display updates
+  and attention determination.
+- [ ] `IMPL-PERF-505`: Confirm poll count and wakeups drop below
+  baseline for many-pane idle.
+  - 2026-07-09: Confirmed a 75% reduction in stable poll count via the
+    `process_poll` unit test and the W5 log. Wakeups/sec still awaits an
+    on-device idle run.
 
 ### ID 6: Occluded window surface release
 
-- [ ] `IMPL-PERF-601`: 高解像度 + 多 tab で GPU memory baseline を取る。
-- [x] `IMPL-PERF-602`: wgpu 27 の public API で surface を安全に解放・再構成できる方式を確認する。
-  - `Surface::unconfigure` ではなく、occluded 中だけ `Surface::configure` へ渡す effective config を 1x1 に縮める。
-- [x] `IMPL-PERF-603`: `WindowState` の `surface` / `surface_config` / `renderer` lifecycle 変更範囲を設計する。
-  - `surface_config` は論理的な最新 window size として保持し、実際の configure size だけ occluded gate で切り替える。
-- [ ] `IMPL-PERF-604`: occluded/unoccluded、resize、scale factor change、overview host の回帰 scenario を確認する。
-  - 2026-07-09: W6 log に unit-level occlusion config / overview redraw gate 確認を保存。実機 reveal/resize/scale factor/overview visual run は未実施。
-- [ ] `IMPL-PERF-605`: 再表示 latency と GPU memory 削減量の tradeoff を記録する。
+- [ ] `IMPL-PERF-601`: Capture the GPU memory baseline for high
+  resolution + many tabs.
+- [x] `IMPL-PERF-602`: Confirm a way to safely release/reconfigure the
+  surface using wgpu 27's public API.
+  - Instead of `Surface::unconfigure`, shrink the effective config
+    passed to `Surface::configure` to 1x1 only while occluded.
+- [x] `IMPL-PERF-603`: Design the scope of change to `WindowState`'s
+  `surface` / `surface_config` / `renderer` lifecycle.
+  - Keep `surface_config` as the logical latest window size, and only
+    switch the actual configure size via the occlusion gate.
+- [ ] `IMPL-PERF-604`: Confirm regression scenarios for
+  occluded/unoccluded, resize, scale factor change, and overview host.
+  - 2026-07-09: Saved unit-level occlusion config / overview redraw
+    gate confirmation in the W6 log. An on-device
+    reveal/resize/scale-factor/overview visual run has not been done
+    yet.
+- [ ] `IMPL-PERF-605`: Record the tradeoff between reveal latency and
+  GPU memory savings.
 
 ### ID 7: `Cell` layout compaction
 
-- [x] `IMPL-PERF-701`: `std::mem::size_of::<Cell>()` と representative grid/snapshot memory の baseline を取る。
-- [x] `IMPL-PERF-702`: `combining` と `hyperlink` の候補型を比較する。
-  - 例: `String`, `Option<Box<str>>`, small inline buffer, `Option<NonZeroU32>`。
-- [x] `IMPL-PERF-703`: `clone_from` による combining buffer reuse を失わないことを確認する。
-  - `combining: String` は維持し、`clone_from` / `set_from` の buffer reuse を失わない設計にした。
-- [x] `IMPL-PERF-704`: wide cell、combining、hyperlink、scrollback materialization、search/url の回帰 test を追加する。
-- [ ] `IMPL-PERF-705`: retained size が下がり、主要 workload の CPU/alloc が悪化しないことを確認する。
-  - 2026-07-09: `docs/performance-measurements.md` に W7 quick probe を保存。`Cell` は 64B → 48B、bulk print は同等。scrollback push が低く出たため、完了扱いにはせず追加計測待ち。
+- [x] `IMPL-PERF-701`: Capture the baseline for
+  `std::mem::size_of::<Cell>()` and representative grid/snapshot memory.
+- [x] `IMPL-PERF-702`: Compare candidate types for `combining` and
+  `hyperlink`.
+  - E.g. `String`, `Option<Box<str>>`, a small inline buffer,
+    `Option<NonZeroU32>`.
+- [x] `IMPL-PERF-703`: Confirm combining-buffer reuse via `clone_from`
+  isn't lost.
+  - Kept `combining: String` and designed to preserve `clone_from` /
+    `set_from` buffer reuse.
+- [x] `IMPL-PERF-704`: Add regression tests for wide cells, combining,
+  hyperlink, scrollback materialization, and search/url.
+- [ ] `IMPL-PERF-705`: Confirm retained size drops without regressing
+  CPU/alloc on major workloads.
+  - 2026-07-09: Saved the W7 quick probe in
+    `docs/performance-measurements.md`. `Cell` went from 64B to 48B,
+    bulk print stayed roughly equivalent. Scrollback push came out
+    lower, so this is not marked complete pending further measurement.
 
 ## Explanation
 
-最初の候補として最も強いのは ID 1。既存の app state は sticky logical focus と
-real OS focus をすでに分けているため、小さな gate で background / occluded 時の
-cursor blink wakeup を避けられる。
+ID 1 is the strongest first candidate. The existing app state already
+separates sticky logical focus from real OS focus, so a small gate
+avoids cursor-blink wakeups while background/occluded.
 
-ID 2 と ID 3 はどちらも row snapshot copy cost を扱う。ID 2 は通常の terminal
-draw path に効くため、影響範囲はより広い。ID 3 は Session Overview が visible
-のとき重要で、primary path の recycled row buffer を使わず `peek` が deep clone
-している点が焦点。
+ID 2 and ID 3 both deal with row-snapshot copy cost. ID 2 affects the
+normal terminal draw path, so its blast radius is broader. ID 3 matters
+when Session Overview is visible; the key issue is that `peek`
+deep-clones instead of using the primary path's recycled row buffer.
 
-ID 4 は rendering と独立しており、bulk PTY output で測りやすい。event queue は
-bounded なので queued payload の上限はあるが、sustained output では per-read
-allocation が allocator sample に出る可能性が高い。
+ID 4 is independent of rendering and easy to measure with bulk PTY
+output. The event queue is bounded, so queued payload has a ceiling,
+but per-read allocation is likely to show up in allocator samples under
+sustained output.
 
-ID 5 は主に idle wakeup 削減。現在の behavior は意図的で、process state は
-sidebar hidden 時にも session metadata と agent attention に使われるため、
-backoff しても semantics を保つ必要がある。
+ID 5 is mainly about reducing idle wakeups. The current behavior is
+intentional — process state is also used for session metadata and
+agent attention even when the sidebar is hidden — so backoff must
+preserve those semantics.
 
-ID 6 と ID 7 は memory 効果が大きい可能性があるが、変更幅も大きい。ID 6 は
-wgpu surface lifecycle と macOS tab occlusion behavior に制約される。ID 7 は
-基礎データ構造を変えるため、retained size を下げても allocation churn を増やす
-可能性があり、bench が必須。
+ID 6 and ID 7 may have a large memory payoff but also a large change
+footprint. ID 6 is constrained by wgpu surface lifecycle and macOS tab
+occlusion behavior. ID 7 changes a foundational data structure, so
+shrinking retained size could increase allocation churn; benchmarking
+is essential.
 
 ## Sources
 

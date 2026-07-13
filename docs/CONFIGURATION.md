@@ -133,7 +133,8 @@ or fails to decode, a diagnostic is shown and the background image is disabled.
 | `quick-terminal-size` | positive finite decimal, or percentage | `0.4` | Ratio relative to screen height. Clamped to `0.1..=1.0`. e.g. `40%` |
 | `quick-terminal-autohide` | `true`, `false` | `true` | Automatically hide when focus is lost |
 | `sidebar-enabled` | `true`, `false` | `false` | Initial sidebar visibility for new windows |
-| `sidebar-width` | finite decimal `>= 0` | `360` | Sidebar width (points) |
+| `sidebar-width` | finite decimal `200..=600` | `360` | Sidebar width (points) |
+| `sidebar-font-size` | finite decimal `8..=20` | `11.5` | Session sidebar font size (points) |
 | `sidebar-hotkey` | global hotkey chord, or `none` / `off` / `false` | none | System-wide hotkey for the sidebar. An empty value also disables it |
 | `sidebar-preview-lines` | integer `0..=20` | `5` | Number of trailing lines shown in a card. `0` means no preview |
 

@@ -215,6 +215,8 @@ impl App {
             window_padding_y: self.config.window_padding_y.unwrap_or(0.0),
             macos_titlebar_style: self.config.macos_titlebar_style,
             sidebar_preview_lines: self.config.sidebar_preview_lines,
+            sidebar_width: self.config.sidebar_width,
+            sidebar_font_size: self.config.sidebar_font_size,
             quick_terminal_size: quick_terminal_height_fraction(self.config.quick_terminal_size),
             confirm_quit: self.config.confirm_quit,
             font_family,
@@ -574,6 +576,8 @@ impl App {
                 self.apply_live_background_blur(radius, opacity);
             }
             RowEffect::SidebarPreviewLines(lines) => self.apply_live_sidebar_preview_lines(lines),
+            RowEffect::SidebarWidth(width) => self.apply_live_sidebar_width(width),
+            RowEffect::SidebarFontSize(size) => self.apply_live_sidebar_font_size(size),
             RowEffect::CopyServerToken => self.copy_server_token_to_clipboard(),
         }
     }
@@ -711,6 +715,8 @@ impl App {
             );
             self.apply_runtime_font_size(session.window_id, values.font_size);
             self.apply_live_sidebar_preview_lines(values.sidebar_preview_lines);
+            self.apply_live_sidebar_width(values.sidebar_width);
+            self.apply_live_sidebar_font_size(values.sidebar_font_size);
         }
         self.request_window_redraw(session.window_id);
     }
@@ -948,6 +954,8 @@ impl App {
             payload.revert.background_opacity,
         );
         self.apply_live_sidebar_preview_lines(payload.revert.sidebar_preview_lines);
+        self.apply_live_sidebar_width(payload.revert.sidebar_width);
+        self.apply_live_sidebar_font_size(payload.revert.sidebar_font_size);
         self.apply_reloaded_background_image();
 
         for id in commit_redraw_targets(&self.windows) {
@@ -1022,6 +1030,12 @@ impl App {
                 RowDraft::SidebarPreviewLines(v) => {
                     self.apply_live_sidebar_preview_lines(*v);
                 }
+                RowDraft::SidebarWidth(v) => {
+                    self.apply_live_sidebar_width(*v);
+                }
+                RowDraft::SidebarFontSize(v) => {
+                    self.apply_live_sidebar_font_size(*v);
+                }
                 RowDraft::QuickTerminalHeight(_) => {}
                 RowDraft::ConfirmQuit(v) => {
                     self.config.confirm_quit = *v;
@@ -1064,6 +1078,32 @@ impl App {
         self.config.sidebar_preview_lines = lines;
         self.sidebar_preview_lines_gate
             .store(lines, Ordering::Relaxed);
+    }
+
+    /// Sidebar-width live apply: the same relayout a `sidebar-width` config
+    /// reload triggers in `config_reload.rs`.
+    fn apply_live_sidebar_width(&mut self, width: f32) {
+        self.config.sidebar_width = width;
+        self.relayout_all_windows();
+    }
+
+    /// Sidebar-font-size live apply: rebuilds the dedicated sidebar
+    /// `FontGrid` at the new point size (`App::rebuild_sidebar_font`, shared
+    /// with the config-reload path) and relayouts every window — the same
+    /// two steps a `sidebar-font-size` config reload triggers in
+    /// `config_reload.rs`. On a rebuild failure the config value is rolled
+    /// back to `previous` rather than left applied: otherwise the coherent
+    /// zoom (`sidebar_font_zoom()`) would resize the layout while the
+    /// rasterized glyphs stayed at the old size. No terminal-renderer
+    /// `sync_atlas` call is needed here — the sidebar `Renderer` re-syncs its
+    /// atlas from `gpu.sidebar_font` on its next draw.
+    fn apply_live_sidebar_font_size(&mut self, size: f32) {
+        let previous = self.config.sidebar_font_size;
+        self.config.sidebar_font_size = size;
+        if !self.rebuild_sidebar_font(size) {
+            self.config.sidebar_font_size = previous;
+        }
+        self.relayout_all_windows();
     }
 
     /// Apply a cursor-shape change to every live terminal now (R-10:
@@ -1426,6 +1466,8 @@ mod commit_theme_settings_tests {
             window_padding_y: 2.0,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
             sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
+            sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
+            sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
             confirm_quit: true,
             font_family: "Menlo".to_string(),
@@ -1498,6 +1540,8 @@ mod commit_theme_settings_tests {
             background_image_repeat: false,
             background_image_interval_secs: noa_config::DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS,
             sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
+            sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
+            sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
             window_padding_x: 2.0,
             window_padding_y: 2.0,
@@ -1557,6 +1601,8 @@ mod commit_theme_settings_tests {
             window_padding_y: 2.0,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
             sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
+            sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
+            sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
             confirm_quit: true,
             font_family: "Menlo".to_string(),

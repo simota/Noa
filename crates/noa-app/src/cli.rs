@@ -431,6 +431,11 @@ fn show_config_output(config: &StartupConfig) -> String {
     push_line(&mut out, "sidebar-width", &config.sidebar_width.to_string());
     push_line(
         &mut out,
+        "sidebar-font-size",
+        &config.sidebar_font_size.to_string(),
+    );
+    push_line(
+        &mut out,
         "sidebar-hotkey",
         config.sidebar_hotkey.as_deref().unwrap_or(""),
     );
@@ -703,6 +708,7 @@ mod tests {
         assert!(output.contains("quick-terminal-animation-duration = 0.2\n"));
         assert!(output.contains("sidebar-enabled = false\n"));
         assert!(output.contains("sidebar-width = 360\n"));
+        assert!(output.contains("sidebar-font-size = 11.5\n"));
         assert!(output.contains("sidebar-hotkey = \n"));
         assert!(output.contains("sidebar-preview-lines = 5\n"));
         assert!(output.contains("visual-bell = false\n"));
@@ -737,6 +743,7 @@ mod tests {
             quick_terminal_animation_duration: 0.0,
             sidebar_enabled: true,
             sidebar_width: 280.0,
+            sidebar_font_size: 12.5,
             sidebar_hotkey: Some("cmd+shift+s".to_string()),
             sidebar_preview_lines: 4,
             visual_bell: true,
@@ -776,6 +783,7 @@ mod tests {
         assert!(output.contains("quick-terminal-animation-duration = 0\n"));
         assert!(output.contains("sidebar-enabled = true\n"));
         assert!(output.contains("sidebar-width = 280\n"));
+        assert!(output.contains("sidebar-font-size = 12.5\n"));
         assert!(output.contains("sidebar-hotkey = cmd+shift+s\n"));
         assert!(output.contains("sidebar-preview-lines = 4\n"));
         assert!(output.contains("visual-bell = true\n"));

@@ -29,6 +29,8 @@ fn init() -> ThemeSettingsInit {
         window_padding_y: 2.0,
         macos_titlebar_style: MacosTitlebarStyle::Native,
         sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
+        sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
+        sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
         // Matches `noa_config::DEFAULT_QUICK_TERMINAL_SIZE`'s 40% primary —
         // this row only ever edits a plain fraction (see
         // `quick_terminal_height_fraction` at the `App` layer).
@@ -801,6 +803,88 @@ fn sidebar_preview_lines_row_adjusts_clamps_and_commits() {
 }
 
 #[test]
+fn sidebar_width_row_adjusts_clamps_and_commits() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::SidebarWidth);
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::SidebarWidth(370.0));
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::SidebarWidth)].draft,
+        RowDraft::SidebarWidth(370.0)
+    );
+    assert!(!settings.restart_note(SettingsRowKind::SidebarWidth));
+
+    for _ in 0..30 {
+        settings.adjust(1, Instant::now());
+    }
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::SidebarWidth)].draft,
+        RowDraft::SidebarWidth(noa_config::MAX_SIDEBAR_WIDTH)
+    );
+    for _ in 0..50 {
+        settings.adjust(-1, Instant::now());
+    }
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::SidebarWidth)].draft,
+        RowDraft::SidebarWidth(noa_config::MIN_SIDEBAR_WIDTH)
+    );
+
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "sidebar-width"),
+        Some(&(
+            "sidebar-width".to_string(),
+            format!("{}", noa_config::MIN_SIDEBAR_WIDTH)
+        ))
+    );
+}
+
+#[test]
+fn sidebar_font_size_row_adjusts_clamps_and_commits() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::SidebarFontSize);
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::SidebarFontSize(12.0));
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::SidebarFontSize)].draft,
+        RowDraft::SidebarFontSize(12.0)
+    );
+    assert!(!settings.restart_note(SettingsRowKind::SidebarFontSize));
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::SidebarFontSize)]
+            .draft
+            .display_value(),
+        "12.0"
+    );
+
+    for _ in 0..30 {
+        settings.adjust(1, Instant::now());
+    }
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::SidebarFontSize)].draft,
+        RowDraft::SidebarFontSize(noa_config::MAX_SIDEBAR_FONT_SIZE)
+    );
+    for _ in 0..50 {
+        settings.adjust(-1, Instant::now());
+    }
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::SidebarFontSize)].draft,
+        RowDraft::SidebarFontSize(noa_config::MIN_SIDEBAR_FONT_SIZE)
+    );
+
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "sidebar-font-size"),
+        Some(&(
+            "sidebar-font-size".to_string(),
+            format!("{}", noa_config::MIN_SIDEBAR_FONT_SIZE)
+        ))
+    );
+}
+
+#[test]
 fn quick_terminal_height_row_adjusts_clamps_and_commits() {
     let mut settings = ThemeSettings::open(settings_init());
     move_to_row(&mut settings, SettingsRowKind::QuickTerminalHeight);
@@ -1260,6 +1344,14 @@ fn liveness_downgrades_opaque_opacity_and_blur_to_on_launch() {
         settings.liveness(SettingsRowKind::SidebarPreviewLines),
         Liveness::Live
     );
+    assert_eq!(
+        settings.liveness(SettingsRowKind::SidebarWidth),
+        Liveness::Live
+    );
+    assert_eq!(
+        settings.liveness(SettingsRowKind::SidebarFontSize),
+        Liveness::Live
+    );
 }
 
 // AC-16: every row's description is non-empty and distinct from its label.
@@ -1680,6 +1772,14 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
         RowDraft::SidebarPreviewLines(noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES)
     );
     assert_eq!(
+        RowDraft::default_for(SettingsRowKind::SidebarWidth),
+        RowDraft::SidebarWidth(noa_config::DEFAULT_SIDEBAR_WIDTH)
+    );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::SidebarFontSize),
+        RowDraft::SidebarFontSize(noa_config::DEFAULT_SIDEBAR_FONT_SIZE)
+    );
+    assert_eq!(
         RowDraft::default_for(SettingsRowKind::QuickTerminalHeight),
         RowDraft::QuickTerminalHeight(0.4)
     );
@@ -1731,12 +1831,13 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
 // accidental drop of an entry fails loudly instead of silently shrinking
 // the overlay. The server-settings-panel-row addition brings it to 23 (+3),
 // the token-copy action row brings it to 24 (+1), the read-only status row
-// (settings-panel-server-status) brings it to 25 (+1), and the LAN bind-
-// address row (server-bind) brings it to 26 (+1).
+// (settings-panel-server-status) brings it to 25 (+1), the LAN bind-
+// address row (server-bind) brings it to 26 (+1), the sidebar-width row
+// brings it to 27 (+1), and the sidebar-font-size row brings it to 28 (+1).
 #[test]
-fn settings_row_kind_count_is_twenty_six_after_server_bind_row() {
-    assert_eq!(SettingsRowKind::COUNT, 26);
-    assert_eq!(SettingsRowKind::ALL.len(), 26);
+fn settings_row_kind_count_is_twenty_eight_after_sidebar_font_size_row() {
+    assert_eq!(SettingsRowKind::COUNT, 28);
+    assert_eq!(SettingsRowKind::ALL.len(), 28);
 }
 
 // settings-panel-server-status: the status row is read-only (mirrors
@@ -3161,6 +3262,8 @@ fn sample_revert(theme_name: &str) -> RevertValues {
         background_image_repeat: true,
         background_image_interval_secs: 30,
         sidebar_preview_lines: 3,
+        sidebar_width: 360.0,
+        sidebar_font_size: 11.5,
         quick_terminal_size: 0.4,
         window_padding_x: 2.0,
         window_padding_y: 2.0,

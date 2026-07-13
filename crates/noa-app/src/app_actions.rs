@@ -22,6 +22,7 @@ pub(crate) const CONFIG_TEMPLATE: &str = "\
 # font-size = 15
 # sidebar-enabled = true
 # sidebar-width = 360
+# sidebar-font-size = 11.5
 # sidebar-preview-lines = 3
 # confirm-quit = true
 #

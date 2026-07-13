@@ -1232,13 +1232,54 @@ fn sidebar_enabled_and_width_parse_and_default() {
 }
 
 #[test]
-fn sidebar_width_rejects_negative_and_non_numeric() {
-    for value in ["-1", "wide"] {
+fn sidebar_width_rejects_invalid_and_out_of_range() {
+    for value in ["-1", "wide", "100", "700"] {
         let (overrides, diagnostics) = parse_overrides(path(), &format!("sidebar-width = {value}"));
 
         assert_eq!(overrides.sidebar_width, None, "{value:?}");
         assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
         assert!(diagnostics[0].message.contains("sidebar-width"));
+    }
+}
+
+#[test]
+fn sidebar_width_accepts_boundary_values() {
+    for value in ["200", "600"] {
+        let (overrides, diagnostics) = parse_overrides(path(), &format!("sidebar-width = {value}"));
+
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        assert_eq!(
+            overrides.sidebar_width,
+            Some(value.parse().unwrap()),
+            "{value:?}"
+        );
+    }
+}
+
+#[test]
+fn sidebar_font_size_rejects_invalid_and_out_of_range() {
+    for value in ["-1", "big", "7", "21"] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("sidebar-font-size = {value}"));
+
+        assert_eq!(overrides.sidebar_font_size, None, "{value:?}");
+        assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+        assert!(diagnostics[0].message.contains("sidebar-font-size"));
+    }
+}
+
+#[test]
+fn sidebar_font_size_accepts_boundary_values() {
+    for value in ["8", "20", "11.5"] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("sidebar-font-size = {value}"));
+
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+        assert_eq!(
+            overrides.sidebar_font_size,
+            Some(value.parse().unwrap()),
+            "{value:?}"
+        );
     }
 }
 
@@ -1291,6 +1332,7 @@ fn sidebar_hotkey_none_disables_via_empty_sentinel() {
 fn sidebar_keys_are_supported_scalar_keys_for_import() {
     assert!(is_supported_scalar_key("sidebar-enabled"));
     assert!(is_supported_scalar_key("sidebar-width"));
+    assert!(is_supported_scalar_key("sidebar-font-size"));
     assert!(is_supported_scalar_key("sidebar-hotkey"));
     assert!(is_supported_scalar_key("sidebar-preview-lines"));
     assert!(is_supported_scalar_key("auto-approve"));

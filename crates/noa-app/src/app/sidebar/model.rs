@@ -31,7 +31,11 @@ impl App {
         // The sidebar rasterizes with its own dedicated, smaller font, so cell
         // placement uses that font's metrics (not the terminal font's).
         let metrics = gpu.sidebar_font.metrics();
-        let scale = state.window.scale_factor() as f32;
+        // Folds in `sidebar_font_zoom()` so chrome details drawn at this
+        // scale (drop indicator, borders, radii, glyph size) zoom coherently
+        // with the cards laid out by `sidebar_metrics()` — the same factor,
+        // applied at these two choke points only.
+        let scale = state.window.scale_factor() as f32 * self.sidebar_font_zoom();
         let layout_metrics = self.sidebar_metrics(window_id);
         let height = state.window.inner_size().height.max(1);
         let band = PaneRectApp::new(0, 0, inset, height);

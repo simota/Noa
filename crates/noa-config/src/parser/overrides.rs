@@ -64,6 +64,7 @@ pub(crate) fn build_overrides(
     let mut quick_terminal_animation_duration = None;
     let mut sidebar_enabled = None;
     let mut sidebar_width = None;
+    let mut sidebar_font_size = None;
     let mut sidebar_hotkey = None;
     let mut sidebar_preview_lines = None;
     let mut resize_overlay = None;
@@ -287,7 +288,10 @@ pub(crate) fn build_overrides(
                 sidebar_enabled = parse_bool_directive(path, directive, &mut diagnostics);
             }
             "sidebar-width" => {
-                sidebar_width = parse_non_negative_f32(path, directive, &mut diagnostics);
+                sidebar_width = parse_sidebar_width(path, directive, &mut diagnostics);
+            }
+            "sidebar-font-size" => {
+                sidebar_font_size = parse_sidebar_font_size(path, directive, &mut diagnostics);
             }
             "sidebar-hotkey" => {
                 // Mirror `quick-terminal-hotkey`: the chord is stored verbatim
@@ -409,6 +413,7 @@ pub(crate) fn build_overrides(
             quick_terminal_animation_duration,
             sidebar_enabled,
             sidebar_width,
+            sidebar_font_size,
             sidebar_hotkey,
             sidebar_preview_lines,
             resize_overlay,
@@ -508,6 +513,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "quick-terminal-animation-duration"
             | "sidebar-enabled"
             | "sidebar-width"
+            | "sidebar-font-size"
             | "sidebar-hotkey"
             | "sidebar-preview-lines"
             | "resize-overlay"

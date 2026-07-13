@@ -69,6 +69,14 @@ const BLUR_MAX: u16 = 64;
 const WINDOW_PADDING_STEP: f32 = 1.0;
 /// Sidebar preview line count step per ←→ press.
 const SIDEBAR_PREVIEW_LINES_STEP: i32 = 1;
+/// Sidebar width step per ←→ press, in points. Bounds are
+/// `noa_config::MIN_SIDEBAR_WIDTH`/`MAX_SIDEBAR_WIDTH` directly, so they
+/// never drift from the config-layer validation.
+const SIDEBAR_WIDTH_STEP: f32 = 10.0;
+/// Sidebar font size step per ←→ press, in points. Bounds are
+/// `noa_config::MIN_SIDEBAR_FONT_SIZE`/`MAX_SIDEBAR_FONT_SIZE` directly, so
+/// they never drift from the config-layer validation.
+const SIDEBAR_FONT_SIZE_STEP: f32 = 0.5;
 /// Quick terminal height fraction step per ←→ press.
 const QUICK_TERMINAL_SIZE_STEP: f32 = 0.05;
 const QUICK_TERMINAL_SIZE_MIN: f32 = 0.1;
@@ -269,6 +277,8 @@ impl ThemeSettings {
                     background_image_repeat: init.background_image_repeat,
                     background_image_interval_secs: init.background_image_interval_secs,
                     sidebar_preview_lines: init.sidebar_preview_lines,
+                    sidebar_width: init.sidebar_width,
+                    sidebar_font_size: init.sidebar_font_size,
                     quick_terminal_size: init.quick_terminal_size,
                     window_padding_x: init.window_padding_x,
                     window_padding_y: init.window_padding_y,
@@ -336,6 +346,14 @@ impl ThemeSettings {
                     },
                     SettingsRow {
                         draft: RowDraft::SidebarPreviewLines(init.sidebar_preview_lines),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::SidebarWidth(init.sidebar_width),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::SidebarFontSize(init.sidebar_font_size),
                         touched: false,
                     },
                     SettingsRow {
@@ -1093,6 +1111,34 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
+            SettingsRowKind::SidebarWidth => {
+                let RowDraft::SidebarWidth(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = (current + delta as f32 * SIDEBAR_WIDTH_STEP)
+                    .clamp(noa_config::MIN_SIDEBAR_WIDTH, noa_config::MAX_SIDEBAR_WIDTH);
+                if (new - current).abs() > f32::EPSILON {
+                    self.rows[idx].draft = RowDraft::SidebarWidth(new);
+                    self.rows[idx].touched = true;
+                    return RowEffect::SidebarWidth(new);
+                }
+                RowEffect::None
+            }
+            SettingsRowKind::SidebarFontSize => {
+                let RowDraft::SidebarFontSize(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = (current + delta as f32 * SIDEBAR_FONT_SIZE_STEP).clamp(
+                    noa_config::MIN_SIDEBAR_FONT_SIZE,
+                    noa_config::MAX_SIDEBAR_FONT_SIZE,
+                );
+                if (new - current).abs() > f32::EPSILON {
+                    self.rows[idx].draft = RowDraft::SidebarFontSize(new);
+                    self.rows[idx].touched = true;
+                    return RowEffect::SidebarFontSize(new);
+                }
+                RowEffect::None
+            }
             SettingsRowKind::QuickTerminalHeight => {
                 let RowDraft::QuickTerminalHeight(current) = self.rows[idx].draft else {
                     return RowEffect::None;
@@ -1440,6 +1486,12 @@ impl ThemeSettings {
             }
             (SettingsRowKind::SidebarPreviewLines, RowDraft::SidebarPreviewLines(value)) => {
                 RowEffect::SidebarPreviewLines(value)
+            }
+            (SettingsRowKind::SidebarWidth, RowDraft::SidebarWidth(value)) => {
+                RowEffect::SidebarWidth(value)
+            }
+            (SettingsRowKind::SidebarFontSize, RowDraft::SidebarFontSize(value)) => {
+                RowEffect::SidebarFontSize(value)
             }
             _ => RowEffect::None,
         }
@@ -1794,6 +1846,12 @@ impl ThemeSettings {
                 RowDraft::SidebarPreviewLines(lines) => {
                     updates.push(("sidebar-preview-lines".to_string(), lines.to_string()));
                 }
+                RowDraft::SidebarWidth(w) => {
+                    updates.push(("sidebar-width".to_string(), format!("{w}")));
+                }
+                RowDraft::SidebarFontSize(v) => {
+                    updates.push(("sidebar-font-size".to_string(), format!("{v}")));
+                }
                 RowDraft::QuickTerminalHeight(size) => {
                     updates.push(("quick-terminal-size".to_string(), format!("{size:.2}")));
                 }
@@ -2018,6 +2076,14 @@ pub(crate) fn revert_updates(
         revert.sidebar_preview_lines.to_string(),
     ));
     updates.push((
+        "sidebar-width".to_string(),
+        format!("{}", revert.sidebar_width),
+    ));
+    updates.push((
+        "sidebar-font-size".to_string(),
+        format!("{}", revert.sidebar_font_size),
+    ));
+    updates.push((
         "quick-terminal-size".to_string(),
         format!("{:.2}", revert.quick_terminal_size),
     ));
@@ -2133,6 +2199,8 @@ fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
         RowDraft::FontSize(v)
         | RowDraft::BackgroundOpacity(v)
         | RowDraft::BackgroundImageOpacity(v)
+        | RowDraft::SidebarWidth(v)
+        | RowDraft::SidebarFontSize(v)
         | RowDraft::QuickTerminalHeight(v) => v.to_bits().hash(hasher),
         RowDraft::BackgroundBlurRadius(v) => v.hash(hasher),
         RowDraft::BackgroundImage(s) | RowDraft::FontFamily(s) => s.hash(hasher),

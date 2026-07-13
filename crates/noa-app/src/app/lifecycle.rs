@@ -188,7 +188,7 @@ impl App {
                 font_atlases: noa_render::GlyphAtlasCache::default(),
                 font: first_font.expect("first tab must initialize the font"),
                 sidebar_font: FontGrid::new(
-                    sidebar_font_pixel_size(window_scale_factor),
+                    sidebar_font_pixel_size(self.config.sidebar_font_size, window_scale_factor),
                     font_config_from_noa_config(&self.config.font),
                 )
                 .unwrap_or_else(|e| {

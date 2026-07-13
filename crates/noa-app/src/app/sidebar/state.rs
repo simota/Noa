@@ -326,15 +326,30 @@ impl App {
         crate::sidebar::SidebarRect::new(0, top, inset, height - top)
     }
 
+    /// The sidebar's own zoom factor, from `sidebar-font-size` relative to
+    /// [`SIDEBAR_FONT_POINT_SIZE`] — the layout-design baseline the whole
+    /// sidebar chrome (card height, padding, drop-indicator, glyph size) was
+    /// designed against. `1.0` at the default; folding this single factor
+    /// into both [`Self::sidebar_metrics`] (layout/hit-test) and
+    /// `sidebar_draw_model`'s `scale` (chrome drawing, `model.rs`) keeps the
+    /// two choke points — and everything downstream of them — in lockstep,
+    /// the same way DPR itself is threaded through.
+    pub(in crate::app) fn sidebar_font_zoom(&self) -> f32 {
+        self.config.sidebar_font_size / SIDEBAR_FONT_POINT_SIZE
+    }
+
     /// The DPR-scaled layout metrics for a window (FR-4): built from the live
     /// scale factor, the same source as [`window_sidebar_inset_px`](Self::window_sidebar_inset_px),
     /// so the card heights and interior offsets scale with the inset. Falls back
-    /// to scale 1.0 for an unknown window.
+    /// to scale 1.0 for an unknown window. Also folds in [`Self::sidebar_font_zoom`]
+    /// so the sidebar's own font-size setting scales cards and hit-testing
+    /// coherently with the chrome drawn from `sidebar_draw_model`.
     pub(super) fn sidebar_metrics(&self, window_id: WindowId) -> SidebarMetrics {
         let scale = self
             .windows
             .get(&window_id)
-            .map_or(1.0, |state| state.window.scale_factor() as f32);
+            .map_or(1.0, |state| state.window.scale_factor() as f32)
+            * self.sidebar_font_zoom();
         SidebarMetrics::new_with_preview_lines(scale, self.config.sidebar_preview_lines)
     }
 

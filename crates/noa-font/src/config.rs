@@ -56,7 +56,9 @@ pub struct FontVariation {
 }
 
 /// Which styles are synthesized (faux-bold / faux-italic) when the resolved
-/// family lacks the native style.
+/// family lacks the native style. Never applied to a shared fallback face
+/// (emoji/Nerd Font/CJK, or a macOS cascade hit) regardless of these toggles
+/// — see `FontStack::is_native_style_face` / `is_fallback_face`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct SyntheticStyle {
     pub bold: bool,

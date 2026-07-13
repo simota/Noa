@@ -46,6 +46,21 @@ pub const DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION: f32 = 0.2;
 pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "cmd+grave";
 /// `sidebar-width` default: the session sidebar's width in points when visible.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 360.0;
+/// Smallest supported `sidebar-width` value. Narrower widths leave no room
+/// for session card content.
+pub const MIN_SIDEBAR_WIDTH: f32 = 200.0;
+/// Largest supported `sidebar-width` value. Wider widths crowd out the
+/// terminal viewport.
+pub const MAX_SIDEBAR_WIDTH: f32 = 600.0;
+/// `sidebar-font-size` default: the session sidebar's own font size in
+/// points, independent of the terminal grid's `font-size`.
+pub const DEFAULT_SIDEBAR_FONT_SIZE: f32 = 11.5;
+/// Smallest supported `sidebar-font-size` value. Smaller sizes make card
+/// text illegible.
+pub const MIN_SIDEBAR_FONT_SIZE: f32 = 8.0;
+/// Largest supported `sidebar-font-size` value. Larger sizes make cards too
+/// tall for the sidebar's dense session-list use case.
+pub const MAX_SIDEBAR_FONT_SIZE: f32 = 20.0;
 /// `sidebar-preview-lines` default: card last-output preview rows.
 pub const DEFAULT_SIDEBAR_PREVIEW_LINES: usize = 5;
 /// Largest supported `sidebar-preview-lines` value. Higher values make each
@@ -559,6 +574,10 @@ pub struct StartupConfig {
     /// converted to a grid inset during the grid-first resize. Default
     /// [`DEFAULT_SIDEBAR_WIDTH`].
     pub sidebar_width: f32,
+    /// `sidebar-font-size`: the session sidebar's own font size in points,
+    /// independent of the terminal grid's [`Self::font_size`]. Default
+    /// [`DEFAULT_SIDEBAR_FONT_SIZE`].
+    pub sidebar_font_size: f32,
     /// `sidebar-hotkey`: the chord that toggles the session sidebar for the
     /// focused window. Stored verbatim and parsed by the same app-layer chord
     /// path as [`Self::quick_terminal_hotkey`]; `none`/`off`/empty normalize to
@@ -661,6 +680,7 @@ impl Default for StartupConfig {
             quick_terminal_animation_duration: DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION,
             sidebar_enabled: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            sidebar_font_size: DEFAULT_SIDEBAR_FONT_SIZE,
             sidebar_hotkey: None,
             sidebar_preview_lines: DEFAULT_SIDEBAR_PREVIEW_LINES,
             resize_overlay: ResizeOverlay::default(),
@@ -727,6 +747,7 @@ pub struct ConfigOverrides {
     pub quick_terminal_animation_duration: Option<f32>,
     pub sidebar_enabled: Option<bool>,
     pub sidebar_width: Option<f32>,
+    pub sidebar_font_size: Option<f32>,
     pub sidebar_hotkey: Option<String>,
     pub sidebar_preview_lines: Option<usize>,
     pub resize_overlay: Option<ResizeOverlay>,
@@ -837,6 +858,7 @@ impl ConfigOverrides {
                 .or(self.quick_terminal_animation_duration),
             sidebar_enabled: higher_priority.sidebar_enabled.or(self.sidebar_enabled),
             sidebar_width: higher_priority.sidebar_width.or(self.sidebar_width),
+            sidebar_font_size: higher_priority.sidebar_font_size.or(self.sidebar_font_size),
             sidebar_hotkey: higher_priority.sidebar_hotkey.or(self.sidebar_hotkey),
             sidebar_preview_lines: higher_priority
                 .sidebar_preview_lines
@@ -941,6 +963,7 @@ impl ConfigOverrides {
                 .unwrap_or(base.quick_terminal_animation_duration),
             sidebar_enabled: self.sidebar_enabled.unwrap_or(base.sidebar_enabled),
             sidebar_width: self.sidebar_width.unwrap_or(base.sidebar_width),
+            sidebar_font_size: self.sidebar_font_size.unwrap_or(base.sidebar_font_size),
             sidebar_hotkey: self.sidebar_hotkey.or(base.sidebar_hotkey),
             sidebar_preview_lines: self
                 .sidebar_preview_lines
@@ -1089,6 +1112,20 @@ pub fn validate_startup_config(config: &StartupConfig, context: &str) -> anyhow:
     if !config.minimum_contrast.is_finite() || !(1.0..=21.0).contains(&config.minimum_contrast) {
         bail!("invalid {context}: `minimum_contrast` must be between 1 and 21");
     }
+    if !config.sidebar_width.is_finite()
+        || !(MIN_SIDEBAR_WIDTH..=MAX_SIDEBAR_WIDTH).contains(&config.sidebar_width)
+    {
+        bail!(
+            "invalid {context}: `sidebar-width` must be between {MIN_SIDEBAR_WIDTH} and {MAX_SIDEBAR_WIDTH}"
+        );
+    }
+    if !config.sidebar_font_size.is_finite()
+        || !(MIN_SIDEBAR_FONT_SIZE..=MAX_SIDEBAR_FONT_SIZE).contains(&config.sidebar_font_size)
+    {
+        bail!(
+            "invalid {context}: `sidebar-font-size` must be between {MIN_SIDEBAR_FONT_SIZE} and {MAX_SIDEBAR_FONT_SIZE}"
+        );
+    }
     if config.sidebar_preview_lines > MAX_SIDEBAR_PREVIEW_LINES {
         bail!(
             "invalid {context}: `sidebar-preview-lines` must be between 0 and {}",
@@ -1170,6 +1207,7 @@ mod tests {
                 quick_terminal_animation_duration: DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION,
                 sidebar_enabled: false,
                 sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+                sidebar_font_size: DEFAULT_SIDEBAR_FONT_SIZE,
                 sidebar_hotkey: None,
                 sidebar_preview_lines: DEFAULT_SIDEBAR_PREVIEW_LINES,
                 resize_overlay: ResizeOverlay::AfterFirst,

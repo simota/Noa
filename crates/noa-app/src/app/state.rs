@@ -650,6 +650,8 @@ mod theme_settings_session_tests {
             window_padding_y: 2.0,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
             sidebar_preview_lines: noa_config::DEFAULT_SIDEBAR_PREVIEW_LINES,
+            sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
+            sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
             confirm_quit: true,
             font_family: "Menlo".to_string(),

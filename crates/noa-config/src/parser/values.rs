@@ -4,10 +4,11 @@ use noa_core::Rgb;
 
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, CursorShape,
-    FontFeature, FontVariation, MAX_SIDEBAR_PREVIEW_LINES, MIN_BACKGROUND_IMAGE_INTERVAL_SECS,
-    MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle, PaletteOverride,
-    QuickTerminalPosition, QuickTerminalScreen, QuickTerminalSize, QuickTerminalSizeDim,
-    ResizeOverlay, SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
+    FontFeature, FontVariation, MAX_SIDEBAR_FONT_SIZE, MAX_SIDEBAR_PREVIEW_LINES,
+    MAX_SIDEBAR_WIDTH, MIN_BACKGROUND_IMAGE_INTERVAL_SECS, MIN_SIDEBAR_FONT_SIZE,
+    MIN_SIDEBAR_WIDTH, MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle,
+    PaletteOverride, QuickTerminalPosition, QuickTerminalScreen, QuickTerminalSize,
+    QuickTerminalSizeDim, ResizeOverlay, SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
 };
 
 use super::diagnostics::*;
@@ -321,6 +322,46 @@ pub(super) fn parse_non_negative_f32(
         return None;
     };
     if !parsed.is_finite() || parsed < 0.0 {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(parsed)
+}
+
+/// Parse `sidebar-width`: the session sidebar's width in points, bounded to
+/// [`MIN_SIDEBAR_WIDTH`, `MAX_SIDEBAR_WIDTH`] so the sidebar never shrinks
+/// past usable content or crowds out the terminal viewport.
+pub(super) fn parse_sidebar_width(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<f32> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<f32>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if !parsed.is_finite() || !(MIN_SIDEBAR_WIDTH..=MAX_SIDEBAR_WIDTH).contains(&parsed) {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    }
+    Some(parsed)
+}
+
+/// Parse `sidebar-font-size`: the session sidebar's own font size in points,
+/// bounded to [`MIN_SIDEBAR_FONT_SIZE`, `MAX_SIDEBAR_FONT_SIZE`] — independent
+/// of the terminal grid's `font-size`.
+pub(super) fn parse_sidebar_font_size(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<f32> {
+    let value = directive.value.as_deref()?;
+    let Ok(parsed) = value.parse::<f32>() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    if !parsed.is_finite() || !(MIN_SIDEBAR_FONT_SIZE..=MAX_SIDEBAR_FONT_SIZE).contains(&parsed) {
         diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
         return None;
     }

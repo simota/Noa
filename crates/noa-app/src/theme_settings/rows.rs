@@ -60,6 +60,8 @@ pub(crate) enum SettingsRowKind {
     WindowPadding,
     MacosTitlebarStyle,
     SidebarPreviewLines,
+    SidebarWidth,
+    SidebarFontSize,
     QuickTerminalHeight,
     ConfirmQuit,
     /// R-9: `scrollback-limit`. `is_live() == false` (no runtime-apply path
@@ -124,7 +126,7 @@ pub(crate) enum SettingsRowKind {
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 26;
+    pub(crate) const COUNT: usize = 28;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -140,6 +142,8 @@ impl SettingsRowKind {
         Self::WindowPadding,
         Self::MacosTitlebarStyle,
         Self::SidebarPreviewLines,
+        Self::SidebarWidth,
+        Self::SidebarFontSize,
         Self::QuickTerminalHeight,
         Self::ConfirmQuit,
         Self::ScrollbackLimit,
@@ -168,6 +172,8 @@ impl SettingsRowKind {
                 | Self::BackgroundBlurRadius
                 | Self::CursorStyle
                 | Self::SidebarPreviewLines
+                | Self::SidebarWidth
+                | Self::SidebarFontSize
                 | Self::ServerTokenCopy
                 | Self::ServerStatus
         )
@@ -194,6 +200,8 @@ impl SettingsRowKind {
             Self::WindowPadding => "Window Padding",
             Self::MacosTitlebarStyle => "Titlebar Style",
             Self::SidebarPreviewLines => "Sidebar Preview Lines",
+            Self::SidebarWidth => "Sidebar Width",
+            Self::SidebarFontSize => "Sidebar Font Size",
             Self::QuickTerminalHeight => "Quick Terminal Height",
             Self::ConfirmQuit => "Confirm Quit",
             Self::ScrollbackLimit => "Scrollback Limit",
@@ -235,6 +243,8 @@ impl SettingsRowKind {
             Self::WindowPadding => "Uniform padding around the terminal grid, in points.",
             Self::MacosTitlebarStyle => "Native or transparent titlebar presentation.",
             Self::SidebarPreviewLines => "Trailing output rows shown in each sidebar card.",
+            Self::SidebarWidth => "Session sidebar width in points. Applies live.",
+            Self::SidebarFontSize => "Session sidebar font size in points. Applies live.",
             Self::QuickTerminalHeight => {
                 "Drop-down quick terminal's height as a fraction of the screen."
             }
@@ -348,6 +358,8 @@ pub(crate) enum RowDraft {
     WindowPadding(f32, f32),
     MacosTitlebarStyle(MacosTitlebarStyle),
     SidebarPreviewLines(usize),
+    SidebarWidth(f32),
+    SidebarFontSize(f32),
     QuickTerminalHeight(f32),
     ConfirmQuit(bool),
     ScrollbackLimit(usize),
@@ -434,6 +446,8 @@ impl RowDraft {
             RowDraft::WindowPadding(x, y) => format!("{x:.1} x {y:.1}"),
             RowDraft::MacosTitlebarStyle(style) => format!("{style:?}"),
             RowDraft::SidebarPreviewLines(lines) => lines.to_string(),
+            RowDraft::SidebarWidth(w) => format!("{w:.0}"),
+            RowDraft::SidebarFontSize(v) => format!("{v:.1}"),
             RowDraft::QuickTerminalHeight(size) => format!("{:.0}%", size * 100.0),
             RowDraft::ConfirmQuit(confirm) => {
                 if *confirm {
@@ -521,6 +535,8 @@ impl RowDraft {
             SettingsRowKind::SidebarPreviewLines => {
                 RowDraft::SidebarPreviewLines(d.sidebar_preview_lines)
             }
+            SettingsRowKind::SidebarWidth => RowDraft::SidebarWidth(d.sidebar_width),
+            SettingsRowKind::SidebarFontSize => RowDraft::SidebarFontSize(d.sidebar_font_size),
             SettingsRowKind::QuickTerminalHeight => {
                 // Mirrors `App`'s `quick_terminal_height_fraction` (app-layer,
                 // unreachable from this pure module) — kept in sync manually;
@@ -602,6 +618,10 @@ pub(crate) enum RowEffect {
     Blur(u16),
     /// Sidebar card preview line count changed and should apply immediately.
     SidebarPreviewLines(usize),
+    /// Session sidebar width changed and should apply immediately.
+    SidebarWidth(f32),
+    /// Session sidebar font size changed and should apply immediately.
+    SidebarFontSize(f32),
     /// The server-token row was activated; `App` must resolve the token
     /// (config override, else the token file) and write it to the system
     /// clipboard outside the pure state machine, then report the result
@@ -626,6 +646,8 @@ pub(crate) struct RevertValues {
     pub(crate) background_image_repeat: bool,
     pub(crate) background_image_interval_secs: u64,
     pub(crate) sidebar_preview_lines: usize,
+    pub(crate) sidebar_width: f32,
+    pub(crate) sidebar_font_size: f32,
     pub(crate) quick_terminal_size: f32,
     /// TSV2-1: the commit-only rows (R-8) were previously left out of this
     /// snapshot entirely, so [`super::revert_updates`] never wrote them
@@ -722,6 +744,8 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) window_padding_y: f32,
     pub(crate) macos_titlebar_style: MacosTitlebarStyle,
     pub(crate) sidebar_preview_lines: usize,
+    pub(crate) sidebar_width: f32,
+    pub(crate) sidebar_font_size: f32,
     pub(crate) quick_terminal_size: f32,
     pub(crate) confirm_quit: bool,
     pub(crate) font_family: String,

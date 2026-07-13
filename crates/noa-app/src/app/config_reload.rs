@@ -140,6 +140,7 @@ impl App {
         let terminal_policy_changed = terminal_policy_inputs_changed(&previous, &applied);
         let sidebar_preview_changed =
             previous.sidebar_preview_lines != applied.sidebar_preview_lines;
+        let sidebar_font_size_changed = previous.sidebar_font_size != applied.sidebar_font_size;
         let keybinds_changed = previous.keybinds != applied.keybinds;
         let server_restart = decide_server_restart(&previous, &applied);
         let quick_terminal_hotkey_changed =
@@ -182,6 +183,15 @@ impl App {
                 .store(self.config.sidebar_preview_lines, Ordering::Relaxed);
             self.request_sidebar_redraw();
         }
+        // `rebuild_runtime_fonts` above (when it ran) rebuilt the sidebar font
+        // too, but using `self.config.sidebar_font_size` as it stood *before*
+        // `self.config = applied` — i.e. the pre-reload value. Rebuild again,
+        // unconditionally, whenever `sidebar-font-size` actually changed, so
+        // it ends up at the now-current (post-assign) value even if a
+        // terminal font/font-size change landed in the same reload.
+        if sidebar_font_size_changed {
+            self.rebuild_sidebar_font(self.config.sidebar_font_size);
+        }
         if server_restart == ServerRestartAction::Restart {
             self.restart_ipc_server();
         }
@@ -211,7 +221,11 @@ impl App {
         // from the render-loop diff-cache keyed on the focused pane's raw
         // cwd (`render.rs`), so a config-only toggle visibly applies on that
         // pane's *next* cwd change, not immediately on reload.
-        if font_applied || padding_changed || self.config.sidebar_width != previous.sidebar_width {
+        if font_applied
+            || padding_changed
+            || self.config.sidebar_width != previous.sidebar_width
+            || sidebar_font_size_changed
+        {
             self.relayout_all_windows();
         } else if theme_changed || background_image_changed || opacity_changed || blur_changed {
             self.request_all_windows_redraw();
@@ -243,7 +257,7 @@ impl App {
             }
         };
         let sidebar_font = match FontGrid::new(
-            sidebar_font_pixel_size(scale_factor),
+            sidebar_font_pixel_size(self.config.sidebar_font_size, scale_factor),
             font_config_from_noa_config(font),
         ) {
             Ok(font) => font,
@@ -267,6 +281,43 @@ impl App {
                 .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         }
         true
+    }
+
+    /// Rebuild only the dedicated sidebar `FontGrid`, at `point_size` and the
+    /// focused (or first) window's current scale factor — the same
+    /// scale-factor lookup [`Self::rebuild_runtime_fonts`] uses. Shared by the
+    /// config-reload `sidebar-font-size` diff above and the Settings panel's
+    /// live `sidebar-font-size` apply (`input_ops/theme_settings.rs`).
+    /// Returns whether the rebuild succeeded; `false` leaves `gpu.sidebar_font`
+    /// untouched, so the caller must not treat the new size as applied.
+    pub(in crate::app) fn rebuild_sidebar_font(&mut self, point_size: f32) -> bool {
+        let scale_factor = self
+            .focused
+            .or_else(|| self.window_order.first().copied())
+            .and_then(|window_id| {
+                self.windows
+                    .get(&window_id)
+                    .map(|state| state.window.scale_factor())
+            })
+            .unwrap_or(1.0);
+        let Some(gpu) = self.gpu.as_mut() else {
+            return true;
+        };
+        match FontGrid::new(
+            sidebar_font_pixel_size(point_size, scale_factor),
+            font_config_from_noa_config(&self.config.font),
+        ) {
+            Ok(font) => {
+                gpu.sidebar_font = font;
+                true
+            }
+            Err(err) => {
+                log::warn!(
+                    "failed to rebuild sidebar font for size {point_size} at scale factor {scale_factor}: {err}"
+                );
+                false
+            }
+        }
     }
 
     /// `WindowEvent::ThemeChanged`: the OS light/dark appearance flipped.
@@ -388,7 +439,7 @@ impl App {
         }
     }
 
-    fn relayout_all_windows(&mut self) {
+    pub(in crate::app) fn relayout_all_windows(&mut self) {
         let windows = self
             .windows
             .iter()

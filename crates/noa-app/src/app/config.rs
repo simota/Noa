@@ -139,6 +139,9 @@ pub struct AppConfig {
     /// (FR-13). Multiplied by the window scale factor at the resize call site
     /// to get the pixel inset.
     pub sidebar_width: f32,
+    /// `sidebar-font-size`: the session sidebar's own font size in points,
+    /// independent of the terminal grid's `font-size`.
+    pub sidebar_font_size: f32,
     /// `sidebar-hotkey`: the global chord that toggles the sidebar for the
     /// focused window (FR-13). `None` (or the empty-string "disabled" sentinel)
     /// registers no chord.
@@ -235,6 +238,7 @@ impl AppConfig {
             quick_terminal_animation_duration: config.quick_terminal_animation_duration,
             sidebar_enabled: config.sidebar_enabled,
             sidebar_width: config.sidebar_width,
+            sidebar_font_size: config.sidebar_font_size,
             sidebar_hotkey: config.sidebar_hotkey,
             sidebar_preview_lines: config.sidebar_preview_lines,
             resize_overlay: config.resize_overlay,

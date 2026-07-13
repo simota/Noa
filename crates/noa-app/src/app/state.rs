@@ -921,6 +921,22 @@ pub(super) struct Surface {
     /// itself driven by a pty write or user action that already requests a
     /// redraw, so the cache catches up on the very next frame.
     pub(super) cursor_blink_state: CursorBlinkState,
+    /// This pane's last real (non-suppressed) `FrameSnapshot`, kept so
+    /// `redraw` can keep presenting it while synchronized output (DECSET
+    /// 2026) holds the terminal mid-update instead of reading a torn one.
+    /// `None` before this pane's first frame, or whenever it has never been
+    /// captured while synchronized output was active — see
+    /// `sync_output_snapshot_decision` in `render.rs`.
+    pub(super) held_snapshot: Option<HeldSnapshot>,
+}
+
+/// See `Surface::held_snapshot`.
+pub(super) struct HeldSnapshot {
+    pub(super) snapshot: FrameSnapshot,
+    /// When `snapshot` was captured — the reuse decision's grace-period
+    /// clock, shared with the io thread's own
+    /// `io_thread::SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION` cap.
+    pub(super) captured_at: Instant,
 }
 
 /// See `Surface::cursor_blink_state`.

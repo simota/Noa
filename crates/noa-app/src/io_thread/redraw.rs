@@ -20,7 +20,14 @@ use std::time::{Duration, Instant};
 /// still paints atomically at its ESU (which arrives well within the cap, so
 /// the cap never fires for it), while sustained back-to-back frames refresh at
 /// ~10fps instead of freezing until output happens to stop on a frame boundary.
-pub(super) const SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION: Duration = Duration::from_millis(100);
+///
+/// `pub(crate)`: `app::render`'s `sync_output_snapshot_decision` shares this
+/// same cap for its own suppression window (how long a pane may keep
+/// presenting a held snapshot instead of reading the terminal — see that
+/// function's doc comment) so the two independent mode-2026 timeouts — one
+/// gating redraw *requests* here, one gating the redraw *read* there — can
+/// never drift apart into two different effective limits.
+pub(crate) const SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION: Duration = Duration::from_millis(100);
 
 /// Floor between consecutive redraw requests outside synchronized output.
 /// Each `UserEvent::Redraw` is a real OS wake-up of the winit event loop and

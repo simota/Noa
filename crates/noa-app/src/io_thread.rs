@@ -61,7 +61,9 @@ pub(crate) use auto_approve::{AutoApproveFeedback, AutoApprovePublish};
 pub(crate) use input_queue::{PtyInputQueue, QueueInputResult, input_channel};
 pub(crate) use ipc_tap::IpcOutputTap;
 pub(crate) use overview::OverviewPublish;
-pub(crate) use redraw::{RedrawFloor, redraw_floor_from_refresh_millihertz};
+pub(crate) use redraw::{
+    RedrawFloor, SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION, redraw_floor_from_refresh_millihertz,
+};
 pub(crate) use sidebar::SidebarPublish;
 pub(crate) use spawn::{IoThreadHandle, IoThreadTarget, spawn};
 

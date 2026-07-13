@@ -961,7 +961,9 @@ fn send_selection_send_enter_row_toggles_and_commits_without_restart_note() {
 
     let updates = settings.commit_updates();
     assert_eq!(
-        updates.iter().find(|(k, _)| k == "send-selection-send-enter"),
+        updates
+            .iter()
+            .find(|(k, _)| k == "send-selection-send-enter"),
         Some(&("send-selection-send-enter".to_string(), "true".to_string()))
     );
 }
@@ -3360,7 +3362,9 @@ fn revert_updates_restores_all_five_commit_only_rows() {
         "confirm-quit must revert"
     );
     assert_eq!(
-        updates.iter().find(|(k, _)| k == "send-selection-send-enter"),
+        updates
+            .iter()
+            .find(|(k, _)| k == "send-selection-send-enter"),
         Some(&("send-selection-send-enter".to_string(), "false".to_string())),
         "send-selection-send-enter must revert"
     );

@@ -330,8 +330,7 @@ pub(crate) fn build_overrides(
                 auto_approve = parse_bool_directive(path, directive, &mut diagnostics);
             }
             "send-selection-send-enter" => {
-                send_selection_send_enter =
-                    parse_bool_directive(path, directive, &mut diagnostics);
+                send_selection_send_enter = parse_bool_directive(path, directive, &mut diagnostics);
             }
             "keybind" => {
                 if let Some(keybind) = parse_keybind_config(path, directive, &mut diagnostics) {

@@ -127,6 +127,7 @@ impl App {
         // terminal lock the snapshot takes (no extra lock later).
         let mut scroll_thumbs: Vec<sidebar::ScrollThumb> = Vec::new();
         let visible_panes = visible_pane_ids(&state.split_tree, state.zoomed);
+        let now = Instant::now();
         for pane_id in visible_panes {
             let Some(surface) = state.surfaces.get_mut(&pane_id) else {
                 log::error!(
@@ -136,6 +137,17 @@ impl App {
                 continue;
             };
             let mut term = surface.terminal.lock();
+            // Refresh the lock-free cursor-blink cache (see
+            // `Surface::cursor_blink_state`) while the lock is already held,
+            // so `tick_cursor_blink`'s per-wake gate never needs its own.
+            let active = term.active();
+            let cursor = active.cursor;
+            let (active_cols, active_rows) = (active.cols, active.rows);
+            surface.cursor_blink_state = CursorBlinkState {
+                visible: cursor.visible,
+                style: cursor.style,
+                at_live_viewport: term.viewport_offset() == 0,
+            };
             if pane_id == state.focused_pane {
                 title = resolved_tab_title(title_override.as_deref(), &term.title);
                 focused_cwd_update = proxy_icon_update(&state.proxy_icon_cwd, term.cwd.as_deref());
@@ -148,10 +160,59 @@ impl App {
                     viewport_rows: term.active().rows,
                 });
             }
-            let mut snapshot = FrameSnapshot::from_terminal_recycle(
-                &mut term,
-                std::mem::take(&mut surface.snapshot_recycle),
+            // Synchronized output (DECSET 2026, read under the lock already
+            // held above — no second lock, see R3's cursor-blink cache): a
+            // redraw triggered from outside the io thread's own pacing (focus
+            // change, cursor blink, an unrelated pane's redraw in the same
+            // window) can otherwise land mid-update and capture a torn frame.
+            // `sync_output_snapshot_decision` picks between reading the
+            // terminal fresh and reusing this pane's last held snapshot.
+            let synchronized = term.modes.synchronized_output();
+            let dimensions_match = surface.held_snapshot.as_ref().is_some_and(|held| {
+                held.snapshot.cols == active_cols && held.snapshot.rows_n == active_rows
+            });
+            let decision = sync_output_snapshot_decision(
+                synchronized,
+                surface.held_snapshot.as_ref().map(|held| held.captured_at),
+                now,
+                dimensions_match,
             );
+            let mut snapshot = match decision {
+                SyncSnapshotDecision::Reuse => surface
+                    .held_snapshot
+                    .as_ref()
+                    .expect("Reuse is only decided when held_snapshot is Some")
+                    .snapshot
+                    .clone(),
+                SyncSnapshotDecision::Fresh => {
+                    let fresh = FrameSnapshot::from_terminal_recycle(
+                        &mut term,
+                        std::mem::take(&mut surface.snapshot_recycle),
+                    );
+                    // Only retained while synchronized output is actually
+                    // active: an app that never uses mode 2026 never pays for
+                    // this clone (see `sync_output_snapshot_decision`'s doc
+                    // comment on the performance trade-off).
+                    if sync_output_snapshot_release_decision(synchronized) {
+                        // Sync just ended (or was never on): a held snapshot
+                        // no longer serves any purpose, and keeping it around
+                        // would retain a stale full-grid `FrameSnapshot` for
+                        // the rest of this pane's lifetime. The `is_some()`
+                        // guard keeps the common case — a pane that has never
+                        // used mode 2026 — a single no-op check, not a write
+                        // every frame.
+                        if surface.held_snapshot.is_some() {
+                            surface.held_snapshot = None;
+                        }
+                    } else {
+                        surface.held_snapshot = Some(HeldSnapshot {
+                            snapshot: fresh.clone(),
+                            captured_at: now,
+                        });
+                    }
+                    fresh
+                }
+            };
             snapshot.search_prompt = self
                 .search_prompt
                 .as_ref()
@@ -594,5 +655,212 @@ impl App {
                 surface.snapshot_recycle = snapshot.into_recycle();
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyncSnapshotDecision {
+    /// Read a fresh `FrameSnapshot` off the terminal this redraw.
+    Fresh,
+    /// Redraw with the pane's already-`Surface::held_snapshot` instead of
+    /// reading the terminal — it may be mid-update under synchronized output.
+    Reuse,
+}
+
+/// Whether a pane's redraw should read a fresh [`FrameSnapshot`] off the
+/// terminal, or keep presenting the snapshot already held for it.
+///
+/// While an application holds synchronized output (DECSET 2026) open, a
+/// redraw triggered from outside the io thread's own pacing — an OS focus
+/// change, a cursor-blink tick, or an unrelated pane's redraw request in the
+/// same window (every visible pane in a window redraws together, see
+/// `redraw`'s pane loop) — can land mid-update and capture a torn frame:
+/// some cells already rewritten by the app, others not yet. Ghostty avoids
+/// this by pacing its renderer off vsync and simply not presenting until
+/// sync releases; noa's renderer is redraw-driven instead, so it substitutes
+/// the pane's last known-good snapshot for the duration.
+///
+/// `held_since` mirrors `io_thread::decide_redraw_floor`'s window logic:
+/// reuse holds only up to `io_thread::SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION`
+/// since the held snapshot was captured (the same cap the io thread already
+/// enforces on redraw *requests*, applied here to the redraw *read*), so an
+/// application that forgets to close mode 2026 can't freeze a pane's display
+/// forever — it degrades to `Fresh` (and so a possible tear) instead, same
+/// as a runaway sync already does for redraw pacing.
+///
+/// `dimensions_match` must be `false` whenever the held snapshot's grid size
+/// no longer matches the terminal's current one: presenting an old-sized
+/// snapshot into a just-resized surface would be worse than a rare tear, so
+/// a resize always forces `Fresh` regardless of the other inputs.
+///
+/// Known residual: the *first* externally-triggered redraw of a sync block
+/// (`held_since` is `None` because this pane has never held a snapshot, or
+/// hasn't since `held_snapshot` was last released) still reads fresh and can
+/// tear once. Holding a snapshot continuously from before a pane's first
+/// sync use isn't worth it — it would charge every pane that never touches
+/// mode 2026 a permanent extra full-grid `FrameSnapshot` for no benefit. This
+/// fix narrows the failure from "tears for every externally-triggered redraw
+/// throughout the sync block" down to "at most one tear at its start."
+fn sync_output_snapshot_decision(
+    synchronized: bool,
+    held_since: Option<Instant>,
+    now: Instant,
+    dimensions_match: bool,
+) -> SyncSnapshotDecision {
+    if !synchronized || !dimensions_match {
+        return SyncSnapshotDecision::Fresh;
+    }
+    match held_since {
+        Some(since)
+            if now.saturating_duration_since(since)
+                < crate::io_thread::SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION =>
+        {
+            SyncSnapshotDecision::Reuse
+        }
+        _ => SyncSnapshotDecision::Fresh,
+    }
+}
+
+/// Whether a pane's `Surface::held_snapshot` should be cleared after a
+/// `Fresh` redraw of it, independent of *why* this redraw went `Fresh`
+/// (synchronized output simply isn't active, the grace period elapsed, or a
+/// resize forced it). A held snapshot only exists to survive synchronized
+/// output; once `synchronized` reads `false`, holding it any longer serves
+/// no purpose and would retain a stale full-grid `FrameSnapshot` (rows,
+/// cursor, colors, images) for the rest of this pane's lifetime — the exact
+/// leak this function exists to close.
+fn sync_output_snapshot_release_decision(synchronized: bool) -> bool {
+    !synchronized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        SyncSnapshotDecision, sync_output_snapshot_decision, sync_output_snapshot_release_decision,
+    };
+    use crate::io_thread::SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION;
+    use std::time::{Duration, Instant};
+
+    /// Outside synchronized output, always read fresh regardless of how
+    /// recent or size-matched a held snapshot is — reuse only exists to
+    /// dodge a *sync-induced* tear.
+    #[test]
+    fn sync_inactive_always_reads_fresh() {
+        let now = Instant::now();
+        assert_eq!(
+            sync_output_snapshot_decision(false, Some(now), now, true),
+            SyncSnapshotDecision::Fresh
+        );
+        assert_eq!(
+            sync_output_snapshot_decision(false, None, now, false),
+            SyncSnapshotDecision::Fresh
+        );
+    }
+
+    /// Synchronized output, a recently-held same-size snapshot, and the
+    /// grace period not yet elapsed: reuse it instead of reading the
+    /// terminal.
+    #[test]
+    fn sync_active_within_grace_and_same_size_reuses_held_snapshot() {
+        let start = Instant::now();
+        let now = start + SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION / 2;
+        assert_eq!(
+            sync_output_snapshot_decision(true, Some(start), now, true),
+            SyncSnapshotDecision::Reuse
+        );
+    }
+
+    /// A runaway sync (app never closes mode 2026) must not freeze the pane
+    /// forever: once the shared `SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION` cap
+    /// elapses since the held snapshot was captured, force a fresh read even
+    /// though synchronized output is still reported active.
+    #[test]
+    fn sync_active_past_grace_period_forces_fresh() {
+        let start = Instant::now();
+        let now = start + SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION;
+        assert_eq!(
+            sync_output_snapshot_decision(true, Some(start), now, true),
+            SyncSnapshotDecision::Fresh
+        );
+    }
+
+    /// A resize mid-sync must never be delayed by reuse: a stale-sized
+    /// snapshot in a freshly-resized surface is worse than a rare tear.
+    #[test]
+    fn dimension_mismatch_forces_fresh_even_within_grace() {
+        let start = Instant::now();
+        let now = start + Duration::from_millis(1);
+        assert_eq!(
+            sync_output_snapshot_decision(true, Some(start), now, false),
+            SyncSnapshotDecision::Fresh
+        );
+    }
+
+    /// Synchronized output active but this pane has never held a snapshot
+    /// yet (`held_since: None`) reads fresh — the caller only ever passes
+    /// `None` for the *first* redraw a pane sees while sync is active (its
+    /// own first-ever redraw under sync, or any redraw more than
+    /// `SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION` after its last one, since the
+    /// caller only reports `dimensions_match: true` — and therefore this
+    /// function only sees `None` — when no prior held snapshot exists at
+    /// all). That first read races whatever the application has already
+    /// written under sync and so may itself be torn; there is no fallback to
+    /// substitute here without a snapshot already in hand. This is a known,
+    /// residual gap: reuse only suppresses *repeat* tears within one sync
+    /// session, not the session's opening read.
+    #[test]
+    fn sync_active_with_no_prior_held_snapshot_reads_fresh() {
+        let now = Instant::now();
+        assert_eq!(
+            sync_output_snapshot_decision(true, None, now, true),
+            SyncSnapshotDecision::Fresh
+        );
+    }
+
+    /// Just inside the grace window (one tick before the cap) still reuses;
+    /// paired with `sync_active_past_grace_period_forces_fresh`'s
+    /// exactly-at-cap case, this pins the boundary to a strict `<` so a
+    /// mutant flipping it to `<=` is caught on the other side.
+    #[test]
+    fn sync_active_just_under_grace_period_still_reuses() {
+        let start = Instant::now();
+        let now = start + SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION - Duration::from_nanos(1);
+        assert_eq!(
+            sync_output_snapshot_decision(true, Some(start), now, true),
+            SyncSnapshotDecision::Reuse
+        );
+    }
+
+    /// Sync releases the instant after a frame was reused: even a
+    /// just-captured held snapshot (well within the grace window) must not
+    /// be reused once `synchronized` itself reports false, so the pane's
+    /// very next frame after ESU always reads the terminal's true final
+    /// state rather than the frozen mid-sync one.
+    #[test]
+    fn sync_just_ended_reads_fresh_even_with_a_fresh_held_snapshot() {
+        let start = Instant::now();
+        let now = start + Duration::from_millis(1);
+        assert_eq!(
+            sync_output_snapshot_decision(false, Some(start), now, true),
+            SyncSnapshotDecision::Fresh
+        );
+    }
+
+    /// A pane still under synchronized output must not release its held
+    /// snapshot — that is the entire point of holding it.
+    #[test]
+    fn sync_active_does_not_release_held_snapshot() {
+        assert!(!sync_output_snapshot_release_decision(true));
+    }
+
+    /// Regression test for the held-snapshot leak (Radar 1b): once
+    /// synchronized output is no longer active, the held snapshot must be
+    /// released — before this fix, `Surface::held_snapshot` was only ever
+    /// set to `None` at pane construction, so any pane that used mode 2026
+    /// even once retained a stale full-grid `FrameSnapshot` for the rest of
+    /// its lifetime.
+    #[test]
+    fn sync_inactive_releases_held_snapshot() {
+        assert!(sync_output_snapshot_release_decision(false));
     }
 }

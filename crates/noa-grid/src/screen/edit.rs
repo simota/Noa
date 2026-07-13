@@ -413,8 +413,12 @@ impl Screen {
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
         match mode {
             EraseDisplay::Below => {
+                // `set_from` (not `*c = blank.clone()`) reuses each
+                // destination cell's existing `combining` buffer instead of
+                // dropping it and cloning blank's — same rationale as
+                // `Row::clear` and `erase_line`.
                 for c in &mut self.grid[y].cells[x..] {
-                    *c = blank.clone();
+                    c.set_from(&blank);
                 }
                 Self::sanitize_wide_row(&mut self.grid[y], &blank);
                 self.grid[y].dirty = true;
@@ -427,7 +431,7 @@ impl Screen {
                     r.clear(&blank);
                 }
                 for c in &mut self.grid[y].cells[..=x] {
-                    *c = blank.clone();
+                    c.set_from(&blank);
                 }
                 Self::sanitize_wide_row(&mut self.grid[y], &blank);
                 self.grid[y].dirty = true;
@@ -469,20 +473,24 @@ impl Screen {
         let blank = self.blank();
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
         let row = &mut self.grid[y];
+        // `set_from` (not `*c = blank.clone()`) reuses each destination
+        // cell's existing `combining` buffer instead of dropping it and
+        // cloning blank's — same rationale as `Row::clear` and `print`'s
+        // per-scalar overwrite, and this is the same erase-to-blank shape.
         match mode {
             EraseLine::Right => {
                 for c in &mut row.cells[x..] {
-                    *c = blank.clone();
+                    c.set_from(&blank);
                 }
             }
             EraseLine::Left => {
                 for c in &mut row.cells[..=x] {
-                    *c = blank.clone();
+                    c.set_from(&blank);
                 }
             }
             EraseLine::Complete => {
                 for c in &mut row.cells {
-                    *c = blank.clone();
+                    c.set_from(&blank);
                 }
             }
         }
@@ -514,8 +522,11 @@ impl Screen {
         let n = (n.max(1) as usize).min(len);
         let row = &mut self.grid[y];
         row.cells[x..].rotate_right(n);
+        // `set_from` (not `*c = blank.clone()`) reuses each destination
+        // cell's existing `combining` buffer — same rationale as
+        // `Row::clear` and `erase_line`.
         for c in &mut row.cells[x..x + n] {
-            *c = blank.clone();
+            c.set_from(&blank);
         }
         Self::sanitize_wide_row(row, &blank);
         row.dirty = true;
@@ -531,7 +542,7 @@ impl Screen {
         let row = &mut self.grid[y];
         row.cells[x..].rotate_left(n);
         for c in &mut row.cells[self.cols as usize - n..] {
-            *c = blank.clone();
+            c.set_from(&blank);
         }
         Self::sanitize_wide_row(row, &blank);
         row.dirty = true;
@@ -546,7 +557,7 @@ impl Screen {
         let n = (n.max(1) as usize).min(len);
         let row = &mut self.grid[y];
         for c in &mut row.cells[x..x + n] {
-            *c = blank.clone();
+            c.set_from(&blank);
         }
         Self::sanitize_wide_row(row, &blank);
         row.dirty = true;

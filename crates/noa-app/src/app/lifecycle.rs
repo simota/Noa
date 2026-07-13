@@ -587,6 +587,8 @@ impl App {
             overview_snapshot,
             snapshot_recycle: noa_render::FrameSnapshotRecycle::default(),
             kitty_animation_flag,
+            cursor_blink_state: CursorBlinkState::default(),
+            held_snapshot: None,
         })
     }
 

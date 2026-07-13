@@ -73,7 +73,12 @@ impl Screen {
         let underline_color = self.cursor.underline_color;
         let hyperlink = self.cursor.hyperlink;
         let attrs = self.pen_attrs();
-        let cell = Cell {
+        // In-place `set_from` (not a struct-literal assignment) so an
+        // already-populated destination cell's `combining` buffer is reused
+        // rather than dropped and replaced by this template's empty one —
+        // matters when the same screen position keeps getting overwritten
+        // by combining-mark-heavy content (accent/emoji redraws).
+        let template = Cell {
             ch: c,
             combining: String::new(),
             fg,
@@ -91,17 +96,17 @@ impl Screen {
 
         if width == 1 {
             Self::clear_wide_at(row, x, &blank);
-            row.cells[x] = cell;
+            row.cells[x].set_from(&template);
         } else {
             Self::clear_wide_at(row, x, &blank);
             Self::clear_wide_at(row, x + 1, &blank);
 
-            let mut lead = cell.clone();
+            let mut lead = template.clone();
             lead.attrs.insert(CellAttrs::WIDE);
             let mut spacer_attrs = attrs;
             spacer_attrs.insert(CellAttrs::WIDE_SPACER);
-            row.cells[x] = lead;
-            row.cells[x + 1] = Cell {
+            row.cells[x].set_from(&lead);
+            let spacer = Cell {
                 ch: ' ',
                 combining: String::new(),
                 fg,
@@ -110,6 +115,7 @@ impl Screen {
                 hyperlink,
                 attrs: spacer_attrs,
             };
+            row.cells[x + 1].set_from(&spacer);
         }
         row.dirty = true;
 
@@ -451,7 +457,7 @@ impl Screen {
         let mut spacer_attrs = lead.attrs;
         spacer_attrs.remove(CellAttrs::WIDE);
         spacer_attrs.insert(CellAttrs::WIDE_SPACER);
-        row.cells[spacer_x] = Cell {
+        let spacer = Cell {
             ch: ' ',
             combining: String::new(),
             fg,
@@ -460,6 +466,7 @@ impl Screen {
             hyperlink,
             attrs: spacer_attrs,
         };
+        row.cells[spacer_x].set_from(&spacer);
         row.dirty = true;
         if self.cursor.x as usize == spacer_x {
             if self.cursor.x.saturating_add(1) > self.right_margin() {

@@ -848,3 +848,250 @@ fn stream_invalid_utf8_yields_replacement_between_bulk_runs() {
         ]
     );
 }
+
+// ── scan_run boundary-scan + UTF-8-fast-path regression coverage ────
+//
+// `scan_run` (the merged word-at-a-time boundary scan + ASCII fast-path
+// used by `Stream::feed`'s ground-run fast path) processes 8 bytes at a
+// time. Off-by-one bugs in that chunking characteristically show up right
+// at chunk edges, so the tests below sweep run lengths and byte offsets
+// through several 8-byte-word boundaries (0, 8, 16) rather than relying on
+// a couple of hand-picked examples.
+
+/// Reference oracle for `scan_run`'s boundary rule, independent of its SWAR
+/// implementation: the first byte that is a C0 control or DEL.
+fn naive_run_end(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .position(|&b| b < 0x20 || b == 0x7f)
+        .unwrap_or(bytes.len())
+}
+
+#[test]
+fn scan_run_matches_naive_boundary_and_ascii_flag_across_word_boundaries() {
+    for len in 0..=20usize {
+        let base = vec![b'a'; len];
+        let (end, ascii) = crate::stream::scan_run(&base);
+        assert_eq!(end, naive_run_end(&base), "len={len} all-ascii run_end");
+        assert_eq!(end, len, "len={len} all-ascii run_end should reach the end");
+        assert!(ascii, "len={len} all-ascii run should report ascii=true");
+
+        for pos in 0..len {
+            // Bytes that must split the run (C0 controls, DEL) and bytes
+            // that must not (ordinary ASCII edges, C1/continuation bytes,
+            // stray UTF-8 lead bytes) — the latter only flip the ascii flag.
+            for &special in &[0x00u8, 0x01, 0x1f, 0x7f, 0x20, 0x7e, 0x80, 0x9f, 0xc0, 0xff] {
+                let mut buf = base.clone();
+                buf[pos] = special;
+                let (end, ascii) = crate::stream::scan_run(&buf);
+                let expected_end = naive_run_end(&buf);
+                assert_eq!(
+                    end, expected_end,
+                    "len={len} pos={pos} special={special:#04x} run_end mismatch"
+                );
+                let expected_ascii = buf[..expected_end].iter().all(|&b| b < 0x80);
+                assert_eq!(
+                    ascii, expected_ascii,
+                    "len={len} pos={pos} special={special:#04x} ascii flag mismatch"
+                );
+            }
+        }
+    }
+}
+
+/// Build the expected `TextEvent`s for an all-`a` run of `len` bytes with a
+/// single byte at `pos` replaced by one event (a C0 execute or a decode
+/// error's replacement scalar); `None` reproduces a plain unbroken run.
+fn split_run_expectation(len: usize, pos: usize, mid: Option<TextEvent>) -> Vec<TextEvent> {
+    let mut expected = Vec::new();
+    if pos > 0 {
+        expected.push(TextEvent::Run("a".repeat(pos)));
+    }
+    if let Some(e) = mid {
+        expected.push(e);
+    }
+    let suffix_len = len - pos - 1;
+    if suffix_len > 0 {
+        expected.push(TextEvent::Run("a".repeat(suffix_len)));
+    }
+    expected
+}
+
+#[test]
+fn stream_control_bytes_split_ascii_runs_across_word_boundaries() {
+    for len in 1..=20usize {
+        for pos in 0..len {
+            for &byte in &[0x00u8, 0x08, 0x1f, 0x0d] {
+                let mut buf = vec![b'a'; len];
+                buf[pos] = byte;
+                assert_eq!(
+                    text_events(&[&buf]),
+                    split_run_expectation(len, pos, Some(TextEvent::C0(byte))),
+                    "control byte len={len} pos={pos} byte={byte:#04x}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn stream_lone_c1_and_stray_lead_bytes_are_invalid_utf8_across_word_boundaries() {
+    // A single C1 byte outside the recognized 8-bit CSI/OSC/DCS/APC/SOS/PM
+    // introducers (0x90/0x98/0x9b/0x9c/0x9d/0x9e/0x9f — see `c1_control`),
+    // or a stray multi-byte lead/continuation byte, is a run byte
+    // (is_run_byte doesn't special-case C1) but on its own is never valid
+    // UTF-8, so the slow from_utf8 path must still catch it and emit
+    // exactly one replacement scalar — regardless of which SWAR chunk it
+    // lands in.
+    for len in 1..=20usize {
+        for pos in 0..len {
+            for &byte in &[0x80u8, 0x81, 0x8a, 0x99, 0xa0, 0xc0, 0xff] {
+                let mut buf = vec![b'a'; len];
+                buf[pos] = byte;
+                assert_eq!(
+                    text_events(&[&buf]),
+                    split_run_expectation(len, pos, Some(TextEvent::Scalar('\u{FFFD}'))),
+                    "invalid utf8 byte len={len} pos={pos} byte={byte:#04x}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn stream_cjk_and_emoji_runs_stay_bulk_across_word_boundaries() {
+    // A multi-byte scalar straddling the SWAR 8-byte chunk boundary must
+    // still decode as part of one uninterrupted bulk run, not get split or
+    // misdetected by the boundary scan.
+    for pos in 0..=12usize {
+        for ch in ["日", "\u{1f4a9}"] {
+            let text = format!("{}{}{}", "a".repeat(pos), ch, "a".repeat(9));
+            assert_eq!(
+                text_events(&[text.as_bytes()]),
+                vec![TextEvent::Run(text.clone())],
+                "pos={pos} ch={ch:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn stream_overlong_sequence_across_word_boundaries_yields_replacements() {
+    // `0xc0 0xaf` is an overlong (invalid) 2-byte encoding of '/': each byte
+    // is individually invalid, so it must yield two replacement scalars no
+    // matter where the DFA detour starts relative to the SWAR chunking.
+    for pos in 0..=14usize {
+        let mut buf = vec![b'a'; pos];
+        buf.extend_from_slice(&[0xc0, 0xaf]);
+        buf.extend(std::iter::repeat_n(b'a', 9));
+
+        let mut expected = Vec::new();
+        if pos > 0 {
+            expected.push(TextEvent::Run("a".repeat(pos)));
+        }
+        expected.push(TextEvent::Scalar('\u{FFFD}'));
+        expected.push(TextEvent::Scalar('\u{FFFD}'));
+        expected.push(TextEvent::Run("a".repeat(9)));
+
+        assert_eq!(text_events(&[&buf]), expected, "pos={pos}");
+    }
+}
+
+#[test]
+fn stream_bulk_run_huge_ascii_is_a_single_run() {
+    let text = "x".repeat(10_000);
+    assert_eq!(text_events(&[text.as_bytes()]), vec![TextEvent::Run(text)]);
+}
+
+// ── scan_run adversarial verification: SWAR unsafe-soundness audit ──
+//
+// `Stream::feed`'s fast path trusts `scan_run`'s `ascii` flag to skip UTF-8
+// validation via `from_utf8_unchecked` (see the `SAFETY` comment on its call
+// site in `stream.rs`). If `scan_run` ever reported `ascii = true` for a
+// range containing a byte `>= 0x80`, that would be a memory-safety bug, not
+// just a logic bug. The SWAR `haslessthan`/`haszero` tricks it uses compute
+// a real 64-bit subtraction per chunk, and subtraction borrows can
+// propagate from one byte lane into the next, so the tests below fuzz
+// `scan_run` against a byte-by-byte reference oracle from three angles:
+// (1) every one of the 256 byte values at every position, swept across
+// several 8-byte SWAR-chunk boundaries, (2) every 256x256 adjacent-byte
+// pair at every intra-chunk lane transition, to rule out a borrow from lane
+// `k` corrupting the result at lane `k+1`, and (3) large-scale seeded
+// random fuzzing over arbitrary buffers.
+
+/// Reference oracle: `scan_run`'s documented contract, computed the slow
+/// but obviously-correct way (equivalent to the pre-SWAR two-pass
+/// implementation this function replaced).
+fn naive_scan_run(bytes: &[u8]) -> (usize, bool) {
+    let end = naive_run_end(bytes);
+    (end, bytes[..end].iter().all(|&b| b < 0x80))
+}
+
+#[test]
+fn scan_run_exhaustive_all_256_byte_values_at_every_position() {
+    // Sweep run lengths through the 1st, 2nd, and into the 3rd 8-byte SWAR
+    // chunk, every insertion position, every possible byte value (0-255),
+    // not just the hand-picked "special" bytes the sweep test above uses.
+    for len in 1..=17usize {
+        for pos in 0..len {
+            for byte in 0u16..=255 {
+                let byte = byte as u8;
+                let mut buf = vec![b'a'; len];
+                buf[pos] = byte;
+                let expected = naive_scan_run(&buf);
+                let actual = crate::stream::scan_run(&buf);
+                assert_eq!(actual, expected, "len={len} pos={pos} byte={byte:#04x}");
+            }
+        }
+    }
+}
+
+#[test]
+fn scan_run_exhaustive_adjacent_byte_pairs_no_cross_lane_contamination() {
+    // A SWAR subtraction borrow can only ever propagate from one lane into
+    // the immediately next lane (the borrow state is a single bit), so
+    // exhaustively covering every (b0, b1) pair at every adjacent
+    // intra-chunk lane transition (0,1)..(6,7), for every possible
+    // incoming-borrow-inducing predecessor value, fully rules out
+    // cross-lane corruption — including arbitrarily long propagation
+    // chains, since the recurrence is memoryless beyond that one bit.
+    for pos in 0..7usize {
+        for b0 in 0u16..=255 {
+            for b1 in 0u16..=255 {
+                let mut buf = [b'A'; 16];
+                buf[pos] = b0 as u8;
+                buf[pos + 1] = b1 as u8;
+                let expected = naive_scan_run(&buf);
+                let actual = crate::stream::scan_run(&buf);
+                assert_eq!(actual, expected, "pos={pos} b0={b0:#04x} b1={b1:#04x}");
+            }
+        }
+    }
+}
+
+/// Minimal splitmix64: deterministic, dependency-free PRNG for the fuzz
+/// sweep below (`noa-vt` has no `rand` dev-dependency).
+struct SplitMix64(u64);
+impl SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+}
+
+#[test]
+fn scan_run_random_fuzz_matches_naive_oracle() {
+    // Fixed seed => fully deterministic/reproducible; 2M random-length,
+    // random-byte buffers cross-checked against the naive oracle.
+    let mut rng = SplitMix64(0xC0FF_EE15_5EED_1234);
+    for _ in 0..2_000_000u32 {
+        let len = (rng.next_u64() % 48) as usize;
+        let buf: Vec<u8> = (0..len).map(|_| (rng.next_u64() % 256) as u8).collect();
+        let expected = naive_scan_run(&buf);
+        let actual = crate::stream::scan_run(&buf);
+        assert_eq!(actual, expected, "buf={buf:?}");
+    }
+}

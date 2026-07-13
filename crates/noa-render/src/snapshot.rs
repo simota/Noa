@@ -175,6 +175,15 @@ fn kitty_snapshot(terminal: &Terminal) -> (Vec<ImagePlacementSnapshot>, Vec<Snap
 /// index order) and reports each row's `noa_grid::Row::dirty` bit as it
 /// stood *before* this snapshot cleared it — the renderer's dirty-row patch
 /// path consumes it to skip instance work for unchanged rows.
+///
+/// `Clone` exists for `noa-app`'s synchronized-output hold (DECSET 2026):
+/// while a pane's terminal is mid-update under mode 2026, `redraw` reuses a
+/// previously-held snapshot instead of reading a torn one, which requires an
+/// owned copy independent of the one already queued for this frame's render.
+/// Every field is cheap to clone relative to a fresh terminal read (`rows`'
+/// cost is the same order as a cache-miss `from_terminal_recycle`, and
+/// `images`' pixel data is `Arc`-shared, not copied).
+#[derive(Clone)]
 pub struct FrameSnapshot {
     pub rows: Vec<Row>,
     pub row_dirty: Vec<bool>,

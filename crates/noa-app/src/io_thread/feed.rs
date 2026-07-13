@@ -1,7 +1,11 @@
-//! Terminal feed/drain: parses queued pty bytes into the shared `Terminal`
-//! under one lock hold, opportunistically publishing the overview and
-//! sidebar mirrors while the lock is already taken, plus the debug
-//! (`NOA_PTY_CAPTURE`) capture tap.
+//! Terminal feed/drain: parses queued pty bytes into the shared `Terminal`,
+//! then opportunistically publishes the overview and sidebar mirrors while
+//! holding one final lock, plus the debug (`NOA_PTY_CAPTURE`) capture tap.
+//!
+//! The parse itself is chunked: each reader-thread chunk (or the eager
+//! `first` read) takes its own lock hold with a *fair* unlock in between
+//! (see [`feed_chunk_fair`]), so a big batch never blocks the main thread's
+//! `FrameSnapshot` pass for longer than one chunk's parse time.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -31,11 +35,13 @@ use super::sidebar::{
     SidebarPublish, SidebarUpsert, decide_sidebar_publish, preview_rows, preview_spans,
 };
 
-/// Ceiling on pty bytes coalesced into one parse batch (one terminal-lock
-/// hold). Bigger batches drain a sustained flood in proportionally fewer
-/// lock/wake cycles, while the cap bounds how long a single hold can block
-/// the main thread's snapshot pass (~1 MiB parses in a few ms even on the
-/// heavier unicode path).
+/// Ceiling on pty bytes coalesced into one parse batch. Bigger batches drain
+/// a sustained flood in proportionally fewer wake cycles, while the cap
+/// bounds the batch's total parse cost (~1 MiB parses in a few ms even on
+/// the heavier unicode path). This no longer bounds a single terminal-lock
+/// hold — the lock is taken per chunk (see [`feed_chunk_fair`]), so the
+/// worst-case hold is one `noa-pty` `READ_CHUNK` (64 KiB), not the whole
+/// batch.
 pub(super) const PTY_DATA_DRAIN_BYTE_LIMIT: usize = 1024 * 1024;
 
 pub(super) struct TerminalOutput {
@@ -118,6 +124,28 @@ pub(super) fn feed_terminal(
     )
 }
 
+/// Feed one chunk (a `noa-pty` reader-thread `READ_CHUNK`, or the eager
+/// `first` read) into the terminal under its own lock hold, then release
+/// with a *fair* unlock.
+///
+/// `parking_lot::Mutex` is unfair by default: the thread that just dropped a
+/// guard is free to re-lock immediately, even past another thread that has
+/// been parked on it — it only falls back to a fair unlock automatically on
+/// average every ~0.5 ms, or unconditionally once a critical section runs
+/// past ~1 ms (see the `parking_lot::Mutex` docs on eventual fairness). A
+/// single chunk parses in well under either threshold, so without an
+/// explicit `unlock_fair` here this io thread would keep barging back in
+/// ahead of the main thread's queued `FrameSnapshot` lock, and chunking the
+/// batch would buy nothing. `unlock_fair` costs nothing extra when no thread
+/// is waiting — parking_lot's raw mutex takes the same single
+/// compare-exchange fast path a plain unlock does in that case; the slower
+/// handoff path only runs once a waiter is actually parked.
+fn feed_chunk_fair(terminal: &Arc<Mutex<Terminal>>, stream: &mut noa_vt::Stream, bytes: &[u8]) {
+    let mut term = terminal.lock();
+    stream.feed(bytes, &mut *term);
+    parking_lot::MutexGuard::unlock_fair(term);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn feed_terminal_batch<'a>(
     terminal: &Arc<Mutex<Terminal>>,
@@ -134,11 +162,21 @@ pub(super) fn feed_terminal_batch<'a>(
     last_ipc_push: &mut Option<Instant>,
     ipc_row_cache: &mut IpcRowCache,
 ) -> TerminalOutput {
-    let mut term = terminal.lock();
-    stream.feed(first, &mut *term);
+    // Feed each chunk under its own lock hold (worst case one `READ_CHUNK`,
+    // 64 KiB) instead of holding the lock across the whole (up to 1 MiB)
+    // `PTY_DATA_DRAIN_BYTE_LIMIT` batch, so a main thread waiting on this
+    // same lock for a `FrameSnapshot` gets a chance to run between chunks.
+    // The bytes still reach `stream`/`term` in the exact same order as
+    // before — only the lock granularity changes, not the parse.
+    feed_chunk_fair(terminal, stream, first);
     for bytes in rest {
-        stream.feed(bytes, &mut *term);
+        feed_chunk_fair(terminal, stream, bytes);
     }
+
+    // Batch-tail work (overview/sidebar/auto-approve/IPC extraction below)
+    // stays a single lock hold, as before — none of it should be
+    // interleaved with the main thread's snapshot pass.
+    let mut term = terminal.lock();
     let overview_publish_pending =
         publish_overview_snapshot(&term, overview, last_overview_publish);
 
@@ -193,6 +231,15 @@ pub(super) fn feed_terminal_batch<'a>(
             IpcOutputPushDecision::ScheduleTrailingFlush { deadline } => (None, Some(deadline)),
         };
 
+    // `take_pending_writes` still drains once at the batch tail, not per
+    // chunk: `spawn`'s loop only writes `output.pending_writes` back to the
+    // pty once, after this whole call returns (see `feed_terminal_batch`'s
+    // caller), so draining per chunk and concatenating here would produce
+    // an identical byte string handed back at the identical moment — no
+    // earlier reply actually reaches the pty. Moving the drain earlier would
+    // add relock overhead for zero responsiveness gain, so DA/DSR reply
+    // latency is unchanged by this chunking (bounded by total batch parse
+    // time either way, same as before).
     let mut output = TerminalOutput {
         pending_writes: term.take_pending_writes(),
         pending_clipboard_writes: term.take_pending_clipboard_writes(),

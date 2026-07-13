@@ -904,15 +904,21 @@ fn mouse_wheel_viewport_scroll_snapshot_tracks_scrolled_row_base() {
 }
 
 #[test]
-fn terminal_clear_action_uses_grid_clear_api() {
+fn terminal_clear_action_erases_rows_above_cursor_when_not_at_a_prompt() {
+    // No OSC 133 shell-integration marks were recorded, so the cursor isn't
+    // "at a prompt": the clear erases scrollback plus the rows above the
+    // cursor (rather than the whole display) and doesn't ask for a form feed.
     let mut terminal = terminal_with_scrollback(GridSize::new(5, 3));
     terminal.scroll_viewport_up(1);
     terminal.pending_writes.extend_from_slice(b"reply");
 
-    apply_terminal_action(&mut terminal, TerminalAction::Clear);
+    let form_feed = apply_terminal_action(&mut terminal, TerminalAction::Clear);
 
+    assert!(!form_feed);
     assert_eq!(terminal.scrollback_len(), 0);
     assert_eq!(terminal.viewport_offset(), 0);
+    assert_eq!(terminal.primary.cursor.y, 0);
+    assert_eq!(terminal.primary.grid[0].cells[0].ch, 'F');
     assert_eq!(terminal.pending_writes, b"reply");
 }
 

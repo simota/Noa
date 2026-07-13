@@ -4,22 +4,41 @@
 use super::*;
 
 impl Screen {
-    pub(crate) fn clear_display(&mut self) {
-        let blank = self.blank();
-        for row in &mut self.grid {
-            row.clear(&blank);
-        }
-        self.viewport_offset = 0;
-        // The cleared cells may sit inside the selection; don't let a later
-        // copy pick up whatever gets written there next.
-        self.clear_selection();
-    }
-
     pub(crate) fn clear_scrollback(&mut self) {
         self.scrollback.clear();
         self.viewport_offset = 0;
         self.clear_selection();
         self.clear_search();
+    }
+
+    /// Ghostty parity: the non-prompt branch of `Termio.clearScreen` — erase
+    /// the rows above the cursor and shift the remaining rows up so the
+    /// cursor's row content lands on row 0 (`cursor.y` becomes `0`;
+    /// `cursor.x` is untouched). No-op if the cursor is already on row 0.
+    pub(crate) fn erase_rows_above_cursor(&mut self) {
+        let n = usize::from(self.cursor.y);
+        if n == 0 {
+            return;
+        }
+        let blank = self.blank();
+        self.grid.rotate_left(n);
+        for row in &mut self.grid[self.rows as usize - n..] {
+            row.clear(&blank);
+        }
+        for row in &mut self.grid {
+            row.dirty = true;
+        }
+        self.cursor.y = 0;
+        self.viewport_offset = 0;
+        // The rotated-away rows may have carried the selection; content
+        // moved, so don't let a later copy pick up whatever is written there
+        // next (same rationale as `EraseDisplay::Complete` above).
+        self.clear_selection();
+        // Ghostty deletes all graphics placements on this screen here; the
+        // shared `ImageStore` on `Terminal` (image data, quota-evicted) is
+        // untouched since it also backs the alternate screen.
+        let last = self.rows as usize - 1;
+        self.remove_placements_intersecting_grid_rows(0, last);
     }
 
     pub(crate) fn select_all(&mut self) {

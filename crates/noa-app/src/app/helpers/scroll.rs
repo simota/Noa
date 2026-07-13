@@ -2,12 +2,16 @@
 
 use super::*;
 
-pub(crate) fn apply_terminal_action(terminal: &mut Terminal, action: TerminalAction) {
+/// Apply `action` to `terminal`. Returns whether the caller must write a
+/// form feed (`0x0C`) to the pty afterward — only `Clear` at a shell prompt
+/// asks for this (see [`Terminal::clear_screen_and_scrollback`]).
+pub(crate) fn apply_terminal_action(terminal: &mut Terminal, action: TerminalAction) -> bool {
     match action {
-        TerminalAction::Clear => terminal.clear_active_display_and_scrollback(),
+        TerminalAction::Clear => return terminal.clear_screen_and_scrollback(),
         TerminalAction::ClearScrollback => terminal.clear_scrollback(),
         TerminalAction::SelectAll => terminal.select_all(),
     }
+    false
 }
 
 pub(crate) fn apply_viewport_scroll(

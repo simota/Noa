@@ -21,7 +21,7 @@ use crate::screen::Screen;
 use crate::search::SearchMatch;
 use crate::selection::SelectionPoint;
 use noa_core::{CellAttrs, Color, GridSize, Point};
-use noa_vt::SgrAttr;
+use noa_vt::{EraseDisplay, SgrAttr};
 
 /// Cap on the `XTWINOPS` title stack (`CSI 22/23 t`), mirroring the
 /// unbounded-growth guardrails already used for `Screen::scrollback` and the
@@ -300,15 +300,112 @@ impl Terminal {
         self.active_mut().search_previous()
     }
 
-    pub fn clear_active_display_and_scrollback(&mut self) {
+    /// Whether the cursor sits at a shell-integration prompt/input line
+    /// rather than mid-command output.
+    ///
+    /// Ghostty parity: `Terminal.cursorIsAtPrompt`, which checks the cursor's
+    /// row `semantic_prompt` tag and then the cursor cell's `semantic_content`
+    /// directly (input/prompt → true, output → false) — Ghostty tags every
+    /// row and cell as it prints. `noa-grid` has no per-row/per-cell semantic
+    /// tags, only the flat `shell_marks` vector, so this approximates the
+    /// same answer by scanning marks from the cursor upward (most recently
+    /// recorded first) for the nearest row-tagging mark: `CommandEnd`
+    /// (OSC 133;D) tags no row and is skipped; the first remaining mark at or
+    /// above the cursor decides — `PromptStart` / `InputStart` means the
+    /// cursor is at a prompt, `CommandStart` means a command is still
+    /// running. No such mark means shell integration hasn't tagged anything
+    /// yet, so treat it as not-a-prompt. This agrees with Ghostty's per-cell
+    /// check for every realistic OSC 133 sequence (idle prompt, typing input,
+    /// running command, post-command before the next prompt, no integration
+    /// at all).
+    pub fn cursor_is_at_prompt(&self) -> bool {
         if self.active_is_alt {
-            let active = self.active_mut();
-            active.clear_display();
-            active.clear_selection();
-            active.clear_search();
+            return false;
+        }
+        let cursor_abs = self.primary.rows_evicted()
+            + self.primary.scrollback_len()
+            + usize::from(self.primary.cursor.y);
+        self.shell_marks
+            .iter()
+            .rev()
+            .filter(|mark| mark.kind != ShellIntegrationMarkKind::CommandEnd)
+            .find(|mark| mark.point.y <= cursor_abs)
+            .is_some_and(|mark| {
+                matches!(
+                    mark.kind,
+                    ShellIntegrationMarkKind::PromptStart | ShellIntegrationMarkKind::InputStart
+                )
+            })
+    }
+
+    /// Ghostty parity: `Termio.clearScreen(history=true)` — the `clear_screen`
+    /// keybind (Cmd+K). An emulator-level clear on the alternate screen would
+    /// corrupt a running full-screen program's own idea of the display, so
+    /// this is a complete no-op there. Otherwise scrollback is always erased;
+    /// at a shell-integration prompt the whole display is erased too and the
+    /// return value tells the caller to write a form feed (`0x0C`) so the
+    /// shell repaints its prompt. Mid-command (or with no shell integration
+    /// at all), only the rows above the cursor are erased — the cursor's row
+    /// becomes row 0 — since nothing above it is a prompt the shell would
+    /// otherwise redraw.
+    ///
+    /// Returns whether the caller must write a form feed to the pty.
+    pub fn clear_screen_and_scrollback(&mut self) -> bool {
+        if self.active_is_alt {
+            return false;
+        }
+
+        let at_prompt = self.cursor_is_at_prompt();
+        let old_sb_len = self.primary.scrollback_len();
+        let old_live_top = self.primary.rows_evicted() + old_sb_len;
+        self.primary.erase_display(EraseDisplay::Scrollback);
+        // `erase_display(Scrollback)` collapses the session-absolute
+        // coordinate space by `old_sb_len`, re-anchoring surviving Kitty
+        // placements accordingly (see the `EraseDisplay::Scrollback` arm in
+        // `screen/edit.rs`). `shell_marks` live on `Terminal`, not `Screen`,
+        // so that call can't reach them — collapse them here the same way:
+        // drop marks anchored in the now-cleared history, shift survivors
+        // down by the same amount.
+        self.shell_marks.retain_mut(|mark| {
+            if mark.point.y < old_live_top {
+                false
+            } else {
+                mark.point.y -= old_sb_len;
+                true
+            }
+        });
+
+        if at_prompt {
+            self.primary.erase_display(EraseDisplay::Complete);
+            // Ghostty parity: the erased rows' shell-integration tags die
+            // with them. Dropping every mark also guarantees a repeated
+            // Cmd+K before the shell repaints its prompt returns `false`
+            // (no double form feed).
+            self.shell_marks.clear();
+            self.primary.clear_search();
+            true
         } else {
-            self.primary.clear_display();
-            self.primary.clear_scrollback();
+            let old_cursor_abs = self.primary.rows_evicted()
+                + self.primary.scrollback_len()
+                + usize::from(self.primary.cursor.y);
+            self.primary.erase_rows_above_cursor();
+            let new_cursor_abs = self.primary.rows_evicted()
+                + self.primary.scrollback_len()
+                + usize::from(self.primary.cursor.y);
+            let shift = old_cursor_abs - new_cursor_abs;
+            // Marks above the cursor's row were just erased along with their
+            // rows (Ghostty parity: a row's tag dies with the row); survivors
+            // shift down by the same amount the cursor's own row did.
+            self.shell_marks.retain_mut(|mark| {
+                if mark.point.y < old_cursor_abs {
+                    false
+                } else {
+                    mark.point.y -= shift;
+                    true
+                }
+            });
+            self.primary.clear_search();
+            false
         }
     }
 

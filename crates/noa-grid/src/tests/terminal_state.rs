@@ -876,7 +876,10 @@ fn erase_display_scrollback_clears_history_only() {
 }
 
 #[test]
-fn clear_active_display_and_scrollback_clears_primary_state() {
+fn clear_screen_and_scrollback_without_shell_marks_preserves_cursor_row() {
+    // No OSC 133 marks recorded at all, so `cursor_is_at_prompt` is false:
+    // rows above the cursor are erased and its row (holding "D") lands at
+    // row 0, rather than blanking the whole display.
     let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
     t.scroll_viewport_up(1);
     t.set_viewport_selection(Point { x: 0, y: 0 }, Point { x: 0, y: 1 });
@@ -884,17 +887,168 @@ fn clear_active_display_and_scrollback_clears_primary_state() {
     t.pending_writes.extend_from_slice(b"reply");
     t.pending_clipboard_writes.push("clip".to_string());
 
-    t.clear_active_display_and_scrollback();
+    let form_feed = t.clear_screen_and_scrollback();
 
+    assert!(!form_feed, "no shell prompt means no FF for the shell");
     assert_eq!(t.scrollback_len(), 0);
     assert_eq!(t.viewport_offset(), 0);
-    assert_eq!(row_text(&t, 0, 5), "     ");
+    assert_eq!(row_text(&t, 0, 5), "D    ");
     assert_eq!(row_text(&t, 1, 5), "     ");
     assert_eq!(row_text(&t, 2, 5), "     ");
+    assert_eq!(t.primary.cursor.y, 0);
     assert!(t.active().selection.is_none());
     assert!(t.active().search.query().is_empty());
     assert_eq!(t.pending_writes, b"reply");
     assert_eq!(t.pending_clipboard_writes, vec!["clip"]);
+}
+
+#[test]
+fn clear_screen_and_scrollback_at_prompt_blanks_display_and_signals_form_feed() {
+    let mut t = run_size(20, 3, b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert!(t.cursor_is_at_prompt());
+
+    let form_feed = t.clear_screen_and_scrollback();
+
+    assert!(form_feed, "at a prompt, the caller must FF the shell");
+    assert_eq!(t.scrollback_len(), 0);
+    for y in 0..3 {
+        assert_eq!(row_text(&t, y, 20), " ".repeat(20));
+    }
+
+    // Marks are dropped with the erased rows, so an immediate repeat finds
+    // no prompt and returns false (no double FF).
+    let second = t.clear_screen_and_scrollback();
+    assert!(!second, "repeated Cmd+K before the shell repaints must not FF twice");
+}
+
+#[test]
+fn clear_screen_and_scrollback_mid_command_drops_marks_above_cursor() {
+    // A CommandStart mark (C) recorded at row 0, then two lines of command
+    // output move the cursor down to row 2 without scrolling anything into
+    // scrollback. The C mark's row is now strictly above the cursor, so
+    // `erase_rows_above_cursor` erases it along with its row — Ghostty's row
+    // tags die with the row they were recorded on, so `has_running_program`
+    // correctly flips to false rather than surviving the clear.
+    let mut t = run_size(
+        20,
+        4,
+        b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\r\noutput1\r\noutput2",
+    );
+    assert!(!t.cursor_is_at_prompt());
+    assert!(t.has_running_program());
+    assert_eq!(t.primary.cursor.y, 2);
+
+    let form_feed = t.clear_screen_and_scrollback();
+
+    assert!(!form_feed);
+    assert_eq!(row_text(&t, 0, 20), format!("{:<20}", "output2"));
+    assert_eq!(t.primary.cursor.y, 0);
+    assert!(t.shell_marks.is_empty());
+    assert!(!t.has_running_program());
+}
+
+#[test]
+fn clear_screen_and_scrollback_collapses_shell_marks_with_the_scrollback_erase() {
+    // Regression: `erase_display(EraseDisplay::Scrollback)` collapses the
+    // session-absolute coordinate space by the old scrollback length and
+    // re-anchors surviving Kitty placements accordingly (the `Scrollback` arm
+    // in `screen/edit.rs`), but `shell_marks` live on `Terminal`, so that call
+    // can't reach them. With non-empty scrollback at clear time, a
+    // `CommandStart` mark recorded on the cursor's own row must land at
+    // `rows_evicted + cursor.y` after the clear — not at a coordinate that's
+    // still `old_sb_len` rows too high because the collapse never happened.
+    let mut t = run_size(
+        10,
+        3,
+        b"L1\r\nL2\r\nL3\r\nL4\r\n\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07",
+    );
+    assert_eq!(t.scrollback_len(), 2, "two rows scrolled into history");
+    assert_eq!(t.primary.cursor.y, 2);
+    assert!(!t.cursor_is_at_prompt());
+    assert!(t.has_running_program());
+
+    let form_feed = t.clear_screen_and_scrollback();
+
+    assert!(!form_feed);
+    assert_eq!(t.scrollback_len(), 0);
+    assert_eq!(t.primary.cursor.y, 0);
+    assert!(
+        t.has_running_program(),
+        "the CommandStart mark sat on the cursor's own row and must survive the clear"
+    );
+    assert_eq!(
+        t.shell_marks.last().unwrap().point.y,
+        t.primary.rows_evicted() + usize::from(t.primary.cursor.y),
+        "the surviving mark must land exactly on the cursor's new row, not `old_sb_len` too high"
+    );
+}
+
+#[test]
+fn clear_screen_and_scrollback_drops_a_mark_above_the_cursor_despite_scrollback() {
+    // Same coordinate-collapse regression as above, but for a mark that
+    // should be *dropped*: with non-empty scrollback, comparing an
+    // uncollapsed (old-space) mark coordinate against a collapsed (new-space)
+    // threshold can make the retain test wrongly pass, keeping a mark whose
+    // row was actually erased.
+    let mut t = run_size(
+        10,
+        4,
+        b"L1\r\nL2\r\nL3\r\n\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\r\noutput1",
+    );
+    assert_eq!(t.scrollback_len(), 1, "one row scrolled into history");
+    assert!(!t.cursor_is_at_prompt());
+    assert!(
+        t.has_running_program(),
+        "C was recorded before the trailing output line"
+    );
+
+    let form_feed = t.clear_screen_and_scrollback();
+
+    assert!(!form_feed);
+    assert!(
+        t.shell_marks.is_empty(),
+        "the C mark's row ended up above the cursor and was erased with it"
+    );
+    assert!(!t.has_running_program());
+}
+
+#[test]
+fn clear_screen_and_scrollback_drops_a_prompt_mark_left_in_scrollback() {
+    // An older PromptStart mark (`A`) scrolls deep into history while a fresh
+    // command cycle (`C`) keeps the clear non-prompt. Without the upfront
+    // mark collapse, the non-prompt branch's retain (`mark.point.y <
+    // old_cursor_abs`) compares an *old-space* mark coordinate against a
+    // *new-space* threshold and can wrongly keep `A` with a ghost coordinate
+    // that still looks like a reachable prompt to `scroll_to_prompt`.
+    //
+    // `PromptJump::Prev` is checked because that's the direction a user
+    // scrolling back through history after a clear would use; it returns
+    // `false` in both the buggy and fixed code immediately after the clear
+    // (the viewport sits at the absolute top, so nothing can be "further
+    // back" yet) — included for completeness. `PromptJump::Next` is the
+    // check that actually catches the regression: on the buggy code the
+    // surviving ghost mark sits just below the viewport top and `Next`
+    // reports finding a prompt there (jumping to now-erased content); on the
+    // fixed code `A` was dropped outright, so no prompt mark exists at all.
+    let mut t = run_size(
+        10,
+        3,
+        b"r0\r\nr1\r\nr2\r\n\x1b]133;A\x07$ \r\nout1\r\nout2\r\nout3\x1b]133;C\x07",
+    );
+    assert_eq!(t.scrollback_len(), 4, "the prompt row scrolled into history");
+    assert!(!t.cursor_is_at_prompt());
+
+    let form_feed = t.clear_screen_and_scrollback();
+
+    assert!(!form_feed);
+    assert!(
+        !t.shell_marks
+            .iter()
+            .any(|mark| mark.kind == ShellIntegrationMarkKind::PromptStart),
+        "the prompt mark's row was in the cleared scrollback and must not survive"
+    );
+    assert!(!t.scroll_to_prompt(PromptJump::Prev));
+    assert!(!t.scroll_to_prompt(PromptJump::Next));
 }
 
 #[test]
@@ -916,7 +1070,11 @@ fn clear_scrollback_preserves_primary_live_display() {
 }
 
 #[test]
-fn alternate_clear_preserves_primary_scrollback_and_terminal_state() {
+fn alternate_screen_clear_is_a_complete_noop() {
+    // Ghostty parity: an emulator-level clear on the alternate screen would
+    // corrupt a running full-screen program's own idea of the display, so
+    // `clear_screen_and_scrollback` must not touch anything at all here —
+    // not even the alt screen's own content, selection, or search.
     let mut t = run_size(
         5,
         3,
@@ -929,21 +1087,47 @@ fn alternate_clear_preserves_primary_scrollback_and_terminal_state() {
     t.set_search_query("ALT");
     let primary_scrollback_len = t.primary.scrollback_len();
 
-    t.clear_active_display_and_scrollback();
+    let form_feed = t.clear_screen_and_scrollback();
 
+    assert!(!form_feed, "a no-op alt-screen clear must not FF the pty");
     assert!(t.active_is_alt);
     assert_eq!(t.primary.scrollback_len(), primary_scrollback_len);
     assert_eq!(row_text(&t, 0, 1), "B");
     assert_eq!(row_text(&t, 1, 1), "C");
     assert_eq!(row_text(&t, 2, 1), "D");
-    assert_eq!(active_row_text(&t, 0, 5), "     ");
-    assert_eq!(active_row_text(&t, 1, 5), "     ");
-    assert_eq!(active_row_text(&t, 2, 5), "     ");
-    assert!(t.active().selection.is_none());
-    assert!(t.active().search.query().is_empty());
+    assert_eq!(active_row_text(&t, 0, 5), "ALT  ");
+    assert!(t.active().selection.is_some());
+    assert!(!t.active().search.query().is_empty());
     assert!(t.modes.bracketed_paste());
     assert_eq!(t.title, "alt title");
     assert_eq!(t.colors.default_fg(), Some(Rgb::new(1, 2, 3)));
     assert_eq!(t.pending_writes, b"reply");
     assert_eq!(t.pending_clipboard_writes, vec!["clip"]);
+}
+
+#[test]
+fn cursor_is_at_prompt_follows_the_nearest_row_tagging_mark() {
+    assert!(!run(b"hello").cursor_is_at_prompt(), "no marks at all");
+    assert!(run(b"\x1b]133;A\x07").cursor_is_at_prompt(), "A: prompt");
+    assert!(
+        run(b"\x1b]133;A\x07$ \x1b]133;B\x07").cursor_is_at_prompt(),
+        "A,B: input line"
+    );
+    assert!(
+        !run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07").cursor_is_at_prompt(),
+        "A,B,C: command running"
+    );
+    assert!(
+        !run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\x1b]133;D;0\x07").cursor_is_at_prompt(),
+        "A,B,C,D: D tags no row, nearest tagging mark is still C"
+    );
+    assert!(
+        run(b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07")
+            .cursor_is_at_prompt(),
+        "A,B,C,D,A: a fresh prompt mark is now nearest"
+    );
+    assert!(
+        !run(b"\x1b]133;A\x07\x1b[?1049h").cursor_is_at_prompt(),
+        "alternate screen is always false regardless of marks"
+    );
 }

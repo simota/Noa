@@ -16,7 +16,10 @@ impl App {
             return;
         };
 
-        apply_terminal_action(&mut terminal.lock(), action);
+        let send_form_feed = apply_terminal_action(&mut terminal.lock(), action);
+        if send_form_feed {
+            self.write_pane_pty_bytes(window_id, pane_id, &b"\x0c"[..]);
+        }
 
         if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();

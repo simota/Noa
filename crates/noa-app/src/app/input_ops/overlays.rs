@@ -233,6 +233,7 @@ impl App {
             target.window_id,
             target.pane_id,
             session.selected_text,
+            self.config.send_selection_send_enter,
         );
     }
 

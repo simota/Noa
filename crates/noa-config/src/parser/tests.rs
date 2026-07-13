@@ -1365,6 +1365,15 @@ fn bell_keys_parse_and_are_supported_scalar_keys_for_import() {
 }
 
 #[test]
+fn send_selection_send_enter_parses_and_is_supported_scalar_key_for_import() {
+    let (overrides, diagnostics) = parse_overrides(path(), "send-selection-send-enter = true");
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(overrides.send_selection_send_enter, Some(true));
+    assert!(is_supported_scalar_key("send-selection-send-enter"));
+}
+
+#[test]
 fn invalid_values_warn_and_fall_back() {
     let (overrides, diagnostics) = parse_overrides(path(), "font-size = not-a-number");
 

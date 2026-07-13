@@ -284,6 +284,7 @@ impl ThemeSettings {
                     window_padding_y: init.window_padding_y,
                     macos_titlebar_style: init.macos_titlebar_style,
                     confirm_quit: init.confirm_quit,
+                    send_selection_send_enter: init.send_selection_send_enter,
                     font_family: init.font_family.clone(),
                 },
                 [
@@ -362,6 +363,10 @@ impl ThemeSettings {
                     },
                     SettingsRow {
                         draft: RowDraft::ConfirmQuit(init.confirm_quit),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::SendSelectionSendEnter(init.send_selection_send_enter),
                         touched: false,
                     },
                     SettingsRow {
@@ -1160,6 +1165,15 @@ impl ThemeSettings {
                 self.rows[idx].touched = true;
                 RowEffect::None
             }
+            SettingsRowKind::SendSelectionSendEnter => {
+                let RowDraft::SendSelectionSendEnter(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new = !current;
+                self.rows[idx].draft = RowDraft::SendSelectionSendEnter(new);
+                self.rows[idx].touched = true;
+                RowEffect::None
+            }
             // R-9: all four rows are persist-only (no runtime-apply path
             // from this row directly — the reload-exempt three still show
             // `Liveness::OnSave` because `ConfigWatcher` re-applies them
@@ -1858,6 +1872,12 @@ impl ThemeSettings {
                 RowDraft::ConfirmQuit(confirm) => {
                     updates.push(("confirm-quit".to_string(), confirm.to_string()));
                 }
+                RowDraft::SendSelectionSendEnter(send_enter) => {
+                    updates.push((
+                        "send-selection-send-enter".to_string(),
+                        send_enter.to_string(),
+                    ));
+                }
                 RowDraft::ScrollbackLimit(bytes) => {
                     updates.push(("scrollback-limit".to_string(), bytes.to_string()));
                 }
@@ -2103,6 +2123,10 @@ pub(crate) fn revert_updates(
         macos_titlebar_style_config_value(revert.macos_titlebar_style).to_string(),
     ));
     updates.push(("confirm-quit".to_string(), revert.confirm_quit.to_string()));
+    updates.push((
+        "send-selection-send-enter".to_string(),
+        revert.send_selection_send_enter.to_string(),
+    ));
     updates.push(("font-family".to_string(), revert.font_family.clone()));
     updates
 }
@@ -2128,6 +2152,7 @@ fn is_reload_exempt(row: SettingsRowKind) -> bool {
             | SettingsRowKind::BackgroundImageRepeat
             | SettingsRowKind::BackgroundImageInterval
             | SettingsRowKind::ConfirmQuit
+            | SettingsRowKind::SendSelectionSendEnter
             | SettingsRowKind::QuickTerminalHeight
             // R-9/Addendum D-1's FM-01 correction: these three are picked up
             // by `ConfigWatcher`'s 500ms poll (`app/config_reload.rs`'s
@@ -2208,7 +2233,9 @@ fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
             background_image_position_value(*position).hash(hasher);
         }
         RowDraft::BackgroundImageFit(fit) => background_image_fit_value(*fit).hash(hasher),
-        RowDraft::BackgroundImageRepeat(v) | RowDraft::ConfirmQuit(v) => v.hash(hasher),
+        RowDraft::BackgroundImageRepeat(v)
+        | RowDraft::ConfirmQuit(v)
+        | RowDraft::SendSelectionSendEnter(v) => v.hash(hasher),
         RowDraft::BackgroundImageInterval(v) => v.hash(hasher),
         RowDraft::CursorStyle(shape) => cursor_shape_config_value(*shape).hash(hasher),
         RowDraft::WindowPadding(x, y) => {

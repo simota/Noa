@@ -150,6 +150,27 @@ pub fn encode_key_with_modes(
     }
 }
 
+/// Bytes an unmodified Enter press writes to the pty under the given Kitty
+/// keyboard flags: `CSI 13 u` once report-all-keys is in effect, legacy CR
+/// otherwise. Delegates to [`encode_key_with_modes`] so a synthesized Enter
+/// (the send-selection trailing Enter) can never diverge from a typed one.
+pub(crate) fn encode_enter_key(kitty_flags: u8) -> Vec<u8> {
+    encode_key_with_modes(
+        &Key::Named(NamedKey::Enter),
+        None,
+        None,
+        None,
+        ModifiersState::empty(),
+        true,
+        false,
+        false,
+        kitty_flags,
+        true,
+        false,
+    )
+    .expect("an unmodified Enter press always encodes")
+}
+
 /// The C0 byte for Ctrl+`c` under the legacy encoding: letters map to
 /// 0x01..0x1a, plus the classic xterm symbol and digit mappings.
 fn ctrl_c0_byte(c: char) -> Option<u8> {

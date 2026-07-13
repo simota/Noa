@@ -73,6 +73,7 @@ pub(crate) fn build_overrides(
     let mut audible_bell_when_unfocused = None;
     let mut audible_bell_dock_bounce = None;
     let mut auto_approve = None;
+    let mut send_selection_send_enter = None;
     let mut keybinds = Vec::new();
     let mut server_enable = None;
     let mut server_port = None;
@@ -328,6 +329,10 @@ pub(crate) fn build_overrides(
             "auto-approve" => {
                 auto_approve = parse_bool_directive(path, directive, &mut diagnostics);
             }
+            "send-selection-send-enter" => {
+                send_selection_send_enter =
+                    parse_bool_directive(path, directive, &mut diagnostics);
+            }
             "keybind" => {
                 if let Some(keybind) = parse_keybind_config(path, directive, &mut diagnostics) {
                     keybinds.push(keybind);
@@ -422,6 +427,7 @@ pub(crate) fn build_overrides(
             audible_bell_when_unfocused,
             audible_bell_dock_bounce,
             auto_approve,
+            send_selection_send_enter,
             keybinds,
             server_enable,
             server_port,
@@ -522,5 +528,6 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "audible-bell-when-unfocused"
             | "audible-bell-dock-bounce"
             | "auto-approve"
+            | "send-selection-send-enter"
     )
 }

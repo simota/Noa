@@ -64,6 +64,11 @@ pub(crate) enum SettingsRowKind {
     SidebarFontSize,
     QuickTerminalHeight,
     ConfirmQuit,
+    /// `send-selection-send-enter`. Same reload-exempt classification as
+    /// `ConfirmQuit`: no live-preview path, but `commit_theme_settings`
+    /// mirrors it into `self.config` the moment the overlay saves (the
+    /// send-selection picker reads it from there at commit time).
+    SendSelectionSendEnter,
     /// R-9: `scrollback-limit`. `is_live() == false` (no runtime-apply path
     /// from this row directly), but reload-exempt (`Liveness::OnSave`,
     /// `RestartReason::None`) — `ConfigWatcher` re-applies it within 500ms
@@ -126,7 +131,7 @@ pub(crate) enum SettingsRowKind {
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 28;
+    pub(crate) const COUNT: usize = 29;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -146,6 +151,7 @@ impl SettingsRowKind {
         Self::SidebarFontSize,
         Self::QuickTerminalHeight,
         Self::ConfirmQuit,
+        Self::SendSelectionSendEnter,
         Self::ScrollbackLimit,
         Self::CursorStyleBlink,
         Self::MinimumContrast,
@@ -204,6 +210,7 @@ impl SettingsRowKind {
             Self::SidebarFontSize => "Sidebar Font Size",
             Self::QuickTerminalHeight => "Quick Terminal Height",
             Self::ConfirmQuit => "Confirm Quit",
+            Self::SendSelectionSendEnter => "Send Selection Enter",
             Self::ScrollbackLimit => "Scrollback Limit",
             Self::CursorStyleBlink => "Cursor Blink",
             Self::MinimumContrast => "Minimum Contrast",
@@ -249,6 +256,9 @@ impl SettingsRowKind {
                 "Drop-down quick terminal's height as a fraction of the screen."
             }
             Self::ConfirmQuit => "Ask for confirmation before quitting the app.",
+            Self::SendSelectionSendEnter => {
+                "Send Enter after the send-selection picker pastes. Applies on save."
+            }
             Self::ScrollbackLimit => {
                 "Total scrollback storage retained per pane, in bytes. Applies on save."
             }
@@ -362,6 +372,7 @@ pub(crate) enum RowDraft {
     SidebarFontSize(f32),
     QuickTerminalHeight(f32),
     ConfirmQuit(bool),
+    SendSelectionSendEnter(bool),
     ScrollbackLimit(usize),
     /// Normalizes `noa_config::StartupConfig::cursor_style_blink`'s
     /// `Option<bool>` (`None` = terminal default) to a plain `bool` the row
@@ -451,6 +462,13 @@ impl RowDraft {
             RowDraft::QuickTerminalHeight(size) => format!("{:.0}%", size * 100.0),
             RowDraft::ConfirmQuit(confirm) => {
                 if *confirm {
+                    "On".to_string()
+                } else {
+                    "Off".to_string()
+                }
+            }
+            RowDraft::SendSelectionSendEnter(send_enter) => {
+                if *send_enter {
                     "On".to_string()
                 } else {
                     "Off".to_string()
@@ -548,6 +566,9 @@ impl RowDraft {
                 RowDraft::QuickTerminalHeight(fraction)
             }
             SettingsRowKind::ConfirmQuit => RowDraft::ConfirmQuit(d.confirm_quit),
+            SettingsRowKind::SendSelectionSendEnter => {
+                RowDraft::SendSelectionSendEnter(d.send_selection_send_enter)
+            }
             SettingsRowKind::ScrollbackLimit => RowDraft::ScrollbackLimit(d.scrollback_limit),
             SettingsRowKind::CursorStyleBlink => {
                 RowDraft::CursorStyleBlink(d.cursor_style_blink.unwrap_or(true))
@@ -657,6 +678,7 @@ pub(crate) struct RevertValues {
     pub(crate) window_padding_y: f32,
     pub(crate) macos_titlebar_style: MacosTitlebarStyle,
     pub(crate) confirm_quit: bool,
+    pub(crate) send_selection_send_enter: bool,
     pub(crate) font_family: String,
 }
 
@@ -748,6 +770,7 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) sidebar_font_size: f32,
     pub(crate) quick_terminal_size: f32,
     pub(crate) confirm_quit: bool,
+    pub(crate) send_selection_send_enter: bool,
     pub(crate) font_family: String,
     pub(crate) available_font_families: Vec<String>,
     /// R-9.

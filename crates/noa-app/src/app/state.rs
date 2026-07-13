@@ -654,6 +654,7 @@ mod theme_settings_session_tests {
             sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
             confirm_quit: true,
+            send_selection_send_enter: false,
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
             scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,
@@ -857,6 +858,10 @@ pub(super) enum ConfirmAction {
         window_id: WindowId,
         pane_id: PaneId,
         text: String,
+        /// Follow the paste with an Enter (`\r`) write — the send-selection
+        /// picker's `send-selection-send-enter` behavior, deferred with the
+        /// paste itself.
+        then_enter: bool,
     },
     /// Fulfill an OSC 52 clipboard read: read the clipboard now and write the
     /// base64 reply to the pane's pty.

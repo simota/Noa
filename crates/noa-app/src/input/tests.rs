@@ -1309,3 +1309,19 @@ fn kitty_keypad_uses_dedicated_codes_under_report_all() {
         Some(b"\x1b[57400u".to_vec())
     );
 }
+
+// The send-selection trailing Enter must match what a typed Enter sends: a
+// report-all-keys client reads `CSI 13 u`, everything else the legacy CR.
+#[test]
+fn encode_enter_key_follows_kitty_flags() {
+    assert_eq!(encode_enter_key(0), b"\r".to_vec());
+    assert_eq!(encode_enter_key(KITTY_DISAMBIGUATE), b"\r".to_vec());
+    assert_eq!(
+        encode_enter_key(KITTY_REPORT_ALL_KEYS),
+        b"\x1b[13u".to_vec()
+    );
+    assert_eq!(
+        encode_enter_key(KITTY_REPORT_ALL_KEYS | KITTY_REPORT_EVENT_TYPES),
+        b"\x1b[13u".to_vec()
+    );
+}

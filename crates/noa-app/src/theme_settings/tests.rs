@@ -36,6 +36,7 @@ fn init() -> ThemeSettingsInit {
         // `quick_terminal_height_fraction` at the `App` layer).
         quick_terminal_size: 0.4,
         confirm_quit: true,
+        send_selection_send_enter: false,
         font_family: "Menlo".to_string(),
         available_font_families: vec![
             "Menlo".to_string(),
@@ -945,6 +946,26 @@ fn confirm_quit_row_toggles_and_commits_without_restart_note() {
     );
 }
 
+#[test]
+fn send_selection_send_enter_row_toggles_and_commits_without_restart_note() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::SendSelectionSendEnter);
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::SendSelectionSendEnter)].draft,
+        RowDraft::SendSelectionSendEnter(true)
+    );
+    assert!(!settings.restart_note(SettingsRowKind::SendSelectionSendEnter));
+
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "send-selection-send-enter"),
+        Some(&("send-selection-send-enter".to_string(), "true".to_string()))
+    );
+}
+
 // R-17/NFR-6, Theme mode: `commit_updates` can only ever contain the
 // `theme` key now — the settings section doesn't exist in this mode, so no
 // row can ever become `touched` (an untouched row's draft can equal the
@@ -1787,6 +1808,10 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
         RowDraft::default_for(SettingsRowKind::ConfirmQuit),
         RowDraft::ConfirmQuit(true)
     );
+    assert_eq!(
+        RowDraft::default_for(SettingsRowKind::SendSelectionSendEnter),
+        RowDraft::SendSelectionSendEnter(false)
+    );
     // R-9.
     assert_eq!(
         RowDraft::default_for(SettingsRowKind::ScrollbackLimit),
@@ -1833,11 +1858,12 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
 // the token-copy action row brings it to 24 (+1), the read-only status row
 // (settings-panel-server-status) brings it to 25 (+1), the LAN bind-
 // address row (server-bind) brings it to 26 (+1), the sidebar-width row
-// brings it to 27 (+1), and the sidebar-font-size row brings it to 28 (+1).
+// brings it to 27 (+1), the sidebar-font-size row brings it to 28 (+1),
+// and the send-selection-send-enter row brings it to 29 (+1).
 #[test]
-fn settings_row_kind_count_is_twenty_eight_after_sidebar_font_size_row() {
-    assert_eq!(SettingsRowKind::COUNT, 28);
-    assert_eq!(SettingsRowKind::ALL.len(), 28);
+fn settings_row_kind_count_is_twenty_nine_after_send_selection_send_enter_row() {
+    assert_eq!(SettingsRowKind::COUNT, 29);
+    assert_eq!(SettingsRowKind::ALL.len(), 29);
 }
 
 // settings-panel-server-status: the status row is read-only (mirrors
@@ -2583,6 +2609,7 @@ fn restart_reason_never_reports_commit_only_for_the_reload_exempt_rows_even_when
         (SettingsRowKind::BackgroundImageRepeat, 1),
         (SettingsRowKind::BackgroundImageInterval, 1),
         (SettingsRowKind::ConfirmQuit, 1),
+        (SettingsRowKind::SendSelectionSendEnter, 1),
         (SettingsRowKind::QuickTerminalHeight, 1),
     ];
     for (kind, delta) in adjust_exempt {
@@ -2662,6 +2689,7 @@ fn liveness_reports_on_save_for_every_reload_exempt_row() {
         SettingsRowKind::BackgroundImageRepeat,
         SettingsRowKind::BackgroundImageInterval,
         SettingsRowKind::ConfirmQuit,
+        SettingsRowKind::SendSelectionSendEnter,
         SettingsRowKind::QuickTerminalHeight,
         // R-9 (Addendum D-1): the three reload-applied keys join the same
         // OnSave class as the pre-existing 8.
@@ -3269,6 +3297,7 @@ fn sample_revert(theme_name: &str) -> RevertValues {
         window_padding_y: 2.0,
         macos_titlebar_style: MacosTitlebarStyle::Native,
         confirm_quit: true,
+        send_selection_send_enter: false,
         font_family: "Menlo".to_string(),
     }
 }
@@ -3329,6 +3358,11 @@ fn revert_updates_restores_all_five_commit_only_rows() {
         updates.iter().find(|(k, _)| k == "confirm-quit"),
         Some(&("confirm-quit".to_string(), "true".to_string())),
         "confirm-quit must revert"
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "send-selection-send-enter"),
+        Some(&("send-selection-send-enter".to_string(), "false".to_string())),
+        "send-selection-send-enter must revert"
     );
 }
 

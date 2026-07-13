@@ -76,7 +76,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 | Background image | `background-image`, `background-image-opacity/-position/-fit/-repeat/-interval` |
 | Cursor | `cursor-style`, `cursor-style-blink` |
 | Bell | `visual-bell`, `audible-bell`, `audible-bell-dock-bounce`, `audible-bell-when-unfocused` |
-| Behavior | `scrollback-limit`, `clipboard-read`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve` |
+| Behavior | `scrollback-limit`, `clipboard-read`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter` |
 | macOS | `macos-option-as-alt`, `macos-titlebar-style`, `macos-non-native-fullscreen`, `macos-titlebar-proxy-icon` |
 | Quick Terminal | `quick-terminal-hotkey/-size/-autohide` |
 | Sidebar | `sidebar-enabled/-width/-hotkey/-preview-lines` |

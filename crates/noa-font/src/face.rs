@@ -20,6 +20,11 @@ use crate::{FontConfig, FontError};
 pub enum FontBytes {
     Owned(Vec<u8>),
     Mapped(memmap2::Mmap),
+    /// Bytes compiled into the binary's read-only data segment via
+    /// `include_bytes!` — the embedded Symbols Nerd Font Mono fallback (see
+    /// `embedded_symbols_nerd_font_face`). Already resident and shared like a
+    /// `Mapped` file, so unlike `Owned` it costs no heap copy.
+    Static(&'static [u8]),
 }
 
 impl std::ops::Deref for FontBytes {
@@ -29,6 +34,7 @@ impl std::ops::Deref for FontBytes {
         match self {
             FontBytes::Owned(bytes) => bytes,
             FontBytes::Mapped(map) => map,
+            FontBytes::Static(bytes) => bytes,
         }
     }
 }
@@ -44,6 +50,7 @@ impl std::fmt::Debug for FontBytes {
         let kind = match self {
             FontBytes::Owned(_) => "Owned",
             FontBytes::Mapped(_) => "Mapped",
+            FontBytes::Static(_) => "Static",
         };
         write!(f, "FontBytes::{kind}({} bytes)", self.len())
     }
@@ -348,6 +355,13 @@ pub fn load_font_stack(font_cfg: &FontConfig) -> Result<FontStack, FontError> {
     for family_name in nerd_font_fallback_family_names(&source) {
         push_some_face(&mut fallbacks, family_fallback_face(&source, &family_name));
     }
+
+    // Permanent embedded fallback: guarantees Nerd Font PUA icon coverage
+    // even when no Nerd Font family is installed system-wide (NFR-5/AC-21).
+    // Kept after the installed-Nerd-Font loop above (an installed family
+    // keeps winning) and before CJK below (so PUA never resolves to a CJK
+    // private glyph) — see `embedded_symbols_nerd_font_face`.
+    push_some_face(&mut fallbacks, embedded_symbols_nerd_font_face());
 
     for postscript_name in cjk_fallback_postscript_names() {
         push_some_face(
@@ -717,6 +731,39 @@ fn nerd_font_family_priority(name: &str) -> u8 {
     } else {
         2
     }
+}
+
+/// The vendored "Symbols Nerd Font Mono" face (MIT, `ryanoasis/nerd-fonts`;
+/// see `vendor/ATTRIBUTION.md`), compiled directly into the binary.
+///
+/// It carries no Latin/CJK letterforms — only Nerd Fonts' private-use-area
+/// icon codepoints and a small set of shared symbols — so it can only ever
+/// resolve codepoints the primary/emoji/CJK faces miss, which is what makes
+/// it safe to keep permanently in the fallback stack (see
+/// [`embedded_symbols_nerd_font_face`]'s call site in `load_font_stack`).
+static EMBEDDED_SYMBOLS_NERD_FONT_MONO: &[u8] =
+    include_bytes!("../vendor/SymbolsNerdFontMono-Regular.ttf");
+
+/// Load the embedded Symbols Nerd Font Mono face (see
+/// [`EMBEDDED_SYMBOLS_NERD_FONT_MONO`]) as a permanent, always-present Nerd
+/// Font fallback — the guarantee behind `docs/specs/session-sidebar.md`'s
+/// NFR-5/AC-21: the sidebar's own Nerd Font PUA glyphs (status dot
+/// `U+F111`, `icon_glyph`'s project icons) render even on a machine with no
+/// Nerd Font family installed, mirroring Ghostty's bundled-font coverage
+/// guarantee.
+///
+/// Placed in `load_font_stack` after any installed Nerd Font (an installed
+/// family — the user's own choice — keeps winning per
+/// [`FontStack::face_indices_for_style`]'s first-match order) and before CJK
+/// (so PUA codepoints never resolve to a CJK private glyph). Returns `None`
+/// only if the embedded bytes somehow fail to parse, which would indicate a
+/// corrupt vendor asset rather than a runtime condition.
+fn embedded_symbols_nerd_font_face() -> Option<FontData> {
+    let data = FontData {
+        bytes: FontBytes::Static(EMBEDDED_SYMBOLS_NERD_FONT_MONO),
+        index: 0,
+    };
+    data.font_ref().is_ok().then_some(data)
 }
 
 /// Ask the macOS CoreText cascade which installed font can render `ch`, and
@@ -1233,10 +1280,81 @@ mod tests {
         );
     }
 
+    /// `docs/specs/session-sidebar.md` NFR-5/AC-21 revision: every Nerd Font
+    /// PUA codepoint the sidebar itself draws — the status dot (`nf-fa-circle`
+    /// `U+F111`) and every `noa-app/src/sidebar.rs` `icon_glyph` variant —
+    /// must resolve to a real glyph through [`load_font_stack`]'s fallback
+    /// stack, independent of whether any Nerd Font family is installed
+    /// system-wide. This is exactly the guarantee the embedded Symbols Nerd
+    /// Font Mono face (see [`embedded_symbols_nerd_font_face`]) exists to
+    /// provide, so this test must not skip on missing Nerd Fonts the way
+    /// [`emoji_codepoint_resolves_to_apple_color_emoji_face`] skips on
+    /// missing Apple Color Emoji.
+    #[test]
+    fn sidebar_icon_codepoints_resolve_without_installed_nerd_font() {
+        let stack = match load_font_stack(&FontConfig::default()) {
+            Ok(stack) => stack,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+
+        let sidebar_icon_codepoints = [
+            '\u{F111}', // nf-fa-circle: sidebar status dot
+            '\u{E5FF}', // nf-custom-folder: IconKind::Folder
+            '\u{E7A8}', // nf-dev-rust: IconKind::Rust
+            '\u{E718}', // nf-dev-nodejs_small: IconKind::Node
+            '\u{E69A}', // nf-seti-terraform: IconKind::Terraform
+            '\u{E627}', // nf-seti-go: IconKind::Go
+            '\u{E606}', // nf-seti-python: IconKind::Python
+            '\u{E702}', // nf-dev-git: IconKind::Git
+        ];
+
+        for ch in sidebar_icon_codepoints {
+            let resolved = stack
+                .face_indices_for_style(FontStyle::Regular)
+                .iter()
+                .find_map(|&face_index| {
+                    let font = stack.faces()[face_index].font_ref().ok()?;
+                    let glyph_id = font.charmap().map(ch);
+                    (glyph_id != 0).then_some(glyph_id)
+                });
+            assert!(
+                resolved.is_some(),
+                "U+{:04X} must resolve to a real (non-notdef) glyph through the fallback \
+                 stack even with no Nerd Font installed",
+                ch as u32
+            );
+        }
+    }
+
+    /// The embedded Symbols Nerd Font Mono face must classify as an icon
+    /// fallback face (`FontStack::is_icon_fallback_face`) so it inherits the
+    /// cell-constrained icon sizing/styling parity from commit fc50f8b
+    /// ("align fallback styling and glyph sizing with Ghostty"), the same as
+    /// an installed Nerd Font would.
+    #[test]
+    fn embedded_symbols_font_is_classified_icon_fallback_face() {
+        let embedded = embedded_symbols_nerd_font_face().expect("embedded font must parse");
+        let dummy_primary = FontData {
+            bytes: vec![1, 2, 3].into(),
+            index: 0,
+        };
+        let stack = FontStack::new(dummy_primary, None, None, None, vec![embedded]);
+
+        // Fallback faces are appended after the primary (index 0), so the
+        // single fallback here lands at index 1.
+        assert!(stack.is_icon_fallback_face(1));
+    }
+
     /// System fonts must end up memory-mapped, not heap-copied: font-kit's
     /// CoreText source returns `Handle::Memory` with the whole file slurped,
     /// and keeping that copy per FontGrid cost hundreds of MB of dirty
-    /// footprint (Apple Color Emoji alone is ~190 MB).
+    /// footprint (Apple Color Emoji alone is ~190 MB). The one exception is
+    /// the embedded Symbols Nerd Font Mono fallback (`FontBytes::Static`),
+    /// which is not a system font at all — it is compiled into the binary,
+    /// so it is already resident without a heap copy or an `mmap` call.
     #[test]
     #[cfg(target_os = "macos")]
     fn system_font_faces_are_memory_mapped() {
@@ -1249,8 +1367,9 @@ mod tests {
         };
         for face in stack.faces() {
             assert!(
-                matches!(face.bytes, FontBytes::Mapped(_)),
-                "system font face should be memory-mapped, got {:?}",
+                matches!(face.bytes, FontBytes::Mapped(_) | FontBytes::Static(_)),
+                "system font face should be memory-mapped (or the compiled-in embedded \
+                 fallback), got {:?}",
                 face.bytes
             );
             assert!(face.font_ref().is_ok(), "mapped face must stay parseable");

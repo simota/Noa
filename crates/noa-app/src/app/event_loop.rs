@@ -243,6 +243,17 @@ impl ApplicationHandler<UserEvent> for App {
                 command,
             } => self.spawn_applescript_tab(event_loop, window_target, cwd, command),
             UserEvent::IpcAction { request_id } => self.handle_ipc_action(event_loop, request_id),
+            UserEvent::RestoreFocus { window_id } => {
+                let target_exists = self.windows.contains_key(&window_id);
+                if should_apply_deferred_focus_restore(window_id, self.focused, target_exists)
+                    && let Some(window) = self
+                        .windows
+                        .get(&window_id)
+                        .map(|state| state.window.clone())
+                {
+                    window.focus_window();
+                }
+            }
             UserEvent::PtyExit(window_id, pane_id) => {
                 // The quick terminal isn't a saved/tabbed window, so its shell
                 // exiting tears the whole drop-down down rather than routing

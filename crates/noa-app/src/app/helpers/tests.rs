@@ -975,6 +975,40 @@ fn close_tab_outcome_is_unambiguous() {
 }
 
 #[test]
+fn macos_tab_close_focus_is_deferred_until_appkit_teardown_finishes() {
+    assert_eq!(
+        tab_close_focus_decision(true, Some(2_u8), true),
+        TabCloseFocusDecision::Deferred(2),
+        "macOS close must defer focus until AppKit finishes native-tab teardown"
+    );
+}
+
+#[test]
+fn non_macos_tab_close_focus_remains_immediate() {
+    assert_eq!(
+        tab_close_focus_decision(false, Some(2_u8), true),
+        TabCloseFocusDecision::Immediate(2),
+        "non-macOS close must keep the existing immediate focus behavior"
+    );
+}
+
+#[test]
+fn stale_deferred_tab_close_focus_restore_is_ignored() {
+    assert!(
+        should_apply_deferred_focus_restore(2_u8, Some(2_u8), true),
+        "a live deferred restore for the still-focused tab must be applied"
+    );
+    assert!(
+        !should_apply_deferred_focus_restore(2_u8, Some(3_u8), true),
+        "stale restore must be ignored after focus moves to another tab"
+    );
+    assert!(
+        !should_apply_deferred_focus_restore(2_u8, Some(2_u8), false),
+        "stale restore must be ignored after its target tab closes"
+    );
+}
+
+#[test]
 fn close_confirm_message_names_scope_and_count() {
     assert_eq!(
         close_confirm_message(CloseConfirmTarget::Pane, 1),

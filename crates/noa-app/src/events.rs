@@ -104,6 +104,14 @@ pub enum UserEvent {
     /// payload lives in `App::ipc_pending`, keyed by `request_id`, because
     /// `UserEvent` derives `Eq` and so cannot carry a reply channel directly.
     IpcAction { request_id: u64 },
+    /// Deferred focus restore after a macOS native-tab close. Calling
+    /// `focus_window()` synchronously from `close_tab` collides with AppKit
+    /// still transferring key/firstResponder to the sibling tab, leaving the
+    /// window key but its firstResponder pointed at the NSWindow rather than
+    /// winit's text-input view — so `keyDown:` never reaches winit and input
+    /// goes dead. Posting through the proxy re-runs the focus on a fresh
+    /// event-loop iteration, after AppKit has finished the tab teardown.
+    RestoreFocus { window_id: WindowId },
 }
 
 /// Whether an AppleScript-driven spawn joins the focused window's tab group or

@@ -39,6 +39,13 @@ pub(super) enum TabCloseOutcome<Id> {
     Continue { focused: Option<Id> },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TabCloseFocusDecision<Id> {
+    NoTarget,
+    Immediate(Id),
+    Deferred(Id),
+}
+
 /// Which tab group a spawned tab should join, given the spawn target and the
 /// focused window's group (if any). The `Fresh` arm defers minting an id to
 /// the caller ([`App::allocate_group_id`]) so this stays a pure decision.

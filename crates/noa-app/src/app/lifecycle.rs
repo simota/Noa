@@ -760,10 +760,22 @@ impl App {
             }
             TabCloseOutcome::Continue { focused } => {
                 self.focused = focused;
-                if let Some(window) = self.focused_window() {
-                    window.focus_window();
-                } else if self.overview_visible {
-                    self.focus_overview_window();
+                let target_exists = self.focused_window().is_some();
+                match tab_close_focus_decision(cfg!(target_os = "macos"), focused, target_exists) {
+                    TabCloseFocusDecision::Deferred(window_id) => {
+                        // AppKit transfers key/firstResponder after native-tab
+                        // teardown, so re-focus on the next event-loop turn.
+                        let _ = self.proxy.send_event(UserEvent::RestoreFocus { window_id });
+                    }
+                    TabCloseFocusDecision::Immediate(window_id) => {
+                        if let Some(state) = self.windows.get(&window_id) {
+                            state.window.focus_window();
+                        }
+                    }
+                    TabCloseFocusDecision::NoTarget if self.overview_visible => {
+                        self.focus_overview_window();
+                    }
+                    TabCloseFocusDecision::NoTarget => {}
                 }
                 self.request_overview_redraw();
             }

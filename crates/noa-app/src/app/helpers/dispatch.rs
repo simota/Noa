@@ -36,6 +36,26 @@ pub(crate) fn close_tab_outcome<Id: Copy + Eq>(
     }
 }
 
+pub(crate) fn tab_close_focus_decision<Id: Copy>(
+    is_macos: bool,
+    focused: Option<Id>,
+    target_exists: bool,
+) -> TabCloseFocusDecision<Id> {
+    match (focused, target_exists, is_macos) {
+        (Some(window_id), true, true) => TabCloseFocusDecision::Deferred(window_id),
+        (Some(window_id), true, false) => TabCloseFocusDecision::Immediate(window_id),
+        _ => TabCloseFocusDecision::NoTarget,
+    }
+}
+
+pub(crate) fn should_apply_deferred_focus_restore<Id: Eq>(
+    requested: Id,
+    focused: Option<Id>,
+    target_exists: bool,
+) -> bool {
+    target_exists && focused.as_ref() == Some(&requested)
+}
+
 pub(crate) fn spawn_group_choice<G: Copy>(
     target: SpawnTarget,
     focused_group: Option<G>,

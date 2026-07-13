@@ -124,6 +124,7 @@ or fails to decode, a diagnostic is shown and the background image is disabled.
 | `audible-bell-when-unfocused` | `true`, `false` | `false` | Only sound the audible bell when unfocused |
 | `audible-bell-dock-bounce` | `true`, `false` | `false` | Trigger Dock attention on an unfocused audible BEL. macOS only |
 | `auto-approve` | `true`, `false` | `false` | Initial value for agent CLI auto approval in new tabs |
+| `send-selection-send-enter` | `true`, `false` | `false` | Send Enter after the send-selection picker pastes into the target pane |
 
 ## Quick Terminal and sidebar
 

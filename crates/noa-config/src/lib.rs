@@ -607,6 +607,11 @@ pub struct StartupConfig {
     /// `auto-approve`: seed new tabs with agent-CLI auto approval enabled.
     /// Runtime use is still per-tab opt-in; default off.
     pub auto_approve: bool,
+    /// `send-selection-send-enter`: after the send-selection picker pastes
+    /// the selection into the target pane, also send Enter so the pasted
+    /// text is submitted immediately. Default off. noa-specific key (no
+    /// Ghostty analog).
+    pub send_selection_send_enter: bool,
     /// `keybind`: repeatable in-app keybinding edits applied to the default
     /// [`noa-app`] keybinding engine in config order.
     pub keybinds: Vec<KeybindConfig>,
@@ -689,6 +694,7 @@ impl Default for StartupConfig {
             audible_bell_when_unfocused: false,
             audible_bell_dock_bounce: false,
             auto_approve: false,
+            send_selection_send_enter: false,
             keybinds: Vec::new(),
             server_enable: false,
             server_port: DEFAULT_SERVER_PORT,
@@ -756,6 +762,7 @@ pub struct ConfigOverrides {
     pub audible_bell_when_unfocused: Option<bool>,
     pub audible_bell_dock_bounce: Option<bool>,
     pub auto_approve: Option<bool>,
+    pub send_selection_send_enter: Option<bool>,
     pub keybinds: Vec<KeybindConfig>,
     pub server_enable: Option<bool>,
     pub server_port: Option<u16>,
@@ -873,6 +880,9 @@ impl ConfigOverrides {
                 .audible_bell_dock_bounce
                 .or(self.audible_bell_dock_bounce),
             auto_approve: higher_priority.auto_approve.or(self.auto_approve),
+            send_selection_send_enter: higher_priority
+                .send_selection_send_enter
+                .or(self.send_selection_send_enter),
             keybinds,
             server_enable: higher_priority.server_enable.or(self.server_enable),
             server_port: higher_priority.server_port.or(self.server_port),
@@ -978,6 +988,9 @@ impl ConfigOverrides {
                 .audible_bell_dock_bounce
                 .unwrap_or(base.audible_bell_dock_bounce),
             auto_approve: self.auto_approve.unwrap_or(base.auto_approve),
+            send_selection_send_enter: self
+                .send_selection_send_enter
+                .unwrap_or(base.send_selection_send_enter),
             keybinds,
             server_enable: self.server_enable.unwrap_or(base.server_enable),
             server_port: self.server_port.unwrap_or(base.server_port),
@@ -1216,6 +1229,7 @@ mod tests {
                 audible_bell_when_unfocused: false,
                 audible_bell_dock_bounce: false,
                 auto_approve: false,
+                send_selection_send_enter: false,
                 keybinds: Vec::new(),
                 server_enable: false,
                 server_port: DEFAULT_SERVER_PORT,
@@ -1224,6 +1238,22 @@ mod tests {
                 server_scopes: "read".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn send_selection_send_enter_defaults_off_and_cli_wins_over_file() {
+        assert!(!StartupConfig::default().send_selection_send_enter);
+
+        let file = ConfigOverrides {
+            send_selection_send_enter: Some(false),
+            ..Default::default()
+        };
+        let cli = ConfigOverrides {
+            send_selection_send_enter: Some(true),
+            ..Default::default()
+        };
+        let config = file.merge(cli).apply_to(StartupConfig::default());
+        assert!(config.send_selection_send_enter);
     }
 
     #[test]

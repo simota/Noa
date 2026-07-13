@@ -219,6 +219,7 @@ impl App {
             sidebar_font_size: self.config.sidebar_font_size,
             quick_terminal_size: quick_terminal_height_fraction(self.config.quick_terminal_size),
             confirm_quit: self.config.confirm_quit,
+            send_selection_send_enter: self.config.send_selection_send_enter,
             font_family,
             available_font_families,
             scrollback_limit: self.config.scrollback_limit,
@@ -966,9 +967,9 @@ impl App {
 
     /// Mirror the just-committed runtime rows (font-size, background-opacity,
     /// background-blur-radius, background-image settings, cursor-style,
-    /// sidebar-preview-lines, quick-terminal-size, confirm-quit) into
-    /// `self.config` so a future reopen of the overlay, or the next quick-
-    /// terminal toggle, shows the new value.
+    /// sidebar-preview-lines, quick-terminal-size, confirm-quit,
+    /// send-selection-send-enter) into `self.config` so a future reopen of
+    /// the overlay, or the next quick-terminal toggle, shows the new value.
     /// The restart-only rows are deliberately excluded: nothing on screen
     /// actually changes for them until a restart, so leaving `self.config` at
     /// its pre-commit value keeps it truthful to what the user still sees, even
@@ -1039,6 +1040,9 @@ impl App {
                 RowDraft::QuickTerminalHeight(_) => {}
                 RowDraft::ConfirmQuit(v) => {
                     self.config.confirm_quit = *v;
+                }
+                RowDraft::SendSelectionSendEnter(v) => {
+                    self.config.send_selection_send_enter = *v;
                 }
                 // Commit-only rows: intentionally not mirrored (see the doc
                 // comment above).
@@ -1224,9 +1228,10 @@ fn resolve_current_theme(config: &AppConfig, appearance: winit::window::Theme) -
 }
 
 /// TSV2-1 (judge, CONFIRMED): [`sync_config_from_committed_live_rows`]
-/// mirrors `confirm-quit` and (via [`sync_quick_terminal_size_from_committed_rows`])
+/// mirrors `confirm-quit`, `send-selection-send-enter`, and (via
+/// [`sync_quick_terminal_size_from_committed_rows`])
 /// `quick-terminal-size` into `self.config` on a successful commit, because
-/// both are read back out of `self.config` at runtime rather than applied
+/// all are read back out of `self.config` at runtime rather than applied
 /// live like the R-8 `is_live` rows — an Undo that only rewrote the config
 /// *file* left the running session's `self.config` still holding the
 /// committed (unwanted) value. Standalone (rather than inlined into
@@ -1244,6 +1249,7 @@ fn sync_reverted_confirm_quit_and_quick_terminal_size(
     revert: &crate::theme_settings::RevertValues,
 ) {
     config.confirm_quit = revert.confirm_quit;
+    config.send_selection_send_enter = revert.send_selection_send_enter;
     config.quick_terminal_size =
         quick_terminal_size_from_height_fraction(revert.quick_terminal_size);
 }
@@ -1470,6 +1476,7 @@ mod commit_theme_settings_tests {
             sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
             confirm_quit: true,
+            send_selection_send_enter: false,
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
             scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,
@@ -1523,8 +1530,10 @@ mod commit_theme_settings_tests {
             noa_config::ConfigOverrides::default(),
         );
         // Simulate the post-commit state a real session would have left
-        // `self.config` in: confirm-quit flipped off, quick-terminal grown.
+        // `self.config` in: confirm-quit flipped off, send-selection Enter
+        // flipped on, quick-terminal grown.
         config.confirm_quit = false;
+        config.send_selection_send_enter = true;
         config.quick_terminal_size = quick_terminal_size_from_height_fraction(0.9);
 
         let revert = crate::theme_settings::RevertValues {
@@ -1547,6 +1556,7 @@ mod commit_theme_settings_tests {
             window_padding_y: 2.0,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
             confirm_quit: true,
+            send_selection_send_enter: false,
             font_family: "Menlo".to_string(),
         };
         sync_reverted_confirm_quit_and_quick_terminal_size(&mut config, &revert);
@@ -1554,6 +1564,10 @@ mod commit_theme_settings_tests {
         assert!(
             config.confirm_quit,
             "confirm-quit must revert to the pre-open value"
+        );
+        assert!(
+            !config.send_selection_send_enter,
+            "send-selection-send-enter must revert to the pre-open value"
         );
         assert!(
             (quick_terminal_height_fraction(config.quick_terminal_size) - 0.4).abs() < 0.001,
@@ -1605,6 +1619,7 @@ mod commit_theme_settings_tests {
             sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
             confirm_quit: true,
+            send_selection_send_enter: false,
             font_family: "Menlo".to_string(),
             available_font_families: Vec::new(),
             scrollback_limit: noa_config::DEFAULT_SCROLLBACK_LIMIT,

@@ -457,6 +457,11 @@ fn show_config_output(config: &StartupConfig) -> String {
         &config.audible_bell_dock_bounce.to_string(),
     );
     push_line(&mut out, "auto-approve", &config.auto_approve.to_string());
+    push_line(
+        &mut out,
+        "send-selection-send-enter",
+        &config.send_selection_send_enter.to_string(),
+    );
     push_repeatable_lines(
         &mut out,
         "keybind",
@@ -716,6 +721,7 @@ mod tests {
         assert!(output.contains("audible-bell-when-unfocused = false\n"));
         assert!(output.contains("audible-bell-dock-bounce = false\n"));
         assert!(output.contains("auto-approve = false\n"));
+        assert!(output.contains("send-selection-send-enter = false\n"));
         assert!(
             output.lines().all(|line| line.contains(" = ")),
             "every line must be `key = value`"
@@ -751,6 +757,7 @@ mod tests {
             audible_bell_when_unfocused: true,
             audible_bell_dock_bounce: true,
             auto_approve: true,
+            send_selection_send_enter: true,
             font: noa_config::FontConfig {
                 families: vec!["JetBrains Mono".to_string(), "Menlo".to_string()],
                 features: vec![noa_config::FontFeature {
@@ -791,6 +798,7 @@ mod tests {
         assert!(output.contains("audible-bell-when-unfocused = true\n"));
         assert!(output.contains("audible-bell-dock-bounce = true\n"));
         assert!(output.contains("auto-approve = true\n"));
+        assert!(output.contains("send-selection-send-enter = true\n"));
         assert!(output.contains("font-family = JetBrains Mono\n"));
         assert!(output.contains("font-family = Menlo\n"));
         assert!(output.contains("font-feature = -liga\n"));

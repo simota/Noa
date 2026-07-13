@@ -61,7 +61,7 @@ impl App {
         pane_id: PaneId,
         text: String,
     ) {
-        self.paste_text_to_pane_with_confirm_window(window_id, window_id, pane_id, text);
+        self.paste_text_to_pane_with_confirm_window(window_id, window_id, pane_id, text, false);
     }
 
     pub(in crate::app) fn paste_text_to_pane_with_confirm_window(
@@ -70,6 +70,7 @@ impl App {
         window_id: WindowId,
         pane_id: PaneId,
         text: String,
+        then_enter: bool,
     ) {
         let bracketed_paste = self.bracketed_paste(window_id, pane_id);
         // Paste protection: confirm before sending content that could run a
@@ -87,11 +88,12 @@ impl App {
                     window_id,
                     pane_id,
                     text,
+                    then_enter,
                 },
             );
             return;
         }
-        self.write_paste_text_to_pane(window_id, pane_id, &text);
+        self.write_paste_text_to_pane(window_id, pane_id, &text, then_enter);
     }
 
     pub(in crate::app) fn write_paste_text_to_pane(
@@ -99,13 +101,40 @@ impl App {
         window_id: WindowId,
         pane_id: PaneId,
         text: &str,
+        then_enter: bool,
     ) {
         let bracketed_paste = self.bracketed_paste(window_id, pane_id);
-        if let Some(bytes) = input::encode_paste(text, bracketed_paste) {
+        if let Some(mut bytes) = input::encode_paste(text, bracketed_paste) {
+            // The trailing Enter is appended after the paste encoding — outside
+            // the bracketed-paste wrapper, where a newline is inert data — so
+            // the pair travels in one queue element and is admitted or dropped
+            // atomically. Written separately, a backpressured input queue could
+            // drop the large paste yet admit the tiny Enter, executing whatever
+            // already sits on the prompt line. It is encoded under the target
+            // pane's Kitty flags: a report-all-keys client reads Enter as
+            // `CSI 13 u`, not a legacy CR. Skipped entirely when nothing was
+            // pasted, for the same run-the-stale-prompt-line reason.
+            if then_enter {
+                bytes.extend_from_slice(&input::encode_enter_key(
+                    self.pane_kitty_keyboard_flags(window_id, pane_id),
+                ));
+            }
             self.mark_pane_paste_input(window_id, pane_id);
             self.snap_pane_viewport_to_bottom(window_id, pane_id);
             self.write_pane_pty_bytes(window_id, pane_id, bytes);
         }
+    }
+
+    /// The target pane's active Kitty keyboard progressive-enhancement flags
+    /// (`0` when the pane is gone). Per-pane counterpart of the focused-surface
+    /// `App::kitty_keyboard_flags` — the send-selection target need not be the
+    /// focused pane.
+    fn pane_kitty_keyboard_flags(&self, window_id: WindowId, pane_id: PaneId) -> u8 {
+        self.windows
+            .get(&window_id)
+            .and_then(|state| state.surfaces.get(&pane_id))
+            .map(|surface| surface.terminal.lock().kitty_keyboard_flags())
+            .unwrap_or(0)
     }
 
     pub(in crate::app) fn bracketed_paste(&self, window_id: WindowId, pane_id: PaneId) -> bool {
@@ -207,7 +236,8 @@ impl App {
                 window_id,
                 pane_id,
                 text,
-            } => self.write_paste_text_to_pane(window_id, pane_id, &text),
+                then_enter,
+            } => self.write_paste_text_to_pane(window_id, pane_id, &text, then_enter),
             ConfirmAction::ClipboardRead {
                 window_id,
                 pane_id,

@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-07-13
+
+### Added
+
+- `noa-server`: JSON-RPC over WebSocket control server (new `noa-ipc` crate)
+  with token auth, read/input/manage scopes, pane output subscriptions,
+  configurable bind address for LAN access, and settings-panel rows for
+  enable/port/scopes/bind, server status, and one-click token copy (#2)
+- Process monitor overlay listing per-pane foreground process, CPU, and
+  memory, backed by foreground-process-tree metrics collection (#2)
+- JPEG and WebP background images (magic-byte dispatch, decode capped at
+  64 MiB RGBA), including slideshow support (#4)
+- Configurable sidebar width (`sidebar-width`, 200-600 pt) and font size
+  (`sidebar-font-size`, 8-20 pt) with live Settings rows (#9)
+- Embedded Symbols Nerd Font Mono fallback so Nerd Font private-use-area
+  icons render without a locally installed Nerd Font (#8)
+
+### Changed
+
+- Hot-path performance: combining-buffer and row-instance-buffer reuse,
+  cached cursor blink state, terminal lock split across PTY chunk
+  boundaries, linear-scan mode storage, SWAR printable-run scanning, and
+  in-place cell erase/shift (#5)
+- Documentation (specs, user guide, runbooks, protocol references,
+  benchmark README) translated to English
+
+### Fixed
+
+- Cmd+K clear repaints the shell prompt instead of leaving a blank screen,
+  matching Ghostty's clear semantics (prompt-aware via OSC 133, no-op on
+  the alternate screen) (#7)
+- Fallback glyph styling and sizing aligned with Ghostty: no synthetic
+  bold/italic on fallback faces, natural-size rasterization for ordinary
+  text, cell-fit only for Nerd Font icons (#6)
+- IME preedit and OS composition are discarded on window focus loss, so
+  refocusing no longer swallows keypresses (#3)
+- Redraws during synchronized output reuse the pre-sync snapshot (#5)
+
 ## [0.1.2] - 2026-07-11
 
 ### Added
@@ -96,6 +134,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session sidebar, session overview, quick terminal, command palette, native
   tabs, and macOS app bundle packaging with signing/notarization CI
 
+[0.1.3]: https://github.com/simota/noa/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/simota/noa/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/simota/noa/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/simota/noa/releases/tag/v0.1.0

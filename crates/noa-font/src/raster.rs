@@ -188,18 +188,24 @@ fn mask_glyph_from_image(
 /// else rasterizes to an R8 alpha mask, as before.
 ///
 /// `fit_width`, when given, is the glyph's allotted span in device pixels
-/// (`span_cells * cell_w`, per the source cell's `unicode-width`). Some
-/// macOS fallback faces ship metrics sized for a wider layout than noa's
-/// grid gives the codepoint (e.g. East Asian Ambiguous-width symbols like
-/// `①`), so their outline advance overshoots the cell(s) and bleeds into a
-/// neighbor. When the rasterized advance exceeds `fit_width` by more than a
-/// 10% tolerance (headroom for ordinary ink overshoot, e.g. `x`'s slightly
-/// negative bearing), the glyph is uniformly downscaled — re-rendered at a
-/// smaller `px` so hinting stays correct at the new size, kitty-style —
-/// and centered in its allotted span. Color bitmap strikes are never
-/// downscaled (guarded below regardless of `fit_width`, since they resolve
-/// to a fixed strike and are already sized for a 2-cell span with headroom
-/// to spare); this is noa's own polish on top of the Ghostty parity target.
+/// (`span_cells * cell_w`, per the source cell's `unicode-width`). Ghostty
+/// does NOT shrink ordinary text glyphs to fit their cell — they rasterize
+/// at natural size and may overflow into a neighbor; only codepoints in its
+/// generated Nerd Font/Powerline icon table are cell-constrained
+/// (`nerd_font_attributes.zig`). Callers (`FontGrid::get_or_raster` /
+/// `raster_shaped`) therefore only pass `Some(fit_width)` for glyphs
+/// resolved from a Nerd Font fallback face (see
+/// `FontStack::is_icon_fallback_face`) — `None` for ordinary text, including
+/// East-Asian-Ambiguous-width symbols like `①` whose native advance happens
+/// to overshoot a single-cell span but which are not icons and must render
+/// at their natural size regardless. When `fit_width` is given and the
+/// rasterized advance exceeds it by more than a 10% tolerance (headroom for
+/// ordinary ink overshoot, e.g. `x`'s slightly negative bearing), the glyph
+/// is uniformly downscaled — re-rendered at a smaller `px` so hinting stays
+/// correct at the new size, kitty-style — and centered in its allotted span.
+/// Color bitmap strikes are never downscaled (guarded below regardless of
+/// `fit_width`, since they resolve to a fixed strike and are already sized
+/// for a 2-cell span with headroom to spare).
 ///
 /// Returns an empty (zero-sized) glyph for whitespace / glyphs with no
 /// outline coverage; callers can treat that as "nothing to blit".

@@ -257,7 +257,15 @@ impl FontGrid {
             thicken: self.font_cfg.thicken,
             thicken_strength: self.font_cfg.thicken_strength,
         };
-        let fit_width = f32::from(span_for_char(ch)) * self.metrics.cell_w;
+        // Ghostty does not shrink ordinary text glyphs to fit their cell span
+        // — only its generated Nerd Font/Powerline icon codepoints are
+        // cell-constrained (see `raster::rasterize_with_variations`'s
+        // `fit_width` doc comment). `font_index` is the icon-fallback check's
+        // seam here since it is already resolved for this codepoint.
+        let fit_width = self
+            .font_stack
+            .is_icon_fallback_face(font_index)
+            .then(|| f32::from(span_for_char(ch)) * self.metrics.cell_w);
         let glyph = rasterize_with_variations(
             &mut self.ctx,
             font,
@@ -265,7 +273,7 @@ impl FontGrid {
             self.px_size,
             &[],
             synthesis,
-            Some(fit_width),
+            fit_width,
         );
 
         self.store_and_cache(&glyph, SlotOwner::Char(key))
@@ -493,10 +501,13 @@ impl FontGrid {
     /// `FontConfig.synthetic_style` (REQ-SHAPE-7).
     ///
     /// `span` is the source cell's width in grid columns (1 or 2, per
-    /// `unicode-width` — the same measure `noa-grid`'s `print_width` uses),
-    /// so a fallback glyph whose advance overshoots its allotted `span *
-    /// cell_w` gets downscaled and centered rather than bleeding into the
-    /// neighbor cell (see `raster::rasterize_with_variations`'s doc comment).
+    /// `unicode-width` — the same measure `noa-grid`'s `print_width` uses).
+    /// When the resolved face is a Nerd Font fallback (icon/Powerline
+    /// glyphs), an advance overshooting `span * cell_w` gets downscaled and
+    /// centered rather than bleeding into the neighbor cell; ordinary text
+    /// glyphs are never fit this way and rasterize at natural size (see
+    /// `raster::rasterize_with_variations`'s doc comment and
+    /// `FontStack::is_icon_fallback_face`).
     pub fn raster_shaped(
         &mut self,
         face_id: FaceId,
@@ -536,7 +547,13 @@ impl FontGrid {
             self.font_stack
                 .is_native_style_face(face_id.0 as usize, font_style),
         );
-        let fit_width = f32::from(span) * self.metrics.cell_w;
+        // See the matching comment in `get_or_raster`: only Nerd Font
+        // icon/Powerline glyphs are fit to their cell span; ordinary text
+        // glyphs render at natural size, per Ghostty parity.
+        let fit_width = self
+            .font_stack
+            .is_icon_fallback_face(face_id.0 as usize)
+            .then(|| f32::from(span) * self.metrics.cell_w);
         let glyph = rasterize_with_variations(
             &mut self.ctx,
             font,
@@ -544,7 +561,7 @@ impl FontGrid {
             self.px_size,
             &variation_coords,
             synthesis,
-            Some(fit_width),
+            fit_width,
         );
 
         self.store_and_cache(&glyph, SlotOwner::Shaped(key))
@@ -905,13 +922,18 @@ mod tests {
         assert_eq!(grid.mask_atlas_generation(), generation);
     }
 
-    /// Regression: a fallback glyph whose native advance overshoots its
-    /// grid cell (e.g. `①`, a circled digit some macOS fallback fonts size
-    /// for a wider layout than noa's single-cell East-Asian-Ambiguous width)
-    /// must be downscaled + centered to fit its allotted span instead of
-    /// bleeding into the neighbor cell (kitty-style fit-to-cell).
+    /// Regression (Scout RCA, verified against Ghostty upstream; supersedes
+    /// the old `narrow_fallback_glyph_fits_within_its_cell_span` pin, which
+    /// asserted the opposite): Ghostty does not shrink ordinary text glyphs
+    /// to fit their cell span — only its generated Nerd Font/Powerline icon
+    /// codepoints are cell-constrained (`nerd_font_attributes.zig`). `①` (a
+    /// circled digit some macOS fallback fonts size for a wider layout than
+    /// noa's single-cell East-Asian-Ambiguous width) is ordinary text, not a
+    /// Nerd Font icon, so it must rasterize at its natural size and may
+    /// overflow its cell — exactly like `※` in
+    /// `ordinary_text_glyph_is_not_shrunk_to_fit_its_span` above.
     #[test]
-    fn narrow_fallback_glyph_fits_within_its_cell_span() {
+    fn narrow_fallback_glyph_renders_at_natural_size_and_is_not_fit_to_its_cell_span() {
         let mut grid = match FontGrid::new(14.0, FontConfig::default()) {
             Ok(g) => g,
             Err(e) => {
@@ -925,23 +947,33 @@ mod tests {
             return;
         }
 
-        let cell_w = grid.metrics().cell_w;
+        let (font_index, glyph_id) = grid.resolve_glyph(CIRCLED_ONE);
+        let font_data = &grid.font_stack.faces()[font_index];
+        let font = font_data.font_ref().expect("resolved face must parse");
+        let natural = rasterize_with_variations(
+            &mut ScaleContext::new(),
+            font,
+            glyph_id,
+            grid.px_size,
+            &[],
+            GlyphSynthesis::default(),
+            None,
+        );
+
         let info = grid.get_or_raster(CIRCLED_ONE);
         assert!(
             info.atlas_size[0] > 0 && info.atlas_size[1] > 0,
             "'①' should rasterize to a non-empty atlas region: {:?}",
             info.atlas_size
         );
-        let bearing_x = i32::from(info.bearing[0]);
-        let right_edge = bearing_x + i32::from(info.atlas_size[0]);
-        assert!(
-            bearing_x >= 0,
-            "'①' must not bleed left of its cell: bearing_x = {bearing_x}"
-        );
-        assert!(
-            right_edge <= cell_w.round() as i32 + 1,
-            "'①' must fit within its single-cell span (+1px AA tolerance): \
-             right edge {right_edge}, cell_w {cell_w}"
+        assert_eq!(
+            (natural.width, natural.height),
+            (info.atlas_size[0] as u32, info.atlas_size[1] as u32),
+            "'①' is ordinary text (not a Nerd Font icon) and must rasterize at its natural \
+             size regardless of its allotted single-cell span: natural {}x{}, got {:?}",
+            natural.width,
+            natural.height,
+            info.atlas_size
         );
     }
 
@@ -1494,6 +1526,254 @@ mod tests {
                 thicken_strength: 0,
             },
             "native bold-italic faces must not get faux embolden/shear on top"
+        );
+    }
+
+    /// Regression (Scout RCA): `raster_shaped` decides the synthetic-style
+    /// transform from `FontStack::is_native_style_face` alone, which only
+    /// answers "does this face have its own native bold/italic variant?" —
+    /// it cannot distinguish that from "this face is a SHARED fallback (CJK
+    /// / emoji / Nerd Font, installed once and reused for every style) that
+    /// must never be synthetically slanted, no matter which style resolved
+    /// it". A codepoint that only a fallback face covers (U+FF09 `）` here)
+    /// must render identically regardless of the requested style; italic
+    /// styling on it must not add a faux shear.
+    #[test]
+    fn fallback_face_never_gets_synthetic_shear() {
+        const FULLWIDTH_RPAREN: char = '\u{FF09}'; // '）'
+
+        let mut grid = skip_if_no_font!(FontGrid::new(24.0, FontConfig::default()));
+
+        if grid.primary_has_glyph(FULLWIDTH_RPAREN) {
+            eprintln!("skipping: primary font itself renders U+FF09; no fallback face involved");
+            return;
+        }
+        if !grid.has_glyph(FULLWIDTH_RPAREN) {
+            eprintln!("skipping: no installed font can render U+FF09");
+            return;
+        }
+
+        let upright_style = StyleKey::default();
+        let italic_style = StyleKey {
+            bold: false,
+            italic: true,
+        };
+
+        let (font_index, glyph_id) = grid.resolve_glyph_for_style(FULLWIDTH_RPAREN, italic_style);
+        let italic_face = FaceId(font_index as u16);
+        assert_ne!(
+            italic_face,
+            FaceId(0),
+            "U+FF09 must resolve to a fallback face, not the primary family, in this environment"
+        );
+
+        // This is exactly what `raster_shaped` computes internally — assert
+        // the decision directly so the failure message shows the wrong
+        // synthesis outcome, not just a pixel-level side effect of it.
+        let is_native = grid
+            .font_stack
+            .is_native_style_face(font_index, FontStyle::Italic);
+        let synthesis = synthesis_for(&grid.font_cfg, italic_style, is_native);
+        assert!(
+            !synthesis.shear,
+            "a shared fallback face must never get synthetic italic shear, but synthesis_for \
+             returned shear=true (native_style_face={is_native}, font_cfg.synthetic_style.italic={})",
+            grid.font_cfg.synthetic_style.italic
+        );
+
+        // Cross-check against the real raster path: a fallback face must
+        // render upright regardless of style, so bearing/atlas size must not
+        // shift between the upright and italic requests for the same glyph.
+        let upright = grid.raster_shaped(italic_face, glyph_id, upright_style, 2);
+        let italic = grid.raster_shaped(italic_face, glyph_id, italic_style, 2);
+        assert_eq!(
+            (upright.bearing, upright.atlas_size),
+            (italic.bearing, italic.atlas_size),
+            "a shared fallback face must not shift ink between upright and italic \
+             rasterization: upright {:?}/{:?}, italic {:?}/{:?}",
+            upright.bearing,
+            upright.atlas_size,
+            italic.bearing,
+            italic.atlas_size
+        );
+    }
+
+    /// Same defect on the bold axis: `synthesis_for` gates faux-embolden
+    /// through the identical `native_style_face` parameter, so a fallback
+    /// face resolved under a bold style is just as exposed to unwanted
+    /// synthesis as the italic case above.
+    #[test]
+    fn fallback_face_never_gets_synthetic_embolden() {
+        const FULLWIDTH_RPAREN: char = '\u{FF09}'; // '）'
+
+        let mut grid = skip_if_no_font!(FontGrid::new(24.0, FontConfig::default()));
+
+        if grid.primary_has_glyph(FULLWIDTH_RPAREN) {
+            eprintln!("skipping: primary font itself renders U+FF09; no fallback face involved");
+            return;
+        }
+        if !grid.has_glyph(FULLWIDTH_RPAREN) {
+            eprintln!("skipping: no installed font can render U+FF09");
+            return;
+        }
+
+        let bold_style = StyleKey {
+            bold: true,
+            italic: false,
+        };
+
+        let (font_index, _glyph_id) = grid.resolve_glyph_for_style(FULLWIDTH_RPAREN, bold_style);
+        let bold_face = FaceId(font_index as u16);
+        assert_ne!(
+            bold_face,
+            FaceId(0),
+            "U+FF09 must resolve to a fallback face, not the primary family, in this environment"
+        );
+
+        let is_native = grid
+            .font_stack
+            .is_native_style_face(font_index, FontStyle::Bold);
+        let synthesis = synthesis_for(&grid.font_cfg, bold_style, is_native);
+        assert!(
+            !synthesis.embolden,
+            "a shared fallback face must never get synthetic embolden, but synthesis_for \
+             returned embolden=true (native_style_face={is_native}, font_cfg.synthetic_style.bold={})",
+            grid.font_cfg.synthetic_style.bold
+        );
+    }
+
+    /// Guard rail in the OTHER direction: when the PRIMARY face genuinely
+    /// lacks a native italic variant (so `resolve_glyph_for_style` falls
+    /// back to the regular primary face itself, i.e. face index 0), synthetic
+    /// italic must still be applied — the fix for the fallback-face defect
+    /// above must not overcorrect and suppress this legitimate case. Whether
+    /// the primary face has its own native italic is machine-dependent (it
+    /// depends on which fonts are installed), so this test skips itself
+    /// rather than asserting on a config it can't control.
+    #[test]
+    fn primary_face_without_native_italic_still_gets_synthetic_shear() {
+        let mut grid = skip_if_no_font!(FontGrid::new(24.0, FontConfig::default()));
+
+        let italic_style = StyleKey {
+            bold: false,
+            italic: true,
+        };
+        let (font_index, _glyph_id) = grid.resolve_glyph_for_style('A', italic_style);
+        if font_index != 0 {
+            eprintln!(
+                "skipping: this environment's primary font has a distinct native italic face; \
+                 cannot portably exercise the \"no native italic\" synthesis path"
+            );
+            return;
+        }
+
+        let is_native = grid
+            .font_stack
+            .is_native_style_face(font_index, FontStyle::Italic);
+        assert!(
+            !is_native,
+            "sanity check: resolving italic 'A' to face index 0 should mean there is no \
+             distinct native italic face"
+        );
+        let synthesis = synthesis_for(&grid.font_cfg, italic_style, is_native);
+        assert!(
+            synthesis.shear,
+            "primary face lacking a native italic must still get synthetic italic shear \
+             when font_cfg.synthetic_style.italic is on"
+        );
+    }
+
+    /// Regression (Scout RCA, verified against Ghostty upstream): Ghostty
+    /// does not shrink ordinary monochrome text glyphs to fit their cell
+    /// span — only specific generated/icon codepoints (Nerd Font icon
+    /// tables) are constrained to a cell box; every other glyph rasterizes
+    /// at its natural size and may overflow. noa-font's fit-to-cell downscale
+    /// (`raster::rasterize_with_variations`, ~line 257-288) is applied
+    /// unconditionally whenever a glyph's advance exceeds its allotted span
+    /// by more than 10%, with no distinction for U+203B `※` — a
+    /// single-column (East\_Asian\_Width=Ambiguous, narrow per parity) CJK
+    /// punctuation mark rasterized from a real cmap-resolved font glyph, not
+    /// a generated icon. This shrinks `※` to roughly half its natural ink
+    /// size (Scout measured ~12x12px vs a natural ~20x20px at 24px font).
+    #[test]
+    fn ordinary_text_glyph_is_not_shrunk_to_fit_its_span() {
+        const REFERENCE_MARK: char = '\u{203B}'; // '※'
+
+        let mut grid = skip_if_no_font!(FontGrid::new(24.0, FontConfig::default()));
+        if !grid.has_glyph(REFERENCE_MARK) {
+            eprintln!("skipping: no installed font can render U+203B");
+            return;
+        }
+
+        let style = StyleKey::default();
+        let (font_index, glyph_id) = grid.resolve_glyph_for_style(REFERENCE_MARK, style);
+        let face_id = FaceId(font_index as u16);
+
+        // The TRUE natural (un-fitted) raster: invoke the same rasterizer
+        // `raster_shaped` uses, but with `fit_width: None` so the fit-to-cell
+        // downscale branch cannot trigger — this is the Ghostty-parity
+        // ground truth for an ordinary text glyph's size.
+        let font_data = &grid.font_stack.faces()[font_index];
+        let font = font_data.font_ref().expect("resolved face must parse");
+        let natural = rasterize_with_variations(
+            &mut ScaleContext::new(),
+            font,
+            glyph_id,
+            grid.px_size,
+            &[],
+            GlyphSynthesis::default(),
+            None,
+        );
+
+        // span=1 is what noa-grid actually assigns U+203B (Ambiguous width,
+        // narrow per parity — see `noa-grid`'s `print_width`).
+        let fitted = grid.raster_shaped(face_id, glyph_id, style, 1);
+
+        assert_eq!(
+            (natural.width, natural.height),
+            (fitted.atlas_size[0] as u32, fitted.atlas_size[1] as u32),
+            "an ordinary text glyph must rasterize at its natural size regardless of its \
+             allotted cell span (Ghostty does not shrink ordinary text glyphs to fit — only \
+             generated icon codepoints are cell-constrained): natural {}x{}, span=1-fitted {:?}",
+            natural.width,
+            natural.height,
+            fitted.atlas_size
+        );
+    }
+
+    /// Regression (Scout RCA, verified against Ghostty upstream): on macOS,
+    /// Menlo genuinely ships a distinct Italic style file, and Ghostty
+    /// renders italic text with that real face — never a synthetic shear
+    /// over Menlo Regular. `font-kit` 0.14.3's CoreText backend misreports
+    /// `Font::properties()` identically for every static Menlo face, so
+    /// `face::handle_supports_style`'s italic check rejects the real Menlo
+    /// Italic handle and `load_font_stack` never registers a
+    /// `native_italic_face` for it. noa then falls back to Menlo Regular
+    /// plus a synthetic shear, producing italic glyphs shaped differently
+    /// from Ghostty's real italic Menlo (see the companion
+    /// `primary_face_without_native_italic_still_gets_synthetic_shear` guard
+    /// test above, which currently runs its body — not its skip branch —
+    /// precisely because of this detection bug).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn default_config_menlo_resolves_a_native_italic_face() {
+        let mut grid = skip_if_no_font!(FontGrid::new(24.0, FontConfig::default()));
+
+        let italic_style = StyleKey {
+            bold: false,
+            italic: true,
+        };
+        let (font_index, _glyph_id) = grid.resolve_glyph_for_style('A', italic_style);
+        let is_native = grid
+            .font_stack
+            .is_native_style_face(font_index, FontStyle::Italic);
+        let synthesis = synthesis_for(&grid.font_cfg, italic_style, is_native);
+
+        assert!(
+            !synthesis.shear,
+            "default config (Menlo on macOS) must resolve 'A' under italic style to a \
+             genuine native italic face, not synthesize shear over the regular face \
+             (font_index={font_index}, native_style_face={is_native})"
         );
     }
 

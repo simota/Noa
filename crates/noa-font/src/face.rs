@@ -167,12 +167,56 @@ impl FontStack {
     }
 
     pub fn is_native_style_face(&self, face_index: usize, style: FontStyle) -> bool {
+        // A shared fallback face (emoji/Nerd Font/CJK, loaded regular-only —
+        // see `load_font_stack` — and reused across every style stack via
+        // `stack_for_style`) must never be synthetically slanted/emboldened,
+        // no matter which style resolved it: Ghostty applies synthetic
+        // bold/italic only to the primary family's own regular face, never to
+        // a dynamically-discovered fallback (`CodepointResolver.zig`
+        // `getIndex` + `Collection.zig` `completeStyles`). Treating it as
+        // "native" here is exactly the signal callers (`synthesis_for`) use
+        // to skip synthesis.
+        if self.is_fallback_face(face_index) {
+            return true;
+        }
         match style {
             FontStyle::Regular => true,
             FontStyle::Bold => self.native_bold_face == Some(face_index),
             FontStyle::Italic => self.native_italic_face == Some(face_index),
             FontStyle::BoldItalic => self.native_bold_italic_face == Some(face_index),
         }
+    }
+
+    /// Whether `face_index` belongs to the fallback stack (emoji / Nerd Font /
+    /// CJK from [`load_font_stack`], or a macOS CoreText cascade hit pushed by
+    /// [`FontStack::push_dynamic_fallback`]) rather than one of the primary
+    /// family's four style slots (regular/bold/italic/bold-italic).
+    pub fn is_fallback_face(&self, face_index: usize) -> bool {
+        face_index != self.regular_faces[0]
+            && Some(face_index) != self.native_bold_face
+            && Some(face_index) != self.native_italic_face
+            && Some(face_index) != self.native_bold_italic_face
+    }
+
+    /// Whether `face_index`'s family is a Nerd Font — the source of
+    /// Ghostty's generated icon/Powerline codepoint ranges
+    /// (`nerd_font_attributes.zig`) that stay cell-constrained even though
+    /// ordinary text glyphs are not (see `raster::rasterize_with_variations`'s
+    /// `fit_width` doc comment). Read from the face's own name-table family
+    /// string rather than tracked separately at stack construction, so this
+    /// also covers a Nerd Font resolved dynamically via the macOS cascade.
+    pub fn is_icon_fallback_face(&self, face_index: usize) -> bool {
+        let Some(font_data) = self.faces.get(face_index) else {
+            return false;
+        };
+        let Ok(font) = font_data.font_ref() else {
+            return false;
+        };
+        let strings = font.localized_strings();
+        [swash::StringId::Family, swash::StringId::TypographicFamily]
+            .into_iter()
+            .filter_map(|id| strings.find_by_id(id, None))
+            .any(|name| is_nerd_font_family_name(&name.chars().collect::<String>()))
     }
 }
 
@@ -390,11 +434,10 @@ fn load_generic_monospace_family(
     let handle = source
         .select_best_match(&[FamilyName::Monospace], properties)
         .ok()?;
-    if let Some(style) = required_style
-        && !handle_supports_style(&handle, style)
-    {
-        return None;
-    }
+    let handle = match required_style {
+        Some(style) => resolve_required_style(source, handle, style)?,
+        None => handle,
+    };
     load_valid_handle(handle)
 }
 
@@ -416,11 +459,10 @@ fn load_title_family(
     required_style: Option<FontStyle>,
 ) -> Option<FontData> {
     let handle = select_title_best_match(source, family_name, properties).ok()?;
-    if let Some(style) = required_style
-        && !handle_supports_style(&handle, style)
-    {
-        return None;
-    }
+    let handle = match required_style {
+        Some(style) => resolve_required_style(source, handle, style)?,
+        None => handle,
+    };
     load_valid_handle(handle)
 }
 
@@ -432,13 +474,113 @@ fn load_first_matching_family(
 ) -> Option<FontData> {
     families.iter().find_map(|family_name| {
         let handle = select_title_best_match(source, family_name, properties).ok()?;
-        if let Some(style) = required_style
-            && !handle_supports_style(&handle, style)
-        {
-            return None;
-        }
+        let handle = match required_style {
+            Some(style) => resolve_required_style(source, handle, style)?,
+            None => handle,
+        };
         load_valid_handle(handle)
     })
+}
+
+/// Confirm `handle` actually provides `style`, hardened against a font
+/// backend that misreports `Font::properties()` identically for every static
+/// face in a family (verified for Menlo and Helvetica on font-kit 0.14.3's
+/// CoreText backend — Courier New and Hiragino Sans are unaffected there).
+///
+/// When the family's `properties()` are self-consistent (the common case),
+/// `handle_supports_style` — font-kit's own CSS-properties check, which is
+/// also what selected `handle` in the first place — decides, with a
+/// PostScript-name cross-check as a defensive fallback if it still rejects
+/// `handle`: unchanged behavior for families where `properties()` works.
+/// When the family's `properties()` are detected unreliable, both that check
+/// and font-kit's own selection are equally untrustworthy, so style is
+/// resolved purely from each family member's PostScript name instead — read
+/// back reliably even when `properties()` is not (e.g. "Menlo-Italic").
+/// Returns `None` when no face in the family genuinely has the requested
+/// style, either way.
+fn resolve_required_style(
+    source: &SystemSource,
+    handle: Handle,
+    style: FontStyle,
+) -> Option<Handle> {
+    let family_name = Font::from_handle(&handle).ok()?.family_name();
+    let members = family_members_with_postscript_names(source, &family_name);
+
+    // Every static face in the family reporting identical `properties()` is
+    // never legitimate (a real Regular/Bold/Italic/BoldItalic cut always
+    // differs in at least weight or slant) — it means this font backend
+    // cannot be trusted to distinguish this family's faces at all. In that
+    // case font-kit's own `select_best_match`, which chose `handle` using
+    // those same properties, is just as unreliable as our `properties()`
+    // check would be, so skip both and resolve purely by PostScript name.
+    if properties_are_unreliable(&members) {
+        return find_by_postscript_style(&members, style);
+    }
+
+    if handle_supports_style(&handle, style) {
+        return Some(handle);
+    }
+    find_by_postscript_style(&members, style)
+}
+
+/// `(Handle, PostScript name)` for every loadable member of `family_name`.
+fn family_members_with_postscript_names(
+    source: &SystemSource,
+    family_name: &str,
+) -> Vec<(Handle, String)> {
+    let Ok(family) = source.select_family_by_name(family_name) else {
+        return Vec::new();
+    };
+    family
+        .fonts()
+        .iter()
+        .filter_map(|handle| {
+            let postscript_name = Font::from_handle(handle).ok()?.postscript_name()?;
+            Some((handle.clone(), postscript_name))
+        })
+        .collect()
+}
+
+/// Whether `Font::properties()` is unreliable for this family: true when two
+/// distinctly-PostScript-named static faces report identical properties
+/// (verified for Menlo and Helvetica on font-kit 0.14.3's CoreText backend —
+/// every one of Menlo's four static faces, Regular included, reads back as
+/// `Style::Italic`/weight 400; Courier New and Hiragino Sans are unaffected).
+fn properties_are_unreliable(members: &[(Handle, String)]) -> bool {
+    let mut seen: Vec<Properties> = Vec::new();
+    for (handle, _) in members {
+        let Ok(font) = Font::from_handle(handle) else {
+            continue;
+        };
+        let props = font.properties();
+        if seen.contains(&props) {
+            return true;
+        }
+        seen.push(props);
+    }
+    false
+}
+
+/// Find a member whose PostScript name's style suffix matches `style` (e.g.
+/// "Menlo-Italic" for [`FontStyle::Italic`]) — the name-table-based
+/// resolution path used by [`resolve_required_style`].
+fn find_by_postscript_style(members: &[(Handle, String)], style: FontStyle) -> Option<Handle> {
+    members
+        .iter()
+        .find(|(_, postscript_name)| postscript_name_matches_style(postscript_name, style))
+        .map(|(handle, _)| handle.clone())
+}
+
+/// Whether a PostScript name's style suffix (e.g. "-Italic", "-BoldItalic")
+/// matches `style` exactly — a bold-only request must not match a
+/// "BoldItalic" face, and vice versa.
+fn postscript_name_matches_style(postscript_name: &str, style: FontStyle) -> bool {
+    let lower = postscript_name.to_ascii_lowercase();
+    let wants_bold = matches!(style, FontStyle::Bold | FontStyle::BoldItalic);
+    let wants_italic = matches!(style, FontStyle::Italic | FontStyle::BoldItalic);
+    let has_bold = lower.contains("bold");
+    let has_italic = lower.contains("italic") || lower.contains("oblique");
+    has_bold == wants_bold && has_italic == wants_italic
 }
 
 fn select_title_best_match(

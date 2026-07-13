@@ -906,12 +906,14 @@ pub fn format_cwd(cwd: &str, home: Option<&str>, max: usize) -> String {
     truncate_tail(&abbreviated, max)
 }
 
-/// Project-icon glyph for a card (FR-9). Nerd Font glyphs (mockup parity); an
-/// environment without a Nerd Font falls back to tofu / a replacement box for
-/// these private-use codepoints (AC-21 [manual] — graceful degradation, NFR-5),
-/// which is why the branch of the app that renders these never depends on the
-/// glyph being present. The codepoints are Nerd Font private-use area
-/// (`nf-seti-*` / `nf-dev-*`).
+/// Project-icon glyph for a card (FR-9). Nerd Font glyphs (mockup parity);
+/// `noa-font` embeds the vendored Symbols Nerd Font Mono face as a permanent
+/// fallback face in its font stack, so these private-use codepoints render
+/// even on a machine with no Nerd Font family installed (AC-21 [manual],
+/// NFR-5) — the app logic here still never depends on the glyph being
+/// present, since the coverage guarantee lives in the font stack, not this
+/// call site. The codepoints are Nerd Font private-use area (`nf-seti-*` /
+/// `nf-dev-*`).
 pub fn icon_glyph(icon: IconKind) -> &'static str {
     match icon {
         IconKind::Rust => "\u{e7a8}",      // nf-dev-rust

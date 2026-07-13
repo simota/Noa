@@ -102,7 +102,7 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 - **Header label**: the foreground-process-name detection originally parked was implemented at user request on 2026-07-05 (`Pty::foreground_probe` = dup the master fd → tcgetpgrp → libproc `proc_name`, polled at 1s by the session-metadata worker, only while the sidebar is visible). The label shows the actual process name (`✳ <proc>`); falls back to Running/Idle when undetected.
 
 ### Assumptions
-- A1: Nerd Font/emoji can be cell-rendered via the font fallback cascade (face.rs). Degrades to tofu/emoji when not installed
+- A1: Nerd Font/emoji can be cell-rendered via the font fallback cascade (face.rs). `noa-font` embeds a vendored Symbols Nerd Font Mono face as a permanent fallback, so Nerd Font PUA icons render even with no Nerd Font installed; emoji still degrades to tofu if Apple Color Emoji is unavailable
 - A2: concurrent session count ≤ ~20
 - A3: macOS only
 - A4: busy/bell assume OSC 133 shell integration. Shells without it degrade to busy=false
@@ -137,7 +137,7 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 - **NFR-2 No git on io loop**: git spawn never runs on the io read loop (dedicated branch-poll thread).
 - **NFR-3 Throttles**: the last-output preview is reused at a minimum render interval (~10Hz); branch-poll throttles per-cwd (≥1s) with a negative cache for non-git.
 - **NFR-4 Pure layout**: sidebar layout/hit-testing/scroll math live in a pure, unit-testable module, same as `tab_overview.rs`.
-- **NFR-5 Graceful degradation**: degrades gracefully — no Nerd Font → tofu/emoji, shell without OSC 133 → busy=false, non-git cwd → branch hidden.
+- **NFR-5 Graceful degradation**: degrades gracefully — no Nerd Font installed → icons still render via `noa-font`'s embedded Symbols Nerd Font Mono fallback (no tofu); shell without OSC 133 → busy=false, non-git cwd → branch hidden.
 - **NFR-6 Crate boundaries**: wgpu only in noa-app/noa-render, winit only in noa-app. SessionStore/layout stay GUI-independent.
 
 ## L2 — Detail
@@ -178,7 +178,7 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 - **AC-18 (NFR-2)**: a source-scan `#[test]` asserts that `io_thread.rs`'s read loop (`feed_terminal`) source contains no git spawn such as `Command::new("git")` (that branch-poll runs on a separate thread is confirmed via code review).
 - **AC-19 (NFR-3)**: the preview slot is published only while the sidebar is visible, and is throttled at the minimum render interval (extends the existing throttle test pattern to the sidebar gate).
 - **AC-20 (NFR-4, FR-15)**: each of `sidebar.rs`'s `card_layout`, `hit_test`, and scroll-clamp functions has window/GPU-independent unit tests, and scrolling asserts the offset is clamped to an upper/lower bound when card count exceeds the viewport.
-- **AC-21 (NFR-5) [manual]**: no Nerd Font installed → tofu; shell without OSC 133 → all dots green (idle); non-git cwd → branch field is empty.
+- **AC-21 (NFR-5) [manual]**: no Nerd Font installed → icons still render via the embedded Symbols Nerd Font Mono fallback (no tofu); shell without OSC 133 → all dots green (idle); non-git cwd → branch field is empty.
 - **AC-22 (NFR-6)**: satisfied by AC-2's source-scan test covering SessionStore and sidebar layout (`cargo tree` isn't used since it can't see module boundaries; noa-config's wgpu/winit independence can be confirmed via `cargo tree` as a crate dependency).
 - **AC-23 (FR-15)**: increasing/decreasing the scroll offset with a card count exceeding the viewport height allows reaching the first/last card respectively, with the offset clamped to [0, max] (unit test).
 

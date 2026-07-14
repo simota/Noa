@@ -1,6 +1,8 @@
 //! [`Stream`] — feeds bytes through a [`Parser`] and maps each [`Action`] onto
 //! a [`Handler`]. This is the semantic layer: it knows what `CSI … H` *means*.
 
+use std::sync::{Arc, Mutex};
+
 use crate::action::Action;
 use crate::csi::{Csi, Esc};
 use crate::handler::{
@@ -10,13 +12,40 @@ use crate::handler::{
 use crate::parser::Parser;
 use crate::sgr::{SgrAttr, parse_sgr_into};
 
+/// Parser storage shared only by streams whose state must be snapshotted at a
+/// byte boundary, such as a raw terminal attach endpoint.
+#[derive(Clone, Default)]
+pub struct SharedParser(Arc<Mutex<Parser>>);
+
+impl SharedParser {
+    pub fn pending_bytes(&self) -> Option<Vec<u8>> {
+        self.0
+            .lock()
+            .expect("shared VT parser mutex poisoned")
+            .pending_bytes()
+    }
+}
+
+enum ParserStorage {
+    Owned(Parser),
+    Shared(SharedParser),
+}
+
 /// Owns a [`Parser`] and drives a [`Handler`] from a byte stream.
-#[derive(Default)]
 pub struct Stream {
-    parser: Parser,
+    parser: ParserStorage,
     /// Reused across `SGR` dispatches so the hot colored-output path doesn't
     /// allocate a fresh `Vec` per escape sequence (see `parse_sgr_into`).
     sgr_attrs: Vec<SgrAttr>,
+}
+
+impl Default for Stream {
+    fn default() -> Self {
+        Self {
+            parser: ParserStorage::Owned(Parser::new()),
+            sgr_attrs: Vec::new(),
+        }
+    }
 }
 
 impl Stream {
@@ -24,65 +53,87 @@ impl Stream {
         Self::default()
     }
 
+    pub fn with_shared_parser(parser: SharedParser) -> Self {
+        Self {
+            parser: ParserStorage::Shared(parser),
+            sgr_attrs: Vec::new(),
+        }
+    }
+
     /// Feed a chunk of bytes, dispatching all resulting operations to `handler`.
     pub fn feed<H: Handler>(&mut self, bytes: &[u8], handler: &mut H) {
-        let mut i = 0;
-        // Cached exclusive end of the printable run containing `i` (bytes in
-        // `i..run_end` are all `is_run_byte`), plus whether that whole run is
-        // pure ASCII. Caching both across DFA detours for invalid UTF-8 keeps
-        // the run scan linear even on hostile input.
-        let mut run_end = 0;
-        let mut run_ascii = false;
-        while i < bytes.len() {
-            // Fast path: in plain ground state every byte until the next C0
-            // control (ESC included) is print data, so the dominant
-            // bulk-output case hands whole decoded runs to
-            // `Handler::print_str` and skips the per-byte DFA dispatch
-            // entirely (Ghostty analog: `stream.zig`'s ground scan).
-            if is_run_byte(bytes[i]) && self.parser.in_ground_plain() {
-                if run_end <= i {
-                    let (end, ascii) = scan_run(&bytes[i..]);
-                    run_end = i + end;
-                    run_ascii = ascii;
-                }
-                if run_ascii {
-                    // SAFETY: `scan_run` only sets `ascii` when every byte in
-                    // `bytes[i..run_end]` is `< 0x80`, which is always valid
-                    // single-byte-per-scalar UTF-8, so skipping the redundant
-                    // `from_utf8` re-scan of a range we already proved ASCII
-                    // is sound.
-                    let text = unsafe { core::str::from_utf8_unchecked(&bytes[i..run_end]) };
+        match &mut self.parser {
+            ParserStorage::Owned(parser) => {
+                feed_parser(parser, &mut self.sgr_attrs, bytes, handler)
+            }
+            ParserStorage::Shared(parser) => {
+                let mut parser = parser.0.lock().expect("shared VT parser mutex poisoned");
+                feed_parser(&mut parser, &mut self.sgr_attrs, bytes, handler);
+            }
+        }
+    }
+}
+
+fn feed_parser<H: Handler>(
+    parser: &mut Parser,
+    sgr_attrs: &mut Vec<SgrAttr>,
+    bytes: &[u8],
+    handler: &mut H,
+) {
+    let mut i = 0;
+    // Cached exclusive end of the printable run containing `i` (bytes in
+    // `i..run_end` are all `is_run_byte`), plus whether that whole run is
+    // pure ASCII. Caching both across DFA detours for invalid UTF-8 keeps
+    // the run scan linear even on hostile input.
+    let mut run_end = 0;
+    let mut run_ascii = false;
+    while i < bytes.len() {
+        // Fast path: in plain ground state every byte until the next C0
+        // control (ESC included) is print data, so the dominant
+        // bulk-output case hands whole decoded runs to
+        // `Handler::print_str` and skips the per-byte DFA dispatch
+        // entirely (Ghostty analog: `stream.zig`'s ground scan).
+        if is_run_byte(bytes[i]) && parser.in_ground_plain() {
+            if run_end <= i {
+                let (end, ascii) = scan_run(&bytes[i..]);
+                run_end = i + end;
+                run_ascii = ascii;
+            }
+            if run_ascii {
+                // SAFETY: `scan_run` only sets `ascii` when every byte in
+                // `bytes[i..run_end]` is `< 0x80`, which is always valid
+                // single-byte-per-scalar UTF-8, so skipping the redundant
+                // `from_utf8` re-scan of a range we already proved ASCII
+                // is sound.
+                let text = unsafe { core::str::from_utf8_unchecked(&bytes[i..run_end]) };
+                handler.print_str(text);
+                i = run_end;
+                continue;
+            }
+            match core::str::from_utf8(&bytes[i..run_end]) {
+                Ok(text) => {
                     handler.print_str(text);
                     i = run_end;
                     continue;
                 }
-                match core::str::from_utf8(&bytes[i..run_end]) {
-                    Ok(text) => {
+                Err(err) => {
+                    // Bulk-print the valid prefix, then let the DFA own
+                    // the invalid/incomplete sequence byte-by-byte below
+                    // (it carries the replacement + cross-chunk resume
+                    // semantics), re-entering this fast path once it
+                    // returns to plain ground.
+                    let valid = err.valid_up_to();
+                    if valid > 0 {
+                        let text = core::str::from_utf8(&bytes[i..i + valid])
+                            .expect("valid_up_to marks a valid UTF-8 prefix");
                         handler.print_str(text);
-                        i = run_end;
-                        continue;
-                    }
-                    Err(err) => {
-                        // Bulk-print the valid prefix, then let the DFA own
-                        // the invalid/incomplete sequence byte-by-byte below
-                        // (it carries the replacement + cross-chunk resume
-                        // semantics), re-entering this fast path once it
-                        // returns to plain ground.
-                        let valid = err.valid_up_to();
-                        if valid > 0 {
-                            let text = core::str::from_utf8(&bytes[i..i + valid])
-                                .expect("valid_up_to marks a valid UTF-8 prefix");
-                            handler.print_str(text);
-                            i += valid;
-                        }
+                        i += valid;
                     }
                 }
             }
-            let sgr_attrs = &mut self.sgr_attrs;
-            self.parser
-                .advance(bytes[i], &mut |action| dispatch(action, handler, sgr_attrs));
-            i += 1;
         }
+        parser.advance(bytes[i], &mut |action| dispatch(action, handler, sgr_attrs));
+        i += 1;
     }
 }
 
@@ -239,7 +290,13 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) 
             };
             h.set_cursor_style(style);
         }
-        b'q' if csi.private == b'>' => h.xtversion_query(),
+        // Client-mode seed-only: see `Handler::seed_set_default_cursor_style`.
+        // The `$` intermediate keeps this clear of `CSI > q` / `CSI > 0 q`
+        // (XTVERSION) below, which has no intermediate of its own.
+        b'q' if csi.private == b'>' && csi.intermediates() == b"$" => {
+            h.seed_set_default_cursor_style(csi.param(0, 1), csi.param(1, 0) != 0);
+        }
+        b'q' if csi.private == b'>' && csi.intermediates().is_empty() => h.xtversion_query(),
         b'h' | b'l' => {
             let on = csi.final_byte == b'h';
             let ansi = csi.private != b'?';
@@ -260,6 +317,15 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) 
         b'r' if csi.private == 0 => h.set_scroll_region(csi.param(0, 1), csi.param(1, 0)),
         b's' if csi.private == 0 && csi.params().is_empty() => h.save_cursor(),
         b's' if csi.private == 0 => h.set_horizontal_margins(csi.param(0, 1), csi.param(1, 0)),
+        // Client-mode seed-only: see `Handler::seed_set_last_printed`. The
+        // `$` intermediate keeps this clear of xterm's `CSI > Ps s`
+        // (XTSHIFTESCAPE) namespace.
+        b's' if csi.private == b'>' && csi.intermediates() == b"$" => {
+            let codepoint = (u32::from(csi.param(0, 0)) << 16) | u32::from(csi.param(1, 0));
+            if let Some(ch) = char::from_u32(codepoint) {
+                h.seed_set_last_printed(ch);
+            }
+        }
         // Plain `CSI u` is SCORC (restore cursor). The private markers select
         // the Kitty keyboard protocol progressive-enhancement operations.
         b'u' if csi.private == 0 && csi.intermediates().is_empty() => h.restore_cursor(),
@@ -275,6 +341,10 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) 
             _ => {}
         },
         b't' if plain => h.window_op(csi.param(0, 0), csi.param(1, 0), csi.param(2, 0)), // XTWINOPS
+        // Client-mode seed-only: see `Handler::seed_set_cursor_hollow`. The
+        // `$` intermediate keeps this clear of xterm's `CSI > Ps ; Ps t`
+        // (title-mode set) namespace.
+        b't' if csi.private == b'>' && csi.intermediates() == b"$" => h.seed_set_cursor_hollow(),
         _ => {} // unknown / inc>=2
     }
 }

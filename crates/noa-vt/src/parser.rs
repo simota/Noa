@@ -96,6 +96,80 @@ impl Parser {
         self.state == State::Ground && self.utf8_rem == 0
     }
 
+    /// Reconstruct the bytes that have been consumed without completing a
+    /// parser action. Replaying this suffix after a terminal snapshot lets a
+    /// fresh parser meet the next live byte at the same DFA boundary.
+    ///
+    /// An overflowed string cannot be reconstructed faithfully because its
+    /// discarded payload affects the eventual dispatch. Callers must wait for
+    /// that string to terminate instead of attaching at that boundary.
+    pub(crate) fn pending_bytes(&self) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        match self.state {
+            State::Ground => {
+                append_pending_utf8(&mut bytes, self.utf8_acc, self.utf8_rem, self.utf8_min)
+            }
+            State::Escape => bytes.push(0x1b),
+            State::EscapeIntermediate => {
+                bytes.push(0x1b);
+                bytes.extend_from_slice(self.intermediates.as_slice());
+            }
+            State::CsiEntry => bytes.extend_from_slice(b"\x1b["),
+            State::CsiParam | State::CsiIntermediate => {
+                bytes.extend_from_slice(b"\x1b[");
+                if self.private != 0 {
+                    bytes.push(self.private);
+                }
+                for (index, param) in self.params.as_slice().iter().enumerate() {
+                    if index > 0 {
+                        bytes.push(if self.sep_colon.is_colon(index - 1) {
+                            b':'
+                        } else {
+                            b';'
+                        });
+                    }
+                    bytes.extend_from_slice(param.to_string().as_bytes());
+                }
+                if self.state == State::CsiIntermediate {
+                    bytes.extend_from_slice(self.intermediates.as_slice());
+                }
+            }
+            State::CsiIgnore => bytes.extend_from_slice(b"\x1b[??"),
+            State::DcsPassthrough | State::DcsEscape => {
+                if self.dcs_overflow {
+                    return None;
+                }
+                bytes.extend_from_slice(b"\x1bP");
+                bytes.extend_from_slice(&self.dcs);
+                if self.state == State::DcsEscape {
+                    bytes.push(0x1b);
+                }
+            }
+            State::OscString => {
+                if self.osc_overflow {
+                    return None;
+                }
+                bytes.extend_from_slice(b"\x1b]");
+                bytes.extend_from_slice(&self.osc);
+            }
+            State::SosPmApcString => {
+                bytes.extend_from_slice(b"\x1bX");
+                append_string_utf8_lead(&mut bytes, self.string_utf8_rem);
+            }
+            State::ApcString | State::ApcEscape => {
+                if self.apc_overflow {
+                    return None;
+                }
+                bytes.extend_from_slice(b"\x1b_");
+                bytes.extend_from_slice(&self.apc);
+                if self.state == State::ApcEscape {
+                    bytes.push(0x1b);
+                }
+            }
+        }
+        Some(bytes)
+    }
+
     /// Feed one byte, emitting any resulting actions through `sink`.
     pub fn advance<F: FnMut(Action)>(&mut self, b: u8, sink: &mut F) {
         if self.state == State::DcsEscape {
@@ -566,4 +640,36 @@ impl Parser {
             _ => {}
         }
     }
+}
+
+fn append_pending_utf8(bytes: &mut Vec<u8>, accumulator: u32, remaining: u8, minimum: u32) {
+    if remaining == 0 {
+        return;
+    }
+    let total = match minimum {
+        0x80 => 2,
+        0x800 => 3,
+        0x10000 => 4,
+        _ => return,
+    };
+    let consumed = total - 1 - usize::from(remaining);
+    let lead_mask = match total {
+        2 => 0xc0,
+        3 => 0xe0,
+        4 => 0xf0,
+        _ => unreachable!(),
+    };
+    bytes.push(lead_mask | ((accumulator >> (consumed * 6)) as u8));
+    for index in (0..consumed).rev() {
+        bytes.push(0x80 | ((accumulator >> (index * 6)) as u8 & 0x3f));
+    }
+}
+
+fn append_string_utf8_lead(bytes: &mut Vec<u8>, remaining: u8) {
+    bytes.extend_from_slice(match remaining {
+        1 => &[0xc2],
+        2 => &[0xe0],
+        3 => &[0xf0],
+        _ => &[],
+    });
 }

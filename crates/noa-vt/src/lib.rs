@@ -36,4 +36,4 @@ pub use parser::Parser;
 pub use sgr::{SgrAttr, parse_sgr};
 pub use sixel::SixelGraphicsCommand;
 pub use state::State;
-pub use stream::Stream;
+pub use stream::{SharedParser, Stream};

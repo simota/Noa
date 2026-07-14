@@ -126,6 +126,41 @@ or fails to decode, a diagnostic is shown and the background image is disabled.
 | `auto-approve` | `true`, `false` | `false` | Initial value for agent CLI auto approval in new tabs |
 | `send-selection-send-enter` | `true`, `false` | `false` | Send Enter after the send-selection picker pastes into the target pane |
 
+## Server and remote client
+
+Noa's server is disabled by default. Client Mode connects another Noa instance to a server pane through the command palette's single **Attach Remote** entry; there is no connection-settings form in the GUI.
+
+| Key | Accepted values | Default | Description |
+|---|---|---|---|
+| `server-enable` | `true`, `false` | `false` | Start the JSON-RPC/WebSocket server. No listening socket is opened while disabled |
+| `server-port` | integer `1..=65535` | `61771` | Control and raw attach WebSocket port |
+| `server-bind` | IP address | `127.0.0.1` | Listening interface. A non-loopback value opts into LAN exposure |
+| `server-token` | non-empty string | generated token file | Bearer token override. When set, automatic token-file generation and loading are skipped |
+| `server-scopes` | comma-separated subset of `read`, `control`, `input`, `attach` | `read` | Scopes the server may grant. Interactive raw attach is disabled unless `attach` is listed explicitly |
+| `client-remote` | `host:port` | unspecified | Target noa-server endpoint. If omitted, **Attach Remote** prompts for an endpoint for that attempt |
+| `client-token` | non-empty string | unspecified | Bearer token for Client Mode. Takes precedence over `client-token-file`; `+show-config` always displays it as `<redacted>` |
+| `client-token-file` | file path | unspecified | File containing the Client Mode bearer token. Used only when `client-token` is unset; surrounding whitespace is trimmed |
+
+A minimal loopback setup is:
+
+```conf
+# Server Mac
+server-enable = true
+server-scopes = read,control,attach
+
+# Client Mac
+client-remote = 127.0.0.1:61771
+client-token-file = ~/.config/noa/remote-server-token
+```
+
+Copy the server's token into the client token file through an appropriate secure channel; do not commit tokens to source control. `client-token` is convenient for temporary local setups, but stores the secret in plaintext configuration.
+
+Noa's WebSocket transport does not provide TLS. Before the first connection to a non-loopback `client-remote`, the UI asks you to confirm that the endpoint is on a trusted LAN or behind a protected tunnel. Cancelling the warning opens no socket. When using a tunnel, the network between endpoints is assumed to be protected by the tunnel. A loopback tunnel endpoint cannot be distinguished from a purely local connection, so the warning does not fire in that case.
+
+Client Mode persistence stores only the endpoint, remote pane ID, and cached title. Tokens, one-time attach URLs, retry state, and remote input are never persisted. Restored remote tabs remain detached until an explicit retry; they are not respawned as local shells.
+
+See [noa-server-protocol.md](api/noa-server-protocol.md) for scope and attach-channel details.
+
 ## Quick Terminal and sidebar
 
 | Key | Accepted values | Default | Description |

@@ -3,6 +3,7 @@
 //! analog — this mirrors the pattern the AppleScript bridge already uses
 //! (`EventLoopProxy` for mutation, a shared snapshot for reads).
 
+use crate::AttachOutputSender;
 use crate::error::IpcError;
 use crate::protocol::{Panel, Row, SplitDirection, TextSource};
 
@@ -69,4 +70,47 @@ pub trait IpcBackend: Send + Sync + 'static {
     fn split(&self, pane: PaneRef, direction: SplitDirection) -> Result<PaneRef, IpcError>;
 
     fn close_pane(&self, pane: PaneRef) -> Result<(), IpcError>;
+
+    /// Checks that `pane` exists and supports raw attach before the server
+    /// reserves a one-time token. Existing backend implementations remain
+    /// source-compatible through the default unsupported result.
+    fn validate_attach(&self, _pane: PaneRef) -> Result<(), IpcError> {
+        Err(IpcError::Unsupported("validate_attach"))
+    }
+
+    /// Atomically registers `output` as the pane's raw PTY tap and snapshots
+    /// the synthetic VT seed. The application implementation must perform
+    /// both operations under one terminal lock acquisition. This method must
+    /// return before any WebSocket write occurs.
+    fn open_attach(
+        &self,
+        _pane: PaneRef,
+        _generation: u64,
+        _output: AttachOutputSender,
+    ) -> Result<Vec<u8>, IpcError> {
+        Err(IpcError::Unsupported("open_attach"))
+    }
+
+    /// Delivers one raw binary client frame to the attached pane's PTY input
+    /// path. The generation prevents a stale socket from writing into a newer
+    /// attach lease.
+    fn write_attach(
+        &self,
+        _pane: PaneRef,
+        _generation: u64,
+        _bytes: &[u8],
+    ) -> Result<(), IpcError> {
+        Err(IpcError::Unsupported("write_attach"))
+    }
+
+    /// Releases application-owned tap/input state for one generation. The
+    /// default is intentionally idempotent so legacy backends stay compatible.
+    fn detach_attach(&self, _pane: PaneRef, _generation: u64) -> Result<(), IpcError> {
+        Ok(())
+    }
+
+    /// Applies grid-first remote resize for an attached pane.
+    fn resize_pane(&self, _pane: PaneRef, _cols: u16, _rows: u16) -> Result<(), IpcError> {
+        Err(IpcError::Unsupported("resize_pane"))
+    }
 }

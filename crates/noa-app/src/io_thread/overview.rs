@@ -66,7 +66,7 @@ pub(super) fn decide_overview_publish(
 /// `feed_terminal` already holds the `Terminal` lock (Fix B, REQ-NF-6).
 /// Returns the trailing-flush deadline when [`decide_overview_publish`]
 /// schedules one (see `spawn`'s dynamic-timeout `Select`), `None` otherwise.
-pub(super) fn publish_overview_snapshot(
+pub(crate) fn publish_overview_snapshot(
     terminal: &Terminal,
     overview: &OverviewPublish,
     last_overview_publish: &mut Option<Instant>,

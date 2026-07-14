@@ -984,6 +984,7 @@ fn subscribe_delivers_state_changed_and_unsubscribe_stops_it() {
         process: None,
         busy: false,
         attention: false,
+        attachable: true,
         preview: vec![],
     };
     broadcaster.broadcast_state_changed(vec![panel]);

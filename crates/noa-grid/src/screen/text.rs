@@ -8,6 +8,74 @@ impl Screen {
         self.scrollback.len()
     }
 
+    pub(crate) fn scrollback_limit_bytes(&self) -> usize {
+        self.scrollback.limit_bytes()
+    }
+
+    /// Prepend a plain-text snapshot as older scrollback while preserving the
+    /// current live grid. This is a cold path used by remote attach backfill;
+    /// the text is rewrapped to the current width and stored with default
+    /// styling because `noa.getText` intentionally carries no cell styles.
+    ///
+    /// `trailing_wrapped` marks whether `text`'s last row is a soft-wrap
+    /// continuation of whatever content immediately follows it (the caller's
+    /// merge boundary), as opposed to a hard line break. When true, the last
+    /// inserted row's `wrapped` flag is set so it stays one logical line with
+    /// what was already the oldest row before this prepend, instead of the
+    /// two rows being split apart for copy/search/reflow.
+    pub(crate) fn prepend_plain_text_history(
+        &mut self,
+        text: &str,
+        trailing_wrapped: bool,
+    ) -> usize {
+        if text.is_empty() || !self.scrollback_enabled || self.cols == 0 {
+            return 0;
+        }
+        let mut rows = Self::plain_text_rows(text, self.cols);
+        if trailing_wrapped && let Some(last) = rows.last_mut() {
+            last.wrapped = true;
+        }
+        let inserted = rows.len();
+        if inserted == 0 {
+            return 0;
+        }
+
+        let evicted = self.scrollback.prepend_rows(&rows);
+        self.rows_evicted = self.rows_evicted.saturating_add(evicted);
+        for placement in &mut self.kitty_placements {
+            placement.anchor_abs_row = placement.anchor_abs_row.saturating_add(inserted);
+        }
+        self.selection = None;
+        self.search.clear();
+        self.scroll_shift = 0;
+        self.clamp_viewport();
+        inserted
+    }
+
+    fn plain_text_rows(text: &str, cols: u16) -> Vec<Row> {
+        let mut staging = Screen::with_scrollback(cols, 1, true);
+        staging.set_scrollback_limit_bytes(usize::MAX);
+        for character in text.chars() {
+            match character {
+                '\n' => {
+                    staging.carriage_return();
+                    staging.index();
+                }
+                '\r' => staging.carriage_return(),
+                character if !character.is_control() => staging.print(character, true, true),
+                _ => {}
+            }
+        }
+
+        let history_len = staging.scrollback_len();
+        let mut rows = Vec::with_capacity(history_len + usize::from(!text.ends_with('\n')));
+        staging.for_each_scrollback_row(0..history_len, |_, row| rows.push(row.clone()));
+        if !text.ends_with('\n') {
+            rows.push(staging.grid[0].clone());
+        }
+        rows
+    }
+
     pub fn viewport_offset(&self) -> usize {
         self.viewport_offset
     }

@@ -80,6 +80,11 @@ impl KittyKeyboard {
         self.stack(is_alt).last().copied().unwrap_or(0)
     }
 
+    /// Ordered stack entries for synthetic terminal-state replay.
+    pub(crate) fn stack_values(&self, is_alt: bool) -> &[u8] {
+        self.stack(is_alt)
+    }
+
     /// `CSI > flags u` — push new flags. Beyond [`STACK_DEPTH`] the oldest
     /// entry is evicted first.
     pub fn push(&mut self, is_alt: bool, flags: u8) {

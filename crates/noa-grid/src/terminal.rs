@@ -5,6 +5,7 @@
 mod handler;
 mod kitty_graphics;
 mod reports;
+mod seed;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -82,6 +83,10 @@ pub struct Terminal {
     pub size: GridSize,
     /// Bytes the terminal must write back to the pty (query replies).
     pub pending_writes: Vec<u8>,
+    /// Whether [`Self::take_pending_writes`] may return terminal-generated
+    /// replies. Remote replica terminals disable this because the server-side
+    /// terminal remains the sole reply authority.
+    reply_writes_enabled: bool,
     /// Text payloads accepted by OSC 52 and ready for the app clipboard layer.
     pub pending_clipboard_writes: Vec<String>,
     /// OSC 52 clipboard *read* requests (`OSC 52;<t>;?`) the policy allowed.
@@ -160,6 +165,7 @@ impl Terminal {
             modify_other_keys_2: false,
             size,
             pending_writes: Vec::new(),
+            reply_writes_enabled: true,
             pending_clipboard_writes: Vec::new(),
             pending_clipboard_reads: Vec::new(),
             pending_notifications: VecDeque::new(),
@@ -336,6 +342,23 @@ impl Terminal {
     /// [`crate::screen::Screen::scrollback_text_tail`].
     pub fn scrollback_text_tail(&mut self, max_bytes: usize) -> Option<(String, bool)> {
         self.active_mut().scrollback_text_tail(max_bytes)
+    }
+
+    /// Merge older plain-text history without disturbing either live screen.
+    /// `trailing_wrapped` marks whether `text`'s last row soft-wraps into
+    /// whatever content already sits at the merge boundary (see
+    /// [`crate::screen::Screen::prepend_plain_text_history`]). Returns the
+    /// number of source rows inserted before retention eviction.
+    pub fn prepend_scrollback_text(&mut self, text: &str, trailing_wrapped: bool) -> usize {
+        let inserted = self
+            .primary
+            .prepend_plain_text_history(text, trailing_wrapped);
+        if inserted > 0 {
+            for mark in &mut self.shell_marks {
+                mark.point.y = mark.point.y.saturating_add(inserted);
+            }
+        }
+        inserted
     }
 
     pub fn set_search_query(&mut self, query: impl Into<String>) {
@@ -516,9 +539,28 @@ impl Terminal {
         self.size = size;
     }
 
+    /// Enable or suppress terminal-generated report replies at the drain
+    /// boundary. Disabling also discards replies queued before this call.
+    ///
+    /// Local terminals leave this enabled. Client-mode replica terminals must
+    /// disable it so DA/DSR and similar replies are not reflected to the remote
+    /// attach channel.
+    pub fn set_reply_writes_enabled(&mut self, enabled: bool) {
+        self.reply_writes_enabled = enabled;
+        if !enabled {
+            self.pending_writes.clear();
+        }
+    }
+
     /// Take the queued report-reply bytes (for the io thread → pty writer).
+    /// The queue is always drained, but suppressed terminals return no bytes.
     pub fn take_pending_writes(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.pending_writes)
+        let pending = std::mem::take(&mut self.pending_writes);
+        if self.reply_writes_enabled {
+            pending
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn take_pending_clipboard_writes(&mut self) -> Vec<String> {

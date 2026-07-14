@@ -5,6 +5,7 @@ pub(in crate::app) enum ActiveOverlay {
     None,
     CommandPalette,
     SendSelectionPicker,
+    RemoteUi,
     Search,
     ThemeSettings,
     ProcessMonitor,
@@ -20,6 +21,7 @@ pub(in crate::app) enum ActiveOverlay {
 fn active_overlay_gate(
     command_palette_open: bool,
     send_selection_picker_open: bool,
+    remote_ui_open: bool,
     search_open: bool,
     theme_settings_open: bool,
     process_monitor_open: bool,
@@ -29,6 +31,8 @@ fn active_overlay_gate(
         ActiveOverlay::CommandPalette
     } else if send_selection_picker_open {
         ActiveOverlay::SendSelectionPicker
+    } else if remote_ui_open {
+        ActiveOverlay::RemoteUi
     } else if search_open {
         ActiveOverlay::Search
     } else if theme_settings_open {
@@ -396,6 +400,9 @@ impl App {
             self.send_selection_picker
                 .as_ref()
                 .is_some_and(|s| s.window_id == window_id),
+            self.remote_ui
+                .as_ref()
+                .is_some_and(|s| s.window_id == window_id),
             self.search_prompt
                 .as_ref()
                 .is_some_and(|s| s.window_id == window_id),
@@ -422,7 +429,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn command_palette_open_refuses_theme_settings() {
         assert_eq!(
-            active_overlay_gate(true, false, false, false, false, false),
+            active_overlay_gate(true, false, false, false, false, false, false),
             ActiveOverlay::CommandPalette
         );
     }
@@ -430,7 +437,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn send_selection_picker_refuses_other_overlays() {
         assert_eq!(
-            active_overlay_gate(false, true, false, false, false, false),
+            active_overlay_gate(false, true, false, false, false, false, false),
             ActiveOverlay::SendSelectionPicker
         );
     }
@@ -442,7 +449,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn theme_settings_open_refuses_palette_and_search() {
         assert_eq!(
-            active_overlay_gate(false, false, false, true, false, false),
+            active_overlay_gate(false, false, false, false, true, false, false),
             ActiveOverlay::ThemeSettings
         );
     }
@@ -453,7 +460,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn search_open_refuses_theme_settings() {
         assert_eq!(
-            active_overlay_gate(false, false, true, false, false, false),
+            active_overlay_gate(false, false, false, true, false, false, false),
             ActiveOverlay::Search
         );
     }
@@ -464,7 +471,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn process_monitor_open_refuses_other_overlays() {
         assert_eq!(
-            active_overlay_gate(false, false, false, false, true, false),
+            active_overlay_gate(false, false, false, false, false, true, false),
             ActiveOverlay::ProcessMonitor
         );
     }
@@ -472,12 +479,20 @@ mod active_overlay_gate_tests {
     #[test]
     fn copy_mode_excludes_other_overlays_but_has_lower_modal_priority() {
         assert_eq!(
-            active_overlay_gate(false, false, false, false, false, true),
+            active_overlay_gate(false, false, false, false, false, false, true),
             ActiveOverlay::CopyMode
         );
         assert_eq!(
-            active_overlay_gate(true, false, false, false, false, true),
+            active_overlay_gate(true, false, false, false, false, false, true),
             ActiveOverlay::CommandPalette
+        );
+    }
+
+    #[test]
+    fn remote_ui_refuses_other_overlays() {
+        assert_eq!(
+            active_overlay_gate(false, false, true, false, false, false, false),
+            ActiveOverlay::RemoteUi
         );
     }
 }
@@ -524,7 +539,15 @@ mod palette_enter_decision_tests {
         assert!(decision.close_palette);
         let palette_open_after_enter = !decision.close_palette;
         assert_eq!(
-            active_overlay_gate(palette_open_after_enter, false, false, false, false, false),
+            active_overlay_gate(
+                palette_open_after_enter,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
             ActiveOverlay::None
         );
     }

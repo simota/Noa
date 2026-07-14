@@ -15,19 +15,27 @@
 //! thread-per-connection + `crossbeam`/`parking_lot`, matching the rest of
 //! the codebase's `io_thread` model.
 
+mod attach;
 pub mod auth;
 pub mod backend;
+pub mod client;
 pub mod error;
 pub mod protocol;
 pub mod push;
 pub mod server;
 
+pub use attach::{
+    ATTACH_BACKPRESSURE_TIMEOUT, ATTACH_OUTPUT_CAPACITY_BYTES, ATTACH_TOKEN_TTL, AttachOutputError,
+    AttachOutputSender,
+};
 pub use auth::{Scope, ScopeSet, constant_time_eq, load_or_create_token};
 pub use backend::{GridResult, IpcBackend, PaneRef, TextResult, WindowRef};
+pub use client::{AttachClient, Client, ClientError, DEFAULT_ATTACH_POLL_TIMEOUT};
 pub use error::{ErrorCode, IpcError};
 pub use protocol::{
-    Attr, EventKind, PROTOCOL_VERSION, Panel, Row, Span, SpanColor, SplitDirection, TextSource,
-    WireId,
+    AttachParams, AttachResult, Attr, DetachParams, EventKind, GetTextResult, ListPanelsResult,
+    PROTOCOL_VERSION, PaneIdResult, Panel, ResizePaneParams, Row, Span, SpanColor, SplitDirection,
+    TextSource, WireId,
 };
 pub use push::{Broadcaster, EventMask, PushQueue};
-pub use server::{Server, ServerConfig, ServerHandle};
+pub use server::{ATTACH_HANDSHAKE_CLOSE_REASON, Server, ServerConfig, ServerHandle};

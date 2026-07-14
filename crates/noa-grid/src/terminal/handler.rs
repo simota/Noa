@@ -283,7 +283,9 @@ impl Handler for Terminal {
     }
 
     fn full_reset(&mut self) {
+        let scrollback_limit = self.primary.scrollback_limit_bytes();
         self.primary = crate::screen::Screen::new(self.size.cols, self.size.rows);
+        self.primary.set_scrollback_limit_bytes(scrollback_limit);
         self.alt = None;
         self.active_is_alt = false;
         self.screen_generation = self.screen_generation.wrapping_add(1);
@@ -355,6 +357,40 @@ impl Handler for Terminal {
         let grapheme_clustering = self.modes.grapheme_clustering();
         self.active_mut()
             .repeat_preceding_char(n, autowrap, grapheme_clustering);
+    }
+
+    fn seed_set_last_printed(&mut self, ch: char) {
+        self.active_mut().set_last_printed(ch);
+    }
+
+    fn seed_set_cursor_hollow(&mut self) {
+        let cursor = &mut self.active_mut().cursor;
+        cursor.style = match cursor.style {
+            crate::cursor::CursorStyle::BlinkingBlock => {
+                crate::cursor::CursorStyle::BlinkingBlockHollow
+            }
+            crate::cursor::CursorStyle::SteadyBlock => {
+                crate::cursor::CursorStyle::SteadyBlockHollow
+            }
+            other => other,
+        };
+    }
+
+    fn seed_set_default_cursor_style(&mut self, ps: u16, hollow: bool) {
+        use crate::cursor::CursorStyle;
+        // Mirrors the `DECSCUSR` numbering `write_cursor_style` emits, plus
+        // the seed-only `hollow` bit for the two block variants standard
+        // `DECSCUSR` cannot express (see `seed_set_cursor_hollow`).
+        self.default_cursor_style = match ps {
+            2 if hollow => CursorStyle::SteadyBlockHollow,
+            2 => CursorStyle::SteadyBlock,
+            3 => CursorStyle::BlinkingUnderline,
+            4 => CursorStyle::SteadyUnderline,
+            5 => CursorStyle::BlinkingBar,
+            6 => CursorStyle::SteadyBar,
+            1 if hollow => CursorStyle::BlinkingBlockHollow,
+            _ => CursorStyle::BlinkingBlock,
+        };
     }
 
     fn device_attributes(&mut self, kind: DaKind) {

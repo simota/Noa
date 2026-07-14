@@ -19,6 +19,10 @@ pub enum AppCommand {
     ReloadConfig,
     Copy,
     Paste,
+    /// Start the config-backed remote pane discovery/attach flow. The only
+    /// connection-UX entry in v1; deliberately has no default keybinding or
+    /// native menu item.
+    AttachRemote,
     SendSelectionToPane,
     ExportScrollback,
     PipeScrollbackToPager,
@@ -195,6 +199,7 @@ impl AppCommand {
             AppCommand::ReloadConfig => "",
             AppCommand::Copy => Self::COPY_MENU_ID,
             AppCommand::Paste => Self::PASTE_MENU_ID,
+            AppCommand::AttachRemote => "",
             AppCommand::SendSelectionToPane => Self::SEND_SELECTION_TO_PANE_MENU_ID,
             AppCommand::ExportScrollback => Self::EXPORT_SCROLLBACK_MENU_ID,
             AppCommand::PipeScrollbackToPager => Self::PIPE_SCROLLBACK_TO_PAGER_MENU_ID,
@@ -351,6 +356,7 @@ impl AppCommand {
             Self::ReloadConfig => "config.reload",
             Self::Copy => "copy",
             Self::Paste => "paste",
+            Self::AttachRemote => "remote.attach",
             Self::SendSelectionToPane => "pane.send-selection",
             Self::ExportScrollback => "terminal.export-scrollback",
             Self::PipeScrollbackToPager => "terminal.pipe-scrollback-to-pager",
@@ -432,6 +438,7 @@ impl AppCommand {
             "config.reload" => Some(Self::ReloadConfig),
             "copy" => Some(Self::Copy),
             "paste" => Some(Self::Paste),
+            "remote.attach" => Some(Self::AttachRemote),
             "pane.send-selection" => Some(Self::SendSelectionToPane),
             "terminal.export-scrollback" => Some(Self::ExportScrollback),
             "terminal.pipe-scrollback-to-pager" => Some(Self::PipeScrollbackToPager),

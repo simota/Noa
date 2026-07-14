@@ -2,6 +2,7 @@
 //! ordered overflow buffer for bursts (huge pastes) the channel can't absorb.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use parking_lot::Mutex;
@@ -10,24 +11,68 @@ pub(crate) type PtyInput = Box<[u8]>;
 
 pub(crate) const PTY_INPUT_QUEUE_CAPACITY: usize = 1024;
 
-/// Ceiling on bytes parked in a pane's input overflow buffer. The overflow
-/// absorbs a burst (huge paste) faster than the program reads; against a
-/// program that *stops* reading it would otherwise grow without bound. Writes
-/// past the cap are dropped — by then the target has ignored 64 MiB of input,
-/// so preserving order matters more than preserving the excess.
-pub(super) const PTY_INPUT_OVERFLOW_BYTE_CAP: usize = 64 * 1024 * 1024;
+/// Ceiling on all bytes pending for one pane, including both the bounded
+/// channel and its overflow buffer. A message-count-only limit is insufficient:
+/// raw attach accepts 1 MiB messages, so 1024 channel slots could otherwise pin
+/// roughly 1 GiB before the overflow limit was even consulted.
+pub(super) const PTY_INPUT_PENDING_BYTE_CAP: usize = 8 * 1024 * 1024;
+/// Small frames are charged at least this much so container/allocation
+/// overhead is bounded along with payload bytes.
+pub(super) const PTY_INPUT_PENDING_MIN_CHARGE: usize = 1024;
 
-pub(crate) fn input_channel() -> (PtyInputQueue, Receiver<PtyInput>) {
+pub(crate) fn input_channel() -> (PtyInputQueue, Receiver<QueuedPtyInput>) {
     let (tx, rx) = crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY);
     (PtyInputQueue::new(tx), rx)
+}
+
+/// Input plus a shared byte-budget reservation. The reservation follows the
+/// bytes through the channel, overflow queue, and PTY writer queue and is
+/// released only after the real PTY write completes (or the bytes are dropped).
+pub(crate) struct QueuedPtyInput {
+    bytes: PtyInput,
+    pending_bytes: Arc<AtomicUsize>,
+    charge: usize,
+}
+
+impl QueuedPtyInput {
+    fn reserve(input: PtyInput, pending_bytes: Arc<AtomicUsize>) -> Result<Self, PtyInput> {
+        let charge = input.len().max(PTY_INPUT_PENDING_MIN_CHARGE);
+        if pending_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(charge)
+                    .filter(|next| *next <= PTY_INPUT_PENDING_BYTE_CAP)
+            })
+            .is_err()
+        {
+            return Err(input);
+        }
+        Ok(Self {
+            bytes: input,
+            pending_bytes,
+            charge,
+        })
+    }
+}
+
+impl AsRef<[u8]> for QueuedPtyInput {
+    fn as_ref(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+}
+
+impl Drop for QueuedPtyInput {
+    fn drop(&mut self) {
+        self.pending_bytes.fetch_sub(self.charge, Ordering::AcqRel);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueueInputResult {
     Queued,
     Deferred,
-    /// The overflow buffer is at [`PTY_INPUT_OVERFLOW_BYTE_CAP`]; the input
-    /// was discarded rather than parked.
+    /// The pane is at [`PTY_INPUT_PENDING_BYTE_CAP`]; the input was discarded
+    /// rather than queued or parked.
     Dropped,
     Disconnected,
 }
@@ -43,68 +88,55 @@ pub(crate) enum QueueInputResult {
 /// land typed keys in the middle of a deferred paste.)
 #[derive(Clone)]
 pub(crate) struct PtyInputQueue {
-    tx: Sender<PtyInput>,
+    tx: Sender<QueuedPtyInput>,
     overflow: Arc<Mutex<InputOverflow>>,
+    pending_bytes: Arc<AtomicUsize>,
 }
 
 #[derive(Default)]
 struct InputOverflow {
-    queue: std::collections::VecDeque<PtyInput>,
-    /// Sum of `queue`'s element lengths, enforced against
-    /// [`PTY_INPUT_OVERFLOW_BYTE_CAP`].
-    queued_bytes: usize,
+    queue: std::collections::VecDeque<QueuedPtyInput>,
     drainer_active: bool,
 }
 
 impl InputOverflow {
-    /// Park `input` unless doing so would exceed the byte cap; reports whether
-    /// it was accepted.
-    fn park(&mut self, input: PtyInput) -> bool {
-        if self.queued_bytes.saturating_add(input.len()) > PTY_INPUT_OVERFLOW_BYTE_CAP {
-            return false;
-        }
-        self.queued_bytes += input.len();
+    fn park(&mut self, input: QueuedPtyInput) {
         self.queue.push_back(input);
-        true
     }
 
-    fn pop(&mut self) -> Option<PtyInput> {
-        let input = self.queue.pop_front()?;
-        self.queued_bytes -= input.len();
-        Some(input)
+    fn pop(&mut self) -> Option<QueuedPtyInput> {
+        self.queue.pop_front()
     }
 
     fn reset(&mut self) {
         self.queue.clear();
-        self.queued_bytes = 0;
         self.drainer_active = false;
     }
 }
 
 impl PtyInputQueue {
-    pub(crate) fn new(tx: Sender<PtyInput>) -> Self {
+    fn new(tx: Sender<QueuedPtyInput>) -> Self {
         PtyInputQueue {
             tx,
             overflow: Arc::new(Mutex::new(InputOverflow::default())),
+            pending_bytes: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     /// Queue `input` behind every byte accepted before it, blocking never.
     pub(crate) fn queue(&self, input: PtyInput) -> QueueInputResult {
+        let Ok(input) = QueuedPtyInput::reserve(input, Arc::clone(&self.pending_bytes)) else {
+            return QueueInputResult::Dropped;
+        };
         let mut overflow = self.overflow.lock();
         if overflow.drainer_active {
-            return if overflow.park(input) {
-                QueueInputResult::Deferred
-            } else {
-                QueueInputResult::Dropped
-            };
+            overflow.park(input);
+            return QueueInputResult::Deferred;
         }
         match self.tx.try_send(input) {
             Ok(()) => QueueInputResult::Queued,
             Err(TrySendError::Full(input)) => {
-                if !overflow.park(input) {
-                    return QueueInputResult::Dropped;
-                }
+                overflow.park(input);
                 overflow.drainer_active = true;
                 drop(overflow);
                 let drainer = self.clone();

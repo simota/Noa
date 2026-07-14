@@ -104,6 +104,10 @@ pub enum UserEvent {
     /// payload lives in `App::ipc_pending`, keyed by `request_id`, because
     /// `UserEvent` derives `Eq` and so cannot carry a reply channel directly.
     IpcAction { request_id: u64 },
+    /// A remote discovery or create-pane worker completed. Panels and worker
+    /// results remain in `App::remote_pending`; the Eq event carries only its
+    /// monotonic lookup id and never carries the bearer token.
+    RemoteRequestCompleted { request_id: u64 },
     /// Deferred focus restore after a macOS native-tab close. Calling
     /// `focus_window()` synchronously from `close_tab` collides with AppKit
     /// still transferring key/firstResponder to the sibling tab, leaving the

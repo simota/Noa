@@ -14,6 +14,281 @@ fn test_sidebar_publish(visible: bool) -> SidebarPublish {
     }
 }
 
+fn feed_terminal_raw(
+    terminal: &Arc<Mutex<Terminal>>,
+    stream: &mut noa_vt::Stream,
+    bytes: &[u8],
+    raw_attach: &RawAttachTap,
+) -> TerminalOutput {
+    let auto_approve = AutoApprovePublish {
+        enabled: Arc::new(AtomicBool::new(false)),
+        guards: Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        )),
+    };
+    feed_terminal_batch(
+        terminal,
+        stream,
+        bytes,
+        std::iter::empty::<&[u8]>(),
+        &test_overview_publish(),
+        &mut None,
+        &test_sidebar_publish(false),
+        &mut None,
+        &auto_approve,
+        &mut crate::auto_approve::AutoApproveState::default(),
+        false,
+        &mut None,
+        &mut IpcRowCache::default(),
+        raw_attach,
+    )
+}
+
+#[derive(Default)]
+struct RecordingRawOutput {
+    chunks: Mutex<Vec<Vec<u8>>>,
+    closed: AtomicBool,
+}
+
+impl RawAttachOutput for RecordingRawOutput {
+    fn send(&self, bytes: Vec<u8>) -> bool {
+        if self.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.chunks.lock().push(bytes);
+        true
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn raw_attach_seed_and_live_output_have_an_atomic_terminal_lock_boundary() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(8, 2))));
+    let raw_attach = RawAttachTap::default();
+    let output = Arc::new(RecordingRawOutput::default());
+    {
+        let mut source = terminal.lock();
+        noa_vt::Stream::new().feed(b"A", &mut *source);
+    }
+
+    // Hold the exact lock open_attach uses while a PTY feed attempts to land.
+    // Registration + snapshot happen first; the blocked byte must therefore
+    // appear only in the live stream, never in neither side of the boundary.
+    let guard = terminal.lock();
+    let ready = Arc::new(std::sync::Barrier::new(2));
+    let feed_terminal = terminal.clone();
+    let feed_tap = raw_attach.clone();
+    let feed_ready = ready.clone();
+    let feed = std::thread::spawn(move || {
+        let mut stream = noa_vt::Stream::new();
+        feed_ready.wait();
+        feed_terminal_raw(&feed_terminal, &mut stream, b"B", &feed_tap);
+    });
+    ready.wait();
+    let seed = raw_attach
+        .register_test_and_seed(7, output.clone(), &guard)
+        .unwrap();
+    drop(guard);
+    feed.join().unwrap();
+
+    assert_eq!(output.chunks.lock().as_slice(), &[b"B".to_vec()]);
+    let mut replica = Terminal::new(GridSize::new(8, 2));
+    let mut replica_stream = noa_vt::Stream::new();
+    replica_stream.feed(&seed, &mut replica);
+    for chunk in output.chunks.lock().iter() {
+        replica_stream.feed(chunk, &mut replica);
+    }
+    let source = terminal.lock();
+    assert_eq!(replica.primary.grid[0].cells, source.primary.grid[0].cells);
+    assert_eq!(replica.primary.cursor.x, source.primary.cursor.x);
+}
+
+#[test]
+fn raw_attach_seed_carries_partial_csi_and_utf8_parser_prefixes() {
+    for (prefix, suffix) in [
+        (b"\x1b[".as_slice(), b"31mR".as_slice()),
+        ([0xe4, 0xbd].as_slice(), [0xa0].as_slice()),
+    ] {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(8, 2))));
+        let raw_attach = RawAttachTap::default();
+        let output = Arc::new(RecordingRawOutput::default());
+        let mut source_stream = noa_vt::Stream::with_shared_parser(raw_attach.parser());
+
+        feed_terminal_raw(&terminal, &mut source_stream, prefix, &raw_attach);
+        let seed = {
+            let source = terminal.lock();
+            raw_attach
+                .register_test_and_seed(7, output.clone(), &source)
+                .unwrap()
+        };
+        feed_terminal_raw(&terminal, &mut source_stream, suffix, &raw_attach);
+
+        assert_eq!(output.chunks.lock().as_slice(), &[suffix.to_vec()]);
+        let mut replica = Terminal::new(GridSize::new(8, 2));
+        let mut replica_stream = noa_vt::Stream::new();
+        replica_stream.feed(&seed, &mut replica);
+        for chunk in output.chunks.lock().iter() {
+            replica_stream.feed(chunk, &mut replica);
+        }
+        let source = terminal.lock();
+        assert_eq!(replica.primary.grid[0].cells, source.primary.grid[0].cells);
+        assert_eq!(replica.primary.cursor.x, source.primary.cursor.x);
+    }
+}
+
+struct BlockingRawOutput {
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+impl RawAttachOutput for BlockingRawOutput {
+    fn send(&self, _bytes: Vec<u8>) -> bool {
+        self.entered.wait();
+        self.release.wait();
+        true
+    }
+
+    fn close(&self) {}
+}
+
+#[test]
+fn raw_attach_backpressure_never_holds_the_terminal_lock() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(8, 2))));
+    let raw_attach = RawAttachTap::default();
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    raw_attach
+        .register_test(
+            3,
+            Arc::new(BlockingRawOutput {
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+        )
+        .unwrap();
+
+    let feed_terminal = terminal.clone();
+    let feed_tap = raw_attach.clone();
+    let feed = std::thread::spawn(move || {
+        feed_terminal_raw(
+            &feed_terminal,
+            &mut noa_vt::Stream::new(),
+            b"blocked",
+            &feed_tap,
+        );
+    });
+    entered.wait();
+    let terminal_was_unlocked = terminal.try_lock().is_some();
+    release.wait();
+    feed.join().unwrap();
+
+    assert!(
+        terminal_was_unlocked,
+        "lossless send must block only after releasing Terminal"
+    );
+}
+
+#[test]
+fn raw_attach_stale_generation_cannot_write_or_detach_the_new_generation() {
+    let raw_attach = RawAttachTap::default();
+    let first_output = Arc::new(RecordingRawOutput::default());
+    let second_output = Arc::new(RecordingRawOutput::default());
+    let (input, rx) = input_channel();
+
+    raw_attach.register_test(1, first_output.clone()).unwrap();
+    assert_eq!(
+        raw_attach.queue_input(1, &input, b"first"),
+        Ok(QueueInputResult::Queued)
+    );
+    assert!(raw_attach.detach(1));
+    raw_attach.register_test(2, second_output).unwrap();
+
+    assert_eq!(raw_attach.queue_input(1, &input, b"stale"), Err(()));
+    assert!(!raw_attach.detach(1), "stale detach cleared generation 2");
+    let current_bytes = b"\0\xff\x1b[<0;2;3M";
+    assert_eq!(
+        raw_attach.queue_input(2, &input, current_bytes),
+        Ok(QueueInputResult::Queued)
+    );
+    assert!(first_output.closed.load(Ordering::SeqCst));
+    assert_eq!(rx.recv().unwrap().as_ref(), b"first");
+    assert_eq!(rx.recv().unwrap().as_ref(), current_bytes);
+    assert!(rx.try_recv().is_err(), "stale bytes reached the PTY queue");
+}
+
+#[test]
+fn raw_attach_pane_shutdown_rejects_every_later_generation() {
+    let raw_attach = RawAttachTap::default();
+    let output = Arc::new(RecordingRawOutput::default());
+    let (input, _rx) = input_channel();
+    raw_attach.register_test(1, output.clone()).unwrap();
+
+    raw_attach.shutdown();
+
+    assert!(output.closed.load(Ordering::SeqCst));
+    assert!(
+        raw_attach
+            .register_test(2, Arc::new(RecordingRawOutput::default()))
+            .is_err()
+    );
+    assert_eq!(raw_attach.queue_input(1, &input, b"closed"), Err(()));
+    assert_eq!(raw_attach.queue_input(2, &input, b"closed"), Err(()));
+}
+
+struct FailedRawOutput;
+
+impl RawAttachOutput for FailedRawOutput {
+    fn send(&self, _bytes: Vec<u8>) -> bool {
+        false
+    }
+
+    fn close(&self) {}
+}
+
+#[test]
+fn raw_attach_backpressure_failure_detaches_the_generation() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(8, 2))));
+    let raw_attach = RawAttachTap::default();
+    raw_attach
+        .register_test(9, Arc::new(FailedRawOutput))
+        .unwrap();
+
+    feed_terminal_raw(
+        &terminal,
+        &mut noa_vt::Stream::new(),
+        b"overflow",
+        &raw_attach,
+    );
+
+    assert!(raw_attach.sink().is_none());
+    let (input, _rx) = input_channel();
+    assert_eq!(raw_attach.queue_input(9, &input, b"stale"), Err(()));
+}
+
+#[test]
+fn raw_attach_forwards_only_pty_bytes_not_terminal_generated_side_effects() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(8, 2))));
+    terminal.lock().osc52_policy.allow_read = true;
+    let raw_attach = RawAttachTap::default();
+    let output = Arc::new(RecordingRawOutput::default());
+    raw_attach.register_test(4, output.clone()).unwrap();
+    let pty_bytes = b"\x1b[6n\x1b]52;c;?\x07";
+
+    let terminal_output = feed_terminal_raw(
+        &terminal,
+        &mut noa_vt::Stream::new(),
+        pty_bytes,
+        &raw_attach,
+    );
+
+    assert_eq!(output.chunks.lock().as_slice(), &[pty_bytes.to_vec()]);
+    assert_eq!(terminal_output.pending_writes, b"\x1b[1;1R");
+    assert_eq!(terminal_output.pending_clipboard_reads, vec!["c"]);
+}
+
 /// Drives `feed_terminal_batch` directly (not through the `feed_terminal`
 /// test wrapper, which always passes `ipc_active: false`) — for F-6's row
 /// diff behavior.
@@ -50,6 +325,7 @@ fn feed_terminal_ipc(
         true,
         last_ipc_push,
         ipc_row_cache,
+        &RawAttachTap::default(),
     )
 }
 
@@ -281,6 +557,7 @@ fn tap_present_but_no_output_subscriber_keeps_ipc_output_none() {
         tap.broadcaster.has_output_subscriber_for(tap.ipc_pane_id),
         &mut last_ipc_push,
         &mut ipc_row_cache,
+        &RawAttachTap::default(),
     );
     assert!(
         output.ipc_output.is_none(),
@@ -349,6 +626,7 @@ fn output_subscriber_for_one_pane_does_not_gate_open_for_another_pane() {
         broadcaster.has_output_subscriber_for(2),
         &mut last_ipc_push,
         &mut ipc_row_cache,
+        &RawAttachTap::default(),
     );
     assert!(
         output.ipc_output.is_none(),
@@ -394,6 +672,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
         true,
         &mut last_ipc_push,
         &mut ipc_row_cache,
+        &RawAttachTap::default(),
     );
     assert_eq!(first.ipc_output.expect("first feed sends a diff").len(), 4);
 
@@ -413,6 +692,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
         false,
         &mut last_ipc_push,
         &mut ipc_row_cache,
+        &RawAttachTap::default(),
     );
     assert!(
         closed.ipc_output.is_none(),
@@ -437,6 +717,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
         true,
         &mut last_ipc_push,
         &mut ipc_row_cache,
+        &RawAttachTap::default(),
     );
     let rows = reopened
         .ipc_output
@@ -842,6 +1123,7 @@ fn feed_terminal_batch_chunked_locking_matches_single_lock_result() {
         false,
         &mut None,
         &mut IpcRowCache::default(),
+        &RawAttachTap::default(),
     );
 
     let single = single_terminal.lock();
@@ -933,6 +1215,7 @@ fn feed_terminal_batch_chunked_locking_matches_single_lock_for_osc_and_dcs() {
         false,
         &mut None,
         &mut IpcRowCache::default(),
+        &RawAttachTap::default(),
     );
 
     let mut single = single_terminal.lock();
@@ -1527,24 +1810,54 @@ fn overflowing_input_defers_and_preserves_order_across_later_writes() {
 }
 
 #[test]
-fn input_overflow_past_byte_cap_is_dropped() {
+fn input_pending_past_byte_cap_is_dropped_and_released_after_consumption() {
     fn input(bytes: &[u8]) -> PtyInput {
         bytes.to_vec().into_boxed_slice()
     }
 
     let (queue, rx) = input_channel();
-    for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
-        assert_eq!(queue.queue(input(b"x")), QueueInputResult::Queued);
+    let raw_message_size = 1024 * 1024;
+    for _ in 0..(PTY_INPUT_PENDING_BYTE_CAP / raw_message_size) {
+        assert_eq!(
+            queue.queue(vec![0u8; raw_message_size].into_boxed_slice()),
+            QueueInputResult::Queued
+        );
     }
 
-    // A parked write that alone exceeds the byte cap is refused outright
-    // instead of growing the overflow buffer without bound.
-    let huge = vec![0u8; PTY_INPUT_OVERFLOW_BYTE_CAP + 1].into_boxed_slice();
-    assert_eq!(queue.queue(huge), QueueInputResult::Dropped);
+    // The byte budget covers the channel itself, not just overflow. Another
+    // message is rejected even though most message slots remain available.
+    assert_eq!(queue.queue(input(b"x")), QueueInputResult::Dropped);
 
-    // The drop leaves the queue fully usable.
-    assert_eq!(rx.recv().expect("queued input").as_ref(), b"x");
+    for _ in 0..(PTY_INPUT_PENDING_BYTE_CAP / raw_message_size) {
+        let received = rx.recv().expect("queued input");
+        assert_eq!(received.as_ref().len(), raw_message_size);
+    }
+
+    // Consuming the queued bytes releases their reservation.
     assert_eq!(queue.queue(input(b"y")), QueueInputResult::Queued);
+}
+
+#[test]
+fn input_pending_budget_charges_small_message_overhead() {
+    let (queue, rx) = input_channel();
+    let message_cap = PTY_INPUT_PENDING_BYTE_CAP / PTY_INPUT_PENDING_MIN_CHARGE;
+    for index in 0..message_cap {
+        let result = queue.queue(Vec::new().into_boxed_slice());
+        assert_eq!(
+            result,
+            if index < PTY_INPUT_QUEUE_CAPACITY {
+                QueueInputResult::Queued
+            } else {
+                QueueInputResult::Deferred
+            }
+        );
+    }
+    assert_eq!(
+        queue.queue(Vec::new().into_boxed_slice()),
+        QueueInputResult::Dropped,
+        "empty frames must not grow container overhead without bound"
+    );
+    drop(rx);
 }
 
 // Regression guard for the `write_pty_bytes`/`write_pane_pty_bytes`/
@@ -1815,6 +2128,7 @@ fn bench_feed_terminal_batch_large_flood() {
             false,
             &mut last_ipc_push,
             &mut ipc_row_cache,
+            &RawAttachTap::default(),
         ));
     }
     let elapsed = start.elapsed();

@@ -286,6 +286,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::ReloadConfig
         | AppCommand::NewTab
         | AppCommand::NewWindow
+        | AppCommand::AttachRemote
         | AppCommand::ToggleCommandPalette
         | AppCommand::OpenThemePicker
         | AppCommand::OpenSettings
@@ -348,6 +349,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         // The palette does not open while the overview is focused (v1, R-10):
         // Overview scope makes `ToggleCommandPalette` a no-op there (AC-15).
         AppCommand::ToggleCommandPalette
+        | AppCommand::AttachRemote
         | AppCommand::OpenThemePicker
         | AppCommand::OpenSettings
         | AppCommand::ToggleProcessMonitor

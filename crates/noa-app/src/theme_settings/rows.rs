@@ -280,7 +280,7 @@ impl SettingsRowKind {
                 "Interface the control server binds to. 127.0.0.1=local only, 0.0.0.0=LAN-exposed (no TLS). Applies on save."
             }
             Self::ServerScopes => {
-                "Scopes grantable to clients. control=window ops, input=send text. Applies on save."
+                "Scopes grantable to clients. control=window ops, input=send text, attach=interactive raw VT. Applies on save."
             }
             Self::ServerTokenCopy => {
                 "Copy the bearer token to the clipboard. The token is never displayed."

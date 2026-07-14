@@ -27,6 +27,37 @@ impl App {
             Some(cwd) => cwd,
             None => self.focused_pane_cwd(),
         };
+        self.spawn_tab_with_initial_pane(event_loop, target, InitialPane::Local { inherited_cwd })
+    }
+
+    pub(super) fn spawn_detached_remote_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        target: SpawnTarget,
+        identity: crate::remote_attach::RemotePaneIdentity,
+    ) -> anyhow::Result<WindowId> {
+        self.spawn_tab_with_initial_pane(event_loop, target, InitialPane::DetachedRemote(identity))
+    }
+
+    pub(super) fn spawn_detached_remote_tab_in_group(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        group: WindowGroupId,
+        identity: crate::remote_attach::RemotePaneIdentity,
+    ) -> anyhow::Result<WindowId> {
+        self.spawn_tab_with_initial_pane_in_group(
+            event_loop,
+            GroupChoice::Existing(group),
+            InitialPane::DetachedRemote(identity),
+        )
+    }
+
+    fn spawn_tab_with_initial_pane(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        target: SpawnTarget,
+        initial_spec: InitialPane,
+    ) -> anyhow::Result<WindowId> {
         // Resolve which logical window (tab group) this tab joins before the
         // window is created — the macOS `tabbingIdentifier` is baked into the
         // window attributes and can't change afterward.
@@ -34,7 +65,21 @@ impl App {
             .focused
             .and_then(|id| self.windows.get(&id))
             .map(|state| state.group);
-        let group = match spawn_group_choice(target, focused_group) {
+        let group = spawn_group_choice(target, focused_group);
+        self.spawn_tab_with_initial_pane_in_group(event_loop, group, initial_spec)
+    }
+
+    fn spawn_tab_with_initial_pane_in_group(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        group: GroupChoice<WindowGroupId>,
+        initial_spec: InitialPane,
+    ) -> anyhow::Result<WindowId> {
+        let remote_card_identity = match &initial_spec {
+            InitialPane::Local { .. } => None,
+            InitialPane::DetachedRemote(identity) => Some(identity.clone()),
+        };
+        let group = match group {
             GroupChoice::Existing(group) => group,
             GroupChoice::Fresh => {
                 let group = self.allocate_group_id();
@@ -316,15 +361,20 @@ impl App {
                     .and_then(|monitor| monitor.refresh_rate_millihertz()),
             ),
         );
-        let initial_surface = self.spawn_pane_surface(
-            window_id,
-            initial_pane,
-            initial_grid_size,
-            initial_rect,
-            inherited_cwd,
-            auto_approve_enabled.clone(),
-            redraw_floor.clone(),
-        )?;
+        let initial_surface = match initial_spec {
+            InitialPane::Local { inherited_cwd } => self.spawn_pane_surface(
+                window_id,
+                initial_pane,
+                initial_grid_size,
+                initial_rect,
+                inherited_cwd,
+                auto_approve_enabled.clone(),
+                redraw_floor.clone(),
+            )?,
+            InitialPane::DetachedRemote(identity) => {
+                self.detached_remote_surface(initial_grid_size, initial_rect, identity)
+            }
+        };
         let mut surfaces = HashMap::new();
         surfaces.insert(initial_pane, initial_surface);
 
@@ -366,6 +416,9 @@ impl App {
                 native_overlays: Default::default(),
             },
         );
+        if let Some(identity) = remote_card_identity.as_ref() {
+            self.register_remote_session_card(window_id, initial_pane, identity);
+        }
         self.window_order.push(window_id);
         self.mark_overview_tile_dirty(OverviewTileId::new(window_id, initial_pane));
         // A window seeded with the sidebar visible (`sidebar-enabled`) must turn
@@ -505,33 +558,12 @@ impl App {
         {
             worker.register_process_probe(Self::session_card_id(window_id, pane_id), probe);
         }
-        let mut terminal = Terminal::new(grid_size);
-        if let Some(style) = self.initial_cursor_style {
-            terminal.set_default_cursor_style(style);
-        }
+        let mut terminal = self.new_terminal(grid_size);
         // A read (query) request is only queued when reads aren't fully
         // denied; the finer allow-vs-ask decision is made by the app layer
         // when a request arrives.
         terminal.osc52_policy.allow_read =
             self.config.clipboard_read != noa_config::ClipboardAccess::Deny;
-        terminal.title_report = self.config.title_report;
-        terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
-        terminal.set_kitty_image_limit(self.config.image_storage_limit);
-        if let Some(gpu) = self.gpu.as_ref() {
-            // Deliberately `gpu.theme` directly, not the `active_theme()`
-            // resolver: a live theme preview must never reach a `Terminal`'s
-            // `TerminalColors` (AC-2, spec L2 "Terminal生成箇所には手を入れない").
-            terminal.set_base_colors(
-                gpu.theme.default_fg,
-                gpu.theme.default_bg,
-                gpu.theme.cursor,
-                apply_palette_overrides(gpu.theme.palette, &self.config.palette),
-            );
-        }
-        // Grabbed before the terminal moves behind the shared lock: a cheap
-        // `Arc` clone the app layer holds so the idle-animation timer can
-        // poll it without locking the terminal at all (see `Surface::
-        // kitty_animation_flag`).
         let kitty_animation_flag = terminal.kitty_animation_flag();
         let terminal = Arc::new(Mutex::new(terminal));
         let (resize_tx, resize_rx) = crossbeam_channel::unbounded();
@@ -554,6 +586,12 @@ impl App {
             guards: auto_approve_guards.clone(),
         };
         let ipc_tap = self.ipc_output_tap(window_id, pane_id);
+        let raw_attach_tap = self.register_ipc_attach_pane(
+            window_id,
+            pane_id,
+            terminal.clone(),
+            pty_input_tx.clone(),
+        );
         let io_thread = crate::io_thread::spawn(
             pty,
             terminal.clone(),
@@ -567,29 +605,149 @@ impl App {
             auto_approve,
             redraw_floor,
             ipc_tap,
+            raw_attach_tap,
         );
 
-        Ok(Surface {
+        Ok(Surface::new(
             terminal,
-            pty_input_tx,
-            auto_approve_feedback_tx,
-            resize_tx,
-            io_thread: Some(io_thread),
+            SurfaceTransport::Local(LocalSurfaceTransport {
+                pty_input_tx,
+                auto_approve_feedback_tx,
+                resize_tx,
+                io_thread: Some(io_thread),
+            }),
             grid_size,
-            mouse_selection: MouseSelectionState::default(),
-            selection_anchor: None,
-            last_mouse_cell: None,
-            pressed_mouse_button: None,
-            ime_state: input::ImeState::default(),
-            auto_approve_guards,
             rect,
-            hover_link: None,
+            auto_approve_guards,
             overview_snapshot,
-            snapshot_recycle: noa_render::FrameSnapshotRecycle::default(),
             kitty_animation_flag,
-            cursor_blink_state: CursorBlinkState::default(),
-            held_snapshot: None,
-        })
+        ))
+    }
+
+    fn new_terminal(&self, grid_size: GridSize) -> Terminal {
+        let mut terminal = Terminal::new(grid_size);
+        if let Some(style) = self.initial_cursor_style {
+            terminal.set_default_cursor_style(style);
+        }
+        terminal.title_report = self.config.title_report;
+        terminal.set_scrollback_limit_bytes(self.config.scrollback_limit);
+        terminal.set_kitty_image_limit(self.config.image_storage_limit);
+        if let Some(gpu) = self.gpu.as_ref() {
+            // Deliberately `gpu.theme` directly, not the `active_theme()`
+            // resolver: a live theme preview must never reach a `Terminal`'s
+            // `TerminalColors` (AC-2, spec L2 "Terminal生成箇所には手を入れない").
+            terminal.set_base_colors(
+                gpu.theme.default_fg,
+                gpu.theme.default_bg,
+                gpu.theme.cursor,
+                apply_palette_overrides(gpu.theme.palette, &self.config.palette),
+            );
+        }
+        terminal
+    }
+
+    pub(super) fn detached_remote_surface(
+        &self,
+        grid_size: GridSize,
+        rect: PaneRectApp,
+        identity: crate::remote_attach::RemotePaneIdentity,
+    ) -> Surface {
+        let mut terminal = self.new_terminal(grid_size);
+        terminal.osc52_policy.allow_read = false;
+        terminal.set_reply_writes_enabled(false);
+        let mut stream = noa_vt::Stream::new();
+        stream.feed(
+            b"\x1b[2J\x1b[HRemote pane detached.\r\nUse Attach Remote to reconnect.",
+            &mut terminal,
+        );
+        let kitty_animation_flag = terminal.kitty_animation_flag();
+        let terminal = Arc::new(Mutex::new(terminal));
+        let auto_approve_guards = Arc::new(Mutex::new(
+            crate::auto_approve::AutoApproveInputGuards::default(),
+        ));
+        let overview_snapshot = Arc::new(Mutex::new(None));
+        Surface::new(
+            terminal,
+            SurfaceTransport::Remote(RemoteSurfaceTransport {
+                identity,
+                state: Arc::new(Mutex::new(
+                    crate::remote_attach::RemoteAttachState::Detached,
+                )),
+                connection: None,
+                card_seq: 1,
+            }),
+            grid_size,
+            rect,
+            auto_approve_guards,
+            overview_snapshot,
+            kitty_animation_flag,
+        )
+    }
+
+    pub(super) fn register_remote_session_card(
+        &mut self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        identity: &crate::remote_attach::RemotePaneIdentity,
+    ) {
+        let name = identity
+            .cached_title
+            .clone()
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| format!("Remote pane {}", identity.pane_id));
+        self.session_store
+            .apply(crate::session_store::SessionDelta::Upsert {
+                id: Self::session_card_id(window_id, pane_id),
+                seq: 1,
+                name,
+                cwd: format!("REMOTE {}", identity.endpoint),
+                busy: false,
+                updated_at: crate::localtime::wall_clock_now(),
+                preview: Some(vec![vec![crate::session_store::PreviewSpan {
+                    text: "Detached — Retry Attach to reconnect".to_string(),
+                    fg: noa_core::Color::Default,
+                }]]),
+            });
+    }
+
+    /// Mirror remote transport redraws into the same SessionDelta path local
+    /// PTY output uses. Connection workers emit a targeted redraw for every
+    /// state transition and raw output batch, so the card cannot remain stuck
+    /// on its initial detached placeholder.
+    pub(super) fn refresh_remote_session_card(&mut self, window_id: WindowId, pane_id: PaneId) {
+        let preview_lines = self.config.sidebar_preview_lines;
+        let Some((identity, remote_state, terminal, seq)) = (|| {
+            let window = self.windows.get_mut(&window_id)?;
+            let surface = window.surfaces.get_mut(&pane_id)?;
+            let SurfaceTransport::Remote(remote) = &mut surface.transport else {
+                return None;
+            };
+            remote.card_seq = remote.card_seq.saturating_add(1);
+            Some((
+                remote.identity.clone(),
+                remote.state.lock().clone(),
+                Arc::clone(&surface.terminal),
+                remote.card_seq,
+            ))
+        })() else {
+            return;
+        };
+
+        let (busy, preview) =
+            remote_session_card_content(&remote_state, &terminal.lock(), preview_lines);
+        let name = identity
+            .cached_title
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| format!("Remote pane {}", identity.pane_id));
+        self.apply_session_delta(crate::session_store::SessionDelta::Upsert {
+            id: Self::session_card_id(window_id, pane_id),
+            seq,
+            name,
+            cwd: format!("REMOTE {}", identity.endpoint),
+            busy,
+            updated_at: crate::localtime::wall_clock_now(),
+            preview: Some(preview),
+        });
     }
 
     fn pane_has_running_program(&self, window_id: WindowId, pane_id: PaneId) -> bool {
@@ -655,6 +813,14 @@ impl App {
             return;
         }
 
+        let closing_panes: Vec<_> = self
+            .windows
+            .get(&window_id)
+            .map(|state| state.surfaces.keys().copied().collect())
+            .unwrap_or_default();
+        for pane_id in closing_panes {
+            self.cleanup_ipc_attach_pane(window_id, pane_id);
+        }
         if let Some(mut state) = self.windows.remove(&window_id) {
             state.shutdown();
         }
@@ -903,6 +1069,8 @@ impl App {
             return;
         }
 
+        self.cleanup_ipc_attach_pane(window_id, pane_id);
+
         let mut tab_should_close = false;
         let window =
             {
@@ -1098,5 +1266,86 @@ impl App {
         ) {
             log::debug!("failed to show macOS split context menu: {error:#}");
         }
+    }
+}
+
+fn remote_status_preview(text: &str) -> Vec<crate::session_store::PreviewLine> {
+    vec![vec![crate::session_store::PreviewSpan {
+        text: text.to_string(),
+        fg: noa_core::Color::Default,
+    }]]
+}
+
+fn remote_session_card_content(
+    state: &crate::remote_attach::RemoteAttachState,
+    terminal: &Terminal,
+    preview_lines: usize,
+) -> (bool, Vec<crate::session_store::PreviewLine>) {
+    match state {
+        crate::remote_attach::RemoteAttachState::Connected => {
+            let rows = crate::io_thread::sidebar::preview_rows(terminal, preview_lines);
+            let preview = crate::io_thread::sidebar::preview_spans(rows);
+            (
+                true,
+                if preview.is_empty() {
+                    remote_status_preview("Connected to remote pane")
+                } else {
+                    preview
+                },
+            )
+        }
+        crate::remote_attach::RemoteAttachState::Reconnecting { attempt, .. } => (
+            false,
+            remote_status_preview(&format!(
+                "Reconnecting {attempt}/{}…",
+                crate::remote_attach::MAX_RECONNECT_ATTEMPTS
+            )),
+        ),
+        crate::remote_attach::RemoteAttachState::Detached => (
+            false,
+            remote_status_preview("Detached — Retry Attach to reconnect"),
+        ),
+    }
+}
+
+enum InitialPane {
+    Local { inherited_cwd: Option<String> },
+    DetachedRemote(crate::remote_attach::RemotePaneIdentity),
+}
+
+#[cfg(test)]
+mod remote_session_card_tests {
+    use super::*;
+
+    #[test]
+    fn connected_remote_card_uses_terminal_output_and_reconnect_uses_status() {
+        let mut terminal = Terminal::new(GridSize::new(20, 3));
+        let mut stream = Stream::new();
+        stream.feed(b"remote output", &mut terminal);
+
+        let (busy, preview) = remote_session_card_content(
+            &crate::remote_attach::RemoteAttachState::Connected,
+            &terminal,
+            3,
+        );
+        assert!(busy);
+        assert_eq!(
+            crate::session_store::preview_line_text(&preview[0]),
+            "remote output"
+        );
+
+        let (busy, preview) = remote_session_card_content(
+            &crate::remote_attach::RemoteAttachState::Reconnecting {
+                attempt: 4,
+                delay: Duration::from_secs(8),
+            },
+            &terminal,
+            3,
+        );
+        assert!(!busy);
+        assert_eq!(
+            crate::session_store::preview_line_text(&preview[0]),
+            "Reconnecting 4/10…"
+        );
     }
 }

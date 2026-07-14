@@ -277,7 +277,7 @@ impl Separators {
         self.len += 1;
     }
 
-    fn is_colon(&self, idx: usize) -> bool {
+    pub(crate) fn is_colon(&self, idx: usize) -> bool {
         idx < self.len as usize && (self.colon_bits & (1u32 << idx)) != 0
     }
 

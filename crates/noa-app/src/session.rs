@@ -11,9 +11,12 @@
 use std::fs;
 use std::path::Path;
 
-/// Schema version. Bump on any incompatible shape change; an older/newer
-/// `version` field makes [`parse`] return `None` (fall back to a fresh start).
-pub const SESSION_VERSION: u32 = 1;
+/// Current schema version. Version 2 adds per-leaf remote metadata. The
+/// reader intentionally accepts v1 as well, but the writer always emits v2
+/// so an older binary rejects a remote-aware session instead of silently
+/// respawning its leaves as local shells.
+pub const SESSION_VERSION: u32 = 2;
+const MIN_SESSION_VERSION: u32 = 1;
 
 /// The whole persisted session: every logical window, plus which one had OS
 /// focus at save time.
@@ -63,6 +66,9 @@ pub struct TabSession {
 pub enum PaneNode {
     Leaf {
         cwd: Option<String>,
+        /// Present only for a remote Client Mode leaf. Credentials and
+        /// transient connection state are deliberately never persisted.
+        remote: Option<RemotePane>,
     },
     Split {
         orientation: Orientation,
@@ -70,6 +76,15 @@ pub enum PaneNode {
         first: Box<PaneNode>,
         second: Box<PaneNode>,
     },
+}
+
+/// Stable, non-secret identity needed to restore a remote leaf in a detached
+/// state. Reconnecting still requires credentials from the current config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePane {
+    pub endpoint: String,
+    pub pane_id: u64,
+    pub cached_title: Option<String>,
 }
 
 /// Split axis, mirroring `split_tree::SplitOrientation` without depending on it.
@@ -84,8 +99,16 @@ impl PaneNode {
     /// tab's initial surface when the topology is rebuilt on restore.
     pub fn first_leaf_cwd(&self) -> Option<String> {
         match self {
-            PaneNode::Leaf { cwd } => cwd.clone(),
+            PaneNode::Leaf { cwd, .. } => cwd.clone(),
             PaneNode::Split { first, .. } => first.first_leaf_cwd(),
+        }
+    }
+
+    /// Remote identity of the left-most leaf, when that leaf is remote.
+    pub fn first_leaf_remote(&self) -> Option<RemotePane> {
+        match self {
+            PaneNode::Leaf { remote, .. } => remote.clone(),
+            PaneNode::Split { first, .. } => first.first_leaf_remote(),
         }
     }
 
@@ -168,13 +191,19 @@ fn serialize_tab(out: &mut String, tab: &TabSession) {
 fn serialize_node(out: &mut String, node: &PaneNode) {
     out.push('{');
     match node {
-        PaneNode::Leaf { cwd } => {
+        PaneNode::Leaf { cwd, remote } => {
             push_key(out, "type");
             push_string(out, "leaf");
             out.push(',');
             push_key(out, "cwd");
             match cwd {
                 Some(path) => push_string(out, path),
+                None => out.push_str("null"),
+            }
+            out.push(',');
+            push_key(out, "remote");
+            match remote {
+                Some(remote) => serialize_remote(out, remote),
                 None => out.push_str("null"),
             }
         }
@@ -205,6 +234,22 @@ fn serialize_node(out: &mut String, node: &PaneNode) {
             push_key(out, "second");
             serialize_node(out, second);
         }
+    }
+    out.push('}');
+}
+
+fn serialize_remote(out: &mut String, remote: &RemotePane) {
+    out.push('{');
+    push_key(out, "endpoint");
+    push_string(out, &remote.endpoint);
+    out.push(',');
+    push_key(out, "pane_id");
+    out.push_str(&remote.pane_id.to_string());
+    out.push(',');
+    push_key(out, "cached_title");
+    match &remote.cached_title {
+        Some(title) => push_string(out, title),
+        None => out.push_str("null"),
     }
     out.push('}');
 }
@@ -249,13 +294,13 @@ fn push_string(out: &mut String, value: &str) {
 }
 
 /// Parse a session JSON string. Returns `None` on any malformed input or a
-/// `version` that is not [`SESSION_VERSION`], so the caller always has a clean
-/// "no session" signal rather than a partial/garbled state.
+/// unsupported `version`, so the caller always has a clean "no session"
+/// signal rather than a partial/garbled state.
 pub fn parse(source: &str) -> Option<SessionState> {
     let value = json::parse(source)?;
     let object = value.as_object()?;
     let version = object.field("version")?.as_u64()?;
-    if version != u64::from(SESSION_VERSION) {
+    if !(u64::from(MIN_SESSION_VERSION)..=u64::from(SESSION_VERSION)).contains(&version) {
         return None;
     }
     let focused_window = match object.field("focused_window") {
@@ -266,7 +311,7 @@ pub fn parse(source: &str) -> Option<SessionState> {
         .field("windows")?
         .as_array()?
         .iter()
-        .map(parse_window)
+        .map(|window| parse_window(window, version as u32))
         .collect::<Option<Vec<_>>>()?;
     Some(SessionState {
         windows,
@@ -274,7 +319,7 @@ pub fn parse(source: &str) -> Option<SessionState> {
     })
 }
 
-fn parse_window(value: &json::Value) -> Option<WindowSession> {
+fn parse_window(value: &json::Value, version: u32) -> Option<WindowSession> {
     let object = value.as_object()?;
     let frame = match object.field("frame") {
         None | Some(json::Value::Null) => None,
@@ -285,7 +330,7 @@ fn parse_window(value: &json::Value) -> Option<WindowSession> {
         .field("tabs")?
         .as_array()?
         .iter()
-        .map(parse_tab)
+        .map(|tab| parse_tab(tab, version))
         .collect::<Option<Vec<_>>>()?;
     Some(WindowSession {
         frame,
@@ -311,7 +356,7 @@ fn parse_frame(value: &json::Value) -> Option<WindowFrame> {
     })
 }
 
-fn parse_tab(value: &json::Value) -> Option<TabSession> {
+fn parse_tab(value: &json::Value, version: u32) -> Option<TabSession> {
     let object = value.as_object()?;
     let focused_leaf = usize::try_from(object.field("focused_leaf")?.as_u64()?).ok()?;
     // Absent (pre-field session files) and null both mean "no override".
@@ -319,7 +364,7 @@ fn parse_tab(value: &json::Value) -> Option<TabSession> {
         None | Some(json::Value::Null) => None,
         Some(title) => Some(title.as_str()?.to_string()),
     };
-    let split = parse_node(object.field("split")?)?;
+    let split = parse_node(object.field("split")?, version)?;
     Some(TabSession {
         focused_leaf,
         title,
@@ -327,7 +372,7 @@ fn parse_tab(value: &json::Value) -> Option<TabSession> {
     })
 }
 
-fn parse_node(value: &json::Value) -> Option<PaneNode> {
+fn parse_node(value: &json::Value, version: u32) -> Option<PaneNode> {
     let object = value.as_object()?;
     match object.field("type")?.as_str()? {
         "leaf" => {
@@ -335,7 +380,15 @@ fn parse_node(value: &json::Value) -> Option<PaneNode> {
                 None | Some(json::Value::Null) => None,
                 Some(cwd) => Some(cwd.as_str()?.to_string()),
             };
-            Some(PaneNode::Leaf { cwd })
+            let remote = if version == 1 {
+                None
+            } else {
+                match object.field("remote") {
+                    None | Some(json::Value::Null) => None,
+                    Some(remote) => Some(parse_remote(remote)?),
+                }
+            };
+            Some(PaneNode::Leaf { cwd, remote })
         }
         "split" => {
             let orientation = match object.field("orientation")?.as_str()? {
@@ -344,8 +397,8 @@ fn parse_node(value: &json::Value) -> Option<PaneNode> {
                 _ => return None,
             };
             let ratio = object.field("ratio")?.as_f64()? as f32;
-            let first = Box::new(parse_node(object.field("first")?)?);
-            let second = Box::new(parse_node(object.field("second")?)?);
+            let first = Box::new(parse_node(object.field("first")?, version)?);
+            let second = Box::new(parse_node(object.field("second")?, version)?);
             Some(PaneNode::Split {
                 orientation,
                 ratio,
@@ -355,6 +408,24 @@ fn parse_node(value: &json::Value) -> Option<PaneNode> {
         }
         _ => None,
     }
+}
+
+fn parse_remote(value: &json::Value) -> Option<RemotePane> {
+    let object = value.as_object()?;
+    let endpoint = object.field("endpoint")?.as_str()?.trim();
+    if endpoint.is_empty() {
+        return None;
+    }
+    let pane_id = object.field("pane_id")?.as_u64()?;
+    let cached_title = match object.field("cached_title") {
+        None | Some(json::Value::Null) => None,
+        Some(title) => Some(title.as_str()?.to_string()),
+    };
+    Some(RemotePane {
+        endpoint: endpoint.to_string(),
+        pane_id,
+        cached_title,
+    })
 }
 
 /// Atomically write the session to `path`, creating the parent directory.
@@ -644,6 +715,7 @@ mod tests {
                         title: Some("api server \u{65e5}\u{672c}\u{8a9e} \u{1f680}".to_string()),
                         split: PaneNode::Leaf {
                             cwd: Some("/home/user".to_string()),
+                            remote: None,
                         },
                     }],
                 },
@@ -659,13 +731,18 @@ mod tests {
                                 ratio: 0.4,
                                 first: Box::new(PaneNode::Leaf {
                                     cwd: Some("/a".to_string()),
+                                    remote: None,
                                 }),
                                 second: Box::new(PaneNode::Split {
                                     orientation: Orientation::Vertical,
                                     ratio: 0.25,
-                                    first: Box::new(PaneNode::Leaf { cwd: None }),
+                                    first: Box::new(PaneNode::Leaf {
+                                        cwd: None,
+                                        remote: None,
+                                    }),
                                     second: Box::new(PaneNode::Leaf {
                                         cwd: Some("/b/c".to_string()),
+                                        remote: None,
                                     }),
                                 }),
                             },
@@ -673,7 +750,10 @@ mod tests {
                         TabSession {
                             focused_leaf: 0,
                             title: Some("logs \"quoted\"\\slash".to_string()),
-                            split: PaneNode::Leaf { cwd: None },
+                            split: PaneNode::Leaf {
+                                cwd: None,
+                                remote: None,
+                            },
                         },
                     ],
                 },
@@ -700,12 +780,17 @@ mod tests {
                 ratio: 0.33,
                 first: Box::new(PaneNode::Leaf {
                     cwd: Some("/one".to_string()),
+                    remote: None,
                 }),
                 second: Box::new(PaneNode::Leaf {
                     cwd: Some("/two".to_string()),
+                    remote: None,
                 }),
             }),
-            second: Box::new(PaneNode::Leaf { cwd: None }),
+            second: Box::new(PaneNode::Leaf {
+                cwd: None,
+                remote: None,
+            }),
         };
         assert_eq!(split.leaf_count(), 3);
         assert_eq!(split.first_leaf_cwd(), Some("/one".to_string()));
@@ -737,6 +822,7 @@ mod tests {
                     title: None,
                     split: PaneNode::Leaf {
                         cwd: Some("/path/with \"quote\"\tand\\slash".to_string()),
+                        remote: None,
                     },
                 }],
             }],
@@ -756,6 +842,53 @@ mod tests {
         );
         let state = parse(source).expect("pre-title session must parse");
         assert_eq!(state.windows[0].tabs[0].title, None);
+        assert!(matches!(
+            &state.windows[0].tabs[0].split,
+            PaneNode::Leaf { remote: None, .. }
+        ));
+    }
+
+    #[test]
+    fn remote_leaf_roundtrips_without_credentials() {
+        let state = SessionState {
+            focused_window: Some(0),
+            windows: vec![WindowSession {
+                frame: None,
+                focused_tab: 0,
+                tabs: vec![TabSession {
+                    focused_leaf: 0,
+                    title: None,
+                    split: PaneNode::Leaf {
+                        cwd: None,
+                        remote: Some(RemotePane {
+                            endpoint: "server.local:61771".to_string(),
+                            pane_id: 42,
+                            cached_title: Some("remote shell".to_string()),
+                        }),
+                    },
+                }],
+            }],
+        };
+
+        let text = serialize(&state);
+        assert!(text.contains("\"version\":2"));
+        assert!(!text.contains("token"));
+        assert_eq!(parse(&text), Some(state));
+    }
+
+    #[test]
+    fn malformed_v2_remote_metadata_never_becomes_a_local_leaf() {
+        for remote in [
+            "{}",
+            "{\"endpoint\":\"\",\"pane_id\":1}",
+            "{\"endpoint\":\"server:61771\"}",
+            "{\"endpoint\":\"server:61771\",\"pane_id\":\"1\"}",
+        ] {
+            let source = format!(
+                "{{\"version\":2,\"focused_window\":0,\"windows\":[{{\"frame\":null,\"focused_tab\":0,\"tabs\":[{{\"focused_leaf\":0,\"title\":null,\"split\":{{\"type\":\"leaf\",\"cwd\":null,\"remote\":{remote}}}}}]}}]}}"
+            );
+            assert!(parse(&source).is_none(), "{source}");
+        }
     }
 
     #[test]

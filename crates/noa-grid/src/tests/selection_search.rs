@@ -28,6 +28,69 @@ fn scrollback_text_uses_selection_copy_wrapping_rules() {
 }
 
 #[test]
+fn prepend_scrollback_text_places_remote_history_before_the_live_grid() {
+    let mut terminal = run_size(8, 2, b"newer");
+
+    assert_eq!(terminal.prepend_scrollback_text("old-1\nold-2", false), 2);
+    assert_eq!(terminal.scrollback_len(), 2);
+    assert_eq!(
+        terminal.primary.absolute_row(0).unwrap().cells[..5]
+            .iter()
+            .map(|cell| cell.ch)
+            .collect::<String>(),
+        "old-1"
+    );
+    assert_eq!(
+        terminal.primary.absolute_row(1).unwrap().cells[..5]
+            .iter()
+            .map(|cell| cell.ch)
+            .collect::<String>(),
+        "old-2"
+    );
+    assert!(!terminal.primary.absolute_row(1).unwrap().wrapped);
+    let text = terminal.scrollback_text().unwrap();
+    assert!(text.starts_with("old-1\nold-2\nnewer"));
+}
+
+#[test]
+fn prepend_scrollback_text_preserves_a_soft_wrap_across_the_merge_boundary() {
+    // At 5 columns "FGHIJKL" autowraps onto the live grid as "FGHIJ"
+    // (wrapped) / "KL". Prepending "ABCDE" as a continuation of that same
+    // logical line (`trailing_wrapped: true`) must chain it onto "FGHIJ"
+    // rather than splitting the original "ABCDEFGHIJKL" into two lines.
+    let mut terminal = run_size(5, 2, b"FGHIJKL");
+    assert!(terminal.primary.grid[0].wrapped, "precondition: autowrap split the line");
+
+    assert_eq!(terminal.prepend_scrollback_text("ABCDE", true), 1);
+
+    assert!(terminal.primary.absolute_row(0).unwrap().wrapped);
+    let text = terminal.scrollback_text().unwrap();
+    assert_eq!(text, "ABCDEFGHIJKL");
+
+    // Reflow to a wider column count must rejoin the merged history and the
+    // live grid back into a single row, exactly as it would if the whole
+    // line had always lived in one screen (the trailing blank row on the
+    // now-wider 2-row grid contributes its own separator, which is not part
+    // of what's under test here).
+    terminal.resize(GridSize::new(12, 2));
+    let reflowed = terminal.scrollback_text().unwrap();
+    assert_eq!(reflowed.trim_end_matches('\n'), "ABCDEFGHIJKL");
+}
+
+#[test]
+fn prepend_scrollback_text_keeps_a_hard_break_when_the_boundary_is_not_wrapped() {
+    let mut terminal = run_size(8, 2, b"newer");
+
+    assert_eq!(terminal.prepend_scrollback_text("old", false), 1);
+
+    assert!(!terminal.primary.absolute_row(0).unwrap().wrapped);
+    // The trailing "\n" is the grid's own blank second row, unrelated to the
+    // merge boundary under test.
+    let text = terminal.scrollback_text().unwrap();
+    assert_eq!(text.trim_end_matches('\n'), "old\nnewer");
+}
+
+#[test]
 fn scrollback_text_tail_matches_full_text_when_budget_covers_everything() {
     let mut t = run_size(5, 3, b"A\r\nB\r\nC\r\nD");
 

@@ -29,9 +29,10 @@ use super::feed::{
     PtyDrainTerminalEvent, capture_pty_bytes, drain_queued_pty_data, feed_terminal_batch,
     open_pty_capture,
 };
-use super::input_queue::PtyInput;
+use super::input_queue::QueuedPtyInput;
 use super::ipc_tap::{IpcOutputTap, flush_pending_ipc_output};
 use super::overview::{OverviewPublish, flush_pending_overview_publish};
+use super::raw_attach::RawAttachTap;
 use super::redraw::{RedrawDecision, RedrawFloor};
 use super::sidebar::SidebarPublish;
 
@@ -122,13 +123,14 @@ pub fn spawn(
     proxy: EventLoopProxy<UserEvent>,
     target: IoThreadTarget,
     resize_rx: Receiver<GridSize>,
-    input_rx: Receiver<PtyInput>,
+    input_rx: Receiver<QueuedPtyInput>,
     auto_approve_feedback_rx: Receiver<AutoApproveFeedback>,
     overview: OverviewPublish,
     sidebar: SidebarPublish,
     auto_approve: AutoApprovePublish,
     redraw_floor: RedrawFloor,
     ipc: IpcOutputTap,
+    raw_attach: RawAttachTap,
 ) -> IoThreadHandle {
     let IoThreadTarget { window_id, pane_id } = target;
     // The GUI-agnostic card key for every sidebar delta this thread posts. The
@@ -138,7 +140,7 @@ pub fn spawn(
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
     let join = std::thread::spawn(move || {
         let writer = pty.writer();
-        let mut stream = noa_vt::Stream::new();
+        let mut stream = noa_vt::Stream::with_shared_parser(raw_attach.parser());
         let mut pty_capture = open_pty_capture(window_id, pane_id);
         let mut last_overview_publish: Option<Instant> = None;
         let mut last_sidebar_publish: Option<Instant> = None;
@@ -206,7 +208,15 @@ pub fn spawn(
             }
             match input_rx.try_recv() {
                 Ok(bytes) => {
-                    write_pty_bytes(&writer, bytes.as_ref());
+                    if std::env::var_os("NOA_IME_TRACE").is_some() {
+                        eprintln!(
+                            "[ime-trace] io write: {:?}",
+                            String::from_utf8_lossy(bytes.as_ref())
+                        );
+                    }
+                    if let Err(err) = writer.write_owned(bytes) {
+                        log::warn!("failed to queue bytes to pty: {err}");
+                    }
                     did_work = true;
                 }
                 Err(TryRecvError::Disconnected) => break, // main thread / App dropped
@@ -256,6 +266,7 @@ pub fn spawn(
                         ipc.broadcaster.has_output_subscriber_for(ipc.ipc_pane_id),
                         &mut last_ipc_push,
                         &mut ipc_row_cache,
+                        &raw_attach,
                     );
                     auto_approve_rescan_at =
                         auto_approve_rescan_deadline(&auto_approve_state, Instant::now());

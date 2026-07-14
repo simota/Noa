@@ -156,7 +156,16 @@ pub(crate) fn apply_pane_grid_resize(state: &mut WindowState, targets: &[(PaneId
             continue;
         }
         if let Some(surface) = state.surfaces.get(&pane_id) {
-            let _ = surface.resize_tx.send(grid_size);
+            match &surface.transport {
+                SurfaceTransport::Local(local) => {
+                    let _ = local.resize_tx.send(grid_size);
+                }
+                SurfaceTransport::Remote(remote) => {
+                    if let Some(connection) = remote.connection.as_ref() {
+                        let _ = connection.resize(grid_size);
+                    }
+                }
+            }
         }
     }
 }

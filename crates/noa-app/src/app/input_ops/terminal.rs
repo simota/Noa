@@ -7,16 +7,16 @@ impl App {
         else {
             return;
         };
-        let Some(terminal) = self
+        let Some((terminal, is_remote_replica)) = self
             .windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
-            .map(|surface| surface.terminal.clone())
+            .map(|surface| (surface.terminal.clone(), surface.is_remote()))
         else {
             return;
         };
 
-        let send_form_feed = apply_terminal_action(&mut terminal.lock(), action);
+        let send_form_feed = apply_terminal_action(&mut terminal.lock(), action, is_remote_replica);
         if send_form_feed {
             self.write_pane_pty_bytes(window_id, pane_id, &b"\x0c"[..]);
         }
@@ -260,7 +260,20 @@ impl App {
         else {
             return crate::io_thread::QueueInputResult::Disconnected;
         };
-        surface.pty_input_tx.queue(bytes)
+        match &surface.transport {
+            SurfaceTransport::Local(local) => local.pty_input_tx.queue(bytes),
+            SurfaceTransport::Remote(remote) => {
+                if remote
+                    .connection
+                    .as_ref()
+                    .is_some_and(|connection| connection.send_input(bytes.into_vec()))
+                {
+                    crate::io_thread::QueueInputResult::Queued
+                } else {
+                    crate::io_thread::QueueInputResult::Disconnected
+                }
+            }
+        }
     }
 
     pub(in crate::app) fn resolve_pane_command_target(

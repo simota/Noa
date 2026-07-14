@@ -82,6 +82,7 @@ mod ipc;
 mod lifecycle;
 mod overview;
 mod quick_terminal;
+mod remote_ui;
 mod render;
 mod session_restore;
 mod sidebar;
@@ -229,6 +230,9 @@ pub struct App {
     command_palette: Option<CommandPaletteSession>,
     /// The open send-selection target picker, if any.
     send_selection_picker: Option<SendSelectionPickerSession>,
+    /// The endpoint/discovery/target-picker overlay for the single
+    /// `Attach Remote` command-palette flow.
+    remote_ui: Option<remote_ui::RemoteUiSession>,
     /// The open theme-settings overlay (theme-settings-ui R-1), if any — see
     /// [`ThemeSettingsSession`]. Mutually exclusive with `command_palette`
     /// and `search_prompt` (R-3, `App::active_overlay`).
@@ -382,6 +386,14 @@ pub struct App {
     /// [`Self::server_status_display`], the Settings panel's read-only
     /// `ServerStatus` row.
     ipc_last_error: Option<String>,
+    /// Results from short-lived remote discovery/create workers. UserEvent
+    /// carries only the Eq request id; Panel values never cross that enum.
+    remote_pending: remote_ui::RemotePendingTable,
+    /// Short-lived remote discovery/create/cleanup workers. Keeping their
+    /// joins lets final shutdown wait until every result has entered the
+    /// pending table before orphan cleanup drains it.
+    remote_workers: Vec<std::thread::JoinHandle<()>>,
+    remote_next_request: Arc<AtomicU64>,
 }
 
 impl App {
@@ -446,6 +458,7 @@ impl App {
             copy_mode_suppressed_repeats: HashSet::new(),
             command_palette: None,
             send_selection_picker: None,
+            remote_ui: None,
             theme_settings: None,
             process_monitor: None,
             theme_favorites: crate::theme_favorites::ThemeFavorites::new(),
@@ -484,6 +497,9 @@ impl App {
             ipc_snapshot_sig: 0,
             ipc_snapshot_at: None,
             ipc_last_error: None,
+            remote_pending: Arc::new(Mutex::new(HashMap::new())),
+            remote_workers: Vec::new(),
+            remote_next_request: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -545,6 +561,7 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        self.shutdown_remote_requests();
         self.overview_window.take();
         for state in self.windows.values_mut() {
             state.shutdown();

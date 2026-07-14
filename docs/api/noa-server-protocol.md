@@ -5,9 +5,10 @@ For operational procedures (enabling, tokens, troubleshooting) see `docs/runbook
 
 ## 1. Transport
 
-- **WebSocket over TCP**: `ws://<server-bind>:<server-port>/` (default bind `127.0.0.1`, default port `61771`). No TLS. The default is a loopback-only bind — setting `server-bind` (e.g. `0.0.0.0`) opts in to a bind address reachable directly from other hosts on the LAN (v2). Since there's still no TLS, a LAN bind should only be used on a trusted network. On untrusted networks, remote access should still go through a tunnel endpoint such as SSH/Tailscale, as before.
-- Messages are **JSON-RPC 2.0** over WS text frames. ≤ 1 MiB per message, ≤ 256 KiB per frame (exceeding either closes the connection).
-- Max 32 concurrent connections (accepting beyond that immediately closes the connection).
+- **WebSocket over TCP**: `ws://<server-bind>:<server-port>/` (default bind `127.0.0.1`, default port `61771`). No TLS. The default is a loopback-only bind — setting `server-bind` (e.g. `0.0.0.0`) opts in to a bind address reachable directly from other hosts on the LAN (v2). Since there's still no TLS, a LAN bind should only be used on a trusted network. On untrusted networks, remote access should still go through a protected tunnel endpoint such as SSH or Tailscale. When using a tunnel, the network between endpoints is assumed to be protected by the tunnel.
+- The control endpoint at `/` uses **JSON-RPC 2.0** over WS text frames. Messages are ≤ 1 MiB and individual frames are ≤ 256 KiB (exceeding either closes the connection).
+- The attach endpoint at `/attach` is a separate raw binary channel described in [§6](#6-raw-attach-channel). It never carries JSON-RPC or base64-wrapped payloads.
+- Max 32 concurrent connections, counting both control and raw attach WebSockets (accepting beyond that immediately closes the connection).
 - **Connection deadlines**: the WS handshake must complete within 5 seconds of connecting (an absolute deadline — even a connection trickling bytes slowly to dodge per-read timeouts cannot exceed this), and `noa.hello` must succeed within 10 seconds of connecting. Connections that exceed these are closed server-side.
 
 ## 2. JSON-RPC conventions
@@ -43,8 +44,9 @@ Any other method before hello returns `-32001`. A major mismatch returns `-32006
 | `read` | listPanels / getText / getGrid / subscribe / unsubscribe |
 | `control` | focusPane / newTab / split / closePane |
 | `input` | sendText |
+| `attach` | attach / detach / resizePane |
 
-`grantedScopes` = the intersection of hello's `scopes` (requested) and the server's `server-scopes` config. `control`/`input` are granted only when explicitly allowed server-side. Methods on an ungranted scope return `-32003`.
+`grantedScopes` = the intersection of hello's `scopes` (requested) and the server's `server-scopes` config. `control`/`input`/`attach` are granted only when explicitly allowed server-side. The default `server-scopes=read` never grants attach access. Methods on an ungranted scope return `-32003`.
 
 ## 5. Method reference
 
@@ -60,7 +62,7 @@ result: `{"protocolVersion":1,"grantedScopes":["read"],"serverVersion":"0.1.2"}`
 
 ### noa.listPanels — requires read
 
-params: `{}` / result: `{"panels":[Panel]}` (all panels across all window groups. Quick Terminal panels are excluded, same as in the sidebar)
+params: `{}` / result: `{"panels":[Panel]}` (all panels across all window groups. Quick Terminal panels are excluded, same as in the sidebar. A panel with `attachable:false` is discoverable/readable but has no raw `noa.attach` endpoint.)
 
 ### noa.getText — requires read
 
@@ -113,6 +115,36 @@ params: `{"paneId":"1"}` / result: `{"ok":true}`
 
 The `control` scope is treated as authorized automation, so the pane closes immediately even if a process is running, without going through the GUI confirmation dialog (the confirm dialog normally shown by e.g. cmd+w is skipped). `ok:true` is returned only after the close has actually been dispatched.
 
+### noa.attach — requires attach
+
+params: `{"paneId":"1"}`
+
+result:
+
+```json
+{"attachToken":"<opaque-one-time-token>","attachUrl":"ws://127.0.0.1:61771/attach"}
+```
+
+Reserves a single raw attach lease for the pane and returns the fixed attach endpoint plus a short-lived, one-time correlation token. Only one reserved or active attach is allowed per pane; another request returns `-32007` without disturbing the existing lease. The token is not embedded in the URL and must not be logged.
+
+Open `attachUrl` as a second WebSocket and send `attachToken` as the first **binary** frame within 10 seconds. A successful server sends the synthetic VT seed in one or more binary messages of at most 64 KiB, followed by an empty binary message that marks the seed boundary; later binary messages are live PTY bytes. A mismatched, expired, replayed, or non-binary token frame closes the WebSocket with policy code `1008` and the stable, non-secret reason `-32008 attach handshake failure`.
+
+### noa.detach — requires attach
+
+params: `{"paneId":"1"}` / result: `{"ok":true}`
+
+Releases the pane's attach lease and closes its raw subscription. It does not close the pane or terminate the remote process.
+
+### noa.resizePane — requires attach
+
+params: `{"paneId":"1","cols":120,"rows":40}` / result: `{"ok":true}`
+
+`cols` and `rows` must each be in `1..=4096`, and their product must not
+exceed 1,048,576 cells. Larger grids return `-32602` before reaching the pane
+backend.
+
+Resizes the server-side terminal grid first and then updates the PTY winsize. A concurrent local GUI resize is last-writer-wins.
+
 ### noa.subscribe — requires read
 
 | params | type | required | description |
@@ -130,9 +162,25 @@ params: `{"subscriptionId":"1"}` / result: `{"ok":true}`
 
 ### Mutation execution semantics
 
-`sendText` / `focusPane` / `newTab` / `split` / `closePane` execute via a round trip to the UI thread, and return `-32603` (internal) if they time out after 2 seconds. **The operation may still execute later, even after the timeout (at-least-once).** Blindly retrying on a failure response can result in double execution.
+`sendText` / `focusPane` / `newTab` / `split` / `closePane` / `resizePane` execute via a round trip to the UI thread, and return `-32603` (internal) if they time out after 2 seconds. **The operation may still execute later, even after the timeout (at-least-once).** Blindly retrying on a failure response can result in double execution.
 
-## 6. Notifications (server → client)
+## 6. Raw attach channel
+
+After the first-frame token handshake, every data message on `/attach` is binary and carries at most 64 KiB of application payload:
+
+- Server → client: a synthetic repaint VT seed split across as many messages as needed, one empty binary seed terminator, then lossless PTY output in order. The terminator is a boundary marker and contributes no VT bytes.
+- Client → server: raw terminal input bytes, split across as many messages as needed while preserving byte order. Arrow keys, control sequences, mouse reports, paste bytes, and escape timing are not converted to text or JSON.
+
+The seed reconstructs the visible grid and terminal modes; it intentionally excludes scrollback and the window title. Fetch scrollback independently with `noa.getText` (`source=scrollback`) or `noa.getGrid`, and use `Panel.name` for the title. The server buffers output behind the seed boundary and uses a dedicated byte-counted 1 MiB queue. If output remains backpressured for 2 seconds, the raw channel disconnects rather than dropping bytes. A client should re-run `noa.attach` and apply the new seed; it must not replay input queued for a previous attach generation.
+
+Client-to-PTY input is also bounded end to end: at most 8 MiB per pane may be
+pending across the attach, IO, and PTY-writer queues, with small messages
+charged at least 1 KiB to bound container overhead. Exceeding that budget
+disconnects the raw channel instead of retaining unbounded input.
+
+Closing a raw WebSocket tears down only the attach subscription. Attach connections share the server's global 32-connection limit with control connections.
+
+## 7. Notifications (server → client)
 
 ### noa.stateChanged
 
@@ -154,7 +202,7 @@ Delivers panel-output updates as **only the visible rows that changed, coalesced
 
 When the subscription queue overflows, the oldest notifications are dropped and the next notification of that same type carries `"dropped":true` (only appears when true). On receiving it, it's recommended to refetch the full state of that subscription via `listPanels` / `getGrid`.
 
-## 7. Data types
+## 8. Data types
 
 ### Panel
 
@@ -164,11 +212,12 @@ When the subscription queue overflows, the oldest notifications are dropped and 
   "name": "zsh", "cwd": "/Users/me/src",
   "branch": "main", "process": "vim",
   "busy": true, "attention": false,
+  "attachable": true,
   "preview": [Row]
 }
 ```
 
-`branch` / `process` are **omitted as keys** when unknown. `preview` is the sidebar-equivalent last few rows (with color runs). Each `Row.row` in `preview` is **not an absolute row number** but a 0-based preview-row index (first row is 0) — note this differs in meaning from `noa.getGrid`'s `Row.row` (absolute row).
+`branch` / `process` are **omitted as keys** when unknown. `attachable` reports whether this exact panel is registered with the raw attach endpoint; clients must not call `noa.attach` for a panel where it is `false`. It defaults to `true` when omitted by an older protocol-v1 peer. `preview` is the sidebar-equivalent last few rows (with color runs). Each `Row.row` in `preview` is **not an absolute row number** but a 0-based preview-row index (first row is 0) — note this differs in meaning from `noa.getGrid`'s `Row.row` (absolute row).
 
 ### Row / Span
 
@@ -185,7 +234,7 @@ When the subscription queue overflows, the oldest notifications are dropped and 
 | `fg` / `bg` | `"#rrggbb"` \| number | truecolor is a hex string, palette colors are a 0-255 integer. **The terminal's default color has the key omitted** — render it using the client's own theme default |
 | `attrs` | string[] | omitted = none. Values: `bold` `faint` `italic` `underline` `double_underline` `curly_underline` `dotted_underline` `dashed_underline` `blink` `inverse` `invisible` `strikethrough` `overline` |
 
-## 8. Error codes
+## 9. Error codes
 
 | code | meaning |
 |------|------|
@@ -196,8 +245,10 @@ When the subscription queue overflows, the oldest notifications are dropped and 
 | `-32004` | panel disappeared mid-execution |
 | `-32005` | payload exceeded (request/response) |
 | `-32006` | protocolVersion major mismatch |
+| `-32007` | attach conflict (the pane already has a reserved or active attach) |
+| `-32008` | attach handshake failure |
 
-## 9. Full session example
+## 10. Full session example
 
 ```json
 → {"jsonrpc":"2.0","id":1,"method":"noa.hello","params":{"protocolVersion":1,"token":"<hex64>","scopes":["read","input"]}}
@@ -211,7 +262,7 @@ When the subscription queue overflows, the oldest notifications are dropped and 
 ← {"jsonrpc":"2.0","method":"noa.output","params":{"paneId":"1","lines":[{"row":42,"spans":[{"text":"hi"}]}]}}
 ```
 
-## 10. Client implementation checklist
+## 11. Client implementation checklist
 
 - [ ] Ignore unknown fields and unknown notifications (assumes FR-19)
 - [ ] Keep IDs as strings (don't parse u64 into a number — can exceed 2^53)
@@ -220,3 +271,7 @@ When the subscription queue overflows, the oldest notifications are dropped and 
 - [ ] Account for at-least-once semantics when auto-retrying a failed mutation
 - [ ] Handle omitted `fg`/`bg` and the conditional presence of `truncated`/`dropped`/`hasMore`
 - [ ] Redo hello on reconnect (subscriptions are lost per-connection)
+- [ ] Keep the attach token out of URLs, logs, error text, and persisted session state
+- [ ] Treat `/attach` as binary-only; re-attach and re-seed after any disconnect
+- [ ] Do not buffer or replay user input across attach generations
+- [ ] Drain locally generated terminal replies without forwarding them to the remote attach channel

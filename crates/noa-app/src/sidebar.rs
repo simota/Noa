@@ -640,6 +640,9 @@ pub struct CardLines {
     /// card: "updated just now" is a tautology while output is flowing, so
     /// only idle cards carry the age.
     pub updated: String,
+    /// Client Mode panes have no local process probe or auto-approve worker;
+    /// the renderer uses this to show both unsupported states explicitly.
+    pub remote_unsupported: bool,
 }
 
 /// Build a card's display lines from its state and the current wall clock.
@@ -688,6 +691,7 @@ pub fn card_lines(
         branch,
         process,
         updated,
+        remote_unsupported: false,
     }
 }
 

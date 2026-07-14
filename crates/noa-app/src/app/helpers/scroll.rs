@@ -5,7 +5,18 @@ use super::*;
 /// Apply `action` to `terminal`. Returns whether the caller must write a
 /// form feed (`0x0C`) to the pty afterward — only `Clear` at a shell prompt
 /// asks for this (see [`Terminal::clear_screen_and_scrollback`]).
-pub(crate) fn apply_terminal_action(terminal: &mut Terminal, action: TerminalAction) -> bool {
+pub(crate) fn apply_terminal_action(
+    terminal: &mut Terminal,
+    action: TerminalAction,
+    is_remote_replica: bool,
+) -> bool {
+    // `Clear` rewrites cursor/grid state, so applying it only to a remote
+    // replica makes the next raw bytes diverge from the authoritative server
+    // terminal. The other actions are local view/selection operations and do
+    // not change how future VT bytes are interpreted.
+    if is_remote_replica && action == TerminalAction::Clear {
+        return false;
+    }
     match action {
         TerminalAction::Clear => return terminal.clear_screen_and_scrollback(),
         TerminalAction::ClearScrollback => terminal.clear_scrollback(),

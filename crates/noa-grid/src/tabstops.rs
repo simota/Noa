@@ -39,6 +39,14 @@ impl Tabstops {
         }
     }
 
+    pub(crate) fn positions(&self) -> impl Iterator<Item = u16> + '_ {
+        self.stops
+            .iter()
+            .enumerate()
+            .filter(|(_, stopped)| **stopped)
+            .map(|(column, _)| column as u16)
+    }
+
     /// The next tab stop strictly greater than `from`, clamped to the last column.
     pub fn next(&self, from: u16, cols: u16) -> u16 {
         let mut i = from as usize + 1;

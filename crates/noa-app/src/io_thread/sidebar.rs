@@ -51,7 +51,7 @@ pub(super) struct SidebarUpsert {
 /// rows the preview needs (at most `limit`), each truncated
 /// at its last non-blank cell. Span/string building happens lock-free in
 /// [`preview_spans`], keeping the pty-feed lock section short (NFR-1).
-pub(super) fn preview_rows(terminal: &Terminal, limit: usize) -> Vec<Vec<noa_grid::Cell>> {
+pub(crate) fn preview_rows(terminal: &Terminal, limit: usize) -> Vec<Vec<noa_grid::Cell>> {
     let grid = &terminal.active().grid;
     let mut rows: Vec<Vec<noa_grid::Cell>> = grid
         .iter()
@@ -68,7 +68,7 @@ pub(super) fn preview_rows(terminal: &Terminal, limit: usize) -> Vec<Vec<noa_gri
 
 /// Lock-free half of `extract_preview`: coalesce adjacent cells sharing a
 /// foreground color into [`PreviewSpan`]s.
-pub(super) fn preview_spans(rows: Vec<Vec<noa_grid::Cell>>) -> Vec<PreviewLine> {
+pub(crate) fn preview_spans(rows: Vec<Vec<noa_grid::Cell>>) -> Vec<PreviewLine> {
     rows.into_iter()
         .map(|cells| {
             let mut spans: PreviewLine = Vec::new();

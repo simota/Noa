@@ -33,6 +33,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ReloadConfig => "Reload Configuration",
         AppCommand::Copy => "Copy to Clipboard",
         AppCommand::Paste => "Paste from Clipboard",
+        AppCommand::AttachRemote => "Attach Remote",
         AppCommand::SendSelectionToPane => "Send Selection to Pane",
         AppCommand::ExportScrollback => "Export Scrollback to File",
         AppCommand::PipeScrollbackToPager => "Pipe Scrollback to Pager",
@@ -138,6 +139,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ReloadConfig,
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::AttachRemote,
         AppCommand::SendSelectionToPane,
         AppCommand::ExportScrollback,
         AppCommand::PipeScrollbackToPager,
@@ -337,6 +339,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         AppCommand::About
         | AppCommand::Preferences
         | AppCommand::EditConfigFile
+        | AppCommand::AttachRemote
         | AppCommand::OpenThemePicker
         | AppCommand::OpenSettings
         | AppCommand::ReloadConfig
@@ -621,6 +624,7 @@ mod tests {
             AppCommand::ReloadConfig,
             AppCommand::Copy,
             AppCommand::Paste,
+            AppCommand::AttachRemote,
             AppCommand::SendSelectionToPane,
             AppCommand::ExportScrollback,
             AppCommand::PipeScrollbackToPager,
@@ -692,6 +696,21 @@ mod tests {
                 "missing title for {command:?}"
             );
         }
+    }
+
+    #[test]
+    fn attach_remote_is_registered_exactly_once() {
+        assert_eq!(
+            command_palette_entries()
+                .iter()
+                .filter(|command| **command == AppCommand::AttachRemote)
+                .count(),
+            1
+        );
+        assert_eq!(
+            command_palette_title(AppCommand::AttachRemote),
+            "Attach Remote"
+        );
     }
 
     #[test]

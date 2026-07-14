@@ -190,6 +190,34 @@ pub trait Handler {
     fn erase_chars(&mut self, _n: u16) {}
     /// `REP` — repeat the preceding printable character.
     fn repeat_preceding_char(&mut self, _n: u16) {}
+    /// Client-mode seed-only: `CSI > Ph ; Pl $ s` sets the active screen's
+    /// `REP` state (`last_printed`) to the Unicode scalar
+    /// `(Ph << 16) | Pl`, without touching grid content. Standard `REP`
+    /// ties `last_printed` to whatever was most recently painted, so a
+    /// synthetic repaint that visits cells in a different order than the
+    /// source's live prints would otherwise leave `last_printed` pointing
+    /// at the wrong character. Emitted only by
+    /// `noa_grid::terminal::Terminal::synthetic_seed`; real programs never
+    /// send this.
+    fn seed_set_last_printed(&mut self, _ch: char) {}
+    /// Client-mode seed-only: `CSI > $ t` promotes the cursor style
+    /// set by the immediately preceding `DECSCUSR` from a plain block to
+    /// its hollow variant. Standard `DECSCUSR` cannot express
+    /// `block_hollow`, so the seed follows a block `DECSCUSR` with this to
+    /// recover it exactly. Emitted only by `Terminal::synthetic_seed`; real
+    /// programs never send this.
+    fn seed_set_cursor_hollow(&mut self) {}
+    /// Client-mode seed-only: `CSI > Ps ; Ph $ q` restores the DECSCUSR-0
+    /// default cursor style (the shape a bare `CSI 0 q` resets to), kept
+    /// independent from whatever `DECSCUSR` the seed used to paint the
+    /// *current* cursor above it. `Ps` matches `DECSCUSR`'s own
+    /// blink/style numbering (1=blinking block … 6=steady bar); `Ph` is `1`
+    /// when the default is the hollow-block variant standard `DECSCUSR`
+    /// cannot express (mirrors [`Self::seed_set_cursor_hollow`] for the
+    /// default rather than the live cursor). Emitted only by
+    /// `noa_grid::terminal::Terminal::synthetic_seed`; real programs never
+    /// send this.
+    fn seed_set_default_cursor_style(&mut self, _ps: u16, _hollow: bool) {}
 
     // ── reports (terminal writes back to the pty) ──────────────────
     fn device_attributes(&mut self, kind: DaKind);

@@ -31,6 +31,7 @@ use super::ipc_tap::{
     IpcOutputPushDecision, IpcRowCache, compute_ipc_row_diff, decide_ipc_output_push,
 };
 use super::overview::{OverviewPublish, publish_overview_snapshot};
+use super::raw_attach::RawAttachTap;
 use super::sidebar::{
     SidebarPublish, SidebarUpsert, decide_sidebar_publish, preview_rows, preview_spans,
 };
@@ -121,6 +122,7 @@ pub(super) fn feed_terminal(
         false,
         &mut last_ipc_push,
         &mut ipc_row_cache,
+        &RawAttachTap::default(),
     )
 }
 
@@ -140,10 +142,19 @@ pub(super) fn feed_terminal(
 /// is waiting — parking_lot's raw mutex takes the same single
 /// compare-exchange fast path a plain unlock does in that case; the slower
 /// handoff path only runs once a waiter is actually parked.
-fn feed_chunk_fair(terminal: &Arc<Mutex<Terminal>>, stream: &mut noa_vt::Stream, bytes: &[u8]) {
+fn feed_chunk_fair(
+    terminal: &Arc<Mutex<Terminal>>,
+    stream: &mut noa_vt::Stream,
+    bytes: &[u8],
+    raw_attach: &RawAttachTap,
+) {
     let mut term = terminal.lock();
     stream.feed(bytes, &mut *term);
+    let sink = raw_attach.sink();
     parking_lot::MutexGuard::unlock_fair(term);
+    if let Some(sink) = sink {
+        sink.send(raw_attach, bytes);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -161,6 +172,7 @@ pub(super) fn feed_terminal_batch<'a>(
     ipc_active: bool,
     last_ipc_push: &mut Option<Instant>,
     ipc_row_cache: &mut IpcRowCache,
+    raw_attach: &RawAttachTap,
 ) -> TerminalOutput {
     // Feed each chunk under its own lock hold (worst case one `READ_CHUNK`,
     // 64 KiB) instead of holding the lock across the whole (up to 1 MiB)
@@ -168,9 +180,9 @@ pub(super) fn feed_terminal_batch<'a>(
     // same lock for a `FrameSnapshot` gets a chance to run between chunks.
     // The bytes still reach `stream`/`term` in the exact same order as
     // before — only the lock granularity changes, not the parse.
-    feed_chunk_fair(terminal, stream, first);
+    feed_chunk_fair(terminal, stream, first, raw_attach);
     for bytes in rest {
-        feed_chunk_fair(terminal, stream, bytes);
+        feed_chunk_fair(terminal, stream, bytes, raw_attach);
     }
 
     // Batch-tail work (overview/sidebar/auto-approve/IPC extraction below)

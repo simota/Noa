@@ -435,7 +435,7 @@ fn merge_list<T>(base: Vec<T>, higher_priority: Vec<T>) -> Vec<T> {
 }
 
 /// Resolved, validated startup settings.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct StartupConfig {
     pub cols: u16,
     pub rows: u16,
@@ -632,9 +632,19 @@ pub struct StartupConfig {
     /// is generated/read; the configured value is used verbatim. Default
     /// `None` (auto-generate and persist to the token file).
     pub server_token: Option<String>,
-    /// `server-scopes`: comma-separated subset of `read`/`control`/`input`
-    /// grantable to a connecting client (FR-6). Default `"read"` only.
+    /// `server-scopes`: comma-separated subset of
+    /// `read`/`control`/`input`/`attach` grantable to a connecting client
+    /// (FR-6). Default `"read"` only.
     pub server_scopes: String,
+    /// `client-remote`: target noa-server address (`host:port`). Default
+    /// `None`; the attach flow may prompt for an ad hoc endpoint instead.
+    pub client_remote: Option<String>,
+    /// `client-token`: bearer token used for a remote connection. A direct
+    /// configured value takes precedence over [`Self::client_token_file`].
+    pub client_token: Option<String>,
+    /// `client-token-file`: path to a bearer token file. The file is read
+    /// only when [`Self::client_token`] is not configured directly.
+    pub client_token_file: Option<PathBuf>,
 }
 
 impl Default for StartupConfig {
@@ -701,12 +711,15 @@ impl Default for StartupConfig {
             server_bind: DEFAULT_SERVER_BIND.to_string(),
             server_token: None,
             server_scopes: "read".to_string(),
+            client_remote: None,
+            client_token: None,
+            client_token_file: None,
         }
     }
 }
 
 /// Optional values from a config file or explicit CLI flags.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Default, Clone, PartialEq)]
 pub struct ConfigOverrides {
     pub cols: Option<u16>,
     pub rows: Option<u16>,
@@ -769,7 +782,105 @@ pub struct ConfigOverrides {
     pub server_bind: Option<String>,
     pub server_token: Option<String>,
     pub server_scopes: Option<String>,
+    pub client_remote: Option<String>,
+    pub client_token: Option<String>,
+    pub client_token_file: Option<PathBuf>,
 }
+
+macro_rules! impl_redacted_config_debug {
+    ($config:ty) => {
+        impl std::fmt::Debug for $config {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let server_token = self.server_token.as_ref().map(|_| "<redacted>");
+                let client_token = self.client_token.as_ref().map(|_| "<redacted>");
+                f.debug_struct(stringify!($config))
+                    .field("cols", &self.cols)
+                    .field("rows", &self.rows)
+                    .field("font_size", &self.font_size)
+                    .field("theme", &self.theme)
+                    .field("theme_appearance", &self.theme_appearance)
+                    .field("font", &self.font)
+                    .field("palette", &self.palette)
+                    .field("clipboard_read", &self.clipboard_read)
+                    .field(
+                        "clipboard_paste_protection",
+                        &self.clipboard_paste_protection,
+                    )
+                    .field("confirm_quit", &self.confirm_quit)
+                    .field("title_report", &self.title_report)
+                    .field("window_padding_x", &self.window_padding_x)
+                    .field("window_padding_y", &self.window_padding_y)
+                    .field("background", &self.background)
+                    .field("foreground", &self.foreground)
+                    .field("cursor_color", &self.cursor_color)
+                    .field("selection_foreground", &self.selection_foreground)
+                    .field("selection_background", &self.selection_background)
+                    .field("minimum_contrast", &self.minimum_contrast)
+                    .field("cursor_style", &self.cursor_style)
+                    .field("cursor_style_blink", &self.cursor_style_blink)
+                    .field("background_opacity", &self.background_opacity)
+                    .field("background_blur_radius", &self.background_blur_radius)
+                    .field("background_image", &self.background_image)
+                    .field("background_image_opacity", &self.background_image_opacity)
+                    .field("background_image_position", &self.background_image_position)
+                    .field("background_image_fit", &self.background_image_fit)
+                    .field("background_image_repeat", &self.background_image_repeat)
+                    .field(
+                        "background_image_interval_secs",
+                        &self.background_image_interval_secs,
+                    )
+                    .field("scrollback_limit", &self.scrollback_limit)
+                    .field("image_storage_limit", &self.image_storage_limit)
+                    .field("window_save_state", &self.window_save_state)
+                    .field("macos_option_as_alt", &self.macos_option_as_alt)
+                    .field("macos_titlebar_style", &self.macos_titlebar_style)
+                    .field(
+                        "macos_non_native_fullscreen",
+                        &self.macos_non_native_fullscreen,
+                    )
+                    .field("macos_titlebar_proxy_icon", &self.macos_titlebar_proxy_icon)
+                    .field("macos_applescript", &self.macos_applescript)
+                    .field("quick_terminal_hotkey", &self.quick_terminal_hotkey)
+                    .field("quick_terminal_size", &self.quick_terminal_size)
+                    .field("quick_terminal_autohide", &self.quick_terminal_autohide)
+                    .field("quick_terminal_screen", &self.quick_terminal_screen)
+                    .field("quick_terminal_position", &self.quick_terminal_position)
+                    .field(
+                        "quick_terminal_animation_duration",
+                        &self.quick_terminal_animation_duration,
+                    )
+                    .field("sidebar_enabled", &self.sidebar_enabled)
+                    .field("sidebar_width", &self.sidebar_width)
+                    .field("sidebar_font_size", &self.sidebar_font_size)
+                    .field("sidebar_hotkey", &self.sidebar_hotkey)
+                    .field("sidebar_preview_lines", &self.sidebar_preview_lines)
+                    .field("resize_overlay", &self.resize_overlay)
+                    .field("visual_bell", &self.visual_bell)
+                    .field("audible_bell", &self.audible_bell)
+                    .field(
+                        "audible_bell_when_unfocused",
+                        &self.audible_bell_when_unfocused,
+                    )
+                    .field("audible_bell_dock_bounce", &self.audible_bell_dock_bounce)
+                    .field("auto_approve", &self.auto_approve)
+                    .field("send_selection_send_enter", &self.send_selection_send_enter)
+                    .field("keybinds", &self.keybinds)
+                    .field("server_enable", &self.server_enable)
+                    .field("server_port", &self.server_port)
+                    .field("server_bind", &self.server_bind)
+                    .field("server_token", &server_token)
+                    .field("server_scopes", &self.server_scopes)
+                    .field("client_remote", &self.client_remote)
+                    .field("client_token", &client_token)
+                    .field("client_token_file", &self.client_token_file)
+                    .finish()
+            }
+        }
+    };
+}
+
+impl_redacted_config_debug!(StartupConfig);
+impl_redacted_config_debug!(ConfigOverrides);
 
 impl ConfigOverrides {
     pub fn merge(self, higher_priority: Self) -> Self {
@@ -889,6 +1000,9 @@ impl ConfigOverrides {
             server_bind: higher_priority.server_bind.or(self.server_bind),
             server_token: higher_priority.server_token.or(self.server_token),
             server_scopes: higher_priority.server_scopes.or(self.server_scopes),
+            client_remote: higher_priority.client_remote.or(self.client_remote),
+            client_token: higher_priority.client_token.or(self.client_token),
+            client_token_file: higher_priority.client_token_file.or(self.client_token_file),
         }
     }
 
@@ -997,6 +1111,9 @@ impl ConfigOverrides {
             server_bind: self.server_bind.unwrap_or(base.server_bind),
             server_token: self.server_token.or(base.server_token),
             server_scopes: self.server_scopes.unwrap_or(base.server_scopes),
+            client_remote: self.client_remote.or(base.client_remote),
+            client_token: self.client_token.or(base.client_token),
+            client_token_file: self.client_token_file.or(base.client_token_file),
         }
     }
 }
@@ -1006,8 +1123,7 @@ pub fn load_startup_config(
 ) -> anyhow::Result<(StartupConfig, Vec<Diagnostic>)> {
     let (Some(config_path), Some(legacy_path)) = (default_config_path(), legacy_toml_config_path())
     else {
-        let config = cli.apply_to(StartupConfig::default());
-        validate_startup_config(&config, "resolved startup config")?;
+        let config = finalize_startup_config(cli.apply_to(StartupConfig::default()))?;
         return Ok((config, Vec::new()));
     };
     load_startup_config_from(&config_path, &legacy_path, cli)
@@ -1034,9 +1150,35 @@ pub fn load_startup_config_from(
         });
     }
 
-    let config = file.merge(cli).apply_to(StartupConfig::default());
-    validate_startup_config(&config, "resolved startup config")?;
+    let config = finalize_startup_config(file.merge(cli).apply_to(StartupConfig::default()))?;
     Ok((config, diagnostics))
+}
+
+fn finalize_startup_config(config: StartupConfig) -> anyhow::Result<StartupConfig> {
+    finalize_startup_config_with_home(config, dirs::home_dir().as_deref())
+}
+
+fn finalize_startup_config_with_home(
+    mut config: StartupConfig,
+    home: Option<&Path>,
+) -> anyhow::Result<StartupConfig> {
+    if config.client_token.is_none()
+        && let Some(path) = config.client_token_file.as_deref()
+    {
+        let resolved_path = expand_tilde(path, home);
+        let token = fs::read_to_string(&resolved_path)
+            .with_context(|| format!("failed to read `client-token-file` {}", path.display()))?;
+        config.client_token = Some(token.trim().to_string());
+    }
+    validate_startup_config(&config, "resolved startup config")?;
+    Ok(config)
+}
+
+fn expand_tilde(path: &Path, home: Option<&Path>) -> PathBuf {
+    match (home, path.strip_prefix("~")) {
+        (Some(home), Ok(relative)) => home.join(relative),
+        _ => path.to_path_buf(),
+    }
 }
 
 pub fn load_file_overrides() -> anyhow::Result<(ConfigOverrides, Vec<Diagnostic>)> {
@@ -1236,6 +1378,9 @@ mod tests {
                 server_bind: DEFAULT_SERVER_BIND.to_string(),
                 server_token: None,
                 server_scopes: "read".to_string(),
+                client_remote: None,
+                client_token: None,
+                client_token_file: None,
             }
         );
     }
@@ -1633,6 +1778,192 @@ font-size = 15.5
 
         let resolved = overrides.apply_to(StartupConfig::default());
         assert_eq!(resolved.server_bind, DEFAULT_SERVER_BIND);
+    }
+
+    #[test]
+    fn client_keys_parse_and_default_to_unset() {
+        let default = ConfigOverrides::default().apply_to(StartupConfig::default());
+        assert_eq!(default.client_remote, None);
+        assert_eq!(default.client_token, None);
+        assert_eq!(default.client_token_file, None);
+
+        let token_path = PathBuf::from("/tmp/noa-client-token");
+        let (overrides, diagnostics) = parse_overrides(
+            test_path(),
+            "client-remote = host.example:61771\nclient-token = abc123\nclient-token-file = /tmp/noa-client-token",
+        );
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            overrides.client_remote.as_deref(),
+            Some("host.example:61771")
+        );
+        assert_eq!(overrides.client_token.as_deref(), Some("abc123"));
+        assert_eq!(overrides.client_token_file.as_ref(), Some(&token_path));
+
+        let resolved = overrides.apply_to(StartupConfig::default());
+        assert_eq!(
+            resolved.client_remote.as_deref(),
+            Some("host.example:61771")
+        );
+        assert_eq!(resolved.client_token.as_deref(), Some("abc123"));
+        assert_eq!(resolved.client_token_file.as_ref(), Some(&token_path));
+    }
+
+    #[test]
+    fn client_keys_preserve_source_precedence_through_merge_and_apply() {
+        let file_token_path = PathBuf::from("/tmp/file-client-token");
+        let cli_token_path = PathBuf::from("/tmp/cli-client-token");
+        let file = ConfigOverrides {
+            client_remote: Some("file.example:61771".to_string()),
+            client_token: Some("file-direct-token".to_string()),
+            client_token_file: Some(file_token_path),
+            ..Default::default()
+        };
+        let cli = ConfigOverrides {
+            client_remote: Some("cli.example:61771".to_string()),
+            client_token_file: Some(cli_token_path.clone()),
+            ..Default::default()
+        };
+
+        let resolved = file.merge(cli).apply_to(StartupConfig::default());
+
+        assert_eq!(resolved.client_remote.as_deref(), Some("cli.example:61771"));
+        assert_eq!(resolved.client_token.as_deref(), Some("file-direct-token"));
+        assert_eq!(resolved.client_token_file, Some(cli_token_path));
+    }
+
+    #[test]
+    fn load_startup_config_reads_client_token_file() {
+        let dir = unique_temp_dir("client-token-file");
+        let config_path = dir.join("config");
+        let legacy_path = dir.join("config.toml");
+        let token_path = dir.join("client-token");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&token_path, "  file-secret\n").unwrap();
+        fs::write(
+            &config_path,
+            format!("client-token-file = {}", token_path.display()),
+        )
+        .unwrap();
+
+        let (config, diagnostics) =
+            load_startup_config_from(&config_path, &legacy_path, ConfigOverrides::default())
+                .unwrap();
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(config.client_token.as_deref(), Some("file-secret"));
+        assert_eq!(
+            config.client_token_file.as_deref(),
+            Some(token_path.as_path())
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn client_token_file_expands_tilde_against_the_home_directory() {
+        let home = unique_temp_dir("client-token-home");
+        let token_path = home.join(".config/noa/remote-server-token");
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(token_path.parent().unwrap()).unwrap();
+        fs::write(&token_path, "home-secret\n").unwrap();
+        let config = StartupConfig {
+            client_token_file: Some(PathBuf::from("~/.config/noa/remote-server-token")),
+            ..StartupConfig::default()
+        };
+
+        let resolved = finalize_startup_config_with_home(config, Some(&home)).unwrap();
+
+        assert_eq!(resolved.client_token.as_deref(), Some("home-secret"));
+        assert_eq!(
+            resolved.client_token_file.as_deref(),
+            Some(Path::new("~/.config/noa/remote-server-token"))
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn direct_client_token_skips_higher_priority_token_file_read() {
+        let dir = unique_temp_dir("client-token-direct");
+        let config_path = dir.join("config");
+        let legacy_path = dir.join("config.toml");
+        let missing_token_path = dir.join("missing-client-token");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&config_path, "client-token = direct-secret").unwrap();
+        let cli = ConfigOverrides {
+            client_token_file: Some(missing_token_path.clone()),
+            ..Default::default()
+        };
+
+        let (config, diagnostics) =
+            load_startup_config_from(&config_path, &legacy_path, cli).unwrap();
+
+        assert!(diagnostics.is_empty());
+        assert_eq!(config.client_token.as_deref(), Some("direct-secret"));
+        assert_eq!(config.client_token_file, Some(missing_token_path));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_client_token_file_error_does_not_expose_contents() {
+        let dir = unique_temp_dir("client-token-invalid");
+        let config_path = dir.join("config");
+        let legacy_path = dir.join("config.toml");
+        let token_path = dir.join("client-token");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&token_path, b"secret-marker\xff").unwrap();
+        fs::write(
+            &config_path,
+            format!("client-token-file = {}", token_path.display()),
+        )
+        .unwrap();
+
+        let error =
+            load_startup_config_from(&config_path, &legacy_path, ConfigOverrides::default())
+                .unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("client-token-file"));
+        assert!(message.contains(token_path.to_string_lossy().as_ref()));
+        assert!(!message.contains("secret-marker"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn config_debug_redacts_server_and_client_tokens() {
+        let startup = StartupConfig {
+            server_token: Some("startup-server-secret".to_string()),
+            client_remote: Some("remote.example:61771".to_string()),
+            client_token: Some("startup-client-secret".to_string()),
+            client_token_file: Some(PathBuf::from("/tmp/client-token")),
+            ..Default::default()
+        };
+        let overrides = ConfigOverrides {
+            server_token: Some("override-server-secret".to_string()),
+            client_token: Some("override-client-secret".to_string()),
+            ..Default::default()
+        };
+
+        let startup_debug = format!("{startup:?}");
+        let overrides_debug = format!("{overrides:?}");
+
+        for output in [&startup_debug, &overrides_debug] {
+            assert!(output.contains("server_token: Some(\"<redacted>\")"));
+            assert!(output.contains("client_token: Some(\"<redacted>\")"));
+            assert!(output.contains("client_token_file:"));
+            assert!(output.contains("send_selection_send_enter:"));
+        }
+        for secret in [
+            "startup-server-secret",
+            "startup-client-secret",
+            "override-server-secret",
+            "override-client-secret",
+        ] {
+            assert!(!startup_debug.contains(secret));
+            assert!(!overrides_debug.contains(secret));
+        }
     }
 
     #[test]

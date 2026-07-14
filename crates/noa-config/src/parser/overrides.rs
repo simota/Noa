@@ -80,6 +80,9 @@ pub(crate) fn build_overrides(
     let mut server_bind = None;
     let mut server_token = None;
     let mut server_scopes = None;
+    let mut client_remote = None;
+    let mut client_token = None;
+    let mut client_token_file = None;
     let mut diagnostics = Vec::new();
     let mut window_pair_path = std::path::PathBuf::new();
 
@@ -355,6 +358,15 @@ pub(crate) fn build_overrides(
             "server-scopes" => {
                 server_scopes = directive.value.clone();
             }
+            "client-remote" => {
+                client_remote = directive.value.clone();
+            }
+            "client-token" => {
+                client_token = directive.value.clone();
+            }
+            "client-token-file" => {
+                client_token_file = directive.value.as_deref().map(std::path::PathBuf::from);
+            }
             unknown => {
                 diagnostics.push(unknown_key_diagnostic(path, unknown));
             }
@@ -433,6 +445,9 @@ pub(crate) fn build_overrides(
             server_bind,
             server_token,
             server_scopes,
+            client_remote,
+            client_token,
+            client_token_file,
         },
         diagnostics,
     )

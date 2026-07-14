@@ -12,6 +12,14 @@ impl Screen {
         self.viewport_offset
     }
 
+    pub fn set_viewport_locked(&mut self, locked: bool) {
+        self.viewport_locked = locked;
+    }
+
+    pub fn viewport_locked(&self) -> bool {
+        self.viewport_locked
+    }
+
     /// Set the scrollback byte limit at runtime (`0` disables scrollback and
     /// drops all history), evicting immediately. No-op on the alternate screen,
     /// which keeps no history. Evicted rows advance `rows_evicted` and shift the
@@ -26,6 +34,7 @@ impl Screen {
             self.selection = self
                 .selection
                 .and_then(|selection| selection.shift_rows_up(evicted));
+            self.shift_copy_mode_points_up(evicted);
             self.prune_evicted_placements();
         }
         self.clamp_viewport();

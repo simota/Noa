@@ -8,6 +8,7 @@
 
 pub mod cell;
 mod charset;
+pub mod copy_mode;
 pub mod cursor;
 pub mod kitty;
 pub mod kitty_keyboard;
@@ -27,6 +28,7 @@ pub mod url;
 mod tests;
 
 pub use cell::{Cell, Hyperlink, HyperlinkId, Row};
+pub use copy_mode::{CopyDirection, CopyModeCancel, CopyModeState};
 pub use cursor::{Cursor, CursorStyle, HorizontalMargins, ScrollRegion};
 pub use kitty::{ImageStore, KittyImage};
 pub use kitty_keyboard::{

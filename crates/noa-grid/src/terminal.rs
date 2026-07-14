@@ -50,6 +50,10 @@ pub struct Terminal {
     /// Alternate screen — populated in inc≥2.
     pub alt: Option<Screen>,
     pub active_is_alt: bool,
+    /// Generation of the active screen's coordinate space. This is advanced
+    /// whenever a control sequence replaces the active [`Screen`] without
+    /// necessarily changing `active_is_alt`.
+    screen_generation: u64,
     pub modes: ModeState,
     /// G0/G1 designation + active (GL) slot for `SCS`/`SO`/`SI`.
     charset: CharsetState,
@@ -142,6 +146,7 @@ impl Terminal {
             primary: Screen::new(size.cols, size.rows),
             alt: None,
             active_is_alt: false,
+            screen_generation: 0,
             modes: ModeState::defaults(),
             charset: CharsetState::default(),
             title: String::new(),
@@ -175,6 +180,11 @@ impl Terminal {
     /// `noa-app` reads this to select its key-encoding path.
     pub fn kitty_keyboard_flags(&self) -> u8 {
         self.kitty_keyboard.flags(self.active_is_alt)
+    }
+
+    /// Identity of the active screen's coordinate space.
+    pub const fn screen_generation(&self) -> u64 {
+        self.screen_generation
     }
 
     /// Set the cursor style DECSCUSR 0 resets to, and apply it immediately as
@@ -230,6 +240,50 @@ impl Terminal {
 
     pub fn scroll_viewport_to_bottom(&mut self) {
         self.active_mut().scroll_viewport_to_bottom();
+    }
+
+    /// Explicitly pin the active viewport against pty-output following. This
+    /// is distinct from the ordinary `viewport_offset > 0` lock and therefore
+    /// also works when activated at the live bottom.
+    pub fn lock_viewport(&mut self) {
+        self.active_mut().set_viewport_locked(true);
+    }
+
+    pub(crate) fn copy_mode_points(&self) -> Option<crate::screen::TrackedCopyModePoints> {
+        self.active().copy_mode_points()
+    }
+
+    pub(crate) fn set_copy_mode_points(
+        &mut self,
+        cursor: SelectionPoint,
+        anchor: Option<SelectionPoint>,
+    ) {
+        self.active_mut().set_copy_mode_points(cursor, anchor);
+    }
+
+    /// Release any copy-mode viewport locks, including a screen that became
+    /// inactive after a primary/alternate-screen switch.
+    pub fn unlock_viewport(&mut self) {
+        self.primary.set_viewport_locked(false);
+        if let Some(alt) = &mut self.alt {
+            alt.set_viewport_locked(false);
+        }
+    }
+
+    /// Clear every screen-local artifact owned by copy mode. This is
+    /// deliberately independent of the active screen because a pty may switch
+    /// primary/alternate screens while the app-level session is still alive.
+    pub fn exit_copy_mode(&mut self) {
+        self.primary.clear_selection();
+        self.primary.clear_copy_mode_points();
+        self.primary.set_viewport_locked(false);
+        self.primary.scroll_viewport_to_bottom();
+        if let Some(alt) = &mut self.alt {
+            alt.clear_selection();
+            alt.clear_copy_mode_points();
+            alt.set_viewport_locked(false);
+            alt.scroll_viewport_to_bottom();
+        }
     }
 
     pub fn set_selection(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
@@ -705,6 +759,7 @@ impl Terminal {
             let mut alt = Screen::alternate(self.size.cols, self.size.rows);
             alt.cursor.visible = self.modes.cursor_visible();
             self.alt = Some(alt);
+            self.screen_generation = self.screen_generation.wrapping_add(1);
         } else if let Some(alt) = &mut self.alt {
             alt.cursor.visible = self.modes.cursor_visible();
         }

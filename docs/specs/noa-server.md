@@ -52,7 +52,7 @@
 
 **In-scope (v1):** RPCs `list_panels` / `get_text` / `get_grid` (viewport-limited, paginated, with color attributes) / `send_text` / `focus_pane` / `new_tab` / `split` / `close_pane`; `subscribe` → `state_changed` + `output` (structured line diffs); config `server-enable`/`server-port`/`server-token`; 5 NFRs (CHALLENGE section).
 
-**Out-of-scope (v1):** direct LAN bind / in-process TLS / full keybind vocabulary / per-client subscription policy / raw VT streaming / CRDT/offline / multi-noa remoting.
+**Out-of-scope (v1):** direct LAN bind / in-process TLS / full keybind vocabulary / per-client subscription policy / raw VT streaming / CRDT/offline / multi-noa remoting. *(Amendment 2026-07-14: LAN bind has since shipped as opt-in `server-bind`; raw VT streaming / PTY attach is superseded for the noa↔noa consumer by `docs/specs/noa-client-mode.md` — see amendment notes in the Out-of-scope and Considered-but-rejected sections below.)*
 
 **Assumptions:** iOS reaches the server via a tunnel / loopback bind is possible even under sandbox (degrade if not) / IDs have a stable u64 representation / `about_to_wait` update frequency satisfies push-latency requirements.
 
@@ -195,6 +195,7 @@
 - Direct LAN bind / in-process TLS (iOS terminates via tunnel) / UDS transport (mentioned only as a degrade-path investigation topic for OQ-1).
 - Full keybind vocabulary passthrough / per-client subscription policy.
 - Raw VT stream delivery / PTY attach / CRDT/offline sync / multi-noa remoting.
+  - **Amendment (2026-07-14):** raw VT delivery / PTY attach is reintroduced as an **additive extension** by `docs/specs/noa-client-mode.md` (`noa.attach` + dedicated attach channel + new `attach` scope), scoped to the noa↔noa Client Mode consumer. The original rejection rationale — thin clients must not reimplement VT interpretation — does not apply when the client is a full noa instance carrying the identical `noa-vt`/`noa-grid` engine. Dashboard/iOS-class clients remain on the structured-diff surface; nothing in this spec's shipped surface changes.
 
 ## Open Questions
 
@@ -267,5 +268,5 @@
 - A. Control-mode line protocol — custom-framing maintenance tax, unsuited to typed clients (iOS).
 - C. gRPC mux — heavyweight (tonic/protoc/mTLS), overkill for near-term needs.
 - D. REST+SSE — weak for high-frequency bidirectional traffic, two separate mental models.
-- E. PTY attach — raw VT delivery rejected (requires client-side VT interpretation).
+- E. PTY attach — raw VT delivery rejected (requires client-side VT interpretation). *(Amendment 2026-07-14: revived for the noa↔noa Client Mode consumer only — see `docs/specs/noa-client-mode.md`; the rejection stands for thin/typed clients.)*
 - F. CRDT document — too ambitious, dependency weight too high. Only the "scrollback=log/viewport=snapshot" state-splitting idea was borrowed for the design.

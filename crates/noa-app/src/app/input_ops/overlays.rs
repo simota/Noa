@@ -8,6 +8,7 @@ pub(in crate::app) enum ActiveOverlay {
     Search,
     ThemeSettings,
     ProcessMonitor,
+    CopyMode,
 }
 
 /// The R-3 exclusion gate every one of the three overlay open-paths
@@ -22,6 +23,7 @@ fn active_overlay_gate(
     search_open: bool,
     theme_settings_open: bool,
     process_monitor_open: bool,
+    copy_mode_open: bool,
 ) -> ActiveOverlay {
     if command_palette_open {
         ActiveOverlay::CommandPalette
@@ -33,6 +35,8 @@ fn active_overlay_gate(
         ActiveOverlay::ThemeSettings
     } else if process_monitor_open {
         ActiveOverlay::ProcessMonitor
+    } else if copy_mode_open {
+        ActiveOverlay::CopyMode
     } else {
         ActiveOverlay::None
     }
@@ -79,6 +83,33 @@ impl App {
             return;
         };
 
+        self.show_send_selection_picker(source_window_id, source_pane, selected_text, targets);
+    }
+
+    pub(in crate::app) fn open_send_selection_picker_with_payload(
+        &mut self,
+        source_window_id: WindowId,
+        source_pane: PaneId,
+        selected_text: String,
+    ) {
+        if selected_text.is_empty() {
+            return;
+        }
+        let Some(targets) = self.available_send_selection_targets(source_window_id, source_pane)
+        else {
+            return;
+        };
+
+        self.show_send_selection_picker(source_window_id, source_pane, selected_text, targets);
+    }
+
+    fn show_send_selection_picker(
+        &mut self,
+        source_window_id: WindowId,
+        source_pane: PaneId,
+        selected_text: String,
+        targets: Vec<SendSelectionTarget>,
+    ) {
         self.send_selection_picker = Some(SendSelectionPickerSession {
             window_id: source_window_id,
             source_pane,
@@ -104,6 +135,23 @@ impl App {
         source_window_id: WindowId,
         source_pane: PaneId,
     ) -> Option<(String, Vec<SendSelectionTarget>)> {
+        let targets = self.available_send_selection_targets(source_window_id, source_pane)?;
+
+        let selected_text = self
+            .windows
+            .get(&source_window_id)
+            .and_then(|state| state.surfaces.get(&source_pane))
+            .and_then(|surface| surface.terminal.lock().selected_text());
+        let selected_text = selected_text.filter(|text| !text.is_empty())?;
+
+        Some((selected_text, targets))
+    }
+
+    fn available_send_selection_targets(
+        &self,
+        source_window_id: WindowId,
+        source_pane: PaneId,
+    ) -> Option<Vec<SendSelectionTarget>> {
         if self.active_overlay(source_window_id) != ActiveOverlay::None
             || self
                 .confirm_dialog
@@ -121,19 +169,12 @@ impl App {
             return None;
         }
 
-        let selected_text = self
-            .windows
-            .get(&source_window_id)
-            .and_then(|state| state.surfaces.get(&source_pane))
-            .and_then(|surface| surface.terminal.lock().selected_text());
-        let selected_text = selected_text.filter(|text| !text.is_empty())?;
-
         let targets = self.send_selection_targets(source_window_id, source_pane);
         if targets.is_empty() {
             return None;
         }
 
-        Some((selected_text, targets))
+        Some(targets)
     }
 
     fn send_selection_targets(
@@ -364,6 +405,9 @@ impl App {
             self.process_monitor
                 .as_ref()
                 .is_some_and(|s| s.window_id == window_id),
+            self.copy_mode
+                .as_ref()
+                .is_some_and(|s| s.window_id == window_id),
         )
     }
 }
@@ -378,7 +422,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn command_palette_open_refuses_theme_settings() {
         assert_eq!(
-            active_overlay_gate(true, false, false, false, false),
+            active_overlay_gate(true, false, false, false, false, false),
             ActiveOverlay::CommandPalette
         );
     }
@@ -386,7 +430,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn send_selection_picker_refuses_other_overlays() {
         assert_eq!(
-            active_overlay_gate(false, true, false, false, false),
+            active_overlay_gate(false, true, false, false, false, false),
             ActiveOverlay::SendSelectionPicker
         );
     }
@@ -398,7 +442,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn theme_settings_open_refuses_palette_and_search() {
         assert_eq!(
-            active_overlay_gate(false, false, false, true, false),
+            active_overlay_gate(false, false, false, true, false, false),
             ActiveOverlay::ThemeSettings
         );
     }
@@ -409,7 +453,7 @@ mod active_overlay_gate_tests {
     #[test]
     fn search_open_refuses_theme_settings() {
         assert_eq!(
-            active_overlay_gate(false, false, true, false, false),
+            active_overlay_gate(false, false, true, false, false, false),
             ActiveOverlay::Search
         );
     }
@@ -420,8 +464,20 @@ mod active_overlay_gate_tests {
     #[test]
     fn process_monitor_open_refuses_other_overlays() {
         assert_eq!(
-            active_overlay_gate(false, false, false, false, true),
+            active_overlay_gate(false, false, false, false, true, false),
             ActiveOverlay::ProcessMonitor
+        );
+    }
+
+    #[test]
+    fn copy_mode_excludes_other_overlays_but_has_lower_modal_priority() {
+        assert_eq!(
+            active_overlay_gate(false, false, false, false, false, true),
+            ActiveOverlay::CopyMode
+        );
+        assert_eq!(
+            active_overlay_gate(true, false, false, false, false, true),
+            ActiveOverlay::CommandPalette
         );
     }
 }
@@ -468,7 +524,7 @@ mod palette_enter_decision_tests {
         assert!(decision.close_palette);
         let palette_open_after_enter = !decision.close_palette;
         assert_eq!(
-            active_overlay_gate(palette_open_after_enter, false, false, false, false),
+            active_overlay_gate(palette_open_after_enter, false, false, false, false, false),
             ActiveOverlay::None
         );
     }

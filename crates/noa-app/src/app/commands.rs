@@ -50,6 +50,9 @@ impl App {
         if overview_should_intercept_command(command, self.overview_visible, origin) {
             return;
         }
+        if self.handle_copy_mode_before_app_command(command) {
+            return;
+        }
         // C1 (FM1): dispatching any command means leaving the palette. Close
         // it here so a command routed around the palette's own Enter path —
         // notably a menu-bar click while the palette is open — can't leave
@@ -151,6 +154,11 @@ impl App {
             AppCommand::FontSize(action) => self.handle_font_size_action(action),
             AppCommand::Search(action) => self.handle_search_action(action),
             AppCommand::ScrollViewport(scroll) => self.scroll_viewport(scroll),
+            AppCommand::CopyMode(action) => {
+                if let Some(window_id) = self.focused {
+                    self.start_copy_mode(window_id, action);
+                }
+            }
             AppCommand::ToggleCommandPalette => self.toggle_command_palette(),
             AppCommand::OpenThemePicker => self.open_theme_settings(ThemeSettingsMode::Theme),
             AppCommand::OpenSettings => self.open_theme_settings(ThemeSettingsMode::Settings),
@@ -163,6 +171,7 @@ impl App {
             AppCommand::CloseWindow => self.request_close_window(event_loop),
             AppCommand::Quit => self.request_quit(event_loop),
         }
+        self.reconcile_copy_mode_after_app_command();
     }
 
     /// Toggle the single app-wide command palette (R-5). Opening binds it to

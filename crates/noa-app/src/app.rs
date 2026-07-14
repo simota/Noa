@@ -31,14 +31,16 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{MonitorHandleExtMacOS, WindowAttributesExtMacOS, WindowExtMacOS};
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
 use crate::clipboard::{self, PasteContents, SystemClipboard};
 use crate::command_palette::{self, CommandPalette};
-use crate::commands::{FontSizeAction, KeybindEngine, SearchAction, TerminalAction};
+use crate::commands::{
+    CopyModeAction, FontSizeAction, KeybindEngine, SearchAction, TerminalAction,
+};
 use crate::events::UserEvent;
 use crate::input;
 use crate::link_open;
@@ -214,6 +216,14 @@ pub struct App {
     hovered_link: Option<(WindowId, PaneId)>,
     /// The open search prompt (Cmd+F), if any — see [`SearchPromptSession`].
     search_prompt: Option<SearchPromptSession>,
+    /// Keyboard copy mode, bound to exactly one focused window/pane.
+    copy_mode: Option<CopyModeSession>,
+    /// Physical presses consumed by copy mode whose matching Kitty release
+    /// must not reach the pty, even when the press itself exited the mode.
+    copy_mode_suppressed_releases: HashSet<PhysicalKey>,
+    /// Enter/Escape presses consumed by copy mode. Their auto-repeats stay
+    /// suppressed until release, even when the initial press ended the mode.
+    copy_mode_suppressed_repeats: HashSet<PhysicalKey>,
     /// The open command palette (`cmd+shift+p`), if any — see
     /// [`CommandPaletteSession`].
     command_palette: Option<CommandPaletteSession>,
@@ -431,6 +441,9 @@ impl App {
             attention_blink_deadline: None,
             hovered_link: None,
             search_prompt: None,
+            copy_mode: None,
+            copy_mode_suppressed_releases: HashSet::new(),
+            copy_mode_suppressed_repeats: HashSet::new(),
             command_palette: None,
             send_selection_picker: None,
             theme_settings: None,

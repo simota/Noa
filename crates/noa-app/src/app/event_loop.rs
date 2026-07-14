@@ -259,6 +259,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // exiting tears the whole drop-down down rather than routing
                 // through the tab-close path (which walks `window_order`).
                 if self.is_quick_terminal_window(window_id) {
+                    self.end_copy_mode_for_window(window_id);
                     self.destroy_quick_terminal();
                 } else {
                     self.close_pane_after_pty_exit(event_loop, window_id, pane_id)
@@ -300,6 +301,7 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested if self.is_quick_terminal_window(window_id) => {
                 // Closing the drop-down just hides it; it isn't a real tab.
+                self.end_copy_mode_for_window(window_id);
                 self.start_quick_terminal_hide();
             }
             WindowEvent::CloseRequested => self.request_close_tab(event_loop, window_id),
@@ -312,11 +314,15 @@ impl ApplicationHandler<UserEvent> for App {
             // displays at 60Hz and 120Hz) — re-derive the redraw floor here
             // too (FIX 1).
             WindowEvent::Moved(_) => self.refresh_redraw_floor(window_id),
-            WindowEvent::Resized(size) => self.on_resize(window_id, size),
+            WindowEvent::Resized(size) => {
+                self.end_copy_mode_for_window(window_id);
+                self.on_resize(window_id, size);
+            }
             WindowEvent::ThemeChanged(theme) => self.on_system_appearance_changed(theme),
             WindowEvent::Focused(true) => {
                 self.focused = Some(window_id);
                 self.os_focused = Some(window_id);
+                self.end_copy_mode_if_focus_changed();
                 if self.is_quick_terminal_window(window_id) {
                     self.mark_quick_terminal_focused(window_id);
                 }
@@ -338,6 +344,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Focused(false) => {
+                self.end_copy_mode_for_window(window_id);
                 // Only clear if this window is the one we recorded as focused —
                 // when macOS switches between our own windows the incoming
                 // `Focused(true)` may already have repointed `os_focused`, and
@@ -442,12 +449,25 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Ime(event) => self.on_ime_event(window_id, event),
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+                if pressed
+                    && self.copy_mode_key_repeat_is_suppressed(event.physical_key, event.repeat)
+                {
+                    return;
+                }
                 if pressed {
                     // Any keypress snaps the focused cursor back to its visible
                     // blink phase and restarts the interval, matching common
                     // terminal behavior (typing shouldn't leave the cursor
                     // stuck invisible mid-blink).
                     self.reset_cursor_blink_phase();
+                }
+                // Copy mode suppresses only releases paired with presses it
+                // consumed. Unmatched releases continue to normal encoding;
+                // the mode exits later only if that encoding produces actual
+                // pty bytes. This runs before modal release swallowing so a
+                // key that opened a modal cannot leave stale pairing state.
+                if !pressed && self.handle_copy_mode_key_release(window_id, event.physical_key) {
+                    return;
                 }
                 // IME composition and the modal UI layers (confirm dialog,
                 // search prompt, command palette) fully own the keyboard while
@@ -530,7 +550,13 @@ impl ApplicationHandler<UserEvent> for App {
                     .is_some_and(|session| session.window_id == window_id)
                 {
                     if pressed {
+                        let copy_mode_was_active = self.copy_mode.is_some();
                         self.handle_command_palette_key(event_loop, window_id, &event);
+                        self.remember_copy_mode_activation_press(
+                            window_id,
+                            event.physical_key,
+                            copy_mode_was_active,
+                        );
                     }
                     return;
                 }
@@ -579,6 +605,12 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 if pressed
+                    && self.copy_mode.is_some()
+                    && self.handle_copy_mode_key(event_loop, window_id, &event)
+                {
+                    return;
+                }
+                if pressed
                     && self
                         .windows
                         .get_mut(&window_id)
@@ -589,11 +621,39 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     return;
                 }
+                let resolved_command = self.keybinds.resolve(&event.logical_key, self.modifiers);
+                let mut copy_mode_directional_passthrough =
+                    resolved_command.is_some_and(|command| {
+                        self.copy_mode_directional_action_passes_through(window_id, command)
+                    });
                 if pressed
-                    && let Some(command) = self.keybinds.resolve(&event.logical_key, self.modifiers)
+                    && let Some(command) = resolved_command
+                    && !copy_mode_directional_passthrough
                 {
-                    self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);
-                    return;
+                    let copy_mode_was_active = self.copy_mode.is_some();
+                    if let AppCommand::CopyMode(action @ CopyModeAction::Extend(_)) = command {
+                        if self.start_copy_mode(window_id, action) {
+                            self.remember_copy_mode_activation_press(
+                                window_id,
+                                event.physical_key,
+                                copy_mode_was_active,
+                            );
+                            return;
+                        }
+                        // The terminal may have switched to the alternate
+                        // screen after the first check. A rejected directional
+                        // start must fall through to the pty encoder, including
+                        // bypassing the generic Cmd-key swallow below.
+                        copy_mode_directional_passthrough = true;
+                    } else {
+                        self.handle_app_command(event_loop, command, CommandOrigin::TerminalWindow);
+                        self.remember_copy_mode_activation_press(
+                            window_id,
+                            event.physical_key,
+                            copy_mode_was_active,
+                        );
+                        return;
+                    }
                 }
                 // R-31: ⌘Z re-commits a still-live theme-settings Undo
                 // toast. Checked here (past every modal branch above, so it
@@ -617,7 +677,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // that terminal owns focus and must keep accepting shell input.
                 // Cmd-based combos are app shortcuts, not shell input. Unknown
                 // Cmd combos remain swallowed to match the previous behavior.
-                if self.modifiers.super_key() {
+                if input_ops::copy_mode_should_swallow_super_key(
+                    self.modifiers,
+                    copy_mode_directional_passthrough,
+                ) {
                     return;
                 }
                 let app_cursor_keys = self.app_cursor_keys(window_id);
@@ -644,7 +707,24 @@ impl ApplicationHandler<UserEvent> for App {
                     pressed,
                     event.repeat,
                 );
+                if input_ops::copy_mode_should_exit_for_pty_bytes(
+                    self.copy_mode.is_some(),
+                    &event.logical_key,
+                    event.physical_key,
+                    bytes.as_deref(),
+                ) {
+                    self.end_copy_mode_for_window(window_id);
+                }
                 if let Some(bytes) = bytes {
+                    if pressed {
+                        // A later pty-bound repeat/press for the same physical
+                        // key supersedes an older copy-mode-consumed press;
+                        // its eventual release must now reach the pty.
+                        self.copy_mode_suppressed_releases
+                            .remove(&event.physical_key);
+                        self.copy_mode_suppressed_repeats
+                            .remove(&event.physical_key);
+                    }
                     // Typing follows the prompt: writing keyboard input snaps
                     // a scrolled-back viewport to the live bottom (Ghostty
                     // behavior).
@@ -1064,6 +1144,9 @@ impl App {
         state: ElementState,
         button: MouseButton,
     ) {
+        if state == ElementState::Pressed {
+            self.end_copy_mode_for_window(window_id);
+        }
         // A left press inside the sidebar band is consumed there (card switch,
         // toolbar `+`/`…`, per-card menu) and never reaches the terminal/split
         // handling (FR-3/FR-6/FR-7).
@@ -1206,6 +1289,7 @@ impl App {
     }
 
     pub(super) fn on_mouse_wheel(&mut self, window_id: WindowId, delta: MouseScrollDelta) {
+        self.end_copy_mode_for_window(window_id);
         // A wheel turn over the sidebar band scrolls its card list (FR-15),
         // consuming the event so the terminal viewport doesn't also scroll.
         let sidebar_lines = match delta {
@@ -1329,6 +1413,9 @@ impl App {
             });
 
         if let (Some(pane_id), Some(bytes)) = (pane_id, bytes) {
+            if Self::ime_commit_should_end_copy_mode(false, &event, true) {
+                self.end_copy_mode_for_window(window_id);
+            }
             // Committed IME text follows the prompt like typed keys do.
             self.mark_pane_user_input(window_id, pane_id);
             self.snap_focused_viewport_to_bottom(window_id);
@@ -1366,7 +1453,15 @@ impl App {
             return;
         };
 
-        let snapshot = apply_viewport_scroll_and_snapshot(&mut terminal.lock(), grid_size, scroll);
+        let (snapshot, viewport_changed) = {
+            let mut terminal = terminal.lock();
+            let viewport_before = terminal.viewport_offset();
+            let snapshot = apply_viewport_scroll_and_snapshot(&mut terminal, grid_size, scroll);
+            (snapshot, terminal.viewport_offset() != viewport_before)
+        };
+        if viewport_changed {
+            self.invalidate_copy_mode_held_snapshot(window_id, pane_id);
+        }
         *overview_snapshot.lock() = Some(snapshot);
         self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
         self.request_overview_redraw();
@@ -1391,7 +1486,15 @@ impl App {
             return;
         };
 
-        let snapshot = apply_mouse_wheel_viewport_scroll_and_snapshot(&mut terminal.lock(), scroll);
+        let (snapshot, viewport_changed) = {
+            let mut terminal = terminal.lock();
+            let viewport_before = terminal.viewport_offset();
+            let snapshot = apply_mouse_wheel_viewport_scroll_and_snapshot(&mut terminal, scroll);
+            (snapshot, terminal.viewport_offset() != viewport_before)
+        };
+        if viewport_changed {
+            self.invalidate_copy_mode_held_snapshot(window_id, pane_id);
+        }
         *overview_snapshot.lock() = Some(snapshot);
         self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
         self.request_overview_redraw();

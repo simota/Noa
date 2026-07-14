@@ -536,6 +536,15 @@ impl App {
     pub(super) fn tick_resize_throttle(&mut self) -> Option<Instant> {
         let now = Instant::now();
         let mut next: Option<Instant> = None;
+        let copy_resize_due = self.copy_mode.as_ref().is_some_and(|session| {
+            self.windows
+                .get(&session.window_id)
+                .and_then(|state| state.resize_throttle.next_deadline())
+                .is_some_and(|deadline| deadline <= now)
+        });
+        if copy_resize_due {
+            self.end_copy_mode();
+        }
         for state in self.windows.values_mut() {
             if let Some(targets) = state.resize_throttle.poll(now) {
                 apply_pane_grid_resize(state, &targets);

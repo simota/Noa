@@ -636,6 +636,7 @@ impl App {
     }
 
     pub(super) fn close_tab(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId) {
+        self.end_copy_mode_for_window(window_id);
         // The Overview overlay lives inside its host window; closing the host
         // tears the overlay down with it (before `close_tab_outcome`, so the
         // last-window case quits instead of keeping a ghost overlay alive).
@@ -892,6 +893,7 @@ impl App {
         window_id: WindowId,
         pane_id: PaneId,
     ) {
+        self.end_copy_mode_for_pane(window_id, pane_id);
         let should_close_tab = self
             .windows
             .get(&window_id)

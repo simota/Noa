@@ -401,6 +401,24 @@ impl PagedScrollback {
         self.spare = None;
     }
 
+    /// Insert older rows before the currently retained history. Repacking is
+    /// intentional: pages are append-only on the hot path, while remote
+    /// attach backfill is a one-time cold-path operation.
+    pub(crate) fn prepend_rows(&mut self, rows: &[Row]) -> usize {
+        if rows.is_empty() || self.limit_bytes == 0 {
+            return 0;
+        }
+        let mut retained = Vec::with_capacity(self.total_rows);
+        self.for_each_row(0..self.total_rows, |_, row| retained.push(row.clone()));
+        self.clear();
+
+        let mut evicted = 0;
+        for row in rows.iter().chain(&retained) {
+            evicted += self.push_row(row);
+        }
+        evicted
+    }
+
     /// Pack one row that fell off the live grid and append it. Returns the
     /// number of rows evicted (whole pages) to stay within the byte limit.
     pub(crate) fn push_row(&mut self, row: &Row) -> usize {

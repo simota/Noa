@@ -207,6 +207,25 @@ fn take_pending_writes_drains_queue() {
 }
 
 #[test]
+fn reply_writes_can_be_suppressed_for_remote_replicas() {
+    let mut t = run(b"\x1b[3;5H\x1b[6n");
+
+    t.set_reply_writes_enabled(false);
+    assert!(t.pending_writes.is_empty(), "queued reply was not cleared");
+
+    let mut stream = Stream::new();
+    // RIS must not turn reply forwarding back on for a remote replica.
+    stream.feed(b"\x1b[c\x1b[6n\x1bc\x1b[c", &mut t);
+    assert!(t.take_pending_writes().is_empty());
+    assert!(t.pending_writes.is_empty());
+
+    t.set_reply_writes_enabled(true);
+    assert!(t.take_pending_writes().is_empty(), "suppressed reply leaked late");
+    stream.feed(b"\x1b[3;5H\x1b[6n", &mut t);
+    assert_eq!(t.take_pending_writes(), b"\x1b[3;5R");
+}
+
+#[test]
 fn da1_reply() {
     let t = run(b"\x1b[c");
     assert_eq!(t.pending_writes, b"\x1b[?62;4;22c");

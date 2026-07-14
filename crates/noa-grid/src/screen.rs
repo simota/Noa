@@ -292,6 +292,21 @@ impl Screen {
         self.clear_copy_mode_points();
     }
 
+    /// The character last passed through [`Screen::print`] on this screen,
+    /// used by `REP` (`CSI b`) and restored verbatim by the client-mode
+    /// seed protocol (`crate::terminal::seed`).
+    pub(crate) fn last_printed(&self) -> Option<char> {
+        self.last_printed
+    }
+
+    /// Seed-only: sets `last_printed` without touching grid content, so the
+    /// synthetic seed can recreate a replica's `REP` state exactly even
+    /// when the source's last-printed character is no longer the last cell
+    /// visited while repainting the grid.
+    pub(crate) fn set_last_printed(&mut self, ch: char) {
+        self.last_printed = Some(ch);
+    }
+
     fn pen_attrs(&self) -> CellAttrs {
         let mut attrs = self.cursor.attrs;
         attrs.remove(CellAttrs::WIDE | CellAttrs::WIDE_SPACER);

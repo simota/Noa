@@ -24,6 +24,10 @@ impl Default for CharsetState {
 }
 
 impl CharsetState {
+    pub(crate) fn designations(&self) -> (Charset, Charset, CharsetSlot) {
+        (self.g0, self.g1, self.active)
+    }
+
     /// `SCS` — designate `set` into `slot`.
     pub fn designate(&mut self, slot: CharsetSlot, set: Charset) {
         match slot {

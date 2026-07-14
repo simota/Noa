@@ -104,6 +104,7 @@ fn baseline_snapshot(chars: [char; 3]) -> FrameSnapshot {
         rows,
         row_dirty: vec![false, false, false],
         cursor: Cursor::default(),
+        copy_cursor: None,
         colors: TerminalColors::default(),
         selection: None,
         search: SearchState::default(),

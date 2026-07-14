@@ -14,7 +14,11 @@ impl App {
             return;
         };
 
-        if let Err(err) = self.clipboard.set_text(&selected_text) {
+        self.write_text_to_clipboard(&selected_text);
+    }
+
+    pub(in crate::app) fn write_text_to_clipboard(&mut self, text: &str) {
+        if let Err(err) = self.clipboard.set_text(text) {
             log::warn!("failed to copy selection to clipboard: {err}");
         }
     }
@@ -192,6 +196,7 @@ impl App {
         message: String,
         action: ConfirmAction,
     ) {
+        self.end_copy_mode_for_window(window_id);
         self.confirm_dialog = Some(ConfirmDialogSession {
             window_id,
             message,

@@ -195,6 +195,10 @@ pub struct FrameSnapshot {
     /// rebuilding the whole pane. `0` means no translation is possible.
     pub scroll_shift: usize,
     pub cursor: Cursor,
+    /// Copy-mode cursor in selection/storage coordinates. When present the
+    /// renderer suppresses the shell cursor and draws this point as a steady
+    /// hollow block without adding GPU bindings.
+    pub copy_cursor: Option<SelectionPoint>,
     pub colors: TerminalColors,
     pub selection: Option<Selection>,
     pub search: SearchState,
@@ -385,18 +389,19 @@ impl FrameSnapshot {
         let rows_n = screen.rows;
         let selection = screen.selection;
         let search = screen.search.clone();
+        let scroll_shift = screen.take_scroll_shift();
         let mut row_dirty = Vec::new();
         screen.take_visible_rows_with_damage_into_reusing_clean(
             rows_buf,
             &mut row_dirty,
-            reuse_clean_rows,
+            reuse_clean_rows && scroll_shift == 0,
         );
-        let scroll_shift = screen.take_scroll_shift();
         FrameSnapshot {
             rows: std::mem::take(rows_buf),
             row_dirty,
             scroll_shift,
             cursor,
+            copy_cursor: None,
             colors,
             selection,
             search,
@@ -471,6 +476,7 @@ impl FrameSnapshot {
             row_dirty,
             scroll_shift: 0,
             cursor,
+            copy_cursor: None,
             colors,
             selection,
             search,
@@ -510,6 +516,7 @@ impl FrameSnapshot {
         snapshot.row_dirty.resize(snapshot.rows.len(), true);
         snapshot.scroll_shift = 0;
         snapshot.cursor = cursor;
+        snapshot.copy_cursor = None;
         snapshot.colors = colors;
         snapshot.selection = selection;
         snapshot.search = search;
@@ -727,6 +734,29 @@ mod tests {
 
         assert_eq!(snap.rows[0].cells[0].ch, 'B');
         assert_eq!(snap.rows[1].cells[0].ch, 'C');
+    }
+
+    #[test]
+    fn recycled_snapshot_reclones_rows_for_a_pinned_scroll() {
+        let mut term = Terminal::new(GridSize::new(2, 3));
+        put(&mut term, 0, 'A');
+        put(&mut term, 1, 'B');
+        put(&mut term, 2, 'C');
+        let first = FrameSnapshot::from_terminal(&mut term);
+        let base = (first.row_base, first.abs_row_base);
+        let recycle = first.into_recycle();
+
+        term.primary.set_viewport_locked(true);
+        put(&mut term, 0, 'X');
+        term.primary.grid[0].dirty = true;
+        term.primary.scroll_up_region(1);
+        let snap = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
+
+        assert_eq!((snap.row_base, snap.abs_row_base), base);
+        assert_eq!(snap.scroll_shift, 1);
+        assert_eq!(snap.rows[0].cells[0].ch, 'X');
+        assert_eq!(snap.rows[1].cells[0].ch, 'B');
+        assert_eq!(snap.rows[2].cells[0].ch, 'C');
     }
 
     #[test]

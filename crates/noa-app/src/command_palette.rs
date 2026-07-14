@@ -12,7 +12,8 @@
 //! menu bar and keybinds already dispatch.
 
 use crate::commands::{
-    AppCommand, FontSizeAction, KeybindEngine, SearchAction, TerminalAction, ViewportScroll,
+    AppCommand, CopyModeAction, FontSizeAction, KeybindEngine, SearchAction, TerminalAction,
+    ViewportScroll,
 };
 use crate::split_tree::Direction;
 
@@ -53,6 +54,19 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::ScrollViewport(ViewportScroll::Bottom) => "Scroll to Bottom",
         AppCommand::ScrollViewport(ViewportScroll::PrevPrompt) => "Jump to Previous Prompt",
         AppCommand::ScrollViewport(ViewportScroll::NextPrompt) => "Jump to Next Prompt",
+        AppCommand::CopyMode(crate::commands::CopyModeAction::CursorOnly) => "Enter Copy Mode",
+        AppCommand::CopyMode(crate::commands::CopyModeAction::Extend(
+            noa_grid::CopyDirection::Left,
+        )) => "Select Left in Copy Mode",
+        AppCommand::CopyMode(crate::commands::CopyModeAction::Extend(
+            noa_grid::CopyDirection::Right,
+        )) => "Select Right in Copy Mode",
+        AppCommand::CopyMode(crate::commands::CopyModeAction::Extend(
+            noa_grid::CopyDirection::Up,
+        )) => "Select Up in Copy Mode",
+        AppCommand::CopyMode(crate::commands::CopyModeAction::Extend(
+            noa_grid::CopyDirection::Down,
+        )) => "Select Down in Copy Mode",
         AppCommand::NewTab => "New Tab",
         AppCommand::NewWindow => "New Window",
         AppCommand::NewSplitLeft => "Add Pane Left",
@@ -145,6 +159,11 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ScrollViewport(ViewportScroll::Bottom),
         AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
         AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
+        AppCommand::CopyMode(CopyModeAction::CursorOnly),
+        AppCommand::CopyMode(CopyModeAction::Extend(noa_grid::CopyDirection::Left)),
+        AppCommand::CopyMode(CopyModeAction::Extend(noa_grid::CopyDirection::Right)),
+        AppCommand::CopyMode(CopyModeAction::Extend(noa_grid::CopyDirection::Up)),
+        AppCommand::CopyMode(CopyModeAction::Extend(noa_grid::CopyDirection::Down)),
         AppCommand::NewTab,
         AppCommand::NewWindow,
         AppCommand::NewSplitLeft,
@@ -334,6 +353,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::ToggleProcessMonitor => CommandCategory::View,
         AppCommand::Search(_) => CommandCategory::Search,
         AppCommand::ScrollViewport(_) => CommandCategory::Scroll,
+        AppCommand::CopyMode(_) => CommandCategory::Clipboard,
         AppCommand::NewSplitLeft
         | AppCommand::NewSplitRight
         | AppCommand::NewSplitUp
@@ -597,6 +617,7 @@ mod tests {
             AppCommand::EditConfigFile,
             AppCommand::OpenThemePicker,
             AppCommand::OpenSettings,
+            AppCommand::ToggleProcessMonitor,
             AppCommand::ReloadConfig,
             AppCommand::Copy,
             AppCommand::Paste,
@@ -621,6 +642,11 @@ mod tests {
             AppCommand::ScrollViewport(ViewportScroll::Bottom),
             AppCommand::ScrollViewport(ViewportScroll::PrevPrompt),
             AppCommand::ScrollViewport(ViewportScroll::NextPrompt),
+            AppCommand::CopyMode(CopyModeAction::CursorOnly),
+            AppCommand::CopyMode(CopyModeAction::Extend(noa_grid::CopyDirection::Left)),
+            AppCommand::CopyMode(CopyModeAction::Extend(noa_grid::CopyDirection::Right)),
+            AppCommand::CopyMode(CopyModeAction::Extend(noa_grid::CopyDirection::Up)),
+            AppCommand::CopyMode(CopyModeAction::Extend(noa_grid::CopyDirection::Down)),
             AppCommand::NewTab,
             AppCommand::NewWindow,
             AppCommand::NewSplitLeft,
@@ -642,6 +668,7 @@ mod tests {
             AppCommand::CloseTab,
             AppCommand::NextTab,
             AppCommand::PrevTab,
+            AppCommand::SetTabTitle,
             AppCommand::CloseWindow,
             AppCommand::Quit,
             AppCommand::ToggleCommandPalette,
@@ -704,6 +731,27 @@ mod tests {
         assert!(
             split_left < split_right,
             "Add Pane Left precedes Add Pane Right"
+        );
+    }
+
+    #[test]
+    fn copy_mode_actions_are_listed_and_cursor_only_is_searchable() {
+        let copy_mode_commands = [
+            AppCommand::CopyMode(CopyModeAction::CursorOnly),
+            AppCommand::CopyMode(CopyModeAction::Extend(noa_grid::CopyDirection::Left)),
+            AppCommand::CopyMode(CopyModeAction::Extend(noa_grid::CopyDirection::Right)),
+            AppCommand::CopyMode(CopyModeAction::Extend(noa_grid::CopyDirection::Up)),
+            AppCommand::CopyMode(CopyModeAction::Extend(noa_grid::CopyDirection::Down)),
+        ];
+        for command in copy_mode_commands {
+            assert!(command_palette_entries().contains(&command));
+        }
+
+        let mut palette = CommandPalette::open();
+        palette.push_text("enter copy mode");
+        assert_eq!(
+            palette.selected_command(),
+            Some(AppCommand::CopyMode(CopyModeAction::CursorOnly))
         );
     }
 

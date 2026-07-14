@@ -586,6 +586,14 @@ pub(super) struct SearchPromptSession {
     pub(super) prompt: SearchPrompt,
 }
 
+/// A keyboard copy-mode session bound to the focused surface at activation.
+pub(super) struct CopyModeSession {
+    pub(super) window_id: WindowId,
+    pub(super) pane_id: PaneId,
+    pub(super) terminal: Arc<Mutex<Terminal>>,
+    pub(super) state: noa_grid::CopyModeState,
+}
+
 /// An open command palette (`cmd+shift+p`), bound to the window it was opened
 /// from. Only one exists at a time app-wide (`App::toggle_command_palette`).
 pub(super) struct CommandPaletteSession {

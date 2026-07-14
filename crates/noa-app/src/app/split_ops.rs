@@ -93,6 +93,10 @@ impl App {
         if !state.contains_pane(pane_id) || state.focused_pane == pane_id {
             return;
         }
+        self.end_copy_mode_for_window(window_id);
+        let Some(state) = self.windows.get(&window_id) else {
+            return;
+        };
         let losing = state.focused_pane;
         let losing_preedit = state
             .surfaces

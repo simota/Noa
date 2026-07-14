@@ -183,7 +183,7 @@ impl App {
     /// is scrolled into scrollback. Called on user input destined for the pty
     /// (keys, IME commits, pastes) so typing always follows the prompt;
     /// program-initiated writes (DA/DSR replies, mouse reports) do not snap.
-    pub(in crate::app) fn snap_focused_viewport_to_bottom(&self, window_id: WindowId) {
+    pub(in crate::app) fn snap_focused_viewport_to_bottom(&mut self, window_id: WindowId) {
         let Some(pane_id) = self.windows.get(&window_id).map(|state| state.focused_pane) else {
             return;
         };
@@ -191,19 +191,20 @@ impl App {
     }
 
     pub(in crate::app) fn snap_pane_viewport_to_bottom(
-        &self,
+        &mut self,
         window_id: WindowId,
         pane_id: PaneId,
     ) {
-        let Some(surface) = self
+        let Some(terminal) = self
             .windows
             .get(&window_id)
             .and_then(|state| state.surfaces.get(&pane_id))
+            .map(|surface| Arc::clone(&surface.terminal))
         else {
             return;
         };
         let snapped = {
-            let mut terminal = surface.terminal.lock();
+            let mut terminal = terminal.lock();
             let scrolled = terminal.viewport_offset() != 0;
             if scrolled {
                 terminal.scroll_viewport_to_bottom();
@@ -211,6 +212,7 @@ impl App {
             scrolled
         };
         if snapped {
+            self.invalidate_copy_mode_held_snapshot(window_id, pane_id);
             self.request_window_redraw(window_id);
         }
     }

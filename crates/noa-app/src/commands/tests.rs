@@ -1,8 +1,9 @@
 use super::{
-    AppCommand, FontSizeAction, KeyBinding, KeybindEngine, KeybindParseError, SearchAction,
-    TerminalAction, ViewportScroll,
+    AppCommand, CopyModeAction, FontSizeAction, KeyBinding, KeybindEngine, KeybindParseError,
+    SearchAction, TerminalAction, ViewportScroll,
 };
 use crate::split_tree::Direction;
+use noa_grid::CopyDirection;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 #[test]
@@ -174,14 +175,30 @@ fn find_action_is_addressable_and_bound_to_cmd_f() {
 }
 
 #[test]
-fn shift_navigation_keys_map_to_viewport_scroll_commands() {
+fn shift_arrows_map_to_directional_copy_mode_gestures() {
+    assert_eq!(
+        AppCommand::from_key(&Key::Named(NamedKey::ArrowLeft), ModifiersState::SHIFT),
+        Some(AppCommand::CopyMode(CopyModeAction::Extend(
+            CopyDirection::Left
+        )))
+    );
+    assert_eq!(
+        AppCommand::from_key(&Key::Named(NamedKey::ArrowRight), ModifiersState::SHIFT),
+        Some(AppCommand::CopyMode(CopyModeAction::Extend(
+            CopyDirection::Right
+        )))
+    );
     assert_eq!(
         AppCommand::from_key(&Key::Named(NamedKey::ArrowUp), ModifiersState::SHIFT),
-        Some(AppCommand::ScrollViewport(ViewportScroll::LineUp))
+        Some(AppCommand::CopyMode(CopyModeAction::Extend(
+            CopyDirection::Up
+        )))
     );
     assert_eq!(
         AppCommand::from_key(&Key::Named(NamedKey::ArrowDown), ModifiersState::SHIFT),
-        Some(AppCommand::ScrollViewport(ViewportScroll::LineDown))
+        Some(AppCommand::CopyMode(CopyModeAction::Extend(
+            CopyDirection::Down
+        )))
     );
     assert_eq!(
         AppCommand::from_key(&Key::Named(NamedKey::PageUp), ModifiersState::SHIFT),
@@ -198,6 +215,41 @@ fn shift_navigation_keys_map_to_viewport_scroll_commands() {
     assert_eq!(
         AppCommand::from_key(&Key::Named(NamedKey::End), ModifiersState::SHIFT),
         Some(AppCommand::ScrollViewport(ViewportScroll::Bottom))
+    );
+}
+
+#[test]
+fn copy_mode_actions_are_configurable_and_directional_defaults_are_rebindable() {
+    let (engine, diagnostics) = KeybindEngine::from_config(&[
+        noa_config::KeybindConfig::Unbind {
+            trigger: "shift+arrowright".to_string(),
+        },
+        noa_config::KeybindConfig::Bind {
+            trigger: "cmd+y".to_string(),
+            action: "copy_mode".to_string(),
+        },
+        noa_config::KeybindConfig::Bind {
+            trigger: "cmd+shift+y".to_string(),
+            action: "copy_mode:right".to_string(),
+        },
+    ]);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        engine.resolve(&Key::Named(NamedKey::ArrowRight), ModifiersState::SHIFT),
+        None
+    );
+    assert_eq!(
+        engine.resolve(&Key::Character("y".into()), ModifiersState::SUPER),
+        Some(AppCommand::CopyMode(CopyModeAction::CursorOnly))
+    );
+    assert_eq!(
+        engine.resolve(
+            &Key::Character("y".into()),
+            ModifiersState::SUPER | ModifiersState::SHIFT
+        ),
+        Some(AppCommand::CopyMode(CopyModeAction::Extend(
+            CopyDirection::Right
+        )))
     );
 }
 
@@ -406,6 +458,14 @@ fn chord_for_reverse_maps_bound_commands_and_reports_none_for_unbound() {
         engine
             .chord_for(AppCommand::ScrollViewport(ViewportScroll::LineUp))
             .as_deref(),
+        None
+    );
+    assert_eq!(
+        engine
+            .chord_for(AppCommand::CopyMode(CopyModeAction::Extend(
+                CopyDirection::Up,
+            )))
+            .as_deref(),
         Some("shift+arrowup")
     );
     assert_eq!(
@@ -464,6 +524,11 @@ fn action_names_map_to_commands() {
         AppCommand::Search(SearchAction::FindPrevious),
         AppCommand::Search(SearchAction::Clear),
         AppCommand::ScrollViewport(ViewportScroll::PageUp),
+        AppCommand::CopyMode(CopyModeAction::CursorOnly),
+        AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Left)),
+        AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Right)),
+        AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Up)),
+        AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Down)),
         AppCommand::NewTab,
         AppCommand::NewWindow,
         AppCommand::NewSplitLeft,

@@ -136,6 +136,19 @@ pub struct Screen {
     scrollback: PagedScrollback,
     scrollback_enabled: bool,
     viewport_offset: usize,
+    /// Keep the currently visible rows anchored while new output enters
+    /// scrollback. Unlike the ordinary `viewport_offset > 0` scroll lock,
+    /// this also pins a viewport activated at the live bottom (`offset == 0`).
+    viewport_locked: bool,
+    /// Copy-mode points mirrored from [`crate::CopyModeState`] so structural
+    /// screen edits can transform them at the same time as their content.
+    copy_mode_cursor: Option<SelectionPoint>,
+    copy_mode_anchor: Option<SelectionPoint>,
+    copy_mode_cursor_was_evicted: bool,
+    copy_mode_anchor_was_evicted: bool,
+    /// Changes when an edit collapses the retained coordinate space in a way
+    /// that cannot safely preserve every copy-mode point.
+    coordinate_generation: u64,
     /// Rows evicted from the front of the scrollback over this screen's whole
     /// lifetime. Lets callers keep session-absolute row coordinates (e.g.
     /// shell-integration marks) stable across scrollback trimming: a stored
@@ -148,6 +161,14 @@ pub struct Screen {
     /// instances instead of a full-pane rebuild.
     scroll_shift: usize,
     last_printed: Option<char>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TrackedCopyModePoints {
+    pub(crate) cursor: SelectionPoint,
+    pub(crate) anchor: Option<SelectionPoint>,
+    pub(crate) cursor_was_evicted: bool,
+    pub(crate) anchor_was_evicted: bool,
 }
 mod edit;
 mod print;
@@ -186,6 +207,12 @@ impl Screen {
             }),
             scrollback_enabled,
             viewport_offset: 0,
+            viewport_locked: false,
+            copy_mode_cursor: None,
+            copy_mode_anchor: None,
+            copy_mode_cursor_was_evicted: false,
+            copy_mode_anchor_was_evicted: false,
+            coordinate_generation: 0,
             scroll_shift: 0,
             rows_evicted: 0,
             last_printed: None,
@@ -195,6 +222,74 @@ impl Screen {
     /// A blank cell carrying the current pen background (background-color-erase).
     fn blank(&self) -> Cell {
         Cell::blank(self.cursor.bg)
+    }
+
+    pub(crate) const fn coordinate_generation(&self) -> u64 {
+        self.coordinate_generation
+    }
+
+    pub(crate) const fn copy_mode_points(&self) -> Option<TrackedCopyModePoints> {
+        match self.copy_mode_cursor {
+            Some(cursor) => Some(TrackedCopyModePoints {
+                cursor,
+                anchor: self.copy_mode_anchor,
+                cursor_was_evicted: self.copy_mode_cursor_was_evicted,
+                anchor_was_evicted: self.copy_mode_anchor_was_evicted,
+            }),
+            None => None,
+        }
+    }
+
+    pub(crate) fn set_copy_mode_points(
+        &mut self,
+        cursor: SelectionPoint,
+        anchor: Option<SelectionPoint>,
+    ) {
+        self.copy_mode_cursor = Some(cursor);
+        self.copy_mode_anchor = anchor;
+        self.copy_mode_cursor_was_evicted = false;
+        self.copy_mode_anchor_was_evicted = false;
+    }
+
+    pub(crate) fn clear_copy_mode_points(&mut self) {
+        self.copy_mode_cursor = None;
+        self.copy_mode_anchor = None;
+        self.copy_mode_cursor_was_evicted = false;
+        self.copy_mode_anchor_was_evicted = false;
+    }
+
+    pub(super) fn shift_copy_mode_points_up(&mut self, rows: usize) {
+        if let Some(cursor) = &mut self.copy_mode_cursor {
+            self.copy_mode_cursor_was_evicted |= cursor.y < rows;
+            cursor.y = cursor.y.saturating_sub(rows);
+        }
+        if let Some(anchor) = &mut self.copy_mode_anchor {
+            self.copy_mode_anchor_was_evicted |= anchor.y < rows;
+            anchor.y = anchor.y.saturating_sub(rows);
+        }
+    }
+
+    pub(super) fn shift_tracked_points_down_from(&mut self, first_row: usize, rows: usize) {
+        let shift = |point: &mut SelectionPoint| {
+            if point.y >= first_row {
+                point.y = point.y.saturating_add(rows);
+            }
+        };
+        if let Some(cursor) = &mut self.copy_mode_cursor {
+            shift(cursor);
+        }
+        if let Some(anchor) = &mut self.copy_mode_anchor {
+            shift(anchor);
+        }
+        if let Some(selection) = &mut self.selection {
+            shift(&mut selection.anchor);
+            shift(&mut selection.focus);
+        }
+    }
+
+    pub(super) fn invalidate_coordinate_space(&mut self) {
+        self.coordinate_generation = self.coordinate_generation.wrapping_add(1);
+        self.clear_copy_mode_points();
     }
 
     fn pen_attrs(&self) -> CellAttrs {
@@ -256,12 +351,11 @@ impl Screen {
         }
     }
 
-    /// Keep a scrolled-back viewport anchored to its content when `n` rows
-    /// enter scrollback: the offset counts back from the live bottom, so it
-    /// must grow with the history for the same rows to stay visible. A
-    /// viewport at the live bottom (`offset == 0`) keeps following output.
-    fn pin_viewport_for_scrollback_push(&mut self, n: usize) {
-        if self.viewport_offset > 0 {
+    /// Keep a historical viewport anchored when rows enter scrollback. An
+    /// explicit live-bottom lock pins only full-height translations; a partial
+    /// region leaves fixed live rows in place and must keep them visible.
+    fn pin_viewport_for_scrollback_push(&mut self, n: usize, full_height: bool) {
+        if self.viewport_offset > 0 || (self.viewport_locked && full_height) {
             self.viewport_offset = (self.viewport_offset + n).min(self.max_viewport_offset());
         }
     }
@@ -296,6 +390,7 @@ impl Screen {
             self.selection = self
                 .selection
                 .and_then(|selection| selection.shift_rows_up(evicted));
+            self.shift_copy_mode_points_up(evicted);
             self.prune_evicted_placements();
         }
         self.clamp_viewport();

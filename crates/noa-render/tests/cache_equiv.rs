@@ -99,6 +99,7 @@ fn fresh_snapshot(term: &Terminal) -> FrameSnapshot {
         row_dirty: vec![true; rows.len()],
         rows,
         cursor,
+        copy_cursor: None,
         colors: term.colors.clone(),
         selection: None,
         search: noa_grid::SearchState::default(),

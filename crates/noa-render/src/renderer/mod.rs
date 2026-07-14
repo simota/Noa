@@ -129,6 +129,21 @@ struct FrameInvalidationKey {
     atlas_eviction_generation: u64,
 }
 
+/// Shell-cursor render state plus copy-mode presence and its projected cursor.
+/// Presence is kept separately so an offscreen copy cursor still suppresses
+/// and invalidates the shell cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CursorCacheKey {
+    shell_x: u16,
+    shell_y: u16,
+    shell_visible: bool,
+    shell_style: CursorStyle,
+    focused: bool,
+    blink_visible: bool,
+    copy_mode_active: bool,
+    copy_cursor: Option<(u16, u16)>,
+}
+
 /// A pane's persisted per-row instance segments (WP4, REQ-PERF-2/3). Three
 /// row-indexed vectors — NOT a per-row `[bg, glyph, deco]` grouping — so the
 /// flatten step can reproduce the existing GLOBAL 3-pass order (all bg, then
@@ -140,12 +155,10 @@ struct PaneRenderCache {
     deco: Vec<Vec<CellInstance>>,
     flat: Vec<CellInstance>,
     key: Option<FrameInvalidationKey>,
-    /// `(cursor.x, cursor.y, cursor.visible, cursor.style, focused,
-    /// cursor_blink_visible)` as of the last rebuild — used only to detect
-    /// a change to the cursor's position OR its rendered shape (movement,
-    /// DECSCUSR style, focus, or blink phase), which dirties exactly the
-    /// two affected rows (not a full-pane invalidation trigger).
-    prev_cursor: Option<(u16, u16, bool, CursorStyle, bool, bool)>,
+    /// Shell cursor state plus the optional projected copy cursor as of the
+    /// last rebuild. Changes dirty exactly the affected rows instead of
+    /// invalidating the full pane.
+    prev_cursor: Option<CursorCacheKey>,
     /// `FrameSnapshot::row_base` as of the last rebuild. The scroll fast
     /// path requires it to have advanced by exactly `scroll_shift` (i.e. no
     /// scrollback eviction happened), because selection/search highlights

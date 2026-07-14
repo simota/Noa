@@ -1,7 +1,10 @@
-use super::command::{AppCommand, FontSizeAction, SearchAction, TerminalAction, ViewportScroll};
+use super::command::{
+    AppCommand, CopyModeAction, FontSizeAction, SearchAction, TerminalAction, ViewportScroll,
+};
 use super::key_token::{KeyTrigger, KeybindParseError};
 use crate::split_tree::Direction;
 use noa_config::KeybindConfig;
+use noa_grid::CopyDirection;
 use winit::keyboard::{Key, ModifiersState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,12 +67,20 @@ impl Default for KeybindEngine {
                 AppCommand::Search(SearchAction::FindPrevious),
             ),
             (
+                "shift+arrowleft",
+                AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Left)),
+            ),
+            (
+                "shift+arrowright",
+                AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Right)),
+            ),
+            (
                 "shift+arrowup",
-                AppCommand::ScrollViewport(ViewportScroll::LineUp),
+                AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Up)),
             ),
             (
                 "shift+arrowdown",
-                AppCommand::ScrollViewport(ViewportScroll::LineDown),
+                AppCommand::CopyMode(CopyModeAction::Extend(CopyDirection::Down)),
             ),
             (
                 "shift+pageup",
@@ -292,6 +303,19 @@ fn ghostty_action_alias(action: &str) -> Option<AppCommand> {
         "find" => Some(AppCommand::Search(SearchAction::Find)),
         "find_next" => Some(AppCommand::Search(SearchAction::FindNext)),
         "find_previous" => Some(AppCommand::Search(SearchAction::FindPrevious)),
+        "copy_mode" => Some(AppCommand::CopyMode(CopyModeAction::CursorOnly)),
+        "copy_mode:left" | "copy_mode_extend_left" => Some(AppCommand::CopyMode(
+            CopyModeAction::Extend(CopyDirection::Left),
+        )),
+        "copy_mode:right" | "copy_mode_extend_right" => Some(AppCommand::CopyMode(
+            CopyModeAction::Extend(CopyDirection::Right),
+        )),
+        "copy_mode:up" | "copy_mode_extend_up" => Some(AppCommand::CopyMode(
+            CopyModeAction::Extend(CopyDirection::Up),
+        )),
+        "copy_mode:down" | "copy_mode_extend_down" => Some(AppCommand::CopyMode(
+            CopyModeAction::Extend(CopyDirection::Down),
+        )),
         "new_split:left" => Some(AppCommand::NewSplitLeft),
         "new_split:right" => Some(AppCommand::NewSplitRight),
         "new_split:up" => Some(AppCommand::NewSplitUp),

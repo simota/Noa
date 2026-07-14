@@ -1,6 +1,7 @@
 #[cfg(test)]
 use super::keybind::KeybindEngine;
 use crate::split_tree::Direction;
+use noa_grid::CopyDirection;
 #[cfg(test)]
 use winit::keyboard::{Key, ModifiersState};
 
@@ -25,6 +26,7 @@ pub enum AppCommand {
     FontSize(FontSizeAction),
     Search(SearchAction),
     ScrollViewport(ViewportScroll),
+    CopyMode(CopyModeAction),
     NewTab,
     NewWindow,
     NewSplitLeft,
@@ -69,6 +71,15 @@ pub enum AppCommand {
     /// (v1 scope: Open Questions), so it carries no menu id either (mirrors
     /// `SelectTab`'s `menu_id() -> ""`).
     ToggleProcessMonitor,
+}
+
+/// Config-addressable copy-mode entry actions. `CursorOnly` implements the
+/// unbound `copy_mode` action; the directional actions power the rebindable
+/// direct gestures and extend immediately on entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyModeAction {
+    CursorOnly,
+    Extend(CopyDirection),
 }
 
 /// Terminal-state commands handled by noa instead of sending escape bytes.
@@ -211,6 +222,7 @@ impl AppCommand {
             AppCommand::ScrollViewport(ViewportScroll::NextPrompt) => {
                 Self::SCROLL_NEXT_PROMPT_MENU_ID
             }
+            AppCommand::CopyMode(_) => "",
             AppCommand::NewTab => Self::NEW_TAB_MENU_ID,
             AppCommand::NewWindow => Self::NEW_WINDOW_MENU_ID,
             AppCommand::NewSplitLeft => Self::NEW_SPLIT_LEFT_MENU_ID,
@@ -360,6 +372,11 @@ impl AppCommand {
             Self::ScrollViewport(ViewportScroll::Bottom) => "scroll.bottom",
             Self::ScrollViewport(ViewportScroll::PrevPrompt) => "scroll.prev-prompt",
             Self::ScrollViewport(ViewportScroll::NextPrompt) => "scroll.next-prompt",
+            Self::CopyMode(CopyModeAction::CursorOnly) => "copy-mode",
+            Self::CopyMode(CopyModeAction::Extend(CopyDirection::Left)) => "copy-mode.left",
+            Self::CopyMode(CopyModeAction::Extend(CopyDirection::Right)) => "copy-mode.right",
+            Self::CopyMode(CopyModeAction::Extend(CopyDirection::Up)) => "copy-mode.up",
+            Self::CopyMode(CopyModeAction::Extend(CopyDirection::Down)) => "copy-mode.down",
             Self::NewTab => "tab.new",
             Self::NewWindow => "window.new",
             Self::NewSplitLeft => "split.new-left",
@@ -436,6 +453,11 @@ impl AppCommand {
             "scroll.bottom" => Some(Self::ScrollViewport(ViewportScroll::Bottom)),
             "scroll.prev-prompt" => Some(Self::ScrollViewport(ViewportScroll::PrevPrompt)),
             "scroll.next-prompt" => Some(Self::ScrollViewport(ViewportScroll::NextPrompt)),
+            "copy-mode" => Some(Self::CopyMode(CopyModeAction::CursorOnly)),
+            "copy-mode.left" => Some(Self::CopyMode(CopyModeAction::Extend(CopyDirection::Left))),
+            "copy-mode.right" => Some(Self::CopyMode(CopyModeAction::Extend(CopyDirection::Right))),
+            "copy-mode.up" => Some(Self::CopyMode(CopyModeAction::Extend(CopyDirection::Up))),
+            "copy-mode.down" => Some(Self::CopyMode(CopyModeAction::Extend(CopyDirection::Down))),
             "tab.new" => Some(Self::NewTab),
             "window.new" => Some(Self::NewWindow),
             "split.new-left" => Some(Self::NewSplitLeft),

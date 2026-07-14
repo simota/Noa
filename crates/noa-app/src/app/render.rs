@@ -16,6 +16,7 @@ impl App {
         // layout, AC-17) before borrowing `gpu`/`state` mutably, so the band can
         // be composited inline after the panes without a second borrow.
         let sidebar_model = self.sidebar_draw_model(window_id);
+        let copy_mode_pane = self.copy_mode_pane_for_redraw(window_id);
         let padding = self.padding;
         // Resolve the open palette's render payload up front (like the sidebar
         // model) so the rounded card can be composited after the panes without
@@ -137,6 +138,18 @@ impl App {
                 continue;
             };
             let mut term = surface.terminal.lock();
+            let copy_mode_state = (copy_mode_pane == Some(pane_id)).then(|| {
+                &mut self
+                    .copy_mode
+                    .as_mut()
+                    .expect("copy_mode_pane_for_redraw returned a bound session")
+                    .state
+            });
+            let copy_mode_active = copy_mode_state.is_some();
+            // This terminal guard remains held through the fresh snapshot
+            // capture (or held-snapshot patch) below, so PTY output cannot
+            // move the repaired cursor into a different row space mid-frame.
+            let pane_copy_cursor = repair_copy_mode_for_redraw(copy_mode_state, &mut term);
             // Refresh the lock-free cursor-blink cache (see
             // `Surface::cursor_blink_state`) while the lock is already held,
             // so `tick_cursor_blink`'s per-wake gate never needs its own.
@@ -176,6 +189,7 @@ impl App {
                 surface.held_snapshot.as_ref().map(|held| held.captured_at),
                 now,
                 dimensions_match,
+                copy_mode_active,
             );
             let mut snapshot = match decision {
                 SyncSnapshotDecision::Reuse => surface
@@ -233,6 +247,7 @@ impl App {
                 pane_owns_keyboard_focus(window_id, pane_id, self.os_focused, state.focused_pane)
                     && snapshot.search_prompt.is_none();
             snapshot.cursor_blink_visible = self.cursor_blink_visible;
+            patch_copy_mode_cursor(&mut snapshot, pane_copy_cursor);
             snapshot.hover_link = surface.hover_link;
             // Neither the palette nor the confirm dialog draws in the pane
             // cell pass — both are composited as rounded modal cards after
@@ -667,6 +682,29 @@ enum SyncSnapshotDecision {
     Reuse,
 }
 
+/// Apply copy-mode UI only when this is its bound pane. A `None` cursor means
+/// the pane is outside copy mode, so a reused synchronized-output snapshot must
+/// retain the selection captured with its held rows.
+fn patch_copy_mode_cursor(
+    snapshot: &mut FrameSnapshot,
+    copy_cursor: Option<noa_grid::SelectionPoint>,
+) {
+    let Some(copy_cursor) = copy_cursor else {
+        return;
+    };
+    snapshot.copy_cursor = Some(copy_cursor);
+}
+
+fn repair_copy_mode_for_redraw(
+    state: Option<&mut noa_grid::CopyModeState>,
+    terminal: &mut Terminal,
+) -> Option<noa_grid::SelectionPoint> {
+    state.map(|state| {
+        state.repair_eviction(terminal);
+        state.cursor()
+    })
+}
+
 /// Whether a pane's redraw should read a fresh [`FrameSnapshot`] off the
 /// terminal, or keep presenting the snapshot already held for it.
 ///
@@ -689,9 +727,18 @@ enum SyncSnapshotDecision {
 /// as a runaway sync already does for redraw pacing.
 ///
 /// `dimensions_match` must be `false` whenever the held snapshot's grid size
-/// no longer matches the terminal's current one: presenting an old-sized
-/// snapshot into a just-resized surface would be worse than a rare tear, so
-/// a resize always forces `Fresh` regardless of the other inputs.
+/// no longer matches the terminal's current one. App-owned copy-mode viewport
+/// changes invalidate the held snapshot at the mutation site; PTY-owned row
+/// movement during synchronized output deliberately does not, because those
+/// intermediate rows are exactly what this hold must hide.
+///
+/// Copy mode itself always forces `Fresh`. Its cursor and selection belong to
+/// the terminal's current storage coordinates, which may no longer describe
+/// the rows frozen in a held snapshot after PTY scrolling or eviction. Mixing
+/// those live coordinates into held rows would show or copy a different range;
+/// for this interactive pane, coordinate consistency takes priority over sync
+/// tear suppression. Other panes continue to reuse their held snapshots and
+/// retain the selection captured with those rows.
 ///
 /// Known residual: the *first* externally-triggered redraw of a sync block
 /// (`held_since` is `None` because this pane has never held a snapshot, or
@@ -706,8 +753,9 @@ fn sync_output_snapshot_decision(
     held_since: Option<Instant>,
     now: Instant,
     dimensions_match: bool,
+    copy_mode_active: bool,
 ) -> SyncSnapshotDecision {
-    if !synchronized || !dimensions_match {
+    if !synchronized || !dimensions_match || copy_mode_active {
         return SyncSnapshotDecision::Fresh;
     }
     match held_since {
@@ -736,9 +784,14 @@ fn sync_output_snapshot_release_decision(synchronized: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        SyncSnapshotDecision, sync_output_snapshot_decision, sync_output_snapshot_release_decision,
+        SyncSnapshotDecision, patch_copy_mode_cursor, repair_copy_mode_for_redraw,
+        sync_output_snapshot_decision, sync_output_snapshot_release_decision,
     };
     use crate::io_thread::SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION;
+    use noa_core::GridSize;
+    use noa_grid::{Selection, SelectionPoint, Terminal};
+    use noa_render::FrameSnapshot;
+    use noa_vt::Stream;
     use std::time::{Duration, Instant};
 
     /// Outside synchronized output, always read fresh regardless of how
@@ -748,25 +801,36 @@ mod tests {
     fn sync_inactive_always_reads_fresh() {
         let now = Instant::now();
         assert_eq!(
-            sync_output_snapshot_decision(false, Some(now), now, true),
+            sync_output_snapshot_decision(false, Some(now), now, true, false),
             SyncSnapshotDecision::Fresh
         );
         assert_eq!(
-            sync_output_snapshot_decision(false, None, now, false),
+            sync_output_snapshot_decision(false, None, now, false, false),
             SyncSnapshotDecision::Fresh
         );
     }
 
     /// Synchronized output, a recently-held same-size snapshot, and the
-    /// grace period not yet elapsed: reuse it instead of reading the
-    /// terminal.
+    /// grace period not yet elapsed: reuse it instead of reading the terminal.
     #[test]
     fn sync_active_within_grace_and_same_size_reuses_held_snapshot() {
         let start = Instant::now();
         let now = start + SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION / 2;
         assert_eq!(
-            sync_output_snapshot_decision(true, Some(start), now, true),
+            sync_output_snapshot_decision(true, Some(start), now, true, false),
             SyncSnapshotDecision::Reuse
+        );
+    }
+
+    /// Copy-mode coordinates are live terminal state and cannot be projected
+    /// safely onto rows frozen before a PTY scroll or eviction.
+    #[test]
+    fn copy_mode_forces_fresh_snapshot_during_sync() {
+        let start = Instant::now();
+        let now = start + SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION / 2;
+        assert_eq!(
+            sync_output_snapshot_decision(true, Some(start), now, true, true),
+            SyncSnapshotDecision::Fresh
         );
     }
 
@@ -779,7 +843,7 @@ mod tests {
         let start = Instant::now();
         let now = start + SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION;
         assert_eq!(
-            sync_output_snapshot_decision(true, Some(start), now, true),
+            sync_output_snapshot_decision(true, Some(start), now, true, false),
             SyncSnapshotDecision::Fresh
         );
     }
@@ -791,8 +855,34 @@ mod tests {
         let start = Instant::now();
         let now = start + Duration::from_millis(1);
         assert_eq!(
-            sync_output_snapshot_decision(true, Some(start), now, false),
+            sync_output_snapshot_decision(true, Some(start), now, false, false),
             SyncSnapshotDecision::Fresh
+        );
+    }
+
+    #[test]
+    fn pty_scroll_during_sync_reuses_same_size_held_snapshot() {
+        let mut terminal = Terminal::new(GridSize::new(4, 2));
+        Stream::new().feed(b"a\r\nb\r\nc", &mut terminal);
+        let held = FrameSnapshot::from_terminal(&mut terminal);
+        let held_row_base = held.row_base;
+
+        Stream::new().feed(b"\x1b[?2026hd\r\ne\r\nf", &mut terminal);
+
+        assert!(terminal.modes.synchronized_output());
+        assert_ne!(held_row_base, terminal.active().visible_row_base());
+        assert_eq!(held.cols, terminal.active().cols);
+        assert_eq!(held.rows_n, terminal.active().rows);
+        let start = Instant::now();
+        assert_eq!(
+            sync_output_snapshot_decision(
+                true,
+                Some(start),
+                start + Duration::from_millis(1),
+                true,
+                false,
+            ),
+            SyncSnapshotDecision::Reuse
         );
     }
 
@@ -812,7 +902,7 @@ mod tests {
     fn sync_active_with_no_prior_held_snapshot_reads_fresh() {
         let now = Instant::now();
         assert_eq!(
-            sync_output_snapshot_decision(true, None, now, true),
+            sync_output_snapshot_decision(true, None, now, true, false),
             SyncSnapshotDecision::Fresh
         );
     }
@@ -826,7 +916,7 @@ mod tests {
         let start = Instant::now();
         let now = start + SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION - Duration::from_nanos(1);
         assert_eq!(
-            sync_output_snapshot_decision(true, Some(start), now, true),
+            sync_output_snapshot_decision(true, Some(start), now, true, false),
             SyncSnapshotDecision::Reuse
         );
     }
@@ -841,7 +931,7 @@ mod tests {
         let start = Instant::now();
         let now = start + Duration::from_millis(1);
         assert_eq!(
-            sync_output_snapshot_decision(false, Some(start), now, true),
+            sync_output_snapshot_decision(false, Some(start), now, true, false),
             SyncSnapshotDecision::Fresh
         );
     }
@@ -862,5 +952,55 @@ mod tests {
     #[test]
     fn sync_inactive_releases_held_snapshot() {
         assert!(sync_output_snapshot_release_decision(false));
+    }
+
+    #[test]
+    fn copy_mode_snapshot_receives_live_cursor_and_selection() {
+        let mut terminal = Terminal::new(GridSize::new(4, 2));
+        let anchor = SelectionPoint::new(0, 0);
+        let cursor = SelectionPoint::new(2, 0);
+        let live_selection = Some(Selection::new(anchor, cursor));
+        terminal.set_selection(anchor, cursor);
+        let mut snapshot = FrameSnapshot::from_terminal(&mut terminal);
+
+        patch_copy_mode_cursor(&mut snapshot, Some(cursor));
+
+        assert_eq!(snapshot.copy_cursor, Some(cursor));
+        assert_eq!(snapshot.selection, live_selection);
+    }
+
+    #[test]
+    fn non_copy_pane_preserves_selection_captured_with_held_rows() {
+        let mut terminal = Terminal::new(GridSize::new(4, 2));
+        let mut held = FrameSnapshot::from_terminal(&mut terminal);
+        let held_selection = Some(Selection::new(
+            SelectionPoint::new(0, 0),
+            SelectionPoint::new(2, 0),
+        ));
+        held.selection = held_selection;
+        patch_copy_mode_cursor(&mut held, None);
+
+        assert_eq!(held.copy_cursor, None);
+        assert_eq!(held.selection, held_selection);
+    }
+
+    #[test]
+    fn repaired_copy_cursor_matches_the_captured_screen_generation() {
+        let mut terminal = Terminal::new(GridSize::new(4, 2));
+        terminal.primary.grid[0].cells[0].ch = 'a';
+        terminal.primary.cursor.x = 1;
+        let mut state = noa_grid::CopyModeState::enter(&mut terminal).expect("copy mode");
+        assert!(state.move_cursor(&mut terminal, noa_grid::CopyDirection::Right, true));
+
+        Stream::new().feed(b"\x1bc", &mut terminal);
+
+        let cursor = repair_copy_mode_for_redraw(Some(&mut state), &mut terminal);
+        let mut snapshot = FrameSnapshot::from_terminal(&mut terminal);
+        patch_copy_mode_cursor(&mut snapshot, cursor);
+
+        assert_eq!(snapshot.copy_cursor, Some(state.cursor()));
+        assert_eq!(snapshot.copy_cursor, Some(SelectionPoint::new(0, 0)));
+        assert_eq!(snapshot.selection, terminal.active().selection);
+        assert_eq!(snapshot.row_base, terminal.active().visible_row_base());
     }
 }

@@ -5,6 +5,9 @@ use super::*;
 
 impl Screen {
     pub(crate) fn clear_scrollback(&mut self) {
+        if self.scrollback.len() > 0 {
+            self.invalidate_coordinate_space();
+        }
         self.scrollback.clear();
         self.viewport_offset = 0;
         self.clear_selection();
@@ -232,6 +235,7 @@ impl Screen {
         let recorded = self.records_scrollback_for_region(top, bottom);
         let full_height = top == 0 && bottom + 1 == self.rows as usize;
         if recorded {
+            let old_scrollback_len = self.scrollback.len();
             // Pack the leaving rows straight into scrollback *before* the
             // rotation, borrowing them in place — cloning them out first
             // (the previous shape) cost a full `Vec<Cell>` clone per
@@ -240,8 +244,17 @@ impl Screen {
             for row in &self.grid[top..top + n] {
                 evicted += self.scrollback.push_row(row);
             }
+            if !full_height {
+                // Appending the scrolled rows moves fixed live rows down in
+                // storage coordinates. Apply that structural shift before
+                // eviction rebases every surviving point upward.
+                self.shift_tracked_points_down_from(
+                    old_scrollback_len.saturating_add(bottom + 1),
+                    n,
+                );
+            }
             self.note_scrollback_evictions(evicted);
-            self.pin_viewport_for_scrollback_push(n);
+            self.pin_viewport_for_scrollback_push(n, full_height);
         }
         let blank = self.blank();
         self.grid[top..=bottom].rotate_left(n);
@@ -469,6 +482,9 @@ impl Screen {
                 // re-anchor the survivors (live area) into the shrunken space.
                 let old_len = self.scrollback.len();
                 let old_live_top = self.live_area_abs_top();
+                if old_len > 0 {
+                    self.invalidate_coordinate_space();
+                }
                 self.scrollback.clear();
                 self.viewport_offset = 0;
                 self.kitty_placements.retain_mut(|p| {

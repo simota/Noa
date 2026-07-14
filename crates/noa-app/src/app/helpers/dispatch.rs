@@ -264,6 +264,7 @@ pub(crate) fn command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::FontSize(_)
         | AppCommand::Search(_)
         | AppCommand::ScrollViewport(_)
+        | AppCommand::CopyMode(_)
         | AppCommand::NewSplitLeft
         | AppCommand::NewSplitRight
         | AppCommand::NewSplitUp
@@ -359,6 +360,7 @@ pub(crate) fn overview_command_scope(command: AppCommand) -> CommandScope {
         | AppCommand::FontSize(_)
         | AppCommand::Search(_)
         | AppCommand::ScrollViewport(_)
+        | AppCommand::CopyMode(_)
         | AppCommand::NewTab
         | AppCommand::NewWindow
         | AppCommand::NewSplitLeft

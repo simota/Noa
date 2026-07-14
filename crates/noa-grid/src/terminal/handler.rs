@@ -286,6 +286,7 @@ impl Handler for Terminal {
         self.primary = crate::screen::Screen::new(self.size.cols, self.size.rows);
         self.alt = None;
         self.active_is_alt = false;
+        self.screen_generation = self.screen_generation.wrapping_add(1);
         self.modes = crate::modes::ModeState::defaults();
         self.charset = crate::charset::CharsetState::default();
         self.title.clear();

@@ -212,6 +212,177 @@ fn scroll_translation_output_matches_a_full_rebuild() {
 }
 
 #[test]
+fn pinned_scroll_without_base_change_forces_a_full_rebuild() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping pinned-scroll cache test");
+        return;
+    };
+    let Some(mut font) = skip_font() else { return };
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8Unorm,
+        &mut font,
+        GridPadding::ZERO,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: 64, h: 64 });
+
+    let theme = Theme::new();
+    let pane = PaneId::new(202);
+    let rect = PaneRect::new(0, 0, 64, 64);
+    let mut terminal = Terminal::new(GridSize::new(4, 3));
+    for (row, ch) in ['A', 'B', 'C'].into_iter().enumerate() {
+        terminal.primary.grid[row].cells[0].ch = ch;
+    }
+
+    let snap1 = FrameSnapshot::from_terminal(&mut terminal);
+    let base = (snap1.row_base, snap1.abs_row_base);
+    renderer.rebuild_panes(
+        &[PaneFrame {
+            pane,
+            rect,
+            snapshot: &snap1,
+        }],
+        &mut font,
+        &theme,
+    );
+    let recycle = snap1.into_recycle();
+
+    terminal.primary.set_viewport_locked(true);
+    terminal.primary.grid[0].cells[0].ch = 'X';
+    terminal.primary.grid[0].dirty = true;
+    terminal.primary.scroll_up_region(1);
+    let snap2 = FrameSnapshot::from_terminal_recycle(&mut terminal, recycle);
+
+    assert_eq!((snap2.row_base, snap2.abs_row_base), base);
+    assert_eq!(snap2.scroll_shift, 1);
+    assert_eq!(snap2.rows[0].cells[0].ch, 'X');
+    renderer.rebuild_panes(
+        &[PaneFrame {
+            pane,
+            rect,
+            snapshot: &snap2,
+        }],
+        &mut font,
+        &theme,
+    );
+    assert_eq!(
+        renderer.rows_rebuilt_last_frame(),
+        3,
+        "an untranslated pinned scroll must rebuild every visible row"
+    );
+
+    let patched = renderer.instances_for_test().to_vec();
+    let mut reference = Vec::new();
+    rebuild_cell_instances(&mut reference, &snap2, &mut font, &theme, false);
+    assert_eq!(patched, reference);
+}
+
+#[test]
+fn scroll_translation_with_copy_cursor_move_matches_a_full_rebuild() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping copy-cursor scroll test");
+        return;
+    };
+    let Some(mut font) = skip_font() else { return };
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8Unorm,
+        &mut font,
+        GridPadding::ZERO,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: 64, h: 64 });
+    let (theme, pane, rect) = (Theme::new(), PaneId::new(2), PaneRect::new(0, 0, 64, 64));
+
+    let mut before = baseline_snapshot(['A', 'B', 'C']);
+    before.copy_cursor = Some(SelectionPoint::new(0, 2));
+    renderer.rebuild_panes(
+        &[PaneFrame {
+            pane,
+            rect,
+            snapshot: &before,
+        }],
+        &mut font,
+        &theme,
+    );
+
+    let mut after = baseline_snapshot(['B', 'C', 'D']);
+    after.row_base = 1;
+    after.abs_row_base = 1;
+    after.scroll_shift = 1;
+    after.copy_cursor = Some(SelectionPoint::new(0, 3));
+    renderer.rebuild_panes(
+        &[PaneFrame {
+            pane,
+            rect,
+            snapshot: &after,
+        }],
+        &mut font,
+        &theme,
+    );
+    let patched = renderer.instances_for_test().to_vec();
+    let mut reference = Vec::new();
+    rebuild_cell_instances(&mut reference, &after, &mut font, &theme, false);
+
+    assert_eq!(
+        patched, reference,
+        "translated cache must not retain the copy cursor's old row"
+    );
+}
+
+#[test]
+fn offscreen_copy_cursor_entry_invalidates_the_shell_cursor_row() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping offscreen copy-cursor cache test");
+        return;
+    };
+    let Some(mut font) = skip_font() else { return };
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8Unorm,
+        &mut font,
+        GridPadding::ZERO,
+    )
+    .expect("build renderer");
+    renderer.resize(PixelSize { w: 64, h: 64 });
+    let (theme, pane, rect) = (Theme::new(), PaneId::new(3), PaneRect::new(0, 0, 64, 64));
+
+    let before = baseline_snapshot(['A', 'B', 'C']);
+    renderer.rebuild_panes(
+        &[PaneFrame {
+            pane,
+            rect,
+            snapshot: &before,
+        }],
+        &mut font,
+        &theme,
+    );
+    let mut after = baseline_snapshot(['A', 'B', 'C']);
+    after.copy_cursor = Some(SelectionPoint::new(0, 3));
+    renderer.rebuild_panes(
+        &[PaneFrame {
+            pane,
+            rect,
+            snapshot: &after,
+        }],
+        &mut font,
+        &theme,
+    );
+    let patched = renderer.instances_for_test().to_vec();
+    let mut reference = Vec::new();
+    rebuild_cell_instances(&mut reference, &after, &mut font, &theme, false);
+
+    assert_eq!(
+        patched, reference,
+        "copy-mode entry must invalidate the cached shell cursor"
+    );
+}
+
+#[test]
 fn pane_wide_invalidation_triggers_are_covered_fm11() {
     // FM-11: representative pane-wide triggers bundled into
     // `FrameInvalidationKey` must force EVERY row in the pane dirty when

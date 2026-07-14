@@ -48,6 +48,9 @@ impl App {
     }
 
     pub(in crate::app) fn relayout_and_resize_window(&mut self, window_id: WindowId) {
+        // Window/sidebar/font/fullscreen/split reflows all converge here.
+        // Copy coordinates are not remapped across resize (FR-11).
+        self.end_copy_mode_for_window(window_id);
         #[cfg(target_os = "macos")]
         let has_visible_background_image = self.background_image.has_visible_image();
         #[cfg(target_os = "macos")]

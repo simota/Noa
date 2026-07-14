@@ -149,6 +149,44 @@ mod tests {
         assert!(app_config.auto_approve);
     }
 
+    #[test]
+    fn client_keys_flow_to_app_config_without_debug_secret_exposure() {
+        let config = noa_config::StartupConfig {
+            server_token: Some("server-secret-literal".to_string()),
+            client_remote: Some("remote.example:61771".to_string()),
+            client_token: Some("client-secret-literal".to_string()),
+            client_token_file: Some(std::path::PathBuf::from("/tmp/client-token")),
+            ..Default::default()
+        };
+        let cli_overrides = noa_config::ConfigOverrides {
+            client_token: Some("cli-secret-literal".to_string()),
+            ..Default::default()
+        };
+
+        let app_config = noa_app::AppConfig::from_startup(config, false, cli_overrides);
+
+        assert_eq!(
+            app_config.client_remote.as_deref(),
+            Some("remote.example:61771")
+        );
+        assert_eq!(
+            app_config.client_token.as_deref(),
+            Some("client-secret-literal")
+        );
+        assert_eq!(
+            app_config.client_token_file.as_deref(),
+            Some(std::path::Path::new("/tmp/client-token"))
+        );
+
+        let debug = format!("{app_config:?}");
+        assert!(debug.contains("client_token: Some(\"<redacted>\")"));
+        assert!(debug.contains("server_token: Some(\"<redacted>\")"));
+        assert!(debug.contains("client_token_file: Some(\"/tmp/client-token\")"));
+        assert!(!debug.contains("client-secret-literal"));
+        assert!(!debug.contains("server-secret-literal"));
+        assert!(!debug.contains("cli-secret-literal"));
+    }
+
     // AC-7: a config carrying all background-image keys resolves through
     // `AppConfig::from_startup` into an `AppConfig` holding those values.
     #[test]

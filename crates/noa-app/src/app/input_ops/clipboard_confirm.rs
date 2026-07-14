@@ -237,6 +237,15 @@ impl App {
         action: ConfirmAction,
     ) {
         match action {
+            ConfirmAction::AttachRemote {
+                window_id,
+                endpoint,
+            } => self.confirm_remote_warning(window_id, endpoint),
+            ConfirmAction::RetryDetachedRemote {
+                window_id,
+                pane_id,
+                endpoint,
+            } => self.confirm_detached_remote_retry(window_id, pane_id, endpoint),
             ConfirmAction::Paste {
                 window_id,
                 pane_id,

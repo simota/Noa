@@ -22,12 +22,15 @@ impl App {
 
         let Some((feedback_tx, pane_live, auto_enabled)) =
             self.windows.get(&window_id).and_then(|state| {
-                state.surfaces.get(&pane_id).map(|surface| {
-                    (
-                        surface.auto_approve_feedback_tx.clone(),
+                state.surfaces.get(&pane_id).and_then(|surface| {
+                    let SurfaceTransport::Local(local) = &surface.transport else {
+                        return None;
+                    };
+                    Some((
+                        local.auto_approve_feedback_tx.clone(),
                         state.contains_pane(pane_id),
                         state.auto_approve_enabled.load(Ordering::Relaxed),
-                    )
+                    ))
                 })
             })
         else {

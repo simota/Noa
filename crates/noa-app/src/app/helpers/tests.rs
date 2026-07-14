@@ -912,7 +912,7 @@ fn terminal_clear_action_erases_rows_above_cursor_when_not_at_a_prompt() {
     terminal.scroll_viewport_up(1);
     terminal.pending_writes.extend_from_slice(b"reply");
 
-    let form_feed = apply_terminal_action(&mut terminal, TerminalAction::Clear);
+    let form_feed = apply_terminal_action(&mut terminal, TerminalAction::Clear, false);
 
     assert!(!form_feed);
     assert_eq!(terminal.scrollback_len(), 0);
@@ -926,7 +926,7 @@ fn terminal_clear_action_erases_rows_above_cursor_when_not_at_a_prompt() {
 fn terminal_clear_scrollback_action_preserves_live_grid() {
     let mut terminal = terminal_with_scrollback(GridSize::new(5, 3));
 
-    apply_terminal_action(&mut terminal, TerminalAction::ClearScrollback);
+    apply_terminal_action(&mut terminal, TerminalAction::ClearScrollback, false);
 
     assert_eq!(terminal.scrollback_len(), 0);
     assert_eq!(terminal.primary.grid[0].cells[0].ch, 'D');
@@ -938,11 +938,42 @@ fn terminal_clear_scrollback_action_preserves_live_grid() {
 fn terminal_select_all_action_uses_grid_selection_api() {
     let mut terminal = terminal_with_scrollback(GridSize::new(5, 3));
 
-    apply_terminal_action(&mut terminal, TerminalAction::SelectAll);
+    apply_terminal_action(&mut terminal, TerminalAction::SelectAll, false);
 
     assert_eq!(
         terminal.selected_text().as_deref(),
         Some("A\nB\nC\nD\nE\nF")
+    );
+}
+
+#[test]
+fn terminal_clear_action_does_not_mutate_a_remote_replica() {
+    let mut terminal = terminal_with_scrollback(GridSize::new(5, 3));
+    let scrollback_len = terminal.scrollback_len();
+    let cursor = (terminal.primary.cursor.x, terminal.primary.cursor.y);
+    let visible = terminal
+        .primary
+        .grid
+        .iter()
+        .map(|row| row.cells[0].ch)
+        .collect::<Vec<_>>();
+
+    let form_feed = apply_terminal_action(&mut terminal, TerminalAction::Clear, true);
+
+    assert!(!form_feed);
+    assert_eq!(terminal.scrollback_len(), scrollback_len);
+    assert_eq!(
+        (terminal.primary.cursor.x, terminal.primary.cursor.y),
+        cursor
+    );
+    assert_eq!(
+        terminal
+            .primary
+            .grid
+            .iter()
+            .map(|row| row.cells[0].ch)
+            .collect::<Vec<_>>(),
+        visible
     );
 }
 

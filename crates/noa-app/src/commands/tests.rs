@@ -510,6 +510,7 @@ fn action_names_map_to_commands() {
     for command in [
         AppCommand::Copy,
         AppCommand::Paste,
+        AppCommand::AttachRemote,
         AppCommand::SendSelectionToPane,
         AppCommand::ExportScrollback,
         AppCommand::PipeScrollbackToPager,

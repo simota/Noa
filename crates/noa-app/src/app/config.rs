@@ -11,7 +11,7 @@ use winit::window::WindowAttributes;
 const BUILTIN_WALLPAPER_SOURCE: &str = "noa";
 
 /// Configuration the binary passes into [`crate::run`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppConfig {
     pub cols: u16,
     pub rows: u16,
@@ -183,8 +183,38 @@ pub struct AppConfig {
     /// `server-token`: bearer token override (FR-3). `None` auto-generates
     /// and persists one to the token file.
     pub server_token: Option<String>,
-    /// `server-scopes`: comma-separated grantable scope subset (FR-6).
+    /// `server-scopes`: comma-separated `read`/`control`/`input`/`attach`
+    /// grantable scope subset (FR-6).
     pub server_scopes: String,
+    /// `client-remote`: target noa-server address (`host:port`).
+    pub client_remote: Option<String>,
+    /// `client-token`: resolved bearer token for remote connections. This
+    /// value must never be emitted by `Debug`, config dumps, or logs.
+    pub client_token: Option<String>,
+    /// `client-token-file`: configured token source path. The path itself is
+    /// not secret; [`Self::client_token`] contains the loaded secret.
+    pub client_token_file: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let server_token = self.server_token.as_ref().map(|_| "<redacted>");
+        let client_token = self.client_token.as_ref().map(|_| "<redacted>");
+        f.debug_struct("AppConfig")
+            .field("cols", &self.cols)
+            .field("rows", &self.rows)
+            .field("font_size", &self.font_size)
+            .field("theme", &self.theme)
+            .field("server_enable", &self.server_enable)
+            .field("server_bind", &self.server_bind)
+            .field("server_token", &server_token)
+            .field("client_remote", &self.client_remote)
+            .field("client_token", &client_token)
+            .field("client_token_file", &self.client_token_file)
+            // CLI overrides may independently contain server/client tokens.
+            .field("cli_overrides", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 impl AppConfig {
@@ -257,6 +287,9 @@ impl AppConfig {
             server_bind: config.server_bind,
             server_token: config.server_token,
             server_scopes: config.server_scopes,
+            client_remote: config.client_remote,
+            client_token: config.client_token,
+            client_token_file: config.client_token_file,
         }
     }
 }

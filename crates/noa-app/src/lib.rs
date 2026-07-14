@@ -30,6 +30,7 @@ mod macos_window;
 mod mouse;
 mod notification;
 mod process_monitor;
+mod remote_attach;
 mod search_prompt;
 mod secure_input;
 mod session;

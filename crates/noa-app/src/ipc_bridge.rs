@@ -27,6 +27,7 @@ use noa_ipc::{
 };
 
 use crate::events::UserEvent;
+use crate::io_thread::{PtyInputQueue, QueueInputResult, RawAttachTap};
 use crate::session_store::{PreviewLine, SessionCard, SessionCardId};
 
 /// Maps IPC-visible pane ids (minted, monotonic u64s — DEC-B) to/from the
@@ -90,6 +91,74 @@ pub(crate) struct IpcShared {
     /// `(window_id, pane_id) -> Arc<Mutex<Terminal>>` for the off-main-thread
     /// `getText`/`getGrid` reads (short-held lock, per spec "制約").
     pub(crate) terminals: HashMap<(u64, u64), Arc<Mutex<Terminal>>>,
+    /// Pane-local raw attach endpoints. Unlike `terminals`, these are wired
+    /// eagerly at pane spawn so an attach does not wait for the coarse read
+    /// snapshot refresh.
+    pub(crate) attach_panes: HashMap<(u64, u64), IpcAttachPane>,
+}
+
+/// The local pane resources needed by the raw attach backend. Clones retain
+/// the pane endpoint but [`RawAttachTap::shutdown`] permanently rejects a
+/// raced open after the pane has closed.
+#[derive(Clone)]
+pub(crate) struct IpcAttachPane {
+    terminal: Arc<Mutex<Terminal>>,
+    raw_output: RawAttachTap,
+    input: PtyInputQueue,
+}
+
+impl IpcAttachPane {
+    pub(crate) fn new(
+        terminal: Arc<Mutex<Terminal>>,
+        raw_output: RawAttachTap,
+        input: PtyInputQueue,
+    ) -> Self {
+        Self {
+            terminal,
+            raw_output,
+            input,
+        }
+    }
+
+    fn validate(&self) -> Result<(), IpcError> {
+        self.raw_output
+            .is_available()
+            .then_some(())
+            .ok_or(IpcError::PaneClosed)
+    }
+
+    fn open(
+        &self,
+        generation: u64,
+        output: noa_ipc::AttachOutputSender,
+    ) -> Result<Vec<u8>, IpcError> {
+        // This is the seed/live ordering boundary: the io thread also takes
+        // this Terminal lock before parsing bytes and cloning the raw sink.
+        // No socket or backpressured channel send occurs in this section.
+        let terminal = self.terminal.lock();
+        self.raw_output
+            .register_and_seed(generation, output, &terminal)
+            .map_err(|()| IpcError::PaneClosed)
+    }
+
+    fn write(&self, generation: u64, bytes: &[u8]) -> Result<(), IpcError> {
+        match self.raw_output.queue_input(generation, &self.input, bytes) {
+            Ok(QueueInputResult::Queued | QueueInputResult::Deferred) => Ok(()),
+            Ok(QueueInputResult::Dropped) => Err(IpcError::Internal(
+                "attach input queue capacity exceeded".to_string(),
+            )),
+            Ok(QueueInputResult::Disconnected) => Err(IpcError::PaneClosed),
+            Err(()) => Err(IpcError::PaneClosed),
+        }
+    }
+
+    fn detach(&self, generation: u64) {
+        self.raw_output.detach(generation);
+    }
+
+    pub(crate) fn shutdown(&self) {
+        self.raw_output.shutdown();
+    }
 }
 
 /// One in-flight IPC mutation awaiting the main thread's reply (DEC-C).
@@ -98,9 +167,8 @@ pub(crate) struct PendingIpcAction {
     pub(crate) reply: Sender<Result<IpcActionReply, IpcError>>,
 }
 
-/// The five mutating RPCs (`focusPane`/`newTab`/`split`/`closePane`/
-/// `sendText`), re-validated and executed on the main thread through the
-/// same internal methods the existing `UserEvent` arms already call.
+/// GUI-owned mutations, re-validated and executed on the main thread through
+/// the same internal methods the existing `UserEvent` arms already call.
 pub(crate) enum IpcActionKind {
     FocusPane {
         pane: PaneRef,
@@ -119,6 +187,11 @@ pub(crate) enum IpcActionKind {
         pane: PaneRef,
         text: String,
         paste: bool,
+    },
+    ResizePane {
+        pane: PaneRef,
+        cols: u16,
+        rows: u16,
     },
 }
 
@@ -166,6 +239,16 @@ impl AppIpcBackend {
             .registry
             .resolve(pane)
             .ok_or(IpcError::UnknownPane)
+    }
+
+    fn resolve_attach_pane(&self, pane: PaneRef) -> Result<IpcAttachPane, IpcError> {
+        let shared = self.shared.lock();
+        let key = shared.registry.resolve(pane).ok_or(IpcError::UnknownPane)?;
+        shared
+            .attach_panes
+            .get(&key)
+            .cloned()
+            .ok_or(IpcError::PaneClosed)
     }
 
     /// Submit a mutation to the main thread and block for its reply
@@ -301,6 +384,39 @@ impl IpcBackend for AppIpcBackend {
     fn close_pane(&self, pane: PaneRef) -> Result<(), IpcError> {
         self.submit(IpcActionKind::ClosePane { pane }).map(|_| ())
     }
+
+    fn validate_attach(&self, pane: PaneRef) -> Result<(), IpcError> {
+        self.resolve_attach_pane(pane)?.validate()
+    }
+
+    fn open_attach(
+        &self,
+        pane: PaneRef,
+        generation: u64,
+        output: noa_ipc::AttachOutputSender,
+    ) -> Result<Vec<u8>, IpcError> {
+        self.resolve_attach_pane(pane)?.open(generation, output)
+    }
+
+    fn write_attach(&self, pane: PaneRef, generation: u64, bytes: &[u8]) -> Result<(), IpcError> {
+        self.resolve_attach_pane(pane)?.write(generation, bytes)
+    }
+
+    fn detach_attach(&self, pane: PaneRef, generation: u64) -> Result<(), IpcError> {
+        // A pane-close cleanup may already have removed the bridge. Detach is
+        // intentionally idempotent, and a stale generation can never clear
+        // a newer one because RawAttachTap performs the generation check.
+        if let Ok(attach) = self.resolve_attach_pane(pane) {
+            attach.detach(generation);
+        }
+        Ok(())
+    }
+
+    fn resize_pane(&self, pane: PaneRef, cols: u16, rows: u16) -> Result<(), IpcError> {
+        self.resolve_attach_pane(pane)?.validate()?;
+        self.submit(IpcActionKind::ResizePane { pane, cols, rows })
+            .map(|_| ())
+    }
 }
 
 /// Join visible screen rows into `noa.getText(source: "screen")` plain text
@@ -414,6 +530,7 @@ pub(crate) fn card_to_panel(
     window_group_id: u64,
     window_id: u64,
     card: &SessionCard,
+    attachable: bool,
 ) -> Panel {
     Panel {
         window_group_id: window_group_id.into(),
@@ -425,6 +542,7 @@ pub(crate) fn card_to_panel(
         process: card.process.clone(),
         busy: card.busy,
         attention: card.attention,
+        attachable,
         preview: card
             .preview
             .iter()

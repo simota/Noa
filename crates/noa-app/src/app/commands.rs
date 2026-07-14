@@ -64,6 +64,13 @@ impl App {
         if command != AppCommand::SendSelectionToPane {
             self.send_selection_picker = None;
         }
+        let remote_ui_loading = self
+            .remote_ui
+            .as_ref()
+            .is_some_and(|session| session.is_loading());
+        if should_dismiss_remote_ui(command, remote_ui_loading) {
+            self.remote_ui = None;
+        }
         match command {
             AppCommand::About => crate::app_actions::show_about(),
             // R-22: Cmd+, now opens the GUI settings overlay instead of the
@@ -147,6 +154,7 @@ impl App {
                     self.paste_clipboard_to_pty();
                 }
             }
+            AppCommand::AttachRemote => self.begin_attach_remote(),
             AppCommand::SendSelectionToPane => self.open_send_selection_picker(),
             AppCommand::ExportScrollback => self.export_scrollback_to_temp_file(),
             AppCommand::PipeScrollbackToPager => self.pipe_scrollback_to_pager(event_loop),
@@ -239,4 +247,20 @@ fn toggle_borderless_fullscreen(window: &Window) {
         ))
     };
     window.set_fullscreen(fullscreen);
+}
+
+fn should_dismiss_remote_ui(command: AppCommand, loading: bool) -> bool {
+    command != AppCommand::AttachRemote && !loading
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unrelated_commands_keep_loading_remote_requests_owned() {
+        assert!(!should_dismiss_remote_ui(AppCommand::NewTab, true));
+        assert!(should_dismiss_remote_ui(AppCommand::NewTab, false));
+        assert!(!should_dismiss_remote_ui(AppCommand::AttachRemote, false));
+    }
 }

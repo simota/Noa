@@ -194,7 +194,21 @@ impl App {
 
         let mut panels = Vec::new();
         let mut terminals = HashMap::new();
-        let mut live_keys = HashSet::new();
+        // Raw attach resources are registered when the Surface is spawned,
+        // before the PTY's first output creates its session card. Treat the
+        // Surface map as the lifetime authority so an initially silent pane
+        // cannot lose its attach endpoint during the first snapshot tick.
+        let mut live_keys: HashSet<_> = self
+            .windows
+            .iter()
+            .flat_map(|(window_id, state)| {
+                let window_id = u64::from(*window_id);
+                state
+                    .surfaces
+                    .keys()
+                    .map(move |pane_id| (window_id, pane_id.get()))
+            })
+            .collect();
         let previous_panels = {
             let mut shared = self.ipc_shared.lock();
             for (id, card) in self.session_store.ordered_cards() {
@@ -207,22 +221,30 @@ impl App {
                 }
                 let key = registry_key(id);
                 let ipc_id = shared.registry.mint(key.0, key.1);
+                let attachable = shared.attach_panes.contains_key(&key);
                 live_keys.insert(key);
-                panels.push(card_to_panel(ipc_id, state.group.0, key.0, card));
+                panels.push(card_to_panel(
+                    ipc_id,
+                    state.group.0,
+                    key.0,
+                    card,
+                    attachable,
+                ));
                 if let Some(surface) = state.surfaces.get(&id.pane_id) {
                     terminals.insert(key, surface.terminal.clone());
                 }
             }
             let previous = std::mem::replace(&mut shared.panels, panels.clone());
             shared.terminals = terminals;
+            let stale_attach_keys = stale_registry_keys(shared.attach_panes.keys(), &live_keys);
+            for key in stale_attach_keys {
+                if let Some(attach) = shared.attach_panes.remove(&key) {
+                    attach.shutdown();
+                }
+            }
             // Closed panes never reappear under the same `(window_id,
             // pane_id)` key (`WindowId`/`PaneId` are never reused), so
-            // pruning anything absent from this tick's live set is safe.
-            // A pane minted this same tick via `ipc_output_tap` (eager
-            // mint at spawn, before it lands in `session_store`) is always
-            // in `live_keys` too: spawn wiring inserts into
-            // `session_store`/`self.windows` synchronously before the
-            // event loop yields to the next `about_to_wait`.
+            // pruning anything absent from the live Surface set is safe.
             shared.registry.prune(&live_keys);
             previous
         };
@@ -380,6 +402,33 @@ impl App {
                 }
                 Ok(IpcActionReply::Ok)
             }
+            IpcActionKind::ResizePane { pane, cols, rows } => {
+                let (window_id, pane_id) = self.resolve_ipc_pane(pane)?;
+                let surface = self
+                    .windows
+                    .get_mut(&window_id)
+                    .and_then(|state| state.surfaces.get_mut(&pane_id))
+                    .ok_or(noa_ipc::IpcError::PaneClosed)?;
+                let resize_tx = match &surface.transport {
+                    SurfaceTransport::Local(local) => local.resize_tx.clone(),
+                    SurfaceTransport::Remote(_) => {
+                        return Err(noa_ipc::IpcError::Unsupported(
+                            "resize server-side remote pane",
+                        ));
+                    }
+                };
+                apply_attach_grid_first_resize(
+                    &surface.terminal,
+                    &mut surface.grid_size,
+                    GridSize::new(cols, rows),
+                    |size| {
+                        resize_tx
+                            .send(size)
+                            .map_err(|_| noa_ipc::IpcError::PaneClosed)
+                    },
+                )?;
+                Ok(IpcActionReply::Ok)
+            }
         }
     }
 
@@ -458,6 +507,38 @@ impl App {
         }
     }
 
+    /// Wire a local pane's generation-aware raw attach resources eagerly at
+    /// spawn. The returned tap is passed to that pane's io thread.
+    pub(super) fn register_ipc_attach_pane(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+        terminal: Arc<Mutex<Terminal>>,
+        input: crate::io_thread::PtyInputQueue,
+    ) -> crate::io_thread::RawAttachTap {
+        let raw_output = crate::io_thread::RawAttachTap::default();
+        let id = SessionCardId::new(
+            crate::session_store::SessionWindowId(u64::from(window_id)),
+            pane_id,
+        );
+        let key = registry_key(id);
+        let mut shared = self.ipc_shared.lock();
+        shared.registry.mint(key.0, key.1);
+        shared.attach_panes.insert(
+            key,
+            crate::ipc_bridge::IpcAttachPane::new(terminal, raw_output.clone(), input),
+        );
+        raw_output
+    }
+
+    pub(super) fn cleanup_ipc_attach_pane(&self, window_id: WindowId, pane_id: PaneId) {
+        let key = (u64::from(window_id), pane_id.get());
+        let attach = self.ipc_shared.lock().attach_panes.remove(&key);
+        if let Some(attach) = attach {
+            attach.shutdown();
+        }
+    }
+
     fn mint_ipc_pane(&self, window_id: WindowId, pane_id: PaneId) -> u64 {
         let id = SessionCardId::new(
             crate::session_store::SessionWindowId(u64::from(window_id)),
@@ -465,5 +546,70 @@ impl App {
         );
         let (window, pane) = registry_key(id);
         self.ipc_shared.lock().registry.mint(window, pane)
+    }
+}
+
+fn stale_registry_keys<'a>(
+    registered: impl Iterator<Item = &'a (u64, u64)>,
+    live: &HashSet<(u64, u64)>,
+) -> Vec<(u64, u64)> {
+    registered
+        .filter(|key| !live.contains(key))
+        .copied()
+        .collect()
+}
+
+fn apply_attach_grid_first_resize(
+    terminal: &Arc<Mutex<Terminal>>,
+    current_size: &mut GridSize,
+    new_size: GridSize,
+    dispatch_pty_resize: impl FnOnce(GridSize) -> Result<(), noa_ipc::IpcError>,
+) -> Result<(), noa_ipc::IpcError> {
+    if *current_size == new_size {
+        return Ok(());
+    }
+    *current_size = new_size;
+    terminal.lock().resize(new_size);
+    dispatch_pty_resize(new_size)
+}
+
+#[cfg(test)]
+mod attach_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn attach_resize_dispatch_observes_grid_already_resized() {
+        let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+        let mut current_size = GridSize::new(80, 24);
+        let dispatched = AtomicBool::new(false);
+
+        apply_attach_grid_first_resize(
+            &terminal,
+            &mut current_size,
+            GridSize::new(120, 40),
+            |size| {
+                assert_eq!(terminal.lock().size, size, "grid must resize first");
+                dispatched.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(dispatched.load(Ordering::SeqCst));
+        assert_eq!(current_size, GridSize::new(120, 40));
+    }
+
+    #[test]
+    fn attach_cleanup_retains_live_surface_without_session_card() {
+        let silent_surface = (7, 1);
+        let closed_surface = (8, 2);
+        let registered = [silent_surface, closed_surface];
+        let live = HashSet::from([silent_surface]);
+
+        assert_eq!(
+            stale_registry_keys(registered.iter(), &live),
+            vec![closed_surface]
+        );
     }
 }

@@ -45,6 +45,7 @@ pub fn resolve_pane_command_target(
         | AppCommand::ReloadConfig
         | AppCommand::NewTab
         | AppCommand::NewWindow
+        | AppCommand::AttachRemote
         | AppCommand::ToggleTabOverview
         | AppCommand::ToggleCommandPalette
         | AppCommand::OpenThemePicker

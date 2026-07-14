@@ -9,7 +9,7 @@ pub(crate) fn shutdown_pane_io_threads<'a>(surfaces: impl IntoIterator<Item = &'
 }
 
 pub(crate) fn surface_has_running_program(surface: &Surface) -> bool {
-    surface.terminal.lock().has_running_program()
+    !surface.is_remote() && surface.terminal.lock().has_running_program()
 }
 
 pub(crate) fn running_program_count<'a>(surfaces: impl IntoIterator<Item = &'a Surface>) -> usize {

@@ -100,11 +100,20 @@ const MINIMUM_CONTRAST_MAX: f32 = 21.0;
 const SERVER_PORT_STEP: i32 = 1;
 const SERVER_PORT_MIN: u16 = 1024;
 const SERVER_PORT_MAX: u16 = 65535;
-/// `server-scopes` cycle presets, in ←→ order — the same 4 combinations
-/// `docs/specs/noa-server.md`'s scope table documents as meaningful
-/// (control/input are each additive over `read`).
-const SERVER_SCOPES_PRESETS: [&str; 4] =
-    ["read", "read,control", "read,input", "read,control,input"];
+/// `server-scopes` cycle presets, in ←→ order. `control`, `input`, and the
+/// raw Client Mode `attach` scope are independently additive over `read`;
+/// keeping the four non-attach presets first preserves the familiar cycle
+/// before exposing the four explicit attach grants.
+const SERVER_SCOPES_PRESETS: [&str; 8] = [
+    "read",
+    "read,control",
+    "read,input",
+    "read,control,input",
+    "read,attach",
+    "read,control,attach",
+    "read,input,attach",
+    "read,control,input,attach",
+];
 /// `server-bind` cycle presets, in ←→ order (v2 LAN opt-in): loopback-only
 /// (the default) and `0.0.0.0` (all interfaces, LAN-exposed).
 const SERVER_BIND_PRESETS: [&str; 2] = ["127.0.0.1", "0.0.0.0"];

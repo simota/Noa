@@ -31,8 +31,9 @@ mod feed;
 mod input_queue;
 mod ipc_tap;
 mod overview;
+mod raw_attach;
 mod redraw;
-mod sidebar;
+pub(crate) mod sidebar;
 mod spawn;
 
 // Not directly used at this level — these glob-imports flatten every
@@ -51,6 +52,8 @@ use ipc_tap::*;
 #[allow(unused_imports)]
 use overview::*;
 #[allow(unused_imports)]
+use raw_attach::*;
+#[allow(unused_imports)]
 use redraw::*;
 #[allow(unused_imports)]
 use sidebar::*;
@@ -60,7 +63,8 @@ use spawn::*;
 pub(crate) use auto_approve::{AutoApproveFeedback, AutoApprovePublish};
 pub(crate) use input_queue::{PtyInputQueue, QueueInputResult, input_channel};
 pub(crate) use ipc_tap::IpcOutputTap;
-pub(crate) use overview::OverviewPublish;
+pub(crate) use overview::{OverviewPublish, publish_overview_snapshot};
+pub(crate) use raw_attach::RawAttachTap;
 pub(crate) use redraw::{
     RedrawFloor, SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION, redraw_floor_from_refresh_millihertz,
 };

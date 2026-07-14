@@ -80,6 +80,18 @@ impl App {
         match tree {
             SplitTree::Leaf { pane } => session::PaneNode::Leaf {
                 cwd: self.pane_cwd(window_id, *pane),
+                remote: self
+                    .windows
+                    .get(&window_id)
+                    .and_then(|state| state.surfaces.get(pane))
+                    .and_then(|surface| match &surface.transport {
+                        SurfaceTransport::Local(_) => None,
+                        SurfaceTransport::Remote(remote) => Some(session::RemotePane {
+                            endpoint: remote.identity.endpoint.clone(),
+                            pane_id: remote.identity.pane_id,
+                            cached_title: remote.identity.cached_title.clone(),
+                        }),
+                    }),
             },
             SplitTree::Split {
                 orientation,
@@ -148,14 +160,25 @@ impl App {
                     SpawnTarget::CurrentWindow
                 };
                 let first_leaf_cwd = tab.split.first_leaf_cwd();
-                let window_id =
-                    match self.spawn_tab_with_cwd(event_loop, target, Some(first_leaf_cwd)) {
-                        Ok(window_id) => window_id,
-                        Err(err) => {
-                            log::warn!("session restore: failed to spawn tab: {err}");
-                            continue;
-                        }
-                    };
+                let spawn_result = match tab.split.first_leaf_remote() {
+                    Some(remote) => self.spawn_detached_remote_tab(
+                        event_loop,
+                        target,
+                        crate::remote_attach::RemotePaneIdentity {
+                            endpoint: remote.endpoint,
+                            pane_id: remote.pane_id,
+                            cached_title: remote.cached_title,
+                        },
+                    ),
+                    None => self.spawn_tab_with_cwd(event_loop, target, Some(first_leaf_cwd)),
+                };
+                let window_id = match spawn_result {
+                    Ok(window_id) => window_id,
+                    Err(err) => {
+                        log::warn!("session restore: failed to spawn tab: {err}");
+                        continue;
+                    }
+                };
                 tab_ids.push(window_id);
                 if let Some(state) = self.windows.get_mut(&window_id) {
                     state.title_override = tab.title.clone();
@@ -233,19 +256,34 @@ impl App {
             if leaf.is_root {
                 continue;
             }
-            match self.spawn_pane_surface(
-                window_id,
-                leaf.pane,
-                placeholder_grid,
-                placeholder_rect,
-                leaf.cwd.clone(),
-                auto_approve_enabled.clone(),
-                redraw_floor.clone(),
-            ) {
-                Ok(surface) => spawned.push((leaf.pane, surface)),
-                Err(err) => {
-                    spawn_failed = true;
-                    log::warn!("session restore: failed to spawn split pane: {err}");
+            if let Some(remote) = &leaf.remote {
+                spawned.push((
+                    leaf.pane,
+                    self.detached_remote_surface(
+                        placeholder_grid,
+                        placeholder_rect,
+                        crate::remote_attach::RemotePaneIdentity {
+                            endpoint: remote.endpoint.clone(),
+                            pane_id: remote.pane_id,
+                            cached_title: remote.cached_title.clone(),
+                        },
+                    ),
+                ));
+            } else {
+                match self.spawn_pane_surface(
+                    window_id,
+                    leaf.pane,
+                    placeholder_grid,
+                    placeholder_rect,
+                    leaf.cwd.clone(),
+                    auto_approve_enabled.clone(),
+                    redraw_floor.clone(),
+                ) {
+                    Ok(surface) => spawned.push((leaf.pane, surface)),
+                    Err(err) => {
+                        spawn_failed = true;
+                        log::warn!("session restore: failed to spawn split pane: {err}");
+                    }
                 }
             }
         }
@@ -263,6 +301,22 @@ impl App {
             .get(tab.focused_leaf)
             .map(|leaf| leaf.pane)
             .unwrap_or(root_pane);
+        let remote_cards = leaves
+            .iter()
+            .filter(|leaf| !leaf.is_root)
+            .filter_map(|leaf| {
+                leaf.remote.as_ref().map(|remote| {
+                    (
+                        leaf.pane,
+                        crate::remote_attach::RemotePaneIdentity {
+                            endpoint: remote.endpoint.clone(),
+                            pane_id: remote.pane_id,
+                            cached_title: remote.cached_title.clone(),
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.split_tree = tree;
             state.next_pane_id = minter.next;
@@ -273,6 +327,9 @@ impl App {
                 state.focused_pane = focused_pane;
                 state.last_mouse_pane = Some(focused_pane);
             }
+        }
+        for (pane_id, identity) in remote_cards {
+            self.register_remote_session_card(window_id, pane_id, &identity);
         }
         self.relayout_and_resize_window(window_id);
     }
@@ -319,6 +376,7 @@ impl PaneMinter {
 struct LeafSpec {
     pane: PaneId,
     cwd: Option<String>,
+    remote: Option<session::RemotePane>,
     is_root: bool,
 }
 
@@ -331,11 +389,12 @@ fn build_split_tree(
     leaves: &mut Vec<LeafSpec>,
 ) -> SplitTree {
     match node {
-        session::PaneNode::Leaf { cwd } => {
+        session::PaneNode::Leaf { cwd, remote } => {
             let (pane, is_root) = minter.mint();
             leaves.push(LeafSpec {
                 pane,
                 cwd: cwd.clone(),
+                remote: remote.clone(),
                 is_root,
             });
             SplitTree::leaf(pane)
@@ -396,5 +455,46 @@ fn capture_window_frame(window: &Window) -> session::WindowFrame {
         position,
         width: size.width,
         height: size.height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_rebuild_keeps_remote_identity_on_the_original_leaf() {
+        let remote = session::RemotePane {
+            endpoint: "server.local:61771".to_string(),
+            pane_id: 19,
+            cached_title: Some("remote editor".to_string()),
+        };
+        let node = session::PaneNode::Split {
+            orientation: session::Orientation::Horizontal,
+            ratio: 0.5,
+            first: Box::new(session::PaneNode::Leaf {
+                cwd: None,
+                remote: Some(remote.clone()),
+            }),
+            second: Box::new(session::PaneNode::Leaf {
+                cwd: Some("/local".to_string()),
+                remote: None,
+            }),
+        };
+        let root = PaneId::new(7);
+        let mut minter = PaneMinter {
+            next: 8,
+            root: Some(root),
+        };
+        let mut leaves = Vec::new();
+
+        let _tree = build_split_tree(&node, &mut minter, &mut leaves);
+
+        assert_eq!(leaves.len(), 2);
+        assert_eq!(leaves[0].pane, root);
+        assert!(leaves[0].is_root);
+        assert_eq!(leaves[0].remote, Some(remote));
+        assert_eq!(leaves[1].cwd.as_deref(), Some("/local"));
+        assert_eq!(leaves[1].remote, None);
     }
 }

@@ -10,6 +10,13 @@ impl App {
             return Some(ModalImeTarget::ConfirmDialog);
         }
         if self
+            .remote_ui
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            return Some(ModalImeTarget::RemoteUi);
+        }
+        if self
             .tab_title_prompt
             .as_ref()
             .is_some_and(|session| session.window_id == window_id)
@@ -72,6 +79,7 @@ impl App {
     ) {
         match target {
             ModalImeTarget::ConfirmDialog => {}
+            ModalImeTarget::RemoteUi => self.push_remote_ui_text(text),
             ModalImeTarget::TabTitlePrompt => self.push_tab_title_prompt_text(text),
             ModalImeTarget::SearchPrompt => {
                 let effect = self

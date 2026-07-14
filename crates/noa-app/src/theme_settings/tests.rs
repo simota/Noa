@@ -2296,7 +2296,7 @@ fn server_port_row_steps_by_one_and_clamps_to_the_valid_port_range() {
 }
 
 // Server settings panel rows, part 3/3 (server-scopes): cycles through the
-// 4 documented presets both directions, and a non-preset config value
+// 8 documented presets both directions, and a non-preset config value
 // (e.g. hand-edited "input,read") falls back to the first preset ("read")
 // on the first press rather than panicking or getting stuck.
 #[test]
@@ -2312,7 +2312,16 @@ fn server_scopes_row_cycles_presets_and_falls_back_from_a_non_preset_value() {
         RowDraft::ServerScopes("read".to_string())
     );
 
-    let forward = ["read,control", "read,input", "read,control,input", "read"];
+    let forward = [
+        "read,control",
+        "read,input",
+        "read,control,input",
+        "read,attach",
+        "read,control,attach",
+        "read,input,attach",
+        "read,control,input,attach",
+        "read",
+    ];
     for expected in forward {
         settings.adjust(1, Instant::now());
         assert_eq!(
@@ -2326,7 +2335,16 @@ fn server_scopes_row_cycles_presets_and_falls_back_from_a_non_preset_value() {
         RestartReason::None
     );
 
-    let backward = ["read,control,input", "read,input", "read,control", "read"];
+    let backward = [
+        "read,control,input,attach",
+        "read,input,attach",
+        "read,control,attach",
+        "read,attach",
+        "read,control,input",
+        "read,input",
+        "read,control",
+        "read",
+    ];
     for expected in backward {
         settings.adjust(-1, Instant::now());
         assert_eq!(
@@ -2342,7 +2360,7 @@ fn server_scopes_row_cycles_presets_and_falls_back_from_a_non_preset_value() {
     );
 
     // Non-preset fallback: a hand-edited config value that isn't one of the
-    // 4 cycle presets doesn't panic or get stuck — `cycle`'s shared
+    // 8 cycle presets doesn't panic or get stuck — `cycle`'s shared
     // not-found fallback (`state.rs`) treats it as sitting at preset index 0
     // ("read") and steps from there, landing on a real preset immediately
     // (index 1, "read,control", for a `+1` press) rather than requiring two

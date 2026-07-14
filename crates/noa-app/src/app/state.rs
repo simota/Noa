@@ -832,6 +832,7 @@ pub(super) struct TabTitlePromptSession {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ModalImeTarget {
     ConfirmDialog,
+    RemoteUi,
     TabTitlePrompt,
     SearchPrompt,
     CommandPalette,
@@ -858,6 +859,21 @@ pub(super) struct ConfirmDialogSession {
 
 /// The deferred side effect a [`ConfirmDialogSession`] runs on confirmation.
 pub(super) enum ConfirmAction {
+    /// Continue a previously gated non-loopback remote discovery. The token
+    /// is deliberately not stored in the dialog; it is cloned from config
+    /// only when the confirmed background worker starts.
+    AttachRemote {
+        window_id: WindowId,
+        endpoint: crate::remote_attach::RemoteEndpoint,
+    },
+    /// Reconnect one restored remote surface after the same non-loopback
+    /// warning used by discovery. The token remains config-owned and is only
+    /// cloned when the confirmed connection manager starts.
+    RetryDetachedRemote {
+        window_id: WindowId,
+        pane_id: PaneId,
+        endpoint: crate::remote_attach::RemoteEndpoint,
+    },
     /// Paste raw (unencoded) text to the pane's pty. Encoding (bracketed or
     /// raw) happens at confirm time, not dialog-open time, so a bracketed-
     /// paste mode change while the dialog is open can't produce a stale
@@ -895,10 +911,7 @@ pub(super) enum ConfirmAction {
 /// `PaneId`; this map owns the corresponding live surface payload.
 pub(super) struct Surface {
     pub(super) terminal: Arc<Mutex<Terminal>>,
-    pub(super) pty_input_tx: crate::io_thread::PtyInputQueue,
-    pub(super) auto_approve_feedback_tx: Sender<crate::io_thread::AutoApproveFeedback>,
-    pub(super) resize_tx: Sender<GridSize>,
-    pub(super) io_thread: Option<crate::io_thread::IoThreadHandle>,
+    pub(super) transport: SurfaceTransport,
     pub(super) grid_size: GridSize,
     pub(super) mouse_selection: MouseSelectionState,
     /// The in-progress drag's anchor pinned to content: its storage
@@ -945,6 +958,28 @@ pub(super) struct Surface {
     pub(super) held_snapshot: Option<HeldSnapshot>,
 }
 
+/// Transport-specific ownership for a pane. Keeping this explicit prevents a
+/// detached remote pane from being mistaken for a local pane whose io thread
+/// happens to be absent.
+pub(super) enum SurfaceTransport {
+    Local(LocalSurfaceTransport),
+    Remote(RemoteSurfaceTransport),
+}
+
+pub(super) struct LocalSurfaceTransport {
+    pub(super) pty_input_tx: crate::io_thread::PtyInputQueue,
+    pub(super) auto_approve_feedback_tx: Sender<crate::io_thread::AutoApproveFeedback>,
+    pub(super) resize_tx: Sender<GridSize>,
+    pub(super) io_thread: Option<crate::io_thread::IoThreadHandle>,
+}
+
+pub(super) struct RemoteSurfaceTransport {
+    pub(super) identity: crate::remote_attach::RemotePaneIdentity,
+    pub(super) state: Arc<Mutex<crate::remote_attach::RemoteAttachState>>,
+    pub(super) connection: Option<crate::remote_attach::RemoteConnectionHandle>,
+    pub(super) card_seq: u64,
+}
+
 /// See `Surface::held_snapshot`.
 pub(super) struct HeldSnapshot {
     pub(super) snapshot: FrameSnapshot,
@@ -985,10 +1020,52 @@ impl WindowState {
 }
 
 impl Surface {
-    pub(super) fn shutdown(&mut self) {
-        if let Some(io_thread) = self.io_thread.take() {
-            io_thread.shutdown_and_join();
+    pub(super) fn new(
+        terminal: Arc<Mutex<Terminal>>,
+        transport: SurfaceTransport,
+        grid_size: GridSize,
+        rect: PaneRectApp,
+        auto_approve_guards: Arc<Mutex<crate::auto_approve::AutoApproveInputGuards>>,
+        overview_snapshot: Arc<Mutex<Option<Arc<FrameSnapshot>>>>,
+        kitty_animation_flag: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            terminal,
+            transport,
+            grid_size,
+            mouse_selection: MouseSelectionState::default(),
+            selection_anchor: None,
+            last_mouse_cell: None,
+            pressed_mouse_button: None,
+            ime_state: input::ImeState::default(),
+            auto_approve_guards,
+            rect,
+            hover_link: None,
+            overview_snapshot,
+            snapshot_recycle: noa_render::FrameSnapshotRecycle::default(),
+            kitty_animation_flag,
+            cursor_blink_state: CursorBlinkState::default(),
+            held_snapshot: None,
         }
+    }
+
+    pub(super) fn shutdown(&mut self) {
+        match &mut self.transport {
+            SurfaceTransport::Local(local) => {
+                if let Some(io_thread) = local.io_thread.take() {
+                    io_thread.shutdown_and_join();
+                }
+            }
+            SurfaceTransport::Remote(remote) => {
+                if let Some(connection) = remote.connection.take() {
+                    connection.shutdown_and_join();
+                }
+            }
+        }
+    }
+
+    pub(super) fn is_remote(&self) -> bool {
+        matches!(self.transport, SurfaceTransport::Remote(_))
     }
 }
 

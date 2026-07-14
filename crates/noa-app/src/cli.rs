@@ -467,6 +467,29 @@ fn show_config_output(config: &StartupConfig) -> String {
         "keybind",
         config.keybinds.iter().map(|keybind| keybind.config_value()),
     );
+    push_line(
+        &mut out,
+        "client-remote",
+        config.client_remote.as_deref().unwrap_or(""),
+    );
+    push_line(
+        &mut out,
+        "client-token",
+        config
+            .client_token
+            .as_ref()
+            .map(|_| "<redacted>")
+            .unwrap_or(""),
+    );
+    push_line(
+        &mut out,
+        "client-token-file",
+        config
+            .client_token_file
+            .as_deref()
+            .and_then(std::path::Path::to_str)
+            .unwrap_or(""),
+    );
     out
 }
 
@@ -722,10 +745,30 @@ mod tests {
         assert!(output.contains("audible-bell-dock-bounce = false\n"));
         assert!(output.contains("auto-approve = false\n"));
         assert!(output.contains("send-selection-send-enter = false\n"));
+        assert!(output.contains("client-remote = \n"));
+        assert!(output.contains("client-token = \n"));
+        assert!(output.contains("client-token-file = \n"));
         assert!(
             output.lines().all(|line| line.contains(" = ")),
             "every line must be `key = value`"
         );
+    }
+
+    #[test]
+    fn show_config_output_redacts_client_token() {
+        let config = StartupConfig {
+            client_remote: Some("remote.example:61771".to_string()),
+            client_token: Some("client-secret-literal".to_string()),
+            client_token_file: Some(std::path::PathBuf::from("/tmp/client-token")),
+            ..Default::default()
+        };
+
+        let output = show_config_output(&config);
+
+        assert!(output.contains("client-remote = remote.example:61771\n"));
+        assert!(output.contains("client-token = <redacted>\n"));
+        assert!(output.contains("client-token-file = /tmp/client-token\n"));
+        assert!(!output.contains("client-secret-literal"));
     }
 
     #[test]

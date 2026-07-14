@@ -14,6 +14,13 @@ impl App {
             .clone()
     }
 
+    fn session_card_is_remote(&self, card: &SessionCardId) -> bool {
+        self.windows
+            .get(&WindowId::from(card.window_id.0))
+            .and_then(|state| state.surfaces.get(&card.pane_id))
+            .is_some_and(Surface::is_remote)
+    }
+
     /// Build the per-frame sidebar draw model for `window_id` (FR-2/FR-5), or
     /// `None` when the window has no visible sidebar. Reads only the store and
     /// the pure layout — never a `Terminal` (AC-17). Computed before the redraw
@@ -99,7 +106,8 @@ impl App {
                 continue;
             };
             let tab_title = self.tab_title_override_for_card(&card_rects.id);
-            let lines: CardLines = card_lines(card, now, home, tab_title.as_deref());
+            let mut lines: CardLines = card_lines(card, now, home, tab_title.as_deref());
+            lines.remote_unsupported = self.session_card_is_remote(&card_rects.id);
             let marker = self.attention_marker_visible(&card_rects.id);
             let renaming = self
                 .sidebar_rename
@@ -216,7 +224,8 @@ impl App {
             .and_then(|drag| {
                 let card = self.session_store.get(&drag.card)?;
                 let tab_title = self.tab_title_override_for_card(&drag.card);
-                let lines = card_lines(card, now, home, tab_title.as_deref());
+                let mut lines = card_lines(card, now, home, tab_title.as_deref());
+                lines.remote_unsupported = self.session_card_is_remote(&drag.card);
                 let marker = self.attention_marker_visible(&drag.card);
                 let local = layout_metrics.card_local_rects(drag.card, card_w);
                 let mut card_runs = Vec::new();
@@ -461,14 +470,24 @@ fn emit_card_text(
     // and appends the waiting label; the label is held steady while pending
     // (only the dot blinks, via `effective_status_dot`) so it stays legible.
     if rects.meta.w > 0 && rects.meta.h > 0 {
-        let (badge, badge_fg) = process_badge(&lines.process, card.busy);
+        let (badge, badge_fg) = if lines.remote_unsupported {
+            ("PROCESS N/A".to_string(), chrome().dim_fg)
+        } else {
+            process_badge(&lines.process, card.busy)
+        };
         let (badge, badge_fg) = if card.attention {
             (format!("{badge} · {ATTENTION_LABEL}"), chrome().dot_red)
         } else {
             (badge, badge_fg)
         };
         let mut text = String::new();
-        let run_fg = if card.auto_approve_enabled {
+        let run_fg = if lines.remote_unsupported {
+            text.push_str("AUTO N/A");
+            text.push_str(&sgr_fg(chrome().dim_fg));
+            text.push_str(" · ");
+            text.push_str(&badge);
+            chrome().dim_fg
+        } else if card.auto_approve_enabled {
             text.push_str("AUTO ON");
             text.push_str(&sgr_fg(chrome().dim_fg));
             text.push_str(" · ");
@@ -963,6 +982,32 @@ mod tests {
         assert!(
             without_hint.iter().all(|r| r.text != "⋯"),
             "no ⋯ glyph without the hint"
+        );
+    }
+
+    #[test]
+    fn remote_card_names_process_and_auto_approve_as_unsupported() {
+        let card = store_card(false, "idle");
+        let mut lines = card_lines(&card, wall(10, 3), None, None);
+        lines.remote_unsupported = true;
+        let palette = [Rgb::new(0, 0, 0); 256];
+        let to_cell = cell_at();
+        let mut out = Vec::new();
+        emit_card_text(
+            &mut out,
+            &card_rects(),
+            &card,
+            &lines,
+            &to_cell,
+            false,
+            &palette,
+            None,
+            false,
+        );
+
+        assert!(
+            out.iter()
+                .any(|run| { run.text.contains("AUTO N/A") && run.text.contains("PROCESS N/A") })
         );
     }
 }

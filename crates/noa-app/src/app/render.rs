@@ -39,6 +39,7 @@ impl App {
                 (snapshot, session.opened_at)
             });
         let send_selection_picker_card = self.send_selection_picker_snapshot(window_id);
+        let remote_ui_card = self.remote_ui_snapshot(window_id);
         // Same for the theme-settings overlay: its own modal card, mutually
         // exclusive with the palette (R-3) so only one of the two is ever
         // `Some` here.
@@ -137,6 +138,14 @@ impl App {
                 );
                 continue;
             };
+            let focused_remote_state = if pane_id == state.focused_pane {
+                match &surface.transport {
+                    SurfaceTransport::Local(_) => None,
+                    SurfaceTransport::Remote(remote) => Some(remote.state.lock().clone()),
+                }
+            } else {
+                None
+            };
             let mut term = surface.terminal.lock();
             let copy_mode_state = (copy_mode_pane == Some(pane_id)).then(|| {
                 &mut self
@@ -162,8 +171,21 @@ impl App {
                 at_live_viewport: term.viewport_offset() == 0,
             };
             if pane_id == state.focused_pane {
-                title = resolved_tab_title(title_override.as_deref(), &term.title);
-                focused_cwd_update = proxy_icon_update(&state.proxy_icon_cwd, term.cwd.as_deref());
+                if let (SurfaceTransport::Remote(remote), Some(remote_state)) =
+                    (&surface.transport, focused_remote_state.as_ref())
+                {
+                    let remote_title = crate::remote_attach::tab_title(
+                        &remote.identity,
+                        remote_state,
+                        &term.title,
+                    );
+                    title = resolved_tab_title(title_override.as_deref(), &remote_title);
+                    focused_cwd_update = proxy_icon_update(&state.proxy_icon_cwd, None);
+                } else {
+                    title = resolved_tab_title(title_override.as_deref(), &term.title);
+                    focused_cwd_update =
+                        proxy_icon_update(&state.proxy_icon_cwd, term.cwd.as_deref());
+                }
             }
             if term.viewport_offset() > 0 {
                 scroll_thumbs.push(sidebar::ScrollThumb {
@@ -403,6 +425,7 @@ impl App {
                 palette_card
                     .as_ref()
                     .or(send_selection_picker_card.as_ref())
+                    .or(remote_ui_card.as_ref())
                     .and_then(|(snap, _)| focused_rect.map(|r| (snap, r))),
                 &colors,
             );
@@ -498,6 +521,35 @@ impl App {
                 &view,
                 surface_size,
                 picker,
+                render_pane_rect(*rect),
+                snapshot.cols,
+                snapshot.rows_n,
+                padding,
+                state.window.scale_factor() as f32,
+                fade.progress(now),
+            );
+            if !fade.done(now) {
+                state.window.request_redraw();
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        if let Some((remote, opened_at)) = remote_ui_card.as_ref()
+            && let Some((_, rect, snapshot)) = snapshots
+                .iter()
+                .find(|(pane_id, _, _)| *pane_id == state.focused_pane)
+        {
+            let surface_size = PixelSize {
+                w: state.surface_config.width,
+                h: state.surface_config.height,
+            };
+            let fade = crate::anim::Tween::new(*opened_at, crate::anim::DUR_FAST);
+            let now = Instant::now();
+            sidebar::draw_command_palette_card(
+                gpu,
+                state.surface_config.format,
+                &view,
+                surface_size,
+                remote,
                 render_pane_rect(*rect),
                 snapshot.cols,
                 snapshot.rows_n,

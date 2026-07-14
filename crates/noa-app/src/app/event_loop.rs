@@ -43,6 +43,7 @@ impl ApplicationHandler<UserEvent> for App {
         // last file written by `persist_session` intact (this is a no-op when
         // `windows` is empty), matching "restore the last session".
         self.persist_session();
+        self.shutdown_remote_requests();
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -157,6 +158,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Redraw(window_id, pane_id) => {
+                self.refresh_remote_session_card(window_id, pane_id);
                 let pane_state = self
                     .windows
                     .get(&window_id)
@@ -243,6 +245,9 @@ impl ApplicationHandler<UserEvent> for App {
                 command,
             } => self.spawn_applescript_tab(event_loop, window_target, cwd, command),
             UserEvent::IpcAction { request_id } => self.handle_ipc_action(event_loop, request_id),
+            UserEvent::RemoteRequestCompleted { request_id } => {
+                self.handle_remote_request_completed(event_loop, request_id)
+            }
             UserEvent::RestoreFocus { window_id } => {
                 let target_exists = self.windows.contains_key(&window_id);
                 if should_apply_deferred_focus_restore(window_id, self.focused, target_exists)
@@ -498,6 +503,16 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     if pressed {
                         self.handle_confirm_dialog_key(event_loop, window_id, &event);
+                    }
+                    return;
+                }
+                if self
+                    .remote_ui
+                    .as_ref()
+                    .is_some_and(|session| session.window_id == window_id)
+                {
+                    if pressed {
+                        self.handle_remote_ui_key(event_loop, window_id, &event);
                     }
                     return;
                 }

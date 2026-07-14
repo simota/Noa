@@ -539,7 +539,15 @@ mod palette_enter_decision_tests {
         assert!(decision.close_palette);
         let palette_open_after_enter = !decision.close_palette;
         assert_eq!(
-            active_overlay_gate(palette_open_after_enter, false, false, false, false, false, false),
+            active_overlay_gate(
+                palette_open_after_enter,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+            ),
             ActiveOverlay::None
         );
     }

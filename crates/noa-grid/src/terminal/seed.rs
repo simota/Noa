@@ -847,7 +847,10 @@ mod tests {
     #[test]
     fn synthetic_seed_preserves_hollow_cursor_style() {
         let size = GridSize::new(4, 2);
-        for style in [CursorStyle::BlinkingBlockHollow, CursorStyle::SteadyBlockHollow] {
+        for style in [
+            CursorStyle::BlinkingBlockHollow,
+            CursorStyle::SteadyBlockHollow,
+        ] {
             let mut source = Terminal::new(size);
             source.set_default_cursor_style(style);
             let mut source_stream = Stream::new();

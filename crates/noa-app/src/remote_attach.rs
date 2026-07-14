@@ -668,8 +668,7 @@ impl RemoteConnectionHandle {
         {
             return false;
         }
-        let Ok(bytes) = BudgetedInput::reserve(bytes, Arc::clone(&self.pending_input_bytes))
-        else {
+        let Ok(bytes) = BudgetedInput::reserve(bytes, Arc::clone(&self.pending_input_bytes)) else {
             // The pane's queued-but-unsent bytes already hit the cap: a slow
             // or stalled remote socket combined with repeated huge pastes
             // could otherwise pin unbounded memory. Same remedy as the
@@ -1308,8 +1307,7 @@ fn merge_scrollback_snapshot(
     // byte immediately before the merge boundary unambiguously tells us
     // whether the last unique row continues into the already-local content:
     // a `\n` means a hard break, anything else means a soft wrap.
-    let trailing_wrapped =
-        unique_end > 0 && snapshot.text.as_bytes()[unique_end - 1] != b'\n';
+    let trailing_wrapped = unique_end > 0 && snapshot.text.as_bytes()[unique_end - 1] != b'\n';
     terminal.prepend_scrollback_text(&snapshot.text[..unique_end], trailing_wrapped);
     true
 }
@@ -1549,9 +1547,9 @@ where
                     );
                 }
                 retry_pending_scrollback_merge(terminal, generation, scrollback);
-                sync_redraw_deadline = outcome
-                    .synchronized_output
-                    .then(|| Instant::now() + crate::io_thread::SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION);
+                sync_redraw_deadline = outcome.synchronized_output.then(|| {
+                    Instant::now() + crate::io_thread::SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION
+                });
             }
             Ok(None) => {
                 let now = Instant::now();
@@ -2863,10 +2861,7 @@ mod tests {
             scrollback_scopes()
         }
 
-        fn reserve_attach(
-            &mut self,
-            _pane_id: u64,
-        ) -> Result<Self::Reservation, TransportFailure> {
+        fn reserve_attach(&mut self, _pane_id: u64) -> Result<Self::Reservation, TransportFailure> {
             Ok(())
         }
 
@@ -2926,7 +2921,12 @@ mod tests {
         one_line_terminal.set_reply_writes_enabled(false);
         let terminal = Arc::new(Mutex::new(one_line_terminal));
         let mut stream = noa_vt::Stream::new();
-        feed_remote_bytes(&mut stream, &terminal, b"seedfuture", &FakeNotifier::default());
+        feed_remote_bytes(
+            &mut stream,
+            &terminal,
+            b"seedfuture",
+            &FakeNotifier::default(),
+        );
 
         let connects = Arc::new(AtomicUsize::new(0));
         let factory = SequentialScrollbackFactory {
@@ -2976,7 +2976,12 @@ mod tests {
             2,
             "an overtaken snapshot must trigger exactly one same-generation refetch"
         );
-        assert!(cache.lock().as_ref().is_some_and(|cached| cached.generation == 3));
+        assert!(
+            cache
+                .lock()
+                .as_ref()
+                .is_some_and(|cached| cached.generation == 3)
+        );
     }
 
     #[test]
@@ -3757,10 +3762,7 @@ mod tests {
         wait_until(|| redraws.load(Ordering::Acquire) >= 2);
 
         shutdown.store(true, Ordering::Release);
-        assert!(matches!(
-            handle.join().unwrap(),
-            ConnectedOutcome::Shutdown
-        ));
+        assert!(matches!(handle.join().unwrap(), ConnectedOutcome::Shutdown));
     }
 
     #[test]
@@ -3977,5 +3979,4 @@ mod tests {
             HeartbeatAction::TimedOut
         ));
     }
-
 }

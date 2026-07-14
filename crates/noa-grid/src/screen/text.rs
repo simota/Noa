@@ -23,14 +23,16 @@ impl Screen {
     /// inserted row's `wrapped` flag is set so it stays one logical line with
     /// what was already the oldest row before this prepend, instead of the
     /// two rows being split apart for copy/search/reflow.
-    pub(crate) fn prepend_plain_text_history(&mut self, text: &str, trailing_wrapped: bool) -> usize {
+    pub(crate) fn prepend_plain_text_history(
+        &mut self,
+        text: &str,
+        trailing_wrapped: bool,
+    ) -> usize {
         if text.is_empty() || !self.scrollback_enabled || self.cols == 0 {
             return 0;
         }
         let mut rows = Self::plain_text_rows(text, self.cols);
-        if trailing_wrapped
-            && let Some(last) = rows.last_mut()
-        {
+        if trailing_wrapped && let Some(last) = rows.last_mut() {
             last.wrapped = true;
         }
         let inserted = rows.len();

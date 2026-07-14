@@ -79,12 +79,14 @@ result: `{"paneId":"1","text":"..."}` — when truncated, the **tail is kept in 
 | params | type | required | description |
 |--------|----|------|------|
 | `paneId` | string | ✓ | |
-| `startRow` | number | ✓ | absolute row. Row 0 = the oldest scrollback row |
+| `startRow` | number | ✓ | session-absolute row. Coordinates are never reused after scrollback eviction |
 | `rowCount` | number | ✓ | effective limit of 2048 rows per request |
 
-result: `{"paneId":"1","cols":80,"startRow":0,"rows":[Row],"hasMore":false}`
+result: `{"paneId":"1","cols":80,"startRow":0,"oldestRow":120,"nextRow":220,"rows":[Row],"hasMore":false}`
 
-The response is rounded to fit within 256 KiB serialized. When `hasMore:true`, continue with `startRow = previous startRow + rows.length`. If a single row exceeds the limit by itself, `-32005` is returned.
+`oldestRow` is the first retained coordinate and `nextRow` is the exclusive end of the retained range. To load the current tail, request `startRow = max(oldestRow, nextRow - desiredRowCount)` after an initial bounds probe. Coordinates below `oldestRow` have been evicted and remain invalid; surviving rows keep their existing numbers.
+
+The response is rounded to fit within 256 KiB serialized. `hasMore:true` means only that the requested range was truncated by the 2048-row or 256 KiB response cap; it does not mean that newer or older history exists. Continue the same range from one past the last returned `Row.row`. If a single row exceeds the limit by itself, `-32005` is returned.
 
 ### noa.sendText — requires input
 
@@ -196,7 +198,7 @@ Delivers **only the Panels that changed or were added** when panel metadata chan
 {"jsonrpc":"2.0","method":"noa.output","params":{"paneId":"1","lines":[Row]}}
 ```
 
-Delivers panel-output updates as **only the visible rows that changed, coalesced at ≥16ms intervals** (with color runs). `Row.row` is the absolute row number. Treat each row as a full replacement, not a patch.
+Delivers panel-output updates as **only the visible rows that changed, coalesced at ≥16ms intervals** (with color runs). `Row.row` uses the same stable session-absolute coordinate space as `noa.getGrid`; scrollback eviction never reuses an earlier coordinate. Treat each row as a full replacement, not a patch.
 
 ### The dropped marker
 

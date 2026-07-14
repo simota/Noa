@@ -1182,6 +1182,8 @@ fn handle_get_grid(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value
         pane_id: p.pane_id,
         cols: backend_result.cols,
         start_row: p.start_row,
+        oldest_row: backend_result.oldest_row,
+        next_row: backend_result.next_row,
         rows,
         has_more,
     };

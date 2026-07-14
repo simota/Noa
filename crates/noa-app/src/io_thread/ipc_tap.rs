@@ -71,7 +71,7 @@ pub(super) fn decide_ipc_output_push(
 
 /// Per-pane cache of last-sent viewport row content hashes (F-6), keyed by
 /// viewport slot (`visible_rows()` index), plus the absolute row `base`
-/// (`visible_row_base()`) those hashes were computed against.
+/// (`rows_evicted + visible_row_base()`) those hashes were computed against.
 ///
 /// The `base` is required, not just the hashes: `compute_ipc_row_diff`
 /// diffs by *slot*, and when the viewport's base shifts (scrollback growth
@@ -108,7 +108,9 @@ impl IpcRowCache {
 /// under a `Terminal` lock hold rather than one of them caching a
 /// possibly-stale snapshot.
 pub(super) fn compute_ipc_row_diff(term: &Terminal, cache: &mut IpcRowCache) -> Vec<Row> {
-    let base = term.active().visible_row_base() as u64;
+    let base = term
+        .active_oldest_row()
+        .saturating_add(term.active().visible_row_base()) as u64;
     let rows = term.active().visible_rows();
     if cache.hashes.len() != rows.len() || cache.base != Some(base) {
         // A viewport resize (length change) or a scroll (base change) both

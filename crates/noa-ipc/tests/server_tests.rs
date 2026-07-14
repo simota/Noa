@@ -70,12 +70,16 @@ impl IpcBackend for MockBackend {
             .get(&pane)
             .cloned()
             .ok_or(IpcError::UnknownPane)?;
+        let oldest_row = rows.first().map_or(0, |row| row.row);
+        let next_row = rows.last().map_or(0, |row| row.row.saturating_add(1));
         let rows: Vec<Row> = rows
             .into_iter()
             .filter(|r| r.row >= start_row && r.row < start_row + row_count)
             .collect();
         Ok(GridResult {
             cols: 80,
+            oldest_row,
+            next_row,
             rows,
             has_more: false,
         })
@@ -467,6 +471,8 @@ fn ac10_get_grid_returns_range_only_rows() {
     assert_eq!(rows.len(), 5);
     assert_eq!(rows[0]["row"], 10);
     assert_eq!(rows[4]["row"], 14);
+    assert_eq!(resp["result"]["oldestRow"], 0);
+    assert_eq!(resp["result"]["nextRow"], 50);
     let _ = sock.close(None);
 }
 

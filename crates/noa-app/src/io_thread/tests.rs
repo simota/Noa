@@ -471,6 +471,27 @@ fn ipc_output_resends_every_row_when_the_viewport_base_shifts_even_with_identica
 }
 
 #[test]
+fn ipc_output_row_ids_do_not_reuse_evicted_scrollback_coordinates() {
+    let mut terminal = Terminal::new(GridSize::new(80, 4));
+    let mut bytes = Vec::new();
+    for i in 0..2_000 {
+        bytes.extend_from_slice(format!("line-{i:04}-{}\r\n", "x".repeat(68)).as_bytes());
+    }
+    noa_vt::Stream::new().feed(&bytes, &mut terminal);
+    terminal.set_scrollback_limit_bytes(1);
+
+    let oldest = terminal.selection_rows_evicted() as u64;
+    assert!(oldest > 0, "test setup must evict retained scrollback");
+
+    let rows = compute_ipc_row_diff(&terminal, &mut IpcRowCache::default());
+    assert_eq!(
+        rows.first().map(|row| row.row),
+        Some(oldest + terminal.active().visible_row_base() as u64),
+        "push row ids must stay in the same session-absolute coordinate space as getGrid"
+    );
+}
+
+#[test]
 fn ipc_output_is_none_when_nothing_changed_or_the_tap_is_inactive() {
     let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
     let mut stream = noa_vt::Stream::new();

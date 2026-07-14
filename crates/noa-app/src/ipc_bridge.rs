@@ -222,6 +222,40 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// what limits a response.
 const MAX_GRID_ROWS_PER_REQUEST: u64 = 2048;
 
+fn terminal_grid_result(terminal: &Terminal, start_row: u64, row_count: u64) -> GridResult {
+    let cols = terminal.active().cols as u32;
+    let oldest_row = terminal.active_oldest_row() as u64;
+    let next_row = terminal.active_next_row() as u64;
+    // Clamp independent of `cap_grid_rows`' later byte-budget trim (F-1):
+    // never loop over an unclamped client-supplied `row_count` while holding
+    // the `Terminal` lock.
+    let clamped_row_count = row_count.min(MAX_GRID_ROWS_PER_REQUEST);
+    let requested_end = start_row.saturating_add(row_count).min(next_row);
+    let start = start_row.max(oldest_row);
+    let end = start_row
+        .saturating_add(clamped_row_count)
+        .min(next_row)
+        .max(start);
+    let has_more = end < requested_end;
+    let rows = (start..end)
+        .filter_map(|y| {
+            terminal
+                .active_absolute_row(y as usize)
+                .map(|grid_row| WireRow {
+                    row: y,
+                    spans: row_to_spans(&grid_row),
+                })
+        })
+        .collect();
+    GridResult {
+        cols,
+        oldest_row,
+        next_row,
+        rows,
+        has_more,
+    }
+}
+
 /// The `noa-ipc` backend implementation wired to a running `App`. Cheap to
 /// clone; every clone shares the same registry/snapshot/pending-table state.
 #[derive(Clone)]
@@ -323,33 +357,7 @@ impl IpcBackend for AppIpcBackend {
             .cloned()
             .ok_or(IpcError::PaneClosed)?;
         let terminal = terminal.lock();
-        let cols = terminal.active().cols as u32;
-        let total = terminal.active_total_rows() as u64;
-        // Clamp independent of `cap_grid_rows`' later byte-budget trim (F-1):
-        // never loop over an unclamped client-supplied `row_count` while
-        // holding the `Terminal` lock.
-        let clamped_row_count = row_count.min(MAX_GRID_ROWS_PER_REQUEST);
-        let end = start_row.saturating_add(clamped_row_count).min(total);
-        // Rows beyond the clamp that the client's original `rowCount` would
-        // have covered but this call didn't walk — the server's byte-budget
-        // `hasMore` wouldn't otherwise catch this since it never sees them.
-        let has_more = end < start_row.saturating_add(row_count).min(total);
-        let mut rows = Vec::new();
-        let mut y = start_row;
-        while y < end {
-            if let Some(grid_row) = terminal.active_absolute_row(y as usize) {
-                rows.push(WireRow {
-                    row: y,
-                    spans: row_to_spans(&grid_row),
-                });
-            }
-            y += 1;
-        }
-        Ok(GridResult {
-            cols,
-            rows,
-            has_more,
-        })
+        Ok(terminal_grid_result(&terminal, start_row, row_count))
     }
 
     fn send_text(&self, pane: PaneRef, text: &str, paste: bool) -> Result<(), IpcError> {
@@ -695,5 +703,28 @@ mod tests {
             wire_color(Color::Rgb(Rgb::new(1, 2, 3))),
             Some(SpanColor::rgb(1, 2, 3))
         );
+    }
+
+    #[test]
+    fn grid_result_reports_tail_bounds_and_stable_rows_after_eviction() {
+        let mut terminal = Terminal::new(noa_core::GridSize::new(80, 4));
+        let mut bytes = Vec::new();
+        for i in 0..2_000 {
+            bytes.extend_from_slice(format!("line-{i:04}-{}\r\n", "x".repeat(68)).as_bytes());
+        }
+        noa_vt::Stream::new().feed(&bytes, &mut terminal);
+        terminal.set_scrollback_limit_bytes(1);
+
+        let oldest = terminal.active_oldest_row() as u64;
+        let next = terminal.active_next_row() as u64;
+        let tail_start = next.saturating_sub(48).max(oldest);
+        let result = terminal_grid_result(&terminal, tail_start, 48);
+
+        assert!(oldest > 0, "test setup must evict retained scrollback");
+        assert_eq!(result.oldest_row, oldest);
+        assert_eq!(result.next_row, next);
+        assert_eq!(result.rows.first().map(|row| row.row), Some(tail_start));
+        assert_eq!(result.rows.last().map(|row| row.row), Some(next - 1));
+        assert!(result.rows.iter().all(|row| row.row >= oldest));
     }
 }

@@ -27,6 +27,10 @@ pub struct TextResult {
 #[derive(Clone, Debug)]
 pub struct GridResult {
     pub cols: u32,
+    /// Oldest retained session-absolute row coordinate.
+    pub oldest_row: u64,
+    /// Exclusive end of the retained session-absolute row range.
+    pub next_row: u64,
     pub rows: Vec<Row>,
     /// Set when the backend itself stopped short of `rowCount` for a reason
     /// the server's own byte-budget trim ([`crate::protocol::cap_grid_rows`])

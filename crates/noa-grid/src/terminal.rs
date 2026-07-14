@@ -214,16 +214,24 @@ impl Terminal {
         self.active().scrollback_len()
     }
 
-    /// Total addressable rows in the active screen's session-absolute row
-    /// space (retained scrollback plus the live grid), for IPC `getGrid`
-    /// paging (noa-server spec).
+    /// Number of currently retained addressable rows in the active screen.
     pub fn active_total_rows(&self) -> usize {
         self.active().total_rows()
     }
 
-    /// A row in the active screen's session-absolute space (`0` = oldest
-    /// retained scrollback row), for IPC `getGrid` paging. `None` if `y` is
-    /// out of range.
+    /// Oldest retained session-absolute row coordinate.
+    pub fn active_oldest_row(&self) -> usize {
+        self.active().rows_evicted()
+    }
+
+    /// Exclusive end of the active screen's retained session-absolute range.
+    pub fn active_next_row(&self) -> usize {
+        self.active_oldest_row()
+            .saturating_add(self.active_total_rows())
+    }
+
+    /// A row in the active screen's stable session-absolute space. `None`
+    /// if `y` has been evicted or is beyond [`Self::active_next_row`].
     pub fn active_absolute_row(&self, y: usize) -> Option<crate::cell::Row> {
         self.active().absolute_row(y)
     }

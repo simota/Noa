@@ -553,6 +553,17 @@ fn scrollback_eviction_advances_rows_evicted_and_shifts_selection() {
         .expect("live selection survives eviction");
     assert_eq!(after.anchor.y, before.anchor.y - evicted);
     assert_eq!(after.focus.y, before.focus.y - evicted);
+
+    let oldest = t.active_oldest_row();
+    assert_eq!(oldest, t.selection_rows_evicted());
+    assert!(
+        t.active_absolute_row(oldest).is_some(),
+        "the first retained row remains addressable by its stable session coordinate"
+    );
+    assert!(
+        t.active_absolute_row(oldest - 1).is_none(),
+        "an evicted coordinate must never be reused for different content"
+    );
 }
 
 #[test]

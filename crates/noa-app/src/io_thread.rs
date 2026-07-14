@@ -2,8 +2,9 @@
 //! can't be shared behind an `Arc` with the main thread), reads `PtyEvent`s,
 //! feeds bytes into the shared `Terminal` through one long-lived
 //! `noa_vt::Stream`, drains any reply bytes the terminal queued back out to
-//! the pty, and pokes the winit event loop to redraw. Resize and input
-//! requests come in from the main thread over crossbeam channels.
+//! the pty, and pokes the winit event loop to redraw. Resize, input, and
+//! explicit IPC viewport-refresh requests come in from the main thread over
+//! crossbeam channels.
 
 // Not directly used at this level — brought into scope only so
 // `io_thread::tests` can resolve these unqualified via `use super::*;`, same

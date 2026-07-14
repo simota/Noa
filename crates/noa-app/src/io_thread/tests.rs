@@ -496,6 +496,29 @@ fn ipc_output_row_ids_do_not_reuse_evicted_scrollback_coordinates() {
 }
 
 #[test]
+fn ipc_output_row_ids_advance_when_scrollback_is_disabled() {
+    let mut terminal = Terminal::new(GridSize::new(80, 4));
+    terminal.set_scrollback_limit_bytes(0);
+    let mut stream = noa_vt::Stream::new();
+    stream.feed(b"one\r\ntwo\r\nthree\r\nfour", &mut terminal);
+    let mut cache = IpcRowCache::default();
+
+    let before = compute_ipc_row_diff(&terminal, &mut cache);
+    stream.feed(b"\r\nfive", &mut terminal);
+    let after = compute_ipc_row_diff(&terminal, &mut cache);
+
+    assert_eq!(
+        after.coordinate_generation, before.coordinate_generation,
+        "ordinary scrolling must stay in the same coordinate generation"
+    );
+    assert_eq!(
+        after.lines.iter().map(|row| row.row).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4],
+        "discarded rows must still advance session-absolute row ids"
+    );
+}
+
+#[test]
 fn ipc_output_resends_full_viewport_with_a_new_generation_after_clear_scrollback() {
     let mut terminal = Terminal::new(GridSize::new(80, 4));
     noa_vt::Stream::new().feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive", &mut terminal);
@@ -507,6 +530,46 @@ fn ipc_output_resends_full_viewport_with_a_new_generation_after_clear_scrollback
 
     assert_ne!(after.coordinate_generation, before.coordinate_generation);
     assert_eq!(after.lines.len(), terminal.active().visible_rows().len());
+}
+
+#[test]
+fn forced_ipc_output_refresh_notifies_idle_subscribers_after_generation_change() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 4))));
+    {
+        let mut terminal = terminal.lock();
+        noa_vt::Stream::new().feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive", &mut *terminal);
+    }
+    let mut cache = IpcRowCache::default();
+    let generation_before =
+        compute_ipc_row_diff(&terminal.lock(), &mut cache).coordinate_generation;
+    terminal.lock().clear_scrollback();
+
+    let broadcaster = noa_ipc::push::Broadcaster::new();
+    let (conn_id, queue) = broadcaster.register_connection();
+    broadcaster
+        .add_subscription(conn_id, noa_ipc::push::EventMask::OUTPUT, None)
+        .expect("connection was just registered");
+    let tap = super::ipc_tap::IpcOutputTap {
+        broadcaster,
+        ipc_pane_id: 42,
+    };
+    let mut last_ipc_push = Some(Instant::now());
+
+    super::ipc_tap::force_ipc_output_refresh(&terminal, &tap, &mut last_ipc_push, &mut cache);
+
+    let notifications = queue.drain();
+    assert_eq!(notifications.len(), 1);
+    match &notifications[0] {
+        noa_ipc::push::QueuedNotification::Output {
+            coordinate_generation,
+            lines,
+            ..
+        } => {
+            assert_ne!(*coordinate_generation, generation_before);
+            assert_eq!(lines.len(), terminal.lock().active().visible_rows().len());
+        }
+        other => panic!("expected an Output notification, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1976,6 +2039,7 @@ fn io_thread_handle_shutdown_joins_within_timeout() {
     });
     let mut handle = IoThreadHandle {
         shutdown_tx,
+        ipc_output_refresh_tx: crossbeam_channel::bounded::<()>(1).0,
         join: Some(join),
     };
 
@@ -1993,6 +2057,7 @@ fn pane_io_thread_shutdown_joins_all_blocked_handles_within_timeout() {
         });
         handles.push(IoThreadHandle {
             shutdown_tx,
+            ipc_output_refresh_tx: crossbeam_channel::bounded::<()>(1).0,
             join: Some(join),
         });
     }
@@ -2016,6 +2081,7 @@ fn shutdown_and_join_does_not_block_the_caller() {
     });
     let handle = IoThreadHandle {
         shutdown_tx,
+        ipc_output_refresh_tx: crossbeam_channel::bounded::<()>(1).0,
         join: Some(join),
     };
 

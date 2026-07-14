@@ -176,6 +176,24 @@ pub(super) fn flush_pending_ipc_output(
     }
 }
 
+/// Wake-up path for coordinate-space changes made outside the pty feed loop
+/// (for example Clear Scrollback or a main-thread grid resize). Resetting the
+/// cache makes this an explicit full-viewport resend; the per-pane subscriber
+/// gate preserves the normal zero-work behavior when nobody is listening.
+pub(super) fn force_ipc_output_refresh(
+    terminal: &Arc<Mutex<Terminal>>,
+    tap: &IpcOutputTap,
+    last_ipc_push: &mut Option<Instant>,
+    ipc_row_cache: &mut IpcRowCache,
+) {
+    ipc_row_cache.reset();
+    if !tap.broadcaster.has_output_subscriber_for(tap.ipc_pane_id) {
+        *last_ipc_push = None;
+        return;
+    }
+    flush_pending_ipc_output(terminal, tap, last_ipc_push, ipc_row_cache);
+}
+
 /// A content hash of one wire row's spans (F-6: row diffing). Two calls with
 /// unchanged text/fg/bg/attrs must hash equal, so a per-pane cache of these
 /// (keyed by viewport slot) can skip resending rows that haven't changed.

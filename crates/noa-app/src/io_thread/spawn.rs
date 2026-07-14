@@ -2,8 +2,9 @@
 //! can't be shared behind an `Arc` with the main thread), reads `PtyEvent`s,
 //! feeds bytes into the shared `Terminal` through one long-lived
 //! `noa_vt::Stream`, drains any reply bytes the terminal queued back out to
-//! the pty, and pokes the winit event loop to redraw. Resize and input
-//! requests come in from the main thread over crossbeam channels.
+//! the pty, and pokes the winit event loop to redraw. Resize, input, and
+//! explicit IPC viewport-refresh requests come in from the main thread over
+//! crossbeam channels.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,7 +31,7 @@ use super::feed::{
     open_pty_capture,
 };
 use super::input_queue::QueuedPtyInput;
-use super::ipc_tap::{IpcOutputTap, flush_pending_ipc_output};
+use super::ipc_tap::{IpcOutputTap, flush_pending_ipc_output, force_ipc_output_refresh};
 use super::overview::{OverviewPublish, flush_pending_overview_publish};
 use super::raw_attach::RawAttachTap;
 use super::redraw::{RedrawDecision, RedrawFloor};
@@ -48,11 +49,19 @@ pub(crate) struct IoThreadTarget {
 /// Owned handle for stopping and joining a PTY io thread.
 pub(crate) struct IoThreadHandle {
     pub(super) shutdown_tx: Sender<()>,
+    pub(super) ipc_output_refresh_tx: Sender<()>,
     pub(super) join: Option<std::thread::JoinHandle<()>>,
 }
 
 impl IoThreadHandle {
     const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// Ask the io thread to resend this pane's full viewport to matching IPC
+    /// output subscribers. The bounded channel coalesces repeated main-thread
+    /// mutations and never blocks the event loop.
+    pub(crate) fn request_ipc_output_refresh(&self) {
+        let _ = self.ipc_output_refresh_tx.try_send(());
+    }
 
     /// Signal shutdown and reap the io thread off the caller (Item 6): a pty
     /// write stuck mid-syscall could otherwise freeze the caller — the main
@@ -138,6 +147,7 @@ pub fn spawn(
     // here via winit's stable `WindowId` ↔ `u64` mapping.
     let card_id = SessionCardId::new(SessionWindowId(u64::from(window_id)), pane_id);
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
+    let (ipc_output_refresh_tx, ipc_output_refresh_rx) = crossbeam_channel::bounded(1);
     let join = std::thread::spawn(move || {
         let writer = pty.writer();
         let mut stream = noa_vt::Stream::with_shared_parser(raw_attach.parser());
@@ -188,7 +198,7 @@ pub fn spawn(
         loop {
             // Fast path: poll every channel with `try_recv` before falling
             // back to a blocking `Select`. During sustained output the pty
-            // channel is almost always ready, so rebuilding the five-op
+            // channel is almost always ready, so rebuilding the six-op
             // `Select` per batch is pure overhead — while the control
             // channels are still polled every iteration, so a flood can't
             // starve shutdown, resize, or user input (^C must reach the
@@ -198,6 +208,20 @@ pub fn spawn(
                 Err(TryRecvError::Empty) => {}
             }
             let mut did_work = false;
+            match ipc_output_refresh_rx.try_recv() {
+                Ok(()) => {
+                    force_ipc_output_refresh(
+                        &terminal,
+                        &ipc,
+                        &mut last_ipc_push,
+                        &mut ipc_row_cache,
+                    );
+                    ipc_publish_pending_at = None;
+                    did_work = true;
+                }
+                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => {}
+            }
             match resize_rx.try_recv() {
                 Ok(size) => {
                     let _ = pty.resize(size);
@@ -481,6 +505,7 @@ pub fn spawn(
             .min();
             let mut sel = crossbeam_channel::Select::new();
             sel.recv(&shutdown_rx);
+            sel.recv(&ipc_output_refresh_rx);
             sel.recv(pty.event_rx());
             sel.recv(&resize_rx);
             sel.recv(&input_rx);
@@ -497,6 +522,7 @@ pub fn spawn(
     });
     IoThreadHandle {
         shutdown_tx,
+        ipc_output_refresh_tx,
         join: Some(join),
     }
 }

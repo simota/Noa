@@ -357,6 +357,7 @@ fn command_palette_card_composites_without_validation_error() {
         row_dirty: vec![true; rows.len()],
         rows,
         cursor: Cursor::default(),
+        copy_cursor: None,
         colors: TerminalColors::default(),
         selection: None,
         search: SearchState::default(),

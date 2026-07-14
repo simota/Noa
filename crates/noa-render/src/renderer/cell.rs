@@ -85,6 +85,15 @@ pub(super) struct RowInstanceBuffers<'a> {
     pub(super) decoration: &'a mut Vec<CellInstance>,
 }
 
+fn projected_copy_cursor(snap: &FrameSnapshot, rows: usize) -> Option<(u16, u16)> {
+    snap.copy_cursor.and_then(|point| {
+        point
+            .y
+            .checked_sub(snap.row_base)
+            .and_then(|y| (y < rows).then_some((point.x, y as u16)))
+    })
+}
+
 /// Build one row's background / glyph / decoration instance segments. Pure
 /// function of `(y, row, snap, ...)` — no cross-row state — which is what
 /// makes per-row caching in [`PaneRenderCache`] safe: a clean row's segments
@@ -122,7 +131,12 @@ pub(super) fn rebuild_row_instances(
     // Cursor shape only depends on pane-wide snapshot state (position,
     // DECSCUSR style, focus, blink phase), so it is resolved once per row
     // rather than recomputed per cell.
-    let cursor_visual = cursor_visual_for(snap);
+    let copy_cursor = projected_copy_cursor(snap, usize::from(snap.rows_n));
+    let cursor_visual = if snap.copy_cursor.is_some() {
+        CursorVisual::None
+    } else {
+        cursor_visual_for(snap)
+    };
     let row_highlights = RowHighlights::new(snap, y, row.cells.len());
 
     for (col_idx, cell) in row.cells.iter().enumerate() {
@@ -135,6 +149,7 @@ pub(super) fn rebuild_row_instances(
         let wide_spacer = cell.attrs.contains(CellAttrs::WIDE_SPACER);
         let cursor_here =
             cursor_visual != CursorVisual::None && snap.cursor.x == x && snap.cursor.y == y;
+        let copy_cursor_here = copy_cursor == Some((x, y));
         // A wide glyph's spacer joins the block fill when the cursor sits on
         // its lead, so the inverted glyph's right half lands on cursor-colored
         // background instead of splitting visually at the cell boundary.
@@ -253,6 +268,21 @@ pub(super) fn rebuild_row_instances(
                 x,
                 y,
                 cursor_visual,
+                to_u8_color(cursor_rgba),
+                metrics,
+                deco_span,
+            );
+        }
+        if copy_cursor_here {
+            let cursor_rgba = surface_output_rgb(
+                cursor_fill_rgb(theme, snap, text_base_rgb, bg_rgb),
+                target_format_is_srgb,
+            );
+            push_cursor_decorations(
+                decoration_instances,
+                x,
+                y,
+                CursorVisual::Hollow,
                 to_u8_color(cursor_rgba),
                 metrics,
                 deco_span,
@@ -469,14 +499,16 @@ pub(super) fn rebuild_pane_cached(
     };
 
     let rows = snap.rows.len();
-    let new_cursor = (
-        snap.cursor.x,
-        snap.cursor.y,
-        snap.cursor.visible,
-        snap.cursor.style,
-        snap.focused,
-        snap.cursor_blink_visible,
-    );
+    let new_cursor = CursorCacheKey {
+        shell_x: snap.cursor.x,
+        shell_y: snap.cursor.y,
+        shell_visible: snap.cursor.visible,
+        shell_style: snap.cursor.style,
+        focused: snap.focused,
+        blink_visible: snap.cursor_blink_visible,
+        copy_mode_active: snap.copy_cursor.is_some(),
+        copy_cursor: projected_copy_cursor(snap, rows),
+    };
     let mut rows_rebuilt: u64 = 0;
     let instance_start = instances.len();
     let mut bg_len = 0;
@@ -495,7 +527,7 @@ pub(super) fn rebuild_pane_cached(
     // bottom, plus the cursor's old/new rows (a baked cursor overlay does
     // not translate with content), are re-dirtied inside the pass loop.
     let mut shifted_in = 0usize;
-    let mut cursor_rows_after_shift: [Option<usize>; 2] = [None, None];
+    let mut cursor_rows_after_shift: [Option<usize>; 4] = [None, None, None, None];
     if snap.scroll_shift > 0
         && snap.scroll_shift < rows
         && cache.bg.len() == rows
@@ -526,8 +558,13 @@ pub(super) fn rebuild_pane_cached(
         cursor_rows_after_shift = [
             cache
                 .prev_cursor
-                .map(|prev| (prev.1 as usize).saturating_sub(shift)),
-            Some(new_cursor.1 as usize),
+                .map(|prev| (prev.shell_y as usize).saturating_sub(shift)),
+            Some(new_cursor.shell_y as usize),
+            cache.prev_cursor.and_then(|prev| {
+                prev.copy_cursor
+                    .and_then(|(_, y)| usize::from(y).checked_sub(shift))
+            }),
+            new_cursor.copy_cursor.map(|(_, y)| usize::from(y)),
         ];
     }
 
@@ -536,8 +573,12 @@ pub(super) fn rebuild_pane_cached(
 
         // Any pane-wide trigger bundled in `FrameInvalidationKey` differing
         // from the cached previous-frame key forces every row dirty. A pane's
-        // first frame (`cache.key` still `None`) is also a full rebuild.
+        // first frame (`cache.key` still `None`) is also a full rebuild. A
+        // recorded scroll whose translation fast path did not apply must also
+        // rebuild: a pinned viewport can keep the same absolute base while a
+        // dirty live row becomes an immutable, clean history row.
         let full = cache.bg.len() != rows
+            || (snap.scroll_shift > 0 && shifted_in == 0)
             || !cache.key.as_ref().is_some_and(|k| {
                 k.abs_row_base == snap.abs_row_base && key_fields_match(k, eviction_before)
             });
@@ -556,10 +597,20 @@ pub(super) fn rebuild_pane_cached(
             && let Some(prev) = cache.prev_cursor
             && prev != new_cursor
         {
-            if let Some(slot) = dirty.get_mut(prev.1 as usize) {
+            if let Some(slot) = dirty.get_mut(prev.shell_y as usize) {
                 *slot = true;
             }
-            if let Some(slot) = dirty.get_mut(new_cursor.1 as usize) {
+            if let Some(slot) = dirty.get_mut(new_cursor.shell_y as usize) {
+                *slot = true;
+            }
+            if let Some((_, y)) = prev.copy_cursor
+                && let Some(slot) = dirty.get_mut(y as usize)
+            {
+                *slot = true;
+            }
+            if let Some((_, y)) = new_cursor.copy_cursor
+                && let Some(slot) = dirty.get_mut(y as usize)
+            {
                 *slot = true;
             }
         }

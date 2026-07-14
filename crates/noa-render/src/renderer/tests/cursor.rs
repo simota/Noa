@@ -112,6 +112,54 @@ fn unfocused_pane_draws_a_hollow_outline_not_a_block_fill() {
 }
 
 #[test]
+fn copy_cursor_is_steady_hollow_and_suppresses_the_shell_cursor() {
+    let Some(mut font) = font_with_rasterized_m() else {
+        return;
+    };
+
+    let mut terminal = Terminal::new(GridSize::new(2, 1));
+    terminal.primary.grid[0].cells[0].ch = 'M';
+    terminal.primary.grid[0].cells[1].ch = 'M';
+    terminal.primary.cursor.x = 0;
+    let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+    snap.copy_cursor = Some(SelectionPoint::new(1, 0));
+    snap.cursor_blink_visible = false;
+
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
+
+    let cursor_instances: Vec<_> = instances
+        .iter()
+        .filter(|instance| instance.flags & CellInstance::FLAG_CURSOR != 0)
+        .collect();
+    assert_eq!(cursor_instances.len(), 4);
+    assert!(cursor_instances.iter().all(|instance| {
+        instance.grid_pos == [1, 0]
+            && instance.flags == (CellInstance::FLAG_DECORATION | CellInstance::FLAG_CURSOR)
+    }));
+}
+
+#[test]
+fn offscreen_copy_cursor_still_suppresses_the_shell_cursor() {
+    let Some(mut font) = font_with_rasterized_m() else {
+        return;
+    };
+    let mut terminal = one_cell_terminal_with_cursor_style(CursorStyle::SteadyBlock);
+    let mut snap = FrameSnapshot::from_terminal(&mut terminal);
+    snap.copy_cursor = Some(SelectionPoint::new(0, snap.row_base + 1));
+
+    let mut instances = Vec::new();
+    rebuild_cell_instances(&mut instances, &snap, &mut font, &Theme::new(), false);
+
+    assert!(
+        instances
+            .iter()
+            .all(|instance| instance.flags & CellInstance::FLAG_CURSOR == 0),
+        "copy-mode presence hides the shell cursor even when its own cursor is outside the viewport"
+    );
+}
+
+#[test]
 fn focused_blinking_cursor_in_off_phase_emits_no_cursor_instances() {
     let Some(mut font) = font_with_rasterized_m() else {
         return;

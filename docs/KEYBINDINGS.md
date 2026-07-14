@@ -39,7 +39,7 @@ names — such as `new_tab`, `prompt_surface_title`,
 | Category | Action |
 |---|---|
 | App | `about`, `preferences`, `config.reload`, `app.quit` |
-| Edit | `copy`, `paste`, `pane.send-selection` |
+| Edit | `copy`, `paste`, `pane.send-selection`, `copy-mode`, `copy-mode.left`, `copy-mode.right`, `copy-mode.up`, `copy-mode.down` |
 | Terminal | `terminal.clear`, `terminal.clear-scrollback`, `terminal.select-all`, `terminal.export-scrollback`, `terminal.pipe-scrollback-to-pager` |
 | Font | `font-size.increase`, `font-size.decrease`, `font-size.reset` |
 | Search | `search.find`, `search.next`, `search.previous`, `search.clear` |
@@ -54,6 +54,10 @@ names — such as `new_tab`, `prompt_surface_title`,
 substituted is also matched. The full Ghostty-style alias table is
 sourced from `ghostty_action_alias` in
 `crates/noa-app/src/commands/keybind.rs`.
+
+For copy mode, Ghostty-style aliases `copy_mode` and
+`copy_mode:left|right|up|down` are accepted. `copy_mode` enters with only a
+cursor; the directional actions enter and immediately extend the selection.
 
 ## Global (While Terminal Is Focused)
 
@@ -116,16 +120,28 @@ Zoom).
 
 ⌘⇧F is intentionally left unassigned for future use.
 
+### Copy Mode
+
+| Key | Action |
+|---|---|
+| ⇧← / ⇧→ / ⇧↑ / ⇧↓ | Enter copy mode and select one cell in that direction |
+
+The direct gestures are disabled on the alternate screen and pass through to
+the running TUI. The cursor-only `copy-mode` action has no default binding.
+Within copy mode, Arrow moves and clears a selection, ⇧Arrow extends, Enter
+copies and exits, and Escape clears then exits on a second press. An unbound
+pty key exits and passes through. All exits return the viewport to the live
+bottom.
+
 ### Scroll (Viewport Manipulation, Not Sent to pty)
 
 | Key | Action |
 |---|---|
-| ⇧↑ / ⇧↓ | Scroll 1 line |
 | ⇧PageUp / ⇧PageDown | Scroll 1 page |
 | ⇧Home / ⇧End | Jump to top / bottom |
 | ⌘↑ / ⌘↓ | Jump to previous / next prompt (requires shell integration OSC 133) |
 
-Shift-only scroll does not trigger if another modifier is also held.
+The one-line scroll actions remain configurable but have no default binding.
 
 ### Overlay Launchers
 

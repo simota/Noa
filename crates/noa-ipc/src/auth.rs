@@ -5,12 +5,13 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-/// One of the three noa-ipc authorization scopes.
+/// One noa-ipc authorization scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Scope {
     Read,
     Control,
     Input,
+    Attach,
 }
 
 impl Scope {
@@ -19,6 +20,7 @@ impl Scope {
             Scope::Read => 1 << 0,
             Scope::Control => 1 << 1,
             Scope::Input => 1 << 2,
+            Scope::Attach => 1 << 3,
         }
     }
 
@@ -27,6 +29,7 @@ impl Scope {
             "read" => Some(Scope::Read),
             "control" => Some(Scope::Control),
             "input" => Some(Scope::Input),
+            "attach" => Some(Scope::Attach),
             _ => None,
         }
     }
@@ -36,6 +39,7 @@ impl Scope {
             Scope::Read => "read",
             Scope::Control => "control",
             Scope::Input => "input",
+            Scope::Attach => "attach",
         }
     }
 }
@@ -96,7 +100,7 @@ impl ScopeSet {
 
     pub fn to_strings(self) -> Vec<String> {
         let mut out = Vec::new();
-        for scope in [Scope::Read, Scope::Control, Scope::Input] {
+        for scope in [Scope::Read, Scope::Control, Scope::Input, Scope::Attach] {
             if self.contains(scope) {
                 out.push(scope.as_str().to_string());
             }

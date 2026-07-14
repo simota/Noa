@@ -16,6 +16,8 @@ pub enum ErrorCode {
     PaneClosed,
     PayloadTooLarge,
     VersionMismatch,
+    AttachConflict,
+    AttachHandshakeFailure,
     Internal,
 }
 
@@ -33,6 +35,8 @@ impl ErrorCode {
             ErrorCode::PaneClosed => -32004,
             ErrorCode::PayloadTooLarge => -32005,
             ErrorCode::VersionMismatch => -32006,
+            ErrorCode::AttachConflict => -32007,
+            ErrorCode::AttachHandshakeFailure => -32008,
         }
     }
 }
@@ -63,6 +67,8 @@ pub enum IpcError {
     PaneClosed,
     #[error("payload too large")]
     PayloadTooLarge,
+    #[error("unsupported backend operation: {0}")]
+    Unsupported(&'static str),
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -73,6 +79,7 @@ impl IpcError {
             IpcError::UnknownPane => ErrorCode::UnknownPane,
             IpcError::PaneClosed => ErrorCode::PaneClosed,
             IpcError::PayloadTooLarge => ErrorCode::PayloadTooLarge,
+            IpcError::Unsupported(_) => ErrorCode::Internal,
             IpcError::Internal(_) => ErrorCode::Internal,
         }
     }

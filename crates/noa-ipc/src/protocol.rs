@@ -174,7 +174,36 @@ pub struct Panel {
     pub process: Option<String>,
     pub busy: bool,
     pub attention: bool,
+    /// Whether the server exposes this pane through `noa.attach`.
+    #[serde(default = "default_attachable")]
+    pub attachable: bool,
     pub preview: Vec<Row>,
+}
+
+const fn default_attachable() -> bool {
+    true
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::Panel;
+
+    #[test]
+    fn missing_attachable_field_defaults_to_true_for_protocol_v1_peers() {
+        let panel: Panel = serde_json::from_value(serde_json::json!({
+            "windowGroupId": "1",
+            "windowId": "2",
+            "paneId": "3",
+            "name": "shell",
+            "cwd": "/tmp",
+            "busy": false,
+            "attention": false,
+            "preview": []
+        }))
+        .unwrap();
+
+        assert!(panel.attachable);
+    }
 }
 
 /// `source` for `noa.getText`.
@@ -213,7 +242,7 @@ pub struct HelloParams {
     pub scopes: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HelloResult {
     pub protocol_version: u64,
@@ -223,7 +252,7 @@ pub struct HelloResult {
 
 // ---- noa.listPanels ----
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ListPanelsResult {
     pub panels: Vec<Panel>,
 }
@@ -239,12 +268,12 @@ pub struct GetTextParams {
     pub max_bytes: Option<usize>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetTextResult {
     pub pane_id: WireId,
     pub text: String,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
 }
 
@@ -284,7 +313,7 @@ pub struct SendTextParams {
     pub paste: Option<bool>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OkResult {
     pub ok: bool,
 }
@@ -303,6 +332,38 @@ pub struct PaneIdParams {
     pub pane_id: WireId,
 }
 
+// ---- noa.attach / noa.detach / noa.resizePane ----
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachParams {
+    pub pane_id: WireId,
+}
+
+/// Connection information for one reserved raw attach channel. Deliberately
+/// does not implement `Debug`: `attach_token` is a one-time secret and must
+/// not leak through routine structured logging.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachResult {
+    pub attach_token: String,
+    pub attach_url: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetachParams {
+    pub pane_id: WireId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResizePaneParams {
+    pub pane_id: WireId,
+    pub cols: u16,
+    pub rows: u16,
+}
+
 // ---- noa.newTab ----
 
 #[derive(Clone, Debug, Deserialize)]
@@ -312,7 +373,7 @@ pub struct NewTabParams {
     pub window_id: Option<WireId>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaneIdResult {
     pub pane_id: WireId,

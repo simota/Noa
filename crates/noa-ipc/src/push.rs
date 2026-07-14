@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use crate::attach::AttachRegistry;
 use crate::protocol::{EventKind, Panel, Row};
 
 const DEFAULT_QUEUE_CAP: usize = 256;
@@ -161,6 +162,11 @@ pub struct Broadcaster {
     conns: Arc<Mutex<HashMap<u64, ConnEntry>>>,
     next_conn_id: Arc<AtomicU64>,
     next_sub_id: Arc<AtomicU64>,
+    /// Attach ownership belongs to the long-lived IPC runtime, not to one
+    /// listener instance. Config reloads reuse the broadcaster while old
+    /// connection threads wind down, so every server generation must consult
+    /// the same lease registry.
+    attach_registry: AttachRegistry,
     /// Count of live subscriptions (across every connection) whose
     /// `events` include `OUTPUT` (R-3). Maintained on every
     /// `add_subscription`/`remove_subscription`/`unregister_connection`
@@ -186,8 +192,13 @@ impl Broadcaster {
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn_id: Arc::new(AtomicU64::new(1)),
             next_sub_id: Arc::new(AtomicU64::new(1)),
+            attach_registry: AttachRegistry::default(),
             output_subscribers: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    pub(crate) fn attach_registry(&self) -> AttachRegistry {
+        self.attach_registry.clone()
     }
 
     /// Registers a new connection, returning its id and the queue its
@@ -491,6 +502,7 @@ mod tests {
             process: None,
             busy: false,
             attention: false,
+            attachable: true,
             preview: vec![],
         }
     }

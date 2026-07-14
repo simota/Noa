@@ -2,6 +2,7 @@
 //! sync tungstenite + thread-per-connection + crossbeam, no async runtime —
 //! NFR-3).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, TcpListener, TcpStream};
@@ -13,7 +14,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tungstenite::Message;
 use tungstenite::handshake::server::{Request, Response};
-use tungstenite::protocol::WebSocketConfig;
+use tungstenite::protocol::frame::coding::CloseCode;
+use tungstenite::protocol::{CloseFrame, WebSocketConfig};
 
 /// Hard cap on concurrent connections (F-3 / DoS bound): a proxy flood
 /// (Omen ④) closes excess accepts immediately rather than spawning an
@@ -26,13 +28,18 @@ const MAX_CONNECTIONS: usize = 32;
 /// not — otherwise races the whole 32-slot pool to exhaustion by opening
 /// connections faster than the hello deadline reclaims them, denying every
 /// other client. Capping per source IP keeps one host from monopolizing the
-/// pool; a well-behaved client needs only one connection.
+/// pool while still admitting one fully populated nine-pane Client Mode tab:
+/// every attached pane holds control + raw sockets and briefly opens a third
+/// read socket for scrollback backfill.
 ///
 /// Loopback peers are deliberately exempt (see the accept loop): there every
 /// local client shares `127.0.0.1`, so a per-IP cap couldn't tell a hostile
 /// local script from a legitimate one and would only shrink the usable pool
 /// for the default loopback-only deployment.
-const MAX_CONNECTIONS_PER_REMOTE_IP: usize = 8;
+const MAX_REMOTE_PANES_PER_CLIENT_TAB: usize = 9;
+const PEAK_CONNECTIONS_PER_REMOTE_PANE: usize = 3;
+const MAX_CONNECTIONS_PER_REMOTE_IP: usize =
+    MAX_REMOTE_PANES_PER_CLIENT_TAB * PEAK_CONNECTIONS_PER_REMOTE_PANE;
 
 /// Bounds on a single incoming WebSocket frame/message (F-3 / DoS bound),
 /// well above the largest legitimate request (`noa.sendText`'s text isn't
@@ -40,6 +47,9 @@ const MAX_CONNECTIONS_PER_REMOTE_IP: usize = 8;
 /// under this) and far below tungstenite's 64 MiB/16 MiB defaults.
 const MAX_WS_MESSAGE_SIZE: usize = 1024 * 1024;
 const MAX_WS_FRAME_SIZE: usize = 256 * 1024;
+const MAX_RESIZE_COLS: u16 = 4096;
+const MAX_RESIZE_ROWS: u16 = 4096;
+const MAX_RESIZE_CELLS: u32 = 1024 * 1024;
 
 /// Per-read/write idle bound during the WS handshake — the ceiling any one
 /// `DeadlineStream` read/write call is ever given, even when more of the
@@ -55,20 +65,37 @@ const HANDSHAKE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// life of the process.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Stable close reason for attach authentication/protocol failures. The raw
+/// channel never carries JSON-RPC frames, so the noa error code is surfaced in
+/// a policy-violation close frame instead.
+pub const ATTACH_HANDSHAKE_CLOSE_REASON: &str = "-32008 attach handshake failure";
+
+const ATTACH_PATH: &str = "/attach";
+const ATTACH_READ_POLL: Duration = Duration::from_millis(1);
+/// Bound one output-drain turn so a continuously refilled PTY queue cannot
+/// starve client input waiting on the same WebSocket.
+const ATTACH_OUTPUT_BYTES_PER_POLL: usize = 64 * 1024;
+
 fn connection_ws_config() -> WebSocketConfig {
     #[allow(deprecated)]
     WebSocketConfig {
         max_send_queue: None,
         write_buffer_size: 128 * 1024,
-        max_write_buffer_size: usize::MAX,
+        // Bounds both control and raw connections. Raw output also passes
+        // through the exact byte-counted 1 MiB queue in `attach`.
+        max_write_buffer_size: crate::attach::ATTACH_OUTPUT_CAPACITY_BYTES,
         max_message_size: Some(MAX_WS_MESSAGE_SIZE),
         max_frame_size: Some(MAX_WS_FRAME_SIZE),
         accept_unmasked_frames: false,
     }
 }
 
+use crate::attach::{
+    ATTACH_BINARY_CHUNK_BYTES, AttachOutputReceiver, AttachRegistry, AttachTryRecvError,
+    LeaseIdentity, ReserveError, output_channel,
+};
 use crate::auth::{Scope, ScopeSet, constant_time_eq};
-use crate::backend::IpcBackend;
+use crate::backend::{IpcBackend, PaneRef};
 use crate::error::{ErrorCode, IpcError};
 use crate::protocol::*;
 use crate::push::{AddSubscriptionError, Broadcaster, EventMask, PushQueue, QueuedNotification};
@@ -115,6 +142,7 @@ pub struct ServerHandle {
     bind_addr: std::net::IpAddr,
     shutdown: Arc<AtomicBool>,
     broadcaster: Broadcaster,
+    connection_count: Arc<AtomicUsize>,
     accept_thread: Option<JoinHandle<()>>,
 }
 
@@ -129,6 +157,11 @@ impl ServerHandle {
 
     pub fn broadcaster(&self) -> Broadcaster {
         self.broadcaster.clone()
+    }
+
+    /// Includes both control and raw attach WebSocket connections.
+    pub fn active_connection_count(&self) -> usize {
+        self.connection_count.load(Ordering::SeqCst)
     }
 }
 
@@ -148,12 +181,12 @@ impl Server {
     /// `127.0.0.1` only (FR-2); binds a non-loopback interface only when the
     /// caller opts in via `config.bind_addr` (v2 LAN opt-in, `server-bind`).
     ///
-    /// `broadcaster` is supplied by the caller rather than created here so a
-    /// long-lived registry can outlive any one `Server::start`/`ServerHandle`
-    /// drop cycle (e.g. `noa-app`'s config-reload server restart): panes
-    /// wired to the same `Broadcaster` before a restart keep pushing to
-    /// whichever server currently owns its connections, without needing to
-    /// be re-wired.
+    /// `broadcaster` is supplied by the caller rather than created here so
+    /// long-lived push connections and attach ownership can outlive any one
+    /// `Server::start`/`ServerHandle` drop cycle (e.g. `noa-app`'s
+    /// config-reload server restart). Panes keep pushing without being
+    /// re-wired, and old/new connection threads consult the same attach lease
+    /// registry while their lifetimes overlap.
     pub fn start(
         config: ServerConfig,
         backend: Arc<dyn IpcBackend>,
@@ -179,6 +212,8 @@ impl Server {
         let hello_deadline = config.hello_deadline;
         let handshake_timeout = config.handshake_timeout;
         let connection_count = Arc::new(AtomicUsize::new(0));
+        let connection_count_handle = connection_count.clone();
+        let attach_registry = broadcaster.attach_registry();
         let per_ip_counts: Arc<Mutex<HashMap<IpAddr, usize>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
@@ -218,6 +253,7 @@ impl Server {
                         let shutdown_conn = shutdown_loop.clone();
                         let connection_count = connection_count.clone();
                         let per_ip_counts = per_ip_counts.clone();
+                        let attach_registry = attach_registry.clone();
                         thread::spawn(move || {
                             // R-4: `handle_connection` owns a `ConnectionGuard`
                             // that decrements `connection_count` and
@@ -239,6 +275,7 @@ impl Server {
                                 connection_count,
                                 per_ip_counts,
                                 ip_slot,
+                                attach_registry,
                             ) {
                                 log::debug!("noa-ipc: connection ended: {err}");
                             }
@@ -260,6 +297,7 @@ impl Server {
             bind_addr,
             shutdown,
             broadcaster,
+            connection_count: connection_count_handle,
             accept_thread: Some(accept_thread),
         })
     }
@@ -314,6 +352,14 @@ struct Session {
     hello_done: bool,
     header_authed: bool,
     granted_scopes: ScopeSet,
+    attach_authority: String,
+    attach_leases: HashMap<PaneRef, LeaseIdentity>,
+}
+
+enum ConnectionRoute {
+    Control { authority: String },
+    Attach,
+    Invalid,
 }
 
 /// Where a [`DeadlineStream`] is in its lifecycle: bounded by an absolute
@@ -378,6 +424,14 @@ impl DeadlineStream {
         // R-4: a bounded write timeout for the connection's whole life, not
         // just the handshake — see `WRITE_TIMEOUT`'s doc comment.
         self.inner.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        Ok(())
+    }
+
+    fn mark_attach_connected(&mut self) -> io::Result<()> {
+        self.mode = StreamMode::Connected;
+        self.inner.set_read_timeout(Some(ATTACH_READ_POLL))?;
+        self.inner
+            .set_write_timeout(Some(crate::attach::ATTACH_BACKPRESSURE_TIMEOUT))?;
         Ok(())
     }
 }
@@ -452,6 +506,7 @@ fn handle_connection(
     connection_count: Arc<AtomicUsize>,
     per_ip_counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
     ip_slot: Option<IpAddr>,
+    attach_registry: AttachRegistry,
 ) -> io::Result<()> {
     let mut guard = ConnectionGuard {
         broadcaster: broadcaster.clone(),
@@ -463,18 +518,37 @@ fn handle_connection(
 
     stream.set_nonblocking(false)?;
     stream.set_nodelay(true).ok();
+    let fallback_authority = stream.local_addr()?.to_string();
 
     let header_authed = Arc::new(AtomicBool::new(false));
     let header_authed_cb = header_authed.clone();
+    let route = Arc::new(Mutex::new(None));
+    let route_cb = route.clone();
     let token_cb = token.clone();
     let callback = move |req: &Request, response: Response| {
-        if let Some(value) = req.headers().get("Authorization")
-            && let Ok(text) = value.to_str()
-            && let Some(presented) = text.strip_prefix("Bearer ")
-            && constant_time_eq(presented.as_bytes(), token_cb.as_bytes())
-        {
-            header_authed_cb.store(true, Ordering::SeqCst);
-        }
+        let path = req.uri().path();
+        let selected = if path == "/" {
+            if let Some(value) = req.headers().get("Authorization")
+                && let Ok(text) = value.to_str()
+                && let Some(presented) = text.strip_prefix("Bearer ")
+                && constant_time_eq(presented.as_bytes(), token_cb.as_bytes())
+            {
+                header_authed_cb.store(true, Ordering::SeqCst);
+            }
+            let authority = req
+                .headers()
+                .get("Host")
+                .and_then(|value| value.to_str().ok())
+                .filter(|host| !host.is_empty())
+                .unwrap_or(&fallback_authority)
+                .to_string();
+            ConnectionRoute::Control { authority }
+        } else if path == ATTACH_PATH && req.uri().query().is_none() {
+            ConnectionRoute::Attach
+        } else {
+            ConnectionRoute::Invalid
+        };
+        *route_cb.lock().unwrap() = Some(selected);
         Ok(response)
     };
 
@@ -488,30 +562,45 @@ fn handle_connection(
         Some(connection_ws_config()),
     )
     .map_err(|err| io::Error::other(err.to_string()))?;
-    ws.get_mut().mark_connected()?;
-
-    let (conn_id, queue) = broadcaster.register_connection();
-    guard.conn_id = Some(conn_id);
-    let mut session = Session {
-        hello_done: false,
-        header_authed: header_authed.load(Ordering::SeqCst),
-        granted_scopes: ScopeSet::empty(),
-    };
-
-    let connected_at = Instant::now();
-    run_connection_loop(
-        &mut ws,
-        &backend,
-        &token,
-        allowed_scopes,
-        &broadcaster,
-        conn_id,
-        &queue,
-        &mut session,
-        &shutdown,
-        connected_at,
-        hello_deadline,
-    )
+    let selected = route
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap_or(ConnectionRoute::Invalid);
+    match selected {
+        ConnectionRoute::Control { authority } => {
+            ws.get_mut().mark_connected()?;
+            let (conn_id, queue) = broadcaster.register_connection();
+            guard.conn_id = Some(conn_id);
+            let mut session = Session {
+                hello_done: false,
+                header_authed: header_authed.load(Ordering::SeqCst),
+                granted_scopes: ScopeSet::empty(),
+                attach_authority: authority,
+                attach_leases: HashMap::new(),
+            };
+            let connected_at = Instant::now();
+            run_connection_loop(
+                &mut ws,
+                &backend,
+                &token,
+                allowed_scopes,
+                &broadcaster,
+                &attach_registry,
+                conn_id,
+                &queue,
+                &mut session,
+                &shutdown,
+                connected_at,
+                hello_deadline,
+            )
+        }
+        ConnectionRoute::Attach => {
+            ws.get_mut().mark_attach_connected()?;
+            run_attach_connection(&mut ws, &backend, &attach_registry, &shutdown)
+        }
+        ConnectionRoute::Invalid => close_policy(&mut ws, "invalid websocket path"),
+    }
     // `guard` drops here on every path above (including the `?`s earlier in
     // this function and any error `run_connection_loop` returns),
     // unregistering the broadcaster connection and decrementing
@@ -525,6 +614,7 @@ fn run_connection_loop(
     token: &str,
     allowed_scopes: ScopeSet,
     broadcaster: &Broadcaster,
+    attach_registry: &AttachRegistry,
     conn_id: u64,
     queue: &Arc<PushQueue>,
     session: &mut Session,
@@ -559,6 +649,7 @@ fn run_connection_loop(
                     token,
                     allowed_scopes,
                     broadcaster,
+                    attach_registry,
                     conn_id,
                     session,
                 ) {
@@ -584,6 +675,199 @@ fn run_connection_loop(
             }
             Err(err) => return Err(ws_err_to_io(err)),
         }
+    }
+}
+
+struct ActiveAttachGuard {
+    registry: AttachRegistry,
+    backend: Arc<dyn IpcBackend>,
+    identity: LeaseIdentity,
+}
+
+impl Drop for ActiveAttachGuard {
+    fn drop(&mut self) {
+        if self.registry.release_generation(self.identity) {
+            let _ = self
+                .backend
+                .detach_attach(self.identity.pane, self.identity.generation);
+        }
+    }
+}
+
+fn run_attach_connection(
+    ws: &mut tungstenite::WebSocket<DeadlineStream>,
+    backend: &Arc<dyn IpcBackend>,
+    registry: &AttachRegistry,
+    shutdown: &Arc<AtomicBool>,
+) -> io::Result<()> {
+    let Some(identity) = authenticate_attach(ws, registry, shutdown)? else {
+        return Ok(());
+    };
+    let _lease = ActiveAttachGuard {
+        registry: registry.clone(),
+        backend: backend.clone(),
+        identity,
+    };
+
+    let (output, receiver) = output_channel();
+    // The backend performs raw-tap registration and seed snapshot atomically.
+    // Only after it returns do we touch the socket, so a Terminal lock held by
+    // the application can never include a WebSocket write.
+    let seed = match backend.open_attach(identity.pane, identity.generation, output) {
+        Ok(seed) => seed,
+        Err(_) => return close_attach_failure(ws),
+    };
+    send_attach_seed(ws, &seed)?;
+
+    run_raw_loop(ws, backend, registry, shutdown, identity, receiver)
+}
+
+fn authenticate_attach(
+    ws: &mut tungstenite::WebSocket<DeadlineStream>,
+    registry: &AttachRegistry,
+    shutdown: &Arc<AtomicBool>,
+) -> io::Result<Option<LeaseIdentity>> {
+    let deadline = Instant::now() + crate::attach::ATTACH_TOKEN_TTL;
+    loop {
+        if shutdown.load(Ordering::SeqCst) || Instant::now() >= deadline {
+            close_attach_failure(ws)?;
+            return Ok(None);
+        }
+        match ws.read() {
+            Ok(Message::Binary(presented)) => {
+                return match registry.authenticate(&presented) {
+                    Ok(identity) => Ok(Some(identity)),
+                    Err(_) => {
+                        close_attach_failure(ws)?;
+                        Ok(None)
+                    }
+                };
+            }
+            Ok(Message::Ping(payload)) => {
+                ws.send(Message::Pong(payload)).map_err(ws_err_to_io)?;
+            }
+            Ok(Message::Close(_)) => return Ok(None),
+            Ok(_) => {
+                close_attach_failure(ws)?;
+                return Ok(None);
+            }
+            Err(tungstenite::Error::Io(err))
+                if err.kind() == io::ErrorKind::WouldBlock
+                    || err.kind() == io::ErrorKind::TimedOut => {}
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                return Ok(None);
+            }
+            Err(err) => return Err(ws_err_to_io(err)),
+        }
+    }
+}
+
+fn run_raw_loop(
+    ws: &mut tungstenite::WebSocket<DeadlineStream>,
+    backend: &Arc<dyn IpcBackend>,
+    registry: &AttachRegistry,
+    shutdown: &Arc<AtomicBool>,
+    identity: LeaseIdentity,
+    receiver: AttachOutputReceiver,
+) -> io::Result<()> {
+    loop {
+        if shutdown.load(Ordering::SeqCst) || !registry.is_active(identity) {
+            return Ok(());
+        }
+
+        if !drain_attach_output(&receiver, |bytes| send_attach_binary(ws, &bytes))? {
+            return Ok(());
+        }
+
+        match ws.read() {
+            Ok(Message::Binary(bytes)) => {
+                if backend
+                    .write_attach(identity.pane, identity.generation, &bytes)
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+            Ok(Message::Ping(payload)) => {
+                ws.send(Message::Pong(payload)).map_err(ws_err_to_io)?;
+            }
+            Ok(Message::Pong(_)) => {}
+            Ok(Message::Close(_)) => return Ok(()),
+            Ok(_) => {
+                close_attach_failure(ws)?;
+                return Ok(());
+            }
+            Err(tungstenite::Error::Io(err))
+                if err.kind() == io::ErrorKind::WouldBlock
+                    || err.kind() == io::ErrorKind::TimedOut => {}
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                return Ok(());
+            }
+            Err(err) => return Err(ws_err_to_io(err)),
+        }
+    }
+}
+
+/// Send one logical raw byte stream as frame-safe Binary messages. WebSocket
+/// message boundaries are not PTY boundaries; receivers concatenate bytes in
+/// arrival order.
+fn send_attach_binary(
+    ws: &mut tungstenite::WebSocket<DeadlineStream>,
+    bytes: &[u8],
+) -> io::Result<()> {
+    for chunk in bytes.chunks(ATTACH_BINARY_CHUNK_BYTES) {
+        ws.send(Message::Binary(chunk.to_vec()))
+            .map_err(ws_err_to_io)?;
+    }
+    Ok(())
+}
+
+/// The initial seed is a bounded sequence of Binary chunks followed by one
+/// empty Binary message. The terminator is unambiguous because the raw output
+/// loop starts only after this function returns.
+fn send_attach_seed(
+    ws: &mut tungstenite::WebSocket<DeadlineStream>,
+    seed: &[u8],
+) -> io::Result<()> {
+    send_attach_binary(ws, seed)?;
+    ws.send(Message::Binary(Vec::new())).map_err(ws_err_to_io)
+}
+
+fn drain_attach_output(
+    receiver: &AttachOutputReceiver,
+    mut send: impl FnMut(Vec<u8>) -> io::Result<()>,
+) -> io::Result<bool> {
+    let mut sent_bytes = 0usize;
+    while sent_bytes < ATTACH_OUTPUT_BYTES_PER_POLL {
+        match receiver.try_recv() {
+            Ok(bytes) => {
+                sent_bytes = sent_bytes.saturating_add(bytes.len());
+                send(bytes)?;
+            }
+            Err(AttachTryRecvError::Empty) => return Ok(true),
+            Err(AttachTryRecvError::Closed) => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
+fn close_attach_failure(ws: &mut tungstenite::WebSocket<DeadlineStream>) -> io::Result<()> {
+    close_policy(ws, ATTACH_HANDSHAKE_CLOSE_REASON)
+}
+
+fn close_policy(
+    ws: &mut tungstenite::WebSocket<DeadlineStream>,
+    reason: &'static str,
+) -> io::Result<()> {
+    let frame = CloseFrame {
+        code: CloseCode::Policy,
+        reason: Cow::Borrowed(reason),
+    };
+    match ws.close(Some(frame)) {
+        Ok(()) | Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+            Ok(())
+        }
+        Err(err) => Err(ws_err_to_io(err)),
     }
 }
 
@@ -688,6 +972,7 @@ fn dispatch(
     token: &str,
     allowed_scopes: ScopeSet,
     broadcaster: &Broadcaster,
+    attach_registry: &AttachRegistry,
     conn_id: u64,
     session: &mut Session,
 ) -> Option<String> {
@@ -793,7 +1078,19 @@ fn dispatch(
             }
             "noa.closePane" => {
                 require_scope(session, Scope::Control)?;
-                handle_close_pane(backend, req.params)
+                handle_close_pane(backend, attach_registry, req.params)
+            }
+            "noa.attach" => {
+                require_scope(session, Scope::Attach)?;
+                handle_attach(backend, attach_registry, session, req.params)
+            }
+            "noa.detach" => {
+                require_scope(session, Scope::Attach)?;
+                handle_detach(backend, attach_registry, session, req.params)
+            }
+            "noa.resizePane" => {
+                require_scope(session, Scope::Attach)?;
+                handle_resize_pane(backend, attach_registry, session, req.params)
             }
             "noa.subscribe" => {
                 require_scope(session, Scope::Read)?;
@@ -922,9 +1219,99 @@ fn handle_split(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, R
     .unwrap())
 }
 
-fn handle_close_pane(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value, RpcFail> {
+fn handle_close_pane(
+    backend: &Arc<dyn IpcBackend>,
+    attach_registry: &AttachRegistry,
+    params: Value,
+) -> Result<Value, RpcFail> {
     let p: PaneIdParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
     backend.close_pane(p.pane_id.0)?;
+    if let Some(identity) = attach_registry.release_pane(p.pane_id.0) {
+        let _ = backend.detach_attach(identity.pane, identity.generation);
+    }
+    Ok(serde_json::to_value(OkResult::ok()).unwrap())
+}
+
+fn handle_attach(
+    backend: &Arc<dyn IpcBackend>,
+    attach_registry: &AttachRegistry,
+    session: &mut Session,
+    params: Value,
+) -> Result<Value, RpcFail> {
+    let p: AttachParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
+    backend.validate_attach(p.pane_id.0)?;
+    let reservation = attach_registry
+        .reserve(p.pane_id.0)
+        .map_err(|err| match err {
+            ReserveError::Conflict => RpcFail::new(
+                ErrorCode::AttachConflict,
+                "pane already has an attach lease",
+            ),
+        })?;
+    session
+        .attach_leases
+        .insert(p.pane_id.0, reservation.identity);
+    let attach_url = format!("ws://{}{ATTACH_PATH}", session.attach_authority);
+    Ok(serde_json::to_value(AttachResult {
+        attach_token: reservation.token,
+        attach_url,
+    })
+    .unwrap())
+}
+
+fn handle_detach(
+    backend: &Arc<dyn IpcBackend>,
+    attach_registry: &AttachRegistry,
+    session: &mut Session,
+    params: Value,
+) -> Result<Value, RpcFail> {
+    let p: DetachParams = serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
+    if let Some(identity) = session.attach_leases.remove(&p.pane_id.0)
+        && attach_registry.release_generation(identity)
+    {
+        backend.detach_attach(identity.pane, identity.generation)?;
+    }
+    Ok(serde_json::to_value(OkResult::ok()).unwrap())
+}
+
+fn handle_resize_pane(
+    backend: &Arc<dyn IpcBackend>,
+    attach_registry: &AttachRegistry,
+    session: &Session,
+    params: Value,
+) -> Result<Value, RpcFail> {
+    let p: ResizePaneParams =
+        serde_json::from_value(params).map_err(|_| RpcFail::invalid_params())?;
+    if p.cols == 0
+        || p.rows == 0
+        || p.cols > MAX_RESIZE_COLS
+        || p.rows > MAX_RESIZE_ROWS
+        || u32::from(p.cols)
+            .checked_mul(u32::from(p.rows))
+            .is_none_or(|cells| cells > MAX_RESIZE_CELLS)
+    {
+        return Err(RpcFail::invalid_params());
+    }
+    let identity = session
+        .attach_leases
+        .get(&p.pane_id.0)
+        .copied()
+        .ok_or_else(|| {
+            RpcFail::new(
+                ErrorCode::AttachConflict,
+                "control session does not own the attach lease",
+            )
+        })?;
+    let resize = attach_registry.with_current_lease(identity, || {
+        backend.resize_pane(p.pane_id.0, p.cols, p.rows)
+    });
+    let Some(resize) = resize else {
+        return Err(RpcFail::new(
+            ErrorCode::AttachConflict,
+            "control session does not own the current attach lease",
+        ));
+    };
+    resize?;
     Ok(serde_json::to_value(OkResult::ok()).unwrap())
 }
 
@@ -971,6 +1358,31 @@ fn handle_unsubscribe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_output_drain_yields_to_input_after_a_bounded_byte_turn() {
+        let (sender, receiver) = crate::attach::output_channel();
+        for _ in 0..128 {
+            sender.send(vec![b'x'; 1024]).unwrap();
+        }
+
+        let mut frames = 0usize;
+        let mut bytes = 0usize;
+        assert!(
+            drain_attach_output(&receiver, |frame| {
+                frames += 1;
+                bytes += frame.len();
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(bytes, ATTACH_OUTPUT_BYTES_PER_POLL);
+        assert_eq!(frames, 64);
+        assert!(
+            receiver.try_recv().is_ok(),
+            "the next turn retains queued output"
+        );
+    }
     use std::net::TcpListener;
 
     fn tcp_pair() -> (TcpStream, TcpStream) {
@@ -1095,6 +1507,15 @@ mod tests {
         // Freeing one slot lets the host connect again.
         release_ip_slot(&counts, ip);
         assert!(matches!(reserve_ip_slot(&counts, ip), IpSlot::Reserved(_)));
+    }
+
+    #[test]
+    fn client_mode_scrollback_peak_fits_the_per_ip_cap() {
+        let counts = Mutex::new(HashMap::new());
+        let ip: IpAddr = "192.168.1.50".parse().unwrap();
+        for _ in 0..4 * PEAK_CONNECTIONS_PER_REMOTE_PANE {
+            assert!(matches!(reserve_ip_slot(&counts, ip), IpSlot::Reserved(_)));
+        }
     }
 
     #[test]

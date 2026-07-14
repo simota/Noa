@@ -354,7 +354,7 @@ fn ipc_output_first_feed_sends_the_full_viewport_as_a_diff() {
         &mut ipc_row_cache,
     );
 
-    let rows = output.ipc_output.expect("first feed sends a diff");
+    let rows = output.ipc_output.expect("first feed sends a diff").lines;
     assert_eq!(rows.len(), 4, "every viewport row is new on the first push");
 }
 
@@ -397,7 +397,10 @@ fn ipc_output_only_diffs_rows_whose_content_actually_changed() {
         &mut last_ipc_push,
         &mut ipc_row_cache,
     );
-    let rows = second.ipc_output.expect("changed content produces a diff");
+    let rows = second
+        .ipc_output
+        .expect("changed content produces a diff")
+        .lines;
     assert_eq!(
         rows.len(),
         1,
@@ -433,7 +436,7 @@ fn ipc_output_resends_every_row_when_the_viewport_base_shifts_even_with_identica
         &mut last_ipc_push,
         &mut ipc_row_cache,
     );
-    let first_rows = first.ipc_output.expect("first feed sends a diff");
+    let first_rows = first.ipc_output.expect("first feed sends a diff").lines;
     assert_eq!(first_rows.len(), 4);
     assert_eq!(
         first_rows.iter().map(|r| r.row).collect::<Vec<_>>(),
@@ -458,7 +461,8 @@ fn ipc_output_resends_every_row_when_the_viewport_base_shifts_even_with_identica
     );
     let second_rows = second
         .ipc_output
-        .expect("a base shift must resend rows even though their content is unchanged");
+        .expect("a base shift must resend rows even though their content is unchanged")
+        .lines;
     assert_eq!(
         second_rows.len(),
         4,
@@ -483,12 +487,26 @@ fn ipc_output_row_ids_do_not_reuse_evicted_scrollback_coordinates() {
     let oldest = terminal.selection_rows_evicted() as u64;
     assert!(oldest > 0, "test setup must evict retained scrollback");
 
-    let rows = compute_ipc_row_diff(&terminal, &mut IpcRowCache::default());
+    let rows = compute_ipc_row_diff(&terminal, &mut IpcRowCache::default()).lines;
     assert_eq!(
         rows.first().map(|row| row.row),
         Some(oldest + terminal.active().visible_row_base() as u64),
         "push row ids must stay in the same session-absolute coordinate space as getGrid"
     );
+}
+
+#[test]
+fn ipc_output_resends_full_viewport_with_a_new_generation_after_clear_scrollback() {
+    let mut terminal = Terminal::new(GridSize::new(80, 4));
+    noa_vt::Stream::new().feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive", &mut terminal);
+    let mut cache = IpcRowCache::default();
+
+    let before = compute_ipc_row_diff(&terminal, &mut cache);
+    terminal.clear_scrollback();
+    let after = compute_ipc_row_diff(&terminal, &mut cache);
+
+    assert_ne!(after.coordinate_generation, before.coordinate_generation);
+    assert_eq!(after.lines.len(), terminal.active().visible_rows().len());
 }
 
 #[test]
@@ -695,7 +713,14 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
         &mut ipc_row_cache,
         &RawAttachTap::default(),
     );
-    assert_eq!(first.ipc_output.expect("first feed sends a diff").len(), 4);
+    assert_eq!(
+        first
+            .ipc_output
+            .expect("first feed sends a diff")
+            .lines
+            .len(),
+        4
+    );
 
     // Gate closes (subscriber went away) — content still changes underneath,
     // but nothing is pushed and the cache is reset, not left stale.
@@ -742,7 +767,8 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
     );
     let rows = reopened
         .ipc_output
-        .expect("gate reopening must produce a push");
+        .expect("gate reopening must produce a push")
+        .lines;
     assert_eq!(
         rows.len(),
         4,

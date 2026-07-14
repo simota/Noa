@@ -55,6 +55,11 @@ pub struct Terminal {
     /// whenever a control sequence replaces the active [`Screen`] without
     /// necessarily changing `active_is_alt`.
     screen_generation: u64,
+    /// Opaque generation for IPC grid coordinates. Automatic scrollback
+    /// eviction keeps this stable because `rows_evicted` preserves surviving
+    /// row numbers. Operations that rebuild or collapse the coordinate space
+    /// advance it so remote clients can discard every cached row atomically.
+    grid_coordinate_generation: u64,
     pub modes: ModeState,
     /// G0/G1 designation + active (GL) slot for `SCS`/`SO`/`SI`.
     charset: CharsetState,
@@ -152,6 +157,7 @@ impl Terminal {
             alt: None,
             active_is_alt: false,
             screen_generation: 0,
+            grid_coordinate_generation: 0,
             modes: ModeState::defaults(),
             charset: CharsetState::default(),
             title: String::new(),
@@ -191,6 +197,15 @@ impl Terminal {
     /// Identity of the active screen's coordinate space.
     pub const fn screen_generation(&self) -> u64 {
         self.screen_generation
+    }
+
+    /// Identity of the active IPC grid coordinate space.
+    pub const fn grid_coordinate_generation(&self) -> u64 {
+        self.grid_coordinate_generation
+    }
+
+    fn invalidate_grid_coordinate_space(&mut self) {
+        self.grid_coordinate_generation = self.grid_coordinate_generation.wrapping_add(1);
     }
 
     /// Set the cursor style DECSCUSR 0 resets to, and apply it immediately as
@@ -362,6 +377,7 @@ impl Terminal {
             .primary
             .prepend_plain_text_history(text, trailing_wrapped);
         if inserted > 0 {
+            self.invalidate_grid_coordinate_space();
             for mark in &mut self.shell_marks {
                 mark.point.y = mark.point.y.saturating_add(inserted);
             }
@@ -440,6 +456,8 @@ impl Terminal {
             return false;
         }
 
+        self.invalidate_grid_coordinate_space();
+
         let at_prompt = self.cursor_is_at_prompt();
         let old_sb_len = self.primary.scrollback_len();
         let old_live_top = self.primary.rows_evicted() + old_sb_len;
@@ -495,6 +513,9 @@ impl Terminal {
     }
 
     pub fn clear_scrollback(&mut self) {
+        if self.primary.scrollback_len() > 0 {
+            self.invalidate_grid_coordinate_space();
+        }
         self.primary.clear_scrollback();
     }
 
@@ -540,6 +561,9 @@ impl Terminal {
     /// Resize the terminal to a new cell grid (from a window resize). Resizes
     /// every screen, reflows soft-wrapped lines, and updates the recorded size.
     pub fn resize(&mut self, size: GridSize) {
+        if size.cols != self.size.cols {
+            self.invalidate_grid_coordinate_space();
+        }
         self.primary.resize(size.cols, size.rows);
         if let Some(alt) = &mut self.alt {
             alt.resize(size.cols, size.rows);
@@ -805,6 +829,7 @@ impl Terminal {
     }
 
     fn enter_alt_screen(&mut self, clear: bool) {
+        let changes_active_space = !self.active_is_alt || clear || self.alt.is_none();
         if clear || self.alt.is_none() {
             let mut alt = Screen::alternate(self.size.cols, self.size.rows);
             alt.cursor.visible = self.modes.cursor_visible();
@@ -814,6 +839,9 @@ impl Terminal {
             alt.cursor.visible = self.modes.cursor_visible();
         }
         self.active_is_alt = true;
+        if changes_active_space {
+            self.invalidate_grid_coordinate_space();
+        }
         self.primary.clear_selection();
         self.primary.clear_search();
         if let Some(alt) = &mut self.alt {
@@ -825,6 +853,9 @@ impl Terminal {
     fn leave_alt_screen(&mut self, restore_cursor: bool, clear_alt: bool) {
         let was_alt = self.active_is_alt;
         self.active_is_alt = false;
+        if was_alt {
+            self.invalidate_grid_coordinate_space();
+        }
         self.primary.scroll_viewport_to_bottom();
         self.primary.cursor.visible = self.modes.cursor_visible();
         if restore_cursor {

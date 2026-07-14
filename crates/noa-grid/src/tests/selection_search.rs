@@ -567,6 +567,30 @@ fn scrollback_eviction_advances_rows_evicted_and_shifts_selection() {
 }
 
 #[test]
+fn ipc_grid_generation_changes_only_when_coordinates_are_rebuilt() {
+    let mut terminal = Terminal::new(GridSize::new(8, 3));
+    let mut stream = noa_vt::Stream::new();
+    stream.feed(b"one\r\ntwo\r\nthree\r\nfour", &mut terminal);
+
+    let before_eviction = terminal.grid_coordinate_generation();
+    terminal.set_scrollback_limit_bytes(1);
+    assert_eq!(
+        terminal.grid_coordinate_generation(),
+        before_eviction,
+        "front eviction preserves surviving absolute row coordinates"
+    );
+
+    stream.feed(b"\r\nfive\r\nsix", &mut terminal);
+    let before_clear = terminal.grid_coordinate_generation();
+    terminal.clear_scrollback();
+    assert_ne!(terminal.grid_coordinate_generation(), before_clear);
+
+    let before_reflow = terminal.grid_coordinate_generation();
+    terminal.resize(GridSize::new(4, 3));
+    assert_ne!(terminal.grid_coordinate_generation(), before_reflow);
+}
+
+#[test]
 fn search_matches_span_scrollback_page_boundaries() {
     let mut t = terminal_full_history(80, 3, 300);
 

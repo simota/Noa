@@ -28,7 +28,7 @@ use super::auto_approve::{
     AutoApproveCandidate, AutoApprovePublish, detect_auto_approve_candidate,
 };
 use super::ipc_tap::{
-    IpcOutputPushDecision, IpcRowCache, compute_ipc_row_diff, decide_ipc_output_push,
+    IpcOutputPushDecision, IpcRowCache, IpcRowDiff, compute_ipc_row_diff, decide_ipc_output_push,
 };
 use super::overview::{OverviewPublish, publish_overview_snapshot};
 use super::raw_attach::RawAttachTap;
@@ -79,7 +79,7 @@ pub(super) struct TerminalOutput {
     /// (R-3: `Broadcaster::has_output_subscriber_for(pane_id)`) or the push
     /// is still within its throttle window; `Some(vec![])` never happens (an
     /// empty diff just stays `None`).
-    pub(super) ipc_output: Option<Vec<noa_ipc::protocol::Row>>,
+    pub(super) ipc_output: Option<IpcRowDiff>,
     /// Trailing-flush deadline owed by this feed's throttled `noa.output`
     /// push (R-1: mirrors `overview_publish_pending` — a burst's final feed
     /// can land inside the 16ms throttle window and get silently skipped,
@@ -238,7 +238,14 @@ pub(super) fn feed_terminal_batch<'a>(
             IpcOutputPushDecision::Push => {
                 *last_ipc_push = Some(Instant::now());
                 let diff = compute_ipc_row_diff(&term, ipc_row_cache);
-                (if diff.is_empty() { None } else { Some(diff) }, None)
+                (
+                    if diff.lines.is_empty() {
+                        None
+                    } else {
+                        Some(diff)
+                    },
+                    None,
+                )
             }
             IpcOutputPushDecision::ScheduleTrailingFlush { deadline } => (None, Some(deadline)),
         };

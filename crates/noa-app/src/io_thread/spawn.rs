@@ -318,8 +318,12 @@ pub fn spawn(
                     // when `has_output_subscriber_for(ipc.ipc_pane_id)` was
                     // true, so this `broadcast_output` never fires into an
                     // empty room.
-                    if let Some(rows) = output.ipc_output.take() {
-                        ipc.broadcaster.broadcast_output(ipc.ipc_pane_id, rows);
+                    if let Some(diff) = output.ipc_output.take() {
+                        ipc.broadcaster.broadcast_output(
+                            ipc.ipc_pane_id,
+                            diff.coordinate_generation,
+                            diff.lines,
+                        );
                     }
                     if !output.pending_writes.is_empty() {
                         write_pty_bytes(&writer, &output.pending_writes);

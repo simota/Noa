@@ -9,9 +9,9 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Current protocol major version (additive-only; a major bump is reserved
-/// for breaking changes, per FR-19).
-pub const PROTOCOL_VERSION: u64 = 1;
+/// Current protocol major version. Version 2 separates stable grid-coordinate
+/// semantics from version 1's retained-array indices.
+pub const PROTOCOL_VERSION: u64 = 2;
 
 /// Default `getText` response cap, in UTF-8 bytes (FR-8).
 pub const DEFAULT_TEXT_MAX_BYTES: usize = 256 * 1024;
@@ -293,8 +293,12 @@ pub struct GetGridResult {
     pub pane_id: WireId,
     pub cols: u32,
     pub start_row: u64,
+    /// Opaque identity of the row-coordinate space. Clients must discard all
+    /// cached rows when this value changes.
+    pub coordinate_generation: u64,
     /// Oldest retained session-absolute row coordinate. Coordinates below
-    /// this value have been evicted and will never be reused in the session.
+    /// this value have been evicted and will not be reused within this
+    /// coordinate generation.
     pub oldest_row: u64,
     /// Exclusive end of the currently retained session-absolute row range.
     /// Clients use this to request the tail without guessing its location.
@@ -433,6 +437,9 @@ pub struct StateChangedParams {
 #[serde(rename_all = "camelCase")]
 pub struct OutputParams {
     pub pane_id: WireId,
+    /// Opaque identity of the row-coordinate space. Clients must discard all
+    /// cached rows when this value changes.
+    pub coordinate_generation: u64,
     pub lines: Vec<Row>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dropped: bool,
@@ -459,7 +466,7 @@ pub fn truncate_tail(text: &str, max_bytes: usize) -> (String, bool) {
 /// (R-4): `serde_json::to_vec(&row)` measures only each `Row` in isolation,
 /// so raw per-row summation ignores the `,` array separators between rows,
 /// `GetGridResult`'s sibling fields (`paneId`/`cols`/`startRow`/
-/// `oldestRow`/`nextRow`/`hasMore`),
+/// `coordinateGeneration`/`oldestRow`/`nextRow`/`hasMore`),
 /// and the JSON-RPC envelope (`jsonrpc`/`id`/`result`) wrapping the whole
 /// response — a response summed to exactly `cap_bytes` would then actually
 /// serialize larger. A fixed margin is simpler than measuring the full
@@ -545,6 +552,7 @@ mod cap_grid_rows_tests {
             pane_id: WireId(1),
             cols: 120,
             start_row: 0,
+            coordinate_generation: 0,
             oldest_row: 0,
             next_row: BOUNDARY_ROW_COUNT,
             rows: capped,

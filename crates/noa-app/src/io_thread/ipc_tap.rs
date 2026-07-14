@@ -83,6 +83,12 @@ pub(super) fn decide_ipc_output_push(
 pub(super) struct IpcRowCache {
     hashes: Vec<u64>,
     base: Option<u64>,
+    coordinate_generation: Option<u64>,
+}
+
+pub(super) struct IpcRowDiff {
+    pub(super) coordinate_generation: u64,
+    pub(super) lines: Vec<Row>,
 }
 
 impl IpcRowCache {
@@ -97,6 +103,7 @@ impl IpcRowCache {
     pub(super) fn reset(&mut self) {
         self.hashes.clear();
         self.base = None;
+        self.coordinate_generation = None;
     }
 }
 
@@ -107,12 +114,16 @@ impl IpcRowCache {
 /// path (`flush_pending_ipc_output`) so both compute the diff identically
 /// under a `Terminal` lock hold rather than one of them caching a
 /// possibly-stale snapshot.
-pub(super) fn compute_ipc_row_diff(term: &Terminal, cache: &mut IpcRowCache) -> Vec<Row> {
+pub(super) fn compute_ipc_row_diff(term: &Terminal, cache: &mut IpcRowCache) -> IpcRowDiff {
+    let coordinate_generation = term.grid_coordinate_generation();
     let base = term
         .active_oldest_row()
         .saturating_add(term.active().visible_row_base()) as u64;
     let rows = term.active().visible_rows();
-    if cache.hashes.len() != rows.len() || cache.base != Some(base) {
+    if cache.hashes.len() != rows.len()
+        || cache.base != Some(base)
+        || cache.coordinate_generation != Some(coordinate_generation)
+    {
         // A viewport resize (length change) or a scroll (base change) both
         // invalidate every cached slot: a resize because slot indices no
         // longer mean the same thing, a scroll because a slot's absolute
@@ -121,6 +132,7 @@ pub(super) fn compute_ipc_row_diff(term: &Terminal, cache: &mut IpcRowCache) -> 
         cache.hashes.resize(rows.len(), 0);
     }
     cache.base = Some(base);
+    cache.coordinate_generation = Some(coordinate_generation);
     let mut diff = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         let spans = crate::ipc_bridge::row_to_spans(row);
@@ -133,7 +145,10 @@ pub(super) fn compute_ipc_row_diff(term: &Terminal, cache: &mut IpcRowCache) -> 
             });
         }
     }
-    diff
+    IpcRowDiff {
+        coordinate_generation,
+        lines: diff,
+    }
 }
 
 /// Effectful trailing-edge flush (R-1, mirrors
@@ -155,8 +170,9 @@ pub(super) fn flush_pending_ipc_output(
         compute_ipc_row_diff(&term, ipc_row_cache)
     };
     *last_ipc_push = Some(now);
-    if !diff.is_empty() {
-        tap.broadcaster.broadcast_output(tap.ipc_pane_id, diff);
+    if !diff.lines.is_empty() {
+        tap.broadcaster
+            .broadcast_output(tap.ipc_pane_id, diff.coordinate_generation, diff.lines);
     }
 }
 

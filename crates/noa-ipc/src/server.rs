@@ -884,12 +884,18 @@ fn to_notification(item: QueuedNotification) -> Value {
         }),
         QueuedNotification::Output {
             pane_id,
+            coordinate_generation,
             lines,
             dropped,
         } => serde_json::json!({
             "jsonrpc": "2.0",
             "method": "noa.output",
-            "params": OutputParams { pane_id: WireId(pane_id), lines, dropped },
+            "params": OutputParams {
+                pane_id: WireId(pane_id),
+                coordinate_generation,
+                lines,
+                dropped,
+            },
         }),
     }
 }
@@ -1182,6 +1188,7 @@ fn handle_get_grid(backend: &Arc<dyn IpcBackend>, params: Value) -> Result<Value
         pane_id: p.pane_id,
         cols: backend_result.cols,
         start_row: p.start_row,
+        coordinate_generation: backend_result.coordinate_generation,
         oldest_row: backend_result.oldest_row,
         next_row: backend_result.next_row,
         rows,

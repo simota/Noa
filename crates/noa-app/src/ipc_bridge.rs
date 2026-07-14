@@ -224,6 +224,7 @@ const MAX_GRID_ROWS_PER_REQUEST: u64 = 2048;
 
 fn terminal_grid_result(terminal: &Terminal, start_row: u64, row_count: u64) -> GridResult {
     let cols = terminal.active().cols as u32;
+    let coordinate_generation = terminal.grid_coordinate_generation();
     let oldest_row = terminal.active_oldest_row() as u64;
     let next_row = terminal.active_next_row() as u64;
     // Clamp independent of `cap_grid_rows`' later byte-budget trim (F-1):
@@ -231,9 +232,10 @@ fn terminal_grid_result(terminal: &Terminal, start_row: u64, row_count: u64) -> 
     // the `Terminal` lock.
     let clamped_row_count = row_count.min(MAX_GRID_ROWS_PER_REQUEST);
     let requested_end = start_row.saturating_add(row_count).min(next_row);
-    let start = start_row.max(oldest_row);
-    let end = start_row
+    let start = start_row.max(oldest_row).min(next_row);
+    let end = start
         .saturating_add(clamped_row_count)
+        .min(requested_end)
         .min(next_row)
         .max(start);
     let has_more = end < requested_end;
@@ -249,6 +251,7 @@ fn terminal_grid_result(terminal: &Terminal, start_row: u64, row_count: u64) -> 
         .collect();
     GridResult {
         cols,
+        coordinate_generation,
         oldest_row,
         next_row,
         rows,
@@ -723,8 +726,31 @@ mod tests {
         assert!(oldest > 0, "test setup must evict retained scrollback");
         assert_eq!(result.oldest_row, oldest);
         assert_eq!(result.next_row, next);
+        assert_eq!(
+            result.coordinate_generation,
+            terminal.grid_coordinate_generation()
+        );
         assert_eq!(result.rows.first().map(|row| row.row), Some(tail_start));
         assert_eq!(result.rows.last().map(|row| row.row), Some(next - 1));
         assert!(result.rows.iter().all(|row| row.row >= oldest));
+    }
+
+    #[test]
+    fn grid_result_applies_row_cap_after_the_evicted_prefix() {
+        let mut terminal = Terminal::new(noa_core::GridSize::new(80, 4));
+        let mut bytes = Vec::new();
+        for i in 0..6_000 {
+            bytes.extend_from_slice(format!("line-{i:04}-{}\r\n", "x".repeat(68)).as_bytes());
+        }
+        noa_vt::Stream::new().feed(&bytes, &mut terminal);
+        terminal.set_scrollback_limit_bytes(1);
+
+        let oldest = terminal.active_oldest_row() as u64;
+        assert!(oldest > MAX_GRID_ROWS_PER_REQUEST);
+        let result = terminal_grid_result(&terminal, 0, oldest + 1);
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].row, oldest);
+        assert!(!result.has_more);
     }
 }

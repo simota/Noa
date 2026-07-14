@@ -114,6 +114,9 @@ impl Handler for Terminal {
     }
 
     fn erase_display(&mut self, mode: EraseDisplay) {
+        if matches!(mode, EraseDisplay::Scrollback) && self.active().scrollback_len() > 0 {
+            self.invalidate_grid_coordinate_space();
+        }
         self.active_mut().erase_display(mode);
     }
     fn erase_line(&mut self, mode: EraseLine) {
@@ -283,6 +286,7 @@ impl Handler for Terminal {
     }
 
     fn full_reset(&mut self) {
+        self.invalidate_grid_coordinate_space();
         let scrollback_limit = self.primary.scrollback_limit_bytes();
         self.primary = crate::screen::Screen::new(self.size.cols, self.size.rows);
         self.primary.set_scrollback_limit_bytes(scrollback_limit);

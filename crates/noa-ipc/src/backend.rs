@@ -27,6 +27,8 @@ pub struct TextResult {
 #[derive(Clone, Debug)]
 pub struct GridResult {
     pub cols: u32,
+    /// Opaque identity of the row-coordinate space.
+    pub coordinate_generation: u64,
     /// Oldest retained session-absolute row coordinate.
     pub oldest_row: u64,
     /// Exclusive end of the retained session-absolute row range.

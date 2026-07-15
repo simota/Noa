@@ -248,7 +248,7 @@ impl Terminal {
     /// A row in the active screen's stable session-absolute space. `None`
     /// if `y` has been evicted or is beyond [`Self::active_next_row`].
     pub fn active_absolute_row(&self, y: usize) -> Option<crate::cell::Row> {
-        self.active().absolute_row(y)
+        self.active().session_absolute_row(y)
     }
 
     pub fn viewport_offset(&self) -> usize {

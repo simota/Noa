@@ -151,10 +151,15 @@ impl Screen {
         self.scrollback.len() + self.grid.len()
     }
 
-    /// A row in session-absolute space. The oldest retained coordinate is
-    /// [`Self::rows_evicted`], so coordinates below it stay invalid instead
-    /// of being reused after scrollback eviction.
+    /// A row by its index in the currently retained `scrollback + grid`
+    /// storage (`0` = oldest retained row).
     pub fn absolute_row(&self, y: usize) -> Option<Row> {
+        self.storage_row(y).map(std::borrow::Cow::into_owned)
+    }
+
+    /// A row in session-absolute space. Coordinates below
+    /// [`Self::rows_evicted`] refer to discarded content and stay invalid.
+    pub(crate) fn session_absolute_row(&self, y: usize) -> Option<Row> {
         let retained_y = y.checked_sub(self.rows_evicted)?;
         self.storage_row(retained_y)
             .map(std::borrow::Cow::into_owned)

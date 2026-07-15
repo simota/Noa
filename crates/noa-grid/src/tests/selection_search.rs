@@ -591,6 +591,31 @@ fn ipc_grid_generation_changes_only_when_coordinates_are_rebuilt() {
 }
 
 #[test]
+fn ipc_grid_generation_changes_when_row_shrink_reduces_coordinate_range() {
+    let mut terminal = Terminal::new(GridSize::new(8, 4));
+    let generation_before = terminal.grid_coordinate_generation();
+    let next_before = terminal.active_next_row();
+
+    terminal.resize(GridSize::new(8, 2));
+
+    assert!(terminal.active_next_row() < next_before);
+    assert_ne!(terminal.grid_coordinate_generation(), generation_before);
+}
+
+#[test]
+fn ipc_grid_generation_stays_when_row_shrink_preserves_coordinate_range() {
+    let mut terminal = Terminal::new(GridSize::new(8, 4));
+    noa_vt::Stream::new().feed(b"\x1b[4;1H", &mut terminal);
+    let generation_before = terminal.grid_coordinate_generation();
+    let next_before = terminal.active_next_row();
+
+    terminal.resize(GridSize::new(8, 2));
+
+    assert_eq!(terminal.active_next_row(), next_before);
+    assert_eq!(terminal.grid_coordinate_generation(), generation_before);
+}
+
+#[test]
 fn search_matches_span_scrollback_page_boundaries() {
     let mut t = terminal_full_history(80, 3, 300);
 

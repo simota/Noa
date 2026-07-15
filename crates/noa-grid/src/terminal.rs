@@ -561,7 +561,9 @@ impl Terminal {
     /// Resize the terminal to a new cell grid (from a window resize). Resizes
     /// every screen, reflows soft-wrapped lines, and updates the recorded size.
     pub fn resize(&mut self, size: GridSize) {
-        if size.cols != self.size.cols {
+        let columns_changed = size.cols != self.size.cols;
+        let active_next_before = self.active_next_row();
+        if columns_changed {
             self.invalidate_grid_coordinate_space();
         }
         self.primary.resize(size.cols, size.rows);
@@ -569,6 +571,9 @@ impl Terminal {
             alt.resize(size.cols, size.rows);
         }
         self.size = size;
+        if !columns_changed && self.active_next_row() < active_next_before {
+            self.invalidate_grid_coordinate_space();
+        }
     }
 
     /// Enable or suppress terminal-generated report replies at the drain

@@ -88,6 +88,35 @@ pub(crate) fn preferred_surface_alpha_mode(
         .unwrap_or(wgpu::CompositeAlphaMode::Auto)
 }
 
+/// Build the swapchain configuration for a tab window's surface: format from
+/// [`preferred_surface_format`], alpha mode from [`preferred_surface_alpha_mode`],
+/// Fifo present.
+///
+/// `desired_maximum_frame_latency` is 1, not the wgpu default of 2: with two
+/// frames allowed in flight a keypress echo can sit a whole extra vsync
+/// (8-16ms) behind an already-queued frame before it is scanned out. Depth 1
+/// makes `get_current_texture` block until the previous frame is consumed,
+/// trading that queue latency for backpressure on the redraw path — the right
+/// trade for a terminal, where a keystroke echo is the latency-critical path
+/// and the renderer comfortably finishes a frame within one refresh interval.
+pub(crate) fn build_surface_config(
+    caps: &wgpu::SurfaceCapabilities,
+    alpha_blending: noa_font::AlphaBlending,
+    size: winit::dpi::PhysicalSize<u32>,
+    transparent: bool,
+) -> wgpu::SurfaceConfiguration {
+    wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: preferred_surface_format(&caps.formats, alpha_blending),
+        width: size.width.max(1),
+        height: size.height.max(1),
+        present_mode: wgpu::PresentMode::Fifo,
+        desired_maximum_frame_latency: 1,
+        alpha_mode: preferred_surface_alpha_mode(caps, transparent),
+        view_formats: vec![],
+    }
+}
+
 const OCCLUDED_SURFACE_EXTENT: u32 = 1;
 
 pub(crate) fn effective_surface_config(

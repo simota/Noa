@@ -304,11 +304,6 @@ pub fn list_families() -> Result<Vec<String>, FontError> {
 /// the rest of `load_font_stack` still adds emoji, Nerd Font, CJK, and CoreText
 /// cascade fallbacks for multibyte coverage. Other platforms keep the generic
 /// monospace lookup, with `Menlo` retained as a compatibility fallback.
-pub fn load_monospace() -> Result<FontData, FontError> {
-    let source = SystemSource::new();
-    load_monospace_from_source(&source)
-}
-
 fn load_monospace_from_source(source: &SystemSource) -> Result<FontData, FontError> {
     let properties = properties_for_style(FontStyle::Regular);
     load_default_monospace_family(source, &properties, Some(FontStyle::Regular))
@@ -320,18 +315,38 @@ fn load_monospace_from_source(source: &SystemSource) -> Result<FontData, FontErr
 }
 
 /// Discover the font stack described by `font_cfg`, falling back to the
-/// platform default coding font (see [`load_monospace`]) when
+/// platform default coding font (see [`load_monospace_from_source`]) when
 /// `font_cfg.families` is empty or none of the configured families resolve.
 ///
 /// Configured regular/bold/italic families are resolved with font-kit's CSS
 /// matcher. If a native style face is unavailable, the style stack falls back
 /// to the regular primary and rasterization may synthesize the missing style.
 pub fn load_font_stack(font_cfg: &FontConfig) -> Result<FontStack, FontError> {
+    load_font_stack_with_primary(load_primary_font(font_cfg)?, font_cfg)
+}
+
+/// Resolve and load only the primary (regular) face for `font_cfg` — the
+/// face [`Metrics`] (and thus the first window's pixel size) are computed
+/// from. This is a small fraction of the full [`load_font_stack`] cost, so a
+/// caller that needs cell metrics early (window sizing at startup) can load
+/// the primary first, publish its metrics, and feed the face back into
+/// [`load_font_stack_with_primary`] to finish discovery without re-resolving.
+pub fn load_primary_font(font_cfg: &FontConfig) -> Result<FontData, FontError> {
     let source = SystemSource::new();
-    let primary = match load_configured_primary(&source, font_cfg) {
-        Some(primary) => primary,
-        None => load_monospace()?,
-    };
+    match load_configured_primary(&source, font_cfg) {
+        Some(primary) => Ok(primary),
+        None => load_monospace_from_source(&source),
+    }
+}
+
+/// Second stage of [`load_font_stack`]: style faces + the fallback cascade,
+/// with the already-loaded `primary` from [`load_primary_font`]. `font_cfg`
+/// must be the config the primary was resolved with.
+pub fn load_font_stack_with_primary(
+    primary: FontData,
+    font_cfg: &FontConfig,
+) -> Result<FontStack, FontError> {
+    let source = SystemSource::new();
     let bold_primary = load_style_primary(&source, font_cfg, FontStyle::Bold);
     let italic_primary = load_style_primary(&source, font_cfg, FontStyle::Italic);
     let bold_italic_primary = load_style_primary(&source, font_cfg, FontStyle::BoldItalic);

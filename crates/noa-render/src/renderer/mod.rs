@@ -39,6 +39,69 @@ pub fn renderer_construction_count() -> u64 {
     RENDERER_CONSTRUCTION_COUNT.load(Ordering::Relaxed)
 }
 
+/// Paint the startup pre-first frame into `view`: the theme background clear
+/// plus (when configured) the background image — everything the first real
+/// frame draws below the still-empty grid. This lets `noa-app` show the first
+/// window before fonts and the full [`Renderer`] exist without flashing
+/// content that differs from the first real frame: the clear routes through
+/// [`startup_clear_color`] (same sRGB handling + `background-opacity` alpha
+/// as the cell pass) and the image through the same [`BackgroundImageLayer`]
+/// draw the renderer uses.
+///
+/// The image pipeline/texture built here are throwaway (dropped on return);
+/// the real renderer re-uploads its own copy moments later. That double
+/// upload costs a few ms once at startup — irrelevant next to the ~60 ms of
+/// font discovery this pre-paint stops the window from waiting on.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_startup_frame(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    view: &wgpu::TextureView,
+    format: wgpu::TextureFormat,
+    viewport: PixelSize,
+    theme: &Theme,
+    background_opacity: f32,
+    background_image: Option<BackgroundImage>,
+) {
+    let image_layer = background_image.map(|image| {
+        let pipeline = crate::background_image::BackgroundImagePipeline::new(device, format);
+        let mut layer = BackgroundImageLayer::new(std::sync::Arc::new(pipeline));
+        layer.set_image(device, queue, Some(image));
+        layer
+    });
+    let image_draws = image_layer
+        .as_ref()
+        .and_then(|layer| layer.build_draw(device, queue, viewport));
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("noa-startup-frame"),
+    });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("noa-startup-frame-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(startup_clear_color(
+                        theme,
+                        format.is_srgb(),
+                        background_opacity,
+                    )),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        if let Some(layer) = &image_layer {
+            layer.draw(&mut pass, image_draws.as_ref());
+        }
+    }
+    queue.submit([encoder.finish()]);
+}
+
 /// One pane's immutable frame input.
 pub struct PaneFrame<'a> {
     pub pane: PaneId,

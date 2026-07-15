@@ -22,6 +22,41 @@ pub(crate) fn show_quick_terminal_window(window: &Window) {
     show_quick_terminal_window_impl(window);
 }
 
+/// Commit a just-shown window to the screen immediately: draw any dirty
+/// views (`displayIfNeeded`) and flush the pending window-server transaction
+/// (`CATransaction flush`). Startup W1: the first window is shown from inside
+/// the `resumed` callback, long before the event loop turns and AppKit would
+/// flush the implicit transaction — without this the on-screen moment lags
+/// `set_visible(true)` by the rest of the (font-join + renderer + pty)
+/// bring-up. A no-op off macOS and when the lookups fail.
+#[allow(unused_variables)]
+pub(crate) fn commit_window_display(window: &Window) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        // SAFETY: main-thread-only winit callback; the NSWindow is live and
+        // owned by winit; `CATransaction` is resolved at runtime from the
+        // already-loaded QuartzCore. Pointers are nil-checked.
+        unsafe {
+            if let Ok(handle) = window.window_handle()
+                && let RawWindowHandle::AppKit(appkit) = handle.as_raw()
+            {
+                let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+                let ns_window: *mut AnyObject = msg_send![ns_view, window];
+                if !ns_window.is_null() {
+                    let _: () = msg_send![ns_window, displayIfNeeded];
+                }
+            }
+            if let Some(transaction) = AnyClass::get(c"CATransaction") {
+                let _: () = msg_send![transaction, flush];
+            }
+        }
+    }
+}
+
 /// Toggle AppKit's native fullscreen Space for a normal terminal window.
 /// Returns `false` only when the live NSWindow cannot be reached.
 pub(crate) fn toggle_native_fullscreen(window: &Window) -> bool {

@@ -398,17 +398,48 @@ pub struct App {
     /// first tab's shell boots in parallel with font discovery, window
     /// creation, and GPU init instead of serialized after them (startup
     /// C1). Consumed by the first [`App::spawn_pane_surface`] whose request
-    /// matches what was anticipated (default shell, initial grid size,
-    /// inherited cwd); any non-matching first spawn discards it (the shell
-    /// child is killed by `Pty`'s `Drop`). `Mutex` only because
-    /// `spawn_pane_surface` takes `&self`; there is no cross-thread access.
+    /// matches what was anticipated (the CLI `-e` command if one was given,
+    /// otherwise the default shell; initial grid size; inherited cwd); any
+    /// non-matching first spawn discards it (the child is killed by `Pty`'s
+    /// `Drop`). With `-e` the prespawn runs that command — prespawning a
+    /// default shell instead would hand the first pane a shell and silently
+    /// drop the command. `Mutex` only because `spawn_pane_surface` takes
+    /// `&self`; there is no cross-thread access.
     prespawned_pty: Mutex<Option<PrespawnedPty>>,
+    /// The CLI `-e` command, waiting for the first [`App::spawn_pane_surface`]
+    /// to consume it. One-shot (Ghostty `initial-command` parity): only the
+    /// first surface runs the command; every later tab/split/quick-terminal
+    /// spawn finds the slot empty and gets the normal shell. `Mutex` only
+    /// because `spawn_pane_surface` takes `&self`.
+    initial_command: Mutex<Option<Vec<String>>>,
 }
 
 /// See [`App::prespawned_pty`].
 struct PrespawnedPty {
     size: GridSize,
+    /// The `-e` command the prespawn was started with (`None` = default
+    /// shell). A spawn request only consumes the prespawn when it asks for
+    /// exactly this command — a mismatch here is how `-e` used to be
+    /// silently discarded in favor of the prespawned shell.
+    command: Option<Vec<String>>,
     handle: std::thread::JoinHandle<noa_pty::Result<Pty>>,
+}
+
+/// Whether a pane's spawn request matches what the prespawned pty anticipated
+/// (see [`App::prespawned_pty`]): the same child command (the CLI `-e` argv,
+/// or `None` for the default shell), the initial grid size, inheriting the
+/// process cwd, with login + shell-integration defaults.
+fn prespawn_matches(
+    config: &PtyConfig,
+    prespawn_size: GridSize,
+    prespawn_command: Option<&[String]>,
+) -> bool {
+    config.command.as_deref() == prespawn_command
+        && config.cwd.is_none()
+        && config.shell.is_none()
+        && config.size == prespawn_size
+        && config.login
+        && config.shell_integration
 }
 
 impl App {
@@ -426,19 +457,25 @@ impl App {
         // over it. The worker also shares the sidebar-visible gate so its
         // process poll only ticks while a sidebar is shown (AC-18).
         let proxy_for_branch_poll = proxy.clone();
+        let initial_command = config.launch_command.clone();
         let sidebar_visible_gate = Arc::new(AtomicBool::new(false));
         let sidebar_preview_lines_gate = Arc::new(AtomicUsize::new(config.sidebar_preview_lines));
-        // Boot the first tab's shell now, in parallel with everything between
-        // here and `spawn_pane_surface` (font discovery, window creation, GPU
-        // init) — see the `prespawned_pty` field doc. Client mode attaches to
-        // a remote pane and never spawns a local shell, so skip it there.
+        // Boot the first tab's child now — the CLI `-e` command if one was
+        // given, otherwise the default shell — in parallel with everything
+        // between here and `spawn_pane_surface` (font discovery, window
+        // creation, GPU init) — see the `prespawned_pty` field doc. Client
+        // mode attaches to a remote pane and never spawns locally, so skip
+        // it there.
         let prespawned_pty = (config.client_remote.is_none()).then(|| {
             let size = GridSize::new(config.cols, config.rows);
+            let command = initial_command.clone();
             PrespawnedPty {
                 size,
+                command: command.clone(),
                 handle: std::thread::spawn(move || {
                     let pty = Pty::spawn(PtyConfig {
                         size,
+                        command,
                         ..Default::default()
                     });
                     crate::startup_trace::mark("pty-prespawned");
@@ -534,6 +571,7 @@ impl App {
             remote_workers: Vec::new(),
             remote_next_request: Arc::new(AtomicU64::new(1)),
             prespawned_pty: Mutex::new(prespawned_pty),
+            initial_command: Mutex::new(initial_command),
         }
     }
 
@@ -544,12 +582,7 @@ impl App {
     /// the stale shell child is killed without blocking this spawn.
     fn take_prespawned_pty(&self, config: &PtyConfig) -> Option<Pty> {
         let prespawn = self.prespawned_pty.lock().take()?;
-        let matches = config.cwd.is_none()
-            && config.shell.is_none()
-            && config.size == prespawn.size
-            && config.login
-            && config.shell_integration;
-        if !matches {
+        if !prespawn_matches(config, prespawn.size, prespawn.command.as_deref()) {
             std::thread::spawn(move || drop(prespawn.handle.join()));
             return None;
         }
@@ -640,5 +673,106 @@ impl Drop for App {
             branch_poll.shutdown();
         }
         self.gpu.take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn initial_size() -> GridSize {
+        GridSize::new(80, 24)
+    }
+
+    fn dash_e_argv() -> Vec<String> {
+        vec!["/bin/sh".into(), "-c".into(), "echo hi".into()]
+    }
+
+    // Regression: a `-e <command>` first spawn must NOT consume a prespawned
+    // default shell — doing so silently discarded the requested command
+    // (`noa -e /bin/sh -c '...'` ran a plain shell instead).
+    #[test]
+    fn command_spawn_rejects_a_default_shell_prespawn() {
+        let config = PtyConfig {
+            size: initial_size(),
+            command: Some(dash_e_argv()),
+            ..Default::default()
+        };
+
+        assert!(!prespawn_matches(&config, initial_size(), None));
+    }
+
+    // With `-e`, the prespawn is started with that command and the first
+    // spawn must still consume it (warm startup stays on the fast path).
+    #[test]
+    fn command_spawn_consumes_a_prespawn_of_the_same_command() {
+        let config = PtyConfig {
+            size: initial_size(),
+            command: Some(dash_e_argv()),
+            ..Default::default()
+        };
+
+        assert!(prespawn_matches(
+            &config,
+            initial_size(),
+            Some(dash_e_argv()).as_deref()
+        ));
+    }
+
+    // The inverse: a default-shell spawn must not steal a `-e` prespawn.
+    #[test]
+    fn shell_spawn_rejects_a_command_prespawn() {
+        let config = PtyConfig {
+            size: initial_size(),
+            ..Default::default()
+        };
+
+        assert!(!prespawn_matches(
+            &config,
+            initial_size(),
+            Some(dash_e_argv()).as_deref()
+        ));
+    }
+
+    // The default first spawn (no -e, no cwd override, initial size) is
+    // exactly what the default prespawn anticipated — the warm-startup fast
+    // path.
+    #[test]
+    fn prespawn_matches_the_default_first_spawn() {
+        let config = PtyConfig {
+            size: initial_size(),
+            ..Default::default()
+        };
+
+        assert!(prespawn_matches(&config, initial_size(), None));
+    }
+
+    // Non-default requests (restored cwd, custom shell, different grid size,
+    // no login/integration) must respawn rather than reuse the prespawn.
+    #[test]
+    fn prespawn_is_rejected_for_non_default_requests() {
+        let base = || PtyConfig {
+            size: initial_size(),
+            ..Default::default()
+        };
+
+        let mut with_cwd = base();
+        with_cwd.cwd = Some("/tmp".into());
+        assert!(!prespawn_matches(&with_cwd, initial_size(), None));
+
+        let mut with_shell = base();
+        with_shell.shell = Some("/bin/bash".into());
+        assert!(!prespawn_matches(&with_shell, initial_size(), None));
+
+        let resized = base();
+        assert!(!prespawn_matches(&resized, GridSize::new(120, 40), None));
+
+        let mut no_login = base();
+        no_login.login = false;
+        assert!(!prespawn_matches(&no_login, initial_size(), None));
+
+        let mut no_integration = base();
+        no_integration.shell_integration = false;
+        assert!(!prespawn_matches(&no_integration, initial_size(), None));
     }
 }

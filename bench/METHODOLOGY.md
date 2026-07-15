@@ -203,3 +203,9 @@ bench/run_all.sh --only noa,kitty        # subset
 
 Outputs: `bench/results/<timestamp>/{results.json,table.md,raw.tsv,METHODOLOGY.md}`.
 `raw.tsv` retains every per-rep sample for independent re-aggregation.
+
+## Claim scoping (final)
+
+- **Startup**: noa is #1 on *usable* startup (window visible AND prompt ready: 143ms vs Ghostty 198 / Termy 211) and on pty-ready (66ms). On *blank-frame-visible* alone, Ghostty wins (42ms vs noa 143ms) — noa boots the shell first, Ghostty paints first. Both readings are reported; pick the definition that matches your question.
+- **Input latency**: measured as DSR (ESC[6n) round-trip = pty→parser→responder loop, the same path as keystroke echo. It is a *parser-respond* proxy, not keyboard-to-glass photon latency. noa additionally ships `NOA_LATENCY_TRACE=1` for internal key→present timing (~1.6ms median), but no cross-terminal keypress-to-glass comparison exists.
+- **Scope**: all numbers are from one Apple M4 (Mac16,13), macOS 26.5.1, single day, terminal versions as recorded in each results dir. Rankings are machine-scoped; rerun `bench/run_all.sh` to reproduce on your hardware.

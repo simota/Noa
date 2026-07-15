@@ -40,6 +40,7 @@ mod session_persist;
 mod session_store;
 mod sidebar;
 pub mod split_tree;
+pub mod startup_trace;
 mod theme;
 mod theme_favorites;
 mod theme_settings;
@@ -68,8 +69,10 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     }
 
     let event_loop = builder.build()?;
+    startup_trace::mark("event-loop-built");
     let proxy = event_loop.create_proxy();
     let mut app = app::App::new(config, proxy);
+    startup_trace::mark("app-constructed");
     event_loop.run_app(&mut app)?;
     Ok(())
 }

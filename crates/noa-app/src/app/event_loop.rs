@@ -6,6 +6,7 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        crate::startup_trace::mark("resumed");
         // Install the Apple Event handlers once, after `NSApp` finished
         // launching (applescript R-2/Amendment 3). Guarded by its own flag so a
         // later resume can't double-register, independent of the windows check.

@@ -24,7 +24,7 @@ mod shape;
 
 pub use atlas::Atlas;
 pub use config::{AlphaBlending, FontConfig, FontFeature, FontVariation, SyntheticStyle};
-pub use face::{Metrics, list_families};
+pub use face::{FontStack, Metrics, list_families, load_font_stack};
 pub use grid::FontGrid;
 pub use raster::{GlyphSynthesis, RasterizedGlyph};
 pub use shape::{FaceId, ShapeCell, ShapedGlyph, StyleKey};

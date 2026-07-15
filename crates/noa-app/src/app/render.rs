@@ -707,6 +707,11 @@ impl App {
             sidebar::draw_bell_flash(gpu, state.surface_config.format, &view, surface_size);
         }
         frame.present();
+        {
+            static FIRST_FRAME: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            crate::startup_trace::mark_once("first-frame-presented", &FIRST_FRAME);
+        }
 
         // An atlas-eviction-unstable frame may have drawn some glyphs with
         // another glyph's pixels; ask for one more frame so the display

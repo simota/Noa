@@ -113,14 +113,27 @@ impl App {
             .map(|monitor| monitor.scale_factor())
             .unwrap_or(1.0);
 
+        // The sidebar font repeats the same (relatively slow) system font
+        // discovery as the terminal font; run the discovery (the stack is
+        // scale-independent — only `FontGrid::with_stack` consumes a pixel
+        // size) on a thread so it overlaps the terminal font load, window
+        // creation, and GPU init below.
+        let mut sidebar_font_task = if self.gpu.is_none() {
+            let font_cfg = font_config_from_noa_config(&self.config.font);
+            Some(std::thread::spawn(move || {
+                noa_font::load_font_stack(&font_cfg).map(|stack| (stack, font_cfg))
+            }))
+        } else {
+            None
+        };
         let mut first_font = if self.gpu.is_none() {
-            Some(
-                FontGrid::new(
-                    font_pixel_size(self.runtime_font_size, monitor_scale_factor),
-                    font_config_from_noa_config(&self.config.font),
-                )
-                .expect("failed to load a system monospace font"),
+            let font = FontGrid::new(
+                font_pixel_size(self.runtime_font_size, monitor_scale_factor),
+                font_config_from_noa_config(&self.config.font),
             )
+            .expect("failed to load a system monospace font");
+            crate::startup_trace::mark("font-ready");
+            Some(font)
         } else {
             None
         };
@@ -142,6 +155,7 @@ impl App {
                 .create_window(window_attrs)
                 .expect("failed to create window"),
         );
+        crate::startup_trace::mark("window-created");
         let window_scale_factor = window.scale_factor();
         // Seed the system-appearance snapshot from the first real window we
         // get a chance to ask (only meaningfully read once, at startup — a
@@ -213,6 +227,7 @@ impl App {
                         e,
                     )
                 });
+            crate::startup_trace::mark("gpu-adapter-ready");
             let (device, queue) =
                 pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                     label: Some("noa-device"),
@@ -229,6 +244,7 @@ impl App {
                         e,
                     )
                 });
+            crate::startup_trace::mark("gpu-device-ready");
             // Validation errors and device loss must not abort inside the
             // macOS winit delegate (non-unwinding); log them instead. Device
             // loss then surfaces as SurfaceError::Lost on the next frame and
@@ -247,17 +263,33 @@ impl App {
                 pipelines: noa_render::PipelineCache::default(),
                 font_atlases: noa_render::GlyphAtlasCache::default(),
                 font: first_font.expect("first tab must initialize the font"),
-                sidebar_font: FontGrid::new(
-                    sidebar_font_pixel_size(self.config.sidebar_font_size, window_scale_factor),
-                    font_config_from_noa_config(&self.config.font),
-                )
-                .unwrap_or_else(|e| {
-                    gpu_init_fatal(
-                        &mut self.session_persister,
-                        "could not load the sidebar font",
-                        e,
-                    )
-                }),
+                sidebar_font: {
+                    // Stack prefetched on the worker thread above; a join
+                    // failure or load error (worth re-reporting through the
+                    // fatal path) falls back to a fresh inline load.
+                    let px_size =
+                        sidebar_font_pixel_size(self.config.sidebar_font_size, window_scale_factor);
+                    let prefetched = sidebar_font_task
+                        .take()
+                        .and_then(|task| task.join().ok())
+                        .and_then(Result::ok)
+                        .and_then(|(stack, font_cfg)| {
+                            FontGrid::with_stack(stack, px_size, font_cfg).ok()
+                        });
+                    match prefetched {
+                        Some(font) => font,
+                        None => {
+                            FontGrid::new(px_size, font_config_from_noa_config(&self.config.font))
+                                .unwrap_or_else(|e| {
+                                    gpu_init_fatal(
+                                        &mut self.session_persister,
+                                        "could not load the sidebar font",
+                                        e,
+                                    )
+                                })
+                        }
+                    }
+                },
                 sidebar_font_atlases: noa_render::GlyphAtlasCache::default(),
                 theme: {
                     let theme = crate::theme::resolve_theme_with_overrides(
@@ -333,6 +365,7 @@ impl App {
             });
             (surface_config, renderer)
         };
+        crate::startup_trace::mark("renderer-ready");
 
         // A translucent window leaves native titlebar/tab chrome compositing
         // against undefined pixels; back the strip with an opaque theme view.
@@ -573,7 +606,13 @@ impl App {
             cwd,
             ..Default::default()
         };
-        let pty = Pty::spawn(pty_config)?;
+        // The first spawn normally consumes the shell already booted in
+        // parallel by `App::new` (see `App::prespawned_pty`).
+        let pty = match self.take_prespawned_pty(&pty_config) {
+            Some(pty) => pty,
+            None => Pty::spawn(pty_config)?,
+        };
+        crate::startup_trace::mark("pty-spawned");
         // Hand the foreground-process probe to the session-metadata worker
         // (running-process display) before the pty moves into the io thread.
         // Quick-terminal panes never get a sidebar card, so they need no probe.

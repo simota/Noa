@@ -1,8 +1,25 @@
 //! The writable end of a [`Pty`](crate::Pty).
 
 use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, TryRecvError};
+
+/// How recently the last pty write must have completed for the writer
+/// thread to spin-poll before parking. Mirrors the io thread's hot-traffic
+/// spin (same rationale, same tail): during serialized query/reply traffic
+/// the next reply is enqueued 20–40µs after the previous write, so a parked
+/// wake (20–80µs of scheduler latency) would otherwise sit on every
+/// round-trip's critical path. Human-typing rates never keep this window
+/// hot, so an interactive-but-quiet pane parks exactly as before.
+const HOT_SPIN_WINDOW: Duration = Duration::from_millis(2);
+/// Upper bound on one pre-park spin; caps the wasted spin at the trailing
+/// edge of a write burst.
+const HOT_SPIN_BUDGET: Duration = Duration::from_micros(150);
+/// A completed write at or under this size counts as interactive traffic
+/// (keystrokes and query replies are a handful of bytes) and arms the hot
+/// spin; bulk writes (large pastes) do not.
+const HOT_SPIN_MAX_WRITE: usize = 256;
 
 trait WriteBuffer: AsRef<[u8]> + Send {}
 
@@ -50,7 +67,35 @@ impl PtyWriter {
         std::thread::Builder::new()
             .name("noa-pty-writer".into())
             .spawn(move || {
-                while let Ok(request) = rx.recv() {
+                let mut last_write_at: Option<Instant> = None;
+                loop {
+                    let request = match rx.try_recv() {
+                        Ok(request) => request,
+                        Err(TryRecvError::Disconnected) => return,
+                        Err(TryRecvError::Empty) => {
+                            // Hot-traffic spin before parking (see
+                            // `HOT_SPIN_WINDOW`); cold falls straight
+                            // through to the blocking recv as before.
+                            let mut spun = None;
+                            if last_write_at.is_some_and(|at| at.elapsed() < HOT_SPIN_WINDOW) {
+                                let deadline = Instant::now() + HOT_SPIN_BUDGET;
+                                while Instant::now() < deadline {
+                                    if let Ok(request) = rx.try_recv() {
+                                        spun = Some(request);
+                                        break;
+                                    }
+                                    std::hint::spin_loop();
+                                }
+                            }
+                            match spun {
+                                Some(request) => request,
+                                None => match rx.recv() {
+                                    Ok(request) => request,
+                                    Err(_) => return,
+                                },
+                            }
+                        }
+                    };
                     if let Err(err) = writer
                         .write_all(request.as_ref())
                         .and_then(|()| writer.flush())
@@ -58,6 +103,8 @@ impl PtyWriter {
                         log::warn!("pty writer thread stopping: {err}");
                         return;
                     }
+                    last_write_at =
+                        (request.as_ref().len() <= HOT_SPIN_MAX_WRITE).then(Instant::now);
                 }
             })?;
         Ok(Self { tx })

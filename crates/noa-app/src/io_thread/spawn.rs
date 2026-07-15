@@ -37,6 +37,24 @@ use super::raw_attach::RawAttachTap;
 use super::redraw::{RedrawDecision, RedrawFloor};
 use super::sidebar::SidebarPublish;
 
+/// How recently the last *small* pty output batch must have arrived for the
+/// io thread to spin-poll before parking (see the pre-`Select` spin below).
+/// Serialized query/reply traffic (DSR probes, TUI status queries, echo
+/// during bursts) arrives well inside this window; human typing does not,
+/// so an interactive-but-quiet pane never spins.
+const HOT_SPIN_WINDOW: Duration = Duration::from_millis(2);
+/// Upper bound on one pre-park spin. The next request of a serialized
+/// round-trip loop lands 10–30µs after this thread goes idle, so this
+/// budget catches it with margin while capping the wasted spin at the
+/// trailing edge of a burst.
+const HOT_SPIN_BUDGET: Duration = Duration::from_micros(150);
+/// A fed batch at or under this size counts as interactive traffic and arms
+/// the hot spin; anything bigger is bulk output (a flood reads full 64 KiB
+/// `READ_CHUNK`s), where spinning would only steal cache/CPU from the
+/// reader thread's sends — measured as a ~3% hit on the 150 MB consume
+/// benchmark when the spin armed unconditionally.
+const HOT_SPIN_MAX_BATCH: usize = 4096;
+
 /// Which window/pane's `UserEvent`s this io thread posts back to the main
 /// loop. Grouped into one struct (rather than two `spawn` arguments)
 /// because they're always passed and used together, and to keep `spawn`
@@ -204,6 +222,11 @@ pub fn spawn(
         // bypass per input event, so a non-echoing program costs one extra
         // repaint per keystroke at worst — bounded by typing speed.
         let mut input_echo_pending = false;
+        // When the last *small* pty output batch arrived, for the
+        // hot-traffic spin gate: `None`/stale means this pane is idle (or
+        // mid-flood), and every park below stays a plain block, exactly as
+        // before the spin existed.
+        let mut last_small_data_at: Option<Instant> = None;
         loop {
             // Fast path: poll every channel with `try_recv` before falling
             // back to a blocking `Select`. During sustained output the pty
@@ -277,6 +300,10 @@ pub fn spawn(
                     let mut drained = Vec::new();
                     let terminal_event =
                         drain_queued_pty_data(pty.event_rx(), &mut drained, bytes.len());
+                    let batch_bytes = bytes.len()
+                        + drained.iter().map(|chunk| chunk.len()).sum::<usize>();
+                    last_small_data_at =
+                        (batch_bytes <= HOT_SPIN_MAX_BATCH).then(Instant::now);
                     if let Some(file) = pty_capture.as_mut()
                         && !capture_pty_bytes(
                             file,
@@ -506,6 +533,40 @@ pub fn spawn(
                     }
                 }
                 continue;
+            }
+
+            // Hot-traffic spin (input-latency tail): a parked wake on this
+            // thread costs 20–80µs at the scheduler's mercy, which is the
+            // dominant term in a query round-trip's p99 (the parse itself is
+            // ~1µs). While *interactive-sized* output is actively streaming
+            // (see `HOT_SPIN_MAX_BATCH` — bulk floods never arm this), poll
+            // every channel for a short budget before parking — the next
+            // event of a serialized round-trip loop (DSR probe, TUI query,
+            // echoed keystroke burst) arrives within a few tens of µs,
+            // turning that scheduler wake into a hit in this loop. An idle
+            // or human-typing pane parks exactly as before, burning
+            // nothing.
+            if last_small_data_at
+                .is_some_and(|at| now.saturating_duration_since(at) < HOT_SPIN_WINDOW)
+            {
+                let spin_deadline = Instant::now() + HOT_SPIN_BUDGET;
+                let mut ready = false;
+                while Instant::now() < spin_deadline {
+                    if !pty.event_rx().is_empty()
+                        || !input_rx.is_empty()
+                        || !resize_rx.is_empty()
+                        || !shutdown_rx.is_empty()
+                        || !ipc_output_refresh_rx.is_empty()
+                        || !auto_approve_feedback_rx.is_empty()
+                    {
+                        ready = true;
+                        break;
+                    }
+                    std::hint::spin_loop();
+                }
+                if ready {
+                    continue;
+                }
             }
 
             // Wake at whichever owed deadline comes first: an overview

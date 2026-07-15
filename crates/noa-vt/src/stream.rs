@@ -110,7 +110,10 @@ fn feed_parser<H: Handler>(
                 i = run_end;
                 continue;
             }
-            match core::str::from_utf8(&bytes[i..run_end]) {
+            // SIMD validation (NEON/SSE): the run was already boundary-scanned
+            // by `scan_run`, so this pass is purely UTF-8 structure. `compat`
+            // keeps std's `valid_up_to` semantics for the invalid-suffix path.
+            match simdutf8::compat::from_utf8(&bytes[i..run_end]) {
                 Ok(text) => {
                     handler.print_str(text);
                     i = run_end;

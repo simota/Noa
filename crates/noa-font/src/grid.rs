@@ -158,6 +158,20 @@ impl FontGrid {
     /// later WPs can consume it for real without re-breaking this signature.
     pub fn new(px_size: f32, font_cfg: FontConfig) -> Result<Self, FontError> {
         let font_stack = load_font_stack(&font_cfg)?;
+        Self::with_stack(font_stack, px_size, font_cfg)
+    }
+
+    /// Build a grid from an already-discovered [`FontStack`]. System font
+    /// discovery is the expensive part of [`FontGrid::new`] and the stack is
+    /// `Send` (unlike the grid, whose shape cache is `Rc`-based), so callers
+    /// can run [`load_font_stack`] on a worker thread and finish construction
+    /// cheaply on their own thread. `font_cfg` must be the config the stack
+    /// was discovered with.
+    pub fn with_stack(
+        font_stack: FontStack,
+        px_size: f32,
+        font_cfg: FontConfig,
+    ) -> Result<Self, FontError> {
         let metrics = {
             let font = font_stack.primary().font_ref()?;
             Metrics::compute(font, px_size)

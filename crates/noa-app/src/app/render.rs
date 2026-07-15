@@ -714,6 +714,11 @@ impl App {
         // NOA_LATENCY_TRACE t2: the echo frame has been handed to the
         // compositor (present-call proxy; see `latency_trace` module docs).
         crate::latency_trace::on_present(trace_frame_start);
+        {
+            static FIRST_FRAME: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            crate::startup_trace::mark_once("first-frame-presented", &FIRST_FRAME);
+        }
 
         // An atlas-eviction-unstable frame may have drawn some glyphs with
         // another glyph's pixels; ask for one more frame so the display

@@ -24,6 +24,7 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
+    noa_app::startup_trace::init();
     env_logger::init();
 
     // `Noa +<action>` runs a one-shot query and exits without the GUI, so it
@@ -52,6 +53,7 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     let (config, diagnostics) = noa_config::load_startup_config(cli_overrides.clone())?;
+    noa_app::startup_trace::mark("config-loaded");
     for diagnostic in diagnostics {
         eprintln!("{}", diagnostic.message);
     }

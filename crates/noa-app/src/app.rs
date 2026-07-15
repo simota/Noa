@@ -394,6 +394,21 @@ pub struct App {
     /// pending table before orphan cleanup drains it.
     remote_workers: Vec<std::thread::JoinHandle<()>>,
     remote_next_request: Arc<AtomicU64>,
+    /// A pty + default shell spawned concurrently at construction so the
+    /// first tab's shell boots in parallel with font discovery, window
+    /// creation, and GPU init instead of serialized after them (startup
+    /// C1). Consumed by the first [`App::spawn_pane_surface`] whose request
+    /// matches what was anticipated (default shell, initial grid size,
+    /// inherited cwd); any non-matching first spawn discards it (the shell
+    /// child is killed by `Pty`'s `Drop`). `Mutex` only because
+    /// `spawn_pane_surface` takes `&self`; there is no cross-thread access.
+    prespawned_pty: Mutex<Option<PrespawnedPty>>,
+}
+
+/// See [`App::prespawned_pty`].
+struct PrespawnedPty {
+    size: GridSize,
+    handle: std::thread::JoinHandle<noa_pty::Result<Pty>>,
 }
 
 impl App {
@@ -413,6 +428,24 @@ impl App {
         let proxy_for_branch_poll = proxy.clone();
         let sidebar_visible_gate = Arc::new(AtomicBool::new(false));
         let sidebar_preview_lines_gate = Arc::new(AtomicUsize::new(config.sidebar_preview_lines));
+        // Boot the first tab's shell now, in parallel with everything between
+        // here and `spawn_pane_surface` (font discovery, window creation, GPU
+        // init) — see the `prespawned_pty` field doc. Client mode attaches to
+        // a remote pane and never spawns a local shell, so skip it there.
+        let prespawned_pty = (config.client_remote.is_none()).then(|| {
+            let size = GridSize::new(config.cols, config.rows);
+            PrespawnedPty {
+                size,
+                handle: std::thread::spawn(move || {
+                    let pty = Pty::spawn(PtyConfig {
+                        size,
+                        ..Default::default()
+                    });
+                    crate::startup_trace::mark("pty-prespawned");
+                    pty
+                }),
+            }
+        });
         App {
             config_watcher: ConfigWatcher::new(),
             // Corrected once the first window exists and can report
@@ -500,6 +533,38 @@ impl App {
             remote_pending: Arc::new(Mutex::new(HashMap::new())),
             remote_workers: Vec::new(),
             remote_next_request: Arc::new(AtomicU64::new(1)),
+            prespawned_pty: Mutex::new(prespawned_pty),
+        }
+    }
+
+    /// Hand out the prespawned pty if `config` matches what it anticipated
+    /// (see [`App::prespawned_pty`]). The slot is emptied on the first call
+    /// either way: a non-matching first spawn (restore forcing a cwd, a
+    /// differently sized quick terminal) discards it on a reaper thread so
+    /// the stale shell child is killed without blocking this spawn.
+    fn take_prespawned_pty(&self, config: &PtyConfig) -> Option<Pty> {
+        let prespawn = self.prespawned_pty.lock().take()?;
+        let matches = config.cwd.is_none()
+            && config.shell.is_none()
+            && config.size == prespawn.size
+            && config.login
+            && config.shell_integration;
+        if !matches {
+            std::thread::spawn(move || drop(prespawn.handle.join()));
+            return None;
+        }
+        match prespawn.handle.join() {
+            Ok(Ok(pty)) => Some(pty),
+            Ok(Err(err)) => {
+                // Fall back to the caller's own `Pty::spawn`, which reports
+                // its own (almost certainly identical) error to the user.
+                log::warn!("prespawned pty failed, respawning: {err}");
+                None
+            }
+            Err(_) => {
+                log::warn!("prespawned pty thread panicked, respawning");
+                None
+            }
         }
     }
 

@@ -141,11 +141,9 @@ impl Pty {
 
         cmd.env("TERM", &config.term);
         cmd.env("COLORTERM", "truecolor");
-        // When noa itself is launched from another terminal, the parent's
-        // identity would leak into the child and make programs style their
-        // output for that terminal (e.g. an inherited TERM_PROGRAM=ghostty
-        // makes Claude Code emit Ghostty-targeted sequences). Scrub it.
-        cmd.env_remove("TERM_PROGRAM");
+        // Replace any inherited terminal identity with Noa's so child
+        // programs can identify the terminal without seeing the parent.
+        cmd.env("TERM_PROGRAM", "Noa");
         cmd.env_remove("TERM_PROGRAM_VERSION");
         if let Some(cwd) = &config.cwd {
             cmd.cwd(cwd);
@@ -655,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn colorterm_and_term_are_exported_to_the_child() {
+    fn terminal_environment_is_exported_to_the_child() {
         // noa-vt fully supports 24-bit truecolor SGR, so the child should see
         // COLORTERM=truecolor alongside TERM (needed by tools that gate
         // truecolor support on COLORTERM rather than the terminfo entry).
@@ -671,7 +669,7 @@ mod tests {
         let pty = Pty::spawn(cfg).expect("spawn pty");
 
         let w = pty.writer();
-        w.write(b"echo \"$TERM $COLORTERM\"\nexit\n")
+        w.write(b"echo \"$TERM $COLORTERM $TERM_PROGRAM\"\nexit\n")
             .expect("write");
         w.flush().expect("flush");
 
@@ -688,8 +686,8 @@ mod tests {
 
         let text = String::from_utf8_lossy(&collected);
         assert!(
-            text.contains("xterm-256color truecolor"),
-            "expected TERM and COLORTERM in child env: {text:?}"
+            text.contains("xterm-256color truecolor Noa"),
+            "expected Noa's terminal environment in child: {text:?}"
         );
     }
 

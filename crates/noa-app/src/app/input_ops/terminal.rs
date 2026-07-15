@@ -16,7 +16,28 @@ impl App {
             return;
         };
 
-        let send_form_feed = apply_terminal_action(&mut terminal.lock(), action, is_remote_replica);
+        let (send_form_feed, coordinate_generation_changed) = {
+            let mut terminal = terminal.lock();
+            let generation_before = terminal.grid_coordinate_generation();
+            let send_form_feed = apply_terminal_action(&mut terminal, action, is_remote_replica);
+            (
+                send_form_feed,
+                terminal.grid_coordinate_generation() != generation_before,
+            )
+        };
+        if coordinate_generation_changed
+            && let Some(local) = self
+                .windows
+                .get(&window_id)
+                .and_then(|state| state.surfaces.get(&pane_id))
+                .and_then(|surface| match &surface.transport {
+                    SurfaceTransport::Local(local) => Some(local),
+                    SurfaceTransport::Remote(_) => None,
+                })
+            && let Some(io_thread) = local.io_thread.as_ref()
+        {
+            io_thread.request_ipc_output_refresh();
+        }
         if send_form_feed {
             self.write_pane_pty_bytes(window_id, pane_id, &b"\x0c"[..]);
         }

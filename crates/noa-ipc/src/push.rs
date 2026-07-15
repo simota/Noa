@@ -58,6 +58,7 @@ pub enum QueuedNotification {
     },
     Output {
         pane_id: u64,
+        coordinate_generation: u64,
         lines: Vec<Row>,
         dropped: bool,
     },
@@ -364,7 +365,7 @@ impl Broadcaster {
     /// same defect and fix as `broadcast_state_changed`: overlapping
     /// `output` subscriptions on one connection that both match `pane_id`
     /// previously each pushed their own copy of the same `lines`).
-    pub fn broadcast_output(&self, pane_id: u64, lines: Vec<Row>) {
+    pub fn broadcast_output(&self, pane_id: u64, coordinate_generation: u64, lines: Vec<Row>) {
         let conns = self.conns.lock();
         for entry in conns.values() {
             let matches = entry.subs.iter().any(|s| {
@@ -374,6 +375,7 @@ impl Broadcaster {
             if matches {
                 entry.queue.push(QueuedNotification::Output {
                     pane_id,
+                    coordinate_generation,
                     lines: lines.clone(),
                     dropped: false,
                 });
@@ -392,6 +394,7 @@ mod tests {
         for i in 0..10u64 {
             q.push(QueuedNotification::Output {
                 pane_id: 1,
+                coordinate_generation: 0,
                 lines: vec![],
                 dropped: false,
             });
@@ -456,16 +459,19 @@ mod tests {
         // tagged too.
         q.push(QueuedNotification::Output {
             pane_id: 1,
+            coordinate_generation: 0,
             lines: vec![],
             dropped: false,
         });
         q.push(QueuedNotification::Output {
             pane_id: 1,
+            coordinate_generation: 0,
             lines: vec![],
             dropped: false,
         });
         q.push(QueuedNotification::Output {
             pane_id: 1,
+            coordinate_generation: 0,
             lines: vec![],
             dropped: false,
         }); // evicts oldest
@@ -484,10 +490,10 @@ mod tests {
         ids.insert(42u64);
         let _ = b.add_subscription(conn_id, EventMask::OUTPUT, Some(ids));
 
-        b.broadcast_output(1, vec![]);
+        b.broadcast_output(1, 0, vec![]);
         assert_eq!(queue.len(), 0, "non-matching pane must not enqueue");
 
-        b.broadcast_output(42, vec![]);
+        b.broadcast_output(42, 0, vec![]);
         assert_eq!(queue.len(), 1);
     }
 
@@ -626,7 +632,7 @@ mod tests {
         let _ = b.add_subscription(conn_id, EventMask::OUTPUT, Some(ids_a));
         let _ = b.add_subscription(conn_id, EventMask::OUTPUT, None); // matches everything, including 42
 
-        b.broadcast_output(42, vec![]);
+        b.broadcast_output(42, 0, vec![]);
         assert_eq!(
             queue.len(),
             1,

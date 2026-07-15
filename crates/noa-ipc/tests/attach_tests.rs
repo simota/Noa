@@ -228,7 +228,7 @@ fn connect_control(port: u16, scopes: &[&str]) -> Socket {
         1,
         "noa.hello",
         json!({
-            "protocolVersion": 1,
+            "protocolVersion": 2,
             "token": "control-token",
             "scopes": scopes,
         }),
@@ -375,7 +375,7 @@ fn attach_scope_is_explicit_and_conflicts_until_detach() {
         1,
         "noa.hello",
         json!({
-            "protocolVersion": 1,
+            "protocolVersion": 2,
             "token": "control-token",
             "scopes": ["attach"],
         }),

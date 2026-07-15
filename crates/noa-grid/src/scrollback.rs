@@ -420,10 +420,11 @@ impl PagedScrollback {
     }
 
     /// Pack one row that fell off the live grid and append it. Returns the
-    /// number of rows evicted (whole pages) to stay within the byte limit.
+    /// number of rows discarded, either because scrollback is disabled or
+    /// because whole pages were evicted to stay within the byte limit.
     pub(crate) fn push_row(&mut self, row: &Row) -> usize {
         if self.limit_bytes == 0 {
-            return 0;
+            return 1;
         }
         let cols = row.cells.len() as u16;
 
@@ -816,10 +817,10 @@ mod tests {
     }
 
     #[test]
-    fn limit_zero_makes_push_a_no_op() {
+    fn limit_zero_reports_the_discarded_row() {
         let mut sb = PagedScrollback::new(0);
         let evicted = sb.push_row(&text_row("ignored", 20));
-        assert_eq!(evicted, 0);
+        assert_eq!(evicted, 1);
         assert_eq!(sb.len(), 0);
         assert_eq!(sb.bytes(), 0);
         assert!(sb.row(0).is_none());

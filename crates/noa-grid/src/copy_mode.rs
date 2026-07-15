@@ -789,6 +789,9 @@ mod tests {
                 state.cursor()
             ))
         );
+        assert_eq!(semantic_row_end(term.active(), state.cursor().y), 79);
+        assert!(state.move_cursor(&mut term, CopyDirection::Left, false));
+        assert_eq!(state.cursor().x, cursor_before.x - 1);
     }
 
     #[test]

@@ -145,18 +145,24 @@ impl Screen {
         self.rows_evicted
     }
 
-    /// Total addressable rows in this screen's session-absolute row space
-    /// (retained scrollback plus the live grid) — the coordinate space
-    /// `noa.getGrid` (noa-server spec L2 "Grid ペイロード") pages over.
+    /// Number of currently retained addressable rows (scrollback plus the
+    /// live grid).
     pub fn total_rows(&self) -> usize {
         self.scrollback.len() + self.grid.len()
     }
 
-    /// A row in session-absolute space (`0` = oldest retained scrollback
-    /// row; `scrollback_len()..` is the live grid), for IPC grid paging.
-    /// `None` if `y` is out of range.
+    /// A row by its index in the currently retained `scrollback + grid`
+    /// storage (`0` = oldest retained row).
     pub fn absolute_row(&self, y: usize) -> Option<Row> {
         self.storage_row(y).map(std::borrow::Cow::into_owned)
+    }
+
+    /// A row in session-absolute space. Coordinates below
+    /// [`Self::rows_evicted`] refer to discarded content and stay invalid.
+    pub(crate) fn session_absolute_row(&self, y: usize) -> Option<Row> {
+        let retained_y = y.checked_sub(self.rows_evicted)?;
+        self.storage_row(retained_y)
+            .map(std::borrow::Cow::into_owned)
     }
 
     /// Scroll so the history row at `index` (into the current

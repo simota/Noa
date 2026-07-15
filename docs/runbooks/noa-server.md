@@ -103,13 +103,13 @@ Two authentication methods (either one):
 2. `params.token` in `noa.hello` right after connecting
 
 Either way, **`noa.hello` must come first** (other methods return `-32001`). `protocolVersion` is
-currently `1` (a major version mismatch returns `-32006`).
+currently `2` (a major version mismatch returns `-32006`).
 
 ```sh
 # Example interaction with websocat (brew install websocat)
 websocat ws://127.0.0.1:61771/
-{"jsonrpc":"2.0","id":1,"method":"noa.hello","params":{"protocolVersion":1,"token":"<TOKEN>","scopes":["read","control","input","attach"]}}
-# → {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"grantedScopes":["read"],"serverVersion":"0.1.2"}}
+{"jsonrpc":"2.0","id":1,"method":"noa.hello","params":{"protocolVersion":2,"token":"<TOKEN>","scopes":["read","control","input","attach"]}}
+# → {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2,"grantedScopes":["read"],"serverVersion":"0.1.2"}}
 ```
 
 `grantedScopes` = requested scopes ∩ `server-scopes`. With the default settings, requesting
@@ -228,7 +228,7 @@ Notes:
 lsof -nP -iTCP:61771 -sTCP:LISTEN                      # confirm LISTEN
 TOKEN=$(cat ~/.config/noa/server-token)
 websocat ws://127.0.0.1:61771/ <<EOF
-{"jsonrpc":"2.0","id":1,"method":"noa.hello","params":{"protocolVersion":1,"token":"$TOKEN","scopes":["read"]}}
+{"jsonrpc":"2.0","id":1,"method":"noa.hello","params":{"protocolVersion":2,"token":"$TOKEN","scopes":["read"]}}
 {"jsonrpc":"2.0","id":2,"method":"noa.listPanels","params":{}}
 EOF
 ```

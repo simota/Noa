@@ -1,4 +1,4 @@
-# noa-server Client API Specification (protocolVersion 1)
+# noa-server Client API Specification (protocolVersion 2)
 
 A protocol reference for connecting to noa from external clients (CLI, dashboard, iOS app, etc.).
 For operational procedures (enabling, tokens, troubleshooting) see `docs/runbooks/noa-server.md`; for design background see `docs/specs/noa-server.md`.
@@ -54,11 +54,11 @@ Any other method before hello returns `-32001`. A major mismatch returns `-32006
 
 | params | type | required | description |
 |--------|----|------|------|
-| `protocolVersion` | number | ✓ | the client's major version. Currently `1` |
+| `protocolVersion` | number | ✓ | the client's major version. Currently `2` |
 | `token` | string | optional if header-authenticated | Bearer token |
 | `scopes` | string[] | — (omitted = `[]`) | requested scopes |
 
-result: `{"protocolVersion":1,"grantedScopes":["read"],"serverVersion":"0.1.2"}`
+result: `{"protocolVersion":2,"grantedScopes":["read"],"serverVersion":"0.1.2"}`
 
 ### noa.listPanels — requires read
 
@@ -79,12 +79,16 @@ result: `{"paneId":"1","text":"..."}` — when truncated, the **tail is kept in 
 | params | type | required | description |
 |--------|----|------|------|
 | `paneId` | string | ✓ | |
-| `startRow` | number | ✓ | absolute row. Row 0 = the oldest scrollback row |
+| `startRow` | number | ✓ | session-absolute row within the current `coordinateGeneration` |
 | `rowCount` | number | ✓ | effective limit of 2048 rows per request |
 
-result: `{"paneId":"1","cols":80,"startRow":0,"rows":[Row],"hasMore":false}`
+result: `{"paneId":"1","cols":80,"startRow":0,"coordinateGeneration":4,"oldestRow":120,"nextRow":220,"rows":[Row],"hasMore":false}`
 
-The response is rounded to fit within 256 KiB serialized. When `hasMore:true`, continue with `startRow = previous startRow + rows.length`. If a single row exceeds the limit by itself, `-32005` is returned.
+`coordinateGeneration` is the opaque identity of the row-coordinate space. Clients must discard every cached row and restart from the tail when it changes. It advances after operations that rebuild or collapse row coordinates, including scrollback clear, column reflow, full reset, and primary/alternate screen switches. Ordinary front eviction keeps the generation stable and preserves the coordinates of surviving rows.
+
+`oldestRow` is the first retained coordinate and `nextRow` is the exclusive end of the retained range. To load the current tail, request `startRow = max(oldestRow, nextRow - desiredRowCount)` after an initial bounds probe. Coordinates below `oldestRow` have been evicted and remain invalid within that generation.
+
+The response is rounded to fit within 256 KiB serialized. `hasMore:true` means only that the requested range was truncated by the 2048-row or 256 KiB response cap; it does not mean that newer or older history exists. Continue the same range from one past the last returned `Row.row`. If a single row exceeds the limit by itself, `-32005` is returned.
 
 ### noa.sendText — requires input
 
@@ -193,10 +197,10 @@ Delivers **only the Panels that changed or were added** when panel metadata chan
 ### noa.output
 
 ```json
-{"jsonrpc":"2.0","method":"noa.output","params":{"paneId":"1","lines":[Row]}}
+{"jsonrpc":"2.0","method":"noa.output","params":{"paneId":"1","coordinateGeneration":4,"lines":[Row]}}
 ```
 
-Delivers panel-output updates as **only the visible rows that changed, coalesced at ≥16ms intervals** (with color runs). `Row.row` is the absolute row number. Treat each row as a full replacement, not a patch.
+Delivers panel-output updates as **only the visible rows that changed, coalesced at ≥16ms intervals** (with color runs). `coordinateGeneration` and `Row.row` use the same coordinate space as `noa.getGrid`. Ignore the lines and refetch the tail if the generation differs from the cached grid. Treat each row as a full replacement, not a patch.
 
 ### The dropped marker
 
@@ -251,15 +255,15 @@ When the subscription queue overflows, the oldest notifications are dropped and 
 ## 10. Full session example
 
 ```json
-→ {"jsonrpc":"2.0","id":1,"method":"noa.hello","params":{"protocolVersion":1,"token":"<hex64>","scopes":["read","input"]}}
-← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"grantedScopes":["read","input"],"serverVersion":"0.1.2"}}
+→ {"jsonrpc":"2.0","id":1,"method":"noa.hello","params":{"protocolVersion":2,"token":"<hex64>","scopes":["read","input"]}}
+← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2,"grantedScopes":["read","input"],"serverVersion":"0.1.2"}}
 → {"jsonrpc":"2.0","id":2,"method":"noa.listPanels","params":{}}
 ← {"jsonrpc":"2.0","id":2,"result":{"panels":[{"windowGroupId":"1","windowId":"105553...","paneId":"1","name":"zsh","cwd":"/Users/me","busy":false,"attention":false,"preview":[]}]}}
 → {"jsonrpc":"2.0","id":3,"method":"noa.subscribe","params":{"events":["output"],"paneIds":["1"]}}
 ← {"jsonrpc":"2.0","id":3,"result":{"subscriptionId":"1"}}
 → {"jsonrpc":"2.0","id":4,"method":"noa.sendText","params":{"paneId":"1","text":"echo hi\n"}}
 ← {"jsonrpc":"2.0","id":4,"result":{"ok":true}}
-← {"jsonrpc":"2.0","method":"noa.output","params":{"paneId":"1","lines":[{"row":42,"spans":[{"text":"hi"}]}]}}
+← {"jsonrpc":"2.0","method":"noa.output","params":{"paneId":"1","coordinateGeneration":0,"lines":[{"row":42,"spans":[{"text":"hi"}]}]}}
 ```
 
 ## 11. Client implementation checklist

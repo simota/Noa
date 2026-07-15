@@ -55,6 +55,11 @@ pub struct Terminal {
     /// whenever a control sequence replaces the active [`Screen`] without
     /// necessarily changing `active_is_alt`.
     screen_generation: u64,
+    /// Opaque generation for IPC grid coordinates. Automatic scrollback
+    /// eviction keeps this stable because `rows_evicted` preserves surviving
+    /// row numbers. Operations that rebuild or collapse the coordinate space
+    /// advance it so remote clients can discard every cached row atomically.
+    grid_coordinate_generation: u64,
     pub modes: ModeState,
     /// G0/G1 designation + active (GL) slot for `SCS`/`SO`/`SI`.
     charset: CharsetState,
@@ -152,6 +157,7 @@ impl Terminal {
             alt: None,
             active_is_alt: false,
             screen_generation: 0,
+            grid_coordinate_generation: 0,
             modes: ModeState::defaults(),
             charset: CharsetState::default(),
             title: String::new(),
@@ -193,6 +199,15 @@ impl Terminal {
         self.screen_generation
     }
 
+    /// Identity of the active IPC grid coordinate space.
+    pub const fn grid_coordinate_generation(&self) -> u64 {
+        self.grid_coordinate_generation
+    }
+
+    fn invalidate_grid_coordinate_space(&mut self) {
+        self.grid_coordinate_generation = self.grid_coordinate_generation.wrapping_add(1);
+    }
+
     /// Set the cursor style DECSCUSR 0 resets to, and apply it immediately as
     /// the active cursor style. Called by `noa-app` from the `cursor-style`
     /// config at surface creation.
@@ -214,18 +229,26 @@ impl Terminal {
         self.active().scrollback_len()
     }
 
-    /// Total addressable rows in the active screen's session-absolute row
-    /// space (retained scrollback plus the live grid), for IPC `getGrid`
-    /// paging (noa-server spec).
+    /// Number of currently retained addressable rows in the active screen.
     pub fn active_total_rows(&self) -> usize {
         self.active().total_rows()
     }
 
-    /// A row in the active screen's session-absolute space (`0` = oldest
-    /// retained scrollback row), for IPC `getGrid` paging. `None` if `y` is
-    /// out of range.
+    /// Oldest retained session-absolute row coordinate.
+    pub fn active_oldest_row(&self) -> usize {
+        self.active().rows_evicted()
+    }
+
+    /// Exclusive end of the active screen's retained session-absolute range.
+    pub fn active_next_row(&self) -> usize {
+        self.active_oldest_row()
+            .saturating_add(self.active_total_rows())
+    }
+
+    /// A row in the active screen's stable session-absolute space. `None`
+    /// if `y` has been evicted or is beyond [`Self::active_next_row`].
     pub fn active_absolute_row(&self, y: usize) -> Option<crate::cell::Row> {
-        self.active().absolute_row(y)
+        self.active().session_absolute_row(y)
     }
 
     pub fn viewport_offset(&self) -> usize {
@@ -354,6 +377,7 @@ impl Terminal {
             .primary
             .prepend_plain_text_history(text, trailing_wrapped);
         if inserted > 0 {
+            self.invalidate_grid_coordinate_space();
             for mark in &mut self.shell_marks {
                 mark.point.y = mark.point.y.saturating_add(inserted);
             }
@@ -432,6 +456,8 @@ impl Terminal {
             return false;
         }
 
+        self.invalidate_grid_coordinate_space();
+
         let at_prompt = self.cursor_is_at_prompt();
         let old_sb_len = self.primary.scrollback_len();
         let old_live_top = self.primary.rows_evicted() + old_sb_len;
@@ -487,6 +513,9 @@ impl Terminal {
     }
 
     pub fn clear_scrollback(&mut self) {
+        if self.primary.scrollback_len() > 0 {
+            self.invalidate_grid_coordinate_space();
+        }
         self.primary.clear_scrollback();
     }
 
@@ -532,11 +561,19 @@ impl Terminal {
     /// Resize the terminal to a new cell grid (from a window resize). Resizes
     /// every screen, reflows soft-wrapped lines, and updates the recorded size.
     pub fn resize(&mut self, size: GridSize) {
+        let columns_changed = size.cols != self.size.cols;
+        let active_next_before = self.active_next_row();
+        if columns_changed {
+            self.invalidate_grid_coordinate_space();
+        }
         self.primary.resize(size.cols, size.rows);
         if let Some(alt) = &mut self.alt {
             alt.resize(size.cols, size.rows);
         }
         self.size = size;
+        if !columns_changed && self.active_next_row() < active_next_before {
+            self.invalidate_grid_coordinate_space();
+        }
     }
 
     /// Enable or suppress terminal-generated report replies at the drain
@@ -797,6 +834,7 @@ impl Terminal {
     }
 
     fn enter_alt_screen(&mut self, clear: bool) {
+        let changes_active_space = !self.active_is_alt || clear || self.alt.is_none();
         if clear || self.alt.is_none() {
             let mut alt = Screen::alternate(self.size.cols, self.size.rows);
             alt.cursor.visible = self.modes.cursor_visible();
@@ -806,6 +844,9 @@ impl Terminal {
             alt.cursor.visible = self.modes.cursor_visible();
         }
         self.active_is_alt = true;
+        if changes_active_space {
+            self.invalidate_grid_coordinate_space();
+        }
         self.primary.clear_selection();
         self.primary.clear_search();
         if let Some(alt) = &mut self.alt {
@@ -817,6 +858,9 @@ impl Terminal {
     fn leave_alt_screen(&mut self, restore_cursor: bool, clear_alt: bool) {
         let was_alt = self.active_is_alt;
         self.active_is_alt = false;
+        if was_alt {
+            self.invalidate_grid_coordinate_space();
+        }
         self.primary.scroll_viewport_to_bottom();
         self.primary.cursor.visible = self.modes.cursor_visible();
         if restore_cursor {

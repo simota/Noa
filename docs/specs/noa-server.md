@@ -94,7 +94,7 @@
 
 - WebSocket over TCP, `ws://127.0.0.1:61771/` (configurable via `server-port`). No TLS (loopback assumed; iOS terminates via tunnel).
 - Auth: an `Authorization: Bearer <token>` header on the WS upgrade, or for clients that can't set headers, an `noa.hello` request (`params.token`) sent immediately after connecting. Either is compared against the FR-3 token in constant time.
-- Handshake: the client sends `noa.hello { protocolVersion, token, scopes }`, and the server responds with `{ protocolVersion, grantedScopes, serverVersion }`. Current `protocolVersion` is `1`. `grantedScopes` = requested scopes ∩ `server-scopes` (config, default `read` only).
+- Handshake: the client sends `noa.hello { protocolVersion, token, scopes }`, and the server responds with `{ protocolVersion, grantedScopes, serverVersion }`. Current `protocolVersion` is `2`. `grantedScopes` = requested scopes ∩ `server-scopes` (config, default `read` only).
 - Any method called before auth and version are established is rejected with `-32001` (auth) / `-32006` (version).
 
 ### JSON-RPC 2.0 method table
@@ -104,7 +104,7 @@
 | `noa.hello` | — | `{ protocolVersion, token, scopes:[…] }` | `{ protocolVersion, grantedScopes:[…], serverVersion }` |
 | `noa.listPanels` | read | `{}` | `{ panels:[Panel] }` |
 | `noa.getText` | read | `{ paneId, source:"screen"|"scrollback", maxBytes? }` | `{ paneId, text, truncated? }` |
-| `noa.getGrid` | read | `{ paneId, startRow, rowCount }` | `{ paneId, cols, startRow, rows:[Row], hasMore }` |
+| `noa.getGrid` | read | `{ paneId, startRow, rowCount }` | `{ paneId, cols, startRow, coordinateGeneration, oldestRow, nextRow, rows:[Row], hasMore }` |
 | `noa.sendText` | input | `{ paneId, text }` | `{ ok:true }` |
 | `noa.focusPane` | control | `{ paneId }` | `{ ok:true }` |
 | `noa.newTab` | control | `{ windowId? }` | `{ paneId }` |
@@ -113,7 +113,7 @@
 | `noa.subscribe` | read | `{ events:["state_changed","output"], paneIds?:[…] }` | `{ subscriptionId }` |
 | `noa.unsubscribe` | read | `{ subscriptionId }` | `{ ok:true }` |
 | notification `noa.stateChanged` | — | `{ panels:[Panel] }` (delta) | (notification, no response) |
-| notification `noa.output` | — | `{ paneId, lines:[Row], dropped?:true }` | (notification, no response) |
+| notification `noa.output` | — | `{ paneId, coordinateGeneration, lines:[Row], dropped?:true }` | (notification, no response) |
 
 ### ID model & Panel metadata
 
@@ -124,7 +124,7 @@
 ### Grid payload
 
 - `Row` = `{ row, spans:[{ text, fg?, bg?, attrs? }] }`. `fg`/`bg` are `#rrggbb` or a palette index; `attrs` is a flag set for bold/italic/underline etc. **Consecutive cells with identical style are folded into a single span while preserving their text** (equivalent to PreviewSpan).
-- Pagination: row range specified via `startRow`/`rowCount`. When the response would exceed the limit (roughly 256KB by default), it returns `hasMore:true` and defers the remainder to the next request. A single request that exceeds the limit outright is rejected with `-32005`.
+- Pagination: row range specified via `startRow`/`rowCount`. `Row.row`, `startRow`, `oldestRow`, and `nextRow` are session-absolute coordinates within one `coordinateGeneration`. Clients must discard cached rows when the generation changes. When the response would exceed the limit (roughly 256KB by default), it returns `hasMore:true` and defers the remainder to the next request. A single request that exceeds the limit outright is rejected with `-32005`.
 
 ### Push pipeline
 

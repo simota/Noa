@@ -427,6 +427,11 @@ impl App {
                             .map_err(|_| noa_ipc::IpcError::PaneClosed)
                     },
                 )?;
+                if let SurfaceTransport::Local(local) = &surface.transport
+                    && let Some(io_thread) = local.io_thread.as_ref()
+                {
+                    io_thread.request_ipc_output_refresh();
+                }
                 Ok(IpcActionReply::Ok)
             }
         }

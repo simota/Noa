@@ -553,6 +553,66 @@ fn scrollback_eviction_advances_rows_evicted_and_shifts_selection() {
         .expect("live selection survives eviction");
     assert_eq!(after.anchor.y, before.anchor.y - evicted);
     assert_eq!(after.focus.y, before.focus.y - evicted);
+
+    let oldest = t.active_oldest_row();
+    assert_eq!(oldest, t.selection_rows_evicted());
+    assert!(
+        t.active_absolute_row(oldest).is_some(),
+        "the first retained row remains addressable by its stable session coordinate"
+    );
+    assert!(
+        t.active_absolute_row(oldest - 1).is_none(),
+        "an evicted coordinate must never be reused for different content"
+    );
+}
+
+#[test]
+fn ipc_grid_generation_changes_only_when_coordinates_are_rebuilt() {
+    let mut terminal = Terminal::new(GridSize::new(8, 3));
+    let mut stream = noa_vt::Stream::new();
+    stream.feed(b"one\r\ntwo\r\nthree\r\nfour", &mut terminal);
+
+    let before_eviction = terminal.grid_coordinate_generation();
+    terminal.set_scrollback_limit_bytes(1);
+    assert_eq!(
+        terminal.grid_coordinate_generation(),
+        before_eviction,
+        "front eviction preserves surviving absolute row coordinates"
+    );
+
+    stream.feed(b"\r\nfive\r\nsix", &mut terminal);
+    let before_clear = terminal.grid_coordinate_generation();
+    terminal.clear_scrollback();
+    assert_ne!(terminal.grid_coordinate_generation(), before_clear);
+
+    let before_reflow = terminal.grid_coordinate_generation();
+    terminal.resize(GridSize::new(4, 3));
+    assert_ne!(terminal.grid_coordinate_generation(), before_reflow);
+}
+
+#[test]
+fn ipc_grid_generation_changes_when_row_shrink_reduces_coordinate_range() {
+    let mut terminal = Terminal::new(GridSize::new(8, 4));
+    let generation_before = terminal.grid_coordinate_generation();
+    let next_before = terminal.active_next_row();
+
+    terminal.resize(GridSize::new(8, 2));
+
+    assert!(terminal.active_next_row() < next_before);
+    assert_ne!(terminal.grid_coordinate_generation(), generation_before);
+}
+
+#[test]
+fn ipc_grid_generation_stays_when_row_shrink_preserves_coordinate_range() {
+    let mut terminal = Terminal::new(GridSize::new(8, 4));
+    noa_vt::Stream::new().feed(b"\x1b[4;1H", &mut terminal);
+    let generation_before = terminal.grid_coordinate_generation();
+    let next_before = terminal.active_next_row();
+
+    terminal.resize(GridSize::new(8, 2));
+
+    assert_eq!(terminal.active_next_row(), next_before);
+    assert_eq!(terminal.grid_coordinate_generation(), generation_before);
 }
 
 #[test]

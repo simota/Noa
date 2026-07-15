@@ -145,6 +145,11 @@ pub(crate) fn apply_pane_grid_resize(state: &mut WindowState, targets: &[(PaneId
         surface.grid_size = grid_size;
         if changed.contains(&pane_id) {
             surface.terminal.lock().resize(grid_size);
+            if let SurfaceTransport::Local(local) = &surface.transport
+                && let Some(io_thread) = local.io_thread.as_ref()
+            {
+                io_thread.request_ipc_output_refresh();
+            }
         }
     }
 

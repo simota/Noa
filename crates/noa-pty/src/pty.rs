@@ -172,8 +172,23 @@ impl Pty {
             .take_writer()
             .map_err(|e| PtyError::TakeWriter(e.to_string()))?;
 
+        // Independent dup of the master fd for the reader's readability
+        // polling (congestion coalescing — see `reader.rs`). Owned by the
+        // reader thread so its lifetime is decoupled from this `Pty`'s.
+        #[cfg(unix)]
+        let poll_fd = master.as_raw_fd().and_then(|raw| {
+            use std::os::fd::FromRawFd as _;
+            // SAFETY: `raw` is a live fd owned by the master; `dup` returns a
+            // fresh, exclusively-owned fd (or -1, handled below).
+            let dup = unsafe { libc::dup(raw) };
+            (dup >= 0).then(|| unsafe { std::os::fd::OwnedFd::from_raw_fd(dup) })
+        });
+        #[cfg(not(unix))]
+        let poll_fd = None;
+
         let (tx, event_rx) = pty_event_channel();
-        spawn_reader(reader, tx.clone()).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
+        spawn_reader(reader, poll_fd, tx.clone())
+            .map_err(|e| PtyError::SpawnThread(e.to_string()))?;
         spawn_waiter(child, tx).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
 
         let writer = PtyWriter::spawn(writer).map_err(|e| PtyError::SpawnThread(e.to_string()))?;

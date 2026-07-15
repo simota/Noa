@@ -316,8 +316,8 @@ pub fn spawn(
                     let mut output = feed_terminal_batch(
                         &terminal,
                         &mut stream,
-                        bytes.as_ref(),
-                        drained.iter().map(|chunk| chunk.as_ref()),
+                        bytes,
+                        drained,
                         &overview,
                         &mut last_overview_publish,
                         &sidebar,

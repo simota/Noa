@@ -1,9 +1,0 @@
-terminal	axis	variant	rep	metric	value	unit
-noa	latency	-	1	median_ns	15000	ns
-noa	latency	-	1	p99_ns	79000	ns
-noa	latency	-	1	min_ns	10000	ns
-noa	latency	-	2	median_ns	31000	ns
-noa	latency	-	2	p99_ns	51000	ns
-noa	latency	-	2	min_ns	13000	ns
-noa	latency	-	median	median_ns	23000	ns
-noa	latency	-	median	p99_ns	65000	ns

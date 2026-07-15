@@ -71,8 +71,9 @@ if axis_selected scroll; then
 fi
 
 # ── tools ──────────────────────────────────────────────────────────
-[ -x "$NOWNS" ] && [ -x "$PROBE" ] || (cd "$BENCH_DIR/tools" && mkdir -p bin && \
-  cc -O2 -o bin/nowns nowns.c && cc -O2 -o bin/dsr_probe dsr_probe.c)
+[ -x "$NOWNS" ] && [ -x "$PROBE" ] && [ -x "$TOOLS/winwait" ] || (cd "$BENCH_DIR/tools" && mkdir -p bin && \
+  cc -O2 -o bin/nowns nowns.c && cc -O2 -o bin/dsr_probe dsr_probe.c && \
+  cc -O2 -framework ApplicationServices -o bin/winwait winwait.c)
 chmod +x "$WRAPPER"
 
 # ── equalize: swap user configs for minimal ones, restore on exit ──

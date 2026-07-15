@@ -648,7 +648,7 @@ fn tap_present_but_no_output_subscriber_keeps_ipc_output_none() {
     let output = feed_terminal_batch(
         &terminal,
         &mut stream,
-        b"hello",
+        b"hello".as_slice(),
         std::iter::empty::<&[u8]>(),
         &overview,
         &mut last_overview_publish,
@@ -717,7 +717,7 @@ fn output_subscriber_for_one_pane_does_not_gate_open_for_another_pane() {
     let output = feed_terminal_batch(
         &terminal,
         &mut stream,
-        b"hello",
+        b"hello".as_slice(),
         std::iter::empty::<&[u8]>(),
         &overview,
         &mut last_overview_publish,
@@ -763,7 +763,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
     let first = feed_terminal_batch(
         &terminal,
         &mut stream,
-        b"one\r\ntwo\r\nthree",
+        b"one\r\ntwo\r\nthree".as_slice(),
         std::iter::empty::<&[u8]>(),
         &overview,
         &mut last_overview_publish,
@@ -790,7 +790,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
     let closed = feed_terminal_batch(
         &terminal,
         &mut stream,
-        b"\r\nfour",
+        b"\r\nfour".as_slice(),
         std::iter::empty::<&[u8]>(),
         &overview,
         &mut last_overview_publish,
@@ -815,7 +815,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
     let reopened = feed_terminal_batch(
         &terminal,
         &mut stream,
-        b"",
+        b"".as_slice(),
         std::iter::empty::<&[u8]>(),
         &overview,
         &mut last_overview_publish,

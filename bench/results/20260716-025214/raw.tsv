@@ -1,0 +1,3 @@
+terminal	axis	variant	rep	metric	value	unit
+noa	scroll	-	-	status	UNMEASURED	timeout
+noa	meta	-	-	equalized	grid=120x40;font=Menlo@14;ligatures-off;bg-off	note

@@ -406,12 +406,135 @@ pub struct App {
     /// drop the command. `Mutex` only because `spawn_pane_surface` takes
     /// `&self`; there is no cross-thread access.
     prespawned_pty: Mutex<Option<PrespawnedPty>>,
+    /// Terminal + sidebar font discovery and the GPU prewarm, started at the
+    /// top of [`crate::run`] (see [`StartupTasks`]), consumed by the first
+    /// tab spawn.
+    startup_tasks: Option<StartupTasks>,
     /// The CLI `-e` command, waiting for the first [`App::spawn_pane_surface`]
     /// to consume it. One-shot (Ghostty `initial-command` parity): only the
     /// first surface runs the command; every later tab/split/quick-terminal
     /// spawn finds the slot empty and gets the normal shell. `Mutex` only
     /// because `spawn_pane_surface` takes `&self`.
     initial_command: Mutex<Option<Vec<String>>>,
+}
+
+/// The wgpu foundation prewarmed on a worker: adapter/device are requested
+/// without a compatible surface (macOS exposes a single Metal adapter, which
+/// can present to any surface), so the ~10 ms of GPU bring-up overlaps
+/// event-loop construction instead of serializing after window creation.
+pub(crate) struct PrewarmedGpu {
+    pub(crate) instance: wgpu::Instance,
+    pub(crate) adapter: wgpu::Adapter,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
+}
+
+/// Both system-font discoveries (terminal + sidebar) plus the GPU prewarm
+/// running on worker threads, spawned at the very top of [`crate::run`] —
+/// before the winit event loop is even built — so the ~60 ms font discovery
+/// and the GPU bring-up overlap event-loop construction, `App::new`, and
+/// window creation instead of serializing in front of the first window
+/// (startup W1). Consumed once by the first tab spawn (the
+/// `self.gpu.is_none()` path in `lifecycle.rs`).
+///
+/// The terminal worker resolves the primary face first, then blocks until
+/// the main thread sends the pixel size (unknown until a monitor is known)
+/// over `terminal_px_tx`, replies with the primary's cell [`noa_font::Metrics`]
+/// on `terminal_metrics_rx` (sizing the first window needs only this), and
+/// finishes the full fallback-stack discovery in the background.
+pub(crate) struct StartupTasks {
+    terminal_px_tx: Sender<f32>,
+    terminal_metrics_rx: crossbeam_channel::Receiver<noa_font::Metrics>,
+    terminal_stack: std::thread::JoinHandle<Result<noa_font::FontStack, noa_font::FontError>>,
+    sidebar: std::thread::JoinHandle<
+        Result<(noa_font::FontStack, noa_font::FontConfig), noa_font::FontError>,
+    >,
+    gpu: std::thread::JoinHandle<Result<PrewarmedGpu, String>>,
+}
+
+impl StartupTasks {
+    pub(crate) fn spawn(config: &AppConfig) -> Self {
+        let font_cfg = font_config_from_noa_config(&config.font);
+        let (terminal_px_tx, px_rx) = crossbeam_channel::bounded(1);
+        let (metrics_tx, terminal_metrics_rx) = crossbeam_channel::bounded(1);
+        let terminal_stack = std::thread::spawn({
+            let font_cfg = font_cfg.clone();
+            move || {
+                let primary = noa_font::load_primary_font(&font_cfg)?;
+                // A disconnected px channel means the app is exiting without
+                // ever spawning a window; finishing the stack is harmless.
+                if let Ok(px) = px_rx.recv()
+                    && let Ok(font_ref) = primary.font_ref()
+                {
+                    let _ = metrics_tx.send(noa_font::Metrics::compute(font_ref, px));
+                }
+                noa_font::load_font_stack_with_primary(primary, &font_cfg)
+            }
+        });
+        // The sidebar font repeats the same (relatively slow) discovery at its
+        // own pixel size; the stack is scale-independent (only
+        // `FontGrid::with_stack` consumes a pixel size), so it runs fully in
+        // parallel and is joined only when the first `GpuState` is built.
+        let sidebar = std::thread::spawn(move || {
+            noa_font::load_font_stack(&font_cfg).map(|stack| (stack, font_cfg))
+        });
+        let gpu = std::thread::spawn(|| {
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::default(),
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                }))
+                .map_err(|e| format!("no compatible GPU adapter found ({e})"))?;
+            crate::startup_trace::mark("gpu-adapter-ready");
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    label: Some("noa-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    experimental_features: wgpu::ExperimentalFeatures::default(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                    trace: wgpu::Trace::Off,
+                }))
+                .map_err(|e| format!("could not open a GPU device ({e})"))?;
+            crate::startup_trace::mark("gpu-device-ready");
+            Ok(PrewarmedGpu {
+                instance,
+                adapter,
+                device,
+                queue,
+            })
+        });
+        Self {
+            terminal_px_tx,
+            terminal_metrics_rx,
+            terminal_stack,
+            sidebar,
+            gpu,
+        }
+    }
+
+    /// Ask the terminal-font worker for the primary face's metrics at
+    /// `px_size`. An `Err` means the worker failed before resolving a primary
+    /// (no usable font): join [`Self::into_handles`]' stack for the cause.
+    pub(crate) fn terminal_metrics(&self, px_size: f32) -> Result<noa_font::Metrics, ()> {
+        let _ = self.terminal_px_tx.send(px_size);
+        self.terminal_metrics_rx.recv().map_err(|_| ())
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn into_handles(
+        self,
+    ) -> (
+        std::thread::JoinHandle<Result<noa_font::FontStack, noa_font::FontError>>,
+        std::thread::JoinHandle<
+            Result<(noa_font::FontStack, noa_font::FontConfig), noa_font::FontError>,
+        >,
+        std::thread::JoinHandle<Result<PrewarmedGpu, String>>,
+    ) {
+        (self.terminal_stack, self.sidebar, self.gpu)
+    }
 }
 
 /// See [`App::prespawned_pty`].
@@ -443,7 +566,11 @@ fn prespawn_matches(
 }
 
 impl App {
-    pub fn new(config: AppConfig, proxy: EventLoopProxy<UserEvent>) -> Self {
+    pub fn new(
+        config: AppConfig,
+        proxy: EventLoopProxy<UserEvent>,
+        startup_tasks: StartupTasks,
+    ) -> Self {
         let padding = resolve_grid_padding(config.window_padding_x, config.window_padding_y);
         let initial_cursor_style =
             resolve_cursor_style(config.cursor_style, config.cursor_style_blink);
@@ -571,6 +698,7 @@ impl App {
             remote_workers: Vec::new(),
             remote_next_request: Arc::new(AtomicU64::new(1)),
             prespawned_pty: Mutex::new(prespawned_pty),
+            startup_tasks: Some(startup_tasks),
             initial_command: Mutex::new(initial_command),
         }
     }

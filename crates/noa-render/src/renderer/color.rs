@@ -16,6 +16,30 @@ pub(super) fn apply_background_opacity(clear_color: [f32; 4], opacity: f32) -> [
     out
 }
 
+/// The exact clear color the cell pass would use for a frame whose default
+/// background is the theme background — for the startup pre-first-frame
+/// solid paint (window shown before the renderer/font exist). Routes through
+/// the same [`surface_output_rgba`] sRGB handling and the same
+/// `background-opacity` alpha scaling as [`Renderer::draw_panes`]'s clear, so
+/// the early solid frame is byte-identical to the first real frame's
+/// background (no flash-of-wrong-color when the real frame replaces it).
+pub fn startup_clear_color(
+    theme: &Theme,
+    target_format_is_srgb: bool,
+    background_opacity: f32,
+) -> wgpu::Color {
+    let c = apply_background_opacity(
+        surface_output_rgba(crate::theme::rgba(theme.default_bg), target_format_is_srgb),
+        background_opacity,
+    );
+    wgpu::Color {
+        r: f64::from(c[0]),
+        g: f64::from(c[1]),
+        b: f64::from(c[2]),
+        a: f64::from(c[3]),
+    }
+}
+
 pub(super) fn to_u8_color(c: [f32; 4]) -> [u8; 4] {
     [
         (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,

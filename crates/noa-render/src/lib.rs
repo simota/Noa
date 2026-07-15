@@ -30,7 +30,7 @@ pub use image_layer::{ImageBand, Z_BG_THRESHOLD, classify_band, resolve_image_qu
 pub use instance::{BlendMode, CellInstance, PaneUniformParams, Uniforms, populate_pane_uniform};
 pub use renderer::{
     ConfirmDialogLayout, PaletteLayout, PaneFrame, Renderer, command_palette_layout,
-    confirm_dialog_layout, renderer_construction_count,
+    confirm_dialog_layout, paint_startup_frame, renderer_construction_count,
 };
 pub use shared::{GlyphAtlasCache, PipelineCache, SharedGlyphAtlases, SharedPipelines};
 pub use snapshot::{

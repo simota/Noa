@@ -46,6 +46,7 @@ unicode-width     = "0.2"
 
 # ── image decoding (Kitty graphics: PNG + zlib; background-image: JPEG/WebP) ──
 png        = "0.18"
+qrcode     = { version = "0.14", default-features = false }
 flate2     = "1"
 zune-jpeg  = "0.5"
 image-webp = "0.2"

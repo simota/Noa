@@ -116,6 +116,9 @@ pub(crate) enum SettingsRowKind {
     ServerBind,
     /// `server-scopes`. Same reload-exempt classification as `ServerEnable`.
     ServerScopes,
+    /// Show a versioned connection QR code for Noa Remote. Like the token
+    /// copy row, this is an immediate action and has no persisted draft.
+    ServerRemoteAppQr,
     /// Not a config key at all — an action row (R-2 "no per-row adjust
     /// side effect" is the exception here, not the rule) that copies the
     /// server's bearer token to the system clipboard without ever
@@ -131,7 +134,7 @@ pub(crate) enum SettingsRowKind {
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 29;
+    pub(crate) const COUNT: usize = 30;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -161,6 +164,7 @@ impl SettingsRowKind {
         Self::ServerPort,
         Self::ServerBind,
         Self::ServerScopes,
+        Self::ServerRemoteAppQr,
         Self::ServerTokenCopy,
     ];
 
@@ -181,6 +185,7 @@ impl SettingsRowKind {
                 | Self::SidebarWidth
                 | Self::SidebarFontSize
                 | Self::ServerTokenCopy
+                | Self::ServerRemoteAppQr
                 | Self::ServerStatus
         )
     }
@@ -220,6 +225,7 @@ impl SettingsRowKind {
             Self::ServerPort => "Server Port",
             Self::ServerBind => "Server Bind",
             Self::ServerScopes => "Server Scopes",
+            Self::ServerRemoteAppQr => "Remote App QR",
             Self::ServerTokenCopy => "Server Token",
         }
     }
@@ -281,6 +287,9 @@ impl SettingsRowKind {
             }
             Self::ServerScopes => {
                 "Scopes grantable to clients. control=window ops, input=send text, attach=interactive raw VT. Applies on save."
+            }
+            Self::ServerRemoteAppQr => {
+                "Show a QR code containing the running server URL and bearer token."
             }
             Self::ServerTokenCopy => {
                 "Copy the bearer token to the clipboard. The token is never displayed."
@@ -587,6 +596,7 @@ impl RowDraft {
             SettingsRowKind::ServerPort => RowDraft::ServerPort(d.server_port),
             SettingsRowKind::ServerBind => RowDraft::ServerBind(d.server_bind),
             SettingsRowKind::ServerScopes => RowDraft::ServerScopes(d.server_scopes),
+            SettingsRowKind::ServerRemoteAppQr => RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
             SettingsRowKind::ServerTokenCopy => RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
         }
     }
@@ -597,6 +607,9 @@ pub(crate) fn settings_row_display_value(
     draft: &RowDraft,
     editing: bool,
 ) -> String {
+    if kind == SettingsRowKind::ServerRemoteAppQr {
+        return "Show QR Code".to_string();
+    }
     if editing
         && kind == SettingsRowKind::BackgroundImage
         && let RowDraft::BackgroundImage(path) = draft
@@ -648,6 +661,8 @@ pub(crate) enum RowEffect {
     /// clipboard outside the pure state machine, then report the result
     /// back via [`super::ThemeSettings::set_server_token_copy_status`].
     CopyServerToken,
+    /// The Remote App QR row was activated.
+    ShowRemoteAppQr,
 }
 
 /// The pre-open snapshot every value reverts to on Esc (R-16). Also doubles

@@ -13,6 +13,7 @@ mod cli;
 mod clipboard;
 mod command_palette;
 mod commands;
+mod connection_qr;
 pub mod debounce;
 mod events;
 mod input;

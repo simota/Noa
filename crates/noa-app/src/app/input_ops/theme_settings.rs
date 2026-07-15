@@ -580,6 +580,28 @@ impl App {
             RowEffect::SidebarWidth(width) => self.apply_live_sidebar_width(width),
             RowEffect::SidebarFontSize(size) => self.apply_live_sidebar_font_size(size),
             RowEffect::CopyServerToken => self.copy_server_token_to_clipboard(),
+            RowEffect::ShowRemoteAppQr => self.show_remote_app_qr(),
+        }
+    }
+
+    fn show_remote_app_qr(&mut self) {
+        let result = (|| {
+            let server = self
+                .ipc_server
+                .as_ref()
+                .ok_or_else(|| io::Error::other("the control server is not running"))?;
+            let token = self.resolve_server_token()?;
+            let payload = crate::connection_qr::RemoteConnectionPayload::new(
+                server.bind_addr(),
+                server.port(),
+                token,
+            )?;
+            let png = crate::connection_qr::render_png(&payload)?;
+            crate::connection_qr::show_pairing_qr(&payload.url, &png)
+        })();
+        if let Err(err) = result {
+            let _ = crate::connection_qr::show_pairing_error(&err.to_string());
+            log::warn!("failed to show Remote App QR: {err}");
         }
     }
 

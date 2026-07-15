@@ -772,6 +772,32 @@ fn scrollback_records_full_screen_scrolls() {
 }
 
 #[test]
+fn bulk_flood_keeps_scrollback_content_across_seal_tiers() {
+    // A flood large enough to cross several deferred-seal publish/collect
+    // boundaries (batches of 256) and leave stragglers in the in-flight and
+    // pending tiers: every retained row must materialize with the exact line
+    // that scrolled off, in order, regardless of which tier serves it.
+    let n = 1500usize;
+    let mut input = Vec::new();
+    for i in 0..n {
+        input.extend_from_slice(format!("line-{i:04}\r\n").as_bytes());
+    }
+    let t = run_size(20, 4, &input);
+
+    // n lines printed on 4 rows: n + 1 - 4 rows scrolled into history
+    // (the trailing \r\n leaves an empty last row).
+    assert_eq!(t.scrollback_len(), n + 1 - 4);
+    for y in (0..t.scrollback_len()).step_by(97) {
+        let row = t.primary.absolute_row(y).expect("retained row");
+        let text: String = row.cells.iter().map(|c| c.ch).collect();
+        assert_eq!(text.trim_end(), format!("line-{y:04}"), "row {y}");
+    }
+    // The live grid holds the newest lines.
+    assert_eq!(row_text(&t, 0, 9), format!("line-{:04}", n - 3));
+    assert_eq!(row_text(&t, 2, 9), format!("line-{:04}", n - 1));
+}
+
+#[test]
 fn top_anchored_scroll_region_records_scrollback() {
     let mut t = run_size(
         5,

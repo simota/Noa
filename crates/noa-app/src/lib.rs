@@ -19,6 +19,7 @@ mod events;
 mod input;
 mod io_thread;
 mod ipc_bridge;
+mod latency_trace;
 mod link_open;
 mod localtime;
 mod macos_applescript;
@@ -40,6 +41,7 @@ mod session_persist;
 mod session_store;
 mod sidebar;
 pub mod split_tree;
+pub mod startup_trace;
 mod theme;
 mod theme_favorites;
 mod theme_settings;
@@ -54,6 +56,11 @@ use winit::event_loop::EventLoop;
 
 /// Launch the terminal. Blocks until the window closes.
 pub fn run(config: AppConfig) -> anyhow::Result<()> {
+    // Font discovery (~60 ms) and GPU bring-up (~15 ms) are the longest
+    // items on the first window's critical path; start them on workers
+    // before anything else so they overlap event-loop construction,
+    // `App::new`, and window creation (startup W1). See `StartupTasks`.
+    let startup_tasks = app::StartupTasks::spawn(&config);
     let mut builder = EventLoop::<UserEvent>::with_user_event();
 
     // Present as a real foreground macOS app even when launched from a plain
@@ -68,8 +75,10 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     }
 
     let event_loop = builder.build()?;
+    startup_trace::mark("event-loop-built");
     let proxy = event_loop.create_proxy();
-    let mut app = app::App::new(config, proxy);
+    let mut app = app::App::new(config, proxy, startup_tasks);
+    startup_trace::mark("app-constructed");
     event_loop.run_app(&mut app)?;
     Ok(())
 }

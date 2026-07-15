@@ -194,6 +194,12 @@ pub struct AppConfig {
     /// `client-token-file`: configured token source path. The path itself is
     /// not secret; [`Self::client_token`] contains the loaded secret.
     pub client_token_file: Option<PathBuf>,
+    /// CLI `-e <command...>`: run this argv as every pane's pty child instead
+    /// of the login shell (Ghostty parity; used by benchmark/automation
+    /// harnesses to drive noa like `ghostty -e`). CLI-only — never read from
+    /// a config file, so [`Self::from_startup`] leaves it `None` and the
+    /// binary fills it in; live config reload preserves it explicitly.
+    pub launch_command: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for AppConfig {
@@ -290,6 +296,7 @@ impl AppConfig {
             client_remote: config.client_remote,
             client_token: config.client_token,
             client_token_file: config.client_token_file,
+            launch_command: None,
         }
     }
 }

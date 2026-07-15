@@ -5,6 +5,32 @@ use super::*;
 impl Screen {
     // ── printing ───────────────────────────────────────────────────
 
+    /// [`Screen::print_width`] behind a direct-indexed BMP table. The
+    /// per-scalar `unicode-width` multi-level lookup shows up at ~6% of the
+    /// bulk unicode ingest profile; one byte per BMP codepoint (64 KiB,
+    /// built lazily from `print_width` itself, so the two can never
+    /// disagree) turns the dominant CJK case into a single indexed load.
+    /// Astral scalars (emoji etc.) fall through to the crate lookup.
+    #[inline]
+    pub(super) fn print_width_fast(c: char) -> usize {
+        let cp = c as u32;
+        if cp < 0x10000 {
+            static TABLE: std::sync::OnceLock<Box<[u8; 0x10000]>> = std::sync::OnceLock::new();
+            let table = TABLE.get_or_init(|| {
+                let mut table = Box::new([0u8; 0x10000]);
+                for (cp, slot) in table.iter_mut().enumerate() {
+                    // Surrogate codepoints are not `char`s and can never be
+                    // looked up; their slots keep the arbitrary default.
+                    *slot = char::from_u32(cp as u32).map_or(1, |c| Self::print_width(c) as u8);
+                }
+                table
+            });
+            usize::from(table[cp as usize])
+        } else {
+            Self::print_width(c)
+        }
+    }
+
     /// Print a scalar at the cursor, honoring the deferred-wrap latch.
     ///
     /// `grapheme_clustering` gates mode 2027 (DECSET `?2027`): when on, a
@@ -16,7 +42,7 @@ impl Screen {
         if grapheme_clustering && self.extend_cluster_at_cursor(c) {
             return;
         }
-        let width = Self::print_width(c);
+        let width = Self::print_width_fast(c);
         if width == 0 {
             self.attach_combining_mark(c);
             return;
@@ -225,7 +251,7 @@ impl Screen {
     /// may *extend* the preceding cluster under mode 2027, so they stay on
     /// the per-scalar path.
     pub(crate) fn is_plain_wide(c: char) -> bool {
-        Self::print_width(c) == 2 && !matches!(c, '\u{1F3FB}'..='\u{1F3FF}')
+        Self::print_width_fast(c) == 2 && !matches!(c, '\u{1F3FB}'..='\u{1F3FF}')
     }
 
     /// Bulk print a run of plain width-2 scalars (see [`Self::is_plain_wide`]),
@@ -235,25 +261,41 @@ impl Screen {
     /// width-2 path.
     pub fn print_wide_run(&mut self, text: &str, autowrap: bool, grapheme_clustering: bool) {
         debug_assert!(text.chars().all(Self::is_plain_wide));
-        let mut text = text;
+        self.print_wide_scalars(text.chars(), autowrap, grapheme_clustering);
+    }
+
+    /// Iterator-driven core of [`Self::print_wide_run`]: every yielded scalar
+    /// must satisfy [`Self::is_plain_wide`]. Taking the scalars as an
+    /// iterator lets `print_str` feed the chars it already decoded during
+    /// run classification straight through, instead of re-slicing and
+    /// re-decoding the source text a second time.
+    pub(crate) fn print_wide_scalars<I>(
+        &mut self,
+        chars: I,
+        autowrap: bool,
+        grapheme_clustering: bool,
+    ) where
+        I: Iterator<Item = char>,
+    {
+        let mut chars = chars.peekable();
         if grapheme_clustering {
             // As in `print_ascii_run`: only a run prefix can extend a
             // pre-existing cluster (a plain wide scalar extends only across
             // a trailing ZWJ, which the run itself never contains).
-            while let Some(c) = text.chars().next() {
+            while let Some(&c) = chars.peek() {
                 if !self.extend_cluster_at_cursor(c) {
                     break;
                 }
-                text = &text[c.len_utf8()..];
+                chars.next();
             }
         }
-        if text.is_empty() {
+        if chars.peek().is_none() {
             return;
         }
         if self.right_margin() <= self.left_margin() {
             // Degenerate margins take the width-2 special case in `print`;
             // keep the per-scalar path authoritative there.
-            for c in text.chars() {
+            for c in chars {
                 self.print(c, autowrap, grapheme_clustering);
             }
             return;
@@ -275,7 +317,13 @@ impl Screen {
         spacer.attrs.insert(CellAttrs::WIDE_SPACER);
         let left = self.left_margin();
         let right = self.right_margin();
-        for c in text.chars() {
+        // Row-segment writer: the wrap/margin decisions run once per row
+        // segment instead of once per scalar, and the whole segment is
+        // written under one `grid.get_mut` borrow. Semantically identical to
+        // the old per-scalar loop — the latch can only engage at a segment
+        // boundary, so no mid-segment scalar ever observes `pending_wrap`.
+        let mut pending = chars.next();
+        while let Some(first) = pending.take() {
             if self.cursor.pending_wrap && autowrap {
                 if let Some(row) = self.grid.get_mut(self.cursor.y as usize) {
                     row.wrapped = true;
@@ -303,7 +351,8 @@ impl Screen {
                     Self::clear_wide_at(row, x, &blank);
                     row.dirty = true;
                     self.cursor.pending_wrap = false;
-                    self.last_printed = Some(c);
+                    self.last_printed = Some(first);
+                    pending = chars.next();
                     continue;
                 }
             }
@@ -316,25 +365,46 @@ impl Screen {
                 // without further state change, so the whole rest drops.
                 return;
             }
-            for k in [x, x + 1] {
-                if row.cells[k]
-                    .attrs
-                    .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
-                {
-                    Self::clear_wide_at(row, k, &blank);
+            // Wide pairs available on this row segment: through the right
+            // margin (inclusive) and within the row. `x + 1 <= right` and
+            // `x + 2 <= row.cells.len()` both hold here, so at least one
+            // pair always fits.
+            let seg_end = (right as usize + 1).min(row.cells.len());
+            let fit = (seg_end - x) / 2;
+            let mut cur = first;
+            let mut wrote = 0usize;
+            loop {
+                let k = x + 2 * wrote;
+                for cell_x in [k, k + 1] {
+                    if row.cells[cell_x]
+                        .attrs
+                        .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+                    {
+                        Self::clear_wide_at(row, cell_x, &blank);
+                    }
+                }
+                row.cells[k].set_from(&lead);
+                row.cells[k].ch = cur;
+                row.cells[k + 1].set_from(&spacer);
+                self.last_printed = Some(cur);
+                wrote += 1;
+                if wrote == fit {
+                    pending = chars.next();
+                    break;
+                }
+                match chars.next() {
+                    Some(next) => cur = next,
+                    None => break,
                 }
             }
-            row.cells[x].set_from(&lead);
-            row.cells[x].ch = c;
-            row.cells[x + 1].set_from(&spacer);
             row.dirty = true;
-            if self.cursor.x.saturating_add(2) > right {
+            let new_x = (x + 2 * wrote) as u16;
+            if new_x > right {
                 self.cursor.x = right;
                 self.cursor.pending_wrap = true; // latch; stay in the last column
             } else {
-                self.cursor.x += 2;
+                self.cursor.x = new_x;
             }
-            self.last_printed = Some(c);
         }
     }
 

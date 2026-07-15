@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `-e <command...>` CLI flag: run a command instead of the login shell in the
+  first window (Ghostty `initial-command` parity — first surface only;
+  suppresses session restore)
+- `bench/`: reproducible 4-axis cross-terminal benchmark harness
+  (`bench/run_all.sh` — throughput, scroll, DSR latency, dual-sentinel
+  startup) with methodology and recorded results
+- Env-gated performance instrumentation: `NOA_LATENCY_TRACE=1`
+  (key→present timing) and `NOA_STARTUP_TRACE=1` (startup stage breakdown)
+
+### Changed
+
+- Bulk-output throughput: scrollback rows are now sealed in deferred batches
+  and packed off-thread; pty reads are flow-controlled by a byte budget with
+  congestion read-coalescing (ASCII +22%, Unicode +38% on the reference M4)
+- Input latency: swapchain depth lowered to 1, keystroke echo bypasses the
+  redraw floor, and pipeline threads use a traffic-gated bounded spin before
+  parking (DSR round-trip 16µs median / 51µs p99 on the reference M4)
+- Warm startup: the pty is pre-spawned, the primary font face loads before
+  the full fallback stack, the GPU is prewarmed, and the window shows with a
+  pre-painted theme-background frame before font/renderer init completes
+  (window-visible + prompt-ready in ~143ms on the reference M4)
+- Unicode print path: SIMD UTF-8 validation, BMP-indexed width table, and
+  unified decode (no re-decoding between parser and grid)
+
+### Fixed
+
+- Keystroke echo could be delayed up to one redraw-floor interval (~8ms)
+  while cursor-blink repaints were active
+
 ## [0.1.4] - 2026-07-13
 
 ### Fixed

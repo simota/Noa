@@ -6,3 +6,4 @@ Cargo.lock.orig
 .agents/
 .nexus/
 bench/*.txt
+bench/tools/bin/

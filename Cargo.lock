@@ -1614,6 +1614,7 @@ name = "noa-vt"
 version = "0.1.4"
 dependencies = [
  "noa-core",
+ "simdutf8",
  "thiserror 2.0.18",
 ]
 

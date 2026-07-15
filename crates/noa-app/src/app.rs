@@ -394,10 +394,183 @@ pub struct App {
     /// pending table before orphan cleanup drains it.
     remote_workers: Vec<std::thread::JoinHandle<()>>,
     remote_next_request: Arc<AtomicU64>,
+    /// A pty + default shell spawned concurrently at construction so the
+    /// first tab's shell boots in parallel with font discovery, window
+    /// creation, and GPU init instead of serialized after them (startup
+    /// C1). Consumed by the first [`App::spawn_pane_surface`] whose request
+    /// matches what was anticipated (the CLI `-e` command if one was given,
+    /// otherwise the default shell; initial grid size; inherited cwd); any
+    /// non-matching first spawn discards it (the child is killed by `Pty`'s
+    /// `Drop`). With `-e` the prespawn runs that command — prespawning a
+    /// default shell instead would hand the first pane a shell and silently
+    /// drop the command. `Mutex` only because `spawn_pane_surface` takes
+    /// `&self`; there is no cross-thread access.
+    prespawned_pty: Mutex<Option<PrespawnedPty>>,
+    /// Terminal + sidebar font discovery and the GPU prewarm, started at the
+    /// top of [`crate::run`] (see [`StartupTasks`]), consumed by the first
+    /// tab spawn.
+    startup_tasks: Option<StartupTasks>,
+    /// The CLI `-e` command, waiting for the first [`App::spawn_pane_surface`]
+    /// to consume it. One-shot (Ghostty `initial-command` parity): only the
+    /// first surface runs the command; every later tab/split/quick-terminal
+    /// spawn finds the slot empty and gets the normal shell. `Mutex` only
+    /// because `spawn_pane_surface` takes `&self`.
+    initial_command: Mutex<Option<Vec<String>>>,
+}
+
+/// The wgpu foundation prewarmed on a worker: adapter/device are requested
+/// without a compatible surface (macOS exposes a single Metal adapter, which
+/// can present to any surface), so the ~10 ms of GPU bring-up overlaps
+/// event-loop construction instead of serializing after window creation.
+pub(crate) struct PrewarmedGpu {
+    pub(crate) instance: wgpu::Instance,
+    pub(crate) adapter: wgpu::Adapter,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
+}
+
+/// Both system-font discoveries (terminal + sidebar) plus the GPU prewarm
+/// running on worker threads, spawned at the very top of [`crate::run`] —
+/// before the winit event loop is even built — so the ~60 ms font discovery
+/// and the GPU bring-up overlap event-loop construction, `App::new`, and
+/// window creation instead of serializing in front of the first window
+/// (startup W1). Consumed once by the first tab spawn (the
+/// `self.gpu.is_none()` path in `lifecycle.rs`).
+///
+/// The terminal worker resolves the primary face first, then blocks until
+/// the main thread sends the pixel size (unknown until a monitor is known)
+/// over `terminal_px_tx`, replies with the primary's cell [`noa_font::Metrics`]
+/// on `terminal_metrics_rx` (sizing the first window needs only this), and
+/// finishes the full fallback-stack discovery in the background.
+pub(crate) struct StartupTasks {
+    terminal_px_tx: Sender<f32>,
+    terminal_metrics_rx: crossbeam_channel::Receiver<noa_font::Metrics>,
+    terminal_stack: std::thread::JoinHandle<Result<noa_font::FontStack, noa_font::FontError>>,
+    sidebar: std::thread::JoinHandle<
+        Result<(noa_font::FontStack, noa_font::FontConfig), noa_font::FontError>,
+    >,
+    gpu: std::thread::JoinHandle<Result<PrewarmedGpu, String>>,
+}
+
+impl StartupTasks {
+    pub(crate) fn spawn(config: &AppConfig) -> Self {
+        let font_cfg = font_config_from_noa_config(&config.font);
+        let (terminal_px_tx, px_rx) = crossbeam_channel::bounded(1);
+        let (metrics_tx, terminal_metrics_rx) = crossbeam_channel::bounded(1);
+        let terminal_stack = std::thread::spawn({
+            let font_cfg = font_cfg.clone();
+            move || {
+                let primary = noa_font::load_primary_font(&font_cfg)?;
+                // A disconnected px channel means the app is exiting without
+                // ever spawning a window; finishing the stack is harmless.
+                if let Ok(px) = px_rx.recv()
+                    && let Ok(font_ref) = primary.font_ref()
+                {
+                    let _ = metrics_tx.send(noa_font::Metrics::compute(font_ref, px));
+                }
+                noa_font::load_font_stack_with_primary(primary, &font_cfg)
+            }
+        });
+        // The sidebar font repeats the same (relatively slow) discovery at its
+        // own pixel size; the stack is scale-independent (only
+        // `FontGrid::with_stack` consumes a pixel size), so it runs fully in
+        // parallel and is joined only when the first `GpuState` is built.
+        let sidebar = std::thread::spawn(move || {
+            noa_font::load_font_stack(&font_cfg).map(|stack| (stack, font_cfg))
+        });
+        let gpu = std::thread::spawn(|| {
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::default(),
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                }))
+                .map_err(|e| format!("no compatible GPU adapter found ({e})"))?;
+            crate::startup_trace::mark("gpu-adapter-ready");
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    label: Some("noa-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    experimental_features: wgpu::ExperimentalFeatures::default(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                    trace: wgpu::Trace::Off,
+                }))
+                .map_err(|e| format!("could not open a GPU device ({e})"))?;
+            crate::startup_trace::mark("gpu-device-ready");
+            Ok(PrewarmedGpu {
+                instance,
+                adapter,
+                device,
+                queue,
+            })
+        });
+        Self {
+            terminal_px_tx,
+            terminal_metrics_rx,
+            terminal_stack,
+            sidebar,
+            gpu,
+        }
+    }
+
+    /// Ask the terminal-font worker for the primary face's metrics at
+    /// `px_size`. An `Err` means the worker failed before resolving a primary
+    /// (no usable font): join [`Self::into_handles`]' stack for the cause.
+    pub(crate) fn terminal_metrics(&self, px_size: f32) -> Result<noa_font::Metrics, ()> {
+        let _ = self.terminal_px_tx.send(px_size);
+        self.terminal_metrics_rx.recv().map_err(|_| ())
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn into_handles(
+        self,
+    ) -> (
+        std::thread::JoinHandle<Result<noa_font::FontStack, noa_font::FontError>>,
+        std::thread::JoinHandle<
+            Result<(noa_font::FontStack, noa_font::FontConfig), noa_font::FontError>,
+        >,
+        std::thread::JoinHandle<Result<PrewarmedGpu, String>>,
+    ) {
+        (self.terminal_stack, self.sidebar, self.gpu)
+    }
+}
+
+/// See [`App::prespawned_pty`].
+struct PrespawnedPty {
+    size: GridSize,
+    /// The `-e` command the prespawn was started with (`None` = default
+    /// shell). A spawn request only consumes the prespawn when it asks for
+    /// exactly this command — a mismatch here is how `-e` used to be
+    /// silently discarded in favor of the prespawned shell.
+    command: Option<Vec<String>>,
+    handle: std::thread::JoinHandle<noa_pty::Result<Pty>>,
+}
+
+/// Whether a pane's spawn request matches what the prespawned pty anticipated
+/// (see [`App::prespawned_pty`]): the same child command (the CLI `-e` argv,
+/// or `None` for the default shell), the initial grid size, inheriting the
+/// process cwd, with login + shell-integration defaults.
+fn prespawn_matches(
+    config: &PtyConfig,
+    prespawn_size: GridSize,
+    prespawn_command: Option<&[String]>,
+) -> bool {
+    config.command.as_deref() == prespawn_command
+        && config.cwd.is_none()
+        && config.shell.is_none()
+        && config.size == prespawn_size
+        && config.login
+        && config.shell_integration
 }
 
 impl App {
-    pub fn new(config: AppConfig, proxy: EventLoopProxy<UserEvent>) -> Self {
+    pub fn new(
+        config: AppConfig,
+        proxy: EventLoopProxy<UserEvent>,
+        startup_tasks: StartupTasks,
+    ) -> Self {
         let padding = resolve_grid_padding(config.window_padding_x, config.window_padding_y);
         let initial_cursor_style =
             resolve_cursor_style(config.cursor_style, config.cursor_style_blink);
@@ -411,8 +584,32 @@ impl App {
         // over it. The worker also shares the sidebar-visible gate so its
         // process poll only ticks while a sidebar is shown (AC-18).
         let proxy_for_branch_poll = proxy.clone();
+        let initial_command = config.launch_command.clone();
         let sidebar_visible_gate = Arc::new(AtomicBool::new(false));
         let sidebar_preview_lines_gate = Arc::new(AtomicUsize::new(config.sidebar_preview_lines));
+        // Boot the first tab's child now — the CLI `-e` command if one was
+        // given, otherwise the default shell — in parallel with everything
+        // between here and `spawn_pane_surface` (font discovery, window
+        // creation, GPU init) — see the `prespawned_pty` field doc. Client
+        // mode attaches to a remote pane and never spawns locally, so skip
+        // it there.
+        let prespawned_pty = (config.client_remote.is_none()).then(|| {
+            let size = GridSize::new(config.cols, config.rows);
+            let command = initial_command.clone();
+            PrespawnedPty {
+                size,
+                command: command.clone(),
+                handle: std::thread::spawn(move || {
+                    let pty = Pty::spawn(PtyConfig {
+                        size,
+                        command,
+                        ..Default::default()
+                    });
+                    crate::startup_trace::mark("pty-prespawned");
+                    pty
+                }),
+            }
+        });
         App {
             config_watcher: ConfigWatcher::new(),
             // Corrected once the first window exists and can report
@@ -500,6 +697,35 @@ impl App {
             remote_pending: Arc::new(Mutex::new(HashMap::new())),
             remote_workers: Vec::new(),
             remote_next_request: Arc::new(AtomicU64::new(1)),
+            prespawned_pty: Mutex::new(prespawned_pty),
+            startup_tasks: Some(startup_tasks),
+            initial_command: Mutex::new(initial_command),
+        }
+    }
+
+    /// Hand out the prespawned pty if `config` matches what it anticipated
+    /// (see [`App::prespawned_pty`]). The slot is emptied on the first call
+    /// either way: a non-matching first spawn (restore forcing a cwd, a
+    /// differently sized quick terminal) discards it on a reaper thread so
+    /// the stale shell child is killed without blocking this spawn.
+    fn take_prespawned_pty(&self, config: &PtyConfig) -> Option<Pty> {
+        let prespawn = self.prespawned_pty.lock().take()?;
+        if !prespawn_matches(config, prespawn.size, prespawn.command.as_deref()) {
+            std::thread::spawn(move || drop(prespawn.handle.join()));
+            return None;
+        }
+        match prespawn.handle.join() {
+            Ok(Ok(pty)) => Some(pty),
+            Ok(Err(err)) => {
+                // Fall back to the caller's own `Pty::spawn`, which reports
+                // its own (almost certainly identical) error to the user.
+                log::warn!("prespawned pty failed, respawning: {err}");
+                None
+            }
+            Err(_) => {
+                log::warn!("prespawned pty thread panicked, respawning");
+                None
+            }
         }
     }
 
@@ -575,5 +801,106 @@ impl Drop for App {
             branch_poll.shutdown();
         }
         self.gpu.take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn initial_size() -> GridSize {
+        GridSize::new(80, 24)
+    }
+
+    fn dash_e_argv() -> Vec<String> {
+        vec!["/bin/sh".into(), "-c".into(), "echo hi".into()]
+    }
+
+    // Regression: a `-e <command>` first spawn must NOT consume a prespawned
+    // default shell — doing so silently discarded the requested command
+    // (`noa -e /bin/sh -c '...'` ran a plain shell instead).
+    #[test]
+    fn command_spawn_rejects_a_default_shell_prespawn() {
+        let config = PtyConfig {
+            size: initial_size(),
+            command: Some(dash_e_argv()),
+            ..Default::default()
+        };
+
+        assert!(!prespawn_matches(&config, initial_size(), None));
+    }
+
+    // With `-e`, the prespawn is started with that command and the first
+    // spawn must still consume it (warm startup stays on the fast path).
+    #[test]
+    fn command_spawn_consumes_a_prespawn_of_the_same_command() {
+        let config = PtyConfig {
+            size: initial_size(),
+            command: Some(dash_e_argv()),
+            ..Default::default()
+        };
+
+        assert!(prespawn_matches(
+            &config,
+            initial_size(),
+            Some(dash_e_argv()).as_deref()
+        ));
+    }
+
+    // The inverse: a default-shell spawn must not steal a `-e` prespawn.
+    #[test]
+    fn shell_spawn_rejects_a_command_prespawn() {
+        let config = PtyConfig {
+            size: initial_size(),
+            ..Default::default()
+        };
+
+        assert!(!prespawn_matches(
+            &config,
+            initial_size(),
+            Some(dash_e_argv()).as_deref()
+        ));
+    }
+
+    // The default first spawn (no -e, no cwd override, initial size) is
+    // exactly what the default prespawn anticipated — the warm-startup fast
+    // path.
+    #[test]
+    fn prespawn_matches_the_default_first_spawn() {
+        let config = PtyConfig {
+            size: initial_size(),
+            ..Default::default()
+        };
+
+        assert!(prespawn_matches(&config, initial_size(), None));
+    }
+
+    // Non-default requests (restored cwd, custom shell, different grid size,
+    // no login/integration) must respawn rather than reuse the prespawn.
+    #[test]
+    fn prespawn_is_rejected_for_non_default_requests() {
+        let base = || PtyConfig {
+            size: initial_size(),
+            ..Default::default()
+        };
+
+        let mut with_cwd = base();
+        with_cwd.cwd = Some("/tmp".into());
+        assert!(!prespawn_matches(&with_cwd, initial_size(), None));
+
+        let mut with_shell = base();
+        with_shell.shell = Some("/bin/bash".into());
+        assert!(!prespawn_matches(&with_shell, initial_size(), None));
+
+        let resized = base();
+        assert!(!prespawn_matches(&resized, GridSize::new(120, 40), None));
+
+        let mut no_login = base();
+        no_login.login = false;
+        assert!(!prespawn_matches(&no_login, initial_size(), None));
+
+        let mut no_integration = base();
+        no_integration.shell_integration = false;
+        assert!(!prespawn_matches(&no_integration, initial_size(), None));
     }
 }

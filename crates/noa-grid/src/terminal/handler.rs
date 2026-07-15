@@ -52,13 +52,17 @@ impl Handler for Terminal {
             } else {
                 let c = s[i..].chars().next().expect("s is valid UTF-8");
                 if crate::screen::Screen::is_plain_wide(c) {
-                    // CJK/emoji runs take the bulk width-2 path.
-                    let end = s[i..]
-                        .char_indices()
-                        .find(|&(_, c)| !crate::screen::Screen::is_plain_wide(c))
-                        .map_or(s.len(), |(off, _)| i + off);
-                    screen.print_wide_run(&s[i..end], autowrap, grapheme_clustering);
-                    i = end;
+                    // CJK/emoji runs take the bulk width-2 path. The
+                    // `take_while` classification doubles as the decode:
+                    // each scalar reaches the screen without a second
+                    // boundary scan + re-decode of the same text.
+                    let mut consumed = 0usize;
+                    let run = s[i..]
+                        .chars()
+                        .take_while(|&c| crate::screen::Screen::is_plain_wide(c))
+                        .inspect(|c| consumed += c.len_utf8());
+                    screen.print_wide_scalars(run, autowrap, grapheme_clustering);
+                    i += consumed;
                 } else {
                     // Combining/cluster scalars stay on the per-scalar path.
                     screen.print(c, autowrap, grapheme_clustering);

@@ -16,9 +16,15 @@ struct Args {
     /// Import supported settings from Ghostty config into noa config.
     #[arg(long)]
     import_ghostty_config: bool,
+    /// Run this command instead of the login shell (Ghostty parity). Greedy:
+    /// everything after `-e` becomes the command's argv, so it must be the
+    /// last flag on the line.
+    #[arg(short = 'e', value_name = "COMMAND", num_args = 1.., allow_hyphen_values = true)]
+    command: Option<Vec<String>>,
 }
 
 fn main() -> anyhow::Result<()> {
+    noa_app::startup_trace::init();
     env_logger::init();
 
     // `Noa +<action>` runs a one-shot query and exits without the GUI, so it
@@ -47,6 +53,7 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     let (config, diagnostics) = noa_config::load_startup_config(cli_overrides.clone())?;
+    noa_app::startup_trace::mark("config-loaded");
     for diagnostic in diagnostics {
         eprintln!("{}", diagnostic.message);
     }
@@ -55,13 +62,13 @@ fn main() -> anyhow::Result<()> {
     }
     // An explicit `--cols`/`--rows` means the user asked for specific
     // dimensions, which suppresses session restore (the saved topology would
-    // otherwise override them).
-    let cli_grid_override = args.cols.is_some() || args.rows.is_some();
-    noa_app::run(noa_app::AppConfig::from_startup(
-        config,
-        cli_grid_override,
-        cli_overrides,
-    ))
+    // otherwise override them). `-e` suppresses it too: a saved topology
+    // would respawn every restored pane running the one-shot command
+    // (Ghostty likewise starts `-e` in a fresh single-surface window).
+    let cli_grid_override = args.cols.is_some() || args.rows.is_some() || args.command.is_some();
+    let mut app_config = noa_app::AppConfig::from_startup(config, cli_grid_override, cli_overrides);
+    app_config.launch_command = args.command;
+    noa_app::run(app_config)
 }
 
 fn run_import() -> anyhow::Result<()> {
@@ -264,6 +271,25 @@ mod tests {
         let flag = ["--", "theme"].concat();
 
         assert!(Args::try_parse_from(["Noa", flag.as_str(), "3024 Day"]).is_err());
+    }
+
+    #[test]
+    fn dash_e_consumes_the_rest_of_the_line_as_the_command() {
+        // `-e` is greedy (Ghostty parity): everything after it — including
+        // hyphen-prefixed tokens like `-c` — belongs to the command's argv,
+        // while flags placed before it still parse as noa's own.
+        let args = Args::try_parse_from(["Noa", "--cols", "120", "-e", "/bin/sh", "-c", "echo hi"])
+            .unwrap();
+
+        assert_eq!(args.cols, Some(120));
+        assert_eq!(
+            args.command,
+            Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo hi".to_string()
+            ])
+        );
     }
 
     #[test]

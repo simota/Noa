@@ -113,22 +113,48 @@ impl App {
             .map(|monitor| monitor.scale_factor())
             .unwrap_or(1.0);
 
-        let mut first_font = if self.gpu.is_none() {
+        let first_window = self.gpu.is_none();
+        // Both font discoveries (terminal, primary-first + sidebar) have been
+        // running on workers since the top of `crate::run` — before the event
+        // loop was even built (startup W1). The first window consumes them:
+        // only the primary face's metrics are needed to size the window
+        // (available ~10 ms into the ~60 ms discovery); the full stacks are
+        // joined later, right before the renderer needs glyphs.
+        let mut font_tasks = if first_window {
             Some(
-                FontGrid::new(
-                    font_pixel_size(self.runtime_font_size, monitor_scale_factor),
-                    font_config_from_noa_config(&self.config.font),
-                )
-                .expect("failed to load a system monospace font"),
+                self.startup_tasks
+                    .take()
+                    .expect("startup font tasks are consumed exactly once, by the first window"),
             )
         } else {
             None
         };
-        let metrics = first_font
-            .as_ref()
-            .map(FontGrid::metrics)
-            .or_else(|| self.gpu.as_ref().map(|gpu| gpu.font.metrics()))
-            .expect("font must exist before creating a tab");
+        let metrics = match font_tasks.as_ref().map(|tasks| {
+            tasks.terminal_metrics(font_pixel_size(
+                self.runtime_font_size,
+                monitor_scale_factor,
+            ))
+        }) {
+            Some(Ok(metrics)) => metrics,
+            // An error means the worker failed before resolving a primary
+            // face (no usable font / parse failure): join it to surface the
+            // cause with the same fatal message the old inline load used.
+            Some(Err(())) => {
+                let (terminal_stack, _, _) =
+                    font_tasks.take().expect("just matched Some").into_handles();
+                let err = match terminal_stack.join() {
+                    Ok(Err(e)) => format!("{e:?}"),
+                    Ok(Ok(_)) => "font worker dropped its metrics channel".to_string(),
+                    Err(_) => "font worker panicked".to_string(),
+                };
+                panic!("failed to load a system monospace font: {err}")
+            }
+            None => self
+                .gpu
+                .as_ref()
+                .map(|gpu| gpu.font.metrics())
+                .expect("font must exist before creating a tab"),
+        };
         let inner_size = initial_window_logical_size(
             metrics,
             initial_grid_size,
@@ -136,12 +162,22 @@ impl App {
             self.padding,
         );
 
-        let window_attrs = self.tab_window_attributes(inner_size, group);
+        // First window: created hidden, painted with the full startup
+        // background (theme clear + background image when configured), and
+        // only then shown (`early_show`) — the same pre-render-then-show
+        // discipline as the quick terminal (RC1/RC2), so the window is on
+        // screen long before fonts/renderer are ready and never flashes
+        // unpainted/system-default content.
+        let early_show = first_window;
+        let window_attrs = self
+            .tab_window_attributes(inner_size, group)
+            .with_visible(!early_show);
         let window = Arc::new(
             event_loop
                 .create_window(window_attrs)
                 .expect("failed to create window"),
         );
+        crate::startup_trace::mark("window-created");
         let window_scale_factor = window.scale_factor();
         // Seed the system-appearance snapshot from the first real window we
         // get a chance to ask (only meaningfully read once, at startup — a
@@ -149,22 +185,6 @@ impl App {
         // live changes arrive via `WindowEvent::ThemeChanged` afterward).
         if let Some(theme) = window.theme() {
             self.system_appearance = theme;
-        }
-        if let Some(font) = first_font.as_mut()
-            && (window_scale_factor - monitor_scale_factor).abs() > f64::EPSILON
-        {
-            *font = FontGrid::new(
-                font_pixel_size(self.runtime_font_size, window_scale_factor),
-                font_config_from_noa_config(&self.config.font),
-            )
-            .expect("failed to load a system monospace font");
-            let inner_size = initial_window_logical_size(
-                font.metrics(),
-                initial_grid_size,
-                window_scale_factor,
-                self.padding,
-            );
-            let _ = window.request_inner_size(inner_size);
         }
         window.set_ime_allowed(true);
         crate::macos_blur::apply_background_blur(
@@ -181,8 +201,9 @@ impl App {
             self.padding,
         );
 
-        let surface = if let Some(gpu) = &self.gpu {
-            gpu.instance
+        let (surface, early_surface_config) = if let Some(gpu) = &self.gpu {
+            let surface = gpu
+                .instance
                 .create_surface(window.clone())
                 .unwrap_or_else(|e| {
                     gpu_init_fatal(
@@ -190,9 +211,34 @@ impl App {
                         "could not create the window surface",
                         e,
                     )
-                })
+                });
+            (surface, None)
         } else {
-            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+            // The GPU foundation (instance/adapter/device) has been warming on
+            // a startup worker since the top of `crate::run`; by now it is
+            // ready and the join is instant.
+            let (terminal_stack_handle, sidebar_handle, gpu_handle) = font_tasks
+                .take()
+                .expect("first window consumes the startup font tasks")
+                .into_handles();
+            let PrewarmedGpu {
+                instance,
+                adapter,
+                device,
+                queue,
+            } = match gpu_handle.join() {
+                Ok(Ok(gpu)) => gpu,
+                Ok(Err(msg)) => gpu_init_fatal(
+                    &mut self.session_persister,
+                    "could not initialize the GPU",
+                    msg,
+                ),
+                Err(_) => gpu_init_fatal(
+                    &mut self.session_persister,
+                    "could not initialize the GPU",
+                    "prewarm worker panicked",
+                ),
+            };
             let surface = instance.create_surface(window.clone()).unwrap_or_else(|e| {
                 gpu_init_fatal(
                     &mut self.session_persister,
@@ -200,35 +246,6 @@ impl App {
                     e,
                 )
             });
-            let adapter =
-                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::default(),
-                    compatible_surface: Some(&surface),
-                    force_fallback_adapter: false,
-                }))
-                .unwrap_or_else(|e| {
-                    gpu_init_fatal(
-                        &mut self.session_persister,
-                        "no compatible GPU adapter found",
-                        e,
-                    )
-                });
-            let (device, queue) =
-                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                    label: Some("noa-device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    experimental_features: wgpu::ExperimentalFeatures::default(),
-                    memory_hints: wgpu::MemoryHints::default(),
-                    trace: wgpu::Trace::Off,
-                }))
-                .unwrap_or_else(|e| {
-                    gpu_init_fatal(
-                        &mut self.session_persister,
-                        "could not open a GPU device",
-                        e,
-                    )
-                });
             // Validation errors and device loss must not abort inside the
             // macOS winit delegate (non-unwinding); log them instead. Device
             // loss then surfaces as SurfaceError::Lost on the next frame and
@@ -239,6 +256,120 @@ impl App {
             device.on_uncaptured_error(Arc::new(|err| {
                 log::error!("wgpu uncaptured error: {err}");
             }));
+
+            // Theme resolution needs only the config (~0.4 ms of work), so it
+            // happens before the fonts join — the early solid frame below is
+            // painted in the exact theme background color.
+            let theme = crate::theme::resolve_theme_with_overrides(
+                effective_theme_name(&self.config, self.system_appearance).as_deref(),
+                &self.theme_overrides(),
+            );
+            // Chrome (sidebar/overview) polarity follows the terminal
+            // theme: a light theme gets light chrome.
+            crate::chrome::select_palette(theme.is_light());
+
+            let caps = surface.get_capabilities(&adapter);
+            let alpha_blending = alpha_blending_mode(&self.config.font);
+            let surface_config = build_surface_config(
+                &caps,
+                alpha_blending,
+                window.inner_size(),
+                self.config.background_opacity < 1.0,
+            );
+            surface.configure(&device, &surface_config);
+
+            // W1 pre-render-then-show: put the native chrome backdrop in
+            // place, paint the startup background (theme clear + background
+            // image when configured) into the still-hidden window, and only
+            // then order it front — the quick-terminal RC1/RC2 discipline, so
+            // the window is on screen (~90 ms) while font discovery and
+            // renderer bring-up are still running, and never flashes
+            // unpainted/system-default content.
+            if early_show {
+                // A translucent window leaves native titlebar/tab chrome
+                // compositing against undefined pixels; back the strip with an
+                // opaque theme view — before the window is ever on screen.
+                #[cfg(target_os = "macos")]
+                {
+                    crate::macos_window::set_window_background_color(
+                        &window,
+                        theme.default_bg,
+                        self.config.background_opacity,
+                    );
+                    if needs_macos_titlebar_backdrop(
+                        self.config.macos_titlebar_style,
+                        self.config.background_opacity,
+                        self.background_image.has_visible_image(),
+                    ) {
+                        crate::macos_window::install_titlebar_backdrop(&window, theme.default_bg);
+                    }
+                }
+                match surface.get_current_texture() {
+                    Ok(frame) => {
+                        let view = frame
+                            .texture
+                            .create_view(&wgpu::TextureViewDescriptor::default());
+                        noa_render::paint_startup_frame(
+                            &device,
+                            &queue,
+                            &view,
+                            surface_config.format,
+                            PixelSize {
+                                w: surface_config.width,
+                                h: surface_config.height,
+                            },
+                            &theme,
+                            self.config.background_opacity,
+                            self.background_image.current_image(),
+                        );
+                        frame.present();
+                        crate::startup_trace::mark("bg-frame-presented");
+                    }
+                    // The window still shows the NSWindow background color
+                    // set above (the same theme bg), so showing it unpainted
+                    // is safe — just unexpected enough to log.
+                    Err(e) => log::warn!("startup pre-paint skipped: {e}"),
+                }
+                window.set_visible(true);
+                // Push the show to the screen now: the event loop won't turn
+                // (and flush AppKit's implicit transaction) until the rest of
+                // this spawn — font join, renderer, pty — finishes.
+                crate::macos_window::commit_window_display(&window);
+                crate::startup_trace::mark("window-shown");
+            }
+
+            // The window is on screen; now join the terminal font stack (the
+            // worker has been running since the top of `crate::run`) and
+            // finish grid construction at the window's actual scale.
+            let font = {
+                let stack = match terminal_stack_handle.join() {
+                    Ok(Ok(stack)) => stack,
+                    Ok(Err(e)) => panic!("failed to load a system monospace font: {e:?}"),
+                    Err(_) => panic!("failed to load a system monospace font: worker panicked"),
+                };
+                let font = FontGrid::with_stack(
+                    stack,
+                    font_pixel_size(self.runtime_font_size, window_scale_factor),
+                    font_config_from_noa_config(&self.config.font),
+                )
+                .expect("failed to load a system monospace font");
+                crate::startup_trace::mark("font-ready");
+                font
+            };
+            // The probe metrics that sized the window were computed at the
+            // monitor's scale; if the window landed on a different scale the
+            // real metrics differ — correct the size now (the Resized event
+            // reconfigures the surface), matching the old inline-rebuild path.
+            if (window_scale_factor - monitor_scale_factor).abs() > f64::EPSILON {
+                let corrected = initial_window_logical_size(
+                    font.metrics(),
+                    initial_grid_size,
+                    window_scale_factor,
+                    self.padding,
+                );
+                let _ = window.request_inner_size(corrected);
+            }
+
             self.gpu = Some(GpuState {
                 instance,
                 adapter,
@@ -246,29 +377,32 @@ impl App {
                 queue,
                 pipelines: noa_render::PipelineCache::default(),
                 font_atlases: noa_render::GlyphAtlasCache::default(),
-                font: first_font.expect("first tab must initialize the font"),
-                sidebar_font: FontGrid::new(
-                    sidebar_font_pixel_size(self.config.sidebar_font_size, window_scale_factor),
-                    font_config_from_noa_config(&self.config.font),
-                )
-                .unwrap_or_else(|e| {
-                    gpu_init_fatal(
-                        &mut self.session_persister,
-                        "could not load the sidebar font",
-                        e,
-                    )
-                }),
-                sidebar_font_atlases: noa_render::GlyphAtlasCache::default(),
-                theme: {
-                    let theme = crate::theme::resolve_theme_with_overrides(
-                        effective_theme_name(&self.config, self.system_appearance).as_deref(),
-                        &self.theme_overrides(),
+                font,
+                sidebar_font: {
+                    // Stack prefetched on the startup worker; a join failure
+                    // or load error (worth re-reporting through the fatal
+                    // path) falls back to a fresh inline load.
+                    let px_size =
+                        sidebar_font_pixel_size(self.config.sidebar_font_size, window_scale_factor);
+                    let prefetched = sidebar_handle.join().ok().and_then(Result::ok).and_then(
+                        |(stack, font_cfg)| FontGrid::with_stack(stack, px_size, font_cfg).ok(),
                     );
-                    // Chrome (sidebar/overview) polarity follows the terminal
-                    // theme: a light theme gets light chrome.
-                    crate::chrome::select_palette(theme.is_light());
-                    theme
+                    match prefetched {
+                        Some(font) => font,
+                        None => {
+                            FontGrid::new(px_size, font_config_from_noa_config(&self.config.font))
+                                .unwrap_or_else(|e| {
+                                    gpu_init_fatal(
+                                        &mut self.session_persister,
+                                        "could not load the sidebar font",
+                                        e,
+                                    )
+                                })
+                        }
+                    }
                 },
+                sidebar_font_atlases: noa_render::GlyphAtlasCache::default(),
+                theme,
                 preview_theme: None,
                 chrome_textures: ChromeTextures::default(),
                 palette_renderer: None,
@@ -276,30 +410,30 @@ impl App {
                 palette_padding: noa_core::GridPadding::ZERO,
                 palette_scrim: None,
             });
-            surface
+            (surface, Some(surface_config))
         };
 
         let (surface_config, renderer) = {
             let gpu = self.gpu.as_mut().expect("gpu initialized");
-            let caps = surface.get_capabilities(&gpu.adapter);
             let alpha_blending = alpha_blending_mode(&self.config.font);
-            let surface_format = preferred_surface_format(&caps.formats, alpha_blending);
-
-            let size = window.inner_size();
-            let surface_config = wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: surface_format,
-                width: size.width.max(1),
-                height: size.height.max(1),
-                present_mode: wgpu::PresentMode::Fifo,
-                desired_maximum_frame_latency: 2,
-                alpha_mode: preferred_surface_alpha_mode(
-                    &caps,
-                    self.config.background_opacity < 1.0,
-                ),
-                view_formats: vec![],
+            let surface_config = match early_surface_config {
+                // First window: the surface was configured (and painted)
+                // before the fonts joined — reconfiguring here would discard
+                // the already-presented solid startup frame.
+                Some(config) => config,
+                None => {
+                    let caps = surface.get_capabilities(&gpu.adapter);
+                    let config = build_surface_config(
+                        &caps,
+                        alpha_blending,
+                        window.inner_size(),
+                        self.config.background_opacity < 1.0,
+                    );
+                    surface.configure(&gpu.device, &config);
+                    config
+                }
             };
-            surface.configure(&gpu.device, &surface_config);
+            let surface_format = surface_config.format;
 
             let pipelines = gpu.pipelines.get(&gpu.device, surface_format);
             let font_atlases =
@@ -333,11 +467,14 @@ impl App {
             });
             (surface_config, renderer)
         };
+        crate::startup_trace::mark("renderer-ready");
 
         // A translucent window leaves native titlebar/tab chrome compositing
         // against undefined pixels; back the strip with an opaque theme view.
+        // (The early-show path installed this before ordering the window
+        // front; installing twice would stack backdrop views.)
         #[cfg(target_os = "macos")]
-        {
+        if !early_show {
             let bg = self.gpu.as_ref().expect("gpu initialized").theme.default_bg;
             crate::macos_window::set_window_background_color(
                 &window,
@@ -571,9 +708,20 @@ impl App {
         let pty_config = PtyConfig {
             size: grid_size,
             cwd,
+            // One-shot: only the first spawned surface runs the CLI `-e`
+            // command (see `App::initial_command`); later tabs/splits find
+            // the slot empty and get the normal shell.
+            command: self.initial_command.lock().take(),
             ..Default::default()
         };
-        let pty = Pty::spawn(pty_config)?;
+        // The first spawn normally consumes the child already booted in
+        // parallel by `App::new` (see `App::prespawned_pty`) — the `-e`
+        // command when one was given, the default shell otherwise.
+        let pty = match self.take_prespawned_pty(&pty_config) {
+            Some(pty) => pty,
+            None => Pty::spawn(pty_config)?,
+        };
+        crate::startup_trace::mark("pty-spawned");
         // Hand the foreground-process probe to the session-metadata worker
         // (running-process display) before the pty moves into the io thread.
         // Quick-terminal panes never get a sidebar card, so they need no probe.

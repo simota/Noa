@@ -648,7 +648,7 @@ fn tap_present_but_no_output_subscriber_keeps_ipc_output_none() {
     let output = feed_terminal_batch(
         &terminal,
         &mut stream,
-        b"hello",
+        b"hello".as_slice(),
         std::iter::empty::<&[u8]>(),
         &overview,
         &mut last_overview_publish,
@@ -717,7 +717,7 @@ fn output_subscriber_for_one_pane_does_not_gate_open_for_another_pane() {
     let output = feed_terminal_batch(
         &terminal,
         &mut stream,
-        b"hello",
+        b"hello".as_slice(),
         std::iter::empty::<&[u8]>(),
         &overview,
         &mut last_overview_publish,
@@ -763,7 +763,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
     let first = feed_terminal_batch(
         &terminal,
         &mut stream,
-        b"one\r\ntwo\r\nthree",
+        b"one\r\ntwo\r\nthree".as_slice(),
         std::iter::empty::<&[u8]>(),
         &overview,
         &mut last_overview_publish,
@@ -790,7 +790,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
     let closed = feed_terminal_batch(
         &terminal,
         &mut stream,
-        b"\r\nfour",
+        b"\r\nfour".as_slice(),
         std::iter::empty::<&[u8]>(),
         &overview,
         &mut last_overview_publish,
@@ -815,7 +815,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
     let reopened = feed_terminal_batch(
         &terminal,
         &mut stream,
-        b"",
+        b"".as_slice(),
         std::iter::empty::<&[u8]>(),
         &overview,
         &mut last_overview_publish,
@@ -1607,6 +1607,62 @@ fn redraw_floor_claim_deadline_lets_only_one_pane_through() {
     );
     // A genuinely later redraw can still be claimed afterward.
     assert!(pane_b.claim_deadline(deadline + Duration::from_millis(1)));
+}
+
+// A user-input echo bypasses the redraw floor: even when the window painted
+// moments ago (which would suppress an ordinary output batch), the echo's
+// batch repaints now — a keystroke must never wait out the floor behind
+// another pane's recent paint.
+#[test]
+fn redraw_floor_input_echo_bypasses_the_floor() {
+    let floor = RedrawFloor::new(Duration::from_millis(10));
+    let t0 = Instant::now();
+    assert_eq!(floor.decide(false, t0), RedrawDecision::Now);
+
+    let t1 = t0 + Duration::from_millis(2);
+    // Ordinary output inside the floor window: suppressed…
+    assert!(matches!(
+        floor.decide(false, t1),
+        RedrawDecision::Suppress { .. }
+    ));
+    // …but an input echo is not.
+    assert_eq!(floor.decide_input_echo(false, t1), RedrawDecision::Now);
+}
+
+// The bypassed paint must still land on the window's shared clock, so a
+// sibling pane's next ordinary batch sees it and suppresses against it.
+#[test]
+fn redraw_floor_input_echo_records_on_the_shared_clock() {
+    let floor = RedrawFloor::new(Duration::from_millis(10));
+    let sibling = floor.clone();
+
+    let t0 = Instant::now();
+    assert_eq!(floor.decide_input_echo(false, t0), RedrawDecision::Now);
+    let t1 = t0 + Duration::from_millis(2);
+    assert_eq!(
+        sibling.decide(false, t1),
+        RedrawDecision::Suppress {
+            deadline: t0 + Duration::from_millis(10)
+        }
+    );
+}
+
+// Synchronized output (DECSET 2026) is an application-requested atomicity
+// contract, not a pacing heuristic — an input echo mid-sync must keep
+// deferring like any other batch (bounded by the suppression cap).
+#[test]
+fn redraw_floor_input_echo_does_not_bypass_synchronized_output() {
+    let floor = RedrawFloor::new(Duration::from_millis(10));
+    let t0 = Instant::now();
+    assert_eq!(floor.decide(false, t0), RedrawDecision::Now);
+
+    let t1 = t0 + Duration::from_millis(2);
+    assert_eq!(
+        floor.decide_input_echo(true, t1),
+        RedrawDecision::Suppress {
+            deadline: t0 + SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION
+        }
+    );
 }
 
 #[test]

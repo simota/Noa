@@ -1,0 +1,915 @@
+{
+  "timestamp": "20260716-012100",
+  "machine": {
+    "model": "Mac16,13",
+    "chip": "Apple M4",
+    "cores": "10",
+    "mem_bytes": "34359738368",
+    "os": "26.5.1",
+    "build": "25F80",
+    "arch": "arm64"
+  },
+  "terminal_versions": {
+    "noa": "Noa 0.1.4",
+    "ghostty": "1.3.1",
+    "termy": "0.2.21",
+    "kitty": "0.47.4"
+  },
+  "equalized": {
+    "noa": "grid=120x40;font=Menlo@14;ligatures-off;bg-off",
+    "ghostty": "grid=120x40;font=Menlo@14;clean-config",
+    "termy": "grid=NATIVE-DEFAULT(no-size-key);font=Menlo@14",
+    "kitty": "grid=120x40;font=Menlo@14;config=NONE"
+  },
+  "axes": {
+    "throughput": {
+      "ghostty": {
+        "ascii": {
+          "mib_per_s": 71.7,
+          "median_ns": 2092204000
+        },
+        "unicode": {
+          "mib_per_s": 79.1,
+          "median_ns": 1895461000
+        }
+      },
+      "kitty": {
+        "ascii": {
+          "mib_per_s": 103.9,
+          "median_ns": 1444315000
+        },
+        "unicode": {
+          "mib_per_s": 114.4,
+          "median_ns": 1311686000
+        }
+      },
+      "noa": {
+        "ascii": {
+          "mib_per_s": 127.1,
+          "median_ns": 1179868000
+        },
+        "unicode": {
+          "mib_per_s": 121.0,
+          "median_ns": 1239274000
+        }
+      },
+      "termy": {
+        "ascii": {
+          "mib_per_s": 138.9,
+          "median_ns": 1080194000
+        },
+        "unicode": {
+          "mib_per_s": 151.9,
+          "median_ns": 987778000
+        }
+      }
+    },
+    "scroll": {
+      "ghostty": {
+        "mib_per_s": 28.9,
+        "median_ms": 1386
+      },
+      "kitty": {
+        "mib_per_s": 107.9,
+        "median_ms": 371
+      },
+      "noa": {
+        "mib_per_s": 188.3,
+        "median_ms": 212
+      },
+      "termy": {
+        "mib_per_s": 145.4,
+        "median_ms": 275
+      }
+    },
+    "latency": {
+      "ghostty": {
+        "status": "UNMEASURED"
+      },
+      "kitty": {
+        "status": "UNMEASURED"
+      },
+      "noa": {
+        "status": "UNMEASURED"
+      },
+      "termy": {
+        "status": "UNMEASURED"
+      }
+    },
+    "startup": {
+      "ghostty": {
+        "status": "UNMEASURED"
+      },
+      "kitty": {
+        "status": "UNMEASURED"
+      },
+      "noa": {
+        "status": "UNMEASURED"
+      },
+      "termy": {
+        "status": "UNMEASURED"
+      }
+    }
+  },
+  "raw_rows": [
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "1",
+      "metric": "inner_ns",
+      "value": "1170357000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "1",
+      "metric": "total_ns",
+      "value": "1442934000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "2",
+      "metric": "inner_ns",
+      "value": "1182077000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "2",
+      "metric": "total_ns",
+      "value": "1439923000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "3",
+      "metric": "inner_ns",
+      "value": "1179868000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "3",
+      "metric": "total_ns",
+      "value": "1446892000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "median",
+      "metric": "inner_ns",
+      "value": "1179868000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "median",
+      "metric": "mib_per_s",
+      "value": "127.1",
+      "unit": "mib_s"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "1",
+      "metric": "inner_ns",
+      "value": "1235784000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "1",
+      "metric": "total_ns",
+      "value": "1501480000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "2",
+      "metric": "inner_ns",
+      "value": "1239274000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "2",
+      "metric": "total_ns",
+      "value": "1484213000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "3",
+      "metric": "inner_ns",
+      "value": "1253694000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "3",
+      "metric": "total_ns",
+      "value": "1502541000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "median",
+      "metric": "inner_ns",
+      "value": "1239274000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "median",
+      "metric": "mib_per_s",
+      "value": "121.0",
+      "unit": "mib_s"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "1",
+      "metric": "inner_ns",
+      "value": "2309427000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "1",
+      "metric": "total_ns",
+      "value": "2531462000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "2",
+      "metric": "inner_ns",
+      "value": "2039932000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "2",
+      "metric": "total_ns",
+      "value": "2259965000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "3",
+      "metric": "inner_ns",
+      "value": "2092204000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "3",
+      "metric": "total_ns",
+      "value": "2328262000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "median",
+      "metric": "inner_ns",
+      "value": "2092204000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "median",
+      "metric": "mib_per_s",
+      "value": "71.7",
+      "unit": "mib_s"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "1",
+      "metric": "inner_ns",
+      "value": "1895461000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "1",
+      "metric": "total_ns",
+      "value": "2101796000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "2",
+      "metric": "inner_ns",
+      "value": "1880212000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "2",
+      "metric": "total_ns",
+      "value": "2101132000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "3",
+      "metric": "inner_ns",
+      "value": "1938873000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "3",
+      "metric": "total_ns",
+      "value": "2161225000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "median",
+      "metric": "inner_ns",
+      "value": "1895461000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "median",
+      "metric": "mib_per_s",
+      "value": "79.1",
+      "unit": "mib_s"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "1",
+      "metric": "inner_ns",
+      "value": "1080194000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "1",
+      "metric": "total_ns",
+      "value": "1301104000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "2",
+      "metric": "inner_ns",
+      "value": "1039401000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "2",
+      "metric": "total_ns",
+      "value": "1218662000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "3",
+      "metric": "inner_ns",
+      "value": "1103103000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "3",
+      "metric": "total_ns",
+      "value": "1291249000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "median",
+      "metric": "inner_ns",
+      "value": "1080194000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "median",
+      "metric": "mib_per_s",
+      "value": "138.9",
+      "unit": "mib_s"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "1",
+      "metric": "inner_ns",
+      "value": "984742000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "1",
+      "metric": "total_ns",
+      "value": "1178535000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "2",
+      "metric": "inner_ns",
+      "value": "987778000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "2",
+      "metric": "total_ns",
+      "value": "1175747000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "3",
+      "metric": "inner_ns",
+      "value": "1004296000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "3",
+      "metric": "total_ns",
+      "value": "1202265000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "median",
+      "metric": "inner_ns",
+      "value": "987778000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "median",
+      "metric": "mib_per_s",
+      "value": "151.9",
+      "unit": "mib_s"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "1",
+      "metric": "inner_ns",
+      "value": "1431103000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "1",
+      "metric": "total_ns",
+      "value": "1818232000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "2",
+      "metric": "inner_ns",
+      "value": "1445358000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "2",
+      "metric": "total_ns",
+      "value": "1734891000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "3",
+      "metric": "inner_ns",
+      "value": "1444315000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "3",
+      "metric": "total_ns",
+      "value": "1727706000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "median",
+      "metric": "inner_ns",
+      "value": "1444315000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "ascii",
+      "rep": "median",
+      "metric": "mib_per_s",
+      "value": "103.9",
+      "unit": "mib_s"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "1",
+      "metric": "inner_ns",
+      "value": "1310926000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "1",
+      "metric": "total_ns",
+      "value": "1613825000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "2",
+      "metric": "inner_ns",
+      "value": "1313733000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "2",
+      "metric": "total_ns",
+      "value": "1605351000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "3",
+      "metric": "inner_ns",
+      "value": "1311686000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "3",
+      "metric": "total_ns",
+      "value": "1598788000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "median",
+      "metric": "inner_ns",
+      "value": "1311686000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "throughput",
+      "variant": "unicode",
+      "rep": "median",
+      "metric": "mib_per_s",
+      "value": "114.4",
+      "unit": "mib_s"
+    },
+    {
+      "terminal": "noa",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "1",
+      "metric": "inner_ns",
+      "value": "224108000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "2",
+      "metric": "inner_ns",
+      "value": "212465000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "3",
+      "metric": "inner_ns",
+      "value": "179602000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "median",
+      "metric": "inner_ns",
+      "value": "212465000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "noa",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "median",
+      "metric": "mib_per_s",
+      "value": "188.3",
+      "unit": "mib_s"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "1",
+      "metric": "inner_ns",
+      "value": "1385967000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "2",
+      "metric": "inner_ns",
+      "value": "1390383000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "3",
+      "metric": "inner_ns",
+      "value": "1233743000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "median",
+      "metric": "inner_ns",
+      "value": "1385967000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "median",
+      "metric": "mib_per_s",
+      "value": "28.9",
+      "unit": "mib_s"
+    },
+    {
+      "terminal": "termy",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "1",
+      "metric": "inner_ns",
+      "value": "263444000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "2",
+      "metric": "inner_ns",
+      "value": "277335000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "3",
+      "metric": "inner_ns",
+      "value": "275089000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "median",
+      "metric": "inner_ns",
+      "value": "275089000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "termy",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "median",
+      "metric": "mib_per_s",
+      "value": "145.4",
+      "unit": "mib_s"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "1",
+      "metric": "inner_ns",
+      "value": "370605000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "2",
+      "metric": "inner_ns",
+      "value": "374278000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "3",
+      "metric": "inner_ns",
+      "value": "370495000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "median",
+      "metric": "inner_ns",
+      "value": "370605000",
+      "unit": "ns"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "scroll",
+      "variant": "-",
+      "rep": "median",
+      "metric": "mib_per_s",
+      "value": "107.9",
+      "unit": "mib_s"
+    },
+    {
+      "terminal": "noa",
+      "axis": "meta",
+      "variant": "-",
+      "rep": "-",
+      "metric": "equalized",
+      "value": "grid=120x40;font=Menlo@14;ligatures-off;bg-off",
+      "unit": "note"
+    },
+    {
+      "terminal": "ghostty",
+      "axis": "meta",
+      "variant": "-",
+      "rep": "-",
+      "metric": "equalized",
+      "value": "grid=120x40;font=Menlo@14;clean-config",
+      "unit": "note"
+    },
+    {
+      "terminal": "termy",
+      "axis": "meta",
+      "variant": "-",
+      "rep": "-",
+      "metric": "equalized",
+      "value": "grid=NATIVE-DEFAULT(no-size-key);font=Menlo@14",
+      "unit": "note"
+    },
+    {
+      "terminal": "kitty",
+      "axis": "meta",
+      "variant": "-",
+      "rep": "-",
+      "metric": "equalized",
+      "value": "grid=120x40;font=Menlo@14;config=NONE",
+      "unit": "note"
+    }
+  ],
+  "scroll_robust_best_ms": {
+    "noa": 169,
+    "ghostty": 945,
+    "termy": 265,
+    "kitty": 367
+  },
+  "scroll_robust_note": "min-of-N reps; render axis was CPU-contended during the median run; noa/ghostty CPU-bound, termy/kitty display-paced"
+}

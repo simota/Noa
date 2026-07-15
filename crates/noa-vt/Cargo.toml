@@ -6,4 +6,7 @@ license.workspace = true
 
 [dependencies]
 noa-core.workspace = true
+# SIMD UTF-8 validation for the bulk ground-state print path (already in the
+# workspace lockfile as a transitive dependency).
+simdutf8 = "0.1"
 thiserror.workspace = true

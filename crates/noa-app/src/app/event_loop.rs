@@ -6,6 +6,7 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        crate::startup_trace::mark("resumed");
         // Install the Apple Event handlers once, after `NSApp` finished
         // launching (applescript R-2/Amendment 3). Guarded by its own flag so a
         // later resume can't double-register, independent of the windows check.
@@ -454,6 +455,12 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Ime(event) => self.on_ime_event(window_id, event),
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+                if pressed {
+                    // NOA_LATENCY_TRACE t0: winit key-event receipt, before
+                    // any routing — this is the earliest app-side timestamp
+                    // a keystroke has.
+                    crate::latency_trace::on_key_pressed();
+                }
                 if pressed
                     && self.copy_mode_key_repeat_is_suppressed(event.physical_key, event.repeat)
                 {

@@ -158,11 +158,11 @@ fn feed_chunk_fair(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn feed_terminal_batch<'a>(
+pub(super) fn feed_terminal_batch<T: AsRef<[u8]>>(
     terminal: &Arc<Mutex<Terminal>>,
     stream: &mut noa_vt::Stream,
-    first: &[u8],
-    rest: impl IntoIterator<Item = &'a [u8]>,
+    first: T,
+    rest: impl IntoIterator<Item = T>,
     overview: &OverviewPublish,
     last_overview_publish: &mut Option<Instant>,
     sidebar: &SidebarPublish,
@@ -180,9 +180,17 @@ pub(super) fn feed_terminal_batch<'a>(
     // same lock for a `FrameSnapshot` gets a chance to run between chunks.
     // The bytes still reach `stream`/`term` in the exact same order as
     // before — only the lock granularity changes, not the parse.
-    feed_chunk_fair(terminal, stream, first, raw_attach);
+    //
+    // Chunks are taken by value and dropped one by one as they are parsed
+    // (not held to the end of the batch): dropping a `noa_pty::PtyData`
+    // credits the reader's in-flight byte gate and returns its buffer to the
+    // read pool, so the reader thread refills while this batch is still
+    // parsing — read and parse overlap instead of alternating.
+    feed_chunk_fair(terminal, stream, first.as_ref(), raw_attach);
+    drop(first);
     for bytes in rest {
-        feed_chunk_fair(terminal, stream, bytes, raw_attach);
+        feed_chunk_fair(terminal, stream, bytes.as_ref(), raw_attach);
+        drop(bytes);
     }
 
     // Batch-tail work (overview/sidebar/auto-approve/IPC extraction below)

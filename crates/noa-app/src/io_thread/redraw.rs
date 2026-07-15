@@ -230,4 +230,27 @@ impl RedrawFloor {
     pub(super) fn claim_deadline(&self, now: Instant) -> bool {
         self.claim(now)
     }
+
+    /// [`RedrawFloor::decide`] for a batch that carries a user-input echo:
+    /// the floor is bypassed and the repaint fires now. The floor exists to
+    /// stop a flood of *program output* batches from waking the event loop
+    /// faster than the display presents; a keystroke echo is the
+    /// latency-critical path, its rate is bounded by typing/key-repeat speed
+    /// (nowhere near the refresh rate), and withholding it up to one floor
+    /// interval (~8ms) is a visible input-latency regression — e.g. when a
+    /// blink-adjacent pane in the same window painted moments earlier and
+    /// holds the shared clock. Synchronized output (DECSET 2026) is *not*
+    /// bypassed: that suppression is an application-requested atomicity
+    /// contract, not a pacing heuristic, so mid-sync input echoes keep
+    /// deferring to [`decide_redraw_floor`]'s capped window.
+    ///
+    /// A `Now` result records on the shared clock (like `decide`) so other
+    /// panes' floors account for this paint.
+    pub(super) fn decide_input_echo(&self, synchronized: bool, now: Instant) -> RedrawDecision {
+        if synchronized {
+            return self.decide(true, now);
+        }
+        self.record(now);
+        RedrawDecision::Now
+    }
 }

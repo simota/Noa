@@ -613,11 +613,15 @@ impl App {
         let pty_config = PtyConfig {
             size: grid_size,
             cwd,
-            command: self.config.launch_command.clone(),
+            // One-shot: only the first spawned surface runs the CLI `-e`
+            // command (see `App::initial_command`); later tabs/splits find
+            // the slot empty and get the normal shell.
+            command: self.initial_command.lock().take(),
             ..Default::default()
         };
-        // The first spawn normally consumes the shell already booted in
-        // parallel by `App::new` (see `App::prespawned_pty`).
+        // The first spawn normally consumes the child already booted in
+        // parallel by `App::new` (see `App::prespawned_pty`) — the `-e`
+        // command when one was given, the default shell otherwise.
         let pty = match self.take_prespawned_pty(&pty_config) {
             Some(pty) => pty,
             None => Pty::spawn(pty_config)?,

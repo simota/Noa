@@ -234,15 +234,27 @@ impl Screen {
         }
         let recorded = self.records_scrollback_for_region(top, bottom);
         let full_height = top == 0 && bottom + 1 == self.rows as usize;
+        let blank = self.blank();
         if recorded {
             let old_scrollback_len = self.scrollback.len();
-            // Pack the leaving rows straight into scrollback *before* the
-            // rotation, borrowing them in place — cloning them out first
-            // (the previous shape) cost a full `Vec<Cell>` clone per
-            // scrolled line and dominated bulk-output profiles.
+            let default_blank = Self::is_default_blank(&blank);
+            // Seal the leaving rows by *moving* them into the deferred
+            // scrollback ring (O(1) per row; packing happens in batches off
+            // this path — see `PagedScrollback::push_row_deferred`). Each
+            // sealed row is replaced by a recycled pre-blanked carcass, so
+            // the post-rotate clear below is skipped for this branch.
             let mut evicted = 0;
-            for row in &self.grid[top..top + n] {
-                evicted += self.scrollback.push_row(row);
+            for i in top..top + n {
+                let replacement = match self.scrollback.take_blank_row(self.cols) {
+                    Some(row) if default_blank => row,
+                    Some(mut row) => {
+                        row.clear(&blank);
+                        row
+                    }
+                    None => Self::row_with_blank(self.cols, &blank),
+                };
+                let sealed = std::mem::replace(&mut self.grid[i], replacement);
+                evicted += self.scrollback.push_row_deferred(sealed);
             }
             if !full_height {
                 // Appending the scrolled rows moves fixed live rows down in
@@ -256,10 +268,11 @@ impl Screen {
             self.note_scrollback_evictions(evicted);
             self.pin_viewport_for_scrollback_push(n, full_height);
         }
-        let blank = self.blank();
         self.grid[top..=bottom].rotate_left(n);
-        for r in &mut self.grid[(bottom + 1 - n)..=bottom] {
-            r.clear(&blank);
+        if !recorded {
+            for r in &mut self.grid[(bottom + 1 - n)..=bottom] {
+                r.clear(&blank);
+            }
         }
         if recorded && full_height {
             // A scrollback-recording scroll is a pure translation of the

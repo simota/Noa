@@ -12,11 +12,35 @@
 //! and materialized back to `Row`/`Cell` on the way out ([`PagedScrollback::row`]
 //! / [`PagedScrollback::for_each_row`]), so the renderer's `FrameSnapshot`
 //! boundary is unchanged.
+//!
+//! ## Deferred sealing (the bulk-output fast path)
+//!
+//! Packing a row costs a per-cell scan; on the bulk-output path (`scroll_up_region`
+//! at the region bottom) that scan dominated whole-terminal profiles. Scroll paths
+//! therefore *move* rows in via [`PagedScrollback::push_row_deferred`] — an O(1)
+//! append to a `pending` ring. Every [`SEAL_BATCH_ROWS`] rows the pending batch is
+//! *published* to a small persistent worker pool as an immutable `Arc<Vec<Row>>`
+//! (the `sealing` batch) and packed off-thread while the owner keeps feeding; the
+//! results are collected at the next batch boundary (or at any synchronous flush
+//! point), so at most one batch is ever in flight and all collection points are
+//! deterministic row-count boundaries — never wall-clock dependent.
+//!
+//! The logical row sequence is always `pages ++ sealing ++ pending`, and every
+//! read ([`PagedScrollback::row`] / [`PagedScrollback::for_each_row`] /
+//! [`PagedScrollback::len`] / [`PagedScrollback::has_text`]) serves all three
+//! tiers under the owner's borrow — workers only ever *read* the shared sealing
+//! batch, so there is no locking on the read path. The only observable
+//! difference from immediate packing is that byte-limit eviction settles in
+//! batch-sized lumps: retention may transiently exceed the limit by up to two
+//! batches of rows. When the pending rows' size estimate alone could cross the
+//! limit (tiny retention limits), sealing degrades to the synchronous inline
+//! path so eviction timing stays exactly as eager as immediate packing.
 
 use crate::cell::{Cell, HyperlinkId, Row};
 use noa_core::{CellAttrs, Color};
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Soft target for a page's cell arena, in bytes. A page seals (and the next
 /// push starts a fresh one) once its arena reaches this; a single row is never
@@ -29,6 +53,20 @@ const PAGE_CELL_CAPACITY: usize = PAGE_TARGET_BYTES / PACKED_CELL_SIZE;
 /// block). Approximate — byte accounting is deterministic but not a heap
 /// measurement (see the module doc and `docs/ghostty-parity-plan.md`).
 const PAGE_HEADER_COST: usize = 256;
+
+/// Deferred-seal batch size: `push_row_deferred` publishes a pack batch (and
+/// collects the previous one, settling byte-limit eviction) every this many
+/// rows. Bounds the raw-row staging memory to roughly
+/// `2 × SEAL_BATCH_ROWS × cols × size_of::<Cell>()` per flooding screen.
+const SEAL_BATCH_ROWS: usize = 512;
+/// Worker threads in the lazy per-scrollback pack pool; a published batch
+/// splits into this many contiguous chunks.
+const PACK_WORKERS: usize = 3;
+/// Recycled-row pool cap: covers one full seal batch so a sustained flood
+/// reuses every carcass instead of allocating fresh blank rows.
+const POOL_CAP: usize = SEAL_BATCH_ROWS + 32;
+/// Per-row constant in the pending-bytes upper bound (row meta + slack).
+const PACKED_ROW_EST_OVERHEAD: usize = 16;
 /// Charged per grapheme-table entry on top of the stored `String`'s capacity.
 const GRAPHEME_ENTRY_COST: usize = 32;
 
@@ -310,6 +348,132 @@ impl Page {
         self.materialize_row_into(local, &mut row);
         row
     }
+
+    /// Pack one row's cells into this page's arena, appending its `RowMeta`
+    /// and billing `self.bytes`. Returns `(bytes_delta, trimmed_len)`; the
+    /// caller owes `bytes_delta` to the scrollback-wide total. The page must
+    /// have arena headroom for `row.cells.len()` more cells (guaranteed by
+    /// `ensure_page` / the chunk packer's page rollover).
+    fn pack_row(&mut self, row: &Row) -> (usize, usize) {
+        let mut len = row.cells.len();
+        while len > 0 && pack_is_default_blank(&row.cells[len - 1]) {
+            len -= 1;
+        }
+
+        let base = self.cells.len();
+        let offset = base as u32;
+        let mut delta = len * PACKED_CELL_SIZE;
+
+        // The whole row fits without reallocating — the caller guarantees
+        // `len <= cols` headroom past the seal threshold — so fill the
+        // reserved tail directly and bump the length once at the end. A
+        // per-cell `Vec::push` re-loads and re-stores the vec's length (and
+        // re-checks capacity) on every one of the tens of cells per scrolled
+        // row; on the bulk-output path that store/reload dominated the pack
+        // loop over the actual style/flag work (measured).
+        self.cells.reserve(len);
+        // Raw destination pointer, not a `&mut` slice: writing through it does
+        // not borrow `self.cells`, so `self.styles`/`self.graphemes` stay
+        // freely usable in the loop, and each store carries no bounds or length
+        // bookkeeping. `intern`/`graphemes.insert` never touch `self.cells`, so
+        // the pointer stays valid across them.
+        let dst = self.cells.as_mut_ptr();
+        let cells = &row.cells[..len];
+        let layout = CellAttrs::WIDE | CellAttrs::WIDE_SPACER;
+
+        // Bulk output overwhelmingly pushes cells that share one pen with no
+        // combining marks, yet deriving the full `Style` per cell (three
+        // `encode_color` branches, the hyperlink match, the attr strip) plus
+        // the 20-byte intern compare dominated this loop (measured: 76.5% of
+        // push_row self-time even with the intern memo always hitting). So
+        // pack runs: the outer loop pays the full derivation once for a run's
+        // first cell (its "anchor"), and the inner loop reuses that interned
+        // id while cells keep matching the anchor's raw style fields — a few
+        // predictable compares per cell instead of the whole construction.
+        // Wide glyphs stay in a run (`WIDE`/`WIDE_SPACER` are layout flags,
+        // masked out of the style compare); a style change or combining mark
+        // ends the run and anchors the next one, so style-diverse rows pay at
+        // most one failed compare chain per cell on top of the old cost.
+        let mut i = 0usize;
+        while i < len {
+            // Run anchor: full style/flags derivation, grapheme handling.
+            let anchor = &cells[i];
+            // The style memo lives in the table (`StyleTable::last`), so a
+            // pen held across runs — or across whole rows of bulk output —
+            // skips the hash lookup entirely.
+            let (id, is_new) = self.styles.intern(style_of(anchor));
+            if is_new {
+                delta += std::mem::size_of::<Style>();
+            }
+            let flags = flags_of(anchor);
+            if flags.contains(PackedFlags::HAS_GRAPHEME) {
+                // Rare (only combining-mark cells); keep the index arithmetic
+                // and the grapheme clone off the common per-cell path.
+                let grapheme = anchor.combining.clone();
+                delta += grapheme.capacity() + GRAPHEME_ENTRY_COST;
+                self.graphemes.insert((base + i) as u32, grapheme);
+            }
+            // SAFETY: `reserve(len)` guaranteed room for `base..base+len`;
+            // `i < len` and `self.cells` is untouched by the calls above, so
+            // `dst.add(base + i)` is in-bounds and uninitialized.
+            unsafe {
+                dst.add(base + i).write(PackedCell {
+                    ch: anchor.ch,
+                    style: id,
+                    flags,
+                });
+            }
+            let anchor_style_attrs = anchor.attrs.difference(layout);
+            i += 1;
+
+            // Run continuation: cells whose style fields match the anchor's.
+            while i < len {
+                let cell = &cells[i];
+                // Short-circuit `||`, deliberately: a fused bitwise-`|`
+                // divergence test was measured 24% slower (it forces all six
+                // loads/compares into one dependency chain per cell).
+                if cell.fg != anchor.fg
+                    || cell.bg != anchor.bg
+                    || cell.underline_color != anchor.underline_color
+                    || cell.hyperlink != anchor.hyperlink
+                    || cell.attrs.difference(layout) != anchor_style_attrs
+                    || !cell.combining.is_empty()
+                {
+                    break;
+                }
+                // `flags_of` sans the combining check (proven empty above).
+                let mut flags = PackedFlags::empty();
+                if cell.attrs.contains(CellAttrs::WIDE) {
+                    flags.insert(PackedFlags::WIDE);
+                }
+                if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
+                    flags.insert(PackedFlags::WIDE_SPACER);
+                }
+                // SAFETY: same argument as the anchor write above; nothing in
+                // this loop touches `self.cells`.
+                unsafe {
+                    dst.add(base + i).write(PackedCell {
+                        ch: cell.ch,
+                        style: id,
+                        flags,
+                    });
+                }
+                i += 1;
+            }
+        }
+        // SAFETY: the loops above initialized exactly slots `base..base+len`.
+        unsafe {
+            self.cells.set_len(base + len);
+        }
+
+        self.rows.push(RowMeta {
+            offset,
+            len: len as u16,
+            wrapped: row.wrapped,
+        });
+        self.bytes += delta;
+        (delta, len)
+    }
 }
 
 #[inline]
@@ -355,9 +519,38 @@ fn empty_row() -> Row {
 /// retention limit. `limit_bytes == 0` disables scrollback entirely.
 pub(crate) struct PagedScrollback {
     pages: VecDeque<Page>,
+    /// Retained row count across `pages`, `sealing`, *and* `pending`.
     total_rows: usize,
     total_bytes: usize,
     limit_bytes: usize,
+    /// Lazy worker pool for off-thread batch packing. Declared before
+    /// `sealing` so a drop joins the workers first (they hold `Arc` clones
+    /// of the sealing batch; `Arc` makes any order safe, this just keeps the
+    /// teardown obvious).
+    packer: Option<Packer>,
+    /// The published in-flight batch: workers pack it while the owner keeps
+    /// feeding. Immutable until collected (workers and readers only share
+    /// `&Row` reads). Logically sits between `pages` and `pending`.
+    sealing: Option<Arc<Vec<Row>>>,
+    /// Rows moved in by [`Self::push_row_deferred`] and not yet published.
+    /// These are the *newest* retained rows: the logical row sequence is
+    /// always `pages ++ sealing ++ pending`, and every read serves all three.
+    pending: VecDeque<Row>,
+    /// Upper-bound packed sizes of the `sealing` batch and the `pending`
+    /// ring (untrimmed cells × packed cell size). Drive the early-sync
+    /// trigger that keeps eviction timing faithful under small retention
+    /// limits.
+    sealing_est_bytes: usize,
+    pending_est_bytes: usize,
+    /// Blank-row pool recycled from packed carcasses, handed back to the live
+    /// grid via [`Self::take_blank_row`] so scroll paths skip the full-row
+    /// clear (a packed row's trailing cells are proven default-blank by the
+    /// pack trim; only the prefix needs re-blanking).
+    pool: Vec<Row>,
+    /// Carcasses of the last collected batch, awaiting their prefix re-blank.
+    /// Attached to the next published batch so the *workers* pay the clear;
+    /// they come back through `PackResult::cleared` one batch later.
+    dirty_carcasses: Option<(Vec<Row>, Vec<usize>)>,
     /// Reused row buffer for [`Self::for_each_row`] (zero-allocation walks).
     scratch: Row,
     /// One evicted page kept for reuse: a sustained flood at the retention
@@ -374,9 +567,27 @@ impl PagedScrollback {
             total_rows: 0,
             total_bytes: 0,
             limit_bytes,
+            packer: None,
+            sealing: None,
+            pending: VecDeque::new(),
+            sealing_est_bytes: 0,
+            pending_est_bytes: 0,
+            pool: Vec::new(),
+            dirty_carcasses: None,
             scratch: empty_row(),
             spare: None,
         }
+    }
+
+    fn sealing_rows(&self) -> usize {
+        self.sealing.as_ref().map_or(0, |batch| batch.len())
+    }
+
+    /// Rows currently packed into pages (the logical prefix; `sealing` holds
+    /// indices `packed_rows()..packed_rows() + sealing_rows()` and `pending`
+    /// the remainder up to `total_rows`).
+    fn packed_rows(&self) -> usize {
+        self.total_rows - self.pending.len() - self.sealing_rows()
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -395,7 +606,23 @@ impl PagedScrollback {
     }
 
     pub(crate) fn clear(&mut self) {
+        // Wait out any in-flight pack before discarding its input (results
+        // are dropped with it; nothing here should survive).
+        if self.sealing.is_some()
+            && let Some(packer) = &self.packer
+        {
+            let _ = packer.wait_results();
+        }
+        self.sealing = None;
         self.pages.clear();
+        self.pending.clear();
+        self.sealing_est_bytes = 0;
+        self.pending_est_bytes = 0;
+        // Memory-decay hook: an explicit history clear also releases the
+        // recycled-row pool (its rows are not history, but this is the one
+        // user-driven point where dropping the flood-sized cache is right).
+        self.pool.clear();
+        self.dirty_carcasses = None;
         self.total_rows = 0;
         self.total_bytes = 0;
         self.spare = None;
@@ -422,139 +649,172 @@ impl PagedScrollback {
     /// Pack one row that fell off the live grid and append it. Returns the
     /// number of rows discarded, either because scrollback is disabled or
     /// because whole pages were evicted to stay within the byte limit.
+    ///
+    /// Cold-path variant (reflow, remote-attach backfill, tests): packs
+    /// immediately, flushing every deferred row first so ordering holds.
     pub(crate) fn push_row(&mut self, row: &Row) -> usize {
         if self.limit_bytes == 0 {
             return 1;
         }
+        let mut evicted = self.flush_all();
+
         let cols = row.cells.len() as u16;
-
-        let mut len = row.cells.len();
-        while len > 0 && pack_is_default_blank(&row.cells[len - 1]) {
-            len -= 1;
-        }
-
         let page = self.ensure_page(cols);
-        let base = page.cells.len();
-        let offset = base as u32;
-        let mut delta = len * PACKED_CELL_SIZE;
-
-        // The whole row fits without reallocating — `ensure_page` guarantees
-        // `PAGE_CELL_CAPACITY + cols` headroom and `len <= cols` — so fill the
-        // reserved tail directly and bump the length once at the end. A
-        // per-cell `Vec::push` re-loads and re-stores the vec's length (and
-        // re-checks capacity) on every one of the tens of cells per scrolled
-        // row; on the bulk-output path that store/reload dominated the pack
-        // loop over the actual style/flag work (measured).
-        page.cells.reserve(len);
-        // Raw destination pointer, not a `&mut` slice: writing through it does
-        // not borrow `page.cells`, so `page.styles`/`page.graphemes` stay
-        // freely usable in the loop, and each store carries no bounds or length
-        // bookkeeping. `intern`/`graphemes.insert` never touch `page.cells`, so
-        // the pointer stays valid across them.
-        let dst = page.cells.as_mut_ptr();
-        let cells = &row.cells[..len];
-        let layout = CellAttrs::WIDE | CellAttrs::WIDE_SPACER;
-
-        // Bulk output overwhelmingly pushes cells that share one pen with no
-        // combining marks, yet deriving the full `Style` per cell (three
-        // `encode_color` branches, the hyperlink match, the attr strip) plus
-        // the 20-byte intern compare dominated this loop (measured: 76.5% of
-        // push_row self-time even with the intern memo always hitting). So
-        // pack runs: the outer loop pays the full derivation once for a run's
-        // first cell (its "anchor"), and the inner loop reuses that interned
-        // id while cells keep matching the anchor's raw style fields — a few
-        // predictable compares per cell instead of the whole construction.
-        // Wide glyphs stay in a run (`WIDE`/`WIDE_SPACER` are layout flags,
-        // masked out of the style compare); a style change or combining mark
-        // ends the run and anchors the next one, so style-diverse rows pay at
-        // most one failed compare chain per cell on top of the old cost.
-        let mut i = 0usize;
-        while i < len {
-            // Run anchor: full style/flags derivation, grapheme handling.
-            let anchor = &cells[i];
-            // The style memo lives in the table (`StyleTable::last`), so a
-            // pen held across runs — or across whole rows of bulk output —
-            // skips the hash lookup entirely.
-            let (id, is_new) = page.styles.intern(style_of(anchor));
-            if is_new {
-                delta += std::mem::size_of::<Style>();
-            }
-            let flags = flags_of(anchor);
-            if flags.contains(PackedFlags::HAS_GRAPHEME) {
-                // Rare (only combining-mark cells); keep the index arithmetic
-                // and the grapheme clone off the common per-cell path.
-                let grapheme = anchor.combining.clone();
-                delta += grapheme.capacity() + GRAPHEME_ENTRY_COST;
-                page.graphemes.insert((base + i) as u32, grapheme);
-            }
-            // SAFETY: `reserve(len)` guaranteed room for `base..base+len`;
-            // `i < len` and `page.cells` is untouched by the calls above, so
-            // `dst.add(base + i)` is in-bounds and uninitialized.
-            unsafe {
-                dst.add(base + i).write(PackedCell {
-                    ch: anchor.ch,
-                    style: id,
-                    flags,
-                });
-            }
-            let anchor_style_attrs = anchor.attrs.difference(layout);
-            i += 1;
-
-            // Run continuation: cells whose style fields match the anchor's.
-            while i < len {
-                let cell = &cells[i];
-                // Short-circuit `||`, deliberately: a fused bitwise-`|`
-                // divergence test was measured 24% slower (it forces all six
-                // loads/compares into one dependency chain per cell).
-                if cell.fg != anchor.fg
-                    || cell.bg != anchor.bg
-                    || cell.underline_color != anchor.underline_color
-                    || cell.hyperlink != anchor.hyperlink
-                    || cell.attrs.difference(layout) != anchor_style_attrs
-                    || !cell.combining.is_empty()
-                {
-                    break;
-                }
-                // `flags_of` sans the combining check (proven empty above).
-                let mut flags = PackedFlags::empty();
-                if cell.attrs.contains(CellAttrs::WIDE) {
-                    flags.insert(PackedFlags::WIDE);
-                }
-                if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
-                    flags.insert(PackedFlags::WIDE_SPACER);
-                }
-                // SAFETY: same argument as the anchor write above; nothing in
-                // this loop touches `page.cells`.
-                unsafe {
-                    dst.add(base + i).write(PackedCell {
-                        ch: cell.ch,
-                        style: id,
-                        flags,
-                    });
-                }
-                i += 1;
-            }
-        }
-        // SAFETY: the loops above initialized exactly slots `base..base+len`.
-        unsafe {
-            page.cells.set_len(base + len);
-        }
-
-        page.rows.push(RowMeta {
-            offset,
-            len: len as u16,
-            wrapped: row.wrapped,
-        });
-        page.bytes += delta;
+        let (delta, _) = page.pack_row(row);
         self.total_bytes += delta;
         self.total_rows += 1;
 
+        evicted += self.evict_to_limit();
+        evicted
+    }
+
+    /// Hot-path seal: move a row that scrolled off the live grid into the
+    /// pending ring (O(1), no per-cell work); every [`SEAL_BATCH_ROWS`] rows
+    /// the previous published batch is collected and the pending one takes
+    /// its place on the worker pool. Returns rows discarded — `1` immediately
+    /// when scrollback is disabled, otherwise whatever a triggered collection
+    /// evicted.
+    pub(crate) fn push_row_deferred(&mut self, mut row: Row) -> usize {
+        if self.limit_bytes == 0 {
+            return 1;
+        }
+        // History rows always report clean (see `take_visible_rows_with_damage`).
+        row.dirty = false;
+        self.pending_est_bytes += row.cells.len() * PACKED_CELL_SIZE + PACKED_ROW_EST_OVERHEAD;
+        self.pending.push_back(row);
+        self.total_rows += 1;
+        // Degrade to fully synchronous sealing when the deferred rows could
+        // push retention meaningfully past the byte limit, so eviction (and
+        // the selection/viewport rebasing it drives) stays as timely as
+        // immediate packing whenever the limit is small enough to notice.
+        let over_limit = self
+            .total_bytes
+            .saturating_add(self.sealing_est_bytes)
+            .saturating_add(self.pending_est_bytes)
+            > self.limit_bytes.saturating_add(self.limit_bytes / 4);
+        if over_limit {
+            self.flush_all()
+        } else if self.pending.len() >= SEAL_BATCH_ROWS {
+            let evicted = self.collect_sealing();
+            self.publish_sealing();
+            evicted
+        } else {
+            0
+        }
+    }
+
+    /// A recycled, already-blank row of exactly `cols` cells for the live
+    /// grid (`wrapped = false`, `dirty = true`), if one is pooled. Rows of a
+    /// stale width (post-resize) are discarded wholesale.
+    pub(crate) fn take_blank_row(&mut self, cols: u16) -> Option<Row> {
+        match self.pool.last() {
+            Some(row) if row.cells.len() == cols as usize => self.pool.pop(),
+            Some(_) => {
+                self.pool.clear();
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Settle every deferred row synchronously: collect the in-flight batch,
+    /// pack the pending tail inline (continuing the open page, byte-for-byte
+    /// what immediate pushes would have built), and evict to the limit.
+    /// After this call the whole history is in `pages`.
+    fn flush_all(&mut self) -> usize {
+        let mut evicted = self.collect_sealing();
+        // Settle the worker-clear pipeline inline (cold path).
+        if let Some((rows, lens)) = self.dirty_carcasses.take() {
+            for (row, len) in rows.into_iter().zip(lens) {
+                self.recycle_carcass(row, len);
+            }
+        }
+        self.pending_est_bytes = 0;
+        while let Some(row) = self.pending.pop_front() {
+            let cols = row.cells.len() as u16;
+            let page = self.ensure_page(cols);
+            let (delta, len) = page.pack_row(&row);
+            self.total_bytes += delta;
+            self.recycle_carcass(row, len);
+        }
+        evicted += self.evict_to_limit();
+        evicted
+    }
+
+    /// Collect the in-flight sealing batch, if any: wait for the workers
+    /// (usually already done — a full batch interval has passed), append the
+    /// chunk pages in row order, recycle the packed rows' allocations into
+    /// the blank pool, and settle byte-limit eviction.
+    fn collect_sealing(&mut self) -> usize {
+        let Some(batch) = self.sealing.take() else {
+            return 0;
+        };
+        self.sealing_est_bytes = 0;
+        let results = self
+            .packer
+            .as_ref()
+            .expect("sealing batch implies a spawned packer")
+            .wait_results();
+        let mut lens = Vec::with_capacity(batch.len());
+        for result in results {
+            for page in result.pages {
+                self.total_bytes += page.bytes;
+                self.pages.push_back(page);
+            }
+            lens.extend(result.lens);
+            // Last batch's carcasses come back pre-blanked by the workers.
+            let spare = POOL_CAP.saturating_sub(self.pool.len());
+            self.pool.extend(result.cleared.into_iter().take(spare));
+        }
+        // Workers drop their `Arc` clones before reporting completion, so
+        // after `wait_results` the owner holds the only reference. The rows
+        // still carry their packed content; queue them for the workers to
+        // re-blank alongside the next published batch.
+        let rows = Arc::try_unwrap(batch).expect("workers released the sealing batch");
+        self.dirty_carcasses = Some((rows, lens));
         self.evict_to_limit()
+    }
+
+    /// Publish the pending rows as the in-flight sealing batch on the worker
+    /// pool. The previous batch must have been collected.
+    fn publish_sealing(&mut self) {
+        debug_assert!(self.sealing.is_none());
+        if self.pending.is_empty() {
+            return;
+        }
+        let batch: Arc<Vec<Row>> = Arc::new(self.pending.drain(..).collect());
+        self.sealing_est_bytes = std::mem::take(&mut self.pending_est_bytes);
+        let carcasses = self.dirty_carcasses.take();
+        let packer = self.packer.get_or_insert_with(Packer::spawn);
+        packer.publish(&batch, carcasses);
+        self.sealing = Some(batch);
+    }
+
+    /// Return a just-packed row's allocation to the blank pool. The pack trim
+    /// proved `row.cells[len..]` equal to `Cell::default()`, so only the
+    /// occupied prefix needs re-blanking — on the bulk-output path this
+    /// halves the full-row clear the scroll used to pay.
+    fn recycle_carcass(&mut self, mut row: Row, len: usize) {
+        if self.pool.len() >= POOL_CAP {
+            return;
+        }
+        clear_carcass_prefix(&mut row, len);
+        self.pool.push(row);
     }
 
     /// Materialize row `y` (`0` = oldest retained row), or `None` if out of
     /// range. Trimmed trailing cells are padded back to `cols`.
     pub(crate) fn row(&self, y: usize) -> Option<Row> {
+        let packed = self.packed_rows();
+        if y >= packed {
+            let sealing = self.sealing_rows();
+            if y < packed + sealing {
+                // Workers only read the shared batch; cloning a row out of it
+                // is an ordinary shared read.
+                return self.sealing.as_ref().map(|batch| batch[y - packed].clone());
+            }
+            return self.pending.get(y - packed - sealing).cloned();
+        }
         let mut base = 0;
         for page in &self.pages {
             let n = page.rows.len();
@@ -596,14 +856,35 @@ impl PagedScrollback {
             base += n;
         }
         self.scratch = scratch;
+
+        // Deferred rows are the newest suffix of the logical sequence:
+        // the in-flight sealing batch, then the pending ring.
+        let packed = self.packed_rows();
+        let sealing = self.sealing_rows();
+        if let Some(batch) = &self.sealing {
+            let start = range.start.max(packed);
+            for y in start..range.end.min(packed + sealing) {
+                f(y, &batch[y - packed]);
+            }
+        }
+        let start = range.start.max(packed + sealing);
+        for y in start..range.end.min(self.total_rows) {
+            f(y, &self.pending[y - packed - sealing]);
+        }
     }
 
     /// Whether any retained row holds selectable text (packed scan, no
     /// materialization).
     pub(crate) fn has_text(&self) -> bool {
+        let row_has_text = |row: &Row| row.cells.iter().any(|cell| !cell.is_blank());
         self.pages
             .iter()
             .any(|page| page.cells.iter().any(PackedCell::has_text))
+            || self
+                .sealing
+                .as_ref()
+                .is_some_and(|batch| batch.iter().any(row_has_text))
+            || self.pending.iter().any(row_has_text)
     }
 
     /// Change the retention limit at runtime, evicting immediately. Returns the
@@ -615,7 +896,9 @@ impl PagedScrollback {
             self.clear();
             return evicted;
         }
-        self.evict_to_limit()
+        // Settle deferred rows so the new limit applies to everything
+        // retained (`flush_all` ends with its own `evict_to_limit`).
+        self.flush_all()
     }
 
     fn ensure_page(&mut self, cols: u16) -> &mut Page {
@@ -652,6 +935,231 @@ impl PagedScrollback {
             self.spare = Some(page);
         }
         evicted
+    }
+}
+
+// ── Batch packing worker pool ───────────────────────────────────────
+
+/// One chunk's output: pages in row order, each packed row's trimmed length
+/// (the rows themselves go back to the owner through the shared `Arc`), and
+/// the previous batch's carcasses this chunk re-blanked for the pool.
+struct PackResult {
+    pages: Vec<Page>,
+    lens: Vec<usize>,
+    cleared: Vec<Row>,
+}
+
+/// Pack a contiguous chunk of rows into fresh pages. Pure function of the
+/// rows (no shared state), so chunks of one batch can pack concurrently and
+/// the assembled `pages ++ pages ++ …` sequence is deterministic. Chunk pages
+/// never continue an existing page, so their arenas are shrunk to fit (a
+/// chunk usually under-fills its last page).
+fn pack_chunk(rows: &[Row], mut to_clear: Vec<(Row, usize)>) -> PackResult {
+    let mut pages: Vec<Page> = Vec::new();
+    let mut lens = Vec::with_capacity(rows.len());
+    for row in rows {
+        let cols = row.cells.len() as u16;
+        let need_new = match pages.last() {
+            None => true,
+            Some(page) => page.cols != cols || page.cells.len() >= PAGE_CELL_CAPACITY,
+        };
+        if need_new {
+            if let Some(page) = pages.last_mut() {
+                page.cells.shrink_to_fit();
+            }
+            pages.push(Page::new(cols));
+        }
+        let page = pages.last_mut().unwrap();
+        let (_, len) = page.pack_row(row);
+        lens.push(len);
+    }
+    if let Some(page) = pages.last_mut() {
+        page.cells.shrink_to_fit();
+    }
+    let cleared = to_clear
+        .drain(..)
+        .map(|(mut row, len)| {
+            clear_carcass_prefix(&mut row, len);
+            row
+        })
+        .collect();
+    PackResult {
+        pages,
+        lens,
+        cleared,
+    }
+}
+
+/// Re-blank a packed row's occupied prefix (the pack trim proved
+/// `row.cells[len..]` already equal `Cell::default()`), reusing each cell's
+/// combining buffer, and reset the row flags a fresh blank row carries.
+fn clear_carcass_prefix(row: &mut Row, len: usize) {
+    let blank = Cell::default();
+    for cell in &mut row.cells[..len] {
+        cell.set_from(&blank);
+    }
+    row.wrapped = false;
+    row.dirty = true;
+}
+
+/// One published chunk: a shared handle on the whole sealing batch plus the
+/// row range this chunk covers.
+struct PackJob {
+    id: usize,
+    batch: Arc<Vec<Row>>,
+    range: Range<usize>,
+    /// Previous batch's carcasses (with their trimmed lengths) for this
+    /// worker to re-blank while it is awake anyway.
+    to_clear: Vec<(Row, usize)>,
+}
+
+/// Job board shared between the owner and the pack workers. At most one
+/// batch is ever in flight: `publish` posts its chunks, `wait_results`
+/// blocks until `outstanding` drains and takes the per-chunk results.
+struct PackerShared {
+    state: Mutex<PackerBoard>,
+    work_cv: Condvar,
+    done_cv: Condvar,
+}
+
+#[derive(Default)]
+struct PackerBoard {
+    /// Chunk slots for the in-flight batch (`None` once claimed by a worker).
+    jobs: Vec<Option<PackJob>>,
+    /// Per-chunk results, indexed by chunk id.
+    results: Vec<Option<PackResult>>,
+    outstanding: usize,
+    /// A worker panicked mid-chunk (a bug); the collector re-panics.
+    poisoned: bool,
+    shutdown: bool,
+}
+
+/// Lazy pool of [`PACK_WORKERS`] threads packing published batches off the
+/// owner's thread.
+struct Packer {
+    shared: Arc<PackerShared>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Packer {
+    fn spawn() -> Self {
+        let shared = Arc::new(PackerShared {
+            state: Mutex::new(PackerBoard::default()),
+            work_cv: Condvar::new(),
+            done_cv: Condvar::new(),
+        });
+        let workers = (0..PACK_WORKERS)
+            .map(|_| {
+                let shared = Arc::clone(&shared);
+                std::thread::Builder::new()
+                    .name("noa-sb-pack".into())
+                    .spawn(move || Self::worker_loop(&shared))
+                    .expect("spawn scrollback pack worker")
+            })
+            .collect();
+        Packer { shared, workers }
+    }
+
+    fn worker_loop(shared: &PackerShared) {
+        loop {
+            let job = {
+                let mut state = shared.state.lock().unwrap();
+                loop {
+                    if state.shutdown {
+                        return;
+                    }
+                    if let Some(slot) = state.jobs.iter_mut().find(|slot| slot.is_some()) {
+                        break slot.take().unwrap();
+                    }
+                    state = shared.work_cv.wait(state).unwrap();
+                }
+            };
+            // `pack_chunk` is pure; a panic here is a bug, surfaced on the
+            // collecting thread instead of deadlocking its completion wait.
+            let id = job.id;
+            let batch = Arc::clone(&job.batch);
+            let range = job.range.clone();
+            let to_clear = job.to_clear;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pack_chunk(&batch[range], to_clear)
+            }));
+            // Release this worker's handles on the batch *before* reporting
+            // completion: the collector `Arc::try_unwrap`s the batch as soon
+            // as `outstanding` hits zero.
+            drop(batch);
+            drop(job.batch);
+            let mut state = shared.state.lock().unwrap();
+            match result {
+                Ok(packed) => state.results[id] = Some(packed),
+                Err(_) => state.poisoned = true,
+            }
+            state.outstanding -= 1;
+            if state.outstanding == 0 || state.poisoned {
+                shared.done_cv.notify_all();
+            }
+        }
+    }
+
+    /// Post `batch` split into [`PACK_WORKERS`] contiguous chunks and return
+    /// immediately; the owner keeps feeding while workers pack. Results are
+    /// picked up by [`Self::wait_results`].
+    fn publish(&self, batch: &Arc<Vec<Row>>, carcasses: Option<(Vec<Row>, Vec<usize>)>) {
+        let parts = PACK_WORKERS.min(batch.len().max(1));
+        let chunk_len = batch.len().div_ceil(parts);
+        let mut to_clear: Vec<(Row, usize)> = match carcasses {
+            Some((rows, lens)) => rows.into_iter().zip(lens).collect(),
+            None => Vec::new(),
+        };
+        let clear_len = to_clear.len().div_ceil(parts);
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            debug_assert!(state.jobs.iter().all(Option::is_none) && state.outstanding == 0);
+            state.jobs = (0..parts)
+                .map(|id| {
+                    let start = id * chunk_len;
+                    let end = ((id + 1) * chunk_len).min(batch.len());
+                    let split = to_clear.len().saturating_sub(clear_len);
+                    Some(PackJob {
+                        id,
+                        batch: Arc::clone(batch),
+                        range: start..end,
+                        to_clear: to_clear.split_off(split),
+                    })
+                })
+                .collect();
+            state.results = std::iter::repeat_with(|| None).take(parts).collect();
+            state.outstanding = parts;
+        }
+        self.shared.work_cv.notify_all();
+    }
+
+    /// Block until every published chunk is packed and take the results in
+    /// chunk (row) order. After this returns, no worker holds a reference to
+    /// the batch.
+    fn wait_results(&self) -> Vec<PackResult> {
+        let mut state = self.shared.state.lock().unwrap();
+        while state.outstanding > 0 && !state.poisoned {
+            state = self.shared.done_cv.wait(state).unwrap();
+        }
+        assert!(!state.poisoned, "scrollback pack worker panicked");
+        state.jobs.clear();
+        std::mem::take(&mut state.results)
+            .into_iter()
+            .map(|result| result.expect("all pack chunks completed"))
+            .collect()
+    }
+}
+
+impl Drop for Packer {
+    fn drop(&mut self) {
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            state.shutdown = true;
+        }
+        self.shared.work_cv.notify_all();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -1078,6 +1586,120 @@ mod tests {
         sb.push_row(&text_row("", 10));
         let out = sb.row(1).unwrap();
         assert!(out.cells.iter().all(|c| *c == Cell::default()));
+    }
+
+    fn styled_row(i: usize, cols: usize) -> Row {
+        let mut cells: Vec<Cell> = format!("row{i}")
+            .chars()
+            .map(|ch| Cell {
+                ch,
+                fg: Color::Palette((i % 7) as u8),
+                ..Cell::default()
+            })
+            .collect();
+        if i % 3 == 0 {
+            cells[0].combining.push('\u{0301}');
+        }
+        while cells.len() < cols {
+            cells.push(Cell::default());
+        }
+        let mut row = row_from(cells);
+        row.wrapped = i % 5 == 0;
+        row
+    }
+
+    #[test]
+    fn deferred_rows_are_readable_before_any_flush() {
+        let mut sb = PagedScrollback::new(usize::MAX);
+        for i in 0..10 {
+            let evicted = sb.push_row_deferred(styled_row(i, 20));
+            assert_eq!(evicted, 0);
+        }
+        assert_eq!(sb.len(), 10);
+        assert!(sb.has_text());
+        // Random access and ordered walks both serve the pending tier.
+        let row3 = sb.row(3).expect("pending row 3");
+        assert_eq!(row3.cells[0].ch, 'r');
+        assert_eq!(row3.cells[3].ch, '3');
+        assert!(!row3.dirty, "history rows always report clean");
+        let mut seen = Vec::new();
+        sb.for_each_row(2..7, |y, row| seen.push((y, row.cells[3].ch)));
+        assert_eq!(
+            seen,
+            vec![(2, '2'), (3, '3'), (4, '4'), (5, '5'), (6, '6')]
+        );
+    }
+
+    #[test]
+    fn deferred_sealing_matches_immediate_packing() {
+        // Push enough rows to cross several publish/collect boundaries and
+        // leave stragglers in `sealing` and `pending`, then compare every
+        // materialized row against the immediate-packing reference.
+        let n = SEAL_BATCH_ROWS * 2 + 57;
+        let mut deferred = PagedScrollback::new(usize::MAX);
+        let mut immediate = PagedScrollback::new(usize::MAX);
+        for i in 0..n {
+            deferred.push_row_deferred(styled_row(i, 40));
+            immediate.push_row(&styled_row(i, 40));
+        }
+        assert_eq!(deferred.len(), n);
+        assert_eq!(immediate.len(), n);
+        for y in 0..n {
+            let d = deferred.row(y).expect("deferred row");
+            let i = immediate.row(y).expect("immediate row");
+            assert_eq!(d.cells, i.cells, "row {y} content diverged");
+            assert_eq!(d.wrapped, i.wrapped, "row {y} wrapped flag diverged");
+        }
+    }
+
+    #[test]
+    fn deferred_pushes_stay_eager_under_tiny_limits() {
+        // With a limit the pending estimate immediately exceeds, deferred
+        // sealing degrades to the synchronous path: eviction is exactly as
+        // timely as immediate packing (`copy_mode` rebasing depends on it).
+        let mut sb = PagedScrollback::new(1);
+        let mut total_evicted = 0;
+        let dense = "x".repeat(79);
+        for _ in 0..300 {
+            total_evicted += sb.push_row_deferred(text_row(&dense, 80));
+        }
+        assert!(total_evicted > 0, "tiny limit evicts during the pushes");
+        assert_eq!(sb.len() + total_evicted, 300);
+        assert_eq!(sb.pages.len(), 1, "only the newest page is retained");
+    }
+
+    #[test]
+    fn take_blank_row_recycles_carcasses_of_matching_width() {
+        let mut sb = PagedScrollback::new(usize::MAX);
+        // Three full batches: batch 1's carcasses ride along with batch 2's
+        // publish and come back cleared when batch 2 collects (third publish).
+        for i in 0..SEAL_BATCH_ROWS * 3 {
+            sb.push_row_deferred(styled_row(i, 30));
+        }
+        let row = sb.take_blank_row(30).expect("pool has recycled rows");
+        assert_eq!(row.cells.len(), 30);
+        assert!(row.cells.iter().all(|c| *c == Cell::default()));
+        assert!(!row.wrapped);
+        assert!(row.dirty);
+        // A width mismatch (post-resize) drops the stale pool wholesale.
+        assert!(sb.take_blank_row(31).is_none());
+        assert!(sb.take_blank_row(30).is_none());
+    }
+
+    #[test]
+    fn clear_discards_inflight_and_pending_rows() {
+        let mut sb = PagedScrollback::new(usize::MAX);
+        for i in 0..SEAL_BATCH_ROWS + 13 {
+            sb.push_row_deferred(styled_row(i, 24));
+        }
+        sb.clear();
+        assert_eq!(sb.len(), 0);
+        assert!(sb.row(0).is_none());
+        assert!(!sb.has_text());
+        // The scrollback stays fully usable afterwards.
+        sb.push_row_deferred(styled_row(1, 24));
+        assert_eq!(sb.len(), 1);
+        assert_eq!(sb.row(0).unwrap().cells[3].ch, '1');
     }
 
     #[test]

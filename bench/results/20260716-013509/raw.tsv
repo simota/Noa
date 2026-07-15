@@ -1,0 +1,6 @@
+terminal	axis	variant	rep	metric	value	unit
+noa	scroll	-	1	inner_ns	182616000	ns
+noa	scroll	-	2	inner_ns	186220000	ns
+noa	scroll	-	3	inner_ns	173335000	ns
+noa	scroll	-	median	inner_ns	182616000	ns
+noa	scroll	-	median	mib_per_s	219.1	mib_s

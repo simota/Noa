@@ -19,6 +19,7 @@ mod events;
 mod input;
 mod io_thread;
 mod ipc_bridge;
+mod latency_trace;
 mod link_open;
 mod localtime;
 mod macos_applescript;

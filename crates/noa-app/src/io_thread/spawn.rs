@@ -195,6 +195,15 @@ pub fn spawn(
         // is owed and the select below blocks exactly as before.
         let mut redraw_deadline: Option<Instant> = None;
         let mut auto_approve_rescan_at: Option<Instant> = None;
+        // True while this pane owes a repaint for a user-input echo: set when
+        // input bytes are forwarded to the pty, cleared by the next redraw
+        // that actually fires. The next pty-output batch (the echo, when the
+        // program echoes at all) then bypasses the redraw floor via
+        // [`RedrawFloor::decide_input_echo`] instead of being withheld up to
+        // one floor interval behind another pane's recent paint. At most one
+        // bypass per input event, so a non-echoing program costs one extra
+        // repaint per keystroke at worst — bounded by typing speed.
+        let mut input_echo_pending = false;
         loop {
             // Fast path: poll every channel with `try_recv` before falling
             // back to a blocking `Select`. During sustained output the pty
@@ -241,6 +250,7 @@ pub fn spawn(
                     if let Err(err) = writer.write_owned(bytes) {
                         log::warn!("failed to queue bytes to pty: {err}");
                     }
+                    input_echo_pending = true;
                     did_work = true;
                 }
                 Err(TryRecvError::Disconnected) => break, // main thread / App dropped
@@ -292,6 +302,10 @@ pub fn spawn(
                         &mut ipc_row_cache,
                         &raw_attach,
                     );
+                    // NOA_LATENCY_TRACE t1: the batch (a pending keypress's
+                    // echo, when one is pending) is now parsed into the
+                    // shared Terminal — the next snapshot contains it.
+                    crate::latency_trace::on_pty_feed();
                     auto_approve_rescan_at =
                         auto_approve_rescan_deadline(&auto_approve_state, Instant::now());
                     publish_pending_at = output.overview_publish_pending;
@@ -352,7 +366,14 @@ pub fn spawn(
                     if !output.pending_writes.is_empty() {
                         write_pty_bytes(&writer, &output.pending_writes);
                     }
-                    let redraw = redraw_floor.decide(output.synchronized_output, Instant::now());
+                    let redraw = if input_echo_pending {
+                        redraw_floor.decide_input_echo(output.synchronized_output, Instant::now())
+                    } else {
+                        redraw_floor.decide(output.synchronized_output, Instant::now())
+                    };
+                    if matches!(redraw, RedrawDecision::Now) {
+                        input_echo_pending = false;
+                    }
                     for text in output.pending_clipboard_writes {
                         let _ = proxy.send_event(UserEvent::ClipboardWrite {
                             window_id,

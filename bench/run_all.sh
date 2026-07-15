@@ -12,6 +12,8 @@
 #   bench/run_all.sh                 # full suite, all present terminals
 #   bench/run_all.sh --quick         # 1 rep / smaller data (smoke)
 #   bench/run_all.sh --only noa,kitty
+#   bench/run_all.sh --axes latency,scroll   # subset of the four axes
+#   NOA_BIN=/path/to/noa bench/run_all.sh    # measure a non-default noa build
 set -u
 
 BENCH_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,6 +26,7 @@ PROBE="$TOOLS/dsr_probe"
 # ── options ────────────────────────────────────────────────────────
 QUICK=0
 ONLY=""
+AXES="throughput,scroll,latency,startup"
 EQUALIZE=0
 # equalized-condition targets (used only with --equalize)
 EQ_COLS=120; EQ_ROWS=40; EQ_FONT="Menlo"; EQ_FSIZE=14
@@ -31,11 +34,14 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --quick) QUICK=1 ;;
     --only) ONLY="$2"; shift ;;
+    --axes) AXES="$2"; shift ;;
     --equalize) EQUALIZE=1 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
 done
+
+axis_selected() { case ",$AXES," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 
 TS="$(date +%Y%m%d-%H%M%S)"
 OUT_DIR="$BENCH_DIR/results/$TS"
@@ -53,14 +59,16 @@ else
 fi
 TP_TIMEOUT=180; SCROLL_TIMEOUT=120; LAT_TIMEOUT=60; START_TIMEOUT=30
 
-# ── data files ─────────────────────────────────────────────────────
+# ── data files (only for the axes that consume them) ───────────────
 ASCII="$BENCH_DIR/150MB_ascii.txt"
 UNICODE="$BENCH_DIR/150MB_unicode.txt"
 SCROLLF="$BENCH_DIR/scroll_stress.txt"
-if [ ! -f "$ASCII" ] || [ ! -f "$UNICODE" ]; then
+if axis_selected throughput && { [ ! -f "$ASCII" ] || [ ! -f "$UNICODE" ]; }; then
   (cd "$BENCH_DIR" && python3 generate_data.py)
 fi
-[ -f "$SCROLLF" ] || (cd "$BENCH_DIR" && python3 gen_scroll.py 40 scroll_stress.txt)
+if axis_selected scroll; then
+  [ -f "$SCROLLF" ] || (cd "$BENCH_DIR" && python3 gen_scroll.py 40 scroll_stress.txt)
+fi
 
 # ── tools ──────────────────────────────────────────────────────────
 [ -x "$NOWNS" ] && [ -x "$PROBE" ] || (cd "$BENCH_DIR/tools" && mkdir -p bin && \
@@ -95,7 +103,9 @@ if [ "$EQUALIZE" = 1 ]; then
 fi
 
 # ── terminal registry ──────────────────────────────────────────────
-NOA_BIN="$REPO_DIR/target/release/noa"
+# NOA_BIN is overridable from the environment so a candidate build (e.g. a
+# worktree's target/release/noa) can be measured against the same harness.
+NOA_BIN="${NOA_BIN:-$REPO_DIR/target/release/noa}"
 GHOSTTY_BIN="/Applications/Ghostty.app/Contents/MacOS/ghostty"
 TERMY_BIN="/Applications/Termy.app/Contents/MacOS/termy"
 KITTY_BIN="/Applications/kitty.app/Contents/MacOS/kitty"
@@ -110,12 +120,26 @@ term_present() {
   esac
 }
 
+# noa gained a Ghostty-style `-e <command...>` flag (2026-07). Detect it once
+# so the harness can drive noa exactly like Ghostty (`-e $WRAPPER`) while
+# older builds keep working through the $SHELL fallback.
+if "$NOA_BIN" --help 2>/dev/null | grep -q '^  -e '; then NOA_HAS_E=1; else NOA_HAS_E=0; fi
+
+# Launch noa with the wrapper as pty child, preferring native `-e`.
+launch_noa() { # extra flags in "$@"
+  if [ "$NOA_HAS_E" = 1 ]; then
+    "$NOA_BIN" "$@" -e "$WRAPPER" >/dev/null 2>&1 &
+  else
+    SHELL="$WRAPPER" "$NOA_BIN" "$@" >/dev/null 2>&1 &
+  fi
+}
+
 # Launch a terminal (fresh process) running $WRAPPER as its pty child.
 # Env (NOA_MODE etc.) is already exported by the caller and inherited.
 launch_term() {
   if [ "$EQUALIZE" = 1 ]; then
     case "$1" in
-      noa)     SHELL="$WRAPPER" "$NOA_BIN" --cols "$EQ_COLS" --rows "$EQ_ROWS" --font-size "$EQ_FSIZE" >/dev/null 2>&1 & ;;
+      noa)     launch_noa --cols "$EQ_COLS" --rows "$EQ_ROWS" --font-size "$EQ_FSIZE" ;;
       ghostty) "$GHOSTTY_BIN" --config-default-files=false --font-family="$EQ_FONT" --font-size="$EQ_FSIZE" \
                  --window-width="$EQ_COLS" --window-height="$EQ_ROWS" -e "$WRAPPER" >/dev/null 2>&1 & ;;
       termy)   SHELL="$WRAPPER" "$TERMY_BIN" >/dev/null 2>&1 & ;;  # size not controllable
@@ -125,13 +149,32 @@ launch_term() {
     esac
   else
     case "$1" in
-      noa)     SHELL="$WRAPPER" "$NOA_BIN" --cols 120 --rows 40 >/dev/null 2>&1 & ;;
+      noa)     launch_noa --cols 120 --rows 40 ;;
       ghostty) "$GHOSTTY_BIN" -e "$WRAPPER" >/dev/null 2>&1 & ;;
       termy)   SHELL="$WRAPPER" "$TERMY_BIN" >/dev/null 2>&1 & ;;
       kitty)   "$KITTY_BIN" -1=no -o confirm_os_window_close=0 "$WRAPPER" >/dev/null 2>&1 & ;;
     esac
   fi
   echo $!
+}
+
+# Bring a just-launched terminal's window to the foreground. Some terminals
+# (Termy; kitty is also sluggish unfocused) only answer DSR from their render
+# path and only while focused, so the latency probe needs the window frontmost
+# to measure them at all. `open -a` re-activates an already-running app bundle
+# without any TCC/Accessibility permission; bare-binary noa (not an .app) gets
+# a best-effort System Events fallback, but doesn't need it — noa answers DSR
+# on its io thread regardless of focus.
+activate_term() {
+  # Only activate an instance that is still running: the caller fires this
+  # from a delayed background subshell, and `open -a` on an already-killed
+  # app would *launch a fresh instance* instead of focusing the probe's.
+  case "$1" in
+    noa)     osascript -e 'tell application "System Events" to set frontmost of (first process whose name is "noa") to true' >/dev/null 2>&1 || true ;;
+    ghostty) pgrep -xq ghostty && open -a Ghostty 2>/dev/null || true ;;
+    termy)   pgrep -xq termy && open -a Termy 2>/dev/null || true ;;
+    kitty)   pgrep -xq kitty && open -a kitty 2>/dev/null || true ;;
+  esac
 }
 
 kill_term() {
@@ -177,6 +220,14 @@ run_once() {
   local t0 t1
   t0="$("$NOWNS")"
   launch_term "$term" >/dev/null
+  if [ "$mode" = latency ]; then
+    # Focus the fresh window so render-thread/focus-gated DSR responders
+    # (Termy) reply. Backgrounded with a delay so the launch timestamp path
+    # is untouched; the probe's blocking read simply resumes once focus
+    # lands. Repeated: app registration with the window server can lag the
+    # first attempt on a cold start.
+    ( sleep 1.0; activate_term "$term"; sleep 1.5; activate_term "$term" ) >/dev/null 2>&1 &
+  fi
   if ! wait_sentinel "$sentinel" "$timeout"; then
     kill_term "$term"; sleep 0.3
     return 1
@@ -215,6 +266,7 @@ echo "Terminals under test:$SELECTED"
 echo "Results -> $OUT_DIR"
 
 # ── THROUGHPUT ─────────────────────────────────────────────────────
+if axis_selected throughput; then
 for term in $SELECTED; do
   for variant in ascii unicode; do
     case "$variant" in ascii) file="$ASCII";; unicode) file="$UNICODE";; esac
@@ -241,8 +293,10 @@ for term in $SELECTED; do
     fi
   done
 done
+fi  # axis: throughput
 
 # ── FRAME / SCROLL ─────────────────────────────────────────────────
+if axis_selected scroll; then
 sbytes=$(stat -f%z "$SCROLLF")
 for term in $SELECTED; do
   echo "[scroll] $term"
@@ -265,11 +319,13 @@ for term in $SELECTED; do
     echo "    UNMEASURED (timeout)"
   fi
 done
+fi  # axis: scroll
 
 # Latency + startup are condition-independent; skip them under --equalize
 # (the equalized re-run targets the render-sensitive throughput+scroll axes).
 if [ "$EQUALIZE" != 1 ]; then
 # ── INPUT LATENCY (DSR round-trip proxy) ───────────────────────────
+if axis_selected latency; then
 for term in $SELECTED; do
   echo "[latency] $term"
   med_samples=""; p99_samples=""; got=0
@@ -295,8 +351,10 @@ for term in $SELECTED; do
     echo "    UNMEASURED (no DSR reply within timeout — reply appears render-thread/focus-gated)"
   fi
 done
+fi  # axis: latency
 
 # ── WARM STARTUP ───────────────────────────────────────────────────
+if axis_selected startup; then
 for term in $SELECTED; do
   echo "[startup] $term"
   # one warm-up (not recorded), then START_REPS recorded
@@ -317,6 +375,7 @@ for term in $SELECTED; do
     echo "    UNMEASURED (timeout)"
   fi
 done
+fi  # axis: startup
 fi  # end non-equalize axes
 
 # record equalization status per terminal (for the report / methodology)

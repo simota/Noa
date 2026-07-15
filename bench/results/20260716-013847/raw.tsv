@@ -1,0 +1,9 @@
+terminal	axis	variant	rep	metric	value	unit
+termy	latency	-	1	median_ns	16667000	ns
+termy	latency	-	1	p99_ns	20600000	ns
+termy	latency	-	1	min_ns	12542000	ns
+termy	latency	-	2	median_ns	16665000	ns
+termy	latency	-	2	p99_ns	19413000	ns
+termy	latency	-	2	min_ns	11979000	ns
+termy	latency	-	median	median_ns	16666000	ns
+termy	latency	-	median	p99_ns	20006500	ns

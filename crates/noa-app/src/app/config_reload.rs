@@ -107,7 +107,11 @@ impl App {
             log::warn!("config reload: {}", diagnostic.message);
         }
 
-        let next = AppConfig::from_startup(startup, self.config.cli_grid_override, cli_overrides);
+        let mut next =
+            AppConfig::from_startup(startup, self.config.cli_grid_override, cli_overrides);
+        // `-e` is CLI-only (never in a config file): carry it across the
+        // reload so newly spawned panes keep running the requested command.
+        next.launch_command = self.config.launch_command.clone();
         self.apply_reloaded_config(next);
         self.config_watcher.mark_current();
         log::info!("config reloaded");

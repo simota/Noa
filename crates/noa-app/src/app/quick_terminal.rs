@@ -747,7 +747,10 @@ impl App {
                 width: size.width.max(1),
                 height: size.height.max(1),
                 present_mode: wgpu::PresentMode::Fifo,
-                desired_maximum_frame_latency: 2,
+                // 1 for the same reason as the main window's surface (see
+                // `lifecycle.rs`): a single frame in flight keeps a keypress
+                // echo from queueing behind an already-submitted frame.
+                desired_maximum_frame_latency: 1,
                 alpha_mode: preferred_surface_alpha_mode(
                     &caps,
                     self.config.background_opacity < 1.0,

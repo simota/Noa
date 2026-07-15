@@ -465,7 +465,7 @@ fn test_surface_config(width: u32, height: u32) -> wgpu::SurfaceConfiguration {
         width,
         height,
         present_mode: wgpu::PresentMode::Fifo,
-        desired_maximum_frame_latency: 2,
+        desired_maximum_frame_latency: 1,
         alpha_mode: wgpu::CompositeAlphaMode::Opaque,
         view_formats: vec![],
     }

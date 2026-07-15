@@ -4,6 +4,10 @@ use super::*;
 
 impl App {
     pub(super) fn redraw(&mut self, window_id: WindowId) {
+        // NOA_LATENCY_TRACE: stamp before the FrameSnapshot is built so
+        // `on_present` can tell whether this frame could contain a pending
+        // keypress echo. `0` (disabled) makes both hooks no-ops.
+        let trace_frame_start = crate::latency_trace::frame_start();
         // The quick terminal is exempt from occlusion-driven surface
         // shrinking (see `event_loop.rs`'s `Occluded` handler) and instead
         // gates its own redraws here: once fully hidden and not sliding,
@@ -707,6 +711,9 @@ impl App {
             sidebar::draw_bell_flash(gpu, state.surface_config.format, &view, surface_size);
         }
         frame.present();
+        // NOA_LATENCY_TRACE t2: the echo frame has been handed to the
+        // compositor (present-call proxy; see `latency_trace` module docs).
+        crate::latency_trace::on_present(trace_frame_start);
 
         // An atlas-eviction-unstable frame may have drawn some glyphs with
         // another glyph's pixels; ask for one more frame so the display

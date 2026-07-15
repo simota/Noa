@@ -292,7 +292,16 @@ impl App {
                 width: size.width.max(1),
                 height: size.height.max(1),
                 present_mode: wgpu::PresentMode::Fifo,
-                desired_maximum_frame_latency: 2,
+                // 1, not the wgpu default of 2: with two frames allowed in
+                // flight a keypress echo can sit a whole extra vsync
+                // (8-16ms) behind an already-queued frame before it is
+                // scanned out. Depth 1 makes `get_current_texture` block
+                // until the previous frame is consumed, trading that queue
+                // latency for backpressure on the redraw path — the right
+                // trade for a terminal, where a keystroke echo is the
+                // latency-critical path and the renderer comfortably
+                // finishes a frame within one refresh interval.
+                desired_maximum_frame_latency: 1,
                 alpha_mode: preferred_surface_alpha_mode(
                     &caps,
                     self.config.background_opacity < 1.0,
@@ -571,6 +580,7 @@ impl App {
         let pty_config = PtyConfig {
             size: grid_size,
             cwd,
+            command: self.config.launch_command.clone(),
             ..Default::default()
         };
         let pty = Pty::spawn(pty_config)?;

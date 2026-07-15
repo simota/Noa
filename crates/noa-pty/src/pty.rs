@@ -23,6 +23,11 @@ pub struct PtyConfig {
     pub size: GridSize,
     /// Shell program to run. `None` uses `$SHELL`, falling back to `/bin/zsh`.
     pub shell: Option<String>,
+    /// Explicit command argv to run *instead of* the shell (the CLI `-e`
+    /// flag). When set, `shell`, `login`, and `shell_integration` are all
+    /// ignored: the argv is spawned verbatim as the pty child, exactly like
+    /// Ghostty's `-e`. Must be non-empty when `Some`.
+    pub command: Option<Vec<String>>,
     /// Working directory for the child. `None` inherits the current one.
     pub cwd: Option<String>,
     /// Value for the `TERM` environment variable.
@@ -39,6 +44,7 @@ impl Default for PtyConfig {
         Self {
             size: GridSize::new(80, 24),
             shell: None,
+            command: None,
             cwd: None,
             term: "xterm-256color".to_string(),
             login: true,
@@ -76,49 +82,62 @@ impl Pty {
             })
             .map_err(|e| PtyError::OpenPty(e.to_string()))?;
 
-        // Build the shell command.
-        let shell = config
-            .shell
-            .clone()
-            .or_else(|| std::env::var("SHELL").ok())
-            .unwrap_or_else(|| "/bin/zsh".to_string());
-
-        let mut cmd = CommandBuilder::new(&shell);
-
-        // Resolve shell integration first: it can add flags/env and, for
-        // bash, take over login-shell startup (so we skip our own `-l`).
-        let integration = if config.shell_integration {
-            shell_integration::resources_dir().and_then(|dir| {
-                shell_integration::integration_for(
-                    &shell,
-                    dir,
-                    config.login,
-                    std::env::var("ZDOTDIR").ok().as_deref(),
-                    std::env::var("XDG_DATA_DIRS").ok().as_deref(),
-                )
-            })
-        } else {
-            None
-        };
-        let suppress_login = integration.as_ref().is_some_and(|i| i.suppress_login_flag);
-
-        if config.login && !suppress_login {
-            // Login shell. NOTE: portable-pty's CommandBuilder does not let us
-            // override argv[0], so the classic "-<shell>" argv[0] convention
-            // isn't available — passing "-zsh" as an argument makes zsh treat
-            // it as options ("bad option: -z") and exit. Use the `-l` flag,
-            // which zsh/bash/sh all accept. Interactivity comes from stdin
-            // being a tty (the pty slave), so no explicit `-i` is needed.
-            cmd.arg("-l");
-        }
-        if let Some(integration) = &integration {
-            for arg in &integration.args {
+        // Build the child command: an explicit `-e` argv verbatim, or the
+        // (login) shell with optional integration.
+        let mut cmd = if let Some(argv) = config.command.as_deref().filter(|argv| !argv.is_empty())
+        {
+            // Explicit command (`-e`): no login flag, no shell integration —
+            // the argv is the child, exactly as given (Ghostty parity).
+            let mut cmd = CommandBuilder::new(&argv[0]);
+            for arg in &argv[1..] {
                 cmd.arg(arg);
             }
-            for (key, value) in &integration.env {
-                cmd.env(key, value);
+            cmd
+        } else {
+            let shell = config
+                .shell
+                .clone()
+                .or_else(|| std::env::var("SHELL").ok())
+                .unwrap_or_else(|| "/bin/zsh".to_string());
+
+            let mut cmd = CommandBuilder::new(&shell);
+
+            // Resolve shell integration first: it can add flags/env and, for
+            // bash, take over login-shell startup (so we skip our own `-l`).
+            let integration = if config.shell_integration {
+                shell_integration::resources_dir().and_then(|dir| {
+                    shell_integration::integration_for(
+                        &shell,
+                        dir,
+                        config.login,
+                        std::env::var("ZDOTDIR").ok().as_deref(),
+                        std::env::var("XDG_DATA_DIRS").ok().as_deref(),
+                    )
+                })
+            } else {
+                None
+            };
+            let suppress_login = integration.as_ref().is_some_and(|i| i.suppress_login_flag);
+
+            if config.login && !suppress_login {
+                // Login shell. NOTE: portable-pty's CommandBuilder does not let us
+                // override argv[0], so the classic "-<shell>" argv[0] convention
+                // isn't available — passing "-zsh" as an argument makes zsh treat
+                // it as options ("bad option: -z") and exit. Use the `-l` flag,
+                // which zsh/bash/sh all accept. Interactivity comes from stdin
+                // being a tty (the pty slave), so no explicit `-i` is needed.
+                cmd.arg("-l");
             }
-        }
+            if let Some(integration) = &integration {
+                for arg in &integration.args {
+                    cmd.arg(arg);
+                }
+                for (key, value) in &integration.env {
+                    cmd.env(key, value);
+                }
+            }
+            cmd
+        };
 
         cmd.env("TERM", &config.term);
         cmd.env("COLORTERM", "truecolor");
@@ -540,6 +559,7 @@ mod tests {
         let cfg = PtyConfig {
             size: GridSize::new(80, 24),
             shell: Some("/bin/sh".to_string()),
+            command: None,
             cwd: None,
             term: "xterm-256color".to_string(),
             login: false,
@@ -576,6 +596,49 @@ mod tests {
         assert!(saw_exit, "expected an Exit event");
     }
 
+    // `-e` path: an explicit command argv is spawned verbatim as the pty
+    // child (no shell wrapping, args passed through) and its exit is
+    // delivered like any child's.
+    #[test]
+    fn explicit_command_argv_runs_instead_of_the_shell() {
+        let cfg = PtyConfig {
+            size: GridSize::new(80, 24),
+            // A shell that would loop forever proves `command` wins over it.
+            shell: Some("/bin/zsh".to_string()),
+            command: Some(vec![
+                "/bin/echo".to_string(),
+                "argv-passthrough".to_string(),
+            ]),
+            cwd: None,
+            term: "xterm-256color".to_string(),
+            login: true,
+            shell_integration: true,
+        };
+        let pty = Pty::spawn(cfg).expect("spawn pty");
+
+        let mut collected = Vec::new();
+        let mut saw_exit = false;
+        let deadline = Duration::from_secs(5);
+        loop {
+            match pty.event_rx().recv_timeout(deadline) {
+                Ok(PtyEvent::Data(chunk)) => collected.extend_from_slice(&chunk),
+                Ok(PtyEvent::Exit(_)) => {
+                    saw_exit = true;
+                    break;
+                }
+                Ok(PtyEvent::Error(e)) => panic!("pty error: {e}"),
+                Err(_) => break, // timeout guard so we never hang
+            }
+        }
+
+        let text = String::from_utf8_lossy(&collected);
+        assert!(
+            text.contains("argv-passthrough"),
+            "expected the command's own output: {text:?}"
+        );
+        assert!(saw_exit, "expected an Exit event when the command finishes");
+    }
+
     #[test]
     fn colorterm_and_term_are_exported_to_the_child() {
         // noa-vt fully supports 24-bit truecolor SGR, so the child should see
@@ -584,6 +647,7 @@ mod tests {
         let cfg = PtyConfig {
             size: GridSize::new(80, 24),
             shell: Some("/bin/sh".to_string()),
+            command: None,
             cwd: None,
             term: "xterm-256color".to_string(),
             login: false,
@@ -622,6 +686,7 @@ mod tests {
         let pty = Pty::spawn(PtyConfig {
             size: GridSize::new(80, 24),
             shell: Some("/bin/sh".to_string()),
+            command: None,
             cwd: None,
             term: "xterm-256color".to_string(),
             login: false,

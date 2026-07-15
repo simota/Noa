@@ -454,6 +454,12 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Ime(event) => self.on_ime_event(window_id, event),
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+                if pressed {
+                    // NOA_LATENCY_TRACE t0: winit key-event receipt, before
+                    // any routing — this is the earliest app-side timestamp
+                    // a keystroke has.
+                    crate::latency_trace::on_key_pressed();
+                }
                 if pressed
                     && self.copy_mode_key_repeat_is_suppressed(event.physical_key, event.repeat)
                 {

@@ -69,6 +69,16 @@ pub(crate) fn spawn_group_choice<G: Copy>(
     }
 }
 
+/// Index at which a new tab should be inserted. A live anchor places the tab
+/// immediately after itself; a missing or absent anchor safely falls back to
+/// the end of the current order.
+pub(crate) fn tab_insert_index<Id: Eq>(order: &[Id], anchor: Option<Id>) -> usize {
+    anchor
+        .as_ref()
+        .and_then(|anchor| order.iter().position(|id| id == anchor))
+        .map_or(order.len(), |index| index + 1)
+}
+
 /// The ids in `order` whose group is `group`, preserving `order`. Backs
 /// [`App::close_window`] (which closes every tab of the focused window's
 /// group) and keeps the group-membership filter unit-testable without a live

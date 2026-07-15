@@ -75,6 +75,21 @@ impl App {
         group: GroupChoice<WindowGroupId>,
         initial_spec: InitialPane,
     ) -> anyhow::Result<WindowId> {
+        // Preserve the current tab as an insertion anchor before creating the
+        // new window. Only a live tab in the requested logical group can
+        // anchor insertion; every other path keeps the existing append
+        // behavior.
+        let tab_anchor = match group {
+            GroupChoice::Existing(group) => self.focused.filter(|window_id| {
+                self.window_order.contains(window_id)
+                    && self
+                        .windows
+                        .get(window_id)
+                        .is_some_and(|state| state.group == group)
+            }),
+            GroupChoice::Fresh => None,
+        };
+        let tab_insert_at = tab_insert_index(&self.window_order, tab_anchor);
         let remote_card_identity = match &initial_spec {
             InitialPane::Local { .. } => None,
             InitialPane::DetachedRemote(identity) => Some(identity.clone()),
@@ -419,7 +434,17 @@ impl App {
         if let Some(identity) = remote_card_identity.as_ref() {
             self.register_remote_session_card(window_id, initial_pane, identity);
         }
-        self.window_order.push(window_id);
+        let inserted_after_anchor = tab_anchor
+            .and_then(|anchor_id| self.windows.get(&anchor_id))
+            .is_some_and(|anchor| crate::macos_window::insert_tab_after(&anchor.window, &window));
+        if inserted_after_anchor {
+            self.window_order.insert(tab_insert_at, window_id);
+        } else {
+            // AppKit automatically appends new native tabs. If explicit
+            // insertion is unavailable or fails, mirror that order rather
+            // than letting Noa's navigation/session order diverge from it.
+            self.window_order.push(window_id);
+        }
         self.mark_overview_tile_dirty(OverviewTileId::new(window_id, initial_pane));
         // A window seeded with the sidebar visible (`sidebar-enabled`) must turn
         // the io-thread gate on so its panes start publishing card state.

@@ -1083,6 +1083,26 @@ fn spawn_group_choice_routes_new_tab_and_new_window() {
 }
 
 #[test]
+fn tab_insert_index_places_new_tab_after_middle_anchor() {
+    assert_eq!(tab_insert_index(&[1_u8, 2, 3], Some(2)), 2);
+}
+
+#[test]
+fn tab_insert_index_places_new_tab_after_end_anchor() {
+    assert_eq!(tab_insert_index(&[1_u8, 2, 3], Some(3)), 3);
+}
+
+#[test]
+fn tab_insert_index_falls_back_to_end_for_missing_anchor() {
+    assert_eq!(tab_insert_index(&[1_u8, 2, 3], Some(9)), 3);
+}
+
+#[test]
+fn tab_insert_index_falls_back_to_end_without_anchor() {
+    assert_eq!(tab_insert_index(&[1_u8, 2, 3], None), 3);
+}
+
+#[test]
 fn ids_in_group_filters_focused_windows_tabs() {
     // Two windows: tabs 1,3 in group 0; tabs 2,4 in group 1. Close Window
     // for the group-0 window must target exactly its tabs, in order.

@@ -28,6 +28,112 @@ pub(crate) fn toggle_native_fullscreen(window: &Window) -> bool {
     toggle_native_fullscreen_impl(window)
 }
 
+/// Move `new_window` immediately after `anchor_window` in their native AppKit
+/// tab group. Returns `true` only when the resulting native order is verified.
+pub(crate) fn insert_tab_after(anchor_window: &Window, new_window: &Window) -> bool {
+    insert_tab_after_impl(anchor_window, new_window)
+}
+
+#[cfg(target_os = "macos")]
+fn insert_tab_after_impl(anchor_window: &Window, new_window: &Window) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(anchor_handle) = anchor_window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(anchor_appkit) = anchor_handle.as_raw() else {
+        return false;
+    };
+    let Ok(new_handle) = new_window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(new_appkit) = new_handle.as_raw() else {
+        return false;
+    };
+    let anchor_view = anchor_appkit.ns_view.as_ptr().cast::<AnyObject>();
+    let new_view = new_appkit.ns_view.as_ptr().cast::<AnyObject>();
+
+    // SAFETY: tab creation runs on winit's main (window-owning) thread. Both
+    // NSViews come from live winit window handles, every returned object is
+    // nil-checked, and the insertion index is derived from the tab group's
+    // current `windows` array before `insertWindow:atIndex:` is sent.
+    unsafe {
+        let anchor: *mut AnyObject = msg_send![anchor_view, window];
+        let new: *mut AnyObject = msg_send![new_view, window];
+        if anchor.is_null() || new.is_null() {
+            return false;
+        }
+        let tab_group: *mut AnyObject = msg_send![anchor, tabGroup];
+        if tab_group.is_null() {
+            return false;
+        }
+        let windows: *mut AnyObject = msg_send![tab_group, windows];
+        if windows.is_null() {
+            return false;
+        }
+        let count: usize = msg_send![windows, count];
+        let mut anchor_index = None;
+        let mut new_index = None;
+        for index in 0..count {
+            let candidate: *mut AnyObject = msg_send![windows, objectAtIndex: index];
+            if candidate == anchor {
+                anchor_index = Some(index);
+            }
+            if candidate == new {
+                new_index = Some(index);
+            }
+        }
+        let Some(anchor_index) = anchor_index else {
+            return false;
+        };
+        let target_index = anchor_index + 1;
+        if new_index == Some(target_index) {
+            return true;
+        }
+        let Ok(target_index) = isize::try_from(target_index) else {
+            return false;
+        };
+        let _: () = msg_send![tab_group, insertWindow: new, atIndex: target_index];
+
+        let windows: *mut AnyObject = msg_send![tab_group, windows];
+        if !windows.is_null() {
+            let count: usize = msg_send![windows, count];
+            for index in 0..count.saturating_sub(1) {
+                let candidate: *mut AnyObject = msg_send![windows, objectAtIndex: index];
+                let next: *mut AnyObject = msg_send![windows, objectAtIndex: index + 1];
+                if candidate == anchor && next == new {
+                    return true;
+                }
+            }
+        }
+
+        // Preserve the established fallback contract: AppKit's default is to
+        // append a newly created tab. If the verified move did not take,
+        // remove any partial group placement before adding the window back at
+        // the native end; the caller appends it to Noa's `window_order` too.
+        let windows: *mut AnyObject = msg_send![tab_group, windows];
+        if !windows.is_null() {
+            let count: usize = msg_send![windows, count];
+            for index in 0..count {
+                let candidate: *mut AnyObject = msg_send![windows, objectAtIndex: index];
+                if candidate == new {
+                    let _: () = msg_send![tab_group, removeWindow: new];
+                    break;
+                }
+            }
+        }
+        let _: () = msg_send![tab_group, addWindow: new];
+        false
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn insert_tab_after_impl(_anchor_window: &Window, _new_window: &Window) -> bool {
+    false
+}
+
 /// Resolves `quick-terminal-screen`'s `mode` to the `CGDirectDisplayID` of the
 /// target `NSScreen`, re-resolved fresh on every quick-terminal reveal (never
 /// cached) so the hotkey always targets whatever the mode currently points

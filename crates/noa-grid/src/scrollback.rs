@@ -1624,10 +1624,7 @@ mod tests {
         assert!(!row3.dirty, "history rows always report clean");
         let mut seen = Vec::new();
         sb.for_each_row(2..7, |y, row| seen.push((y, row.cells[3].ch)));
-        assert_eq!(
-            seen,
-            vec![(2, '2'), (3, '3'), (4, '4'), (5, '5'), (6, '6')]
-        );
+        assert_eq!(seen, vec![(2, '2'), (3, '3'), (4, '4'), (5, '5'), (6, '6')]);
     }
 
     #[test]

@@ -10,7 +10,9 @@ use std::time::Instant;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: feed_bench <file> [cols] [rows] [reps]");
+    let path = args
+        .next()
+        .expect("usage: feed_bench <file> [cols] [rows] [reps]");
     let cols: u16 = args.next().map_or(120, |s| s.parse().unwrap());
     let rows: u16 = args.next().map_or(40, |s| s.parse().unwrap());
     let reps: usize = args.next().map_or(1, |s| s.parse().unwrap());

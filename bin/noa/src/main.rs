@@ -65,10 +65,8 @@ fn main() -> anyhow::Result<()> {
     // otherwise override them). `-e` suppresses it too: a saved topology
     // would respawn every restored pane running the one-shot command
     // (Ghostty likewise starts `-e` in a fresh single-surface window).
-    let cli_grid_override =
-        args.cols.is_some() || args.rows.is_some() || args.command.is_some();
-    let mut app_config =
-        noa_app::AppConfig::from_startup(config, cli_grid_override, cli_overrides);
+    let cli_grid_override = args.cols.is_some() || args.rows.is_some() || args.command.is_some();
+    let mut app_config = noa_app::AppConfig::from_startup(config, cli_grid_override, cli_overrides);
     app_config.launch_command = args.command;
     noa_app::run(app_config)
 }
@@ -280,9 +278,8 @@ mod tests {
         // `-e` is greedy (Ghostty parity): everything after it — including
         // hyphen-prefixed tokens like `-c` — belongs to the command's argv,
         // while flags placed before it still parse as noa's own.
-        let args =
-            Args::try_parse_from(["Noa", "--cols", "120", "-e", "/bin/sh", "-c", "echo hi"])
-                .unwrap();
+        let args = Args::try_parse_from(["Noa", "--cols", "120", "-e", "/bin/sh", "-c", "echo hi"])
+            .unwrap();
 
         assert_eq!(args.cols, Some(120));
         assert_eq!(

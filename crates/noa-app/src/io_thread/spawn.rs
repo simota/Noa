@@ -300,10 +300,9 @@ pub fn spawn(
                     let mut drained = Vec::new();
                     let terminal_event =
                         drain_queued_pty_data(pty.event_rx(), &mut drained, bytes.len());
-                    let batch_bytes = bytes.len()
-                        + drained.iter().map(|chunk| chunk.len()).sum::<usize>();
-                    last_small_data_at =
-                        (batch_bytes <= HOT_SPIN_MAX_BATCH).then(Instant::now);
+                    let batch_bytes =
+                        bytes.len() + drained.iter().map(|chunk| chunk.len()).sum::<usize>();
+                    last_small_data_at = (batch_bytes <= HOT_SPIN_MAX_BATCH).then(Instant::now);
                     if let Some(file) = pty_capture.as_mut()
                         && !capture_pty_bytes(
                             file,

@@ -130,17 +130,18 @@ impl App {
             None
         };
         let metrics = match font_tasks.as_ref().map(|tasks| {
-            tasks.terminal_metrics(font_pixel_size(self.runtime_font_size, monitor_scale_factor))
+            tasks.terminal_metrics(font_pixel_size(
+                self.runtime_font_size,
+                monitor_scale_factor,
+            ))
         }) {
             Some(Ok(metrics)) => metrics,
             // An error means the worker failed before resolving a primary
             // face (no usable font / parse failure): join it to surface the
             // cause with the same fatal message the old inline load used.
             Some(Err(())) => {
-                let (terminal_stack, _, _) = font_tasks
-                    .take()
-                    .expect("just matched Some")
-                    .into_handles();
+                let (terminal_stack, _, _) =
+                    font_tasks.take().expect("just matched Some").into_handles();
                 let err = match terminal_stack.join() {
                     Ok(Err(e)) => format!("{e:?}"),
                     Ok(Ok(_)) => "font worker dropped its metrics channel".to_string(),
@@ -227,9 +228,11 @@ impl App {
                 queue,
             } = match gpu_handle.join() {
                 Ok(Ok(gpu)) => gpu,
-                Ok(Err(msg)) => {
-                    gpu_init_fatal(&mut self.session_persister, "could not initialize the GPU", msg)
-                }
+                Ok(Err(msg)) => gpu_init_fatal(
+                    &mut self.session_persister,
+                    "could not initialize the GPU",
+                    msg,
+                ),
                 Err(_) => gpu_init_fatal(
                     &mut self.session_persister,
                     "could not initialize the GPU",
@@ -381,13 +384,9 @@ impl App {
                     // path) falls back to a fresh inline load.
                     let px_size =
                         sidebar_font_pixel_size(self.config.sidebar_font_size, window_scale_factor);
-                    let prefetched = sidebar_handle
-                        .join()
-                        .ok()
-                        .and_then(Result::ok)
-                        .and_then(|(stack, font_cfg)| {
-                            FontGrid::with_stack(stack, px_size, font_cfg).ok()
-                        });
+                    let prefetched = sidebar_handle.join().ok().and_then(Result::ok).and_then(
+                        |(stack, font_cfg)| FontGrid::with_stack(stack, px_size, font_cfg).ok(),
+                    );
                     match prefetched {
                         Some(font) => font,
                         None => {

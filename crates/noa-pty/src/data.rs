@@ -236,7 +236,12 @@ mod tests {
         let pool = Arc::new(ReadBufferPool::new(8, 1));
         let gate = Arc::new(FlowGate::new());
         gate.add(10);
-        let chunk = PtyData::pooled(vec![b'x'; 16], 10, Arc::clone(&pool), Some(Arc::clone(&gate)));
+        let chunk = PtyData::pooled(
+            vec![b'x'; 16],
+            10,
+            Arc::clone(&pool),
+            Some(Arc::clone(&gate)),
+        );
 
         let waiter = {
             let gate = Arc::clone(&gate);
@@ -245,7 +250,10 @@ mod tests {
         // Not a strict proof of parking, but gives the waiter a chance to
         // reach the condvar before the credit lands.
         std::thread::sleep(Duration::from_millis(20));
-        assert!(!waiter.is_finished(), "10 in flight >= budget 8: reader parks");
+        assert!(
+            !waiter.is_finished(),
+            "10 in flight >= budget 8: reader parks"
+        );
         drop(chunk); // credits 10 -> level 0 < 8, wakes the waiter
         waiter.join().expect("waiter returns after the credit");
         assert_eq!(gate.level(), 0);

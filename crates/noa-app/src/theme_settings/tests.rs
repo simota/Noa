@@ -1861,11 +1861,12 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
 // (settings-panel-server-status) brings it to 25 (+1), the LAN bind-
 // address row (server-bind) brings it to 26 (+1), the sidebar-width row
 // brings it to 27 (+1), the sidebar-font-size row brings it to 28 (+1),
-// and the send-selection-send-enter row brings it to 29 (+1).
+// the send-selection-send-enter row brings it to 29 (+1), and the Remote
+// App QR action brings it to 30 (+1).
 #[test]
-fn settings_row_kind_count_is_twenty_nine_after_send_selection_send_enter_row() {
-    assert_eq!(SettingsRowKind::COUNT, 29);
-    assert_eq!(SettingsRowKind::ALL.len(), 29);
+fn settings_row_kind_count_includes_remote_app_qr_action() {
+    assert_eq!(SettingsRowKind::COUNT, 30);
+    assert_eq!(SettingsRowKind::ALL.len(), 30);
 }
 
 // settings-panel-server-status: the status row is read-only (mirrors
@@ -2018,6 +2019,29 @@ fn server_token_copy_row_reports_effect_without_touching_or_committing() {
     let reset_effect = settings.reset_selected_row(Instant::now());
     assert_eq!(reset_effect, RowEffect::None);
     assert!(!settings.rows()[idx].touched);
+}
+
+#[test]
+fn remote_app_qr_row_reports_effect_without_touching_or_committing() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::ServerRemoteAppQr);
+    let idx = row_index(SettingsRowKind::ServerRemoteAppQr);
+
+    assert_eq!(
+        settings_row_display_value(
+            SettingsRowKind::ServerRemoteAppQr,
+            &settings.rows()[idx].draft,
+            false
+        ),
+        "Show QR Code"
+    );
+    assert_eq!(
+        settings.adjust(1, Instant::now()),
+        RowEffect::ShowRemoteAppQr
+    );
+    assert!(!settings.rows()[idx].touched);
+    assert!(settings.commit_updates().is_empty());
+    assert_eq!(settings.reset_selected_row(Instant::now()), RowEffect::None);
 }
 
 // R-9's 6-point set, part 1/4 (scrollback-limit): ALL entry / label /
@@ -2474,7 +2498,9 @@ fn reset_selected_row_writes_default_for_and_marks_touched_for_every_row_kind() 
         let idx = row_index(kind);
         if matches!(
             kind,
-            SettingsRowKind::ServerTokenCopy | SettingsRowKind::ServerStatus
+            SettingsRowKind::ServerTokenCopy
+                | SettingsRowKind::ServerRemoteAppQr
+                | SettingsRowKind::ServerStatus
         ) {
             assert_eq!(
                 settings.rows()[idx].draft,
@@ -2970,6 +2996,9 @@ fn every_mutator_that_changes_state_changes_the_fingerprint() {
             SettingsRowKind::ServerTokenCopy => {
                 settings.set_server_token_copy_status(TokenCopyStatus::Copied);
             }
+            // This action mutates no pure state: App presents the QR outside
+            // the state machine, so its RowEffect is tested separately.
+            SettingsRowKind::ServerRemoteAppQr => {}
             // Same shape as `ServerTokenCopy` above, but for the read-only
             // status row's own out-of-band refresh (see its doc comment on
             // `SettingsRowKind::ServerStatus`).
@@ -2996,6 +3025,9 @@ fn every_mutator_that_changes_state_changes_the_fingerprint() {
 
         let before_edit = settings.view_fingerprint_u64();
         exercise(&mut settings, *kind, Instant::now());
+        if *kind == SettingsRowKind::ServerRemoteAppQr {
+            continue;
+        }
         assert_ne!(
             before_edit,
             settings.view_fingerprint_u64(),

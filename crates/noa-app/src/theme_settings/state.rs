@@ -418,6 +418,10 @@ impl ThemeSettings {
                         draft: RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
                         touched: false,
                     },
+                    SettingsRow {
+                        draft: RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
+                        touched: false,
+                    },
                 ],
                 init.background_opacity >= 1.0,
             ),
@@ -1309,6 +1313,7 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
+            SettingsRowKind::ServerRemoteAppQr => RowEffect::ShowRemoteAppQr,
             // Action row (R-2's exception, see `SettingsRowKind::ServerTokenCopy`'s
             // doc comment): never sets `touched` and never rewrites its own
             // draft here — `App` performs the actual clipboard write and
@@ -1461,7 +1466,9 @@ impl ThemeSettings {
         // here, same as each row's `adjust` never marking `touched`.
         if matches!(
             kind,
-            SettingsRowKind::ServerTokenCopy | SettingsRowKind::ServerStatus
+            SettingsRowKind::ServerTokenCopy
+                | SettingsRowKind::ServerRemoteAppQr
+                | SettingsRowKind::ServerStatus
         ) {
             return RowEffect::None;
         }

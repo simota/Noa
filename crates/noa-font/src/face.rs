@@ -378,15 +378,15 @@ pub fn load_font_stack_with_primary(
     // private glyph) — see `embedded_symbols_nerd_font_face`.
     push_some_face(&mut fallbacks, embedded_symbols_nerd_font_face());
 
-    for postscript_name in cjk_fallback_postscript_names() {
-        push_some_face(
-            &mut fallbacks,
-            postscript_fallback_face(&source, postscript_name),
-        );
-    }
-    for family_name in cjk_fallback_family_names() {
-        push_some_face(&mut fallbacks, family_fallback_face(&source, family_name));
-    }
+    // CJK fallbacks are NOT loaded here. Resolving the ~18 curated CJK
+    // families/faces at startup faulted whole `.ttc` files into the page cache
+    // (Hiragino Sans GB 44.8 MB, ヒラギノ角ゴシック W3 30.0 MB, AppleGothic
+    // 29.2 MB, …) — ~100 MB of idle RSS even when no CJK glyph is ever drawn.
+    // Instead a CJK codepoint that misses the stack pulls in exactly the one
+    // font that covers it, lazily, via [`cjk_fallback_face_for`] (called from
+    // `FontGrid` on a stack miss, ahead of the generic system cascade). The
+    // priority order there is identical to the eager list this replaced, so
+    // which font wins for a given CJK codepoint is unchanged.
 
     Ok(FontStack::new(
         primary,
@@ -879,6 +879,42 @@ pub(crate) fn cascade_fallback_face(ch: char) -> Option<FontData> {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn cascade_fallback_face(_ch: char) -> Option<FontData> {
     None
+}
+
+/// Lazily resolve the first curated CJK fallback face that covers `ch`, in
+/// the exact priority order the eager stack used to load them
+/// ([`cjk_fallback_postscript_names`] then [`cjk_fallback_family_names`]) — so
+/// which font wins for a given CJK codepoint is unchanged from when the whole
+/// CJK list was resolved at startup.
+///
+/// Called by `FontGrid` on a stack miss, *before* the generic macOS system
+/// cascade ([`cascade_fallback_face`]), and its result is pushed into the
+/// stack and cached — so no CJK font file is resolved or mapped until a
+/// codepoint one of these fonts covers is actually drawn. Each candidate
+/// resolves via the no-slurp CoreText→mmap path ([`postscript_fallback_face`]
+/// / [`family_fallback_face`]); probing a candidate that does not cover `ch`
+/// only faults that font's `cmap`, and the winning font stays memory-mapped so
+/// only its touched glyph pages ever become resident.
+///
+/// Returns `None` when no curated CJK font covers `ch` (the caller then tries
+/// the generic system cascade).
+pub(crate) fn cjk_fallback_face_for(ch: char) -> Option<FontData> {
+    let source = SystemSource::new();
+    cjk_fallback_postscript_names()
+        .iter()
+        .find_map(|name| face_covering(postscript_fallback_face(&source, name), ch))
+        .or_else(|| {
+            cjk_fallback_family_names()
+                .iter()
+                .find_map(|name| face_covering(family_fallback_face(&source, name), ch))
+        })
+}
+
+/// Return `face` only if it maps `ch` to a real (non-notdef) glyph — the
+/// coverage gate for the lazy CJK priority walk in [`cjk_fallback_face_for`].
+fn face_covering(face: Option<FontData>, ch: char) -> Option<FontData> {
+    let face = face?;
+    (face.font_ref().ok()?.charmap().map(ch) != 0).then_some(face)
 }
 
 fn cjk_fallback_postscript_names() -> &'static [&'static str] {
@@ -1610,6 +1646,78 @@ mod tests {
             postscript_name_in(&data.bytes, data.index),
             postscript_name_in(&memory_bytes, memory_index),
             "mapped face must be the exact face the handle selected"
+        );
+    }
+
+    /// Acceptance (a): no CJK font is resolved/mapped at startup. The default
+    /// stack is primary (Menlo on macOS) + emoji + Nerd + embedded symbols —
+    /// none of which carry kanji — so a common kanji must NOT be covered by
+    /// any face already in the stack. It is only resolved later, lazily, via
+    /// [`cjk_fallback_face_for`]. (Observable externally as vmmap showing no
+    /// Hiragino/AppleGothic mapped-file regions before CJK is drawn.)
+    #[test]
+    fn startup_stack_does_not_cover_cjk() {
+        let stack = match load_font_stack(&FontConfig::default()) {
+            Ok(stack) => stack,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+        // U+65E5 '日' — a common kanji absent from Menlo/emoji/Nerd/symbols.
+        let covered = stack.faces().iter().any(|face| {
+            face.font_ref()
+                .ok()
+                .is_some_and(|font| font.charmap().map('日') != 0)
+        });
+        assert!(
+            !covered,
+            "the startup font stack must not cover kanji — CJK fonts load lazily, not eagerly"
+        );
+    }
+
+    /// The lazy CJK resolver must (1) return a face that actually covers the
+    /// codepoint and (2) pick the same face the old eager priority list would
+    /// have — PostScript names first, then families, each in list order — so
+    /// Japanese text renders with exactly the same fonts as before.
+    #[test]
+    fn cjk_fallback_resolves_in_eager_priority_order() {
+        let Some(face) = cjk_fallback_face_for('日') else {
+            eprintln!("skipping: no curated CJK font installed to resolve U+65E5");
+            return;
+        };
+        assert!(
+            face.font_ref()
+                .expect("resolved face parses")
+                .charmap()
+                .map('日')
+                != 0,
+            "cjk_fallback_face_for must return a face that covers the codepoint"
+        );
+
+        // Independently walk the same priority list; the winner must match.
+        let source = SystemSource::new();
+        let expected = cjk_fallback_postscript_names()
+            .iter()
+            .find_map(|name| face_covering(postscript_fallback_face(&source, name), '日'))
+            .or_else(|| {
+                cjk_fallback_family_names()
+                    .iter()
+                    .find_map(|name| face_covering(family_fallback_face(&source, name), '日'))
+            })
+            .expect("the same priority walk must also find a covering face");
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            postscript_name_in(&face.bytes, face.index),
+            postscript_name_in(&expected.bytes, expected.index),
+            "lazy CJK resolution must select the same face the eager priority list would"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            (face.bytes, face.index),
+            (expected.bytes, expected.index),
+            "lazy CJK resolution must select the same face the eager priority list would"
         );
     }
 

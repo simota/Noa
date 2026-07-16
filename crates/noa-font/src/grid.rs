@@ -12,7 +12,9 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::atlas::Atlas;
 use crate::boxdraw::{self, is_builtin_glyph};
-use crate::face::{FontStack, FontStyle, Metrics, cascade_fallback_face, load_font_stack};
+use crate::face::{
+    FontStack, FontStyle, Metrics, cascade_fallback_face, cjk_fallback_face_for, load_font_stack,
+};
 use crate::raster::{GlyphSynthesis, RasterizedGlyph, rasterize_with_variations};
 use crate::shape::{self, FaceId, ShapeCell, ShapeRunEntry, ShapedGlyph, StyleKey};
 use crate::{FontConfig, FontError, GlyphInfo, GlyphKey};
@@ -153,11 +155,11 @@ pub struct FontGrid {
     /// row caches hold concrete atlas coordinates, so eviction is a semantic
     /// invalidation even if the CPU atlas dimensions did not change.
     atlas_eviction_generation: u64,
-    /// Codepoints the static stack could not map and the macOS CoreText
-    /// cascade could not resolve to a real font either (see
-    /// [`cascade_fallback_face`]). Cached so a genuinely-uncovered glyph is
-    /// probed once, not on every segmentation pass, and never re-runs the
-    /// (relatively costly) `CTFontCreateForString` query.
+    /// Codepoints the static stack could not map and neither the lazy curated
+    /// CJK list ([`cjk_fallback_face_for`]) nor the macOS CoreText cascade
+    /// ([`cascade_fallback_face`]) could resolve to a real font either. Cached
+    /// so a genuinely-uncovered glyph is probed once, not on every
+    /// segmentation pass, and never re-runs the (relatively costly) resolution.
     cascade_misses: HashSet<char>,
 }
 
@@ -343,10 +345,11 @@ impl FontGrid {
         if let Some(hit) = self.lookup_glyph_in_stack(ch, font_style) {
             return hit;
         }
-        // The curated stack (primary + emoji/Nerd/CJK fallbacks, plus any face
-        // an earlier cascade hit already pulled in) has no glyph for `ch`.
-        // Defer to the macOS system cascade once, then retry the lookup.
-        if self.try_cascade_fallback(ch)
+        // The curated stack (primary + emoji/Nerd fallbacks, plus any face an
+        // earlier dynamic-fallback hit already pulled in) has no glyph for
+        // `ch`. Pull in a fallback lazily (curated CJK list first, then the
+        // macOS system cascade) once, then retry the lookup.
+        if self.try_dynamic_fallback(ch)
             && let Some(hit) = self.lookup_glyph_in_stack(ch, font_style)
         {
             return hit;
@@ -368,12 +371,15 @@ impl FontGrid {
         None
     }
 
-    /// Pull a system fallback face covering `ch` into the stack via the macOS
-    /// CoreText cascade. Returns whether a new face was added (so the caller
-    /// retries the lookup). Negative results are cached in `cascade_misses` so
-    /// a genuinely uncovered codepoint probes CoreText only once, not on every
-    /// segmentation pass. No-op (always `false`) off macOS.
-    fn try_cascade_fallback(&mut self, ch: char) -> bool {
+    /// Pull a fallback face covering `ch` into the stack on demand: the curated
+    /// CJK priority list first ([`cjk_fallback_face_for`] — lazily mapping only
+    /// the one CJK font that covers `ch`, in the same priority order the eager
+    /// stack used), then the macOS CoreText system cascade
+    /// ([`cascade_fallback_face`]) for anything CJK doesn't cover. Returns
+    /// whether a new face was added (so the caller retries the lookup).
+    /// Negative results are cached in `cascade_misses` so a genuinely uncovered
+    /// codepoint is resolved once, not on every segmentation pass.
+    fn try_dynamic_fallback(&mut self, ch: char) -> bool {
         if self.cascade_misses.contains(&ch) {
             return false;
         }
@@ -383,9 +389,9 @@ impl FontGrid {
             self.cascade_misses.insert(ch);
             return false;
         }
-        match cascade_fallback_face(ch) {
-            // `cascade_fallback_face` guarantees the returned face maps `ch`,
-            // so the caller's retry is guaranteed to find it.
+        // Both resolvers guarantee the returned face maps `ch`, so the caller's
+        // retry is guaranteed to find it.
+        match cjk_fallback_face_for(ch).or_else(|| cascade_fallback_face(ch)) {
             Some(face) => {
                 self.font_stack.push_dynamic_fallback(face);
                 true
@@ -1003,6 +1009,79 @@ mod tests {
             natural.width,
             natural.height,
             info.atlas_size
+        );
+    }
+
+    /// A CJK codepoint absent from the (CJK-free) startup stack is resolved
+    /// lazily: the first lookup pulls in exactly one fallback face, and the
+    /// second is served from the now-populated stack without growing it again
+    /// or re-running resolution.
+    #[test]
+    fn cjk_glyph_is_resolved_lazily_then_cached() {
+        let mut grid = match FontGrid::new(14.0, FontConfig::default()) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+        // Precondition for a meaningful test: the startup stack must not
+        // already cover the kanji (otherwise there is nothing to lazily pull).
+        if grid
+            .lookup_glyph_in_stack('日', FontStyle::Regular)
+            .is_some()
+        {
+            eprintln!("skipping: this environment's startup stack already covers kanji");
+            return;
+        }
+
+        let faces_before = grid.font_stack.faces().len();
+        let (face_index, glyph_id) = grid.resolve_glyph('日');
+        if glyph_id == 0 {
+            eprintln!("skipping: no CJK-capable font installed to resolve U+65E5");
+            return;
+        }
+        assert_eq!(
+            grid.font_stack.faces().len(),
+            faces_before + 1,
+            "a CJK miss must lazily pull in exactly one fallback face"
+        );
+        assert!(
+            grid.font_stack.is_fallback_face(face_index),
+            "the kanji must resolve to a dynamically-added fallback face, not the primary"
+        );
+
+        // Second lookup: same face + glyph, and the stack does not grow again
+        // (served from the populated stack, no re-resolution).
+        let (face_index2, glyph_id2) = grid.resolve_glyph('日');
+        assert_eq!((face_index, glyph_id), (face_index2, glyph_id2));
+        assert_eq!(
+            grid.font_stack.faces().len(),
+            faces_before + 1,
+            "a cached CJK lookup must not pull in another fallback face"
+        );
+    }
+
+    /// The non-CJK path is unaffected: plain ASCII stays on the primary face
+    /// (index 0) and never pulls a fallback into the stack.
+    #[test]
+    fn ascii_resolution_stays_on_primary_and_adds_no_fallback() {
+        let mut grid = match FontGrid::new(14.0, FontConfig::default()) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("skipping: no system monospace font available: {e}");
+                return;
+            }
+        };
+        let faces_before = grid.font_stack.faces().len();
+
+        let (face_index, glyph_id) = grid.resolve_glyph('A');
+        assert_eq!(face_index, 0, "ASCII 'A' must resolve to the primary face");
+        assert_ne!(glyph_id, 0, "the primary face must cover ASCII 'A'");
+        assert_eq!(
+            grid.font_stack.faces().len(),
+            faces_before,
+            "resolving ASCII must not pull any fallback face into the stack"
         );
     }
 

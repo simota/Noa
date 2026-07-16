@@ -5,10 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.5] - 2026-07-16
 
 ### Added
 
+- Remote App QR pairing: a settings-panel row renders the noa-server
+  connection payload (URL + token) as a QR code for one-scan pairing from a
+  remote app (#15)
+- Client mode: attach a pane to a remote noa-server as a raw VT stream, with
+  parser-state seeding, scrollback history backfill, and client connection
+  config keys (#12)
+- Keyboard-only copy mode: grid-owned selection with character/word/line
+  motions, rendered selection and hollow cursor, plus keybindings and command
+  palette entries (#11)
+- `send-selection-send-enter` config key (default off): the send-selection
+  picker follows the paste with an Enter, queued atomically with the paste so
+  a dropped paste never submits a stale prompt line (#10)
 - `-e <command...>` CLI flag: run a command instead of the login shell in the
   first window (Ghostty `initial-command` parity — first surface only;
   suppresses session restore)
@@ -26,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- New tabs are inserted after the current tab instead of at the end, with
+  native and internal tab order kept aligned for navigation, closing, and
+  session persistence (#14)
 - Config live-reload cadence: the idle file poll slowed from 500ms to 3s;
   window focus gain and settings-panel commits now expedite an immediate
   check instead. Net effect: edits made in another app apply on refocus
@@ -52,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Child processes now see `TERM_PROGRAM=Noa`, so shells and TUIs can identify
+  the hosting terminal (#17)
+- `noa-ipc` grid coordinates are stable session-absolute row coordinates:
+  `getGrid` and output notifications survive scrollback eviction, coordinate
+  generations are versioned, and copy-mode indexing is translated once at the
+  IPC boundary (#13)
 - Keystroke echo could be delayed up to one redraw-floor interval (~8ms)
   while cursor-blink repaints were active
 - IME composition (`Preedit`/`Commit`) now counts as typing for
@@ -199,6 +220,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session sidebar, session overview, quick terminal, command palette, native
   tabs, and macOS app bundle packaging with signing/notarization CI
 
+[0.1.5]: https://github.com/simota/noa/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/simota/noa/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/simota/noa/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/simota/noa/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/simota/noa/compare/v0.1.0...v0.1.1

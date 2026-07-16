@@ -88,6 +88,15 @@ pub(super) struct TerminalOutput {
     /// throttle window even with no further pty output. `None` when nothing
     /// is owed (pushed now, or the tap is inactive).
     pub(super) ipc_output_publish_pending: Option<Instant>,
+    /// Whether this batch could have changed visible terminal state
+    /// ([`noa_vt::Stream::take_display_dirty`]). `false` — every completed
+    /// action was a pure report query (DSR/DA/DECRQM/XTVERSION/Kitty kbd
+    /// query) — means the spawn loop skips the redraw poke entirely: there
+    /// is nothing new to paint, and waking the main thread mid-query-burst
+    /// only adds a snapshot pass that contends the terminal lock against
+    /// the very next query's parse (measured as the dominant term in the
+    /// DSR round-trip p99).
+    pub(super) display_dirty: bool,
 }
 
 #[cfg(test)]
@@ -279,6 +288,7 @@ pub(super) fn feed_terminal_batch<T: AsRef<[u8]>>(
         sidebar_bell,
         ipc_output,
         ipc_output_publish_pending,
+        display_dirty: stream.take_display_dirty(),
     };
     drop(term);
     output.sidebar_upsert = sidebar_raw.map(|(name, cwd, busy, rows)| SidebarUpsert {

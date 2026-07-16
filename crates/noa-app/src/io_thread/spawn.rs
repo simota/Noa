@@ -42,18 +42,68 @@ use super::sidebar::SidebarPublish;
 /// Serialized query/reply traffic (DSR probes, TUI status queries, echo
 /// during bursts) arrives well inside this window; human typing does not,
 /// so an interactive-but-quiet pane never spins.
-const HOT_SPIN_WINDOW: Duration = Duration::from_millis(2);
+pub(super) const HOT_SPIN_WINDOW: Duration = Duration::from_millis(2);
 /// Upper bound on one pre-park spin. The next request of a serialized
 /// round-trip loop lands 10–30µs after this thread goes idle, so this
 /// budget catches it with margin while capping the wasted spin at the
 /// trailing edge of a burst.
 const HOT_SPIN_BUDGET: Duration = Duration::from_micros(150);
-/// A fed batch at or under this size counts as interactive traffic and arms
-/// the hot spin; anything bigger is bulk output (a flood reads full 64 KiB
-/// `READ_CHUNK`s), where spinning would only steal cache/CPU from the
-/// reader thread's sends — measured as a ~3% hit on the 150 MB consume
-/// benchmark when the spin armed unconditionally.
-const HOT_SPIN_MAX_BATCH: usize = 4096;
+/// Recent pty traffic at or under this many bytes (summed over roughly the
+/// last two [`HOT_SPIN_WINDOW`]s, see [`SpinTraffic`]) counts as interactive
+/// and arms the hot spin; anything above is bulk output, where spinning
+/// would only steal cache/CPU from the reader thread's sends — measured as
+/// a ~3% wall hit on the 150 MB consume benchmark when the spin armed
+/// unconditionally, and ~340 CPU-ms of pure spin per 150 MB flood when the
+/// gate keyed on single-batch size (pty reads deliver floods in small
+/// chunks whenever the parser outpaces the reader, so "small batch" alone
+/// does not mean "interactive").
+pub(super) const HOT_SPIN_MAX_BATCH: usize = 4096;
+
+/// Two-bucket sliding byte counter behind the hot-spin gate: how many pty
+/// bytes arrived within roughly the last [`HOT_SPIN_WINDOW`] (over-counting
+/// at most one window into the past at a bucket boundary — bulk traffic can
+/// never slip under the gate at a window edge). A serialized query/reply
+/// loop (DSR probes, TUI status queries — tens of bytes per window) always
+/// stays under [`HOT_SPIN_MAX_BATCH`]; a flood blows through it within its
+/// first couple of read chunks regardless of chunk size.
+#[derive(Default)]
+pub(super) struct SpinTraffic {
+    bucket_start: Option<Instant>,
+    last_data_at: Option<Instant>,
+    current: usize,
+    previous: usize,
+}
+
+impl SpinTraffic {
+    /// Record one fed batch.
+    pub(super) fn record(&mut self, now: Instant, bytes: usize) {
+        match self.bucket_start {
+            Some(start) => {
+                let elapsed = now.saturating_duration_since(start);
+                if elapsed >= HOT_SPIN_WINDOW * 2 {
+                    self.previous = 0;
+                    self.current = 0;
+                    self.bucket_start = Some(now);
+                } else if elapsed >= HOT_SPIN_WINDOW {
+                    self.previous = self.current;
+                    self.current = 0;
+                    self.bucket_start = Some(now);
+                }
+            }
+            None => self.bucket_start = Some(now),
+        }
+        self.current = self.current.saturating_add(bytes);
+        self.last_data_at = Some(now);
+    }
+
+    /// Whether the pre-park spin should arm: data arrived within
+    /// [`HOT_SPIN_WINDOW`] and recent traffic is interactive-sized.
+    pub(super) fn wants_spin(&self, now: Instant) -> bool {
+        self.last_data_at
+            .is_some_and(|at| now.saturating_duration_since(at) < HOT_SPIN_WINDOW)
+            && self.current.saturating_add(self.previous) <= HOT_SPIN_MAX_BATCH
+    }
+}
 
 /// Which window/pane's `UserEvent`s this io thread posts back to the main
 /// loop. Grouped into one struct (rather than two `spawn` arguments)
@@ -222,19 +272,32 @@ pub fn spawn(
         // bypass per input event, so a non-echoing program costs one extra
         // repaint per keystroke at worst — bounded by typing speed.
         let mut input_echo_pending = false;
-        // When the last *small* pty output batch arrived, for the
-        // hot-traffic spin gate: `None`/stale means this pane is idle (or
-        // mid-flood), and every park below stays a plain block, exactly as
-        // before the spin existed.
-        let mut last_small_data_at: Option<Instant> = None;
+        // Short-window pty traffic gauge for the hot-traffic spin gate: no
+        // recent data (idle pane) or bulk-rate data (flood, whatever the
+        // per-read chunk size) means every park below stays a plain block,
+        // exactly as before the spin existed.
+        let mut spin_traffic = SpinTraffic::default();
+        // One reusable six-op `Select` for every park below, built once:
+        // during a reader-bottlenecked flood this thread parks once per pty
+        // sliver (tens of thousands of times per second), and re-registering
+        // all six channels per park was measurable overhead. `ready`/
+        // `ready_timeout` only report readiness — the fast-path `try_recv`s
+        // at the top of the loop complete the actual operations — so the
+        // registration list never needs to change between parks.
+        let mut sel = crossbeam_channel::Select::new();
+        sel.recv(&shutdown_rx);
+        sel.recv(&ipc_output_refresh_rx);
+        sel.recv(pty.event_rx());
+        sel.recv(&resize_rx);
+        sel.recv(&input_rx);
+        sel.recv(&auto_approve_feedback_rx);
         loop {
             // Fast path: poll every channel with `try_recv` before falling
             // back to a blocking `Select`. During sustained output the pty
-            // channel is almost always ready, so rebuilding the six-op
-            // `Select` per batch is pure overhead — while the control
-            // channels are still polled every iteration, so a flood can't
-            // starve shutdown, resize, or user input (^C must reach the
-            // shell mid-flood).
+            // channel is almost always ready — while the control channels
+            // are still polled every iteration, so a flood can't starve
+            // shutdown, resize, or user input (^C must reach the shell
+            // mid-flood).
             match shutdown_rx.try_recv() {
                 Ok(()) | Err(TryRecvError::Disconnected) => break,
                 Err(TryRecvError::Empty) => {}
@@ -302,7 +365,7 @@ pub fn spawn(
                         drain_queued_pty_data(pty.event_rx(), &mut drained, bytes.len());
                     let batch_bytes =
                         bytes.len() + drained.iter().map(|chunk| chunk.len()).sum::<usize>();
-                    last_small_data_at = (batch_bytes <= HOT_SPIN_MAX_BATCH).then(Instant::now);
+                    spin_traffic.record(Instant::now(), batch_bytes);
                     if let Some(file) = pty_capture.as_mut()
                         && !capture_pty_bytes(
                             file,
@@ -392,12 +455,25 @@ pub fn spawn(
                     if !output.pending_writes.is_empty() {
                         write_pty_bytes(&writer, &output.pending_writes);
                     }
-                    let redraw = if input_echo_pending {
-                        redraw_floor.decide_input_echo(output.synchronized_output, Instant::now())
+                    // A query-only batch (`TerminalOutput::display_dirty` ==
+                    // false: nothing but DSR/DA/DECRQM-style reports) paints
+                    // nothing — skip the redraw poke and floor bookkeeping
+                    // entirely instead of waking the main thread to snapshot
+                    // an unchanged frame while the next query of the burst is
+                    // waiting on the same terminal lock. `input_echo_pending`
+                    // stays armed: an echo can only arrive in a batch that
+                    // actually prints, which dirties the display.
+                    let redraw = if output.display_dirty {
+                        Some(if input_echo_pending {
+                            redraw_floor
+                                .decide_input_echo(output.synchronized_output, Instant::now())
+                        } else {
+                            redraw_floor.decide(output.synchronized_output, Instant::now())
+                        })
                     } else {
-                        redraw_floor.decide(output.synchronized_output, Instant::now())
+                        None
                     };
-                    if matches!(redraw, RedrawDecision::Now) {
+                    if matches!(redraw, Some(RedrawDecision::Now)) {
                         input_echo_pending = false;
                     }
                     for text in output.pending_clipboard_writes {
@@ -423,7 +499,7 @@ pub fn spawn(
                         });
                     }
                     match redraw {
-                        RedrawDecision::Now => {
+                        Some(RedrawDecision::Now) => {
                             redraw_deadline = None;
                             if proxy
                                 .send_event(UserEvent::Redraw(window_id, pane_id))
@@ -435,9 +511,11 @@ pub fn spawn(
                         // Frame withheld (redraw floor or synchronized
                         // output): owe a redraw at the window deadline so it
                         // can't get stuck.
-                        RedrawDecision::Suppress { deadline } => {
+                        Some(RedrawDecision::Suppress { deadline }) => {
                             redraw_deadline = Some(deadline);
                         }
+                        // Query-only batch: nothing to paint, nothing owed.
+                        None => {}
                     }
                     match terminal_event {
                         Some(PtyDrainTerminalEvent::ExitOrError) => {
@@ -537,17 +615,15 @@ pub fn spawn(
             // Hot-traffic spin (input-latency tail): a parked wake on this
             // thread costs 20–80µs at the scheduler's mercy, which is the
             // dominant term in a query round-trip's p99 (the parse itself is
-            // ~1µs). While *interactive-sized* output is actively streaming
-            // (see `HOT_SPIN_MAX_BATCH` — bulk floods never arm this), poll
-            // every channel for a short budget before parking — the next
-            // event of a serialized round-trip loop (DSR probe, TUI query,
-            // echoed keystroke burst) arrives within a few tens of µs,
-            // turning that scheduler wake into a hit in this loop. An idle
-            // or human-typing pane parks exactly as before, burning
-            // nothing.
-            if last_small_data_at
-                .is_some_and(|at| now.saturating_duration_since(at) < HOT_SPIN_WINDOW)
-            {
+            // ~1µs). While *interactive-rate* output is actively streaming
+            // (see `SpinTraffic` — bulk floods never arm this, whatever
+            // their per-read chunk size), poll every channel for a short
+            // budget before parking — the next event of a serialized
+            // round-trip loop (DSR probe, TUI query, echoed keystroke
+            // burst) arrives within a few tens of µs, turning that
+            // scheduler wake into a hit in this loop. An idle or
+            // human-typing pane parks exactly as before, burning nothing.
+            if spin_traffic.wants_spin(now) {
                 let spin_deadline = Instant::now() + HOT_SPIN_BUDGET;
                 let mut ready = false;
                 while Instant::now() < spin_deadline {
@@ -584,13 +660,6 @@ pub fn spawn(
             .into_iter()
             .flatten()
             .min();
-            let mut sel = crossbeam_channel::Select::new();
-            sel.recv(&shutdown_rx);
-            sel.recv(&ipc_output_refresh_rx);
-            sel.recv(pty.event_rx());
-            sel.recv(&resize_rx);
-            sel.recv(&input_rx);
-            sel.recv(&auto_approve_feedback_rx);
             match next_deadline {
                 Some(deadline) => {
                     let _ = sel.ready_timeout(deadline.saturating_duration_since(Instant::now()));

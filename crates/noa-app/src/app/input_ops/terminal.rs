@@ -291,8 +291,8 @@ impl App {
             SurfaceTransport::Local(local) => match local.pty_input_tx.reserve(bytes) {
                 Some(reserved) => {
                     local
-                        .input_echo_pending
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                        .input_echo_seq
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     match local.pty_writer.write_owned(reserved) {
                         Ok(()) => crate::io_thread::QueueInputResult::Queued,
                         Err(_) => crate::io_thread::QueueInputResult::Disconnected,

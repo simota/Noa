@@ -769,7 +769,7 @@ impl App {
         // Main-thread writer clone taken before `pty` moves into the io thread,
         // so keyboard/paste input writes straight to the writer thread.
         let pty_writer = pty.writer();
-        let input_echo_pending = Arc::new(AtomicBool::new(false));
+        let input_echo_seq = Arc::new(AtomicU64::new(0));
         let io_thread = crate::io_thread::spawn(
             pty,
             terminal.clone(),
@@ -778,7 +778,7 @@ impl App {
             resize_rx,
             pty_input_rx,
             auto_approve_feedback_rx,
-            input_echo_pending.clone(),
+            input_echo_seq.clone(),
             overview_publish,
             sidebar_publish,
             auto_approve,
@@ -792,7 +792,7 @@ impl App {
             SurfaceTransport::Local(LocalSurfaceTransport {
                 pty_input_tx,
                 pty_writer,
-                input_echo_pending,
+                input_echo_seq,
                 auto_approve_feedback_tx,
                 resize_tx,
                 io_thread: Some(io_thread),

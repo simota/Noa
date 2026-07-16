@@ -982,10 +982,13 @@ pub(super) struct LocalSurfaceTransport {
     /// the io thread's own DSR/DA replies share it, and independent-producer
     /// interleaving is acceptable (same model as a separated termio writer).
     pub(super) pty_writer: PtyWriter,
-    /// Shared with this pane's io thread: set true when input is written to
-    /// the pty, so the echo batch bypasses the redraw floor. See
-    /// `io_thread::spawn`'s `input_echo_pending`.
-    pub(super) input_echo_pending: Arc<AtomicBool>,
+    /// Shared with this pane's io thread: incremented when input is written
+    /// to the pty, so the echo batch bypasses the redraw floor. A generation
+    /// counter rather than a bool: the io thread consumes only the generation
+    /// it observed at redraw-decision time, so an input landing between its
+    /// load and consume is never lost. See `io_thread::spawn`'s
+    /// `input_echo_seq`.
+    pub(super) input_echo_seq: Arc<AtomicU64>,
     pub(super) auto_approve_feedback_tx: Sender<crate::io_thread::AutoApproveFeedback>,
     pub(super) resize_tx: Sender<GridSize>,
     pub(super) io_thread: Option<crate::io_thread::IoThreadHandle>,

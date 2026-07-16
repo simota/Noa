@@ -7,7 +7,7 @@
 //! crossbeam channels.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -203,7 +203,7 @@ pub fn spawn(
     resize_rx: Receiver<GridSize>,
     input_rx: Receiver<QueuedPtyInput>,
     auto_approve_feedback_rx: Receiver<AutoApproveFeedback>,
-    input_echo_pending: Arc<AtomicBool>,
+    input_echo_seq: Arc<AtomicU64>,
     overview: OverviewPublish,
     sidebar: SidebarPublish,
     auto_approve: AutoApprovePublish,
@@ -265,18 +265,20 @@ pub fn spawn(
         // is owed and the select below blocks exactly as before.
         let mut redraw_deadline: Option<Instant> = None;
         let mut auto_approve_rescan_at: Option<Instant> = None;
-        // True while this pane owes a repaint for a user-input echo: set when
-        // input bytes are forwarded to the pty, cleared by the next redraw
-        // that actually fires. The next pty-output batch (the echo, when the
-        // program echoes at all) then bypasses the redraw floor via
+        // Generation of the last user input whose echo repaint this thread
+        // has served: the pane owes an echo repaint while `input_echo_seq`
+        // (bumped per input write — by the main thread's direct pty write,
+        // and by the IPC-attach forward on `input_rx` below) is ahead of it.
+        // The next pty-output batch (the echo, when the program echoes at
+        // all) then bypasses the redraw floor via
         // [`RedrawFloor::decide_input_echo`] instead of being withheld up to
-        // one floor interval behind another pane's recent paint. At most one
-        // bypass per input event, so a non-echoing program costs one extra
-        // repaint per keystroke at worst — bounded by typing speed. Shared
-        // with the main thread: keyboard/paste input now reaches the PTY
-        // writer directly (skipping this thread's batch loop), so the setter
-        // is the main-thread write path; IPC-attach input still arrives on
-        // `input_rx` below and sets it here.
+        // one floor interval behind another pane's recent paint. Consuming
+        // records only the generation observed at decision time, so an input
+        // that lands between the load and the consume stays owed — a shared
+        // bool cleared here would drop it. At most one bypass per input
+        // event, so a non-echoing program costs one extra repaint per
+        // keystroke at worst — bounded by typing speed.
+        let mut input_echo_served: u64 = 0;
         // Short-window pty traffic gauge for the hot-traffic spin gate: no
         // recent data (idle pane) or bulk-rate data (flood, whatever the
         // per-read chunk size) means every park below stays a plain block,
@@ -341,7 +343,7 @@ pub fn spawn(
                     if let Err(err) = writer.write_owned(bytes) {
                         log::warn!("failed to queue bytes to pty: {err}");
                     }
-                    input_echo_pending.store(true, Ordering::Relaxed);
+                    input_echo_seq.fetch_add(1, Ordering::Relaxed);
                     did_work = true;
                 }
                 Err(TryRecvError::Disconnected) => break, // main thread / App dropped
@@ -465,22 +467,24 @@ pub fn spawn(
                     // nothing — skip the redraw poke and floor bookkeeping
                     // entirely instead of waking the main thread to snapshot
                     // an unchanged frame while the next query of the burst is
-                    // waiting on the same terminal lock. `input_echo_pending`
+                    // waiting on the same terminal lock. The echo debt
                     // stays armed: an echo can only arrive in a batch that
                     // actually prints, which dirties the display.
                     let redraw = if output.display_dirty {
-                        Some(if input_echo_pending.load(Ordering::Relaxed) {
+                        let echo_seq = input_echo_seq.load(Ordering::Relaxed);
+                        let decision = if echo_seq != input_echo_served {
                             redraw_floor
                                 .decide_input_echo(output.synchronized_output, Instant::now())
                         } else {
                             redraw_floor.decide(output.synchronized_output, Instant::now())
-                        })
+                        };
+                        if matches!(decision, RedrawDecision::Now) {
+                            input_echo_served = echo_seq;
+                        }
+                        Some(decision)
                     } else {
                         None
                     };
-                    if matches!(redraw, Some(RedrawDecision::Now)) {
-                        input_echo_pending.store(false, Ordering::Relaxed);
-                    }
                     for text in output.pending_clipboard_writes {
                         let _ = proxy.send_event(UserEvent::ClipboardWrite {
                             window_id,

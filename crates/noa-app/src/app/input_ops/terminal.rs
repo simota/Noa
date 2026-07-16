@@ -282,7 +282,24 @@ impl App {
             return crate::io_thread::QueueInputResult::Disconnected;
         };
         match &surface.transport {
-            SurfaceTransport::Local(local) => local.pty_input_tx.queue(bytes),
+            // Reserve against the pane's shared byte budget, then write
+            // straight to the PTY writer thread — bypassing the io thread's
+            // output-batch loop so a keystroke isn't stuck behind a large
+            // pty-output batch. The reservation travels with the bytes and is
+            // released after the real write, preserving the overflow-cap
+            // accounting `PtyInputQueue::queue` would apply.
+            SurfaceTransport::Local(local) => match local.pty_input_tx.reserve(bytes) {
+                Some(reserved) => {
+                    local
+                        .input_echo_pending
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    match local.pty_writer.write_owned(reserved) {
+                        Ok(()) => crate::io_thread::QueueInputResult::Queued,
+                        Err(_) => crate::io_thread::QueueInputResult::Disconnected,
+                    }
+                }
+                None => crate::io_thread::QueueInputResult::Dropped,
+            },
             SurfaceTransport::Remote(remote) => {
                 if remote
                     .connection

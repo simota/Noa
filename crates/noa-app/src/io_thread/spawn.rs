@@ -7,6 +7,7 @@
 //! crossbeam channels.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -202,6 +203,7 @@ pub fn spawn(
     resize_rx: Receiver<GridSize>,
     input_rx: Receiver<QueuedPtyInput>,
     auto_approve_feedback_rx: Receiver<AutoApproveFeedback>,
+    input_echo_pending: Arc<AtomicBool>,
     overview: OverviewPublish,
     sidebar: SidebarPublish,
     auto_approve: AutoApprovePublish,
@@ -270,8 +272,11 @@ pub fn spawn(
         // [`RedrawFloor::decide_input_echo`] instead of being withheld up to
         // one floor interval behind another pane's recent paint. At most one
         // bypass per input event, so a non-echoing program costs one extra
-        // repaint per keystroke at worst — bounded by typing speed.
-        let mut input_echo_pending = false;
+        // repaint per keystroke at worst — bounded by typing speed. Shared
+        // with the main thread: keyboard/paste input now reaches the PTY
+        // writer directly (skipping this thread's batch loop), so the setter
+        // is the main-thread write path; IPC-attach input still arrives on
+        // `input_rx` below and sets it here.
         // Short-window pty traffic gauge for the hot-traffic spin gate: no
         // recent data (idle pane) or bulk-rate data (flood, whatever the
         // per-read chunk size) means every park below stays a plain block,
@@ -336,7 +341,7 @@ pub fn spawn(
                     if let Err(err) = writer.write_owned(bytes) {
                         log::warn!("failed to queue bytes to pty: {err}");
                     }
-                    input_echo_pending = true;
+                    input_echo_pending.store(true, Ordering::Relaxed);
                     did_work = true;
                 }
                 Err(TryRecvError::Disconnected) => break, // main thread / App dropped
@@ -464,7 +469,7 @@ pub fn spawn(
                     // stays armed: an echo can only arrive in a batch that
                     // actually prints, which dirties the display.
                     let redraw = if output.display_dirty {
-                        Some(if input_echo_pending {
+                        Some(if input_echo_pending.load(Ordering::Relaxed) {
                             redraw_floor
                                 .decide_input_echo(output.synchronized_output, Instant::now())
                         } else {
@@ -474,7 +479,7 @@ pub fn spawn(
                         None
                     };
                     if matches!(redraw, Some(RedrawDecision::Now)) {
-                        input_echo_pending = false;
+                        input_echo_pending.store(false, Ordering::Relaxed);
                     }
                     for text in output.pending_clipboard_writes {
                         let _ = proxy.send_event(UserEvent::ClipboardWrite {

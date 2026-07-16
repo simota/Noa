@@ -123,6 +123,19 @@ impl PtyInputQueue {
         }
     }
 
+    /// Reserve `input` against this pane's shared byte budget without routing
+    /// it through the io thread's input channel, returning the reservation
+    /// wrapper for the caller to hand straight to the PTY writer (the
+    /// main-thread input fast path — keystrokes must not wait out the io
+    /// thread's output batch). `None` means the pane is at
+    /// [`PTY_INPUT_PENDING_BYTE_CAP`] and the input must be dropped, exactly
+    /// as [`queue`](Self::queue) would return [`QueueInputResult::Dropped`].
+    /// The returned wrapper shares this pane's budget with `queue`, so both
+    /// paths are capped together.
+    pub(crate) fn reserve(&self, input: PtyInput) -> Option<QueuedPtyInput> {
+        QueuedPtyInput::reserve(input, Arc::clone(&self.pending_bytes)).ok()
+    }
+
     /// Queue `input` behind every byte accepted before it, blocking never.
     pub(crate) fn queue(&self, input: PtyInput) -> QueueInputResult {
         let Ok(input) = QueuedPtyInput::reserve(input, Arc::clone(&self.pending_bytes)) else {

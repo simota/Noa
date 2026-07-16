@@ -21,19 +21,14 @@ unset NOA_BASH_LOGIN NOA_BASH_INJECT NOA_BASH_RCFILE
 # Only wire up integration for a real interactive terminal.
 case "$-" in
   *i*)
-    _noa_report_cwd() {
-      printf '\e]7;file://%s%s\a' "${HOSTNAME}" "$PWD"
-    }
-
-    # OSC 133 D (last command's exit status) + A (prompt start) + B (input
-    # start), plus OSC 7, emitted before each prompt. Runs first in
-    # PROMPT_COMMAND so `$?` is still the finished command's status.
+    # OSC 133 D (last command's exit status) + OSC 7 (cwd, raw path via the
+    # kitty-shell-cwd:// scheme — no encoding needed) + A (prompt start) +
+    # B (input start), emitted before each prompt in one builtin printf.
+    # Runs first in PROMPT_COMMAND so `$?` is still the finished command's
+    # status when it's expanded.
     _noa_prompt() {
-      local ret="$?"
-      printf '\e]133;D;%s\a' "$ret"
-      _noa_report_cwd
-      printf '\e]133;A\a'
-      printf '\e]133;B\a'
+      builtin printf '\e]133;D;%s\a\e]7;kitty-shell-cwd://%s%s\a\e]133;A\a\e]133;B\a' \
+        "$?" "$HOSTNAME" "$PWD"
     }
     PROMPT_COMMAND="_noa_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
 

@@ -827,8 +827,8 @@ mod tests {
                     collected.extend_from_slice(&chunk);
                     if collected.windows(7).any(|w| w == b"\x1b]133;A")
                         && collected
-                            .windows(11)
-                            .any(|w| w == b"\x1b]7;file://".as_ref())
+                            .windows(22)
+                            .any(|w| w == b"\x1b]7;kitty-shell-cwd://".as_ref())
                     {
                         break;
                     }
@@ -844,7 +844,9 @@ mod tests {
             "expected an OSC 133;A prompt mark in zsh output"
         );
         assert!(
-            collected.windows(11).any(|w| w == b"\x1b]7;file://"),
+            collected
+                .windows(22)
+                .any(|w| w == b"\x1b]7;kitty-shell-cwd://"),
             "expected an OSC 7 cwd report in zsh output"
         );
     }
@@ -879,8 +881,8 @@ mod tests {
                     collected.extend_from_slice(&chunk);
                     if collected.windows(7).any(|w| w == b"\x1b]133;A")
                         && collected
-                            .windows(11)
-                            .any(|w| w == b"\x1b]7;file://".as_ref())
+                            .windows(22)
+                            .any(|w| w == b"\x1b]7;kitty-shell-cwd://".as_ref())
                     {
                         break;
                     }
@@ -896,7 +898,9 @@ mod tests {
             "expected an OSC 133;A prompt mark in bash output"
         );
         assert!(
-            collected.windows(11).any(|w| w == b"\x1b]7;file://"),
+            collected
+                .windows(22)
+                .any(|w| w == b"\x1b]7;kitty-shell-cwd://"),
             "expected an OSC 7 cwd report in bash output"
         );
     }

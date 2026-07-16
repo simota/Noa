@@ -511,6 +511,28 @@ pub(super) fn parse_background_image_interval(
     Some((parsed as u64).max(MIN_BACKGROUND_IMAGE_INTERVAL_SECS))
 }
 
+/// Parse `cursor-stop-blinking-after`: non-negative integer seconds of
+/// focused-surface inactivity before a blinking cursor settles solid. `0` is
+/// a real value ("never stop", Ghostty-parity behavior); negative and
+/// non-integer values diagnose and fall back to the default.
+pub(super) fn parse_cursor_stop_blinking_after(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<u64> {
+    let Some(value) = directive.value.as_deref() else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, ""));
+        return None;
+    };
+    match value.parse::<u64>() {
+        Ok(parsed) => Some(parsed),
+        Err(_) => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+            None
+        }
+    }
+}
+
 /// Parse one `quick-terminal-size` side: a percentage (`40%`) or a pixel
 /// count in AppKit points (`400px`). `None` for anything else, including a
 /// non-positive magnitude.

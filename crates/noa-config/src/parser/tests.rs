@@ -772,6 +772,48 @@ fn background_image_interval_parses_seconds_and_clamps_small_positive_values() {
 }
 
 #[test]
+fn cursor_stop_blinking_after_parses_seconds_including_zero() {
+    // `0` is a real value: never stop blinking (Ghostty-parity behavior).
+    for (value, expected) in [("10", 10), ("0", 0), ("1", 1), ("900", 900)] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("cursor-stop-blinking-after = {value}"));
+
+        assert_eq!(
+            overrides.cursor_stop_blinking_after_secs,
+            Some(expected),
+            "{value:?}"
+        );
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+    }
+
+    assert_eq!(
+        ConfigOverrides::default()
+            .apply_to(crate::StartupConfig::default())
+            .cursor_stop_blinking_after_secs,
+        crate::DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS
+    );
+}
+
+#[test]
+fn cursor_stop_blinking_after_rejects_negative_and_non_integer_values() {
+    for value in ["-1", "1.5", "never", ""] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("cursor-stop-blinking-after = {value}"));
+
+        assert_eq!(overrides.cursor_stop_blinking_after_secs, None, "{value:?}");
+        assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+        assert!(diagnostics[0].message.contains("cursor-stop-blinking-after"));
+        assert_eq!(
+            overrides
+                .apply_to(crate::StartupConfig::default())
+                .cursor_stop_blinking_after_secs,
+            crate::DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS,
+            "{value:?}"
+        );
+    }
+}
+
+#[test]
 fn background_image_interval_rejects_zero_negative_and_non_integer_values() {
     for value in ["0", "-1", "1.5", "fast"] {
         let (overrides, diagnostics) =

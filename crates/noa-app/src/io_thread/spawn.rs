@@ -31,7 +31,7 @@ use super::feed::{
     PtyDrainTerminalEvent, capture_pty_bytes, drain_queued_pty_data, feed_terminal_batch,
     open_pty_capture,
 };
-use super::input_queue::QueuedPtyInput;
+use super::input_queue::{EchoStampedInput, QueuedPtyInput};
 use super::ipc_tap::{IpcOutputTap, flush_pending_ipc_output, force_ipc_output_refresh};
 use super::overview::{OverviewPublish, flush_pending_overview_publish};
 use super::raw_attach::RawAttachTap;
@@ -267,8 +267,8 @@ pub fn spawn(
         let mut auto_approve_rescan_at: Option<Instant> = None;
         // Generation of the last user input whose echo repaint this thread
         // has served: the pane owes an echo repaint while `input_echo_seq`
-        // (bumped per input write — by the main thread's direct pty write,
-        // and by the IPC-attach forward on `input_rx` below) is ahead of it.
+        // (bumped by the writer thread as it completes each real PTY input
+        // write — see `EchoStampedInput`) is ahead of it.
         // The next pty-output batch (the echo, when the program echoes at
         // all) then bypasses the redraw floor via
         // [`RedrawFloor::decide_input_echo`] instead of being withheld up to
@@ -340,10 +340,12 @@ pub fn spawn(
                             String::from_utf8_lossy(bytes.as_ref())
                         );
                     }
-                    if let Err(err) = writer.write_owned(bytes) {
+                    // Stamped so the echo generation advances at the real
+                    // PTY write, not at queue time (see `EchoStampedInput`).
+                    let stamped = EchoStampedInput::new(bytes, input_echo_seq.clone());
+                    if let Err(err) = writer.write_owned(stamped) {
                         log::warn!("failed to queue bytes to pty: {err}");
                     }
-                    input_echo_seq.fetch_add(1, Ordering::Relaxed);
                     did_work = true;
                 }
                 Err(TryRecvError::Disconnected) => break, // main thread / App dropped

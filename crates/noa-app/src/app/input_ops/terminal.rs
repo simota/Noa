@@ -290,10 +290,16 @@ impl App {
             // accounting `PtyInputQueue::queue` would apply.
             SurfaceTransport::Local(local) => match local.pty_input_tx.reserve(bytes) {
                 Some(reserved) => {
-                    local
-                        .input_echo_seq
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    match local.pty_writer.write_owned(reserved) {
+                    // The echo-repaint generation advances when the writer
+                    // thread completes the real PTY write (the wrapper's
+                    // Drop), not here: output the io thread was already
+                    // parsing predates this input and must not consume the
+                    // echo debt.
+                    let stamped = crate::io_thread::EchoStampedInput::new(
+                        reserved,
+                        local.input_echo_seq.clone(),
+                    );
+                    match local.pty_writer.write_owned(stamped) {
                         Ok(()) => crate::io_thread::QueueInputResult::Queued,
                         Err(_) => crate::io_thread::QueueInputResult::Disconnected,
                     }

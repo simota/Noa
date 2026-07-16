@@ -2,7 +2,7 @@
 //! ordered overflow buffer for bursts (huge pastes) the channel can't absorb.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use parking_lot::Mutex;
@@ -64,6 +64,36 @@ impl AsRef<[u8]> for QueuedPtyInput {
 impl Drop for QueuedPtyInput {
     fn drop(&mut self) {
         self.pending_bytes.fetch_sub(self.charge, Ordering::AcqRel);
+    }
+}
+
+/// A reserved input that advances the pane's echo-repaint generation
+/// (`input_echo_seq`) only when the writer thread drops it — i.e. after the
+/// real PTY write completes (or the write is abandoned on a dead pane, where
+/// the extra repaint is moot). Bumping at queue time instead would let an
+/// output batch the io thread was already parsing — necessarily pre-echo
+/// output — consume the debt, sending the actual echo through the normal
+/// redraw floor.
+pub(crate) struct EchoStampedInput {
+    input: QueuedPtyInput,
+    echo_seq: Arc<AtomicU64>,
+}
+
+impl EchoStampedInput {
+    pub(crate) fn new(input: QueuedPtyInput, echo_seq: Arc<AtomicU64>) -> Self {
+        Self { input, echo_seq }
+    }
+}
+
+impl AsRef<[u8]> for EchoStampedInput {
+    fn as_ref(&self) -> &[u8] {
+        self.input.as_ref()
+    }
+}
+
+impl Drop for EchoStampedInput {
+    fn drop(&mut self) {
+        self.echo_seq.fetch_add(1, Ordering::Relaxed);
     }
 }
 

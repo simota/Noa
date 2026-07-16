@@ -481,12 +481,26 @@ fn load_menlo_compatibility_fallback(
     load_title_family(source, "Menlo", properties, required_style)
 }
 
-fn load_title_family(
+/// Resolve one named family for `required_style` (or the regular cut when
+/// `None`), preferring the no-slurp CoreText→mmap path on macOS
+/// ([`mapped_font_data_for_family_style`]) and falling back to font-kit's
+/// slurping selector off macOS, or on macOS when the mmap path can't resolve
+/// the family/style (a font with no on-disk file, or a style whose native cut
+/// this family lacks — where font-kit's `resolve_required_style` also returns
+/// `None`, so the style is synthesized either way).
+fn load_named_family_for_style(
     source: &SystemSource,
     family_name: &str,
     properties: &Properties,
     required_style: Option<FontStyle>,
 ) -> Option<FontData> {
+    #[cfg(target_os = "macos")]
+    if let Some(face) = mapped_font_data_for_family_style(
+        family_name,
+        required_style.unwrap_or(FontStyle::Regular),
+    ) {
+        return Some(face);
+    }
     let handle = select_title_best_match(source, family_name, properties).ok()?;
     let handle = match required_style {
         Some(style) => resolve_required_style(source, handle, style)?,
@@ -495,20 +509,26 @@ fn load_title_family(
     load_valid_handle(handle)
 }
 
+fn load_title_family(
+    source: &SystemSource,
+    family_name: &str,
+    properties: &Properties,
+    required_style: Option<FontStyle>,
+) -> Option<FontData> {
+    load_named_family_for_style(source, family_name, properties, required_style)
+}
+
 fn load_first_matching_family(
     source: &SystemSource,
     families: &[String],
     properties: &Properties,
     required_style: Option<FontStyle>,
 ) -> Option<FontData> {
-    families.iter().find_map(|family_name| {
-        let handle = select_title_best_match(source, family_name, properties).ok()?;
-        let handle = match required_style {
-            Some(style) => resolve_required_style(source, handle, style)?,
-            None => handle,
-        };
-        load_valid_handle(handle)
-    })
+    families
+        .iter()
+        .find_map(|family_name| {
+            load_named_family_for_style(source, family_name, properties, required_style)
+        })
 }
 
 /// Confirm `handle` actually provides `style`, hardened against a font
@@ -957,15 +977,66 @@ fn mapped_font_data_for_postscript_name(postscript_name: &str) -> Option<FontDat
 }
 
 /// Resolve the best normal-style face of a family via CoreText descriptors,
-/// memory-mapped. Skips italics and takes the weight closest to regular
-/// (CoreText normalized weight 0.0), lighter on ties — the face font-kit's
-/// CSS matcher picks for `Properties::new()` in practice (e.g. Hiragino W3
-/// over W6, "Regular" over "Bold").
+/// memory-mapped. Convenience wrapper over [`mapped_font_data_for_family_style`]
+/// for the fallback stack (emoji/Nerd/CJK), which only ever wants the regular
+/// cut.
 #[cfg(target_os = "macos")]
 fn mapped_font_data_for_family(family_name: &str) -> Option<FontData> {
+    mapped_font_data_for_family_style(family_name, FontStyle::Regular)
+}
+
+/// Resolve the best face of `family_name` for `style` via CoreText descriptors,
+/// memory-mapped — the no-slurp equivalent of font-kit's
+/// `select_best_match` + [`resolve_required_style`] for the primary/style
+/// faces. font-kit's CoreText source slurps every candidate file into the heap
+/// during selection (Menlo.ttc is ~2 MB, re-slurped per style; Apple Color
+/// Emoji ~190 MB), and the freed pages linger on libmalloc's death-row; walking
+/// descriptors reads no font bytes until the one chosen file is mmapped.
+///
+/// Style resolution mirrors [`resolve_required_style`]'s trusted signals, in
+/// order:
+///
+/// 1. **PostScript-name suffix** (e.g. "Menlo-BoldItalic") — the signal
+///    `resolve_required_style` falls back to for families whose font-kit
+///    `properties()` misreport (Menlo, Helvetica: font-kit 0.14.3's CoreText
+///    backend reads every Menlo face as `Style::Italic`/weight 400). CoreText's
+///    *descriptor* traits are reliable here — verified against Menlo's four
+///    cuts — but the PostScript name is the strongest signal, so try it first
+///    for a non-regular request.
+/// 2. **CoreText descriptor traits** — italic bit + normalized weight. For
+///    `Regular`, always resolvable: the non-italic face with weight nearest
+///    regular (0.0), lighter on ties (matches font-kit's `Properties::new()`
+///    pick — Hiragino W3 over W6). For a non-regular style with no PS-name
+///    match, only a face whose traits genuinely carry the style qualifies;
+///    otherwise `None`, so the caller synthesizes the style exactly as it does
+///    when [`resolve_required_style`] returns `None`.
+#[cfg(target_os = "macos")]
+fn mapped_font_data_for_family_style(family_name: &str, style: FontStyle) -> Option<FontData> {
     use core_text::font_descriptor::{TraitAccessors, kCTFontItalicTrait};
 
     let matched = matching_descriptors("NSFontFamilyAttribute", family_name)?;
+
+    // Tier 1: exact style match by PostScript-name suffix (skip for Regular —
+    // "Menlo-Regular" would match but so would a bare "Menlo", and the trait
+    // pass below picks the true regular cut deterministically).
+    if !matches!(style, FontStyle::Regular) {
+        for index in 0..matched.len() {
+            let Some(descriptor) = matched.get(index) else {
+                continue;
+            };
+            if postscript_name_matches_style(&descriptor.font_name(), style)
+                && let Some(face) = mapped_font_data_from_descriptor(&descriptor)
+            {
+                return Some(face);
+            }
+        }
+    }
+
+    // Tier 2: descriptor traits. Rank non-italic/italic to match the request,
+    // then weight fit (nearest regular for a non-bold request, heaviest for a
+    // bold one), lighter on ties.
+    let wants_bold = matches!(style, FontStyle::Bold | FontStyle::BoldItalic);
+    let wants_italic = matches!(style, FontStyle::Italic | FontStyle::BoldItalic);
     let mut best: Option<((bool, f64, f64), isize)> = None;
     for index in 0..matched.len() {
         let Some(descriptor) = matched.get(index) else {
@@ -974,7 +1045,21 @@ fn mapped_font_data_for_family(family_name: &str) -> Option<FontData> {
         let traits = descriptor.traits();
         let weight = traits.normalized_weight();
         let italic = traits.symbolic_traits() & kCTFontItalicTrait != 0;
-        let rank = (italic, weight.abs(), weight);
+        // For a non-regular request, reject faces that plainly lack the style
+        // so an absent cut yields `None` (→ synthesis) rather than a wrong
+        // face. A bold request needs meaningful weight (CoreText normalizes
+        // Bold to ~0.4; ≥0.23 clears Medium without demanding Heavy).
+        if !matches!(style, FontStyle::Regular) {
+            if italic != wants_italic {
+                continue;
+            }
+            if wants_bold && weight < 0.23 {
+                continue;
+            }
+        }
+        let italic_mismatch = italic != wants_italic;
+        let weight_rank = if wants_bold { -weight } else { weight.abs() };
+        let rank = (italic_mismatch, weight_rank, weight);
         if best.as_ref().is_none_or(|(current, _)| rank < *current) {
             best = Some((rank, index));
         }
@@ -1388,6 +1473,119 @@ mod tests {
                 face.bytes
             );
             assert!(face.font_ref().is_ok(), "mapped face must stay parseable");
+        }
+    }
+
+    /// Primary/style resolution must take the no-slurp CoreText→mmap path
+    /// ([`mapped_font_data_for_family_style`]) and land on the *same*
+    /// PostScript name font-kit's slurping selector + [`resolve_required_style`]
+    /// would pick — for every style. This is the parity contract behind
+    /// rerouting the primary/style faces off font-kit: bytes stay mapped (no
+    /// death-row heap slurp) and the selected face is unchanged. Menlo is the
+    /// macOS default coding face and the family whose font-kit `properties()`
+    /// misreport, so it is the critical case.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn menlo_style_faces_resolve_via_mmap_matching_fontkit() {
+        let source = SystemSource::new();
+        if source.select_family_by_name("Menlo").is_err() {
+            eprintln!("skipping: Menlo not available in this environment");
+            return;
+        }
+        for style in [
+            FontStyle::Regular,
+            FontStyle::Bold,
+            FontStyle::Italic,
+            FontStyle::BoldItalic,
+        ] {
+            let mapped = mapped_font_data_for_family_style("Menlo", style)
+                .expect("Menlo style must resolve via the mmap path");
+            assert!(
+                matches!(mapped.bytes, FontBytes::Mapped(_)),
+                "{style:?}: primary/style face must be memory-mapped, got {:?}",
+                mapped.bytes
+            );
+            let mapped_ps = postscript_name_in(&mapped.bytes, mapped.index);
+
+            // font-kit reference selection, mirroring the default-config path
+            // (load_default_monospace_family passes Some(style) for all styles).
+            let props = properties_for_style(style);
+            let fontkit_ps = select_title_best_match(&source, "Menlo", &props)
+                .ok()
+                .and_then(|handle| resolve_required_style(&source, handle, style))
+                .and_then(load_valid_handle)
+                .and_then(|data| postscript_name_in(&data.bytes, data.index));
+
+            assert_eq!(
+                mapped_ps, fontkit_ps,
+                "{style:?}: mmap path must select the same PostScript name as font-kit"
+            );
+        }
+    }
+
+    /// Rendering parity backup for the primary/style reroute: glyphs
+    /// rasterized from the mmap-selected face must be **byte-identical** to
+    /// glyphs rasterized from the font-kit-selected face, for every style and
+    /// for both ordinary letters and box-drawing glyphs. Stronger than a screen
+    /// capture (no compositor/P3 noise): the rasterizer is a pure function of
+    /// (face bytes, glyph id, size), so identical output proves the reroute
+    /// changed nothing the renderer can see.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn menlo_style_rasterization_is_identical_via_mmap_and_fontkit() {
+        use crate::raster::{GlyphSynthesis, rasterize_with_variations};
+        use swash::scale::ScaleContext;
+
+        let source = SystemSource::new();
+        if source.select_family_by_name("Menlo").is_err() {
+            eprintln!("skipping: Menlo not available in this environment");
+            return;
+        }
+        let mut ctx = ScaleContext::new();
+        let sample_chars = ['A', 'g', '@', '│', '┼', '╳'];
+
+        for style in [
+            FontStyle::Regular,
+            FontStyle::Bold,
+            FontStyle::Italic,
+            FontStyle::BoldItalic,
+        ] {
+            let mmap_face = mapped_font_data_for_family_style("Menlo", style)
+                .expect("mmap path must resolve Menlo style");
+            let props = properties_for_style(style);
+            let fontkit_face = select_title_best_match(&source, "Menlo", &props)
+                .ok()
+                .and_then(|handle| resolve_required_style(&source, handle, style))
+                .and_then(load_valid_handle)
+                .expect("font-kit path must resolve Menlo style");
+
+            let mmap_font = mmap_face.font_ref().expect("mmap face parses");
+            let fontkit_font = fontkit_face.font_ref().expect("font-kit face parses");
+
+            for ch in sample_chars {
+                let mmap_gid = mmap_font.charmap().map(ch);
+                let fontkit_gid = fontkit_font.charmap().map(ch);
+                assert_eq!(
+                    mmap_gid, fontkit_gid,
+                    "{style:?} '{ch}': glyph id must match across selection paths"
+                );
+                let syn = GlyphSynthesis::default();
+                let a = rasterize_with_variations(&mut ctx, mmap_font, mmap_gid, 24.0, &[], syn, None);
+                let b = rasterize_with_variations(
+                    &mut ctx,
+                    fontkit_font,
+                    fontkit_gid,
+                    24.0,
+                    &[],
+                    syn,
+                    None,
+                );
+                assert_eq!(
+                    (a.width, a.height, a.bearing_x, a.bearing_y, a.bitmap),
+                    (b.width, b.height, b.bearing_x, b.bearing_y, b.bitmap),
+                    "{style:?} '{ch}': rasterized coverage must be byte-identical"
+                );
+            }
         }
     }
 

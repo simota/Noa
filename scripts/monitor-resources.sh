@@ -3,7 +3,7 @@
 set -uo pipefail
 
 VERSION="0.2.0"
-DEFAULT_PROCESSES=("Noa" "Ghostty" "Terminal" "iTerm2")
+DEFAULT_PROCESSES=("Noa" "Ghostty" "Terminal" "iTerm2" "kitty" "wezterm-gui" "Alacritty" "rio" "termy")
 
 INTERVAL="2"
 SAMPLES="0"
@@ -18,7 +18,8 @@ Usage:
   scripts/monitor-resources.sh [options] [process ...]
 
 Monitor CPU percent, RSS, memory footprint, thread count, and idle wakeups for
-terminal processes. By default this samples Noa, Ghostty, Terminal, and iTerm2.
+terminal processes. By default this samples Noa, Ghostty, Terminal, iTerm2,
+kitty, wezterm-gui (WezTerm), Alacritty, rio, and termy.
 Use --process or positional process names to replace the default targets.
 
 Options:
@@ -33,7 +34,7 @@ Options:
 Output:
   Human mode prints one table row per process per sample.
   JSON mode prints one JSON object per sample with a processes array.
-  Missing processes are reported with cpu_percent=0, rss_kib=0, and status=missing.
+  Processes that are not running are omitted from the output.
 
 Metrics:
   cpu%, rss        From ps. RSS counts shared pages, so it overstates real cost.
@@ -455,6 +456,7 @@ emit_human_rows() {
 
   while IFS=$'\t' read -r process cpu rss count status footprint threads idlew; do
     [ -n "$process" ] || continue
+    [ "$status" = "missing" ] && continue
     rss_display="$(rss_human "$rss")"
     footprint_display="$(rss_human "$footprint")"
     emit_line "$(printf '%-20s %6s %-24s %-8s %5s %8s %12s %12s %5s %8s' "$timestamp" "$sample" "$process" "$status" "$count" "$cpu" "$rss_display" "$footprint_display" "$threads" "$idlew")"
@@ -473,6 +475,7 @@ emit_json_sample() {
 
   while IFS=$'\t' read -r process cpu rss count status footprint threads idlew; do
     [ -n "$process" ] || continue
+    [ "$status" = "missing" ] && continue
     [ "$first" -eq 1 ] || json="${json},"
     first=0
     rss_bytes=$((rss * 1024))

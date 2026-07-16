@@ -190,6 +190,19 @@ pub struct App {
     /// displayable `Blinking*` cursor (the event loop then sits at
     /// `ControlFlow::Wait`, no busy wake-ups).
     cursor_blink_deadline: Option<Instant>,
+    /// Last keyboard/pty activity on the focused surface, driving the
+    /// `cursor-stop-blinking-after` idle stop: once
+    /// `cursor_stop_blinking_after_secs` elapse with no activity,
+    /// `tick_cursor_blink` settles the cursor solid and disarms its wake-up
+    /// so a fully idle app schedules no blink timer at all. Refreshed by
+    /// `reset_cursor_blink_phase` (keyboard input, focus/occlusion
+    /// transitions, config reload) and by pty-driven redraws targeting the
+    /// focused surface.
+    cursor_blink_activity_at: Instant,
+    /// One-shot deadline for the post-burst memory trim
+    /// (`tick_memory_trim`): re-armed by every pty-driven redraw and once at
+    /// startup, `None` after firing — an idle app pays no wake-up for this.
+    memory_trim_deadline: Option<Instant>,
     /// Monotonic origin for the Kitty-graphics animation clock. Set lazily on the
     /// first animation tick; `advance_kitty_animations` takes ms since this so
     /// `noa-grid` stays timer-free.
@@ -611,7 +624,7 @@ impl App {
             }
         });
         App {
-            config_watcher: ConfigWatcher::new(),
+            config_watcher: ConfigWatcher::new(config.config_default_files),
             // Corrected once the first window exists and can report
             // `Window::theme()` (see `lifecycle.rs`); light is a harmless
             // placeholder until then since startup theme resolution for a
@@ -643,6 +656,11 @@ impl App {
             overview_wake_deadline: None,
             cursor_blink_visible: true,
             cursor_blink_deadline: None,
+            cursor_blink_activity_at: Instant::now(),
+            // Armed at startup so the launch transients (font-discovery and
+            // config-parse scratch) are returned to the OS shortly after the
+            // first window settles.
+            memory_trim_deadline: Some(Instant::now() + timers::MEMORY_TRIM_QUIESCENCE),
             kitty_anim_origin: None,
             kitty_anim_deadline: None,
             attention_onset: HashMap::new(),

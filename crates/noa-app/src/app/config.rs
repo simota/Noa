@@ -55,6 +55,11 @@ pub struct AppConfig {
     /// `cursor-style` shape and `cursor-style-blink` toggle.
     pub cursor_style: Option<noa_config::CursorShape>,
     pub cursor_style_blink: Option<bool>,
+    /// `cursor-stop-blinking-after`: seconds of focused-surface inactivity
+    /// (no keyboard input, no pty output) after which a blinking cursor
+    /// settles solid, letting an idle app stop its blink wake-ups entirely.
+    /// `0` never stops (Ghostty-parity behavior).
+    pub cursor_stop_blinking_after_secs: u64,
     /// `background-opacity`, clamped to `0.0..=1.0`. Drives window
     /// transparency: below 1.0 the window is created transparent, a
     /// non-Opaque surface alpha mode is chosen, and the renderer scales its
@@ -115,6 +120,10 @@ pub struct AppConfig {
     /// CLI-provided config overrides that must keep winning over file changes
     /// during a live config reload, matching startup precedence.
     pub cli_overrides: noa_config::ConfigOverrides,
+    /// `--config-default-files` (Ghostty parity): `false` means the default
+    /// config files were skipped at startup, so live config reload (both the
+    /// file watcher and the explicit reload command) must keep skipping them.
+    pub config_default_files: bool,
     /// `quick-terminal-hotkey`: the global hotkey chord toggling the drop-down
     /// quick terminal (e.g. `cmd+grave`). `None` leaves the feature disabled.
     pub quick_terminal_hotkey: Option<String>,
@@ -251,6 +260,7 @@ impl AppConfig {
             minimum_contrast: config.minimum_contrast,
             cursor_style: config.cursor_style,
             cursor_style_blink: config.cursor_style_blink,
+            cursor_stop_blinking_after_secs: config.cursor_stop_blinking_after_secs,
             background_opacity: config.background_opacity,
             background_blur_radius: config.background_blur_radius,
             background_image: config.background_image,
@@ -269,6 +279,7 @@ impl AppConfig {
             macos_applescript: config.macos_applescript,
             cli_grid_override,
             cli_overrides,
+            config_default_files: true,
             quick_terminal_hotkey: config.quick_terminal_hotkey,
             quick_terminal_size: config.quick_terminal_size,
             quick_terminal_autohide: config.quick_terminal_autohide,

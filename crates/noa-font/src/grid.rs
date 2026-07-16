@@ -17,8 +17,19 @@ use crate::raster::{GlyphSynthesis, RasterizedGlyph, rasterize_with_variations};
 use crate::shape::{self, FaceId, ShapeCell, ShapeRunEntry, ShapedGlyph, StyleKey};
 use crate::{FontConfig, FontError, GlyphInfo, GlyphKey};
 
-/// Default atlas dimensions. The atlas grows on demand when glyph pressure exceeds it.
-const ATLAS_DIM: u32 = 1024;
+/// Initial atlas dimensions. These are floors, not caps: the atlas grows on
+/// demand (doubling — see `atlas.rs`) when glyph pressure exceeds them, up to
+/// `MAX_ATLAS_DIM`. They start below a fixed 1024² because the GPU-side atlas
+/// texture (`noa-render`) is committed eagerly at the atlas's current size the
+/// moment the renderer initializes, while the CPU pixel buffer is only lazily
+/// faulted (zero-page `vec![0u8; …]`). A fresh/idle terminal touches a small
+/// mask working set and frequently *zero* color glyphs, so an eager 1024²
+/// color texture is 4 MiB of committed GPU memory sitting unused. The mask
+/// starts at 512² (an ASCII + box-drawing working set fits without a grow, so
+/// bulk-ASCII throughput sees no extra reallocation) and the color atlas at
+/// 256² (256 KiB); both grow back the moment a session's glyph set demands it.
+const MASK_ATLAS_INIT_DIM: u32 = 512;
+const COLOR_ATLAS_INIT_DIM: u32 = 256;
 const MASK_BYTES_PER_PX: u32 = 1;
 const COLOR_BYTES_PER_PX: u32 = 4;
 
@@ -181,8 +192,8 @@ impl FontGrid {
             font_stack,
             ctx: ScaleContext::new(),
             metrics,
-            mask_atlas: Atlas::new(ATLAS_DIM, ATLAS_DIM, MASK_BYTES_PER_PX),
-            color_atlas: Atlas::new(ATLAS_DIM, ATLAS_DIM, COLOR_BYTES_PER_PX),
+            mask_atlas: Atlas::new(MASK_ATLAS_INIT_DIM, MASK_ATLAS_INIT_DIM, MASK_BYTES_PER_PX),
+            color_atlas: Atlas::new(COLOR_ATLAS_INIT_DIM, COLOR_ATLAS_INIT_DIM, COLOR_BYTES_PER_PX),
             atlas_identity: next_atlas_identity(),
             cache: HashMap::new(),
             px_size,
@@ -1808,6 +1819,120 @@ mod tests {
             latin_face, cjk_face,
             "a CJK codepoint should resolve to a different face than plain Latin ASCII \
              when a CJK fallback face is installed"
+        );
+    }
+
+    /// A set of visible codepoints any macOS system monospace font is expected
+    /// to cover: printable ASCII plus the Latin-1 accented letters. Rasterizing
+    /// all of them at a large pixel size is enough distinct ink to overflow the
+    /// small initial atlas and force the on-demand growth path.
+    fn atlas_pressure_chars() -> Vec<char> {
+        ('!'..='~').chain('\u{00C0}'..='\u{00FF}').collect()
+    }
+
+    /// Assert a rasterized glyph sits fully inside the atlas that currently
+    /// backs it — the invariant the renderer's UV mapping relies on. A zero
+    /// sized region means "nothing to draw" (unmapped/space) and is not packed.
+    fn assert_glyph_in_bounds(grid: &FontGrid, info: GlyphInfo) {
+        if info.atlas_size == [0, 0] {
+            return;
+        }
+        let (w, h) = if info.color {
+            grid.color_atlas_size()
+        } else {
+            grid.mask_atlas_size()
+        };
+        let right = info.atlas_pos[0] as u32 + info.atlas_size[0] as u32;
+        let bottom = info.atlas_pos[1] as u32 + info.atlas_size[1] as u32;
+        assert!(
+            right <= w && bottom <= h,
+            "glyph at {:?}+{:?} escapes its {:?} atlas of size {:?}",
+            info.atlas_pos,
+            info.atlas_size,
+            if info.color { "color" } else { "mask" },
+            (w, h)
+        );
+    }
+
+    /// Copy the mask-atlas ink covered by `info` (row-major, 1 byte/px).
+    fn copy_mask_glyph_ink(grid: &FontGrid, info: GlyphInfo) -> Vec<u8> {
+        let (w, _h) = grid.mask_atlas_size();
+        let data = grid.mask_atlas_data();
+        let mut out = Vec::with_capacity((info.atlas_size[0] as usize) * (info.atlas_size[1] as usize));
+        for row in 0..info.atlas_size[1] as usize {
+            let y = info.atlas_pos[1] as usize + row;
+            let start = y * w as usize + info.atlas_pos[0] as usize;
+            out.extend_from_slice(&data[start..start + info.atlas_size[0] as usize]);
+        }
+        out
+    }
+
+    /// Regression for the reduced initial atlas dimensions (mask/color now start
+    /// well below the historic fixed 1024²): a warmup workload that exceeds the
+    /// initial size must drive the atlas growth path — via the real production
+    /// `FontGrid::new` init, not the capped-for-tests constructor — rather than
+    /// panicking or handing back out-of-bounds placements. Every packed glyph
+    /// stays inside its backing atlas the whole way through the grow.
+    #[test]
+    fn small_initial_atlas_grows_under_glyph_pressure_and_keeps_placements_in_bounds() {
+        // A large pixel size makes each glyph big enough that the printable
+        // ASCII + Latin-1 working set overflows the small initial atlas and
+        // forces at least one growth, without coupling to the exact init dims.
+        let mut grid = skip_if_no_font!(FontGrid::new(128.0, FontConfig::default()));
+        let initial = grid.mask_atlas_size();
+
+        for ch in atlas_pressure_chars() {
+            let info = grid.get_or_raster(ch);
+            assert_glyph_in_bounds(&grid, info);
+        }
+
+        let grown = grid.mask_atlas_size();
+        assert!(
+            grown.0 > initial.0 || grown.1 > initial.1,
+            "glyph pressure should grow the mask atlas beyond its initial {initial:?}, got {grown:?}"
+        );
+    }
+
+    /// Regression: a glyph packed before an atlas growth must keep both its
+    /// atlas position and its pixels across the reallocation — that is what
+    /// keeps a cached `GlyphInfo`'s UVs pointing at the right ink after the
+    /// smaller initial atlas grows. Exercises the production init path so the
+    /// reduced initial dims are what actually forces the grow.
+    #[test]
+    fn cached_glyph_survives_atlas_growth_at_stable_position() {
+        let mut grid = skip_if_no_font!(FontGrid::new(128.0, FontConfig::default()));
+
+        let anchor = grid.get_or_raster('A');
+        if anchor.atlas_size == [0, 0] {
+            eprintln!("skipping: installed font did not rasterize 'A'");
+            return;
+        }
+        assert!(!anchor.color, "ASCII 'A' must live in the R8 mask atlas");
+        let ink_before = copy_mask_glyph_ink(&grid, anchor);
+        let size_before = grid.mask_atlas_size();
+
+        for ch in atlas_pressure_chars() {
+            if ch != 'A' {
+                grid.get_or_raster(ch);
+            }
+        }
+        assert_ne!(
+            grid.mask_atlas_size(),
+            size_before,
+            "test needs the atlas to actually grow to exercise pixel preservation"
+        );
+
+        let anchor_after = grid.get_or_raster('A');
+        assert_eq!(
+            anchor_after.atlas_pos, anchor.atlas_pos,
+            "a cached glyph must keep its atlas position across growth"
+        );
+        assert_eq!(anchor_after.atlas_size, anchor.atlas_size);
+        assert_glyph_in_bounds(&grid, anchor_after);
+        assert_eq!(
+            copy_mask_glyph_ink(&grid, anchor_after),
+            ink_before,
+            "glyph pixels must survive the atlas grow's row-by-row copy"
         );
     }
 }

@@ -1095,3 +1095,140 @@ fn scan_run_random_fuzz_matches_naive_oracle() {
         assert_eq!(actual, expected, "buf={buf:?}");
     }
 }
+
+// ── Stream::take_display_dirty (query-only batch detection) ────────
+
+/// Feed `bytes` through a fresh no-op-handler [`crate::Stream`] and return
+/// `take_display_dirty()`.
+fn display_dirty_after(bytes: &[u8]) -> bool {
+    use crate::handler::{DaKind, DsrKind, EraseDisplay, EraseLine, Handler};
+    use crate::sgr::SgrAttr;
+
+    struct NoOp;
+    impl Handler for NoOp {
+        fn print(&mut self, _c: char) {}
+        fn execute_c0(&mut self, _byte: u8) {}
+        fn cursor_up(&mut self, _n: u16) {}
+        fn cursor_down(&mut self, _n: u16) {}
+        fn cursor_forward(&mut self, _n: u16) {}
+        fn cursor_backward(&mut self, _n: u16) {}
+        fn cursor_position(&mut self, _row: u16, _col: u16) {}
+        fn cursor_col_abs(&mut self, _col: u16) {}
+        fn cursor_row_abs(&mut self, _row: u16) {}
+        fn erase_display(&mut self, _mode: EraseDisplay) {}
+        fn erase_line(&mut self, _mode: EraseLine) {}
+        fn set_attributes(&mut self, _attrs: &[SgrAttr]) {}
+        fn set_mode(&mut self, _value: u16, _ansi: bool, _on: bool) {}
+        fn carriage_return(&mut self) {}
+        fn linefeed(&mut self) {}
+        fn tab(&mut self, _n: u16) {}
+        fn reverse_index(&mut self) {}
+        fn save_cursor(&mut self) {}
+        fn restore_cursor(&mut self) {}
+        fn full_reset(&mut self) {}
+        fn device_attributes(&mut self, _kind: DaKind) {}
+        fn device_status_report(&mut self, _kind: DsrKind) {}
+    }
+
+    let mut stream = crate::Stream::new();
+    stream.feed(bytes, &mut NoOp);
+    stream.take_display_dirty()
+}
+
+/// The pure report queries — DSR, DA1/DA2, DECRQM, XTVERSION, Kitty keyboard
+/// query — must not mark the display dirty: they only queue replies, and the
+/// io thread uses a clean batch to skip its redraw poke.
+#[test]
+fn pure_report_queries_do_not_dirty_the_display() {
+    assert!(!display_dirty_after(b"\x1b[6n"), "DSR CPR");
+    assert!(!display_dirty_after(b"\x1b[5n"), "DSR status");
+    assert!(!display_dirty_after(b"\x1b[c"), "DA1");
+    assert!(!display_dirty_after(b"\x1b[>c"), "DA2");
+    assert!(!display_dirty_after(b"\x1b[?2026$p"), "DECRQM (DEC)");
+    assert!(!display_dirty_after(b"\x1b[4$p"), "DECRQM (ANSI)");
+    assert!(!display_dirty_after(b"\x1b[>q"), "XTVERSION");
+    assert!(!display_dirty_after(b"\x1b[?u"), "Kitty keyboard query");
+    assert!(
+        !display_dirty_after(b"\x1b[6n\x1b[c\x1b[?2026$p\x1b[>q\x1b[?u"),
+        "a whole capability-poll burst stays clean"
+    );
+}
+
+/// Everything else is conservative-dirty: prints (both the ground fast path
+/// and DFA-resumed UTF-8), C0 controls, visually meaningful CSI/ESC/OSC, and
+/// even sequences noa ignores — a misclassification may only ever cause a
+/// spurious repaint, never a stale frame.
+#[test]
+fn non_query_actions_dirty_the_display() {
+    assert!(display_dirty_after(b"x"), "ASCII print (fast path)");
+    assert!(display_dirty_after("é".as_bytes()), "UTF-8 print");
+    assert!(display_dirty_after(b"\n"), "C0 control");
+    assert!(display_dirty_after(b"\x1b[2J"), "erase display");
+    assert!(display_dirty_after(b"\x1b[1m"), "SGR");
+    assert!(display_dirty_after(b"\x1b[?25l"), "DECSET");
+    assert!(display_dirty_after(b"\x1b[!p"), "DECSTR (soft reset)");
+    assert!(display_dirty_after(b"\x1b[ q"), "DECSCUSR (cursor style)");
+    assert!(display_dirty_after(b"\x1b[>1u"), "Kitty keyboard push");
+    assert!(display_dirty_after(b"\x1bc"), "RIS");
+    assert!(display_dirty_after(b"\x1b]0;t\x07"), "OSC title");
+    assert!(
+        display_dirty_after(b"\x1b[9999z"),
+        "unknown CSI stays dirty"
+    );
+    assert!(
+        display_dirty_after(b"x\x1b[6n"),
+        "mixed print+query is dirty"
+    );
+}
+
+/// A sequence still mid-parse dispatches nothing and so must stay clean; the
+/// flag belongs to the batch whose completed actions dirtied the frame.
+#[test]
+fn take_display_dirty_resets_per_take_and_ignores_partial_sequences() {
+    use crate::handler::Handler;
+    struct NoOp2;
+    impl Handler for NoOp2 {
+        fn print(&mut self, _c: char) {}
+        fn execute_c0(&mut self, _byte: u8) {}
+        fn cursor_up(&mut self, _n: u16) {}
+        fn cursor_down(&mut self, _n: u16) {}
+        fn cursor_forward(&mut self, _n: u16) {}
+        fn cursor_backward(&mut self, _n: u16) {}
+        fn cursor_position(&mut self, _row: u16, _col: u16) {}
+        fn cursor_col_abs(&mut self, _col: u16) {}
+        fn cursor_row_abs(&mut self, _row: u16) {}
+        fn erase_display(&mut self, _mode: crate::handler::EraseDisplay) {}
+        fn erase_line(&mut self, _mode: crate::handler::EraseLine) {}
+        fn set_attributes(&mut self, _attrs: &[crate::sgr::SgrAttr]) {}
+        fn set_mode(&mut self, _value: u16, _ansi: bool, _on: bool) {}
+        fn carriage_return(&mut self) {}
+        fn linefeed(&mut self) {}
+        fn tab(&mut self, _n: u16) {}
+        fn reverse_index(&mut self) {}
+        fn save_cursor(&mut self) {}
+        fn restore_cursor(&mut self) {}
+        fn full_reset(&mut self) {}
+        fn device_attributes(&mut self, _kind: crate::handler::DaKind) {}
+        fn device_status_report(&mut self, _kind: crate::handler::DsrKind) {}
+    }
+
+    let mut stream = crate::Stream::new();
+    let mut h = NoOp2;
+
+    stream.feed(b"x", &mut h);
+    assert!(stream.take_display_dirty());
+    assert!(!stream.take_display_dirty(), "take resets the flag");
+
+    // Partial CSI: no action completed yet.
+    stream.feed(b"\x1b[2", &mut h);
+    assert!(!stream.take_display_dirty());
+    // Completing it as erase-display dirties.
+    stream.feed(b"J", &mut h);
+    assert!(stream.take_display_dirty());
+
+    // Partial query completing as a query stays clean.
+    stream.feed(b"\x1b[6", &mut h);
+    assert!(!stream.take_display_dirty());
+    stream.feed(b"n", &mut h);
+    assert!(!stream.take_display_dirty());
+}

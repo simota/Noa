@@ -35,6 +35,29 @@
 //! batches of rows. When the pending rows' size estimate alone could cross the
 //! limit (tiny retention limits), sealing degrades to the synchronous inline
 //! path so eviction timing stays exactly as eager as immediate packing.
+//!
+//! ## Measured design floor (2026-07, wish #2 — read before "optimizing")
+//!
+//! The pack workers' flood cost (~250ms/worker per 150MB ascii flood) is
+//! **memory-bound, not instruction-bound**: per-row cost is ~230ns hot-cache
+//! but ~535ns over a >L2 working set, and it barely moves when instructions
+//! are removed. Experiments already run and measured, so they are not
+//! repeated:
+//!
+//! - **Raw staging tier (drop-before-pack)**: parking the retention window
+//!   raw to skip packing soon-evicted flood rows multiplies the circulating
+//!   working set by the raw/packed ratio (~13× → ~131MB at the default
+//!   10MiB limit), turning every carcass clear / pool reuse / grid write
+//!   DRAM-cold: measured **+38% CPU, +18% wall, +102MB RSS** on the 150MB
+//!   flood. The compacting pack *is* the cache-locality optimization. (See
+//!   the reverted commit pair in history for the full implementation.)
+//! - **Row watermark / trim-skip**: a perfect "occupied prefix" hint that
+//!   skips the blank-tail loads entirely is worth only ~8% of cold-cache
+//!   pack_row (535 → 493 ns/row, `bench_flood_shape_cold_cache_pack_cost`)
+//!   — not worth per-cell-write bookkeeping in the fidelity core.
+//! - **[`SEAL_BATCH_ROWS`]**: 512 is the locality sweet spot — 256 measured
+//!   equal (publish overhead cancels the warmth gain), 1024 measured +26%
+//!   flood CPU (rows go cold before the workers reach them).
 
 use crate::cell::{Cell, HyperlinkId, Row};
 use noa_core::{CellAttrs, Color};
@@ -628,6 +651,28 @@ impl PagedScrollback {
         self.spare = None;
     }
 
+    /// Post-burst memory trim: settle every deferred row into packed pages
+    /// and drop the spare evicted page. After this the retained heap is the
+    /// packed history plus one bounded recycled-row pool ([`POOL_CAP`]) —
+    /// the in-flight sealing batch, its dirty carcasses and the unpacked
+    /// pending tail (up to ~1500 flood-width rows in total) are settled or
+    /// recycled. History content and reads are unaffected. Returns rows
+    /// evicted by the settle (the caller owes the usual
+    /// `note_scrollback_evictions` bookkeeping).
+    ///
+    /// Deliberately kept: the row pool and the (parked, ~0-cost) pack
+    /// workers. Dropping them was tried and measured *worse* on repeated
+    /// burst/idle cycles under the macOS 26 xzone allocator — its quarantine
+    /// places the next burst's replacement rows on fresh pages instead of
+    /// the just-freed ones, growing the dirty footprint by more than the
+    /// pool's own size.
+    pub(crate) fn trim_memory(&mut self) -> usize {
+        let evicted = self.flush_all();
+        self.pending.shrink_to_fit();
+        self.spare = None;
+        evicted
+    }
+
     /// Insert older rows before the currently retained history. Repacking is
     /// intentional: pages are append-only on the hot path, while remote
     /// attach backfill is a one-time cold-path operation.
@@ -1170,13 +1215,22 @@ fn pack_is_default_blank(cell: &Cell) -> bool {
     // Field-wise, not `*cell == Cell::default()`: this runs once per trailing
     // cell of every pushed row, and constructing a `Cell` (with its `String`)
     // just to compare is measurable on the bulk-output path.
-    cell.ch == ' '
-        && cell.combining.is_empty()
-        && cell.fg == Color::Default
-        && cell.bg == Color::Default
-        && cell.underline_color.is_none()
-        && cell.hyperlink.is_none()
-        && cell.attrs.is_empty()
+    //
+    // Bitwise-`&`, not short-circuit `&&`: a blank tail cell passes *every*
+    // check, so `&&` pays six well-predicted-but-serial branches per cell.
+    // Fusing them into one branch measured 117 → 40 ns/row on the 62-blank
+    // tail of the throughput-workload shape (58 text cells / 120 cols) —
+    // the trim scan was ~48% of the whole pack-worker cost before this.
+    // (The *run-continuation* compare in `pack_row` is the opposite case:
+    // fusing it was measured 24% slower, because its cells diverge and the
+    // short-circuit usually exits on the first compare.)
+    (cell.ch == ' ')
+        & cell.combining.is_empty()
+        & (cell.fg == Color::Default)
+        & (cell.bg == Color::Default)
+        & cell.underline_color.is_none()
+        & cell.hyperlink.is_none()
+        & cell.attrs.is_empty()
 }
 
 #[cfg(test)]
@@ -1566,6 +1620,189 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "profiling decomposition; run with `--release --ignored --nocapture`"]
+    fn bench_flood_shape_cost_decomposition() {
+        // Replicates the wish-#2 throughput workload shape: ~58-char ASCII
+        // lines in a 120-col grid (bench/generate_data.py + EQ_COLS=120), and
+        // decomposes the per-row pack-worker cost into its parts so the
+        // raw-tier-eviction design can be sized by measurement.
+        const COLS: usize = 120;
+        const TEXT: usize = 58;
+        let n = 200_000usize;
+        let row = text_row(&"x".repeat(TEXT), COLS);
+
+        // (1) trailing-blank trim scan only.
+        let start = std::time::Instant::now();
+        let mut acc = 0usize;
+        for _ in 0..n {
+            let mut len = row.cells.len();
+            while len > 0 && pack_is_default_blank(&row.cells[len - 1]) {
+                len -= 1;
+            }
+            acc += len;
+        }
+        let trim = start.elapsed();
+        assert_eq!(acc, TEXT * n);
+
+        // (2) full pack_row into pages (includes the trim).
+        let mut pages: Vec<Page> = Vec::new();
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            let need_new = match pages.last() {
+                None => true,
+                Some(page) => page.cells.len() >= PAGE_CELL_CAPACITY,
+            };
+            if need_new {
+                pages.push(Page::new(COLS as u16));
+            }
+            pages.last_mut().unwrap().pack_row(&row);
+        }
+        let pack = start.elapsed();
+        drop(pages);
+
+        // (1b) branchless fused trim (single `&` chain, one branch per cell).
+        let start = std::time::Instant::now();
+        let mut acc2 = 0usize;
+        for _ in 0..n {
+            let mut len = row.cells.len();
+            while len > 0 {
+                let c = &row.cells[len - 1];
+                let blank = (c.ch == ' ')
+                    & c.combining.is_empty()
+                    & (c.fg == Color::Default)
+                    & (c.bg == Color::Default)
+                    & c.underline_color.is_none()
+                    & c.hyperlink.is_none()
+                    & c.attrs.is_empty();
+                if !blank {
+                    break;
+                }
+                len -= 1;
+            }
+            acc2 += len;
+        }
+        let trim_fused = start.elapsed();
+        assert_eq!(acc2, TEXT * n);
+
+        // (3) carcass prefix clear (what the pool recycle costs per row).
+        // Re-dirty the prefix each iteration so the clear does real writes,
+        // then subtract the re-dirty cost.
+        let mut carcass = row.clone();
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            for (cell, src) in carcass.cells[..TEXT].iter_mut().zip(&row.cells[..TEXT]) {
+                cell.set_from(src);
+            }
+            std::hint::black_box(&mut carcass);
+            clear_carcass_prefix(&mut carcass, TEXT);
+            std::hint::black_box(&mut carcass);
+        }
+        let clear_pair = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            for (cell, src) in carcass.cells[..TEXT].iter_mut().zip(&row.cells[..TEXT]) {
+                cell.set_from(src);
+            }
+            std::hint::black_box(&mut carcass);
+        }
+        let redirty = start.elapsed();
+        let clear = clear_pair.saturating_sub(redirty);
+
+        // (4) whole worker batch path: pack_chunk incl. page alloc/shrink +
+        // carcass clears riding along (mirrors steady-state worker cost).
+        let batch: Vec<Row> = (0..SEAL_BATCH_ROWS).map(|_| row.clone()).collect();
+        let carcasses: Vec<(Row, usize)> =
+            (0..SEAL_BATCH_ROWS).map(|_| (row.clone(), TEXT)).collect();
+        let iters = n / SEAL_BATCH_ROWS;
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            let result = pack_chunk(&batch, carcasses.clone());
+            std::hint::black_box(&result.pages);
+        }
+        let chunk = start.elapsed();
+        // The clone of `carcasses` inside the loop is overhead; time it.
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(carcasses.clone());
+        }
+        let clone_overhead = start.elapsed();
+
+        let per_row = |d: std::time::Duration, rows: usize| d.as_nanos() as f64 / rows as f64;
+        println!("flood-shape ({TEXT} text cells / {COLS} cols), n={n} rows:");
+        println!("  trim scan only     : {:8.1} ns/row", per_row(trim, n));
+        println!(
+            "  trim fused (&)     : {:8.1} ns/row",
+            per_row(trim_fused, n)
+        );
+        println!("  pack_row (in trim) : {:8.1} ns/row", per_row(pack, n));
+        println!("  carcass clear      : {:8.1} ns/row", per_row(clear, n));
+        println!(
+            "  pack_chunk total   : {:8.1} ns/row (minus clone {:.1})",
+            per_row(chunk, iters * SEAL_BATCH_ROWS),
+            per_row(clone_overhead, iters * SEAL_BATCH_ROWS)
+        );
+    }
+
+    #[test]
+    #[ignore = "profiling decomposition; run with `--release --ignored --nocapture`"]
+    fn bench_flood_shape_cold_cache_pack_cost() {
+        // Same flood shape as `bench_flood_shape_cost_decomposition`, but
+        // over a >L2-sized set of distinct rows so each pack reads cold(ish)
+        // memory — the real worker regime during a flood. Compares full
+        // pack_row against a tail-skipping variant (perfect watermark) to
+        // measure how much of the cost is the blank-tail *loads*.
+        const COLS: usize = 120;
+        const TEXT: usize = 58;
+        let n = 40_000usize; // 40k rows × 5.8KB ≈ 230MB, way past L2
+        let rows: Vec<Row> = (0..n).map(|_| text_row(&"x".repeat(TEXT), COLS)).collect();
+
+        // Pass 1: full pack_row (trim scan reads the 62-cell tail).
+        let mut pages: Vec<Page> = Vec::new();
+        let start = std::time::Instant::now();
+        for row in &rows {
+            let need_new = pages
+                .last()
+                .is_none_or(|p| p.cells.len() >= PAGE_CELL_CAPACITY);
+            if need_new {
+                pages.push(Page::new(COLS as u16));
+            }
+            pages.last_mut().unwrap().pack_row(row);
+        }
+        let full = start.elapsed();
+        drop(pages);
+
+        // Pass 2: pack only the occupied prefix (simulates a row watermark
+        // that skips the tail loads entirely) — measures the ceiling.
+        let trimmed: Vec<Row> = rows
+            .iter()
+            .map(|r| {
+                let mut r2 = r.clone();
+                r2.cells.truncate(TEXT);
+                r2
+            })
+            .collect();
+        drop(rows);
+        let mut pages: Vec<Page> = Vec::new();
+        let start = std::time::Instant::now();
+        for row in &trimmed {
+            let need_new = pages
+                .last()
+                .is_none_or(|p| p.cells.len() >= PAGE_CELL_CAPACITY);
+            if need_new {
+                pages.push(Page::new(COLS as u16));
+            }
+            pages.last_mut().unwrap().pack_row(row);
+        }
+        let prefix_only = start.elapsed();
+        drop(pages);
+
+        let per = |d: std::time::Duration| d.as_nanos() as f64 / n as f64;
+        println!("cold-cache flood shape ({TEXT}/{COLS} cells), n={n}:");
+        println!("  pack_row full row   : {:8.1} ns/row", per(full));
+        println!("  pack_row prefix-only: {:8.1} ns/row", per(prefix_only));
+    }
+
+    #[test]
     fn push_row_packs_grapheme_at_first_and_last_index_and_fully_blank_row() {
         let mut sb = PagedScrollback::new(usize::MAX);
 
@@ -1681,6 +1918,55 @@ mod tests {
         // A width mismatch (post-resize) drops the stale pool wholesale.
         assert!(sb.take_blank_row(31).is_none());
         assert!(sb.take_blank_row(30).is_none());
+    }
+
+    #[test]
+    fn trim_memory_preserves_history_and_drops_scratch() {
+        let mut sb = PagedScrollback::new(usize::MAX);
+        // Cross a publish boundary and leave stragglers in `sealing` and
+        // `pending`, plus recycled carcasses in the pool.
+        let n = SEAL_BATCH_ROWS * 3 + 41;
+        let mut reference = PagedScrollback::new(usize::MAX);
+        for i in 0..n {
+            sb.push_row_deferred(styled_row(i, 40));
+            reference.push_row(&styled_row(i, 40));
+        }
+        assert!(sb.take_blank_row(40).is_some(), "pool populated pre-trim");
+        let evicted = sb.trim_memory();
+        assert_eq!(evicted, 0, "unlimited retention evicts nothing");
+        // History is byte-for-byte what immediate packing built.
+        assert_eq!(sb.len(), n);
+        for y in 0..n {
+            assert_eq!(sb.row(y).unwrap().cells, reference.row(y).unwrap().cells);
+        }
+        // Every deferred/spare buffer is settled; the bounded pool stays
+        // (deliberate — see `trim_memory`), capped at POOL_CAP.
+        assert!(sb.sealing.is_none());
+        assert!(sb.pending.is_empty());
+        assert!(sb.dirty_carcasses.is_none());
+        assert!(sb.spare.is_none());
+        assert!(sb.pool.len() <= POOL_CAP);
+        // ...and the scrollback stays fully usable afterwards.
+        for i in 0..SEAL_BATCH_ROWS + 7 {
+            sb.push_row_deferred(styled_row(i, 40));
+        }
+        assert_eq!(sb.len(), n + SEAL_BATCH_ROWS + 7);
+        assert_eq!(sb.row(n).unwrap().cells, reference.row(0).unwrap().cells);
+    }
+
+    #[test]
+    fn trim_memory_settles_eviction_debt_under_limits() {
+        // A limit small enough that the deferred tail crosses it when packed:
+        // the trim's settle must report those evictions to the caller.
+        let dense = "x".repeat(79);
+        let mut sb = PagedScrollback::new(64 * 1024);
+        let mut evicted = 0;
+        for _ in 0..SEAL_BATCH_ROWS {
+            evicted += sb.push_row_deferred(text_row(&dense, 80));
+        }
+        evicted += sb.trim_memory();
+        assert_eq!(sb.len() + evicted, SEAL_BATCH_ROWS);
+        assert!(sb.bytes() <= sb.limit_bytes());
     }
 
     #[test]

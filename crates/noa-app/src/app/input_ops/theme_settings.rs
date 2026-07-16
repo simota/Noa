@@ -809,6 +809,12 @@ impl App {
         // The write already landed on disk; everything from here is an
         // in-memory swap that cannot itself fail, so there is no reachable
         // state where only one half of the commit applied.
+        //
+        // The OnSave rows (scrollback-limit etc.) are applied by the config
+        // watcher's reload-diff pass picking up the write above; its idle
+        // poll is slow, so expedite it — the next `about_to_wait` pass
+        // reloads immediately instead of the user waiting out the interval.
+        self.expedite_config_watch();
         self.sync_config_from_committed_live_rows(session.state.rows());
         if let Some(gpu) = self.gpu.as_mut() {
             let new_theme = active_theme(&gpu.theme, &gpu.preview_theme).clone();
@@ -931,6 +937,9 @@ impl App {
             log::warn!("failed to undo theme-settings commit: {err}");
             return false;
         }
+        // Same as the commit path: let the watcher's reload-diff pick the
+        // reverted write up on the very next pass, not an interval later.
+        self.expedite_config_watch();
 
         let overrides = self.theme_overrides();
         let reverted_theme_name =

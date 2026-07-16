@@ -10,8 +10,13 @@
 // how quickly a terminal's parser turns around a query, which is on the same
 // code path that echoes keystrokes.
 //
-// Usage: dsr_probe <iterations> <warmup> <out_file>
-//   Writes "<median_ns> <p99_ns> <min_ns> <count>" to out_file.
+// Usage: dsr_probe <iterations> <warmup> <out_file> [samples_file]
+//   Writes "<median_ns> <p95_ns> <p99_ns> <max_ns> <min_ns> <count>" to
+//   out_file. If samples_file is given, additionally writes every kept
+//   sample (one ns value per line, unsorted arrival order) so the harness
+//   can pool raw samples across multiple process launches and compute
+//   percentiles over the pooled distribution instead of medianing per-run
+//   percentiles.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,12 +57,13 @@ static int read_reply(int timeout_ms) {
 
 int main(int argc, char **argv) {
     if (argc < 4) {
-        fprintf(stderr, "usage: dsr_probe <iterations> <warmup> <out_file>\n");
+        fprintf(stderr, "usage: dsr_probe <iterations> <warmup> <out_file> [samples_file]\n");
         return 2;
     }
     int iters = atoi(argv[1]);
     int warmup = atoi(argv[2]);
     const char *out = argv[3];
+    const char *samples_out = (argc >= 5 && argv[4][0] != '\0') ? argv[4] : NULL;
     if (iters <= 0) iters = 200;
 
     struct termios orig, raw;
@@ -85,18 +91,31 @@ int main(int argc, char **argv) {
 
     tcsetattr(STDIN_FILENO, TCSANOW, &orig);
 
+    // Raw kept samples (arrival order) for cross-launch pooling.
+    if (samples_out && kept > 0) {
+        FILE *sf = fopen(samples_out, "w");
+        if (sf) {
+            for (int i = 0; i < kept; i++) fprintf(sf, "%lld\n", samples[i]);
+            fclose(sf);
+        }
+    }
+
     FILE *f = fopen(out, "w");
     if (!f) { free(samples); return 4; }
     if (kept == 0) {
-        fprintf(f, "0 0 0 0\n");
+        fprintf(f, "0 0 0 0 0 0\n");
     } else {
         qsort(samples, kept, sizeof(long long), cmp_ll);
         long long med = samples[kept / 2];
+        int p95i = (int)((double)kept * 0.95);
+        if (p95i >= kept) p95i = kept - 1;
         int p99i = (int)((double)kept * 0.99);
         if (p99i >= kept) p99i = kept - 1;
+        long long p95 = samples[p95i];
         long long p99 = samples[p99i];
+        long long mx = samples[kept - 1];
         long long mn = samples[0];
-        fprintf(f, "%lld %lld %lld %d\n", med, p99, mn, kept);
+        fprintf(f, "%lld %lld %lld %lld %lld %d\n", med, p95, p99, mx, mn, kept);
     }
     fclose(f);
     free(samples);

@@ -16,6 +16,18 @@ struct Args {
     /// Import supported settings from Ghostty config into noa config.
     #[arg(long)]
     import_ghostty_config: bool,
+    /// Whether to load the default config files (Ghostty parity). Pass
+    /// `--config-default-files=false` to run with built-in defaults + CLI
+    /// flags only; live config reload stays disabled for the process.
+    #[arg(
+        long,
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_name = "BOOL"
+    )]
+    config_default_files: bool,
     /// Run this command instead of the login shell (Ghostty parity). Greedy:
     /// everything after `-e` becomes the command's argv, so it must be the
     /// last flag on the line.
@@ -52,12 +64,18 @@ fn main() -> anyhow::Result<()> {
         theme: None,
         ..Default::default()
     };
-    let (config, diagnostics) = noa_config::load_startup_config(cli_overrides.clone())?;
+    let (config, diagnostics) = if args.config_default_files {
+        noa_config::load_startup_config(cli_overrides.clone())?
+    } else {
+        noa_config::load_startup_config_without_files(cli_overrides.clone())?
+    };
     noa_app::startup_trace::mark("config-loaded");
     for diagnostic in diagnostics {
         eprintln!("{}", diagnostic.message);
     }
-    if let Some(message) = import_hint(config_exists(), ghostty_config_exists()) {
+    if args.config_default_files
+        && let Some(message) = import_hint(config_exists(), ghostty_config_exists())
+    {
         eprintln!("{message}");
     }
     // An explicit `--cols`/`--rows` means the user asked for specific
@@ -68,6 +86,7 @@ fn main() -> anyhow::Result<()> {
     let cli_grid_override = args.cols.is_some() || args.rows.is_some() || args.command.is_some();
     let mut app_config = noa_app::AppConfig::from_startup(config, cli_grid_override, cli_overrides);
     app_config.launch_command = args.command;
+    app_config.config_default_files = args.config_default_files;
     noa_app::run(app_config)
 }
 
@@ -297,6 +316,29 @@ mod tests {
         let args = Args::try_parse_from(["Noa", "--import-ghostty-config"]).unwrap();
 
         assert!(args.import_ghostty_config);
+    }
+
+    /// Ghostty-parity `--config-default-files`: defaults to true, and both
+    /// the `=false` and bare-flag forms parse (the bench harness and scripts
+    /// rely on `--config-default-files=false` for config-free launches).
+    #[test]
+    fn config_default_files_flag_parses_ghostty_style() {
+        assert!(Args::try_parse_from(["Noa"]).unwrap().config_default_files);
+        assert!(
+            !Args::try_parse_from(["Noa", "--config-default-files=false"])
+                .unwrap()
+                .config_default_files
+        );
+        assert!(
+            Args::try_parse_from(["Noa", "--config-default-files=true"])
+                .unwrap()
+                .config_default_files
+        );
+        assert!(
+            Args::try_parse_from(["Noa", "--config-default-files"])
+                .unwrap()
+                .config_default_files
+        );
     }
 
     #[test]

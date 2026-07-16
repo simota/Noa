@@ -289,6 +289,51 @@ fn raw_attach_forwards_only_pty_bytes_not_terminal_generated_side_effects() {
     assert_eq!(terminal_output.pending_clipboard_reads, vec!["c"]);
 }
 
+/// A batch of pure report queries (a DSR probe / TUI capability poll) must
+/// come back `display_dirty: false` — the spawn loop skips its redraw poke,
+/// so a query round-trip burst never wakes the main thread to snapshot an
+/// unchanged frame (the dominant term in the DSR p99 tail). Anything that
+/// prints (or otherwise mutates visible state) must flip it back to `true`,
+/// and the flag must reset between batches rather than stick.
+#[test]
+fn query_only_batches_are_not_display_dirty_but_printing_batches_are() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(8, 2))));
+    let raw_attach = RawAttachTap::default();
+    let mut stream = noa_vt::Stream::new();
+
+    // DSR (CSI 6 n) + DA1 (CSI c): replies queued, nothing visible changed.
+    let queries = feed_terminal_raw(&terminal, &mut stream, b"\x1b[6n\x1b[c", &raw_attach);
+    assert!(!queries.display_dirty);
+    assert!(
+        !queries.pending_writes.is_empty(),
+        "the replies themselves must still be queued"
+    );
+
+    // Printing dirties the display; the previous batch must not have latched
+    // the flag off.
+    let print = feed_terminal_raw(&terminal, &mut stream, b"hi", &raw_attach);
+    assert!(print.display_dirty);
+
+    // And a following pure-query batch resets to clean again.
+    let queries_again = feed_terminal_raw(&terminal, &mut stream, b"\x1b[6n", &raw_attach);
+    assert!(!queries_again.display_dirty);
+}
+
+/// A batch mixing a query with visible output (echoed keystroke + DSR, the
+/// common interactive shape) must stay dirty — the conservative direction:
+/// misclassification may only ever cost a spurious repaint, never a stale
+/// frame.
+#[test]
+fn mixed_query_and_output_batches_stay_display_dirty() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(8, 2))));
+    let raw_attach = RawAttachTap::default();
+    let mut stream = noa_vt::Stream::new();
+
+    let mixed = feed_terminal_raw(&terminal, &mut stream, b"x\x1b[6n", &raw_attach);
+    assert!(mixed.display_dirty);
+    assert_eq!(mixed.pending_writes, b"\x1b[1;2R");
+}
+
 /// Drives `feed_terminal_batch` directly (not through the `feed_terminal`
 /// test wrapper, which always passes `ipc_active: false`) — for F-6's row
 /// diff behavior.
@@ -2308,4 +2353,77 @@ fn bench_feed_terminal_batch_large_flood() {
         (total_bytes as f64 / elapsed.as_secs_f64()) / 1e6,
         full.len(),
     );
+}
+
+// ---- SpinTraffic: the hot-spin gate's sliding traffic gauge ----
+
+/// A single small batch (a DSR reply, an echoed keystroke) arms the spin
+/// for the next park, and it stays armed only within `HOT_SPIN_WINDOW`.
+#[test]
+fn spin_traffic_arms_on_small_recent_traffic_and_expires() {
+    let t0 = Instant::now();
+    let mut traffic = SpinTraffic::default();
+    assert!(!traffic.wants_spin(t0), "no traffic yet");
+    traffic.record(t0, 32);
+    assert!(traffic.wants_spin(t0 + HOT_SPIN_WINDOW / 2));
+    assert!(!traffic.wants_spin(t0 + HOT_SPIN_WINDOW), "gone quiet");
+}
+
+/// A serialized query/reply loop — small frames arriving every few tens of
+/// µs, indefinitely — keeps the spin armed: each bucket's byte total stays
+/// interactive-sized no matter how long the loop runs.
+#[test]
+fn spin_traffic_stays_armed_through_a_sustained_query_reply_loop() {
+    let t0 = Instant::now();
+    let mut traffic = SpinTraffic::default();
+    let step = Duration::from_micros(50);
+    let mut now = t0;
+    for _ in 0..2000 {
+        traffic.record(now, 10);
+        now += step;
+    }
+    assert!(traffic.wants_spin(now));
+}
+
+/// A flood delivered in *small* pty read chunks (the parser outpacing the
+/// reader) must disarm the spin: cumulative window bytes cross
+/// `HOT_SPIN_MAX_BATCH` within the first few chunks even though every
+/// individual batch is tiny.
+#[test]
+fn spin_traffic_disarms_during_a_small_chunk_flood() {
+    let t0 = Instant::now();
+    let mut traffic = SpinTraffic::default();
+    let step = Duration::from_micros(20);
+    let mut now = t0;
+    for _ in 0..8 {
+        traffic.record(now, 1024);
+        now += step;
+    }
+    assert!(!traffic.wants_spin(now));
+}
+
+/// Bulk traffic cannot slip under the gate at a bucket boundary: the
+/// previous bucket's bytes still count against the budget right after a
+/// rotation.
+#[test]
+fn spin_traffic_bucket_rotation_carries_the_previous_window() {
+    let t0 = Instant::now();
+    let mut traffic = SpinTraffic::default();
+    traffic.record(t0, 64 * 1024);
+    // Just past one window: rotate, current resets, previous carries.
+    let t1 = t0 + HOT_SPIN_WINDOW + Duration::from_micros(1);
+    traffic.record(t1, 16);
+    assert!(!traffic.wants_spin(t1));
+}
+
+/// A flood followed by ≥ two quiet windows fully resets the gauge, so the
+/// next interactive exchange arms the spin again.
+#[test]
+fn spin_traffic_resets_after_two_quiet_windows() {
+    let t0 = Instant::now();
+    let mut traffic = SpinTraffic::default();
+    traffic.record(t0, 1024 * 1024);
+    let t1 = t0 + HOT_SPIN_WINDOW * 2;
+    traffic.record(t1, 16);
+    assert!(traffic.wants_spin(t1));
 }

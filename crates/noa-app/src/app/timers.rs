@@ -27,8 +27,47 @@ fn cursor_blink_focus_gate<Window: Copy + PartialEq>(
     sticky_focused == Some(window_id) && os_focused == Some(window_id) && !occluded
 }
 
+/// Whether an IME event is user typing for the purposes of cursor-blink
+/// bookkeeping. `Preedit` updates and `Commit`s are composition keystrokes —
+/// they must reset the blink phase (and with it the
+/// `cursor-stop-blinking-after` idle clock) exactly like the raw keypresses
+/// in the `KeyboardInput` path; while a composition is active those raw
+/// events are swallowed by the IME, so without this a CJK composition paused
+/// longer than the idle window freezes the cursor solid mid-preedit.
+/// `Enabled`/`Disabled` are IME lifecycle transitions (focus changes flip
+/// them programmatically), not typing.
+pub(super) fn ime_event_is_cursor_blink_activity(event: &winit::event::Ime) -> bool {
+    matches!(
+        event,
+        winit::event::Ime::Preedit(..) | winit::event::Ime::Commit(_)
+    )
+}
+
+/// Whether the `cursor-stop-blinking-after` idle window has fully elapsed:
+/// a non-zero configured stop (`0` = never stop, Ghostty-parity) whose
+/// `stop_after_secs` have passed since the last focused-surface activity.
+/// Once true, `tick_cursor_blink` settles the cursor solid (visible) and
+/// stops scheduling blink wake-ups — the single per-blink-interval wake an
+/// otherwise idle app would keep paying forever.
+fn cursor_blink_idle_elapsed(stop_after_secs: u64, activity_at: Instant, now: Instant) -> bool {
+    stop_after_secs != 0
+        && now.saturating_duration_since(activity_at) >= Duration::from_secs(stop_after_secs)
+}
+
 const LIVE_WALLPAPER_FADE_DURATION: Duration = Duration::from_secs(2);
 const LIVE_WALLPAPER_FADE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Post-burst quiescence before deferred scrollback is settled and freed
+/// heap pages are offered back to the OS (see [`App::tick_memory_trim`]).
+///
+/// Deliberately long: firing between the bursts of a periodic workload was
+/// tried at 8s and measured *counterproductive* on macOS 26 — each settle's
+/// free/alloc churn lands on fresh pages under the xzone allocator's
+/// quarantine, growing the dirty-page union by more than the settle
+/// releases (5-cycle flood/idle: +13MB dirty vs. never trimming). At 30s
+/// the trim only fires once a burst source is genuinely done, where
+/// converting parked rows into packed pages is a pure live-heap win.
+pub(super) const MEMORY_TRIM_QUIESCENCE: Duration = Duration::from_secs(30);
 
 fn live_wallpaper_timer_step(
     deadline: Option<Instant>,
@@ -89,6 +128,48 @@ impl App {
     pub(super) fn reset_cursor_blink_phase(&mut self) {
         self.cursor_blink_visible = true;
         self.cursor_blink_deadline = None;
+        // Every phase reset is user-visible activity (keyboard input, focus
+        // gain, de-occlusion, config reload): restart the
+        // `cursor-stop-blinking-after` idle clock so blinking resumes.
+        self.cursor_blink_activity_at = Instant::now();
+    }
+
+    /// Restart the `cursor-stop-blinking-after` idle clock without touching
+    /// the blink phase: pty output on the focused surface resumes (or keeps)
+    /// blinking but must not snap the cursor's current phase the way a
+    /// keypress does — a program printing mid-blink would otherwise pin the
+    /// cursor solid for as long as it keeps printing.
+    pub(super) fn note_cursor_blink_activity(&mut self) {
+        self.cursor_blink_activity_at = Instant::now();
+    }
+
+    /// Re-arm the post-burst memory trim: called on every pty-driven redraw,
+    /// so the one-shot fires [`MEMORY_TRIM_QUIESCENCE`] after the *last*
+    /// output of a burst. A field store per event — nothing else happens
+    /// until quiescence.
+    pub(super) fn arm_memory_trim(&mut self) {
+        self.memory_trim_deadline = Some(Instant::now() + MEMORY_TRIM_QUIESCENCE);
+    }
+
+    /// One-shot post-quiescence memory trim (see `crate::memory`). Returns
+    /// the pending deadline while armed, `None` (and trims) once it passes.
+    pub(super) fn tick_memory_trim(&mut self) -> Option<Instant> {
+        let deadline = self.memory_trim_deadline?;
+        if Instant::now() < deadline {
+            return Some(deadline);
+        }
+        self.memory_trim_deadline = None;
+        // Settle each pane's deferred scrollback and drop its flood-sized
+        // scratch (recycled-row pool, spare page, parked pack workers) so
+        // the pressure relief below has actual free pages to return. The
+        // panes are quiescent — the lock is uncontended and held briefly.
+        for state in self.windows.values() {
+            for surface in state.surfaces.values() {
+                surface.terminal.lock().trim_memory();
+            }
+        }
+        crate::memory::release_reclaimable_memory();
+        None
     }
 
     /// Advance the cursor blink phase and return the next wake-up deadline.
@@ -99,6 +180,31 @@ impl App {
         }
 
         let now = Instant::now();
+        // `cursor-stop-blinking-after` idle stop (deviation from Ghostty —
+        // see the key's doc in `noa-config`): settle solid and disarm. No
+        // wake-up is scheduled for the stop boundary itself; the blink chain
+        // is already awake every CURSOR_BLINK_INTERVAL, so the first tick
+        // past the boundary lands here at most one interval late. Any resume
+        // (keypress, focused-surface pty output) refreshes the idle clock
+        // *and* wakes the loop, so the next `about_to_wait` re-arms below.
+        if cursor_blink_idle_elapsed(
+            self.config.cursor_stop_blinking_after_secs,
+            self.cursor_blink_activity_at,
+            now,
+        ) {
+            if !self.cursor_blink_visible {
+                // Stopped mid-invisible-phase: repaint once so the settled
+                // cursor is solid, not stuck hidden.
+                self.cursor_blink_visible = true;
+                if let Some(window_id) = self.focused
+                    && let Some(state) = self.windows.get(&window_id)
+                {
+                    state.window.request_redraw();
+                }
+            }
+            self.cursor_blink_deadline = None;
+            return None;
+        }
         let deadline = *self
             .cursor_blink_deadline
             .get_or_insert(now + CURSOR_BLINK_INTERVAL);
@@ -575,8 +681,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        LIVE_WALLPAPER_FADE_DURATION, cursor_blink_focus_gate, cursor_blink_state_wants_blink,
-        live_wallpaper_fade_progress, live_wallpaper_timer_step,
+        LIVE_WALLPAPER_FADE_DURATION, cursor_blink_focus_gate, cursor_blink_idle_elapsed,
+        cursor_blink_state_wants_blink, live_wallpaper_fade_progress, live_wallpaper_timer_step,
     };
     use crate::app::state::CursorBlinkState;
     use noa_grid::CursorStyle;
@@ -642,6 +748,70 @@ mod tests {
             !cursor_blink_focus_gate(Some(1_u8), Some(1_u8), 1_u8, true),
             "occlusion must veto blink regardless of a stale blink-eligible cache"
         );
+    }
+
+    /// The `cursor-stop-blinking-after` idle gate (`tick_cursor_blink`'s
+    /// settle-solid branch): elapses only once the full configured window has
+    /// passed since the last activity, and `0` — the Ghostty-parity value —
+    /// must never elapse no matter how stale the activity timestamp is.
+    #[test]
+    fn cursor_blink_idle_elapses_after_configured_window_and_never_for_zero() {
+        let activity = Instant::now();
+
+        assert!(
+            !cursor_blink_idle_elapsed(10, activity, activity + Duration::from_secs(9)),
+            "must keep blinking strictly inside the idle window"
+        );
+        assert!(
+            cursor_blink_idle_elapsed(10, activity, activity + Duration::from_secs(10)),
+            "must settle solid once the idle window fully elapses"
+        );
+        assert!(cursor_blink_idle_elapsed(
+            10,
+            activity,
+            activity + Duration::from_secs(3600)
+        ));
+        assert!(
+            !cursor_blink_idle_elapsed(0, activity, activity + Duration::from_secs(3600)),
+            "0 = never stop (Ghostty parity), regardless of idle time"
+        );
+    }
+
+    /// Fresh activity restarts the idle clock: a timestamp at (or absurdly,
+    /// after) `now` must read as not-elapsed — this is what a keypress or
+    /// focused-surface pty output relies on to resume blinking.
+    #[test]
+    fn cursor_blink_idle_restarts_from_fresh_activity() {
+        let now = Instant::now();
+        assert!(!cursor_blink_idle_elapsed(10, now, now));
+        assert!(
+            !cursor_blink_idle_elapsed(10, now + Duration::from_secs(5), now),
+            "an activity timestamp ahead of now must saturate, not underflow"
+        );
+    }
+
+    /// IME composition events feed the same idle clock a raw keypress does
+    /// (`on_ime_event` calls `reset_cursor_blink_phase` for these): `Preedit`
+    /// updates and `Commit`s are typing — a CJK composition paused past the
+    /// `cursor-stop-blinking-after` window must not freeze the cursor solid
+    /// mid-preedit. `Enabled`/`Disabled` flip programmatically on focus
+    /// changes and must not count.
+    #[test]
+    fn cursor_blink_ime_preedit_and_commit_count_as_activity() {
+        use winit::event::Ime;
+        assert!(super::ime_event_is_cursor_blink_activity(&Ime::Preedit(
+            "か".to_string(),
+            Some((0, 3)),
+        )));
+        assert!(
+            super::ime_event_is_cursor_blink_activity(&Ime::Preedit(String::new(), None)),
+            "cancelling a composition (empty preedit) is still a user action"
+        );
+        assert!(super::ime_event_is_cursor_blink_activity(&Ime::Commit(
+            "漢字".to_string()
+        )));
+        assert!(!super::ime_event_is_cursor_blink_activity(&Ime::Enabled));
+        assert!(!super::ime_event_is_cursor_blink_activity(&Ime::Disabled));
     }
 
     #[test]

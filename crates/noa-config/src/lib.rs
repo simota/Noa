@@ -78,6 +78,10 @@ pub const DEFAULT_BACKGROUND_IMAGE_INTERVAL_SECS: u64 = 30;
 /// Smallest positive `background-image-interval` value. Lower positive values
 /// are clamped so the feature cannot become a display-rate animation loop.
 pub const MIN_BACKGROUND_IMAGE_INTERVAL_SECS: u64 = 5;
+/// `cursor-stop-blinking-after` default: stop blinking (cursor solid) after
+/// this many idle seconds. See `StartupConfig::cursor_stop_blinking_after_secs`
+/// for the deviation rationale; `0` restores Ghostty parity (never stop).
+pub const DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS: u64 = 10;
 
 /// `clipboard-read` policy for OSC 52 clipboard *read* (query) requests.
 /// Mirrors Ghostty, whose default is `ask`.
@@ -486,6 +490,20 @@ pub struct StartupConfig {
     /// terminal default (Ghostty: blinking block).
     pub cursor_style: Option<CursorShape>,
     pub cursor_style_blink: Option<bool>,
+    /// `cursor-stop-blinking-after`: seconds of focused-surface inactivity
+    /// (no keyboard input, no pty output) after which a blinking cursor
+    /// settles solid (visible); any activity resumes blinking. `0` never
+    /// stops. noa-specific key (no Ghostty analog).
+    ///
+    /// **Deviation from Ghostty** (which blinks forever, matching the
+    /// default here being non-zero rather than the key existing): an
+    /// eternally blinking cursor forces a redraw wake-up every blink
+    /// interval even when the terminal is completely idle, keeping idle CPU
+    /// and context-switch rates measurably above terminals that quiesce
+    /// (kitty stops blinking after 15 idle seconds for the same reason).
+    /// Default [`DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS`]; set `0` to
+    /// restore Ghostty-parity behavior.
+    pub cursor_stop_blinking_after_secs: u64,
     /// `background-opacity`: 0.0..=1.0, clamped. Consumed by the transparency
     /// follow-up; plumbed through for now. Default is fully opaque.
     pub background_opacity: f32,
@@ -671,6 +689,7 @@ impl Default for StartupConfig {
             minimum_contrast: DEFAULT_MINIMUM_CONTRAST,
             cursor_style: None,
             cursor_style_blink: None,
+            cursor_stop_blinking_after_secs: DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS,
             background_opacity: 1.0,
             background_blur_radius: 0,
             background_image: None,
@@ -742,6 +761,7 @@ pub struct ConfigOverrides {
     pub minimum_contrast: Option<f32>,
     pub cursor_style: Option<CursorShape>,
     pub cursor_style_blink: Option<bool>,
+    pub cursor_stop_blinking_after_secs: Option<u64>,
     pub background_opacity: Option<f32>,
     pub background_blur_radius: Option<u16>,
     pub background_image: Option<PathBuf>,
@@ -818,6 +838,10 @@ macro_rules! impl_redacted_config_debug {
                     .field("minimum_contrast", &self.minimum_contrast)
                     .field("cursor_style", &self.cursor_style)
                     .field("cursor_style_blink", &self.cursor_style_blink)
+                    .field(
+                        "cursor_stop_blinking_after_secs",
+                        &self.cursor_stop_blinking_after_secs,
+                    )
                     .field("background_opacity", &self.background_opacity)
                     .field("background_blur_radius", &self.background_blur_radius)
                     .field("background_image", &self.background_image)
@@ -916,6 +940,9 @@ impl ConfigOverrides {
             cursor_style_blink: higher_priority
                 .cursor_style_blink
                 .or(self.cursor_style_blink),
+            cursor_stop_blinking_after_secs: higher_priority
+                .cursor_stop_blinking_after_secs
+                .or(self.cursor_stop_blinking_after_secs),
             background_opacity: higher_priority
                 .background_opacity
                 .or(self.background_opacity),
@@ -1037,6 +1064,9 @@ impl ConfigOverrides {
             minimum_contrast: self.minimum_contrast.unwrap_or(base.minimum_contrast),
             cursor_style: self.cursor_style.or(base.cursor_style),
             cursor_style_blink: self.cursor_style_blink.or(base.cursor_style_blink),
+            cursor_stop_blinking_after_secs: self
+                .cursor_stop_blinking_after_secs
+                .unwrap_or(base.cursor_stop_blinking_after_secs),
             background_opacity: self.background_opacity.unwrap_or(base.background_opacity),
             background_blur_radius: self
                 .background_blur_radius
@@ -1123,10 +1153,19 @@ pub fn load_startup_config(
 ) -> anyhow::Result<(StartupConfig, Vec<Diagnostic>)> {
     let (Some(config_path), Some(legacy_path)) = (default_config_path(), legacy_toml_config_path())
     else {
-        let config = finalize_startup_config(cli.apply_to(StartupConfig::default()))?;
-        return Ok((config, Vec::new()));
+        return load_startup_config_without_files(cli);
     };
     load_startup_config_from(&config_path, &legacy_path, cli)
+}
+
+/// Resolve the startup config from built-in defaults + CLI overrides only,
+/// never reading any config file (Ghostty parity:
+/// `--config-default-files=false`).
+pub fn load_startup_config_without_files(
+    cli: ConfigOverrides,
+) -> anyhow::Result<(StartupConfig, Vec<Diagnostic>)> {
+    let config = finalize_startup_config(cli.apply_to(StartupConfig::default()))?;
+    Ok((config, Vec::new()))
 }
 
 pub fn load_startup_config_from(
@@ -1338,6 +1377,7 @@ mod tests {
                 minimum_contrast: DEFAULT_MINIMUM_CONTRAST,
                 cursor_style: None,
                 cursor_style_blink: None,
+                cursor_stop_blinking_after_secs: DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS,
                 background_opacity: 1.0,
                 background_blur_radius: 0,
                 background_image: None,
@@ -2154,6 +2194,26 @@ font-size = 15.5
         assert_eq!(config, StartupConfig::default());
         assert!(diagnostics.is_empty());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `--config-default-files=false` path: defaults + CLI only, no file IO.
+    /// CLI overrides must still win over the built-in defaults.
+    #[test]
+    fn load_startup_config_without_files_applies_cli_over_defaults() {
+        let cli = ConfigOverrides {
+            cols: Some(200),
+            font_size: Some(21.0),
+            ..Default::default()
+        };
+
+        let (config, diagnostics) = load_startup_config_without_files(cli).unwrap();
+
+        assert_eq!(config.cols, 200);
+        assert_eq!(config.font_size, 21.0);
+        assert_eq!(config.rows, StartupConfig::default().rows);
+        assert!(config.background_image.is_none());
+        assert!(!config.server_enable);
+        assert!(diagnostics.is_empty());
     }
 
     #[test]

@@ -37,6 +37,10 @@ pub struct Stream {
     /// Reused across `SGR` dispatches so the hot colored-output path doesn't
     /// allocate a fresh `Vec` per escape sequence (see `parse_sgr_into`).
     sgr_attrs: Vec<SgrAttr>,
+    /// Sticky "something visible may have changed" flag, see
+    /// [`Stream::take_display_dirty`]. Set by every dispatched action except
+    /// the pure report queries in [`is_pure_query`].
+    display_dirty: bool,
 }
 
 impl Default for Stream {
@@ -44,6 +48,7 @@ impl Default for Stream {
         Self {
             parser: ParserStorage::Owned(Parser::new()),
             sgr_attrs: Vec::new(),
+            display_dirty: false,
         }
     }
 }
@@ -57,20 +62,69 @@ impl Stream {
         Self {
             parser: ParserStorage::Shared(parser),
             sgr_attrs: Vec::new(),
+            display_dirty: false,
         }
     }
 
     /// Feed a chunk of bytes, dispatching all resulting operations to `handler`.
     pub fn feed<H: Handler>(&mut self, bytes: &[u8], handler: &mut H) {
         match &mut self.parser {
-            ParserStorage::Owned(parser) => {
-                feed_parser(parser, &mut self.sgr_attrs, bytes, handler)
-            }
+            ParserStorage::Owned(parser) => feed_parser(
+                parser,
+                &mut self.sgr_attrs,
+                bytes,
+                handler,
+                &mut self.display_dirty,
+            ),
             ParserStorage::Shared(parser) => {
                 let mut parser = parser.0.lock().expect("shared VT parser mutex poisoned");
-                feed_parser(&mut parser, &mut self.sgr_attrs, bytes, handler);
+                feed_parser(
+                    &mut parser,
+                    &mut self.sgr_attrs,
+                    bytes,
+                    handler,
+                    &mut self.display_dirty,
+                );
             }
         }
+    }
+
+    /// Whether anything fed since the last take could have changed *visible*
+    /// terminal state, and reset the flag. `false` means every completed
+    /// action so far was a pure report query ([`is_pure_query`]: DSR, DA,
+    /// DECRQM, XTVERSION, the Kitty keyboard query) — sequences that only
+    /// queue a reply and can never dirty a frame. Callers that pace repaints
+    /// off pty output (the io thread) use this to skip waking the render
+    /// path for query/reply round-trips: a probe or TUI polling `CSI 6 n` in
+    /// a tight loop otherwise forces snapshot passes that repaint an
+    /// unchanged frame *and* stretch the reply's own tail latency by
+    /// contending on the terminal lock mid-burst.
+    ///
+    /// Conservative by construction: the flag is set by *every* other
+    /// action, including unknown/ignored sequences and bytes still mid-parse
+    /// on a later chunk — a misclassification can only cause a spurious
+    /// repaint, never a stale frame.
+    pub fn take_display_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.display_dirty)
+    }
+}
+
+/// A CSI action that only reports state back to the application (the
+/// terminal queues a reply; nothing on screen can change): DSR (`CSI n`),
+/// DA1/DA2 (`CSI c` / `CSI > c`), DECRQM (`CSI ? Pd $ p`), XTVERSION
+/// (`CSI > q`), and the Kitty keyboard query (`CSI ? u`). Everything else —
+/// prints, C0, other CSI/ESC/OSC/DCS/APC, and unknown sequences — counts as
+/// display-dirtying for [`Stream::take_display_dirty`].
+fn is_pure_query(action: &Action) -> bool {
+    let Action::CsiDispatch(csi) = action else {
+        return false;
+    };
+    match csi.final_byte {
+        b'n' | b'c' => csi.intermediates().is_empty(),
+        b'p' => csi.intermediates() == [b'$'],
+        b'q' => csi.private == b'>' && csi.intermediates().is_empty(),
+        b'u' => csi.private == b'?',
+        _ => false,
     }
 }
 
@@ -79,6 +133,7 @@ fn feed_parser<H: Handler>(
     sgr_attrs: &mut Vec<SgrAttr>,
     bytes: &[u8],
     handler: &mut H,
+    display_dirty: &mut bool,
 ) {
     let mut i = 0;
     // Cached exclusive end of the printable run containing `i` (bytes in
@@ -106,6 +161,7 @@ fn feed_parser<H: Handler>(
                 // `from_utf8` re-scan of a range we already proved ASCII
                 // is sound.
                 let text = unsafe { core::str::from_utf8_unchecked(&bytes[i..run_end]) };
+                *display_dirty = true;
                 handler.print_str(text);
                 i = run_end;
                 continue;
@@ -115,6 +171,7 @@ fn feed_parser<H: Handler>(
             // keeps std's `valid_up_to` semantics for the invalid-suffix path.
             match simdutf8::compat::from_utf8(&bytes[i..run_end]) {
                 Ok(text) => {
+                    *display_dirty = true;
                     handler.print_str(text);
                     i = run_end;
                     continue;
@@ -129,13 +186,17 @@ fn feed_parser<H: Handler>(
                     if valid > 0 {
                         let text = core::str::from_utf8(&bytes[i..i + valid])
                             .expect("valid_up_to marks a valid UTF-8 prefix");
+                        *display_dirty = true;
                         handler.print_str(text);
                         i += valid;
                     }
                 }
             }
         }
-        parser.advance(bytes[i], &mut |action| dispatch(action, handler, sgr_attrs));
+        parser.advance(bytes[i], &mut |action| {
+            *display_dirty |= !is_pure_query(&action);
+            dispatch(action, handler, sgr_attrs);
+        });
         i += 1;
     }
 }

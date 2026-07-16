@@ -325,6 +325,11 @@ fn show_config_output(config: &StartupConfig) -> String {
     push_optional_line(&mut out, "cursor-style-blink", config.cursor_style_blink);
     push_line(
         &mut out,
+        "cursor-stop-blinking-after",
+        &config.cursor_stop_blinking_after_secs.to_string(),
+    );
+    push_line(
+        &mut out,
         "background-opacity",
         &config.background_opacity.to_string(),
     );

@@ -366,6 +366,15 @@ impl Screen {
         }
     }
 
+    /// Post-burst memory trim: settle deferred scrollback rows into packed
+    /// pages and release the flood-sized scratch buffers (recycled-row pool,
+    /// spare page, parked pack workers). Cheap when there is nothing to
+    /// settle; never touches visible content.
+    pub fn trim_memory(&mut self) {
+        let evicted = self.scrollback.trim_memory();
+        self.note_scrollback_evictions(evicted);
+    }
+
     /// Keep a historical viewport anchored when rows enter scrollback. An
     /// explicit live-bottom lock pins only full-height translations; a partial
     /// region leaves fixed live rows in place and must keep them visible.

@@ -74,7 +74,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 | Font | `font-family[-bold/-italic/-bold-italic]`, `font-size`, `font-feature`, `font-variation*`, `font-synthetic-style`, `font-thicken[-strength]` |
 | Color/theme | `theme`, `background`, `foreground`, `cursor-color`, `selection-foreground/background`, `minimum-contrast`, `background-opacity`, `background-blur-radius` |
 | Background image | `background-image`, `background-image-opacity/-position/-fit/-repeat/-interval` |
-| Cursor | `cursor-style`, `cursor-style-blink` |
+| Cursor | `cursor-style`, `cursor-style-blink`, `cursor-stop-blinking-after` |
 | Bell | `visual-bell`, `audible-bell`, `audible-bell-dock-bounce`, `audible-bell-when-unfocused` |
 | Behavior | `scrollback-limit`, `clipboard-read`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter` |
 | macOS | `macos-option-as-alt`, `macos-titlebar-style`, `macos-non-native-fullscreen`, `macos-titlebar-proxy-icon` |
@@ -84,6 +84,8 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 - **Ghostty config import** — import with migration statistics
 - **Custom keybindings** — reassignment via `keybind = <chord>=<action>` / `unbind` / `clear`
 - **Recognized-but-unsupported keys** — `palette` and `config-file` emit a diagnostic and their values are ignored; palette override and include are not implemented
+- **Live reload** — the config file is watched and re-applied at runtime: immediately on window focus gain and settings-panel commits, otherwise on a slow 3s idle poll (so a save from inside a focused noa pane applies within ≤3s; refocus or use the settings UI to apply instantly)
+- **Deviating defaults** — `cursor-stop-blinking-after = 10` (Ghostty blinks forever; `0` restores parity) and `quick-terminal-screen = mouse` (Ghostty: `main`); see CONFIGURATION.md "Deviations from Ghostty defaults" for rationale
 
 ## macOS integration
 

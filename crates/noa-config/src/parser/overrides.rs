@@ -40,6 +40,7 @@ pub(crate) fn build_overrides(
     let mut minimum_contrast = None;
     let mut cursor_style = None;
     let mut cursor_style_blink = None;
+    let mut cursor_stop_blinking_after_secs = None;
     let mut background_opacity = None;
     let mut background_blur_radius = None;
     let mut background_image = None;
@@ -203,6 +204,10 @@ pub(crate) fn build_overrides(
             }
             "cursor-style-blink" => {
                 cursor_style_blink = parse_bool_directive(path, directive, &mut diagnostics);
+            }
+            "cursor-stop-blinking-after" => {
+                cursor_stop_blinking_after_secs =
+                    parse_cursor_stop_blinking_after(path, directive, &mut diagnostics);
             }
             "background-opacity" => {
                 background_opacity = parse_opacity(path, directive, &mut diagnostics);
@@ -405,6 +410,7 @@ pub(crate) fn build_overrides(
             minimum_contrast,
             cursor_style,
             cursor_style_blink,
+            cursor_stop_blinking_after_secs,
             background_opacity,
             background_blur_radius,
             background_image,
@@ -508,6 +514,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "minimum-contrast"
             | "cursor-style"
             | "cursor-style-blink"
+            | "cursor-stop-blinking-after"
             | "alpha-blending"
             | "background-opacity"
             | "background-blur-radius"

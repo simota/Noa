@@ -144,9 +144,19 @@ pub struct ServerHandle {
     broadcaster: Broadcaster,
     connection_count: Arc<AtomicUsize>,
     accept_thread: Option<JoinHandle<()>>,
+    /// Shared with the accept thread. The handle keeps its own reference so
+    /// the listener fd is guaranteed still open whenever
+    /// [`ServerHandle::stop_accept_thread`] needs to force-close it — the fd
+    /// can't have been dropped (and its number reused) while this `Arc` is
+    /// alive.
+    listener: Arc<TcpListener>,
 }
 
 impl ServerHandle {
+    /// Bound on how long a shutdown waits for the accept thread to observe
+    /// the flag and exit before detaching it with a warning.
+    const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -163,14 +173,109 @@ impl ServerHandle {
     pub fn active_connection_count(&self) -> usize {
         self.connection_count.load(Ordering::SeqCst)
     }
+
+    /// Stop the accept loop: set the shutdown flag, unblock the blocking
+    /// `accept()` (wake connection, falling back to force-closing the
+    /// listener socket), and join the thread with a bounded timeout.
+    /// Returns whether the thread was actually reaped. Factored out of
+    /// `Drop` so tests can drive the wake-failure path with an unreachable
+    /// `wake_addr`.
+    fn stop_accept_thread(&mut self, wake_addr: std::net::SocketAddr) -> bool {
+        self.shutdown.store(true, Ordering::SeqCst);
+        let Some(handle) = self.accept_thread.take() else {
+            return true;
+        };
+        // The accept thread sits in a *blocking* `accept()` (zero idle
+        // wake-ups — it used to poll at 20ms forever); wake it with a
+        // throwaway loopback connection so it can observe the shutdown
+        // flag and exit.
+        if let Err(err) = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(250)) {
+            // Wake connection failed (exhausted fd table, firewall filter,
+            // half-torn-down network stack …). Force-close the listening
+            // socket instead: on macOS a blocked `accept(2)` does NOT return
+            // on `shutdown(2)` of a listening socket (that fails ENOTCONN),
+            // but it does return `ECONNABORTED` once the socket itself is
+            // deallocated — which `force_close_listener`'s dup2-to-/dev/null
+            // achieves without ever double-closing a possibly-reused fd
+            // number. Without this, the parked thread (and the port) leaked
+            // for the life of the process.
+            log::warn!(
+                "noa-ipc: could not wake accept thread for shutdown ({err}); force-closing the listener"
+            );
+            force_close_listener(&self.listener);
+        }
+        // The accept loop rechecks the flag before handling any accepted
+        // stream, so a wake connection is dropped unhandled; a force-closed
+        // listener surfaces as an accept error, whose handler also rechecks
+        // the flag. Either way the thread exits promptly — but bound the
+        // wait anyway so a pathological stall can only cost `JOIN_TIMEOUT`,
+        // never hang the caller (the main thread, on config-reload server
+        // restarts).
+        let deadline = Instant::now() + Self::JOIN_TIMEOUT;
+        while !handle.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        if !handle.is_finished() {
+            log::warn!(
+                "noa-ipc: accept thread did not stop within {:?}; detaching it",
+                Self::JOIN_TIMEOUT
+            );
+            return false;
+        }
+        if let Err(err) = handle.join() {
+            log::warn!("noa-ipc: accept thread panicked during shutdown: {err:?}");
+            return false;
+        }
+        true
+    }
+}
+
+/// Close the listening socket out from under a thread blocked in `accept()`
+/// without freeing its fd *number*: `dup2` an fd for `/dev/null` over the
+/// listener's fd. The kernel drops the socket's last reference (waking the
+/// blocked `accept(2)` with `ECONNABORTED` — verified on macOS; `shutdown(2)`
+/// on a listening socket fails `ENOTCONN` and wakes nothing), while the fd
+/// number stays validly open on `/dev/null`, so the accept thread's eventual
+/// `TcpListener` drop closes that harmless dup instead of racing a reused fd
+/// (no double-close).
+#[cfg(unix)]
+fn force_close_listener(listener: &TcpListener) {
+    use std::os::fd::AsRawFd;
+    match std::fs::File::open("/dev/null") {
+        Ok(devnull) => {
+            let rv = unsafe { libc::dup2(devnull.as_raw_fd(), listener.as_raw_fd()) };
+            if rv < 0 {
+                log::warn!(
+                    "noa-ipc: dup2 over the listener fd failed: {}",
+                    io::Error::last_os_error()
+                );
+            }
+        }
+        Err(err) => log::warn!("noa-ipc: cannot open /dev/null to close the listener: {err}"),
+    }
+}
+
+#[cfg(not(unix))]
+fn force_close_listener(_listener: &TcpListener) {
+    // No safe way to close a listener out from under a blocked accept
+    // without fd-number reuse hazards on this platform; the thread stays
+    // parked until process exit (the pre-hardening behavior).
 }
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.accept_thread.take() {
-            let _ = handle.join();
-        }
+        // An unspecified bind address (`0.0.0.0`/`::`) is reachable via the
+        // matching loopback.
+        let wake_ip = match self.bind_addr {
+            std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            }
+            std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
+                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+            }
+            ip => ip,
+        };
+        self.stop_accept_thread(std::net::SocketAddr::new(wake_ip, self.port));
     }
 }
 
@@ -202,8 +307,12 @@ impl Server {
             ));
         }
         let bind_addr = config.bind_addr;
-        let listener = TcpListener::bind((bind_addr, config.port))?;
-        listener.set_nonblocking(true)?;
+        // The listener stays *blocking*: the accept thread parks in
+        // `accept()` and wakes only for a real connection (or the
+        // `ServerHandle::drop` wake connection) instead of the previous
+        // non-blocking accept + 20ms sleep poll, which burned ~42 wake-ups/s
+        // for the whole life of the server even with zero clients.
+        let listener = Arc::new(TcpListener::bind((bind_addr, config.port))?);
         let port = listener.local_addr()?.port();
 
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -219,10 +328,18 @@ impl Server {
 
         let shutdown_loop = shutdown.clone();
         let broadcaster_loop = broadcaster.clone();
+        let listener_loop = listener.clone();
         let accept_thread = thread::spawn(move || {
             while !shutdown_loop.load(Ordering::SeqCst) {
-                match listener.accept() {
+                match listener_loop.accept() {
                     Ok((stream, addr)) => {
+                        // Recheck after every (blocking) accept: a shutdown
+                        // wake connection (see `ServerHandle::drop`) must be
+                        // dropped unhandled, not given a connection thread.
+                        if shutdown_loop.load(Ordering::SeqCst) {
+                            drop(stream);
+                            break;
+                        }
                         // Refuse excess connections by closing immediately
                         // rather than spawning a thread for them (F-3).
                         if connection_count.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
@@ -281,10 +398,18 @@ impl Server {
                             }
                         });
                     }
-                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(20));
-                    }
                     Err(err) => {
+                        // A shutdown that couldn't open a wake connection
+                        // force-closes the listener instead, surfacing here
+                        // as ECONNABORTED (see `stop_accept_thread`) — exit
+                        // immediately rather than logging and backing off.
+                        if shutdown_loop.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        // Transient accept failure (e.g. EMFILE, aborted
+                        // connection). Back off briefly so a persistent error
+                        // can't spin this thread; the loop condition rechecks
+                        // the shutdown flag each iteration.
                         log::warn!("noa-ipc: accept error: {err}");
                         thread::sleep(Duration::from_millis(50));
                     }
@@ -299,6 +424,7 @@ impl Server {
             broadcaster,
             connection_count: connection_count_handle,
             accept_thread: Some(accept_thread),
+            listener,
         })
     }
 }
@@ -1541,6 +1667,110 @@ mod tests {
             reserve_ip_slot(&counts, other),
             IpSlot::Reserved(_)
         ));
+    }
+
+    // ---- shutdown hardening: the accept thread must never leak ----
+
+    /// Minimal backend for lifecycle-only tests: no RPC is ever dispatched.
+    struct NoopBackend;
+    impl IpcBackend for NoopBackend {
+        fn list_panels(&self) -> Vec<Panel> {
+            Vec::new()
+        }
+        fn get_text(
+            &self,
+            _pane: PaneRef,
+            _source: crate::protocol::TextSource,
+            _max_bytes: usize,
+        ) -> Result<crate::backend::TextResult, IpcError> {
+            Err(IpcError::PaneClosed)
+        }
+        fn get_grid(
+            &self,
+            _pane: PaneRef,
+            _start_row: u64,
+            _row_count: u64,
+        ) -> Result<crate::backend::GridResult, IpcError> {
+            Err(IpcError::PaneClosed)
+        }
+        fn send_text(&self, _pane: PaneRef, _text: &str, _paste: bool) -> Result<(), IpcError> {
+            Err(IpcError::PaneClosed)
+        }
+        fn focus_pane(&self, _pane: PaneRef) -> Result<(), IpcError> {
+            Err(IpcError::PaneClosed)
+        }
+        fn new_tab(&self, _window: Option<crate::backend::WindowRef>) -> Result<PaneRef, IpcError> {
+            Err(IpcError::PaneClosed)
+        }
+        fn split(
+            &self,
+            _pane: PaneRef,
+            _direction: crate::protocol::SplitDirection,
+        ) -> Result<PaneRef, IpcError> {
+            Err(IpcError::PaneClosed)
+        }
+        fn close_pane(&self, _pane: PaneRef) -> Result<(), IpcError> {
+            Err(IpcError::PaneClosed)
+        }
+    }
+
+    /// The wake-failure path (`stop_accept_thread` with an unreachable wake
+    /// address, standing in for an exhausted fd table or filtered loopback)
+    /// must still unblock the parked `accept()` — by force-closing the
+    /// listening socket — and reap the thread within the bounded join,
+    /// instead of logging and leaking it (the pre-hardening behavior).
+    #[test]
+    fn wake_failure_force_closes_the_listener_and_reaps_the_accept_thread() {
+        let mut handle = Server::start(
+            ServerConfig {
+                port: 0,
+                bind_addr: ServerConfig::DEFAULT_BIND_ADDR,
+                token: "lifecycle-test-token".to_string(),
+                allowed_scopes: ScopeSet::empty(),
+                hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+                handshake_timeout: ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT,
+            },
+            Arc::new(NoopBackend),
+            Broadcaster::new(),
+        )
+        .expect("server should bind an ephemeral loopback port");
+
+        // A loopback port that refuses connections: bind an ephemeral
+        // listener, note its port, and drop it before connecting.
+        let dead_port = {
+            let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+            probe.local_addr().unwrap().port()
+        };
+        let dead_addr =
+            std::net::SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), dead_port);
+
+        assert!(
+            handle.stop_accept_thread(dead_addr),
+            "wake failure must fall back to closing the listener so the \
+             accept thread exits and joins within the bounded timeout"
+        );
+        // `Drop` runs after `accept_thread` was taken — a no-op second stop.
+    }
+
+    /// The normal shutdown path (reachable wake address) still reaps the
+    /// thread — guarding the refactor of `Drop` into `stop_accept_thread`.
+    #[test]
+    fn normal_shutdown_wakes_and_reaps_the_accept_thread() {
+        let mut handle = Server::start(
+            ServerConfig {
+                port: 0,
+                bind_addr: ServerConfig::DEFAULT_BIND_ADDR,
+                token: "lifecycle-test-token".to_string(),
+                allowed_scopes: ScopeSet::empty(),
+                hello_deadline: ServerConfig::DEFAULT_HELLO_DEADLINE,
+                handshake_timeout: ServerConfig::DEFAULT_HANDSHAKE_TIMEOUT,
+            },
+            Arc::new(NoopBackend),
+            Broadcaster::new(),
+        )
+        .expect("server should bind an ephemeral loopback port");
+        let wake_addr = std::net::SocketAddr::new(handle.bind_addr(), handle.port());
+        assert!(handle.stop_accept_thread(wake_addr));
     }
 
     #[test]

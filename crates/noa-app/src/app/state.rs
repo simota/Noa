@@ -325,6 +325,13 @@ pub(super) struct WindowState {
     /// settings, confirm dialog, toast. Plain data on every platform; only
     /// the macOS redraw path feeds it.
     pub(super) native_overlays: crate::macos_overlay::NativeOverlayCache,
+    /// The `(theme bg, opacity bits)` last applied via
+    /// `set_window_background_color`, so `redraw` only touches the NSWindow
+    /// when the value actually changes. Re-setting it every frame is not
+    /// free: each `setBackgroundColor:` dirties the window's backdrop layer,
+    /// dragging a full AppKit layout + CA commit into every cursor-blink
+    /// frame (measured as the largest single main-thread idle cost).
+    pub(super) applied_window_bg: Option<(noa_core::Rgb, u32)>,
 }
 
 /// How long the `cols × rows` resize toast stays up after the last grid

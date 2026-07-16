@@ -226,3 +226,26 @@ does not show a clear regression in this quick probe. `IMPL-PERF-705` remains
 open because the scrollback push wall-clock probe was lower on current in two
 runs; use a steadier benchmark or allocation sampler before declaring the
 workload fully non-regressed.
+
+## Latency engineering notes (behavior disclosures)
+
+Two deliberate, workload-scoped behaviors on the interactive-latency path — documented here
+because they are visible in CPU profiles even though neither affects correctness:
+
+- **Interactive-query hot spin.** While *interactive-rate* pty traffic is streaming (data within
+  the last ~2ms **and** ≤4 KiB over the last two such windows), each pane's io thread polls its
+  channels for up to **150µs** before parking, converting the scheduler's 20–80µs park/wake cost
+  into a hit in the loop (`crates/noa-app/src/io_thread/spawn.rs`, `HOT_SPIN_*`). Consequence, by
+  design: an application running a *sustained* escape-query loop (e.g. polling `CSI 6 n`
+  continuously) keeps that spin armed for the duration of the loop — that is precisely the
+  serialized round-trip workload the spin exists to accelerate. The gate is workload-scoped, not
+  global: bulk floods (>4 KiB per window) and idle/human-typing panes never arm it, so the spin
+  can never burn CPU outside an active query/echo exchange.
+- **Query-only batches skip renderer wake-ups.** A pty batch whose completed actions are all pure
+  report queries (DSR, DA1/DA2, DECRQM, XTVERSION, Kitty keyboard query — see
+  `noa_vt::Stream::take_display_dirty`) paints nothing, so the io thread skips its redraw poke
+  entirely instead of waking the main thread to snapshot an unchanged frame. Besides saving the
+  wake, this removes the main-thread snapshot pass that used to contend the terminal lock against
+  the next query of a burst — the dominant term in the DSR round-trip p99 tail. Classification is
+  conservative (anything unknown counts as display-dirtying), so a misclassification can only cost
+  a spurious repaint, never a stale frame.

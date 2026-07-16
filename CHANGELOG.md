@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-07-16
+
+### Changed
+
+- Idle memory: the ~18 curated CJK fallback fonts are no longer resolved
+  eagerly at startup (which faulted whole `.ttc` files into the page cache);
+  they resolve lazily on the first CJK glyph miss via the same
+  priority-ordered, cmap-gated lookup, so glyph selection is unchanged.
+  Measured idle RSS: 239MB → 133MB (#20)
+- Shell integration prompt marks (OSC 133 D/A/B + OSC 7) are now emitted as a
+  single builtin `printf` per prompt, with OSC 7 switched to the
+  `kitty-shell-cwd://` scheme (raw path, no per-character percent-encoding):
+  ~60µs → ~7µs per prompt in zsh, ~3.7ms → ~7µs on non-ASCII paths (#19)
+
+### Fixed
+
+- Shell integration no longer leaks noa-only bookkeeping into the session
+  environment: `ZDOTDIR` is unset after startup when the user never had one
+  (Ghostty parity), and `USER_ZDOTDIR` is a plain unexported variable (#19)
+
 ## [0.1.5] - 2026-07-16
 
 ### Added
@@ -220,6 +240,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session sidebar, session overview, quick terminal, command palette, native
   tabs, and macOS app bundle packaging with signing/notarization CI
 
+[0.1.6]: https://github.com/simota/noa/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/simota/noa/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/simota/noa/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/simota/noa/compare/v0.1.2...v0.1.3

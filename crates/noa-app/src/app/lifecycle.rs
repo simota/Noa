@@ -270,10 +270,49 @@ impl App {
 
             let caps = surface.get_capabilities(&adapter);
             let alpha_blending = alpha_blending_mode(&self.config.font);
+
+            // If the window landed on a scale factor the monitor probe didn't
+            // predict, the probe-sized surface would be the wrong physical
+            // size. Settle the scale-corrected size *before* the first
+            // `configure`/present so only one CAMetalLayer drawable generation
+            // is ever allocated: drawables are allocated lazily by the first
+            // `get_current_texture` (the present below), never by `configure`
+            // alone, so a second `request_inner_size`-driven generation would
+            // otherwise stay resident alongside the correct one. Deriving the
+            // corrected size needs the real window-scale metrics, so on this
+            // path the terminal font stack is joined up front; the common
+            // (matched-scale) path still presents the startup frame before the
+            // join to keep first paint early.
+            let font_px = font_pixel_size(self.runtime_font_size, window_scale_factor);
+            let mut terminal_stack_handle = Some(terminal_stack_handle);
+            let mut prebuilt_font: Option<FontGrid> = None;
+            let mut configure_size = None;
+            if (window_scale_factor - monitor_scale_factor).abs() > f64::EPSILON {
+                let font = build_terminal_font(
+                    terminal_stack_handle.take().expect("handle present"),
+                    font_px,
+                    font_config_from_noa_config(&self.config.font),
+                );
+                let corrected = initial_window_logical_size(
+                    font.metrics(),
+                    initial_grid_size,
+                    window_scale_factor,
+                    self.padding,
+                );
+                // macOS applies this synchronously and returns the new size, so
+                // the surface is configured at the corrected size on its first
+                // (and only) `configure`. A platform that applies it
+                // asynchronously returns `None`; the fall-through to
+                // `window.inner_size()` then keeps the pre-correction size and
+                // the later `Resized` reconfigures as before.
+                configure_size = window.request_inner_size(corrected);
+                prebuilt_font = Some(font);
+            }
+
             let surface_config = build_surface_config(
                 &caps,
                 alpha_blending,
-                window.inner_size(),
+                configure_size.unwrap_or_else(|| window.inner_size()),
                 self.config.background_opacity < 1.0,
             );
             surface.configure(&device, &surface_config);
@@ -340,35 +379,16 @@ impl App {
 
             // The window is on screen; now join the terminal font stack (the
             // worker has been running since the top of `crate::run`) and
-            // finish grid construction at the window's actual scale.
-            let font = {
-                let stack = match terminal_stack_handle.join() {
-                    Ok(Ok(stack)) => stack,
-                    Ok(Err(e)) => panic!("failed to load a system monospace font: {e:?}"),
-                    Err(_) => panic!("failed to load a system monospace font: worker panicked"),
-                };
-                let font = FontGrid::with_stack(
-                    stack,
-                    font_pixel_size(self.runtime_font_size, window_scale_factor),
+            // finish grid construction at the window's actual scale. The
+            // scale-mismatch path above already joined it to size the surface.
+            let font = match prebuilt_font {
+                Some(font) => font,
+                None => build_terminal_font(
+                    terminal_stack_handle.take().expect("handle present"),
+                    font_px,
                     font_config_from_noa_config(&self.config.font),
-                )
-                .expect("failed to load a system monospace font");
-                crate::startup_trace::mark("font-ready");
-                font
+                ),
             };
-            // The probe metrics that sized the window were computed at the
-            // monitor's scale; if the window landed on a different scale the
-            // real metrics differ — correct the size now (the Resized event
-            // reconfigures the surface), matching the old inline-rebuild path.
-            if (window_scale_factor - monitor_scale_factor).abs() > f64::EPSILON {
-                let corrected = initial_window_logical_size(
-                    font.metrics(),
-                    initial_grid_size,
-                    window_scale_factor,
-                    self.padding,
-                );
-                let _ = window.request_inner_size(corrected);
-            }
 
             self.gpu = Some(GpuState {
                 instance,
@@ -766,6 +786,10 @@ impl App {
             terminal.clone(),
             pty_input_tx.clone(),
         );
+        // Main-thread writer clone taken before `pty` moves into the io thread,
+        // so keyboard/paste input writes straight to the writer thread.
+        let pty_writer = pty.writer();
+        let input_echo_seq = Arc::new(AtomicU64::new(0));
         let io_thread = crate::io_thread::spawn(
             pty,
             terminal.clone(),
@@ -774,6 +798,7 @@ impl App {
             resize_rx,
             pty_input_rx,
             auto_approve_feedback_rx,
+            input_echo_seq.clone(),
             overview_publish,
             sidebar_publish,
             auto_approve,
@@ -786,6 +811,8 @@ impl App {
             terminal,
             SurfaceTransport::Local(LocalSurfaceTransport {
                 pty_input_tx,
+                pty_writer,
+                input_echo_seq,
                 auto_approve_feedback_tx,
                 resize_tx,
                 io_thread: Some(io_thread),
@@ -1441,6 +1468,25 @@ impl App {
             log::debug!("failed to show macOS split context menu: {error:#}");
         }
     }
+}
+
+/// Join the terminal font-discovery worker and build the primary [`FontGrid`]
+/// at `px_size`. A join or parse failure is fatal — the terminal cannot render
+/// without a monospace face — matching the old inline load.
+fn build_terminal_font(
+    handle: std::thread::JoinHandle<Result<noa_font::FontStack, noa_font::FontError>>,
+    px_size: f32,
+    font_cfg: noa_font::FontConfig,
+) -> FontGrid {
+    let stack = match handle.join() {
+        Ok(Ok(stack)) => stack,
+        Ok(Err(e)) => panic!("failed to load a system monospace font: {e:?}"),
+        Err(_) => panic!("failed to load a system monospace font: worker panicked"),
+    };
+    let font = FontGrid::with_stack(stack, px_size, font_cfg)
+        .expect("failed to load a system monospace font");
+    crate::startup_trace::mark("font-ready");
+    font
 }
 
 fn remote_status_preview(text: &str) -> Vec<crate::session_store::PreviewLine> {

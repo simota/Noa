@@ -7,6 +7,7 @@
 //! crossbeam channels.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -30,7 +31,7 @@ use super::feed::{
     PtyDrainTerminalEvent, capture_pty_bytes, drain_queued_pty_data, feed_terminal_batch,
     open_pty_capture,
 };
-use super::input_queue::QueuedPtyInput;
+use super::input_queue::{EchoStampedInput, QueuedPtyInput};
 use super::ipc_tap::{IpcOutputTap, flush_pending_ipc_output, force_ipc_output_refresh};
 use super::overview::{OverviewPublish, flush_pending_overview_publish};
 use super::raw_attach::RawAttachTap;
@@ -202,6 +203,7 @@ pub fn spawn(
     resize_rx: Receiver<GridSize>,
     input_rx: Receiver<QueuedPtyInput>,
     auto_approve_feedback_rx: Receiver<AutoApproveFeedback>,
+    input_echo_seq: Arc<AtomicU64>,
     overview: OverviewPublish,
     sidebar: SidebarPublish,
     auto_approve: AutoApprovePublish,
@@ -263,15 +265,20 @@ pub fn spawn(
         // is owed and the select below blocks exactly as before.
         let mut redraw_deadline: Option<Instant> = None;
         let mut auto_approve_rescan_at: Option<Instant> = None;
-        // True while this pane owes a repaint for a user-input echo: set when
-        // input bytes are forwarded to the pty, cleared by the next redraw
-        // that actually fires. The next pty-output batch (the echo, when the
-        // program echoes at all) then bypasses the redraw floor via
+        // Generation of the last user input whose echo repaint this thread
+        // has served: the pane owes an echo repaint while `input_echo_seq`
+        // (bumped by the writer thread as it completes each real PTY input
+        // write — see `EchoStampedInput`) is ahead of it.
+        // The next pty-output batch (the echo, when the program echoes at
+        // all) then bypasses the redraw floor via
         // [`RedrawFloor::decide_input_echo`] instead of being withheld up to
-        // one floor interval behind another pane's recent paint. At most one
-        // bypass per input event, so a non-echoing program costs one extra
-        // repaint per keystroke at worst — bounded by typing speed.
-        let mut input_echo_pending = false;
+        // one floor interval behind another pane's recent paint. Consuming
+        // records only the generation observed at decision time, so an input
+        // that lands between the load and the consume stays owed — a shared
+        // bool cleared here would drop it. At most one bypass per input
+        // event, so a non-echoing program costs one extra repaint per
+        // keystroke at worst — bounded by typing speed.
+        let mut input_echo_served: u64 = 0;
         // Short-window pty traffic gauge for the hot-traffic spin gate: no
         // recent data (idle pane) or bulk-rate data (flood, whatever the
         // per-read chunk size) means every park below stays a plain block,
@@ -333,10 +340,12 @@ pub fn spawn(
                             String::from_utf8_lossy(bytes.as_ref())
                         );
                     }
-                    if let Err(err) = writer.write_owned(bytes) {
+                    // Stamped so the echo generation advances at the real
+                    // PTY write, not at queue time (see `EchoStampedInput`).
+                    let stamped = EchoStampedInput::new(bytes, input_echo_seq.clone());
+                    if let Err(err) = writer.write_owned(stamped) {
                         log::warn!("failed to queue bytes to pty: {err}");
                     }
-                    input_echo_pending = true;
                     did_work = true;
                 }
                 Err(TryRecvError::Disconnected) => break, // main thread / App dropped
@@ -460,22 +469,24 @@ pub fn spawn(
                     // nothing — skip the redraw poke and floor bookkeeping
                     // entirely instead of waking the main thread to snapshot
                     // an unchanged frame while the next query of the burst is
-                    // waiting on the same terminal lock. `input_echo_pending`
+                    // waiting on the same terminal lock. The echo debt
                     // stays armed: an echo can only arrive in a batch that
                     // actually prints, which dirties the display.
                     let redraw = if output.display_dirty {
-                        Some(if input_echo_pending {
+                        let echo_seq = input_echo_seq.load(Ordering::Relaxed);
+                        let decision = if echo_seq != input_echo_served {
                             redraw_floor
                                 .decide_input_echo(output.synchronized_output, Instant::now())
                         } else {
                             redraw_floor.decide(output.synchronized_output, Instant::now())
-                        })
+                        };
+                        if matches!(decision, RedrawDecision::Now) {
+                            input_echo_served = echo_seq;
+                        }
+                        Some(decision)
                     } else {
                         None
                     };
-                    if matches!(redraw, Some(RedrawDecision::Now)) {
-                        input_echo_pending = false;
-                    }
                     for text in output.pending_clipboard_writes {
                         let _ = proxy.send_event(UserEvent::ClipboardWrite {
                             window_id,

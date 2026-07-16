@@ -975,6 +975,22 @@ pub(super) enum SurfaceTransport {
 
 pub(super) struct LocalSurfaceTransport {
     pub(super) pty_input_tx: crate::io_thread::PtyInputQueue,
+    /// Main-thread handle to the PTY writer thread. Keyboard/paste/IME input
+    /// is written here directly (after reserving on `pty_input_tx`), skipping
+    /// the io thread's output-batch loop so a keystroke never waits out a
+    /// large pty-output batch (input-latency fix). The writer channel is MPSC:
+    /// the io thread's own DSR/DA replies share it, and independent-producer
+    /// interleaving is acceptable (same model as a separated termio writer).
+    pub(super) pty_writer: PtyWriter,
+    /// Shared with this pane's io thread: incremented when the writer thread
+    /// completes an input's real PTY write (`EchoStampedInput`'s Drop), so
+    /// the echo batch bypasses the redraw floor. A generation counter rather
+    /// than a bool: the io thread consumes only the generation it observed at
+    /// redraw-decision time, so an input landing between its load and consume
+    /// is never lost — and advancing at the real write (not queue time) keeps
+    /// output parsed before the write from consuming the debt. See
+    /// `io_thread::spawn`'s `input_echo_served`.
+    pub(super) input_echo_seq: Arc<AtomicU64>,
     pub(super) auto_approve_feedback_tx: Sender<crate::io_thread::AutoApproveFeedback>,
     pub(super) resize_tx: Sender<GridSize>,
     pub(super) io_thread: Option<crate::io_thread::IoThreadHandle>,

@@ -20,7 +20,7 @@ use noa_grid::{
     CursorStyle, PromptJump, Terminal,
     modes::{MouseFormat, MouseTracking},
 };
-use noa_pty::{Pty, PtyConfig};
+use noa_pty::{Pty, PtyConfig, PtyWriter};
 use noa_render::{
     BackgroundImage, CardPipeline, CardStyle, CardTexturePlacement, CardTilePlacement,
     CommandPaletteSnapshot, FrameSnapshot, HoverLink, OverviewThumbnailResources, PaletteRow,
@@ -764,28 +764,24 @@ impl App {
             .map(|state| state.window.clone())
     }
 
-    fn app_cursor_keys(&self, window_id: WindowId) -> bool {
+    /// The three keyboard-encoding modes read on every key-encode pass,
+    /// returned `(app_cursor_keys, app_keypad, kitty_keyboard_flags)` under a
+    /// single terminal lock. One acquisition rather than three keeps the
+    /// key-input path off the io thread's output-batch lock longer than
+    /// necessary (input-latency under heavy pty output).
+    fn key_encode_modes(&self, window_id: WindowId) -> (bool, bool, u8) {
         self.windows
             .get(&window_id)
             .and_then(WindowState::focused_surface)
-            .map(|surface| surface.terminal.lock().modes.app_cursor_keys())
-            .unwrap_or(false)
-    }
-
-    fn app_keypad(&self, window_id: WindowId) -> bool {
-        self.windows
-            .get(&window_id)
-            .and_then(WindowState::focused_surface)
-            .map(|surface| surface.terminal.lock().modes.app_keypad())
-            .unwrap_or(false)
-    }
-
-    fn kitty_keyboard_flags(&self, window_id: WindowId) -> u8 {
-        self.windows
-            .get(&window_id)
-            .and_then(WindowState::focused_surface)
-            .map(|surface| surface.terminal.lock().kitty_keyboard_flags())
-            .unwrap_or(0)
+            .map(|surface| {
+                let terminal = surface.terminal.lock();
+                (
+                    terminal.modes.app_cursor_keys(),
+                    terminal.modes.app_keypad(),
+                    terminal.kitty_keyboard_flags(),
+                )
+            })
+            .unwrap_or((false, false, 0))
     }
 
     fn focus_reporting(&self, window_id: WindowId) -> bool {

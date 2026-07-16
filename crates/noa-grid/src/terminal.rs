@@ -290,6 +290,16 @@ impl Terminal {
         self.active_mut().set_copy_mode_points(cursor, anchor);
     }
 
+    /// Post-burst memory trim (driven by the app's quiescence timer): settle
+    /// deferred scrollback and drop flood-sized scratch buffers on both
+    /// screens. Cheap when idle-clean; never changes observable state.
+    pub fn trim_memory(&mut self) {
+        self.primary.trim_memory();
+        if let Some(alt) = &mut self.alt {
+            alt.trim_memory();
+        }
+    }
+
     /// Release any copy-mode viewport locks, including a screen that became
     /// inactive after a primary/alternate-screen switch.
     pub fn unlock_viewport(&mut self) {

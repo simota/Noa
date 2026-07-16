@@ -159,6 +159,21 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Redraw(window_id, pane_id) => {
+                // Every pty-driven redraw pushes the post-burst memory trim
+                // out; it fires once, MEMORY_TRIM_QUIESCENCE after the burst.
+                self.arm_memory_trim();
+                // Pty output on the focused surface is activity for the
+                // `cursor-stop-blinking-after` idle stop: it restarts the
+                // idle clock (resuming blink if it had settled solid)
+                // without snapping the blink phase like a keypress does.
+                if self.focused == Some(window_id)
+                    && self
+                        .windows
+                        .get(&window_id)
+                        .is_some_and(|state| state.focused_pane == pane_id)
+                {
+                    self.note_cursor_blink_activity();
+                }
                 self.refresh_remote_session_card(window_id, pane_id);
                 let pane_state = self
                     .windows
@@ -333,6 +348,10 @@ impl ApplicationHandler<UserEvent> for App {
                     self.mark_quick_terminal_focused(window_id);
                 }
                 self.reset_cursor_blink_phase();
+                // Focus gain is the moment an externally edited config should
+                // apply: expedite the (slow) watcher so the `about_to_wait`
+                // pass right after this event stats the file immediately.
+                self.expedite_config_watch();
                 // A window gaining focus clears its cards' unread bells (FR-11).
                 self.clear_session_bell_for_window(window_id);
                 // The native tab bar appears/disappears without a `Resized`
@@ -785,6 +804,7 @@ impl ApplicationHandler<UserEvent> for App {
         let config_watch_deadline = self.tick_config_watch();
         let live_wallpaper_deadline = self.tick_live_wallpaper();
         let kitty_anim_deadline = self.tick_kitty_animations();
+        let memory_trim_deadline = self.tick_memory_trim();
         let deadline = [
             blink_deadline,
             resize_throttle_deadline,
@@ -798,6 +818,7 @@ impl ApplicationHandler<UserEvent> for App {
             config_watch_deadline,
             live_wallpaper_deadline,
             kitty_anim_deadline,
+            memory_trim_deadline,
         ]
         .into_iter()
         .flatten()
@@ -1392,6 +1413,14 @@ impl App {
     }
 
     pub(super) fn on_ime_event(&mut self, window_id: WindowId, event: Ime) {
+        // Composition traffic is typing: `Preedit` updates and `Commit`s
+        // reset the blink phase (and the `cursor-stop-blinking-after` idle
+        // clock) exactly like the raw keypresses in `KeyboardInput` — which
+        // the IME swallows while composing, so without this a composition
+        // paused past the idle window freezes the cursor solid mid-preedit.
+        if timers::ime_event_is_cursor_blink_activity(&event) {
+            self.reset_cursor_blink_phase();
+        }
         // The modal layers own the keyboard in the same order as
         // `KeyboardInput`: confirm dialog → search prompt → palette → rename.
         // While one is up the composition belongs to *it*: the pane's

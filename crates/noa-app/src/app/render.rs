@@ -99,11 +99,23 @@ impl App {
         };
         #[cfg(target_os = "macos")]
         {
-            crate::macos_window::set_window_background_color(
-                &state.window,
+            // Only touch the NSWindow when the resolved background actually
+            // changed (theme swap, opacity change): `setBackgroundColor:`
+            // dirties the window's backdrop layer, and doing it every frame
+            // dragged a full AppKit layout pass + CA commit into every
+            // cursor-blink redraw.
+            let window_bg = (
                 gpu.theme.default_bg,
-                self.config.background_opacity,
+                self.config.background_opacity.to_bits(),
             );
+            if state.applied_window_bg != Some(window_bg) {
+                crate::macos_window::set_window_background_color(
+                    &state.window,
+                    gpu.theme.default_bg,
+                    self.config.background_opacity,
+                );
+                state.applied_window_bg = Some(window_bg);
+            }
             if needs_macos_titlebar_backdrop(
                 self.config.macos_titlebar_style,
                 self.config.background_opacity,

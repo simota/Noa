@@ -29,6 +29,7 @@ mod macos_hotkey;
 mod macos_menu;
 mod macos_overlay;
 mod macos_window;
+mod memory;
 mod mouse;
 mod notification;
 mod process_monitor;

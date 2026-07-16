@@ -6,7 +6,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 use super::*;
 
-const CONFIG_WATCH_INTERVAL: Duration = Duration::from_millis(500);
+/// How often the config file's signature is re-stat'd. This poll is the one
+/// wake-up an otherwise fully idle noa keeps forever, so it is deliberately
+/// slow: the common "edited externally, switched back to noa" flow doesn't
+/// wait on it at all — window focus gain expedites an immediate check (see
+/// [`ConfigWatcher::expedite`]) — leaving only save-while-noa-stays-focused
+/// (e.g. `vim` inside a pane) to ride the slow interval.
+const CONFIG_WATCH_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Debug)]
 pub(super) struct ConfigWatcher {
@@ -29,8 +35,11 @@ enum ConfigWatchTick {
 }
 
 impl ConfigWatcher {
-    pub(super) fn new() -> Self {
-        Self::with_path(noa_config::default_config_path())
+    /// `config_default_files: false` (Ghostty parity) disables the watcher
+    /// entirely: the startup config never read the file, so a file edit must
+    /// not trigger a reload that would suddenly apply it.
+    pub(super) fn new(config_default_files: bool) -> Self {
+        Self::with_path(config_default_files.then(noa_config::default_config_path).flatten())
     }
 
     fn with_path(path: Option<PathBuf>) -> Self {
@@ -67,6 +76,18 @@ impl ConfigWatcher {
         }
     }
 
+    /// Pull the next signature check forward to "now". Called on window
+    /// focus gain so a config edited in another app is picked up by the
+    /// `about_to_wait` pass that immediately follows the focus event,
+    /// instead of waiting out the (slow) [`CONFIG_WATCH_INTERVAL`]. A no-op
+    /// on an inactive watcher; never schedules extra checks — it only
+    /// re-times the one already pending.
+    fn expedite(&mut self, now: Instant) {
+        if self.path.is_some() && self.next_check.is_some() {
+            self.next_check = Some(now);
+        }
+    }
+
     fn mark_current(&mut self) {
         if let Some(path) = self.path.as_deref() {
             self.signature = config_file_signature(path);
@@ -83,6 +104,12 @@ fn config_file_signature(path: &Path) -> Option<ConfigFileSignature> {
 }
 
 impl App {
+    /// See [`ConfigWatcher::expedite`]: check the config file on the wake
+    /// that follows a window gaining focus.
+    pub(super) fn expedite_config_watch(&mut self) {
+        self.config_watcher.expedite(Instant::now());
+    }
+
     pub(super) fn tick_config_watch(&mut self) -> Option<Instant> {
         match self.config_watcher.tick(Instant::now()) {
             ConfigWatchTick::Inactive => None,
@@ -96,7 +123,14 @@ impl App {
 
     pub(in crate::app) fn reload_config_from_disk(&mut self) {
         let cli_overrides = self.config.cli_overrides.clone();
-        let (startup, diagnostics) = match noa_config::load_startup_config(cli_overrides.clone()) {
+        let loaded = if self.config.config_default_files {
+            noa_config::load_startup_config(cli_overrides.clone())
+        } else {
+            // Startup skipped the default config files; the explicit reload
+            // command must not sneak them back in.
+            noa_config::load_startup_config_without_files(cli_overrides.clone())
+        };
+        let (startup, diagnostics) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {
                 log::warn!("config reload failed: {error:#}");
@@ -112,6 +146,8 @@ impl App {
         // `-e` is CLI-only (never in a config file): carry it across the
         // reload so newly spawned panes keep running the requested command.
         next.launch_command = self.config.launch_command.clone();
+        // CLI-only as well: a reload must not flip the file-skipping mode.
+        next.config_default_files = self.config.config_default_files;
         self.apply_reloaded_config(next);
         self.config_watcher.mark_current();
         log::info!("config reloaded");
@@ -604,6 +640,33 @@ mod tests {
             watcher.tick(due + CONFIG_WATCH_INTERVAL * 3),
             ConfigWatchTick::Changed(_)
         ));
+    }
+
+    /// `expedite` (focus gain / settings-panel commit) must make the very
+    /// next tick stat the file instead of waiting out the slow
+    /// `CONFIG_WATCH_INTERVAL`, and must only re-time the pending check —
+    /// a no-change expedited tick still reports `Waiting`, not `Changed`.
+    #[test]
+    fn watcher_expedite_pulls_the_next_check_to_now() {
+        let path = temp_config_path("expedite");
+        let mut watcher = ConfigWatcher::with_path(Some(path.clone()));
+        let now = Instant::now();
+
+        // Freshly armed: the check is a full interval away.
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Waiting(_)));
+
+        fs::write(&path, "font-size = 15\n").unwrap();
+        // Without expedite the same instant would still be Waiting …
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Waiting(_)));
+        // … with it, the change is picked up immediately.
+        watcher.expedite(now);
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Changed(_)));
+
+        // Expediting with nothing changed re-checks but stays quiet.
+        watcher.expedite(now);
+        assert!(matches!(watcher.tick(now), ConfigWatchTick::Waiting(_)));
+
+        fs::remove_file(&path).ok();
     }
 
     #[test]

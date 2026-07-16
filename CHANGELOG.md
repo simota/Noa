@@ -17,8 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   startup) with methodology and recorded results
 - Env-gated performance instrumentation: `NOA_LATENCY_TRACE=1`
   (key→present timing) and `NOA_STARTUP_TRACE=1` (startup stage breakdown)
+- `cursor-stop-blinking-after` config key (default `10` seconds): the cursor
+  settles solid after that long with no input/output on the focused pane, so
+  an idle noa schedules no blink wake-ups. **Intentional default deviation
+  from Ghostty** (which blinks forever), benchmark/idle-power motivated —
+  `0` restores Ghostty-parity eternal blink (see CONFIGURATION.md
+  "Deviations from Ghostty defaults")
 
 ### Changed
+
+- Config live-reload cadence: the idle file poll slowed from 500ms to 3s;
+  window focus gain and settings-panel commits now expedite an immediate
+  check instead. Net effect: edits made in another app apply on refocus
+  (faster than before), while a save from *inside a focused noa pane* (e.g.
+  `vim` editing the config in that window) applies within ≤3s (was ≤500ms) —
+  refocus the window or use the settings UI to apply instantly
+- Query-only pty batches (DSR/DA/DECRQM/XTVERSION/Kitty-keyboard reports —
+  e.g. a TUI capability poll or latency probe) no longer wake the renderer:
+  nothing visible changed, and skipping the snapshot pass removes the main
+  contributor to the DSR round-trip p99 tail
 
 - Bulk-output throughput: scrollback rows are now sealed in deferred batches
   and packed off-thread; pty reads are flow-controlled by a byte budget with
@@ -37,6 +54,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keystroke echo could be delayed up to one redraw-floor interval (~8ms)
   while cursor-blink repaints were active
+- IME composition (`Preedit`/`Commit`) now counts as typing for
+  `cursor-stop-blinking-after`: a CJK composition paused longer than the
+  idle window no longer freezes the cursor solid mid-preedit
+- `noa-ipc`: a server shutdown whose loopback wake connection failed used to
+  leak the accept thread parked in `accept()` forever; it now force-closes
+  the listening socket (fd-reuse-safe dup2-over) and joins the thread with a
+  bounded timeout
 
 ## [0.1.4] - 2026-07-13
 

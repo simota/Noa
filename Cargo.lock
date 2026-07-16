@@ -1554,6 +1554,7 @@ name = "noa-ipc"
 version = "0.1.4"
 dependencies = [
  "crossbeam-channel",
+ "libc",
  "log",
  "parking_lot",
  "rand",

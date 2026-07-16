@@ -34,6 +34,31 @@ noa +show-config
 At present, `+show-config` does not print `background-image*` or `resize-overlay`, so check those
 values directly in the config file.
 
+## Live reload
+
+Noa watches the config file and applies edits at runtime. The idle poll is deliberately slow
+(every **3 seconds** — it is the only wake-up an otherwise fully idle noa would keep forever),
+and the latency-sensitive flows are expedited instead: the file is re-checked immediately when a
+noa window **gains focus** (the "edited in another app, switched back" flow) and when the
+settings panel **commits or undoes** a change. The one flow that rides the slow interval is
+saving the config from *inside a focused noa pane* (e.g. editing it in `vim` in that very
+window): the edit then applies within ≤3s (this was 500ms in earlier builds). Workaround when
+that matters: briefly refocus the window, or use the settings UI.
+
+## Deviations from Ghostty defaults (既定値の逸脱)
+
+noa is a fidelity clone, so out-of-the-box behavior differences are kept rare, deliberate, and
+listed here. Each one has a config value that restores Ghostty parity.
+
+| Key | noa default | Ghostty behavior | Why deviate | Restore parity |
+|---|---|---|---|---|
+| `cursor-stop-blinking-after` | `10` (seconds) | No such key — the cursor blinks forever | Intentional, benchmark-/idle-power-motivated: the eternal blink forces a redraw wake-up every 600ms, keeping idle CPU and context-switch rates measurably above terminals that quiesce (kitty stops after 15 idle seconds for the same reason). After 10s with no keyboard/IME input or output on the focused pane, the cursor settles solid and the blink timer disarms | `cursor-stop-blinking-after = 0` |
+| `quick-terminal-screen` | `mouse` | Defaults to `main` | The global hotkey fires while noa is usually *not* the active app; `NSScreen.mainScreen` then degrades to the screen holding noa's existing window — the exact "opens on the wrong screen" bug the key exists to fix. The mouse screen follows where the user is actually looking | `quick-terminal-screen = main` |
+
+Behavioral (non-key) deviation: the config-file **live reload** cadence described above
+(≤3s while noa stays focused, immediate on refocus/settings commit; Ghostty reloads on
+`reload_config` / its own file-watch cadence).
+
 ## Window and session
 
 | Key | Accepted values | Default | Description |
@@ -91,6 +116,7 @@ font-variation = wght=550
 | `minimum-contrast` | finite decimal `1.0..=21.0` | `1.0` | Lower bound of the WCAG contrast ratio. `1.0` means no correction |
 | `cursor-style` | `block`, `bar`, `underline` | blinking block | `block_hollow` is recognized but ignored as unsupported |
 | `cursor-style-blink` | `true`, `false` | equivalent to `true` | Cursor blinking. It also blinks when only the shape is specified |
+| `cursor-stop-blinking-after` | non-negative integer (seconds) | `10` | noa-specific key whose **default deviates from Ghostty** (which blinks forever) — see [Deviations from Ghostty defaults](#deviations-from-ghostty-defaults-既定値の逸脱): after this many seconds with no keyboard/IME input or output on the focused pane, the cursor settles solid so an idle noa schedules no blink wake-ups. Any activity resumes blinking. `0` never stops (Ghostty-parity behavior) |
 | `background-opacity` | finite decimal | `1.0` | Clamped to `0.0..=1.0` |
 | `background-blur-radius` | `true`, `false`, non-negative integer | `0` | macOS blur. `true` maps to `20`, `false` to `0`; integers are clamped to `0..=64` |
 
@@ -168,6 +194,7 @@ See [noa-server-protocol.md](api/noa-server-protocol.md) for scope and attach-ch
 | `quick-terminal-hotkey` | global hotkey chord, or `none` / `off` / `false` | `cmd+grave` | System-wide hotkey for the Quick Terminal. An empty value also disables it |
 | `quick-terminal-size` | positive finite decimal, or percentage | `0.4` | Ratio relative to screen height. Clamped to `0.1..=1.0`. e.g. `40%` |
 | `quick-terminal-autohide` | `true`, `false` | `true` | Automatically hide when focus is lost |
+| `quick-terminal-screen` | `main`, `mouse`, `macos-menu-bar` | `mouse` | Which display the quick terminal appears on, resolved fresh on every show. **Default deviates from Ghostty (`main`)** — see [Deviations from Ghostty defaults](#deviations-from-ghostty-defaults-既定値の逸脱) |
 | `sidebar-enabled` | `true`, `false` | `false` | Initial sidebar visibility for new windows |
 | `sidebar-width` | finite decimal `200..=600` | `360` | Sidebar width (points) |
 | `sidebar-font-size` | finite decimal `8..=20` | `11.5` | Session sidebar font size (points) |

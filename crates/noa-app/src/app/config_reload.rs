@@ -39,7 +39,11 @@ impl ConfigWatcher {
     /// entirely: the startup config never read the file, so a file edit must
     /// not trigger a reload that would suddenly apply it.
     pub(super) fn new(config_default_files: bool) -> Self {
-        Self::with_path(config_default_files.then(noa_config::default_config_path).flatten())
+        Self::with_path(
+            config_default_files
+                .then(noa_config::default_config_path)
+                .flatten(),
+        )
     }
 
     fn with_path(path: Option<PathBuf>) -> Self {

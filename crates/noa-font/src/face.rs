@@ -495,10 +495,9 @@ fn load_named_family_for_style(
     required_style: Option<FontStyle>,
 ) -> Option<FontData> {
     #[cfg(target_os = "macos")]
-    if let Some(face) = mapped_font_data_for_family_style(
-        family_name,
-        required_style.unwrap_or(FontStyle::Regular),
-    ) {
+    if let Some(face) =
+        mapped_font_data_for_family_style(family_name, required_style.unwrap_or(FontStyle::Regular))
+    {
         return Some(face);
     }
     let handle = select_title_best_match(source, family_name, properties).ok()?;
@@ -524,11 +523,9 @@ fn load_first_matching_family(
     properties: &Properties,
     required_style: Option<FontStyle>,
 ) -> Option<FontData> {
-    families
-        .iter()
-        .find_map(|family_name| {
-            load_named_family_for_style(source, family_name, properties, required_style)
-        })
+    families.iter().find_map(|family_name| {
+        load_named_family_for_style(source, family_name, properties, required_style)
+    })
 }
 
 /// Confirm `handle` actually provides `style`, hardened against a font
@@ -1570,7 +1567,8 @@ mod tests {
                     "{style:?} '{ch}': glyph id must match across selection paths"
                 );
                 let syn = GlyphSynthesis::default();
-                let a = rasterize_with_variations(&mut ctx, mmap_font, mmap_gid, 24.0, &[], syn, None);
+                let a =
+                    rasterize_with_variations(&mut ctx, mmap_font, mmap_gid, 24.0, &[], syn, None);
                 let b = rasterize_with_variations(
                     &mut ctx,
                     fontkit_font,

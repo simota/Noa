@@ -193,7 +193,11 @@ impl FontGrid {
             ctx: ScaleContext::new(),
             metrics,
             mask_atlas: Atlas::new(MASK_ATLAS_INIT_DIM, MASK_ATLAS_INIT_DIM, MASK_BYTES_PER_PX),
-            color_atlas: Atlas::new(COLOR_ATLAS_INIT_DIM, COLOR_ATLAS_INIT_DIM, COLOR_BYTES_PER_PX),
+            color_atlas: Atlas::new(
+                COLOR_ATLAS_INIT_DIM,
+                COLOR_ATLAS_INIT_DIM,
+                COLOR_BYTES_PER_PX,
+            ),
             atlas_identity: next_atlas_identity(),
             cache: HashMap::new(),
             px_size,
@@ -1858,7 +1862,8 @@ mod tests {
     fn copy_mask_glyph_ink(grid: &FontGrid, info: GlyphInfo) -> Vec<u8> {
         let (w, _h) = grid.mask_atlas_size();
         let data = grid.mask_atlas_data();
-        let mut out = Vec::with_capacity((info.atlas_size[0] as usize) * (info.atlas_size[1] as usize));
+        let mut out =
+            Vec::with_capacity((info.atlas_size[0] as usize) * (info.atlas_size[1] as usize));
         for row in 0..info.atlas_size[1] as usize {
             let y = info.atlas_pos[1] as usize + row;
             let start = y * w as usize + info.atlas_pos[0] as usize;

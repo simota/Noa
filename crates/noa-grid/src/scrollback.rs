@@ -1730,7 +1730,10 @@ mod tests {
         let per_row = |d: std::time::Duration, rows: usize| d.as_nanos() as f64 / rows as f64;
         println!("flood-shape ({TEXT} text cells / {COLS} cols), n={n} rows:");
         println!("  trim scan only     : {:8.1} ns/row", per_row(trim, n));
-        println!("  trim fused (&)     : {:8.1} ns/row", per_row(trim_fused, n));
+        println!(
+            "  trim fused (&)     : {:8.1} ns/row",
+            per_row(trim_fused, n)
+        );
         println!("  pack_row (in trim) : {:8.1} ns/row", per_row(pack, n));
         println!("  carcass clear      : {:8.1} ns/row", per_row(clear, n));
         println!(

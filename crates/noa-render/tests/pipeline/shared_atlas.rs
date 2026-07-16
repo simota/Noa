@@ -231,8 +231,7 @@ fn glyph_renders_identically_after_atlas_growth() {
 /// cheap "did anything actually draw" oracle for a solid-background frame.
 fn non_background_pixel_count(rgba: &[u8]) -> usize {
     let bg = &rgba[0..3];
-    rgba
-        .chunks_exact(4)
+    rgba.chunks_exact(4)
         .filter(|px| px[0] != bg[0] || px[1] != bg[1] || px[2] != bg[2])
         .count()
 }

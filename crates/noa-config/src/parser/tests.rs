@@ -802,7 +802,11 @@ fn cursor_stop_blinking_after_rejects_negative_and_non_integer_values() {
 
         assert_eq!(overrides.cursor_stop_blinking_after_secs, None, "{value:?}");
         assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
-        assert!(diagnostics[0].message.contains("cursor-stop-blinking-after"));
+        assert!(
+            diagnostics[0]
+                .message
+                .contains("cursor-stop-blinking-after")
+        );
         assert_eq!(
             overrides
                 .apply_to(crate::StartupConfig::default())

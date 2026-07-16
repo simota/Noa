@@ -8,10 +8,13 @@
 #
 # The user's real ZDOTDIR (or $HOME) is carried in NOA_ZDOTDIR, set by noa.
 
+# Plain (unexported) shell variables: later startup files in this same shell
+# see them, but child processes don't inherit noa-only bookkeeping.
 if [[ -n "$NOA_ZDOTDIR" ]]; then
-  export USER_ZDOTDIR="$NOA_ZDOTDIR"
+  USER_ZDOTDIR="$NOA_ZDOTDIR"
+  NOA_USER_HAD_ZDOTDIR=1
 else
-  export USER_ZDOTDIR="$HOME"
+  USER_ZDOTDIR="$HOME"
 fi
 unset NOA_ZDOTDIR
 

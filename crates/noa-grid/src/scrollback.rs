@@ -755,8 +755,18 @@ impl PagedScrollback {
         }
         // History rows always report clean (see `take_visible_rows_with_damage`).
         row.dirty = false;
-        self.batch_rows = seal_batch_rows_for(row.cells.len());
-        self.pending_est_bytes += row.cells.len() * PACKED_CELL_SIZE + PACKED_ROW_EST_OVERHEAD;
+        let est_row = row.cells.len() * PACKED_CELL_SIZE + PACKED_ROW_EST_OVERHEAD;
+        // Width-scaled batch, additionally capped to half the quarter-limit
+        // estimate allowance (the other half is pending-refill headroom):
+        // a batch boundary past the `over_limit` crossing would mean the
+        // async pipeline never publishes under a small retention limit —
+        // every cycle would degrade to the inline `flush_all` below, packing
+        // one ever-open page that page-granular eviction cannot evict.
+        let allowance_rows = (self.limit_bytes / 4) / est_row.max(1) / 2;
+        self.batch_rows = seal_batch_rows_for(row.cells.len())
+            .min(allowance_rows)
+            .max(1);
+        self.pending_est_bytes += est_row;
         self.pending.push_back(row);
         self.total_rows += 1;
         // Degrade to fully synchronous sealing when the deferred rows could

@@ -1,0 +1,19 @@
+[package]
+name = "drain-staircase"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "drain-staircase"
+path = "src/main.rs"
+
+[dependencies]
+noa-core.workspace = true
+noa-vt.workspace = true
+noa-grid.workspace = true
+noa-pty.workspace = true
+libc.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true

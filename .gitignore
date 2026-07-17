@@ -7,3 +7,5 @@ Cargo.lock.orig
 .nexus/
 bench/*.txt
 bench/tools/bin/
+bench/results/
+bench/__pycache__/

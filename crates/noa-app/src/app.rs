@@ -328,10 +328,6 @@ pub struct App {
     /// seeded from `sidebar-enabled`. A quick-terminal window never shows it
     /// regardless (`window_sidebar_eligible`, FR-14).
     sidebar_visible_groups: HashSet<WindowGroupId>,
-    /// The registered global `sidebar-hotkey`, kept alive for the app's
-    /// lifetime (dropping it unregisters). `None` until installed, or when no
-    /// `sidebar-hotkey` is configured / registration failed.
-    sidebar_hotkey: Option<crate::macos_hotkey::GlobalHotKey>,
     /// The dedicated branch-poll worker (FR-8/FR-9): receives OSC-7-driven
     /// cwd-change requests and posts back git branch + project icon as
     /// [`crate::session_store::SessionDelta::Branch`]. Kept off the io read loop
@@ -612,7 +608,8 @@ impl App {
         let initial_cursor_style =
             resolve_cursor_style(config.cursor_style, config.cursor_style_blink);
         let background_image = load_background_image_runtime(&config);
-        let (keybinds, keybind_diagnostics) = KeybindEngine::from_config(&config.keybinds);
+        let (keybinds, keybind_diagnostics) =
+            KeybindEngine::from_config(&config.keybinds, config.sidebar_hotkey.as_deref());
         for diagnostic in keybind_diagnostics {
             log::warn!("config keybind: {diagnostic}");
         }
@@ -714,7 +711,6 @@ impl App {
             hotkey_install_attempted: false,
             secure_input: crate::secure_input::SecureInput::new(),
             session_store: SessionStore::new(),
-            sidebar_hotkey: None,
             branch_poll: Some(crate::branch_poll::spawn(proxy_for_branch_poll)),
             session_persister: crate::session_persist::SessionPersister::spawn(),
             sidebar_visible_gate,

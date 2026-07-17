@@ -1420,6 +1420,9 @@ impl App {
                 crate::macos_menu::MacosMenu::install(
                     self.proxy.clone(),
                     self.config.quick_terminal_hotkey.as_deref(),
+                    self.keybinds
+                        .chord_for(crate::commands::AppCommand::ToggleSidebar)
+                        .as_deref(),
                 )
                 .expect("failed to install macOS app menu"),
             );

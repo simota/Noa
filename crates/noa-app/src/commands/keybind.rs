@@ -172,9 +172,65 @@ impl Default for KeybindEngine {
 }
 
 impl KeybindEngine {
-    pub(crate) fn from_config(configs: &[KeybindConfig]) -> (Self, Vec<String>) {
+    pub(crate) fn from_config(
+        configs: &[KeybindConfig],
+        sidebar_hotkey: Option<&str>,
+    ) -> (Self, Vec<String>) {
         let mut engine = Self::default();
         let mut diagnostics = Vec::new();
+
+        // `sidebar-hotkey` rebinds `ToggleSidebar` as a plain in-app chord —
+        // it is deliberately NOT a system-wide hotkey (a global grab would
+        // steal the chord, e.g. ⇧⌘S "Save As…", from every other app).
+        // Applied before the `keybind` entries so explicit keybinds still
+        // win; the empty sentinel (`none`) keeps the default binding, since
+        // it only ever disabled the former global registration.
+        if let Some(spec) = sidebar_hotkey
+            && !spec.trim().is_empty()
+        {
+            match KeyTrigger::parse(spec) {
+                // Reject chords already serving another command — the fixed
+                // native-menu key equivalents mirror these defaults, and
+                // AppKit dispatches menu accelerators before winit sees the
+                // keypress, so silently stealing e.g. cmd+t would leave the
+                // "New Tab" menu item winning over the sidebar anyway.
+                // `cmd+,` is reserved menu-side only (Preferences has no
+                // engine binding).
+                Ok(trigger) => {
+                    let conflict = engine
+                        .bindings
+                        .iter()
+                        .find(|binding| {
+                            binding.trigger.overlaps(&trigger)
+                                && binding.command != AppCommand::ToggleSidebar
+                        })
+                        .map(|binding| binding.command.action_name())
+                        .or_else(|| {
+                            let preferences =
+                                KeyTrigger::parse("cmd+,").expect("reserved chord should parse");
+                            trigger
+                                .overlaps(&preferences)
+                                .then_some("preferences (app menu)")
+                        });
+                    if let Some(taken_by) = conflict {
+                        diagnostics.push(format!(
+                            "sidebar-hotkey `{spec}` conflicts with `{taken_by}`; value ignored"
+                        ));
+                    } else {
+                        engine
+                            .bindings
+                            .retain(|binding| binding.command != AppCommand::ToggleSidebar);
+                        engine.bindings.push(KeyBinding {
+                            trigger,
+                            command: AppCommand::ToggleSidebar,
+                        });
+                    }
+                }
+                Err(error) => diagnostics.push(format!(
+                    "invalid sidebar-hotkey `{spec}`: {error}; value ignored"
+                )),
+            }
+        }
 
         for config in configs {
             match config {
@@ -213,6 +269,13 @@ impl KeybindEngine {
         (engine, diagnostics)
     }
 
+    /// [`Self::from_config`] without a `sidebar-hotkey` override, for tests
+    /// exercising only the `keybind` entries.
+    #[cfg(test)]
+    pub(crate) fn from_config_test(configs: &[KeybindConfig]) -> (Self, Vec<String>) {
+        Self::from_config(configs, None)
+    }
+
     pub(crate) fn resolve(&self, logical_key: &Key, mods: ModifiersState) -> Option<AppCommand> {
         self.bindings
             .iter()
@@ -243,8 +306,13 @@ impl KeybindEngine {
             .collect()
     }
 
+    /// Remove every binding whose trigger can match the same keypress as
+    /// `trigger` (`KeyTrigger::overlaps`, not `==`): resolve() returns the
+    /// first match, so leaving a merely structurally-different overlapping
+    /// binding alive would shadow whatever the caller binds next.
     fn remove_trigger(&mut self, trigger: &KeyTrigger) {
-        self.bindings.retain(|binding| binding.trigger != *trigger);
+        self.bindings
+            .retain(|binding| !binding.trigger.overlaps(trigger));
     }
 }
 
@@ -362,7 +430,7 @@ mod tests {
 
     #[test]
     fn configured_keybinds_override_unbind_and_clear_in_order() {
-        let (engine, diagnostics) = KeybindEngine::from_config(&[
+        let (engine, diagnostics) = KeybindEngine::from_config_test(&[
             KeybindConfig::Bind {
                 trigger: "cmd+t".to_string(),
                 action: "new_window".to_string(),
@@ -390,7 +458,7 @@ mod tests {
             Some(AppCommand::SetTabTitle)
         );
 
-        let (engine, diagnostics) = KeybindEngine::from_config(&[
+        let (engine, diagnostics) = KeybindEngine::from_config_test(&[
             KeybindConfig::Clear,
             KeybindConfig::Bind {
                 trigger: "cmd+i".to_string(),
@@ -410,7 +478,7 @@ mod tests {
 
     #[test]
     fn invalid_configured_keybinds_do_not_remove_existing_bindings() {
-        let (engine, diagnostics) = KeybindEngine::from_config(&[
+        let (engine, diagnostics) = KeybindEngine::from_config_test(&[
             KeybindConfig::Bind {
                 trigger: "cmd+t".to_string(),
                 action: "no.such.action".to_string(),
@@ -434,7 +502,7 @@ mod tests {
     #[test]
     fn grave_aliases_bind_quick_terminal() {
         for trigger in ["cmd+grave", "cmd+backtick", "cmd+`"] {
-            let (engine, diagnostics) = KeybindEngine::from_config(&[
+            let (engine, diagnostics) = KeybindEngine::from_config_test(&[
                 KeybindConfig::Clear,
                 KeybindConfig::Bind {
                     trigger: trigger.to_string(),
@@ -479,7 +547,7 @@ mod tests {
     #[test]
     fn legacy_combined_overlay_action_names_alias_to_open_theme_picker() {
         for action in ["open_theme_settings", "theme-settings.open"] {
-            let (engine, diagnostics) = KeybindEngine::from_config(&[
+            let (engine, diagnostics) = KeybindEngine::from_config_test(&[
                 KeybindConfig::Clear,
                 KeybindConfig::Bind {
                     trigger: "cmd+shift+t".to_string(),
@@ -494,6 +562,195 @@ mod tests {
                 ),
                 Some(AppCommand::OpenThemePicker),
                 "{action} should still bind"
+            );
+        }
+    }
+
+    // `sidebar-hotkey` is an in-app rebind of `ToggleSidebar`, not a global
+    // hotkey: the configured chord resolves, the default `cmd+shift+s` stops
+    // resolving, and explicit `keybind` entries still win over it.
+    #[test]
+    fn sidebar_hotkey_rebinds_toggle_sidebar() {
+        let (engine, diagnostics) = KeybindEngine::from_config(&[], Some("cmd+alt+b"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            engine.resolve(
+                &Key::Character("b".into()),
+                ModifiersState::SUPER | ModifiersState::ALT
+            ),
+            Some(AppCommand::ToggleSidebar)
+        );
+        assert_eq!(
+            engine.resolve(
+                &Key::Character("s".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            None
+        );
+
+        // Explicit keybind entries apply after (and thus override) the
+        // sidebar-hotkey rebind.
+        let (engine, diagnostics) = KeybindEngine::from_config(
+            &[KeybindConfig::Bind {
+                trigger: "cmd+alt+b".to_string(),
+                action: "window.new".to_string(),
+            }],
+            Some("cmd+alt+b"),
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            engine.resolve(
+                &Key::Character("b".into()),
+                ModifiersState::SUPER | ModifiersState::ALT
+            ),
+            Some(AppCommand::NewWindow)
+        );
+    }
+
+    // Chords written in the global-hotkey syntax (`macos_hotkey::parse_hotkey`
+    // aliases: semicolon/backslash/tab/space/escape/JIS keys …) stay valid
+    // now that sidebar-hotkey parses through KeyTrigger — a pre-existing
+    // config value must keep replacing the default chord.
+    #[test]
+    fn sidebar_hotkey_accepts_global_hotkey_chord_aliases() {
+        for spec in [
+            "cmd+semicolon",
+            "cmd+backslash",
+            "cmd+tab",
+            "cmd+space",
+            "cmd+escape",
+            "cmd+jis-yen",
+            "cmd+intl-ro",
+        ] {
+            let (engine, diagnostics) = KeybindEngine::from_config(&[], Some(spec));
+            assert!(diagnostics.is_empty(), "{spec}: {diagnostics:?}");
+            // The default chord is replaced, and the engine reports an
+            // effective ToggleSidebar chord (what the menu accelerator uses).
+            assert_eq!(
+                engine.resolve(
+                    &Key::Character("s".into()),
+                    ModifiersState::SUPER | ModifiersState::SHIFT
+                ),
+                None,
+                "{spec}"
+            );
+            assert!(
+                engine.chord_for(AppCommand::ToggleSidebar).is_some(),
+                "{spec}"
+            );
+        }
+
+        let (engine, diagnostics) = KeybindEngine::from_config(&[], Some("cmd+semicolon"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            engine.resolve(&Key::Character(";".into()), ModifiersState::SUPER),
+            Some(AppCommand::ToggleSidebar)
+        );
+    }
+
+    // A sidebar-hotkey chord already serving another command is rejected
+    // (diagnosed, defaults kept): the fixed native-menu accelerators mirror
+    // those defaults and AppKit dispatches them before winit, so the other
+    // command's menu item would win over the sidebar anyway.
+    #[test]
+    fn sidebar_hotkey_conflicting_with_another_binding_is_rejected() {
+        for spec in ["cmd+t", "cmd+,"] {
+            let (engine, diagnostics) = KeybindEngine::from_config(&[], Some(spec));
+            assert_eq!(diagnostics.len(), 1, "{spec}: {diagnostics:?}");
+            assert!(diagnostics[0].contains("conflicts with"), "{diagnostics:?}");
+            // Both the stolen chord's owner and the sidebar default survive.
+            assert_eq!(
+                engine.resolve(
+                    &Key::Character("s".into()),
+                    ModifiersState::SUPER | ModifiersState::SHIFT
+                ),
+                Some(AppCommand::ToggleSidebar),
+                "{spec}"
+            );
+        }
+        let (engine, _) = KeybindEngine::from_config(&[], Some("cmd+t"));
+        assert_eq!(
+            engine.resolve(&Key::Character("t".into()), ModifiersState::SUPER),
+            Some(AppCommand::NewTab)
+        );
+    }
+
+    // `cmd+backslash` keeps matching every logical key the retired global
+    // hotkey covered physically: ANSI `\`, JIS Yen (`¥`), and JIS Ro (`_`).
+    #[test]
+    fn sidebar_hotkey_backslash_matches_jis_key_variants() {
+        let (engine, diagnostics) = KeybindEngine::from_config(&[], Some("cmd+backslash"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        for logical in ["\\", "¥", "_"] {
+            assert_eq!(
+                engine.resolve(&Key::Character(logical.into()), ModifiersState::SUPER),
+                Some(AppCommand::ToggleSidebar),
+                "{logical}"
+            );
+        }
+    }
+
+    // Conflict detection and dedup use the runtime match relation
+    // (`KeyTrigger::overlaps`), not structural equality: a chord that only
+    // *matches* an existing default (cmd+shift+{ vs cmd+shift+[) is still a
+    // conflict, and a later explicit keybind on a JIS alternate (`cmd+jis-yen`
+    // vs an earlier `cmd+backslash`) still removes the binding it would
+    // otherwise shadow.
+    #[test]
+    fn trigger_overlap_governs_conflicts_and_overrides() {
+        // cmd+shift+{ would always lose to the default cmd+shift+[ (PrevTab)
+        // at resolve time, so it is rejected like a structural conflict.
+        for spec in ["cmd+shift+{", "cmd+shift+}"] {
+            let (engine, diagnostics) = KeybindEngine::from_config(&[], Some(spec));
+            assert_eq!(diagnostics.len(), 1, "{spec}: {diagnostics:?}");
+            assert!(diagnostics[0].contains("conflicts with"), "{diagnostics:?}");
+            assert_eq!(
+                engine.resolve(
+                    &Key::Character("s".into()),
+                    ModifiersState::SUPER | ModifiersState::SHIFT
+                ),
+                Some(AppCommand::ToggleSidebar),
+                "{spec}"
+            );
+        }
+
+        // A later explicit keybind on cmd+jis-yen replaces the earlier
+        // overlapping cmd+backslash sidebar binding (explicit entries win).
+        let (engine, diagnostics) = KeybindEngine::from_config(
+            &[KeybindConfig::Bind {
+                trigger: "cmd+jis-yen".to_string(),
+                action: "window.new".to_string(),
+            }],
+            Some("cmd+backslash"),
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            engine.resolve(&Key::Character("¥".into()), ModifiersState::SUPER),
+            Some(AppCommand::NewWindow)
+        );
+        // The whole overlapping backslash binding is gone (dedup and runtime
+        // matching share one equivalence — no partial physical-candidate
+        // split), so the ANSI key no longer resolves to the sidebar either.
+        assert_eq!(
+            engine.resolve(&Key::Character("\\".into()), ModifiersState::SUPER),
+            None
+        );
+    }
+
+    // The empty sentinel (`sidebar-hotkey = none`) keeps the default
+    // `cmd+shift+s` binding; an unparseable chord is diagnosed and ignored.
+    #[test]
+    fn sidebar_hotkey_empty_or_invalid_keeps_default_binding() {
+        for spec in ["", "cmd+not-a-key"] {
+            let (engine, diagnostics) = KeybindEngine::from_config(&[], Some(spec));
+            assert_eq!(diagnostics.len(), usize::from(!spec.is_empty()), "{spec}");
+            assert_eq!(
+                engine.resolve(
+                    &Key::Character("s".into()),
+                    ModifiersState::SUPER | ModifiersState::SHIFT
+                ),
+                Some(AppCommand::ToggleSidebar),
+                "{spec}"
             );
         }
     }

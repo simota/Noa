@@ -596,11 +596,12 @@ pub struct StartupConfig {
     /// independent of the terminal grid's [`Self::font_size`]. Default
     /// [`DEFAULT_SIDEBAR_FONT_SIZE`].
     pub sidebar_font_size: f32,
-    /// `sidebar-hotkey`: the chord that toggles the session sidebar for the
-    /// focused window. Stored verbatim and parsed by the same app-layer chord
-    /// path as [`Self::quick_terminal_hotkey`]; `none`/`off`/empty normalize to
-    /// the empty-string sentinel (no hotkey). Defaults to `None` (unbound) —
-    /// the sidebar is off by default, so no chord is registered until set.
+    /// `sidebar-hotkey`: the in-app chord that toggles the session sidebar
+    /// for the focused window. Unlike [`Self::quick_terminal_hotkey`] it is
+    /// *not* a system-wide hotkey — it rebinds the keybind engine's
+    /// `ToggleSidebar` chord (default `cmd+shift+s`), so it only fires while
+    /// noa is focused. `none`/`off`/empty normalize to the empty-string
+    /// sentinel (keep the default binding). Defaults to `None`.
     pub sidebar_hotkey: Option<String>,
     /// `sidebar-preview-lines`: how many trailing output rows each sidebar card
     /// extracts and renders. `0` disables last-output preview rows.

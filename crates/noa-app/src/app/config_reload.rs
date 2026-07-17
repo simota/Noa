@@ -185,12 +185,14 @@ impl App {
         let sidebar_preview_changed =
             previous.sidebar_preview_lines != applied.sidebar_preview_lines;
         let sidebar_font_size_changed = previous.sidebar_font_size != applied.sidebar_font_size;
-        let keybinds_changed = previous.keybinds != applied.keybinds;
+        let sidebar_hotkey_changed = previous.sidebar_hotkey != applied.sidebar_hotkey;
+        // `sidebar-hotkey` feeds the keybind engine (in-app chord), so a
+        // change to either input rebuilds it.
+        let keybinds_changed = previous.keybinds != applied.keybinds || sidebar_hotkey_changed;
         let server_restart = decide_server_restart(&previous, &applied);
         let quick_terminal_hotkey_changed =
             previous.quick_terminal_hotkey != applied.quick_terminal_hotkey;
-        let sidebar_hotkey_changed = previous.sidebar_hotkey != applied.sidebar_hotkey;
-        let hotkeys_changed = quick_terminal_hotkey_changed || sidebar_hotkey_changed;
+        let hotkeys_changed = quick_terminal_hotkey_changed;
 
         self.config = applied;
 
@@ -240,7 +242,10 @@ impl App {
             self.restart_ipc_server();
         }
         if keybinds_changed {
-            let (keybinds, diagnostics) = KeybindEngine::from_config(&self.config.keybinds);
+            let (keybinds, diagnostics) = KeybindEngine::from_config(
+                &self.config.keybinds,
+                self.config.sidebar_hotkey.as_deref(),
+            );
             for diagnostic in diagnostics {
                 log::warn!("config reload keybind: {diagnostic}");
             }
@@ -253,10 +258,19 @@ impl App {
             if quick_terminal_hotkey_changed && let Some(menu) = self.macos_menu.as_ref() {
                 menu.set_quick_terminal_hotkey(self.config.quick_terminal_hotkey.as_deref());
             }
+            // Any engine rebuild can move the effective ToggleSidebar chord
+            // (sidebar-hotkey or an explicit keybind), so resync the menu
+            // accelerator from the engine, not from the raw config value.
+            if keybinds_changed && let Some(menu) = self.macos_menu.as_ref() {
+                menu.set_sidebar_chord(
+                    self.keybinds
+                        .chord_for(crate::commands::AppCommand::ToggleSidebar)
+                        .as_deref(),
+                );
+            }
         }
         if hotkeys_changed {
             self.quick_terminal_hotkey = None;
-            self.sidebar_hotkey = None;
             self.hotkey_install_attempted = false;
         }
 

@@ -220,19 +220,22 @@ fn shift_arrows_map_to_directional_copy_mode_gestures() {
 
 #[test]
 fn copy_mode_actions_are_configurable_and_directional_defaults_are_rebindable() {
-    let (engine, diagnostics) = KeybindEngine::from_config(&[
-        noa_config::KeybindConfig::Unbind {
-            trigger: "shift+arrowright".to_string(),
-        },
-        noa_config::KeybindConfig::Bind {
-            trigger: "cmd+y".to_string(),
-            action: "copy_mode".to_string(),
-        },
-        noa_config::KeybindConfig::Bind {
-            trigger: "cmd+shift+y".to_string(),
-            action: "copy_mode:right".to_string(),
-        },
-    ]);
+    let (engine, diagnostics) = KeybindEngine::from_config(
+        &[
+            noa_config::KeybindConfig::Unbind {
+                trigger: "shift+arrowright".to_string(),
+            },
+            noa_config::KeybindConfig::Bind {
+                trigger: "cmd+y".to_string(),
+                action: "copy_mode".to_string(),
+            },
+            noa_config::KeybindConfig::Bind {
+                trigger: "cmd+shift+y".to_string(),
+                action: "copy_mode:right".to_string(),
+            },
+        ],
+        None,
+    );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert_eq!(
         engine.resolve(&Key::Named(NamedKey::ArrowRight), ModifiersState::SHIFT),

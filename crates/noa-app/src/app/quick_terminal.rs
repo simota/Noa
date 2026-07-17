@@ -353,10 +353,11 @@ impl App {
         })
     }
 
-    /// Register the global `quick-terminal-hotkey` and `sidebar-hotkey` once,
-    /// after the app is running. A no-op per chord when unset or explicitly
-    /// disabled; a registration failure is logged, not fatal. Both go through
-    /// the same `parse_hotkey` path (FR-13).
+    /// Register the global `quick-terminal-hotkey` once, after the app is
+    /// running. A no-op when unset or explicitly disabled; a registration
+    /// failure is logged, not fatal. (`sidebar-hotkey` is deliberately not
+    /// registered here — it is an in-app keybind, applied via
+    /// `KeybindEngine::from_config`.)
     pub(super) fn install_global_hotkey_if_needed(&mut self) {
         if self.hotkey_install_attempted {
             return;
@@ -374,19 +375,6 @@ impl App {
             ) {
                 Some(hotkey) => self.quick_terminal_hotkey = Some(hotkey),
                 None => log::warn!("failed to register quick-terminal-hotkey `{spec}`"),
-            }
-        }
-
-        if let Some(spec) = self.config.sidebar_hotkey.clone()
-            && !spec.trim().is_empty()
-        {
-            match crate::macos_hotkey::GlobalHotKey::register(
-                &spec,
-                self.proxy.clone(),
-                crate::macos_hotkey::HotkeyAction::Sidebar,
-            ) {
-                Some(hotkey) => self.sidebar_hotkey = Some(hotkey),
-                None => log::warn!("failed to register sidebar-hotkey `{spec}`"),
             }
         }
     }

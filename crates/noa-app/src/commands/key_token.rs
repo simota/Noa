@@ -38,6 +38,15 @@ impl KeyTrigger {
     pub(super) fn matches(&self, logical_key: &Key, mods: ModifiersState) -> bool {
         self.mods.matches(mods) && self.key.matches(logical_key)
     }
+
+    /// Whether two triggers can match the same keypress. Strictly wider than
+    /// `==`: character tokens carry alternate logical candidates (`[`/`{`,
+    /// `]`/`}`, `\`/`¥`/`_` — see [`KeyToken::candidates`]), so dedup and
+    /// conflict checks must use this relation — structural equality would
+    /// leave a shadowing binding alive that runtime matching still hits.
+    pub(super) fn overlaps(&self, other: &Self) -> bool {
+        self.mods == other.mods && self.key.overlaps(other.key)
+    }
 }
 
 impl std::fmt::Display for KeyTrigger {
@@ -86,11 +95,27 @@ enum KeyToken {
 
 impl KeyToken {
     fn parse(token: &str) -> Result<Self, KeybindParseError> {
-        if token == "plus" {
-            return Ok(Self::Character('+'));
-        }
-        if token == "grave" || token == "backtick" {
-            return Ok(Self::Character('`'));
+        // Multi-char aliases shared with the global-hotkey chord syntax
+        // (`macos_hotkey::parse_hotkey`), so a chord accepted there — e.g. a
+        // pre-existing `sidebar-hotkey` value — parses identically here.
+        let aliased = match token {
+            "plus" => Some('+'),
+            "grave" | "backtick" => Some('`'),
+            "equal" => Some('='),
+            "minus" => Some('-'),
+            "leftbracket" => Some('['),
+            "rightbracket" => Some(']'),
+            "semicolon" => Some(';'),
+            "backslash" => Some('\\'),
+            "comma" => Some(','),
+            "slash" => Some('/'),
+            "period" => Some('.'),
+            "yen" | "jis-yen" | "jis_yen" | "intl-yen" | "intl_yen" => Some('¥'),
+            "underscore" | "jis-underscore" | "jis_underscore" | "intl-ro" | "intl_ro" => Some('_'),
+            _ => None,
+        };
+        if let Some(ch) = aliased {
+            return Ok(Self::Character(ch));
         }
         let mut chars = token.chars();
         if let (Some(ch), None) = (chars.next(), chars.next()) {
@@ -106,8 +131,28 @@ impl KeyToken {
             "home" => NamedKeyToken::Home,
             "end" => NamedKeyToken::End,
             "enter" | "return" => NamedKeyToken::Enter,
+            "tab" => NamedKeyToken::Tab,
+            "space" => NamedKeyToken::Space,
+            "escape" | "esc" => NamedKeyToken::Escape,
             _ => return Err(KeybindParseError::UnknownKey(token.to_string())),
         }))
+    }
+
+    /// The alternate logical-key characters `expected` matches beyond its
+    /// own (case-insensitive) character. The single source of truth for
+    /// character equivalence — runtime matching ([`Self::matches`]) and
+    /// trigger overlap ([`Self::overlaps`]) both derive from it, so a chord
+    /// can never match a keypress that dedup/conflict checks treated as
+    /// unrelated. `\` covers the JIS variants the retired global hotkey
+    /// registered physically (ANSI Backslash → `\`, JIS Yen → `¥`, JIS Ro →
+    /// `_` — see `macos_hotkey::carbon_keycodes`).
+    fn alternates(expected: char) -> &'static [char] {
+        match expected {
+            '[' => &['{'],
+            ']' => &['}'],
+            '\\' => &['¥', '_'],
+            _ => &[],
+        }
     }
 
     fn matches(self, logical_key: &Key) -> bool {
@@ -115,11 +160,27 @@ impl KeyToken {
             (Self::Character(expected), Key::Character(actual)) => {
                 actual.chars().next().is_some_and(|actual| {
                     actual.eq_ignore_ascii_case(&expected)
-                        || (expected == '[' && actual == '{')
-                        || (expected == ']' && actual == '}')
+                        || Self::alternates(expected).contains(&actual)
                 })
             }
             (Self::Named(expected), Key::Named(actual)) => expected.matches(*actual),
+            _ => false,
+        }
+    }
+
+    /// Whether the two tokens' match sets intersect: equal characters, one
+    /// character being an alternate of the other, or a shared alternate.
+    fn overlaps(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Character(a), Self::Character(b)) => {
+                a.eq_ignore_ascii_case(&b)
+                    || Self::alternates(a).contains(&b)
+                    || Self::alternates(b).contains(&a)
+                    || Self::alternates(a)
+                        .iter()
+                        .any(|ka| Self::alternates(b).contains(ka))
+            }
+            (Self::Named(a), Self::Named(b)) => a == b,
             _ => false,
         }
     }
@@ -149,6 +210,9 @@ enum NamedKeyToken {
     Home,
     End,
     Enter,
+    Tab,
+    Space,
+    Escape,
 }
 
 impl NamedKeyToken {
@@ -165,6 +229,9 @@ impl NamedKeyToken {
             Self::Home => "home",
             Self::End => "end",
             Self::Enter => "enter",
+            Self::Tab => "tab",
+            Self::Space => "space",
+            Self::Escape => "escape",
         }
     }
 
@@ -180,6 +247,9 @@ impl NamedKeyToken {
                 | (Self::Home, NamedKey::Home)
                 | (Self::End, NamedKey::End)
                 | (Self::Enter, NamedKey::Enter)
+                | (Self::Tab, NamedKey::Tab)
+                | (Self::Space, NamedKey::Space)
+                | (Self::Escape, NamedKey::Escape)
         )
     }
 }

@@ -84,16 +84,23 @@ fn one_cell_terminal_with_cursor_style(style: CursorStyle) -> Terminal {
     terminal.primary.grid[0].cells[0].ch = 'M';
     terminal.primary.grid[0].cells[0].fg = Color::Rgb(Rgb::new(240, 10, 20));
     terminal.primary.grid[0].cells[0].bg = Color::Rgb(Rgb::new(2, 3, 4));
+    terminal.primary.grid[0].mark_occupied(1);
     terminal
 }
 
 fn baseline_snapshot(chars: [char; 3]) -> FrameSnapshot {
     let rows = chars
         .into_iter()
-        .map(|ch| Row::from_cells(vec![Cell {
-                ch,
-                ..Cell::default()
-            }], false, false))
+        .map(|ch| {
+            Row::from_cells(
+                vec![Cell {
+                    ch,
+                    ..Cell::default()
+                }],
+                false,
+                false,
+            )
+        })
         .collect();
     FrameSnapshot {
         scroll_shift: 0,

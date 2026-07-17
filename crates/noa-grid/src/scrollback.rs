@@ -56,10 +56,18 @@
 //!   DRAM-cold: measured **+38% CPU, +18% wall, +102MB RSS** on the 150MB
 //!   flood. The compacting pack *is* the cache-locality optimization. (See
 //!   the reverted commit pair in history for the full implementation.)
-//! - **Row watermark / trim-skip**: a perfect "occupied prefix" hint that
-//!   skips the blank-tail loads entirely is worth only ~8% of cold-cache
-//!   pack_row (535 → 493 ns/row, `bench_flood_shape_cold_cache_pack_cost`)
-//!   — not worth per-cell-write bookkeeping in the fidelity core.
+//! - **Row watermark / trim-skip**: at the wish-#2 windowed shape (58 text
+//!   cells / 120 cols) a perfect "occupied prefix" hint was worth only ~8%
+//!   of cold-cache pack_row (535 → 493 ns/row,
+//!   `bench_flood_shape_cold_cache_pack_cost`) and was rejected. Re-measured
+//!   at fullscreen widths (wish #3, ~45 text cells / 213-319 cols) the
+//!   blank tail is ~81% of the row's cell loads and the same hint is worth
+//!   +20% whole-pipeline ascii consume — so `Row::occ` now exists (see
+//!   `cell.rs`) and [`Page::pack_row`] trims from it. Caveat: on wide grids
+//!   (319 cols) the unicode flood measured a few % *slower* with the skip
+//!   (owner-side sys-time growth from shifted worker/pool timing; a
+//!   page-residency probe of the skipped tail did not recover it) — the
+//!   decisive fullscreen widths (~198-213 cols) win on every workload.
 //! - **[`SEAL_BATCH_TARGET_BYTES`]** / [`PACK_WORKERS`]: ~1MiB of raw rows
 //!   × 3 workers is the locality sweet spot — the circulating raw-row set
 //!   must stay near the shared L2, so the optimum tracks the batch's *byte*
@@ -1022,7 +1030,11 @@ impl PagedScrollback {
     pub(crate) fn has_text(&self) -> bool {
         // Cells past the occupancy watermark are default (blank), so the
         // deferred-tier scans stop there.
-        let row_has_text = |row: &Row| row.cells[..row.occupied()].iter().any(|cell| !cell.is_blank());
+        let row_has_text = |row: &Row| {
+            row.cells[..row.occupied()]
+                .iter()
+                .any(|cell| !cell.is_blank())
+        };
         self.pages
             .iter()
             .any(|page| page.cells.iter().any(PackedCell::has_text))
@@ -1816,8 +1828,7 @@ mod tests {
         // carcass clears riding along (mirrors steady-state worker cost).
         let batch_rows = seal_batch_rows_for(COLS);
         let batch: Vec<Row> = (0..batch_rows).map(|_| row.clone()).collect();
-        let carcasses: Vec<(Row, usize)> =
-            (0..batch_rows).map(|_| (row.clone(), TEXT)).collect();
+        let carcasses: Vec<(Row, usize)> = (0..batch_rows).map(|_| (row.clone(), TEXT)).collect();
         let iters = n / batch_rows;
         let start = std::time::Instant::now();
         for _ in 0..iters {

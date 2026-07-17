@@ -576,6 +576,8 @@ mod tests {
 
     fn put(term: &mut Terminal, y: usize, ch: char) {
         term.primary.grid[y].cells[0].ch = ch;
+        // Direct cell pokes bypass the print path's occupancy tracking.
+        term.primary.grid[y].mark_occupied(1);
     }
 
     #[test]
@@ -644,6 +646,7 @@ mod tests {
         let mut term = Terminal::new(GridSize::new(2, 2));
         term.primary.grid[0].cells[0].ch = 'a';
         term.primary.grid[0].cells[0].push_combining('\u{301}');
+        term.primary.grid[0].mark_occupied(1);
 
         let snap = FrameSnapshot::from_terminal(&mut term);
 
@@ -767,6 +770,7 @@ mod tests {
 
         term.resize(GridSize::new(3, 2));
         term.primary.grid[0].cells[2].ch = 'C';
+        term.primary.grid[0].mark_occupied(3);
         let snap = FrameSnapshot::from_terminal_recycle(&mut term, recycle);
 
         assert_eq!(snap.cols, 3);
@@ -853,6 +857,7 @@ mod tests {
         for _ in 0..4200 {
             put(&mut term, 0, 'x');
             term.primary.grid[0].cells[1].ch = 'y';
+            term.primary.grid[0].mark_occupied(2);
             term.primary.scroll_up_region(1);
         }
         assert!(

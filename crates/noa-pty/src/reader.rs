@@ -64,6 +64,19 @@ const COALESCE_POLL_MS: libc::c_int = 2;
 /// burst-size saturation gate for the same reason.
 const REFILL_SPIN_MAX: u32 = 16;
 
+/// How many of [`REFILL_SPIN_MAX`]'s retries use a `std::hint::spin_loop()`
+/// CPU hint (a few cycles, no syscall) instead of `std::thread::yield_now()`
+/// (`sched_yield()` — a real syscall, measured at low-single-digit
+/// microseconds on this machine even when nothing else is runnable). Each
+/// retry still pays a `read()` syscall to check for new bytes either way;
+/// this only changes what happens *between* those checks, so replacing the
+/// early ones removes a whole syscall per iteration for the refill gaps
+/// that close within a few dozen nanoseconds, before falling back to
+/// actually relinquishing the CPU for slower ones. Gated on the same
+/// `streaming || congested` condition as the rest of the bridge, so
+/// interactive (non-flood) delivery is untouched.
+const REFILL_SPIN_FAST: u32 = 8;
+
 /// A single read at or above this size counts as "the kernel queue was full
 /// when drained" — the macOS pty output queue hands out at most ~1KiB per
 /// read, so a full-quantum read implies the producer is ahead of us.
@@ -177,7 +190,11 @@ fn drain_nonblocking(
                         gate.level() >= COALESCE_THRESHOLD || tx.len() >= COALESCE_SLOT_THRESHOLD;
                     if (streaming || congested) && spins < REFILL_SPIN_MAX {
                         spins += 1;
-                        std::thread::yield_now();
+                        if spins <= REFILL_SPIN_FAST {
+                            std::hint::spin_loop();
+                        } else {
+                            std::thread::yield_now();
+                        }
                         continue;
                     }
                     break;

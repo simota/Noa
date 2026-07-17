@@ -1467,6 +1467,7 @@ fi
 
 # ── aggregate → json + markdown ────────────────────────────────────
 python3 "$BENCH_DIR/aggregate.py" "$RAW" "$OUT_DIR" "$TS"
+python3 "$BENCH_DIR/visualize.py" "$OUT_DIR" >/dev/null 2>&1 || true
 cp "$BENCH_DIR/METHODOLOGY.md" "$OUT_DIR/METHODOLOGY.md" 2>/dev/null || true
 echo
 echo "==================================================================="
@@ -1474,3 +1475,4 @@ cat "$OUT_DIR/table.md"
 echo "==================================================================="
 echo "JSON:  $OUT_DIR/results.json"
 echo "Table: $OUT_DIR/table.md"
+echo "HTML:  $OUT_DIR/report.html"

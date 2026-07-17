@@ -22,6 +22,15 @@ pub(crate) fn show_quick_terminal_window(window: &Window) {
     show_quick_terminal_window_impl(window);
 }
 
+/// Restore first responder to winit's content `NSView`. AppKit's native-tab
+/// teardown moves first responder off the text-input view, so `KeyboardInput`
+/// stops arriving even though the window is already key — `focus_window`
+/// (`makeKeyAndOrderFront:`) can't fix that on an already-key window. This
+/// re-targets first responder at the content view directly.
+pub(crate) fn focus_content_view(window: &Window) {
+    focus_content_view_impl(window);
+}
+
 /// Commit a just-shown window to the screen immediately: draw any dirty
 /// views (`displayIfNeeded`) and flush the pending window-server transaction
 /// (`CATransaction flush`). Startup W1: the first window is shown from inside
@@ -453,6 +462,35 @@ fn show_quick_terminal_window_impl(window: &Window) {
         let _: () = msg_send![ns_window, orderFrontRegardless];
     }
 }
+
+#[cfg(target_os = "macos")]
+fn focus_content_view_impl(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+
+    // SAFETY: `ns_view` is winit's live AppKit `NSView` for this window and we
+    // are on the main event-loop thread. `makeFirstResponder:` is an AppKit
+    // window method; both pointers are nil-checked before use.
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let _: bool = msg_send![ns_window, makeFirstResponder: ns_view];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn focus_content_view_impl(_window: &Window) {}
 
 #[cfg(not(target_os = "macos"))]
 fn show_quick_terminal_window_impl(window: &Window) {

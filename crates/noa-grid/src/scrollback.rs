@@ -18,7 +18,7 @@
 //! Packing a row costs a per-cell scan; on the bulk-output path (`scroll_up_region`
 //! at the region bottom) that scan dominated whole-terminal profiles. Scroll paths
 //! therefore *move* rows in via [`PagedScrollback::push_row_deferred`] — an O(1)
-//! append to a `pending` ring. Every [`SEAL_BATCH_ROWS`] rows the pending batch is
+//! append to a `pending` ring. Every [`seal_batch_rows_for`] rows the pending batch is
 //! *published* to a small persistent worker pool as an immutable `Arc<Vec<Row>>`
 //! (the `sealing` batch) and packed off-thread while the owner keeps feeding; the
 //! results are collected at a later batch boundary — without ever blocking the
@@ -60,15 +60,14 @@
 //!   skips the blank-tail loads entirely is worth only ~8% of cold-cache
 //!   pack_row (535 → 493 ns/row, `bench_flood_shape_cold_cache_pack_cost`)
 //!   — not worth per-cell-write bookkeeping in the fidelity core.
-//! - **[`SEAL_BATCH_ROWS`]** / [`PACK_WORKERS`]: 256 rows × 3 workers is the
-//!   locality sweet spot at fullscreen widths (wish #3 re-measurement at
-//!   319 cols: 256 ≈ 1.55× the ascii consume of 512 — the circulating
-//!   raw-row set must stay near the shared L2, and 319-col rows carry ~2.7×
-//!   the footprint of the 120-col shape wish #2 tuned 512 on, where 256 vs
-//!   512 measured equal). Doubling workers measured *slower* at every batch
-//!   size tried (512: −30%, 256: −3%; owner + 3 packers + carcass traffic
-//!   already saturate the P-cluster, extra workers spill to E-cores and
-//!   drag the whole batch).
+//! - **[`SEAL_BATCH_TARGET_BYTES`]** / [`PACK_WORKERS`]: ~1MiB of raw rows
+//!   × 3 workers is the locality sweet spot — the circulating raw-row set
+//!   must stay near the shared L2, so the optimum tracks the batch's *byte*
+//!   footprint, not a fixed row count ([`seal_batch_rows_for`] derives rows
+//!   from width; see its doc for the wish #3 cycle-2 sweep on the 24-byte
+//!   POD `Cell`). Doubling workers measured *slower* at every batch size
+//!   tried (owner + 3 packers + carcass traffic already saturate the
+//!   P-cluster, extra workers spill to E-cores and drag the whole batch).
 
 use crate::cell::{Cell, HyperlinkId, Row};
 use crate::grapheme::GraphemeId;
@@ -89,20 +88,33 @@ const PAGE_CELL_CAPACITY: usize = PAGE_TARGET_BYTES / PACKED_CELL_SIZE;
 /// measurement (see the module doc and `docs/ghostty-parity-plan.md`).
 const PAGE_HEADER_COST: usize = 256;
 
-/// Deferred-seal batch size: `push_row_deferred` publishes a pack batch (and
-/// collects the previous one, settling byte-limit eviction) every this many
-/// rows. Bounds the raw-row staging memory to roughly
-/// `2 × SEAL_BATCH_ROWS × cols × size_of::<Cell>()` per flooding screen.
-const SEAL_BATCH_ROWS: usize = 256;
+/// Deferred-seal batch size target, in *raw row bytes* (`cols ×
+/// size_of::<Cell>()`): `push_row_deferred` publishes a pack batch (and
+/// collects the previous one, settling byte-limit eviction) every
+/// [`seal_batch_rows_for`] rows. The optimum tracks the batch's byte
+/// footprint, not its row count — the circulating raw-row set (pending +
+/// sealing + carcasses + pool, several batches' worth) must stay near the
+/// shared L2 — so the row count is derived from the row width (wish #3
+/// cycle-2 re-measurement on the 24-byte POD `Cell`, ascii flood: at 319
+/// cols 128 rows ≈ +15% consume over 256, 512 ≈ −45%, 1024 ≈ −55%; at 213
+/// cols 256 ≈ 192 > 128 within noise — both optima sit at ≈1MiB raw).
+const SEAL_BATCH_TARGET_BYTES: usize = 1024 * 1024;
+/// Row-count clamp for [`seal_batch_rows_for`]: keeps ultra-wide grids from
+/// degenerating into tiny high-churn batches (publish/collect overhead per
+/// batch is fixed) and narrow grids from starving the workers of pipeline
+/// slack.
+const SEAL_BATCH_MIN_ROWS: usize = 128;
+const SEAL_BATCH_MAX_ROWS: usize = 512;
+
+/// Rows per deferred-seal batch for a screen `cols` wide (see
+/// [`SEAL_BATCH_TARGET_BYTES`]).
+fn seal_batch_rows_for(cols: usize) -> usize {
+    let row_bytes = cols.max(1) * std::mem::size_of::<Cell>();
+    (SEAL_BATCH_TARGET_BYTES / row_bytes).clamp(SEAL_BATCH_MIN_ROWS, SEAL_BATCH_MAX_ROWS)
+}
 /// Worker threads in the lazy per-scrollback pack pool; a published batch
 /// splits into this many contiguous chunks.
 const PACK_WORKERS: usize = 3;
-/// Recycled-row pool cap: covers two seal batches (a batch may grow past
-/// [`SEAL_BATCH_ROWS`] while the workers finish the previous one — the
-/// non-blocking boundary) so a sustained flood reuses every carcass instead
-/// of allocating fresh blank rows. Same row count as the wish-#2 cap
-/// (512 + 32) that RSS was validated with.
-const POOL_CAP: usize = 2 * SEAL_BATCH_ROWS + 32;
 /// Per-row constant in the pending-bytes upper bound (row meta + slack).
 const PACKED_ROW_EST_OVERHEAD: usize = 16;
 /// Charged per grapheme-table entry (the tail text itself lives in the
@@ -578,6 +590,10 @@ pub(crate) struct PagedScrollback {
     /// limits.
     sealing_est_bytes: usize,
     pending_est_bytes: usize,
+    /// Rows per deferred-seal batch, tracking the width of the rows being
+    /// pushed ([`seal_batch_rows_for`]; refreshed on every deferred push, so
+    /// a resize retargets the very next batch).
+    batch_rows: usize,
     /// Blank-row pool recycled from packed carcasses, handed back to the live
     /// grid via [`Self::take_blank_row`] so scroll paths skip the full-row
     /// clear (a packed row's trailing cells are proven default-blank by the
@@ -608,6 +624,7 @@ impl PagedScrollback {
             pending: VecDeque::new(),
             sealing_est_bytes: 0,
             pending_est_bytes: 0,
+            batch_rows: SEAL_BATCH_MAX_ROWS,
             pool: Vec::new(),
             dirty_carcasses: None,
             scratch: empty_row(),
@@ -666,7 +683,7 @@ impl PagedScrollback {
 
     /// Post-burst memory trim: settle every deferred row into packed pages
     /// and drop the spare evicted page. After this the retained heap is the
-    /// packed history plus one bounded recycled-row pool ([`POOL_CAP`]) —
+    /// packed history plus one bounded recycled-row pool ([`Self::pool_cap`]) —
     /// the in-flight sealing batch, its dirty carcasses and the unpacked
     /// pending tail (up to ~1500 flood-width rows in total) are settled or
     /// recycled. History content and reads are unaffected. Returns rows
@@ -727,7 +744,7 @@ impl PagedScrollback {
     }
 
     /// Hot-path seal: move a row that scrolled off the live grid into the
-    /// pending ring (O(1), no per-cell work); every [`SEAL_BATCH_ROWS`] rows
+    /// pending ring (O(1), no per-cell work); every [`Self::batch_rows`] rows
     /// the previous published batch is collected and the pending one takes
     /// its place on the worker pool. Returns rows discarded — `1` immediately
     /// when scrollback is disabled, otherwise whatever a triggered collection
@@ -738,6 +755,7 @@ impl PagedScrollback {
         }
         // History rows always report clean (see `take_visible_rows_with_damage`).
         row.dirty = false;
+        self.batch_rows = seal_batch_rows_for(row.cells.len());
         self.pending_est_bytes += row.cells.len() * PACKED_CELL_SIZE + PACKED_ROW_EST_OVERHEAD;
         self.pending.push_back(row);
         self.total_rows += 1;
@@ -769,7 +787,7 @@ impl PagedScrollback {
             > self.limit_bytes / 4;
         if over_limit {
             self.flush_all()
-        } else if self.pending.len() >= SEAL_BATCH_ROWS {
+        } else if self.pending.len() >= self.batch_rows {
             // Batch boundary. Never *block* on the in-flight batch here — a
             // stalled `wait_results` on this path was measured as 27% of the
             // flood consume thread. If the workers are still busy, let
@@ -866,7 +884,7 @@ impl PagedScrollback {
             }
             lens.extend(result.lens);
             // Last batch's carcasses come back pre-blanked by the workers.
-            let spare = POOL_CAP.saturating_sub(self.pool.len());
+            let spare = self.pool_cap().saturating_sub(self.pool.len());
             self.pool.extend(result.cleared.into_iter().take(spare));
         }
         // Workers drop their `Arc` clones before reporting completion, so
@@ -898,11 +916,21 @@ impl PagedScrollback {
     /// occupied prefix needs re-blanking — on the bulk-output path this
     /// halves the full-row clear the scroll used to pay.
     fn recycle_carcass(&mut self, mut row: Row, len: usize) {
-        if self.pool.len() >= POOL_CAP {
+        if self.pool.len() >= self.pool_cap() {
             return;
         }
         clear_carcass_prefix(&mut row, len);
         self.pool.push(row);
+    }
+
+    /// Recycled-row pool cap: covers two seal batches (a batch may grow past
+    /// [`Self::batch_rows`] while the workers finish the previous one — the
+    /// non-blocking boundary) so a sustained flood reuses every carcass
+    /// instead of allocating fresh blank rows. Byte footprint stays
+    /// width-independent (~2 × [`SEAL_BATCH_TARGET_BYTES`]) because the
+    /// batch row count already scales inversely with width.
+    fn pool_cap(&self) -> usize {
+        2 * self.batch_rows + 32
     }
 
     /// Materialize row `y` (`0` = oldest retained row), or `None` if out of
@@ -1771,10 +1799,11 @@ mod tests {
 
         // (4) whole worker batch path: pack_chunk incl. page alloc/shrink +
         // carcass clears riding along (mirrors steady-state worker cost).
-        let batch: Vec<Row> = (0..SEAL_BATCH_ROWS).map(|_| row.clone()).collect();
+        let batch_rows = seal_batch_rows_for(COLS);
+        let batch: Vec<Row> = (0..batch_rows).map(|_| row.clone()).collect();
         let carcasses: Vec<(Row, usize)> =
-            (0..SEAL_BATCH_ROWS).map(|_| (row.clone(), TEXT)).collect();
-        let iters = n / SEAL_BATCH_ROWS;
+            (0..batch_rows).map(|_| (row.clone(), TEXT)).collect();
+        let iters = n / batch_rows;
         let start = std::time::Instant::now();
         for _ in 0..iters {
             let result = pack_chunk(&batch, carcasses.clone());
@@ -1799,8 +1828,8 @@ mod tests {
         println!("  carcass clear      : {:8.1} ns/row", per_row(clear, n));
         println!(
             "  pack_chunk total   : {:8.1} ns/row (minus clone {:.1})",
-            per_row(chunk, iters * SEAL_BATCH_ROWS),
-            per_row(clone_overhead, iters * SEAL_BATCH_ROWS)
+            per_row(chunk, iters * batch_rows),
+            per_row(clone_overhead, iters * batch_rows)
         );
     }
 
@@ -1930,7 +1959,7 @@ mod tests {
         // Push enough rows to cross several publish/collect boundaries and
         // leave stragglers in `sealing` and `pending`, then compare every
         // materialized row against the immediate-packing reference.
-        let n = SEAL_BATCH_ROWS * 2 + 57;
+        let n = seal_batch_rows_for(40) * 2 + 57;
         let mut deferred = PagedScrollback::new(usize::MAX);
         let mut immediate = PagedScrollback::new(usize::MAX);
         for i in 0..n {
@@ -1970,7 +1999,7 @@ mod tests {
         // publish and come back cleared when batch 2 collects (third publish).
         // `await_inflight` keeps every boundary a collect point (the
         // non-blocking boundary otherwise skips collects under load).
-        for i in 0..SEAL_BATCH_ROWS * 3 {
+        for i in 0..seal_batch_rows_for(30) * 3 {
             sb.await_inflight();
             sb.push_row_deferred(styled_row(i, 30));
         }
@@ -1989,7 +2018,7 @@ mod tests {
         let mut sb = PagedScrollback::new(usize::MAX);
         // Cross a publish boundary and leave stragglers in `sealing` and
         // `pending`, plus recycled carcasses in the pool.
-        let n = SEAL_BATCH_ROWS * 3 + 41;
+        let n = seal_batch_rows_for(40) * 3 + 41;
         let mut reference = PagedScrollback::new(usize::MAX);
         for i in 0..n {
             sb.await_inflight(); // deterministic collect points (see above)
@@ -2005,17 +2034,17 @@ mod tests {
             assert_eq!(sb.row(y).unwrap().cells, reference.row(y).unwrap().cells);
         }
         // Every deferred/spare buffer is settled; the bounded pool stays
-        // (deliberate — see `trim_memory`), capped at POOL_CAP.
+        // (deliberate — see `trim_memory`), capped at the pool cap.
         assert!(sb.sealing.is_none());
         assert!(sb.pending.is_empty());
         assert!(sb.dirty_carcasses.is_none());
         assert!(sb.spare.is_none());
-        assert!(sb.pool.len() <= POOL_CAP);
+        assert!(sb.pool.len() <= sb.pool_cap());
         // ...and the scrollback stays fully usable afterwards.
-        for i in 0..SEAL_BATCH_ROWS + 7 {
+        for i in 0..seal_batch_rows_for(40) + 7 {
             sb.push_row_deferred(styled_row(i, 40));
         }
-        assert_eq!(sb.len(), n + SEAL_BATCH_ROWS + 7);
+        assert_eq!(sb.len(), n + seal_batch_rows_for(40) + 7);
         assert_eq!(sb.row(n).unwrap().cells, reference.row(0).unwrap().cells);
     }
 
@@ -2026,18 +2055,18 @@ mod tests {
         let dense = "x".repeat(79);
         let mut sb = PagedScrollback::new(64 * 1024);
         let mut evicted = 0;
-        for _ in 0..SEAL_BATCH_ROWS {
+        for _ in 0..seal_batch_rows_for(80) {
             evicted += sb.push_row_deferred(text_row(&dense, 80));
         }
         evicted += sb.trim_memory();
-        assert_eq!(sb.len() + evicted, SEAL_BATCH_ROWS);
+        assert_eq!(sb.len() + evicted, seal_batch_rows_for(80));
         assert!(sb.bytes() <= sb.limit_bytes());
     }
 
     #[test]
     fn clear_discards_inflight_and_pending_rows() {
         let mut sb = PagedScrollback::new(usize::MAX);
-        for i in 0..SEAL_BATCH_ROWS + 13 {
+        for i in 0..seal_batch_rows_for(24) + 13 {
             sb.push_row_deferred(styled_row(i, 24));
         }
         sb.clear();

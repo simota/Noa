@@ -171,6 +171,7 @@ pub(crate) struct TrackedCopyModePoints {
     pub(crate) anchor_was_evicted: bool,
 }
 mod edit;
+mod line_batch;
 mod print;
 mod reflow;
 mod text;

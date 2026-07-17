@@ -42,6 +42,7 @@ ONLY=""
 AXES="throughput,scroll,latency,startup,memory,load,fire"
 EQUALIZE=0
 FORCE=0
+FULLSCREEN=1   # measure the render-path axes fullscreen (see below); --no-fullscreen opts out
 # equalized-condition targets (used only with --equalize)
 EQ_COLS=120; EQ_ROWS=40; EQ_FONT="Menlo"; EQ_FSIZE=14
 while [ $# -gt 0 ]; do
@@ -51,10 +52,14 @@ while [ $# -gt 0 ]; do
     --axes) AXES="$2"; shift ;;
     --equalize) EQUALIZE=1 ;;
     --force) FORCE=1 ;;
+    --no-fullscreen) FULLSCREEN=0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
 done
+# Fullscreen conflicts with --equalize's pinned grid — geometry equalization
+# is the whole point there, so fullscreen is disabled under --equalize.
+[ "$EQUALIZE" = 1 ] && FULLSCREEN=0
 
 axis_selected() { case ",$AXES," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 
@@ -100,6 +105,39 @@ else
 fi
 emit harness meta - - loadavg_start "$(sysctl -n vm.loadavg 2>/dev/null)" note
 emit harness meta - - uptime_start "$(uptime)" note
+
+# ── fullscreen capability probe (all-or-nothing) ───────────────────
+# The render-path axes (throughput/scroll/fire/latency + load-active) are
+# measured with every terminal's window in native macOS fullscreen: identical
+# physical geometry for all terminals, which also neutralizes the
+# per-terminal grid-pinning gaps (Termy/iTerm2/Warp/Terminal expose no size
+# control). Setting AXFullScreen needs Accessibility permission for
+# osascript; probe it ONCE up front and fall back to windowed FOR EVERY
+# terminal if denied — a run never mixes fullscreen and windowed geometry.
+if [ "$FULLSCREEN" = 1 ]; then
+  # `UI elements enabled` is the canonical Accessibility probe — process-name
+  # listing succeeds WITHOUT the permission, so it must not be used here
+  # (verified 2026-07-17: name listing passed while AXFullScreen was denied).
+  if [ "$(osascript -e 'tell application "System Events" to UI elements enabled' 2>/dev/null)" = "true" ]; then
+    emit harness meta - - fullscreen "enabled (AXFullScreen via System Events, gated workload start)" note
+  else
+    FULLSCREEN=0
+    emit harness meta - - fullscreen "DISABLED: osascript lacks Accessibility permission (System Events denied) — all terminals measured windowed" note
+    # Best-effort: a real AX access attempt makes macOS surface the
+    # "wants to control this computer using accessibility features" prompt
+    # for the host app — the passive `UI elements enabled` read never does.
+    osascript -e 'tell application "System Events" to get value of attribute "AXRole" of (first process whose frontmost is true)' >/dev/null 2>&1 || true
+    echo "WARNING: fullscreen requested, but the terminal you ran this from has no"
+    echo "         macOS Accessibility permission, so AXFullScreen cannot be set."
+    echo "         Measuring ALL terminals windowed (recorded in results)."
+    echo "         To enable fullscreen runs:"
+    echo "           System Settings > Privacy & Security > Accessibility >"
+    echo "           add/enable the terminal app running this script, then rerun."
+    echo "         (If a permission prompt just appeared, approving it is enough.)"
+  fi
+else
+  emit harness meta - - fullscreen "disabled (--no-fullscreen or --equalize)" note
+fi
 
 # reps / timeouts (seconds)
 if [ "$QUICK" = 1 ]; then
@@ -155,7 +193,7 @@ fi
 # prebuilt dsr_probe would silently emit the old 4-field result format).
 tools_fresh() {
   local t
-  for t in nowns dsr_probe winwait wincount fire; do
+  for t in nowns dsr_probe winwait wincount fire dispinfo; do
     [ -x "$TOOLS/$t" ] || return 1
     [ "$BENCH_DIR/tools/$t.c" -nt "$TOOLS/$t" ] && return 1
   done
@@ -166,8 +204,22 @@ tools_fresh || \
   cc -O2 -o bin/nowns nowns.c && cc -O2 -o bin/dsr_probe dsr_probe.c && \
   cc -O2 -o bin/fire fire.c && \
   cc -O2 -framework ApplicationServices -o bin/winwait winwait.c && \
-  cc -O2 -framework ApplicationServices -o bin/wincount wincount.c)
+  cc -O2 -framework ApplicationServices -o bin/wincount wincount.c && \
+  cc -O2 -framework ApplicationServices -o bin/dispinfo dispinfo.c)
 chmod +x "$WRAPPER"
+
+# ── target display (fullscreen runs) ───────────────────────────────
+# Pin every measured window to the display the harness was launched from
+# (the one under the mouse cursor at run start) — without this, macOS may
+# place a terminal's window (and thus its fullscreen Space) on whatever
+# display that app last used.
+DISP_X=""; DISP_Y=""
+if [ "$FULLSCREEN" = 1 ]; then
+  read -r DISP_X DISP_Y DISP_W DISP_H < <("$TOOLS/dispinfo" 2>/dev/null || echo "")
+  if [ -n "$DISP_X" ]; then
+    emit harness meta - - target_display "${DISP_X},${DISP_Y} ${DISP_W}x${DISP_H} (display under the cursor at run start)" note
+  fi
+fi
 
 # ── config isolation: every terminal runs FRESH-INSTALL DEFAULTS ───
 # The scored comparison is fresh defaults for everyone (METHODOLOGY.md
@@ -372,12 +424,33 @@ iterm2_open_cmd_window() {
 # backgrounding its AppleScript helper, then restores it via `wait`-free
 # subshell avoidance — see the branch).
 launch_term_default() {
+  # NOA_GO non-empty == this launch is a fullscreen-gated measurement (set
+  # only by run_once/run_load_active under FULLSCREEN=1). Terminals with a
+  # NATIVE fullscreen flag get it at launch — reliable and needs no
+  # Accessibility; the rest go through fullscreen_term's AX path.
+  local fs=""
+  [ -n "${NOA_GO:-}" ] && fs=1
   case "$1" in
     noa)     launch_noa --cols 120 --rows 40 ;;
-    ghostty) "$GHOSTTY_BIN" --config-default-files=false --window-save-state=never -e "$WRAPPER" >/dev/null 2>&1 & ;;
+    ghostty)
+      # NO --fullscreen here: ghostty 1.3.1 never executes its -e command
+      # when launched with --fullscreen (verified 2026-07-17: sentinel never
+      # appears with the flag, appears without it) — ghostty goes through
+      # the AX fullscreen path instead. The position flags are unaffected
+      # and keep the window on the target display.
+      "$GHOSTTY_BIN" --config-default-files=false --window-save-state=never \
+        ${fs:+--window-position-x=$((DISP_X + 64))} ${fs:+--window-position-y=$((DISP_Y + 64))} \
+        -e "$WRAPPER" >/dev/null 2>&1 & ;;
     termy)   XDG_CONFIG_HOME="$ISO_XDG" SHELL="$WRAPPER" "$TERMY_BIN" >/dev/null 2>&1 & ;;
-    kitty)   "$KITTY_BIN" --config NONE -o confirm_os_window_close=0 "$WRAPPER" >/dev/null 2>&1 & ;;
-    alacritty) XDG_CONFIG_HOME="$ISO_XDG" "$ALACRITTY_BIN" -e "$WRAPPER" >/dev/null 2>&1 & ;;
+    kitty)   "$KITTY_BIN" --config NONE -o confirm_os_window_close=0 \
+               ${fs:+--start-as=fullscreen} "$WRAPPER" >/dev/null 2>&1 & ;;
+    alacritty)
+      if [ -n "$fs" ]; then
+        XDG_CONFIG_HOME="$ISO_XDG" "$ALACRITTY_BIN" -o 'window.startup_mode="Fullscreen"' \
+          -o "window.position={x=$((DISP_X + 64)),y=$((DISP_Y + 64))}" -e "$WRAPPER" >/dev/null 2>&1 &
+      else
+        XDG_CONFIG_HOME="$ISO_XDG" "$ALACRITTY_BIN" -e "$WRAPPER" >/dev/null 2>&1 &
+      fi ;;
     warp)    SHELL="$WRAPPER" "$WARP_BIN" >/dev/null 2>&1 & ;;  # UNVERIFIED (not installed here): if Warp ignores $SHELL the sentinel times out and axes report UNMEASURED honestly
     rio)     RIO_CONFIG_HOME="$ISO_XDG/rio" "$RIO_BIN" -e "$WRAPPER" >/dev/null 2>&1 & ;;
     terminal)
@@ -442,6 +515,57 @@ launch_term() {
 # by mistake. Falls back to `open -a <bundle>` (focus-only, never kills) only
 # if System Events automation is unavailable AND our instance is still alive —
 # `open -a` on an already-dead instance would launch a fresh one.
+# fullscreen_term <term> — put OUR tracked instance's window into native
+# macOS fullscreen. PID-scoped: System Events is addressed via `unix id`, so
+# a user's own instance of the same app is never touched. Sequence: wait for
+# a window to exist (wincount over our pids), set AXFullScreen, poll the
+# attribute back until true, then a short settle for the Space animation.
+# Returns 0 on verified fullscreen, 1 otherwise (caller decides how to note).
+fullscreen_term() {
+  local pid i st
+  pid="$(tracked_roots "$1")"; pid="$(echo $pid | awk '{print $1}')"
+  [ -z "$pid" ] && return 1
+  # window materialization can lag the pid — poll pid-scoped wincount
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    # shellcheck disable=SC2046
+    [ "$("$TOOLS/wincount" $(app_pids "$1") 2>/dev/null || echo 0)" -ge 1 ] && break
+    sleep 0.5
+  done
+  # Native-flag terminals were launched fullscreen already (kitty
+  # --start-as=fullscreen, alacritty startup_mode; ghostty is NOT here —
+  # its --fullscreen suppresses the -e command, see launch_term_default) —
+  # just allow the Space animation to finish; no Accessibility needed.
+  # (Attempting the AX verify anyway would false-negative them as FAILED
+  # when the AX read is denied — observed with kitty 2026-07-17: region
+  # 244x85 = clearly fullscreen, yet flagged FAILED by the AX read.)
+  case "$1" in
+    kitty|alacritty) sleep 1.2; return 0 ;;
+  esac
+  # Pin the window to the target display BEFORE fullscreening — the
+  # fullscreen Space is created on the display containing the window.
+  # Tolerated to fail (some windows reject AXPosition); fullscreen then
+  # happens on whatever display the window opened on.
+  if [ -n "$DISP_X" ]; then
+    osascript -e "tell application \"System Events\" to tell (first process whose unix id is $pid) to set position of window 1 to {$((DISP_X + 64)), $((DISP_Y + 64))}" >/dev/null 2>&1
+    sleep 0.3
+  fi
+  if ! osascript -e "tell application \"System Events\" to tell (first process whose unix id is $pid) to set value of attribute \"AXFullScreen\" of window 1 to true" >/dev/null 2>&1; then
+    return 1
+  fi
+  # Verify best-effort: the AX read can be denied while the set succeeded
+  # (observed 2026-07-17: kitty at a fullscreen-sized region while the read
+  # reported failure), so a set that raised no error counts as applied even
+  # if the read never confirms — the per-rep fire region stays the ground
+  # truth in raw.tsv.
+  for i in 1 2 3 4 5 6 7 8; do
+    st="$(osascript -e "tell application \"System Events\" to tell (first process whose unix id is $pid) to get value of attribute \"AXFullScreen\" of window 1" 2>/dev/null)"
+    [ "$st" = "true" ] && { sleep 0.8; return 0; }
+    sleep 0.5
+  done
+  sleep 0.8
+  return 0
+}
+
 activate_term() {
   local pid; pid="$(tracked_roots "$1")"; pid="$(echo $pid | awk '{print $1}')"
   [ -z "$pid" ] && return 0
@@ -634,12 +758,25 @@ run_once() {
 
   kill_term "$term"; sleep 0.4
 
+  # Fullscreen gate: workload modes hold at wait_go until the window reached
+  # its measurement geometry; startup is never gated (it measures the launch
+  # itself and its sentinel predates any window manipulation).
+  local go=""
+  if [ "$FULLSCREEN" = 1 ] && [ "$mode" != startup ]; then
+    go="$RUNTMP/${term}.${mode}.go.$RANDOM"
+    rm -f "$go"
+  fi
   export NOA_MODE="$mode" NOA_SENTINEL="$sentinel" NOA_NOWNS="$NOWNS" \
-         NOA_PROBE="$PROBE" NOA_FIRE="$FIRE" NOA_RESULT="$result" NOA_BENCH_CMD="$cmd"
+         NOA_PROBE="$PROBE" NOA_FIRE="$FIRE" NOA_RESULT="$result" \
+         NOA_BENCH_CMD="$cmd" NOA_GO="$go"
 
   local t0 t1
   t0="$("$NOWNS")"
   launch_term "$term" >/dev/null
+  if [ -n "$go" ]; then
+    fullscreen_term "$term" || emit "$term" meta - - fullscreen_window "FAILED (windowed for one $mode rep)" note
+    : > "$go"
+  fi
   if [ "$mode" = latency ] || [ "$mode" = fire ]; then
     # Focus the fresh window so render-thread/focus-gated DSR responders
     # (Termy) reply — and, for the fire axis, so no terminal is measured
@@ -746,7 +883,7 @@ run_mem_idle() {
   local term="$1" sentinel="$RUNTMP/${term}.memidle.sentinel"
   kill_term "$term"; sleep 0.4
   rm -f "$sentinel"
-  export NOA_MODE=hold NOA_SENTINEL="$sentinel" NOA_HOLD=1 NOA_NOWNS="$NOWNS" NOA_BENCH_CMD=""
+  export NOA_MODE=hold NOA_SENTINEL="$sentinel" NOA_HOLD=1 NOA_NOWNS="$NOWNS" NOA_BENCH_CMD="" NOA_GO=""
   launch_term "$term" >/dev/null
   if ! wait_sentinel "$sentinel" "$MEM_HOLD_TIMEOUT"; then kill_term "$term"; sleep 0.3; echo ""; return; fi
   mem_dual_sample "$term" idle
@@ -759,7 +896,7 @@ run_mem_scrollback() {
   local term="$1" sentinel="$RUNTMP/${term}.memscroll.sentinel"
   kill_term "$term"; sleep 0.4
   rm -f "$sentinel"
-  export NOA_MODE=scroll NOA_SENTINEL="$sentinel" NOA_HOLD=1 NOA_NOWNS="$NOWNS" NOA_BENCH_CMD="cat '$SCROLLF'"
+  export NOA_MODE=scroll NOA_SENTINEL="$sentinel" NOA_HOLD=1 NOA_NOWNS="$NOWNS" NOA_BENCH_CMD="cat '$SCROLLF'" NOA_GO=""
   launch_term "$term" >/dev/null
   if ! wait_sentinel "$sentinel" "$SCROLL_TIMEOUT"; then kill_term "$term"; sleep 0.3; echo ""; return; fi
   mem_dual_sample "$term" scrollback
@@ -784,7 +921,7 @@ run_mem_multitab() {
   for i in $(seq 1 "$n"); do
     local sentinel="$RUNTMP/${term}.multitab.$i.sentinel"
     rm -f "$sentinel"
-    export NOA_MODE=hold NOA_SENTINEL="$sentinel" NOA_HOLD=1 NOA_NOWNS="$NOWNS" NOA_BENCH_CMD=""
+    export NOA_MODE=hold NOA_SENTINEL="$sentinel" NOA_HOLD=1 NOA_NOWNS="$NOWNS" NOA_BENCH_CMD="" NOA_GO=""
     launch_term "$term" >/dev/null
     sleep 0.3
   done
@@ -824,7 +961,7 @@ run_mem_longevity() {
   # already sleeps $idle before every per-cycle sentinel, but nothing keeps
   # it alive after the final cycle's sentinel + the closing "$NOA_SENTINEL"
   # write, so without HOLD the process can exit before that last sample.
-  export NOA_MODE=longevity NOA_SENTINEL="$sentinel" NOA_CYCLES="$cycles" NOA_IDLE_S="$idle" \
+  export NOA_MODE=longevity NOA_SENTINEL="$sentinel" NOA_CYCLES="$cycles" NOA_IDLE_S="$idle" NOA_GO="" \
          NOA_HOLD=1 NOA_NOWNS="$NOWNS" NOA_BENCH_CMD="cat '$SCROLLF'"
   launch_term "$term" >/dev/null
   local samples="" done_cycles=0 i
@@ -852,7 +989,7 @@ run_load_idle_sample() {
   local term="$1" dur="$LOAD_IDLE_S" sentinel="$RUNTMP/${term}.loadidle.sentinel"
   kill_term "$term"; sleep 0.4
   rm -f "$sentinel"
-  export NOA_MODE=hold NOA_SENTINEL="$sentinel" NOA_HOLD=1 NOA_NOWNS="$NOWNS" NOA_BENCH_CMD=""
+  export NOA_MODE=hold NOA_SENTINEL="$sentinel" NOA_HOLD=1 NOA_NOWNS="$NOWNS" NOA_BENCH_CMD="" NOA_GO=""
   launch_term "$term" >/dev/null
   if ! wait_sentinel "$sentinel" "$MEM_HOLD_TIMEOUT"; then kill_term "$term"; sleep 0.3; echo ""; return; fi
   sleep "$LOAD_IDLE_SETTLE_S"   # settle: launch transient fully discarded
@@ -889,7 +1026,15 @@ run_load_active() {
   local sentinel="$RUNTMP/${term}.loadactive.${mode}.sentinel"
   kill_term "$term"; sleep 0.4
   rm -f "$sentinel"
-  export NOA_MODE="$mode" NOA_SENTINEL="$sentinel" NOA_HOLD=1 NOA_NOWNS="$NOWNS" NOA_BENCH_CMD="$cmd"
+  # Same fullscreen geometry as the throughput/scroll axes (the "same work"
+  # comparison must run under the same conditions). The gate ordering below
+  # keeps the fullscreen transition's own CPU out of the measurement: the
+  # "before" snapshot is taken AFTER fullscreen settles, and only then is
+  # the workload released.
+  local go=""
+  if [ "$FULLSCREEN" = 1 ]; then go="$RUNTMP/${term}.loadactive.go.$RANDOM"; rm -f "$go"; fi
+  export NOA_MODE="$mode" NOA_SENTINEL="$sentinel" NOA_HOLD=1 NOA_NOWNS="$NOWNS" \
+         NOA_BENCH_CMD="$cmd" NOA_GO="$go"
   launch_term "$term" >/dev/null
   local pids="" waited=0
   while [ -z "$pids" ] && [ "$waited" -lt 50 ]; do
@@ -897,7 +1042,9 @@ run_load_active() {
     [ -z "$pids" ] && sleep 0.1
     waited=$((waited + 1))
   done
+  [ -n "$go" ] && { fullscreen_term "$term" || true; }
   local before; before="$(cpu_time_cs "$pids")"
+  [ -n "$go" ] && : > "$go"
   if ! wait_sentinel "$sentinel" "$timeout"; then kill_term "$term"; sleep 0.3; echo ""; return; fi
   local after; after="$(cpu_time_cs "$(app_pids "$term")")"
   kill_term "$term"; sleep 0.4

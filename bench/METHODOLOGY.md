@@ -228,6 +228,68 @@ nor records that state; after the first post-fix run, even a flag-less
 2026-07-16) because the stale state had been cleared. The flag stays in the
 launch line permanently so no future environment state can re-introduce it.
 
+## Fullscreen measurement (2026-07-17)
+
+The render-path axes — **throughput, scroll, fire, latency, and
+load-active** — measure every terminal in **native macOS fullscreen** by
+default. Rationale: it gives every terminal the exact same physical geometry
+without per-terminal grid flags, which also neutralizes the previously
+disclosed equalization gaps (Termy/iTerm2/Warp/Terminal.app expose no size
+control; noa was pinned to 120×40 while others ran native defaults).
+
+Mechanism, per measured launch:
+
+1. Launch as usual; poll pid-scoped `wincount` until a window exists.
+2. **Native-flag terminals** (kitty `--start-as=fullscreen`, Alacritty
+   `-o window.startup_mode="Fullscreen"`) are launched fullscreen directly
+   — reliable, needs no Accessibility; the harness only waits out the Space
+   animation. (An AX verify on them can false-negative: kitty was observed
+   at a clearly-fullscreen 244×85 region while the AX read reported
+   failure.) **Ghostty is deliberately NOT native-flagged**: with
+   `--fullscreen`, ghostty 1.3.1 never executes its `-e` command (verified
+   2026-07-17 — the pty child never starts), so it takes the AX path; its
+   `--window-position-x/y` flags are unaffected and still pin the display.
+   **The rest** (noa, ghostty, Termy, iTerm2, Warp, Terminal.app) get
+   `AXFullScreen` set on window 1 of OUR tracked process via System Events
+   `unix id` (never by app name), polled back until `true`, then settled
+   0.8 s.
+3. **Display pinning:** the target display — the one under the mouse cursor
+   at run start (`bench/tools/dispinfo`, recorded as `target_display`) — is
+   where every measured window is placed before fullscreening, since macOS
+   otherwise places a window (and thus its fullscreen Space) on whatever
+   display that app last used. Ghostty gets `--window-position-x/y` flags,
+   Alacritty `window.position` via `-o`; the AX-path terminals get an
+   AXPosition set before AXFullScreen. kitty exposes no position control —
+   it fullscreens on the display where its window opens (normally the
+   active one). An AX read that never confirms is no longer treated as
+   failure (the set can succeed while the read is denied — observed); the
+   per-rep fire `region` remains the ground truth.
+4. Only then create the **gate file** (`NOA_GO`): the wrapper holds the
+   workload until the gate appears, so no bytes are consumed at pre-
+   fullscreen geometry. `load-active` additionally takes its "before" CPU
+   snapshot after the fullscreen settle and releases the gate afterwards,
+   keeping the transition's own CPU out of the "same work, less CPU" delta.
+
+Not fullscreen: **startup** (measures the plain launch itself; its sentinel
+predates any window manipulation), **memory** and **load-idle** (multitab's
+`wincount` fairness check counts on-screen layer-0 windows, which fullscreen
+Spaces would hide; keeping the whole memory axis windowed keeps its scenarios
+mutually consistent), and **--equalize** runs (pinned-grid geometry is the
+point there).
+
+Setting `AXFullScreen` requires Accessibility permission for `osascript`.
+The harness probes this **once, up front, all-or-nothing**: if denied, it
+prints a warning and measures EVERY terminal windowed — a run never mixes
+fullscreen and windowed terminals — and records the outcome in
+`results.json.contention`-adjacent meta (`fullscreen` key). Per-window
+failures (an app without the attribute) fall back to windowed for that rep
+and are emitted as `fullscreen_window FAILED` meta rows rather than silently
+passing.
+
+Numbers from fullscreen runs are not comparable to pre-2026-07-17 windowed
+runs (visible grid area differs); as always, compare within one results
+directory only.
+
 ## The four axes
 
 ### 1. Throughput

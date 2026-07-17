@@ -23,6 +23,11 @@
 #                 samples across launches
 #   NOA_FIRE      (fire) path to the `fire` DOOM-fire IO-stress tool
 #   NOA_FIRE_SECS (fire) measured duration in seconds (after 60 warmup frames)
+#   NOA_GO        (workload modes, optional) gate file: when set, the
+#                 workload starts only after the file appears — the harness
+#                 creates it once the window reached its measurement
+#                 geometry (fullscreen). 10s fallback so a lost gate can
+#                 never hang the child forever.
 #   NOA_HOLD      (memory/load axes) if "1", after the mode's own work the pty
 #                 child sleeps instead of exiting, so the terminal window (and
 #                 process tree) stays alive for the harness to sample RSS/CPU
@@ -31,8 +36,21 @@
 #   NOA_CYCLES    (longevity) number of flood+idle cycles (default 5)
 #   NOA_IDLE_S    (longevity) idle seconds between cycles (default 3)
 
+# wait_go — block until the harness signals final window geometry (NOA_GO
+# file appears). No-op when NOA_GO is unset (memory/load scenarios reuse the
+# workload modes without gating). Bounded so a lost gate cannot hang the run.
+wait_go() {
+  [ -n "${NOA_GO:-}" ] || return 0
+  i=0
+  while [ ! -f "$NOA_GO" ] && [ "$i" -lt 200 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+}
+
 case "$NOA_MODE" in
   throughput|scroll)
+    wait_go
     start=$("$NOA_NOWNS")
     eval "$NOA_BENCH_CMD"
     end=$("$NOA_NOWNS")
@@ -40,10 +58,12 @@ case "$NOA_MODE" in
     mv "$NOA_SENTINEL.part" "$NOA_SENTINEL"
     ;;
   latency)
+    wait_go
     "$NOA_PROBE" "${NOA_PROBE_ITERS:-200}" "${NOA_PROBE_WARMUP:-20}" "$NOA_RESULT" "${NOA_SAMPLES:-}"
     : > "$NOA_SENTINEL"
     ;;
   fire)
+    wait_go
     # DOOM-fire IO stress (docs/specs/bench-doom-fire.md): renders a fixed
     # 80x24 truecolor half-block fire region flat-out for NOA_FIRE_SECS under
     # pty flow control; the tool writes "<frames> <elapsed_ns> <fps> <WxH>"

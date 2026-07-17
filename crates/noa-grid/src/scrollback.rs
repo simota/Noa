@@ -21,9 +21,12 @@
 //! append to a `pending` ring. Every [`SEAL_BATCH_ROWS`] rows the pending batch is
 //! *published* to a small persistent worker pool as an immutable `Arc<Vec<Row>>`
 //! (the `sealing` batch) and packed off-thread while the owner keeps feeding; the
-//! results are collected at the next batch boundary (or at any synchronous flush
-//! point), so at most one batch is ever in flight and all collection points are
-//! deterministic row-count boundaries — never wall-clock dependent.
+//! results are collected at a later batch boundary — without ever blocking the
+//! owner: if the workers are still packing at a boundary, `pending` simply keeps
+//! growing (bounded, see below) and the collect retries on the next push. At most
+//! one batch is ever in flight; collection happens only at row-push boundaries or
+//! synchronous flush points, though *which* boundary collects depends on when the
+//! workers finish.
 //!
 //! The logical row sequence is always `pages ++ sealing ++ pending`, and every
 //! read ([`PagedScrollback::row`] / [`PagedScrollback::for_each_row`] /
@@ -31,10 +34,12 @@
 //! tiers under the owner's borrow — workers only ever *read* the shared sealing
 //! batch, so there is no locking on the read path. The only observable
 //! difference from immediate packing is that byte-limit eviction settles in
-//! batch-sized lumps: retention may transiently exceed the limit by up to two
-//! batches of rows. When the pending rows' size estimate alone could cross the
-//! limit (tiny retention limits), sealing degrades to the synchronous inline
-//! path so eviction timing stays exactly as eager as immediate packing.
+//! batch-sized lumps: retention may transiently exceed the limit by the rows
+//! still in the deferred tiers, whose estimated packed size is capped at a
+//! quarter of the limit. When the deferred estimate crosses that cap — tiny
+//! retention limits immediately, or workers falling behind a sustained flood —
+//! sealing degrades to the synchronous inline path, so eviction stays timely
+//! and the owner throttles itself instead of queueing unboundedly.
 //!
 //! ## Measured design floor (2026-07, wish #2 — read before "optimizing")
 //!
@@ -55,9 +60,15 @@
 //!   skips the blank-tail loads entirely is worth only ~8% of cold-cache
 //!   pack_row (535 → 493 ns/row, `bench_flood_shape_cold_cache_pack_cost`)
 //!   — not worth per-cell-write bookkeeping in the fidelity core.
-//! - **[`SEAL_BATCH_ROWS`]**: 512 is the locality sweet spot — 256 measured
-//!   equal (publish overhead cancels the warmth gain), 1024 measured +26%
-//!   flood CPU (rows go cold before the workers reach them).
+//! - **[`SEAL_BATCH_ROWS`]** / [`PACK_WORKERS`]: 256 rows × 3 workers is the
+//!   locality sweet spot at fullscreen widths (wish #3 re-measurement at
+//!   319 cols: 256 ≈ 1.55× the ascii consume of 512 — the circulating
+//!   raw-row set must stay near the shared L2, and 319-col rows carry ~2.7×
+//!   the footprint of the 120-col shape wish #2 tuned 512 on, where 256 vs
+//!   512 measured equal). Doubling workers measured *slower* at every batch
+//!   size tried (512: −30%, 256: −3%; owner + 3 packers + carcass traffic
+//!   already saturate the P-cluster, extra workers spill to E-cores and
+//!   drag the whole batch).
 
 use crate::cell::{Cell, HyperlinkId, Row};
 use crate::grapheme::GraphemeId;
@@ -82,13 +93,16 @@ const PAGE_HEADER_COST: usize = 256;
 /// collects the previous one, settling byte-limit eviction) every this many
 /// rows. Bounds the raw-row staging memory to roughly
 /// `2 × SEAL_BATCH_ROWS × cols × size_of::<Cell>()` per flooding screen.
-const SEAL_BATCH_ROWS: usize = 512;
+const SEAL_BATCH_ROWS: usize = 256;
 /// Worker threads in the lazy per-scrollback pack pool; a published batch
 /// splits into this many contiguous chunks.
 const PACK_WORKERS: usize = 3;
-/// Recycled-row pool cap: covers one full seal batch so a sustained flood
-/// reuses every carcass instead of allocating fresh blank rows.
-const POOL_CAP: usize = SEAL_BATCH_ROWS + 32;
+/// Recycled-row pool cap: covers two seal batches (a batch may grow past
+/// [`SEAL_BATCH_ROWS`] while the workers finish the previous one — the
+/// non-blocking boundary) so a sustained flood reuses every carcass instead
+/// of allocating fresh blank rows. Same row count as the wish-#2 cap
+/// (512 + 32) that RSS was validated with.
+const POOL_CAP: usize = 2 * SEAL_BATCH_ROWS + 32;
 /// Per-row constant in the pending-bytes upper bound (row meta + slack).
 const PACKED_ROW_EST_OVERHEAD: usize = 16;
 /// Charged per grapheme-table entry (the tail text itself lives in the
@@ -731,19 +745,64 @@ impl PagedScrollback {
         // push retention meaningfully past the byte limit, so eviction (and
         // the selection/viewport rebasing it drives) stays as timely as
         // immediate packing whenever the limit is small enough to notice.
+        //
+        // The trigger deliberately weighs only the *deferred tiers* against
+        // the limit — not `total_bytes + deferred`, which at a full retention
+        // limit (total ≈ limit, the steady state of every sustained flood)
+        // exceeds any fixed slack on every batch and silently degrades the
+        // whole pipeline to inline packing (measured: 65–83% of flood-consume
+        // CPU burned in pack/recycle on the owner thread, ascii consume 69
+        // MiB/s at 319x84 vs 176+ with the workers actually absorbing it).
+        // Deferred rows only *transiently* overshoot: they settle at the next
+        // collect boundary, where `evict_to_limit` restores the cap. So the
+        // byte-limit contract stays "exceeded by at most the in-flight
+        // batches" (module doc), and the sync path is reserved for limits
+        // small enough that even that transient — a quarter of the limit
+        // here, ~1000 flood-width rows at the 10MiB default — would be
+        // user-visible. It also doubles as backpressure: when the workers
+        // genuinely can't keep up, the ever-growing pending tier crosses the
+        // quarter-limit line and the owner throttles itself by packing
+        // inline.
         let over_limit = self
-            .total_bytes
-            .saturating_add(self.sealing_est_bytes)
+            .sealing_est_bytes
             .saturating_add(self.pending_est_bytes)
-            > self.limit_bytes.saturating_add(self.limit_bytes / 4);
+            > self.limit_bytes / 4;
         if over_limit {
             self.flush_all()
         } else if self.pending.len() >= SEAL_BATCH_ROWS {
-            let evicted = self.collect_sealing();
-            self.publish_sealing();
-            evicted
+            // Batch boundary. Never *block* on the in-flight batch here — a
+            // stalled `wait_results` on this path was measured as 27% of the
+            // flood consume thread. If the workers are still busy, let
+            // `pending` keep growing (bounded by the quarter-limit fallback
+            // above) and retry on the next push; if they are done, collecting
+            // is pure bookkeeping.
+            let in_flight =
+                self.sealing.is_some() && !self.packer.as_ref().is_some_and(Packer::results_ready);
+            if in_flight {
+                0
+            } else {
+                let evicted = self.collect_sealing();
+                self.publish_sealing();
+                evicted
+            }
         } else {
             0
+        }
+    }
+
+    /// Test-only: spin until the in-flight batch (if any) is fully packed.
+    /// The non-blocking batch boundary makes collect timing depend on worker
+    /// speed; tests that pin the collect/recycle pipeline call this before
+    /// each push so every boundary collects, exactly like the old blocking
+    /// boundary, regardless of machine load.
+    #[cfg(test)]
+    fn await_inflight(&self) {
+        if self.sealing.is_some()
+            && let Some(packer) = self.packer.as_ref()
+        {
+            while !packer.results_ready() {
+                std::thread::yield_now();
+            }
         }
     }
 
@@ -1172,6 +1231,14 @@ impl Packer {
             state.outstanding = parts;
         }
         self.shared.work_cv.notify_all();
+    }
+
+    /// Whether every published chunk has been packed (a `wait_results` call
+    /// would return without blocking). Owner-side poll for the batch-boundary
+    /// fast path.
+    fn results_ready(&self) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        state.outstanding == 0
     }
 
     /// Block until every published chunk is packed and take the results in
@@ -1901,7 +1968,10 @@ mod tests {
         let mut sb = PagedScrollback::new(usize::MAX);
         // Three full batches: batch 1's carcasses ride along with batch 2's
         // publish and come back cleared when batch 2 collects (third publish).
+        // `await_inflight` keeps every boundary a collect point (the
+        // non-blocking boundary otherwise skips collects under load).
         for i in 0..SEAL_BATCH_ROWS * 3 {
+            sb.await_inflight();
             sb.push_row_deferred(styled_row(i, 30));
         }
         let row = sb.take_blank_row(30).expect("pool has recycled rows");
@@ -1922,6 +1992,7 @@ mod tests {
         let n = SEAL_BATCH_ROWS * 3 + 41;
         let mut reference = PagedScrollback::new(usize::MAX);
         for i in 0..n {
+            sb.await_inflight(); // deterministic collect points (see above)
             sb.push_row_deferred(styled_row(i, 40));
             reference.push_row(&styled_row(i, 40));
         }

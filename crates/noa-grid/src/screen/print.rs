@@ -230,21 +230,23 @@ impl Screen {
             } else {
                 (seg_end - x).min(bytes.len() - i)
             };
-            // Wide-pair cleanup can touch a neighbor cell, but a lead and its
-            // spacer both carry a layout flag, so any pair overlapping the
-            // segment is visible *inside* it: one branchless prescan proves
-            // the common all-narrow segment safe for the straight fill below
+            // A wide pair straddling the segment can only leak a stray half
+            // *outside* the segment through its two edge cells — an interior
+            // hit's neighbor is also inside the segment and gets the same
+            // unconditional overwrite below regardless of what cleanup would
+            // have done to it, so checking every cell up front (a full read
+            // pass over the segment before the write pass) re-reads bytes
+            // the write is about to touch anyway for no benefit. Checking
+            // just the two edges collapses that O(n) prescan to O(1)
             // (Ghostty analog: `printSliceFill`'s masked simple-cell check).
-            let layout = CellAttrs::WIDE | CellAttrs::WIDE_SPACER;
-            if row.cells[x..x + n]
-                .iter()
-                .any(|cell| cell.attrs.intersects(layout))
-            {
-                for k in 0..n {
-                    if row.cells[x + k].attrs.intersects(layout) {
-                        Self::clear_wide_at(row, x + k, &blank);
-                    }
-                }
+            let first_attrs = row.cells[x].attrs;
+            if first_attrs.contains(CellAttrs::WIDE_SPACER) && x > 0 {
+                row.cells[x - 1].set_from(&blank);
+            }
+            let last = x + n - 1;
+            let last_attrs = if n > 1 { row.cells[last].attrs } else { first_attrs };
+            if last_attrs.contains(CellAttrs::WIDE) && last + 1 < row.cells.len() {
+                row.cells[last + 1].set_from(&blank);
             }
             for (cell, &b) in row.cells[x..x + n].iter_mut().zip(&bytes[i..i + n]) {
                 *cell = Cell {

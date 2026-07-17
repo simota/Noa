@@ -3,9 +3,10 @@
 # Noa
 
 Noa is a GPU-accelerated terminal emulator for macOS, implemented independently
-in Rust with `winit` and `wgpu`. It aims for observable compatibility with
-[Ghostty](https://ghostty.org) while keeping the core terminal model reusable
-and testable.
+in Rust with `winit` and `wgpu`. It is built to be **the fastest terminal at
+swallowing output floods** — `cat huge.log`, build logs, CI streams — and aims
+for observable compatibility with [Ghostty](https://ghostty.org) while keeping
+the core terminal model reusable and testable.
 
 Noa is under active development and is currently built from source. The macOS
 app bundle targets macOS 13 or later. Fixture-based regression tests cover
@@ -77,6 +78,19 @@ gh release delete v0.1.0 --repo simota/Noa --yes
 git push origin :refs/tags/v0.1.0
 git tag -d v0.1.0
 ```
+
+## Performance
+
+Noa's defining trait is sustained output throughput: render throughput of
+220–233 MB/s across plain, ANSI, and CJK workloads, with CJK as the fastest
+variant — wide-character handling carries no cost. Command overhead (1336 µs,
+zsh), idle input latency (1.2–1.3 ms), and settled idle memory (52 MB) round
+out the profile.
+
+Every number is reproducible with the bundled benchmark harness
+(`bench/run_all.sh`), and performance changes are gated on it. See
+[Positioning](docs/positioning.md) for the full claim and
+[Methodology](bench/METHODOLOGY.md) for how the numbers are measured.
 
 ## Key features
 

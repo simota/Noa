@@ -1,6 +1,6 @@
 # Benchmark Methodology
 
-A reproducible 6-axis comparison of terminal emulators on macOS/Apple Silicon.
+A reproducible 7-axis comparison of terminal emulators on macOS/Apple Silicon.
 Everything is driven by `bench/run_all.sh`; a third party can re-run the whole
 suite with one command and get a machine-readable `results.json` plus a
 human-readable `table.md` under `bench/results/<timestamp>/`.
@@ -13,6 +13,11 @@ human-readable `table.md` under `bench/results/<timestamp>/`.
 | Ghostty | `ghostty --config-default-files=false --window-save-state=never -e <wrapper>` | native `-e` |
 | Termy | `XDG_CONFIG_HOME=<iso> termy` with `$SHELL` = wrapper | `$SHELL` (no `-e` flag exists) |
 | kitty | `kitty --config NONE -o confirm_os_window_close=0 <wrapper>` | trailing command arg |
+| Alacritty | `XDG_CONFIG_HOME=<iso> alacritty -e <wrapper>` | native `-e` (entry activates when installed) |
+| iTerm2 | own instance launched directly, then AppleScript `create window with default profile command <env-wrapper>` | AppleScript (no `-e`; `$SHELL` verified ignored) — see caveats below |
+| Warp | `SHELL=<wrapper> Warp` | `$SHELL` — **UNVERIFIED**; **opt-in only** (excluded from the default set; include explicitly via `--only ...,warp`). UNMEASURED axes mean Warp ignored `$SHELL` |
+| Terminal.app | own second instance launched directly with `<wrapper>` as document argument | document-open (verified: real tty, env inherited via `login -p`) |
+| Rio | `RIO_CONFIG_HOME=<iso> rio -e <wrapper>` | native `-e` (Rio ignores `XDG_CONFIG_HOME`; `RIO_CONFIG_HOME` verified via `--write-config`; iso config pins `confirm-before-quit=false`, kitty-precedent kill-safety) |
 
 The `<iso>` dir / `--config`-suppression flags are the **config isolation**
 mechanism (fresh-install defaults for every terminal) and
@@ -21,18 +26,57 @@ added 2026-07-16 and documented in their own sections below.
 
 The noa binary defaults to `<repo>/target/release/noa` and can be overridden
 with the `NOA_BIN` env var (for measuring a candidate build). `--axes
-throughput,scroll,latency,startup,memory,load` (any subset; this is also the
-default set) restricts a run to those axes.
+throughput,scroll,latency,startup,memory,load,fire` (any subset; this is also
+the default set) restricts a run to those axes.
 
 Versions and machine details are captured automatically into `results.json`
 (`terminal_versions`, `machine`) at run time — read them there for the exact
 build numbers of the run you are looking at. At authoring time: Ghostty 1.3.1,
 Termy 0.2.21, kitty 0.47.4, noa release build of the current branch.
 
-**Alacritty** was requested as an optional reference point but is **not
-installed** on this machine (`/Applications/Alacritty.app` absent), so it is
-omitted rather than faked. Install it (`brew install --cask alacritty`) and it
-would need a launch entry in `run_all.sh` (`alacritty -e <wrapper>`).
+### The 2026-07-17 additions (Alacritty / iTerm2 / Warp / Terminal.app)
+
+Four more terminals have launch entries; each activates only when installed
+(`skip (not installed)` otherwise — never faked). What was **verified on this
+machine** vs assumed:
+
+- **Alacritty** (not installed at authoring): standard `-e` launch; isolation
+  via `XDG_CONFIG_HOME` → iso dir containing an **empty `alacritty.toml`**,
+  so the first config candidate wins and a user's `~/.alacritty.toml`
+  fallback is never consulted.
+- **iTerm2** (verified 2026-07-17): `$SHELL` is **ignored** (the default
+  profile execs the passwd login shell), so the pty child is created via
+  AppleScript `create window with default profile command` pointing at a
+  generated **env-wrapper** (AppleScript-launched commands get launchd's
+  env, not ours — verified; the wrapper re-exports `NOA_*` and execs
+  `wrapper.sh`; command runs on a real tty — verified). Three caveats, all
+  disclosed per run: (1) the AppleScript targets the app **by name**, so the
+  harness **skips iTerm2 entirely if a user instance is already running**
+  (collateral-safety invariant); (2) prefs are macOS defaults
+  (com.googlecode.iterm2) and are **not isolable** without mutating user
+  defaults — iTerm2 runs with the user's prefs, recorded in
+  `results.json.isolation`; (3) our instance may open restored/startup
+  windows running login shells alongside the command window (verified: 3
+  windows on this machine) — a Ghostty-phantom-class contamination of the
+  memory/load axes that is visible in `multitab_procs`/`wincount` rather
+  than silently included; read iTerm2's memory/load numbers with that in
+  mind. Its startup number reflects the AppleScript window path, not a
+  plain process launch.
+- **Warp**: launch entry uses `SHELL=<wrapper>`, **unverified** — if Warp
+  resolves the shell from user records instead, every axis reports
+  UNMEASURED (honest failure). Prefs and account state are not isolable;
+  disclosed. **Opt-in only**: excluded from the default terminal set —
+  include it explicitly with `--only ...,warp`.
+- **Terminal.app** (verified 2026-07-17): launched as **our own second
+  instance** by exec'ing the app binary directly with the wrapper path as
+  document argument — verified to coexist with the user's running Terminal
+  (distinct pid, untouched), give the wrapper a real tty, and pass our
+  environment through its `login -p` wrapper. Never launched via
+  `open`/AppleScript (those route to the user's instance). Prefs
+  (com.apple.Terminal) are not isolable; disclosed.
+
+For iTerm2/Warp/Terminal.app the equalized re-run records
+`NATIVE-DEFAULT(prefs-based)` — they expose no CLI size/font control.
 
 ## The uniform-workload design
 
@@ -183,6 +227,68 @@ nor records that state; after the first post-fix run, even a flag-less
 `ghostty -e` on this machine stopped reproducing the phantom (verified
 2026-07-16) because the stale state had been cleared. The flag stays in the
 launch line permanently so no future environment state can re-introduce it.
+
+## Fullscreen measurement (2026-07-17)
+
+The render-path axes — **throughput, scroll, fire, latency, and
+load-active** — measure every terminal in **native macOS fullscreen** by
+default. Rationale: it gives every terminal the exact same physical geometry
+without per-terminal grid flags, which also neutralizes the previously
+disclosed equalization gaps (Termy/iTerm2/Warp/Terminal.app expose no size
+control; noa was pinned to 120×40 while others ran native defaults).
+
+Mechanism, per measured launch:
+
+1. Launch as usual; poll pid-scoped `wincount` until a window exists.
+2. **Native-flag terminals** (kitty `--start-as=fullscreen`, Alacritty
+   `-o window.startup_mode="Fullscreen"`) are launched fullscreen directly
+   — reliable, needs no Accessibility; the harness only waits out the Space
+   animation. (An AX verify on them can false-negative: kitty was observed
+   at a clearly-fullscreen 244×85 region while the AX read reported
+   failure.) **Ghostty is deliberately NOT native-flagged**: with
+   `--fullscreen`, ghostty 1.3.1 never executes its `-e` command (verified
+   2026-07-17 — the pty child never starts), so it takes the AX path; its
+   `--window-position-x/y` flags are unaffected and still pin the display.
+   **The rest** (noa, ghostty, Termy, iTerm2, Warp, Terminal.app) get
+   `AXFullScreen` set on window 1 of OUR tracked process via System Events
+   `unix id` (never by app name), polled back until `true`, then settled
+   0.8 s.
+3. **Display pinning:** the target display — the one under the mouse cursor
+   at run start (`bench/tools/dispinfo`, recorded as `target_display`) — is
+   where every measured window is placed before fullscreening, since macOS
+   otherwise places a window (and thus its fullscreen Space) on whatever
+   display that app last used. Ghostty gets `--window-position-x/y` flags,
+   Alacritty `window.position` via `-o`; the AX-path terminals get an
+   AXPosition set before AXFullScreen. kitty exposes no position control —
+   it fullscreens on the display where its window opens (normally the
+   active one). An AX read that never confirms is no longer treated as
+   failure (the set can succeed while the read is denied — observed); the
+   per-rep fire `region` remains the ground truth.
+4. Only then create the **gate file** (`NOA_GO`): the wrapper holds the
+   workload until the gate appears, so no bytes are consumed at pre-
+   fullscreen geometry. `load-active` additionally takes its "before" CPU
+   snapshot after the fullscreen settle and releases the gate afterwards,
+   keeping the transition's own CPU out of the "same work, less CPU" delta.
+
+Not fullscreen: **startup** (measures the plain launch itself; its sentinel
+predates any window manipulation), **memory** and **load-idle** (multitab's
+`wincount` fairness check counts on-screen layer-0 windows, which fullscreen
+Spaces would hide; keeping the whole memory axis windowed keeps its scenarios
+mutually consistent), and **--equalize** runs (pinned-grid geometry is the
+point there).
+
+Setting `AXFullScreen` requires Accessibility permission for `osascript`.
+The harness probes this **once, up front, all-or-nothing**: if denied, it
+prints a warning and measures EVERY terminal windowed — a run never mixes
+fullscreen and windowed terminals — and records the outcome in
+`results.json.contention`-adjacent meta (`fullscreen` key). Per-window
+failures (an app without the attribute) fall back to windowed for that rep
+and are emitted as `fullscreen_window FAILED` meta rows rather than silently
+passing.
+
+Numbers from fullscreen runs are not comparable to pre-2026-07-17 windowed
+runs (visible grid area differs); as always, compare within one results
+directory only.
 
 ## The four axes
 
@@ -512,6 +618,56 @@ would rank driver-reclaim timing luck, not the terminals.
   part of any terminal's own efficiency; only the terminal process's own
   parse/render CPU is being measured. Reported in ms total and ms-per-MiB
   processed (normalized).
+
+### 7. Fire — DOOM-fire IO stress (fps)
+
+`bench/tools/fire.c` runs as the pty child (`NOA_MODE=fire`): it renders the
+classic DOOM fire effect (Fabien Sanglard's algorithm, the workload
+popularized as a terminal benchmark by
+[DOOM-fire-zig](https://github.com/const-void/DOOM-fire-zig)) as truecolor
+half-blocks — every frame repaints the whole region with per-cell
+`SGR 38;2/48;2` RGB + `U+2584` and absolute cursor positioning. This is the
+"animated TUI at max rate" shape none of the other axes exercise:
+frame-structured, truecolor-dense, cursor-repositioning flood. After 60
+discarded warmup frames (glyph-atlas population, alt-screen entry) it renders
+flat-out for 10 s (3 s in `--quick`) and reports fps; the harness runs 3 reps
+(1 in `--quick`) and reports the median.
+
+**Render region follows the run's geometry mode** (recorded per run as
+`fire_condition`, per rep as `region`):
+
+- **Fullscreen runs (default): full-window** — the upstream DOOM-fire-zig
+  official condition. The fullscreen gate guarantees the winsize read
+  happens at final geometry, and every terminal fills the same physical
+  screen; the resulting **cell count follows each terminal's own font
+  defaults** (exactly like upstream comparisons), so the per-terminal region
+  is printed next to every fps number rather than hidden.
+- **Windowed fallback runs: fixed 80×24 region** — fps is inversely
+  proportional to cell count, so full-window fps on unequal window geometry
+  would measure the geometry lottery, not the terminal. The fixed region
+  fits every default grid (nothing clips) and gives **every terminal a
+  byte-identical stream** (fixed PRNG seed → deterministic frame sequence)
+  with constant frame size, so fps maps linearly to drain MiB/s.
+
+The two conditions are not comparable to each other; `table.md` states which
+one produced its numbers.
+
+**What fps means here:** producer-side frames/second under pty flow control —
+the same "consume the pipe" proxy as axis 1 (the pty's small kernel buffer
+blocks the producer's `write` until the terminal drains). It is drain rate,
+not photon rate: a display-paced consumer shows up as ~refresh-rate fps (the
+signature this axis exists to detect), while an event-driven consumer reports
+hundreds or more. The window is focused during the run (same PID-scoped
+activation as the latency axis, applied uniformly) so no terminal is measured
+under macOS occluded/unfocused throttling.
+
+**Anchor caveat:** published DOOM-fire-zig figures come from other machines
+and full-window regions and are **not comparable** to this axis's numbers —
+they motivated the axis, nothing more. This implementation reproduces the workload *shape*,
+not upstream's exact bytes. As a CPU-bound axis it is covered by the
+builder-quiescence gate; it is skipped under `--equalize` (the fixed region
+makes it grid/font-independent by construction). Full design rationale:
+`docs/specs/bench-doom-fire.md`.
 
 ### Ghostty load-active timeout (baseline 2026-07-16) — root-caused & fixed
 

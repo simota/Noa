@@ -18,7 +18,11 @@ def sh(*args):
 
 def plist(app, key):
     p = f"/Applications/{app}/Contents/Info.plist"
-    return sh("/usr/libexec/PlistBuddy", "-c", f"Print :{key}", p)
+    return plist_at(p, key)
+
+
+def plist_at(path, key):
+    return sh("/usr/libexec/PlistBuddy", "-c", f"Print :{key}", path)
 
 
 def terminal_versions(repo):
@@ -30,6 +34,13 @@ def terminal_versions(repo):
     v["ghostty"] = plist("Ghostty.app", "CFBundleShortVersionString")
     v["termy"] = plist("Termy.app", "CFBundleShortVersionString")
     v["kitty"] = plist("kitty.app", "CFBundleShortVersionString")
+    v["alacritty"] = plist("Alacritty.app", "CFBundleShortVersionString")
+    v["iterm2"] = plist("iTerm.app", "CFBundleShortVersionString")
+    v["warp"] = plist("Warp.app", "CFBundleShortVersionString")
+    v["terminal"] = plist_at(
+        "/System/Applications/Utilities/Terminal.app/Contents/Info.plist",
+        "CFBundleShortVersionString")
+    v["rio"] = plist("Rio.app", "CFBundleShortVersionString")
     return {k: val for k, val in v.items() if val}
 
 
@@ -155,6 +166,33 @@ for term in terminals:
     else:
         lat[term] = {"status": "UNMEASURED"}
 results["axes"]["latency"] = lat
+
+# fire (DOOM-fire IO stress — fixed 80x24 truecolor full-region repaint fps
+# under pty flow control; see docs/specs/bench-doom-fire.md). Gated on
+# axes_with_data: the axis only exists in raw files from harness >= 2026-07-17.
+fire = {}
+if "fire" in axes_with_data:
+    for term in terminals:
+        cell = agg.get((term, "fire", "-"), {})
+        if cell.get("status") == "UNMEASURED":
+            fire[term] = {"status": "UNMEASURED"}
+        elif "fps" in cell:
+            reps = [float(r["value"]) for r in rows
+                    if r["terminal"] == term and r["axis"] == "fire"
+                    and r["metric"] == "fps" and r["rep"] not in ("median", "-")]
+            winsz = next((r["value"] for r in rows if r["terminal"] == term
+                          and r["axis"] == "fire" and r["metric"] == "winsize"), None)
+            # region rows exist from harness >= 2026-07-17 (full-window fire);
+            # older raw files were always the fixed 80x24 region
+            region = next((r["value"] for r in rows if r["terminal"] == term
+                           and r["axis"] == "fire" and r["metric"] == "region"),
+                          "80x24")
+            fire[term] = {"fps_median": float(cell["fps"]), "fps_reps": reps,
+                          "region": region,
+                          **({"winsize": winsz} if winsz else {})}
+        else:
+            fire[term] = {"status": "UNMEASURED"}
+    results["axes"]["fire"] = fire
 
 # startup
 st = {}
@@ -316,14 +354,30 @@ if equalized_notes:
 hdr = "| Terminal | " + " | ".join(terminals) + " |"
 sep = "|---|" + "|".join(["---"] * len(terminals)) + "|"
 
-lines.append("\n## Throughput — ASCII (MiB/s, higher better)")
-lines.append(hdr.replace("Terminal", "Metric")); lines.append(sep)
-lines.append("| ascii MiB/s | " + " | ".join(fmt_tp(tp[t]["ascii"]) for t in terminals) + " |")
-lines.append("| unicode MiB/s | " + " | ".join(fmt_tp(tp[t]["unicode"]) for t in terminals) + " |")
+if "throughput" in axes_with_data:
+    lines.append("\n## Throughput — ASCII (MiB/s, higher better)")
+    lines.append(hdr.replace("Terminal", "Metric")); lines.append(sep)
+    lines.append("| ascii MiB/s | " + " | ".join(fmt_tp(tp[t]["ascii"]) for t in terminals) + " |")
+    lines.append("| unicode MiB/s | " + " | ".join(fmt_tp(tp[t]["unicode"]) for t in terminals) + " |")
 
-lines.append("\n## Frame / Scroll (time ms / MiB·s⁻¹, lower ms better)")
-lines.append(hdr.replace("Terminal", "Metric")); lines.append(sep)
-lines.append("| scroll_stress | " + " | ".join(fmt_sc(sc[t]) for t in terminals) + " |")
+if "scroll" in axes_with_data:
+    lines.append("\n## Frame / Scroll (time ms / MiB·s⁻¹, lower ms better)")
+    lines.append(hdr.replace("Terminal", "Metric")); lines.append(sep)
+    lines.append("| scroll_stress | " + " | ".join(fmt_sc(sc[t]) for t in terminals) + " |")
+
+if "fire" in axes_with_data:
+    def fmt_fire(c):
+        if c.get("status") == "UNMEASURED":
+            return "UNMEASURED"
+        return f"{c['fps_median']:.1f} ({c.get('region', '?')})"
+    fire_cond = contention.get("fire_condition", "fixed 80x24 region (pre-2026-07-17 harness)")
+    lines.append("\n## Fire — DOOM-fire IO stress (fps, higher better)")
+    lines.append(f"Condition: {fire_cond}. Producer-side fps under pty flow control "
+                 "(frames written ≈ frames consumed); per-terminal render region in "
+                 "parentheses. Not comparable to published DOOM-fire-zig figures "
+                 "(other machines/displays).")
+    lines.append(hdr.replace("Terminal", "Metric")); lines.append(sep)
+    lines.append("| fire fps (region) | " + " | ".join(fmt_fire(fire[t]) for t in terminals) + " |")
 
 if "latency" in axes_with_data:
     lines.append("\n## Input Latency — DSR round-trip proxy (median / p95 / p99 / max µs, lower better)")
@@ -434,8 +488,8 @@ if "load" in axes_with_data:
     lines.append("| active: throughput workload | " + " | ".join(fmt_load_active(load[t]["throughput"]) for t in terminals) + " |")
     lines.append("| active: scroll workload | " + " | ".join(fmt_load_active(load[t]["scroll"]) for t in terminals) + " |")
 
-# noa rank per axis
-lines.append("\n## noa rank per axis")
+# noa rank per axis — only when noa was actually measured in this run
+# (an all-n/a section on --only runs without noa reads like a failure)
 def rank(better_high, getval):
     # standard competition ranking: 1 + number of STRICTLY better entries,
     # so ties share a rank instead of being ordered arbitrarily
@@ -487,11 +541,18 @@ def load_idle_val(t):
 def load_active_val(t, scenario):
     c = load[t][scenario]; return None if c.get("status") == "UNMEASURED" else c["cpu_ms"]
 
-rank_items = [
-    ("throughput ascii", rank(True, lambda t: tp_val(t, "ascii"))),
-    ("throughput unicode", rank(True, lambda t: tp_val(t, "unicode"))),
-    ("scroll (MiB/s)", rank(True, sc_val)),
-]
+def fire_val(t):
+    c = fire.get(t, {})
+    return c.get("fps_median")
+
+rank_items = []
+if "throughput" in axes_with_data:
+    rank_items.append(("throughput ascii", rank(True, lambda t: tp_val(t, "ascii"))))
+    rank_items.append(("throughput unicode", rank(True, lambda t: tp_val(t, "unicode"))))
+if "scroll" in axes_with_data:
+    rank_items.append(("scroll (MiB/s)", rank(True, sc_val)))
+if "fire" in axes_with_data:
+    rank_items.append(("fire (fps)", rank(True, fire_val)))
 if "latency" in axes_with_data:
     rank_items.append(("latency (median)", rank(False, lat_val)))
 if "startup" in axes_with_data:
@@ -507,9 +568,12 @@ if "load" in axes_with_data:
     rank_items.append(("load idle (mean CPU%)", rank(False, load_idle_val)))
     rank_items.append(("load active (throughput, CPU-ms)", rank(False, lambda t: load_active_val(t, "throughput"))))
     rank_items.append(("load active (scroll, CPU-ms)", rank(False, lambda t: load_active_val(t, "scroll"))))
-for label, r in rank_items:
-    pos, n = r
-    lines.append(f"- {label}: {'#'+str(pos)+' of '+str(n) if pos else 'n/a'}")
+if "noa" in terminals:
+    ranked = [(label, r) for label, r in rank_items if r[0]]
+    if ranked:
+        lines.append("\n## noa rank per axis")
+        for label, (pos, n) in ranked:
+            lines.append(f"- {label}: #{pos} of {n}")
 
 with open(os.path.join(OUT_DIR, "table.md"), "w") as f:
     f.write("\n".join(lines) + "\n")

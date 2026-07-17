@@ -53,7 +53,6 @@ impl ApplicationHandler<UserEvent> for App {
                 self.handle_app_command(event_loop, command, CommandOrigin::App)
             }
             UserEvent::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
-            UserEvent::ToggleSidebar => self.toggle_sidebar(),
             UserEvent::SessionDelta(delta) => {
                 if let crate::session_store::SessionDelta::Bell { id } = &delta {
                     let window_id = WindowId::from(id.window_id.0);

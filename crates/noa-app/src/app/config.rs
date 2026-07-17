@@ -151,9 +151,10 @@ pub struct AppConfig {
     /// `sidebar-font-size`: the session sidebar's own font size in points,
     /// independent of the terminal grid's `font-size`.
     pub sidebar_font_size: f32,
-    /// `sidebar-hotkey`: the global chord that toggles the sidebar for the
-    /// focused window (FR-13). `None` (or the empty-string "disabled" sentinel)
-    /// registers no chord.
+    /// `sidebar-hotkey`: the in-app chord that toggles the sidebar for the
+    /// focused window — a `ToggleSidebar` rebind fed to
+    /// `KeybindEngine::from_config`, not a system-wide hotkey. `None` (or the
+    /// empty-string sentinel) keeps the default `cmd+shift+s` binding.
     pub sidebar_hotkey: Option<String>,
     /// `sidebar-preview-lines`: number of trailing output rows shown in each
     /// sidebar card. `0` disables the preview rows.

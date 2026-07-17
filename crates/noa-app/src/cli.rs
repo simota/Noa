@@ -109,7 +109,8 @@ pub fn run_action(action: CliAction) -> anyhow::Result<()> {
             for diagnostic in diagnostics {
                 eprintln!("{}", diagnostic.message);
             }
-            let (keybinds, diagnostics) = KeybindEngine::from_config(&config.keybinds);
+            let (keybinds, diagnostics) =
+                KeybindEngine::from_config(&config.keybinds, config.sidebar_hotkey.as_deref());
             for diagnostic in diagnostics {
                 eprintln!("config keybind: {diagnostic}");
             }
@@ -687,7 +688,7 @@ mod tests {
 
     #[test]
     fn list_keybinds_output_uses_the_supplied_effective_engine() {
-        let (keybinds, diagnostics) = KeybindEngine::from_config(&[
+        let (keybinds, diagnostics) = KeybindEngine::from_config_test(&[
             noa_config::KeybindConfig::Unbind {
                 trigger: "cmd+t".to_string(),
             },

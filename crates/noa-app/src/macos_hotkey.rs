@@ -160,7 +160,6 @@ pub(crate) struct GlobalHotKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HotkeyAction {
     QuickTerminal,
-    Sidebar,
 }
 
 impl HotkeyAction {
@@ -168,14 +167,12 @@ impl HotkeyAction {
     fn id(self, slot: u32) -> u32 {
         (match self {
             HotkeyAction::QuickTerminal => 1_000,
-            HotkeyAction::Sidebar => 2_000,
         }) + slot
     }
 
     fn event(self) -> UserEvent {
         match self {
             HotkeyAction::QuickTerminal => UserEvent::ToggleQuickTerminal,
-            HotkeyAction::Sidebar => UserEvent::ToggleSidebar,
         }
     }
 }

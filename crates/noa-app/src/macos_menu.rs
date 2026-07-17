@@ -2,7 +2,7 @@
 
 use muda::{
     CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
-    accelerator::{Accelerator, Code, Modifiers},
+    accelerator::{Accelerator, Code, Key as AcceleratorKey, KeyAccelerator, Modifiers},
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::{dpi::PhysicalPosition, event_loop::EventLoopProxy, window::Window};
@@ -54,6 +54,9 @@ pub(crate) struct MacosMenu {
     split_context_auto_approve: CheckMenuItem,
     split_context_send_selection: MenuItem,
     quick_terminal: MenuItem,
+    /// The "Sidebar" item, retained so its accelerator can track the
+    /// `sidebar-hotkey` config (see [`MacosMenu::set_sidebar_hotkey`]).
+    sidebar: MenuItem,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -86,6 +89,7 @@ impl MacosMenu {
     pub(crate) fn install(
         proxy: EventLoopProxy<UserEvent>,
         quick_terminal_hotkey: Option<&str>,
+        sidebar_chord: Option<&str>,
     ) -> anyhow::Result<Self> {
         let menu = Menu::new();
         let split_context_menu = build_split_context_menu()?;
@@ -131,6 +135,12 @@ impl MacosMenu {
             "Quick Terminal",
             true,
             quick_terminal_accelerator(quick_terminal_hotkey),
+        );
+        let sidebar = MenuItem::with_id(
+            AppCommand::ToggleSidebar.menu_id(),
+            "Sidebar",
+            true,
+            sidebar_accelerator(sidebar_chord),
         );
         let auto_approve = CheckMenuItem::with_id(
             AppCommand::ToggleAutoApprove.menu_id(),
@@ -353,12 +363,7 @@ impl MacosMenu {
                 ),
                 &open_theme_picker,
                 &quick_terminal,
-                &MenuItem::with_id(
-                    AppCommand::ToggleSidebar.menu_id(),
-                    "Sidebar",
-                    true,
-                    Some(cmd_shift_accelerator(Code::KeyS)),
-                ),
+                &sidebar,
                 &auto_approve,
                 &PredefinedMenuItem::separator(),
                 &MenuItem::with_id(
@@ -453,6 +458,7 @@ impl MacosMenu {
             secure_keyboard_entry,
             auto_approve,
             quick_terminal,
+            sidebar,
         })
     }
 
@@ -481,6 +487,30 @@ impl MacosMenu {
             .set_accelerator(quick_terminal_accelerator(hotkey))
         {
             log::warn!("failed to update Quick Terminal menu accelerator: {err}");
+        }
+    }
+
+    /// Reflect the keybind engine's *effective* `ToggleSidebar` chord
+    /// (`KeybindEngine::chord_for`) in the Sidebar menu item's shortcut
+    /// column. AppKit dispatches menu key equivalents before winit sees the
+    /// keypress, so the accelerator must track the engine — not the raw
+    /// `sidebar-hotkey` value — or a stale/overridden chord would keep
+    /// toggling the sidebar through menu dispatch.
+    pub(crate) fn set_sidebar_chord(&self, chord: Option<&str>) {
+        // muda 0.19's `set_accelerator(None)` never touches the native
+        // NSMenuItem (its macOS impl only writes when the accelerator is
+        // `Some`), so an unbound/unrepresentable chord must clear the key
+        // equivalent explicitly via an empty-key `KeyAccelerator` — otherwise
+        // the previous chord keeps firing through AppKit menu dispatch.
+        let result = match sidebar_accelerator(chord) {
+            Some(accelerator) => self.sidebar.set_accelerator(Some(accelerator)),
+            None => self.sidebar.set_key_accelerator(Some(KeyAccelerator::new(
+                None,
+                AcceleratorKey::Character(String::new()),
+            ))),
+        };
+        if let Err(err) = result {
+            log::warn!("failed to update Sidebar menu accelerator: {err}");
         }
     }
 
@@ -632,6 +662,16 @@ fn disabled_item(id: &'static str, text: &'static str) -> MenuItem {
 
 fn quick_terminal_accelerator(hotkey: Option<&str>) -> Option<Accelerator> {
     hotkey.and_then(accelerator_from_hotkey)
+}
+
+/// The Sidebar item's accelerator for the keybind engine's effective
+/// `ToggleSidebar` chord (`KeybindEngine::chord_for`). `None` (unbound)
+/// yields no accelerator; a chord the accelerator path can't represent also
+/// yields none (the keybind engine still handles the keypress; only the
+/// menu's shortcut column goes blank — never a chord the engine would route
+/// elsewhere).
+fn sidebar_accelerator(chord: Option<&str>) -> Option<Accelerator> {
+    chord.and_then(accelerator_from_hotkey)
 }
 
 fn accelerator_from_hotkey(hotkey: &str) -> Option<Accelerator> {
@@ -877,5 +917,23 @@ mod tests {
         assert!(quick_terminal_accelerator(Some("")).is_none());
         assert!(quick_terminal_accelerator(Some("cmd+unknown-key")).is_none());
         assert!(quick_terminal_accelerator(Some("cmd+t+x")).is_none());
+    }
+
+    // The accelerator tracks the engine's effective `ToggleSidebar` chord:
+    // unbound → no accelerator; the engine-default chord and a custom chord
+    // both map through; a chord the accelerator path can't represent leaves
+    // the shortcut column blank (never a chord the engine routes elsewhere).
+    #[test]
+    fn sidebar_accelerator_tracks_the_effective_engine_chord() {
+        assert!(sidebar_accelerator(None).is_none());
+        assert_eq!(
+            sidebar_accelerator(Some("cmd+shift+s")),
+            Some(cmd_shift_accelerator(Code::KeyS))
+        );
+        assert_eq!(
+            sidebar_accelerator(Some("cmd+alt+b")),
+            accelerator_from_hotkey("cmd+alt+b")
+        );
+        assert!(sidebar_accelerator(Some("cmd+unknown-key")).is_none());
     }
 }

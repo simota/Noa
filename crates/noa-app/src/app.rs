@@ -429,6 +429,30 @@ pub struct App {
     /// spawn finds the slot empty and gets the normal shell. `Mutex` only
     /// because `spawn_pane_surface` takes `&self`.
     initial_command: Mutex<Option<Vec<String>>>,
+    /// Global throttle gate for the tab-switch-stall background pane-cache
+    /// refresh (see `helpers::dispatch::background_refresh_selection`):
+    /// when any occluded window last had its cache opportunistically
+    /// refreshed, across ALL windows — not per-window. A per-window gate
+    /// would admit up to one full-viewport rebuild per window per interval,
+    /// which with N busy occluded tabs stalls the event loop (and so the
+    /// foreground window) for up to `N` rebuilds every interval.
+    last_bg_refresh: Option<Instant>,
+    /// Occluded windows with pty output observed since their last background
+    /// refresh (or since becoming occluded, if never refreshed) — candidates
+    /// for the next globally-throttled refresh. Populated only by
+    /// `UserEvent::Redraw` (pty-driven), never by a self-armed wake-up, so an
+    /// app with no occluded pty activity never spends a cycle on this.
+    dirty_occluded_windows: HashSet<WindowId>,
+    /// One-shot trailing wake-up for the background-refresh backlog (kaizen
+    /// cycle 6, finding P2): armed whenever `dirty_occluded_windows` is
+    /// non-empty, at the earliest instant the global throttle reopens —
+    /// so a candidate blocked purely by timing (its output landed inside the
+    /// throttle window, and no further pty output ever arrives to re-trigger
+    /// a check) still gets exactly one retry, rather than sitting stale
+    /// until an unrelated event. `None` whenever the backlog is empty: the
+    /// `about_to_wait` + `WaitUntil` mechanism then arms no timer for this at
+    /// all, same as every other idle-power-sensitive tick here.
+    bg_refresh_wake_deadline: Option<Instant>,
 }
 
 /// The wgpu foundation prewarmed on a worker: adapter/device are requested
@@ -718,6 +742,9 @@ impl App {
             prespawned_pty: Mutex::new(prespawned_pty),
             startup_tasks: Some(startup_tasks),
             initial_command: Mutex::new(initial_command),
+            last_bg_refresh: None,
+            dirty_occluded_windows: HashSet::new(),
+            bg_refresh_wake_deadline: None,
         }
     }
 

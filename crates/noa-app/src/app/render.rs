@@ -3,6 +3,247 @@
 use super::*;
 
 impl App {
+    /// Globally-throttled entry point for occluded windows' background
+    /// pane-cache refresh (tab-switch stall fix). At most one window's cache
+    /// is refreshed per `BG_REFRESH_INTERVAL` ACROSS THE WHOLE APP (kaizen
+    /// cycle 4, finding P1-B) — a per-window gate would let N busy occluded
+    /// tabs each admit their own rebuild every interval, stalling the event
+    /// loop (and so the foreground window) for up to N rebuilds per
+    /// interval. Only called from the `UserEvent::Redraw` path, which fires
+    /// exclusively on real pty output, so an idle app never wakes up on its
+    /// own. `dirty_occluded_windows` may retain ids for windows that have
+    /// since un-occluded or closed; those are filtered out before selection
+    /// and dropped from the set here so it can't grow unbounded.
+    ///
+    /// Kaizen cycle 6, finding P2: whether or not this call actually
+    /// refreshes a window, it always re-derives `bg_refresh_wake_deadline`
+    /// (via the pure `bg_refresh_wake_deadline`) from whatever backlog
+    /// remains afterward — so a candidate that's dirty but blocked purely by
+    /// the throttle (no further pty output ever arrives to re-trigger this
+    /// function) still gets exactly one trailing retry at the moment the
+    /// throttle reopens, instead of sitting stale until an unrelated event.
+    /// `timers::tick_bg_refresh_wake` is what actually fires that retry, via
+    /// the same `about_to_wait` + `WaitUntil` mechanism every other timer
+    /// uses. Once the backlog drains, this reports `None` and the app goes
+    /// fully idle again — no periodic self-wakeup while there is truly
+    /// nothing left to do.
+    pub(super) fn maybe_background_refresh_pane_cache(&mut self) {
+        self.dirty_occluded_windows
+            .retain(|id| self.windows.get(id).is_some_and(|state| state.occluded));
+        let now = Instant::now();
+        let candidates: Vec<(WindowId, Option<Instant>)> = self
+            .dirty_occluded_windows
+            .iter()
+            .filter_map(|&id| {
+                self.windows
+                    .get(&id)
+                    .map(|state| (id, state.bg_refresh_last))
+            })
+            .collect();
+        if let Some(target) = background_refresh_selection(
+            &candidates,
+            self.last_bg_refresh,
+            now,
+            BG_REFRESH_INTERVAL,
+        ) {
+            self.last_bg_refresh = Some(now);
+            self.dirty_occluded_windows.remove(&target);
+            if let Some(state) = self.windows.get_mut(&target) {
+                state.bg_refresh_last = Some(now);
+            }
+            self.background_refresh_pane_cache(target);
+        }
+        self.bg_refresh_wake_deadline = bg_refresh_wake_deadline(
+            !self.dirty_occluded_windows.is_empty(),
+            self.last_bg_refresh,
+            BG_REFRESH_INTERVAL,
+        );
+    }
+
+    /// Rebuild an occluded window's `PaneRenderCache` against its terminals'
+    /// current content, WITHOUT touching the (shrunk 1×1) swapchain or ever
+    /// presenting — so it keeps the row cache overlap and glyph atlas warm
+    /// for whenever this window reveals, instead of a long occlusion forcing
+    /// a full rebuild synchronously on the reveal frame. Deliberately a
+    /// stripped-down version of `redraw()`'s snapshot loop: title, sidebar,
+    /// scrollbar-thumb, and modal-overlay state are all display-only and
+    /// need no upkeep while nothing is on screen.
+    fn background_refresh_pane_cache(&mut self, window_id: WindowId) {
+        let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
+            return;
+        };
+        if !state.occluded {
+            return;
+        }
+        let mut snapshots = Vec::new();
+        let visible_panes = visible_pane_ids(&state.split_tree, state.zoomed);
+        let now = Instant::now();
+        for pane_id in visible_panes {
+            let Some(surface) = state.surfaces.get_mut(&pane_id) else {
+                continue;
+            };
+            let mut term = surface.terminal.lock();
+            let active = term.active();
+            let cursor = active.cursor;
+            let (active_cols, active_rows) = (active.cols, active.rows);
+            surface.cursor_blink_state = CursorBlinkState {
+                visible: cursor.visible,
+                style: cursor.style,
+                at_live_viewport: term.viewport_offset() == 0,
+            };
+            // Kaizen cycle 5: structurally, this pane's window is occluded
+            // (checked above), and `redraw()` never runs — so never stashes
+            // a NEW `pending_reveal_snapshot` — while occluded; any stash
+            // from just before occlusion is drained (and its pane cache
+            // invalidated) by the `Occluded(true)` handler before the window
+            // is considered occluded at all. So this should always be `None`
+            // here. Still checked, not assumed: consuming it exactly like
+            // `redraw()`'s per-pane loop does closes the same lost/backward-
+            // damage class this function would otherwise reopen if that
+            // invariant were ever violated by a future change to either side.
+            let mut snapshot = if let Some(pending) = surface.pending_reveal_snapshot.take() {
+                pending
+            } else {
+                // Same synchronized-output hold bookkeeping `redraw()` uses
+                // (see `sync_output_snapshot_decision`), so a pane using
+                // DECSET 2026 isn't left with mismatched hold state once its
+                // window reveals.
+                let synchronized = term.modes.synchronized_output();
+                let dimensions_match = surface.held_snapshot.as_ref().is_some_and(|held| {
+                    held.snapshot.cols == active_cols && held.snapshot.rows_n == active_rows
+                });
+                let decision = sync_output_snapshot_decision(
+                    synchronized,
+                    surface.held_snapshot.as_ref().map(|held| held.captured_at),
+                    now,
+                    dimensions_match,
+                    false,
+                );
+                match decision {
+                    SyncSnapshotDecision::Reuse => surface
+                        .held_snapshot
+                        .as_ref()
+                        .expect("Reuse is only decided when held_snapshot is Some")
+                        .snapshot
+                        .clone(),
+                    SyncSnapshotDecision::Fresh => {
+                        let fresh = FrameSnapshot::from_terminal_recycle(
+                            &mut term,
+                            std::mem::take(&mut surface.snapshot_recycle),
+                        );
+                        if sync_output_snapshot_release_decision(synchronized) {
+                            if surface.held_snapshot.is_some() {
+                                surface.held_snapshot = None;
+                            }
+                        } else {
+                            surface.held_snapshot = Some(HeldSnapshot {
+                                snapshot: fresh.clone(),
+                                captured_at: now,
+                            });
+                        }
+                        fresh
+                    }
+                }
+            };
+            snapshot.focused =
+                pane_owns_keyboard_focus(window_id, pane_id, self.os_focused, state.focused_pane);
+            snapshot.cursor_blink_visible = self.cursor_blink_visible;
+            snapshot.hover_link = surface.hover_link;
+            snapshots.push((pane_id, surface.rect, snapshot));
+        }
+        let panes = snapshots
+            .iter()
+            .map(|(pane_id, rect, snapshot)| PaneFrame {
+                pane: render_pane_id(*pane_id),
+                rect: render_pane_rect(*rect),
+                snapshot,
+            })
+            .collect::<Vec<_>>();
+        let theme = active_theme(&gpu.theme, &gpu.preview_theme);
+        // Kaizen cycle 6, finding P1: bound this call's main-thread cost. A
+        // hidden pane that scrolled more than one viewport (or has no cache
+        // yet, or its invalidation key otherwise diverged) since its cache
+        // was last built can never hit `cell::rebuild_pane_cached`'s
+        // incremental/scroll-shift path — rebuilding it now would always be
+        // a full, synchronous rebuild (measured 38-93ms for a 200x60 pane),
+        // and that cost is wasted anyway: the eventual reveal's catch-up
+        // frame rebuilds fully regardless of what this background refresh
+        // did or didn't do (see `Renderer::pane_rebuild_would_be_full`'s doc
+        // comment). `rebuild_panes` always rebuilds every pane in `panes`
+        // together (there is no way to apply only the cheap panes without
+        // dropping the expensive one out of `pane_layout` entirely), so the
+        // check and the skip are both whole-window, not per-pane.
+        //
+        // Worst-case bounded cost this call can still incur: this window's
+        // visible-pane count worth of snapshot captures (terminal lock +
+        // row-damage take, no font rasterization — cheap), plus, only when
+        // EVERY pane predicts incremental, one incremental `rebuild_panes`
+        // bounded by that snapshot's actual dirty-row count (a pane that
+        // rewrites every row in place with no scrolling is not caught by
+        // this guard and can still cost close to a full rebuild — an
+        // accepted residual per the reviewed design, distinct from the
+        // scroll-volume case this guard specifically targets).
+        let any_pane_would_be_full = panes.iter().any(|pane| {
+            state
+                .renderer
+                .pane_rebuild_would_be_full(pane.pane, pane.snapshot, &gpu.font, theme)
+        });
+        if any_pane_would_be_full {
+            // CRITICAL fix (kaizen cycle 7): every visible pane's snapshot
+            // above already had its terminal row damage consumed — the
+            // capture loop runs unconditionally regardless of what happens
+            // next. Simply discarding them here (as an earlier version of
+            // this skip did) loses whichever OTHER pane's in-place edits got
+            // captured alongside the one that actually forced this skip: a
+            // mixed window where pane A is scrolling (predicts full) and
+            // pane B just got a same-key in-place edit (would have been
+            // incremental) would show B's pre-edit content indefinitely,
+            // since B's dirty bits are gone and its cache key still matches.
+            //
+            // Fix: force EVERY visible pane onto a full rebuild next time
+            // (`invalidate_pane`), so whichever rebuild happens next —
+            // another bg-refresh attempt, or the reveal catch-up — reads
+            // every row straight from the terminal's actual live content at
+            // that time, independent of any dirty bit this round already
+            // consumed. This forfeits this round's incremental opportunity
+            // for every pane in the window (not just the one that scrolled),
+            // accepted per the reviewed design.
+            //
+            // Rejected alternative: stash-on-skip (reusing
+            // `Surface::pending_reveal_snapshot`, the P1-A mechanism).
+            // Rejected because that field is consumed unconditionally by
+            // EVERY `redraw()` call for that pane (not gated to its
+            // fast-path frame) — a stash planted here could sit across
+            // arbitrarily many bg-refresh throttle intervals and then get
+            // applied to the REAL presented reveal frame in place of a
+            // fresh terminal read, showing stale (potentially very old)
+            // content on an actual visible frame — a worse bug than the one
+            // being fixed. `invalidate_pane` has no such hazard: it never
+            // substitutes stale content for a fresh read: it only ever
+            // forces a rebuild to look at MORE rows than the dirty bits
+            // alone would ask for, straight from whatever's actually there
+            // at rebuild time.
+            for (pane_id, _, _) in &snapshots {
+                state.renderer.invalidate_pane(render_pane_id(*pane_id));
+            }
+        } else {
+            let trace_start = crate::tab_switch_trace::bg_refresh_start();
+            state.renderer.rebuild_panes(&panes, &mut gpu.font, theme);
+            crate::tab_switch_trace::on_bg_refresh(
+                trace_start,
+                state.renderer.rows_rebuilt_last_frame(),
+            );
+            state
+                .renderer
+                .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+        }
+        for (pane_id, _, snapshot) in snapshots {
+            if let Some(surface) = state.surfaces.get_mut(&pane_id) {
+                surface.snapshot_recycle = snapshot.into_recycle();
+            }
+        }
+    }
+
     pub(super) fn redraw(&mut self, window_id: WindowId) {
         // NOA_LATENCY_TRACE: stamp before the FrameSnapshot is built so
         // `on_present` can tell whether this frame could contain a pending
@@ -141,8 +382,52 @@ impl App {
         if state.occluded {
             return;
         }
+        // The CURRENT split layout's `(PaneId, PaneRect)` set, in the exact
+        // form `rebuild_panes` would receive this frame — cheap (no terminal
+        // lock), and computed up front so the fast-path guard below can
+        // catch a split added/closed or a pane closed while occluded (P2-C):
+        // that changes nothing about viewport or atlas, so without this
+        // check the guard would otherwise present a stale, closed-pane
+        // layout.
+        let expected_panes: Vec<(RenderPaneId, PaneRect)> =
+            visible_pane_ids(&state.split_tree, state.zoomed)
+                .into_iter()
+                .filter_map(|pane_id| {
+                    state
+                        .surfaces
+                        .get(&pane_id)
+                        .map(|surface| (render_pane_id(pane_id), render_pane_rect(surface.rect)))
+                })
+                .collect();
+        // Tab-switch stall fix: consume the one-shot post-reveal flag
+        // regardless of outcome — it only ever applies to the very next
+        // redraw after `Occluded(false)`, win or lose. `has_renderable_frame`
+        // is the fallback guard (never rendered, the viewport or pane layout
+        // changed while occluded, the shared glyph atlas moved since, or the
+        // cache never stabilized — see `Renderer::cached_frame_matches_viewport`),
+        // which forces the normal full rebuild instead.
+        let reveal_fast_path = reveal_fast_path_decision(
+            std::mem::take(&mut state.reveal_fast_path_pending),
+            state.renderer.cached_frame_matches_viewport(
+                PixelSize {
+                    w: state.surface_config.width,
+                    h: state.surface_config.height,
+                },
+                &gpu.font,
+                &expected_panes,
+            ),
+        );
 
         let mut snapshots = Vec::new();
+        // Set when any pane this frame consumed a `pending_reveal_snapshot`
+        // (kaizen cycle 4, finding P1-A): that stash reflects the terminal
+        // as of the FAST-PATH frame, not now — any pty output arriving in
+        // between coalesces into this same redraw (winit merges repeated
+        // `request_redraw` calls) and would otherwise sit unpresented until
+        // an unrelated event (cursor blink, input) happens to redraw again.
+        // Closing this deterministically costs one extra (normal,
+        // incremental) redraw rather than an unbounded wait.
+        let mut consumed_pending_reveal_snapshot = false;
         // A user-set override wins over the focused pane's shell title
         // (tab-title REQ-TTL-2/5); the shell path below only applies while
         // there is no override.
@@ -234,58 +519,72 @@ impl App {
                     viewport_rows: term.active().rows,
                 });
             }
-            // Synchronized output (DECSET 2026, read under the lock already
-            // held above — no second lock, see R3's cursor-blink cache): a
-            // redraw triggered from outside the io thread's own pacing (focus
-            // change, cursor blink, an unrelated pane's redraw in the same
-            // window) can otherwise land mid-update and capture a torn frame.
-            // `sync_output_snapshot_decision` picks between reading the
-            // terminal fresh and reusing this pane's last held snapshot.
-            let synchronized = term.modes.synchronized_output();
-            let dimensions_match = surface.held_snapshot.as_ref().is_some_and(|held| {
-                held.snapshot.cols == active_cols && held.snapshot.rows_n == active_rows
-            });
-            let decision = sync_output_snapshot_decision(
-                synchronized,
-                surface.held_snapshot.as_ref().map(|held| held.captured_at),
-                now,
-                dimensions_match,
-                copy_mode_active,
-            );
-            let mut snapshot = match decision {
-                SyncSnapshotDecision::Reuse => surface
-                    .held_snapshot
-                    .as_ref()
-                    .expect("Reuse is only decided when held_snapshot is Some")
-                    .snapshot
-                    .clone(),
-                SyncSnapshotDecision::Fresh => {
-                    let fresh = FrameSnapshot::from_terminal_recycle(
-                        &mut term,
-                        std::mem::take(&mut surface.snapshot_recycle),
-                    );
-                    // Only retained while synchronized output is actually
-                    // active: an app that never uses mode 2026 never pays for
-                    // this clone (see `sync_output_snapshot_decision`'s doc
-                    // comment on the performance trade-off).
-                    if sync_output_snapshot_release_decision(synchronized) {
-                        // Sync just ended (or was never on): a held snapshot
-                        // no longer serves any purpose, and keeping it around
-                        // would retain a stale full-grid `FrameSnapshot` for
-                        // the rest of this pane's lifetime. The `is_some()`
-                        // guard keeps the common case — a pane that has never
-                        // used mode 2026 — a single no-op check, not a write
-                        // every frame.
-                        if surface.held_snapshot.is_some() {
-                            surface.held_snapshot = None;
+            // Tab-switch stall fix (kaizen cycle 3, finding P1-1): a pane
+            // this window presented via the reveal fast path last frame
+            // already had its terminal damage consumed into this exact
+            // snapshot (`FrameSnapshot::from_terminal_recycle` clears the
+            // grid's dirty bits on read) — that frame deliberately did not
+            // feed it into `rebuild_panes`. Reuse it here unconditionally
+            // instead of reading the terminal fresh (which would now see
+            // zero row damage and rebuild nothing), so this catch-up frame
+            // rebuilds against the content the fast path actually presented.
+            let mut snapshot = if let Some(pending) = surface.pending_reveal_snapshot.take() {
+                consumed_pending_reveal_snapshot = true;
+                pending
+            } else {
+                // Synchronized output (DECSET 2026, read under the lock already
+                // held above — no second lock, see R3's cursor-blink cache): a
+                // redraw triggered from outside the io thread's own pacing (focus
+                // change, cursor blink, an unrelated pane's redraw in the same
+                // window) can otherwise land mid-update and capture a torn frame.
+                // `sync_output_snapshot_decision` picks between reading the
+                // terminal fresh and reusing this pane's last held snapshot.
+                let synchronized = term.modes.synchronized_output();
+                let dimensions_match = surface.held_snapshot.as_ref().is_some_and(|held| {
+                    held.snapshot.cols == active_cols && held.snapshot.rows_n == active_rows
+                });
+                let decision = sync_output_snapshot_decision(
+                    synchronized,
+                    surface.held_snapshot.as_ref().map(|held| held.captured_at),
+                    now,
+                    dimensions_match,
+                    copy_mode_active,
+                );
+                match decision {
+                    SyncSnapshotDecision::Reuse => surface
+                        .held_snapshot
+                        .as_ref()
+                        .expect("Reuse is only decided when held_snapshot is Some")
+                        .snapshot
+                        .clone(),
+                    SyncSnapshotDecision::Fresh => {
+                        let fresh = FrameSnapshot::from_terminal_recycle(
+                            &mut term,
+                            std::mem::take(&mut surface.snapshot_recycle),
+                        );
+                        // Only retained while synchronized output is actually
+                        // active: an app that never uses mode 2026 never pays for
+                        // this clone (see `sync_output_snapshot_decision`'s doc
+                        // comment on the performance trade-off).
+                        if sync_output_snapshot_release_decision(synchronized) {
+                            // Sync just ended (or was never on): a held snapshot
+                            // no longer serves any purpose, and keeping it around
+                            // would retain a stale full-grid `FrameSnapshot` for
+                            // the rest of this pane's lifetime. The `is_some()`
+                            // guard keeps the common case — a pane that has never
+                            // used mode 2026 — a single no-op check, not a write
+                            // every frame.
+                            if surface.held_snapshot.is_some() {
+                                surface.held_snapshot = None;
+                            }
+                        } else {
+                            surface.held_snapshot = Some(HeldSnapshot {
+                                snapshot: fresh.clone(),
+                                captured_at: now,
+                            });
                         }
-                    } else {
-                        surface.held_snapshot = Some(HeldSnapshot {
-                            snapshot: fresh.clone(),
-                            captured_at: now,
-                        });
+                        fresh
                     }
-                    fresh
                 }
             };
             snapshot.search_prompt = self
@@ -363,11 +662,47 @@ impl App {
                 snapshot,
             })
             .collect::<Vec<_>>();
-        state.renderer.rebuild_panes(
-            &panes,
-            &mut gpu.font,
-            active_theme(&gpu.theme, &gpu.preview_theme),
-        );
+        if reveal_fast_path {
+            // Instant reveal frame: present the renderer's already-cached
+            // instances (kept warm by background refreshes while occluded,
+            // or simply the last frame drawn before occlusion) as-is, and
+            // request an immediate follow-up redraw to do the real
+            // (now mostly-incremental, thanks to the warm cache) rebuild.
+            // `panes` above is unused this frame — its only job was feeding
+            // `rebuild_panes`, which this branch deliberately skips.
+            //
+            // P1-1: the snapshot loop above already read each pane's
+            // terminal fresh (as it does every frame) and so already
+            // consumed its row damage — that read is simply not fed into a
+            // rebuild this frame. Stash it per pane so the follow-up redraw
+            // requested below rebuilds against exactly this content instead
+            // of re-reading the terminal and finding no damage left.
+            for (pane_id, _, snapshot) in &snapshots {
+                if let Some(surface) = state.surfaces.get_mut(pane_id) {
+                    surface.pending_reveal_snapshot = Some(snapshot.clone());
+                }
+            }
+            crate::tab_switch_trace::on_fast_path_reveal();
+            state.window.request_redraw();
+        } else {
+            // NOA_TAB_SWITCH_TRACE t2: the pane cache rebuild — a full rebuild
+            // of every visible row is the dominant suspected cost on the
+            // occlusion-reveal path (see `tab_switch_trace` module docs).
+            let trace_rebuild_start = crate::tab_switch_trace::rebuild_start();
+            state.renderer.rebuild_panes(
+                &panes,
+                &mut gpu.font,
+                active_theme(&gpu.theme, &gpu.preview_theme),
+            );
+            crate::tab_switch_trace::on_pane_rebuild(
+                trace_rebuild_start,
+                state.renderer.rows_rebuilt_last_frame(),
+            );
+        }
+        // Atlas sync still runs on the fast path: any glyphs rasterized by a
+        // background refresh while occluded need their texture uploaded
+        // before this frame's (reused) instances reference them; cheap no-op
+        // when nothing changed since the last sync.
         state
             .renderer
             .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
@@ -749,6 +1084,9 @@ impl App {
         // NOA_LATENCY_TRACE t2: the echo frame has been handed to the
         // compositor (present-call proxy; see `latency_trace` module docs).
         crate::latency_trace::on_present(trace_frame_start);
+        // NOA_TAB_SWITCH_TRACE t3: closes the occlusion-reveal sample (if
+        // one is pending) and logs the full breakdown.
+        crate::tab_switch_trace::on_present();
         {
             static FIRST_FRAME: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
@@ -759,6 +1097,14 @@ impl App {
         // another glyph's pixels; ask for one more frame so the display
         // converges instead of sticking on the corrupt one.
         if state.renderer.needs_follow_up_frame() {
+            state.window.request_redraw();
+        }
+        // P1-A: this frame presented at least one pane's stashed reveal
+        // snapshot instead of reading the terminal, so any pty output that
+        // arrived between the fast-path frame and this one was never read —
+        // request one more (now normal, no stash left, so a real terminal
+        // read) redraw to pick it up deterministically.
+        if consumed_pending_reveal_snapshot {
             state.window.request_redraw();
         }
 
@@ -1101,5 +1447,48 @@ mod tests {
         assert_eq!(snapshot.copy_cursor, Some(SelectionPoint::new(0, 0)));
         assert_eq!(snapshot.selection, terminal.active().selection);
         assert_eq!(snapshot.row_base, terminal.active().visible_row_base());
+    }
+
+    /// Regression test (kaizen cycle 3, finding P1-1), pinned at the pure
+    /// `FrameSnapshot` mechanism `redraw`'s fast path depends on: reading a
+    /// terminal's snapshot consumes its row damage, so a caller that reads
+    /// one snapshot and discards it (as the reveal fast path does — it
+    /// deliberately does not feed that read into `rebuild_panes`) MUST carry
+    /// that exact snapshot forward for the next rebuild, because a second,
+    /// independent read finds the damage already gone. This is the bug the
+    /// fast path had before `Surface::pending_reveal_snapshot` was added:
+    /// dirty rows captured on the fast-path frame would otherwise vanish
+    /// until unrelated pty output re-dirtied them.
+    #[test]
+    fn a_second_snapshot_read_sees_no_damage_the_first_read_already_consumed() {
+        let mut terminal = Terminal::new(GridSize::new(4, 2));
+        Stream::new().feed(b"before", &mut terminal);
+        // Establish a clean baseline (mirrors production: `redraw` always
+        // takes a snapshot every frame, so any earlier frame's damage is
+        // already consumed by the time this scenario starts).
+        let _ = FrameSnapshot::from_terminal(&mut terminal);
+
+        Stream::new().feed(b"\x1b[Hafter", &mut terminal);
+        let fast_path_read = FrameSnapshot::from_terminal(&mut terminal);
+        assert!(
+            fast_path_read.row_dirty.iter().any(|&dirty| dirty),
+            "the mutated row must show up as damaged on the read that observes it"
+        );
+
+        // Simulate the bug: a naive follow-up frame re-reads the terminal
+        // instead of reusing `fast_path_read`.
+        let naive_second_read = FrameSnapshot::from_terminal(&mut terminal);
+        assert!(
+            naive_second_read.row_dirty.iter().all(|&dirty| !dirty),
+            "a second independent read must see zero damage — proving the \
+             fast-path frame's read has to be carried forward, not discarded, \
+             or this content silently never reaches a rebuild"
+        );
+
+        // The fix: `fast_path_read` itself (stashed in
+        // `Surface::pending_reveal_snapshot` and consumed by the very next
+        // redraw) still carries the correct damage, independent of whatever
+        // a second terminal read would have seen.
+        assert!(fast_path_read.row_dirty.iter().any(|&dirty| dirty));
     }
 }

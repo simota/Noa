@@ -587,6 +587,8 @@ impl App {
                 title_override: None,
                 native_overlays: Default::default(),
                 applied_window_bg: None,
+                bg_refresh_last: None,
+                reveal_fast_path_pending: false,
             },
         );
         if let Some(identity) = remote_card_identity.as_ref() {

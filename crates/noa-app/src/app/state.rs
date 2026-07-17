@@ -332,6 +332,18 @@ pub(super) struct WindowState {
     /// dragging a full AppKit layout + CA commit into every cursor-blink
     /// frame (measured as the largest single main-thread idle cost).
     pub(super) applied_window_bg: Option<(noa_core::Rgb, u32)>,
+    /// Last time this window's pane cache was refreshed while occluded (tab
+    /// switch stall fix). `None` means no background refresh has run yet
+    /// since this window last became occluded — the throttle in
+    /// `background_refresh_decision` treats that as immediately due.
+    pub(super) bg_refresh_last: Option<Instant>,
+    /// Set on `WindowEvent::Occluded(false)`; consumed by the very next
+    /// `redraw()` call, which presents whatever the renderer already has
+    /// cached (possibly refreshed in the background while occluded, up to
+    /// `BG_REFRESH_INTERVAL` stale) instead of forcing a full pane-cache
+    /// rebuild synchronously on the reveal frame. That redraw always requests
+    /// a follow-up frame to catch the cache up.
+    pub(super) reveal_fast_path_pending: bool,
 }
 
 /// How long the `cols × rows` resize toast stays up after the last grid
@@ -963,6 +975,15 @@ pub(super) struct Surface {
     /// captured while synchronized output was active — see
     /// `sync_output_snapshot_decision` in `render.rs`.
     pub(super) held_snapshot: Option<HeldSnapshot>,
+    /// Set for one frame when the tab-switch-stall reveal fast path presents
+    /// this pane without rebuilding (`render.rs`'s `reveal_fast_path`
+    /// branch): the fresh snapshot that frame captured (and so already
+    /// consumed the terminal's row damage for), carried forward so the
+    /// guaranteed follow-up redraw rebuilds against it directly instead of
+    /// re-reading the terminal and finding the damage already cleared
+    /// (kaizen cycle 3, finding P1-1). Consumed (`take`n) by the very next
+    /// redraw of this pane, fast path or not.
+    pub(super) pending_reveal_snapshot: Option<FrameSnapshot>,
 }
 
 /// Transport-specific ownership for a pane. Keeping this explicit prevents a
@@ -1069,6 +1090,7 @@ impl Surface {
             kitty_animation_flag,
             cursor_blink_state: CursorBlinkState::default(),
             held_snapshot: None,
+            pending_reveal_snapshot: None,
         }
     }
 

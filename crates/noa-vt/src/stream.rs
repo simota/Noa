@@ -214,6 +214,28 @@ fn feed_parser<H: Handler>(
                 dispatch_csi(&csi, handler, sgr_attrs);
                 i += len;
                 continue;
+            } else if bytes[i] != 0x1b {
+                // Fast path: `is_run_byte` already ruled out printable ASCII
+                // and DEL, and this isn't the CSI lead byte, so what's left
+                // is a lone C0 control (LF/CR/BS/TAB/BEL/…, the common case
+                // in any line-oriented flood) or DEL. In ground state every
+                // C0 byte dispatches straight to `Execute` with no state
+                // change — `Parser::st_ground`'s own arm for it, plus the
+                // "anywhere" CAN/SUB case, which forces the state back to
+                // Ground and is therefore a no-op here since it already is
+                // — and DEL is silently dropped. Skipping `advance` for this
+                // byte skips its four dead prefix checks (state is
+                // `Ground`, `utf8_rem` is `0`: both guaranteed by
+                // `in_ground_plain`), the `c1_control` call (`b` can't be in
+                // `0x80..=0x9f` here), and the closure-sink indirection;
+                // observable behavior is byte-for-byte the same action.
+                let b = bytes[i];
+                if b != 0x7f {
+                    *display_dirty = true; // Execute is never a pure query
+                    handler.execute_c0(b);
+                }
+                i += 1;
+                continue;
             }
         } else if parser.state() == State::CsiParam {
             // Batch parameter accumulation for a CSI resumed across a feed

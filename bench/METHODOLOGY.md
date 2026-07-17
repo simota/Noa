@@ -13,6 +13,11 @@ human-readable `table.md` under `bench/results/<timestamp>/`.
 | Ghostty | `ghostty --config-default-files=false --window-save-state=never -e <wrapper>` | native `-e` |
 | Termy | `XDG_CONFIG_HOME=<iso> termy` with `$SHELL` = wrapper | `$SHELL` (no `-e` flag exists) |
 | kitty | `kitty --config NONE -o confirm_os_window_close=0 <wrapper>` | trailing command arg |
+| Alacritty | `XDG_CONFIG_HOME=<iso> alacritty -e <wrapper>` | native `-e` (entry activates when installed) |
+| iTerm2 | own instance launched directly, then AppleScript `create window with default profile command <env-wrapper>` | AppleScript (no `-e`; `$SHELL` verified ignored) — see caveats below |
+| Warp | `SHELL=<wrapper> Warp` | `$SHELL` — **UNVERIFIED**; **opt-in only** (excluded from the default set; include explicitly via `--only ...,warp`). UNMEASURED axes mean Warp ignored `$SHELL` |
+| Terminal.app | own second instance launched directly with `<wrapper>` as document argument | document-open (verified: real tty, env inherited via `login -p`) |
+| Rio | `RIO_CONFIG_HOME=<iso> rio -e <wrapper>` | native `-e` (Rio ignores `XDG_CONFIG_HOME`; `RIO_CONFIG_HOME` verified via `--write-config`; iso config pins `confirm-before-quit=false`, kitty-precedent kill-safety) |
 
 The `<iso>` dir / `--config`-suppression flags are the **config isolation**
 mechanism (fresh-install defaults for every terminal) and
@@ -29,10 +34,49 @@ Versions and machine details are captured automatically into `results.json`
 build numbers of the run you are looking at. At authoring time: Ghostty 1.3.1,
 Termy 0.2.21, kitty 0.47.4, noa release build of the current branch.
 
-**Alacritty** was requested as an optional reference point but is **not
-installed** on this machine (`/Applications/Alacritty.app` absent), so it is
-omitted rather than faked. Install it (`brew install --cask alacritty`) and it
-would need a launch entry in `run_all.sh` (`alacritty -e <wrapper>`).
+### The 2026-07-17 additions (Alacritty / iTerm2 / Warp / Terminal.app)
+
+Four more terminals have launch entries; each activates only when installed
+(`skip (not installed)` otherwise — never faked). What was **verified on this
+machine** vs assumed:
+
+- **Alacritty** (not installed at authoring): standard `-e` launch; isolation
+  via `XDG_CONFIG_HOME` → iso dir containing an **empty `alacritty.toml`**,
+  so the first config candidate wins and a user's `~/.alacritty.toml`
+  fallback is never consulted.
+- **iTerm2** (verified 2026-07-17): `$SHELL` is **ignored** (the default
+  profile execs the passwd login shell), so the pty child is created via
+  AppleScript `create window with default profile command` pointing at a
+  generated **env-wrapper** (AppleScript-launched commands get launchd's
+  env, not ours — verified; the wrapper re-exports `NOA_*` and execs
+  `wrapper.sh`; command runs on a real tty — verified). Three caveats, all
+  disclosed per run: (1) the AppleScript targets the app **by name**, so the
+  harness **skips iTerm2 entirely if a user instance is already running**
+  (collateral-safety invariant); (2) prefs are macOS defaults
+  (com.googlecode.iterm2) and are **not isolable** without mutating user
+  defaults — iTerm2 runs with the user's prefs, recorded in
+  `results.json.isolation`; (3) our instance may open restored/startup
+  windows running login shells alongside the command window (verified: 3
+  windows on this machine) — a Ghostty-phantom-class contamination of the
+  memory/load axes that is visible in `multitab_procs`/`wincount` rather
+  than silently included; read iTerm2's memory/load numbers with that in
+  mind. Its startup number reflects the AppleScript window path, not a
+  plain process launch.
+- **Warp**: launch entry uses `SHELL=<wrapper>`, **unverified** — if Warp
+  resolves the shell from user records instead, every axis reports
+  UNMEASURED (honest failure). Prefs and account state are not isolable;
+  disclosed. **Opt-in only**: excluded from the default terminal set —
+  include it explicitly with `--only ...,warp`.
+- **Terminal.app** (verified 2026-07-17): launched as **our own second
+  instance** by exec'ing the app binary directly with the wrapper path as
+  document argument — verified to coexist with the user's running Terminal
+  (distinct pid, untouched), give the wrapper a real tty, and pass our
+  environment through its `login -p` wrapper. Never launched via
+  `open`/AppleScript (those route to the user's instance). Prefs
+  (com.apple.Terminal) are not isolable; disclosed.
+
+For iTerm2/Warp/Terminal.app the equalized re-run records
+`NATIVE-DEFAULT(prefs-based)` — they expose no CLI size/font control.
 
 ## The uniform-workload design
 

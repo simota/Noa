@@ -18,7 +18,11 @@ def sh(*args):
 
 def plist(app, key):
     p = f"/Applications/{app}/Contents/Info.plist"
-    return sh("/usr/libexec/PlistBuddy", "-c", f"Print :{key}", p)
+    return plist_at(p, key)
+
+
+def plist_at(path, key):
+    return sh("/usr/libexec/PlistBuddy", "-c", f"Print :{key}", path)
 
 
 def terminal_versions(repo):
@@ -30,6 +34,13 @@ def terminal_versions(repo):
     v["ghostty"] = plist("Ghostty.app", "CFBundleShortVersionString")
     v["termy"] = plist("Termy.app", "CFBundleShortVersionString")
     v["kitty"] = plist("kitty.app", "CFBundleShortVersionString")
+    v["alacritty"] = plist("Alacritty.app", "CFBundleShortVersionString")
+    v["iterm2"] = plist("iTerm.app", "CFBundleShortVersionString")
+    v["warp"] = plist("Warp.app", "CFBundleShortVersionString")
+    v["terminal"] = plist_at(
+        "/System/Applications/Utilities/Terminal.app/Contents/Info.plist",
+        "CFBundleShortVersionString")
+    v["rio"] = plist("Rio.app", "CFBundleShortVersionString")
     return {k: val for k, val in v.items() if val}
 
 

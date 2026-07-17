@@ -187,8 +187,18 @@ chmod +x "$WRAPPER"
 #          config.txt inside the iso dir on first launch)
 #   kitty  --config NONE (pure built-in defaults)
 ISO_XDG="$RUNTMP/xdg-config"
-mkdir -p "$ISO_XDG/noa" "$ISO_XDG/termy"
+mkdir -p "$ISO_XDG/noa" "$ISO_XDG/termy" "$ISO_XDG/alacritty"
 printf 'window-save-state = never\n' > "$ISO_XDG/noa/config"
+# Alacritty consults XDG paths FIRST but falls back to ~/.alacritty.toml when
+# nothing is found — an empty iso config makes the first candidate win so a
+# user's home-dir config is never consulted.
+: > "$ISO_XDG/alacritty/alacritty.toml"
+# Rio ignores XDG_CONFIG_HOME but honors RIO_CONFIG_HOME (verified
+# 2026-07-17 via --write-config). confirm-before-quit=false is the one
+# harness-mechanics non-default (kitty precedent: kills must not hang on a
+# confirm dialog); disclosed in the isolation note.
+mkdir -p "$ISO_XDG/rio"
+printf 'confirm-before-quit = false\n' > "$ISO_XDG/rio/config.toml"
 # kill_all_tracked is defined below (needs the PID registry); `|| true` keeps
 # an early exit (before definitions) from failing the trap.
 trap 'kill_all_tracked 2>/dev/null || true; rm -rf "$RUNTMP"' EXIT
@@ -204,6 +214,8 @@ if [ "$EQUALIZE" = 1 ]; then
   # Termy has no CLI size/font control; font is settable via config only.
   # (Grid size has no config key -> stays at native default; documented.)
   printf 'font_family = %s\nfont_size = %s\n' "$EQ_FONT" "$EQ_FSIZE" > "$ISO_XDG/termy/config.txt"
+  # Rio: font settable via config; grid size only in pixels -> native default
+  printf 'confirm-before-quit = false\n[fonts]\nfamily = "%s"\nsize = %s\n' "$EQ_FONT" "$EQ_FSIZE" > "$ISO_XDG/rio/config.toml"
 fi
 
 # ── terminal registry ──────────────────────────────────────────────
@@ -213,6 +225,11 @@ NOA_BIN="${NOA_BIN:-$REPO_DIR/target/release/noa}"
 GHOSTTY_BIN="/Applications/Ghostty.app/Contents/MacOS/ghostty"
 TERMY_BIN="/Applications/Termy.app/Contents/MacOS/termy"
 KITTY_BIN="/Applications/kitty.app/Contents/MacOS/kitty"
+ALACRITTY_BIN="/Applications/Alacritty.app/Contents/MacOS/alacritty"
+ITERM_BIN="/Applications/iTerm.app/Contents/MacOS/iTerm2"
+WARP_BIN="/Applications/Warp.app/Contents/MacOS/stable"
+TERMINAL_BIN="/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"
+RIO_BIN="/Applications/Rio.app/Contents/MacOS/rio"
 
 term_present() {
   case "$1" in
@@ -220,6 +237,11 @@ term_present() {
     ghostty) [ -x "$GHOSTTY_BIN" ] ;;
     termy) [ -x "$TERMY_BIN" ] ;;
     kitty) [ -x "$KITTY_BIN" ] ;;
+    alacritty) [ -x "$ALACRITTY_BIN" ] ;;
+    iterm2) [ -x "$ITERM_BIN" ] ;;
+    warp) [ -x "$WARP_BIN" ] ;;
+    terminal) [ -x "$TERMINAL_BIN" ] ;;
+    rio) [ -x "$RIO_BIN" ] ;;
     *) return 1 ;;
   esac
 }
@@ -252,6 +274,11 @@ tracked_roots() {
     ghostty) want="$GHOSTTY_BIN" ;;
     termy) want="$TERMY_BIN" ;;
     kitty) want="$KITTY_BIN" ;;
+    alacritty) want="$ALACRITTY_BIN" ;;
+    iterm2) want="$ITERM_BIN" ;;
+    warp) want="$WARP_BIN" ;;
+    terminal) want="$TERMINAL_BIN" ;;
+    rio) want="$RIO_BIN" ;;
     *) want="" ;;
   esac
   while read -r p; do
@@ -291,6 +318,45 @@ launch_noa() { # extra flags in "$@"
   fi
 }
 
+# gen_env_wrapper <path> — write a script that re-exports every NOA_* var of
+# the CURRENT environment and execs $WRAPPER. Needed for terminals whose pty
+# child is started through an out-of-process path that does not inherit our
+# environment (iTerm2's AppleScript `create window ... command` — verified
+# empirically 2026-07-17: the command runs on a real tty but with launchd's
+# env, so the exported NOA_* contract never reaches wrapper.sh directly).
+# %q-quotes values (NOA_BENCH_CMD contains quotes/spaces).
+gen_env_wrapper() {
+  local f="$1" k v
+  {
+    echo '#!/bin/sh'
+    while IFS='=' read -r k v; do
+      printf 'export %s=%q\n' "$k" "$v"
+    done < <(env | grep '^NOA_')
+    printf 'exec %q\n' "$WRAPPER"
+  } > "$f"
+  chmod +x "$f"
+}
+
+# iTerm2 has no `-e`/$SHELL path (verified 2026-07-17: SHELL=<wrapper> is
+# ignored — the default profile execs the passwd login shell), so the pty
+# child is created via AppleScript AFTER our own instance is up:
+#   1. launch $ITERM_BIN directly (env-inherited child, pid registered);
+#   2. poll `create window with default profile command <env-wrapper>` until
+#      the app answers (fresh instance needs a few seconds to register).
+# The AppleScript targets the app BY NAME, which is ambiguous if the user's
+# own iTerm2 is already running — the selection gate below skips iterm2
+# entirely in that case, so this helper only ever talks to OUR instance.
+iterm2_open_cmd_window() {
+  local eww="$1" i=0
+  while [ $i -lt 30 ]; do
+    if osascript -e "tell application \"iTerm2\" to create window with default profile command \"$eww\"" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5; i=$((i + 1))
+  done
+  return 1
+}
+
 # Launch a terminal (fresh process) running $WRAPPER as its pty child.
 # Env (NOA_MODE etc.) is already exported by the caller and inherited.
 # Ghostty always gets --window-save-state=never: without it, macOS state
@@ -301,6 +367,43 @@ launch_noa() { # extra flags in "$@"
 # saved-state window"). kitty's confirm_os_window_close=0 is the one
 # non-default setting the harness needs (kills must not hang on a confirm
 # dialog); it is disclosed in METHODOLOGY.md.
+# launch_term_default <term> — the fresh-default launch of one terminal.
+# Every branch must leave the app's pid in $! (iterm2 captures it before
+# backgrounding its AppleScript helper, then restores it via `wait`-free
+# subshell avoidance — see the branch).
+launch_term_default() {
+  case "$1" in
+    noa)     launch_noa --cols 120 --rows 40 ;;
+    ghostty) "$GHOSTTY_BIN" --config-default-files=false --window-save-state=never -e "$WRAPPER" >/dev/null 2>&1 & ;;
+    termy)   XDG_CONFIG_HOME="$ISO_XDG" SHELL="$WRAPPER" "$TERMY_BIN" >/dev/null 2>&1 & ;;
+    kitty)   "$KITTY_BIN" --config NONE -o confirm_os_window_close=0 "$WRAPPER" >/dev/null 2>&1 & ;;
+    alacritty) XDG_CONFIG_HOME="$ISO_XDG" "$ALACRITTY_BIN" -e "$WRAPPER" >/dev/null 2>&1 & ;;
+    warp)    SHELL="$WRAPPER" "$WARP_BIN" >/dev/null 2>&1 & ;;  # UNVERIFIED (not installed here): if Warp ignores $SHELL the sentinel times out and axes report UNMEASURED honestly
+    rio)     RIO_CONFIG_HOME="$ISO_XDG/rio" "$RIO_BIN" -e "$WRAPPER" >/dev/null 2>&1 & ;;
+    terminal)
+      # Direct binary launch = OUR OWN second instance (verified 2026-07-17:
+      # coexists with a user's running Terminal, env is inherited through
+      # its `login` wrapper, and the script argument becomes the pty child
+      # on a real tty). Never launched via `open`/AppleScript — those route
+      # through LaunchServices/name lookup to the USER'S instance.
+      "$TERMINAL_BIN" "$WRAPPER" >/dev/null 2>&1 & ;;
+    iterm2)
+      # Two-phase (see gen_env_wrapper/iterm2_open_cmd_window above): start
+      # our own instance, then AppleScript a command window running the
+      # env-wrapper. The app pid must be what $! carries out of this branch,
+      # so the helper's pid is captured and discarded in a subshell.
+      gen_env_wrapper "$RUNTMP/eww.iterm2.sh"
+      "$ITERM_BIN" >/dev/null 2>&1 &
+      local iterm_app_pid=$!
+      ( iterm2_open_cmd_window "$RUNTMP/eww.iterm2.sh" ) >/dev/null 2>&1 &
+      register_pid "$1" "$iterm_app_pid"
+      echo "$iterm_app_pid"
+      return 0 ;;
+  esac
+  register_pid "$1" "$!"
+  echo $!
+}
+
 launch_term() {
   if [ "$EQUALIZE" = 1 ]; then
     case "$1" in
@@ -312,14 +415,20 @@ launch_term() {
       kitty)   "$KITTY_BIN" --config NONE -o remember_window_size=no \
                  -o initial_window_width="${EQ_COLS}c" -o initial_window_height="${EQ_ROWS}c" \
                  -o font_family="$EQ_FONT" -o font_size="$EQ_FSIZE" -o confirm_os_window_close=0 "$WRAPPER" >/dev/null 2>&1 & ;;
+      alacritty) XDG_CONFIG_HOME="$ISO_XDG" "$ALACRITTY_BIN" \
+                 -o "window.dimensions.columns=$EQ_COLS" -o "window.dimensions.lines=$EQ_ROWS" \
+                 -o "font.normal.family=\"$EQ_FONT\"" -o "font.size=$EQ_FSIZE" \
+                 -e "$WRAPPER" >/dev/null 2>&1 & ;;
+      rio)     RIO_CONFIG_HOME="$ISO_XDG/rio" "$RIO_BIN" -e "$WRAPPER" >/dev/null 2>&1 & ;;  # font via iso config; grid px-only -> native default
+      iterm2|warp|terminal)
+        # no CLI size/font control (prefs-based) — equalize unsupported;
+        # native defaults, recorded via the equalized-notes emit below
+        launch_term_default "$1"
+        return 0 ;;
     esac
   else
-    case "$1" in
-      noa)     launch_noa --cols 120 --rows 40 ;;
-      ghostty) "$GHOSTTY_BIN" --config-default-files=false --window-save-state=never -e "$WRAPPER" >/dev/null 2>&1 & ;;
-      termy)   XDG_CONFIG_HOME="$ISO_XDG" SHELL="$WRAPPER" "$TERMY_BIN" >/dev/null 2>&1 & ;;
-      kitty)   "$KITTY_BIN" --config NONE -o confirm_os_window_close=0 "$WRAPPER" >/dev/null 2>&1 & ;;
-    esac
+    launch_term_default "$1"
+    return 0
   fi
   register_pid "$1" "$!"
   echo $!
@@ -798,13 +907,32 @@ run_load_active() {
 }
 
 # ── select terminals ───────────────────────────────────────────────
-ALL="noa ghostty termy kitty"
+# warp is opt-in only (`--only ...,warp`): its $SHELL launch is unverified
+# and it carries account/AI-agent state that doesn't belong in a default
+# sweep — excluded from the default set rather than skipped at runtime.
+ALL="noa ghostty termy kitty alacritty iterm2 terminal rio"
+case ",$ONLY," in *",warp,"*) ALL="$ALL warp" ;; esac
 SELECTED=""
 for t in $ALL; do
   if [ -n "$ONLY" ]; then case ",$ONLY," in *",$t,"*) ;; *) continue ;; esac; fi
-  if term_present "$t"; then SELECTED="$SELECTED $t"; else
+  if ! term_present "$t"; then
     echo "skip (not installed): $t"; emit "$t" meta - - present 0 bool
+    continue
   fi
+  # iTerm2's pty child is created via AppleScript that targets the app BY
+  # NAME (no `-e`/$SHELL path exists — verified 2026-07-17). With a user's
+  # own iTerm2 running, that name lookup could create/act on windows in
+  # THEIR session, so the collateral-safety invariant forces a skip.
+  # Read-only scan; nothing is signaled.
+  if [ "$t" = iterm2 ]; then
+    live="$(ps -axo pid=,comm= 2>/dev/null | awk '$2 ~ /iTerm\.app\/Contents\/MacOS\/iTerm2$/ {printf "%s ", $1}')"
+    if [ -n "$live" ]; then
+      echo "skip (iterm2): user iTerm2 instance running ($live) — AppleScript window creation targets the app by name and could touch the user's session; quit iTerm2 and re-run to include it"
+      emit iterm2 meta - - skipped "user-instance-running:$live" note
+      continue
+    fi
+  fi
+  SELECTED="$SELECTED $t"
 done
 echo "Terminals under test:$SELECTED"
 echo "Results -> $OUT_DIR"
@@ -817,6 +945,11 @@ for t in $SELECTED; do
     ghostty) emit ghostty meta - - isolation "--config-default-files=false (no config files read) + --window-save-state=never (phantom saved-state window suppressed)" note ;;
     termy)   emit termy meta - - isolation "XDG_CONFIG_HOME=iso-dir (fresh defaults; verified: writes its default config.txt into the iso dir)" note ;;
     kitty)   emit kitty meta - - isolation "--config NONE (built-in defaults) + -o confirm_os_window_close=0 (harness kill-safety, disclosed)" note ;;
+    alacritty) emit alacritty meta - - isolation "XDG_CONFIG_HOME=iso-dir with an empty alacritty.toml (first config candidate wins; user's ~/.alacritty.toml never consulted)" note ;;
+    iterm2)  emit iterm2 meta - - isolation "NOT ISOLATED: user preferences (com.googlecode.iterm2 defaults plist) apply; prefs cannot be redirected without mutating user defaults. Restored/startup windows of our instance may add login-shell trees to memory/load — check multitab_procs/wincount" note ;;
+    warp)    emit warp meta - - isolation "NOT ISOLATED: user config + account state apply; \$SHELL=wrapper launch is UNVERIFIED (Warp not installed at authoring) — UNMEASURED axes mean Warp ignored \$SHELL" note ;;
+    terminal) emit terminal meta - - isolation "NOT ISOLATED: user preferences (com.apple.Terminal defaults plist) apply; launched as our own second instance with the wrapper as document argument (verified: real tty, env inherited via login -p)" note ;;
+    rio)     emit rio meta - - isolation "RIO_CONFIG_HOME=iso-dir (fresh defaults; XDG_CONFIG_HOME is ignored by Rio — verified via --write-config) + confirm-before-quit=false (harness kill-safety, disclosed)" note ;;
   esac
 done
 
@@ -1145,6 +1278,9 @@ if [ "$EQUALIZE" = 1 ]; then
       ghostty) emit "$term" meta - - equalized "grid=${EQ_COLS}x${EQ_ROWS};font=${EQ_FONT}@${EQ_FSIZE};clean-config" note ;;
       kitty)   emit "$term" meta - - equalized "grid=${EQ_COLS}x${EQ_ROWS};font=${EQ_FONT}@${EQ_FSIZE};config=NONE" note ;;
       termy)   emit "$term" meta - - equalized "grid=NATIVE-DEFAULT(no-size-key);font=${EQ_FONT}@${EQ_FSIZE}" note ;;
+      alacritty) emit "$term" meta - - equalized "grid=${EQ_COLS}x${EQ_ROWS};font=${EQ_FONT}@${EQ_FSIZE};via -o overrides" note ;;
+      iterm2|warp|terminal) emit "$term" meta - - equalized "NATIVE-DEFAULT(prefs-based; no CLI size/font control)" note ;;
+      rio)     emit "$term" meta - - equalized "grid=NATIVE-DEFAULT(px-only window size);font=${EQ_FONT}@${EQ_FSIZE} via RIO_CONFIG_HOME config" note ;;
     esac
   done
 fi

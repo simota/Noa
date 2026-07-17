@@ -94,7 +94,10 @@ fn watermarked_rows_pack_identically_deferred_and_immediate() {
     bytes.extend_from_slice(b"\r\n\x1b[42m\x1b[J\x1b[0mZ\r\n");
     let t = run_size(40, 6, &bytes);
 
-    let rows: Vec<crate::cell::Row> = t.primary.grid.clone();
+    // `RingGrid` (wish#4 track B) isn't itself a `Vec<Row>`; collect it in
+    // on-screen order to keep this test's byte-identical packing comparison
+    // unchanged.
+    let rows: Vec<crate::cell::Row> = t.primary.grid.iter().cloned().collect();
     assert!(
         rows.iter().any(|r| r.occupied() < r.cells.len()),
         "precondition: at least one row exercises the tail-skip fast path"

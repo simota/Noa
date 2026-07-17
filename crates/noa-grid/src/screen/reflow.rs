@@ -41,22 +41,25 @@ impl Screen {
     pub(super) fn resize_rows_without_reflow(&mut self, cols: u16, rows: u16) {
         let old_rows = self.grid.len() as u16;
         if rows > old_rows {
+            let grid = self.grid.canonicalize();
             for _ in 0..(rows - old_rows) {
-                self.grid.push(Row::new(cols));
+                grid.push(Row::new(cols));
             }
         } else if rows < old_rows {
             let remove = old_rows - rows;
             let below = (old_rows - 1).saturating_sub(self.cursor.y);
             let from_bottom = remove.min(below);
-            self.grid.truncate((old_rows - from_bottom) as usize);
+            self.grid
+                .canonicalize()
+                .truncate((old_rows - from_bottom) as usize);
             let from_top = remove - from_bottom;
             if from_top > 0 {
                 let drained = if self.scrollback_enabled {
-                    self.grid[..from_top as usize].to_vec()
+                    self.grid.canonicalize()[..from_top as usize].to_vec()
                 } else {
                     Vec::new()
                 };
-                self.grid.drain(0..from_top as usize);
+                self.grid.canonicalize().drain(0..from_top as usize);
                 for row in drained {
                     self.push_scrollback_row(row);
                 }
@@ -132,9 +135,9 @@ impl Screen {
         );
         self.scrollback = scrollback;
 
-        self.grid = grid;
+        self.grid = grid.into();
         while self.grid.len() < target_rows {
-            self.grid.push(Self::row_with_blank(cols, &blank));
+            self.grid.canonicalize().push(Self::row_with_blank(cols, &blank));
         }
 
         self.reanchor_placements_after_reflow(&line_remaps, grid_start, grid_end);

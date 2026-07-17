@@ -24,8 +24,8 @@ impl Screen {
             return;
         }
         let blank = self.blank();
-        self.grid.rotate_left(n);
-        for row in &mut self.grid[self.rows as usize - n..] {
+        self.grid.canonicalize().rotate_left(n);
+        for row in &mut self.grid.canonicalize()[self.rows as usize - n..] {
             row.clear(&blank);
         }
         for row in &mut self.grid {
@@ -220,6 +220,30 @@ impl Screen {
         }
     }
 
+    /// Seal `n` rows starting at logical row `top` into scrollback (deferred,
+    /// O(1) per row — see `PagedScrollback::push_row_deferred`), replacing
+    /// each in place with a recycled pre-blanked carcass (or a fresh blank
+    /// row when the pool is empty). Shared by both `scroll_up_region`
+    /// branches below; returns the row count evicted from scrollback by the
+    /// push.
+    fn seal_scrolled_rows(&mut self, top: usize, n: usize, blank: &Cell) -> usize {
+        let default_blank = Self::is_default_blank(blank);
+        let mut evicted = 0;
+        for i in top..top + n {
+            let replacement = match self.scrollback.take_blank_row(self.cols) {
+                Some(row) if default_blank => row,
+                Some(mut row) => {
+                    row.clear(blank);
+                    row
+                }
+                None => Self::row_with_blank(self.cols, blank),
+            };
+            let sealed = std::mem::replace(&mut self.grid[i], replacement);
+            evicted += self.scrollback.push_row_deferred(sealed);
+        }
+        evicted
+    }
+
     /// Scroll the scroll region up by `n` rows (top rows discarded; inc-1 has
     /// no scrollback retention — `PageList` lands in inc≥3).
     pub fn scroll_up_region(&mut self, n: u16) {
@@ -235,60 +259,76 @@ impl Screen {
         let recorded = self.records_scrollback_for_region(top, bottom);
         let full_height = top == 0 && bottom + 1 == self.rows as usize;
         let blank = self.blank();
+
+        if full_height {
+            // Ring fast path (wish#4 track B): a full-height scroll retires
+            // the `n` top rows and welcomes `n` fresh rows at the bottom, but
+            // every *other* row never changes physical storage slot — only
+            // which logical index it answers to. Seal/replace the `n`
+            // retiring rows in place (same per-row cost as the conventional
+            // path below) and advance the ring base instead of
+            // `Vec::rotate_left`ing every row header — see `RingGrid`'s doc
+            // and `.agents/reports/wish4-apply-hotpath.md` §4②③ (that rotate
+            // plus its driven `_platform_memmove` were ~11-34% of owner apply
+            // time on exactly this call, depending on workload).
+            if recorded {
+                let evicted = self.seal_scrolled_rows(0, n, &blank);
+                // full_height ⇒ no fixed live rows below the region for
+                // `shift_tracked_points_down_from` to move (that call only
+                // matters for the partial-region branch below).
+                self.note_scrollback_evictions(evicted);
+                self.pin_viewport_for_scrollback_push(n, true);
+                self.grid.advance_base(n);
+                // A scrollback-recording scroll is a pure translation of the
+                // viewport: every surviving row keeps its content and dirty
+                // bit (untouched — the ring never moved them), and the `n`
+                // rows sealed in above already carry `dirty = true` from
+                // their own construction/clear. `scroll_shift` tells the
+                // renderer to translate its per-row cache instead of
+                // rebuilding every row.
+                self.scroll_shift = self.scroll_shift.saturating_add(n);
+            } else {
+                // Scrollback disabled: the retiring rows' content is simply
+                // discarded, so blank them in place instead of sealing.
+                for i in 0..n {
+                    self.grid[i].clear(&blank);
+                }
+                self.grid.advance_base(n);
+                // No scrollback to translate a cache against — every row's
+                // on-screen identity changed, so the renderer needs a full
+                // rebuild (matches the conventional path's `!recorded` case
+                // below).
+                for r in &mut self.grid {
+                    r.dirty = true;
+                }
+            }
+            self.track_scroll_up(top, bottom, n, recorded);
+            return;
+        }
+
+        // Conventional path: partial regions (DECSTBM) stay correctness-first
+        // — `canonicalize` pays the same O(rows) row-header rotate this whole
+        // method used to pay unconditionally before the ring fast path above.
         if recorded {
             let old_scrollback_len = self.scrollback.len();
-            let default_blank = Self::is_default_blank(&blank);
-            // Seal the leaving rows by *moving* them into the deferred
-            // scrollback ring (O(1) per row; packing happens in batches off
-            // this path — see `PagedScrollback::push_row_deferred`). Each
-            // sealed row is replaced by a recycled pre-blanked carcass, so
-            // the post-rotate clear below is skipped for this branch.
-            let mut evicted = 0;
-            for i in top..top + n {
-                let replacement = match self.scrollback.take_blank_row(self.cols) {
-                    Some(row) if default_blank => row,
-                    Some(mut row) => {
-                        row.clear(&blank);
-                        row
-                    }
-                    None => Self::row_with_blank(self.cols, &blank),
-                };
-                let sealed = std::mem::replace(&mut self.grid[i], replacement);
-                evicted += self.scrollback.push_row_deferred(sealed);
-            }
-            if !full_height {
-                // Appending the scrolled rows moves fixed live rows down in
-                // storage coordinates. Apply that structural shift before
-                // eviction rebases every surviving point upward.
-                self.shift_tracked_points_down_from(
-                    old_scrollback_len.saturating_add(bottom + 1),
-                    n,
-                );
-            }
+            let evicted = self.seal_scrolled_rows(top, n, &blank);
+            // Appending the scrolled rows moves fixed live rows down in
+            // storage coordinates. Apply that structural shift before
+            // eviction rebases every surviving point upward.
+            self.shift_tracked_points_down_from(old_scrollback_len.saturating_add(bottom + 1), n);
             self.note_scrollback_evictions(evicted);
-            self.pin_viewport_for_scrollback_push(n, full_height);
+            self.pin_viewport_for_scrollback_push(n, false);
         }
-        self.grid[top..=bottom].rotate_left(n);
+        self.grid.canonicalize()[top..=bottom].rotate_left(n);
         if !recorded {
-            for r in &mut self.grid[(bottom + 1 - n)..=bottom] {
+            for r in &mut self.grid.canonicalize()[(bottom + 1 - n)..=bottom] {
                 r.clear(&blank);
             }
         }
-        if recorded && full_height {
-            // A scrollback-recording scroll is a pure translation of the
-            // viewport: every row keeps its content (and its dirty bit,
-            // which rotated with it), so no blanket re-dirty is needed.
-            // `scroll_shift` tells the renderer to translate its per-row
-            // cache instead of rebuilding every row.
-            self.scroll_shift = self.scroll_shift.saturating_add(n);
-        } else {
-            // Top-anchored partial regions (common for primary-screen TUIs
-            // with a fixed prompt/status area) still contribute to scrollback,
-            // but only the region moves. Rebuild those rows instead of using
-            // the full-screen row-cache translation fast path.
-            for r in &mut self.grid[top..=bottom] {
-                r.dirty = true;
-            }
+        // `recorded && full_height` is impossible here (handled above), so
+        // this is always the "rebuild the region" branch.
+        for r in &mut self.grid.canonicalize()[top..=bottom] {
+            r.dirty = true;
         }
         self.track_scroll_up(top, bottom, n, recorded);
     }
@@ -305,11 +345,11 @@ impl Screen {
             return;
         }
         let blank = self.blank();
-        self.grid[top..=bottom].rotate_right(n);
-        for r in &mut self.grid[top..(top + n)] {
+        self.grid.canonicalize()[top..=bottom].rotate_right(n);
+        for r in &mut self.grid.canonicalize()[top..(top + n)] {
             r.clear(&blank);
         }
-        for r in &mut self.grid[top..=bottom] {
+        for r in &mut self.grid.canonicalize()[top..=bottom] {
             r.dirty = true;
         }
         self.track_scroll_down(top, bottom, n);
@@ -466,12 +506,12 @@ impl Screen {
                 }
                 Self::sanitize_wide_row(&mut self.grid[y], &blank);
                 self.grid[y].dirty = true;
-                for r in &mut self.grid[y + 1..] {
+                for r in &mut self.grid.canonicalize()[y + 1..] {
                     r.clear(&blank);
                 }
             }
             EraseDisplay::Above => {
-                for r in &mut self.grid[..y] {
+                for r in &mut self.grid.canonicalize()[..y] {
                     r.clear(&blank);
                 }
                 for c in &mut self.grid[y].cells[..=x] {
@@ -643,11 +683,11 @@ impl Screen {
         let len = bottom - start + 1;
         let n = (n.max(1) as usize).min(len);
         let blank = self.blank();
-        self.grid[start..=bottom].rotate_right(n);
-        for r in &mut self.grid[start..start + n] {
+        self.grid.canonicalize()[start..=bottom].rotate_right(n);
+        for r in &mut self.grid.canonicalize()[start..start + n] {
             r.clear(&blank);
         }
-        for r in &mut self.grid[start..=bottom] {
+        for r in &mut self.grid.canonicalize()[start..=bottom] {
             r.dirty = true;
         }
         self.remove_placements_intersecting_grid_rows(start, bottom);
@@ -663,11 +703,11 @@ impl Screen {
         let len = bottom - start + 1;
         let n = (n.max(1) as usize).min(len);
         let blank = self.blank();
-        self.grid[start..=bottom].rotate_left(n);
-        for r in &mut self.grid[bottom + 1 - n..=bottom] {
+        self.grid.canonicalize()[start..=bottom].rotate_left(n);
+        for r in &mut self.grid.canonicalize()[bottom + 1 - n..=bottom] {
             r.clear(&blank);
         }
-        for r in &mut self.grid[start..=bottom] {
+        for r in &mut self.grid.canonicalize()[start..=bottom] {
             r.dirty = true;
         }
         self.remove_placements_intersecting_grid_rows(start, bottom);

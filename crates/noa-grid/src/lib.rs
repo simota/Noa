@@ -28,7 +28,7 @@ pub mod url;
 #[cfg(test)]
 mod tests;
 
-pub use cell::{Cell, Hyperlink, HyperlinkId, Row};
+pub use cell::{Cell, Hyperlink, HyperlinkId, RingGrid, Row};
 pub use copy_mode::{CopyDirection, CopyModeCancel, CopyModeState};
 pub use cursor::{Cursor, CursorStyle, HorizontalMargins, ScrollRegion};
 pub use grapheme::GraphemeId;

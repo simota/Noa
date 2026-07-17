@@ -467,7 +467,7 @@ impl Screen {
                 Self::push_full_row_text(row, &mut text, &mut previous_wrapped, &mut first_row);
             }
         } else {
-            for row in &self.grid[start - scrollback_len..] {
+            for row in &self.grid.canonicalize()[start - scrollback_len..] {
                 Self::push_full_row_text(row, &mut text, &mut previous_wrapped, &mut first_row);
             }
         }

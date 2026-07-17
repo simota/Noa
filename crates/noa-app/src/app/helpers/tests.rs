@@ -1685,8 +1685,44 @@ fn toggle_tab_overview_dispatch_flips_visibility() {
 
 #[test]
 fn empty_terminal_title_falls_back_to_app_name() {
-    assert_eq!(tab_title(""), "Noa");
-    assert_eq!(tab_title("shell"), "shell");
+    // No override, no shell title, and no cwd/process to build a dynamic
+    // fallback from → the app name.
+    assert_eq!(resolved_tab_title(None, "", None, None), "Noa");
+    // A non-empty shell title (OSC 0/2) is shown verbatim.
+    assert_eq!(resolved_tab_title(None, "shell", None, None), "shell");
+}
+
+#[test]
+fn empty_shell_title_uses_dynamic_process_and_cwd_fallback() {
+    // cwd only → the cwd's tail segment (the repo/dir name).
+    assert_eq!(
+        resolved_tab_title(None, "", Some("/Users/me/repos/noa"), None),
+        "noa"
+    );
+    // A non-shell process only (no cwd) → the process name.
+    assert_eq!(resolved_tab_title(None, "", None, Some("vim")), "vim");
+    // Both → `process — cwdtail`.
+    assert_eq!(
+        resolved_tab_title(None, "", Some("/Users/me/repos/noa"), Some("cargo")),
+        "cargo — noa"
+    );
+    // A plain shell as the foreground process collapses to just the cwd tail
+    // (a `zsh` prompt reads better as its directory name); a login-shell `-`
+    // argv0 prefix and a full path both still classify as the shell.
+    assert_eq!(
+        resolved_tab_title(None, "", Some("/Users/me/repos/noa"), Some("zsh")),
+        "noa"
+    );
+    assert_eq!(
+        resolved_tab_title(None, "", Some("/Users/me/repos/noa"), Some("-zsh")),
+        "noa"
+    );
+    assert_eq!(
+        resolved_tab_title(None, "", Some("/Users/me/repos/noa"), Some("/bin/bash")),
+        "noa"
+    );
+    // A plain shell with no cwd has nothing to show → the app name.
+    assert_eq!(resolved_tab_title(None, "", None, Some("zsh")), "Noa");
 }
 
 #[test]
@@ -1786,10 +1822,26 @@ fn command_palette_snapshot_marks_unavailable_commands_disabled() {
 // existing shell-title/fallback path is untouched.
 #[test]
 fn resolved_tab_title_prefers_the_override_over_any_shell_title() {
-    assert_eq!(resolved_tab_title(Some("api server"), "vim"), "api server");
-    assert_eq!(resolved_tab_title(Some("api server"), ""), "api server");
-    assert_eq!(resolved_tab_title(None, "vim"), "vim");
-    assert_eq!(resolved_tab_title(None, ""), "Noa");
+    assert_eq!(
+        resolved_tab_title(Some("api server"), "vim", None, None),
+        "api server"
+    );
+    assert_eq!(
+        resolved_tab_title(Some("api server"), "", None, None),
+        "api server"
+    );
+    // The override even masks a dynamic process/cwd fallback (REQ-TTL-5).
+    assert_eq!(
+        resolved_tab_title(Some("api server"), "", Some("/Users/me/noa"), Some("cargo")),
+        "api server"
+    );
+    assert_eq!(resolved_tab_title(None, "vim", None, None), "vim");
+    // A non-empty OSC title wins over the dynamic fallback.
+    assert_eq!(
+        resolved_tab_title(None, "vim", Some("/Users/me/noa"), Some("cargo")),
+        "vim"
+    );
+    assert_eq!(resolved_tab_title(None, "", None, None), "Noa");
 }
 
 // AC-PXI-5: the diff-cache helper skips the setter when the raw cwd is

@@ -92,6 +92,20 @@ impl App {
         let search_preedit = self
             .modal_preedit_for(window_id, ModalImeTarget::SearchPrompt)
             .to_string();
+        // The focused pane's detected foreground process name, read from the
+        // session store before the mutable `state` borrow below (the store is
+        // owned by `self`, not the per-window state). Feeds the dynamic
+        // tab-title fallback so the title tracks `cargo`/`vim`/… when the shell
+        // sets no OSC 0/2 title.
+        let focused_process = self
+            .windows
+            .get(&window_id)
+            .map(|state| state.focused_pane)
+            .and_then(|pane_id| {
+                self.session_store
+                    .get(&Self::session_card_id(window_id, pane_id))
+                    .and_then(|card| card.process.clone())
+            });
         #[cfg(target_os = "macos")]
         let has_visible_background_image = self.background_image.has_visible_image();
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
@@ -133,7 +147,7 @@ impl App {
         // (tab-title REQ-TTL-2/5); the shell path below only applies while
         // there is no override.
         let title_override = state.title_override.clone();
-        let mut title = resolved_tab_title(title_override.as_deref(), "");
+        let mut title = resolved_tab_title(title_override.as_deref(), "", None, None);
         // The focused pane's raw OSC 7 cwd diff-cache result, computed under
         // the same terminal lock the title read already takes (no extra lock
         // later) — feeds the titlebar proxy icon diff-apply below
@@ -195,10 +209,19 @@ impl App {
                         remote_state,
                         &term.title,
                     );
-                    title = resolved_tab_title(title_override.as_deref(), &remote_title);
+                    // A remote pane's cwd/process aren't tracked locally; the
+                    // remote `tab_title` helper carries its own fallback, so
+                    // the dynamic path stays out of it (pass `None`).
+                    title =
+                        resolved_tab_title(title_override.as_deref(), &remote_title, None, None);
                     focused_cwd_update = proxy_icon_update(&state.proxy_icon_cwd, None);
                 } else {
-                    title = resolved_tab_title(title_override.as_deref(), &term.title);
+                    title = resolved_tab_title(
+                        title_override.as_deref(),
+                        &term.title,
+                        term.cwd.as_deref(),
+                        focused_process.as_deref(),
+                    );
                     focused_cwd_update =
                         proxy_icon_update(&state.proxy_icon_cwd, term.cwd.as_deref());
                 }

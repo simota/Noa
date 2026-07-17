@@ -170,26 +170,50 @@ impl Pty {
             .take_writer()
             .map_err(|e| PtyError::TakeWriter(e.to_string()))?;
 
-        // Independent dup of the master fd for the reader's readability
-        // polling (congestion coalescing — see `reader.rs`). Owned by the
-        // reader thread so its lifetime is decoupled from this `Pty`'s.
+        // Independent dups of the master fd for the reader's and writer's
+        // readiness polling (see `reader.rs` / `writer.rs`). Owned by those
+        // threads so their lifetimes are decoupled from this `Pty`'s. With
+        // both dups secured, the master's open file description is switched
+        // to `O_NONBLOCK`: the reader then drains the kernel tty queue to
+        // `EAGAIN` per wakeup (full chunk coalescing — the legacy
+        // poll-before-every-read gate burned more syscall time in `poll`
+        // than in `read` under flood) and the writer parks in
+        // `poll(POLLOUT)` when the input queue fills. The flag is only ever
+        // set when both ends can handle it; on any failure everything
+        // degrades to the legacy blocking paths.
         #[cfg(unix)]
-        let poll_fd = master.as_raw_fd().and_then(|raw| {
+        let dup_master = |raw: std::os::fd::RawFd| {
             use std::os::fd::FromRawFd as _;
             // SAFETY: `raw` is a live fd owned by the master; `dup` returns a
             // fresh, exclusively-owned fd (or -1, handled below).
             let dup = unsafe { libc::dup(raw) };
             (dup >= 0).then(|| unsafe { std::os::fd::OwnedFd::from_raw_fd(dup) })
-        });
+        };
+        #[cfg(unix)]
+        let (poll_fd, writer_poll_fd, nonblocking) = match master.as_raw_fd() {
+            Some(raw) => {
+                let reader_fd = dup_master(raw);
+                let writer_fd = dup_master(raw);
+                let nonblocking = reader_fd.is_some() && writer_fd.is_some() && {
+                    // SAFETY: `raw` is a live fd; F_GETFL/F_SETFL are benign.
+                    let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
+                    flags >= 0
+                        && unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) } >= 0
+                };
+                (reader_fd, writer_fd, nonblocking)
+            }
+            None => (None, None, false),
+        };
         #[cfg(not(unix))]
-        let poll_fd = None;
+        let (poll_fd, writer_poll_fd, nonblocking) = (None, None, false);
 
         let (tx, event_rx) = pty_event_channel();
-        spawn_reader(reader, poll_fd, tx.clone())
+        spawn_reader(reader, poll_fd, nonblocking, tx.clone())
             .map_err(|e| PtyError::SpawnThread(e.to_string()))?;
         spawn_waiter(child, tx).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
 
-        let writer = PtyWriter::spawn(writer).map_err(|e| PtyError::SpawnThread(e.to_string()))?;
+        let writer = PtyWriter::spawn(writer, writer_poll_fd)
+            .map_err(|e| PtyError::SpawnThread(e.to_string()))?;
 
         Ok(Self {
             master,

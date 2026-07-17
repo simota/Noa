@@ -62,7 +62,16 @@ impl PtyWriter {
     /// write fails (child gone → EIO); a write blocked on a full tty input
     /// queue is unblocked by the child reading, or errors out when the `Pty`
     /// drop kills the child.
-    pub(crate) fn spawn(mut writer: Box<dyn Write + Send>) -> io::Result<Self> {
+    ///
+    /// `poll_fd` is an owned dup of the pty master, required when the master
+    /// description carries `O_NONBLOCK` (the reader's drain mode): a full tty
+    /// input queue then surfaces as `WouldBlock` instead of blocking, and the
+    /// thread parks in `poll(POLLOUT)` until the child drains it — the exact
+    /// behavior a blocking `write_all` had, minus the busy error.
+    pub(crate) fn spawn(
+        mut writer: Box<dyn Write + Send>,
+        #[cfg_attr(not(unix), allow(unused_variables))] poll_fd: Option<std::os::fd::OwnedFd>,
+    ) -> io::Result<Self> {
         let (tx, rx) = crossbeam_channel::unbounded::<WriteRequest>();
         std::thread::Builder::new()
             .name("noa-pty-writer".into())
@@ -96,8 +105,7 @@ impl PtyWriter {
                             }
                         }
                     };
-                    if let Err(err) = writer
-                        .write_all(request.as_ref())
+                    if let Err(err) = write_all_pollout(&mut writer, &poll_fd, request.as_ref())
                         .and_then(|()| writer.flush())
                     {
                         log::warn!("pty writer thread stopping: {err}");
@@ -137,6 +145,39 @@ impl PtyWriter {
     pub fn flush(&self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// `write_all` that tolerates a nonblocking master: on `WouldBlock` it parks
+/// in `poll(POLLOUT)` on `poll_fd` until the child drains the tty input
+/// queue, then resumes. Without a poll fd (non-unix, dup failure — in which
+/// case `O_NONBLOCK` was never set and `WouldBlock` cannot occur) it behaves
+/// exactly like `write_all`.
+fn write_all_pollout(
+    writer: &mut Box<dyn Write + Send>,
+    #[cfg_attr(not(unix), allow(unused_variables))] poll_fd: &Option<std::os::fd::OwnedFd>,
+    mut buf: &[u8],
+) -> io::Result<()> {
+    while !buf.is_empty() {
+        match writer.write(buf) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                ));
+            }
+            Ok(n) => buf = &buf[n..],
+            #[cfg(unix)]
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock && poll_fd.is_some() => {
+                use std::os::fd::AsRawFd as _;
+                if let Some(fd) = poll_fd {
+                    crate::reader::wait_writable(fd.as_raw_fd());
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 impl std::fmt::Debug for PtyWriter {
@@ -194,10 +235,13 @@ mod tests {
         let (entered_tx, entered_rx) = bounded(1);
         let (release_tx, release_rx) = bounded(1);
         let (dropped_tx, dropped_rx) = bounded(1);
-        let writer = PtyWriter::spawn(Box::new(BlockingWriter {
-            entered: entered_tx,
-            release: release_rx,
-        }))
+        let writer = PtyWriter::spawn(
+            Box::new(BlockingWriter {
+                entered: entered_tx,
+                release: release_rx,
+            }),
+            None,
+        )
         .unwrap();
 
         writer

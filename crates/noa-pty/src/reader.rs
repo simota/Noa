@@ -42,20 +42,56 @@ const COALESCE_THRESHOLD: usize = 1024 * 1024;
 const COALESCE_SLOT_THRESHOLD: usize = 64;
 
 /// How long a coalescing top-up waits for the next kernel readability, per
-/// iteration. Only paid while the consumer is at least
-/// [`COALESCE_THRESHOLD`] behind, so it delays nothing user-visible.
+/// iteration (legacy blocking-fd path only). Only paid while the consumer is
+/// at least [`COALESCE_THRESHOLD`] behind, so it delays nothing user-visible.
 const COALESCE_POLL_MS: libc::c_int = 2;
 
+/// Nonblocking-drain refill bridge: after the kernel tty queue runs dry
+/// mid-chunk *while the producer is streaming*, retry the read this many
+/// times (yielding in between) before emitting the partial chunk. The
+/// writing child is woken by the drain itself and refills the ~1KiB queue
+/// within a scheduler quantum; a few yields bridge that gap and keep chunks
+/// near [`READ_CHUNK`] instead of near the 1KiB kernel quantum — every
+/// sliver chunk otherwise costs a channel send/wake *and* a full
+/// terminal-lock parse hold downstream (measured: a 150MB flood emitted
+/// ~105K sliver chunks, avg 1.5KiB, with the bridge gated on downstream
+/// congestion only). "Streaming" is judged by the *last read's size*: a full
+/// kernel quantum (≥[`STREAMING_READ_MIN`]) means the queue was brimming, so
+/// more is imminent; a partial read means the burst's tail (a finished
+/// frame, an interactive echo) — emit immediately, preserving reply latency
+/// for request/response loops like DOOM-fire's DSR sync. Ghostty's
+/// io-gather uses the same bounded spin (`bridge_spin_max`) with a
+/// burst-size saturation gate for the same reason.
+const REFILL_SPIN_MAX: u32 = 16;
+
+/// A single read at or above this size counts as "the kernel queue was full
+/// when drained" — the macOS pty output queue hands out at most ~1KiB per
+/// read, so a full-quantum read implies the producer is ahead of us.
+const STREAMING_READ_MIN: usize = 1024;
+
 #[cfg(unix)]
-fn poll_readable(fd: std::os::fd::RawFd, timeout_ms: libc::c_int) -> bool {
+fn poll_fd_events(fd: std::os::fd::RawFd, events: libc::c_short, timeout_ms: libc::c_int) -> bool {
     let mut pfd = libc::pollfd {
         fd,
-        events: libc::POLLIN,
+        events,
         revents: 0,
     };
     // SAFETY: `pfd` is a valid pollfd for the duration of the call.
     let ready = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-    ready > 0 && (pfd.revents & libc::POLLIN) != 0
+    ready > 0 && (pfd.revents & (events | libc::POLLHUP | libc::POLLERR)) != 0
+}
+
+#[cfg(unix)]
+fn poll_readable(fd: std::os::fd::RawFd, timeout_ms: libc::c_int) -> bool {
+    poll_fd_events(fd, libc::POLLIN, timeout_ms)
+}
+
+/// Block until the pty master is writable again (nonblocking writer path).
+/// Returns on POLLOUT/POLLHUP/POLLERR — the follow-up `write` surfaces the
+/// actual error, so a `false` here (EINTR-style poll failure) just retries.
+#[cfg(unix)]
+pub(crate) fn wait_writable(fd: std::os::fd::RawFd) {
+    while !poll_fd_events(fd, libc::POLLOUT, 100) {}
 }
 
 /// Spawn a thread that reads from `reader` until EOF/error, forwarding data
@@ -64,12 +100,15 @@ fn poll_readable(fd: std::os::fd::RawFd, timeout_ms: libc::c_int) -> bool {
 /// wait thread so the exit code is accurate.
 ///
 /// `poll_fd` is an owned dup of the pty master used only to test readability
-/// (never read from), enabling the congestion coalescing described on
-/// [`COALESCE_THRESHOLD`]; `None` (fd unavailable) degrades to the plain
-/// read-per-event loop.
+/// (never read from). With `nonblocking` set (the master description carries
+/// `O_NONBLOCK`), the loop drains the kernel tty queue until `EAGAIN` and
+/// parks in a single `poll` when idle — full coalescing at ~2 syscalls per
+/// KiB quantum instead of the legacy poll-before-every-read gate. Without it
+/// (fd unavailable / non-unix) it degrades to the legacy blocking loop.
 pub(crate) fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
     #[cfg_attr(not(unix), allow(unused_variables))] poll_fd: Option<std::os::fd::OwnedFd>,
+    #[cfg_attr(not(unix), allow(unused_variables))] nonblocking: bool,
     tx: Sender<PtyEvent>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
@@ -79,76 +118,188 @@ pub(crate) fn spawn_reader(
             let gate = Arc::new(FlowGate::new());
             // Chunk-size/congestion debug tap; checked once, not per chunk.
             let trace = std::env::var_os("NOA_PTY_READER_TRACE").is_some();
-            loop {
-                let mut buf = pool.take();
-                let mut n = match reader.read(&mut buf) {
-                    Ok(0) => {
-                        pool.recycle(buf);
+            #[cfg(unix)]
+            match poll_fd {
+                Some(fd) if nonblocking => {
+                    drain_nonblocking(&mut reader, fd, &tx, &pool, &gate, trace)
+                }
+                other => drain_blocking(&mut reader, other, &tx, &pool, &gate, trace),
+            }
+            #[cfg(not(unix))]
+            drain_blocking(&mut reader, &tx, &pool, &gate, trace);
+        })
+}
+
+/// Nonblocking drain loop (macOS/unix with `O_NONBLOCK` on the master): read
+/// until `EAGAIN`, chunk full, or EOF; park in one `poll(POLLIN)` only when
+/// the queue is truly empty. Under congestion a bounded yield-retry bridges
+/// the child's refill gap so chunks stay near [`READ_CHUNK`]; interactive
+/// slivers are emitted on the first `EAGAIN`, preserving input latency.
+#[cfg(unix)]
+fn drain_nonblocking(
+    reader: &mut Box<dyn Read + Send>,
+    fd: std::os::fd::OwnedFd,
+    tx: &Sender<PtyEvent>,
+    pool: &Arc<ReadBufferPool>,
+    gate: &Arc<FlowGate>,
+    trace: bool,
+) {
+    use std::os::fd::AsRawFd as _;
+    let raw = fd.as_raw_fd();
+    loop {
+        let mut buf = pool.take();
+        let mut n = 0usize;
+        let mut eof = false;
+        let mut pending_error = None;
+        let mut spins = 0u32;
+        let mut streaming = false;
+        loop {
+            match reader.read(&mut buf[n..]) {
+                Ok(0) => {
+                    eof = true;
+                    break;
+                }
+                Ok(m) => {
+                    n += m;
+                    spins = 0;
+                    streaming = m >= STREAMING_READ_MIN;
+                    if n == buf.len() {
                         break;
                     }
-                    Ok(n) => n,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                        pool.recycle(buf);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if n == 0 {
+                        // Idle: park until the next byte (or hangup) arrives.
+                        poll_readable(raw, -1);
                         continue;
                     }
-                    Err(e) => {
-                        pool.recycle(buf);
-                        let _ = tx.send(PtyEvent::Error(e));
+                    let congested =
+                        gate.level() >= COALESCE_THRESHOLD || tx.len() >= COALESCE_SLOT_THRESHOLD;
+                    if (streaming || congested) && spins < REFILL_SPIN_MAX {
+                        spins += 1;
+                        std::thread::yield_now();
+                        continue;
+                    }
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    pending_error = Some(e);
+                    break;
+                }
+            }
+        }
+        if n == 0 && !eof && pending_error.is_none() {
+            pool.recycle(buf);
+            continue;
+        }
+        if trace {
+            eprintln!(
+                "[pty-reader] chunk={n}B gate={}B queued={} eof={eof}",
+                gate.level(),
+                tx.len(),
+            );
+        }
+        if n > 0 {
+            gate.add(n);
+            let chunk = PtyData::pooled(buf, n, Arc::clone(pool), Some(Arc::clone(gate)));
+            if tx.send(PtyEvent::Data(chunk)).is_err() {
+                // Receiver dropped; nothing more to do.
+                return;
+            }
+        } else {
+            pool.recycle(buf);
+        }
+        if let Some(e) = pending_error {
+            let _ = tx.send(PtyEvent::Error(e));
+            return;
+        }
+        if eof {
+            return;
+        }
+        // Byte-budget backpressure (see `IN_FLIGHT_BYTE_BUDGET`).
+        gate.wait_below(IN_FLIGHT_BYTE_BUDGET);
+    }
+}
+
+/// Legacy blocking-fd loop: one blocking read per chunk, with a
+/// poll-gated top-up while the consumer is measurably behind.
+fn drain_blocking(
+    reader: &mut Box<dyn Read + Send>,
+    #[cfg(unix)] poll_fd: Option<std::os::fd::OwnedFd>,
+    tx: &Sender<PtyEvent>,
+    pool: &Arc<ReadBufferPool>,
+    gate: &Arc<FlowGate>,
+    trace: bool,
+) {
+    loop {
+        let mut buf = pool.take();
+        let mut n = match reader.read(&mut buf) {
+            Ok(0) => {
+                pool.recycle(buf);
+                return;
+            }
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                pool.recycle(buf);
+                continue;
+            }
+            Err(e) => {
+                pool.recycle(buf);
+                let _ = tx.send(PtyEvent::Error(e));
+                return;
+            }
+        };
+        // Congestion coalescing: while the consumer is measurably
+        // behind, top this chunk up toward a full `READ_CHUNK` from
+        // reads that are immediately (well, within a poll tick)
+        // available, instead of emitting tty-queue-sized slivers.
+        let mut eof = false;
+        let mut pending_error = None;
+        #[cfg(unix)]
+        if let Some(fd) = &poll_fd {
+            use std::os::fd::AsRawFd as _;
+            while n < buf.len()
+                && (gate.level() >= COALESCE_THRESHOLD || tx.len() >= COALESCE_SLOT_THRESHOLD)
+                && poll_readable(fd.as_raw_fd(), COALESCE_POLL_MS)
+            {
+                match reader.read(&mut buf[n..]) {
+                    Ok(0) => {
+                        eof = true;
                         break;
                     }
-                };
-                // Congestion coalescing: while the consumer is measurably
-                // behind, top this chunk up toward a full `READ_CHUNK` from
-                // reads that are immediately (well, within a poll tick)
-                // available, instead of emitting tty-queue-sized slivers.
-                let mut eof = false;
-                let mut pending_error = None;
-                #[cfg(unix)]
-                if let Some(fd) = &poll_fd {
-                    use std::os::fd::AsRawFd as _;
-                    while n < buf.len()
-                        && (gate.level() >= COALESCE_THRESHOLD
-                            || tx.len() >= COALESCE_SLOT_THRESHOLD)
-                        && poll_readable(fd.as_raw_fd(), COALESCE_POLL_MS)
-                    {
-                        match reader.read(&mut buf[n..]) {
-                            Ok(0) => {
-                                eof = true;
-                                break;
-                            }
-                            Ok(m) => n += m,
-                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                            Err(e) => {
-                                pending_error = Some(e);
-                                break;
-                            }
-                        }
+                    Ok(m) => n += m,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        pending_error = Some(e);
+                        break;
                     }
                 }
-                if trace {
-                    eprintln!(
-                        "[pty-reader] chunk={n}B gate={}B queued={} eof={eof}",
-                        gate.level(),
-                        tx.len(),
-                    );
-                }
-                gate.add(n);
-                let chunk = PtyData::pooled(buf, n, Arc::clone(&pool), Some(Arc::clone(&gate)));
-                if tx.send(PtyEvent::Data(chunk)).is_err() {
-                    // Receiver dropped; nothing more to do.
-                    break;
-                }
-                if let Some(e) = pending_error {
-                    let _ = tx.send(PtyEvent::Error(e));
-                    break;
-                }
-                if eof {
-                    break;
-                }
-                // Byte-budget backpressure (see `IN_FLIGHT_BYTE_BUDGET`).
-                gate.wait_below(IN_FLIGHT_BYTE_BUDGET);
             }
-        })
+        }
+        if trace {
+            eprintln!(
+                "[pty-reader] chunk={n}B gate={}B queued={} eof={eof}",
+                gate.level(),
+                tx.len(),
+            );
+        }
+        gate.add(n);
+        let chunk = PtyData::pooled(buf, n, Arc::clone(pool), Some(Arc::clone(gate)));
+        if tx.send(PtyEvent::Data(chunk)).is_err() {
+            // Receiver dropped; nothing more to do.
+            return;
+        }
+        if let Some(e) = pending_error {
+            let _ = tx.send(PtyEvent::Error(e));
+            return;
+        }
+        if eof {
+            return;
+        }
+        // Byte-budget backpressure (see `IN_FLIGHT_BYTE_BUDGET`).
+        gate.wait_below(IN_FLIGHT_BYTE_BUDGET);
+    }
 }
 
 /// Spawn a thread that blocks on the child, then emits [`PtyEvent::Exit`]
@@ -200,8 +351,13 @@ mod tests {
     fn reader_reuses_returned_payload_buffers() {
         let (step_tx, step_rx) = crossbeam_channel::bounded(1);
         let (event_tx, event_rx) = crossbeam_channel::bounded(1);
-        let handle = spawn_reader(Box::new(ScriptedReader { steps: step_rx }), None, event_tx)
-            .expect("spawn reader");
+        let handle = spawn_reader(
+            Box::new(ScriptedReader { steps: step_rx }),
+            None,
+            false,
+            event_tx,
+        )
+        .expect("spawn reader");
 
         step_tx.send(ReadStep::Data(b"abc")).unwrap();
         let first = match event_rx.recv().unwrap() {
@@ -238,8 +394,13 @@ mod tests {
     fn reader_emits_error_and_exits() {
         let (step_tx, step_rx) = crossbeam_channel::bounded(1);
         let (event_tx, event_rx) = crossbeam_channel::bounded(1);
-        let handle = spawn_reader(Box::new(ScriptedReader { steps: step_rx }), None, event_tx)
-            .expect("spawn reader");
+        let handle = spawn_reader(
+            Box::new(ScriptedReader { steps: step_rx }),
+            None,
+            false,
+            event_tx,
+        )
+        .expect("spawn reader");
 
         step_tx
             .send(ReadStep::Error(ErrorKind::PermissionDenied))
@@ -256,8 +417,13 @@ mod tests {
         let (step_tx, step_rx) = crossbeam_channel::bounded(1);
         let (event_tx, event_rx) = crossbeam_channel::bounded(1);
         drop(event_rx);
-        let handle = spawn_reader(Box::new(ScriptedReader { steps: step_rx }), None, event_tx)
-            .expect("spawn reader");
+        let handle = spawn_reader(
+            Box::new(ScriptedReader { steps: step_rx }),
+            None,
+            false,
+            event_tx,
+        )
+        .expect("spawn reader");
 
         step_tx.send(ReadStep::Data(b"orphaned")).unwrap();
         handle.join().unwrap();

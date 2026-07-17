@@ -275,6 +275,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.handle_remote_request_completed(event_loop, request_id)
             }
             UserEvent::RestoreFocus { window_id } => {
+                // Defensive twin of the `Focused(false)` reset: the deferred
+                // focus restore runs the tab-close teardown path that can eat
+                // the Cmd-up event, so clear any stale held modifiers here too
+                // rather than trusting them to survive the transition.
+                self.modifiers = winit::keyboard::ModifiersState::empty();
                 let target_exists = self.windows.contains_key(&window_id);
                 if should_apply_deferred_focus_restore(window_id, self.focused, target_exists)
                     && let Some(window) = self
@@ -387,20 +392,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.secure_input
                     .on_focus_change(true, &mut crate::secure_input::CarbonSecureInput);
                 if let Some(state) = self.windows.get(&window_id) {
-                    // Belt-and-suspenders for the native-tab-close focus loss:
-                    // whether or not the deferred `RestoreFocus` lands, a real
-                    // focus gain re-anchors first responder on the content view
-                    // and re-arms IME so key input can't stay dead.
-                    #[cfg(target_os = "macos")]
-                    {
-                        crate::macos_window::focus_content_view(&state.window);
-                        state.window.set_ime_allowed(false);
-                        state.window.set_ime_allowed(true);
-                    }
                     state.window.request_redraw();
                 }
             }
             WindowEvent::Focused(false) => {
+                // Focus transitions can eat the modifier-up event — most
+                // notably native-tab teardown on ⌘W, where the Cmd-release
+                // `flagsChanged` lands on the torn-down view and never reaches
+                // winit — leaving `self.modifiers` stuck holding SUPER. Stale
+                // held modifiers then mis-resolve the next plain keypress as a
+                // chord (a plain `f` → `cmd+f` → Search/Find). Clear on focus
+                // loss; winit re-sends `ModifiersChanged` on the next real
+                // modifier press, so nothing is lost.
+                self.modifiers = winit::keyboard::ModifiersState::empty();
                 self.end_copy_mode_for_window(window_id);
                 // Only clear if this window is the one we recorded as focused —
                 // when macOS switches between our own windows the incoming

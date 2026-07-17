@@ -737,6 +737,27 @@ mod tests {
         );
     }
 
+    // Regression guard for the "勝手にSearchモード" bug: a focus transition
+    // (native-tab close on ⌘W) can eat the Cmd-up event, leaving the app's
+    // stored modifiers stuck holding SUPER. The fix resets them to empty on
+    // focus loss. This locks the resolution semantics that reset relies on —
+    // a plain `f` under the reset (empty) modifiers must NOT resolve to
+    // Search/Find, while a live SUPER still does.
+    #[test]
+    fn plain_f_with_reset_modifiers_does_not_resolve_to_find() {
+        let engine = KeybindEngine::default();
+        assert_eq!(
+            engine.resolve(&Key::Character("f".into()), ModifiersState::empty()),
+            None,
+            "plain f with reset (empty) modifiers must not trigger Search/Find"
+        );
+        assert_eq!(
+            engine.resolve(&Key::Character("f".into()), ModifiersState::SUPER),
+            Some(AppCommand::Search(SearchAction::Find)),
+            "cmd+f with live SUPER must still trigger Search/Find"
+        );
+    }
+
     // The empty sentinel (`sidebar-hotkey = none`) keeps the default
     // `cmd+shift+s` binding; an unparseable chord is diagnosed and ignored.
     #[test]

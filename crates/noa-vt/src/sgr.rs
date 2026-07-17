@@ -53,6 +53,19 @@ pub fn parse_sgr(csi: &Csi) -> Vec<SgrAttr> {
 pub fn parse_sgr_into(csi: &Csi, out: &mut Vec<SgrAttr>) {
     out.clear();
     let p = csi.params();
+    // Fast path: a lone truecolor pen (`38;2;r;g;b` / `48;2;r;g;b`) — the
+    // per-cell shape SGR-dense floods emit. Output is identical to the
+    // general loop below (for exactly 5 params, `parse_ext_color` reads
+    // r/g/b from the same slots in both the semicolon and colon forms).
+    if let [code @ (38 | 48), 2, r, g, b] = *p {
+        let color = Color::Rgb(Rgb::new(r as u8, g as u8, b as u8));
+        out.push(if code == 38 {
+            SgrAttr::Fg(color)
+        } else {
+            SgrAttr::Bg(color)
+        });
+        return;
+    }
     if p.is_empty() {
         out.push(SgrAttr::Reset);
         return;

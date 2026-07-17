@@ -548,6 +548,28 @@ impl Parser {
         }
     }
 
+    /// Batch-consume a run of CSI parameter bytes (digits / `;` / `:`) while
+    /// in [`State::CsiParam`], bypassing the per-byte `advance` dispatch (the
+    /// C1/anywhere/state matches cost more than the digit accumulation
+    /// itself). Returns how many bytes were consumed; the first unconsumed
+    /// byte (final byte, intermediate, C0, …) still goes through `advance`,
+    /// so observable semantics are exactly the per-byte path's
+    /// ([`Parser::param_digit`] / [`Parser::param_sep`]).
+    pub(crate) fn scan_csi_params(&mut self, bytes: &[u8]) -> usize {
+        debug_assert_eq!(self.state, State::CsiParam);
+        let mut i = 0;
+        while let Some(&b) = bytes.get(i) {
+            match b {
+                0x30..=0x39 => self.param_digit(b),
+                0x3a => self.param_sep(true),
+                0x3b => self.param_sep(false),
+                _ => break,
+            }
+            i += 1;
+        }
+        i
+    }
+
     fn param_sep(&mut self, colon: bool) {
         if self.params.is_empty() {
             self.params.push(0);

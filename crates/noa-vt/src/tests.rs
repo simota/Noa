@@ -1232,3 +1232,277 @@ fn take_display_dirty_resets_per_take_and_ignores_partial_sequences() {
     stream.feed(b"n", &mut h);
     assert!(!stream.take_display_dirty());
 }
+
+// ── CSI fast-path equivalence: whole-chunk lookahead vs per-byte DFA ──
+//
+// `Stream::feed` lexes a complete in-chunk CSI sequence with `try_scan_csi`
+// and dispatches it without touching the per-byte DFA; sequences split
+// across feed boundaries (or containing any byte the DFA treats specially)
+// still take the DFA path, with `Parser::scan_csi_params` batching digit
+// runs on resume. All three paths must produce identical Handler call
+// sequences. The tests below feed CSI-dense streams whole (fast path), one
+// byte at a time (pure DFA + trivial resumes), and split at every possible
+// position (every partial-sequence resume boundary), asserting the recorded
+// call logs are equal.
+
+/// Records every Handler call CSI dispatch can produce, with arguments.
+/// Adjacent `print`/`print_str` text coalesces into one entry so run
+/// granularity (a chunking artifact by design) doesn't affect equality.
+#[derive(Default)]
+struct CsiRecorder {
+    events: Vec<String>,
+    text: String,
+}
+
+impl CsiRecorder {
+    fn ev(&mut self, event: String) {
+        if !self.text.is_empty() {
+            let text = std::mem::take(&mut self.text);
+            self.events.push(format!("text {text:?}"));
+        }
+        self.events.push(event);
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        self.ev(String::from("end"));
+        self.events
+    }
+}
+
+impl crate::handler::Handler for CsiRecorder {
+    fn print(&mut self, c: char) {
+        self.text.push(c);
+    }
+    fn print_str(&mut self, s: &str) {
+        self.text.push_str(s);
+    }
+    fn execute_c0(&mut self, byte: u8) {
+        self.ev(format!("c0 {byte:#04x}"));
+    }
+    fn cursor_up(&mut self, n: u16) {
+        self.ev(format!("cursor_up {n}"));
+    }
+    fn cursor_down(&mut self, n: u16) {
+        self.ev(format!("cursor_down {n}"));
+    }
+    fn cursor_forward(&mut self, n: u16) {
+        self.ev(format!("cursor_forward {n}"));
+    }
+    fn cursor_backward(&mut self, n: u16) {
+        self.ev(format!("cursor_backward {n}"));
+    }
+    fn cursor_position(&mut self, row: u16, col: u16) {
+        self.ev(format!("cursor_position {row} {col}"));
+    }
+    fn cursor_col_abs(&mut self, col: u16) {
+        self.ev(format!("cursor_col_abs {col}"));
+    }
+    fn cursor_row_abs(&mut self, row: u16) {
+        self.ev(format!("cursor_row_abs {row}"));
+    }
+    fn erase_display(&mut self, mode: crate::handler::EraseDisplay) {
+        self.ev(format!("erase_display {mode:?}"));
+    }
+    fn erase_line(&mut self, mode: crate::handler::EraseLine) {
+        self.ev(format!("erase_line {mode:?}"));
+    }
+    fn set_attributes(&mut self, attrs: &[SgrAttr]) {
+        self.ev(format!("sgr {attrs:?}"));
+    }
+    fn set_mode(&mut self, value: u16, ansi: bool, on: bool) {
+        self.ev(format!("set_mode {value} {ansi} {on}"));
+    }
+    fn set_cursor_style(&mut self, style: crate::handler::CursorStyle) {
+        self.ev(format!("set_cursor_style {style:?}"));
+    }
+    fn set_horizontal_margins(&mut self, left: u16, right: u16) {
+        self.ev(format!("set_horizontal_margins {left} {right}"));
+    }
+    fn request_mode(&mut self, request: crate::handler::ModeRequest) {
+        self.ev(format!("request_mode {request:?}"));
+    }
+    fn carriage_return(&mut self) {
+        self.ev(String::from("carriage_return"));
+    }
+    fn linefeed(&mut self) {
+        self.ev(String::from("linefeed"));
+    }
+    fn tab(&mut self, n: u16) {
+        self.ev(format!("tab {n}"));
+    }
+    fn tab_back(&mut self, n: u16) {
+        self.ev(format!("tab_back {n}"));
+    }
+    fn reverse_index(&mut self) {
+        self.ev(String::from("reverse_index"));
+    }
+    fn save_cursor(&mut self) {
+        self.ev(String::from("save_cursor"));
+    }
+    fn restore_cursor(&mut self) {
+        self.ev(String::from("restore_cursor"));
+    }
+    fn full_reset(&mut self) {
+        self.ev(String::from("full_reset"));
+    }
+    fn soft_reset(&mut self) {
+        self.ev(String::from("soft_reset"));
+    }
+    fn clear_tab_stop(&mut self) {
+        self.ev(String::from("clear_tab_stop"));
+    }
+    fn clear_all_tab_stops(&mut self) {
+        self.ev(String::from("clear_all_tab_stops"));
+    }
+    fn insert_blank_chars(&mut self, n: u16) {
+        self.ev(format!("insert_blank_chars {n}"));
+    }
+    fn insert_lines(&mut self, n: u16) {
+        self.ev(format!("insert_lines {n}"));
+    }
+    fn delete_lines(&mut self, n: u16) {
+        self.ev(format!("delete_lines {n}"));
+    }
+    fn delete_chars(&mut self, n: u16) {
+        self.ev(format!("delete_chars {n}"));
+    }
+    fn scroll_up(&mut self, n: u16) {
+        self.ev(format!("scroll_up {n}"));
+    }
+    fn scroll_down(&mut self, n: u16) {
+        self.ev(format!("scroll_down {n}"));
+    }
+    fn erase_chars(&mut self, n: u16) {
+        self.ev(format!("erase_chars {n}"));
+    }
+    fn repeat_preceding_char(&mut self, n: u16) {
+        self.ev(format!("repeat_preceding_char {n}"));
+    }
+    fn set_scroll_region(&mut self, top: u16, bottom: u16) {
+        self.ev(format!("set_scroll_region {top} {bottom}"));
+    }
+    fn device_attributes(&mut self, kind: crate::handler::DaKind) {
+        self.ev(format!("device_attributes {kind:?}"));
+    }
+    fn device_status_report(&mut self, kind: crate::handler::DsrKind) {
+        self.ev(format!("device_status_report {kind:?}"));
+    }
+    fn xtversion_query(&mut self) {
+        self.ev(String::from("xtversion_query"));
+    }
+    fn window_op(&mut self, ps: u16, p1: u16, p2: u16) {
+        self.ev(format!("window_op {ps} {p1} {p2}"));
+    }
+    fn kitty_keyboard_query(&mut self) {
+        self.ev(String::from("kitty_keyboard_query"));
+    }
+    fn kitty_keyboard_push(&mut self, flags: u8) {
+        self.ev(format!("kitty_keyboard_push {flags}"));
+    }
+    fn kitty_keyboard_pop(&mut self, n: u16) {
+        self.ev(format!("kitty_keyboard_pop {n}"));
+    }
+    fn kitty_keyboard_set(&mut self, flags: u8, mode: u16) {
+        self.ev(format!("kitty_keyboard_set {flags} {mode}"));
+    }
+    fn set_modify_other_keys(&mut self, level: u16) {
+        self.ev(format!("set_modify_other_keys {level}"));
+    }
+}
+
+/// Feed `chunks` through a fresh `Stream` and return the recorded call log
+/// plus the final display-dirty flag.
+fn csi_recorded(chunks: &[&[u8]]) -> (Vec<String>, bool) {
+    let mut stream = crate::Stream::new();
+    let mut recorder = CsiRecorder::default();
+    for chunk in chunks {
+        stream.feed(chunk, &mut recorder);
+    }
+    let dirty = stream.take_display_dirty();
+    (recorder.finish(), dirty)
+}
+
+/// CSI-dense streams covering the fast path's accept shapes and every bail
+/// condition (C0 mid-sequence, CAN abort, ESC restart, DEL, 8-bit ST,
+/// misplaced private markers, param overflow, intermediates).
+fn csi_equivalence_streams() -> Vec<Vec<u8>> {
+    let mut streams: Vec<Vec<u8>> = vec![
+        // Fire-style frame slice: CUP + truecolor bg/fg pens + half blocks.
+        "\x1b[1;1H\x1b[48;2;7;7;7m\x1b[38;2;223;79;7m▄\x1b[48;2;255;255;255m\x1b[38;2;0;0;0m▄\x1b[0m"
+            .as_bytes()
+            .to_vec(),
+        // Scroll-stress line shape: DECSTBM + home + 256-color + attrs.
+        b"\x1b[3;24r\x1b[H\x1b[38;5;196;48;5;17;1mscroll line\x1b[0m\nnext\r\n".to_vec(),
+        // Private modes, intermediates, DECSCUSR, XTMODKEYS, DECRQM.
+        b"\x1b[?1049h\x1b[?25l\x1b[!p\x1b[4 q\x1b[>4;2m\x1b[?2004$p\x1b[?1049l\x1b[0 q".to_vec(),
+        // Colon-form SGR: underline styles and both truecolor spellings.
+        b"\x1b[4:3m\x1b[38:2::255:128:0m\x1b[38:2:255:128:0m\x1b[58:5:100m\x1b[4:0m".to_vec(),
+        // DFA-special bytes inside a sequence: C0 executes mid-CSI, DEL is
+        // ignored, CAN aborts, ESC restarts, 8-bit ST cancels.
+        b"\x1b[3;\x087m\x1b[3\x7f1mA\x1b[38;2;1\x18XY\x1b[12\x1b[31mZ\x1b[3\x9cB".to_vec(),
+        // Misplaced private marker -> CsiIgnore; empty and default params.
+        b"\x1b[1;?5mC\x1b[m\x1b[;m\x1b[H\x1b[;5H".to_vec(),
+        // Queries and the Kitty keyboard family.
+        b"\x1b[?u\x1b[>1u\x1b[<1u\x1b[=5;2u\x1b[u\x1b[6n\x1b[5n\x1b[c\x1b[>c\x1b[>q".to_vec(),
+        // Cursor/edit/tab family with defaults and explicit params.
+        b"\x1b[5A\x1b[3B\x1b[2C\x1b[4D\x1b[2E\x1b[2F\x1b[7G\x1b[3d\x1b[2;5H\x1b[3@\x1b[2L\x1b[2M\x1b[2P\x1b[2S\x1b[2T\x1b[2X\x1b[2Z\x1b[3b\x1b[2J\x1b[1K\x1b[0g\x1b[3g\x1b[14t\x1b[22;0;0t\x1b[s\x1b[5;10s".to_vec(),
+        // Saturating and overlong digit runs.
+        b"\x1b[99999999999999999999m\x1b[65535;65535H".to_vec(),
+    ];
+    // 40 params: beyond MAX_PARAMS, exercising the DFA's overflow quirk
+    // (the fast path must bail so the folded-digit behavior is preserved).
+    let mut overflow = b"\x1b[".to_vec();
+    for _ in 0..40 {
+        overflow.extend_from_slice(b"1;");
+    }
+    overflow.extend_from_slice(b"5m");
+    streams.push(overflow);
+    streams
+}
+
+#[test]
+fn csi_fast_path_equals_dfa_for_whole_and_byte_at_a_time_feeds() {
+    for stream in csi_equivalence_streams() {
+        let whole = csi_recorded(&[&stream]);
+        let bytes: Vec<&[u8]> = stream.chunks(1).collect();
+        assert_eq!(
+            csi_recorded(&bytes),
+            whole,
+            "byte-at-a-time diverged for {stream:?}"
+        );
+    }
+}
+
+#[test]
+fn csi_fast_path_equals_dfa_at_every_split_position() {
+    for stream in csi_equivalence_streams() {
+        let whole = csi_recorded(&[&stream]);
+        for cut in 1..stream.len() {
+            assert_eq!(
+                csi_recorded(&[&stream[..cut], &stream[cut..]]),
+                whole,
+                "split at {cut} diverged for {stream:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn sgr_lone_truecolor_decodes_identically_for_all_separator_patterns() {
+    // A lone 5-param truecolor pen (`38;2;r;g;b` and every colon/semicolon
+    // separator mix) decodes to the same attribute: with exactly 5 params
+    // `parse_ext_color` reads r/g/b from the same slots in both forms, and
+    // the dedicated fast path in `parse_sgr_into` must match.
+    for mask in 0u8..16 {
+        let seps: Vec<bool> = (0..4).map(|k| mask & (1 << k) != 0).collect();
+        for code in [38u16, 48] {
+            let csi = Csi::new(&[code, 2, 10, 20, 30], &seps, &[], 0, b'm');
+            let expected = if code == 38 {
+                SgrAttr::Fg(Color::Rgb(Rgb::new(10, 20, 30)))
+            } else {
+                SgrAttr::Bg(Color::Rgb(Rgb::new(10, 20, 30)))
+            };
+            assert_eq!(parse_sgr(&csi), vec![expected], "mask={mask} code={code}");
+        }
+    }
+}

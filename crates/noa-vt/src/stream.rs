@@ -4,13 +4,14 @@
 use std::sync::{Arc, Mutex};
 
 use crate::action::Action;
-use crate::csi::{Csi, Esc};
+use crate::csi::{Csi, Esc, Intermediates, MAX_INTERMEDIATES, MAX_PARAMS, Params, Separators};
 use crate::handler::{
     Charset, CharsetSlot, CursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine, Handler,
     ModeRequest,
 };
 use crate::parser::Parser;
 use crate::sgr::{SgrAttr, parse_sgr_into};
+use crate::state::State;
 
 /// Parser storage shared only by streams whose state must be snapshotted at a
 /// byte boundary, such as a raw terminal attach endpoint.
@@ -119,6 +120,11 @@ fn is_pure_query(action: &Action) -> bool {
     let Action::CsiDispatch(csi) = action else {
         return false;
     };
+    is_pure_query_csi(csi)
+}
+
+#[inline]
+fn is_pure_query_csi(csi: &Csi) -> bool {
     match csi.final_byte {
         b'n' | b'c' => csi.intermediates().is_empty(),
         b'p' => csi.intermediates() == [b'$'],
@@ -143,54 +149,80 @@ fn feed_parser<H: Handler>(
     let mut run_end = 0;
     let mut run_ascii = false;
     while i < bytes.len() {
-        // Fast path: in plain ground state every byte until the next C0
-        // control (ESC included) is print data, so the dominant
-        // bulk-output case hands whole decoded runs to
-        // `Handler::print_str` and skips the per-byte DFA dispatch
-        // entirely (Ghostty analog: `stream.zig`'s ground scan).
-        if is_run_byte(bytes[i]) && parser.in_ground_plain() {
-            if run_end <= i {
-                let (end, ascii) = scan_run(&bytes[i..]);
-                run_end = i + end;
-                run_ascii = ascii;
-            }
-            if run_ascii {
-                // SAFETY: `scan_run` only sets `ascii` when every byte in
-                // `bytes[i..run_end]` is `< 0x80`, which is always valid
-                // single-byte-per-scalar UTF-8, so skipping the redundant
-                // `from_utf8` re-scan of a range we already proved ASCII
-                // is sound.
-                let text = unsafe { core::str::from_utf8_unchecked(&bytes[i..run_end]) };
-                *display_dirty = true;
-                handler.print_str(text);
-                i = run_end;
-                continue;
-            }
-            // SIMD validation (NEON/SSE): the run was already boundary-scanned
-            // by `scan_run`, so this pass is purely UTF-8 structure. `compat`
-            // keeps std's `valid_up_to` semantics for the invalid-suffix path.
-            match simdutf8::compat::from_utf8(&bytes[i..run_end]) {
-                Ok(text) => {
+        if parser.in_ground_plain() {
+            // Fast path: in plain ground state every byte until the next C0
+            // control (ESC included) is print data, so the dominant
+            // bulk-output case hands whole decoded runs to
+            // `Handler::print_str` and skips the per-byte DFA dispatch
+            // entirely (Ghostty analog: `stream.zig`'s ground scan).
+            if is_run_byte(bytes[i]) {
+                if run_end <= i {
+                    let (end, ascii) = scan_run(&bytes[i..]);
+                    run_end = i + end;
+                    run_ascii = ascii;
+                }
+                if run_ascii {
+                    // SAFETY: `scan_run` only sets `ascii` when every byte in
+                    // `bytes[i..run_end]` is `< 0x80`, which is always valid
+                    // single-byte-per-scalar UTF-8, so skipping the redundant
+                    // `from_utf8` re-scan of a range we already proved ASCII
+                    // is sound.
+                    let text = unsafe { core::str::from_utf8_unchecked(&bytes[i..run_end]) };
                     *display_dirty = true;
                     handler.print_str(text);
                     i = run_end;
                     continue;
                 }
-                Err(err) => {
-                    // Bulk-print the valid prefix, then let the DFA own
-                    // the invalid/incomplete sequence byte-by-byte below
-                    // (it carries the replacement + cross-chunk resume
-                    // semantics), re-entering this fast path once it
-                    // returns to plain ground.
-                    let valid = err.valid_up_to();
-                    if valid > 0 {
-                        let text = core::str::from_utf8(&bytes[i..i + valid])
-                            .expect("valid_up_to marks a valid UTF-8 prefix");
+                // SIMD validation (NEON/SSE): the run was already
+                // boundary-scanned by `scan_run`, so this pass is purely
+                // UTF-8 structure. `compat` keeps std's `valid_up_to`
+                // semantics for the invalid-suffix path.
+                match simdutf8::compat::from_utf8(&bytes[i..run_end]) {
+                    Ok(text) => {
                         *display_dirty = true;
                         handler.print_str(text);
-                        i += valid;
+                        i = run_end;
+                        continue;
+                    }
+                    Err(err) => {
+                        // Bulk-print the valid prefix, then let the DFA own
+                        // the invalid/incomplete sequence byte-by-byte below
+                        // (it carries the replacement + cross-chunk resume
+                        // semantics), re-entering this fast path once it
+                        // returns to plain ground.
+                        let valid = err.valid_up_to();
+                        if valid > 0 {
+                            let text = core::str::from_utf8(&bytes[i..i + valid])
+                                .expect("valid_up_to marks a valid UTF-8 prefix");
+                            *display_dirty = true;
+                            handler.print_str(text);
+                            i += valid;
+                        }
                     }
                 }
+            } else if bytes[i] == 0x1b
+                && bytes.get(i + 1) == Some(&b'[')
+                && let Some((csi, len)) = try_scan_csi(&bytes[i..])
+            {
+                // Fast path: a complete plain CSI sequence inside the chunk
+                // (SGR-dense floods are dominated by these) is lexed in one
+                // tight scan and dispatched directly, skipping the per-byte
+                // DFA entirely. `try_scan_csi` is pure lookahead: it bails
+                // to the DFA on anything the DFA treats specially, so the
+                // dispatched `Csi` is bit-identical to the per-byte path's.
+                *display_dirty |= !is_pure_query_csi(&csi);
+                dispatch_csi(&csi, handler, sgr_attrs);
+                i += len;
+                continue;
+            }
+        } else if parser.state() == State::CsiParam {
+            // Batch parameter accumulation for a CSI resumed across a feed
+            // boundary (or one the whole-sequence fast path bailed on): runs
+            // of digits/`;`/`:` skip the per-byte DFA dispatch.
+            let n = parser.scan_csi_params(&bytes[i..]);
+            if n > 0 {
+                i += n;
+                continue;
             }
         }
         parser.advance(bytes[i], &mut |action| {
@@ -198,6 +230,80 @@ fn feed_parser<H: Handler>(
             dispatch(action, handler, sgr_attrs);
         });
         i += 1;
+    }
+}
+
+/// Attempt to lex one complete CSI sequence starting at `bytes[0] == ESC`,
+/// `bytes[1] == '['` (caller-checked), entirely within `bytes`. Pure
+/// lookahead: nothing is committed unless the whole sequence — through its
+/// final byte — is present and consists only of bytes whose DFA handling is
+/// plain collect/param/dispatch. Any byte the DFA treats specially mid-CSI
+/// (C0 executes, CAN/SUB cancels, a second ESC, DEL, 8-bit bytes, the
+/// param-overflow and intermediate-overflow quirks, `CsiIgnore` transitions)
+/// returns `None`, and the caller feeds the same bytes through the per-byte
+/// DFA unchanged — so observable behavior is byte-for-byte identical.
+#[inline]
+fn try_scan_csi(bytes: &[u8]) -> Option<(Csi, usize)> {
+    debug_assert!(bytes.len() >= 2 && bytes[0] == 0x1b && bytes[1] == b'[');
+    let mut i = 2;
+    let mut params = Params::default();
+    let mut sep_colon = Separators::default();
+    let mut intermediates = Intermediates::default();
+    let mut private = 0u8;
+    // Private marker — only valid immediately after `[` (CsiEntry).
+    if let Some(&b @ 0x3c..=0x3f) = bytes.get(i) {
+        private = b;
+        i += 1;
+    }
+    // Parameter bytes. The value in flight accumulates in a register and is
+    // committed per separator / at sequence end, which lands in the same
+    // `Params` the per-byte `param_digit` / `param_sep` pair builds.
+    let mut cur: u16 = 0;
+    let mut any_params = false;
+    loop {
+        let b = *bytes.get(i)?;
+        match b {
+            0x30..=0x39 => {
+                cur = cur.saturating_mul(10).saturating_add(u16::from(b - 0x30));
+                any_params = true;
+            }
+            0x3a | 0x3b => {
+                params.push(cur);
+                if params.len() >= MAX_PARAMS {
+                    // The DFA's overflow quirk folds later digits into the
+                    // last param; defer to it so that path stays byte-exact.
+                    return None;
+                }
+                sep_colon.push(b == 0x3a);
+                cur = 0;
+                any_params = true;
+            }
+            _ => break,
+        }
+        i += 1;
+    }
+    if any_params {
+        params.push(cur);
+    }
+    // Intermediate bytes, then the final byte.
+    loop {
+        let b = *bytes.get(i)?;
+        match b {
+            0x20..=0x2f => {
+                if intermediates.len() >= MAX_INTERMEDIATES {
+                    return None; // DFA drops extras; defer to keep it byte-exact
+                }
+                intermediates.push(b);
+                i += 1;
+            }
+            0x40..=0x7e => {
+                return Some((
+                    Csi::from_parts(params, sep_colon, intermediates, private, b),
+                    i + 1,
+                ));
+            }
+            _ => return None,
+        }
     }
 }
 

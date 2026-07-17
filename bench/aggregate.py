@@ -354,14 +354,16 @@ if equalized_notes:
 hdr = "| Terminal | " + " | ".join(terminals) + " |"
 sep = "|---|" + "|".join(["---"] * len(terminals)) + "|"
 
-lines.append("\n## Throughput — ASCII (MiB/s, higher better)")
-lines.append(hdr.replace("Terminal", "Metric")); lines.append(sep)
-lines.append("| ascii MiB/s | " + " | ".join(fmt_tp(tp[t]["ascii"]) for t in terminals) + " |")
-lines.append("| unicode MiB/s | " + " | ".join(fmt_tp(tp[t]["unicode"]) for t in terminals) + " |")
+if "throughput" in axes_with_data:
+    lines.append("\n## Throughput — ASCII (MiB/s, higher better)")
+    lines.append(hdr.replace("Terminal", "Metric")); lines.append(sep)
+    lines.append("| ascii MiB/s | " + " | ".join(fmt_tp(tp[t]["ascii"]) for t in terminals) + " |")
+    lines.append("| unicode MiB/s | " + " | ".join(fmt_tp(tp[t]["unicode"]) for t in terminals) + " |")
 
-lines.append("\n## Frame / Scroll (time ms / MiB·s⁻¹, lower ms better)")
-lines.append(hdr.replace("Terminal", "Metric")); lines.append(sep)
-lines.append("| scroll_stress | " + " | ".join(fmt_sc(sc[t]) for t in terminals) + " |")
+if "scroll" in axes_with_data:
+    lines.append("\n## Frame / Scroll (time ms / MiB·s⁻¹, lower ms better)")
+    lines.append(hdr.replace("Terminal", "Metric")); lines.append(sep)
+    lines.append("| scroll_stress | " + " | ".join(fmt_sc(sc[t]) for t in terminals) + " |")
 
 if "fire" in axes_with_data:
     def fmt_fire(c):
@@ -486,8 +488,8 @@ if "load" in axes_with_data:
     lines.append("| active: throughput workload | " + " | ".join(fmt_load_active(load[t]["throughput"]) for t in terminals) + " |")
     lines.append("| active: scroll workload | " + " | ".join(fmt_load_active(load[t]["scroll"]) for t in terminals) + " |")
 
-# noa rank per axis
-lines.append("\n## noa rank per axis")
+# noa rank per axis — only when noa was actually measured in this run
+# (an all-n/a section on --only runs without noa reads like a failure)
 def rank(better_high, getval):
     # standard competition ranking: 1 + number of STRICTLY better entries,
     # so ties share a rank instead of being ordered arbitrarily
@@ -543,11 +545,12 @@ def fire_val(t):
     c = fire.get(t, {})
     return c.get("fps_median")
 
-rank_items = [
-    ("throughput ascii", rank(True, lambda t: tp_val(t, "ascii"))),
-    ("throughput unicode", rank(True, lambda t: tp_val(t, "unicode"))),
-    ("scroll (MiB/s)", rank(True, sc_val)),
-]
+rank_items = []
+if "throughput" in axes_with_data:
+    rank_items.append(("throughput ascii", rank(True, lambda t: tp_val(t, "ascii"))))
+    rank_items.append(("throughput unicode", rank(True, lambda t: tp_val(t, "unicode"))))
+if "scroll" in axes_with_data:
+    rank_items.append(("scroll (MiB/s)", rank(True, sc_val)))
 if "fire" in axes_with_data:
     rank_items.append(("fire (fps)", rank(True, fire_val)))
 if "latency" in axes_with_data:
@@ -565,9 +568,12 @@ if "load" in axes_with_data:
     rank_items.append(("load idle (mean CPU%)", rank(False, load_idle_val)))
     rank_items.append(("load active (throughput, CPU-ms)", rank(False, lambda t: load_active_val(t, "throughput"))))
     rank_items.append(("load active (scroll, CPU-ms)", rank(False, lambda t: load_active_val(t, "scroll"))))
-for label, r in rank_items:
-    pos, n = r
-    lines.append(f"- {label}: {'#'+str(pos)+' of '+str(n) if pos else 'n/a'}")
+if "noa" in terminals:
+    ranked = [(label, r) for label, r in rank_items if r[0]]
+    if ranked:
+        lines.append("\n## noa rank per axis")
+        for label, (pos, n) in ranked:
+            lines.append(f"- {label}: #{pos} of {n}")
 
 with open(os.path.join(OUT_DIR, "table.md"), "w") as f:
     f.write("\n".join(lines) + "\n")

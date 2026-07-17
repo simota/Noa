@@ -95,8 +95,8 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
     renderer.resize(PixelSize { w: 64, h: 32 });
 
     // A tiny snapshot exercising a glyph quad, a background quad, and the cursor.
-    let row = Row {
-        cells: vec![
+    let row = Row::from_cells(
+        vec![
             Cell {
                 ch: 'A',
                 grapheme: None,
@@ -118,9 +118,9 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
             Cell::default(),
             Cell::default(),
         ],
-        wrapped: false,
-        dirty: true,
-    };
+        false,
+        true,
+    );
     let snap = FrameSnapshot {
         scroll_shift: 0,
         rows: vec![row],
@@ -204,11 +204,7 @@ fn command_palette_overlay_draws_one_frame_without_validation_error() {
     let cols = 30u16;
     let rows_n = 8u16;
     let rows: Vec<Row> = (0..rows_n)
-        .map(|_| Row {
-            cells: vec![Cell::default(); cols as usize],
-            wrapped: false,
-            dirty: true,
-        })
+        .map(|_| Row::from_cells(vec![Cell::default(); cols as usize], false, true))
         .collect();
     let snap = FrameSnapshot {
         scroll_shift: 0,
@@ -298,13 +294,15 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
     renderer.resize(PixelSize { w: 64, h: 64 });
 
     fn two_row_snapshot(first: char, second: char, row_dirty: [bool; 2]) -> FrameSnapshot {
-        let make_row = |ch: char, dirty: bool| Row {
-            cells: vec![Cell {
-                ch,
-                ..Cell::default()
-            }],
-            wrapped: false,
-            dirty,
+        let make_row = |ch: char, dirty: bool| {
+            Row::from_cells(
+                vec![Cell {
+                    ch,
+                    ..Cell::default()
+                }],
+                false,
+                dirty,
+            )
         };
         FrameSnapshot {
             scroll_shift: 0,
@@ -420,8 +418,8 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
     // formula does), the rendered pixel would trend toward this exact color.
     // Passthrough sampling (REQ-EMOJI-2) should not.
     let magenta_fg = Color::Rgb(Rgb::new(255, 0, 255));
-    let row = Row {
-        cells: vec![Cell {
+    let row = Row::from_cells(
+        vec![Cell {
             ch: '\u{1F600}',
             grapheme: None,
             fg: magenta_fg,
@@ -430,9 +428,9 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
             hyperlink: None,
             attrs: CellAttrs::empty(),
         }],
-        wrapped: false,
-        dirty: true,
-    };
+        false,
+        true,
+    );
     let snap = FrameSnapshot {
         scroll_shift: 0,
         rows: vec![row],

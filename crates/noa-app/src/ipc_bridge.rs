@@ -650,15 +650,15 @@ mod tests {
 
     #[test]
     fn row_to_spans_coalesces_same_style_runs() {
-        let row = GridRow {
-            cells: vec![
+        let row = GridRow::from_cells(
+            vec![
                 cell('a', Color::Default),
                 cell('b', Color::Default),
                 cell('c', Color::Rgb(Rgb::new(255, 0, 0))),
             ],
-            wrapped: false,
-            dirty: false,
-        };
+            false,
+            false,
+        );
         let spans = row_to_spans(&row);
         assert_eq!(
             spans.len(),
@@ -677,20 +677,16 @@ mod tests {
         // the row after it is blank and unwrapped — the trim on the blank
         // row must not reach back across the row boundary into the wrapped
         // row's content.
-        let wrapped = GridRow {
-            cells: vec![
+        let wrapped = GridRow::from_cells(
+            vec![
                 cell('a', Color::Default),
                 cell(' ', Color::Default),
                 cell(' ', Color::Default),
             ],
-            wrapped: true,
-            dirty: false,
-        };
-        let blank = GridRow {
-            cells: vec![cell(' ', Color::Default)],
-            wrapped: false,
-            dirty: false,
-        };
+            true,
+            false,
+        );
+        let blank = GridRow::from_cells(vec![cell(' ', Color::Default)], false, false);
         let text = screen_text(&[wrapped, blank]);
         assert_eq!(
             text, "a  \n",

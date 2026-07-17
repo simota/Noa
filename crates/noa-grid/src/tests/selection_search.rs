@@ -489,6 +489,10 @@ fn resize_shrink_rows_moves_top_drained_primary_rows_to_scrollback() {
     t.primary.grid[0].cells[0].ch = 'A';
     t.primary.grid[1].cells[0].ch = 'B';
     t.primary.grid[2].cells[0].ch = 'C';
+    for y in 0..3 {
+        // Direct cell pokes bypass the print path's occupancy tracking.
+        t.primary.grid[y].mark_occupied(1);
+    }
 
     t.resize(GridSize::new(5, 3));
 
@@ -508,6 +512,10 @@ fn active_absolute_row_spans_scrollback_then_live_grid() {
     t.primary.grid[0].cells[0].ch = 'A';
     t.primary.grid[1].cells[0].ch = 'B';
     t.primary.grid[2].cells[0].ch = 'C';
+    for y in 0..3 {
+        // Direct cell pokes bypass the print path's occupancy tracking.
+        t.primary.grid[y].mark_occupied(1);
+    }
     t.resize(GridSize::new(5, 3));
     let sb_len = t.scrollback_len();
     assert_eq!(sb_len, 2);

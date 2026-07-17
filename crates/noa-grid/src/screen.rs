@@ -342,11 +342,20 @@ impl Screen {
             row.cells[x + 1].set_from(blank);
         }
         row.cells[x].set_from(blank);
+        // `blank` may carry a background color (BCE): account for the
+        // unconditional write at `x`. The neighbor writes above only hit
+        // cells that carried a layout flag — non-default, so already under
+        // the watermark.
+        row.mark_occupied(x + 1);
     }
 
     fn sanitize_wide_row(row: &mut Row, blank: &Cell) {
+        // Cells past the occupancy watermark are default (no layout flags),
+        // so the invariant scan can stop there. Writes below only touch
+        // cells that carry a layout flag — already under the watermark.
+        let end = row.occupied();
         let mut x = 0;
-        while x < row.cells.len() {
+        while x < end {
             let attrs = row.cells[x].attrs;
             if attrs.contains(CellAttrs::WIDE) {
                 if x + 1 >= row.cells.len()

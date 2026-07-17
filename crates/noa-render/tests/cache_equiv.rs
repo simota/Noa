@@ -82,11 +82,11 @@ fn fresh_snapshot(term: &Terminal) -> FrameSnapshot {
     let mut rows = Vec::new();
     for y in 0..screen.rows {
         let row = screen.visible_row(y).expect("row in range");
-        rows.push(noa_grid::Row {
-            cells: row.cells.clone(),
-            wrapped: row.wrapped,
-            dirty: true,
-        });
+        rows.push(noa_grid::Row::from_cells(
+            row.cells.clone(),
+            row.wrapped,
+            true,
+        ));
     }
     let cols = screen.cols;
     let rows_n = screen.rows;

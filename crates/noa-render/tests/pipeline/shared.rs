@@ -48,11 +48,7 @@ pub(crate) fn snapshot_for_text(text: &str) -> FrameSnapshot {
     let cols = cells.len().min(u16::MAX as usize) as u16;
     FrameSnapshot {
         scroll_shift: 0,
-        rows: vec![Row {
-            cells,
-            wrapped: false,
-            dirty: true,
-        }],
+        rows: vec![Row::from_cells(cells, false, true)],
         row_dirty: vec![true],
         cursor: Cursor::default(),
         copy_cursor: None,
@@ -209,21 +205,23 @@ pub(crate) fn image_snapshot(
     z: i32,
 ) -> FrameSnapshot {
     let rows: Vec<Row> = (0..rows_n)
-        .map(|_| Row {
-            cells: vec![
-                Cell {
-                    ch: ' ',
-                    grapheme: None,
-                    fg: Color::Default,
-                    bg,
-                    underline_color: None,
-                    hyperlink: None,
-                    attrs: CellAttrs::empty(),
-                };
-                cols as usize
-            ],
-            wrapped: false,
-            dirty: true,
+        .map(|_| {
+            Row::from_cells(
+                vec![
+                    Cell {
+                        ch: ' ',
+                        grapheme: None,
+                        fg: Color::Default,
+                        bg,
+                        underline_color: None,
+                        hyperlink: None,
+                        attrs: CellAttrs::empty(),
+                    };
+                    cols as usize
+                ],
+                false,
+                true,
+            )
         })
         .collect();
     // 4×4 solid-color image; the Linear sampler stretches it over the quad.

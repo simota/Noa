@@ -348,6 +348,8 @@ mod tests {
         for (x, ch) in text.chars().enumerate() {
             term.primary.grid[y].cells[x].ch = ch;
         }
+        // Direct cell pokes bypass the print path's occupancy tracking.
+        term.primary.grid[y].mark_occupied(text.chars().count());
     }
 
     fn push_history_row(term: &mut Terminal, text: &str) {
@@ -446,6 +448,7 @@ mod tests {
             .attrs
             .insert(CellAttrs::WIDE_SPACER);
         term.primary.grid[1].cells[4].ch = 'z';
+        term.primary.grid[1].mark_occupied(5);
         term.primary.cursor.x = 3;
 
         let mut state = CopyModeState::enter(&mut term).expect("copy mode enters");
@@ -651,6 +654,7 @@ mod tests {
             for cell in &mut term.primary.grid[0].cells {
                 cell.ch = ch;
             }
+            term.primary.grid[0].mark_all();
             term.primary.scroll_up_region(1);
         }
         assert_eq!(term.scrollback_len(), 2);
@@ -666,6 +670,7 @@ mod tests {
         for cell in &mut term.primary.grid[0].cells {
             cell.ch = 'c';
         }
+        term.primary.grid[0].mark_all();
         let generation = term.active().coordinate_generation();
         let evicted_before = term.selection_rows_evicted();
         term.primary.scroll_up_region(1);

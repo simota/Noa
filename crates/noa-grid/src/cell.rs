@@ -151,6 +151,20 @@ pub struct Row {
     pub wrapped: bool,
     /// Damage bit; the renderer clears it on consume (optimization, inc≥2).
     pub dirty: bool,
+    /// Occupancy watermark. **Invariant: every cell in `cells[occ..]` equals
+    /// `Cell::default()`** — an upper bound on the occupied prefix, never an
+    /// exact length (cells below it may also be default). Lets the
+    /// scrollback seal path ([`crate::scrollback`]) and [`Self::clear`] treat
+    /// the blank tail wholesale instead of loading it (~81% of row cell
+    /// loads at fullscreen widths are blank tail under an ASCII flood).
+    ///
+    /// Discipline for writers: any code writing potentially-non-default
+    /// content through the pub `cells` field must call
+    /// [`Self::mark_occupied`] (or [`Self::mark_all`]) for the touched
+    /// range. Writing default cells never requires a mark. The invariant is
+    /// debug-asserted at every consumption point (`pack_row`, `clear`), so
+    /// the full test suite validates every producer path.
+    pub(crate) occ: u32,
 }
 
 impl Row {
@@ -159,13 +173,72 @@ impl Row {
             cells: vec![Cell::default(); cols as usize],
             wrapped: false,
             dirty: true,
+            occ: 0,
         }
     }
 
+    /// Build a row from pre-made cells. The watermark is conservatively the
+    /// full length (safe for arbitrary content, no tail-skip benefit).
+    pub fn from_cells(cells: Vec<Cell>, wrapped: bool, dirty: bool) -> Self {
+        let occ = cells.len() as u32;
+        Row {
+            cells,
+            wrapped,
+            dirty,
+            occ,
+        }
+    }
+
+    /// The occupancy watermark clamped to the row length: cells at
+    /// `cells[occupied()..]` are guaranteed `Cell::default()`.
+    #[inline]
+    pub fn occupied(&self) -> usize {
+        (self.occ as usize).min(self.cells.len())
+    }
+
+    /// Record that cells below `end` may now hold non-default content.
+    /// Monotonic: never lowers the watermark.
+    #[inline]
+    pub fn mark_occupied(&mut self, end: usize) {
+        let end = end as u32;
+        if end > self.occ {
+            self.occ = end;
+        }
+    }
+
+    /// Conservatively mark the whole row occupied (for writers that cannot
+    /// cheaply bound what they touched).
+    #[inline]
+    pub fn mark_all(&mut self) {
+        self.occ = self.cells.len() as u32;
+    }
+
+    /// Debug-only validation of the watermark invariant (see [`Self::occ`]).
+    #[inline]
+    pub(crate) fn debug_assert_tail_default(&self) {
+        debug_assert!(
+            self.cells[self.occupied()..]
+                .iter()
+                .all(|c| *c == Cell::default()),
+            "row occupancy watermark invariant violated: non-default cell past occ={}",
+            self.occ
+        );
+    }
+
     /// Fill every cell with `template` and reset wrap. `Cell` is POD, so
-    /// this is a branchless pattern fill (memset-shaped, vectorizable).
+    /// this is a branchless pattern fill (memset-shaped, vectorizable); a
+    /// default template only re-blanks the occupied prefix (the watermark
+    /// invariant proves the tail is already default).
     pub fn clear(&mut self, template: &Cell) {
-        self.cells.fill(*template);
+        if *template == Cell::default() {
+            self.debug_assert_tail_default();
+            let end = self.occupied();
+            self.cells[..end].fill(*template);
+            self.occ = 0;
+        } else {
+            self.cells.fill(*template);
+            self.occ = self.cells.len() as u32;
+        }
         self.wrapped = false;
         self.dirty = true;
     }
@@ -202,6 +275,29 @@ mod tests {
         cell.clear_combining();
         assert!(cell.is_blank() == (cell.ch == ' '));
         assert_eq!(cell.combining(), "");
+    }
+
+    #[test]
+    fn row_clear_honors_the_occupancy_watermark() {
+        let mut row = Row::new(8);
+        row.cells[0].ch = 'x';
+        row.cells[1].ch = 'y';
+        row.mark_occupied(2);
+        row.wrapped = true;
+        row.clear(&Cell::default());
+        assert!(row.cells.iter().all(|c| *c == Cell::default()));
+        assert_eq!(row.occupied(), 0);
+        assert!(!row.wrapped);
+
+        // A styled (BCE) template fills — and marks — the whole row.
+        let template = Cell::blank(Color::Palette(3));
+        row.clear(&template);
+        assert!(row.cells.iter().all(|c| *c == template));
+        assert_eq!(row.occupied(), 8);
+
+        // `from_cells` is conservative: full-length watermark.
+        let row = Row::from_cells(vec![Cell::default(); 4], false, false);
+        assert_eq!(row.occupied(), 4);
     }
 
     #[test]

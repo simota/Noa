@@ -346,10 +346,12 @@ fn command_palette_card_composites_without_validation_error() {
     .expect("build palette block renderer");
     renderer.resize(block_px);
     let rows: Vec<Row> = (0..layout.block_rows)
-        .map(|_| Row {
-            cells: vec![Cell::default(); layout.block_cols as usize],
-            wrapped: false,
-            dirty: true,
+        .map(|_| {
+            Row::from_cells(
+                vec![Cell::default(); layout.block_cols as usize],
+                false,
+                true,
+            )
         })
         .collect();
     let snap = FrameSnapshot {

@@ -138,6 +138,7 @@ impl Screen {
             };
         }
         row.dirty = true;
+        row.mark_occupied(x + width);
 
         if self.cursor.x.saturating_add(width as u16) > self.right_margin() {
             self.cursor.x = self.right_margin();
@@ -239,6 +240,7 @@ impl Screen {
                 };
             }
             row.dirty = true;
+            row.mark_occupied(x + n);
             self.last_printed = Some(bytes[i + n - 1] as char);
             i += n;
             let new_x = self.cursor.x.saturating_add(n as u16);
@@ -402,6 +404,7 @@ impl Screen {
                 }
             }
             row.dirty = true;
+            row.mark_occupied(x + 2 * wrote);
             let new_x = (x + 2 * wrote) as u16;
             if new_x > right {
                 self.cursor.x = right;

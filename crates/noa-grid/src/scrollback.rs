@@ -375,6 +375,9 @@ impl Page {
         }
         out.wrapped = meta.wrapped;
         out.dirty = false;
+        // The padded tail is default by construction; the stored prefix may
+        // hold anything.
+        out.occ = meta.len as u32;
     }
 
     /// Return this evicted page to the state [`Page::new`] produces, keeping
@@ -389,11 +392,7 @@ impl Page {
     }
 
     fn materialize_row(&self, local: usize) -> Row {
-        let mut row = Row {
-            cells: Vec::with_capacity(self.cols as usize),
-            wrapped: false,
-            dirty: false,
-        };
+        let mut row = Row::from_cells(Vec::with_capacity(self.cols as usize), false, false);
         self.materialize_row_into(local, &mut row);
         row
     }
@@ -404,7 +403,15 @@ impl Page {
     /// have arena headroom for `row.cells.len()` more cells (guaranteed by
     /// `ensure_page` / the chunk packer's page rollover).
     fn pack_row(&mut self, row: &Row) -> (usize, usize) {
-        let mut len = row.cells.len();
+        // Start the trailing-blank trim at the row's occupancy watermark:
+        // cells past it are default-blank by invariant (debug-checked here,
+        // and by the whole test suite), so the scan never loads the blank
+        // tail — at fullscreen widths ~81% of the row's cell loads on an
+        // ASCII flood. The result is byte-identical to scanning from the
+        // full length: the skipped cells are exactly ones the scan would
+        // have trimmed anyway.
+        row.debug_assert_tail_default();
+        let mut len = row.occupied();
         while len > 0 && pack_is_default_blank(&row.cells[len - 1]) {
             len -= 1;
         }
@@ -556,11 +563,7 @@ fn flags_of(cell: &Cell) -> PackedFlags {
 }
 
 fn empty_row() -> Row {
-    Row {
-        cells: Vec::new(),
-        wrapped: false,
-        dirty: false,
-    }
+    Row::from_cells(Vec::new(), false, false)
 }
 
 /// Paged scrollback: a deque of byte-bounded [`Page`]s with a byte-quantity
@@ -1017,7 +1020,9 @@ impl PagedScrollback {
     /// Whether any retained row holds selectable text (packed scan, no
     /// materialization).
     pub(crate) fn has_text(&self) -> bool {
-        let row_has_text = |row: &Row| row.cells.iter().any(|cell| !cell.is_blank());
+        // Cells past the occupancy watermark are default (blank), so the
+        // deferred-tier scans stop there.
+        let row_has_text = |row: &Row| row.cells[..row.occupied()].iter().any(|cell| !cell.is_blank());
         self.pages
             .iter()
             .any(|page| page.cells.iter().any(PackedCell::has_text))
@@ -1138,6 +1143,10 @@ fn clear_carcass_prefix(row: &mut Row, len: usize) {
     row.cells[..len].fill(Cell::default());
     row.wrapped = false;
     row.dirty = true;
+    // Prefix re-blanked + tail proven default by the pack trim = the whole
+    // row is default now.
+    row.occ = 0;
+    row.debug_assert_tail_default();
 }
 
 /// One published chunk: a shared handle on the whole sealing batch plus the
@@ -1343,11 +1352,7 @@ mod tests {
     }
 
     fn row_from(cells: Vec<Cell>) -> Row {
-        Row {
-            cells,
-            wrapped: false,
-            dirty: true,
-        }
+        Row::from_cells(cells, false, true)
     }
 
     fn text_row(text: &str, cols: usize) -> Row {

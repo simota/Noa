@@ -793,4 +793,5 @@ fn clone_row_into(slot: &mut Row, row: &Row) {
     slot.cells.clone_from(&row.cells);
     slot.wrapped = row.wrapped;
     slot.dirty = row.dirty;
+    slot.occ = row.occ;
 }

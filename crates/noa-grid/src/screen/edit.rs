@@ -461,6 +461,9 @@ impl Screen {
                 for c in &mut self.grid[y].cells[x..] {
                     c.set_from(&blank);
                 }
+                if !Self::is_default_blank(&blank) {
+                    self.grid[y].mark_all();
+                }
                 Self::sanitize_wide_row(&mut self.grid[y], &blank);
                 self.grid[y].dirty = true;
                 for r in &mut self.grid[y + 1..] {
@@ -473,6 +476,9 @@ impl Screen {
                 }
                 for c in &mut self.grid[y].cells[..=x] {
                     c.set_from(&blank);
+                }
+                if !Self::is_default_blank(&blank) {
+                    self.grid[y].mark_occupied(x + 1);
                 }
                 Self::sanitize_wide_row(&mut self.grid[y], &blank);
                 self.grid[y].dirty = true;
@@ -517,20 +523,30 @@ impl Screen {
         let blank = self.blank();
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
         let row = &mut self.grid[y];
+        let styled = !Self::is_default_blank(&blank);
         match mode {
             EraseLine::Right => {
                 for c in &mut row.cells[x..] {
                     c.set_from(&blank);
+                }
+                if styled {
+                    row.mark_all();
                 }
             }
             EraseLine::Left => {
                 for c in &mut row.cells[..=x] {
                     c.set_from(&blank);
                 }
+                if styled {
+                    row.mark_occupied(x + 1);
+                }
             }
             EraseLine::Complete => {
                 for c in &mut row.cells {
                     c.set_from(&blank);
+                }
+                if styled {
+                    row.mark_all();
                 }
             }
         }
@@ -561,9 +577,16 @@ impl Screen {
         let len = self.cols as usize - x;
         let n = (n.max(1) as usize).min(len);
         let row = &mut self.grid[y];
+        // The rotate shifts occupied content right by `n`; the fill may
+        // write a styled (BCE) blank into `x..x + n`.
+        let shifted_occ = row.occupied().saturating_add(n).min(row.cells.len());
         row.cells[x..].rotate_right(n);
         for c in &mut row.cells[x..x + n] {
             c.set_from(&blank);
+        }
+        row.mark_occupied(shifted_occ);
+        if !Self::is_default_blank(&blank) {
+            row.mark_occupied(x + n);
         }
         Self::sanitize_wide_row(row, &blank);
         row.dirty = true;
@@ -581,6 +604,13 @@ impl Screen {
         for c in &mut row.cells[self.cols as usize - n..] {
             c.set_from(&blank);
         }
+        // The left shift only moves content toward lower indices (the cells
+        // it wraps to the end are overwritten by the fill), so the existing
+        // watermark stays a valid bound — unless the fill is a styled (BCE)
+        // blank, which reaches the row end.
+        if !Self::is_default_blank(&blank) {
+            row.mark_all();
+        }
         Self::sanitize_wide_row(row, &blank);
         row.dirty = true;
     }
@@ -595,6 +625,9 @@ impl Screen {
         let row = &mut self.grid[y];
         for c in &mut row.cells[x..x + n] {
             c.set_from(&blank);
+        }
+        if !Self::is_default_blank(&blank) {
+            row.mark_occupied(x + n);
         }
         Self::sanitize_wide_row(row, &blank);
         row.dirty = true;

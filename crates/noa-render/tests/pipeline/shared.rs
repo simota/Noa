@@ -33,7 +33,7 @@ pub(crate) fn snapshot_for_text(text: &str) -> FrameSnapshot {
         .chars()
         .map(|ch| Cell {
             ch,
-            combining: String::new(),
+            grapheme: None,
             fg: Color::Default,
             bg: Color::Default,
             underline_color: None,
@@ -213,7 +213,7 @@ pub(crate) fn image_snapshot(
             cells: vec![
                 Cell {
                     ch: ' ',
-                    combining: String::new(),
+                    grapheme: None,
                     fg: Color::Default,
                     bg,
                     underline_color: None,

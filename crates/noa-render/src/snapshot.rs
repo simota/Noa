@@ -1002,8 +1002,8 @@ mod tests {
         let cell = &mut term.primary.grid[0].cells[0];
         cell.ch = noa_grid::PLACEHOLDER;
         cell.fg = Color::Rgb(Rgb::new(0, 0, 1));
-        cell.combining.push('\u{0305}'); // row 0
-        cell.combining.push('\u{0305}'); // column 0
+        cell.push_combining('\u{0305}'); // row 0
+        cell.push_combining('\u{0305}'); // column 0
 
         let snap = FrameSnapshot::from_terminal(&mut term);
         assert_eq!(

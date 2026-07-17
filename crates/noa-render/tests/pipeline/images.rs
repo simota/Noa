@@ -224,11 +224,11 @@ fn unicode_placeholder_resolves_and_draws_over_text() {
             let cell = &mut term.primary.grid[y].cells[x];
             cell.ch = noa_grid::PLACEHOLDER;
             cell.fg = Color::Rgb(Rgb::new(0, 0, 1));
-            cell.combining.clear();
+            cell.clear_combining();
             if x == 0 {
                 // Row index = y (diacritics table values 0..3).
-                cell.combining.push(placeholder_diacritic(y as u32));
-                cell.combining.push(placeholder_diacritic(0));
+                cell.push_combining(placeholder_diacritic(y as u32));
+                cell.push_combining(placeholder_diacritic(0));
             }
         }
     }
@@ -321,7 +321,7 @@ fn background_image_draws_below_cells_with_independent_opacity() {
     renderer.set_background_opacity(0.3);
     // 2x2 fully-opaque red image, drawn at background-image-opacity = 0.5.
     let image = BackgroundImage {
-        rgba: Arc::from(vec![255u8, 0, 0, 255].repeat(4)),
+        rgba: Arc::from([255u8, 0, 0, 255].repeat(4)),
         width: 2,
         height: 2,
         fit: BackgroundImageFit::Contain,

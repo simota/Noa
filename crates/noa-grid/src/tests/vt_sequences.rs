@@ -280,7 +280,7 @@ fn combining_marks_are_capped_per_cell() {
         input.push('\u{0301}');
     }
     let t = run_size(10, 1, input.as_bytes());
-    assert!(cell(&t, 0, 0).combining.len() <= crate::cell::Cell::MAX_COMBINING_BYTES);
+    assert!(cell(&t, 0, 0).combining().len() <= crate::cell::Cell::MAX_COMBINING_BYTES);
 }
 
 #[test]

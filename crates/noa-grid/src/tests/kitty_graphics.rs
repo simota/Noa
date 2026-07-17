@@ -532,9 +532,9 @@ fn put_placeholder(t: &mut Terminal, x: usize, y: usize, id: u32, diacritics: &[
         ((id >> 8) & 0xff) as u8,
         (id & 0xff) as u8,
     ));
-    cell.combining.clear();
+    cell.clear_combining();
     for &d in diacritics {
-        cell.combining.push(d);
+        cell.push_combining(d);
     }
 }
 

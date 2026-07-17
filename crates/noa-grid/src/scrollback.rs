@@ -60,6 +60,7 @@
 //!   flood CPU (rows go cold before the workers reach them).
 
 use crate::cell::{Cell, HyperlinkId, Row};
+use crate::grapheme::GraphemeId;
 use noa_core::{CellAttrs, Color};
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -90,7 +91,8 @@ const PACK_WORKERS: usize = 3;
 const POOL_CAP: usize = SEAL_BATCH_ROWS + 32;
 /// Per-row constant in the pending-bytes upper bound (row meta + slack).
 const PACKED_ROW_EST_OVERHEAD: usize = 16;
-/// Charged per grapheme-table entry on top of the stored `String`'s capacity.
+/// Charged per grapheme-table entry (the tail text itself lives in the
+/// process-global interner, shared across every page and screen).
 const GRAPHEME_ENTRY_COST: usize = 32;
 
 /// The drawing style interned per page, held in a fixed-width encoded form:
@@ -183,7 +185,7 @@ bitflags::bitflags! {
     }
 }
 
-/// One scrollback cell, 8 bytes (an eighth of an inlined `Cell`). The
+/// One scrollback cell, 8 bytes (a third of an inlined `Cell`). The
 /// `size_of` is pinned by a test.
 #[derive(Clone, Copy)]
 struct PackedCell {
@@ -279,8 +281,9 @@ struct Page {
     cells: Vec<PackedCell>,
     rows: Vec<RowMeta>,
     styles: StyleTable,
-    /// Cell index within `cells` -> combining scalars, for `HAS_GRAPHEME` cells.
-    graphemes: HashMap<u32, String>,
+    /// Cell index within `cells` -> interned combining tail, for
+    /// `HAS_GRAPHEME` cells.
+    graphemes: HashMap<u32, GraphemeId>,
     /// Deterministic accounting size (see module doc).
     bytes: usize,
 }
@@ -314,23 +317,20 @@ impl Page {
         if packed.flags.contains(PackedFlags::WIDE_SPACER) {
             attrs.insert(CellAttrs::WIDE_SPACER);
         }
-        let combining = if packed.flags.contains(PackedFlags::HAS_GRAPHEME) {
-            self.graphemes
-                .get(&(cell_index as u32))
-                .cloned()
-                .unwrap_or_default()
+        let grapheme = if packed.flags.contains(PackedFlags::HAS_GRAPHEME) {
+            self.graphemes.get(&(cell_index as u32)).copied()
         } else {
-            String::new()
+            None
         };
         Cell {
             ch: packed.ch,
-            combining,
             fg: decode_color(style.fg),
             bg: decode_color(style.bg),
             underline_color: (style.underline != UNDERLINE_NONE)
                 .then(|| decode_color(style.underline)),
             hyperlink: style.hyperlink().and_then(|h| HyperlinkId::new(h as usize)),
             attrs,
+            grapheme,
         }
     }
 
@@ -429,11 +429,10 @@ impl Page {
                 delta += std::mem::size_of::<Style>();
             }
             let flags = flags_of(anchor);
-            if flags.contains(PackedFlags::HAS_GRAPHEME) {
+            if let Some(grapheme) = anchor.grapheme {
                 // Rare (only combining-mark cells); keep the index arithmetic
-                // and the grapheme clone off the common per-cell path.
-                let grapheme = anchor.combining.clone();
-                delta += grapheme.capacity() + GRAPHEME_ENTRY_COST;
+                // and the map insert off the common per-cell path.
+                delta += GRAPHEME_ENTRY_COST;
                 self.graphemes.insert((base + i) as u32, grapheme);
             }
             // SAFETY: `reserve(len)` guaranteed room for `base..base+len`;
@@ -460,11 +459,11 @@ impl Page {
                     || cell.underline_color != anchor.underline_color
                     || cell.hyperlink != anchor.hyperlink
                     || cell.attrs.difference(layout) != anchor_style_attrs
-                    || !cell.combining.is_empty()
+                    || cell.grapheme.is_some()
                 {
                     break;
                 }
-                // `flags_of` sans the combining check (proven empty above).
+                // `flags_of` sans the grapheme check (proven `None` above).
                 let mut flags = PackedFlags::empty();
                 if cell.attrs.contains(CellAttrs::WIDE) {
                     flags.insert(PackedFlags::WIDE);
@@ -524,7 +523,7 @@ fn flags_of(cell: &Cell) -> PackedFlags {
     if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
         flags.insert(PackedFlags::WIDE_SPACER);
     }
-    if !cell.combining.is_empty() {
+    if cell.grapheme.is_some() {
         flags.insert(PackedFlags::HAS_GRAPHEME);
     }
     flags
@@ -1036,13 +1035,10 @@ fn pack_chunk(rows: &[Row], mut to_clear: Vec<(Row, usize)>) -> PackResult {
 }
 
 /// Re-blank a packed row's occupied prefix (the pack trim proved
-/// `row.cells[len..]` already equal `Cell::default()`), reusing each cell's
-/// combining buffer, and reset the row flags a fresh blank row carries.
+/// `row.cells[len..]` already equal `Cell::default()`) and reset the row
+/// flags a fresh blank row carries. A branchless POD pattern fill.
 fn clear_carcass_prefix(row: &mut Row, len: usize) {
-    let blank = Cell::default();
-    for cell in &mut row.cells[..len] {
-        cell.set_from(&blank);
-    }
+    row.cells[..len].fill(Cell::default());
     row.wrapped = false;
     row.dirty = true;
 }
@@ -1212,10 +1208,6 @@ impl Drop for Packer {
 /// row's trailing blanks *before* packing (so a background-color-erase blank,
 /// whose style is non-default, is preserved).
 fn pack_is_default_blank(cell: &Cell) -> bool {
-    // Field-wise, not `*cell == Cell::default()`: this runs once per trailing
-    // cell of every pushed row, and constructing a `Cell` (with its `String`)
-    // just to compare is measurable on the bulk-output path.
-    //
     // Bitwise-`&`, not short-circuit `&&`: a blank tail cell passes *every*
     // check, so `&&` pays six well-predicted-but-serial branches per cell.
     // Fusing them into one branch measured 117 → 40 ns/row on the 62-blank
@@ -1225,7 +1217,7 @@ fn pack_is_default_blank(cell: &Cell) -> bool {
     // fusing it was measured 24% slower, because its cells diverge and the
     // short-circuit usually exits on the first compare.)
     (cell.ch == ' ')
-        & cell.combining.is_empty()
+        & cell.grapheme.is_none()
         & (cell.fg == Color::Default)
         & (cell.bg == Color::Default)
         & cell.underline_color.is_none()
@@ -1267,10 +1259,12 @@ mod tests {
     }
 
     #[test]
-    fn inlined_cell_is_48_bytes() {
-        // `HyperlinkId` keeps the hot live/snapshot cell layout compact while
-        // preserving the combining `String` buffer reuse path.
-        assert_eq!(std::mem::size_of::<Cell>(), 48);
+    fn inlined_cell_is_24_bytes() {
+        // The POD `Cell` (combining tails interned out-of-line) is exactly a
+        // third of a packed-cell page's 3x expansion budget; the live-grid
+        // bandwidth paths (scroll rotate, row clear, pack input, snapshot
+        // clone) are sized by this. See `cell::tests::cell_is_24_bytes`.
+        assert_eq!(std::mem::size_of::<Cell>(), 24);
     }
 
     #[test]
@@ -1298,7 +1292,7 @@ mod tests {
         spacer.attrs.insert(CellAttrs::WIDE_SPACER);
         let plain = cell('x');
 
-        let source = row_from(vec![wide.clone(), spacer.clone(), plain.clone()]);
+        let source = row_from(vec![wide, spacer, plain]);
         sb.push_row(&source);
 
         let out = sb.row(0).expect("row 0 exists");
@@ -1338,7 +1332,7 @@ mod tests {
             ..Cell::default()
         };
         for _ in 0..100 {
-            sb.push_row(&row_from(vec![styled.clone(); 4]));
+            sb.push_row(&row_from(vec![styled; 4]));
         }
         // Default (id 0) + the one shared style = 2 entries.
         assert_eq!(sb.pages[0].styles.len(), 2);
@@ -1348,11 +1342,11 @@ mod tests {
     fn grapheme_table_roundtrips_zwj_cluster() {
         let mut sb = PagedScrollback::new(usize::MAX);
         let mut family = cell('\u{1F468}');
-        family.combining.push('\u{200D}');
-        family.combining.push('\u{1F469}');
-        family.combining.push('\u{200D}');
-        family.combining.push('\u{1F467}');
-        sb.push_row(&row_from(vec![family.clone(), cell('!')]));
+        family.push_combining('\u{200D}');
+        family.push_combining('\u{1F469}');
+        family.push_combining('\u{200D}');
+        family.push_combining('\u{1F467}');
+        sb.push_row(&row_from(vec![family, cell('!')]));
 
         let out = sb.row(0).unwrap();
         assert_eq!(out.cells[0], family);
@@ -1459,8 +1453,8 @@ mod tests {
             fg: Color::Palette(1),
             ..Cell::default()
         };
-        let mut red_grapheme = red.clone();
-        red_grapheme.combining.push('\u{0301}');
+        let mut red_grapheme = red;
+        red_grapheme.push_combining('\u{0301}');
         let mut red_wide = Cell {
             ch: '漢',
             fg: Color::Palette(1),
@@ -1486,16 +1480,16 @@ mod tests {
         };
 
         let source = vec![
-            red.clone(),
-            red.clone(),
-            red_grapheme.clone(),
-            red.clone(), // same style resumes after the grapheme break
-            red_wide.clone(),
-            red_spacer.clone(), // wide pair inside the red run
-            red.clone(),
-            blue.clone(), // style change mid-row
-            blue.clone(),
-            linked.clone(), // hyperlink divergence
+            red,
+            red,
+            red_grapheme,
+            red, // same style resumes after the grapheme break
+            red_wide,
+            red_spacer, // wide pair inside the red run
+            red,
+            blue, // style change mid-row
+            blue,
+            linked, // hyperlink divergence
         ];
         sb.push_row(&row_from(source.clone()));
 
@@ -1524,26 +1518,26 @@ mod tests {
         let bg_diverges = Cell {
             ch: 'b',
             bg: Color::Palette(3), // only `bg` differs from `base`
-            ..base.clone()
+            ..base
         };
         let underline_diverges = Cell {
             ch: 'c',
             underline_color: Some(Color::Palette(5)), // only `underline_color` differs
-            ..base.clone()
+            ..base
         };
-        let mut bold_diverges = base.clone();
+        let mut bold_diverges = base;
         bold_diverges.ch = 'd';
         bold_diverges.attrs.insert(CellAttrs::BOLD); // only a non-layout attr differs
 
         let source = vec![
-            base.clone(),
-            base.clone(),
-            bg_diverges.clone(),
-            bg_diverges.clone(),
-            underline_diverges.clone(),
-            underline_diverges.clone(),
-            bold_diverges.clone(),
-            bold_diverges.clone(),
+            base,
+            base,
+            bg_diverges,
+            bg_diverges,
+            underline_diverges,
+            underline_diverges,
+            bold_diverges,
+            bold_diverges,
         ];
         sb.push_row(&row_from(source.clone()));
 
@@ -1600,7 +1594,7 @@ mod tests {
             .map(|i| {
                 let mut c = cell('x');
                 if i % 10 == 0 {
-                    c.combining.push('\u{0301}');
+                    c.push_combining('\u{0301}');
                 }
                 c
             })
@@ -1668,7 +1662,7 @@ mod tests {
             while len > 0 {
                 let c = &row.cells[len - 1];
                 let blank = (c.ch == ' ')
-                    & c.combining.is_empty()
+                    & c.combining().is_empty()
                     & (c.fg == Color::Default)
                     & (c.bg == Color::Default)
                     & c.underline_color.is_none()
@@ -1810,11 +1804,11 @@ mod tests {
         // both the first and the last index the raw-pointer fill loop
         // writes, sandwiching a plain cell.
         let mut first = cell('a');
-        first.combining.push('\u{0301}'); // combining acute accent
+        first.push_combining('\u{0301}'); // combining acute accent
         let middle = cell('b');
         let mut last = cell('c');
-        last.combining.push('\u{0300}'); // combining grave accent
-        sb.push_row(&row_from(vec![first.clone(), middle.clone(), last.clone()]));
+        last.push_combining('\u{0300}'); // combining grave accent
+        sb.push_row(&row_from(vec![first, middle, last]));
         let out = sb.row(0).unwrap();
         assert_eq!(out.cells, vec![first, middle, last]);
 
@@ -1834,14 +1828,14 @@ mod tests {
                 ..Cell::default()
             })
             .collect();
-        if i % 3 == 0 {
-            cells[0].combining.push('\u{0301}');
+        if i.is_multiple_of(3) {
+            cells[0].push_combining('\u{0301}');
         }
         while cells.len() < cols {
             cells.push(Cell::default());
         }
         let mut row = row_from(cells);
-        row.wrapped = i % 5 == 0;
+        row.wrapped = i.is_multiple_of(5);
         row
     }
 

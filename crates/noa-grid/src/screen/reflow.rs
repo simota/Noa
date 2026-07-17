@@ -411,7 +411,7 @@ impl Screen {
             let row_idx = rows.len() - 1;
             let start_x = x;
             if source_width == 2 && cols_usize < 2 {
-                rows[row_idx].cells[start_x] = blank.clone();
+                rows[row_idx].cells[start_x] = *blank;
                 cell_positions[src] = Some(ReflowPosition {
                     row: row_idx,
                     x: start_x as u16,
@@ -426,7 +426,7 @@ impl Screen {
                     Self::cursor_position_after(row_idx, start_x + 1, cols);
                 x += 1;
             } else if cells[src].attrs.contains(CellAttrs::WIDE_SPACER) {
-                rows[row_idx].cells[start_x] = blank.clone();
+                rows[row_idx].cells[start_x] = *blank;
                 cell_positions[src] = Some(ReflowPosition {
                     row: row_idx,
                     x: start_x as u16,
@@ -436,7 +436,7 @@ impl Screen {
                 x += 1;
             } else {
                 for i in 0..source_width {
-                    rows[row_idx].cells[start_x + i] = cells[src + i].clone();
+                    rows[row_idx].cells[start_x + i] = cells[src + i];
                     cell_positions[src + i] = Some(ReflowPosition {
                         row: row_idx,
                         x: (start_x + i) as u16,

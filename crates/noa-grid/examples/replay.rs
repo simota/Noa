@@ -47,7 +47,7 @@ fn main() {
                 continue;
             }
             line.push(cell.ch);
-            line.extend(cell.combining.chars());
+            line.push_str(cell.combining());
         }
         println!("{y:>3}|{}|", line.trim_end());
     }

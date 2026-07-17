@@ -99,19 +99,14 @@ impl Screen {
         let underline_color = self.cursor.underline_color;
         let hyperlink = self.cursor.hyperlink;
         let attrs = self.pen_attrs();
-        // In-place `set_from` (not a struct-literal assignment) so an
-        // already-populated destination cell's `combining` buffer is reused
-        // rather than dropped and replaced by this template's empty one —
-        // matters when the same screen position keeps getting overwritten
-        // by combining-mark-heavy content (accent/emoji redraws).
         let template = Cell {
             ch: c,
-            combining: String::new(),
             fg,
             bg,
             underline_color,
             hyperlink,
             attrs,
+            grapheme: None,
         };
         let Some(row) = self.grid.get_mut(y) else {
             return;
@@ -122,26 +117,25 @@ impl Screen {
 
         if width == 1 {
             Self::clear_wide_at(row, x, &blank);
-            row.cells[x].set_from(&template);
+            row.cells[x] = template;
         } else {
             Self::clear_wide_at(row, x, &blank);
             Self::clear_wide_at(row, x + 1, &blank);
 
-            let mut lead = template.clone();
+            let mut lead = template;
             lead.attrs.insert(CellAttrs::WIDE);
             let mut spacer_attrs = attrs;
             spacer_attrs.insert(CellAttrs::WIDE_SPACER);
-            row.cells[x].set_from(&lead);
-            let spacer = Cell {
+            row.cells[x] = lead;
+            row.cells[x + 1] = Cell {
                 ch: ' ',
-                combining: String::new(),
                 fg,
                 bg,
                 underline_color,
                 hyperlink,
                 attrs: spacer_attrs,
+                grapheme: None,
             };
-            row.cells[x + 1].set_from(&spacer);
         }
         row.dirty = true;
 
@@ -184,12 +178,12 @@ impl Screen {
         let blank = self.blank();
         let template = Cell {
             ch: ' ',
-            combining: String::new(),
             fg: self.cursor.fg,
             bg: self.cursor.bg,
             underline_color: self.cursor.underline_color,
             hyperlink: self.cursor.hyperlink,
             attrs: self.pen_attrs(),
+            grapheme: None,
         };
         let left = self.left_margin();
         let right = self.right_margin();
@@ -222,16 +216,27 @@ impl Screen {
             } else {
                 (seg_end - x).min(bytes.len() - i)
             };
-            for (k, &b) in bytes[i..i + n].iter().enumerate() {
-                if row.cells[x + k]
-                    .attrs
-                    .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
-                {
-                    Self::clear_wide_at(row, x + k, &blank);
+            // Wide-pair cleanup can touch a neighbor cell, but a lead and its
+            // spacer both carry a layout flag, so any pair overlapping the
+            // segment is visible *inside* it: one branchless prescan proves
+            // the common all-narrow segment safe for the straight fill below
+            // (Ghostty analog: `printSliceFill`'s masked simple-cell check).
+            let layout = CellAttrs::WIDE | CellAttrs::WIDE_SPACER;
+            if row.cells[x..x + n]
+                .iter()
+                .any(|cell| cell.attrs.intersects(layout))
+            {
+                for k in 0..n {
+                    if row.cells[x + k].attrs.intersects(layout) {
+                        Self::clear_wide_at(row, x + k, &blank);
+                    }
                 }
-                let cell = &mut row.cells[x + k];
-                cell.set_from(&template);
-                cell.ch = b as char;
+            }
+            for (cell, &b) in row.cells[x..x + n].iter_mut().zip(&bytes[i..i + n]) {
+                *cell = Cell {
+                    ch: b as char,
+                    ..template
+                };
             }
             row.dirty = true;
             self.last_printed = Some(bytes[i + n - 1] as char);
@@ -304,15 +309,15 @@ impl Screen {
         let attrs = self.pen_attrs();
         let mut lead = Cell {
             ch: ' ',
-            combining: String::new(),
             fg: self.cursor.fg,
             bg: self.cursor.bg,
             underline_color: self.cursor.underline_color,
             hyperlink: self.cursor.hyperlink,
             attrs,
+            grapheme: None,
         };
         lead.attrs.insert(CellAttrs::WIDE);
-        let mut spacer = lead.clone();
+        let mut spacer = lead;
         spacer.attrs.remove(CellAttrs::WIDE);
         spacer.attrs.insert(CellAttrs::WIDE_SPACER);
         let left = self.left_margin();
@@ -383,9 +388,8 @@ impl Screen {
                         Self::clear_wide_at(row, cell_x, &blank);
                     }
                 }
-                row.cells[k].set_from(&lead);
-                row.cells[k].ch = cur;
-                row.cells[k + 1].set_from(&spacer);
+                row.cells[k] = Cell { ch: cur, ..lead };
+                row.cells[k + 1] = spacer;
                 self.last_printed = Some(cur);
                 wrote += 1;
                 if wrote == fit {
@@ -487,7 +491,7 @@ impl Screen {
     /// a completed regional-indicator pair (a flag). A text-presentation
     /// selector (VS15) pins the cluster narrow; the *last* selector wins.
     pub(super) fn cluster_wants_wide(cell: &Cell) -> bool {
-        for scalar in cell.combining.chars().rev() {
+        for scalar in cell.combining().chars().rev() {
             match scalar {
                 '\u{FE0F}' => return true,
                 '\u{FE0E}' => return false,
@@ -527,16 +531,15 @@ impl Screen {
         let mut spacer_attrs = lead.attrs;
         spacer_attrs.remove(CellAttrs::WIDE);
         spacer_attrs.insert(CellAttrs::WIDE_SPACER);
-        let spacer = Cell {
+        row.cells[spacer_x] = Cell {
             ch: ' ',
-            combining: String::new(),
             fg,
             bg,
             underline_color,
             hyperlink,
             attrs: spacer_attrs,
+            grapheme: None,
         };
-        row.cells[spacer_x].set_from(&spacer);
         row.dirty = true;
         if self.cursor.x as usize == spacer_x {
             if self.cursor.x.saturating_add(1) > self.right_margin() {
@@ -555,7 +558,7 @@ impl Screen {
     /// only this function.
     pub(super) fn extends_cluster(target: &Cell, next: char) -> bool {
         const ZWJ: char = '\u{200D}';
-        let last_scalar = target.combining.chars().next_back().unwrap_or(target.ch);
+        let last_scalar = target.combining().chars().next_back().unwrap_or(target.ch);
         if next == ZWJ || last_scalar == ZWJ {
             return true;
         }

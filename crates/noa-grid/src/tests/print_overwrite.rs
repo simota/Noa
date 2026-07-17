@@ -24,9 +24,9 @@ fn print_narrow_overwrite_clears_prior_combining_and_hyperlink() {
     let c = cell(&t, 0, 0);
     assert_eq!(c.ch, 'z');
     assert!(
-        c.combining.is_empty(),
+        c.combining().is_empty(),
         "stale combining marks leaked into the reprinted cell: {:?}",
-        c.combining
+        c.combining()
     );
     assert_eq!(
         c.hyperlink, None,
@@ -56,9 +56,9 @@ fn print_wide_overwrite_clears_prior_lead_combining_and_hyperlink() {
     let spacer = cell(&t, 1, 0);
     assert_eq!(lead.ch, '本');
     assert!(
-        lead.combining.is_empty(),
+        lead.combining().is_empty(),
         "stale combining marks leaked into the new wide lead: {:?}",
-        lead.combining
+        lead.combining()
     );
     assert_eq!(
         lead.hyperlink, None,
@@ -96,9 +96,9 @@ fn cluster_promotion_to_wide_clears_prior_spacer_state() {
     assert!(lead.attrs.contains(CellAttrs::WIDE));
     assert_eq!(spacer.ch, ' ', "promoted spacer must be blank, not leftover 'e'");
     assert!(
-        spacer.combining.is_empty(),
+        spacer.combining().is_empty(),
         "stale combining marks leaked into the promoted spacer: {:?}",
-        spacer.combining
+        spacer.combining()
     );
     assert_eq!(
         spacer.hyperlink, None,

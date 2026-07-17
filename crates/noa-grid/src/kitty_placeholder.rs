@@ -136,7 +136,7 @@ pub fn scan_row(cells: &[Cell]) -> Vec<PlaceholderRun> {
             continue;
         };
 
-        let mut dia = cell.combining.chars();
+        let mut dia = cell.combining().chars();
         let d_row = dia.next().and_then(diacritic_value);
         let d_col = dia.next().and_then(diacritic_value);
         let d_msb = dia.next().and_then(diacritic_value);
@@ -266,7 +266,7 @@ mod tests {
         let fg = Color::Rgb(Rgb::new(0, 0, 3));
         let first = placeholder(fg, None, &['\u{0305}', '\u{0305}']); // row 0, col 0
         let bare = placeholder(fg, None, &[]); // infer row 0, col +1
-        let cells = vec![first, bare.clone(), bare.clone(), bare];
+        let cells = vec![first, bare, bare, bare];
         let runs = scan_row(&cells);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].virt_row, 0);
@@ -297,7 +297,7 @@ mod tests {
             ch: 'x',
             ..Default::default()
         };
-        let cells = vec![ph.clone(), plain, ph];
+        let cells = vec![ph, plain, ph];
         let runs = scan_row(&cells);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].screen_x, 0);

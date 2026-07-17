@@ -1,8 +1,8 @@
 // ── erase-family `Cell::set_from` — no residual state ──
 //
 // `erase_line`, `erase_display`, `insert_blank_chars`, `delete_chars`, and
-// `erase_chars` all fill their target cells via `Cell::set_from` (in-place,
-// capacity-reusing) instead of `*c = blank.clone()`. `set_from` must still
+// `erase_chars` all fill their target cells via `Cell::set_from` (a plain
+// POD copy). `set_from` must still
 // touch every field a struct-literal replace would have, so a cell that
 // carried combining marks, a hyperlink, non-default colors, or wide flags
 // leaves no trace after any of these five erase paths — including the
@@ -18,9 +18,9 @@ const DECORATED_WIDE_CLUSTER: &str =
 fn assert_full_blank(c: &crate::cell::Cell, bg: Color) {
     assert_eq!(c.ch, ' ', "erase left a stray scalar: {:?}", c.ch);
     assert!(
-        c.combining.is_empty(),
+        c.combining().is_empty(),
         "stale combining marks survived erase: {:?}",
-        c.combining
+        c.combining()
     );
     assert_eq!(c.fg, Color::Default, "stale fg survived erase");
     assert_eq!(c.bg, bg, "erased cell bg does not reflect the current pen (bce)");
@@ -37,7 +37,7 @@ fn assert_full_blank(c: &crate::cell::Cell, bg: Color) {
 fn assert_decorated(t: &Terminal, x: usize, y: usize) {
     let lead = cell(t, x, y);
     assert_eq!(lead.ch, '日');
-    assert!(!lead.combining.is_empty(), "setup: combining mark missing");
+    assert!(!lead.combining().is_empty(), "setup: combining mark missing");
     assert!(lead.hyperlink.is_some(), "setup: hyperlink missing");
     assert!(
         lead.attrs.contains(CellAttrs::BOLD | CellAttrs::UNDERLINE),

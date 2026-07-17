@@ -10,6 +10,7 @@ pub mod cell;
 mod charset;
 pub mod copy_mode;
 pub mod cursor;
+mod grapheme;
 pub mod kitty;
 pub mod kitty_keyboard;
 pub mod kitty_placeholder;
@@ -30,6 +31,7 @@ mod tests;
 pub use cell::{Cell, Hyperlink, HyperlinkId, Row};
 pub use copy_mode::{CopyDirection, CopyModeCancel, CopyModeState};
 pub use cursor::{Cursor, CursorStyle, HorizontalMargins, ScrollRegion};
+pub use grapheme::GraphemeId;
 pub use kitty::{ImageStore, KittyImage};
 pub use kitty_keyboard::{
     KITTY_ALL_FLAGS, KITTY_DISAMBIGUATE, KITTY_REPORT_ALL_KEYS, KITTY_REPORT_ALTERNATE_KEYS,

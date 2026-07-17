@@ -303,7 +303,7 @@ pub(super) fn rebuild_row_instances(
         let (shape_ch, shape_combining) = if invisible || placeholder {
             (' ', Vec::new())
         } else {
-            (cell.ch, cell.combining.chars().collect())
+            (cell.ch, cell.combining().chars().collect())
         };
         segment_cells.push(SegmentCell {
             ch: shape_ch,

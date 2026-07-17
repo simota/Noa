@@ -458,10 +458,6 @@ impl Screen {
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
         match mode {
             EraseDisplay::Below => {
-                // `set_from` (not `*c = blank.clone()`) reuses each
-                // destination cell's existing `combining` buffer instead of
-                // dropping it and cloning blank's — same rationale as
-                // `Row::clear` and `erase_line`.
                 for c in &mut self.grid[y].cells[x..] {
                     c.set_from(&blank);
                 }
@@ -521,10 +517,6 @@ impl Screen {
         let blank = self.blank();
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
         let row = &mut self.grid[y];
-        // `set_from` (not `*c = blank.clone()`) reuses each destination
-        // cell's existing `combining` buffer instead of dropping it and
-        // cloning blank's — same rationale as `Row::clear` and `print`'s
-        // per-scalar overwrite, and this is the same erase-to-blank shape.
         match mode {
             EraseLine::Right => {
                 for c in &mut row.cells[x..] {
@@ -570,9 +562,6 @@ impl Screen {
         let n = (n.max(1) as usize).min(len);
         let row = &mut self.grid[y];
         row.cells[x..].rotate_right(n);
-        // `set_from` (not `*c = blank.clone()`) reuses each destination
-        // cell's existing `combining` buffer — same rationale as
-        // `Row::clear` and `erase_line`.
         for c in &mut row.cells[x..x + n] {
             c.set_from(&blank);
         }

@@ -45,7 +45,7 @@ fn run_with_base_colors(
 }
 
 fn cell(t: &Terminal, x: usize, y: usize) -> crate::cell::Cell {
-    t.primary.grid[y].cells[x].clone()
+    t.primary.grid[y].cells[x]
 }
 
 fn row_text(t: &Terminal, y: usize, width: usize) -> String {

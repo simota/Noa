@@ -99,7 +99,7 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         cells: vec![
             Cell {
                 ch: 'A',
-                combining: String::new(),
+                grapheme: None,
                 fg: Color::Palette(1),
                 bg: Color::Default,
                 underline_color: None,
@@ -108,7 +108,7 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
             },
             Cell {
                 ch: 'g',
-                combining: String::new(),
+                grapheme: None,
                 fg: Color::Default,
                 bg: Color::Palette(4),
                 underline_color: None,
@@ -423,7 +423,7 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
     let row = Row {
         cells: vec![Cell {
             ch: '\u{1F600}',
-            combining: String::new(),
+            grapheme: None,
             fg: magenta_fg,
             bg: Color::Default,
             underline_color: None,

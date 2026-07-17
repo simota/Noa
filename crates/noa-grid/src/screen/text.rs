@@ -788,8 +788,8 @@ impl Screen {
 }
 
 fn clone_row_into(slot: &mut Row, row: &Row) {
-    // Field-wise so the cell vec's allocation (and each cell's
-    // combining-string buffer) is reused.
+    // Field-wise so the cell vec's allocation is reused; POD cells make
+    // this a plain memcpy.
     slot.cells.clone_from(&row.cells);
     slot.wrapped = row.wrapped;
     slot.dirty = row.dirty;

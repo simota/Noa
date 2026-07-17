@@ -283,6 +283,18 @@ impl ApplicationHandler<UserEvent> for App {
                         .map(|state| state.window.clone())
                 {
                     window.focus_window();
+                    // AppKit's native-tab teardown drops first responder off
+                    // winit's content view, so `focus_window` (already-key
+                    // window) leaves `KeyboardInput` dead. Re-target first
+                    // responder at the content view, then discard any stale
+                    // marked text by toggling IME off/on (same clear the
+                    // `Focused(false)` path uses).
+                    #[cfg(target_os = "macos")]
+                    {
+                        crate::macos_window::focus_content_view(&window);
+                        window.set_ime_allowed(false);
+                        window.set_ime_allowed(true);
+                    }
                 }
             }
             UserEvent::PtyExit(window_id, pane_id) => {
@@ -375,6 +387,16 @@ impl ApplicationHandler<UserEvent> for App {
                 self.secure_input
                     .on_focus_change(true, &mut crate::secure_input::CarbonSecureInput);
                 if let Some(state) = self.windows.get(&window_id) {
+                    // Belt-and-suspenders for the native-tab-close focus loss:
+                    // whether or not the deferred `RestoreFocus` lands, a real
+                    // focus gain re-anchors first responder on the content view
+                    // and re-arms IME so key input can't stay dead.
+                    #[cfg(target_os = "macos")]
+                    {
+                        crate::macos_window::focus_content_view(&state.window);
+                        state.window.set_ime_allowed(false);
+                        state.window.set_ime_allowed(true);
+                    }
                     state.window.request_redraw();
                 }
             }

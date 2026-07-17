@@ -425,6 +425,22 @@ fn dispatch_csi<H: Handler>(csi: &Csi, h: &mut H, sgr_attrs: &mut Vec<SgrAttr>) 
             _ => EraseLine::Right,
         }),
         b'm' if plain => {
+            // Lone truecolor pen (`38;2;r;g;b` / `48;2;r;g;b`) — the
+            // per-cell shape SGR-dense floods emit two of per cell.
+            // Dispatch straight off the stack, skipping the shared vec's
+            // clear/push/deref round-trip; the decoded attr is identical to
+            // `parse_sgr_into`'s fast arm (same slots, both separator
+            // forms).
+            if let [code @ (38 | 48), 2, r, g, b] = *csi.params() {
+                let color = noa_core::Color::Rgb(noa_core::Rgb::new(r as u8, g as u8, b as u8));
+                let attr = if code == 38 {
+                    SgrAttr::Fg(color)
+                } else {
+                    SgrAttr::Bg(color)
+                };
+                h.set_attributes(&[attr]);
+                return;
+            }
             parse_sgr_into(csi, sgr_attrs);
             h.set_attributes(sgr_attrs);
         }

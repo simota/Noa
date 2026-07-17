@@ -93,7 +93,6 @@ impl Screen {
         }
 
         let (x, y) = (self.cursor.x as usize, self.cursor.y as usize);
-        let blank = self.blank();
         let fg = self.cursor.fg;
         let bg = self.cursor.bg;
         let underline_color = self.cursor.underline_color;
@@ -116,9 +115,23 @@ impl Screen {
         }
 
         if width == 1 {
-            Self::clear_wide_at(row, x, &blank);
+            // Wide-pair cleanup is only needed when the target carries a
+            // layout flag (`clear_wide_at`'s neighbor writes are gated on
+            // them, and its unconditional blank at `x` is overwritten by the
+            // template below) — the common narrow overwrite skips both the
+            // extra store and the blank construction entirely (SGR-dense
+            // per-cell repaints hit this per cell).
+            if row.cells[x]
+                .attrs
+                .intersects(CellAttrs::WIDE | CellAttrs::WIDE_SPACER)
+            {
+                // `Cell::blank(bg)` == `self.blank()`, built off the copied
+                // pen so `row`'s borrow of `self.grid` stays undisturbed.
+                Self::clear_wide_at(row, x, &Cell::blank(bg));
+            }
             row.cells[x] = template;
         } else {
+            let blank = Cell::blank(bg);
             Self::clear_wide_at(row, x, &blank);
             Self::clear_wide_at(row, x + 1, &blank);
 

@@ -32,6 +32,15 @@ def terminal_versions(repo):
         out = sh(noa_bin, "+version") or sh(noa_bin, "--version")
         v["noa"] = out.splitlines()[0] if out else "(release build)"
     v["ghostty"] = plist("Ghostty.app", "CFBundleShortVersionString")
+    gn_app = os.environ.get(
+        "GHOSTTY_NIGHTLY_APP",
+        os.path.expanduser(
+            "~/repos/github.com/ghostty/macos/build/ReleaseLocal/Ghostty.app"))
+    gn_bin = os.path.join(gn_app, "Contents/MacOS/ghostty")
+    if os.path.exists(gn_bin):
+        gn_out = sh(gn_bin, "--version")
+        v["ghostty-nightly"] = (gn_out.splitlines()[0] if gn_out
+                                else "(frozen nightly build)")
     v["termy"] = plist("Termy.app", "CFBundleShortVersionString")
     v["kitty"] = plist("kitty.app", "CFBundleShortVersionString")
     v["alacritty"] = plist("Alacritty.app", "CFBundleShortVersionString")

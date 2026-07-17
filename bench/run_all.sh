@@ -278,6 +278,11 @@ fi
 # worktree's target/release/noa) can be measured against the same harness.
 NOA_BIN="${NOA_BIN:-$REPO_DIR/target/release/noa}"
 GHOSTTY_BIN="/Applications/Ghostty.app/Contents/MacOS/ghostty"
+# Frozen Ghostty Nightly under test (wish #3 baseline). A pinned local build,
+# never the installed stable — do NOT rebuild/update it. Its bundle path is
+# also used for the activate fallback so `open -a` targets THIS build.
+GHOSTTY_NIGHTLY_APP="${GHOSTTY_NIGHTLY_APP:-/Users/simota/repos/github.com/ghostty/macos/build/ReleaseLocal/Ghostty.app}"
+GHOSTTY_NIGHTLY_BIN="${GHOSTTY_NIGHTLY_BIN:-$GHOSTTY_NIGHTLY_APP/Contents/MacOS/ghostty}"
 TERMY_BIN="/Applications/Termy.app/Contents/MacOS/termy"
 KITTY_BIN="/Applications/kitty.app/Contents/MacOS/kitty"
 ALACRITTY_BIN="/Applications/Alacritty.app/Contents/MacOS/alacritty"
@@ -290,6 +295,7 @@ term_present() {
   case "$1" in
     noa) [ -x "$NOA_BIN" ] ;;
     ghostty) [ -x "$GHOSTTY_BIN" ] ;;
+    ghostty-nightly) [ -x "$GHOSTTY_NIGHTLY_BIN" ] ;;
     termy) [ -x "$TERMY_BIN" ] ;;
     kitty) [ -x "$KITTY_BIN" ] ;;
     alacritty) [ -x "$ALACRITTY_BIN" ] ;;
@@ -327,6 +333,7 @@ tracked_roots() {
   case "$term" in
     noa) want="$NOA_BIN" ;;
     ghostty) want="$GHOSTTY_BIN" ;;
+    ghostty-nightly) want="$GHOSTTY_NIGHTLY_BIN" ;;
     termy) want="$TERMY_BIN" ;;
     kitty) want="$KITTY_BIN" ;;
     alacritty) want="$ALACRITTY_BIN" ;;
@@ -444,6 +451,12 @@ launch_term_default() {
       "$GHOSTTY_BIN" --config-default-files=false --window-save-state=never \
         ${fs:+--window-position-x=$((DISP_X + 64))} ${fs:+--window-position-y=$((DISP_Y + 64))} \
         -e "$WRAPPER" >/dev/null 2>&1 & ;;
+    ghostty-nightly)
+      # Identical launch semantics to ghostty (same --fullscreen/-e caveat),
+      # only the binary differs — the frozen Nightly build under test.
+      "$GHOSTTY_NIGHTLY_BIN" --config-default-files=false --window-save-state=never \
+        ${fs:+--window-position-x=$((DISP_X + 64))} ${fs:+--window-position-y=$((DISP_Y + 64))} \
+        -e "$WRAPPER" >/dev/null 2>&1 & ;;
     termy)   XDG_CONFIG_HOME="$ISO_XDG" SHELL="$WRAPPER" "$TERMY_BIN" >/dev/null 2>&1 & ;;
     kitty)   "$KITTY_BIN" --config NONE -o confirm_os_window_close=0 \
                ${fs:+--start-as=fullscreen} "$WRAPPER" >/dev/null 2>&1 & ;;
@@ -485,6 +498,9 @@ launch_term() {
     case "$1" in
       noa)     launch_noa --cols "$EQ_COLS" --rows "$EQ_ROWS" --font-size "$EQ_FSIZE" ;;
       ghostty) "$GHOSTTY_BIN" --config-default-files=false --window-save-state=never \
+                 --font-family="$EQ_FONT" --font-size="$EQ_FSIZE" \
+                 --window-width="$EQ_COLS" --window-height="$EQ_ROWS" -e "$WRAPPER" >/dev/null 2>&1 & ;;
+      ghostty-nightly) "$GHOSTTY_NIGHTLY_BIN" --config-default-files=false --window-save-state=never \
                  --font-family="$EQ_FONT" --font-size="$EQ_FSIZE" \
                  --window-width="$EQ_COLS" --window-height="$EQ_ROWS" -e "$WRAPPER" >/dev/null 2>&1 & ;;
       termy)   XDG_CONFIG_HOME="$ISO_XDG" SHELL="$WRAPPER" "$TERMY_BIN" >/dev/null 2>&1 & ;;  # size not controllable
@@ -578,6 +594,7 @@ activate_term() {
   proc_alive "$pid" || return 0
   case "$1" in
     ghostty) open -a Ghostty 2>/dev/null || true ;;
+    ghostty-nightly) open -a "$GHOSTTY_NIGHTLY_APP" 2>/dev/null || true ;;
     termy)   open -a Termy 2>/dev/null || true ;;
     kitty)   open -a kitty 2>/dev/null || true ;;
   esac
@@ -1060,7 +1077,7 @@ run_load_active() {
 # warp is opt-in only (`--only ...,warp`): its $SHELL launch is unverified
 # and it carries account/AI-agent state that doesn't belong in a default
 # sweep — excluded from the default set rather than skipped at runtime.
-ALL="noa ghostty termy kitty alacritty iterm2 terminal rio"
+ALL="noa ghostty ghostty-nightly termy kitty alacritty iterm2 terminal rio"
 case ",$ONLY," in *",warp,"*) ALL="$ALL warp" ;; esac
 SELECTED=""
 for t in $ALL; do
@@ -1093,6 +1110,7 @@ for t in $SELECTED; do
   case "$t" in
     noa)     emit noa meta - - isolation "XDG_CONFIG_HOME=iso-dir (fresh defaults; iso config carries only window-save-state=never to protect the user's session.json)" note ;;
     ghostty) emit ghostty meta - - isolation "--config-default-files=false (no config files read) + --window-save-state=never (phantom saved-state window suppressed)" note ;;
+    ghostty-nightly) emit ghostty-nightly meta - - isolation "frozen Nightly build ($GHOSTTY_NIGHTLY_APP); --config-default-files=false (no config files read) + --window-save-state=never (phantom saved-state window suppressed)" note ;;
     termy)   emit termy meta - - isolation "XDG_CONFIG_HOME=iso-dir (fresh defaults; verified: writes its default config.txt into the iso dir)" note ;;
     kitty)   emit kitty meta - - isolation "--config NONE (built-in defaults) + -o confirm_os_window_close=0 (harness kill-safety, disclosed)" note ;;
     alacritty) emit alacritty meta - - isolation "XDG_CONFIG_HOME=iso-dir with an empty alacritty.toml (first config candidate wins; user's ~/.alacritty.toml never consulted)" note ;;
@@ -1441,7 +1459,7 @@ if [ "$EQUALIZE" = 1 ]; then
   for term in $SELECTED; do
     case "$term" in
       noa)     emit "$term" meta - - equalized "grid=${EQ_COLS}x${EQ_ROWS};font=${EQ_FONT}@${EQ_FSIZE};ligatures-off;bg-off" note ;;
-      ghostty) emit "$term" meta - - equalized "grid=${EQ_COLS}x${EQ_ROWS};font=${EQ_FONT}@${EQ_FSIZE};clean-config" note ;;
+      ghostty|ghostty-nightly) emit "$term" meta - - equalized "grid=${EQ_COLS}x${EQ_ROWS};font=${EQ_FONT}@${EQ_FSIZE};clean-config" note ;;
       kitty)   emit "$term" meta - - equalized "grid=${EQ_COLS}x${EQ_ROWS};font=${EQ_FONT}@${EQ_FSIZE};config=NONE" note ;;
       termy)   emit "$term" meta - - equalized "grid=NATIVE-DEFAULT(no-size-key);font=${EQ_FONT}@${EQ_FSIZE}" note ;;
       alacritty) emit "$term" meta - - equalized "grid=${EQ_COLS}x${EQ_ROWS};font=${EQ_FONT}@${EQ_FSIZE};via -o overrides" note ;;

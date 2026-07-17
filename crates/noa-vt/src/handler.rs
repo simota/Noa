@@ -96,6 +96,17 @@ pub trait Handler {
             self.print(c);
         }
     }
+    /// [`Handler::print_str`] for a caller that has already verified every
+    /// byte of `s` is printable ASCII (`0x20..=0x7e`) — `Stream`'s
+    /// ground-scan fast path knows this the moment its SWAR boundary scan
+    /// finds no non-ASCII byte, but `print_str` re-derives it internally
+    /// (a per-byte classification pass over text this call already proved
+    /// ASCII) to stay correct for callers that can't make that guarantee.
+    /// Default body forwards to `print_str`, so implementations that don't
+    /// override this still behave correctly; `s` is guaranteed non-empty.
+    fn print_ascii_str(&mut self, s: &str) {
+        self.print_str(s);
+    }
     /// A C0 control byte (`BEL`/`BS`/`HT`/`LF`/`VT`/`FF`/`CR`/…).
     fn execute_c0(&mut self, byte: u8);
 

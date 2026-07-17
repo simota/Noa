@@ -169,7 +169,13 @@ fn feed_parser<H: Handler>(
                     // is sound.
                     let text = unsafe { core::str::from_utf8_unchecked(&bytes[i..run_end]) };
                     *display_dirty = true;
-                    handler.print_str(text);
+                    // `scan_run`'s `ascii` flag means every byte here is
+                    // `0x20..=0x7e` (it only spans `is_run_byte` bytes,
+                    // already `>= 0x20` and `!= 0x7f`, further narrowed to
+                    // `< 0x80`) — the exact guarantee `print_ascii_str`
+                    // needs to skip `print_str`'s internal re-classification
+                    // of text this scan already proved ASCII.
+                    handler.print_ascii_str(text);
                     i = run_end;
                     continue;
                 }

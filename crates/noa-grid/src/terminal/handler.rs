@@ -72,6 +72,25 @@ impl Handler for Terminal {
         }
     }
 
+    /// `s` is caller-verified printable ASCII (see the trait doc): the
+    /// per-byte ASCII/wide/combining dispatch `print_str` needs for mixed
+    /// content collapses to a single [`Screen::print_ascii_run`] call —
+    /// same DEC-Special-Graphics guard, since that remaps ASCII *bytes* to
+    /// line-drawing glyphs regardless of their own ASCII-ness.
+    fn print_ascii_str(&mut self, s: &str) {
+        let autowrap = self.modes.autowrap();
+        let grapheme_clustering = self.modes.grapheme_clustering();
+        if !self.charset.active_is_ascii() {
+            for c in s.chars() {
+                let c = self.charset.translate(c);
+                self.active_mut().print(c, autowrap, grapheme_clustering);
+            }
+            return;
+        }
+        self.active_mut()
+            .print_ascii_run(s.as_bytes(), autowrap, grapheme_clustering);
+    }
+
     fn execute_c0(&mut self, byte: u8) {
         match byte {
             0x0e => return self.locking_shift(CharsetSlot::G1), // SO

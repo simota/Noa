@@ -195,7 +195,17 @@ impl Screen {
                 }
                 grid_sealed += 1;
             }
-            self.grid[top..=bottom].rotate_left(k_grid);
+            if full_height {
+                // Ring fast path (wish#4 track B): the batch's one amortized
+                // header rotate becomes an O(1) base bump. The `k_grid`
+                // retiring logical rows land on the bottom and every one of
+                // them is rewritten below (`fill_batch_row` over the last
+                // `ring.len()` rows plus the `!recorded` bottom clear), so
+                // the ring's "already replaced or cleared" contract holds.
+                self.grid.advance_base(k_grid);
+            } else {
+                self.grid.canonicalize()[top..=bottom].rotate_left(k_grid);
+            }
             let r = ring.len();
             for (k, rec) in ring.drain(..).enumerate() {
                 let y = bottom - r + k;
@@ -217,8 +227,12 @@ impl Screen {
                 // per-row dirty bits rotated with their rows, and the
                 // renderer translates its cache by the accumulated shift.
                 self.scroll_shift = self.scroll_shift.saturating_add(emissions);
+            } else if full_height {
+                for row in &mut self.grid {
+                    row.dirty = true;
+                }
             } else {
-                for row in &mut self.grid[top..=bottom] {
+                for row in &mut self.grid.canonicalize()[top..=bottom] {
                     row.dirty = true;
                 }
             }

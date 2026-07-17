@@ -354,7 +354,6 @@ impl Screen {
     /// three conditions true.
     #[inline]
     fn scroll_up_one_full_recorded(&mut self) {
-        let bottom = self.rows as usize - 1;
         let blank = self.blank();
         let default_blank = Self::is_default_blank(&blank);
         let replacement = match self.scrollback.take_blank_row(self.cols) {
@@ -369,7 +368,10 @@ impl Screen {
         let evicted = self.scrollback.push_row_deferred(sealed);
         self.note_scrollback_evictions(evicted);
         self.pin_viewport_for_scrollback_push(1, true);
-        self.grid[0..=bottom].rotate_left(1);
+        // Ring counterpart of the old header rotate (wish#4 track B): the
+        // sealed-and-replaced physical slot 0 becomes the new logical bottom
+        // row by bumping the ring base — no row headers move.
+        self.grid.advance_base(1);
         self.scroll_shift = self.scroll_shift.saturating_add(1);
     }
 

@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-07-17
+
+### Added
+
+- Dynamic tab titles: when the shell has not set an OSC 0/2 title and the tab
+  has not been renamed, the title is derived live from the focused pane's
+  foreground process and OSC 7 cwd tail (`cargo — noa`), matching the sidebar
+  card naming; a plain interactive shell collapses to just the cwd tail (#22)
+- bench: seventh harness axis "fire" (DOOM-fire IO stress, deterministic
+  truecolor stream, producer-side fps), native-fullscreen measurement for all
+  render-path axes on the launch display, five more terminals (Alacritty,
+  iTerm2, Warp, Terminal.app, Rio — activate only when installed), and
+  self-contained HTML reports; `docs/positioning.md` states the
+  output-flood-first positioning (#23)
+
+### Changed
+
+- Keyboard/paste/IME input now bypasses the io thread's output-batch loop and
+  writes straight to the pty writer thread, with the three keyboard-encoding
+  modes read under a single terminal lock and echo-repaint debt tracked as a
+  write-generation counter: loaded key-to-echo latency no longer degrades
+  behind 1MiB output batches (#21)
+- Switching to a tab with heavy output no longer stalls for a frame: occluded
+  windows keep their pane cache warm via a globally throttled (250ms)
+  background refresh, and the first frame after reveal presents the cached
+  instances instantly, deferring the incremental rebuild to an immediately
+  scheduled follow-up frame (was ~93ms cold / ~38ms warm full rebuild at
+  200x60) (#24)
+
+### Fixed
+
+- `sidebar-hotkey` is no longer registered as a system-wide Carbon global
+  hotkey (it grabbed cmd+shift+s — "Save As…" — from every application); it
+  is now an in-app rebind of `ToggleSidebar` through the keybind engine, with
+  explicit `keybind` entries still winning, conflict diagnostics, and the
+  Sidebar menu accelerator tracking the effective chord (#25)
+- Closing a native macOS tab left the surviving tab unable to receive
+  keyboard input: AppKit moves first responder off winit's content view
+  during tab teardown; the deferred focus-restore path now reassigns first
+  responder to the content view and re-arms IME (#26)
+- After closing a tab with cmd+w, the next plain keypress could resolve as a
+  chord (e.g. `f` opening Search): stored modifiers are now reset on focus
+  loss, and the synchronous focus-restore block that raced AppKit teardown
+  (intermittent crash) is removed in favor of the deferred path (#27)
+
 ## [0.1.6] - 2026-07-16
 
 ### Changed

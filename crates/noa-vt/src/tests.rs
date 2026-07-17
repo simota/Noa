@@ -179,7 +179,7 @@ fn decscusr_has_space_intermediate() {
     let csi = only_csi(b"\x1b[4 q");
 
     assert_eq!(csi.params(), &[4]);
-    assert_eq!(csi.intermediates(), &[b' ']);
+    assert_eq!(csi.intermediates(), b" ");
     assert_eq!(csi.final_byte, b'q');
 }
 
@@ -421,7 +421,7 @@ fn esc_dispatch_ris_and_index() {
 fn charset_designation_has_intermediate() {
     // ESC ( B  → EscDispatch with intermediate '('
     let acts = actions(b"\x1b(B");
-    assert_eq!(acts, vec![Action::EscDispatch(Esc::new(&[b'('], b'B'))]);
+    assert_eq!(acts, vec![Action::EscDispatch(Esc::new(b"(", b'B'))]);
 }
 
 #[test]

@@ -169,7 +169,13 @@ fn feed_parser<H: Handler>(
                     // is sound.
                     let text = unsafe { core::str::from_utf8_unchecked(&bytes[i..run_end]) };
                     *display_dirty = true;
-                    handler.print_str(text);
+                    // `scan_run`'s `ascii` flag means every byte here is
+                    // `0x20..=0x7e` (it only spans `is_run_byte` bytes,
+                    // already `>= 0x20` and `!= 0x7f`, further narrowed to
+                    // `< 0x80`) — the exact guarantee `print_ascii_str`
+                    // needs to skip `print_str`'s internal re-classification
+                    // of text this scan already proved ASCII.
+                    handler.print_ascii_str(text);
                     i = run_end;
                     continue;
                 }
@@ -227,6 +233,28 @@ fn feed_parser<H: Handler>(
                 *display_dirty = true;
                 handler.print_ascii_lines(&bytes[i..i + end]);
                 i += end;
+                continue;
+            } else if bytes[i] != 0x1b {
+                // Fast path: `is_run_byte` already ruled out printable ASCII
+                // and DEL, and this isn't the CSI lead byte, so what's left
+                // is a lone C0 control (LF/CR/BS/TAB/BEL/…, the common case
+                // in any line-oriented flood) or DEL. In ground state every
+                // C0 byte dispatches straight to `Execute` with no state
+                // change — `Parser::st_ground`'s own arm for it, plus the
+                // "anywhere" CAN/SUB case, which forces the state back to
+                // Ground and is therefore a no-op here since it already is
+                // — and DEL is silently dropped. Skipping `advance` for this
+                // byte skips its four dead prefix checks (state is
+                // `Ground`, `utf8_rem` is `0`: both guaranteed by
+                // `in_ground_plain`), the `c1_control` call (`b` can't be in
+                // `0x80..=0x9f` here), and the closure-sink indirection;
+                // observable behavior is byte-for-byte the same action.
+                let b = bytes[i];
+                if b != 0x7f {
+                    *display_dirty = true; // Execute is never a pure query
+                    handler.execute_c0(b);
+                }
+                i += 1;
                 continue;
             }
         } else if parser.state() == State::CsiParam {

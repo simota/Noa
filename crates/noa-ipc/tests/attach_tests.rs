@@ -205,7 +205,7 @@ fn start_with_broadcaster(
     scopes: ScopeSet,
     broadcaster: Broadcaster,
 ) -> noa_ipc::ServerHandle {
-    let handle = Server::start(
+    Server::start(
         ServerConfig {
             port: 0,
             bind_addr: ServerConfig::DEFAULT_BIND_ADDR,
@@ -217,8 +217,7 @@ fn start_with_broadcaster(
         backend,
         broadcaster,
     )
-    .unwrap();
-    handle
+    .unwrap()
 }
 
 fn connect_control(port: u16, scopes: &[&str]) -> Socket {

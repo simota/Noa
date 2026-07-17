@@ -23,6 +23,9 @@
 #                 samples across launches
 #   NOA_FIRE      (fire) path to the `fire` DOOM-fire IO-stress tool
 #   NOA_FIRE_SECS (fire) measured duration in seconds (after 60 warmup frames)
+#   NOA_FIRE_ARG  (fire, optional) "full" = render to the live window size
+#                 (upstream DOOM-fire condition; the harness sets it on
+#                 fullscreen runs). Empty = fixed 80x24 region.
 #   NOA_GO        (workload modes, optional) gate file: when set, the
 #                 workload starts only after the file appears — the harness
 #                 creates it once the window reached its measurement
@@ -64,11 +67,13 @@ case "$NOA_MODE" in
     ;;
   fire)
     wait_go
-    # DOOM-fire IO stress (docs/specs/bench-doom-fire.md): renders a fixed
-    # 80x24 truecolor half-block fire region flat-out for NOA_FIRE_SECS under
-    # pty flow control; the tool writes "<frames> <elapsed_ns> <fps> <WxH>"
+    # DOOM-fire IO stress (docs/specs/bench-doom-fire.md): renders truecolor
+    # half-block fire flat-out for NOA_FIRE_SECS under pty flow control —
+    # full-window when NOA_FIRE_ARG=full (fullscreen runs; wait_go above
+    # guarantees the winsize read happens at final geometry), fixed 80x24
+    # otherwise. Writes "<frames> <elapsed_ns> <fps> <winsize> <region>"
     # into NOA_RESULT.
-    "$NOA_FIRE" "${NOA_FIRE_SECS:-10}" "$NOA_RESULT"
+    "$NOA_FIRE" "${NOA_FIRE_SECS:-10}" "$NOA_RESULT" ${NOA_FIRE_ARG:-}
     : > "$NOA_SENTINEL"
     ;;
   startup)

@@ -633,14 +633,24 @@ discarded warmup frames (glyph-atlas population, alt-screen entry) it renders
 flat-out for 10 s (3 s in `--quick`) and reports fps; the harness runs 3 reps
 (1 in `--quick`) and reports the median.
 
-**Fixed 80×24 region, deliberately not window-sized:** fps is inversely
-proportional to cell count, and Termy's grid size is not pinnable (see
-"Equalization"), so rendering to the live window would measure default window
-geometry, not the terminal. With the fixed region — which fits every
-terminal's default grid, so nothing clips — **every terminal consumes a
-byte-identical stream** (fixed PRNG seed → deterministic frame sequence), and
-constant frame size means fps maps linearly to drain MiB/s. The live winsize
-is still recorded per rep in `raw.tsv` for audit.
+**Render region follows the run's geometry mode** (recorded per run as
+`fire_condition`, per rep as `region`):
+
+- **Fullscreen runs (default): full-window** — the upstream DOOM-fire-zig
+  official condition. The fullscreen gate guarantees the winsize read
+  happens at final geometry, and every terminal fills the same physical
+  screen; the resulting **cell count follows each terminal's own font
+  defaults** (exactly like upstream comparisons), so the per-terminal region
+  is printed next to every fps number rather than hidden.
+- **Windowed fallback runs: fixed 80×24 region** — fps is inversely
+  proportional to cell count, so full-window fps on unequal window geometry
+  would measure the geometry lottery, not the terminal. The fixed region
+  fits every default grid (nothing clips) and gives **every terminal a
+  byte-identical stream** (fixed PRNG seed → deterministic frame sequence)
+  with constant frame size, so fps maps linearly to drain MiB/s.
+
+The two conditions are not comparable to each other; `table.md` states which
+one produced its numbers.
 
 **What fps means here:** producer-side frames/second under pty flow control —
 the same "consume the pipe" proxy as axis 1 (the pty's small kernel buffer

@@ -38,20 +38,27 @@ full-region repaint per frame), not its exact bytes. Published fps numbers
 are anchors for manual runs of the real DOOM-fire-zig, never pasted into our
 results.
 
-## Decision 2 — fixed 80×24 render region (identical bytes for everyone)
+## Decision 2 — render region follows the geometry mode (revised 2026-07-17)
 
-fps is inversely proportional to cell count, and Termy's grid size is not
-controllable (see METHODOLOGY "Equalization"). Rendering to the live window
-size would make the axis measure default window geometry, not the terminal.
+fps is inversely proportional to cell count, so the region choice is a
+fairness decision:
 
-Therefore `fire.c` renders a **fixed 80×24 cell region** (fire buffer
-80×48 pixels), top-left anchored via absolute `CUP`, regardless of winsize —
-80×24 fits every terminal's default grid, so no clipping occurs anywhere and
-**every terminal consumes a byte-identical stream**. Winsize is still read
-(`TIOCGWINSZ`) and recorded into the result line for auditability.
+- **Fullscreen runs (the harness default since fullscreen measurement
+  landed): full-window** — matches upstream DOOM-fire-zig's official
+  condition. Every terminal fills the same physical screen; the cell count
+  then follows each terminal's font defaults (as in upstream comparisons)
+  and is disclosed per rep (`region` in raw.tsv, parenthesized in table.md).
+  The fullscreen gate guarantees the `TIOCGWINSZ` read happens at final
+  geometry.
+- **Windowed fallback runs: fixed 80×24 cell region** (fire buffer 80×48
+  pixels, top-left anchored via absolute `CUP`) — on unequal window
+  geometry, full-window fps would measure the geometry lottery, not the
+  terminal. The fixed region fits every default grid (no clipping) and
+  gives **every terminal a byte-identical stream**.
 
 Fixed PRNG seed → the frame sequence is deterministic across terminals and
-runs.
+runs in both modes. The two conditions are mutually incomparable; every
+results dir records which one ran (`fire_condition`).
 
 ## Decision 3 — producer-side fps under flow control (same proxy as axis 1)
 

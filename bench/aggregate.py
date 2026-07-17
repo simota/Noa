@@ -182,8 +182,13 @@ if "fire" in axes_with_data:
                     and r["metric"] == "fps" and r["rep"] not in ("median", "-")]
             winsz = next((r["value"] for r in rows if r["terminal"] == term
                           and r["axis"] == "fire" and r["metric"] == "winsize"), None)
+            # region rows exist from harness >= 2026-07-17 (full-window fire);
+            # older raw files were always the fixed 80x24 region
+            region = next((r["value"] for r in rows if r["terminal"] == term
+                           and r["axis"] == "fire" and r["metric"] == "region"),
+                          "80x24")
             fire[term] = {"fps_median": float(cell["fps"]), "fps_reps": reps,
-                          "region": "80x24",
+                          "region": region,
                           **({"winsize": winsz} if winsz else {})}
         else:
             fire[term] = {"status": "UNMEASURED"}
@@ -360,14 +365,17 @@ lines.append("| scroll_stress | " + " | ".join(fmt_sc(sc[t]) for t in terminals)
 
 if "fire" in axes_with_data:
     def fmt_fire(c):
-        return "UNMEASURED" if c.get("status") == "UNMEASURED" else f"{c['fps_median']:.1f}"
-    lines.append("\n## Fire — DOOM-fire IO stress (fps, fixed 80×24 truecolor region, higher better)")
-    lines.append("Producer-side fps under pty flow control (frames written ≈ frames "
-                 "consumed); fixed region → byte-identical stream for every terminal. "
-                 "Not comparable to published DOOM-fire-zig figures (other machines, "
-                 "full-window regions).")
+        if c.get("status") == "UNMEASURED":
+            return "UNMEASURED"
+        return f"{c['fps_median']:.1f} ({c.get('region', '?')})"
+    fire_cond = contention.get("fire_condition", "fixed 80x24 region (pre-2026-07-17 harness)")
+    lines.append("\n## Fire — DOOM-fire IO stress (fps, higher better)")
+    lines.append(f"Condition: {fire_cond}. Producer-side fps under pty flow control "
+                 "(frames written ≈ frames consumed); per-terminal render region in "
+                 "parentheses. Not comparable to published DOOM-fire-zig figures "
+                 "(other machines/displays).")
     lines.append(hdr.replace("Terminal", "Metric")); lines.append(sep)
-    lines.append("| fire fps | " + " | ".join(fmt_fire(fire[t]) for t in terminals) + " |")
+    lines.append("| fire fps (region) | " + " | ".join(fmt_fire(fire[t]) for t in terminals) + " |")
 
 if "latency" in axes_with_data:
     lines.append("\n## Input Latency — DSR round-trip proxy (median / p95 / p99 / max µs, lower better)")

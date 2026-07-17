@@ -115,10 +115,13 @@ emit harness meta - - uptime_start "$(uptime)" note
 # osascript; probe it ONCE up front and fall back to windowed FOR EVERY
 # terminal if denied — a run never mixes fullscreen and windowed geometry.
 if [ "$FULLSCREEN" = 1 ]; then
-  # `UI elements enabled` is the canonical Accessibility probe — process-name
-  # listing succeeds WITHOUT the permission, so it must not be used here
-  # (verified 2026-07-17: name listing passed while AXFullScreen was denied).
-  if [ "$(osascript -e 'tell application "System Events" to UI elements enabled' 2>/dev/null)" = "true" ]; then
+  # Probe with a REAL AX attribute read. Two decoy probes are known-broken
+  # (both verified 2026-07-17 on macOS 26): process-name listing succeeds
+  # WITHOUT the permission, and `UI elements enabled` can return true while
+  # actual attribute access still fails -1719 (it reflects a global flag,
+  # not this process's TCC grant). Reading AXRole of the frontmost process
+  # exercises the same access class AXFullScreen needs.
+  if osascript -e 'tell application "System Events" to get value of attribute "AXRole" of (first process whose frontmost is true)' >/dev/null 2>&1; then
     emit harness meta - - fullscreen "enabled (AXFullScreen via System Events, gated workload start)" note
   else
     FULLSCREEN=0
@@ -1175,19 +1178,35 @@ fi  # axis: scroll
 # independent by construction. See docs/specs/bench-doom-fire.md.
 if axis_selected fire && [ "$EQUALIZE" != 1 ]; then
 export NOA_FIRE_SECS="$FIRE_SECS"
+# Fire condition follows the run's geometry mode: on fullscreen runs the fire
+# fills the live window (upstream DOOM-fire's official full-window condition
+# — the fullscreen gate guarantees the winsize read happens at final
+# geometry; cell count then follows each terminal's own font defaults, which
+# is exactly the upstream comparison shape and is disclosed via the per-rep
+# region). Windowed fallback runs keep the fixed 80x24 region — full-window
+# fps on unequal window geometry would measure the geometry lottery.
+if [ "$FULLSCREEN" = 1 ]; then
+  export NOA_FIRE_ARG=full
+  FIRE_COND="full-window @ fullscreen (upstream DOOM-fire condition; cell count follows each terminal's font defaults)"
+else
+  export NOA_FIRE_ARG=""
+  FIRE_COND="fixed 80x24 region (windowed fallback; byte-identical stream)"
+fi
+emit harness meta - - fire_condition "$FIRE_COND" note
 for term in $SELECTED; do
-  echo "[fire] $term ($FIRE_REPS reps x ${FIRE_SECS}s, 80x24 region, 60 warmup frames discarded)"
+  echo "[fire] $term ($FIRE_REPS reps x ${FIRE_SECS}s, $FIRE_COND, 60 warmup frames discarded)"
   samples=""; got=0
   for r in $(seq 1 $FIRE_REPS); do
     out="$(run_once "$term" fire "$FIRE_TIMEOUT")" || continue
     set -- $out
-    frames="${1:-0}"; elapsed_ns="${2:-0}"; fps="${3:-0}"; winsz="${4:-unknown}"
+    frames="${1:-0}"; elapsed_ns="${2:-0}"; fps="${3:-0}"; winsz="${4:-unknown}"; region="${5:-unknown}"
     case "$frames" in ''|*[!0-9]*) continue ;; 0) continue ;; esac
     got=$((got + 1))
     emit "$term" fire - "$r" frames "$frames" count
     emit "$term" fire - "$r" elapsed_ns "$elapsed_ns" ns
     emit "$term" fire - "$r" fps "$fps" fps
     emit "$term" fire - "$r" winsize "$winsz" cells
+    emit "$term" fire - "$r" region "$region" cells
     samples="$samples$fps\n"
   done
   if [ "$got" -ge 1 ]; then

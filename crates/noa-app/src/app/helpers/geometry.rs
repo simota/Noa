@@ -133,22 +133,79 @@ pub(crate) fn visible_pane_ids(tree: &SplitTree, zoomed: Option<PaneId>) -> Vec<
     split_tree::zoom_decision(tree, zoomed, PaneRectApp::new(0, 0, 0, 0)).draw_panes
 }
 
-pub(crate) fn tab_title(title: &str) -> String {
-    if title.is_empty() {
-        "Noa".to_string()
-    } else {
-        title.to_string()
+/// The tab label to display, in descending priority (tab-title REQ-TTL-5):
+///
+/// 1. a user-set override, verbatim — it masks any shell title;
+/// 2. a non-empty shell-driven OSC 0/2 title, verbatim;
+/// 3. a dynamic fallback built from the focused pane's live foreground
+///    process and cwd (see [`dynamic_tab_title`]), so the label tracks state
+///    even when the shell sets no title (Ghostty parity);
+/// 4. `"Noa"` when nothing is known.
+pub(crate) fn resolved_tab_title(
+    title_override: Option<&str>,
+    shell_title: &str,
+    cwd: Option<&str>,
+    process: Option<&str>,
+) -> String {
+    if let Some(title) = title_override {
+        return title.to_string();
+    }
+    if !shell_title.is_empty() {
+        return shell_title.to_string();
+    }
+    dynamic_tab_title(cwd, process).unwrap_or_else(|| "Noa".to_string())
+}
+
+/// Build the dynamic fallback title from the focused pane's live state, used
+/// only when the shell has set no OSC 0/2 title. Mirrors the sidebar card's
+/// naming (via the shared [`crate::sidebar::cwd_tail`]) so a tab and its card
+/// read consistently:
+///
+/// - a foreground process that is *not* the plain login shell leads, suffixed
+///   with the cwd's tail segment when known (`cargo — noa`);
+/// - a plain shell (or an unknown process) collapses to just the cwd tail
+///   (`noa`), the identity the shell prompt itself would show;
+/// - nothing known → `None` (the caller substitutes `"Noa"`).
+fn dynamic_tab_title(cwd: Option<&str>, process: Option<&str>) -> Option<String> {
+    let tail = cwd.and_then(crate::sidebar::cwd_tail);
+    let process = process
+        .map(str::trim)
+        .filter(|process| !process.is_empty() && !is_plain_shell(process));
+    match (process, tail) {
+        (Some(process), Some(tail)) => Some(format!("{process} — {tail}")),
+        (Some(process), None) => Some(process.to_string()),
+        (None, Some(tail)) => Some(tail.to_string()),
+        (None, None) => None,
     }
 }
 
-/// The tab label to display: a user-set override verbatim when present
-/// (tab-title REQ-TTL-5 — it masks any shell title), else the shell-driven
-/// path with its `"Noa"` fallback.
-pub(crate) fn resolved_tab_title(title_override: Option<&str>, shell_title: &str) -> String {
-    match title_override {
-        Some(title) => title.to_string(),
-        None => tab_title(shell_title),
-    }
+/// Whether a foreground process name is a plain interactive shell, in which
+/// case the dynamic tab title shows the cwd tail instead of the shell name
+/// (`zsh` in `~/noa` reads better as `noa`). Matched on the executable's
+/// basename, case-insensitively, tolerating a login-shell `-` argv0 prefix.
+fn is_plain_shell(process: &str) -> bool {
+    let base = process
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(process)
+        .trim()
+        .trim_start_matches('-')
+        .to_ascii_lowercase();
+    matches!(
+        base.as_str(),
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "dash"
+            | "ksh"
+            | "tcsh"
+            | "csh"
+            | "nu"
+            | "elvish"
+            | "xonsh"
+            | "pwsh"
+            | "powershell"
+    )
 }
 
 /// Titlebar proxy icon diff-cache (REQ-PXI-4): compares this frame's raw

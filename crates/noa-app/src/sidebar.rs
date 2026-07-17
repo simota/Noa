@@ -730,7 +730,7 @@ fn is_prompt_like_name(name: &str) -> bool {
 }
 
 /// The last non-empty path segment of `cwd`, if any.
-fn cwd_tail(cwd: &str) -> Option<&str> {
+pub(crate) fn cwd_tail(cwd: &str) -> Option<&str> {
     cwd.rsplit('/').find(|segment| !segment.is_empty())
 }
 

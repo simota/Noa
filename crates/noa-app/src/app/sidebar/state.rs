@@ -94,6 +94,10 @@ impl App {
         // process-monitor overlay's rows (checked before `apply` moves the
         // delta) — a no-op when the overlay is closed.
         let is_metrics_delta = matches!(delta, SessionDelta::Metrics { .. });
+        // Checked before `apply` moves the delta; drives the tab-title repaint
+        // below (a process change is otherwise invisible to the render path,
+        // which reads the store, not the delta stream).
+        let is_process_delta = matches!(delta, SessionDelta::Process { .. });
         self.session_store.apply(delta);
         if is_metrics_delta {
             self.refresh_process_monitor();
@@ -107,6 +111,13 @@ impl App {
             );
         }
         self.request_sidebar_redraw();
+        // A foreground-process change also feeds the dynamic tab-title fallback
+        // (geometry::resolved_tab_title), so repaint the affected window even
+        // when its sidebar is closed. cwd (OSC 7) and OSC 0/2 title changes
+        // already ride the io thread's own Redraw, so they need no nudge here.
+        if is_process_delta {
+            self.request_window_redraw(window_id);
+        }
         if flags_overview_tile {
             self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
             self.request_overview_redraw();

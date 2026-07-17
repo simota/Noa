@@ -5,7 +5,9 @@
 #         frame/scroll (SGR + scroll-region stress consume), warm startup,
 #         memory (idle/scrollback/multitab/longevity footprint — every
 #         scenario dual-reported as active @15s + settled @90s, ranked on
-#         settled), load (idle CPU% + active CPU-time-per-workload).
+#         settled), load (idle CPU% + active CPU-time-per-workload),
+#         fire (DOOM-fire IO stress: fixed 80x24 truecolor full-region
+#         repaint fps under pty flow control).
 #   Terminals: noa (target/release), Ghostty, Termy, kitty — whichever exist.
 #
 # One command runs the whole suite and writes a machine-readable results.json
@@ -32,11 +34,12 @@ TOOLS="$BENCH_DIR/tools/bin"
 WRAPPER="$BENCH_DIR/wrapper.sh"
 NOWNS="$TOOLS/nowns"
 PROBE="$TOOLS/dsr_probe"
+FIRE="$TOOLS/fire"
 
 # ── options ────────────────────────────────────────────────────────
 QUICK=0
 ONLY=""
-AXES="throughput,scroll,latency,startup,memory,load"
+AXES="throughput,scroll,latency,startup,memory,load,fire"
 EQUALIZE=0
 FORCE=0
 # equalized-condition targets (used only with --equalize)
@@ -107,6 +110,7 @@ if [ "$QUICK" = 1 ]; then
   MEM_ACTIVE_AT_S=3; MEM_SAMPLE_EVERY_S=5; MEM_SETTLED_UNTIL_S=30
   MEM_MULTITAB_N=3; MEM_LONGEVITY_CYCLES=2; MEM_LONGEVITY_IDLE_S=1
   LOAD_IDLE_SETTLE_S=5; LOAD_IDLE_S=10
+  FIRE_REPS=1; FIRE_SECS=3
 else
   TP_REPS=3; SCROLL_REPS=3; LAT_RUNS=10; START_REPS=5
   # latency (full): 10 process launches x 1000 kept iterations each (100
@@ -127,8 +131,12 @@ else
   # AppKit/first-frame transient decays through `ps pcpu`'s decaying average
   # for >10s), then sample the settled window for LOAD_IDLE_S.
   LOAD_IDLE_SETTLE_S=15; LOAD_IDLE_S=60
+  # fire: median of FIRE_REPS runs, each FIRE_SECS of flat-out rendering
+  # after 60 discarded warmup frames (see docs/specs/bench-doom-fire.md).
+  FIRE_REPS=3; FIRE_SECS=10
 fi
 TP_TIMEOUT=180; SCROLL_TIMEOUT=120; LAT_TIMEOUT=60; START_TIMEOUT=30
+FIRE_TIMEOUT=60
 MEM_HOLD_TIMEOUT=20
 
 # ── data files (only for the axes that consume them) ───────────────
@@ -147,7 +155,7 @@ fi
 # prebuilt dsr_probe would silently emit the old 4-field result format).
 tools_fresh() {
   local t
-  for t in nowns dsr_probe winwait wincount; do
+  for t in nowns dsr_probe winwait wincount fire; do
     [ -x "$TOOLS/$t" ] || return 1
     [ "$BENCH_DIR/tools/$t.c" -nt "$TOOLS/$t" ] && return 1
   done
@@ -156,6 +164,7 @@ tools_fresh() {
 tools_fresh || \
   (cd "$BENCH_DIR/tools" && mkdir -p bin && \
   cc -O2 -o bin/nowns nowns.c && cc -O2 -o bin/dsr_probe dsr_probe.c && \
+  cc -O2 -o bin/fire fire.c && \
   cc -O2 -framework ApplicationServices -o bin/winwait winwait.c && \
   cc -O2 -framework ApplicationServices -o bin/wincount wincount.c)
 chmod +x "$WRAPPER"
@@ -517,14 +526,17 @@ run_once() {
   kill_term "$term"; sleep 0.4
 
   export NOA_MODE="$mode" NOA_SENTINEL="$sentinel" NOA_NOWNS="$NOWNS" \
-         NOA_PROBE="$PROBE" NOA_RESULT="$result" NOA_BENCH_CMD="$cmd"
+         NOA_PROBE="$PROBE" NOA_FIRE="$FIRE" NOA_RESULT="$result" NOA_BENCH_CMD="$cmd"
 
   local t0 t1
   t0="$("$NOWNS")"
   launch_term "$term" >/dev/null
-  if [ "$mode" = latency ]; then
+  if [ "$mode" = latency ] || [ "$mode" = fire ]; then
     # Focus the fresh window so render-thread/focus-gated DSR responders
-    # (Termy) reply. Backgrounded with a delay so the launch timestamp path
+    # (Termy) reply — and, for the fire axis, so no terminal is measured
+    # while macOS throttles its unfocused/occluded window (display-paced
+    # consumers would be understated; focus is applied uniformly).
+    # Backgrounded with a delay so the launch timestamp path
     # is untouched; the probe's blocking read simply resumes once focus
     # lands. Repeated: app registration with the window server can lag the
     # first attempt on a cold start. The delays are RANDOMIZED (+-0.7s
@@ -553,7 +565,7 @@ run_once() {
     startup)
       echo "$((t1 - t0))"
       ;;
-    latency)
+    latency|fire)
       cat "$result"
       ;;
   esac
@@ -561,6 +573,10 @@ run_once() {
 }
 
 median() { sort -n | awk '{a[NR]=$1} END{ if(NR==0){print 0} else if(NR%2){print a[(NR+1)/2]} else {print int((a[NR/2]+a[NR/2+1])/2)} }'; }
+
+# median_f — float-preserving median (median() ints the even-count midpoint,
+# which would truncate fps values like "812.4").
+median_f() { sort -n | awk '{a[NR]=$1} END{ if(NR==0){print 0} else if(NR%2){print a[(NR+1)/2]} else {printf "%.1f\n", (a[NR/2]+a[NR/2+1])/2} }'; }
 
 # pooled_stats <file-of-ns-samples> -> "median p95 p99 max count" over the
 # POOLED distribution (all kept iterations of all launches concatenated).
@@ -869,6 +885,41 @@ for term in $SELECTED; do
   fi
 done
 fi  # axis: scroll
+
+# ── FIRE (DOOM-fire IO stress: truecolor full-region repaint fps) ──
+# Fixed 80x24 region -> byte-identical stream for every terminal (fps scales
+# with cell count and Termy's grid is not pinnable, so window-sized rendering
+# would measure default geometry, not the terminal). Producer-side fps under
+# pty flow control — same "consume the pipe" proxy as the throughput axis.
+# Skipped under --equalize: the fixed region makes the workload grid/font-
+# independent by construction. See docs/specs/bench-doom-fire.md.
+if axis_selected fire && [ "$EQUALIZE" != 1 ]; then
+export NOA_FIRE_SECS="$FIRE_SECS"
+for term in $SELECTED; do
+  echo "[fire] $term ($FIRE_REPS reps x ${FIRE_SECS}s, 80x24 region, 60 warmup frames discarded)"
+  samples=""; got=0
+  for r in $(seq 1 $FIRE_REPS); do
+    out="$(run_once "$term" fire "$FIRE_TIMEOUT")" || continue
+    set -- $out
+    frames="${1:-0}"; elapsed_ns="${2:-0}"; fps="${3:-0}"; winsz="${4:-unknown}"
+    case "$frames" in ''|*[!0-9]*) continue ;; 0) continue ;; esac
+    got=$((got + 1))
+    emit "$term" fire - "$r" frames "$frames" count
+    emit "$term" fire - "$r" elapsed_ns "$elapsed_ns" ns
+    emit "$term" fire - "$r" fps "$fps" fps
+    emit "$term" fire - "$r" winsize "$winsz" cells
+    samples="$samples$fps\n"
+  done
+  if [ "$got" -ge 1 ]; then
+    med="$(printf "$samples" | median_f)"
+    emit "$term" fire - median fps "$med" fps
+    echo "    median ${med} fps"
+  else
+    emit "$term" fire - - status UNMEASURED timeout
+    echo "    UNMEASURED (timeout)"
+  fi
+done
+fi  # axis: fire
 
 # Latency + startup are condition-independent; skip them under --equalize
 # (the equalized re-run targets the render-sensitive throughput+scroll axes).

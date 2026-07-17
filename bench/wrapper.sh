@@ -11,7 +11,7 @@
 # ignored. Behavior is selected entirely by NOA_MODE + friends in the env.
 #
 # Env contract:
-#   NOA_MODE      throughput | scroll | latency | startup | hold | longevity
+#   NOA_MODE      throughput | scroll | latency | startup | hold | longevity | fire
 #   NOA_SENTINEL  file to create when the workload is done (launcher watches it)
 #   NOA_NOWNS     path to the `nowns` monotonic-ns helper
 #   NOA_BENCH_CMD (throughput/scroll/longevity) shell command to run, e.g. `cat file`
@@ -21,6 +21,8 @@
 #   NOA_SAMPLES   (latency, optional) file dsr_probe writes every kept raw
 #                 sample into (one ns per line) so the harness can pool
 #                 samples across launches
+#   NOA_FIRE      (fire) path to the `fire` DOOM-fire IO-stress tool
+#   NOA_FIRE_SECS (fire) measured duration in seconds (after 60 warmup frames)
 #   NOA_HOLD      (memory/load axes) if "1", after the mode's own work the pty
 #                 child sleeps instead of exiting, so the terminal window (and
 #                 process tree) stays alive for the harness to sample RSS/CPU
@@ -39,6 +41,14 @@ case "$NOA_MODE" in
     ;;
   latency)
     "$NOA_PROBE" "${NOA_PROBE_ITERS:-200}" "${NOA_PROBE_WARMUP:-20}" "$NOA_RESULT" "${NOA_SAMPLES:-}"
+    : > "$NOA_SENTINEL"
+    ;;
+  fire)
+    # DOOM-fire IO stress (docs/specs/bench-doom-fire.md): renders a fixed
+    # 80x24 truecolor half-block fire region flat-out for NOA_FIRE_SECS under
+    # pty flow control; the tool writes "<frames> <elapsed_ns> <fps> <WxH>"
+    # into NOA_RESULT.
+    "$NOA_FIRE" "${NOA_FIRE_SECS:-10}" "$NOA_RESULT"
     : > "$NOA_SENTINEL"
     ;;
   startup)

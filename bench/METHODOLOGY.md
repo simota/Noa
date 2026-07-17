@@ -1,6 +1,6 @@
 # Benchmark Methodology
 
-A reproducible 6-axis comparison of terminal emulators on macOS/Apple Silicon.
+A reproducible 7-axis comparison of terminal emulators on macOS/Apple Silicon.
 Everything is driven by `bench/run_all.sh`; a third party can re-run the whole
 suite with one command and get a machine-readable `results.json` plus a
 human-readable `table.md` under `bench/results/<timestamp>/`.
@@ -21,8 +21,8 @@ added 2026-07-16 and documented in their own sections below.
 
 The noa binary defaults to `<repo>/target/release/noa` and can be overridden
 with the `NOA_BIN` env var (for measuring a candidate build). `--axes
-throughput,scroll,latency,startup,memory,load` (any subset; this is also the
-default set) restricts a run to those axes.
+throughput,scroll,latency,startup,memory,load,fire` (any subset; this is also
+the default set) restricts a run to those axes.
 
 Versions and machine details are captured automatically into `results.json`
 (`terminal_versions`, `machine`) at run time — read them there for the exact
@@ -512,6 +512,46 @@ would rank driver-reclaim timing luck, not the terminals.
   part of any terminal's own efficiency; only the terminal process's own
   parse/render CPU is being measured. Reported in ms total and ms-per-MiB
   processed (normalized).
+
+### 7. Fire — DOOM-fire IO stress (fps)
+
+`bench/tools/fire.c` runs as the pty child (`NOA_MODE=fire`): it renders the
+classic DOOM fire effect (Fabien Sanglard's algorithm, the workload
+popularized as a terminal benchmark by
+[DOOM-fire-zig](https://github.com/const-void/DOOM-fire-zig)) as truecolor
+half-blocks — every frame repaints the whole region with per-cell
+`SGR 38;2/48;2` RGB + `U+2584` and absolute cursor positioning. This is the
+"animated TUI at max rate" shape none of the other axes exercise:
+frame-structured, truecolor-dense, cursor-repositioning flood. After 60
+discarded warmup frames (glyph-atlas population, alt-screen entry) it renders
+flat-out for 10 s (3 s in `--quick`) and reports fps; the harness runs 3 reps
+(1 in `--quick`) and reports the median.
+
+**Fixed 80×24 region, deliberately not window-sized:** fps is inversely
+proportional to cell count, and Termy's grid size is not pinnable (see
+"Equalization"), so rendering to the live window would measure default window
+geometry, not the terminal. With the fixed region — which fits every
+terminal's default grid, so nothing clips — **every terminal consumes a
+byte-identical stream** (fixed PRNG seed → deterministic frame sequence), and
+constant frame size means fps maps linearly to drain MiB/s. The live winsize
+is still recorded per rep in `raw.tsv` for audit.
+
+**What fps means here:** producer-side frames/second under pty flow control —
+the same "consume the pipe" proxy as axis 1 (the pty's small kernel buffer
+blocks the producer's `write` until the terminal drains). It is drain rate,
+not photon rate: a display-paced consumer shows up as ~refresh-rate fps (the
+signature this axis exists to detect), while an event-driven consumer reports
+hundreds or more. The window is focused during the run (same PID-scoped
+activation as the latency axis, applied uniformly) so no terminal is measured
+under macOS occluded/unfocused throttling.
+
+**Anchor caveat:** published DOOM-fire-zig figures come from other machines
+and full-window regions and are **not comparable** to this axis's numbers —
+they motivated the axis, nothing more. This implementation reproduces the workload *shape*,
+not upstream's exact bytes. As a CPU-bound axis it is covered by the
+builder-quiescence gate; it is skipped under `--equalize` (the fixed region
+makes it grid/font-independent by construction). Full design rationale:
+`docs/specs/bench-doom-fire.md`.
 
 ### Ghostty load-active timeout (baseline 2026-07-16) — root-caused & fixed
 

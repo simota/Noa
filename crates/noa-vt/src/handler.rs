@@ -79,6 +79,47 @@ pub struct ModeRequest {
     pub ansi: bool,
 }
 
+/// One complete line inside a [`Handler::print_ascii_lines`] batch: the
+/// (possibly empty) printable-ASCII text and whether its terminator was
+/// `CR LF` rather than a bare `LF`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AsciiLine<'a> {
+    pub text: &'a [u8],
+    pub crlf: bool,
+}
+
+/// Iterator over the complete (LF-terminated) lines of a
+/// [`Handler::print_ascii_lines`] batch. The batch contract guarantees every
+/// line is LF-terminated, so [`AsciiLines::remainder`] is empty once the
+/// iterator is exhausted; it is exposed so lenient consumers can still print
+/// a violating unterminated tail rather than drop bytes.
+pub struct AsciiLines<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> AsciiLines<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { rest: data }
+    }
+
+    /// Bytes not yet consumed as complete lines.
+    pub fn remainder(&self) -> &'a [u8] {
+        self.rest
+    }
+}
+
+impl<'a> Iterator for AsciiLines<'a> {
+    type Item = AsciiLine<'a>;
+
+    fn next(&mut self) -> Option<AsciiLine<'a>> {
+        let nl = self.rest.iter().position(|&b| b == b'\n')?;
+        let crlf = nl > 0 && self.rest[nl - 1] == b'\r';
+        let text = &self.rest[..nl - usize::from(crlf)];
+        self.rest = &self.rest[nl + 1..];
+        Some(AsciiLine { text, crlf })
+    }
+}
+
 /// The terminal-state operations a parsed VT stream drives.
 ///
 /// Methods with default no-op / composed bodies are the ones a minimal inc-1
@@ -96,6 +137,39 @@ pub trait Handler {
             self.print(c);
         }
     }
+    /// A run of complete printable-ASCII lines seen in plain ground state:
+    /// `data` is a concatenation of one or more `text (CR)? LF` groups where
+    /// `text` is (possibly empty) printable ASCII (`0x20..=0x7E`).
+    /// Semantically identical to, per group: [`Handler::print_str`] on
+    /// `text` (when non-empty), then [`Handler::execute_c0`] for the `CR`
+    /// (when present) and the `LF`. `Stream` batches ground-state line
+    /// floods through this so a state model can amortize per-line scroll
+    /// costs across the whole batch; the default body preserves per-line
+    /// behavior for implementations that don't.
+    fn print_ascii_lines(&mut self, data: &[u8]) {
+        let mut lines = AsciiLines::new(data);
+        for line in &mut lines {
+            if !line.text.is_empty() {
+                let text = core::str::from_utf8(line.text)
+                    .expect("print_ascii_lines text is printable ASCII");
+                self.print_str(text);
+            }
+            if line.crlf {
+                self.execute_c0(0x0d);
+            }
+            self.execute_c0(0x0a);
+        }
+        debug_assert!(
+            lines.remainder().is_empty(),
+            "print_ascii_lines data must be a run of complete LF-terminated lines"
+        );
+        if !lines.remainder().is_empty() {
+            let text = core::str::from_utf8(lines.remainder())
+                .expect("print_ascii_lines text is printable ASCII");
+            self.print_str(text);
+        }
+    }
+
     /// A C0 control byte (`BEL`/`BS`/`HT`/`LF`/`VT`/`FF`/`CR`/…).
     fn execute_c0(&mut self, byte: u8);
 

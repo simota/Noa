@@ -1506,3 +1506,207 @@ fn sgr_lone_truecolor_decodes_identically_for_all_separator_patterns() {
         }
     }
 }
+
+// ── ground-state line batching (`Handler::print_ascii_lines`) ──────
+
+/// The operation trace a line-batch capture handler records.
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum LineOp {
+    Print(String),
+    Exec(u8),
+    Batch(Vec<u8>),
+    Csi(u8),
+}
+
+macro_rules! line_capture_noop_methods {
+    () => {
+        fn print(&mut self, c: char) {
+            self.ops.push(LineOp::Print(c.to_string()));
+        }
+        fn print_str(&mut self, s: &str) {
+            self.ops.push(LineOp::Print(s.to_owned()));
+        }
+        fn execute_c0(&mut self, byte: u8) {
+            self.ops.push(LineOp::Exec(byte));
+        }
+        fn cursor_up(&mut self, _n: u16) {}
+        fn cursor_down(&mut self, _n: u16) {}
+        fn cursor_forward(&mut self, _n: u16) {}
+        fn cursor_backward(&mut self, _n: u16) {}
+        fn cursor_position(&mut self, _row: u16, _col: u16) {}
+        fn cursor_col_abs(&mut self, _col: u16) {}
+        fn cursor_row_abs(&mut self, _row: u16) {}
+        fn erase_display(&mut self, _mode: crate::handler::EraseDisplay) {}
+        fn erase_line(&mut self, _mode: crate::handler::EraseLine) {}
+        fn set_attributes(&mut self, _attrs: &[SgrAttr]) {
+            self.ops.push(LineOp::Csi(b'm'));
+        }
+        fn set_mode(&mut self, _value: u16, _ansi: bool, _on: bool) {}
+        fn carriage_return(&mut self) {}
+        fn linefeed(&mut self) {}
+        fn tab(&mut self, _n: u16) {}
+        fn reverse_index(&mut self) {}
+        fn save_cursor(&mut self) {}
+        fn restore_cursor(&mut self) {}
+        fn full_reset(&mut self) {}
+        fn device_attributes(&mut self, _kind: crate::handler::DaKind) {}
+        fn device_status_report(&mut self, _kind: crate::handler::DsrKind) {}
+    };
+}
+
+/// Captures the batch dispatches themselves (overrides `print_ascii_lines`).
+#[derive(Default)]
+struct BatchCapture {
+    ops: Vec<LineOp>,
+}
+
+impl crate::Handler for BatchCapture {
+    line_capture_noop_methods!();
+    fn print_ascii_lines(&mut self, data: &[u8]) {
+        self.ops.push(LineOp::Batch(data.to_vec()));
+    }
+}
+
+/// Relies on the default `print_ascii_lines` body (per-line replay).
+#[derive(Default)]
+struct DefaultBatchCapture {
+    ops: Vec<LineOp>,
+}
+
+impl crate::Handler for DefaultBatchCapture {
+    line_capture_noop_methods!();
+}
+
+fn batch_ops(bytes: &[u8]) -> Vec<LineOp> {
+    let mut stream = crate::Stream::new();
+    let mut cap = BatchCapture::default();
+    stream.feed(bytes, &mut cap);
+    cap.ops
+}
+
+#[test]
+fn line_batch_dispatches_whole_ground_spans() {
+    // The LF ending a text run plus at least one whole following line hands
+    // the complete-line span to `print_ascii_lines` in one call.
+    assert_eq!(
+        batch_ops(b"abc\r\ndef\nghi\r\nx"),
+        vec![
+            LineOp::Print("abc".into()),
+            LineOp::Batch(b"\r\ndef\nghi\r\n".to_vec()),
+            LineOp::Print("x".into()),
+        ]
+    );
+}
+
+#[test]
+fn line_batch_requires_two_complete_lines() {
+    // A single terminator (interactive echo) stays on the per-action path.
+    assert_eq!(
+        batch_ops(b"abc\r\n"),
+        vec![
+            LineOp::Print("abc".into()),
+            LineOp::Exec(0x0d),
+            LineOp::Exec(0x0a),
+        ]
+    );
+    assert_eq!(
+        batch_ops(b"abc\ndef"),
+        vec![
+            LineOp::Print("abc".into()),
+            LineOp::Exec(0x0a),
+            LineOp::Print("def".into()),
+        ]
+    );
+}
+
+#[test]
+fn line_batch_stops_before_bytes_the_regular_paths_own() {
+    // An escape ends the batch span before the line containing it.
+    assert_eq!(
+        batch_ops(b"\na\n\x1b[31mb\r\nc\n"),
+        vec![
+            LineOp::Batch(b"\na\n".to_vec()),
+            LineOp::Csi(b'm'),
+            LineOp::Print("b".into()),
+            LineOp::Batch(b"\r\nc\n".to_vec()),
+        ]
+    );
+    // A CR not followed by LF is not a line terminator.
+    assert_eq!(
+        batch_ops(b"\na\nb\rc\n"),
+        vec![
+            LineOp::Batch(b"\na\n".to_vec()),
+            LineOp::Print("b".into()),
+            LineOp::Exec(0x0d),
+            LineOp::Print("c".into()),
+            LineOp::Exec(0x0a),
+        ]
+    );
+    // Non-ASCII text stays on the UTF-8 print path.
+    assert_eq!(
+        batch_ops("\nab\nこ\n".as_bytes()),
+        vec![
+            LineOp::Batch(b"\nab\n".to_vec()),
+            LineOp::Print("こ".into()),
+            LineOp::Exec(0x0a),
+        ]
+    );
+}
+
+#[test]
+fn line_batch_default_body_replays_per_line() {
+    use crate::Handler as _;
+    let mut cap = DefaultBatchCapture::default();
+    cap.print_ascii_lines(b"a\r\nb\n\n");
+    assert_eq!(
+        cap.ops,
+        vec![
+            LineOp::Print("a".into()),
+            LineOp::Exec(0x0d),
+            LineOp::Exec(0x0a),
+            LineOp::Print("b".into()),
+            LineOp::Exec(0x0a),
+            LineOp::Exec(0x0a),
+        ]
+    );
+}
+
+#[test]
+fn line_batch_marks_display_dirty() {
+    let mut stream = crate::Stream::new();
+    let mut cap = BatchCapture::default();
+    stream.feed(b"\x1b[5n", &mut cap); // pure query: not dirty
+    assert!(!stream.take_display_dirty());
+    stream.feed(b"\nx\ny\n", &mut cap);
+    assert!(stream.take_display_dirty());
+    assert!(cap.ops.contains(&LineOp::Batch(b"\nx\ny\n".to_vec())));
+}
+
+#[test]
+fn ascii_lines_iterates_complete_lines_and_exposes_the_remainder() {
+    use crate::handler::{AsciiLine, AsciiLines};
+    let mut lines = AsciiLines::new(b"a\r\n\nbc\nrest");
+    assert_eq!(
+        lines.next(),
+        Some(AsciiLine {
+            text: b"a",
+            crlf: true
+        })
+    );
+    assert_eq!(
+        lines.next(),
+        Some(AsciiLine {
+            text: b"",
+            crlf: false
+        })
+    );
+    assert_eq!(
+        lines.next(),
+        Some(AsciiLine {
+            text: b"bc",
+            crlf: false
+        })
+    );
+    assert_eq!(lines.next(), None);
+    assert_eq!(lines.remainder(), b"rest");
+}

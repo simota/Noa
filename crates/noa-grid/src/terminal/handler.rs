@@ -7,8 +7,9 @@ use crate::osc::{
 };
 use noa_core::{CellAttrs, Color};
 use noa_vt::{
-    Charset, CharsetSlot, CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine,
-    Handler, KittyAction, KittyGraphicsCommand, ModeRequest, SgrAttr, SixelGraphicsCommand,
+    AsciiLines, Charset, CharsetSlot, CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay,
+    EraseLine, Handler, KittyAction, KittyGraphicsCommand, ModeRequest, SgrAttr,
+    SixelGraphicsCommand,
 };
 
 use super::{ShellIntegrationMarkKind, Terminal};
@@ -69,6 +70,56 @@ impl Handler for Terminal {
                     i += c.len_utf8();
                 }
             }
+        }
+    }
+
+    /// Bulk fast path for ground-state line floods (`text (CR)? LF`
+    /// groups): the active screen applies as many whole lines as it can in
+    /// one batched scroll ([`crate::screen::Screen::apply_ascii_line_batch`]),
+    /// and any line it cannot take (cursor off the region bottom, margins,
+    /// autowrap off, …) is replayed through the canonical per-line calls —
+    /// so the batch is semantically identical to the default trait body.
+    fn print_ascii_lines(&mut self, data: &[u8]) {
+        let autowrap = self.modes.autowrap();
+        let lnm = self.modes.linefeed_newline();
+        let grapheme_clustering = self.modes.grapheme_clustering();
+        let ascii_charset = self.charset.active_is_ascii();
+        let mut rest = data;
+        while !rest.is_empty() {
+            if ascii_charset && autowrap {
+                let consumed = self.active_mut().apply_ascii_line_batch(
+                    rest,
+                    autowrap,
+                    lnm,
+                    grapheme_clustering,
+                );
+                if consumed > 0 {
+                    rest = &rest[consumed..];
+                    continue;
+                }
+            }
+            // Per-line replay (the default trait body's exact semantics)
+            // until the batch preconditions hold again.
+            let mut lines = AsciiLines::new(rest);
+            let Some(line) = lines.next() else {
+                // Unterminated tail: a contract violation, but print it like
+                // the default trait body rather than dropping bytes.
+                debug_assert!(false, "print_ascii_lines data holds only complete lines");
+                let text =
+                    core::str::from_utf8(rest).expect("print_ascii_lines text is printable ASCII");
+                self.print_str(text);
+                return;
+            };
+            if !line.text.is_empty() {
+                let text = core::str::from_utf8(line.text)
+                    .expect("print_ascii_lines text is printable ASCII");
+                self.print_str(text);
+            }
+            if line.crlf {
+                self.execute_c0(0x0d);
+            }
+            self.execute_c0(0x0a);
+            rest = lines.remainder();
         }
     }
 

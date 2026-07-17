@@ -214,6 +214,20 @@ fn feed_parser<H: Handler>(
                 dispatch_csi(&csi, handler, sgr_attrs);
                 i += len;
                 continue;
+            } else if matches!(bytes[i], b'\n' | b'\r')
+                && let Some(end) = scan_line_batch(&bytes[i..])
+            {
+                // Fast path: the LF ending a text run, followed by at least
+                // one whole `text (CR)? LF` line inside the chunk (bulk line
+                // floods are a run of these), hands the complete-line span
+                // to `Handler::print_ascii_lines` in one call so the state
+                // model can amortize per-line scroll costs. Pure lookahead:
+                // anything but printable ASCII + CRLF/LF structure bails to
+                // the byte paths below with nothing committed.
+                *display_dirty = true;
+                handler.print_ascii_lines(&bytes[i..i + end]);
+                i += end;
+                continue;
             }
         } else if parser.state() == State::CsiParam {
             // Batch parameter accumulation for a CSI resumed across a feed
@@ -305,6 +319,41 @@ fn try_scan_csi(bytes: &[u8]) -> Option<(Csi, usize)> {
             _ => return None,
         }
     }
+}
+
+/// Scan a run of complete printable-ASCII lines (`text (CR)? LF` groups,
+/// `text` in `0x20..=0x7E`) starting at `bytes[0]` (caller-checked to be
+/// `LF` or `CR`, i.e. the first group's text is empty). Returns the
+/// exclusive end of the last complete group when the run holds at least two
+/// groups — the threshold at which handing the span to
+/// [`Handler::print_ascii_lines`] beats the ordinary per-action dispatch —
+/// or `None` to leave everything to the regular paths. Pure lookahead:
+/// nothing is committed here, and every byte class the regular paths treat
+/// specially (controls, DEL, non-ASCII, a CR not followed by LF) ends the
+/// run before the line containing it.
+fn scan_line_batch(bytes: &[u8]) -> Option<usize> {
+    debug_assert!(matches!(bytes.first(), Some(b'\n' | b'\r')));
+    let mut end = 0;
+    let mut lines = 0usize;
+    loop {
+        let (run, ascii) = scan_run(&bytes[end..]);
+        let t = end + run;
+        if !ascii {
+            break;
+        }
+        match bytes.get(t) {
+            Some(b'\n') => {
+                end = t + 1;
+                lines += 1;
+            }
+            Some(b'\r') if bytes.get(t + 1) == Some(&b'\n') => {
+                end = t + 2;
+                lines += 1;
+            }
+            _ => break,
+        }
+    }
+    (lines >= 2).then_some(end)
 }
 
 /// A byte that stays on the ground-state print path: anything but a C0

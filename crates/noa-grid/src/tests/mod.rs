@@ -95,3 +95,5 @@ include!("bulk_print.rs");
 include!("print_overwrite.rs");
 include!("erase_set_from.rs");
 include!("occupancy_watermark.rs");
+
+include!("line_batch.rs");

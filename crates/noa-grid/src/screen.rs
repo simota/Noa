@@ -2,7 +2,7 @@
 //! stops, and all the cursor/erase/scroll primitives the [`crate::Terminal`]
 //! `Handler` implementation drives.
 
-use crate::cell::{Cell, Row};
+use crate::cell::{Cell, RingGrid, Row};
 use crate::cursor::{Cursor, HorizontalMargins, SavedCursor, ScrollRegion};
 use crate::scrollback::PagedScrollback;
 use crate::search::{SearchAnchor, SearchMatch, SearchState, append_row_matches, needle_len};
@@ -123,7 +123,7 @@ pub struct VisibleKittyPlacement {
 pub struct Screen {
     pub rows: u16,
     pub cols: u16,
-    pub grid: Vec<Row>,
+    pub grid: RingGrid,
     pub cursor: Cursor,
     pub selection: Option<Selection>,
     pub search: SearchState,
@@ -189,7 +189,10 @@ impl Screen {
         Screen {
             rows,
             cols,
-            grid: (0..rows).map(|_| Row::new(cols)).collect(),
+            grid: (0..rows)
+                .map(|_| Row::new(cols))
+                .collect::<Vec<Row>>()
+                .into(),
             cursor: Cursor::default(),
             selection: None,
             search: SearchState::default(),

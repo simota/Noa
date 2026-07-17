@@ -192,6 +192,33 @@ struct FrameInvalidationKey {
     atlas_eviction_generation: u64,
 }
 
+/// Whether `key` (a pane's previously-cached [`FrameInvalidationKey`]) still
+/// matches `snap`'s pane-wide invalidation triggers — i.e. none of the
+/// bundled fields in the doc comment above changed since `key` was recorded.
+/// Shared between [`cell::rebuild_pane_cached`]'s actual rebuild decision and
+/// [`Renderer::pane_rebuild_would_be_full`]'s read-only prediction of it, so
+/// the two can never drift apart.
+fn frame_invalidation_key_matches(
+    key: &FrameInvalidationKey,
+    snap: &FrameSnapshot,
+    theme: &Theme,
+    cell_size: (f32, f32),
+    atlas_identity: u64,
+    atlas_eviction_generation: u64,
+) -> bool {
+    key.active_is_alt == snap.active_is_alt
+        && key.cols == snap.cols
+        && key.rows == snap.rows_n
+        && key.cell_size == cell_size
+        && key.atlas_identity == atlas_identity
+        && key.atlas_eviction_generation == atlas_eviction_generation
+        && key.selection == snap.selection
+        && key.hover_link == snap.hover_link
+        && key.colors == snap.colors
+        && key.theme == *theme
+        && key.search == snap.search
+}
+
 /// Shell-cursor render state plus copy-mode presence and its projected cursor.
 /// Presence is kept separately so an offscreen copy cursor still suppresses
 /// and invalidates the shell cursor.
@@ -269,6 +296,30 @@ pub struct Renderer {
     /// resolved into image quads at draw time (parallel to `pane_layout`).
     pane_images: Vec<PaneImages>,
     pane_layout: Vec<(PaneId, PaneRect)>,
+    /// `self.viewport` as of the `rebuild_panes` call that last populated
+    /// `pane_layout`/`instances` — deliberately NOT the same as the live
+    /// `viewport` field below, which `resize()` mutates unconditionally
+    /// (including while occluded, before the cache catches up). See
+    /// `cached_frame_matches_viewport`.
+    pane_layout_viewport: PixelSize,
+    /// The shared glyph atlas's identity + eviction generation as of the
+    /// `rebuild_panes` call that last populated `pane_layout`/`instances`
+    /// (the same pair `FrameInvalidationKey` uses). The atlas is shared
+    /// across every window's renderer, so another window's background
+    /// refresh can evict/reallocate it between this renderer's last rebuild
+    /// and now; if it has, this renderer's cached instances may reference
+    /// reclaimed atlas rectangles. See `cached_frame_matches_viewport`.
+    pane_layout_atlas_identity: u64,
+    pane_layout_atlas_generation: u64,
+    /// `self.frame_unstable` as of the `rebuild_panes` call that last
+    /// populated `pane_layout`/`instances`: that call could not fully
+    /// stabilize against glyph-atlas evictions, so its instances may
+    /// reference reallocated atlas rectangles. Normal rendering converges by
+    /// requesting one more frame (`needs_follow_up_frame`); a background
+    /// refresh while occluded has no such follow-up loop, so a cache built
+    /// unstable must never be presented as-is by the reveal fast path. See
+    /// `cached_frame_matches_viewport`.
+    pane_layout_unstable: bool,
     divider_range: Range<u32>,
     focus_indicator_range: Range<u32>,
     viewport: PixelSize,
@@ -377,6 +428,10 @@ impl Renderer {
             pane_instances: Vec::new(),
             pane_images: Vec::new(),
             pane_layout: Vec::new(),
+            pane_layout_viewport: PixelSize { w: 0, h: 0 },
+            pane_layout_atlas_identity: 0,
+            pane_layout_atlas_generation: 0,
+            pane_layout_unstable: false,
             divider_range: 0..0,
             focus_indicator_range: 0..0,
             viewport: PixelSize { w: 0, h: 0 },
@@ -527,6 +582,142 @@ impl Renderer {
         self.rows_rebuilt_last_frame
     }
 
+    /// Whether this renderer already holds a built pane layout + instance
+    /// list matching `viewport` and `expected_panes` — i.e. a previous
+    /// `rebuild_panes` (possibly during a background cache refresh while
+    /// occluded) produced something safe to present as-is. Used by the
+    /// tab-switch-stall reveal fast path: `false` means that frame must fall
+    /// back to a normal full rebuild instead of drawing a stale,
+    /// wrongly-sized, wrong-glyph, or stale-split layout. Independent ways
+    /// this can be `false`:
+    /// - never rendered (`pane_layout` empty);
+    /// - resized since the cache was last built — checked against BOTH the
+    ///   live `viewport` (in case the caller's `viewport` argument is itself
+    ///   stale) and `pane_layout_viewport` (what the cache was actually
+    ///   built against; `resize()` mutates the live field unconditionally,
+    ///   including while occluded, well before any rebuild follows — e.g. a
+    ///   macOS tab group resizing every member window together);
+    /// - the shared glyph atlas moved since the cache was last built — it is
+    ///   shared across every window's renderer, so another window's
+    ///   background refresh can evict/reallocate it in between, which would
+    ///   leave this renderer's cached instances referencing reclaimed atlas
+    ///   rectangles;
+    /// - `expected_panes` (the CURRENT split layout's `(PaneId, PaneRect)`
+    ///   set, in the exact form the caller would pass to `rebuild_panes`)
+    ///   no longer matches `pane_layout` — a split added/closed or a pane
+    ///   closed (e.g. via IPC or a pty exit) while occluded, which changes
+    ///   nothing about viewport or atlas but must still fall back, or the
+    ///   reveal frame would present closed/stale panes;
+    /// - the cached frame never stabilized against glyph-atlas evictions
+    ///   (`pane_layout_unstable`) — normal rendering converges via
+    ///   `needs_follow_up_frame`, but a background refresh has no such
+    ///   follow-up loop, so an unstable cache must never be presented as-is.
+    pub fn cached_frame_matches_viewport(
+        &self,
+        viewport: PixelSize,
+        font: &FontGrid,
+        expected_panes: &[(PaneId, PaneRect)],
+    ) -> bool {
+        !self.pane_layout.is_empty()
+            && self.viewport == viewport
+            && self.pane_layout_viewport == viewport
+            && self.pane_layout_atlas_identity == font.atlas_identity()
+            && self.pane_layout_atlas_generation == font.atlas_eviction_generation()
+            && !self.pane_layout_unstable
+            && self.pane_layout == expected_panes
+    }
+
+    /// Force `pane`'s NEXT `rebuild_panes` call to fully rebuild every
+    /// visible row, regardless of `FrameSnapshot::row_dirty` — bypassing the
+    /// per-row cache-key reuse entirely, not just the reveal fast-path guard
+    /// above. A full rebuild reads every row straight from that call's fresh
+    /// `FrameSnapshot` (which always reflects the terminal's actual current
+    /// content; only `row_dirty` — which per-row reuse trusts — can be
+    /// stale), so this restores correctness regardless of how the terminal's
+    /// dirty bits got out of sync with what this cache has already applied.
+    ///
+    /// Used when a pane's captured-but-never-applied snapshot (`noa-app`'s
+    /// `Surface::pending_reveal_snapshot`) is about to be discarded — e.g. a
+    /// window re-occludes before its guaranteed catch-up redraw ran (kaizen
+    /// cycle 5): that snapshot's read already consumed the terminal's row
+    /// damage, so a later rebuild trusting `row_dirty` would see those rows
+    /// as clean and never re-derive them, even though this cache never
+    /// actually applied that content. A no-op if `pane` has no cache entry
+    /// yet (its first rebuild is already full).
+    pub fn invalidate_pane(&mut self, pane: PaneId) {
+        if let Some(cache) = self.pane_render_cache.get_mut(&pane) {
+            cache.key = None;
+        }
+    }
+
+    /// Read-only prediction of whether rebuilding `pane` against `snap` right
+    /// now would hit `cell::rebuild_pane_cached`'s FULL-rebuild path (every
+    /// visible row) rather than its incremental one (only dirty rows, or the
+    /// scroll-shift translation) — without doing any of that work or
+    /// mutating any cache state. Mirrors that function's `full` decision
+    /// exactly (same shared `frame_invalidation_key_matches`), so the two can
+    /// never disagree.
+    ///
+    /// Used to bound the tab-switch-stall background refresh's per-invocation
+    /// cost (kaizen cycle 6, finding P1): a hidden tab that scrolled more than
+    /// one viewport since its cache was last built can never hit the
+    /// scroll-shift fast path, so refreshing it now would always be a full,
+    /// synchronous, main-thread rebuild (measured 38–93ms) — and that work is
+    /// wasted anyway, since the eventual reveal's catch-up frame will be a
+    /// full rebuild regardless of whether this background refresh ran. The
+    /// caller skips refreshing (and, per its own dirty-set policy, does not
+    /// keep retrying) any pane this returns `true` for.
+    pub fn pane_rebuild_would_be_full(
+        &self,
+        pane: PaneId,
+        snap: &FrameSnapshot,
+        font: &FontGrid,
+        theme: &Theme,
+    ) -> bool {
+        let Some(cache) = self.pane_render_cache.get(&pane) else {
+            // No cache entry yet: this pane's first-ever rebuild is always
+            // full (mirrors `cell::rebuild_pane_cached`'s `cache.bg.len() !=
+            // rows` check against a fresh, empty cache).
+            return true;
+        };
+        let rows = snap.rows.len();
+        if cache.bg.len() != rows {
+            return true;
+        }
+        let cell_size = (font.metrics().cell_w, font.metrics().cell_h);
+        let atlas_identity = font.atlas_identity();
+        let atlas_gen = font.atlas_eviction_generation();
+        if snap.scroll_shift > 0 {
+            let scroll_path_applies = snap.scroll_shift < rows
+                && cache
+                    .prev_row_base
+                    .is_some_and(|base| base + snap.scroll_shift == snap.row_base)
+                && cache.key.as_ref().is_some_and(|key| {
+                    key.abs_row_base + snap.scroll_shift == snap.abs_row_base
+                        && frame_invalidation_key_matches(
+                            key,
+                            snap,
+                            theme,
+                            cell_size,
+                            atlas_identity,
+                            atlas_gen,
+                        )
+                });
+            return !scroll_path_applies;
+        }
+        !cache.key.as_ref().is_some_and(|key| {
+            key.abs_row_base == snap.abs_row_base
+                && frame_invalidation_key_matches(
+                    key,
+                    snap,
+                    theme,
+                    cell_size,
+                    atlas_identity,
+                    atlas_gen,
+                )
+        })
+    }
+
     /// `true` when the most recent `rebuild_panes` could not stabilize
     /// against glyph-atlas evictions, so the frame just built may draw some
     /// glyphs with another glyph's pixels. The caller should request one
@@ -674,6 +865,19 @@ impl Renderer {
         self.focus_indicator_color = [accent[0], accent[1], accent[2], FOCUS_INDICATOR_ALPHA];
         self.cell_instance_len = self.instances.len();
         self.rows_rebuilt_last_frame = rows_rebuilt_total;
+        // The viewport + shared-atlas state `pane_layout` was actually built
+        // against, for `cached_frame_matches_viewport`'s guard: `self.viewport`
+        // is mutated unconditionally by `resize()` (including for windows
+        // resized while occluded, before their pane cache catches up), and
+        // the glyph atlas is shared across every window's renderer, so both
+        // must be pinned here rather than re-read live at guard-check time.
+        self.pane_layout_viewport = self.viewport;
+        self.pane_layout_atlas_identity = font.atlas_identity();
+        self.pane_layout_atlas_generation = font.atlas_eviction_generation();
+        // `self.frame_unstable` reflects the FINAL cross-pane pass's
+        // stability (see the loop above), so this is exactly this call's
+        // settled outcome, not a stale value from an earlier pass.
+        self.pane_layout_unstable = self.frame_unstable;
     }
 
     /// Draw the current instance list into `view`, uploading updated GPU

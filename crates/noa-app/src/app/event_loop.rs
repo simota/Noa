@@ -189,6 +189,17 @@ impl ApplicationHandler<UserEvent> for App {
                     && let Some(state) = self.windows.get(&window_id)
                 {
                     state.window.request_redraw();
+                } else if pane_decision == TargetedRedrawDecision::Suppress {
+                    // The window is occluded, so the request above is dropped —
+                    // this pty output would otherwise sit invisible until the
+                    // window reveals, at which point a long-hidden busy pane
+                    // forces a full pane-cache rebuild synchronously (the
+                    // tab-switch stall). Mark it dirty and let the GLOBAL
+                    // (not per-window — see `background_refresh_selection`)
+                    // throttle decide whether — and which occluded window's —
+                    // cache gets opportunistically refreshed right now.
+                    self.dirty_occluded_windows.insert(window_id);
+                    self.maybe_background_refresh_pane_cache();
                 }
                 if overview_decision == TargetedRedrawDecision::Request {
                     self.request_overview_redraw();
@@ -433,22 +444,65 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if !occluded {
                     self.reset_cursor_blink_phase();
+                    // NOA_TAB_SWITCH_TRACE t0: begin the occlusion-reveal
+                    // sample (see `tab_switch_trace` module docs).
+                    crate::tab_switch_trace::on_reveal_start();
                 }
                 let gpu = self.gpu.as_ref();
                 if let Some(state) = self.windows.get_mut(&window_id) {
                     state.occluded = occluded;
+                    if occluded {
+                        // A stashed reveal snapshot from a previous fast-path
+                        // frame that never got its guaranteed follow-up
+                        // redraw (e.g. re-occluded before winit delivered it)
+                        // must not simply be dropped (kaizen cycle 5): its
+                        // capturing read already consumed the terminal's row
+                        // damage, so a later rebuild trusting `row_dirty`
+                        // would see those rows as clean and never re-derive
+                        // them — even though this pane's render cache never
+                        // actually applied that content, leaving it stuck
+                        // showing pre-capture output indefinitely if nothing
+                        // else ever re-dirties those exact rows (e.g. a
+                        // one-shot in-place TUI redraw with no further
+                        // output). `invalidate_pane` sidesteps needing the
+                        // stash's content at all: it forces this pane's next
+                        // rebuild (whichever comes first — a real redraw's
+                        // fresh terminal read, or a background refresh) to
+                        // rebuild every row unconditionally, straight from
+                        // the terminal's actual (still-correct) live content
+                        // at that time, bypassing `row_dirty` entirely. Only
+                        // needed for panes that actually had a stash — a
+                        // pane with none is already consistent.
+                        for (&pane_id, surface) in state.surfaces.iter_mut() {
+                            if surface.pending_reveal_snapshot.take().is_some() {
+                                state.renderer.invalidate_pane(render_pane_id(pane_id));
+                            }
+                        }
+                    }
                     if let Some(gpu) = gpu {
+                        let trace_configure_start = crate::tab_switch_trace::configure_start();
                         configure_wgpu_surface(
                             &state.surface,
                             &gpu.device,
                             &state.surface_config,
                             state.occluded,
                         );
+                        crate::tab_switch_trace::on_surface_configured(trace_configure_start);
                     }
                 }
                 if !occluded {
+                    // A reveal redraws with fresh terminal content, so any
+                    // pending background-refresh candidacy is obsolete; keep
+                    // dirty state scoped to a single occlusion cycle so a
+                    // stale candidate can't consume a refresh slot later.
+                    self.dirty_occluded_windows.remove(&window_id);
                     self.sync_current_background_image_to_window(window_id);
-                    if let Some(state) = self.windows.get(&window_id) {
+                    if let Some(state) = self.windows.get_mut(&window_id) {
+                        // Tab-switch stall fix: let the next `redraw()` present
+                        // whatever the renderer already has cached (kept warm
+                        // by background refreshes while occluded) instead of
+                        // forcing a full rebuild synchronously on this frame.
+                        state.reveal_fast_path_pending = true;
                         state.window.request_redraw();
                     }
                 }
@@ -803,6 +857,7 @@ impl ApplicationHandler<UserEvent> for App {
         let live_wallpaper_deadline = self.tick_live_wallpaper();
         let kitty_anim_deadline = self.tick_kitty_animations();
         let memory_trim_deadline = self.tick_memory_trim();
+        let bg_refresh_wake_deadline = self.tick_bg_refresh_wake();
         let deadline = [
             blink_deadline,
             resize_throttle_deadline,
@@ -817,6 +872,7 @@ impl ApplicationHandler<UserEvent> for App {
             live_wallpaper_deadline,
             kitty_anim_deadline,
             memory_trim_deadline,
+            bg_refresh_wake_deadline,
         ]
         .into_iter()
         .flatten()

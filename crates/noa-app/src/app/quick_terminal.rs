@@ -849,6 +849,8 @@ impl App {
                 bell_flash_until: None,
                 native_overlays: Default::default(),
                 applied_window_bg: None,
+                bg_refresh_last: None,
+                reveal_fast_path_pending: false,
             },
         );
         self.relayout_and_resize_window(window_id);

@@ -43,6 +43,7 @@ mod session_store;
 mod sidebar;
 pub mod split_tree;
 pub mod startup_trace;
+mod tab_switch_trace;
 mod theme;
 mod theme_favorites;
 mod theme_settings;

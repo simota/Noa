@@ -484,18 +484,11 @@ pub(super) fn rebuild_pane_cached(
     // something actually changed. On the steady-state frame nothing is
     // cloned at all.
     let atlas_identity = font.atlas_identity();
+    // Shared with `Renderer::pane_rebuild_would_be_full`'s read-only
+    // prediction of this same decision (see `super::frame_invalidation_key_matches`'s
+    // doc comment) — kept as one function so the two can never drift apart.
     let key_fields_match = |k: &FrameInvalidationKey, atlas_gen: u64| {
-        k.active_is_alt == snap.active_is_alt
-            && k.cols == snap.cols
-            && k.rows == snap.rows_n
-            && k.cell_size == cell_size
-            && k.atlas_identity == atlas_identity
-            && k.atlas_eviction_generation == atlas_gen
-            && k.selection == snap.selection
-            && k.hover_link == snap.hover_link
-            && k.colors == snap.colors
-            && k.theme == *theme
-            && k.search == snap.search
+        super::frame_invalidation_key_matches(k, snap, theme, cell_size, atlas_identity, atlas_gen)
     };
 
     let rows = snap.rows.len();

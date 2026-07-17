@@ -676,6 +676,26 @@ impl App {
         self.request_overview_redraw();
         None
     }
+
+    /// One-shot trailing retry for the tab-switch-stall background pane-cache
+    /// refresh's backlog (kaizen cycle 6, finding P2): fires exactly one
+    /// `maybe_background_refresh_pane_cache` attempt once the global throttle
+    /// reopens, closing the gap where a dirty occluded window is blocked
+    /// purely by timing and no further pty output ever arrives to re-trigger
+    /// a check. That call itself re-derives the next deadline (see
+    /// `bg_refresh_wake_deadline`) from whatever backlog remains afterward —
+    /// draining `dirty_occluded_windows` one throttle interval at a time
+    /// until it empties, at which point this returns `None` and the app goes
+    /// fully idle again (no periodic self-wakeup once there is truly nothing
+    /// left to do).
+    pub(super) fn tick_bg_refresh_wake(&mut self) -> Option<Instant> {
+        let deadline = self.bg_refresh_wake_deadline?;
+        if Instant::now() < deadline {
+            return Some(deadline);
+        }
+        self.maybe_background_refresh_pane_cache();
+        self.bg_refresh_wake_deadline
+    }
 }
 
 #[cfg(test)]

@@ -237,6 +237,91 @@ pub(crate) fn keyboard_preedit_should_swallow_key<Id: Eq>(
     modal_preedit_owner.is_some_and(|owner| owner == window_id) || pane_preedit_active
 }
 
+/// Throttle interval for an occluded window's background pane-cache refresh
+/// (tab-switch stall fix). Chosen so a long-hidden busy tab's row cache and
+/// glyph atlas stay warm enough that the reveal frame's catch-up rebuild is
+/// small, without running a rebuild on every single pty-output redraw a busy
+/// occluded pane requests.
+pub(crate) const BG_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Which (if any) occluded window's pane cache should be opportunistically
+/// rebuilt right now (present-free, no swapchain touch), given every
+/// currently-dirty occluded window and its own last-refresh time.
+///
+/// Throttle is GLOBAL, not per-window (kaizen cycle 4, finding P1-B): a
+/// per-window `BG_REFRESH_INTERVAL` gate admits up to one full-viewport
+/// rebuild PER WINDOW per interval, so N busy occluded tabs stall the event
+/// loop — and so the foreground window's own rendering and input handling —
+/// for up to N rebuilds every interval. At most one candidate is returned per
+/// `interval`, app-wide.
+///
+/// Fairness among ready candidates: the one refreshed longest ago (or never,
+/// which sorts as "most overdue") wins, so no single busy tab can starve the
+/// others by continuously re-dirtying itself — every dirty occluded window
+/// eventually gets its turn, oldest-refresh-first.
+///
+/// Called only from the `UserEvent::Redraw` path, which already fires
+/// exclusively when the io thread observed new pty output — so this is never
+/// invoked on a self-armed wake-up; an app with no occluded pty activity
+/// never spends a cycle here.
+pub(crate) fn background_refresh_selection<Id: Copy>(
+    dirty_windows: &[(Id, Option<Instant>)],
+    global_last_refresh: Option<Instant>,
+    now: Instant,
+    interval: Duration,
+) -> Option<Id> {
+    if let Some(last) = global_last_refresh
+        && now.saturating_duration_since(last) < interval
+    {
+        return None;
+    }
+    dirty_windows
+        .iter()
+        .max_by_key(|(_, last_refresh)| {
+            last_refresh.map_or(Duration::MAX, |t| now.saturating_duration_since(t))
+        })
+        .map(|(id, _)| *id)
+}
+
+/// Next trailing wake-up deadline for the background-refresh backlog
+/// (kaizen cycle 6, finding P2): `None` while the backlog is empty (fully
+/// idle — the caller arms no timer at all), otherwise the earliest instant
+/// the global throttle reopens. Closes the gap where a dirty candidate is
+/// blocked purely by timing (its output landed inside the throttle window,
+/// and nothing else ever triggers another check) — without this, it would
+/// sit stale until an unrelated event happened to redraw again.
+///
+/// `dirty_remaining` is `!dirty_occluded_windows.is_empty()` evaluated AFTER
+/// whatever this invocation of `maybe_background_refresh_pane_cache` did (or
+/// didn't do): the same rule applies whether this call just serviced one
+/// candidate and others remain (chain to drain the existing backlog one
+/// throttle interval at a time) or was itself blocked by the throttle with
+/// candidates still waiting (arm the one retry). Either way, `last_refresh`
+/// (the GLOBAL last-refresh instant) is the anchor: the throttle can't
+/// reopen before `last_refresh + interval`, regardless of which of those two
+/// cases produced this call.
+pub(crate) fn bg_refresh_wake_deadline(
+    dirty_remaining: bool,
+    last_refresh: Option<Instant>,
+    interval: Duration,
+) -> Option<Instant> {
+    if !dirty_remaining {
+        return None;
+    }
+    last_refresh.map(|last| last + interval)
+}
+
+/// Whether `redraw()`'s reveal frame may skip the pane-cache rebuild this
+/// frame and present the renderer's already-built instances as-is.
+/// `pending` is the window's one-shot post-`Occluded(false)` flag;
+/// `has_renderable_frame` guards the case where the renderer has nothing
+/// usable yet (never rendered, or the viewport changed since its last build)
+/// — that case must fall back to the normal full rebuild instead of
+/// presenting garbage or a wrongly-sized layout.
+pub(crate) fn reveal_fast_path_decision(pending: bool, has_renderable_frame: bool) -> bool {
+    pending && has_renderable_frame
+}
+
 pub(crate) fn pane_user_event_redraw_decision(
     pane_state: Option<(bool, bool)>,
 ) -> TargetedRedrawDecision {

@@ -1295,6 +1295,108 @@ fn targeted_redraw_decision_drops_stale_and_suppresses_occluded_tabs() {
 }
 
 #[test]
+fn background_refresh_selection_returns_none_with_no_dirty_windows() {
+    let now = Instant::now();
+    assert_eq!(
+        background_refresh_selection::<u32>(&[], None, now, BG_REFRESH_INTERVAL),
+        None
+    );
+}
+
+#[test]
+fn background_refresh_selection_is_due_immediately_with_no_prior_global_refresh() {
+    let now = Instant::now();
+    assert_eq!(
+        background_refresh_selection(&[(1u32, None)], None, now, BG_REFRESH_INTERVAL),
+        Some(1)
+    );
+}
+
+/// The global gate, not a per-window one (kaizen cycle 4, finding P1-B): even
+/// though window 2 has never been refreshed (individually "due"), a global
+/// refresh within the interval blocks EVERY window's turn, not just window 1's.
+#[test]
+fn background_refresh_selection_throttles_globally_across_every_window() {
+    let start = Instant::now();
+    let dirty = [(1u32, Some(start)), (2u32, None)];
+    assert_eq!(
+        background_refresh_selection(
+            &dirty,
+            Some(start),
+            start + BG_REFRESH_INTERVAL - Duration::from_millis(1),
+            BG_REFRESH_INTERVAL
+        ),
+        None
+    );
+    assert_eq!(
+        background_refresh_selection(
+            &dirty,
+            Some(start),
+            start + BG_REFRESH_INTERVAL,
+            BG_REFRESH_INTERVAL
+        ),
+        Some(2)
+    );
+}
+
+/// Fairness: among ready candidates, the one refreshed longest ago (or never)
+/// wins — a continuously-busy window can't starve a quieter one.
+#[test]
+fn background_refresh_selection_prefers_the_least_recently_refreshed_window() {
+    let now = Instant::now();
+    let long_ago = now - Duration::from_secs(10);
+    let recently = now - Duration::from_millis(1);
+    let dirty = [(1u32, Some(recently)), (2u32, Some(long_ago)), (3u32, None)];
+    // Window 3 has never been refreshed at all — more overdue than any
+    // timestamped window, however old.
+    assert_eq!(
+        background_refresh_selection(&dirty, None, now, BG_REFRESH_INTERVAL),
+        Some(3)
+    );
+    let dirty_without_never_refreshed = [(1u32, Some(recently)), (2u32, Some(long_ago))];
+    assert_eq!(
+        background_refresh_selection(
+            &dirty_without_never_refreshed,
+            None,
+            now,
+            BG_REFRESH_INTERVAL
+        ),
+        Some(2)
+    );
+}
+
+#[test]
+fn bg_refresh_wake_deadline_is_none_when_no_dirty_backlog_remains() {
+    // Fully idle: no dirty candidates left, so no timer is armed at all —
+    // regardless of when the last refresh happened.
+    let now = Instant::now();
+    assert_eq!(
+        bg_refresh_wake_deadline(false, Some(now), BG_REFRESH_INTERVAL),
+        None
+    );
+    assert_eq!(
+        bg_refresh_wake_deadline(false, None, BG_REFRESH_INTERVAL),
+        None
+    );
+}
+
+#[test]
+fn bg_refresh_wake_deadline_is_the_next_throttle_reopening_when_backlog_remains() {
+    let last_refresh = Instant::now();
+    assert_eq!(
+        bg_refresh_wake_deadline(true, Some(last_refresh), BG_REFRESH_INTERVAL),
+        Some(last_refresh + BG_REFRESH_INTERVAL)
+    );
+}
+
+#[test]
+fn reveal_fast_path_requires_both_pending_and_a_renderable_cached_frame() {
+    assert!(!reveal_fast_path_decision(false, true));
+    assert!(!reveal_fast_path_decision(true, false));
+    assert!(reveal_fast_path_decision(true, true));
+}
+
+#[test]
 fn stale_pane_user_event_redraw_decision_noops_without_panicking() {
     assert_eq!(
         pane_user_event_redraw_decision(None),

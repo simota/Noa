@@ -234,6 +234,20 @@ impl Screen {
         }
         let recorded = self.records_scrollback_for_region(top, bottom);
         let full_height = top == 0 && bottom + 1 == self.rows as usize;
+        if n == 1 && full_height && recorded {
+            // Every `LF`/`IND` at the bottom margin with the default
+            // full-screen scroll region takes this exact shape — the
+            // overwhelmingly common case in any line-oriented flood. It's
+            // the general body below with every branch that this
+            // combination always resolves the same way already folded in:
+            // the single-row seal loop collapses to one move, the
+            // `!full_height` point-shift and non-recorded post-rotate clear
+            // are dead, and `track_scroll_up` is a guaranteed no-op when
+            // `recorded` is true (see its own `|| recorded` early return) so
+            // the call itself is skipped rather than made just to return.
+            self.scroll_up_one_full_recorded();
+            return;
+        }
         let blank = self.blank();
         if recorded {
             let old_scrollback_len = self.scrollback.len();
@@ -291,6 +305,32 @@ impl Screen {
             }
         }
         self.track_scroll_up(top, bottom, n, recorded);
+    }
+
+    /// The `n==1 && full_height && recorded` fast path split out of
+    /// [`Self::scroll_up_region`] — see the call site for why every branch
+    /// of the general body is safe to fold away for this shape. Must stay
+    /// byte-for-byte equivalent to running the general body with those
+    /// three conditions true.
+    #[inline]
+    fn scroll_up_one_full_recorded(&mut self) {
+        let bottom = self.rows as usize - 1;
+        let blank = self.blank();
+        let default_blank = Self::is_default_blank(&blank);
+        let replacement = match self.scrollback.take_blank_row(self.cols) {
+            Some(row) if default_blank => row,
+            Some(mut row) => {
+                row.clear(&blank);
+                row
+            }
+            None => Self::row_with_blank(self.cols, &blank),
+        };
+        let sealed = std::mem::replace(&mut self.grid[0], replacement);
+        let evicted = self.scrollback.push_row_deferred(sealed);
+        self.note_scrollback_evictions(evicted);
+        self.pin_viewport_for_scrollback_push(1, true);
+        self.grid[0..=bottom].rotate_left(1);
+        self.scroll_shift = self.scroll_shift.saturating_add(1);
     }
 
     /// Scroll the scroll region down by `n` rows (bottom rows discarded).

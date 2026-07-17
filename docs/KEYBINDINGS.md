@@ -167,7 +167,12 @@ when the app isn't focused. Configurable via config.
 | Config key | Default | Action |
 |---|---|---|
 | `quick-terminal-hotkey` | `cmd+grave` (⌘`) | Toggle Quick Terminal |
-| `sidebar-hotkey` | none (disabled) | Toggle sidebar |
+
+`sidebar-hotkey` is **not** a global hotkey: it rebinds the sidebar
+toggle's in-app chord (default ⌘⇧S, `sidebar.toggle`) and only fires
+while noa is focused. `none` / an empty value keeps the default chord;
+a chord already used by another binding is rejected with a diagnostic.
+The Sidebar menu item's shortcut follows the effective chord.
 
 The syntax is a `+`-separated chord (e.g. `cmd+shift+t`). Modifier
 aliases: `cmd`/`command`/`super`/`meta`, `ctrl`/`control`, `alt`/`option`,

@@ -198,7 +198,7 @@ See [noa-server-protocol.md](api/noa-server-protocol.md) for scope and attach-ch
 | `sidebar-enabled` | `true`, `false` | `false` | Initial sidebar visibility for new windows |
 | `sidebar-width` | finite decimal `200..=600` | `360` | Sidebar width (points) |
 | `sidebar-font-size` | finite decimal `8..=20` | `11.5` | Session sidebar font size (points) |
-| `sidebar-hotkey` | global hotkey chord, or `none` / `off` / `false` | none | System-wide hotkey for the sidebar. An empty value also disables it |
+| `sidebar-hotkey` | in-app keybind chord, or `none` / `off` / `false` | none | Rebinds the sidebar toggle's in-app chord (default `cmd+shift+s`). **Not** a system-wide hotkey — it only fires while noa is focused. `none` / an empty value keeps the default chord. A chord already used by another binding (e.g. `cmd+t`) is rejected with a diagnostic |
 | `sidebar-preview-lines` | integer `0..=20` | `5` | Number of trailing lines shown in a card. `0` means no preview |
 
 See [KEYBINDINGS.md](KEYBINDINGS.md#global-system-hotkeys) for the syntax of global hotkey chords and

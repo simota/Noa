@@ -623,6 +623,109 @@ fn run_tbench_faithful(
     }
 }
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+}
+
+/// `malloc_zone_pressure_relief(all, everything)` — return already-free
+/// heap pages to the OS without touching live state (models the app's
+/// mid-burst relief timer).
+fn pressure_relief() {
+    #[cfg(target_os = "macos")]
+    // SAFETY: documented-safe with NULL zone (all zones) and 0 goal.
+    unsafe {
+        malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+    }
+}
+
+/// Resident-set size of this process in bytes (mach task_info).
+fn current_rss() -> usize {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .expect("ps rss");
+    String::from_utf8_lossy(&out.stdout).trim().parse::<usize>().unwrap_or(0) * 1024
+}
+
+/// Memory-retention suite (bonus-cycle oracle): ONE warm Terminal + ONE
+/// cooked pty session absorbs `suites` repetitions of the full fixture
+/// rotation (each fixture `runs` times, BEL-delimited), with the app's
+/// idle `trim_memory` modeled between fixtures — printing process RSS at
+/// every fixture boundary. Reproduces tbench's suite-over-suite
+/// `resource.mem` growth in-harness.
+fn run_mem_suite(fixtures: &[String], grid: GridSize, suites: usize, runs: usize) {
+    use noa_pty::{Pty, PtyConfig, PtyEvent};
+
+    let mut script = String::from("i=0; ");
+    script.push_str(&format!("while [ $i -lt {suites} ]; do "));
+    for f in fixtures {
+        script.push_str(&format!("j=0; while [ $j -lt {runs} ]; do cat '{f}'; printf '\\a'; j=$((j+1)); done; "));
+    }
+    script.push_str("i=$((i+1)); done");
+    let cfg = PtyConfig {
+        size: grid,
+        shell: None,
+        command: Some(vec!["/bin/sh".to_string(), "-c".to_string(), script]),
+        cwd: None,
+        term: "xterm-256color".to_string(),
+        login: false,
+        shell_integration: false,
+    };
+    let pty = Pty::spawn(cfg).expect("spawn pty");
+    let mut stream = Stream::new();
+    let mut term = Terminal::new(grid);
+    println!("start: rss {:.1} MB", current_rss() as f64 / 1e6);
+
+    let per_fixture = runs;
+    let per_suite = per_fixture * fixtures.len();
+    let total = per_suite * suites;
+    let mut bels = 0usize;
+    let timeout = Duration::from_secs(300);
+    loop {
+        match pty.event_rx().recv_timeout(timeout) {
+            Ok(PtyEvent::Data(chunk)) => {
+                let bytes = chunk.as_ref();
+                stream.feed(bytes, &mut term);
+                for &b in bytes.iter().filter(|&&b| b == 0x07) {
+                    let _ = b;
+                    bels += 1;
+                    if bels.is_multiple_of(per_fixture) {
+                        // Model the app's idle trim between fixture batches
+                        // (suppressible: tbench's cadence never lets the
+                        // 30s-quiescence trim fire).
+                        if std::env::var_os("DS_NO_TRIM").is_none() {
+                            term.trim_memory();
+                        }
+                        // Model the app's mid-burst free-page relief
+                        // (pressure_relief only, no settle).
+                        if std::env::var_os("DS_RELIEF").is_some() {
+                            pressure_relief();
+                        }
+                        let fixture_idx = (bels / per_fixture - 1) % fixtures.len();
+                        let suite = (bels - 1) / per_suite + 1;
+                        println!(
+                            "suite {suite} fixture {}: rss {:.1} MB",
+                            fixtures[fixture_idx]
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or("?"),
+                            current_rss() as f64 / 1e6
+                        );
+                    }
+                }
+                if bels >= total {
+                    break;
+                }
+            }
+            Ok(PtyEvent::Exit(_)) | Ok(PtyEvent::Error(_)) => break,
+            Err(_) => break,
+        }
+    }
+    term.trim_memory();
+    println!("end: rss {:.1} MB", current_rss() as f64 / 1e6);
+}
+
 /// SKEPTIC HARNESS (uncommitted): interactive DSR roundtrip under flood.
 ///
 /// A python "app" spawned through the real `noa_pty::Pty` writes a `burst`-byte
@@ -879,6 +982,23 @@ fn main() {
             stddev,
             mbps_vals.len()
         );
+        return;
+    }
+
+    // mem-suite mode (bonus-cycle memory-retention oracle):
+    //   drain-staircase --mem-suite --suites 3 --runs 20
+    if has("--mem-suite") {
+        let cols = flag("--cols", 80) as u16;
+        let rows = flag("--rows", 24) as u16;
+        let grid = GridSize::new(cols, rows);
+        let suites = flag("--suites", 3);
+        let runs = flag("--runs", 20);
+        let base = "/Users/simota/repos/github.com/TerminalBench/fixtures";
+        let fixtures: Vec<String> = ["large-output-plain.txt", "large-output-ansi.txt", "large-output-cjk.txt"]
+            .iter()
+            .map(|f| format!("{base}/{f}"))
+            .collect();
+        run_mem_suite(&fixtures, grid, suites, runs);
         return;
     }
 

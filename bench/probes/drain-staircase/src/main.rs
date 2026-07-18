@@ -573,6 +573,51 @@ fn main() {
         return;
     }
 
+    // Single authoritative real-lens run (task-3 iteration + external
+    // sampling window):
+    //   drain-staircase --real-one --stage s4 --workload plain --mb 512
+    if has("--real-one") {
+        let cols = flag("--cols", 80) as u16;
+        let rows = flag("--rows", 24) as u16;
+        let grid = GridSize::new(cols, rows);
+        let mb = flag("--mb", 256);
+        let total = mb * 1024 * 1024;
+        let stage = match str_flag("--stage").as_deref() {
+            Some("s1") => Stage::S1Discard,
+            Some("s2") => Stage::S2Parse,
+            Some("s3") => Stage::S3ApplyNoSb,
+            _ => Stage::S4ApplySb,
+        };
+        let w = match str_flag("--workload").as_deref() {
+            Some("ansi") => Workload::Ansi,
+            Some("scroll") => Workload::Scroll,
+            _ => Workload::Plain,
+        };
+        let tmpdir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+        let path = format!("{}/drain_one_{}.dat", tmpdir.trim_end_matches('/'), w.name());
+        let tmpl = template(w);
+        write_workload_file(&path, &tmpl, total);
+        eprintln!(
+            "real-one: {} {} {}x{} {} MiB — pid {}",
+            stage_name(stage),
+            w.name(),
+            cols,
+            rows,
+            mb,
+            std::process::id()
+        );
+        let dur = run_real(stage, &path, total, grid, false);
+        let _ = std::fs::remove_file(&path);
+        println!(
+            "real-one {} {}: {:.1} MB/s ({:.2}s)",
+            stage_name(stage),
+            w.name(),
+            total as f64 / dur.as_secs_f64() / 1e6,
+            dur.as_secs_f64()
+        );
+        return;
+    }
+
     let mb = flag("--mb", 256);
     let reps = flag("--reps", 3);
     let cols = flag("--cols", 80) as u16;

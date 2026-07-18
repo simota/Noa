@@ -203,6 +203,8 @@ pub struct App {
     /// (`tick_memory_trim`): re-armed by every pty-driven redraw and once at
     /// startup, `None` after firing — an idle app pays no wake-up for this.
     memory_trim_deadline: Option<Instant>,
+    /// Last mid-burst free-page relief (see `timers::MEMORY_RELIEF_INTERVAL`).
+    last_memory_relief: Instant,
     /// Monotonic origin for the Kitty-graphics animation clock. Set lazily on the
     /// first animation tick; `advance_kitty_animations` takes ms since this so
     /// `noa-grid` stays timer-free.
@@ -682,6 +684,7 @@ impl App {
             // config-parse scratch) are returned to the OS shortly after the
             // first window settles.
             memory_trim_deadline: Some(Instant::now() + timers::MEMORY_TRIM_QUIESCENCE),
+            last_memory_relief: Instant::now(),
             kitty_anim_origin: None,
             kitty_anim_deadline: None,
             attention_onset: HashMap::new(),

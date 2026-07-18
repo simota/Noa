@@ -128,6 +128,11 @@ const PACK_WORKERS: usize = 3;
 /// cadence just amortizes the flush call further, while the quarter-limit
 /// `over_limit` guard still bounds the transient exactly as before.
 const SPAN_FLUSH_MULTIPLE: usize = 4;
+/// Evicted-page reuse pool cap (see `PagedScrollback::spares`): covers one
+/// inline flush's worth of page turnover (~a quarter-limit of 64KiB pages)
+/// so a sustained flood recycles arenas instead of round-tripping the
+/// allocator. ~2MiB retained at most, and only until the post-burst trim.
+const SPARE_PAGE_CAP: usize = 32;
 /// Per-row constant in the pending-bytes upper bound (row meta + slack).
 const PACKED_ROW_EST_OVERHEAD: usize = 16;
 /// Charged per grapheme-table entry (the tail text itself lives in the
@@ -826,11 +831,16 @@ pub(crate) struct PagedScrollback {
     dirty_carcasses: Option<(Vec<Row>, Vec<usize>)>,
     /// Reused row buffer for [`Self::for_each_row`] (zero-allocation walks).
     scratch: Row,
-    /// One evicted page kept for reuse: a sustained flood at the retention
-    /// limit evicts a page every few dozen rows, and the allocator round-trip
-    /// for its 64KiB arena (malloc, plus madvise on free) is measurable
-    /// there.
-    spare: Option<Page>,
+    /// Evicted pages kept for reuse: a sustained flood at the retention
+    /// limit evicts a page every few dozen rows, and the allocator
+    /// round-trip for a 64KiB arena (malloc, plus madvise on free) is
+    /// measurable there. A *pool* (not a single slot): the inline span
+    /// flush packs a whole batch of pages and then evicts a whole batch at
+    /// its trailing `evict_to_limit`, so a 1-deep spare thrashed ~20 page
+    /// allocations + frees per flush — churn the macOS xzone allocator's
+    /// quarantine turns into monotonic RSS growth across flood suites.
+    /// Bounded by [`SPARE_PAGE_CAP`]; dropped by [`Self::trim_memory`].
+    spares: Vec<Page>,
 }
 
 impl PagedScrollback {
@@ -852,7 +862,7 @@ impl PagedScrollback {
             pool: Vec::new(),
             dirty_carcasses: None,
             scratch: empty_row(),
-            spare: None,
+            spares: Vec::new(),
         }
     }
 
@@ -904,7 +914,7 @@ impl PagedScrollback {
         self.dirty_carcasses = None;
         self.total_rows = 0;
         self.total_bytes = 0;
-        self.spare = None;
+        self.spares = Vec::new();
     }
 
     /// Post-burst memory trim: settle every deferred row into packed pages
@@ -925,8 +935,8 @@ impl PagedScrollback {
     pub(crate) fn trim_memory(&mut self) -> usize {
         let evicted = self.flush_all();
         self.pending.shrink_to_fit();
-        self.pending_span_bytes.shrink_to_fit();
-        self.spare = None;
+        self.pending_span_bytes = Vec::new();
+        self.spares = Vec::new();
         evicted
     }
 
@@ -1156,7 +1166,10 @@ impl PagedScrollback {
             }
         }
         self.pending_est_bytes = 0;
-        // Take the arena so the span rows can borrow it while `self` packs.
+        // Take the arena so the span rows can borrow it while `self` packs;
+        // restored (cleared, capacity kept) below — dropping it here would
+        // re-allocate a fresh ~quarter-limit buffer every flush, pure
+        // allocator churn on the flood path.
         let arena = std::mem::take(&mut self.pending_span_bytes);
         while let Some(row) = self.pending.pop_front() {
             match row {
@@ -1175,6 +1188,9 @@ impl PagedScrollback {
             }
         }
         self.pending_cell_rows = 0;
+        let mut arena = arena;
+        arena.clear();
+        self.pending_span_bytes = arena;
         evicted += self.evict_to_limit();
         evicted
     }
@@ -1408,14 +1424,15 @@ impl PagedScrollback {
             Some(page) => page.cols != cols || page.cells.len() >= PAGE_CELL_CAPACITY,
         };
         if need_new {
-            // Reuse the spare evicted page when its arena is big enough for
+            // Reuse a spare evicted page when its arena is big enough for
             // this width; otherwise build a fresh one.
-            let page = match self.spare.take() {
+            let page = match self.spares.pop() {
                 Some(mut spare) if spare.cells.capacity() >= PAGE_CELL_CAPACITY + cols as usize => {
                     spare.reset(cols);
                     spare
                 }
-                _ => Page::new(cols),
+                Some(_) => Page::new(cols),
+                None => Page::new(cols),
             };
             self.total_bytes += page.bytes;
             self.pages.push_back(page);
@@ -1433,7 +1450,9 @@ impl PagedScrollback {
             self.total_bytes -= page.bytes;
             self.total_rows -= page.rows.len();
             evicted += page.rows.len();
-            self.spare = Some(page);
+            if self.spares.len() < SPARE_PAGE_CAP {
+                self.spares.push(page);
+            }
         }
         evicted
     }
@@ -2564,7 +2583,7 @@ mod tests {
         assert!(sb.sealing.is_none());
         assert!(sb.pending.is_empty());
         assert!(sb.dirty_carcasses.is_none());
-        assert!(sb.spare.is_none());
+        assert!(sb.spares.is_empty());
         assert!(sb.pool.len() <= sb.pool_cap());
         // ...and the scrollback stays fully usable afterwards.
         for i in 0..seal_batch_rows_for(40) + 7 {

@@ -123,15 +123,26 @@ pub(crate) fn spawn_reader(
     std::thread::Builder::new()
         .name("noa-pty-reader".into())
         .spawn(move || {
-            // Latency-critical QoS (macOS): this thread's wake latency *is*
+            // Latency-elevated QoS (macOS): this thread's wake latency *is*
             // the pty drain rate — the kernel tty queue holds ~1KiB, so
             // every scheduling delay while other pipeline threads are
             // runnable directly blocks the producing child's `write`.
+            //
+            // USER_INITIATED, deliberately not USER_INTERACTIVE: the tier
+            // only needs to outrank the UTILITY pack workers so the reader
+            // is never displaced from a performance core by batch packing.
+            // The top tier was measured to change nothing on the drain
+            // (tbench-faithful S1 411.7 / S4 380.4 MB/s at either level)
+            // while taxing everything else at spawn time — an
+            // INTERACTIVE-pinned reader shifts Apple Silicon's P/E
+            // placement against the just-forked shell's init and regressed
+            // real cmd.overhead from ~1284 to 1830-2050µs (ship-gate
+            // finding).
             #[cfg(target_os = "macos")]
             // SAFETY: plain FFI call configuring the calling thread's own QoS.
             unsafe {
                 libc::pthread_set_qos_class_self_np(
-                    libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE,
+                    libc::qos_class_t::QOS_CLASS_USER_INITIATED,
                     0,
                 );
             }

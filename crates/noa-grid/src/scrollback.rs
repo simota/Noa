@@ -537,6 +537,103 @@ impl Page {
         self.bytes += delta;
         (delta, len)
     }
+
+    /// [`Page::pack_row`] for a [`SpanRow`], packing straight from the text
+    /// bytes: byte-identical output (cells, styles, row meta, accounting) to
+    /// `pack_row` on the row [`SpanRow::materialize_into`] would build,
+    /// without that row ever existing. At most two styles per row (blank +
+    /// template), each interned once — no per-cell style derivation at all.
+    fn pack_span_row(&mut self, span: &SpanRow, arena: &[u8]) -> usize {
+        let text = span.text(arena);
+        let col = span.col as usize;
+        let blank_default = pack_is_default_blank(&span.blank);
+        // The template stamped over a space byte is exactly the cell the
+        // trim compares against.
+        let template_default = pack_is_default_blank(&Cell {
+            ch: ' ',
+            ..span.template
+        });
+        // Mirror pack_row's trim from the materialized row's occupancy
+        // watermark: text spaces trim only under a pack-default template,
+        // and once the text region is gone the (default) lead blanks go too.
+        let mut len = if blank_default {
+            col + text.len()
+        } else {
+            span.cols as usize
+        };
+        if blank_default {
+            if template_default {
+                while len > col && text[len - col - 1] == b' ' {
+                    len -= 1;
+                }
+            }
+            if len == col {
+                len = 0;
+            }
+        }
+
+        let base = self.cells.len();
+        let offset = base as u32;
+        let mut delta = len * PACKED_CELL_SIZE;
+        self.cells.reserve(len);
+        let dst = self.cells.as_mut_ptr();
+
+        let lead = col.min(len);
+        if lead > 0 || len > col + text.len() {
+            let (id, is_new) = self.styles.intern(style_of(&span.blank));
+            if is_new {
+                delta += std::mem::size_of::<Style>();
+            }
+            let packed = PackedCell {
+                ch: span.blank.ch,
+                style: id,
+                flags: PackedFlags::empty(),
+            };
+            for i in 0..lead {
+                // SAFETY: `reserve(len)` guaranteed room for `base..base+len`;
+                // `i < lead <= len` and nothing here touches `self.cells`.
+                unsafe {
+                    dst.add(base + i).write(packed);
+                }
+            }
+            for i in (col + text.len())..len {
+                // SAFETY: as above; styled-blank tail indices are `< len`.
+                unsafe {
+                    dst.add(base + i).write(packed);
+                }
+            }
+        }
+        let text_end = (col + text.len()).min(len);
+        if text_end > lead {
+            let (id, is_new) = self.styles.intern(style_of(&span.template));
+            if is_new {
+                delta += std::mem::size_of::<Style>();
+            }
+            for (k, &b) in text[..text_end - lead].iter().enumerate() {
+                // SAFETY: as above; `lead + k < text_end <= len`.
+                unsafe {
+                    dst.add(base + lead + k).write(PackedCell {
+                        ch: b as char,
+                        style: id,
+                        flags: PackedFlags::empty(),
+                    });
+                }
+            }
+        }
+        // SAFETY: the loops above initialized exactly slots `base..base+len`
+        // (lead blanks, text, styled-blank tail partition `0..len`).
+        unsafe {
+            self.cells.set_len(base + len);
+        }
+
+        self.rows.push(RowMeta {
+            offset,
+            len: len as u16,
+            wrapped: span.wrapped,
+        });
+        self.bytes += delta;
+        delta
+    }
 }
 
 #[inline]
@@ -574,6 +671,102 @@ fn empty_row() -> Row {
     Row::from_cells(Vec::new(), false, false)
 }
 
+/// A history row sealed straight from an ASCII line-batch byte span
+/// (`Screen::apply_ascii_line_batch` / its styled sibling): the text bytes
+/// live in the owning tier's shared span arena, and the whole row is fully
+/// determined by `blank[..col] ++ template(text) ++ blank[..]` — so it packs
+/// (and materializes) byte-identically to the `Row` the seal path used to
+/// build, without any Cell row ever existing. That removes, per sealed row,
+/// the owner's replacement-row acquisition + ~cols×24B cell writes and the
+/// worker's ~cols×24B cell reads + carcass round-trip; only the text bytes
+/// (≤ cols) are copied.
+struct SpanRow {
+    /// Text byte range within the tier's span arena.
+    bytes: Range<u32>,
+    /// Column the text starts at.
+    col: u16,
+    /// Full row width.
+    cols: u16,
+    wrapped: bool,
+    /// Style stamped on every text cell.
+    template: Cell,
+    /// The (possibly BCE-styled) blank filling the rest of the row.
+    blank: Cell,
+}
+
+impl SpanRow {
+    fn text<'a>(&self, arena: &'a [u8]) -> &'a [u8] {
+        &arena[self.bytes.start as usize..self.bytes.end as usize]
+    }
+
+    /// Rebuild the exact `Row` the scalar seal path would have pushed:
+    /// a fully-blanked replacement row with the text slice written through
+    /// the template (`wrapped` from the batch, `dirty` false like every
+    /// history row, occupancy per the blank kind).
+    fn materialize_into(&self, arena: &[u8], out: &mut Row) {
+        let cols = self.cols as usize;
+        let col = self.col as usize;
+        let text = self.text(arena);
+        out.cells.clear();
+        out.cells.reserve(cols);
+        for _ in 0..col {
+            out.cells.push(self.blank);
+        }
+        for &b in text {
+            out.cells.push(Cell {
+                ch: b as char,
+                ..self.template
+            });
+        }
+        while out.cells.len() < cols {
+            out.cells.push(self.blank);
+        }
+        out.wrapped = self.wrapped;
+        out.dirty = false;
+        out.occ = if self.blank == Cell::default() {
+            (col + text.len()) as u32
+        } else {
+            cols as u32
+        };
+        out.debug_assert_tail_default();
+    }
+
+    fn materialize(&self, arena: &[u8]) -> Row {
+        let mut row = Row::from_cells(Vec::new(), false, false);
+        self.materialize_into(arena, &mut row);
+        row
+    }
+
+    /// Whether the row holds selectable text: blank cells are spaces, text
+    /// cells are its bytes — so any non-space byte is text.
+    fn has_text(&self, arena: &[u8]) -> bool {
+        self.text(arena).iter().any(|&b| b != b' ')
+    }
+}
+
+/// One deferred (pushed but not yet packed) history row: a full Cell row
+/// from the scalar seal path, or a byte-span row from the line batch.
+enum DeferredRow {
+    Cells(Row),
+    Span(SpanRow),
+}
+
+impl DeferredRow {
+    fn cols(&self) -> usize {
+        match self {
+            DeferredRow::Cells(row) => row.cells.len(),
+            DeferredRow::Span(span) => span.cols as usize,
+        }
+    }
+}
+
+/// A published sealing batch: the deferred rows plus the span arena their
+/// [`SpanRow::bytes`] ranges index. Immutable while shared with the workers.
+struct SealBatch {
+    rows: Vec<DeferredRow>,
+    span_bytes: Vec<u8>,
+}
+
 /// Paged scrollback: a deque of byte-bounded [`Page`]s with a byte-quantity
 /// retention limit. `limit_bytes == 0` disables scrollback entirely.
 pub(crate) struct PagedScrollback {
@@ -589,12 +782,17 @@ pub(crate) struct PagedScrollback {
     packer: Option<Packer>,
     /// The published in-flight batch: workers pack it while the owner keeps
     /// feeding. Immutable until collected (workers and readers only share
-    /// `&Row` reads). Logically sits between `pages` and `pending`.
-    sealing: Option<Arc<Vec<Row>>>,
-    /// Rows moved in by [`Self::push_row_deferred`] and not yet published.
-    /// These are the *newest* retained rows: the logical row sequence is
-    /// always `pages ++ sealing ++ pending`, and every read serves all three.
-    pending: VecDeque<Row>,
+    /// shared reads). Logically sits between `pages` and `pending`.
+    sealing: Option<Arc<SealBatch>>,
+    /// Rows moved in by [`Self::push_row_deferred`] /
+    /// [`Self::push_span_deferred`] and not yet published. These are the
+    /// *newest* retained rows: the logical row sequence is always
+    /// `pages ++ sealing ++ pending`, and every read serves all three.
+    pending: VecDeque<DeferredRow>,
+    /// Byte arena the pending tier's [`SpanRow`]s index; moves wholesale
+    /// into the [`SealBatch`] at publish (ranges stay valid — it is
+    /// append-only between publishes).
+    pending_span_bytes: Vec<u8>,
     /// Upper-bound packed sizes of the `sealing` batch and the `pending`
     /// ring (untrimmed cells × packed cell size). Drive the early-sync
     /// trigger that keeps eviction timing faithful under small retention
@@ -633,6 +831,7 @@ impl PagedScrollback {
             packer: None,
             sealing: None,
             pending: VecDeque::new(),
+            pending_span_bytes: Vec::new(),
             sealing_est_bytes: 0,
             pending_est_bytes: 0,
             batch_rows: SEAL_BATCH_MAX_ROWS,
@@ -644,7 +843,7 @@ impl PagedScrollback {
     }
 
     fn sealing_rows(&self) -> usize {
-        self.sealing.as_ref().map_or(0, |batch| batch.len())
+        self.sealing.as_ref().map_or(0, |batch| batch.rows.len())
     }
 
     /// Rows currently packed into pages (the logical prefix; `sealing` holds
@@ -680,6 +879,7 @@ impl PagedScrollback {
         self.sealing = None;
         self.pages.clear();
         self.pending.clear();
+        self.pending_span_bytes = Vec::new();
         self.sealing_est_bytes = 0;
         self.pending_est_bytes = 0;
         // Memory-decay hook: an explicit history clear also releases the
@@ -710,6 +910,7 @@ impl PagedScrollback {
     pub(crate) fn trim_memory(&mut self) -> usize {
         let evicted = self.flush_all();
         self.pending.shrink_to_fit();
+        self.pending_span_bytes.shrink_to_fit();
         self.spare = None;
         evicted
     }
@@ -766,7 +967,47 @@ impl PagedScrollback {
         }
         // History rows always report clean (see `take_visible_rows_with_damage`).
         row.dirty = false;
-        let est_row = row.cells.len() * PACKED_CELL_SIZE + PACKED_ROW_EST_OVERHEAD;
+        self.account_deferred(row.cells.len());
+        self.pending.push_back(DeferredRow::Cells(row));
+        self.total_rows += 1;
+        self.deferred_boundary()
+    }
+
+    /// [`Self::push_row_deferred`] for a line-batch byte-span row (see
+    /// [`SpanRow`]): copies only the text bytes into the span arena — no
+    /// replacement row, no per-cell writes, no carcass round-trip.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_span_deferred(
+        &mut self,
+        text: &[u8],
+        col: u16,
+        cols: u16,
+        template: &Cell,
+        blank: &Cell,
+        wrapped: bool,
+    ) -> usize {
+        if self.limit_bytes == 0 {
+            return 1;
+        }
+        self.account_deferred(cols as usize);
+        let start = self.pending_span_bytes.len() as u32;
+        self.pending_span_bytes.extend_from_slice(text);
+        self.pending.push_back(DeferredRow::Span(SpanRow {
+            bytes: start..start + text.len() as u32,
+            col,
+            cols,
+            wrapped,
+            template: *template,
+            blank: *blank,
+        }));
+        self.total_rows += 1;
+        self.deferred_boundary()
+    }
+
+    /// Deferred-push bookkeeping shared by both row kinds: the packed-size
+    /// estimate and the width-tracked batch size.
+    fn account_deferred(&mut self, cols: usize) {
+        let est_row = cols * PACKED_CELL_SIZE + PACKED_ROW_EST_OVERHEAD;
         // Width-scaled batch, additionally capped to half the quarter-limit
         // estimate allowance (the other half is pending-refill headroom):
         // a batch boundary past the `over_limit` crossing would mean the
@@ -774,12 +1015,12 @@ impl PagedScrollback {
         // every cycle would degrade to the inline `flush_all` below, packing
         // one ever-open page that page-granular eviction cannot evict.
         let allowance_rows = (self.limit_bytes / 4) / est_row.max(1) / 2;
-        self.batch_rows = seal_batch_rows_for(row.cells.len())
-            .min(allowance_rows)
-            .max(1);
+        self.batch_rows = seal_batch_rows_for(cols).min(allowance_rows).max(1);
         self.pending_est_bytes += est_row;
-        self.pending.push_back(row);
-        self.total_rows += 1;
+    }
+
+    /// The deferred-push batch boundary shared by both row kinds.
+    fn deferred_boundary(&mut self) -> usize {
         // Degrade to fully synchronous sealing when the deferred rows could
         // push retention meaningfully past the byte limit, so eviction (and
         // the selection/viewport rebasing it drives) stays as timely as
@@ -872,12 +1113,23 @@ impl PagedScrollback {
             }
         }
         self.pending_est_bytes = 0;
+        // Take the arena so the span rows can borrow it while `self` packs.
+        let arena = std::mem::take(&mut self.pending_span_bytes);
         while let Some(row) = self.pending.pop_front() {
-            let cols = row.cells.len() as u16;
-            let page = self.ensure_page(cols);
-            let (delta, len) = page.pack_row(&row);
-            self.total_bytes += delta;
-            self.recycle_carcass(row, len);
+            match row {
+                DeferredRow::Cells(row) => {
+                    let cols = row.cells.len() as u16;
+                    let page = self.ensure_page(cols);
+                    let (delta, len) = page.pack_row(&row);
+                    self.total_bytes += delta;
+                    self.recycle_carcass(row, len);
+                }
+                DeferredRow::Span(span) => {
+                    let page = self.ensure_page(span.cols);
+                    let delta = page.pack_span_row(&span, &arena);
+                    self.total_bytes += delta;
+                }
+            }
         }
         evicted += self.evict_to_limit();
         evicted
@@ -897,7 +1149,7 @@ impl PagedScrollback {
             .as_ref()
             .expect("sealing batch implies a spawned packer")
             .wait_results();
-        let mut lens = Vec::with_capacity(batch.len());
+        let mut lens = Vec::with_capacity(batch.rows.len());
         for result in results {
             for page in result.pages {
                 self.total_bytes += page.bytes;
@@ -909,10 +1161,23 @@ impl PagedScrollback {
             self.pool.extend(result.cleared.into_iter().take(spare));
         }
         // Workers drop their `Arc` clones before reporting completion, so
-        // after `wait_results` the owner holds the only reference. The rows
-        // still carry their packed content; queue them for the workers to
-        // re-blank alongside the next published batch.
-        let rows = Arc::try_unwrap(batch).expect("workers released the sealing batch");
+        // after `wait_results` the owner holds the only reference. The Cell
+        // rows still carry their packed content; queue them for the workers
+        // to re-blank alongside the next published batch (`lens` was built
+        // from Cell rows only, in order, so the zip lines up). Span rows
+        // have no allocation to recycle — their arena drops with the batch.
+        let Ok(batch) = Arc::try_unwrap(batch) else {
+            unreachable!("workers released the sealing batch");
+        };
+        let rows: Vec<Row> = batch
+            .rows
+            .into_iter()
+            .filter_map(|row| match row {
+                DeferredRow::Cells(row) => Some(row),
+                DeferredRow::Span(_) => None,
+            })
+            .collect();
+        debug_assert_eq!(rows.len(), lens.len());
         self.dirty_carcasses = Some((rows, lens));
         self.evict_to_limit()
     }
@@ -924,7 +1189,10 @@ impl PagedScrollback {
         if self.pending.is_empty() {
             return;
         }
-        let batch: Arc<Vec<Row>> = Arc::new(self.pending.drain(..).collect());
+        let batch = Arc::new(SealBatch {
+            rows: self.pending.drain(..).collect(),
+            span_bytes: std::mem::take(&mut self.pending_span_bytes),
+        });
         self.sealing_est_bytes = std::mem::take(&mut self.pending_est_bytes);
         let carcasses = self.dirty_carcasses.take();
         let packer = self.packer.get_or_insert_with(Packer::spawn);
@@ -960,12 +1228,21 @@ impl PagedScrollback {
         let packed = self.packed_rows();
         if y >= packed {
             let sealing = self.sealing_rows();
-            if y < packed + sealing {
+            let (row, arena) = if y < packed + sealing {
                 // Workers only read the shared batch; cloning a row out of it
                 // is an ordinary shared read.
-                return self.sealing.as_ref().map(|batch| batch[y - packed].clone());
-            }
-            return self.pending.get(y - packed - sealing).cloned();
+                let batch = self.sealing.as_ref().expect("sealing rows imply a batch");
+                (&batch.rows[y - packed], batch.span_bytes.as_slice())
+            } else {
+                match self.pending.get(y - packed - sealing) {
+                    Some(row) => (row, self.pending_span_bytes.as_slice()),
+                    None => return None,
+                }
+            };
+            return Some(match row {
+                DeferredRow::Cells(row) => row.clone(),
+                DeferredRow::Span(span) => span.materialize(arena),
+            });
         }
         let mut base = 0;
         for page in &self.pages {
@@ -1010,19 +1287,34 @@ impl PagedScrollback {
         self.scratch = scratch;
 
         // Deferred rows are the newest suffix of the logical sequence:
-        // the in-flight sealing batch, then the pending ring.
+        // the in-flight sealing batch, then the pending ring. Span rows
+        // materialize into the same reused scratch as packed rows.
+        let mut scratch = std::mem::replace(&mut self.scratch, empty_row());
         let packed = self.packed_rows();
         let sealing = self.sealing_rows();
         if let Some(batch) = &self.sealing {
             let start = range.start.max(packed);
             for y in start..range.end.min(packed + sealing) {
-                f(y, &batch[y - packed]);
+                match &batch.rows[y - packed] {
+                    DeferredRow::Cells(row) => f(y, row),
+                    DeferredRow::Span(span) => {
+                        span.materialize_into(&batch.span_bytes, &mut scratch);
+                        f(y, &scratch);
+                    }
+                }
             }
         }
         let start = range.start.max(packed + sealing);
         for y in start..range.end.min(self.total_rows) {
-            f(y, &self.pending[y - packed - sealing]);
+            match &self.pending[y - packed - sealing] {
+                DeferredRow::Cells(row) => f(y, row),
+                DeferredRow::Span(span) => {
+                    span.materialize_into(&self.pending_span_bytes, &mut scratch);
+                    f(y, &scratch);
+                }
+            }
         }
+        self.scratch = scratch;
     }
 
     /// Whether any retained row holds selectable text (packed scan, no
@@ -1030,19 +1322,25 @@ impl PagedScrollback {
     pub(crate) fn has_text(&self) -> bool {
         // Cells past the occupancy watermark are default (blank), so the
         // deferred-tier scans stop there.
-        let row_has_text = |row: &Row| {
-            row.cells[..row.occupied()]
+        let row_has_text = |row: &DeferredRow, arena: &[u8]| match row {
+            DeferredRow::Cells(row) => row.cells[..row.occupied()]
                 .iter()
-                .any(|cell| !cell.is_blank())
+                .any(|cell| !cell.is_blank()),
+            DeferredRow::Span(span) => span.has_text(arena),
         };
         self.pages
             .iter()
             .any(|page| page.cells.iter().any(PackedCell::has_text))
+            || self.sealing.as_ref().is_some_and(|batch| {
+                batch
+                    .rows
+                    .iter()
+                    .any(|row| row_has_text(row, &batch.span_bytes))
+            })
             || self
-                .sealing
-                .as_ref()
-                .is_some_and(|batch| batch.iter().any(row_has_text))
-            || self.pending.iter().any(row_has_text)
+                .pending
+                .iter()
+                .any(|row| row_has_text(row, &self.pending_span_bytes))
     }
 
     /// Change the retention limit at runtime, evicting immediately. Returns the
@@ -1107,16 +1405,19 @@ struct PackResult {
     cleared: Vec<Row>,
 }
 
-/// Pack a contiguous chunk of rows into fresh pages. Pure function of the
-/// rows (no shared state), so chunks of one batch can pack concurrently and
-/// the assembled `pages ++ pages ++ …` sequence is deterministic. Chunk pages
-/// never continue an existing page, so their arenas are shrunk to fit (a
-/// chunk usually under-fills its last page).
-fn pack_chunk(rows: &[Row], mut to_clear: Vec<(Row, usize)>) -> PackResult {
+/// Pack a contiguous chunk of a batch's rows into fresh pages. Pure function
+/// of the batch (no shared state), so chunks of one batch can pack
+/// concurrently and the assembled `pages ++ pages ++ …` sequence is
+/// deterministic. Chunk pages never continue an existing page, so their
+/// arenas are shrunk to fit (a chunk usually under-fills its last page).
+/// `lens` collects the trimmed lengths of the *Cell* rows only (span rows
+/// leave no carcass to re-blank), in row order.
+fn pack_chunk(batch: &SealBatch, range: Range<usize>, mut to_clear: Vec<(Row, usize)>) -> PackResult {
+    let rows = &batch.rows[range];
     let mut pages: Vec<Page> = Vec::new();
     let mut lens = Vec::with_capacity(rows.len());
     for row in rows {
-        let cols = row.cells.len() as u16;
+        let cols = row.cols() as u16;
         let need_new = match pages.last() {
             None => true,
             Some(page) => page.cols != cols || page.cells.len() >= PAGE_CELL_CAPACITY,
@@ -1128,8 +1429,15 @@ fn pack_chunk(rows: &[Row], mut to_clear: Vec<(Row, usize)>) -> PackResult {
             pages.push(Page::new(cols));
         }
         let page = pages.last_mut().unwrap();
-        let (_, len) = page.pack_row(row);
-        lens.push(len);
+        match row {
+            DeferredRow::Cells(row) => {
+                let (_, len) = page.pack_row(row);
+                lens.push(len);
+            }
+            DeferredRow::Span(span) => {
+                page.pack_span_row(span, &batch.span_bytes);
+            }
+        }
     }
     if let Some(page) = pages.last_mut() {
         page.cells.shrink_to_fit();
@@ -1165,7 +1473,7 @@ fn clear_carcass_prefix(row: &mut Row, len: usize) {
 /// row range this chunk covers.
 struct PackJob {
     id: usize,
-    batch: Arc<Vec<Row>>,
+    batch: Arc<SealBatch>,
     range: Range<usize>,
     /// Previous batch's carcasses (with their trimmed lengths) for this
     /// worker to re-blank while it is awake anyway.
@@ -1220,6 +1528,16 @@ impl Packer {
     }
 
     fn worker_loop(shared: &PackerShared) {
+        // Background-tier QoS (macOS): packing is deadline-free batch work
+        // that must never displace the latency-critical pty reader / io
+        // threads from performance cores — under a sustained flood the
+        // scheduler otherwise interleaves three pack workers with the
+        // reader's ~1KiB-quantum wake cycle and stretches the whole drain.
+        #[cfg(target_os = "macos")]
+        // SAFETY: plain FFI call configuring the calling thread's own QoS.
+        unsafe {
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+        }
         loop {
             let job = {
                 let mut state = shared.state.lock().unwrap();
@@ -1240,7 +1558,7 @@ impl Packer {
             let range = job.range.clone();
             let to_clear = job.to_clear;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                pack_chunk(&batch[range], to_clear)
+                pack_chunk(&batch, range, to_clear)
             }));
             // Release this worker's handles on the batch *before* reporting
             // completion: the collector `Arc::try_unwrap`s the batch as soon
@@ -1262,9 +1580,9 @@ impl Packer {
     /// Post `batch` split into [`PACK_WORKERS`] contiguous chunks and return
     /// immediately; the owner keeps feeding while workers pack. Results are
     /// picked up by [`Self::wait_results`].
-    fn publish(&self, batch: &Arc<Vec<Row>>, carcasses: Option<(Vec<Row>, Vec<usize>)>) {
-        let parts = PACK_WORKERS.min(batch.len().max(1));
-        let chunk_len = batch.len().div_ceil(parts);
+    fn publish(&self, batch: &Arc<SealBatch>, carcasses: Option<(Vec<Row>, Vec<usize>)>) {
+        let parts = PACK_WORKERS.min(batch.rows.len().max(1));
+        let chunk_len = batch.rows.len().div_ceil(parts);
         let mut to_clear: Vec<(Row, usize)> = match carcasses {
             Some((rows, lens)) => rows.into_iter().zip(lens).collect(),
             None => Vec::new(),
@@ -1276,7 +1594,7 @@ impl Packer {
             state.jobs = (0..parts)
                 .map(|id| {
                     let start = id * chunk_len;
-                    let end = ((id + 1) * chunk_len).min(batch.len());
+                    let end = ((id + 1) * chunk_len).min(batch.rows.len());
                     let split = to_clear.len().saturating_sub(clear_len);
                     Some(PackJob {
                         id,
@@ -1378,6 +1696,128 @@ mod tests {
     #[test]
     fn packed_cell_is_8_bytes() {
         assert_eq!(std::mem::size_of::<PackedCell>(), 8);
+    }
+
+    /// The whole [`SpanRow`] contract: packing straight from the bytes must
+    /// be byte-identical — cells, row meta, byte accounting — to packing the
+    /// materialized row, across blank/template styling, leading columns,
+    /// trims, and empty text.
+    #[test]
+    fn span_rows_pack_identically_to_their_materialized_rows() {
+        let styled_template = Cell {
+            fg: Color::Palette(2),
+            attrs: CellAttrs::BOLD,
+            ..Cell::default()
+        };
+        let bce_blank = Cell::blank(Color::Palette(4));
+        let cases: Vec<(&[u8], u16, u16, Cell, Cell, bool)> = vec![
+            (b"hello world", 0, 40, Cell::default(), Cell::default(), false),
+            (b"hello   ", 0, 40, Cell::default(), Cell::default(), true),
+            (b"indented", 7, 40, Cell::default(), Cell::default(), false),
+            (b"styled text  ", 0, 40, styled_template, Cell::default(), false),
+            (b"bce row", 3, 40, styled_template, bce_blank, false),
+            (b"", 0, 40, Cell::default(), Cell::default(), false),
+            (b"", 5, 40, styled_template, Cell::default(), false),
+            (b"        ", 4, 40, Cell::default(), Cell::default(), false),
+            (b"   ", 0, 40, styled_template, Cell::default(), false),
+            (b"full-width-x-full-width-x-full-width-x!", 0, 40, styled_template, bce_blank, true),
+        ];
+        let mut arena = Vec::new();
+        let mut spans = Vec::new();
+        for (text, col, cols, template, blank, wrapped) in &cases {
+            let start = arena.len() as u32;
+            arena.extend_from_slice(text);
+            spans.push(SpanRow {
+                bytes: start..start + text.len() as u32,
+                col: *col,
+                cols: *cols,
+                wrapped: *wrapped,
+                template: *template,
+                blank: *blank,
+            });
+        }
+
+        let mut by_span = Page::new(40);
+        let mut by_row = Page::new(40);
+        for span in &spans {
+            let delta_span = by_span.pack_span_row(span, &arena);
+            let materialized = span.materialize(&arena);
+            let (delta_row, _) = by_row.pack_row(&materialized);
+            assert_eq!(delta_span, delta_row);
+        }
+        assert_eq!(by_span.cells.len(), by_row.cells.len());
+        for (i, (a, b)) in by_span.cells.iter().zip(&by_row.cells).enumerate() {
+            assert_eq!(
+                (a.ch, a.style.0, a.flags.bits()),
+                (b.ch, b.style.0, b.flags.bits()),
+                "cell {i}"
+            );
+        }
+        assert_eq!(by_span.rows.len(), by_row.rows.len());
+        for (a, b) in by_span.rows.iter().zip(&by_row.rows) {
+            assert_eq!((a.offset, a.len, a.wrapped), (b.offset, b.len, b.wrapped));
+        }
+        assert_eq!(by_span.bytes, by_row.bytes);
+        // And the reads agree with the source row.
+        for (i, span) in spans.iter().enumerate() {
+            assert_eq!(by_span.materialize_row(i).cells, span.materialize(&arena).cells);
+        }
+    }
+
+    /// Span rows flow through the deferred pipeline (publish → workers →
+    /// collect) and read back identically to pushing the materialized rows
+    /// through the scalar deferred path.
+    #[test]
+    fn span_deferred_history_matches_cell_row_history() {
+        let template = Cell {
+            fg: Color::Palette(5),
+            ..Cell::default()
+        };
+        let mut by_span = PagedScrollback::new(10 * 1024 * 1024);
+        let mut by_row = PagedScrollback::new(10 * 1024 * 1024);
+        let mut arena = Vec::new();
+        for i in 0..600usize {
+            let text = format!("row {i} {}", "x".repeat(i % 60));
+            let start = arena.len() as u32;
+            arena.extend_from_slice(text.as_bytes());
+            let span = SpanRow {
+                bytes: start..start + text.len() as u32,
+                col: (i % 3) as u16,
+                cols: 80,
+                wrapped: i % 7 == 0,
+                template,
+                blank: Cell::default(),
+            };
+            let materialized = span.materialize(&arena);
+            by_span.await_inflight();
+            by_span.push_span_deferred(
+                text.as_bytes(),
+                span.col,
+                span.cols,
+                &span.template,
+                &span.blank,
+                span.wrapped,
+            );
+            by_row.await_inflight();
+            by_row.push_row_deferred(materialized);
+        }
+        assert_eq!(by_span.len(), by_row.len());
+        for y in 0..by_span.len() {
+            let a = by_span.row(y).expect("span row");
+            let b = by_row.row(y).expect("cell row");
+            assert_eq!(a.cells, b.cells, "row {y}");
+            assert_eq!(a.wrapped, b.wrapped, "row {y} wrapped");
+        }
+        by_span.trim_memory();
+        by_row.trim_memory();
+        for y in 0..by_span.len() {
+            assert_eq!(
+                by_span.row(y).unwrap().cells,
+                by_row.row(y).unwrap().cells,
+                "packed row {y}"
+            );
+        }
+        assert_eq!(by_span.bytes(), by_row.bytes());
     }
 
     #[test]
@@ -1827,12 +2267,15 @@ mod tests {
         // (4) whole worker batch path: pack_chunk incl. page alloc/shrink +
         // carcass clears riding along (mirrors steady-state worker cost).
         let batch_rows = seal_batch_rows_for(COLS);
-        let batch: Vec<Row> = (0..batch_rows).map(|_| row.clone()).collect();
+        let batch = SealBatch {
+            rows: (0..batch_rows).map(|_| DeferredRow::Cells(row.clone())).collect(),
+            span_bytes: Vec::new(),
+        };
         let carcasses: Vec<(Row, usize)> = (0..batch_rows).map(|_| (row.clone(), TEXT)).collect();
         let iters = n / batch_rows;
         let start = std::time::Instant::now();
         for _ in 0..iters {
-            let result = pack_chunk(&batch, carcasses.clone());
+            let result = pack_chunk(&batch, 0..batch.rows.len(), carcasses.clone());
             std::hint::black_box(&result.pages);
         }
         let chunk = start.elapsed();

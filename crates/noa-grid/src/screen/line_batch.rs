@@ -305,7 +305,7 @@ impl Screen {
                     }
                     let popped = ring.pop_front().expect("ring is full");
                     if recorded {
-                        self.seal_span_row(&popped, data, &blank, default_blank, full_height);
+                        self.seal_span_row(&popped, data, &blank, full_height);
                     }
                 }
                 ring.push_back(rec);
@@ -468,20 +468,26 @@ impl Screen {
         self.scrollback_push_sealed(sealed, full_height);
     }
 
-    /// Materialize a pending batch row straight from its byte span and seal
-    /// it — the row never touches the live grid.
-    fn seal_span_row(
-        &mut self,
-        rec: &RowRec,
-        data: &[u8],
-        blank: &Cell,
-        default_blank: bool,
-        full_height: bool,
-    ) {
-        let mut row = self.take_batch_blank(blank, default_blank);
-        Self::write_rec_slice(&mut row, rec, data);
-        row.wrapped = rec.wrapped;
-        self.scrollback_push_sealed(row, full_height);
+    /// Seal a pending batch row straight from its byte span — no Cell row is
+    /// ever built: the span, its per-line template, and the batch blank go
+    /// into the deferred tier as a [`noa-grid` scrollback] span row, packed
+    /// directly from the bytes by the workers.
+    fn seal_span_row(&mut self, rec: &RowRec, data: &[u8], blank: &Cell, full_height: bool) {
+        let bottom = self.region.bottom as usize;
+        let old_len = self.scrollback.len();
+        let evicted = self.scrollback.push_span_deferred(
+            &data[rec.span.clone()],
+            rec.start as u16,
+            self.cols,
+            &rec.template,
+            blank,
+            rec.wrapped,
+        );
+        if !full_height {
+            self.shift_tracked_points_down_from(old_len.saturating_add(bottom + 1), 1);
+        }
+        self.note_scrollback_evictions(evicted);
+        self.pin_viewport_for_scrollback_push(1, full_height);
     }
 
     /// Push one sealed row and settle the same per-scroll bookkeeping the

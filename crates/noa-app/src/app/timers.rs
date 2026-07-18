@@ -69,19 +69,6 @@ const LIVE_WALLPAPER_FADE_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// converting parked rows into packed pages is a pure live-heap win.
 pub(super) const MEMORY_TRIM_QUIESCENCE: Duration = Duration::from_secs(30);
 
-/// Mid-burst cadence for offering *already-free* heap pages back to the OS
-/// (`malloc_zone_pressure_relief` only — no scrollback settle, no pool
-/// drop). Distinct from the full trim above and safe where the 8s full trim
-/// was not: it never frees-and-reallocates working state, so there is no
-/// settle churn for the xzone quarantine to spread across fresh pages — it
-/// only returns pages the allocator is already sitting on. Without it, a
-/// multi-minute flood (which re-arms the 30s quiescence on every redraw,
-/// so the full trim never fires) accumulates quarantined free pages
-/// suite-over-suite: the tbench decision run measured resource.mem climbing
-/// 145.7 → 164.2 → 186.3 MB across three back-to-back suites while the
-/// pre-flood-pipeline build stayed flat.
-pub(super) const MEMORY_RELIEF_INTERVAL: Duration = Duration::from_secs(10);
-
 fn live_wallpaper_timer_step(
     deadline: Option<Instant>,
     now: Instant,
@@ -168,17 +155,19 @@ impl App {
     /// the pending deadline while armed, `None` (and trims) once it passes.
     pub(super) fn tick_memory_trim(&mut self) -> Option<Instant> {
         let deadline = self.memory_trim_deadline?;
-        let now = Instant::now();
-        if now < deadline {
-            // Still inside a burst (the deadline keeps getting re-armed).
-            // Return free heap pages on a coarse cadence so a sustained
-            // flood cannot pile up quarantined pages until quiescence —
-            // see [`MEMORY_RELIEF_INTERVAL`]. The event loop is awake
-            // every redraw during a burst, so this check actually runs.
-            if now.duration_since(self.last_memory_relief) >= MEMORY_RELIEF_INTERVAL {
-                self.last_memory_relief = now;
-                crate::memory::release_reclaimable_memory();
-            }
+        if Instant::now() < deadline {
+            // Still inside a burst (the deadline keeps getting re-armed):
+            // nothing fires until quiescence — deliberately. RSS sampled
+            // *mid-suite* under back-to-back floods therefore reads a
+            // transient high-water (the xzone allocator keeps freed pages
+            // dirty on its own schedule, and a mid-burst
+            // `malloc_zone_pressure_relief` is a measured no-op there —
+            // see `crate::memory`'s caveat), not a leak: the retained
+            // structures are all bounded (per-page style/grapheme tables
+            // die with their evicted pages, the span arena keeps one
+            // cleared quarter-limit buffer, the recycled-row pool and
+            // spare-page pool are hard-capped), and the post-quiescence
+            // trim below settles everything back to the packed history.
             return Some(deadline);
         }
         self.memory_trim_deadline = None;

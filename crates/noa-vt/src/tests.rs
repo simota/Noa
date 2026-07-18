@@ -1683,14 +1683,10 @@ fn sgr_line_batch_dispatches_edge_styled_spans() {
     );
     // The staircase palette shape: multi-param lead SGR, `ESC[0m` tail —
     // still one styled span even as the palette rotates per line.
-    let stair =
-        b"\r\n\x1b[38;5;196;48;5;17;1mAAAA\x1b[0m\n\x1b[38;5;46;48;5;52;3mBBBB\x1b[0m\n";
+    let stair = b"\r\n\x1b[38;5;196;48;5;17;1mAAAA\x1b[0m\n\x1b[38;5;46;48;5;52;3mBBBB\x1b[0m\n";
     assert_eq!(
         batch_ops(&[b"x".as_slice(), stair.as_slice()].concat()),
-        vec![
-            LineOp::Print("x".into()),
-            LineOp::SgrBatch(stair.to_vec()),
-        ]
+        vec![LineOp::Print("x".into()), LineOp::SgrBatch(stair.to_vec()),]
     );
     // A plain-only span still dispatches through `print_ascii_lines`.
     assert_eq!(
@@ -1808,10 +1804,7 @@ fn parse_plain_sgr_unit_matches_the_csi_parse() {
     parse_plain_sgr_unit(b"\x1b[m", &mut out);
     assert_eq!(out, vec![SgrAttr::Reset]);
     parse_plain_sgr_unit(b"\x1b[1;38;5;196m", &mut out);
-    assert_eq!(
-        out,
-        vec![SgrAttr::Bold, SgrAttr::Fg(Color::Palette(196))]
-    );
+    assert_eq!(out, vec![SgrAttr::Bold, SgrAttr::Fg(Color::Palette(196))]);
     parse_plain_sgr_unit(b"\x1b[38;2;10;20;30m", &mut out);
     assert_eq!(out, vec![SgrAttr::Fg(Color::Rgb(Rgb::new(10, 20, 30)))]);
     parse_plain_sgr_unit(b"\x1b[4:3m", &mut out);

@@ -1476,7 +1476,11 @@ struct PackResult {
 /// arenas are shrunk to fit (a chunk usually under-fills its last page).
 /// `lens` collects the trimmed lengths of the *Cell* rows only (span rows
 /// leave no carcass to re-blank), in row order.
-fn pack_chunk(batch: &SealBatch, range: Range<usize>, mut to_clear: Vec<(Row, usize)>) -> PackResult {
+fn pack_chunk(
+    batch: &SealBatch,
+    range: Range<usize>,
+    mut to_clear: Vec<(Row, usize)>,
+) -> PackResult {
     let rows = &batch.rows[range];
     let mut pages: Vec<Page> = Vec::new();
     let mut lens = Vec::with_capacity(rows.len());
@@ -1777,16 +1781,37 @@ mod tests {
         // (text, col, cols, template, blank, wrapped)
         type SpanCase = (&'static [u8], u16, u16, Cell, Cell, bool);
         let cases: Vec<SpanCase> = vec![
-            (b"hello world", 0, 40, Cell::default(), Cell::default(), false),
+            (
+                b"hello world",
+                0,
+                40,
+                Cell::default(),
+                Cell::default(),
+                false,
+            ),
             (b"hello   ", 0, 40, Cell::default(), Cell::default(), true),
             (b"indented", 7, 40, Cell::default(), Cell::default(), false),
-            (b"styled text  ", 0, 40, styled_template, Cell::default(), false),
+            (
+                b"styled text  ",
+                0,
+                40,
+                styled_template,
+                Cell::default(),
+                false,
+            ),
             (b"bce row", 3, 40, styled_template, bce_blank, false),
             (b"", 0, 40, Cell::default(), Cell::default(), false),
             (b"", 5, 40, styled_template, Cell::default(), false),
             (b"        ", 4, 40, Cell::default(), Cell::default(), false),
             (b"   ", 0, 40, styled_template, Cell::default(), false),
-            (b"full-width-x-full-width-x-full-width-x!", 0, 40, styled_template, bce_blank, true),
+            (
+                b"full-width-x-full-width-x-full-width-x!",
+                0,
+                40,
+                styled_template,
+                bce_blank,
+                true,
+            ),
         ];
         let mut arena = Vec::new();
         let mut spans = Vec::new();
@@ -1826,7 +1851,10 @@ mod tests {
         assert_eq!(by_span.bytes, by_row.bytes);
         // And the reads agree with the source row.
         for (i, span) in spans.iter().enumerate() {
-            assert_eq!(by_span.materialize_row(i).cells, span.materialize(&arena).cells);
+            assert_eq!(
+                by_span.materialize_row(i).cells,
+                span.materialize(&arena).cells
+            );
         }
     }
 
@@ -2344,7 +2372,9 @@ mod tests {
         // carcass clears riding along (mirrors steady-state worker cost).
         let batch_rows = seal_batch_rows_for(COLS);
         let batch = SealBatch {
-            rows: (0..batch_rows).map(|_| DeferredRow::Cells(row.clone())).collect(),
+            rows: (0..batch_rows)
+                .map(|_| DeferredRow::Cells(row.clone()))
+                .collect(),
             span_bytes: Vec::new(),
         };
         let carcasses: Vec<(Row, usize)> = (0..batch_rows).map(|_| (row.clone(), TEXT)).collect();

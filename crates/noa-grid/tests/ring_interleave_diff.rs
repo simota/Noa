@@ -84,7 +84,11 @@ fn gen_stream(seed: u64, cols: u64, rows: u64, tokens: usize) -> Vec<u8> {
             // Scroll up / down (SU/SD).
             11 => {
                 let n = 1 + lcg(&mut st) % 5;
-                let d = if lcg(&mut st).is_multiple_of(2) { b'S' } else { b'T' };
+                let d = if lcg(&mut st).is_multiple_of(2) {
+                    b'S'
+                } else {
+                    b'T'
+                };
                 out.extend_from_slice(format!("\x1b[{n}{}", d as char).as_bytes());
             }
             // Reverse index (RI) — can scroll the region down.
@@ -119,8 +123,16 @@ fn gen_stream(seed: u64, cols: u64, rows: u64, tokens: usize) -> Vec<u8> {
 fn assert_terminals_match(label: &str, whole: &Terminal, byte: &Terminal) {
     let (w, b) = (whole.active(), byte.active());
     assert_eq!(w.total_rows(), b.total_rows(), "{label}: total_rows");
-    assert_eq!(w.scrollback_len(), b.scrollback_len(), "{label}: scrollback_len");
-    assert_eq!(w.viewport_offset(), b.viewport_offset(), "{label}: viewport_offset");
+    assert_eq!(
+        w.scrollback_len(),
+        b.scrollback_len(),
+        "{label}: scrollback_len"
+    );
+    assert_eq!(
+        w.viewport_offset(),
+        b.viewport_offset(),
+        "{label}: viewport_offset"
+    );
     assert_eq!(w.rows_evicted(), b.rows_evicted(), "{label}: rows_evicted");
     assert_eq!(
         (w.cursor.x, w.cursor.y, w.cursor.pending_wrap),
@@ -162,11 +174,7 @@ fn ring_base_survives_interleaved_region_edits() {
             }
             byte.primary.trim_memory();
 
-            assert_terminals_match(
-                &format!("{cols}x{rows} seed {seed}"),
-                &whole,
-                &byte,
-            );
+            assert_terminals_match(&format!("{cols}x{rows} seed {seed}"), &whole, &byte);
 
             // Also compare mid-size chunkings — chunk boundaries can split an
             // escape or land a CR at end-of-chunk with its LF next chunk.

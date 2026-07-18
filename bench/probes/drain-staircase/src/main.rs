@@ -257,7 +257,11 @@ fn write_all(fd: RawFd, buf: &[u8]) {
     let mut off = 0;
     while off < buf.len() {
         let n = unsafe {
-            libc::write(fd, buf[off..].as_ptr() as *const libc::c_void, buf.len() - off)
+            libc::write(
+                fd,
+                buf[off..].as_ptr() as *const libc::c_void,
+                buf.len() - off,
+            )
         };
         if n < 0 {
             let e = std::io::Error::last_os_error();
@@ -288,7 +292,11 @@ fn run_s0_buffer_probe(grid: GridSize) -> usize {
     let mut written = 0usize;
     loop {
         let n = unsafe {
-            libc::write(pair.slave, block.as_ptr() as *const libc::c_void, block.len())
+            libc::write(
+                pair.slave,
+                block.as_ptr() as *const libc::c_void,
+                block.len(),
+            )
         };
         if n < 0 {
             let e = std::io::Error::last_os_error();
@@ -372,9 +380,7 @@ fn run_proc(stage: Stage, tmpl: &[u8], total: usize, grid: GridSize) -> Duration
             match stage {
                 Stage::S1Discard => {}
                 Stage::S2Parse => stream.feed(c, &mut noop),
-                Stage::S3ApplyNoSb | Stage::S4ApplySb => {
-                    stream.feed(c, terminal.as_mut().unwrap())
-                }
+                Stage::S3ApplyNoSb | Stage::S4ApplySb => stream.feed(c, terminal.as_mut().unwrap()),
             }
         }
         written = end;
@@ -645,7 +651,11 @@ fn current_rss() -> usize {
         .args(["-o", "rss=", "-p", &std::process::id().to_string()])
         .output()
         .expect("ps rss");
-    String::from_utf8_lossy(&out.stdout).trim().parse::<usize>().unwrap_or(0) * 1024
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<usize>()
+        .unwrap_or(0)
+        * 1024
 }
 
 /// Memory-retention suite (bonus-cycle oracle): ONE warm Terminal + ONE
@@ -660,7 +670,9 @@ fn run_mem_suite(fixtures: &[String], grid: GridSize, suites: usize, runs: usize
     let mut script = String::from("i=0; ");
     script.push_str(&format!("while [ $i -lt {suites} ]; do "));
     for f in fixtures {
-        script.push_str(&format!("j=0; while [ $j -lt {runs} ]; do cat '{f}'; printf '\\a'; j=$((j+1)); done; "));
+        script.push_str(&format!(
+            "j=0; while [ $j -lt {runs} ]; do cat '{f}'; printf '\\a'; j=$((j+1)); done; "
+        ));
     }
     script.push_str("i=$((i+1)); done");
     let cfg = PtyConfig {
@@ -706,10 +718,7 @@ fn run_mem_suite(fixtures: &[String], grid: GridSize, suites: usize, runs: usize
                         let suite = (bels - 1) / per_suite + 1;
                         println!(
                             "suite {suite} fixture {}: rss {:.1} MB",
-                            fixtures[fixture_idx]
-                                .rsplit('/')
-                                .next()
-                                .unwrap_or("?"),
+                            fixtures[fixture_idx].rsplit('/').next().unwrap_or("?"),
                             current_rss() as f64 / 1e6
                         );
                     }
@@ -804,10 +813,7 @@ with open(resfile, "w") as f:
     let text = std::fs::read_to_string(&result).unwrap_or_default();
     let _ = std::fs::remove_file(&script);
     let _ = std::fs::remove_file(&result);
-    let mut ns: Vec<u64> = text
-        .lines()
-        .filter_map(|l| l.trim().parse().ok())
-        .collect();
+    let mut ns: Vec<u64> = text.lines().filter_map(|l| l.trim().parse().ok()).collect();
     if ns.is_empty() {
         println!("roundtrip burst={burst}: NO SAMPLES (app failed)");
         return;
@@ -915,7 +921,11 @@ fn main() {
             _ => Workload::Plain,
         };
         let tmpdir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
-        let path = format!("{}/drain_one_{}.dat", tmpdir.trim_end_matches('/'), w.name());
+        let path = format!(
+            "{}/drain_one_{}.dat",
+            tmpdir.trim_end_matches('/'),
+            w.name()
+        );
         let tmpl = template(w);
         write_workload_file(&path, &tmpl, total);
         eprintln!(
@@ -971,8 +981,8 @@ fn main() {
         }
         let med = median(mbps_vals.clone());
         let mean: f64 = mbps_vals.iter().sum::<f64>() / mbps_vals.len() as f64;
-        let variance: f64 = mbps_vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
-            / mbps_vals.len() as f64;
+        let variance: f64 =
+            mbps_vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / mbps_vals.len() as f64;
         let stddev = variance.sqrt();
         println!(
             "\ntbench-faithful {} plain: median {:.1} MB/s, mean {:.1}, stddev {:.2}, n={}",
@@ -994,10 +1004,14 @@ fn main() {
         let suites = flag("--suites", 3);
         let runs = flag("--runs", 20);
         let base = "/Users/simota/repos/github.com/TerminalBench/fixtures";
-        let fixtures: Vec<String> = ["large-output-plain.txt", "large-output-ansi.txt", "large-output-cjk.txt"]
-            .iter()
-            .map(|f| format!("{base}/{f}"))
-            .collect();
+        let fixtures: Vec<String> = [
+            "large-output-plain.txt",
+            "large-output-ansi.txt",
+            "large-output-cjk.txt",
+        ]
+        .iter()
+        .map(|f| format!("{base}/{f}"))
+        .collect();
         run_mem_suite(&fixtures, grid, suites, runs);
         return;
     }
@@ -1029,7 +1043,9 @@ fn main() {
     let total = mb * 1024 * 1024;
     let warm = total.min(16 * 1024 * 1024);
 
-    println!("drain-staircase: {mb} MiB/run, reps={reps} (median-of), grid={cols}x{rows}, Apple M4");
+    println!(
+        "drain-staircase: {mb} MiB/run, reps={reps} (median-of), grid={cols}x{rows}, Apple M4"
+    );
     println!("numbers = MB/s of producer PTY write-completion wall-clock\n");
 
     // S0 reference.
@@ -1045,7 +1061,9 @@ fn main() {
         let mut cells = Vec::new();
         for w in Workload::all() {
             let tmpl = template(w);
-            cells.push(measure(reps, total, || run_naive_discard(&tmpl, total, grid)));
+            cells.push(measure(reps, total, || {
+                run_naive_discard(&tmpl, total, grid)
+            }));
         }
         println!(
             "plain {:.0}  ansi {:.0}  scroll {:.0} MB/s\n",
@@ -1056,7 +1074,10 @@ fn main() {
 
     // proc: pure processing ceiling.
     println!("== proc: pure in-memory processing ceiling (no pty) ==");
-    println!("{:<18} {:>10} {:>10} {:>10}", "stage", "plain", "ansi", "scroll");
+    println!(
+        "{:<18} {:>10} {:>10} {:>10}",
+        "stage", "plain", "ansi", "scroll"
+    );
     for stage in [Stage::S2Parse, Stage::S3ApplyNoSb, Stage::S4ApplySb] {
         let mut cells = Vec::new();
         for w in Workload::all() {
@@ -1074,16 +1095,26 @@ fn main() {
 
     // real: production pipeline drain (authoritative).
     println!("\n== real: production noa_pty pipeline (reader thread + locked consumer) ==");
-    println!("{:<18} {:>10} {:>10} {:>10}", "stage", "plain", "ansi", "scroll");
+    println!(
+        "{:<18} {:>10} {:>10} {:>10}",
+        "stage", "plain", "ansi", "scroll"
+    );
     let tmpdir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
     let tmpdir = tmpdir.trim_end_matches('/').to_string();
-    for stage in [Stage::S1Discard, Stage::S2Parse, Stage::S3ApplyNoSb, Stage::S4ApplySb] {
+    for stage in [
+        Stage::S1Discard,
+        Stage::S2Parse,
+        Stage::S3ApplyNoSb,
+        Stage::S4ApplySb,
+    ] {
         let mut cells = Vec::new();
         for w in Workload::all() {
             let tmpl = template(w);
             let path = format!("{}/drain_{}.dat", tmpdir, w.name());
             write_workload_file(&path, &tmpl, total);
-            cells.push(measure(reps, total, || run_real(stage, &path, total, grid, false)));
+            cells.push(measure(reps, total, || {
+                run_real(stage, &path, total, grid, false)
+            }));
             let _ = std::fs::remove_file(&path);
         }
         println!(
@@ -1097,7 +1128,10 @@ fn main() {
 
     if contend {
         println!("\n== real + ~120Hz snapshot lock contender (S4) ==");
-        println!("{:<18} {:>10} {:>10} {:>10}", "stage", "plain", "ansi", "scroll");
+        println!(
+            "{:<18} {:>10} {:>10} {:>10}",
+            "stage", "plain", "ansi", "scroll"
+        );
         let mut cells = Vec::new();
         for w in Workload::all() {
             let tmpl = template(w);

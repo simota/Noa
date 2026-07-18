@@ -189,7 +189,11 @@ pub fn scan_plain_sgr(bytes: &[u8]) -> Option<usize> {
 /// for `ESC [ m`), so the resulting attrs are bit-identical to what the
 /// regular dispatch path hands [`crate::Handler::set_attributes`].
 pub fn parse_plain_sgr_unit(unit: &[u8], out: &mut Vec<SgrAttr>) {
-    debug_assert_eq!(scan_plain_sgr(unit), Some(unit.len()), "not a plain SGR unit");
+    debug_assert_eq!(
+        scan_plain_sgr(unit),
+        Some(unit.len()),
+        "not a plain SGR unit"
+    );
     let mut params = crate::csi::Params::default();
     let mut sep_colon = crate::csi::Separators::default();
     let mut cur: u16 = 0;

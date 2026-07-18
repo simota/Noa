@@ -137,7 +137,9 @@ impl Screen {
 
         self.grid = grid.into();
         while self.grid.len() < target_rows {
-            self.grid.canonicalize().push(Self::row_with_blank(cols, &blank));
+            self.grid
+                .canonicalize()
+                .push(Self::row_with_blank(cols, &blank));
         }
 
         self.reanchor_placements_after_reflow(&line_remaps, grid_start, grid_end);

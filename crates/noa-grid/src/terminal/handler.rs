@@ -8,8 +8,8 @@ use crate::osc::{
 use noa_core::{CellAttrs, Color};
 use noa_vt::{
     AsciiLines, Charset, CharsetSlot, CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay,
-    EraseLine, Handler, KittyAction, KittyGraphicsCommand, ModeRequest, PlainSgrUnits, SgrAttr,
-    SgrAsciiLines, SixelGraphicsCommand,
+    EraseLine, Handler, KittyAction, KittyGraphicsCommand, ModeRequest, PlainSgrUnits,
+    SgrAsciiLines, SgrAttr, SixelGraphicsCommand,
 };
 
 use super::{ShellIntegrationMarkKind, Terminal};
@@ -154,7 +154,10 @@ impl Handler for Terminal {
             let Some(line) = lines.next() else {
                 // Unterminated tail: a contract violation, but print it like
                 // the default trait body rather than dropping bytes.
-                debug_assert!(false, "print_sgr_ascii_lines data holds only complete lines");
+                debug_assert!(
+                    false,
+                    "print_sgr_ascii_lines data holds only complete lines"
+                );
                 let text = core::str::from_utf8(rest)
                     .expect("print_sgr_ascii_lines text is printable ASCII");
                 self.print_str(text);

@@ -75,7 +75,14 @@ impl StyleMemo {
         })
     }
 
-    fn insert(&mut self, pen_before: Pen, lead: &[u8], tail: &[u8], template: Cell, pen_after: Pen) {
+    fn insert(
+        &mut self,
+        pen_before: Pen,
+        lead: &[u8],
+        tail: &[u8],
+        template: Cell,
+        pen_after: Pen,
+    ) {
         let key_len = lead.len() + tail.len();
         if key_len > MEMO_KEY_MAX {
             return;
@@ -299,7 +306,12 @@ impl Screen {
                     // (they scroll off first).
                     while grid_sealed < ring_cap {
                         if recorded {
-                            self.seal_grid_row(top + grid_sealed, &blank, default_blank, full_height);
+                            self.seal_grid_row(
+                                top + grid_sealed,
+                                &blank,
+                                default_blank,
+                                full_height,
+                            );
                         }
                         grid_sealed += 1;
                     }
@@ -329,23 +341,22 @@ impl Screen {
                 // decoding is memoized per `(pen, lead ++ tail)`.
                 let wraps = line.text.len() > cols - x;
                 let pen_before = self.cursor.pen();
-                let (template, pen_after) =
-                    match memo.lookup(&pen_before, line.lead, line.tail) {
-                        Some(e) => (e.template, e.pen_after),
-                        None => {
-                            if !line.lead.is_empty() {
-                                self.apply_plain_sgr_run(line.lead, &mut sgr_buf);
-                            }
-                            let template = self.pen_template();
-                            if !line.tail.is_empty() {
-                                self.apply_plain_sgr_run(line.tail, &mut sgr_buf);
-                            }
-                            let pen_after = self.cursor.pen();
-                            self.cursor.set_pen(pen_before);
-                            memo.insert(pen_before, line.lead, line.tail, template, pen_after);
-                            (template, pen_after)
+                let (template, pen_after) = match memo.lookup(&pen_before, line.lead, line.tail) {
+                    Some(e) => (e.template, e.pen_after),
+                    None => {
+                        if !line.lead.is_empty() {
+                            self.apply_plain_sgr_run(line.lead, &mut sgr_buf);
                         }
-                    };
+                        let template = self.pen_template();
+                        if !line.tail.is_empty() {
+                            self.apply_plain_sgr_run(line.tail, &mut sgr_buf);
+                        }
+                        let pen_after = self.cursor.pen();
+                        self.cursor.set_pen(pen_before);
+                        memo.insert(pen_before, line.lead, line.tail, template, pen_after);
+                        (template, pen_after)
+                    }
+                };
                 if (wraps && Cell::blank(template.bg) != blank)
                     || Cell::blank(pen_after.bg) != blank
                 {
@@ -425,7 +436,14 @@ impl Screen {
             let r = ring.len();
             for (k, rec) in ring.drain(..).enumerate() {
                 let y = bottom - r + k;
-                Self::fill_batch_row(&mut self.grid[y], &rec, data, &blank, default_blank, recorded);
+                Self::fill_batch_row(
+                    &mut self.grid[y],
+                    &rec,
+                    data,
+                    &blank,
+                    default_blank,
+                    recorded,
+                );
             }
             if !recorded {
                 self.grid[bottom].clear(&blank);

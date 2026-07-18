@@ -141,10 +141,7 @@ pub(crate) fn spawn_reader(
             #[cfg(target_os = "macos")]
             // SAFETY: plain FFI call configuring the calling thread's own QoS.
             unsafe {
-                libc::pthread_set_qos_class_self_np(
-                    libc::qos_class_t::QOS_CLASS_USER_INITIATED,
-                    0,
-                );
+                libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0);
             }
             let pool = Arc::new(ReadBufferPool::new(READ_CHUNK, READ_BUFFER_POOL_CAPACITY));
             let gate = Arc::new(FlowGate::new());

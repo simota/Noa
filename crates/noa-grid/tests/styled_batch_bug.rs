@@ -50,7 +50,11 @@ fn plain_line_after_styled_line_in_batch_inherits_stale_template() {
     eprintln!("per-byte BBB = fg {byte_fg:?} bg {byte_bg:?}");
 
     // Ground truth (the canonical per-byte path): BBB is unstyled.
-    assert_eq!(byte_bg, Color::Default, "per-byte: BBB bg should be default");
+    assert_eq!(
+        byte_bg,
+        Color::Default,
+        "per-byte: BBB bg should be default"
+    );
 
     // The batch must match. It does not: it paints BBB with AAA's red bg.
     assert_eq!(

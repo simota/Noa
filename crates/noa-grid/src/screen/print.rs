@@ -244,7 +244,11 @@ impl Screen {
                 row.cells[x - 1].set_from(&blank);
             }
             let last = x + n - 1;
-            let last_attrs = if n > 1 { row.cells[last].attrs } else { first_attrs };
+            let last_attrs = if n > 1 {
+                row.cells[last].attrs
+            } else {
+                first_attrs
+            };
             if last_attrs.contains(CellAttrs::WIDE) && last + 1 < row.cells.len() {
                 row.cells[last + 1].set_from(&blank);
             }

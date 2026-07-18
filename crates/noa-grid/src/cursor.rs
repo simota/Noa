@@ -40,6 +40,93 @@ pub struct Cursor {
     pub style: CursorStyle,
 }
 
+/// The pen half of a [`Cursor`] — exactly the fields SGR mutates. Snapshot /
+/// restore vocabulary for the line-batch's per-line style speculation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Pen {
+    pub fg: Color,
+    pub bg: Color,
+    pub underline_color: Option<Color>,
+    pub attrs: CellAttrs,
+}
+
+impl Cursor {
+    pub(crate) fn pen(&self) -> Pen {
+        Pen {
+            fg: self.fg,
+            bg: self.bg,
+            underline_color: self.underline_color,
+            attrs: self.attrs,
+        }
+    }
+
+    pub(crate) fn set_pen(&mut self, pen: Pen) {
+        self.fg = pen.fg;
+        self.bg = pen.bg;
+        self.underline_color = pen.underline_color;
+        self.attrs = pen.attrs;
+    }
+
+    /// Apply decoded SGR attribute changes to the pen, in order. The single
+    /// authority for SGR→pen semantics: `Terminal::set_attributes` and the
+    /// line-batch's per-line style templating both funnel here.
+    pub(crate) fn apply_sgr(&mut self, attrs: &[noa_vt::SgrAttr]) {
+        use noa_vt::SgrAttr;
+        for a in attrs {
+            match *a {
+                SgrAttr::Reset => {
+                    self.fg = Color::Default;
+                    self.bg = Color::Default;
+                    self.underline_color = None;
+                    self.attrs = CellAttrs::empty();
+                }
+                SgrAttr::Bold => self.attrs.insert(CellAttrs::BOLD),
+                SgrAttr::Faint => self.attrs.insert(CellAttrs::FAINT),
+                SgrAttr::Italic => self.attrs.insert(CellAttrs::ITALIC),
+                SgrAttr::Underline => {
+                    self.attrs.remove(CellAttrs::underline_styles());
+                    self.attrs.insert(CellAttrs::UNDERLINE);
+                }
+                SgrAttr::DoubleUnderline => {
+                    self.attrs.remove(CellAttrs::underline_styles());
+                    self.attrs.insert(CellAttrs::DOUBLE_UNDERLINE);
+                }
+                SgrAttr::CurlyUnderline => {
+                    self.attrs.remove(CellAttrs::underline_styles());
+                    self.attrs.insert(CellAttrs::CURLY_UNDERLINE);
+                }
+                SgrAttr::DottedUnderline => {
+                    self.attrs.remove(CellAttrs::underline_styles());
+                    self.attrs.insert(CellAttrs::DOTTED_UNDERLINE);
+                }
+                SgrAttr::DashedUnderline => {
+                    self.attrs.remove(CellAttrs::underline_styles());
+                    self.attrs.insert(CellAttrs::DASHED_UNDERLINE);
+                }
+                SgrAttr::Blink => self.attrs.insert(CellAttrs::BLINK),
+                SgrAttr::Inverse => self.attrs.insert(CellAttrs::INVERSE),
+                SgrAttr::Invisible => self.attrs.insert(CellAttrs::INVISIBLE),
+                SgrAttr::Strike => self.attrs.insert(CellAttrs::STRIKETHROUGH),
+                SgrAttr::Overline => self.attrs.insert(CellAttrs::OVERLINE),
+                SgrAttr::ResetBold => self.attrs.remove(CellAttrs::BOLD | CellAttrs::FAINT),
+                SgrAttr::ResetItalic => self.attrs.remove(CellAttrs::ITALIC),
+                SgrAttr::ResetUnderline => self.attrs.remove(CellAttrs::underline_styles()),
+                SgrAttr::ResetBlink => self.attrs.remove(CellAttrs::BLINK),
+                SgrAttr::ResetInverse => self.attrs.remove(CellAttrs::INVERSE),
+                SgrAttr::ResetInvisible => self.attrs.remove(CellAttrs::INVISIBLE),
+                SgrAttr::ResetStrike => self.attrs.remove(CellAttrs::STRIKETHROUGH),
+                SgrAttr::ResetOverline => self.attrs.remove(CellAttrs::OVERLINE),
+                SgrAttr::Fg(col) => self.fg = col,
+                SgrAttr::Bg(col) => self.bg = col,
+                SgrAttr::UnderlineColor(col) => self.underline_color = Some(col),
+                SgrAttr::DefaultFg => self.fg = Color::Default,
+                SgrAttr::DefaultBg => self.bg = Color::Default,
+                SgrAttr::DefaultUnderlineColor => self.underline_color = None,
+            }
+        }
+    }
+}
+
 impl Default for Cursor {
     fn default() -> Self {
         Cursor {

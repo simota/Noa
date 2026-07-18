@@ -221,17 +221,23 @@ fn feed_parser<H: Handler>(
                 i += len;
                 continue;
             } else if matches!(bytes[i], b'\n' | b'\r')
-                && let Some(end) = scan_line_batch(&bytes[i..])
+                && let Some((end, styled)) = scan_line_batch(&bytes[i..])
             {
                 // Fast path: the LF ending a text run, followed by at least
-                // one whole `text (CR)? LF` line inside the chunk (bulk line
-                // floods are a run of these), hands the complete-line span
-                // to `Handler::print_ascii_lines` in one call so the state
-                // model can amortize per-line scroll costs. Pure lookahead:
-                // anything but printable ASCII + CRLF/LF structure bails to
-                // the byte paths below with nothing committed.
+                // one whole `sgr* text sgr* (CR)? LF` line inside the chunk
+                // (bulk line floods are a run of these), hands the
+                // complete-line span to `Handler::print_ascii_lines` (or its
+                // styled sibling when any line carries edge SGRs) in one
+                // call so the state model can amortize per-line scroll
+                // costs. Pure lookahead: anything but printable ASCII +
+                // edge-SGR + CRLF/LF structure bails to the byte paths below
+                // with nothing committed.
                 *display_dirty = true;
-                handler.print_ascii_lines(&bytes[i..i + end]);
+                if styled {
+                    handler.print_sgr_ascii_lines(&bytes[i..i + end]);
+                } else {
+                    handler.print_ascii_lines(&bytes[i..i + end]);
+                }
                 i += end;
                 continue;
             } else if bytes[i] != 0x1b {
@@ -349,39 +355,62 @@ fn try_scan_csi(bytes: &[u8]) -> Option<(Csi, usize)> {
     }
 }
 
-/// Scan a run of complete printable-ASCII lines (`text (CR)? LF` groups,
-/// `text` in `0x20..=0x7E`) starting at `bytes[0]` (caller-checked to be
-/// `LF` or `CR`, i.e. the first group's text is empty). Returns the
-/// exclusive end of the last complete group when the run holds at least two
-/// groups — the threshold at which handing the span to
-/// [`Handler::print_ascii_lines`] beats the ordinary per-action dispatch —
-/// or `None` to leave everything to the regular paths. Pure lookahead:
-/// nothing is committed here, and every byte class the regular paths treat
-/// specially (controls, DEL, non-ASCII, a CR not followed by LF) ends the
-/// run before the line containing it.
-fn scan_line_batch(bytes: &[u8]) -> Option<usize> {
+/// Scan a run of complete lines shaped `sgr* text sgr* (CR)? LF` (`text` in
+/// `0x20..=0x7E`, `sgr` a whole plain SGR — [`crate::sgr::scan_plain_sgr`])
+/// starting at `bytes[0]` (caller-checked to be `LF` or `CR`, i.e. the first
+/// group is a bare terminator). Returns the exclusive end of the last
+/// complete group plus whether any group carried an SGR unit — picking
+/// between [`Handler::print_ascii_lines`] and
+/// [`Handler::print_sgr_ascii_lines`] — when the run holds at least two
+/// groups (the threshold at which the batch beats ordinary dispatch), or
+/// `None` to leave everything to the regular paths. Pure lookahead: nothing
+/// is committed here, and every byte class the regular paths treat specially
+/// (controls, DEL, non-ASCII, a CR not followed by LF, any non-plain-SGR
+/// escape, SGRs splitting a line's text) ends the run before the line
+/// containing it.
+fn scan_line_batch(bytes: &[u8]) -> Option<(usize, bool)> {
     debug_assert!(matches!(bytes.first(), Some(b'\n' | b'\r')));
     let mut end = 0;
     let mut lines = 0usize;
-    loop {
-        let (run, ascii) = scan_run(&bytes[end..]);
-        let t = end + run;
+    let mut styled = false;
+    'lines: loop {
+        let mut p = end;
+        let mut line_styled = false;
+        while bytes.get(p) == Some(&0x1b) {
+            let Some(len) = crate::sgr::scan_plain_sgr(&bytes[p..]) else {
+                break 'lines;
+            };
+            p += len;
+            line_styled = true;
+        }
+        let (run, ascii) = scan_run(&bytes[p..]);
         if !ascii {
             break;
         }
-        match bytes.get(t) {
+        p += run;
+        while bytes.get(p) == Some(&0x1b) {
+            let Some(len) = crate::sgr::scan_plain_sgr(&bytes[p..]) else {
+                break 'lines;
+            };
+            p += len;
+            line_styled = true;
+        }
+        // Anything but the terminator here — including a second text
+        // segment after a tail SGR, which would break the one-style-per-row
+        // batch shape — ends the run before this line.
+        match bytes.get(p) {
             Some(b'\n') => {
-                end = t + 1;
-                lines += 1;
+                end = p + 1;
             }
-            Some(b'\r') if bytes.get(t + 1) == Some(&b'\n') => {
-                end = t + 2;
-                lines += 1;
+            Some(b'\r') if bytes.get(p + 1) == Some(&b'\n') => {
+                end = p + 2;
             }
             _ => break,
         }
+        lines += 1;
+        styled |= line_styled;
     }
-    (lines >= 2).then_some(end)
+    (lines >= 2).then_some((end, styled))
 }
 
 /// A byte that stays on the ground-state print path: anything but a C0

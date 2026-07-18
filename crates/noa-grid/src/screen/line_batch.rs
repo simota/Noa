@@ -10,31 +10,67 @@
 //! bookkeeping (deferred sealing, viewport pinning, tracked points, dirty
 //! and `scroll_shift` accounting) is replayed per sealed row in the same
 //! order the per-line path produces.
+//!
+//! [`Screen::apply_sgr_ascii_line_batch`] is the styled sibling
+//! (`Handler::print_sgr_ascii_lines` spans, `sgr* text sgr* (CR)? LF`
+//! groups): lead SGRs update the pen before a line's text — giving each
+//! batched row its own style template — and tail SGRs update it after. One
+//! invariant keeps the batch machinery unchanged: every line must leave the
+//! at-`LF` blank equal to the batch's entry blank (lines whose pen would
+//! scroll a *different* background-erase blank fall back to per-line
+//! replay), so all sealed/filled rows share one blank exactly like the
+//! plain batch.
 
 use std::collections::VecDeque;
 use std::ops::Range;
 
-use noa_vt::AsciiLines;
+use noa_vt::{AsciiLines, PlainSgrUnits, SgrAsciiLine, SgrAsciiLines, SgrAttr};
 
 use super::*;
 
 /// One row's worth of pending batch output: a single contiguous slice of the
-/// batch span printed starting at `start`, plus the soft-wrap flag the row
-/// leaves with. Rows built by the batch are always fresh (they enter the
-/// grid on a scroll), so a record fully determines the row's content given
-/// the pen template and blank.
+/// batch span printed starting at `start`, the style template its cells take
+/// (per-line in the styled batch), plus the soft-wrap flag the row leaves
+/// with. Rows built by the batch are always fresh (they enter the grid on a
+/// scroll), so a record fully determines the row's content given the blank.
 struct RowRec {
     start: usize,
     span: Range<usize>,
+    template: Cell,
     wrapped: bool,
 }
 
-impl RowRec {
-    const EMPTY: RowRec = RowRec {
-        start: 0,
-        span: 0..0,
-        wrapped: false,
-    };
+/// The two span walkers behind the shared batch core: [`AsciiLines`] for
+/// plain spans (no per-line edge-SGR splitting cost) and [`SgrAsciiLines`]
+/// for styled ones.
+trait BatchLines<'a> {
+    fn next_line(&mut self) -> Option<SgrAsciiLine<'a>>;
+    fn remainder(&self) -> &'a [u8];
+}
+
+impl<'a> BatchLines<'a> for AsciiLines<'a> {
+    fn next_line(&mut self) -> Option<SgrAsciiLine<'a>> {
+        self.next().map(|l| SgrAsciiLine {
+            lead: &[],
+            text: l.text,
+            tail: &[],
+            crlf: l.crlf,
+        })
+    }
+
+    fn remainder(&self) -> &'a [u8] {
+        AsciiLines::remainder(self)
+    }
+}
+
+impl<'a> BatchLines<'a> for SgrAsciiLines<'a> {
+    fn next_line(&mut self) -> Option<SgrAsciiLine<'a>> {
+        self.next()
+    }
+
+    fn remainder(&self) -> &'a [u8] {
+        SgrAsciiLines::remainder(self)
+    }
 }
 
 impl Screen {
@@ -47,6 +83,68 @@ impl Screen {
     pub(crate) fn apply_ascii_line_batch(
         &mut self,
         data: &[u8],
+        autowrap: bool,
+        lnm: bool,
+        grapheme_clustering: bool,
+    ) -> usize {
+        self.line_batch_core::<AsciiLines, false>(
+            data,
+            AsciiLines::new(data),
+            autowrap,
+            lnm,
+            grapheme_clustering,
+        )
+    }
+
+    /// The styled sibling: apply as much of a `Handler::print_sgr_ascii_lines`
+    /// span (`sgr* text sgr* (CR)? LF` groups) as one batched scroll. Same
+    /// return contract as [`Screen::apply_ascii_line_batch`]; a partial
+    /// consume additionally happens when a line's tail pen would scroll a
+    /// different background-erase blank than the batch entry's.
+    pub(crate) fn apply_sgr_ascii_line_batch(
+        &mut self,
+        data: &[u8],
+        autowrap: bool,
+        lnm: bool,
+        grapheme_clustering: bool,
+    ) -> usize {
+        self.line_batch_core::<SgrAsciiLines, true>(
+            data,
+            SgrAsciiLines::new(data),
+            autowrap,
+            lnm,
+            grapheme_clustering,
+        )
+    }
+
+    /// Apply each plain SGR unit of `run` to the pen, reusing `buf` for the
+    /// decoded attributes. Unit-at-a-time application matches the per-byte
+    /// dispatch order exactly.
+    fn apply_plain_sgr_run(&mut self, run: &[u8], buf: &mut Vec<SgrAttr>) {
+        for unit in PlainSgrUnits::new(run) {
+            noa_vt::parse_plain_sgr_unit(unit, buf);
+            self.cursor.apply_sgr(buf);
+        }
+    }
+
+    /// The pen's current print template — what `print_ascii_run` stamps into
+    /// every cell it writes.
+    fn pen_template(&self) -> Cell {
+        Cell {
+            ch: ' ',
+            fg: self.cursor.fg,
+            bg: self.cursor.bg,
+            underline_color: self.cursor.underline_color,
+            hyperlink: self.cursor.hyperlink,
+            attrs: self.pen_attrs(),
+            grapheme: None,
+        }
+    }
+
+    fn line_batch_core<'a, L: BatchLines<'a>, const STYLED: bool>(
+        &mut self,
+        data: &'a [u8],
+        mut lines: L,
         autowrap: bool,
         lnm: bool,
         grapheme_clustering: bool,
@@ -68,18 +166,24 @@ impl Screen {
             return 0;
         }
         debug_assert!(autowrap, "caller gates the batch on autowrap");
+        let mut sgr_buf: Vec<SgrAttr> = Vec::new();
 
         // ── prefix: the line in progress, replayed through the scalar
         // primitives. Its text lands on the (possibly remnant-bearing)
         // current bottom row with `print_ascii_run`'s full wide-cell
         // handling, and its LF runs a real `index()` scroll — after which
         // every row the batch touches is fresh by construction.
-        let mut lines = AsciiLines::new(data);
-        let Some(first) = lines.next() else {
+        let Some(first) = lines.next_line() else {
             return 0;
         };
+        if STYLED && !first.lead.is_empty() {
+            self.apply_plain_sgr_run(first.lead, &mut sgr_buf);
+        }
         if !first.text.is_empty() {
             self.print_ascii_run(first.text, autowrap, grapheme_clustering);
+        }
+        if STYLED && !first.tail.is_empty() {
+            self.apply_plain_sgr_run(first.tail, &mut sgr_buf);
         }
         if first.crlf {
             self.carriage_return();
@@ -96,15 +200,7 @@ impl Screen {
         let full_height = top == 0 && bottom + 1 == self.rows as usize;
         let blank = self.blank();
         let default_blank = Self::is_default_blank(&blank);
-        let template = Cell {
-            ch: ' ',
-            fg: self.cursor.fg,
-            bg: self.cursor.bg,
-            underline_color: self.cursor.underline_color,
-            hyperlink: self.cursor.hyperlink,
-            attrs: self.pen_attrs(),
-            grapheme: None,
-        };
+        let mut cur_template = self.pen_template();
         // The last `ring_cap` emitted rows are the ones still visible at the
         // end (everything older seals through, or is dropped when the region
         // does not record scrollback).
@@ -121,7 +217,12 @@ impl Screen {
 
         macro_rules! emit {
             ($wrapped:expr) => {{
-                let mut rec = cur.take().unwrap_or(RowRec::EMPTY);
+                let mut rec = cur.take().unwrap_or(RowRec {
+                    start: 0,
+                    span: 0..0,
+                    template: cur_template,
+                    wrapped: false,
+                });
                 rec.wrapped = $wrapped;
                 emissions += 1;
                 if ring.len() == ring_cap {
@@ -136,19 +237,43 @@ impl Screen {
                     }
                     let popped = ring.pop_front().expect("ring is full");
                     if recorded {
-                        self.seal_span_row(&popped, data, &template, &blank, default_blank, full_height);
+                        self.seal_span_row(&popped, data, &blank, default_blank, full_height);
                     }
                 }
                 ring.push_back(rec);
             }};
         }
 
-        for line in &mut lines {
+        while let Some(line) = lines.next_line() {
             debug_assert!(
                 line.text.iter().all(|b| (0x20..=0x7e).contains(b)),
-                "print_ascii_lines text is printable ASCII"
+                "line-batch text is printable ASCII"
             );
-            let text_start = pos;
+            if STYLED && !(line.lead.is_empty() && line.tail.is_empty()) {
+                // Speculatively run this line's style updates: the pen after
+                // the lead units styles its cells (and is what a mid-text
+                // soft-wrap would scroll with), the pen after the tail units
+                // is what its LF scrolls with. Either scroll using a BCE
+                // blank different from the batch's stops the batch *before*
+                // this line (pen rolled back, bytes left unconsumed) — the
+                // caller's per-line replay applies it with true scrolls.
+                let saved = self.cursor.pen();
+                if !line.lead.is_empty() {
+                    self.apply_plain_sgr_run(line.lead, &mut sgr_buf);
+                }
+                let template = self.pen_template();
+                let wraps = line.text.len() > cols - x;
+                let wrap_blank_differs = wraps && self.blank() != blank;
+                if !line.tail.is_empty() {
+                    self.apply_plain_sgr_run(line.tail, &mut sgr_buf);
+                }
+                if wrap_blank_differs || self.blank() != blank {
+                    self.cursor.set_pen(saved);
+                    break;
+                }
+                cur_template = template;
+            }
+            let text_start = line.text.as_ptr() as usize - data.as_ptr() as usize;
             let text_len = line.text.len();
             let mut i = 0usize;
             while i < text_len {
@@ -165,6 +290,7 @@ impl Screen {
                         cur = Some(RowRec {
                             start: x,
                             span: at..at + n,
+                            template: cur_template,
                             wrapped: false,
                         });
                     }
@@ -184,7 +310,7 @@ impl Screen {
             }
             emit!(false);
             latch = false;
-            pos = text_start + text_len + usize::from(line.crlf) + 1;
+            pos = data.len() - lines.remainder().len();
         }
 
         if emissions > 0 {
@@ -209,15 +335,7 @@ impl Screen {
             let r = ring.len();
             for (k, rec) in ring.drain(..).enumerate() {
                 let y = bottom - r + k;
-                Self::fill_batch_row(
-                    &mut self.grid[y],
-                    &rec,
-                    data,
-                    &template,
-                    &blank,
-                    default_blank,
-                    recorded,
-                );
+                Self::fill_batch_row(&mut self.grid[y], &rec, data, &blank, default_blank, recorded);
             }
             if !recorded {
                 self.grid[bottom].clear(&blank);
@@ -244,7 +362,7 @@ impl Screen {
         if let Some(b) = last_printed {
             self.last_printed = Some(b as char);
         }
-        data.len() - lines.remainder().len()
+        pos
     }
 
     /// Take a pre-blanked row for the batch (recycled pool row, re-blanked
@@ -275,13 +393,12 @@ impl Screen {
         &mut self,
         rec: &RowRec,
         data: &[u8],
-        template: &Cell,
         blank: &Cell,
         default_blank: bool,
         full_height: bool,
     ) {
         let mut row = self.take_batch_blank(blank, default_blank);
-        Self::write_rec_slice(&mut row, rec, data, template);
+        Self::write_rec_slice(&mut row, rec, data);
         row.wrapped = rec.wrapped;
         self.scrollback_push_sealed(row, full_height);
     }
@@ -299,8 +416,8 @@ impl Screen {
         self.pin_viewport_for_scrollback_push(1, full_height);
     }
 
-    /// Write a record's byte slice into a row as pen-templated cells.
-    fn write_rec_slice(row: &mut Row, rec: &RowRec, data: &[u8], template: &Cell) {
+    /// Write a record's byte slice into a row as template-styled cells.
+    fn write_rec_slice(row: &mut Row, rec: &RowRec, data: &[u8]) {
         let len = rec.span.len();
         if len == 0 {
             return;
@@ -311,7 +428,7 @@ impl Screen {
         {
             *cell = Cell {
                 ch: b as char,
-                ..*template
+                ..rec.template
             };
         }
         row.mark_occupied(rec.start + len);
@@ -326,7 +443,6 @@ impl Screen {
         row: &mut Row,
         rec: &RowRec,
         data: &[u8],
-        template: &Cell,
         blank: &Cell,
         default_blank: bool,
         recorded: bool,
@@ -345,7 +461,7 @@ impl Screen {
                 row.occ = row.cells.len() as u32;
             }
         }
-        Self::write_rec_slice(row, rec, data, template);
+        Self::write_rec_slice(row, rec, data);
         row.wrapped = rec.wrapped;
         row.dirty = true;
     }

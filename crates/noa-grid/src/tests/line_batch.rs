@@ -390,6 +390,221 @@ fn line_batch_matches_per_byte_with_rep_and_tabs() {
     assert_line_batch_equivalence("rep and tabs", 80, 24, b"", no_prep, &body);
 }
 
+// ── styled (`Handler::print_sgr_ascii_lines`) batches ──────────────
+
+/// The tbench ansi fixture shape: every line wrapped `ESC[32m … ESC[0m`.
+fn tbench_ansi_flood(lines: usize, term: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for i in 0..lines {
+        out.extend_from_slice(b"\x1b[32m");
+        let len = (i * 7) % 100;
+        for k in 0..len {
+            out.push(b'a' + ((i + k) % 26) as u8);
+        }
+        out.extend_from_slice(b"\x1b[0m");
+        out.extend_from_slice(term.as_bytes());
+    }
+    out
+}
+
+/// The drain-staircase ansi workload shape: a rotating 6-entry palette of
+/// multi-param lead SGRs (fg+bg+attr), text, `ESC[0m` reset, LF.
+fn staircase_ansi_flood(lines: usize, width: usize) -> Vec<u8> {
+    const PALETTE: [&[u8]; 6] = [
+        b"\x1b[38;5;196;48;5;17;1m",
+        b"\x1b[38;5;46;48;5;52;3m",
+        b"\x1b[38;5;51;48;5;22;4m",
+        b"\x1b[38;5;226;48;5;17;7m",
+        b"\x1b[38;5;201;48;5;52;1m",
+        b"\x1b[38;5;129;48;5;22;4m",
+    ];
+    let mut out = Vec::new();
+    for i in 0..lines {
+        out.extend_from_slice(PALETTE[i % PALETTE.len()]);
+        out.extend(std::iter::repeat_n(b'#', width));
+        out.extend_from_slice(b"\x1b[0m\n");
+    }
+    out
+}
+
+#[test]
+fn sgr_line_batch_matches_per_byte_for_tbench_ansi_floods() {
+    assert_line_batch_equivalence(
+        "tbench ansi crlf",
+        80,
+        24,
+        b"",
+        clear_dirty,
+        &tbench_ansi_flood(120, "\r\n"),
+    );
+    assert_line_batch_equivalence(
+        "tbench ansi bare lf",
+        80,
+        24,
+        b"",
+        no_prep,
+        &tbench_ansi_flood(120, "\n"),
+    );
+    // Wrap-boundary widths under a green pen.
+    let mut body = Vec::new();
+    for len in [79usize, 80, 81, 0, 1] {
+        body.extend_from_slice(b"\x1b[32m");
+        body.extend(std::iter::repeat_n(b'w', len));
+        body.extend_from_slice(b"\x1b[0m\r\n");
+    }
+    assert_line_batch_equivalence("ansi wrap-boundary widths", 80, 24, b"", no_prep, &body);
+}
+
+#[test]
+fn sgr_line_batch_matches_per_byte_for_staircase_palette_floods() {
+    assert_line_batch_equivalence(
+        "staircase palette",
+        80,
+        24,
+        b"",
+        clear_dirty,
+        &staircase_ansi_flood(120, 60),
+    );
+    // Full-width styled lines (wrapping mid-line with the palette pen).
+    assert_line_batch_equivalence(
+        "staircase palette wide",
+        80,
+        24,
+        b"",
+        no_prep,
+        &staircase_ansi_flood(60, 97),
+    );
+    // Small grid: seal/rotate/fill split around the region height.
+    for n in 1..=8usize {
+        assert_line_batch_equivalence(
+            &format!("staircase small grid {n} lines"),
+            10,
+            4,
+            b"",
+            no_prep,
+            &staircase_ansi_flood(n, 6),
+        );
+    }
+}
+
+#[test]
+fn sgr_line_batch_matches_per_byte_when_bce_changes_mid_flood() {
+    // Lines that leave the pen with a styled background at their LF (no
+    // reset before the terminator) scroll a BCE blank: the batch must
+    // reject them and the per-line replay must reproduce the styled
+    // fresh rows exactly.
+    let mut body = Vec::new();
+    for i in 0..40usize {
+        match i % 4 {
+            0 => {
+                // Sets bg, keeps it across the LF.
+                body.extend_from_slice(b"\x1b[31;44mbce line");
+            }
+            1 => {
+                // Still under bg 44 from the previous line.
+                body.extend_from_slice(b"plain under bce");
+            }
+            2 => {
+                // Resets at the tail: back to a default blank.
+                body.extend_from_slice(b"\x1b[1mreset line\x1b[0m");
+            }
+            _ => {
+                body.extend(std::iter::repeat_n(b'z', (i * 11) % 90));
+            }
+        }
+        body.extend_from_slice(b"\r\n");
+    }
+    assert_line_batch_equivalence("bce churn", 80, 24, b"", no_prep, &body);
+}
+
+#[test]
+fn sgr_line_batch_matches_per_byte_under_a_constant_bce_pen() {
+    // The pen enters the flood with a styled background and every line
+    // keeps it: all scroll blanks equal the batch entry blank, so the
+    // styled batch may engage — and its sealed/filled rows must carry the
+    // BCE background everywhere the scalar path puts it.
+    let mut body = Vec::new();
+    for i in 0..60usize {
+        body.extend_from_slice(b"\x1b[1m");
+        body.extend(std::iter::repeat_n(b'k', (i * 13) % 85));
+        body.extend_from_slice(b"\x1b[22m\r\n");
+    }
+    assert_line_batch_equivalence("constant bce", 80, 24, b"\x1b[44m", no_prep, &body);
+}
+
+#[test]
+fn sgr_line_batch_matches_per_byte_with_multi_unit_edges_and_lnm() {
+    let mut body = Vec::new();
+    for i in 0..50usize {
+        if i % 2 == 0 {
+            body.extend_from_slice(b"\x1b[1m\x1b[38;5;99m\x1b[4:3m");
+        } else {
+            body.extend_from_slice(b"\x1b[7m");
+        }
+        body.extend(std::iter::repeat_n(b's', (i * 9) % 70));
+        if i % 3 == 0 {
+            body.extend_from_slice(b"\x1b[0m\x1b[2m");
+        } else {
+            body.extend_from_slice(b"\x1b[m");
+        }
+        body.push(b'\n');
+    }
+    assert_line_batch_equivalence("multi-unit edges", 80, 24, b"", no_prep, &body);
+    assert_line_batch_equivalence("multi-unit edges + lnm", 80, 24, b"\x1b[20h", no_prep, &body);
+}
+
+#[test]
+fn sgr_line_batch_matches_per_byte_on_regions_and_alt_screen() {
+    assert_line_batch_equivalence(
+        "styled partial region",
+        80,
+        24,
+        b"\x1b[3;10r\x1b[10;1H",
+        no_prep,
+        &staircase_ansi_flood(50, 30),
+    );
+    assert_line_batch_equivalence(
+        "styled alt screen",
+        80,
+        24,
+        b"\x1b[?1049h\x1b[24;1H",
+        no_prep,
+        &tbench_ansi_flood(50, "\r\n"),
+    );
+    assert_line_batch_equivalence(
+        "styled scrollback off",
+        80,
+        24,
+        b"",
+        |t| t.set_scrollback_limit_bytes(0),
+        &staircase_ansi_flood(60, 40),
+    );
+}
+
+#[test]
+fn apply_sgr_ascii_line_batch_engages_and_consumes_whole_spans() {
+    // Direct engagement pin for the styled batch: per-line templates land
+    // on the grid rows and the styled span is consumed wholesale (not a
+    // permanent per-line fallback).
+    let mut t = Terminal::new(GridSize::new(80, 24));
+    let mut s = Stream::new();
+    s.feed(b"\x1b[24;1H", &mut t);
+    let data = b"\n\x1b[32mgreen\x1b[0m\r\n\x1b[1;44mbold\x1b[0m\n";
+    let consumed = t.primary.apply_sgr_ascii_line_batch(data, true, false, false);
+    assert_eq!(consumed, data.len());
+    assert_eq!(t.primary.take_scroll_shift(), 3);
+    assert_eq!(t.primary.scrollback_len(), 3);
+    let row = |y: usize| &t.primary.grid[y];
+    assert_eq!(row(21).cells[0].ch, 'g');
+    assert_eq!(row(21).cells[0].fg, noa_core::Color::Palette(2));
+    assert_eq!(row(22).cells[0].ch, 'b');
+    assert_eq!(row(22).cells[0].bg, noa_core::Color::Palette(4));
+    assert!(row(22).cells[0].attrs.contains(noa_core::CellAttrs::BOLD));
+    // The tail reset landed on the pen: the final fresh row is default.
+    assert_eq!(t.primary.cursor.fg, noa_core::Color::Default);
+    assert_eq!(t.primary.cursor.bg, noa_core::Color::Default);
+}
+
 // ── seeded pseudo-random differential fuzz ─────────────────────────
 
 fn lcg_next(state: &mut u64) -> u64 {
@@ -403,9 +618,19 @@ fn fuzz_body(seed: u64, cols: u64, tokens: usize) -> Vec<u8> {
     let mut st = seed;
     let mut out = Vec::new();
     for _ in 0..tokens {
-        match lcg_next(&mut st) % 24 {
+        match lcg_next(&mut st) % 26 {
             0 => out.extend_from_slice(b"\x1b[31;42m"),
             1 => out.extend_from_slice(b"\x1b[0m"),
+            22 => {
+                // A batchable styled line (lead palette SGR + reset tail).
+                out.extend_from_slice(b"\x1b[38;5;196;48;5;17;1m");
+                let len = (lcg_next(&mut st) % cols) as usize;
+                for _ in 0..len {
+                    out.push(b'0' + (lcg_next(&mut st) % 10) as u8);
+                }
+                out.extend_from_slice(b"\x1b[0m\n");
+            }
+            23 => out.extend_from_slice(b"\x1b[44m"), // sticky BCE background
             2 => {
                 let r = 1 + lcg_next(&mut st) % 24;
                 let c = 1 + lcg_next(&mut st) % cols;

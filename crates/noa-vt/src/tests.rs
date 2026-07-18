@@ -1515,6 +1515,8 @@ enum LineOp {
     Print(String),
     Exec(u8),
     Batch(Vec<u8>),
+    SgrBatch(Vec<u8>),
+    Attrs(Vec<SgrAttr>),
     Csi(u8),
 }
 
@@ -1537,9 +1539,11 @@ macro_rules! line_capture_noop_methods {
         fn cursor_col_abs(&mut self, _col: u16) {}
         fn cursor_row_abs(&mut self, _row: u16) {}
         fn erase_display(&mut self, _mode: crate::handler::EraseDisplay) {}
-        fn erase_line(&mut self, _mode: crate::handler::EraseLine) {}
-        fn set_attributes(&mut self, _attrs: &[SgrAttr]) {
-            self.ops.push(LineOp::Csi(b'm'));
+        fn erase_line(&mut self, _mode: crate::handler::EraseLine) {
+            self.ops.push(LineOp::Csi(b'K'));
+        }
+        fn set_attributes(&mut self, attrs: &[SgrAttr]) {
+            self.ops.push(LineOp::Attrs(attrs.to_vec()));
         }
         fn set_mode(&mut self, _value: u16, _ansi: bool, _on: bool) {}
         fn carriage_return(&mut self) {}
@@ -1554,7 +1558,8 @@ macro_rules! line_capture_noop_methods {
     };
 }
 
-/// Captures the batch dispatches themselves (overrides `print_ascii_lines`).
+/// Captures the batch dispatches themselves (overrides `print_ascii_lines`
+/// and `print_sgr_ascii_lines`).
 #[derive(Default)]
 struct BatchCapture {
     ops: Vec<LineOp>,
@@ -1564,6 +1569,9 @@ impl crate::Handler for BatchCapture {
     line_capture_noop_methods!();
     fn print_ascii_lines(&mut self, data: &[u8]) {
         self.ops.push(LineOp::Batch(data.to_vec()));
+    }
+    fn print_sgr_ascii_lines(&mut self, data: &[u8]) {
+        self.ops.push(LineOp::SgrBatch(data.to_vec()));
     }
 }
 
@@ -1621,12 +1629,12 @@ fn line_batch_requires_two_complete_lines() {
 
 #[test]
 fn line_batch_stops_before_bytes_the_regular_paths_own() {
-    // An escape ends the batch span before the line containing it.
+    // A non-SGR escape ends the batch span before the line containing it.
     assert_eq!(
-        batch_ops(b"\na\n\x1b[31mb\r\nc\n"),
+        batch_ops(b"\na\n\x1b[2Kb\r\nc\n"),
         vec![
             LineOp::Batch(b"\na\n".to_vec()),
-            LineOp::Csi(b'm'),
+            LineOp::Csi(b'K'),
             LineOp::Print("b".into()),
             LineOp::Batch(b"\r\nc\n".to_vec()),
         ]
@@ -1651,6 +1659,166 @@ fn line_batch_stops_before_bytes_the_regular_paths_own() {
             LineOp::Exec(0x0a),
         ]
     );
+}
+
+#[test]
+fn sgr_line_batch_dispatches_edge_styled_spans() {
+    // The tbench ansi shape: every line wrapped `ESC[32m … ESC[0m`. The
+    // whole complete-line span (from the first line's terminator on) goes
+    // to `print_sgr_ascii_lines` in one call.
+    let body = b"\r\n\x1b[32mthe quick fox\x1b[0m\r\n\x1b[32mjumps over\x1b[0m\r\n";
+    let mut fed = b"lead".to_vec();
+    fed.extend_from_slice(b"\x1b[32mdog\x1b[0m");
+    fed.extend_from_slice(body);
+    let ops = batch_ops(&fed);
+    assert_eq!(
+        ops,
+        vec![
+            LineOp::Print("lead".into()),
+            LineOp::Attrs(vec![SgrAttr::Fg(Color::Palette(2))]),
+            LineOp::Print("dog".into()),
+            LineOp::Attrs(vec![SgrAttr::Reset]),
+            LineOp::SgrBatch(body.to_vec()),
+        ]
+    );
+    // The staircase palette shape: multi-param lead SGR, `ESC[0m` tail —
+    // still one styled span even as the palette rotates per line.
+    let stair =
+        b"\r\n\x1b[38;5;196;48;5;17;1mAAAA\x1b[0m\n\x1b[38;5;46;48;5;52;3mBBBB\x1b[0m\n";
+    assert_eq!(
+        batch_ops(&[b"x".as_slice(), stair.as_slice()].concat()),
+        vec![
+            LineOp::Print("x".into()),
+            LineOp::SgrBatch(stair.to_vec()),
+        ]
+    );
+    // A plain-only span still dispatches through `print_ascii_lines`.
+    assert_eq!(
+        batch_ops(b"\na\nb\n"),
+        vec![LineOp::Batch(b"\na\nb\n".to_vec())]
+    );
+}
+
+#[test]
+fn sgr_line_batch_rejects_non_edge_and_non_plain_sgr_lines() {
+    // An SGR splitting a line's text ends the span before that line.
+    assert_eq!(
+        batch_ops(b"\na\nb\x1b[31mc\r\nd\ne\n"),
+        vec![
+            LineOp::Batch(b"\na\n".to_vec()),
+            LineOp::Print("b".into()),
+            LineOp::Attrs(vec![SgrAttr::Fg(Color::Palette(1))]),
+            LineOp::Print("c".into()),
+            LineOp::Batch(b"\r\nd\ne\n".to_vec()),
+        ]
+    );
+    // XTMODKEYS (`CSI > … m`) is not a plain SGR: never batched.
+    let ops = batch_ops(b"\na\n\x1b[>4;2mb\r\nc\nd\n");
+    assert!(
+        ops.contains(&LineOp::Batch(b"\na\n".to_vec()))
+            && ops.contains(&LineOp::Batch(b"\r\nc\nd\n".to_vec())),
+        "XTMODKEYS line must fall out of the batch: {ops:?}"
+    );
+    assert!(
+        !ops.iter().any(|op| matches!(op, LineOp::SgrBatch(_))),
+        "XTMODKEYS must not mark the span styled: {ops:?}"
+    );
+}
+
+#[test]
+fn sgr_line_batch_default_body_replays_units_in_order() {
+    use crate::Handler as _;
+    let mut cap = DefaultBatchCapture::default();
+    cap.print_sgr_ascii_lines(b"\x1b[1m\x1b[31ma\x1b[0m\r\n\x1b[42mb\n");
+    assert_eq!(
+        cap.ops,
+        vec![
+            LineOp::Attrs(vec![SgrAttr::Bold]),
+            LineOp::Attrs(vec![SgrAttr::Fg(Color::Palette(1))]),
+            LineOp::Print("a".into()),
+            LineOp::Attrs(vec![SgrAttr::Reset]),
+            LineOp::Exec(0x0d),
+            LineOp::Exec(0x0a),
+            LineOp::Attrs(vec![SgrAttr::Bg(Color::Palette(2))]),
+            LineOp::Print("b".into()),
+            LineOp::Exec(0x0a),
+        ]
+    );
+}
+
+#[test]
+fn sgr_ascii_lines_split_lead_text_tail() {
+    use crate::handler::{SgrAsciiLine, SgrAsciiLines};
+    let mut lines = SgrAsciiLines::new(b"\x1b[1m\x1b[31mab\x1b[0m\r\n\ncd\ntail");
+    assert_eq!(
+        lines.next(),
+        Some(SgrAsciiLine {
+            lead: b"\x1b[1m\x1b[31m",
+            text: b"ab",
+            tail: b"\x1b[0m",
+            crlf: true
+        })
+    );
+    assert_eq!(
+        lines.next(),
+        Some(SgrAsciiLine {
+            lead: b"",
+            text: b"",
+            tail: b"",
+            crlf: false
+        })
+    );
+    assert_eq!(
+        lines.next(),
+        Some(SgrAsciiLine {
+            lead: b"",
+            text: b"cd",
+            tail: b"",
+            crlf: false
+        })
+    );
+    assert_eq!(lines.next(), None);
+    assert_eq!(lines.remainder(), b"tail");
+}
+
+#[test]
+fn scan_plain_sgr_accepts_exactly_the_plain_sgr_shape() {
+    use crate::sgr::scan_plain_sgr;
+    assert_eq!(scan_plain_sgr(b"\x1b[m"), Some(3));
+    assert_eq!(scan_plain_sgr(b"\x1b[0m"), Some(4));
+    assert_eq!(scan_plain_sgr(b"\x1b[38;5;196;48;5;17;1mrest"), Some(21));
+    assert_eq!(scan_plain_sgr(b"\x1b[4:3m"), Some(6));
+    assert_eq!(scan_plain_sgr(b"\x1b[>4;2m"), None); // private marker
+    assert_eq!(scan_plain_sgr(b"\x1b[?25h"), None); // private + wrong final
+    assert_eq!(scan_plain_sgr(b"\x1b[2K"), None); // non-SGR final
+    assert_eq!(scan_plain_sgr(b"\x1b[1 m"), None); // intermediate byte
+    assert_eq!(scan_plain_sgr(b"\x1b[31"), None); // incomplete
+    assert_eq!(scan_plain_sgr(b"\x1bM"), None); // not a CSI
+    // Param-count cap matches the whole-CSI lexer: 32 params fit, 33 defer.
+    let max = format!("\x1b[{}m", vec!["1"; 32].join(";"));
+    assert_eq!(scan_plain_sgr(max.as_bytes()), Some(max.len()));
+    let over = format!("\x1b[{}m", vec!["1"; 33].join(";"));
+    assert_eq!(scan_plain_sgr(over.as_bytes()), None);
+}
+
+#[test]
+fn parse_plain_sgr_unit_matches_the_csi_parse() {
+    use crate::sgr::parse_plain_sgr_unit;
+    let mut out = Vec::new();
+    parse_plain_sgr_unit(b"\x1b[m", &mut out);
+    assert_eq!(out, vec![SgrAttr::Reset]);
+    parse_plain_sgr_unit(b"\x1b[1;38;5;196m", &mut out);
+    assert_eq!(
+        out,
+        vec![SgrAttr::Bold, SgrAttr::Fg(Color::Palette(196))]
+    );
+    parse_plain_sgr_unit(b"\x1b[38;2;10;20;30m", &mut out);
+    assert_eq!(out, vec![SgrAttr::Fg(Color::Rgb(Rgb::new(10, 20, 30)))]);
+    parse_plain_sgr_unit(b"\x1b[4:3m", &mut out);
+    assert_eq!(out, vec![SgrAttr::CurlyUnderline]);
+    // Value saturation matches the DFA's accumulator.
+    parse_plain_sgr_unit(b"\x1b[99999m", &mut out);
+    assert_eq!(out, Vec::new());
 }
 
 #[test]

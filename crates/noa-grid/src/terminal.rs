@@ -21,7 +21,7 @@ use crate::osc::{Notification, Osc52Policy, TerminalColors};
 use crate::screen::Screen;
 use crate::search::SearchMatch;
 use crate::selection::SelectionPoint;
-use noa_core::{CellAttrs, Color, GridSize, Point};
+use noa_core::{GridSize, Point};
 use noa_vt::{EraseDisplay, SgrAttr};
 
 /// Cap on the `XTWINOPS` title stack (`CSI 22/23 t`), mirroring the
@@ -678,59 +678,7 @@ impl Terminal {
     }
 
     fn apply_sgr(&mut self, attrs: &[SgrAttr]) {
-        let c = &mut self.active_mut().cursor;
-        for a in attrs {
-            match *a {
-                SgrAttr::Reset => {
-                    c.fg = Color::Default;
-                    c.bg = Color::Default;
-                    c.underline_color = None;
-                    c.attrs = CellAttrs::empty();
-                }
-                SgrAttr::Bold => c.attrs.insert(CellAttrs::BOLD),
-                SgrAttr::Faint => c.attrs.insert(CellAttrs::FAINT),
-                SgrAttr::Italic => c.attrs.insert(CellAttrs::ITALIC),
-                SgrAttr::Underline => {
-                    c.attrs.remove(CellAttrs::underline_styles());
-                    c.attrs.insert(CellAttrs::UNDERLINE);
-                }
-                SgrAttr::DoubleUnderline => {
-                    c.attrs.remove(CellAttrs::underline_styles());
-                    c.attrs.insert(CellAttrs::DOUBLE_UNDERLINE);
-                }
-                SgrAttr::CurlyUnderline => {
-                    c.attrs.remove(CellAttrs::underline_styles());
-                    c.attrs.insert(CellAttrs::CURLY_UNDERLINE);
-                }
-                SgrAttr::DottedUnderline => {
-                    c.attrs.remove(CellAttrs::underline_styles());
-                    c.attrs.insert(CellAttrs::DOTTED_UNDERLINE);
-                }
-                SgrAttr::DashedUnderline => {
-                    c.attrs.remove(CellAttrs::underline_styles());
-                    c.attrs.insert(CellAttrs::DASHED_UNDERLINE);
-                }
-                SgrAttr::Blink => c.attrs.insert(CellAttrs::BLINK),
-                SgrAttr::Inverse => c.attrs.insert(CellAttrs::INVERSE),
-                SgrAttr::Invisible => c.attrs.insert(CellAttrs::INVISIBLE),
-                SgrAttr::Strike => c.attrs.insert(CellAttrs::STRIKETHROUGH),
-                SgrAttr::Overline => c.attrs.insert(CellAttrs::OVERLINE),
-                SgrAttr::ResetBold => c.attrs.remove(CellAttrs::BOLD | CellAttrs::FAINT),
-                SgrAttr::ResetItalic => c.attrs.remove(CellAttrs::ITALIC),
-                SgrAttr::ResetUnderline => c.attrs.remove(CellAttrs::underline_styles()),
-                SgrAttr::ResetBlink => c.attrs.remove(CellAttrs::BLINK),
-                SgrAttr::ResetInverse => c.attrs.remove(CellAttrs::INVERSE),
-                SgrAttr::ResetInvisible => c.attrs.remove(CellAttrs::INVISIBLE),
-                SgrAttr::ResetStrike => c.attrs.remove(CellAttrs::STRIKETHROUGH),
-                SgrAttr::ResetOverline => c.attrs.remove(CellAttrs::OVERLINE),
-                SgrAttr::Fg(col) => c.fg = col,
-                SgrAttr::Bg(col) => c.bg = col,
-                SgrAttr::UnderlineColor(col) => c.underline_color = Some(col),
-                SgrAttr::DefaultFg => c.fg = Color::Default,
-                SgrAttr::DefaultBg => c.bg = Color::Default,
-                SgrAttr::DefaultUnderlineColor => c.underline_color = None,
-            }
-        }
+        self.active_mut().cursor.apply_sgr(attrs);
     }
 
     fn active_mut(&mut self) -> &mut Screen {

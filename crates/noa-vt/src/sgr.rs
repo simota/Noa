@@ -2,7 +2,7 @@
 //! 24-bit truecolor in both semicolon (`38;2;r;g;b`) and colon
 //! (`38:2::r:g:b`) forms.
 
-use crate::csi::Csi;
+use crate::csi::{Csi, MAX_PARAMS};
 use noa_core::{Color, Rgb};
 
 /// A decoded SGR attribute change.
@@ -142,6 +142,84 @@ pub fn parse_sgr_into(csi: &Csi, out: &mut Vec<SgrAttr>) {
         }
         i += 1;
     }
+}
+
+/// Lex the *plain SGR* sequence at the head of `bytes` — `ESC [ params m`
+/// with params consisting only of digits/`;`/`:` (no private marker, no
+/// intermediates) and a parameter count within the DFA's cap — returning its
+/// total byte length. This is exactly the style unit
+/// [`crate::Handler::print_sgr_ascii_lines`] admits; anything else (including
+/// sequences the per-byte DFA would still accept, like `CSI > … m`) returns
+/// `None` so the caller falls back to the regular dispatch paths.
+///
+/// Acceptance must stay aligned with `Stream`'s whole-CSI lexer: a byte
+/// string this function accepts must produce, through
+/// [`parse_plain_sgr_unit`], the same attribute list the DFA path dispatches
+/// for it.
+#[inline]
+pub fn scan_plain_sgr(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < 3 || bytes[0] != 0x1b || bytes[1] != b'[' {
+        return None;
+    }
+    let mut i = 2;
+    // Parameter count mirrors the DFA: one param per separator plus the
+    // trailing one; the DFA's param-overflow quirk (fold into the last
+    // param) is deferred to the per-byte path, like `try_scan_csi`.
+    let mut nparams = 1usize;
+    loop {
+        match *bytes.get(i)? {
+            0x30..=0x39 => {}
+            0x3a | 0x3b => {
+                nparams += 1;
+                if nparams > MAX_PARAMS {
+                    return None;
+                }
+            }
+            b'm' => return Some(i + 1),
+            _ => return None,
+        }
+        i += 1;
+    }
+}
+
+/// Decode one [`scan_plain_sgr`]-shaped unit (`ESC [ params m`) into
+/// attribute changes, clearing `out` first (same contract as
+/// [`parse_sgr_into`]). The parameter accumulation matches the per-byte
+/// DFA's exactly (saturating values, one param per separator, empty list
+/// for `ESC [ m`), so the resulting attrs are bit-identical to what the
+/// regular dispatch path hands [`crate::Handler::set_attributes`].
+pub fn parse_plain_sgr_unit(unit: &[u8], out: &mut Vec<SgrAttr>) {
+    debug_assert_eq!(scan_plain_sgr(unit), Some(unit.len()), "not a plain SGR unit");
+    let mut params = crate::csi::Params::default();
+    let mut sep_colon = crate::csi::Separators::default();
+    let mut cur: u16 = 0;
+    let mut any_params = false;
+    for &b in &unit[2..unit.len() - 1] {
+        match b {
+            0x30..=0x39 => {
+                cur = cur.saturating_mul(10).saturating_add(u16::from(b - 0x30));
+                any_params = true;
+            }
+            _ => {
+                // `scan_plain_sgr` admits only `:`/`;` here.
+                params.push(cur);
+                sep_colon.push(b == 0x3a);
+                cur = 0;
+                any_params = true;
+            }
+        }
+    }
+    if any_params {
+        params.push(cur);
+    }
+    let csi = Csi::from_parts(
+        params,
+        sep_colon,
+        crate::csi::Intermediates::default(),
+        0,
+        b'm',
+    );
+    parse_sgr_into(&csi, out);
 }
 
 /// Parse an extended (38/48/58) color operand starting at index `i` (the

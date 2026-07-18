@@ -8,8 +8,8 @@ use crate::osc::{
 use noa_core::{CellAttrs, Color};
 use noa_vt::{
     AsciiLines, Charset, CharsetSlot, CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay,
-    EraseLine, Handler, KittyAction, KittyGraphicsCommand, ModeRequest, SgrAttr,
-    SixelGraphicsCommand,
+    EraseLine, Handler, KittyAction, KittyGraphicsCommand, ModeRequest, PlainSgrUnits, SgrAttr,
+    SgrAsciiLines, SixelGraphicsCommand,
 };
 
 use super::{ShellIntegrationMarkKind, Terminal};
@@ -114,6 +114,64 @@ impl Handler for Terminal {
                 let text = core::str::from_utf8(line.text)
                     .expect("print_ascii_lines text is printable ASCII");
                 self.print_str(text);
+            }
+            if line.crlf {
+                self.execute_c0(0x0d);
+            }
+            self.execute_c0(0x0a);
+            rest = lines.remainder();
+        }
+    }
+
+    /// Styled sibling of [`Handler::print_ascii_lines`]: the active screen
+    /// batches `sgr* text sgr* (CR)? LF` groups with a per-line style
+    /// template ([`crate::screen::Screen::apply_sgr_ascii_line_batch`]), and
+    /// any line the batch cannot take replays through the canonical
+    /// per-unit calls — semantically identical to the default trait body.
+    fn print_sgr_ascii_lines(&mut self, data: &[u8]) {
+        let autowrap = self.modes.autowrap();
+        let lnm = self.modes.linefeed_newline();
+        let grapheme_clustering = self.modes.grapheme_clustering();
+        let ascii_charset = self.charset.active_is_ascii();
+        let mut attrs = Vec::new();
+        let mut rest = data;
+        while !rest.is_empty() {
+            if ascii_charset && autowrap {
+                let consumed = self.active_mut().apply_sgr_ascii_line_batch(
+                    rest,
+                    autowrap,
+                    lnm,
+                    grapheme_clustering,
+                );
+                if consumed > 0 {
+                    rest = &rest[consumed..];
+                    continue;
+                }
+            }
+            // Per-line replay (the default trait body's exact semantics)
+            // until the batch preconditions hold again.
+            let mut lines = SgrAsciiLines::new(rest);
+            let Some(line) = lines.next() else {
+                // Unterminated tail: a contract violation, but print it like
+                // the default trait body rather than dropping bytes.
+                debug_assert!(false, "print_sgr_ascii_lines data holds only complete lines");
+                let text = core::str::from_utf8(rest)
+                    .expect("print_sgr_ascii_lines text is printable ASCII");
+                self.print_str(text);
+                return;
+            };
+            for unit in PlainSgrUnits::new(line.lead) {
+                noa_vt::parse_plain_sgr_unit(unit, &mut attrs);
+                self.set_attributes(&attrs);
+            }
+            if !line.text.is_empty() {
+                let text = core::str::from_utf8(line.text)
+                    .expect("print_sgr_ascii_lines text is printable ASCII");
+                self.print_str(text);
+            }
+            for unit in PlainSgrUnits::new(line.tail) {
+                noa_vt::parse_plain_sgr_unit(unit, &mut attrs);
+                self.set_attributes(&attrs);
             }
             if line.crlf {
                 self.execute_c0(0x0d);

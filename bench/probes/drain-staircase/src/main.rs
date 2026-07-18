@@ -581,7 +581,7 @@ fn run_tbench_faithful(
                         boundaries.push(now);
                     }
                 }
-                if boundaries.len() >= total_runs + 1 {
+                if boundaries.len() > total_runs {
                     break;
                 }
             }

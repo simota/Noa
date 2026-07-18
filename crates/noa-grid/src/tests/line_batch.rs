@@ -621,7 +621,7 @@ fn fuzz_body(seed: u64, cols: u64, tokens: usize) -> Vec<u8> {
         match lcg_next(&mut st) % 26 {
             0 => out.extend_from_slice(b"\x1b[31;42m"),
             1 => out.extend_from_slice(b"\x1b[0m"),
-            22 => {
+            20 => {
                 // A batchable styled line (lead palette SGR + reset tail).
                 out.extend_from_slice(b"\x1b[38;5;196;48;5;17;1m");
                 let len = (lcg_next(&mut st) % cols) as usize;
@@ -630,7 +630,21 @@ fn fuzz_body(seed: u64, cols: u64, tokens: usize) -> Vec<u8> {
                 }
                 out.extend_from_slice(b"\x1b[0m\n");
             }
-            23 => out.extend_from_slice(b"\x1b[44m"), // sticky BCE background
+            21 => out.extend_from_slice(b"\x1b[44m"), // sticky BCE background
+            22 => {
+                // A styled line whose *tail* moves the pen without touching
+                // the background (blank-neutral): the following plain lines
+                // must print with the tail pen, not this line's lead
+                // template (the cycle-1 stale-template bug class).
+                out.extend_from_slice(b"\x1b[31mtail-shift");
+                out.extend_from_slice(b"\x1b[32;1m\n");
+            }
+            23 => {
+                // Tail-only styled line (no lead): text under the current
+                // pen, then a pen change for whatever follows.
+                out.extend_from_slice(b"tail only");
+                out.extend_from_slice(b"\x1b[35m\n");
+            }
             2 => {
                 let r = 1 + lcg_next(&mut st) % 24;
                 let c = 1 + lcg_next(&mut st) % cols;
@@ -665,7 +679,10 @@ fn fuzz_body(seed: u64, cols: u64, tokens: usize) -> Vec<u8> {
 
 #[test]
 fn line_batch_matches_per_byte_under_random_token_mixes() {
-    for seed in 1..=3u64 {
+    // 40+ seeds per grid: the cycle-1 stale-template bug (a plain line
+    // after a tail-SGR pen change) only surfaced under a wide seed sweep —
+    // narrow sweeps sample too few styled/plain interleavings.
+    for seed in 1..=42u64 {
         assert_line_batch_equivalence(
             &format!("fuzz 80x24 seed {seed}"),
             80,

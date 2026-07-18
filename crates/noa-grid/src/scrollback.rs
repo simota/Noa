@@ -1710,7 +1710,9 @@ mod tests {
             ..Cell::default()
         };
         let bce_blank = Cell::blank(Color::Palette(4));
-        let cases: Vec<(&[u8], u16, u16, Cell, Cell, bool)> = vec![
+        // (text, col, cols, template, blank, wrapped)
+        type SpanCase = (&'static [u8], u16, u16, Cell, Cell, bool);
+        let cases: Vec<SpanCase> = vec![
             (b"hello world", 0, 40, Cell::default(), Cell::default(), false),
             (b"hello   ", 0, 40, Cell::default(), Cell::default(), true),
             (b"indented", 7, 40, Cell::default(), Cell::default(), false),

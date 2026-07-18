@@ -353,6 +353,15 @@ impl Screen {
                 }
                 self.cursor.set_pen(pen_after);
                 cur_template = template;
+            } else if STYLED {
+                // A line with no edge SGRs prints with the *current* pen —
+                // which the previous line's tail SGRs may have just changed
+                // (e.g. `ESC[41m AAA ESC[0m` then a plain `BBB`: the reset
+                // tail means BBB is unstyled, not red). Reusing the previous
+                // line's post-lead template here painted exactly that stale
+                // style (cycle-1 CONFIRMED bug); rebuild from the pen
+                // instead — a handful of register copies per line.
+                cur_template = self.pen_template();
             }
             let text_start = line.text.as_ptr() as usize - data.as_ptr() as usize;
             let text_len = line.text.len();

@@ -506,6 +506,207 @@ fn run_real(stage: Stage, tmpfile: &str, total: usize, grid: GridSize, contend: 
     elapsed
 }
 
+// ── tbench-faithful: real fixture, real ONLCR, one warm session, N runs ──
+
+/// Reproduces tbench's own measurement architecture as closely as this
+/// harness can from the consumer side: ONE `noa_pty::Pty` session (one
+/// cooked, default-termios pty — no `stty raw -opost`, so the kernel's real
+/// ONLCR expands `\n`→`\r\n` exactly as it does for a real Noa window) whose
+/// child shell sequentially `cat`s the *actual* tbench fixture file
+/// `warmup + measured` times, each iteration followed by a BEL (`\a`)
+/// sentinel the consumer uses to mark run boundaries (BEL is a no-op
+/// `execute_c0` for `Terminal` — it cannot appear in the plain-text fixture,
+/// so there is no risk of a false boundary). One long-lived `Terminal`
+/// (scrollback ON, the real default) absorbs all runs in sequence — unlike
+/// `measure()`'s per-rep fresh `Pty`+`Terminal`, this models the same warm,
+/// cumulative-state session tbench's own `--runs 20` exercises against a
+/// single live window. Returns the `measured` per-run wall-clock durations
+/// (warmup runs dropped), in run order.
+fn run_tbench_faithful(
+    fixture_path: &str,
+    grid: GridSize,
+    warmup: usize,
+    measured: usize,
+    raw_tty: bool,
+) -> Vec<Duration> {
+    use noa_pty::{Pty, PtyConfig, PtyEvent};
+
+    let total_runs = warmup + measured;
+    let stty_prefix = if raw_tty {
+        "stty raw -opost 2>/dev/null; "
+    } else {
+        ""
+    };
+    let cfg = PtyConfig {
+        size: grid,
+        shell: None,
+        command: Some(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "{stty_prefix}i=0; while [ $i -lt {total_runs} ]; do cat '{fixture_path}'; printf '\\a'; i=$((i+1)); done"
+            ),
+        ]),
+        cwd: None,
+        term: "xterm-256color".to_string(),
+        login: false,
+        shell_integration: false,
+    };
+    let pty = Pty::spawn(cfg).expect("spawn pty");
+
+    let mut stream = Stream::new();
+    let terminal = Arc::new(Mutex::new(Terminal::new(grid)));
+
+    // boundaries[0] = first byte of run 1 arrives; boundaries[k] = the k-th
+    // BEL sentinel arrives (end of run k). Duration of run k = boundaries[k]
+    // - boundaries[k-1].
+    let mut boundaries: Vec<Instant> = Vec::with_capacity(total_runs + 1);
+    let timeout = Duration::from_secs(120);
+    loop {
+        match pty.event_rx().recv_timeout(timeout) {
+            Ok(PtyEvent::Data(chunk)) => {
+                let bytes = chunk.as_ref();
+                if boundaries.is_empty() {
+                    boundaries.push(Instant::now());
+                }
+                {
+                    let mut t = terminal.lock();
+                    stream.feed(bytes, &mut *t);
+                    parking_lot::MutexGuard::unlock_fair(t);
+                }
+                let bel_count = bytes.iter().filter(|&&b| b == 0x07).count();
+                if bel_count > 0 {
+                    let now = Instant::now();
+                    for _ in 0..bel_count {
+                        boundaries.push(now);
+                    }
+                }
+                if boundaries.len() >= total_runs + 1 {
+                    break;
+                }
+            }
+            Ok(PtyEvent::Exit(_)) | Ok(PtyEvent::Error(_)) => break,
+            Err(_) => break,
+        }
+    }
+    let _ = std::hint::black_box(&terminal);
+    let mut durs = Vec::new();
+    for i in 1..boundaries.len() {
+        durs.push(boundaries[i].duration_since(boundaries[i - 1]));
+    }
+    if durs.len() > warmup {
+        durs.split_off(warmup)
+    } else {
+        eprintln!(
+            "  [warn] tbench-faithful: only {} of {} runs completed",
+            durs.len(),
+            total_runs
+        );
+        durs
+    }
+}
+
+/// SKEPTIC HARNESS (uncommitted): interactive DSR roundtrip under flood.
+///
+/// A python "app" spawned through the real `noa_pty::Pty` writes a `burst`-byte
+/// output burst, then a cursor-position query (`ESC[6n`), then blocks reading
+/// its stdin for the CPR reply — recording query->reply wall-clock. Our
+/// consumer drives the real pipeline (reader thread -> channel -> parse+apply
+/// under the lock) and echoes `take_pending_writes()` back via `pty.writer()`,
+/// exactly like io_thread.rs. Models DOOM-fire's "heavy output then a sync
+/// query" req/resp pattern; measures whether the reader's coalescing/spin
+/// bridge delays a response riding the tail of a burst.
+fn run_roundtrip(burst: usize, iters: usize, grid: GridSize) {
+    use noa_pty::{Pty, PtyConfig, PtyEvent};
+
+    let tmpdir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    let tmpdir = tmpdir.trim_end_matches('/').to_string();
+    let script = format!("{tmpdir}/rt_app_{}.py", std::process::id());
+    let result = format!("{tmpdir}/rt_res_{}.txt", std::process::id());
+    let py = r#"
+import os, sys, time
+resfile = sys.argv[1]; burst = int(sys.argv[2]); iters = int(sys.argv[3])
+line = b"DOOM fire req/resp flood abcdefghijklmnopqrstuvwxyz 0123456789 the quick brown fox\r\n"
+buf = bytearray()
+while len(buf) < burst:
+    buf += line
+buf = bytes(buf[:burst])
+rtts = []
+for i in range(iters + 8):            # first 8 are warmup, dropped
+    off = 0
+    while off < len(buf):
+        off += os.write(1, buf[off:])
+    t0 = time.perf_counter_ns()
+    os.write(1, b"\x1b[6n")
+    resp = b""
+    while b"R" not in resp:
+        resp += os.read(0, 32)
+    t1 = time.perf_counter_ns()
+    if i >= 8:
+        rtts.append(t1 - t0)
+with open(resfile, "w") as f:
+    f.write("\n".join(str(x) for x in rtts))
+"#;
+    std::fs::write(&script, py).expect("write app script");
+
+    let cfg = PtyConfig {
+        size: grid,
+        shell: None,
+        command: Some(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("stty raw -echo 2>/dev/null; exec python3 {script} {result} {burst} {iters}"),
+        ]),
+        cwd: None,
+        term: "xterm-256color".to_string(),
+        login: false,
+        shell_integration: false,
+    };
+    let pty = Pty::spawn(cfg).expect("spawn pty");
+    let writer = pty.writer();
+    let mut stream = Stream::new();
+    let mut term = Terminal::new(grid);
+
+    let timeout = Duration::from_secs(120);
+    loop {
+        match pty.event_rx().recv_timeout(timeout) {
+            Ok(PtyEvent::Data(chunk)) => {
+                stream.feed(chunk.as_ref(), &mut term);
+                let reply = term.take_pending_writes();
+                if !reply.is_empty() {
+                    let _ = writer.write(&reply);
+                }
+            }
+            Ok(PtyEvent::Exit(_)) | Ok(PtyEvent::Error(_)) => break,
+            Err(_) => break,
+        }
+    }
+    let text = std::fs::read_to_string(&result).unwrap_or_default();
+    let _ = std::fs::remove_file(&script);
+    let _ = std::fs::remove_file(&result);
+    let mut ns: Vec<u64> = text
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
+    if ns.is_empty() {
+        println!("roundtrip burst={burst}: NO SAMPLES (app failed)");
+        return;
+    }
+    ns.sort_unstable();
+    let pct = |p: f64| ns[((ns.len() as f64 * p) as usize).min(ns.len() - 1)];
+    let mean = ns.iter().sum::<u64>() as f64 / ns.len() as f64;
+    println!(
+        "roundtrip burst={:>7} n={:>4}: mean {:>7.1}us p50 {:>7.1} p90 {:>7.1} p99 {:>7.1} max {:>7.1} us",
+        burst,
+        ns.len(),
+        mean / 1000.0,
+        pct(0.50) as f64 / 1000.0,
+        pct(0.90) as f64 / 1000.0,
+        pct(0.99) as f64 / 1000.0,
+        *ns.last().unwrap() as f64 / 1000.0,
+    );
+}
+
 fn write_workload_file(path: &str, tmpl: &[u8], total: usize) {
     use std::io::Write as _;
     let f = std::fs::File::create(path).expect("create workload file");
@@ -615,6 +816,63 @@ fn main() {
             total as f64 / dur.as_secs_f64() / 1e6,
             dur.as_secs_f64()
         );
+        return;
+    }
+
+    // tbench-faithful mode (skeptic-oracle attack #2): real fixture bytes,
+    // real ONLCR, one warm session, 20 sequential runs.
+    //   drain-staircase --tbench-faithful --warmup 3 --runs 20
+    if has("--tbench-faithful") {
+        let cols = flag("--cols", 80) as u16;
+        let rows = flag("--rows", 24) as u16;
+        let grid = GridSize::new(cols, rows);
+        let warmup = flag("--warmup", 3);
+        let measured = flag("--runs", 20);
+        let fixture = str_flag("--fixture").unwrap_or_else(|| {
+            "/Users/simota/repos/github.com/TerminalBench/fixtures/large-output-plain.txt"
+                .to_string()
+        });
+        let fixture_len = std::fs::metadata(&fixture).expect("stat fixture").len() as usize;
+        eprintln!(
+            "tbench-faithful: fixture={fixture} ({fixture_len}B) grid={cols}x{rows} warmup={warmup} runs={measured} — pid {}",
+            std::process::id()
+        );
+        let raw_tty = has("--raw-tty");
+        let durs = run_tbench_faithful(&fixture, grid, warmup, measured, raw_tty);
+        let mbps_vals: Vec<f64> = durs.iter().map(|d| mbps(fixture_len, *d)).collect();
+        for (i, (m, d)) in mbps_vals.iter().zip(durs.iter()).enumerate() {
+            println!("run {:2}: {:.1} MB/s ({:.4}s)", i + 1, m, d.as_secs_f64());
+        }
+        let med = median(mbps_vals.clone());
+        let mean: f64 = mbps_vals.iter().sum::<f64>() / mbps_vals.len() as f64;
+        let variance: f64 = mbps_vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+            / mbps_vals.len() as f64;
+        let stddev = variance.sqrt();
+        println!(
+            "\ntbench-faithful plain: median {:.1} MB/s, mean {:.1}, stddev {:.2}, n={}",
+            med,
+            mean,
+            stddev,
+            mbps_vals.len()
+        );
+        return;
+    }
+
+    // roundtrip mode (skeptic-defense attack #3): interactive DSR reply
+    // latency riding the tail of an output burst.
+    //   drain-staircase --roundtrip --burst 262144 --iters 200 --cols 140 --rows 40
+    if has("--roundtrip") {
+        let cols = flag("--cols", 140) as u16;
+        let rows = flag("--rows", 40) as u16;
+        let grid = GridSize::new(cols, rows);
+        let iters = flag("--iters", 200);
+        for burst in [4096usize, 65536, 262144, 1048576] {
+            if has("--burst") {
+                run_roundtrip(flag("--burst", 262144), iters, grid);
+                break;
+            }
+            run_roundtrip(burst, iters, grid);
+        }
         return;
     }
 

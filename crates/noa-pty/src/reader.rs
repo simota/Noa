@@ -48,11 +48,11 @@ const COALESCE_POLL_MS: libc::c_int = 2;
 
 /// Nonblocking-drain refill bridge: after the kernel tty queue runs dry
 /// mid-chunk *while the producer is streaming*, retry the read this many
-/// times (yielding in between) before emitting the partial chunk. The
-/// writing child is woken by the drain itself and refills the ~1KiB queue
-/// within a scheduler quantum; a few yields bridge that gap and keep chunks
-/// near [`READ_CHUNK`] instead of near the 1KiB kernel quantum — every
-/// sliver chunk otherwise costs a channel send/wake *and* a full
+/// times (a `spin_loop` hint in between) before emitting the partial chunk.
+/// The writing child is woken by the drain itself and refills the ~1KiB
+/// queue within a scheduler quantum; a few retries bridge that gap and keep
+/// chunks near [`READ_CHUNK`] instead of near the 1KiB kernel quantum —
+/// every sliver chunk otherwise costs a channel send/wake *and* a full
 /// terminal-lock parse hold downstream (measured: a 150MB flood emitted
 /// ~105K sliver chunks, avg 1.5KiB, with the bridge gated on downstream
 /// congestion only). "Streaming" is judged by the *last read's size*: a full
@@ -62,20 +62,16 @@ const COALESCE_POLL_MS: libc::c_int = 2;
 /// for request/response loops like DOOM-fire's DSR sync. Ghostty's
 /// io-gather uses the same bounded spin (`bridge_spin_max`) with a
 /// burst-size saturation gate for the same reason.
+///
+/// Every retry is `spin_loop`-hinted, never `yield_now`: with the apply
+/// pipeline's worker threads runnable, `sched_yield` deschedules the reader
+/// for a real quantum, the ~1KiB tty queue brims, the producer blocks, and
+/// the whole drain stretches (wish#4: yielding retries cost ~32% of reader
+/// time in `swtch_pri` and ~10% of end-to-end drain throughput on the
+/// 140x40 CRLF staircase — 292 → 324-330 MB/s once removed). A refill gap
+/// the spins can't cover just emits the partial chunk: smaller handoff,
+/// but the reader stays on-core and keeps draining.
 const REFILL_SPIN_MAX: u32 = 16;
-
-/// How many of [`REFILL_SPIN_MAX`]'s retries use a `std::hint::spin_loop()`
-/// CPU hint (a few cycles, no syscall) instead of `std::thread::yield_now()`
-/// (`sched_yield()` — a real syscall, measured at low-single-digit
-/// microseconds on this machine even when nothing else is runnable). Each
-/// retry still pays a `read()` syscall to check for new bytes either way;
-/// this only changes what happens *between* those checks, so replacing the
-/// early ones removes a whole syscall per iteration for the refill gaps
-/// that close within a few dozen nanoseconds, before falling back to
-/// actually relinquishing the CPU for slower ones. Gated on the same
-/// `streaming || congested` condition as the rest of the bridge, so
-/// interactive (non-flood) delivery is untouched.
-const REFILL_SPIN_FAST: u32 = 8;
 
 /// A single read at or above this size counts as "the kernel queue was full
 /// when drained" — the macOS pty output queue hands out at most ~1KiB per
@@ -127,6 +123,18 @@ pub(crate) fn spawn_reader(
     std::thread::Builder::new()
         .name("noa-pty-reader".into())
         .spawn(move || {
+            // Latency-critical QoS (macOS): this thread's wake latency *is*
+            // the pty drain rate — the kernel tty queue holds ~1KiB, so
+            // every scheduling delay while other pipeline threads are
+            // runnable directly blocks the producing child's `write`.
+            #[cfg(target_os = "macos")]
+            // SAFETY: plain FFI call configuring the calling thread's own QoS.
+            unsafe {
+                libc::pthread_set_qos_class_self_np(
+                    libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE,
+                    0,
+                );
+            }
             let pool = Arc::new(ReadBufferPool::new(READ_CHUNK, READ_BUFFER_POOL_CAPACITY));
             let gate = Arc::new(FlowGate::new());
             // Chunk-size/congestion debug tap; checked once, not per chunk.
@@ -159,6 +167,12 @@ fn drain_nonblocking(
 ) {
     use std::os::fd::AsRawFd as _;
     let raw = fd.as_raw_fd();
+    // Whether the previous chunk ended while the producer was still
+    // streaming (its last read filled a kernel quantum). Carried across
+    // chunk boundaries so the empty-queue moment right after a mid-flood
+    // handoff spins briefly instead of paying a full poll-park + wake —
+    // two context switches per ~1KiB kernel quantum otherwise.
+    let mut was_streaming = false;
     loop {
         let mut buf = pool.take();
         let mut n = 0usize;
@@ -182,6 +196,14 @@ fn drain_nonblocking(
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     if n == 0 {
+                        if was_streaming && spins < REFILL_SPIN_MAX {
+                            // Mid-flood refill gap at a chunk boundary:
+                            // bridge it on-core like the mid-chunk case.
+                            spins += 1;
+                            std::hint::spin_loop();
+                            continue;
+                        }
+                        was_streaming = false;
                         // Idle: park until the next byte (or hangup) arrives.
                         poll_readable(raw, -1);
                         continue;
@@ -190,11 +212,7 @@ fn drain_nonblocking(
                         gate.level() >= COALESCE_THRESHOLD || tx.len() >= COALESCE_SLOT_THRESHOLD;
                     if (streaming || congested) && spins < REFILL_SPIN_MAX {
                         spins += 1;
-                        if spins <= REFILL_SPIN_FAST {
-                            std::hint::spin_loop();
-                        } else {
-                            std::thread::yield_now();
-                        }
+                        std::hint::spin_loop();
                         continue;
                     }
                     break;
@@ -206,6 +224,7 @@ fn drain_nonblocking(
                 }
             }
         }
+        was_streaming = streaming;
         if n == 0 && !eof && pending_error.is_none() {
             pool.recycle(buf);
             continue;

@@ -156,29 +156,42 @@ impl<'a> Iterator for SgrAsciiLines<'a> {
     type Item = SgrAsciiLine<'a>;
 
     fn next(&mut self) -> Option<SgrAsciiLine<'a>> {
-        let nl = self.rest.iter().position(|&b| b == b'\n')?;
-        let crlf = nl > 0 && self.rest[nl - 1] == b'\r';
-        let body = &self.rest[..nl - usize::from(crlf)];
-        self.rest = &self.rest[nl + 1..];
+        // Mirrors the walk `Stream`'s scanner validated: SGR units, one
+        // SWAR text-run scan, SGR units, terminator — a single forward pass
+        // (no separate LF search + ESC search over the same bytes).
+        let b = self.rest;
         let mut p = 0;
-        while body.get(p) == Some(&0x1b) {
-            debug_assert!(
-                crate::sgr::scan_plain_sgr(&body[p..]).is_some(),
-                "print_sgr_ascii_lines lead unit is a plain SGR"
-            );
-            let m = body[p..]
-                .iter()
-                .position(|&b| b == b'm')
-                .expect("plain SGR unit ends in m");
-            p += m + 1;
+        while b.get(p) == Some(&0x1b) {
+            let Some(len) = crate::sgr::scan_plain_sgr(&b[p..]) else {
+                debug_assert!(false, "print_sgr_ascii_lines lead unit is a plain SGR");
+                return None;
+            };
+            p += len;
         }
-        let lead = &body[..p];
-        let t = body[p..]
-            .iter()
-            .position(|&b| b == 0x1b)
-            .map_or(body.len(), |o| p + o);
-        let text = &body[p..t];
-        let tail = &body[t..];
+        let lead = &b[..p];
+        let (run, _ascii) = crate::stream::scan_run(&b[p..]);
+        let text = &b[p..p + run];
+        let mut q = p + run;
+        while b.get(q) == Some(&0x1b) {
+            let Some(len) = crate::sgr::scan_plain_sgr(&b[q..]) else {
+                debug_assert!(false, "print_sgr_ascii_lines tail unit is a plain SGR");
+                return None;
+            };
+            q += len;
+        }
+        let tail = &b[p + run..q];
+        let crlf = match b.get(q) {
+            Some(b'\n') => false,
+            Some(b'\r') if b.get(q + 1) == Some(&b'\n') => true,
+            _ => {
+                debug_assert!(
+                    b.get(q).is_none(),
+                    "print_sgr_ascii_lines lines end in (CR)? LF"
+                );
+                return None;
+            }
+        };
+        self.rest = &b[q + 1 + usize::from(crlf)..];
         Some(SgrAsciiLine {
             lead,
             text,
@@ -207,13 +220,9 @@ impl<'a> Iterator for PlainSgrUnits<'a> {
         if self.rest.is_empty() {
             return None;
         }
-        debug_assert_eq!(self.rest[0], 0x1b, "SGR run starts at ESC");
-        let m = self
-            .rest
-            .iter()
-            .position(|&b| b == b'm')
-            .expect("plain SGR unit ends in m");
-        let (unit, rest) = self.rest.split_at(m + 1);
+        let len =
+            crate::sgr::scan_plain_sgr(self.rest).expect("SGR run holds whole plain SGR units");
+        let (unit, rest) = self.rest.split_at(len);
         self.rest = rest;
         Some(unit)
     }

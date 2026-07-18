@@ -27,6 +27,73 @@ use std::ops::Range;
 use noa_vt::{AsciiLines, PlainSgrUnits, SgrAsciiLine, SgrAsciiLines, SgrAttr};
 
 use super::*;
+use crate::cursor::Pen;
+
+/// Longest lead+tail byte string the per-call style memo caches. Covers the
+/// flood shapes that matter (a multi-param palette lead + reset tail is
+/// ~26 bytes); rarer longer edges just re-parse.
+const MEMO_KEY_MAX: usize = 48;
+/// Entries in the per-call style memo — enough for a rotating palette
+/// (drain fixtures cycle 6 styles) plus slack.
+const MEMO_ENTRIES: usize = 8;
+
+/// One memoized styled-line outcome: SGR decoding is a pure function of the
+/// starting pen and the unit bytes, so `(pen_before, lead ++ tail)` fully
+/// determines the line's cell template and the pen it leaves behind.
+#[derive(Clone, Copy)]
+struct StyleMemoEntry {
+    pen_before: Pen,
+    key: [u8; MEMO_KEY_MAX],
+    key_len: u8,
+    lead_len: u8,
+    template: Cell,
+    pen_after: Pen,
+}
+
+/// A tiny per-batch-call LRU-ish ring of styled-line outcomes: a flood
+/// repeats a handful of `sgr* text sgr*` shapes thousands of times per
+/// span, so after the first few lines every line's template/pen come from
+/// a byte-compare instead of a full SGR lex+parse+apply.
+#[derive(Default)]
+struct StyleMemo {
+    entries: [Option<StyleMemoEntry>; MEMO_ENTRIES],
+    next_slot: usize,
+}
+
+impl StyleMemo {
+    fn lookup(&self, pen: &Pen, lead: &[u8], tail: &[u8]) -> Option<&StyleMemoEntry> {
+        let key_len = lead.len() + tail.len();
+        if key_len > MEMO_KEY_MAX {
+            return None;
+        }
+        self.entries.iter().flatten().find(|e| {
+            e.key_len as usize == key_len
+                && e.lead_len as usize == lead.len()
+                && e.pen_before == *pen
+                && &e.key[..lead.len()] == lead
+                && &e.key[lead.len()..key_len] == tail
+        })
+    }
+
+    fn insert(&mut self, pen_before: Pen, lead: &[u8], tail: &[u8], template: Cell, pen_after: Pen) {
+        let key_len = lead.len() + tail.len();
+        if key_len > MEMO_KEY_MAX {
+            return;
+        }
+        let mut key = [0u8; MEMO_KEY_MAX];
+        key[..lead.len()].copy_from_slice(lead);
+        key[lead.len()..key_len].copy_from_slice(tail);
+        self.entries[self.next_slot] = Some(StyleMemoEntry {
+            pen_before,
+            key,
+            key_len: key_len as u8,
+            lead_len: lead.len() as u8,
+            template,
+            pen_after,
+        });
+        self.next_slot = (self.next_slot + 1) % MEMO_ENTRIES;
+    }
+}
 
 /// One row's worth of pending batch output: a single contiguous slice of the
 /// batch span printed starting at `start`, the style template its cells take
@@ -167,6 +234,7 @@ impl Screen {
         }
         debug_assert!(autowrap, "caller gates the batch on autowrap");
         let mut sgr_buf: Vec<SgrAttr> = Vec::new();
+        let mut memo = StyleMemo::default();
 
         // ── prefix: the line in progress, replayed through the scalar
         // primitives. Its text lands on the (possibly remnant-bearing)
@@ -250,27 +318,40 @@ impl Screen {
                 "line-batch text is printable ASCII"
             );
             if STYLED && !(line.lead.is_empty() && line.tail.is_empty()) {
-                // Speculatively run this line's style updates: the pen after
-                // the lead units styles its cells (and is what a mid-text
-                // soft-wrap would scroll with), the pen after the tail units
-                // is what its LF scrolls with. Either scroll using a BCE
-                // blank different from the batch's stops the batch *before*
-                // this line (pen rolled back, bytes left unconsumed) — the
-                // caller's per-line replay applies it with true scrolls.
-                let saved = self.cursor.pen();
-                if !line.lead.is_empty() {
-                    self.apply_plain_sgr_run(line.lead, &mut sgr_buf);
-                }
-                let template = self.pen_template();
+                // Run this line's style updates: the pen after the lead
+                // units styles its cells (and is what a mid-text soft-wrap
+                // would scroll with), the pen after the tail units is what
+                // its LF scrolls with. Either scroll using a BCE blank
+                // different from the batch's stops the batch *before* this
+                // line (pen untouched, bytes left unconsumed) — the caller's
+                // per-line replay applies it with true scrolls. Floods
+                // repeat a handful of edge shapes, so the (pure) SGR
+                // decoding is memoized per `(pen, lead ++ tail)`.
                 let wraps = line.text.len() > cols - x;
-                let wrap_blank_differs = wraps && self.blank() != blank;
-                if !line.tail.is_empty() {
-                    self.apply_plain_sgr_run(line.tail, &mut sgr_buf);
-                }
-                if wrap_blank_differs || self.blank() != blank {
-                    self.cursor.set_pen(saved);
+                let pen_before = self.cursor.pen();
+                let (template, pen_after) =
+                    match memo.lookup(&pen_before, line.lead, line.tail) {
+                        Some(e) => (e.template, e.pen_after),
+                        None => {
+                            if !line.lead.is_empty() {
+                                self.apply_plain_sgr_run(line.lead, &mut sgr_buf);
+                            }
+                            let template = self.pen_template();
+                            if !line.tail.is_empty() {
+                                self.apply_plain_sgr_run(line.tail, &mut sgr_buf);
+                            }
+                            let pen_after = self.cursor.pen();
+                            self.cursor.set_pen(pen_before);
+                            memo.insert(pen_before, line.lead, line.tail, template, pen_after);
+                            (template, pen_after)
+                        }
+                    };
+                if (wraps && Cell::blank(template.bg) != blank)
+                    || Cell::blank(pen_after.bg) != blank
+                {
                     break;
                 }
+                self.cursor.set_pen(pen_after);
                 cur_template = template;
             }
             let text_start = line.text.as_ptr() as usize - data.as_ptr() as usize;

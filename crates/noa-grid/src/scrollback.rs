@@ -123,6 +123,11 @@ fn seal_batch_rows_for(cols: usize) -> usize {
 /// Worker threads in the lazy per-scrollback pack pool; a published batch
 /// splits into this many contiguous chunks.
 const PACK_WORKERS: usize = 3;
+/// Span-only pending flushes inline every `SPAN_FLUSH_MULTIPLE x batch_rows`
+/// rows (see `deferred_boundary`): span packing is cheap enough that a wider
+/// cadence just amortizes the flush call further, while the quarter-limit
+/// `over_limit` guard still bounds the transient exactly as before.
+const SPAN_FLUSH_MULTIPLE: usize = 4;
 /// Per-row constant in the pending-bytes upper bound (row meta + slack).
 const PACKED_ROW_EST_OVERHEAD: usize = 16;
 /// Charged per grapheme-table entry (the tail text itself lives in the
@@ -793,6 +798,13 @@ pub(crate) struct PagedScrollback {
     /// into the [`SealBatch`] at publish (ranges stay valid — it is
     /// append-only between publishes).
     pending_span_bytes: Vec<u8>,
+    /// How many [`DeferredRow::Cells`] rows `pending` holds — routes the
+    /// batch boundary between the inline span flush and the worker pool
+    /// (see `deferred_boundary`).
+    pending_cell_rows: usize,
+    /// `(cols, limit_bytes)` the current `batch_rows` was derived for
+    /// (see `account_deferred`).
+    batch_rows_key: (usize, usize),
     /// Upper-bound packed sizes of the `sealing` batch and the `pending`
     /// ring (untrimmed cells × packed cell size). Drive the early-sync
     /// trigger that keeps eviction timing faithful under small retention
@@ -832,6 +844,8 @@ impl PagedScrollback {
             sealing: None,
             pending: VecDeque::new(),
             pending_span_bytes: Vec::new(),
+            pending_cell_rows: 0,
+            batch_rows_key: (0, 0),
             sealing_est_bytes: 0,
             pending_est_bytes: 0,
             batch_rows: SEAL_BATCH_MAX_ROWS,
@@ -880,6 +894,7 @@ impl PagedScrollback {
         self.pages.clear();
         self.pending.clear();
         self.pending_span_bytes = Vec::new();
+        self.pending_cell_rows = 0;
         self.sealing_est_bytes = 0;
         self.pending_est_bytes = 0;
         // Memory-decay hook: an explicit history clear also releases the
@@ -968,6 +983,7 @@ impl PagedScrollback {
         // History rows always report clean (see `take_visible_rows_with_damage`).
         row.dirty = false;
         self.account_deferred(row.cells.len());
+        self.pending_cell_rows += 1;
         self.pending.push_back(DeferredRow::Cells(row));
         self.total_rows += 1;
         self.deferred_boundary()
@@ -1008,14 +1024,21 @@ impl PagedScrollback {
     /// estimate and the width-tracked batch size.
     fn account_deferred(&mut self, cols: usize) {
         let est_row = cols * PACKED_CELL_SIZE + PACKED_ROW_EST_OVERHEAD;
-        // Width-scaled batch, additionally capped to half the quarter-limit
-        // estimate allowance (the other half is pending-refill headroom):
-        // a batch boundary past the `over_limit` crossing would mean the
-        // async pipeline never publishes under a small retention limit —
-        // every cycle would degrade to the inline `flush_all` below, packing
-        // one ever-open page that page-granular eviction cannot evict.
-        let allowance_rows = (self.limit_bytes / 4) / est_row.max(1) / 2;
-        self.batch_rows = seal_batch_rows_for(cols).min(allowance_rows).max(1);
+        // The derivation runs a handful of divisions; on the flood hot path
+        // (a call per sealed row, millions/s) it only ever changes when the
+        // width or the retention limit does, so memoize on that pair.
+        if self.batch_rows_key != (cols, self.limit_bytes) {
+            self.batch_rows_key = (cols, self.limit_bytes);
+            // Width-scaled batch, additionally capped to half the
+            // quarter-limit estimate allowance (the other half is
+            // pending-refill headroom): a batch boundary past the
+            // `over_limit` crossing would mean the async pipeline never
+            // publishes under a small retention limit — every cycle would
+            // degrade to the inline `flush_all` below, packing one
+            // ever-open page that page-granular eviction cannot evict.
+            let allowance_rows = (self.limit_bytes / 4) / est_row.max(1) / 2;
+            self.batch_rows = seal_batch_rows_for(cols).min(allowance_rows).max(1);
+        }
         self.pending_est_bytes += est_row;
     }
 
@@ -1048,8 +1071,28 @@ impl PagedScrollback {
             .saturating_add(self.pending_est_bytes)
             > self.limit_bytes / 4;
         if over_limit {
-            self.flush_all()
-        } else if self.pending.len() >= self.batch_rows {
+            return self.flush_all();
+        }
+        // Span-dominated pending (the batch-flood steady state: the line
+        // batch seals only ~one screenful of Cell rows per fed chunk, all
+        // the pass-through history as spans) packs *inline*, at a wider
+        // cadence: pack_span_row is ~an order of magnitude cheaper per row
+        // than pack_row (no per-cell style derivation, no carcass churn),
+        // so the owner absorbs it with headroom — while every worker
+        // handoff costs publish/collect bookkeeping plus wake-ups that
+        // measurably steal from the pty quantum cycle the drain rate lives
+        // on (tbench-faithful 80x24: 3 workers 375 MB/s, 1 worker 395,
+        // inline 402). Cell-dominated batches keep the worker pool: their
+        // per-cell pack cost is what the pool exists to absorb (inline
+        // cell packing measured 65-83% of flood-consume CPU on wide
+        // grids — see above).
+        if self.pending_cell_rows * 16 <= self.pending.len() {
+            if self.pending.len() >= SPAN_FLUSH_MULTIPLE * self.batch_rows {
+                return self.flush_all();
+            }
+            return 0;
+        }
+        if self.pending.len() >= self.batch_rows {
             // Batch boundary. Never *block* on the in-flight batch here — a
             // stalled `wait_results` on this path was measured as 27% of the
             // flood consume thread. If the workers are still busy, let
@@ -1131,6 +1174,7 @@ impl PagedScrollback {
                 }
             }
         }
+        self.pending_cell_rows = 0;
         evicted += self.evict_to_limit();
         evicted
     }
@@ -1194,6 +1238,7 @@ impl PagedScrollback {
             span_bytes: std::mem::take(&mut self.pending_span_bytes),
         });
         self.sealing_est_bytes = std::mem::take(&mut self.pending_est_bytes);
+        self.pending_cell_rows = 0;
         let carcasses = self.dirty_carcasses.take();
         let packer = self.packer.get_or_insert_with(Packer::spawn);
         packer.publish(&batch, carcasses);
@@ -1819,7 +1864,17 @@ mod tests {
                 "packed row {y}"
             );
         }
-        assert_eq!(by_span.bytes(), by_row.bytes());
+        // Byte accounting tracks page layout, and the two paths batch at
+        // different cadences by design (span-only pending flushes inline at
+        // a wider boundary than the worker-published cell batches), so page
+        // splits — and the per-page style-table duplicates they carry —
+        // legitimately differ by a few entries. Content identity is pinned
+        // above; accounting must only agree to within that slack.
+        let (a, b) = (by_span.bytes() as i64, by_row.bytes() as i64);
+        assert!(
+            (a - b).abs() <= 4096,
+            "packed accounting diverged: span {a} vs cells {b}"
+        );
     }
 
     #[test]

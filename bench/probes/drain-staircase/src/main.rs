@@ -192,7 +192,18 @@ fn make_terminal(stage: Stage, grid: GridSize) -> Option<Terminal> {
             t.set_scrollback_limit_bytes(0);
             Some(t)
         }
-        Stage::S4ApplySb => Some(Terminal::new(grid)),
+        Stage::S4ApplySb => {
+            let mut t = Terminal::new(grid);
+            // Experiment knob: override the scrollback retention limit to
+            // isolate eviction/limit-coupled costs (default 10MiB stays).
+            if let Some(mb) = std::env::var("DS_SB_LIMIT_MB")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+            {
+                t.set_scrollback_limit_bytes(mb * 1024 * 1024);
+            }
+            Some(t)
+        }
         _ => None,
     }
 }
@@ -528,6 +539,7 @@ fn run_tbench_faithful(
     warmup: usize,
     measured: usize,
     raw_tty: bool,
+    stage: Stage,
 ) -> Vec<Duration> {
     use noa_pty::{Pty, PtyConfig, PtyEvent};
 
@@ -555,7 +567,8 @@ fn run_tbench_faithful(
     let pty = Pty::spawn(cfg).expect("spawn pty");
 
     let mut stream = Stream::new();
-    let terminal = Arc::new(Mutex::new(Terminal::new(grid)));
+    let mut noop = NoOp;
+    let terminal = make_terminal(stage, grid).map(|t| Arc::new(Mutex::new(t)));
 
     // boundaries[0] = first byte of run 1 arrives; boundaries[k] = the k-th
     // BEL sentinel arrives (end of run k). Duration of run k = boundaries[k]
@@ -569,10 +582,14 @@ fn run_tbench_faithful(
                 if boundaries.is_empty() {
                     boundaries.push(Instant::now());
                 }
-                {
-                    let mut t = terminal.lock();
-                    stream.feed(bytes, &mut *t);
-                    parking_lot::MutexGuard::unlock_fair(t);
+                match stage {
+                    Stage::S1Discard => {}
+                    Stage::S2Parse => stream.feed(bytes, &mut noop),
+                    Stage::S3ApplyNoSb | Stage::S4ApplySb => {
+                        let mut t = terminal.as_ref().unwrap().lock();
+                        stream.feed(bytes, &mut *t);
+                        parking_lot::MutexGuard::unlock_fair(t);
+                    }
                 }
                 let bel_count = bytes.iter().filter(|&&b| b == 0x07).count();
                 if bel_count > 0 {
@@ -838,7 +855,13 @@ fn main() {
             std::process::id()
         );
         let raw_tty = has("--raw-tty");
-        let durs = run_tbench_faithful(&fixture, grid, warmup, measured, raw_tty);
+        let stage = match str_flag("--stage").as_deref() {
+            Some("s1") => Stage::S1Discard,
+            Some("s2") => Stage::S2Parse,
+            Some("s3") => Stage::S3ApplyNoSb,
+            _ => Stage::S4ApplySb,
+        };
+        let durs = run_tbench_faithful(&fixture, grid, warmup, measured, raw_tty, stage);
         let mbps_vals: Vec<f64> = durs.iter().map(|d| mbps(fixture_len, *d)).collect();
         for (i, (m, d)) in mbps_vals.iter().zip(durs.iter()).enumerate() {
             println!("run {:2}: {:.1} MB/s ({:.4}s)", i + 1, m, d.as_secs_f64());
@@ -849,7 +872,8 @@ fn main() {
             / mbps_vals.len() as f64;
         let stddev = variance.sqrt();
         println!(
-            "\ntbench-faithful plain: median {:.1} MB/s, mean {:.1}, stddev {:.2}, n={}",
+            "\ntbench-faithful {} plain: median {:.1} MB/s, mean {:.1}, stddev {:.2}, n={}",
+            stage_name(stage),
             med,
             mean,
             stddev,

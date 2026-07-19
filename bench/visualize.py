@@ -124,13 +124,20 @@ def sec_scroll(axis, terms):
 
 
 def sec_fire(axis, terms, contention):
+    # Rank by Mcells/s when present (fps is geometry-dependent under
+    # full-window regions; cell-normalized throughput is the fair key).
     rows, unmeas = [], []
     for t in terms:
         c = axis.get(t, {})
         if cell_measured(c) and "fps_median" in c:
             region = c.get("region", "?")
-            rows.append({"name": t, "value": c["fps_median"],
-                         "label": f'{c["fps_median"]:.1f} fps ({region})', "noa": t == "noa"})
+            mc = c.get("mcells_per_s_median")
+            value = mc if mc is not None else c["fps_median"]
+            label = (f'{mc:.2f} Mcells/s · {c["fps_median"]:.1f} fps ({region})'
+                     if mc is not None
+                     else f'{c["fps_median"]:.1f} fps ({region})')
+            rows.append({"name": t, "value": value, "label": label,
+                         "noa": t == "noa"})
         elif t in axis:
             unmeas.append(t)
     if not rows:
@@ -258,7 +265,21 @@ def noa_trend(runs):
             out["scroll (MiB/s)"] = (sc["mib_per_s"], True)
         fi = ax.get("fire", {}).get("noa", {})
         if cell_measured(fi) and "fps_median" in fi:
-            out["fire (fps)"] = (fi["fps_median"], True)
+            # Geometry-fair trend key; fps across runs with different
+            # window regions would chart the geometry, not the terminal.
+            # Derived from fps+region for results.json written before the
+            # key existed, so one trend series spans old and new runs.
+            mc = fi.get("mcells_per_s_median")
+            if mc is None:
+                try:
+                    w, h = (int(x) for x in fi.get("region", "").split("x"))
+                    mc = fi["fps_median"] * w * h / 1e6
+                except ValueError:
+                    mc = None
+            if mc is not None:
+                out["fire (Mcells/s)"] = (round(mc, 2), True)
+            else:
+                out["fire (fps)"] = (fi["fps_median"], True)
         la = ax.get("latency", {}).get("noa", {})
         if cell_measured(la) and "median_us" in la:
             out["latency median (µs)"] = (la["median_us"], False)

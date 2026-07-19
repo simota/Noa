@@ -199,6 +199,16 @@ if "fire" in axes_with_data:
             fire[term] = {"fps_median": float(cell["fps"]), "fps_reps": reps,
                           "region": region,
                           **({"winsize": winsz} if winsz else {})}
+            # Cell-normalized throughput: full-window regions differ per
+            # terminal (font defaults), so fps alone measures the geometry
+            # lottery; Mcells/s = fps x region cells is the fair rank key.
+            # Derived (not a raw metric) so pre-existing raw files gain it.
+            try:
+                w, h = (int(x) for x in region.split("x"))
+                fire[term]["mcells_per_s_median"] = round(
+                    float(cell["fps"]) * w * h / 1e6, 2)
+            except ValueError:
+                pass
         else:
             fire[term] = {"status": "UNMEASURED"}
     results["axes"]["fire"] = fire
@@ -378,15 +388,20 @@ if "fire" in axes_with_data:
     def fmt_fire(c):
         if c.get("status") == "UNMEASURED":
             return "UNMEASURED"
-        return f"{c['fps_median']:.1f} ({c.get('region', '?')})"
+        mc = c.get("mcells_per_s_median")
+        base = f"{c['fps_median']:.1f} ({c.get('region', '?')})"
+        return f"{mc:.2f} · {base}" if mc is not None else base
     fire_cond = contention.get("fire_condition", "fixed 80x24 region (pre-2026-07-17 harness)")
-    lines.append("\n## Fire — DOOM-fire IO stress (fps, higher better)")
-    lines.append(f"Condition: {fire_cond}. Producer-side fps under pty flow control "
-                 "(frames written ≈ frames consumed); per-terminal render region in "
-                 "parentheses. Not comparable to published DOOM-fire-zig figures "
+    fire_prod = contention.get("fire_producer", "v1-serial (pre-2026-07-19 harness)")
+    lines.append("\n## Fire — DOOM-fire IO stress (Mcells/s · fps, higher better)")
+    lines.append(f"Condition: {fire_cond}. Producer: {fire_prod}. Producer-side fps "
+                 "under pty flow control (frames written ≈ frames consumed); "
+                 "Mcells/s = fps × region cells is the geometry-fair rank key when "
+                 "full-window regions differ per terminal. fps is not comparable "
+                 "across producer versions, nor to published DOOM-fire-zig figures "
                  "(other machines/displays).")
     lines.append(hdr.replace("Terminal", "Metric")); lines.append(sep)
-    lines.append("| fire fps (region) | " + " | ".join(fmt_fire(fire[t]) for t in terminals) + " |")
+    lines.append("| fire Mcells/s · fps (region) | " + " | ".join(fmt_fire(fire[t]) for t in terminals) + " |")
 
 if "latency" in axes_with_data:
     lines.append("\n## Input Latency — DSR round-trip proxy (median / p95 / p99 / max µs, lower better)")
@@ -551,8 +566,10 @@ def load_active_val(t, scenario):
     c = load[t][scenario]; return None if c.get("status") == "UNMEASURED" else c["cpu_ms"]
 
 def fire_val(t):
+    # Geometry-fair rank key; fps fallback only for raw files whose region
+    # was unparsable (mcells is derived whenever region parses).
     c = fire.get(t, {})
-    return c.get("fps_median")
+    return c.get("mcells_per_s_median", c.get("fps_median"))
 
 rank_items = []
 if "throughput" in axes_with_data:
@@ -561,7 +578,7 @@ if "throughput" in axes_with_data:
 if "scroll" in axes_with_data:
     rank_items.append(("scroll (MiB/s)", rank(True, sc_val)))
 if "fire" in axes_with_data:
-    rank_items.append(("fire (fps)", rank(True, fire_val)))
+    rank_items.append(("fire (Mcells/s)", rank(True, fire_val)))
 if "latency" in axes_with_data:
     rank_items.append(("latency (median)", rank(False, lat_val)))
 if "startup" in axes_with_data:

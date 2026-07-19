@@ -1211,15 +1211,21 @@ else
   FIRE_COND="fixed 80x24 region (windowed fallback; byte-identical stream)"
 fi
 emit harness meta - - fire_condition "$FIRE_COND" note
+# Producer version: v2 overlaps frame composition with the pty write
+# (writer thread + two-buffer ping-pong), so fps measures drain alone.
+# v1 (serial compose-then-write) fps is ~8% lower at 169x52 and NOT
+# comparable; the marker below lets aggregate runs across versions refuse
+# to mix them.
+emit harness meta - - fire_producer "v2-overlapped" note
 for term in $SELECTED; do
   echo "[fire] $term ($FIRE_REPS reps x ${FIRE_SECS}s, $FIRE_COND, 60 warmup frames discarded)"
-  samples=""; got=0
+  samples=""; got=0; last_region="unknown"
   for r in $(seq 1 $FIRE_REPS); do
     out="$(run_once "$term" fire "$FIRE_TIMEOUT")" || continue
     set -- $out
     frames="${1:-0}"; elapsed_ns="${2:-0}"; fps="${3:-0}"; winsz="${4:-unknown}"; region="${5:-unknown}"
     case "$frames" in ''|*[!0-9]*) continue ;; 0) continue ;; esac
-    got=$((got + 1))
+    got=$((got + 1)); last_region="$region"
     emit "$term" fire - "$r" frames "$frames" count
     emit "$term" fire - "$r" elapsed_ns "$elapsed_ns" ns
     emit "$term" fire - "$r" fps "$fps" fps
@@ -1230,7 +1236,13 @@ for term in $SELECTED; do
   if [ "$got" -ge 1 ]; then
     med="$(printf "$samples" | median_f)"
     emit "$term" fire - median fps "$med" fps
-    echo "    median ${med} fps"
+    # Cell-normalized throughput (region cells x fps): the geometry-fair
+    # number when full-window regions differ per terminal. Derived here for
+    # the console; aggregate.py re-derives it from fps+region rows so old
+    # raw files gain it too.
+    mcells="$(awk -v fps="$med" -v r="$last_region" \
+      'BEGIN{n=split(r,a,"x"); if(n==2) printf "%.2f", fps*a[1]*a[2]/1e6; else printf "?"}')"
+    echo "    median ${med} fps (${mcells} Mcells/s @ ${last_region})"
   else
     emit "$term" fire - - status UNMEASURED timeout
     echo "    UNMEASURED (timeout)"

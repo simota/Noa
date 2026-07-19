@@ -661,6 +661,24 @@ hundreds or more. The window is focused during the run (same PID-scoped
 activation as the latency axis, applied uniformly) so no terminal is measured
 under macOS occluded/unfocused throttling.
 
+**Overlapped producer (v2, 2026-07-19).** v1 composed each frame and then
+wrote it serially, so every terminal's fps was taxed by the composition time
+(~8% at 169×52 on M-series: 616.9 → 662.3 fps against an identical null-drain
+consumer). v2 composes frame N+1 on the main thread while a writer thread
+pushes frame N into the pty (two-buffer ping-pong); fps now measures the
+terminal's drain alone. The byte stream is unchanged (same seed, same frame
+order, identical-prefix property holds). **v1 and v2 fps are not comparable**;
+runs record `fire_producer` in raw.tsv and `table.md` states it.
+
+**Cell-normalized score (Mcells/s).** Under the full-window condition each
+terminal's region follows its own font defaults, so raw fps partly measures
+the geometry lottery (a terminal drawing 8788 cells/frame at 998 fps is
+faster than one drawing 8188 at 1000). `Mcells/s = fps × region cells` is
+the geometry-fair rank key: aggregate/table/visualize rank by it (derived
+from the recorded per-rep fps + region, so older raw files gain it
+retroactively), with fps + region always printed alongside. Under the fixed
+80×24 condition the two orderings coincide by construction.
+
 **Anchor caveat:** published DOOM-fire-zig figures come from other machines
 and full-window regions and are **not comparable** to this axis's numbers —
 they motivated the axis, nothing more. This implementation reproduces the workload *shape*,

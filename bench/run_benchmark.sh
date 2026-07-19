@@ -125,8 +125,13 @@ if selected fire; then
   "$TOOLS/fire" "$FIRE_SECS" "$result" $fire_mode_arg
   read -r frames elapsed_ns fps winsz region < "$result"
   rm -f "$result"
-  echo "fire: ${fps} fps (${frames} frames / ${FIRE_SECS}s, region ${region}, winsize ${winsz})"
-  note "fire: ${fps} fps (${frames} frames, ${FIRE_SECS}s, region ${region})"
+  # Cell-normalized throughput: fps depends on region geometry (full mode
+  # follows the live window), so Mcells/s = fps x region cells is the
+  # cross-terminal-comparable number.
+  mcells=$(awk -v fps="$fps" -v r="$region" \
+    'BEGIN{n=split(r,a,"x"); if(n==2) printf "%.2f", fps*a[1]*a[2]/1e6; else printf "?"}')
+  echo "fire: ${fps} fps / ${mcells} Mcells/s (${frames} frames / ${FIRE_SECS}s, region ${region}, winsize ${winsz})"
+  note "fire: ${fps} fps / ${mcells} Mcells/s (${frames} frames, ${FIRE_SECS}s, region ${region})"
 fi
 
 # ── latency (DSR round-trip proxy) ──────────────────────────────────

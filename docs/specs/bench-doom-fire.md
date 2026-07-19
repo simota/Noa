@@ -130,6 +130,27 @@ and its caveat (drain rate, not photon rate), the focus policy, and an
 explicit note that published DOOM-fire-zig figures are other machines +
 full-window regions and must not be compared to this axis's numbers.
 
+## Decision 4 — overlapped producer + Mcells/s rank key (2026-07-19)
+
+Root-caused from a transport study (fire is pty-transport-bound: macOS hands
+out at most 1024 B per master read regardless of baud; parse throughput is
+2.4× the transport rate; noa's full pipeline S4 == read-and-discard S1):
+
+- **Producer v2 overlaps composition with the write.** v1's serial
+  compose-then-write loop taxed every terminal's fps by the compose time
+  (~8% at 169×52: 616.9 → 662.3 fps against an identical null-drain
+  consumer). v2 uses a writer thread + two-buffer ping-pong so fps measures
+  the drain alone. Byte stream unchanged (same seed/order; identical-prefix
+  property holds — verified against v1 with `cmp` in both modes). fps is
+  **not comparable across producer versions**; `fire_producer` is recorded
+  in raw.tsv (`v2-overlapped`; absence means v1-serial).
+- **Mcells/s (= fps × region cells) is the rank key.** Full-window regions
+  follow each terminal's font defaults, so raw fps partly measures the
+  geometry lottery. aggregate/table/visualize rank by the derived Mcells/s
+  (computed from recorded fps + region — older raw files gain it
+  retroactively); fps + region stay printed alongside. Fixed-region runs
+  are unaffected (same ordering by construction).
+
 ## Acceptance criteria
 
 1. `bench/run_all.sh --axes fire` produces per-terminal median fps for all

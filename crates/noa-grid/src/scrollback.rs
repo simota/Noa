@@ -230,7 +230,10 @@ bitflags::bitflags! {
 }
 
 /// One scrollback cell, 8 bytes (a third of an inlined `Cell`). The
-/// `size_of` is pinned by a test.
+/// `size_of` is pinned by a test. `repr(C)` fixes the field layout so the
+/// bulk-pack loops can materialize a cell as one little-endian `u64` store
+/// ([`packed_word_base`]) instead of three sub-word stores.
+#[repr(C)]
 #[derive(Clone, Copy)]
 struct PackedCell {
     ch: char,
@@ -244,6 +247,30 @@ impl PackedCell {
     fn has_text(&self) -> bool {
         self.ch != ' ' || self.flags.contains(PackedFlags::HAS_GRAPHEME)
     }
+}
+
+/// The little-endian `u64` image of a [`PackedCell`] with `ch == '\0'`, given
+/// its (constant-across-a-run) `style`/`flags`. OR-ing in a base-ASCII byte
+/// `b` (`b < 0x80`, so it lands in `ch`'s low byte) yields the full cell word,
+/// letting the bulk-pack loops emit one aligned-width store per cell instead
+/// of separate `ch`/`style`/`flags` writes. Layout is fixed by
+/// `PackedCell`'s `repr(C)`: `ch` at byte 0 (4B), `style` at 4 (2B), `flags`
+/// at 6 (1B), pad at 7 (written 0). Correct only on little-endian targets
+/// (every platform noa builds for); pinned by `packed_word_base_matches_write`.
+#[inline]
+fn packed_word_base(style: StyleId, flags: PackedFlags) -> u64 {
+    (style.0 as u64) << 32 | (flags.bits() as u64) << 48
+}
+
+/// Write `word` (a [`packed_word_base`] value OR-ed with a base-ASCII byte)
+/// into the packed cell at `dst`. `dst` need only be `PackedCell`-aligned
+/// (4B); the store is unaligned-width.
+///
+/// # Safety
+/// `dst` must point to at least 8 writable bytes (one `PackedCell` slot).
+#[inline]
+unsafe fn write_packed_word(dst: *mut PackedCell, word: u64) {
+    unsafe { (dst as *mut u64).write_unaligned(word) }
 }
 
 /// Append-only style pool for one page, with an interning lookup.
@@ -486,15 +513,14 @@ impl Page {
                 delta += GRAPHEME_ENTRY_COST;
                 self.graphemes.insert((base + i) as u32, grapheme);
             }
+            // One aligned-width store (`ch` OR-ed into the run's constant
+            // style/flags word) rather than three sub-word writes.
+            let anchor_word = packed_word_base(id, flags) | anchor.ch as u32 as u64;
             // SAFETY: `reserve(len)` guaranteed room for `base..base+len`;
             // `i < len` and `self.cells` is untouched by the calls above, so
-            // `dst.add(base + i)` is in-bounds and uninitialized.
+            // `dst.add(base + i)` is an in-bounds packed-cell slot.
             unsafe {
-                dst.add(base + i).write(PackedCell {
-                    ch: anchor.ch,
-                    style: id,
-                    flags,
-                });
+                write_packed_word(dst.add(base + i), anchor_word);
             }
             let anchor_style_attrs = anchor.attrs.difference(layout);
             i += 1;
@@ -522,14 +548,11 @@ impl Page {
                 if cell.attrs.contains(CellAttrs::WIDE_SPACER) {
                     flags.insert(PackedFlags::WIDE_SPACER);
                 }
+                let word = packed_word_base(id, flags) | cell.ch as u32 as u64;
                 // SAFETY: same argument as the anchor write above; nothing in
                 // this loop touches `self.cells`.
                 unsafe {
-                    dst.add(base + i).write(PackedCell {
-                        ch: cell.ch,
-                        style: id,
-                        flags,
-                    });
+                    write_packed_word(dst.add(base + i), word);
                 }
                 i += 1;
             }
@@ -619,14 +642,19 @@ impl Page {
             if is_new {
                 delta += std::mem::size_of::<Style>();
             }
+            // Every text cell shares one style (the line template) and empty
+            // flags, so the per-cell work is one `word_base | b` OR plus a
+            // single 8-byte store — this loop is the ASCII short-line flood's
+            // hottest (measured ~26% of whole-pipeline CPU). It is
+            // memory-bandwidth-bound: a paired 16-byte store was measured
+            // ~8% *slower* (the extra shift/OR to assemble the wide word costs
+            // more than the store count it saves), so keep the scalar store.
+            let word_base = packed_word_base(id, PackedFlags::empty());
             for (k, &b) in text[..text_end - lead].iter().enumerate() {
-                // SAFETY: as above; `lead + k < text_end <= len`.
+                // SAFETY: as above; `lead + k < text_end <= len`, so
+                // `dst.add(base + lead + k)` is an in-bounds packed-cell slot.
                 unsafe {
-                    dst.add(base + lead + k).write(PackedCell {
-                        ch: b as char,
-                        style: id,
-                        flags: PackedFlags::empty(),
-                    });
+                    write_packed_word(dst.add(base + lead + k), word_base | b as u64);
                 }
             }
         }
@@ -999,9 +1027,90 @@ impl PagedScrollback {
         self.deferred_boundary()
     }
 
+    /// Pack a line-batch byte-span row (see [`SpanRow`]) straight into a page,
+    /// directly from the caller's live text bytes — no copy into the deferred
+    /// span arena, no replacement row, no per-cell Cell writes, no carcass
+    /// round-trip: only the ≤`cols` text bytes are read, once, on their way
+    /// into the packed arena.
+    ///
+    /// Unlike the Cell seal path ([`Self::push_row_deferred`], which the
+    /// off-thread packer pool absorbs), span rows carry no per-cell style
+    /// derivation to hide behind workers — `pack_span_row` is already an
+    /// order of magnitude cheaper — so publishing them to the pool only ever
+    /// bought a redundant text copy (measured ~10% of the ascii short-line
+    /// flood pipeline in `extend_from_slice`). Packing here removes it.
+    ///
+    /// The immediate pack applies only when the scrollback is *caught up* —
+    /// no rows queued in `pending` and no worker batch in flight — so the new
+    /// span is genuinely the newest row and page order is preserved. That is
+    /// the ascii-flood steady state (the batch seals its scrolled grid rows
+    /// through [`Self::push_row_immediate`], which keeps `pending` drained).
+    /// Otherwise the span would land ahead of earlier rows still in the
+    /// deferred tiers, and settling them would mean blocking on the packer —
+    /// so it defers through [`Self::push_span_deferred`] instead, exactly as
+    /// before, preserving order without a worker stall.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_span_immediate(
+        &mut self,
+        text: &[u8],
+        col: u16,
+        cols: u16,
+        template: &Cell,
+        blank: &Cell,
+        wrapped: bool,
+    ) -> usize {
+        if self.limit_bytes == 0 {
+            return 1;
+        }
+        if !self.pending.is_empty() || self.sealing.is_some() {
+            return self.push_span_deferred(text, col, cols, template, blank, wrapped);
+        }
+        let span = SpanRow {
+            bytes: 0..text.len() as u32,
+            col,
+            cols,
+            wrapped,
+            template: *template,
+            blank: *blank,
+        };
+        let page = self.ensure_page(cols);
+        let delta = page.pack_span_row(&span, text);
+        self.total_bytes += delta;
+        self.total_rows += 1;
+        self.evict_to_limit()
+    }
+
+    /// Pack a Cell row straight into a page (recycling its carcass), when the
+    /// caller can guarantee the row is the newest. The line-batch seal path
+    /// uses this for the pre-existing grid rows it scrolls off so `pending`
+    /// stays drained and its span rows take [`Self::push_span_immediate`]'s
+    /// fast path. Any still-deferred rows precede this one, so they settle
+    /// first; in the ascii flood that is at most the one scalar-prefix row
+    /// per fed chunk (no worker batch forms), so the settle never stalls.
+    pub(crate) fn push_row_immediate(&mut self, row: Row) -> usize {
+        if self.limit_bytes == 0 {
+            return 1;
+        }
+        let mut evicted = if self.pending.is_empty() && self.sealing.is_none() {
+            0
+        } else {
+            self.flush_all()
+        };
+        let cols = row.cells.len() as u16;
+        let page = self.ensure_page(cols);
+        let (delta, len) = page.pack_row(&row);
+        self.total_bytes += delta;
+        self.total_rows += 1;
+        self.recycle_carcass(row, len);
+        evicted += self.evict_to_limit();
+        evicted
+    }
+
     /// [`Self::push_row_deferred`] for a line-batch byte-span row (see
-    /// [`SpanRow`]): copies only the text bytes into the span arena — no
-    /// replacement row, no per-cell writes, no carcass round-trip.
+    /// [`SpanRow`]): copies the text bytes into the span arena and defers the
+    /// pack to the worker pool. The seal path reaches this through
+    /// [`Self::push_span_immediate`] only when the scrollback is not caught up
+    /// (a worker batch is in flight); the flood steady state packs immediately.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn push_span_deferred(
         &mut self,
@@ -1764,6 +1873,49 @@ mod tests {
     #[test]
     fn packed_cell_is_8_bytes() {
         assert_eq!(std::mem::size_of::<PackedCell>(), 8);
+    }
+
+    /// `packed_word_base(style, flags) | b` must be the exact byte image a
+    /// `PackedCell { ch: b as char, style, flags }` write produces — the
+    /// invariant the bulk-pack fast store relies on.
+    #[test]
+    fn packed_word_base_matches_write() {
+        for &b in &[0u8, b' ', b'A', 0x7e] {
+            for style in [StyleId(0), StyleId(1), StyleId(0x1234)] {
+                for flags in [
+                    PackedFlags::empty(),
+                    PackedFlags::WIDE,
+                    PackedFlags::WIDE | PackedFlags::HAS_GRAPHEME,
+                ] {
+                    let word = packed_word_base(style, flags) | b as u64;
+                    let cell = PackedCell {
+                        ch: b as char,
+                        style,
+                        flags,
+                    };
+                    // SAFETY: PackedCell is repr(C) POD, 8 bytes, no uninit
+                    // reads here — `cell` is fully initialized (pad byte is
+                    // part of the value copy; the fast store writes it 0, and
+                    // this test never inspects it: compare via a fresh
+                    // unaligned read of the same construction).
+                    let mut buf = [0u8; 8];
+                    unsafe {
+                        (buf.as_mut_ptr() as *mut PackedCell).write_unaligned(cell);
+                    }
+                    // The pad byte (index 7) is unspecified in `cell`; mask it
+                    // out of both sides before comparing.
+                    let mut from_write = u64::from_le_bytes(buf);
+                    from_write &= 0x00ff_ffff_ffff_ffff;
+                    assert_eq!(
+                        word & 0x00ff_ffff_ffff_ffff,
+                        from_write,
+                        "b={b:#x} style={} flags={:#x}",
+                        style.0,
+                        flags.bits()
+                    );
+                }
+            }
+        }
     }
 
     /// The whole [`SpanRow`] contract: packing straight from the bytes must

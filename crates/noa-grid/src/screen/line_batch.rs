@@ -502,7 +502,7 @@ impl Screen {
     fn seal_span_row(&mut self, rec: &RowRec, data: &[u8], blank: &Cell, full_height: bool) {
         let bottom = self.region.bottom as usize;
         let old_len = self.scrollback.len();
-        let evicted = self.scrollback.push_span_deferred(
+        let evicted = self.scrollback.push_span_immediate(
             &data[rec.span.clone()],
             rec.start as u16,
             self.cols,
@@ -518,11 +518,14 @@ impl Screen {
     }
 
     /// Push one sealed row and settle the same per-scroll bookkeeping the
-    /// scalar `scroll_up_region(1)` performs around its push.
+    /// scalar `scroll_up_region(1)` performs around its push. Packs the row
+    /// immediately (keeping `pending` drained so the batch's span rows take
+    /// the immediate fast path — see [`noa-grid` scrollback]
+    /// `push_span_immediate`).
     fn scrollback_push_sealed(&mut self, row: Row, full_height: bool) {
         let bottom = self.region.bottom as usize;
         let old_len = self.scrollback.len();
-        let evicted = self.scrollback.push_row_deferred(row);
+        let evicted = self.scrollback.push_row_immediate(row);
         if !full_height {
             self.shift_tracked_points_down_from(old_len.saturating_add(bottom + 1), 1);
         }

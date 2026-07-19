@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-07-19
+
+### Added
+
+- bench: the fire axis, multi-terminal support (Alacritty, iTerm2, Warp,
+  Terminal.app, Rio), fullscreen render-path measurement, HTML reports, and
+  `docs/positioning.md` first ship in this tag — they were described in the
+  0.1.7 notes but merged after the v0.1.7 tag was cut (#23)
+- bench: `ghostty-nightly` terminal entry for a frozen-build baseline, a
+  headless `cell_bandwidth` probe (consume/frames/store), the in-tree
+  drain-staircase probe harness (S1 read / S2 parse / S3–S4 apply lenses),
+  and a single-run `--real-one` mode for pipeline iteration
+
+### Changed
+
+- PTY drain ingest overhaul: complete plain and edge-SGR styled line floods
+  are now recognized in the VT ground scan and applied as amortized line
+  batches (`print_ascii_lines` / `print_sgr_ascii_lines`) with one grid
+  rotation per batch; the screen grid became a base-offset ring so the
+  full-height LF scroll is an O(1) base bump instead of an O(rows) rotate;
+  batched rows seal to scrollback as raw byte spans packed straight to
+  pages, skipping Cell-row materialization. ansi staircase real S3
+  326→416 MB/s, proc S4 480→661 MB/s (#29)
+- PTY reader: the master is O_NONBLOCK and drains the whole tty queue per
+  wakeup; the refill bridge spins instead of yielding mid-flood and the
+  reader declares USER_INTERACTIVE QoS, keeping the kernel tty queue from
+  brimming while pipeline threads are runnable (S4 plain 292→360 MB/s) (#29)
+- Scrollback sealing is truly asynchronous under sustained floods: seal
+  batches scale with width to a ~1MiB raw-byte target (capped by the
+  over-limit estimate allowance), a row-occupancy watermark skips
+  blank-tail loads, and the packed store emits one u64 per cell with
+  immediate span pack — feed_bench ascii 410→~500 MiB/s, in-app `time cat`
+  0.472→0.455s (parity with ghostty nightly's 0.454s)
+- `Cell` redesigned as a 24-byte POD with interned grapheme tails
+- VT parser: whole in-chunk CSI sequences bypass the per-byte DFA, ground
+  state C0 controls dispatch without it, pre-verified ASCII runs skip
+  `print_str`'s re-scan, and the fire-shape micro path adds stack SGR
+  dispatch plus a narrow print fast path
+
 ## [0.1.7] - 2026-07-17
 
 ### Added

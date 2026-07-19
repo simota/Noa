@@ -50,7 +50,15 @@ esac
 export CARGO_TARGET_DIR="$TARGET_ROOT"
 
 case "$MODE" in
-  release) cargo build --release -p noa; PROFILE="release" ;;
+  release)
+    # Release bundles ship the PGO-optimized binary (+4-6% ingest throughput,
+    # see scripts/build-pgo.sh). NOA_PGO=0 opts out (plain release build).
+    if [ "${NOA_PGO:-1}" = "1" ]; then
+      "$ROOT/scripts/build-pgo.sh"
+    else
+      cargo build --release -p noa
+    fi
+    PROFILE="release" ;;
   debug)   cargo build -p noa;           PROFILE="debug"   ;;
   *) echo "usage: $0 [release|debug]" >&2; exit 2 ;;
 esac

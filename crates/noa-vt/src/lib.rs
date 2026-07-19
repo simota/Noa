@@ -26,14 +26,14 @@ mod tests;
 pub use action::Action;
 pub use csi::{Csi, DcsPayload, Esc};
 pub use handler::{
-    Charset, CharsetSlot, CursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine, Handler,
-    ModeRequest,
+    AsciiLine, AsciiLines, Charset, CharsetSlot, CursorStyle, DaKind, DsrKind, EraseDisplay,
+    EraseLine, Handler, ModeRequest, PlainSgrUnits, SgrAsciiLine, SgrAsciiLines,
 };
 pub use kitty_graphics::{
     KittyAction, KittyCompression, KittyDelete, KittyFormat, KittyGraphicsCommand, KittyMedium,
 };
 pub use parser::Parser;
-pub use sgr::{SgrAttr, parse_sgr};
+pub use sgr::{SgrAttr, parse_plain_sgr_unit, parse_sgr, scan_plain_sgr};
 pub use sixel::SixelGraphicsCommand;
 pub use state::State;
 pub use stream::{SharedParser, Stream};

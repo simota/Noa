@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "bin/noa", "tests/parity"]
+members = ["crates/*", "bin/noa", "tests/parity", "bench/probes/drain-staircase"]
 
 # Cross-crate inlining for the release binary: the hot pty→parser→grid feed
 # path spans noa-vt/noa-grid crate boundaries, and thin LTO recovers the

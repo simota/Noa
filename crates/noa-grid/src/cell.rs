@@ -244,6 +244,164 @@ impl Row {
     }
 }
 
+/// Logical-order iterator over a [`RingGrid`] (see [`RingGrid::iter`]):
+/// physical storage split at the ring `base`, oldest-relative-to-`base`
+/// slice first. Named (rather than `impl Trait`) so it can appear as
+/// `IntoIterator::IntoIter` for `&RingGrid` / `&mut RingGrid`.
+pub type RowIter<'a> = std::iter::Chain<std::slice::Iter<'a, Row>, std::slice::Iter<'a, Row>>;
+pub type RowIterMut<'a> =
+    std::iter::Chain<std::slice::IterMut<'a, Row>, std::slice::IterMut<'a, Row>>;
+
+/// A fixed-length ring of [`Row`]s backing the live grid
+/// (`crate::screen::Screen::grid`). Logical row `y` (`0..len()`) maps to
+/// physical storage index `(base + y) % len()`.
+///
+/// A full-height scroll (the common LF-driven case,
+/// `Screen::scroll_up_region`) retires the departing rows in place through
+/// [`Self::index_mut`] (a plain `mem::replace`, unchanged from before) and
+/// then calls [`Self::advance_base`] — an O(1) index bump, not a data move.
+/// This replaces the `Vec::rotate_left` header memmove that used to run on
+/// every line feed (see `.agents/reports/wish4-apply-hotpath.md`): rotating
+/// a `Vec<Row>` slice always permutes every element's *storage slot*, even
+/// though only the `n` retiring rows actually need new content — a ring
+/// needs to move none of them, since "row 0" is just redefined to point at
+/// a different physical slot.
+///
+/// Operations that need a genuine contiguous slice — partial-region scrolls
+/// (DECSTBM), insert/delete lines, erase, resize/reflow — call
+/// [`Self::canonicalize`] first, which physically rotates storage back to
+/// `base == 0` (the same O(rows) cost `Vec::rotate_left` always paid) and
+/// hands back a plain `&mut Vec<Row>` so those conventional paths are
+/// otherwise untouched.
+#[derive(Clone, Debug)]
+pub struct RingGrid {
+    storage: Vec<Row>,
+    base: usize,
+}
+
+impl RingGrid {
+    #[inline]
+    fn phys(&self, logical: usize) -> usize {
+        let len = self.storage.len();
+        if len == 0 {
+            return 0;
+        }
+        debug_assert!(self.base < len);
+        let p = self.base + logical;
+        if p >= len { p - len } else { p }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.storage.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.storage.is_empty()
+    }
+
+    #[inline]
+    pub fn get(&self, y: usize) -> Option<&Row> {
+        if y >= self.storage.len() {
+            return None;
+        }
+        Some(&self.storage[self.phys(y)])
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, y: usize) -> Option<&mut Row> {
+        if y >= self.storage.len() {
+            return None;
+        }
+        let p = self.phys(y);
+        Some(&mut self.storage[p])
+    }
+
+    /// Logical (on-screen) row order: physical storage split at `base`, the
+    /// `base..` slice (logical rows `0..len-base`) followed by the `..base`
+    /// slice (logical rows `len-base..len`). Double-ended so callers that
+    /// walk from the bottom (e.g. the sidebar preview's trailing-non-blank
+    /// scan) can `.rev()` without collecting.
+    #[inline]
+    pub fn iter(&self) -> RowIter<'_> {
+        let base = self.base.min(self.storage.len());
+        let (head, tail) = self.storage.split_at(base);
+        tail.iter().chain(head.iter())
+    }
+
+    #[inline]
+    pub fn iter_mut(&mut self) -> RowIterMut<'_> {
+        let base = self.base.min(self.storage.len());
+        let (head, tail) = self.storage.split_at_mut(base);
+        tail.iter_mut().chain(head.iter_mut())
+    }
+
+    /// Rebase physical storage so logical row 0 is physical index 0 — an
+    /// O(rows) row-header rotate, skipped when already canonical (`base ==
+    /// 0`) — and hand back the plain backing `Vec<Row>` for range-slicing
+    /// operations a wrapped ring cannot express directly (see the type doc).
+    pub fn canonicalize(&mut self) -> &mut Vec<Row> {
+        if self.base != 0 {
+            self.storage.rotate_left(self.base);
+            self.base = 0;
+        }
+        &mut self.storage
+    }
+
+    /// Advance the ring base by `n` rows (mod length): the O(1) counterpart
+    /// to rotating every row header left by `n`. The caller must already
+    /// have replaced or cleared the `n` retiring logical rows (indices
+    /// `0..n`) — those physical slots become the new logical tail.
+    pub fn advance_base(&mut self, n: usize) {
+        let len = self.storage.len();
+        if len == 0 {
+            return;
+        }
+        self.base = (self.base + n) % len;
+    }
+}
+
+impl std::ops::Index<usize> for RingGrid {
+    type Output = Row;
+    #[inline]
+    fn index(&self, y: usize) -> &Row {
+        &self.storage[self.phys(y)]
+    }
+}
+
+impl std::ops::IndexMut<usize> for RingGrid {
+    #[inline]
+    fn index_mut(&mut self, y: usize) -> &mut Row {
+        let p = self.phys(y);
+        &mut self.storage[p]
+    }
+}
+
+impl<'a> IntoIterator for &'a RingGrid {
+    type Item = &'a Row;
+    type IntoIter = RowIter<'a>;
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut RingGrid {
+    type Item = &'a mut Row;
+    type IntoIter = RowIterMut<'a>;
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl From<Vec<Row>> for RingGrid {
+    fn from(storage: Vec<Row>) -> Self {
+        RingGrid { storage, base: 0 }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

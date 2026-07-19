@@ -156,6 +156,18 @@ impl App {
     pub(super) fn tick_memory_trim(&mut self) -> Option<Instant> {
         let deadline = self.memory_trim_deadline?;
         if Instant::now() < deadline {
+            // Still inside a burst (the deadline keeps getting re-armed):
+            // nothing fires until quiescence — deliberately. RSS sampled
+            // *mid-suite* under back-to-back floods therefore reads a
+            // transient high-water (the xzone allocator keeps freed pages
+            // dirty on its own schedule, and a mid-burst
+            // `malloc_zone_pressure_relief` is a measured no-op there —
+            // see `crate::memory`'s caveat), not a leak: the retained
+            // structures are all bounded (per-page style/grapheme tables
+            // die with their evicted pages, the span arena keeps one
+            // cleared quarter-limit buffer, the recycled-row pool and
+            // spare-page pool are hard-capped), and the post-quiescence
+            // trim below settles everything back to the packed history.
             return Some(deadline);
         }
         self.memory_trim_deadline = None;

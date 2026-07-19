@@ -79,6 +79,155 @@ pub struct ModeRequest {
     pub ansi: bool,
 }
 
+/// One complete line inside a [`Handler::print_ascii_lines`] batch: the
+/// (possibly empty) printable-ASCII text and whether its terminator was
+/// `CR LF` rather than a bare `LF`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AsciiLine<'a> {
+    pub text: &'a [u8],
+    pub crlf: bool,
+}
+
+/// Iterator over the complete (LF-terminated) lines of a
+/// [`Handler::print_ascii_lines`] batch. The batch contract guarantees every
+/// line is LF-terminated, so [`AsciiLines::remainder`] is empty once the
+/// iterator is exhausted; it is exposed so lenient consumers can still print
+/// a violating unterminated tail rather than drop bytes.
+pub struct AsciiLines<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> AsciiLines<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { rest: data }
+    }
+
+    /// Bytes not yet consumed as complete lines.
+    pub fn remainder(&self) -> &'a [u8] {
+        self.rest
+    }
+}
+
+impl<'a> Iterator for AsciiLines<'a> {
+    type Item = AsciiLine<'a>;
+
+    fn next(&mut self) -> Option<AsciiLine<'a>> {
+        let nl = self.rest.iter().position(|&b| b == b'\n')?;
+        let crlf = nl > 0 && self.rest[nl - 1] == b'\r';
+        let text = &self.rest[..nl - usize::from(crlf)];
+        self.rest = &self.rest[nl + 1..];
+        Some(AsciiLine { text, crlf })
+    }
+}
+
+/// One complete line inside a [`Handler::print_sgr_ascii_lines`] batch:
+/// `lead` and `tail` are (possibly empty) contiguous runs of whole plain SGR
+/// sequences (`ESC [ params m`, see [`crate::sgr::scan_plain_sgr`]) around
+/// the (possibly empty) printable-ASCII `text`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SgrAsciiLine<'a> {
+    pub lead: &'a [u8],
+    pub text: &'a [u8],
+    pub tail: &'a [u8],
+    pub crlf: bool,
+}
+
+/// Iterator over the complete (LF-terminated) lines of a
+/// [`Handler::print_sgr_ascii_lines`] batch, splitting each into its
+/// lead-SGR / text / tail-SGR parts. Splitting trusts the batch contract
+/// (`Stream`'s scanner validated the span): an SGR unit's params can never
+/// contain `m`, so each `ESC`-led unit ends at the next `m` byte.
+pub struct SgrAsciiLines<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> SgrAsciiLines<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { rest: data }
+    }
+
+    /// Bytes not yet consumed as complete lines.
+    pub fn remainder(&self) -> &'a [u8] {
+        self.rest
+    }
+}
+
+impl<'a> Iterator for SgrAsciiLines<'a> {
+    type Item = SgrAsciiLine<'a>;
+
+    fn next(&mut self) -> Option<SgrAsciiLine<'a>> {
+        // Mirrors the walk `Stream`'s scanner validated: SGR units, one
+        // SWAR text-run scan, SGR units, terminator — a single forward pass
+        // (no separate LF search + ESC search over the same bytes).
+        let b = self.rest;
+        let mut p = 0;
+        while b.get(p) == Some(&0x1b) {
+            let Some(len) = crate::sgr::scan_plain_sgr(&b[p..]) else {
+                debug_assert!(false, "print_sgr_ascii_lines lead unit is a plain SGR");
+                return None;
+            };
+            p += len;
+        }
+        let lead = &b[..p];
+        let (run, _ascii) = crate::stream::scan_run(&b[p..]);
+        let text = &b[p..p + run];
+        let mut q = p + run;
+        while b.get(q) == Some(&0x1b) {
+            let Some(len) = crate::sgr::scan_plain_sgr(&b[q..]) else {
+                debug_assert!(false, "print_sgr_ascii_lines tail unit is a plain SGR");
+                return None;
+            };
+            q += len;
+        }
+        let tail = &b[p + run..q];
+        let crlf = match b.get(q) {
+            Some(b'\n') => false,
+            Some(b'\r') if b.get(q + 1) == Some(&b'\n') => true,
+            _ => {
+                debug_assert!(
+                    b.get(q).is_none(),
+                    "print_sgr_ascii_lines lines end in (CR)? LF"
+                );
+                return None;
+            }
+        };
+        self.rest = &b[q + 1 + usize::from(crlf)..];
+        Some(SgrAsciiLine {
+            lead,
+            text,
+            tail,
+            crlf,
+        })
+    }
+}
+
+/// Iterator over the whole plain SGR units of a [`SgrAsciiLine`] `lead` or
+/// `tail` slice, yielding each unit's raw bytes (`ESC [ params m`).
+pub struct PlainSgrUnits<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> PlainSgrUnits<'a> {
+    pub fn new(run: &'a [u8]) -> Self {
+        Self { rest: run }
+    }
+}
+
+impl<'a> Iterator for PlainSgrUnits<'a> {
+    type Item = &'a [u8];
+
+    fn next(&mut self) -> Option<&'a [u8]> {
+        if self.rest.is_empty() {
+            return None;
+        }
+        let len =
+            crate::sgr::scan_plain_sgr(self.rest).expect("SGR run holds whole plain SGR units");
+        let (unit, rest) = self.rest.split_at(len);
+        self.rest = rest;
+        Some(unit)
+    }
+}
+
 /// The terminal-state operations a parsed VT stream drives.
 ///
 /// Methods with default no-op / composed bodies are the ones a minimal inc-1
@@ -96,6 +245,94 @@ pub trait Handler {
             self.print(c);
         }
     }
+    /// A run of complete printable-ASCII lines seen in plain ground state:
+    /// `data` is a concatenation of one or more `text (CR)? LF` groups where
+    /// `text` is (possibly empty) printable ASCII (`0x20..=0x7E`).
+    /// Semantically identical to, per group: [`Handler::print_str`] on
+    /// `text` (when non-empty), then [`Handler::execute_c0`] for the `CR`
+    /// (when present) and the `LF`. `Stream` batches ground-state line
+    /// floods through this so a state model can amortize per-line scroll
+    /// costs across the whole batch; the default body preserves per-line
+    /// behavior for implementations that don't.
+    fn print_ascii_lines(&mut self, data: &[u8]) {
+        let mut lines = AsciiLines::new(data);
+        for line in &mut lines {
+            if !line.text.is_empty() {
+                let text = core::str::from_utf8(line.text)
+                    .expect("print_ascii_lines text is printable ASCII");
+                self.print_str(text);
+            }
+            if line.crlf {
+                self.execute_c0(0x0d);
+            }
+            self.execute_c0(0x0a);
+        }
+        debug_assert!(
+            lines.remainder().is_empty(),
+            "print_ascii_lines data must be a run of complete LF-terminated lines"
+        );
+        if !lines.remainder().is_empty() {
+            let text = core::str::from_utf8(lines.remainder())
+                .expect("print_ascii_lines text is printable ASCII");
+            self.print_str(text);
+        }
+    }
+
+    /// [`Handler::print_ascii_lines`] extended with per-line styling: `data`
+    /// is a concatenation of one or more `sgr* text sgr* (CR)? LF` groups,
+    /// where `text` is (possibly empty) printable ASCII and each `sgr` is a
+    /// whole plain SGR sequence ([`crate::sgr::scan_plain_sgr`]). SGRs never
+    /// interrupt a line's text, so a state model can fill each batched row
+    /// from a single per-line style template. Semantically identical to, in
+    /// order per group: [`Handler::set_attributes`] once per lead unit,
+    /// [`Handler::print_str`] on `text` (when non-empty), `set_attributes`
+    /// once per tail unit, then [`Handler::execute_c0`] for the `CR` (when
+    /// present) and the `LF`. The default body replays exactly that.
+    fn print_sgr_ascii_lines(&mut self, data: &[u8]) {
+        let mut attrs = Vec::new();
+        let mut lines = SgrAsciiLines::new(data);
+        for line in &mut lines {
+            for unit in PlainSgrUnits::new(line.lead) {
+                crate::sgr::parse_plain_sgr_unit(unit, &mut attrs);
+                self.set_attributes(&attrs);
+            }
+            if !line.text.is_empty() {
+                let text = core::str::from_utf8(line.text)
+                    .expect("print_sgr_ascii_lines text is printable ASCII");
+                self.print_str(text);
+            }
+            for unit in PlainSgrUnits::new(line.tail) {
+                crate::sgr::parse_plain_sgr_unit(unit, &mut attrs);
+                self.set_attributes(&attrs);
+            }
+            if line.crlf {
+                self.execute_c0(0x0d);
+            }
+            self.execute_c0(0x0a);
+        }
+        debug_assert!(
+            lines.remainder().is_empty(),
+            "print_sgr_ascii_lines data must be a run of complete LF-terminated lines"
+        );
+        if !lines.remainder().is_empty() {
+            let text = core::str::from_utf8(lines.remainder())
+                .expect("print_sgr_ascii_lines text is printable ASCII");
+            self.print_str(text);
+        }
+    }
+
+    /// [`Handler::print_str`] for a caller that has already verified every
+    /// byte of `s` is printable ASCII (`0x20..=0x7e`) — `Stream`'s
+    /// ground-scan fast path knows this the moment its SWAR boundary scan
+    /// finds no non-ASCII byte, but `print_str` re-derives it internally
+    /// (a per-byte classification pass over text this call already proved
+    /// ASCII) to stay correct for callers that can't make that guarantee.
+    /// Default body forwards to `print_str`, so implementations that don't
+    /// override this still behave correctly; `s` is guaranteed non-empty.
+    fn print_ascii_str(&mut self, s: &str) {
+        self.print_str(s);
+    }
+
     /// A C0 control byte (`BEL`/`BS`/`HT`/`LF`/`VT`/`FF`/`CR`/…).
     fn execute_c0(&mut self, byte: u8);
 

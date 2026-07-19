@@ -7,8 +7,9 @@ use crate::osc::{
 };
 use noa_core::{CellAttrs, Color};
 use noa_vt::{
-    Charset, CharsetSlot, CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay, EraseLine,
-    Handler, KittyAction, KittyGraphicsCommand, ModeRequest, SgrAttr, SixelGraphicsCommand,
+    AsciiLines, Charset, CharsetSlot, CursorStyle as VtCursorStyle, DaKind, DsrKind, EraseDisplay,
+    EraseLine, Handler, KittyAction, KittyGraphicsCommand, ModeRequest, PlainSgrUnits,
+    SgrAsciiLines, SgrAttr, SixelGraphicsCommand,
 };
 
 use super::{ShellIntegrationMarkKind, Terminal};
@@ -70,6 +71,136 @@ impl Handler for Terminal {
                 }
             }
         }
+    }
+
+    /// Bulk fast path for ground-state line floods (`text (CR)? LF`
+    /// groups): the active screen applies as many whole lines as it can in
+    /// one batched scroll ([`crate::screen::Screen::apply_ascii_line_batch`]),
+    /// and any line it cannot take (cursor off the region bottom, margins,
+    /// autowrap off, …) is replayed through the canonical per-line calls —
+    /// so the batch is semantically identical to the default trait body.
+    fn print_ascii_lines(&mut self, data: &[u8]) {
+        let autowrap = self.modes.autowrap();
+        let lnm = self.modes.linefeed_newline();
+        let grapheme_clustering = self.modes.grapheme_clustering();
+        let ascii_charset = self.charset.active_is_ascii();
+        let mut rest = data;
+        while !rest.is_empty() {
+            if ascii_charset && autowrap {
+                let consumed = self.active_mut().apply_ascii_line_batch(
+                    rest,
+                    autowrap,
+                    lnm,
+                    grapheme_clustering,
+                );
+                if consumed > 0 {
+                    rest = &rest[consumed..];
+                    continue;
+                }
+            }
+            // Per-line replay (the default trait body's exact semantics)
+            // until the batch preconditions hold again.
+            let mut lines = AsciiLines::new(rest);
+            let Some(line) = lines.next() else {
+                // Unterminated tail: a contract violation, but print it like
+                // the default trait body rather than dropping bytes.
+                debug_assert!(false, "print_ascii_lines data holds only complete lines");
+                let text =
+                    core::str::from_utf8(rest).expect("print_ascii_lines text is printable ASCII");
+                self.print_str(text);
+                return;
+            };
+            if !line.text.is_empty() {
+                let text = core::str::from_utf8(line.text)
+                    .expect("print_ascii_lines text is printable ASCII");
+                self.print_str(text);
+            }
+            if line.crlf {
+                self.execute_c0(0x0d);
+            }
+            self.execute_c0(0x0a);
+            rest = lines.remainder();
+        }
+    }
+
+    /// Styled sibling of [`Handler::print_ascii_lines`]: the active screen
+    /// batches `sgr* text sgr* (CR)? LF` groups with a per-line style
+    /// template ([`crate::screen::Screen::apply_sgr_ascii_line_batch`]), and
+    /// any line the batch cannot take replays through the canonical
+    /// per-unit calls — semantically identical to the default trait body.
+    fn print_sgr_ascii_lines(&mut self, data: &[u8]) {
+        let autowrap = self.modes.autowrap();
+        let lnm = self.modes.linefeed_newline();
+        let grapheme_clustering = self.modes.grapheme_clustering();
+        let ascii_charset = self.charset.active_is_ascii();
+        let mut attrs = Vec::new();
+        let mut rest = data;
+        while !rest.is_empty() {
+            if ascii_charset && autowrap {
+                let consumed = self.active_mut().apply_sgr_ascii_line_batch(
+                    rest,
+                    autowrap,
+                    lnm,
+                    grapheme_clustering,
+                );
+                if consumed > 0 {
+                    rest = &rest[consumed..];
+                    continue;
+                }
+            }
+            // Per-line replay (the default trait body's exact semantics)
+            // until the batch preconditions hold again.
+            let mut lines = SgrAsciiLines::new(rest);
+            let Some(line) = lines.next() else {
+                // Unterminated tail: a contract violation, but print it like
+                // the default trait body rather than dropping bytes.
+                debug_assert!(
+                    false,
+                    "print_sgr_ascii_lines data holds only complete lines"
+                );
+                let text = core::str::from_utf8(rest)
+                    .expect("print_sgr_ascii_lines text is printable ASCII");
+                self.print_str(text);
+                return;
+            };
+            for unit in PlainSgrUnits::new(line.lead) {
+                noa_vt::parse_plain_sgr_unit(unit, &mut attrs);
+                self.set_attributes(&attrs);
+            }
+            if !line.text.is_empty() {
+                let text = core::str::from_utf8(line.text)
+                    .expect("print_sgr_ascii_lines text is printable ASCII");
+                self.print_str(text);
+            }
+            for unit in PlainSgrUnits::new(line.tail) {
+                noa_vt::parse_plain_sgr_unit(unit, &mut attrs);
+                self.set_attributes(&attrs);
+            }
+            if line.crlf {
+                self.execute_c0(0x0d);
+            }
+            self.execute_c0(0x0a);
+            rest = lines.remainder();
+        }
+    }
+
+    /// `s` is caller-verified printable ASCII (see the trait doc): the
+    /// per-byte ASCII/wide/combining dispatch `print_str` needs for mixed
+    /// content collapses to a single [`Screen::print_ascii_run`] call —
+    /// same DEC-Special-Graphics guard, since that remaps ASCII *bytes* to
+    /// line-drawing glyphs regardless of their own ASCII-ness.
+    fn print_ascii_str(&mut self, s: &str) {
+        let autowrap = self.modes.autowrap();
+        let grapheme_clustering = self.modes.grapheme_clustering();
+        if !self.charset.active_is_ascii() {
+            for c in s.chars() {
+                let c = self.charset.translate(c);
+                self.active_mut().print(c, autowrap, grapheme_clustering);
+            }
+            return;
+        }
+        self.active_mut()
+            .print_ascii_run(s.as_bytes(), autowrap, grapheme_clustering);
     }
 
     fn execute_c0(&mut self, byte: u8) {

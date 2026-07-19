@@ -104,6 +104,11 @@ jobs:
           rm -f "${cert_path}"
           echo "NOA_SIGNING_KEYCHAIN=${keychain}" >> "${GITHUB_ENV}"
 
+      - name: Install LLVM profiling tools
+        # llvm-profdata for the PGO build in bundle-macos.sh; the rustup
+        # component matches the rustc LLVM version (Xcode's is a fallback).
+        run: rustup component add llvm-tools
+
       - name: Build app bundle
         env:
           NOA_VERSION: ${{ steps.version.outputs.version }}

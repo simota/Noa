@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-07-20
+
+### Added
+
+- bench: fixed-168x36 region mode for the fire benchmark, enabling
+  geometry-independent runs that approximate fullscreen sizes (scored
+  upstream DOOM-fire runs still default to 80x24)
+
+### Changed
+
+- Release binaries are PGO-optimized: profiles are collected headlessly via
+  the noa-grid ingest benches, merged with llvm-profdata, and the release
+  bundle rebuilds with `-Cprofile-use` (+6% ascii / +4% synthetic ingest
+  throughput on M4; `NOA_PGO=0` opts out) (#30)
+- DSR/DA report replies flush per parsed chunk instead of at the drain-batch
+  tail, so a loaded latency probe's round-trip is no longer bounded by the
+  remaining parse time of an up-to-1MiB batch (#33)
+- bench: fire producer v2 overlaps frame compose with the pty write
+  (two-buffer ping-pong; identical byte stream, but v1/v2 fps are not
+  comparable), and fire results rank by geometry-fair Mcells/s instead of
+  raw fps; raw.tsv records the producer version so aggregations refuse to
+  mix v1/v2 (#31)
+
+### Fixed
+
+- Background-tab window titles no longer freeze at their last-foreground
+  value: title resolution moved ahead of the occlusion early-return, so
+  closing a tab promotes the next tab with its correct title (#32)
+
 ## [0.1.8] - 2026-07-19
 
 ### Added

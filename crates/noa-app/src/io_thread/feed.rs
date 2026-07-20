@@ -226,7 +226,9 @@ pub(super) fn feed_terminal_batch<T: AsRef<[u8]>>(
         stream,
         first.as_ref(),
         raw_attach,
-        reply_flush.as_mut().map(|f| &mut **f as &mut dyn FnMut(&[u8])),
+        reply_flush
+            .as_mut()
+            .map(|f| &mut **f as &mut dyn FnMut(&[u8])),
     );
     drop(first);
     for bytes in rest {
@@ -235,7 +237,9 @@ pub(super) fn feed_terminal_batch<T: AsRef<[u8]>>(
             stream,
             bytes.as_ref(),
             raw_attach,
-            reply_flush.as_mut().map(|f| &mut **f as &mut dyn FnMut(&[u8])),
+            reply_flush
+                .as_mut()
+                .map(|f| &mut **f as &mut dyn FnMut(&[u8])),
         );
         drop(bytes);
     }

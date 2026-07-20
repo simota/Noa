@@ -41,6 +41,7 @@ fn feed_terminal_raw(
         &mut None,
         &mut IpcRowCache::default(),
         raw_attach,
+        None,
     )
 }
 
@@ -371,6 +372,7 @@ fn feed_terminal_ipc(
         last_ipc_push,
         ipc_row_cache,
         &RawAttachTap::default(),
+        None,
     )
 }
 
@@ -705,6 +707,7 @@ fn tap_present_but_no_output_subscriber_keeps_ipc_output_none() {
         &mut last_ipc_push,
         &mut ipc_row_cache,
         &RawAttachTap::default(),
+        None,
     );
     assert!(
         output.ipc_output.is_none(),
@@ -774,6 +777,7 @@ fn output_subscriber_for_one_pane_does_not_gate_open_for_another_pane() {
         &mut last_ipc_push,
         &mut ipc_row_cache,
         &RawAttachTap::default(),
+        None,
     );
     assert!(
         output.ipc_output.is_none(),
@@ -820,6 +824,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
         &mut last_ipc_push,
         &mut ipc_row_cache,
         &RawAttachTap::default(),
+        None,
     );
     assert_eq!(
         first
@@ -847,6 +852,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
         &mut last_ipc_push,
         &mut ipc_row_cache,
         &RawAttachTap::default(),
+        None,
     );
     assert!(
         closed.ipc_output.is_none(),
@@ -872,6 +878,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
         &mut last_ipc_push,
         &mut ipc_row_cache,
         &RawAttachTap::default(),
+        None,
     );
     let rows = reopened
         .ipc_output
@@ -1279,6 +1286,7 @@ fn feed_terminal_batch_chunked_locking_matches_single_lock_result() {
         &mut None,
         &mut IpcRowCache::default(),
         &RawAttachTap::default(),
+        None,
     );
 
     let single = single_terminal.lock();
@@ -1371,6 +1379,7 @@ fn feed_terminal_batch_chunked_locking_matches_single_lock_for_osc_and_dcs() {
         &mut None,
         &mut IpcRowCache::default(),
         &RawAttachTap::default(),
+        None,
     );
 
     let mut single = single_terminal.lock();
@@ -2343,6 +2352,7 @@ fn bench_feed_terminal_batch_large_flood() {
             &mut last_ipc_push,
             &mut ipc_row_cache,
             &RawAttachTap::default(),
+            None,
         ));
     }
     let elapsed = start.elapsed();

@@ -45,6 +45,12 @@ use super::sidebar::{
 /// batch.
 pub(super) const PTY_DATA_DRAIN_BYTE_LIMIT: usize = 1024 * 1024;
 
+/// Eager report-reply sink: when `Some`, [`feed_chunk_fair`] drains
+/// terminal-generated replies (DSR/DA/…) per chunk and hands them here so
+/// they reach the pty without waiting for the rest of the batch to parse.
+/// `None` (tests) keeps the batch-tail drain semantics.
+pub(super) type ReplyFlush<'a> = Option<&'a mut dyn FnMut(&[u8])>;
+
 pub(super) struct TerminalOutput {
     pub(super) pending_writes: Vec<u8>,
     pub(super) pending_clipboard_writes: Vec<String>,
@@ -132,6 +138,7 @@ pub(super) fn feed_terminal(
         &mut last_ipc_push,
         &mut ipc_row_cache,
         &RawAttachTap::default(),
+        None,
     )
 }
 
@@ -156,11 +163,29 @@ fn feed_chunk_fair(
     stream: &mut noa_vt::Stream,
     bytes: &[u8],
     raw_attach: &RawAttachTap,
+    reply_flush: ReplyFlush<'_>,
 ) {
     let mut term = terminal.lock();
     stream.feed(bytes, &mut *term);
+    // With an eager reply sink, drain report replies (DSR/DA/…) produced by
+    // *this chunk* so they reach the pty without waiting for the rest of the
+    // batch to parse — under a sustained flood the remaining-batch parse time
+    // is the dominant term in the loaded DSR round-trip. The `is_empty` check
+    // keeps the common no-reply chunk at one branch; the flush itself runs
+    // after the fair unlock so the pty writer is never called under the
+    // terminal lock.
+    let replies = if reply_flush.is_some() && !term.pending_writes.is_empty() {
+        term.take_pending_writes()
+    } else {
+        Vec::new()
+    };
     let sink = raw_attach.sink();
     parking_lot::MutexGuard::unlock_fair(term);
+    if !replies.is_empty()
+        && let Some(flush) = reply_flush
+    {
+        flush(&replies);
+    }
     if let Some(sink) = sink {
         sink.send(raw_attach, bytes);
     }
@@ -182,6 +207,7 @@ pub(super) fn feed_terminal_batch<T: AsRef<[u8]>>(
     last_ipc_push: &mut Option<Instant>,
     ipc_row_cache: &mut IpcRowCache,
     raw_attach: &RawAttachTap,
+    mut reply_flush: ReplyFlush<'_>,
 ) -> TerminalOutput {
     // Feed each chunk under its own lock hold (worst case one `READ_CHUNK`,
     // 64 KiB) instead of holding the lock across the whole (up to 1 MiB)
@@ -195,10 +221,22 @@ pub(super) fn feed_terminal_batch<T: AsRef<[u8]>>(
     // credits the reader's in-flight byte gate and returns its buffer to the
     // read pool, so the reader thread refills while this batch is still
     // parsing — read and parse overlap instead of alternating.
-    feed_chunk_fair(terminal, stream, first.as_ref(), raw_attach);
+    feed_chunk_fair(
+        terminal,
+        stream,
+        first.as_ref(),
+        raw_attach,
+        reply_flush.as_mut().map(|f| &mut **f as &mut dyn FnMut(&[u8])),
+    );
     drop(first);
     for bytes in rest {
-        feed_chunk_fair(terminal, stream, bytes.as_ref(), raw_attach);
+        feed_chunk_fair(
+            terminal,
+            stream,
+            bytes.as_ref(),
+            raw_attach,
+            reply_flush.as_mut().map(|f| &mut **f as &mut dyn FnMut(&[u8])),
+        );
         drop(bytes);
     }
 
@@ -267,15 +305,9 @@ pub(super) fn feed_terminal_batch<T: AsRef<[u8]>>(
             IpcOutputPushDecision::ScheduleTrailingFlush { deadline } => (None, Some(deadline)),
         };
 
-    // `take_pending_writes` still drains once at the batch tail, not per
-    // chunk: `spawn`'s loop only writes `output.pending_writes` back to the
-    // pty once, after this whole call returns (see `feed_terminal_batch`'s
-    // caller), so draining per chunk and concatenating here would produce
-    // an identical byte string handed back at the identical moment — no
-    // earlier reply actually reaches the pty. Moving the drain earlier would
-    // add relock overhead for zero responsiveness gain, so DA/DSR reply
-    // latency is unchanged by this chunking (bounded by total batch parse
-    // time either way, same as before).
+    // With an eager `reply_flush` every reply already left in
+    // `feed_chunk_fair`; this batch-tail drain is the catch-all for the
+    // `None` path (tests) and for anything queued outside `stream.feed`.
     let mut output = TerminalOutput {
         pending_writes: term.take_pending_writes(),
         pending_clipboard_writes: term.take_pending_clipboard_writes(),

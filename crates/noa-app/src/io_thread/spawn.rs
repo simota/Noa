@@ -399,6 +399,12 @@ pub fn spawn(
                         &mut last_ipc_push,
                         &mut ipc_row_cache,
                         &raw_attach,
+                        // Eager report-reply flush: a DSR/DA reply produced
+                        // mid-batch reaches the pty as soon as its chunk
+                        // parses, instead of waiting out the rest of the (up
+                        // to 1 MiB) batch — the dominant term in the loaded
+                        // DSR round-trip.
+                        Some(&mut |replies: &[u8]| write_pty_bytes(&writer, replies)),
                     );
                     // NOA_LATENCY_TRACE t1: the batch (a pending keypress's
                     // echo, when one is pending) is now parsed into the

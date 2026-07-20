@@ -300,6 +300,12 @@ impl ApplicationHandler<UserEvent> for App {
                         window.set_ime_allowed(false);
                         window.set_ime_allowed(true);
                     }
+                    // The promoted tab's title only refreshes inside a redraw;
+                    // when close_tab's deferred restore promotes an already-
+                    // visible window (no `Occluded(false)` to trigger one), ask
+                    // for a redraw so the newly-focused pane's title replaces
+                    // the closed tab's (tab-close title-freeze fix).
+                    window.request_redraw();
                 }
             }
             UserEvent::PtyExit(window_id, pane_id) => {

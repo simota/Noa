@@ -156,6 +156,15 @@ pub(crate) fn resolved_tab_title(
     dynamic_tab_title(cwd, process).unwrap_or_else(|| "Noa".to_string())
 }
 
+/// The tab title to push to the NSWindow, or `None` when the applied mirror
+/// (`state.title`) already matches — skipping the `set_title` and its AppKit
+/// layout pass. The title refresh runs on every redraw *and* while the window
+/// is occluded (tab-close title-freeze fix), so this diff is what keeps a
+/// background tab tracking its shell without churning the titlebar per frame.
+pub(crate) fn tab_title_update(applied: &str, resolved: &str) -> Option<String> {
+    (applied != resolved).then(|| resolved.to_string())
+}
+
 /// Build the dynamic fallback title from the focused pane's live state, used
 /// only when the shell has set no OSC 0/2 title. Mirrors the sidebar card's
 /// naming (via the shared [`crate::sidebar::cwd_tail`]) so a tab and its card

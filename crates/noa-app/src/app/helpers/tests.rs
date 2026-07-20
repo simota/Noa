@@ -1946,6 +1946,27 @@ fn resolved_tab_title_prefers_the_override_over_any_shell_title() {
     assert_eq!(resolved_tab_title(None, "", None, None), "Noa");
 }
 
+// tab-close title-freeze fix: `refresh_window_title` applies the resolved
+// title through this diff on every redraw AND while occluded, so a changed
+// title always propagates to the applied mirror (returns `Some`) regardless
+// of the window's occlusion state, while an unchanged one skips the AppKit
+// `set_title` (returns `None`).
+#[test]
+fn tab_title_update_fires_only_when_the_applied_mirror_differs() {
+    // A background tab whose shell retitled: the mirror still holds the old
+    // (last-foreground) value, so the change must propagate.
+    assert_eq!(
+        tab_title_update("old tab", "cargo — noa"),
+        Some("cargo — noa".to_string())
+    );
+    // Promotion to a title that already matches the mirror is a no-op — no
+    // redundant titlebar layout pass.
+    assert_eq!(tab_title_update("cargo — noa", "cargo — noa"), None);
+    // Falling back to the default is still a change when the mirror held a
+    // stale shell title.
+    assert_eq!(tab_title_update("vim", "Noa"), Some("Noa".to_string()));
+}
+
 // AC-PXI-5: the diff-cache helper skips the setter when the raw cwd is
 // unchanged across frames, and fires (with the new value to cache) when it
 // changes — including a focus switch, which the caller feeds in as a

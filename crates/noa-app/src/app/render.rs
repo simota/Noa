@@ -69,6 +69,11 @@ impl App {
     /// scrollbar-thumb, and modal-overlay state are all display-only and
     /// need no upkeep while nothing is on screen.
     fn background_refresh_pane_cache(&mut self, window_id: WindowId) {
+        // Track the focused pane's title even while occluded: `redraw()` never
+        // runs for this window, so this is the only path that keeps a
+        // background tab's NSWindow title from freezing at its last-foreground
+        // value (tab-close title-freeze fix).
+        self.refresh_window_title(window_id);
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
             return;
         };
@@ -244,6 +249,63 @@ impl App {
         }
     }
 
+    /// The focused pane's detected foreground process name, read from the
+    /// session store (owned by `self`, not the per-window state). Feeds the
+    /// dynamic tab-title fallback so the title tracks `cargo`/`vim`/… when the
+    /// shell sets no OSC 0/2 title.
+    fn focused_pane_process(&self, window_id: WindowId) -> Option<String> {
+        let pane_id = self.windows.get(&window_id)?.focused_pane;
+        self.session_store
+            .get(&Self::session_card_id(window_id, pane_id))
+            .and_then(|card| card.process.clone())
+    }
+
+    /// Resolve the focused pane's tab title and push it to the NSWindow,
+    /// guarded by the `state.title` applied-mirror so an unchanged title costs
+    /// no AppKit layout pass. Called from `redraw()` *before* the occluded
+    /// early-return, and from `background_refresh_pane_cache`, so a background
+    /// tab's title tracks its shell instead of freezing at the last-foreground
+    /// value (tab-close title-freeze fix). Keyed by `focused_pane`, never by
+    /// tab index/order.
+    fn refresh_window_title(&mut self, window_id: WindowId) {
+        let focused_process = self.focused_pane_process(window_id);
+        let Some(state) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        // A user-set override wins over the focused pane's shell title
+        // (tab-title REQ-TTL-2/5); the shell/dynamic path only applies while
+        // there is no override.
+        let title_override = state.title_override.clone();
+        let Some(surface) = state.surfaces.get(&state.focused_pane) else {
+            return;
+        };
+        let title = match &surface.transport {
+            SurfaceTransport::Remote(remote) => {
+                // A remote pane's cwd/process aren't tracked locally; the
+                // remote `tab_title` helper carries its own fallback, so the
+                // dynamic path stays out of it (pass `None`).
+                let remote_state = remote.state.lock().clone();
+                let term = surface.terminal.lock();
+                let remote_title =
+                    crate::remote_attach::tab_title(&remote.identity, &remote_state, &term.title);
+                resolved_tab_title(title_override.as_deref(), &remote_title, None, None)
+            }
+            SurfaceTransport::Local(_) => {
+                let term = surface.terminal.lock();
+                resolved_tab_title(
+                    title_override.as_deref(),
+                    &term.title,
+                    term.cwd.as_deref(),
+                    focused_process.as_deref(),
+                )
+            }
+        };
+        if let Some(title) = tab_title_update(&state.title, &title) {
+            state.window.set_title(&title);
+            state.title = title;
+        }
+    }
+
     pub(super) fn redraw(&mut self, window_id: WindowId) {
         // NOA_LATENCY_TRACE: stamp before the FrameSnapshot is built so
         // `on_present` can tell whether this frame could contain a pending
@@ -333,20 +395,10 @@ impl App {
         let search_preedit = self
             .modal_preedit_for(window_id, ModalImeTarget::SearchPrompt)
             .to_string();
-        // The focused pane's detected foreground process name, read from the
-        // session store before the mutable `state` borrow below (the store is
-        // owned by `self`, not the per-window state). Feeds the dynamic
-        // tab-title fallback so the title tracks `cargo`/`vim`/… when the shell
-        // sets no OSC 0/2 title.
-        let focused_process = self
-            .windows
-            .get(&window_id)
-            .map(|state| state.focused_pane)
-            .and_then(|pane_id| {
-                self.session_store
-                    .get(&Self::session_card_id(window_id, pane_id))
-                    .and_then(|card| card.process.clone())
-            });
+        // Resolve + apply the focused pane's tab title before the occluded
+        // early-return below, so a background tab tracks its shell instead of
+        // freezing at its last-foreground title (tab-close title-freeze fix).
+        self.refresh_window_title(window_id);
         #[cfg(target_os = "macos")]
         let has_visible_background_image = self.background_image.has_visible_image();
         let (Some(gpu), Some(state)) = (self.gpu.as_mut(), self.windows.get_mut(&window_id)) else {
@@ -428,14 +480,9 @@ impl App {
         // Closing this deterministically costs one extra (normal,
         // incremental) redraw rather than an unbounded wait.
         let mut consumed_pending_reveal_snapshot = false;
-        // A user-set override wins over the focused pane's shell title
-        // (tab-title REQ-TTL-2/5); the shell path below only applies while
-        // there is no override.
-        let title_override = state.title_override.clone();
-        let mut title = resolved_tab_title(title_override.as_deref(), "", None, None);
         // The focused pane's raw OSC 7 cwd diff-cache result, computed under
-        // the same terminal lock the title read already takes (no extra lock
-        // later) — feeds the titlebar proxy icon diff-apply below
+        // the same terminal lock the snapshot read already takes (no extra
+        // lock later) — feeds the titlebar proxy icon diff-apply below
         // (REQ-PXI-2/3). `proxy_icon_update` only clones the cwd when it
         // actually differs from the cached value, so an unchanged cwd costs
         // no allocation per frame.
@@ -452,14 +499,6 @@ impl App {
                     pane_id.get()
                 );
                 continue;
-            };
-            let focused_remote_state = if pane_id == state.focused_pane {
-                match &surface.transport {
-                    SurfaceTransport::Local(_) => None,
-                    SurfaceTransport::Remote(remote) => Some(remote.state.lock().clone()),
-                }
-            } else {
-                None
             };
             let mut term = surface.terminal.lock();
             let copy_mode_state = (copy_mode_pane == Some(pane_id)).then(|| {
@@ -486,30 +525,14 @@ impl App {
                 at_live_viewport: term.viewport_offset() == 0,
             };
             if pane_id == state.focused_pane {
-                if let (SurfaceTransport::Remote(remote), Some(remote_state)) =
-                    (&surface.transport, focused_remote_state.as_ref())
-                {
-                    let remote_title = crate::remote_attach::tab_title(
-                        &remote.identity,
-                        remote_state,
-                        &term.title,
-                    );
-                    // A remote pane's cwd/process aren't tracked locally; the
-                    // remote `tab_title` helper carries its own fallback, so
-                    // the dynamic path stays out of it (pass `None`).
-                    title =
-                        resolved_tab_title(title_override.as_deref(), &remote_title, None, None);
-                    focused_cwd_update = proxy_icon_update(&state.proxy_icon_cwd, None);
-                } else {
-                    title = resolved_tab_title(
-                        title_override.as_deref(),
-                        &term.title,
-                        term.cwd.as_deref(),
-                        focused_process.as_deref(),
-                    );
-                    focused_cwd_update =
-                        proxy_icon_update(&state.proxy_icon_cwd, term.cwd.as_deref());
-                }
+                // A remote pane's cwd isn't tracked locally (its title refresh
+                // in `refresh_window_title` passes `None` too), so the proxy
+                // icon diff sees no cwd for it.
+                let cwd = match &surface.transport {
+                    SurfaceTransport::Remote(_) => None,
+                    SurfaceTransport::Local(_) => term.cwd.as_deref(),
+                };
+                focused_cwd_update = proxy_icon_update(&state.proxy_icon_cwd, cwd);
             }
             if term.viewport_offset() > 0 {
                 scroll_thumbs.push(sidebar::ScrollThumb {
@@ -624,10 +647,8 @@ impl App {
             });
             snapshots.push((pane_id, surface.rect, snapshot));
         }
-        if state.title != title {
-            state.window.set_title(&title);
-            state.title = title;
-        }
+        // The tab title was already resolved + applied by `refresh_window_title`
+        // above (before the occluded early-return), so nothing to do here.
         // Titlebar proxy icon (REQ-PXI-2/3/4): only re-derives/applies when
         // the focused pane's raw cwd actually changed (via OSC 7 or a focus
         // switch) — `set_represented_url` no-ops off macOS.

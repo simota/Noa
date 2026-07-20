@@ -23,7 +23,7 @@
 // same frame order, identical prefix property. v1 and v2 fps are not
 // directly comparable; the harness records which producer ran.
 //
-// Usage: fire <seconds> <result-file> [full]
+// Usage: fire <seconds> <result-file> [full|fixed-168x36]
 //   60 warmup frames (discarded: atlas population, alt-screen entry), then
 //   render flat-out for <seconds>, then write
 //   "<frames> <elapsed_ns> <fps> <winsize-cols>x<rows> <region-cols>x<rows>"
@@ -34,6 +34,8 @@
 //   size instead, approximating upstream DOOM-fire-zig's full-window
 //   condition for manual anchor runs; fps scales ~1/cell-count, so full-mode
 //   numbers are window-geometry-dependent and never enter the scored axis.
+//   `fixed-168x36` renders near-fullscreen fixed geometry for FIRE_FIXED=1
+//   manual runs. The scored harness keeps using the default 80x24 region.
 //
 // Deterministic: fixed xorshift32 seed -> identical frame sequence every
 // run (verify: two runs redirected to files agree on their common prefix;
@@ -206,9 +208,16 @@ static void *writer_main(void *arg) {
 }
 
 int main(int argc, char **argv) {
-    int full = (argc == 4 && strcmp(argv[3], "full") == 0);
-    if (argc != 3 && !full) {
-        fprintf(stderr, "usage: %s <seconds> <result-file> [full]\n", argv[0]);
+    int full = 0;
+    int fixed_168x36 = 0;
+    if (argc == 4) {
+        full = strcmp(argv[3], "full") == 0;
+        fixed_168x36 = strcmp(argv[3], "fixed-168x36") == 0;
+    }
+    if ((argc != 3 && argc != 4) || (argc == 4 && !full && !fixed_168x36)) {
+        fprintf(stderr,
+                "usage: %s <seconds> <result-file> [full|fixed-168x36]\n",
+                argv[0]);
         return 64;
     }
     double secs = atof(argv[1]);
@@ -219,7 +228,11 @@ int main(int argc, char **argv) {
 
     struct winsize ws = {0};
     ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws); /* audit; region source in full mode */
-    if (full && ws.ws_col >= 2 && ws.ws_row >= 2) {
+    if (fixed_168x36) {
+        W = 168;
+        ROWS = 36;
+        PH = ROWS * 2;
+    } else if (full && ws.ws_col >= 2 && ws.ws_row >= 2) {
         W = ws.ws_col;
         ROWS = ws.ws_row;
         if (W > MAX_W) W = MAX_W;

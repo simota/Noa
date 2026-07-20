@@ -17,15 +17,15 @@
 #   ascii    cat 150MB_ascii.txt      (throughput, plain text)
 #   unicode  cat 150MB_unicode.txt    (throughput, CJK/emoji/CSI mix)
 #   scroll   cat scroll_stress.txt    (SGR churn + scroll regions, ~40MB)
-#   fire     DOOM-fire IO stress      (fixed 80x24 truecolor repaint, fps)
+#   fire     DOOM-fire IO stress      (truecolor full-region repaint, fps)
 #   latency  DSR ESC[6n round-trip    (parser-responsiveness proxy, µs)
 #
 # Env knobs: FIRE_SECS (default 10). The fire test renders to the LIVE
 #            window size by default (upstream DOOM-fire-zig's full-window
 #            condition, same as the harness's fullscreen runs) — fps scales
 #            ~1/cell-count, so compare numbers only at the same window
-#            geometry. FIRE_FIXED=1 switches to the fixed 80x24 region
-#            (byte-identical stream, geometry-independent).
+#            geometry. FIRE_FIXED=1 switches to a fixed 168x36 region
+#            (byte-identical stream and geometry-independent).
 #            LAT_ITERS (default 1000), LAT_WARMUP (default 100).
 set -u
 
@@ -117,8 +117,8 @@ if selected fire; then
   fire_mode_arg="full"
   fire_mode_desc="full window (upstream DOOM-fire condition; fps depends on window geometry)"
   if [ "${FIRE_FIXED:-0}" = 1 ]; then
-    fire_mode_arg=""
-    fire_mode_desc="fixed 80x24 region (byte-identical stream, geometry-independent)"
+    fire_mode_arg="fixed-168x36"
+    fire_mode_desc="fixed 168x36 region (byte-identical stream, geometry-independent)"
   fi
   confirm "fire (${FIRE_SECS}s, ${fire_mode_desc})"
   result=$(mktemp) || exit 1

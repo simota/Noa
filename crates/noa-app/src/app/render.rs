@@ -317,6 +317,12 @@ impl App {
         };
         if let Some(title) = tab_title_update(&state.title, &title) {
             state.window.set_title(&title);
+            // `set_title` alone updates the titlebar but not an already-laid-out
+            // native tab button (AppKit caches its label at layout time), so
+            // also push the resolved title onto the NSWindowTab. Runs on the
+            // main (window-owning) thread — same as every other macos_window
+            // call from this handler; a no-op off macOS.
+            crate::macos_window::set_native_tab_title(&state.window, &title);
             state.title = title;
         }
     }

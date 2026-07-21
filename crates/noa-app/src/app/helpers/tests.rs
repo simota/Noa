@@ -2041,6 +2041,26 @@ fn tab_title_update_fires_only_when_the_applied_mirror_differs() {
     assert_eq!(tab_title_update("vim", "Noa"), Some("Noa".to_string()));
 }
 
+// tab-close title-freeze fix: the close-promotion path clears the promoted
+// window's applied-title mirror (`state.title`) so the next refresh re-asserts
+// even in the steady state where the resolved title equals the last-set one.
+// An emptied mirror makes `tab_title_update` fire for any non-empty resolved
+// title, forcing `set_title` to overwrite the shared native titlebar (which
+// still shows the just-closed tab's title).
+#[test]
+fn cleared_title_mirror_forces_a_title_reassert_on_close_promotion() {
+    // Steady state: the promoted tab's resolved title already equals its
+    // mirror, so without the clear the update would be skipped.
+    assert_eq!(tab_title_update("cargo — noa", "cargo — noa"), None);
+    // After the close path zeroes the mirror, the same resolved title fires.
+    assert_eq!(
+        tab_title_update("", "cargo — noa"),
+        Some("cargo — noa".to_string())
+    );
+    // Even the default app name re-asserts once the mirror is cleared.
+    assert_eq!(tab_title_update("", "Noa"), Some("Noa".to_string()));
+}
+
 // AC-PXI-5: the diff-cache helper skips the setter when the raw cwd is
 // unchanged across frames, and fires (with the new value to cache) when it
 // changes — including a focus switch, which the caller feeds in as a

@@ -305,6 +305,16 @@ impl ApplicationHandler<UserEvent> for App {
                     // visible window (no `Occluded(false)` to trigger one), ask
                     // for a redraw so the newly-focused pane's title replaces
                     // the closed tab's (tab-close title-freeze fix).
+                    //
+                    // Clear the applied-title mirror first: the promoted tab's
+                    // resolved title usually equals its own mirror (steady
+                    // state), so `refresh_window_title`'s `tab_title_update`
+                    // diff would skip `set_title` and leave the shared native
+                    // titlebar showing the just-closed tab's title. Zeroing the
+                    // mirror forces the next refresh to re-assert unconditionally.
+                    if let Some(state) = self.windows.get_mut(&window_id) {
+                        state.title.clear();
+                    }
                     window.request_redraw();
                 }
             }

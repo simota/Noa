@@ -1820,7 +1820,13 @@ fn empty_shell_title_uses_dynamic_process_and_cwd_fallback() {
         "noa"
     );
     assert_eq!(
-        resolved_tab_title(None, "", None, Some("/Users/me/repos/noa"), Some("/bin/bash")),
+        resolved_tab_title(
+            None,
+            "",
+            None,
+            Some("/Users/me/repos/noa"),
+            Some("/bin/bash")
+        ),
         "noa"
     );
     // A plain shell with no cwd has nothing to show → the app name.

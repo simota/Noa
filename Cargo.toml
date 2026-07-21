@@ -13,7 +13,7 @@ codegen-units = 1
 
 [workspace.package]
 edition = "2024"
-version = "0.1.9"
+version = "0.2.0"
 license = "MIT"
 repository = "https://github.com/simota/Noa"
 

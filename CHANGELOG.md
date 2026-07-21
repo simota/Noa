@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-07-21
+
+### Fixed
+
+- Shell- and tool-driven OSC 0/2 titles (Claude Code task names, ssh, tmux,
+  REPLs) win over the dynamic process/cwd title again; staleness is judged by
+  a cwd fingerprint captured when the title is set, so stale startup titles
+  still fall back to the dynamic title. The rebind window is
+  hook-order-independent and closes at OSC 133;A / 133;C or an executed
+  LF/CR, and the XTWINOPS title stack (CSI 22/23) saves and restores the
+  fingerprint alongside the title (#36)
+- Closing the focused native tab no longer leaves the shared titlebar
+  showing the closed tab's title: the promoted window's applied-title mirror
+  is cleared so the next refresh re-asserts unconditionally (#36)
+- Occluded native tabs keep their labels fresh: the lightweight title
+  re-assert is decoupled from the throttled background pane-cache refresh,
+  so idle or occlusion-flapped background tabs no longer freeze at an old
+  title (#36)
+- Tab-bar buttons repaint on every title change: the resolved title is now
+  explicitly mirrored onto the NSWindowTab, so a spawn-inherited startup
+  title no longer bakes into the button while the titlebar moves on (#36)
+
+### Changed
+
+- Local tab titles hide the `user@host:` prefix emitted by shell title
+  hooks when the user and short hostname match the local machine; remote
+  sessions (ssh) keep the full identity (#36)
+
 ## [0.2.0] - 2026-07-21
 
 ### Fixed

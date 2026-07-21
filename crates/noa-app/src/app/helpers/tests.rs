@@ -1920,8 +1920,7 @@ fn command_palette_snapshot_marks_unavailable_commands_disabled() {
     }));
 }
 
-// tab-title AC-TTL-5: the override masks any shell title; without one the
-// existing shell-title/fallback path is untouched.
+// tab-title AC-TTL-5: the override masks every automatic title source.
 #[test]
 fn resolved_tab_title_prefers_the_override_over_any_shell_title() {
     assert_eq!(
@@ -1938,12 +1937,28 @@ fn resolved_tab_title_prefers_the_override_over_any_shell_title() {
         "api server"
     );
     assert_eq!(resolved_tab_title(None, "vim", None, None), "vim");
-    // A non-empty OSC title wins over the dynamic fallback.
-    assert_eq!(
-        resolved_tab_title(None, "vim", Some("/Users/me/noa"), Some("cargo")),
-        "vim"
-    );
     assert_eq!(resolved_tab_title(None, "", None, None), "Noa");
+}
+
+#[test]
+fn resolved_tab_title_prefers_live_process_and_cwd_over_stale_startup_osc_title() {
+    let stale_startup_osc_title = "/Users/me/repos/github.com/Noa";
+    let live_cwd = Some("/Users/me/repos/github.com/Noa/crates/noa-app");
+    let live_process = Some("cargo");
+
+    assert_eq!(
+        resolved_tab_title(
+            Some("api server"),
+            stale_startup_osc_title,
+            live_cwd,
+            live_process,
+        ),
+        "api server"
+    );
+    assert_eq!(
+        resolved_tab_title(None, stale_startup_osc_title, live_cwd, live_process),
+        "cargo — noa-app"
+    );
 }
 
 // tab-close title-freeze fix: `refresh_window_title` applies the resolved

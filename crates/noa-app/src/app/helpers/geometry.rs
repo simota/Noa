@@ -136,26 +136,33 @@ pub(crate) fn visible_pane_ids(tree: &SplitTree, zoomed: Option<PaneId>) -> Vec<
 /// The tab label to display, in descending priority (tab-title REQ-TTL-5):
 ///
 /// 1. a user-set override, verbatim — it masks any shell title;
-/// 2. a dynamic title built from the focused pane's live foreground process
-///    and cwd (see [`dynamic_tab_title`]), so stale startup OSC titles do not
-///    mask the pane's current state;
-/// 3. a non-empty shell-driven OSC 0/2 title, verbatim, when no live dynamic
-///    title can be built;
+/// 2. a *live* shell-driven OSC 0/2 title, verbatim — one the shell set for the
+///    pane's current cwd, so tool-driven titles (Claude Code task names, ssh,
+///    tmux, REPLs) surface;
+/// 3. a dynamic title built from the focused pane's live foreground process and
+///    cwd (see [`dynamic_tab_title`]), which takes over once the OSC title is
+///    *stale* — the cwd has changed since the shell set it, as happens with a
+///    full-path startup title after `cd`;
 /// 4. `"Noa"` when nothing is known.
+///
+/// Staleness is judged by `title_cwd`, the cwd captured when the OSC title was
+/// set (`noa_grid::Terminal::title_cwd`): the title is live while it still
+/// matches the current `cwd`, and stale once they diverge.
 pub(crate) fn resolved_tab_title(
     title_override: Option<&str>,
     shell_title: &str,
+    title_cwd: Option<&str>,
     cwd: Option<&str>,
     process: Option<&str>,
 ) -> String {
     if let Some(title) = title_override {
         return title.to_string();
     }
+    if !shell_title.is_empty() && title_cwd == cwd {
+        return shell_title.to_string();
+    }
     if let Some(title) = dynamic_tab_title(cwd, process) {
         return title;
-    }
-    if !shell_title.is_empty() {
-        return shell_title.to_string();
     }
     "Noa".to_string()
 }
@@ -169,16 +176,16 @@ pub(crate) fn tab_title_update(applied: &str, resolved: &str) -> Option<String> 
     (applied != resolved).then(|| resolved.to_string())
 }
 
-/// Build the dynamic title from the focused pane's live state. It takes
-/// precedence over shell-driven OSC 0/2 titles and mirrors the sidebar card's
-/// naming (via the shared [`crate::sidebar::cwd_tail`]) so a tab and its card
-/// read consistently:
+/// Build the dynamic title from the focused pane's live state. It takes over
+/// once the shell's OSC 0/2 title goes stale (see [`resolved_tab_title`]) and
+/// mirrors the sidebar card's naming (via the shared [`crate::sidebar::cwd_tail`])
+/// so a tab and its card read consistently:
 ///
 /// - a foreground process that is *not* the plain login shell leads, suffixed
 ///   with the cwd's tail segment when known (`cargo — noa`);
 /// - a plain shell (or an unknown process) collapses to just the cwd tail
 ///   (`noa`), the identity the shell prompt itself would show;
-/// - nothing known → `None` (the caller falls back to OSC, then `"Noa"`).
+/// - nothing known → `None` (the caller substitutes `"Noa"`).
 fn dynamic_tab_title(cwd: Option<&str>, process: Option<&str>) -> Option<String> {
     let tail = cwd.and_then(crate::sidebar::cwd_tail);
     let process = process

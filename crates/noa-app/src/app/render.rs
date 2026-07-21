@@ -288,13 +288,14 @@ impl App {
                 let term = surface.terminal.lock();
                 let remote_title =
                     crate::remote_attach::tab_title(&remote.identity, &remote_state, &term.title);
-                resolved_tab_title(title_override.as_deref(), &remote_title, None, None)
+                resolved_tab_title(title_override.as_deref(), &remote_title, None, None, None)
             }
             SurfaceTransport::Local(_) => {
                 let term = surface.terminal.lock();
                 resolved_tab_title(
                     title_override.as_deref(),
                     &term.title,
+                    term.title_cwd.as_deref(),
                     term.cwd.as_deref(),
                     focused_process.as_deref(),
                 )

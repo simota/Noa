@@ -1789,42 +1789,42 @@ fn toggle_tab_overview_dispatch_flips_visibility() {
 fn empty_terminal_title_falls_back_to_app_name() {
     // No override, no shell title, and no cwd/process to build a dynamic
     // fallback from → the app name.
-    assert_eq!(resolved_tab_title(None, "", None, None), "Noa");
-    // A non-empty shell title (OSC 0/2) is shown verbatim.
-    assert_eq!(resolved_tab_title(None, "shell", None, None), "shell");
+    assert_eq!(resolved_tab_title(None, "", None, None, None), "Noa");
+    // A non-empty, live shell title (OSC 0/2) is shown verbatim.
+    assert_eq!(resolved_tab_title(None, "shell", None, None, None), "shell");
 }
 
 #[test]
 fn empty_shell_title_uses_dynamic_process_and_cwd_fallback() {
     // cwd only → the cwd's tail segment (the repo/dir name).
     assert_eq!(
-        resolved_tab_title(None, "", Some("/Users/me/repos/noa"), None),
+        resolved_tab_title(None, "", None, Some("/Users/me/repos/noa"), None),
         "noa"
     );
     // A non-shell process only (no cwd) → the process name.
-    assert_eq!(resolved_tab_title(None, "", None, Some("vim")), "vim");
+    assert_eq!(resolved_tab_title(None, "", None, None, Some("vim")), "vim");
     // Both → `process — cwdtail`.
     assert_eq!(
-        resolved_tab_title(None, "", Some("/Users/me/repos/noa"), Some("cargo")),
+        resolved_tab_title(None, "", None, Some("/Users/me/repos/noa"), Some("cargo")),
         "cargo — noa"
     );
     // A plain shell as the foreground process collapses to just the cwd tail
     // (a `zsh` prompt reads better as its directory name); a login-shell `-`
     // argv0 prefix and a full path both still classify as the shell.
     assert_eq!(
-        resolved_tab_title(None, "", Some("/Users/me/repos/noa"), Some("zsh")),
+        resolved_tab_title(None, "", None, Some("/Users/me/repos/noa"), Some("zsh")),
         "noa"
     );
     assert_eq!(
-        resolved_tab_title(None, "", Some("/Users/me/repos/noa"), Some("-zsh")),
+        resolved_tab_title(None, "", None, Some("/Users/me/repos/noa"), Some("-zsh")),
         "noa"
     );
     assert_eq!(
-        resolved_tab_title(None, "", Some("/Users/me/repos/noa"), Some("/bin/bash")),
+        resolved_tab_title(None, "", None, Some("/Users/me/repos/noa"), Some("/bin/bash")),
         "noa"
     );
     // A plain shell with no cwd has nothing to show → the app name.
-    assert_eq!(resolved_tab_title(None, "", None, Some("zsh")), "Noa");
+    assert_eq!(resolved_tab_title(None, "", None, None, Some("zsh")), "Noa");
 }
 
 #[test]
@@ -1924,25 +1924,59 @@ fn command_palette_snapshot_marks_unavailable_commands_disabled() {
 #[test]
 fn resolved_tab_title_prefers_the_override_over_any_shell_title() {
     assert_eq!(
-        resolved_tab_title(Some("api server"), "vim", None, None),
+        resolved_tab_title(Some("api server"), "vim", None, None, None),
         "api server"
     );
     assert_eq!(
-        resolved_tab_title(Some("api server"), "", None, None),
+        resolved_tab_title(Some("api server"), "", None, None, None),
         "api server"
     );
     // The override even masks a dynamic process/cwd fallback (REQ-TTL-5).
     assert_eq!(
-        resolved_tab_title(Some("api server"), "", Some("/Users/me/noa"), Some("cargo")),
+        resolved_tab_title(
+            Some("api server"),
+            "",
+            None,
+            Some("/Users/me/noa"),
+            Some("cargo"),
+        ),
         "api server"
     );
-    assert_eq!(resolved_tab_title(None, "vim", None, None), "vim");
-    assert_eq!(resolved_tab_title(None, "", None, None), "Noa");
+    // A live OSC title (its cwd fingerprint still matches) beats the override
+    // only when there is no override; without one it is shown verbatim.
+    assert_eq!(resolved_tab_title(None, "vim", None, None, None), "vim");
+    assert_eq!(resolved_tab_title(None, "", None, None, None), "Noa");
 }
 
+// tab-title REQ-TTL-5: a live OSC 0/2 title — one whose cwd fingerprint still
+// matches the pane's current cwd — wins over the dynamic process/cwd title, so
+// tool-driven titles (Claude Code task names, ssh, tmux, REPLs) surface.
 #[test]
-fn resolved_tab_title_prefers_live_process_and_cwd_over_stale_startup_osc_title() {
+fn resolved_tab_title_prefers_live_osc_title_over_dynamic() {
+    let cwd = Some("/Users/me/repos/github.com/Noa");
+    // The tool set its title while sitting in this very cwd, so the fingerprint
+    // matches: the OSC title is live and masks the `cargo — Noa` dynamic title.
+    assert_eq!(
+        resolved_tab_title(None, "claude: fix tab titles", cwd, cwd, Some("cargo")),
+        "claude: fix tab titles"
+    );
+    // With no cwd tracking at all (e.g. ssh/tmux over a plain shell) the
+    // fingerprint and current cwd are both absent, so the title stays live.
+    assert_eq!(
+        resolved_tab_title(None, "ssh host", None, None, Some("ssh")),
+        "ssh host"
+    );
+}
+
+// tab-title REQ-TTL-5: a stale OSC title — its cwd fingerprint no longer
+// matches the pane's current cwd (a full-path startup title after `cd`) — loses
+// to the dynamic process/cwd title. This is exactly what PR #34 fixed.
+#[test]
+fn resolved_tab_title_prefers_dynamic_over_stale_startup_osc_title() {
     let stale_startup_osc_title = "/Users/me/repos/github.com/Noa";
+    // The title was set while cwd was the repo root; the pane has since cd'd
+    // into a subdirectory, so the fingerprint and the live cwd diverge.
+    let title_cwd = Some("/Users/me/repos/github.com/Noa");
     let live_cwd = Some("/Users/me/repos/github.com/Noa/crates/noa-app");
     let live_process = Some("cargo");
 
@@ -1950,15 +1984,40 @@ fn resolved_tab_title_prefers_live_process_and_cwd_over_stale_startup_osc_title(
         resolved_tab_title(
             Some("api server"),
             stale_startup_osc_title,
+            title_cwd,
             live_cwd,
             live_process,
         ),
         "api server"
     );
     assert_eq!(
-        resolved_tab_title(None, stale_startup_osc_title, live_cwd, live_process),
+        resolved_tab_title(
+            None,
+            stale_startup_osc_title,
+            title_cwd,
+            live_cwd,
+            live_process,
+        ),
         "cargo — noa-app"
     );
+    // With no live process the stale title still yields to the cwd tail rather
+    // than masking the pane's current directory.
+    assert_eq!(
+        resolved_tab_title(None, stale_startup_osc_title, title_cwd, live_cwd, None),
+        "noa-app"
+    );
+}
+
+// tab-title REQ-TTL-5: an empty OSC title is never shown; the resolver falls
+// straight through to the dynamic title (or `"Noa"`).
+#[test]
+fn resolved_tab_title_ignores_empty_osc_title() {
+    let cwd = Some("/Users/me/repos/github.com/Noa");
+    assert_eq!(
+        resolved_tab_title(None, "", cwd, cwd, Some("cargo")),
+        "cargo — Noa"
+    );
+    assert_eq!(resolved_tab_title(None, "", None, None, None), "Noa");
 }
 
 // tab-close title-freeze fix: `refresh_window_title` applies the resolved

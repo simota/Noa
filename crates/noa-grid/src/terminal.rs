@@ -65,6 +65,19 @@ pub struct Terminal {
     charset: CharsetState,
     /// Window title from OSC 0/2 (stored; unused by the inc-1 renderer).
     pub title: String,
+    /// The cwd a title set by OSC 0/2 is bound to — a staleness fingerprint.
+    /// A title set within the current prompt cycle binds to the cwd reported at
+    /// the *end* of that cycle (the next OSC 7), so intra-prompt ordering of the
+    /// title and cwd hooks does not matter (see [`Self::title_set_since_cwd_report`]).
+    /// When the live cwd later diverges from this, the shell set the title for a
+    /// directory it has since left (a stale startup title), so the tab-title
+    /// resolver discounts it (tab-title REQ-TTL-5).
+    pub title_cwd: Option<String>,
+    /// Whether an OSC 0/2 title was set since the last OSC 7 cwd report. While
+    /// set, the next cwd report re-binds [`Self::title_cwd`] to that report's
+    /// cwd, so a title emitted *before* its prompt's cwd hook still fingerprints
+    /// the correct (post-hook) directory.
+    title_set_since_cwd_report: bool,
     /// Current working directory reported by OSC 7 as a decoded absolute path.
     pub cwd: Option<String>,
     /// OSC 8 hyperlink registry. Cells store indices into this table.
@@ -114,8 +127,11 @@ pub struct Terminal {
     text_area_width_px: u32,
     text_area_height_px: u32,
     /// `XTWINOPS` window-title stack (`CSI 22/23 t`), window-title only —
-    /// icon-title variants (`Ps[1] == 1`) are unsupported and no-op.
-    title_stack: VecDeque<String>,
+    /// icon-title variants (`Ps[1] == 1`) are unsupported and no-op. Each entry
+    /// carries the title *and* its staleness fingerprint ([`Self::title_cwd`]),
+    /// so a popped title is judged fresh against the cwd it was pushed at rather
+    /// than a later title's cwd.
+    title_stack: VecDeque<(String, Option<String>)>,
     /// Cursor style DECSCUSR 0 (`Default`) resets to. Seeded from
     /// `CursorStyle::default()`; `noa-app` overrides it from `cursor-style`.
     default_cursor_style: CursorStyle,
@@ -161,6 +177,8 @@ impl Terminal {
             modes: ModeState::defaults(),
             charset: CharsetState::default(),
             title: String::new(),
+            title_cwd: None,
+            title_set_since_cwd_report: false,
             cwd: None,
             hyperlinks: Vec::new(),
             hyperlink_index: HashMap::new(),
@@ -780,14 +798,19 @@ impl Terminal {
         if self.title_stack.len() >= TITLE_STACK_CAP {
             self.title_stack.pop_front();
         }
-        self.title_stack.push_back(self.title.clone());
+        self.title_stack
+            .push_back((self.title.clone(), self.title_cwd.clone()));
     }
 
-    /// `CSI 23 t` — pop the most recently pushed title back into effect.
-    /// No-op on an empty stack.
+    /// `CSI 23 t` — pop the most recently pushed title back into effect,
+    /// restoring its staleness fingerprint alongside it. No-op on an empty
+    /// stack. The restored title's freshness is fixed to its pushed cwd, so a
+    /// following OSC 7 must not re-bind it — clear the since-cwd-report flag.
     fn pop_title(&mut self) {
-        if let Some(title) = self.title_stack.pop_back() {
+        if let Some((title, title_cwd)) = self.title_stack.pop_back() {
             self.title = title;
+            self.title_cwd = title_cwd;
+            self.title_set_since_cwd_report = false;
         }
     }
 

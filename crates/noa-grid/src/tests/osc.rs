@@ -4,6 +4,157 @@ fn title_from_osc() {
     assert_eq!(t.title, "my title");
 }
 
+// tab-title REQ-TTL-5: a title set within a prompt cycle binds to the cwd
+// reported at that cycle's end, regardless of whether the shell's title hook
+// fires before or after its cwd hook. Both orders leave the fingerprint equal
+// to the live cwd, so the resolver keeps the fresh title.
+#[test]
+fn osc_title_fingerprint_is_independent_of_title_cwd_hook_order() {
+    // Title hook BEFORE cwd hook (zsh appends its cwd hook after user precmd):
+    // OSC 2 for /b lands while cwd is still the previous /a, then OSC 7 reports
+    // /b and re-binds the fingerprint to /b.
+    let title_then_cwd = run(b"\x1b]7;file://localhost/a\x07\
+          \x1b]2;build\x07\
+          \x1b]7;file://localhost/b\x07");
+    assert_eq!(title_then_cwd.title, "build");
+    assert_eq!(title_then_cwd.cwd.as_deref(), Some("/b"));
+    assert_eq!(title_then_cwd.title_cwd.as_deref(), Some("/b"));
+
+    // Cwd hook BEFORE title hook: OSC 7 reports /b, then OSC 2 binds directly
+    // to the fresh /b.
+    let cwd_then_title = run(b"\x1b]7;file://localhost/b\x07\x1b]2;build\x07");
+    assert_eq!(cwd_then_title.title, "build");
+    assert_eq!(cwd_then_title.cwd.as_deref(), Some("/b"));
+    assert_eq!(cwd_then_title.title_cwd.as_deref(), Some("/b"));
+}
+
+// tab-title REQ-TTL-5 (#34): a title set once at launch and never re-emitted
+// stays pinned to its original cwd; a later `cd` (OSC 7 with no intervening
+// OSC 2) diverges from it, so the resolver treats the startup title as stale.
+#[test]
+fn osc_title_fingerprint_goes_stale_when_cwd_moves_without_a_new_title() {
+    let t = run(b"\x1b]2;/repo\x07\
+          \x1b]7;file://localhost/repo\x07\
+          \x1b]7;file://localhost/repo/sub\x07");
+    assert_eq!(t.title, "/repo");
+    assert_eq!(t.cwd.as_deref(), Some("/repo/sub"));
+    // Fingerprint stayed at the launch cwd — diverged from the live cwd.
+    assert_eq!(t.title_cwd.as_deref(), Some("/repo"));
+}
+
+// tab-title REQ-TTL-5 (P2): the title→cwd rebind window is bounded to a single
+// prompt cycle by the OSC 133 prompt boundary. A startup title whose cwd hook
+// ran *before* it (fingerprint provisionally bound, rebind pending) must not
+// keep re-binding to later prompts' cwds — the 133 mark expires the pending
+// rebind, so a subsequent `cd` leaves the startup title stale.
+#[test]
+fn osc133_prompt_boundary_expires_the_pending_title_cwd_rebind() {
+    let t = run(b"\x1b]7;file://localhost/a\x07\
+          \x1b]2;startup\x07\
+          \x1b]133;A\x07\
+          \x1b]7;file://localhost/b\x07");
+    assert_eq!(t.title, "startup");
+    assert_eq!(t.cwd.as_deref(), Some("/b"));
+    // The 133 mark cleared the pending flag, so the /b report did not re-bind:
+    // the fingerprint stays at /a and the title is stale at /b.
+    assert_eq!(t.title_cwd.as_deref(), Some("/a"));
+}
+
+// tab-title REQ-TTL-5 (P1): the rebind window must survive OSC 133;D and only
+// close at 133;A, matching our zsh integration's per-precmd emission order
+// (`133;D → OSC 7 → 133;A`, shell-integration/zsh/.zshrc:23). A title set by a
+// user precmd hook that runs *before* the cwd hook must still fingerprint the
+// post-cd cwd, so the fresh title stays live after `cd`.
+#[test]
+fn osc133_rebind_window_survives_command_end_and_closes_at_prompt_start() {
+    // Prior prompt at /a, then a cd: user title hook fires first (OSC 2 while
+    // cwd is still /a), then the noa precmd emits D → OSC 7 /b → A → B.
+    let t = run(b"\x1b]7;file://localhost/a\x07\x1b]133;A\x07\
+          \x1b]2;cargo b\x07\
+          \x1b]133;D;0\x07\
+          \x1b]7;file://localhost/b\x07\
+          \x1b]133;A\x07\x1b]133;B\x07");
+    assert_eq!(t.title, "cargo b");
+    assert_eq!(t.cwd.as_deref(), Some("/b"));
+    // D did not expire the rebind; the /b report re-bound the fingerprint.
+    assert_eq!(t.title_cwd.as_deref(), Some("/b"));
+}
+
+// A 133 boundary between the title and an unchanged cwd report is harmless:
+// the pending rebind is expired but the fingerprint already matches the live
+// cwd, so the fresh title stays live.
+#[test]
+fn osc133_boundary_leaves_a_same_cwd_title_live() {
+    let t = run(b"\x1b]7;file://localhost/x\x07\
+          \x1b]2;build\x07\
+          \x1b]133;A\x07\
+          \x1b]7;file://localhost/x\x07");
+    assert_eq!(t.title, "build");
+    assert_eq!(t.cwd.as_deref(), Some("/x"));
+    assert_eq!(t.title_cwd.as_deref(), Some("/x"));
+}
+
+// tab-title REQ-TTL-5 (P2): bash emits `133;D → OSC 7 → 133;A → 133;B → user
+// OSC 2` (shell-integration/bash/noa.bash:30-41 runs `_noa_prompt` first in
+// PROMPT_COMMAND), so a one-shot user title lands AFTER A and the A-only expiry
+// never closed its window. 133;C (command start) must also expire, so a later
+// `cd` cannot re-bind the stale title's fingerprint.
+#[test]
+fn osc133_command_start_expires_a_post_prompt_title_rebind() {
+    let t = run(b"\x1b]7;file://localhost/a\x07\
+          \x1b]133;A\x07\x1b]133;B\x07\
+          \x1b]2;startup\x07\
+          \x1b]133;C\x07\
+          \x1b]133;D;0\x07\
+          \x1b]7;file://localhost/b\x07\
+          \x1b]133;A\x07");
+    assert_eq!(t.title, "startup");
+    assert_eq!(t.cwd.as_deref(), Some("/b"));
+    // C expired the window before the /b report, so the fingerprint stayed /a.
+    assert_eq!(t.title_cwd.as_deref(), Some("/a"));
+}
+
+// A title set mid-command (after 133;C) still binds to the cwd its command
+// reports on exit: C precedes the OSC 2, so the window it opens is consumed by
+// the following OSC 7 rather than being expired by C.
+#[test]
+fn osc133_mid_command_title_rebinds_to_the_reported_cwd() {
+    let t = run(b"\x1b]133;C\x07\
+          \x1b]2;ssh box\x07\
+          \x1b]133;D;0\x07\
+          \x1b]7;file://localhost/b\x07");
+    assert_eq!(t.title, "ssh box");
+    assert_eq!(t.cwd.as_deref(), Some("/b"));
+    assert_eq!(t.title_cwd.as_deref(), Some("/b"));
+}
+
+// tab-title REQ-TTL-5 (P2): a shell with no OSC 133 integration still bounds
+// the rebind window by an executed LF/CR — the Enter echo (or command output)
+// that always intervenes between one prompt's title/cwd burst and the next
+// prompt's OSC 7. So a startup title does not re-bind across the boundary.
+#[test]
+fn markless_line_control_expires_the_title_cwd_rebind() {
+    let t = run(b"\x1b]7;file://localhost/a\x07\
+          \x1b]2;startup\x07\
+          \r\n\
+          \x1b]7;file://localhost/b\x07");
+    assert_eq!(t.title, "startup");
+    assert_eq!(t.cwd.as_deref(), Some("/b"));
+    // The CR/LF closed the window before the /b report — fingerprint stays /a.
+    assert_eq!(t.title_cwd.as_deref(), Some("/a"));
+}
+
+// tab-title REQ-TTL-5 (P2): within a single prompt's contiguous escape burst
+// (no CR/LF), a markless shell's OSC 2 then OSC 7 still rebinds — the zsh
+// cwd-hook-after-title order after a `cd`, with no 133 marks.
+#[test]
+fn markless_same_burst_title_then_cwd_rebinds() {
+    let t = run(b"\x1b]2;build\x07\x1b]7;file://localhost/b\x07");
+    assert_eq!(t.title, "build");
+    assert_eq!(t.cwd.as_deref(), Some("/b"));
+    assert_eq!(t.title_cwd.as_deref(), Some("/b"));
+}
+
 #[test]
 fn osc8_hyperlink_state_is_stored_on_printed_cells() {
     let t = run(b"\x1b]8;id=docs;https://example.test/docs\x1b\\AB\

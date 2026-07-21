@@ -441,6 +441,23 @@ fn title_stack_evicts_oldest_entry_past_cap_of_64() {
     assert_eq!(t.pending_writes, b"\x1b]lsentinel\x1b\\");
 }
 
+// tab-title REQ-TTL-5 (P2): the title stack carries each title's staleness
+// fingerprint, so a popped title is judged against the cwd it was pushed at,
+// not a later title's cwd. Push title A bound to /a, cd to /b, set title B,
+// then pop: A is restored AND its fingerprint (/a) diverges from the live cwd
+// (/b), so the resolver treats the restored title as stale.
+#[test]
+fn title_stack_pop_restores_the_pushed_titles_staleness_fingerprint() {
+    let t = run(b"\x1b]2;A\x1b\\\x1b]7;file://localhost/a\x07\
+          \x1b[22;2t\
+          \x1b]7;file://localhost/b\x07\
+          \x1b]2;B\x1b\\\
+          \x1b[23;2t");
+    assert_eq!(t.title, "A");
+    assert_eq!(t.cwd.as_deref(), Some("/b"));
+    assert_eq!(t.title_cwd.as_deref(), Some("/a"));
+}
+
 // ── Kitty keyboard protocol progressive enhancement ────────────────────
 
 #[test]

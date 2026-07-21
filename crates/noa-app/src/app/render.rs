@@ -306,9 +306,13 @@ impl App {
             }
             SurfaceTransport::Local(_) => {
                 let term = surface.terminal.lock();
+                // Drop a local `user@host:` prefix from the shell OSC title
+                // (noise for a local session); a remote host keeps its identity
+                // because its host won't match the local machine. Applied to the
+                // shell title only — not the override or dynamic fallback.
                 resolved_tab_title(
                     title_override.as_deref(),
-                    &term.title,
+                    strip_local_shell_title(&term.title),
                     term.title_cwd.as_deref(),
                     term.cwd.as_deref(),
                     focused_process.as_deref(),

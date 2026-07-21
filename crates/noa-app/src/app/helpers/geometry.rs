@@ -228,6 +228,90 @@ fn is_plain_shell(process: &str) -> bool {
     )
 }
 
+/// Strip a leading `user@host:` prefix from a shell OSC title when — and only
+/// when — both halves name the LOCAL machine, so a local session's title reads
+/// as just its path/rest while an ssh session (whose host differs) keeps its
+/// `user@host` identity intact (user requirement). Pure: the caller injects the
+/// local identity, so this is environment-independent and unit-testable.
+///
+/// Rule: the title must start with `<user>@<host>:` (an optional single space
+/// after the colon is also consumed); `<user>` must equal `local_user`
+/// case-insensitively; `<host>`'s short name (its first dot-separated label, so
+/// a trailing `.local` or an FQDN is ignored) must equal `local_host`'s short
+/// name case-insensitively. An empty remainder (the title is exactly
+/// `user@host:`) falls back to the original — never produce an empty title.
+/// A `None` local identity (unavailable `$USER`/hostname) skips stripping.
+pub(crate) fn strip_local_user_host<'a>(
+    title: &'a str,
+    local_user: Option<&str>,
+    local_host: Option<&str>,
+) -> &'a str {
+    let (Some(local_user), Some(local_host)) = (local_user, local_host) else {
+        return title;
+    };
+    let Some((user, after_user)) = title.split_once('@') else {
+        return title;
+    };
+    if !user.eq_ignore_ascii_case(local_user) {
+        return title;
+    }
+    let Some((host, rest)) = after_user.split_once(':') else {
+        return title;
+    };
+    if !host_short_eq(host, local_host) {
+        return title;
+    }
+    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+    if rest.is_empty() { title } else { rest }
+}
+
+/// Case-insensitive match on two hostnames' short names — the first
+/// dot-separated label, so `host`, `host.local`, and an FQDN all compare equal.
+fn host_short_eq(a: &str, b: &str) -> bool {
+    fn short(h: &str) -> &str {
+        h.split('.').next().unwrap_or(h)
+    }
+    short(a).eq_ignore_ascii_case(short(b))
+}
+
+/// Strip a local `user@host:` prefix from a LOCAL pane's shell OSC title, using
+/// the cached process-local identity. The remote-attach path never calls this,
+/// so remote panes keep their `user@host` display.
+pub(crate) fn strip_local_shell_title(title: &str) -> &str {
+    strip_local_user_host(title, local_user(), local_host())
+}
+
+/// The local username (`$USER`), cached for the process lifetime; `None` when
+/// unset, in which case [`strip_local_user_host`] leaves titles untouched.
+fn local_user() -> Option<&'static str> {
+    static LOCAL_USER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LOCAL_USER
+        .get_or_init(|| std::env::var("USER").ok().filter(|user| !user.is_empty()))
+        .as_deref()
+}
+
+/// The local machine's hostname via `gethostname(2)`, cached for the process
+/// lifetime (it cannot change without a reboot). `None` when the syscall fails.
+fn local_host() -> Option<&'static str> {
+    static LOCAL_HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LOCAL_HOST.get_or_init(query_local_hostname).as_deref()
+}
+
+fn query_local_hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is a valid, correctly-sized buffer for POSIX
+    // `gethostname(2)`; the call never writes past `buf.len()`.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0)?;
+    std::str::from_utf8(&buf[..end])
+        .ok()
+        .map(str::to_owned)
+        .filter(|host| !host.is_empty())
+}
+
 /// Titlebar proxy icon diff-cache (REQ-PXI-4): compares this frame's raw
 /// focused-pane cwd against the cached value from the last frame the setter
 /// actually ran for. Returns `None` (skip the native call) when unchanged,

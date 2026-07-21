@@ -2020,6 +2020,61 @@ fn resolved_tab_title_ignores_empty_osc_title() {
     assert_eq!(resolved_tab_title(None, "", None, None, None), "Noa");
 }
 
+// tab-title: a local `user@host:` prefix is stripped from the shell OSC title
+// (noise on the local machine); a remote host/user keeps its identity.
+#[test]
+fn strip_local_user_host_drops_only_the_local_identity_prefix() {
+    let user = Some("simota");
+    let host = Some("simotaMacBook-Air");
+
+    // Local user@host → just the path/rest.
+    assert_eq!(
+        strip_local_user_host("simota@simotaMacBook-Air:~/repos/x", user, host),
+        "~/repos/x"
+    );
+    // A different host (ssh into a server) keeps user@host.
+    assert_eq!(
+        strip_local_user_host("simota@prod-web-01:~/srv", user, host),
+        "simota@prod-web-01:~/srv"
+    );
+    // A different user (sudo/other account) keeps user@host.
+    assert_eq!(
+        strip_local_user_host("root@simotaMacBook-Air:/etc", user, host),
+        "root@simotaMacBook-Air:/etc"
+    );
+    // The title's host carries a `.local`/FQDN suffix — short names still match.
+    assert_eq!(
+        strip_local_user_host("simota@simotaMacBook-Air.local:~/x", user, host),
+        "~/x"
+    );
+    // Case-insensitive on both user and host.
+    assert_eq!(
+        strip_local_user_host("Simota@SIMOTAMACBOOK-AIR:~/y", user, host),
+        "~/y"
+    );
+    // A single space after the colon is consumed.
+    assert_eq!(
+        strip_local_user_host("simota@simotaMacBook-Air: ~/z", user, host),
+        "~/z"
+    );
+    // No `user@host:` pattern at all → unchanged.
+    assert_eq!(
+        strip_local_user_host("cargo — noa", user, host),
+        "cargo — noa"
+    );
+    // Exactly `user@host:` (empty remainder) → fall back to the original,
+    // never an empty title.
+    assert_eq!(
+        strip_local_user_host("simota@simotaMacBook-Air:", user, host),
+        "simota@simotaMacBook-Air:"
+    );
+    // Unknown local identity → never strip.
+    assert_eq!(
+        strip_local_user_host("simota@simotaMacBook-Air:~/x", None, host),
+        "simota@simotaMacBook-Air:~/x"
+    );
+}
+
 // tab-close title-freeze fix: `refresh_window_title` applies the resolved
 // title through this diff on every redraw AND while occluded, so a changed
 // title always propagates to the applied mirror (returns `Some`) regardless

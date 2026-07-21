@@ -136,26 +136,33 @@ pub(crate) fn visible_pane_ids(tree: &SplitTree, zoomed: Option<PaneId>) -> Vec<
 /// The tab label to display, in descending priority (tab-title REQ-TTL-5):
 ///
 /// 1. a user-set override, verbatim — it masks any shell title;
-/// 2. a dynamic title built from the focused pane's live foreground process
-///    and cwd (see [`dynamic_tab_title`]), so stale startup OSC titles do not
-///    mask the pane's current state;
-/// 3. a non-empty shell-driven OSC 0/2 title, verbatim, when no live dynamic
-///    title can be built;
+/// 2. a *live* shell-driven OSC 0/2 title, verbatim — one the shell set for the
+///    pane's current cwd, so tool-driven titles (Claude Code task names, ssh,
+///    tmux, REPLs) surface;
+/// 3. a dynamic title built from the focused pane's live foreground process and
+///    cwd (see [`dynamic_tab_title`]), which takes over once the OSC title is
+///    *stale* — the cwd has changed since the shell set it, as happens with a
+///    full-path startup title after `cd`;
 /// 4. `"Noa"` when nothing is known.
+///
+/// Staleness is judged by `title_cwd`, the cwd captured when the OSC title was
+/// set (`noa_grid::Terminal::title_cwd`): the title is live while it still
+/// matches the current `cwd`, and stale once they diverge.
 pub(crate) fn resolved_tab_title(
     title_override: Option<&str>,
     shell_title: &str,
+    title_cwd: Option<&str>,
     cwd: Option<&str>,
     process: Option<&str>,
 ) -> String {
     if let Some(title) = title_override {
         return title.to_string();
     }
+    if !shell_title.is_empty() && title_cwd == cwd {
+        return shell_title.to_string();
+    }
     if let Some(title) = dynamic_tab_title(cwd, process) {
         return title;
-    }
-    if !shell_title.is_empty() {
-        return shell_title.to_string();
     }
     "Noa".to_string()
 }
@@ -169,16 +176,16 @@ pub(crate) fn tab_title_update(applied: &str, resolved: &str) -> Option<String> 
     (applied != resolved).then(|| resolved.to_string())
 }
 
-/// Build the dynamic title from the focused pane's live state. It takes
-/// precedence over shell-driven OSC 0/2 titles and mirrors the sidebar card's
-/// naming (via the shared [`crate::sidebar::cwd_tail`]) so a tab and its card
-/// read consistently:
+/// Build the dynamic title from the focused pane's live state. It takes over
+/// once the shell's OSC 0/2 title goes stale (see [`resolved_tab_title`]) and
+/// mirrors the sidebar card's naming (via the shared [`crate::sidebar::cwd_tail`])
+/// so a tab and its card read consistently:
 ///
 /// - a foreground process that is *not* the plain login shell leads, suffixed
 ///   with the cwd's tail segment when known (`cargo — noa`);
 /// - a plain shell (or an unknown process) collapses to just the cwd tail
 ///   (`noa`), the identity the shell prompt itself would show;
-/// - nothing known → `None` (the caller falls back to OSC, then `"Noa"`).
+/// - nothing known → `None` (the caller substitutes `"Noa"`).
 fn dynamic_tab_title(cwd: Option<&str>, process: Option<&str>) -> Option<String> {
     let tail = cwd.and_then(crate::sidebar::cwd_tail);
     let process = process
@@ -219,6 +226,90 @@ fn is_plain_shell(process: &str) -> bool {
             | "pwsh"
             | "powershell"
     )
+}
+
+/// Strip a leading `user@host:` prefix from a shell OSC title when — and only
+/// when — both halves name the LOCAL machine, so a local session's title reads
+/// as just its path/rest while an ssh session (whose host differs) keeps its
+/// `user@host` identity intact (user requirement). Pure: the caller injects the
+/// local identity, so this is environment-independent and unit-testable.
+///
+/// Rule: the title must start with `<user>@<host>:` (an optional single space
+/// after the colon is also consumed); `<user>` must equal `local_user`
+/// case-insensitively; `<host>`'s short name (its first dot-separated label, so
+/// a trailing `.local` or an FQDN is ignored) must equal `local_host`'s short
+/// name case-insensitively. An empty remainder (the title is exactly
+/// `user@host:`) falls back to the original — never produce an empty title.
+/// A `None` local identity (unavailable `$USER`/hostname) skips stripping.
+pub(crate) fn strip_local_user_host<'a>(
+    title: &'a str,
+    local_user: Option<&str>,
+    local_host: Option<&str>,
+) -> &'a str {
+    let (Some(local_user), Some(local_host)) = (local_user, local_host) else {
+        return title;
+    };
+    let Some((user, after_user)) = title.split_once('@') else {
+        return title;
+    };
+    if !user.eq_ignore_ascii_case(local_user) {
+        return title;
+    }
+    let Some((host, rest)) = after_user.split_once(':') else {
+        return title;
+    };
+    if !host_short_eq(host, local_host) {
+        return title;
+    }
+    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+    if rest.is_empty() { title } else { rest }
+}
+
+/// Case-insensitive match on two hostnames' short names — the first
+/// dot-separated label, so `host`, `host.local`, and an FQDN all compare equal.
+fn host_short_eq(a: &str, b: &str) -> bool {
+    fn short(h: &str) -> &str {
+        h.split('.').next().unwrap_or(h)
+    }
+    short(a).eq_ignore_ascii_case(short(b))
+}
+
+/// Strip a local `user@host:` prefix from a LOCAL pane's shell OSC title, using
+/// the cached process-local identity. The remote-attach path never calls this,
+/// so remote panes keep their `user@host` display.
+pub(crate) fn strip_local_shell_title(title: &str) -> &str {
+    strip_local_user_host(title, local_user(), local_host())
+}
+
+/// The local username (`$USER`), cached for the process lifetime; `None` when
+/// unset, in which case [`strip_local_user_host`] leaves titles untouched.
+fn local_user() -> Option<&'static str> {
+    static LOCAL_USER: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LOCAL_USER
+        .get_or_init(|| std::env::var("USER").ok().filter(|user| !user.is_empty()))
+        .as_deref()
+}
+
+/// The local machine's hostname via `gethostname(2)`, cached for the process
+/// lifetime (it cannot change without a reboot). `None` when the syscall fails.
+fn local_host() -> Option<&'static str> {
+    static LOCAL_HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    LOCAL_HOST.get_or_init(query_local_hostname).as_deref()
+}
+
+fn query_local_hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is a valid, correctly-sized buffer for POSIX
+    // `gethostname(2)`; the call never writes past `buf.len()`.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0)?;
+    std::str::from_utf8(&buf[..end])
+        .ok()
+        .map(str::to_owned)
+        .filter(|host| !host.is_empty())
 }
 
 /// Titlebar proxy icon diff-cache (REQ-PXI-4): compares this frame's raw

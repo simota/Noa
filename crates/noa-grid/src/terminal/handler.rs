@@ -210,6 +210,17 @@ impl Handler for Terminal {
             0x07 => return self.bell(),                         // BEL — no grid-state side effect.
             _ => {}
         }
+        // Close the title→cwd rebind window on an executed line-control byte
+        // (LF/CR), the markless-shell fallback for the 133;A/133;C boundary:
+        // between prompt N's title/cwd burst and prompt N+1's OSC 7, an
+        // interactive shell always echoes the Enter (CR/LF) or emits command
+        // output, whereas our integrations' precmd printf emits the OSC 2/7
+        // burst contiguously with no CR/LF (zsh .zshrc:23, bash noa.bash:30).
+        // Residual limitation (unreachable in interactive use): a pure
+        // escape-only replay stream with no C0 between prompts still rebinds.
+        if byte == 0x0a || byte == 0x0d {
+            self.title_set_since_cwd_report = false;
+        }
         let linefeed_newline = self.modes.linefeed_newline();
         let screen = self.active_mut();
         match byte {
@@ -431,6 +442,8 @@ impl Handler for Terminal {
         self.modes = crate::modes::ModeState::defaults();
         self.charset = crate::charset::CharsetState::default();
         self.title.clear();
+        self.title_cwd = None;
+        self.title_set_since_cwd_report = false;
         self.cwd = None;
         self.hyperlinks.clear();
         self.hyperlink_index.clear();
@@ -628,10 +641,24 @@ impl Handler for Terminal {
             return;
         }
         if let Some(action) = parse_cwd_osc(data) {
-            match action {
-                CwdOsc::Set(cwd) => self.cwd = Some(cwd),
-                CwdOsc::Reset => self.cwd = None,
-                CwdOsc::Malformed => {}
+            let reported = match action {
+                CwdOsc::Set(cwd) => {
+                    self.cwd = Some(cwd);
+                    true
+                }
+                CwdOsc::Reset => {
+                    self.cwd = None;
+                    true
+                }
+                CwdOsc::Malformed => false,
+            };
+            // A title set earlier in this prompt cycle binds to the cwd
+            // reported at the cycle's end, so the order in which the shell's
+            // title and cwd hooks fire within one prompt does not matter
+            // (tab-title REQ-TTL-5). A malformed payload is not a report.
+            if reported && self.title_set_since_cwd_report {
+                self.title_cwd = self.cwd.clone();
+                self.title_set_since_cwd_report = false;
             }
             return;
         }
@@ -644,6 +671,26 @@ impl Handler for Terminal {
                     ShellIntegrationOscKind::CommandEnd => ShellIntegrationMarkKind::CommandEnd,
                 };
                 self.record_shell_mark(kind, exit_status);
+                // The title→cwd rebind window opens at OSC 2, is consumed by the
+                // next OSC 7, and closes at 133;A (PromptStart) or 133;C
+                // (CommandStart), whichever comes first — bounding it to a
+                // single prompt generation (tab-title REQ-TTL-5). Both our
+                // integrations emit `133;D → OSC 7 → 133;A` per precmd, so A/C
+                // never fall between a precmd's OSC 2 and OSC 7:
+                //  - zsh (.zshrc:23): the user's OSC 2 precedes the precmd, so
+                //    D → OSC 7 rebinds it, then A closes the window;
+                //  - bash (noa.bash:30-41): `_noa_prompt` runs first, so the
+                //    user's OSC 2 lands AFTER A/B; the window then closes at the
+                //    next C (command start) or A, never letting the next cycle's
+                //    OSC 7 re-bind a stale title.
+                // D must NOT expire (it precedes the same cycle's OSC 7); B must
+                // not either (it precedes bash's user OSC 2).
+                if matches!(
+                    kind,
+                    ShellIntegrationMarkKind::PromptStart | ShellIntegrationMarkKind::CommandStart
+                ) {
+                    self.title_set_since_cwd_report = false;
+                }
             }
             return;
         }
@@ -654,6 +701,11 @@ impl Handler for Terminal {
             let code = &data[..i];
             if code == b"0" || code == b"2" {
                 self.title = String::from_utf8_lossy(&data[i + 1..]).into_owned();
+                // Provisionally bind to the current cwd; the next OSC 7 in this
+                // prompt cycle re-binds it if the cwd hook fires after the title
+                // hook (see the OSC 7 branch and `title_set_since_cwd_report`).
+                self.title_cwd = self.cwd.clone();
+                self.title_set_since_cwd_report = true;
             }
         }
     }

@@ -28,6 +28,20 @@ impl App {
     /// fully idle again — no periodic self-wakeup while there is truly
     /// nothing left to do.
     pub(super) fn maybe_background_refresh_pane_cache(&mut self) {
+        // Re-assert every dirty window's title before the `retain` below can
+        // drop entries: on an occlusion flap a window may leave `occluded`
+        // (and so be retained-out) before it ever won the throttled pane-cache
+        // refresh, which would otherwise strand its label at a stale title.
+        // The title update is cheap and independent of the rebuild throttle
+        // (keep-occluded-tab-titles-fresh).
+        for window_id in self
+            .dirty_occluded_windows
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.refresh_window_title(window_id);
+        }
         self.dirty_occluded_windows
             .retain(|id| self.windows.get(id).is_some_and(|state| state.occluded));
         let now = Instant::now();
@@ -267,7 +281,7 @@ impl App {
     /// tab's title tracks its shell instead of freezing at the last-foreground
     /// value (tab-close title-freeze fix). Keyed by `focused_pane`, never by
     /// tab index/order.
-    fn refresh_window_title(&mut self, window_id: WindowId) {
+    pub(super) fn refresh_window_title(&mut self, window_id: WindowId) {
         let focused_process = self.focused_pane_process(window_id);
         let Some(state) = self.windows.get_mut(&window_id) else {
             return;
@@ -288,13 +302,18 @@ impl App {
                 let term = surface.terminal.lock();
                 let remote_title =
                     crate::remote_attach::tab_title(&remote.identity, &remote_state, &term.title);
-                resolved_tab_title(title_override.as_deref(), &remote_title, None, None)
+                resolved_tab_title(title_override.as_deref(), &remote_title, None, None, None)
             }
             SurfaceTransport::Local(_) => {
                 let term = surface.terminal.lock();
+                // Drop a local `user@host:` prefix from the shell OSC title
+                // (noise for a local session); a remote host keeps its identity
+                // because its host won't match the local machine. Applied to the
+                // shell title only — not the override or dynamic fallback.
                 resolved_tab_title(
                     title_override.as_deref(),
-                    &term.title,
+                    strip_local_shell_title(&term.title),
+                    term.title_cwd.as_deref(),
                     term.cwd.as_deref(),
                     focused_process.as_deref(),
                 )
@@ -302,6 +321,12 @@ impl App {
         };
         if let Some(title) = tab_title_update(&state.title, &title) {
             state.window.set_title(&title);
+            // `set_title` alone updates the titlebar but not an already-laid-out
+            // native tab button (AppKit caches its label at layout time), so
+            // also push the resolved title onto the NSWindowTab. Runs on the
+            // main (window-owning) thread — same as every other macos_window
+            // call from this handler; a no-op off macOS.
+            crate::macos_window::set_native_tab_title(&state.window, &title);
             state.title = title;
         }
     }

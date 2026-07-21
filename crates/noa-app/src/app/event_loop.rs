@@ -198,6 +198,14 @@ impl ApplicationHandler<UserEvent> for App {
                     // throttle decide whether — and which occluded window's —
                     // cache gets opportunistically refreshed right now.
                     self.dirty_occluded_windows.insert(window_id);
+                    // Re-assert the tab title now, decoupled from the throttled
+                    // pane-cache rebuild below: the title update is cheap (brief
+                    // terminal lock + string build + a diff-guarded set_title),
+                    // so an occluded tab's label must not wait for its turn in
+                    // the once-per-interval, one-window-at-a-time refresh
+                    // selection (which an idle or occlusion-flapped tab may
+                    // never win) — keep-occluded-tab-titles-fresh.
+                    self.refresh_window_title(window_id);
                     self.maybe_background_refresh_pane_cache();
                 }
                 if overview_decision == TargetedRedrawDecision::Request {
@@ -305,6 +313,16 @@ impl ApplicationHandler<UserEvent> for App {
                     // visible window (no `Occluded(false)` to trigger one), ask
                     // for a redraw so the newly-focused pane's title replaces
                     // the closed tab's (tab-close title-freeze fix).
+                    //
+                    // Clear the applied-title mirror first: the promoted tab's
+                    // resolved title usually equals its own mirror (steady
+                    // state), so `refresh_window_title`'s `tab_title_update`
+                    // diff would skip `set_title` and leave the shared native
+                    // titlebar showing the just-closed tab's title. Zeroing the
+                    // mirror forces the next refresh to re-assert unconditionally.
+                    if let Some(state) = self.windows.get_mut(&window_id) {
+                        state.title.clear();
+                    }
                     window.request_redraw();
                 }
             }

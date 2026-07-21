@@ -1138,8 +1138,15 @@ impl App {
                         let _ = self.proxy.send_event(UserEvent::RestoreFocus { window_id });
                     }
                     TabCloseFocusDecision::Immediate(window_id) => {
-                        if let Some(state) = self.windows.get(&window_id) {
+                        if let Some(state) = self.windows.get_mut(&window_id) {
+                            // Mirror the deferred path's title re-assert: clear
+                            // the applied-title mirror and request a redraw so
+                            // the promoted window re-resolves its title rather
+                            // than relying on `tab_title_update`'s steady-state
+                            // skip (tab-close title-freeze fix).
+                            state.title.clear();
                             state.window.focus_window();
+                            state.window.request_redraw();
                         }
                     }
                     TabCloseFocusDecision::NoTarget if self.overview_visible => {

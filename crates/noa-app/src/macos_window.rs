@@ -66,6 +66,48 @@ pub(crate) fn commit_window_display(window: &Window) {
     }
 }
 
+/// Push `title` onto the window's `NSWindowTab` so its tab-bar button repaints.
+/// AppKit caches a tab button's label from the window title at layout time, so
+/// a plain `NSWindow setTitle:` leaves an already-laid-out button frozen at its
+/// first title (the spawn-inherited cwd) even as the titlebar tracks later cds
+/// live — reading as "another tab's title". Setting `NSWindowTab.title` is the
+/// authoritative per-button update; because the caller always passes the
+/// current resolved title, no separate clearing is needed. A no-op off macOS
+/// and when the lookups fail (`tab` can be nil on an untabbed window).
+#[allow(unused_variables)]
+pub(crate) fn set_native_tab_title(window: &Window, title: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        use objc2_foundation::NSString;
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        // SAFETY: called from `refresh_window_title` on winit's main
+        // (window-owning) thread; the NSWindow is live and owned by winit;
+        // every pointer is nil-checked. The `NSString` is autoreleased by objc2.
+        unsafe {
+            let Ok(handle) = window.window_handle() else {
+                return;
+            };
+            let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+                return;
+            };
+            let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
+            let ns_window: *mut AnyObject = msg_send![ns_view, window];
+            if ns_window.is_null() {
+                return;
+            }
+            let tab: *mut AnyObject = msg_send![ns_window, tab];
+            if tab.is_null() {
+                return;
+            }
+            let ns_title = NSString::from_str(title);
+            let _: () = msg_send![tab, setTitle: &*ns_title];
+        }
+    }
+}
+
 /// Toggle AppKit's native fullscreen Space for a normal terminal window.
 /// Returns `false` only when the live NSWindow cannot be reached.
 pub(crate) fn toggle_native_fullscreen(window: &Window) -> bool {

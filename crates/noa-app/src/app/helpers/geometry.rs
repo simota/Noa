@@ -136,10 +136,11 @@ pub(crate) fn visible_pane_ids(tree: &SplitTree, zoomed: Option<PaneId>) -> Vec<
 /// The tab label to display, in descending priority (tab-title REQ-TTL-5):
 ///
 /// 1. a user-set override, verbatim — it masks any shell title;
-/// 2. a non-empty shell-driven OSC 0/2 title, verbatim;
-/// 3. a dynamic fallback built from the focused pane's live foreground
-///    process and cwd (see [`dynamic_tab_title`]), so the label tracks state
-///    even when the shell sets no title (Ghostty parity);
+/// 2. a dynamic title built from the focused pane's live foreground process
+///    and cwd (see [`dynamic_tab_title`]), so stale startup OSC titles do not
+///    mask the pane's current state;
+/// 3. a non-empty shell-driven OSC 0/2 title, verbatim, when no live dynamic
+///    title can be built;
 /// 4. `"Noa"` when nothing is known.
 pub(crate) fn resolved_tab_title(
     title_override: Option<&str>,
@@ -150,10 +151,13 @@ pub(crate) fn resolved_tab_title(
     if let Some(title) = title_override {
         return title.to_string();
     }
+    if let Some(title) = dynamic_tab_title(cwd, process) {
+        return title;
+    }
     if !shell_title.is_empty() {
         return shell_title.to_string();
     }
-    dynamic_tab_title(cwd, process).unwrap_or_else(|| "Noa".to_string())
+    "Noa".to_string()
 }
 
 /// The tab title to push to the NSWindow, or `None` when the applied mirror
@@ -165,8 +169,8 @@ pub(crate) fn tab_title_update(applied: &str, resolved: &str) -> Option<String> 
     (applied != resolved).then(|| resolved.to_string())
 }
 
-/// Build the dynamic fallback title from the focused pane's live state, used
-/// only when the shell has set no OSC 0/2 title. Mirrors the sidebar card's
+/// Build the dynamic title from the focused pane's live state. It takes
+/// precedence over shell-driven OSC 0/2 titles and mirrors the sidebar card's
 /// naming (via the shared [`crate::sidebar::cwd_tail`]) so a tab and its card
 /// read consistently:
 ///
@@ -174,7 +178,7 @@ pub(crate) fn tab_title_update(applied: &str, resolved: &str) -> Option<String> 
 ///   with the cwd's tail segment when known (`cargo — noa`);
 /// - a plain shell (or an unknown process) collapses to just the cwd tail
 ///   (`noa`), the identity the shell prompt itself would show;
-/// - nothing known → `None` (the caller substitutes `"Noa"`).
+/// - nothing known → `None` (the caller falls back to OSC, then `"Noa"`).
 fn dynamic_tab_title(cwd: Option<&str>, process: Option<&str>) -> Option<String> {
     let tail = cwd.and_then(crate::sidebar::cwd_tail);
     let process = process

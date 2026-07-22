@@ -1,5 +1,19 @@
 use super::super::*;
 
+/// How long a hover-path probe answer stays authoritative before a
+/// background revalidation is kicked off (files appear and vanish under a
+/// live shell).
+const PATH_PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+/// Probe-cache size cap; completed entries are dropped wholesale when full
+/// (hover churn is tiny — this only guards unbounded growth over a long
+/// session), while in-flight entries always survive.
+const PATH_PROBE_CACHE_CAP: usize = 1024;
+/// Global cap on concurrently outstanding probe workers. A wedged network
+/// volume holds its slot until the stat returns; once every slot is
+/// occupied, new probes are deferred (retried by later hover events) rather
+/// than spawning threads without bound.
+const PATH_PROBE_MAX_IN_FLIGHT: usize = 16;
+
 impl App {
     pub(in crate::app) fn apply_selection_gesture(
         &mut self,
@@ -167,7 +181,7 @@ impl App {
     /// recomputing a pixel hit-test, so it can also be called from
     /// `ModifiersChanged` with the mouse stationary.
     pub(in crate::app) fn hover_link_target(
-        &self,
+        &mut self,
         window_id: WindowId,
     ) -> Option<(PaneId, HoverLink)> {
         if !self.modifiers.super_key() {
@@ -183,15 +197,135 @@ impl App {
         if let Some(link_id) = row.cells.get(cell.x as usize).and_then(|c| c.hyperlink) {
             return Some((pane_id, HoverLink::Registry(link_id.get())));
         }
-        let url = noa_grid::detect_url_at_column(&row, cell.x)?;
+        if let Some(url) = noa_grid::detect_url_at_column(&row, cell.x) {
+            return Some((
+                pane_id,
+                HoverLink::Range {
+                    y: cell.y,
+                    x_start: url.start_x,
+                    x_end: url.end_x,
+                },
+            ));
+        }
+        // Paths in a remote pane's output live on the remote host — never
+        // detect (let alone open) them as local files, even when a same-named
+        // local file happens to exist.
+        if surface.is_remote() {
+            return None;
+        }
+        // Path detection needs no more of the terminal than the row already
+        // borrowed and `cwd` for relative-path resolution; drop the lock
+        // before the existence probe below.
+        let path_match = noa_grid::detect_path_at_column(&row, cell.x);
+        let cwd = terminal.cwd.clone();
+        drop(terminal);
+        let path_match = path_match?;
+        let resolved = resolve_hover_path(&path_match.path, cwd.as_deref())?;
+        if !self.probe_path_exists(window_id, resolved) {
+            return None;
+        }
         Some((
             pane_id,
             HoverLink::Range {
                 y: cell.y,
-                x_start: url.start_x,
-                x_end: url.end_x,
+                x_start: path_match.start_x,
+                x_end: path_match.end_x,
             },
         ))
+    }
+
+    /// Whether `path` is known to exist, per the probe cache. A miss (or an
+    /// entry older than [`PATH_PROBE_TTL`]) answers `false` *now* and kicks
+    /// off a worker-thread `stat` — the filesystem is never touched on the
+    /// main thread, where a slow or wedged network volume would stall
+    /// rendering and input. The worker posts [`UserEvent::PathProbe`], whose
+    /// handler re-syncs the hover link so a confirmed path underlines
+    /// without the mouse having to move again.
+    fn probe_path_exists(&mut self, window_id: WindowId, path: std::path::PathBuf) -> bool {
+        let now = Instant::now();
+        // Global bound on worker threads: every wedged stat occupies its
+        // slot until it answers, so hovering many distinct paths on a dead
+        // volume defers new probes instead of spawning without limit (a
+        // deferred path is simply retried by a later hover event).
+        let slot_free = self
+            .path_probe_cache
+            .values()
+            .filter(|entry| entry.in_flight.is_some())
+            .count()
+            < PATH_PROBE_MAX_IN_FLIGHT;
+        if let Some(entry) = self.path_probe_cache.get_mut(&path) {
+            if entry.in_flight.is_some() {
+                // At most one worker probe per path: a stat wedged on a dead
+                // network volume must not spawn a sibling on every pointer
+                // move. Remember who's asking so the answer re-syncs them.
+                if !entry.waiters.contains(&window_id) {
+                    entry.waiters.push(window_id);
+                }
+                return entry.answer == Some(true);
+            }
+            let answer = entry.answer;
+            if now.duration_since(entry.at) < PATH_PROBE_TTL || !slot_free {
+                // Fresh — or expired with every probe slot occupied, in
+                // which case the stale answer keeps being served until a
+                // slot frees up (`at` deliberately isn't bumped, so any
+                // later hover retries the revalidation).
+                return answer == Some(true);
+            }
+            // Expired: serve the stale answer (no underline flicker on a
+            // stationary hover) and revalidate in the background.
+            entry.in_flight = Some(self.next_path_probe_generation);
+            entry.waiters = vec![window_id];
+            self.start_path_probe(path);
+            return answer == Some(true);
+        }
+        if !slot_free {
+            return false;
+        }
+        if self.path_probe_cache.len() >= PATH_PROBE_CACHE_CAP {
+            // Evict only completed entries: dropping an in-flight one would
+            // orphan its worker (its answer then dies as a generation
+            // mismatch) and let the next hover of the same path spawn a
+            // sibling thread — unbounded when a volume has stats wedged.
+            // In-flight survivors keep the map at most cap + wedged-probes.
+            self.path_probe_cache
+                .retain(|_, entry| entry.in_flight.is_some());
+        }
+        self.path_probe_cache.insert(
+            path.clone(),
+            PathProbeEntry {
+                answer: None,
+                at: now,
+                in_flight: Some(self.next_path_probe_generation),
+                waiters: vec![window_id],
+            },
+        );
+        self.start_path_probe(path);
+        false
+    }
+
+    /// Whether `path`'s last probe answered "exists" — the click-time gate:
+    /// only a path the hover machinery actually confirmed may be opened.
+    pub(in crate::app) fn path_probe_confirmed(&self, path: &std::path::Path) -> bool {
+        self.path_probe_cache
+            .get(path)
+            .is_some_and(|entry| entry.answer == Some(true))
+    }
+
+    /// Stat `path` on a detached worker and post the answer back to the
+    /// event loop as [`UserEvent::PathProbe`], stamped with the generation
+    /// the caller just recorded in the entry's `in_flight` (consumed here).
+    fn start_path_probe(&mut self, path: std::path::PathBuf) {
+        let generation = self.next_path_probe_generation;
+        self.next_path_probe_generation += 1;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let exists = path.exists();
+            let _ = proxy.send_event(UserEvent::PathProbe {
+                generation,
+                path,
+                exists,
+            });
+        });
     }
 
     /// Recompute the Cmd+hover target for `window_id` and reconcile it into
@@ -259,14 +393,16 @@ impl App {
     }
 
     /// Resolve the currently Cmd+hovered link in `window_id`'s under-the-
-    /// mouse pane to its URI text, re-deriving it from live grid state
-    /// (rather than caching the string on `Surface::hover_link`, which the
-    /// renderer only needs the geometry of).
-    pub(in crate::app) fn open_hovered_link(&self, window_id: WindowId) -> Option<String> {
+    /// mouse pane to its open target, re-deriving it from live grid state
+    /// (rather than caching it on `Surface::hover_link`, which the renderer
+    /// only needs the geometry of). A path target's line/column suffix is
+    /// dropped here — `open` has no notion of a line number — but it was
+    /// still part of what got underlined on hover.
+    pub(in crate::app) fn open_hovered_link(&self, window_id: WindowId) -> Option<LinkTarget> {
         let state = self.windows.get(&window_id)?;
         let pane_id = state.last_mouse_pane?;
         let surface = state.surfaces.get(&pane_id)?;
-        surface.hover_link?;
+        let hover_link = surface.hover_link?;
         let cell = surface.last_mouse_cell?;
 
         let terminal = surface.terminal.lock();
@@ -275,8 +411,103 @@ impl App {
             return terminal
                 .hyperlinks
                 .get(link_id.get())
-                .map(|link| link.uri.clone());
+                .map(|link| LinkTarget::Uri(link.uri.clone()));
         }
-        noa_grid::detect_url_at_column(&row, cell.x).map(|url| url.uri)
+        if let Some(url) = noa_grid::detect_url_at_column(&row, cell.x) {
+            return Some(LinkTarget::Uri(url.uri));
+        }
+        // Same remote gate as `hover_link_target` — a remote pane's paths
+        // are another host's files.
+        if surface.is_remote() {
+            return None;
+        }
+        let path_match = noa_grid::detect_path_at_column(&row, cell.x);
+        let cwd = terminal.cwd.clone();
+        drop(terminal);
+        let path_match = path_match?;
+        // The row may have been rewritten under a stationary pointer (a PTY
+        // redraw doesn't re-sync the hover), leaving `hover_link` pointing
+        // at text that no longer matches what was underlined. Only open a
+        // path the hover machinery actually vetted: same geometry as the
+        // live hover, and a probe that answered "exists".
+        let expected = HoverLink::Range {
+            y: cell.y,
+            x_start: path_match.start_x,
+            x_end: path_match.end_x,
+        };
+        if hover_link != expected {
+            return None;
+        }
+        let resolved = resolve_hover_path(&path_match.path, cwd.as_deref())?;
+        self.path_probe_confirmed(&resolved)
+            .then_some(LinkTarget::Path(resolved))
+    }
+}
+
+/// Resolve a detected path token to an absolute filesystem path: `~/...`
+/// expands against `$HOME`, `/...` is used as-is, and anything else is
+/// joined onto `cwd` (the owning pane's `Terminal::cwd`, from OSC 7).
+/// Returns `None` when a relative path has no `cwd` to resolve against —
+/// noa-grid's bare-relative-path heuristic (any token with an interior `/`)
+/// only stays safe once paired with both this resolution *and* the
+/// existence check the caller performs on the result.
+fn resolve_hover_path(path: &str, cwd: Option<&str>) -> Option<std::path::PathBuf> {
+    resolve_hover_path_with(path, cwd, std::env::var_os("HOME").as_deref())
+}
+
+/// Pure core of [`resolve_hover_path`] with `$HOME` injected, so tests can
+/// exercise `~/` expansion without mutating process-global environment
+/// state (cargo runs tests multi-threaded; `set_var` is unsafe there).
+fn resolve_hover_path_with(
+    path: &str,
+    cwd: Option<&str>,
+    home: Option<&std::ffi::OsStr>,
+) -> Option<std::path::PathBuf> {
+    if let Some(rest) = path.strip_prefix("~/") {
+        return Some(std::path::Path::new(home?).join(rest));
+    }
+    if path.starts_with('/') {
+        return Some(std::path::PathBuf::from(path));
+    }
+    Some(std::path::Path::new(cwd?).join(path))
+}
+
+#[cfg(test)]
+mod path_resolution_tests {
+    use super::resolve_hover_path_with;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn resolves_absolute_path_as_is() {
+        assert_eq!(
+            resolve_hover_path_with("/usr/bin/env", Some("/home/x"), None),
+            Some(std::path::PathBuf::from("/usr/bin/env"))
+        );
+    }
+
+    #[test]
+    fn resolves_home_relative_path_against_home() {
+        assert_eq!(
+            resolve_hover_path_with("~/notes/todo.md", None, Some(OsStr::new("/Users/example"))),
+            Some(std::path::PathBuf::from("/Users/example/notes/todo.md"))
+        );
+    }
+
+    #[test]
+    fn refuses_home_relative_path_with_no_home() {
+        assert_eq!(resolve_hover_path_with("~/notes/todo.md", None, None), None);
+    }
+
+    #[test]
+    fn resolves_bare_relative_path_against_cwd() {
+        assert_eq!(
+            resolve_hover_path_with("src/main.rs", Some("/repo"), None),
+            Some(std::path::PathBuf::from("/repo/src/main.rs"))
+        );
+    }
+
+    #[test]
+    fn refuses_relative_path_with_no_cwd() {
+        assert_eq!(resolve_hover_path_with("src/main.rs", None, None), None);
     }
 }

@@ -55,6 +55,19 @@ pub enum UserEvent {
     },
     /// New terminal output is available; request a redraw.
     Redraw(WindowId, PaneId),
+    /// A hover-path existence probe finished on its worker thread
+    /// (`App::hover_link_target` never stats the filesystem on the main
+    /// thread — a network volume can block a metadata query indefinitely).
+    /// The app records the answer in its probe cache — only if `generation`
+    /// still matches the entry's in-flight probe, so a superseded straggler
+    /// can't overwrite a newer answer — and re-syncs every window that was
+    /// waiting on it so a confirmed path underlines without the mouse
+    /// moving.
+    PathProbe {
+        generation: u64,
+        path: std::path::PathBuf,
+        exists: bool,
+    },
     /// The pty's child process exited (or errored) — the app should close.
     PtyExit(WindowId, PaneId),
     /// AppleScript `input text`: write text to a resolved pane's pty on the

@@ -74,6 +74,27 @@ impl IpcRegistry {
             live
         });
     }
+
+    /// Pane-dnd P2-1: move `old`'s existing registration to `new`,
+    /// preserving its minted ipc id — mirrors `SessionStore::rekey` (same id,
+    /// new key). Without this, a cross-tab move leaves the registration
+    /// keyed under the pane's old `(window_id, pane_id)`; the next
+    /// `sync_ipc_snapshot` tick then sees no live pane at that key (`prune`)
+    /// and mints a *brand-new* ipc id at the new key instead, changing the
+    /// pane's wire-visible identity out from under any client that already
+    /// resolved the old one. A no-op when `old` has no registration, or
+    /// `new` is already registered (never expected in practice: `PaneId` is
+    /// process-global and unique, so no other pane can occupy `new`).
+    pub(crate) fn rekey(&mut self, old: (u64, u64), new: (u64, u64)) {
+        if old == new || self.by_pane.contains_key(&new) {
+            return;
+        }
+        let Some(id) = self.by_pane.remove(&old) else {
+            return;
+        };
+        self.by_id.insert(id, new);
+        self.by_pane.insert(new, id);
+    }
 }
 
 /// The main-thread-published, lock-guarded read surface `AppIpcBackend`
@@ -95,6 +116,61 @@ pub(crate) struct IpcShared {
     /// eagerly at pane spawn so an attach does not wait for the coarse read
     /// snapshot refresh.
     pub(crate) attach_panes: HashMap<(u64, u64), IpcAttachPane>,
+}
+
+impl IpcShared {
+    /// Pane-dnd P2-1/L2(e): move a pane's IPC registrations — its minted
+    /// registry id, its raw-attach registration, and its `terminals` read
+    /// handle — to its new window key after a cross-tab move, so a live raw
+    /// attach connection and its wire-visible ipc id both survive the move
+    /// instead of the registry entry being pruned and re-minted (severing
+    /// the attach) on the next `App::sync_ipc_snapshot` tick.
+    ///
+    /// P2-4 (review round 4): `terminals` *is* rebuilt fresh from the live
+    /// `Surface` set on every `sync_ipc_snapshot` tick, but that tick only
+    /// runs on its own `about_to_wait` cadence — a `getText`/`getGrid` call
+    /// landing between this move committing and the next tick would
+    /// otherwise resolve the pane's ipc id through `registry` (already
+    /// rekeyed, above) to its new key, then find no entry for it in
+    /// `terminals` (still under the old key) and fail the lookup as a
+    /// spurious `PaneClosed`. Moving it here, in the same lock as the other
+    /// two maps, closes that window instead of leaving it open until
+    /// whenever the next tick happens to run.
+    pub(crate) fn rekey_pane(&mut self, old: (u64, u64), new: (u64, u64)) {
+        self.registry.rekey(old, new);
+        if old != new
+            && let Some(attach) = self.attach_panes.remove(&old)
+        {
+            self.attach_panes.insert(new, attach);
+        }
+        if old != new
+            && let Some(terminal) = self.terminals.remove(&old)
+        {
+            self.terminals.insert(new, terminal);
+        }
+    }
+
+    /// P2 (review round 11): resolve a pane's ipc id to its live `terminals`
+    /// read handle in a *single* lock hold. `getText`/`getGrid` previously
+    /// resolved the id (locking, then unlocking) and only then looked the
+    /// handle up under a second lock acquisition — a cross-tab
+    /// [`Self::rekey_pane`] interleaving between the two moved the terminal
+    /// to the new key, so the second lookup missed the (now stale) resolved
+    /// key and failed as a spurious `PaneClosed` for a live pane. Doing both
+    /// the registry resolution and the handle clone here, under one lock,
+    /// closes that window — a rekey can only run entirely before or entirely
+    /// after, and either ordering resolves a matching key/handle pair.
+    /// Mirrors [`AppIpcBackend::resolve_attach_pane`]'s single-lock shape.
+    pub(crate) fn resolve_terminal(
+        &self,
+        pane: PaneRef,
+    ) -> Result<Arc<Mutex<Terminal>>, IpcError> {
+        let key = self.registry.resolve(pane).ok_or(IpcError::UnknownPane)?;
+        self.terminals
+            .get(&key)
+            .cloned()
+            .ok_or(IpcError::PaneClosed)
+    }
 }
 
 /// The local pane resources needed by the raw attach backend. Clones retain
@@ -270,12 +346,12 @@ pub(crate) struct AppIpcBackend {
 }
 
 impl AppIpcBackend {
-    fn resolve_pane(&self, pane: PaneRef) -> Result<(u64, u64), IpcError> {
-        self.shared
-            .lock()
-            .registry
-            .resolve(pane)
-            .ok_or(IpcError::UnknownPane)
+    /// Resolve a pane's ipc id to its live `terminals` read handle under a
+    /// single `IpcShared` lock (P2 review round 11) — see
+    /// [`IpcShared::resolve_terminal`] for why the resolution and the handle
+    /// clone must not straddle two lock acquisitions.
+    fn resolve_terminal(&self, pane: PaneRef) -> Result<Arc<Mutex<Terminal>>, IpcError> {
+        self.shared.lock().resolve_terminal(pane)
     }
 
     fn resolve_attach_pane(&self, pane: PaneRef) -> Result<IpcAttachPane, IpcError> {
@@ -326,14 +402,7 @@ impl IpcBackend for AppIpcBackend {
         source: TextSource,
         max_bytes: usize,
     ) -> Result<TextResult, IpcError> {
-        let key = self.resolve_pane(pane)?;
-        let terminal = self
-            .shared
-            .lock()
-            .terminals
-            .get(&key)
-            .cloned()
-            .ok_or(IpcError::PaneClosed)?;
+        let terminal = self.resolve_terminal(pane)?;
         let mut terminal = terminal.lock();
         let (text, truncated) = match source {
             TextSource::Screen => (screen_text(&terminal.active().visible_rows()), false),
@@ -351,14 +420,7 @@ impl IpcBackend for AppIpcBackend {
         start_row: u64,
         row_count: u64,
     ) -> Result<GridResult, IpcError> {
-        let key = self.resolve_pane(pane)?;
-        let terminal = self
-            .shared
-            .lock()
-            .terminals
-            .get(&key)
-            .cloned()
-            .ok_or(IpcError::PaneClosed)?;
+        let terminal = self.resolve_terminal(pane)?;
         let terminal = terminal.lock();
         Ok(terminal_grid_result(&terminal, start_row, row_count))
     }
@@ -638,6 +700,169 @@ mod tests {
         // again (fresh id, not a resurrection of the pruned one).
         let reminted = registry.mint(10, 1);
         assert_ne!(reminted, closed);
+    }
+
+    // Pane-dnd P2-1: a cross-tab move must preserve the pane's minted ipc id
+    // under its new `(window_id, pane_id)` key — not prune the old key and
+    // mint a fresh id, which would change the pane's wire-visible identity
+    // out from under a client that already resolved the old one.
+    #[test]
+    fn rekey_preserves_the_minted_id_under_the_new_key() {
+        let mut registry = IpcRegistry::default();
+        let other = registry.mint(10, 2);
+        let id = registry.mint(10, 1);
+
+        registry.rekey((10, 1), (20, 1));
+
+        assert_eq!(
+            registry.resolve(id),
+            Some((20, 1)),
+            "the id now resolves to the new key"
+        );
+        assert_eq!(
+            registry.by_pane.get(&(10, 1)),
+            None,
+            "the old key is no longer registered"
+        );
+        assert_eq!(
+            registry.mint(20, 1),
+            id,
+            "re-minting the new key returns the same (preserved) id, not a fresh one"
+        );
+        assert_eq!(
+            registry.resolve(other),
+            Some((10, 2)),
+            "an unrelated pane's registration is untouched"
+        );
+    }
+
+    // P2-4 (pane-dnd review round 4): `IpcShared::rekey_pane` must move all
+    // three of a pane's registrations — registry id, raw-attach endpoint,
+    // *and* its `terminals` read handle — to the new key in the same call,
+    // not just the first two. A `getText`/`getGrid` landing between a
+    // cross-tab move and the next `sync_ipc_snapshot` tick resolves the
+    // pane's ipc id through the (already-rekeyed) registry, so a stale
+    // `terminals` entry would fail that lookup as a spurious `PaneClosed`.
+    #[test]
+    fn rekey_pane_moves_registry_attach_and_terminals_to_the_new_key() {
+        let mut shared = IpcShared::default();
+        let ipc_id = shared.registry.mint(10, 1);
+        let terminal = Arc::new(Mutex::new(Terminal::new(noa_core::GridSize::new(80, 24))));
+        shared.terminals.insert((10, 1), terminal.clone());
+        let (queue, _rx) = crate::io_thread::input_channel();
+        shared.attach_panes.insert(
+            (10, 1),
+            IpcAttachPane::new(terminal.clone(), RawAttachTap::default(), queue),
+        );
+
+        shared.rekey_pane((10, 1), (20, 1));
+
+        assert_eq!(
+            shared.registry.resolve(ipc_id),
+            Some((20, 1)),
+            "the minted registry id follows the pane"
+        );
+        assert!(
+            !shared.terminals.contains_key(&(10, 1)),
+            "the old terminals key is gone"
+        );
+        assert!(
+            Arc::ptr_eq(
+                shared.terminals.get(&(20, 1)).expect("terminal moved to the new key"),
+                &terminal
+            ),
+            "the same terminal handle follows the pane, not a fresh lookup"
+        );
+        assert!(
+            !shared.attach_panes.contains_key(&(10, 1)),
+            "the old attach_panes key is gone"
+        );
+        assert!(
+            shared.attach_panes.contains_key(&(20, 1)),
+            "the raw-attach registration follows the pane"
+        );
+    }
+
+    // P2 (pane-dnd review round 11): `getText`/`getGrid` must resolve the
+    // pane's ipc id AND clone its `terminals` handle under one lock. The old
+    // two-phase path resolved the key, released the lock, then re-acquired it
+    // to fetch the handle — a cross-tab `rekey_pane` interleaving between the
+    // two moved the terminal off the resolved key, so the second lookup
+    // missed and returned a spurious `PaneClosed` for a live pane. This test
+    // pins the two-phase break (a key resolved *before* a rekey no longer
+    // finds its terminal) and shows the single-call resolve still returns the
+    // live handle.
+    #[test]
+    fn resolve_terminal_survives_a_rekey_that_breaks_the_two_phase_lookup() {
+        let mut shared = IpcShared::default();
+        let ipc_id = shared.registry.mint(10, 1);
+        let terminal = Arc::new(Mutex::new(Terminal::new(noa_core::GridSize::new(80, 24))));
+        shared.terminals.insert((10, 1), terminal.clone());
+
+        // Phase 1 of the old path: resolve the id to its current key.
+        let stale_key = shared
+            .registry
+            .resolve(ipc_id)
+            .expect("live pane resolves before the move");
+        assert_eq!(stale_key, (10, 1));
+
+        // A cross-tab move rekeys the pane before the old path's phase 2.
+        shared.rekey_pane((10, 1), (20, 1));
+        assert!(
+            !shared.terminals.contains_key(&stale_key),
+            "the two-phase lookup would now miss: terminal moved off the resolved key"
+        );
+
+        // The single-lock resolve resolves the (rekeyed) id and clones its
+        // handle together, so it returns the live terminal rather than a
+        // spurious PaneClosed.
+        let fetched = shared
+            .resolve_terminal(ipc_id)
+            .expect("live pane still resolves through the combined path");
+        assert!(
+            Arc::ptr_eq(&fetched, &terminal),
+            "the combined resolve returns the same live handle at the new key"
+        );
+    }
+
+    #[test]
+    fn resolve_terminal_reports_unknown_pane_and_pane_closed_distinctly() {
+        let mut shared = IpcShared::default();
+        // An id that was never minted is UnknownPane.
+        assert!(matches!(
+            shared.resolve_terminal(999),
+            Err(IpcError::UnknownPane)
+        ));
+        // A minted id whose terminal handle is absent is PaneClosed.
+        let ipc_id = shared.registry.mint(10, 1);
+        assert!(matches!(
+            shared.resolve_terminal(ipc_id),
+            Err(IpcError::PaneClosed)
+        ));
+    }
+
+    #[test]
+    fn rekey_is_a_no_op_when_the_old_key_has_no_registration_or_the_new_key_is_taken() {
+        let mut registry = IpcRegistry::default();
+        let a = registry.mint(10, 1);
+        let b = registry.mint(10, 2);
+
+        // Nothing registered under (99, 9) — rekeying it must not disturb
+        // any existing entry.
+        registry.rekey((99, 9), (100, 1));
+        assert_eq!(registry.resolve(a), Some((10, 1)));
+        assert_eq!(registry.resolve(b), Some((10, 2)));
+
+        // The destination key is already taken by `b` — `a` must not
+        // clobber it (this never occurs in practice, since `PaneId` is
+        // process-global and unique, but the guard must still hold).
+        registry.rekey((10, 1), (10, 2));
+        assert_eq!(
+            registry.resolve(a),
+            Some((10, 1)),
+            "a's registration is left in place when the destination is taken"
+        );
+        assert_eq!(registry.resolve(b), Some((10, 2)));
     }
 
     fn cell(ch: char, fg: Color) -> Cell {

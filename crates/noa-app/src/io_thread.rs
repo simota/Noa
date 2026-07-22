@@ -67,7 +67,8 @@ pub(crate) use ipc_tap::IpcOutputTap;
 pub(crate) use overview::{OverviewPublish, publish_overview_snapshot};
 pub(crate) use raw_attach::RawAttachTap;
 pub(crate) use redraw::{
-    RedrawFloor, SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION, redraw_floor_from_refresh_millihertz,
+    RedrawFloor, RedrawFloorHandle, SYNCHRONIZED_OUTPUT_MAX_SUPPRESSION,
+    redraw_floor_from_refresh_millihertz,
 };
 pub(crate) use sidebar::SidebarPublish;
 pub(crate) use spawn::{IoThreadHandle, IoThreadTarget, spawn};

@@ -18,7 +18,12 @@ use crate::auto_approve::{
 
 #[derive(Clone)]
 pub(crate) struct AutoApprovePublish {
-    pub(crate) enabled: Arc<AtomicBool>,
+    /// P2-1: a swappable holder rather than a bare `Arc<AtomicBool>` — a
+    /// cross-tab pane move (`App::move_pane_to_tab_at`) re-points this at the
+    /// destination tab's flag, and every read below goes through the lock so
+    /// a later toggle of either tab's flag is always observed, not just the
+    /// value at spawn/move time.
+    pub(crate) enabled: Arc<Mutex<Arc<AtomicBool>>>,
     pub(crate) guards: Arc<Mutex<AutoApproveInputGuards>>,
 }
 
@@ -45,7 +50,7 @@ pub(super) fn detect_auto_approve_candidate(
     publish: &AutoApprovePublish,
     state: &mut AutoApproveState,
 ) -> Option<AutoApproveCandidate> {
-    if !publish.enabled.load(Ordering::Relaxed) {
+    if !publish.enabled.lock().load(Ordering::Relaxed) {
         state.reset_for_mode_off();
         return None;
     }

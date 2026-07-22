@@ -35,7 +35,7 @@ use super::input_queue::{EchoStampedInput, QueuedPtyInput};
 use super::ipc_tap::{IpcOutputTap, flush_pending_ipc_output, force_ipc_output_refresh};
 use super::overview::{OverviewPublish, flush_pending_overview_publish};
 use super::raw_attach::RawAttachTap;
-use super::redraw::{RedrawDecision, RedrawFloor};
+use super::redraw::{RedrawDecision, RedrawFloorHandle};
 use super::sidebar::SidebarPublish;
 
 /// How recently the last *small* pty output batch must have arrived for the
@@ -111,8 +111,38 @@ impl SpinTraffic {
 /// because they're always passed and used together, and to keep `spawn`
 /// under clippy's argument-count lint now that `overview` adds an eighth.
 pub(crate) struct IoThreadTarget {
-    pub(crate) window_id: winit::window::WindowId,
+    /// The event-target window id, shared with the main thread (pane-dnd
+    /// L2(e)). Seeded at spawn with `u64::from(window_id)`; a cross-tab pane
+    /// move later `store`s the destination window id here (see
+    /// [`current_card_target`]) so this thread's `Redraw`/`PtyExit`/
+    /// `Clipboard{Write,Read}`/`Notify`/`AutoApprove` events — and its
+    /// `SessionCardId` — follow the pane without a respawn.
+    pub(crate) window_id: Arc<AtomicU64>,
     pub(crate) pane_id: PaneId,
+}
+
+/// Re-derive this thread's current event-routing target from the shared
+/// `window_id` cell, at the moment of each send (pane-dnd L2(e), Omen E3+E5:
+/// the single choke point every `UserEvent`/`SessionCardId` send site must
+/// route through, rather than a value baked in once at spawn or memoized
+/// downstream — a cross-tab move only ever updates the cell itself, so a
+/// stale copy anywhere else would silently stop following the pane).
+///
+/// Loads with `Ordering::Acquire`, pairing with the `Ordering::Release` store
+/// `App::move_pane_to_tab_at` performs on the main thread before the moved
+/// pane's `Surface` becomes visible under the destination window's key —
+/// this is a real cross-thread handoff (unlike `input_echo_seq`'s advisory
+/// `Relaxed` counter above), so every send after the store must observe the
+/// new id, never a torn or stale one.
+pub(super) fn current_card_target(
+    window_id: &Arc<AtomicU64>,
+    pane_id: PaneId,
+) -> (winit::window::WindowId, SessionCardId) {
+    let raw = window_id.load(Ordering::Acquire);
+    (
+        winit::window::WindowId::from(raw),
+        SessionCardId::new(SessionWindowId(raw), pane_id),
+    )
 }
 
 /// Owned handle for stopping and joining a PTY io thread.
@@ -207,21 +237,20 @@ pub fn spawn(
     overview: OverviewPublish,
     sidebar: SidebarPublish,
     auto_approve: AutoApprovePublish,
-    redraw_floor: RedrawFloor,
+    redraw_floor: RedrawFloorHandle,
     ipc: IpcOutputTap,
     raw_attach: RawAttachTap,
 ) -> IoThreadHandle {
     let IoThreadTarget { window_id, pane_id } = target;
-    // The GUI-agnostic card key for every sidebar delta this thread posts. The
-    // store never sees a winit `WindowId` (NFR-6); the app boundary converts it
-    // here via winit's stable `WindowId` ↔ `u64` mapping.
-    let card_id = SessionCardId::new(SessionWindowId(u64::from(window_id)), pane_id);
     let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(1);
     let (ipc_output_refresh_tx, ipc_output_refresh_rx) = crossbeam_channel::bounded(1);
     let join = std::thread::spawn(move || {
         let writer = pty.writer();
         let mut stream = noa_vt::Stream::with_shared_parser(raw_attach.parser());
-        let mut pty_capture = open_pty_capture(window_id, pane_id);
+        // Debug-capture filenames only need a starting identity — unlike the
+        // live `UserEvent`/`SessionCardId` targets below, this file is never
+        // re-opened mid-run, so it is not a `current_card_target` send site.
+        let mut pty_capture = open_pty_capture(current_card_target(&window_id, pane_id).0, pane_id);
         let mut last_overview_publish: Option<Instant> = None;
         let mut last_sidebar_publish: Option<Instant> = None;
         let mut auto_approve_state = AutoApproveState::default();
@@ -419,7 +448,9 @@ pub fn spawn(
                     let auto_approve_candidate = output.auto_approve.take();
                     if sidebar_bell
                         && proxy
-                            .send_event(UserEvent::SessionDelta(SessionDelta::Bell { id: card_id }))
+                            .send_event(UserEvent::SessionDelta(SessionDelta::Bell {
+                                id: current_card_target(&window_id, pane_id).1,
+                            }))
                             .is_err()
                     {
                         break; // event loop gone
@@ -428,7 +459,7 @@ pub fn spawn(
                         sidebar_seq += 1;
                         if proxy
                             .send_event(UserEvent::SessionDelta(SessionDelta::Upsert {
-                                id: card_id,
+                                id: current_card_target(&window_id, pane_id).1,
                                 seq: sidebar_seq,
                                 name: upsert.name,
                                 cwd: upsert.cwd,
@@ -444,7 +475,7 @@ pub fn spawn(
                     if let Some(candidate) = auto_approve_candidate
                         && proxy
                             .send_event(UserEvent::AutoApprove {
-                                id: card_id,
+                                id: current_card_target(&window_id, pane_id).1,
                                 signature: candidate.signature,
                                 region_hash: candidate.region_hash,
                                 disable_after: candidate.disable_after,
@@ -480,11 +511,17 @@ pub fn spawn(
                     // actually prints, which dirties the display.
                     let redraw = if output.display_dirty {
                         let echo_seq = input_echo_seq.load(Ordering::Relaxed);
+                        // P2-4: locked per decision — see `RedrawFloorHandle`'s
+                        // doc comment for why this indirection exists and why
+                        // it's cheap enough for this hot path.
                         let decision = if echo_seq != input_echo_served {
                             redraw_floor
+                                .lock()
                                 .decide_input_echo(output.synchronized_output, Instant::now())
                         } else {
-                            redraw_floor.decide(output.synchronized_output, Instant::now())
+                            redraw_floor
+                                .lock()
+                                .decide(output.synchronized_output, Instant::now())
                         };
                         if matches!(decision, RedrawDecision::Now) {
                             input_echo_served = echo_seq;
@@ -495,21 +532,21 @@ pub fn spawn(
                     };
                     for text in output.pending_clipboard_writes {
                         let _ = proxy.send_event(UserEvent::ClipboardWrite {
-                            window_id,
+                            window_id: current_card_target(&window_id, pane_id).0,
                             pane_id,
                             text,
                         });
                     }
                     for target in output.pending_clipboard_reads {
                         let _ = proxy.send_event(UserEvent::ClipboardRead {
-                            window_id,
+                            window_id: current_card_target(&window_id, pane_id).0,
                             pane_id,
                             target,
                         });
                     }
                     for notification in output.pending_notifications {
                         let _ = proxy.send_event(UserEvent::Notify {
-                            window_id,
+                            window_id: current_card_target(&window_id, pane_id).0,
                             pane_id,
                             title: notification.title,
                             body: notification.body,
@@ -519,7 +556,10 @@ pub fn spawn(
                         Some(RedrawDecision::Now) => {
                             redraw_deadline = None;
                             if proxy
-                                .send_event(UserEvent::Redraw(window_id, pane_id))
+                                .send_event(UserEvent::Redraw(
+                                    current_card_target(&window_id, pane_id).0,
+                                    pane_id,
+                                ))
                                 .is_err()
                             {
                                 break; // event loop gone
@@ -536,7 +576,10 @@ pub fn spawn(
                     }
                     match terminal_event {
                         Some(PtyDrainTerminalEvent::ExitOrError) => {
-                            let _ = proxy.send_event(UserEvent::PtyExit(window_id, pane_id));
+                            let _ = proxy.send_event(UserEvent::PtyExit(
+                                current_card_target(&window_id, pane_id).0,
+                                pane_id,
+                            ));
                             break;
                         }
                         Some(PtyDrainTerminalEvent::Disconnected) => break,
@@ -544,7 +587,10 @@ pub fn spawn(
                     }
                 }
                 Ok(noa_pty::PtyEvent::Exit(_)) | Ok(noa_pty::PtyEvent::Error(_)) => {
-                    let _ = proxy.send_event(UserEvent::PtyExit(window_id, pane_id));
+                    let _ = proxy.send_event(UserEvent::PtyExit(
+                        current_card_target(&window_id, pane_id).0,
+                        pane_id,
+                    ));
                     break;
                 }
                 Err(TryRecvError::Disconnected) => break, // channel closed
@@ -585,7 +631,7 @@ pub fn spawn(
                 // of every pane firing its own wake in the same tick.
                 redraw_deadline = None;
                 deadline_elapsed = true;
-                if redraw_floor.claim_deadline(now) {
+                if redraw_floor.lock().claim_deadline(now) {
                     needs_redraw = true;
                     redraw_claimed = true;
                 }
@@ -601,7 +647,7 @@ pub fn spawn(
                 if let Some(candidate) = candidate
                     && proxy
                         .send_event(UserEvent::AutoApprove {
-                            id: card_id,
+                            id: current_card_target(&window_id, pane_id).1,
                             signature: candidate.signature,
                             region_hash: candidate.region_hash,
                             disable_after: candidate.disable_after,
@@ -617,10 +663,13 @@ pub fn spawn(
                         // Owed by the publish-pending flush, not the shared
                         // floor deadline — still a real paint, so keep the
                         // window's clock in sync for other panes.
-                        redraw_floor.record(now);
+                        redraw_floor.lock().record(now);
                     }
                     if proxy
-                        .send_event(UserEvent::Redraw(window_id, pane_id))
+                        .send_event(UserEvent::Redraw(
+                            current_card_target(&window_id, pane_id).0,
+                            pane_id,
+                        ))
                         .is_err()
                     {
                         break; // event loop gone

@@ -60,8 +60,8 @@ impl App {
     /// is index-parallel with `layout.tiles` (see `overview_tile_target_at_point`).
     pub(in crate::app) fn render_due_overview_tiles(
         &mut self,
-        due_tile_ids: &[OverviewTileId],
-        source_tile_ids: &[OverviewTileId],
+        due_tab_ids: &[WindowId],
+        source_tab_ids: &[WindowId],
     ) {
         let Some(gpu) = self.gpu.as_mut() else {
             return;
@@ -73,62 +73,88 @@ impl App {
             return;
         };
 
-        for &tile_id in due_tile_ids {
-            let Some(tile_index) = source_tile_ids.iter().position(|id| *id == tile_id) else {
-                continue;
-            };
-            let Some(state) = self.windows.get_mut(&tile_id.window_id) else {
-                continue;
-            };
-            let Some(surface) = state.surfaces.get(&tile_id.pane_id) else {
-                continue;
-            };
-            let source_viewport = PixelSize {
-                w: surface.rect.w.max(1),
-                h: surface.rect.h.max(1),
-            };
-            // Read-only publish slot (Fix B, REQ-NF-6): the io thread
-            // already holds `Terminal`'s lock on every pty feed and
-            // opportunistically publishes a `FrameSnapshot::peek` there
-            // (cursor already hidden by `peek`), so this render path never
-            // locks a tab's `Terminal` itself. `None` only for a tab that
-            // hasn't published since the overview opened;
-            // `seed_overview_snapshots`'s one-time fallback covers that gap.
-            let Some(snapshot) = surface.overview_snapshot.lock().clone() else {
-                continue;
-            };
+        // The tile-local content region (below the title band) every tab's
+        // panes composite into — one uniform tile size for the whole grid.
+        let tile_size = thumbnails.tile_size();
+        let content = crate::session_overview::tab_tile_content_rect(
+            PaneRectApp::new(0, 0, tile_size.w, tile_size.h),
+            thumbnails.title_bar_h(),
+        );
 
-            // Reuse this tab's own `Renderer` unmodified (REQ-NF-1): point it
-            // at the source pane's real pixel size just long enough to draw
-            // one frame into the Overview scratch texture, then restore its
-            // real surface viewport so the tab's own next redraw is unaffected.
+        for &window_id in due_tab_ids {
+            let Some(tile_index) = source_tab_ids.iter().position(|id| *id == window_id) else {
+                continue;
+            };
+            let Some(state) = self.windows.get_mut(&window_id) else {
+                continue;
+            };
+            // Overview U1: lay the tab's SplitTree into the tile content region
+            // (scaled), so the tile reproduces the tab's real internal split
+            // geometry — each pane gets a sub-rect to composite its mirror into.
+            let pane_rects =
+                crate::session_overview::tab_tile_pane_rects(content, &state.split_tree);
+
+            // Clear the whole tab tile to the card color first, so divider gaps
+            // and any pane still lacking a published mirror read as an empty
+            // card rather than stale/uninitialized pixels; then composite each
+            // pane on top without re-clearing.
+            thumbnails.clear_tile(&gpu.device, &gpu.queue, tile_index);
+
+            // Reuse this tab's own `Renderer` unmodified (REQ-NF-1): point it at
+            // each source pane's real pixel size just long enough to draw one
+            // frame into the Overview scratch texture, then restore its real
+            // surface viewport so the tab's own next redraw is unaffected.
             let own_viewport = PixelSize {
                 w: state.surface_config.width,
                 h: state.surface_config.height,
             };
-            state.renderer.resize(source_viewport);
-            state.renderer.rebuild_cells(
-                &snapshot,
-                &mut gpu.font,
-                active_theme(&gpu.theme, &gpu.preview_theme),
-            );
-            state
-                .renderer
-                .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
-            if let Err(err) = thumbnails.render_existing_renderer_to_tile(
-                &gpu.device,
-                &gpu.queue,
-                &mut state.renderer,
-                source_viewport,
-                tile_index,
-            ) {
-                log::warn!(
-                    "overview tile render failed for {:?}/pane {}: {err:#}",
-                    tile_id.window_id,
-                    tile_id.pane_id.get()
+            let mut rendered_any = false;
+            for (pane_id, sub_rect) in pane_rects {
+                let Some(surface) = state.surfaces.get(&pane_id) else {
+                    continue;
+                };
+                let source_viewport = PixelSize {
+                    w: surface.rect.w.max(1),
+                    h: surface.rect.h.max(1),
+                };
+                // Read-only publish slot (Fix B, REQ-NF-6): the io thread
+                // already holds `Terminal`'s lock on every pty feed and
+                // opportunistically publishes a `FrameSnapshot::peek` there
+                // (cursor already hidden by `peek`), so this render path never
+                // locks a tab's `Terminal` itself. `None` only for a pane that
+                // hasn't published since the overview opened;
+                // `seed_overview_snapshots`'s one-time fallback covers that gap
+                // (the pane's sub-rect stays the card-color clear until then).
+                let Some(snapshot) = surface.overview_snapshot.lock().clone() else {
+                    continue;
+                };
+                state.renderer.resize(source_viewport);
+                state.renderer.rebuild_cells(
+                    &snapshot,
+                    &mut gpu.font,
+                    active_theme(&gpu.theme, &gpu.preview_theme),
                 );
+                state
+                    .renderer
+                    .sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
+                rendered_any = true;
+                if let Err(err) = thumbnails.render_pane_into_tile_subrect(
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut state.renderer,
+                    source_viewport,
+                    tile_index,
+                    (sub_rect.x, sub_rect.y, sub_rect.w, sub_rect.h),
+                ) {
+                    log::warn!(
+                        "overview tile render failed for {window_id:?}/pane {}: {err:#}",
+                        pane_id.get()
+                    );
+                }
             }
-            state.renderer.resize(own_viewport);
+            if rendered_any {
+                state.renderer.resize(own_viewport);
+            }
         }
     }
 
@@ -212,31 +238,31 @@ impl App {
     /// placeholder labels (AC-OV-12).
     pub(in crate::app) fn render_due_overview_title_bands(
         &mut self,
-        due_tile_ids: &[OverviewTileId],
-        source_tile_ids: &[OverviewTileId],
+        due_tab_ids: &[WindowId],
+        source_tab_ids: &[WindowId],
         layout: &OverviewLayout,
     ) {
-        let live_count = layout.tiles.len().min(source_tile_ids.len());
-        let live_ids = &source_tile_ids[..live_count];
-        let labels = overview_tile_labels(live_ids, |id| self.overview_tile_label(id));
+        let live_count = layout.tiles.len().min(source_tab_ids.len());
+        let live_ids = &source_tab_ids[..live_count];
+        let labels = overview_tile_labels(live_ids, |id| self.overview_tab_label(id));
         let query = self
             .overview_window
             .as_ref()
             .map_or(String::new(), |overview| overview.search_query.clone());
 
-        // Each live tile band carries its `⌘n` switch badge (REQ-OV-15c, only
-        // the 1..=9 the keymap reaches), its status-dot color, and the live
-        // search query for match highlighting (REQ-OV-16).
+        // Each live tab tile band carries its `⌘n` switch badge (REQ-OV-15c,
+        // only the 1..=9 the keymap reaches), its aggregate status-dot color,
+        // and the live search query for match highlighting (REQ-OV-16).
         let jobs: Vec<(usize, String, Option<usize>, Option<noa_core::Rgb>)> = labels
             .iter()
             .enumerate()
-            .filter(|(index, _)| due_tile_ids.contains(&live_ids[*index]))
+            .filter(|(index, _)| due_tab_ids.contains(&live_ids[*index]))
             .map(|(index, label)| {
                 (
                     index,
                     label.label.clone(),
                     (index < 9).then_some(index + 1),
-                    self.overview_tile_dot_color(live_ids[index]),
+                    self.overview_tab_dot_color(live_ids[index]),
                 )
             })
             .collect();
@@ -250,44 +276,33 @@ impl App {
     /// cleared to the card face before the title band is stamped on top.
     pub(in crate::app) fn render_overview_placeholder_labels(
         &mut self,
-        source_tile_ids: &[OverviewTileId],
+        source_tab_ids: &[WindowId],
         layout: &OverviewLayout,
     ) {
+        // v3 paging never overflows a page (each page holds ≤ OVERVIEW_GRID_CAP
+        // tabs, so `compute_overview_grid` yields no placeholder rows) — this
+        // stays as a defensive no-op for the degenerate over-cap case, now
+        // labelling any overflow tab tile with its own tab title.
         if layout.placeholders.is_empty() {
             return;
         }
         let live_count = layout.tiles.len();
-        let overflow_ids = overview_placeholder_source_ids(source_tile_ids, live_count);
-        let labels = overview_tile_labels(overflow_ids, |id| self.overview_tile_label(id));
+        let overflow_ids = overview_placeholder_source_ids(source_tab_ids, live_count);
+        let labels = overview_tile_labels(overflow_ids, |id| self.overview_tab_label(id));
         let query = self
             .overview_window
             .as_ref()
             .map_or(String::new(), |overview| overview.search_query.clone());
-        let home = std::env::var("HOME").ok();
 
-        // A placeholder has no live mirror to identify it, so its single band
-        // row carries the session's cwd (and branch) after the title — pulled
-        // from the same session store the sidebar reads.
         let jobs: Vec<(usize, String, Option<noa_core::Rgb>)> = labels
             .iter()
             .enumerate()
             .map(|(index, label)| {
-                let tile_id = overflow_ids[index];
-                let card_id = Self::session_card_id(tile_id.window_id, tile_id.pane_id);
-                let title = match self.session_store.get(&card_id) {
-                    Some(card) if !card.cwd.is_empty() => {
-                        let cwd = crate::sidebar::format_cwd(&card.cwd, home.as_deref(), 24);
-                        match &card.branch {
-                            Some(branch) => format!("{} — {cwd} ⎇ {branch}", label.label),
-                            None => format!("{} — {cwd}", label.label),
-                        }
-                    }
-                    _ => label.label.clone(),
-                };
+                let window_id = overflow_ids[index];
                 (
                     live_count + index,
-                    title,
-                    self.overview_tile_dot_color(tile_id),
+                    label.label.clone(),
+                    self.overview_tab_dot_color(window_id),
                 )
             })
             .collect();
@@ -609,7 +624,7 @@ impl App {
     pub(in crate::app) fn present_overview_frame(
         &mut self,
         layout: &OverviewLayout,
-        source_tile_ids: &[OverviewTileId],
+        source_tab_ids: &[WindowId],
         page: usize,
         page_count: usize,
     ) {
@@ -656,15 +671,115 @@ impl App {
         // a page has no placeholder rows, so the two orders coincide
         // exactly). Resolved before the gpu/overview borrows so the ring
         // pass needs no `self` access.
-        let attention_tiles: Vec<bool> = source_tile_ids
+        let attention_tiles: Vec<bool> = source_tab_ids
             .iter()
-            .map(|id| {
-                let card_id = Self::session_card_id(id.window_id, id.pane_id);
-                self.session_store
-                    .get(&card_id)
-                    .is_some_and(|card| card.attention)
+            .map(|window_id| {
+                // A tab tile wants attention if ANY of its panes does.
+                self.overview_pane_ids_for_window(*window_id)
+                    .iter()
+                    .any(|pane_id| {
+                        let card_id = Self::session_card_id(*window_id, *pane_id);
+                        self.session_store
+                            .get(&card_id)
+                            .is_some_and(|card| card.attention)
+                    })
             })
             .collect();
+
+        // Overview pane-drag visuals: the source *tab*'s tile index (for the
+        // floating chip), and the hovered tab's tile index when it is a *valid*
+        // drop target. Resolved before the gpu/overview borrows below.
+        let active_drag = self
+            .overview_window
+            .as_ref()
+            .and_then(|overview| overview.pane_drag)
+            .filter(|drag| drag.phase == PaneDragPhase::Active);
+        let drag_source_index = active_drag
+            .and_then(|drag| source_tab_ids.iter().position(|id| *id == drag.source.window_id));
+        // U4 floating chip: the dragged *pane*'s sub-rect of its tab tile
+        // texture, as a normalized `src_uv` plus the sub-rect's pixel size (for
+        // the chip's aspect). Resolved before the gpu/overview borrows so the
+        // chip draw below needs no `self` access. The pane is composited into
+        // this exact sub-rect of the tile by `render_due_overview_tiles`, so
+        // sampling that sub-rect shows just the dragged pane, not the whole tab.
+        let drag_chip: Option<([f32; 4], u32, u32)> = active_drag.and_then(|drag| {
+            let index = drag_source_index?;
+            let tile = layout.tiles.get(index)?;
+            let content = crate::session_overview::tab_tile_content_rect(
+                PaneRectApp::new(0, 0, tile.w, tile.h),
+                metrics.title_bar_h,
+            );
+            let state = self.windows.get(&drag.source.window_id)?;
+            let pane_rects =
+                crate::session_overview::tab_tile_pane_rects(content, &state.split_tree);
+            let (_, sub) = pane_rects
+                .into_iter()
+                .find(|(pane, _)| *pane == drag.source.pane_id)?;
+            let tile_w = tile.w.max(1) as f32;
+            let tile_h = tile.h.max(1) as f32;
+            let src_uv = [
+                sub.x as f32 / tile_w,
+                sub.y as f32 / tile_h,
+                sub.w as f32 / tile_w,
+                sub.h as f32 / tile_h,
+            ];
+            Some((src_uv, sub.w, sub.h))
+        });
+        // U2/U3 in-tile drop-zone highlight: the exact target *pane*'s 60/40
+        // zone sub-rect (center = inner box, edge = edge band — the distinct
+        // shapes are the non-color cue for swap vs split), the tab tile index
+        // it lives in, and the `src_uv` sampling that zone out of the tab tile
+        // texture. Resolved before the gpu/overview borrows. `None` (no
+        // highlight) whenever the release would `Cancel`: a self-drop, a
+        // foreign window group, or the pointer over a divider gap / no pane.
+        // Reuses the pure `pane_zone_highlight_rect` the main-view pane drag
+        // draws, so the highlight always matches what a release resolves to.
+        let drag_zone_highlight: Option<(usize, PaneRectApp, [f32; 4])> = active_drag
+            .and_then(|drag| {
+                let (dest_tab, target_pane, zone) = self.overview_drop_target_at_last_cursor()?;
+                let same_group = {
+                    let source_group = self
+                        .windows
+                        .get(&drag.source.window_id)
+                        .map(|state| state.group);
+                    let dest_group = self.windows.get(&dest_tab).map(|state| state.group);
+                    source_group.is_some() && source_group == dest_group
+                };
+                if matches!(
+                    crate::session_overview::resolve_overview_drop(
+                        drag.source.window_id,
+                        drag.source.pane_id,
+                        Some((dest_tab, target_pane, zone)),
+                        same_group,
+                    ),
+                    crate::session_overview::OverviewDrop::Cancel
+                ) {
+                    return None;
+                }
+                let index = source_tab_ids.iter().position(|id| *id == dest_tab)?;
+                let tile = *layout.tiles.get(index)?;
+                let content =
+                    crate::session_overview::tab_tile_content_rect(tile, metrics.title_bar_h);
+                let state = self.windows.get(&dest_tab)?;
+                let pane_rects =
+                    crate::session_overview::tab_tile_pane_rects(content, &state.split_tree);
+                let (_, pane_rect) = pane_rects.iter().find(|(pane, _)| *pane == target_pane)?;
+                let edge = match zone {
+                    PaneZone::Center => None,
+                    PaneZone::Edge(direction) => Some(direction),
+                };
+                let zone_rect =
+                    crate::app::pane_drag_render::pane_zone_highlight_rect(*pane_rect, edge);
+                let tile_w = tile.w.max(1) as f32;
+                let tile_h = tile.h.max(1) as f32;
+                let src_uv = [
+                    (zone_rect.x.saturating_sub(tile.x)) as f32 / tile_w,
+                    (zone_rect.y.saturating_sub(tile.y)) as f32 / tile_h,
+                    zone_rect.w as f32 / tile_w,
+                    zone_rect.h as f32 / tile_h,
+                ];
+                Some((index, zone_rect, src_uv))
+            });
 
         let Some(host) = self.overview_host() else {
             return;
@@ -887,6 +1002,70 @@ impl App {
                     }],
                 );
             }
+
+            // U2/U3 in-tile drop-zone highlight: a ring around the target
+            // pane's resolved 60/40 zone sub-rect (center = inner box, edge =
+            // edge band), sampled out of the tab tile texture via `src_uv` so
+            // the ring frames exactly the region a release would act on. Only a
+            // *valid* drop (non-Cancel) lights up (see `drag_zone_highlight`).
+            if let Some((index, zone_rect, src_uv)) = drag_zone_highlight
+                && let Some(tile_view) = thumbnails.tile_texture_view(index)
+            {
+                let drop_style = CardStyle {
+                    focus_width: crate::chrome::RING_HOVER * metrics.scale(),
+                    focus_glow_width: 0.0,
+                    ..overview_card_style(metrics)
+                };
+                chrome_card.pipeline.overlay_texture_cards_clipped(
+                    &gpu.device,
+                    &gpu.queue,
+                    &view,
+                    surface_size,
+                    &drop_style,
+                    &[CardTexturePlacement {
+                        texture_view: &tile_view,
+                        x: zone_rect.x,
+                        y: zone_rect.y,
+                        w: zone_rect.w,
+                        h: zone_rect.h,
+                        selected: true,
+                    }],
+                    src_uv,
+                    1.0,
+                );
+            }
+
+            // U4 floating chip: the dragged *pane*'s sub-rect of its tab tile
+            // texture (via `src_uv`), shrunk to half that sub-rect's size and
+            // centered on the cursor at 70% opacity — reuses the already-
+            // composited tile texture, allocates nothing per frame. Drawn last
+            // so it rides above every tile and ring.
+            if let (Some(drag), Some(index), Some((src_uv, sub_w, sub_h))) =
+                (active_drag, drag_source_index, drag_chip)
+                && let Some(tile_view) = thumbnails.tile_texture_view(index)
+            {
+                let chip_w = (sub_w / 2).max(1);
+                let chip_h = (sub_h / 2).max(1);
+                let chip_x = drag.current_point.x.saturating_sub(chip_w / 2);
+                let chip_y = drag.current_point.y.saturating_sub(chip_h / 2);
+                chrome_card.pipeline.overlay_texture_cards_clipped(
+                    &gpu.device,
+                    &gpu.queue,
+                    &view,
+                    surface_size,
+                    &overview_card_style(metrics),
+                    &[CardTexturePlacement {
+                        texture_view: &tile_view,
+                        x: chip_x,
+                        y: chip_y,
+                        w: chip_w,
+                        h: chip_h,
+                        selected: false,
+                    }],
+                    src_uv,
+                    0.7,
+                );
+            }
         }
 
         frame.present();
@@ -904,11 +1083,11 @@ impl App {
 
     pub(in crate::app) fn finish_overview_tile_renders(
         &mut self,
-        tile_ids: &[OverviewTileId],
+        tab_ids: &[WindowId],
         now: Instant,
     ) {
-        for tile_id in tile_ids {
-            let tile = self.overview_tiles.entry(*tile_id).or_default();
+        for window_id in tab_ids {
+            let tile = self.overview_tiles.entry(*window_id).or_default();
             tile.dirty = false;
             tile.last_render_at = Some(now);
         }

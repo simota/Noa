@@ -209,6 +209,102 @@ fn overview_freshly_allocated_tiles_are_cleared_not_uninitialized() {
     );
 }
 
+// Overview U1/Stage 2: `render_pane_into_tile_subrect` composites a pane's
+// mirror into a *sub-rectangle* of the tab tile without clearing the rest, so
+// several panes coexist in one tile. Proves (a) no wgpu validation error, and
+// (b) the sub-rect target is real — swapping which content goes in the left vs
+// right half changes the tile pixel hash, which could only happen if each
+// composite landed in its own half rather than overwriting the whole tile.
+#[test]
+fn overview_pane_subrect_composition_places_panes_in_distinct_regions() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping overview sub-rect composition test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let scratch_size = PixelSize { w: 160, h: 80 };
+    let tile_size = PixelSize { w: 120, h: 72 };
+    let mut font =
+        FontGrid::new(24.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(&device, &queue, format, &mut font, DEFAULT_GRID_PADDING)
+        .expect("build renderer");
+    renderer.resize(scratch_size);
+    let mut overview = OverviewThumbnailResources::for_renderer(
+        &device,
+        &queue,
+        &renderer,
+        scratch_size,
+        tile_size,
+        1,
+        TEST_TITLE_BAR_H,
+        TEST_CARD_COLOR,
+    );
+
+    // Two side-by-side pane cells inside the content region (below the title
+    // band) — mirrors a horizontally-split tab laid out into the tile.
+    let content_y = TEST_TITLE_BAR_H;
+    let content_h = tile_size.h - TEST_TITLE_BAR_H;
+    let half_w = tile_size.w / 2;
+    let left = (0, content_y, half_w, content_h);
+    let right = (half_w, content_y, tile_size.w - half_w, content_h);
+
+    let hash_tile = |overview: &OverviewThumbnailResources| {
+        hash_pixels(&read_rgba_pixels(
+            &device,
+            &queue,
+            overview.tile_texture_for_test(0).expect("tile exists"),
+            tile_size.w,
+            tile_size.h,
+        ))
+    };
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let cleared = {
+        overview.clear_tile(&device, &queue, 0);
+        hash_tile(&overview)
+    };
+
+    // Arrangement 1: "AAA" on the left, "WWW" on the right.
+    overview.clear_tile(&device, &queue, 0);
+    rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "AAA");
+    overview
+        .render_pane_into_tile_subrect(&device, &queue, &mut renderer, scratch_size, 0, left)
+        .expect("composite left pane");
+    rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "WWW");
+    overview
+        .render_pane_into_tile_subrect(&device, &queue, &mut renderer, scratch_size, 0, right)
+        .expect("composite right pane");
+    let arrangement_1 = hash_tile(&overview);
+
+    // Arrangement 2: swap the two — same content, opposite halves.
+    overview.clear_tile(&device, &queue, 0);
+    rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "WWW");
+    overview
+        .render_pane_into_tile_subrect(&device, &queue, &mut renderer, scratch_size, 0, left)
+        .expect("composite left pane (swapped)");
+    rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "AAA");
+    overview
+        .render_pane_into_tile_subrect(&device, &queue, &mut renderer, scratch_size, 0, right)
+        .expect("composite right pane (swapped)");
+    let arrangement_2 = hash_tile(&overview);
+
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error during overview sub-rect composition: {err:?}"
+    );
+    assert_ne!(
+        arrangement_1, cleared,
+        "compositing panes into sub-rects must change the tile from its cleared state"
+    );
+    assert_ne!(
+        arrangement_1, arrangement_2,
+        "swapping which pane content lands in the left vs right sub-rect must change the tile — \
+         proof the sub-rect target is honored, not a full-tile overwrite"
+    );
+}
+
 #[test]
 fn overview_blit_resources_drop_before_renderer_without_validation_error() {
     let Some((device, queue)) = device_queue() else {

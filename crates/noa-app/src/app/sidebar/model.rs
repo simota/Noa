@@ -128,16 +128,17 @@ impl App {
             let menu_hint =
                 hovered_id == Some(card_rects.id) || state.sidebar_menu == Some(card_rects.id);
             let full = card_rects.bounds.h == layout_metrics.card_h;
-            // Fully-visible cards draw text through their transparent overlay;
-            // only partial edge-clipped cards emit text directly to the band.
-            if !full {
+            let via_overlay = full;
+            // Text lives in the overlay for a promoted card; only a flat
+            // (non-promoted) partial card writes its text straight to the band.
+            if !via_overlay {
                 emit_card_text(
                     &mut runs, card_rects, card, &lines, &band_cell, marker, palette, renaming,
                     menu_hint,
                 );
             }
 
-            if full {
+            if via_overlay {
                 let selected = card_rects.id == selected_id;
                 let auto_flash = self
                     .auto_approve_flash_until
@@ -156,6 +157,28 @@ impl App {
                     renaming,
                     menu_hint,
                 );
+                // A promoted partial card samples only its visible vertical
+                // slice of the full-height card texture: a card clipped at the
+                // viewport top shows its lower slice (uv starts past 0); one
+                // clipped only at the bottom shows its upper slice (uv from 0).
+                // (A card short enough to be clipped at both ends — a viewport
+                // narrower than one card — degrades to showing its lower slice.)
+                let src_uv = if full {
+                    [0.0, 0.0, 1.0, 1.0]
+                } else {
+                    let card_h = layout_metrics.card_h.max(1) as f32;
+                    let clipped_top = if card_rects.bounds.y <= layout.viewport.y {
+                        layout_metrics.card_h.saturating_sub(card_rects.bounds.h)
+                    } else {
+                        0
+                    };
+                    [
+                        0.0,
+                        clipped_top as f32 / card_h,
+                        1.0,
+                        card_rects.bounds.h as f32 / card_h,
+                    ]
+                };
                 let selected_bg = sidebar_selected_card_bg(panel_bg);
                 cards.push(SidebarCardDraw {
                     rect: card_rects.bounds,
@@ -173,6 +196,7 @@ impl App {
                     attention: card.attention,
                     accent: card_accent(card, marker),
                     runs: card_runs,
+                    src_uv,
                 });
             }
         }
@@ -256,6 +280,7 @@ impl App {
                     attention: false,
                     accent: None,
                     runs: card_runs,
+                    src_uv: [0.0, 0.0, 1.0, 1.0],
                 };
                 // Drop indicator at the target gap, spanning the card width with a
                 // small horizontal inset so it reads as a rule, not a full band.

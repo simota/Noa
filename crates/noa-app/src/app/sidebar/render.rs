@@ -760,7 +760,7 @@ fn draw_sidebar_cards(
             sidebar_card_frame(card_draw.selected, card_draw.attention),
             SidebarCardFrame::Selected | SidebarCardFrame::Attention
         );
-        pipeline.overlay_texture_cards(
+        pipeline.overlay_texture_cards_clipped(
             &gpu.device,
             &gpu.queue,
             band_view,
@@ -774,6 +774,8 @@ fn draw_sidebar_cards(
                 h: card_draw.rect.h,
                 selected,
             }],
+            card_draw.src_uv,
+            1.0,
         );
 
         // Status accent bar (busy / attention / bell) along the card's left
@@ -806,7 +808,7 @@ fn draw_sidebar_cards(
                     focus_width: 0.0,
                     focus_glow_width: 0.0,
                 };
-                pipeline.overlay_texture_cards(
+                pipeline.overlay_texture_cards_clipped(
                     &gpu.device,
                     &gpu.queue,
                     band_view,
@@ -820,6 +822,8 @@ fn draw_sidebar_cards(
                         h: bar_h,
                         selected: false,
                     }],
+                    card_draw.src_uv,
+                    1.0,
                 );
             }
         }
@@ -1140,6 +1144,7 @@ mod tests {
                     "card".to_string(),
                     Rgb::new(4, 5, 6),
                 )],
+                src_uv: [0.0, 0.0, 1.0, 1.0],
             }],
             menu: None,
             dragging: None,

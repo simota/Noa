@@ -282,6 +282,148 @@ fn sidebar_band_overlay_composites_without_validation_error() {
     );
 }
 
+/// Pane-dnd Track D: the drag-visual composites live entirely in `noa-app`-
+/// side compositing over these existing `noa-render` primitives (no new GPU
+/// pipeline or uniform struct), so this headless test exercises both call
+/// shapes directly instead of duplicating app types here:
+///
+/// 1. The zone highlight — a flat rect sampling a 1x1 tint texture via
+///    `overlay_texture_cards` (the same technique `sidebar_band_overlay_...`
+///    above uses for the sidebar band, and production's scrollbar-thumb/
+///    visual-bell-flash composites already exercise headlessly via other
+///    call sites — this is the same shape at an arbitrary target rect).
+/// 2. The floating snapshot — a small rasterized-text scratch texture
+///    stretched to a larger placement via `overlay_texture_cards_with_opacity`
+///    at pane-dnd's 70% opacity. This exact API is already used in
+///    production (command-palette fade-in) but had no headless coverage
+///    before this test — pane-dnd is its second caller.
+#[test]
+fn pane_drag_visuals_composite_without_validation_error() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping pane-drag visuals composite test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let card = CardPipeline::new(&device, format, wgpu::BlendState::ALPHA_BLENDING);
+    let surface_size = PixelSize { w: 400, h: 300 };
+    let (target_tex, target_view) = render_target(&device, surface_size.w, surface_size.h);
+
+    // Zone highlight: a 1x1 UI_ACCENT-tinted texture (alpha carries the
+    // ~28% overlay opacity, matching `ensure_tint_texture`'s convention).
+    let zone_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("noa-test-pane-drag-zone"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &zone_tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[0x14, 0xa2, 0xff, 71],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    let zone_view = zone_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let flat_style = CardStyle {
+        background: [0.0; 4],
+        border_color: [0.0; 4],
+        focus_color: [0.0; 4],
+        corner_radius: 0.0,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: 0.0,
+    };
+
+    // Floating snapshot: a small text scratch, stretched to a larger card.
+    let scratch_size = PixelSize { w: 48, h: 20 };
+    let (scratch_tex, scratch_view) = render_target(&device, scratch_size.w, scratch_size.h);
+    let _ = &scratch_tex;
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    let mut renderer = Renderer::new(&device, &queue, format, &mut font, DEFAULT_GRID_PADDING)
+        .expect("build pane-drag snapshot renderer");
+    renderer.resize(scratch_size);
+    rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "12x34");
+    renderer.draw(&device, &queue, &scratch_view);
+    let snapshot_style = CardStyle {
+        background: [0.0; 4],
+        border_color: [0.0; 4],
+        focus_color: [0.0; 4],
+        corner_radius: 6.0,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: 0.0,
+    };
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    card.overlay_texture_cards(
+        &device,
+        &queue,
+        &target_view,
+        surface_size,
+        &flat_style,
+        &[CardTexturePlacement {
+            texture_view: &zone_view,
+            x: 20,
+            y: 20,
+            w: 80,
+            h: 120,
+            selected: false,
+        }],
+    );
+    card.overlay_texture_cards_with_opacity(
+        &device,
+        &queue,
+        &target_view,
+        surface_size,
+        &snapshot_style,
+        &[CardTexturePlacement {
+            texture_view: &scratch_view,
+            x: 150,
+            y: 100,
+            w: 160,
+            h: 90,
+            selected: false,
+        }],
+        0.7,
+    );
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll device after pane-drag visuals composite");
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error during pane-drag visuals composite: {err:?}"
+    );
+
+    let pixels = read_rgba_pixels(&device, &queue, &target_tex, surface_size.w, surface_size.h);
+    let first = &pixels[0..4];
+    assert!(
+        pixels.chunks_exact(4).any(|px| px != first),
+        "pane-drag visuals composite produced a uniform frame (nothing drawn)"
+    );
+}
+
 /// Item H: exercise the command-palette rounded-card composite exactly as
 /// `noa-app` does it — rasterize the block into a scratch texture with a
 /// zero-padding `Renderer`, then composite two `overlay_texture_cards` passes

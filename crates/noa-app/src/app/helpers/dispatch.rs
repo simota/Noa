@@ -168,24 +168,6 @@ pub(crate) fn split_tree_pane_ids(tree: &SplitTree) -> Vec<PaneId> {
     panes
 }
 
-pub(crate) fn overview_tile_source_order<W: Copy + Eq, P: Copy>(
-    window_order: &[W],
-    mut live_window: impl FnMut(W) -> bool,
-    mut pane_ids_for_window: impl FnMut(W) -> Vec<P>,
-    overview_window: Option<W>,
-) -> Vec<(W, P)> {
-    window_order
-        .iter()
-        .copied()
-        .filter(|id| Some(*id) != overview_window && live_window(*id))
-        .flat_map(|window_id| {
-            pane_ids_for_window(window_id)
-                .into_iter()
-                .map(move |pane_id| (window_id, pane_id))
-        })
-        .collect()
-}
-
 pub(crate) fn overview_tile_target_at_point<Id: Copy>(
     source_ids: &[Id],
     tile_rects: &[PaneRectApp],

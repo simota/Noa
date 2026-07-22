@@ -16,6 +16,7 @@ pub mod kitty_keyboard;
 pub mod kitty_placeholder;
 pub mod modes;
 mod osc;
+pub mod path;
 pub mod screen;
 mod scrollback;
 pub mod search;
@@ -40,6 +41,7 @@ pub use kitty_keyboard::{
 pub use kitty_placeholder::{PLACEHOLDER, PlaceholderRun, scan_row};
 pub use modes::ModeState;
 pub use osc::{Notification, Osc52Policy, TerminalColors};
+pub use path::{PathMatch, detect_path_at_column};
 pub use screen::{KittyPlacement, Screen, VisibleKittyPlacement};
 pub use search::{SearchAnchor, SearchMatch, SearchState};
 pub use selection::{Selection, SelectionPoint};

@@ -326,6 +326,36 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                 }
             }
+            UserEvent::PathProbe {
+                generation,
+                path,
+                exists,
+            } => {
+                // A mismatched generation is a superseded straggler (a newer
+                // probe answered first, or the cache was cleared): recording
+                // it would overwrite the fresher answer.
+                if let Some(entry) = self.path_probe_cache.get_mut(&path)
+                    && entry.in_flight == Some(generation)
+                {
+                    entry.answer = Some(exists);
+                    entry.at = std::time::Instant::now();
+                    entry.in_flight = None;
+                    // Re-sync every window that hovered this path while the
+                    // probe was in flight, so it underlines (and the cursor
+                    // switches) without the mouse having to move again — but
+                    // skip any waiter when a *different* window holds the
+                    // current hover: syncing a stale waiter would see no
+                    // target there and clear that live hover.
+                    for waiter in std::mem::take(&mut entry.waiters) {
+                        if self
+                            .hovered_link
+                            .is_none_or(|(hovered, _)| hovered == waiter)
+                        {
+                            self.sync_hover_link(waiter);
+                        }
+                    }
+                }
+            }
             UserEvent::PtyExit(window_id, pane_id) => {
                 // The quick terminal isn't a saved/tabbed window, so its shell
                 // exiting tears the whole drop-down down rather than routing
@@ -1316,11 +1346,14 @@ impl App {
                     // consumed: no selection start, no SGR mouse report.
                     // Without a hovered link this falls through to the
                     // existing click handling below.
-                    if let Some(uri) = self.open_hovered_link(window_id) {
+                    if let Some(target) = self.open_hovered_link(window_id) {
                         if let Some(state) = self.windows.get_mut(&window_id) {
                             state.link_click_in_flight = true;
                         }
-                        link_open::open_uri(&uri);
+                        match target {
+                            LinkTarget::Uri(uri) => link_open::open_uri(&uri),
+                            LinkTarget::Path(path) => link_open::open_path(&path),
+                        }
                         return;
                     }
                 }

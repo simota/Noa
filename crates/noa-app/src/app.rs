@@ -43,7 +43,7 @@ use crate::commands::{
 };
 use crate::events::UserEvent;
 use crate::input;
-use crate::link_open;
+use crate::link_open::{self, LinkTarget};
 use crate::mouse::{self, MouseSelectionState, SelectionGesture};
 use crate::search_prompt::{SearchPrompt, SearchPromptEffect};
 use crate::session;
@@ -118,6 +118,24 @@ struct LiveWallpaperTransition {
     current: Option<BackgroundImage>,
     started_at: Instant,
     duration: Duration,
+}
+
+/// One hover-path existence probe, keyed in `App::path_probe_cache` by the
+/// resolved absolute path it stats. See `pointer.rs::probe_path_exists` for
+/// the state machine.
+struct PathProbeEntry {
+    /// Last completed answer, if any; served (even stale) while a
+    /// revalidation is in flight so a stationary hover never flickers.
+    answer: Option<bool>,
+    /// When `answer` was recorded (or the first probe started).
+    at: Instant,
+    /// Generation of the outstanding worker probe — at most one per path,
+    /// no matter how long a wedged volume blocks it. An answer arriving
+    /// with any other generation is a superseded straggler and dropped.
+    in_flight: Option<u64>,
+    /// Windows whose hover asked about this path while the probe was in
+    /// flight; each is re-synced when the answer lands.
+    waiters: Vec<WindowId>,
 }
 
 pub struct App {
@@ -228,6 +246,15 @@ pub struct App {
     /// mouse moves to a different pane/window (or off any pane) without
     /// having to scan every surface.
     hovered_link: Option<(WindowId, PaneId)>,
+    /// Hover-path existence probe results, keyed by resolved absolute path.
+    /// Entries expire (see `pointer.rs`) so a file created or deleted after
+    /// the probe is re-checked; at a size cap the completed entries are
+    /// dropped wholesale (hover churn is tiny and sessions are long) while
+    /// in-flight ones survive, keeping each path's worker unique.
+    path_probe_cache: HashMap<std::path::PathBuf, PathProbeEntry>,
+    /// Monotonic id for [`PathProbeEntry::in_flight`]; a probe answer whose
+    /// generation no longer matches is a superseded straggler and dropped.
+    next_path_probe_generation: u64,
     /// The open search prompt (Cmd+F), if any — see [`SearchPromptSession`].
     search_prompt: Option<SearchPromptSession>,
     /// Keyboard copy mode, bound to exactly one focused window/pane.
@@ -688,6 +715,8 @@ impl App {
             auto_approve_flash_until: HashMap::new(),
             attention_blink_deadline: None,
             hovered_link: None,
+            path_probe_cache: HashMap::new(),
+            next_path_probe_generation: 0,
             search_prompt: None,
             copy_mode: None,
             copy_mode_suppressed_releases: HashSet::new(),

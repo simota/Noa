@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-07-22
+
+### Added
+
+- File paths in terminal output (absolute, `~/`, `./`, `../`, and bare
+  relative tokens, with rustc/grep-style `:LINE[:COL]` suffixes) become
+  Cmd+click links on local panes: hover resolves the text against the
+  pane's cwd and linkifies only if the target exists on disk, probed on a
+  worker thread through a TTL'd cache so a wedged network volume never
+  stalls rendering (#38)
+- Panes can be rearranged and moved across tabs by dragging them in the
+  Tab Overview, which now renders each tab as a layout minimap compositing
+  its panes at their split-tree positions: dragging within a tile swaps or
+  split-inserts (center/edge zones), dropping onto another tab's tile
+  moves the pane there with position targeting, and the running process is
+  carried alive across the move (#39)
+
 ## [0.2.1] - 2026-07-21
 
 ### Fixed

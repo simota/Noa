@@ -39,7 +39,9 @@ pub fn close_pane(tree: &mut SplitTree, pane: PaneId) -> CloseOutcome {
     }
 }
 
-enum RemovePaneResult {
+/// Shared by [`close_pane`] and [`super::reposition::extract_pane`] — the
+/// latter reuses this recursive collapse walk so the two never diverge.
+pub(super) enum RemovePaneResult {
     NotFound(SplitTree),
     Removed {
         tree: Option<SplitTree>,
@@ -47,7 +49,7 @@ enum RemovePaneResult {
     },
 }
 
-fn remove_pane_from_tree(tree: SplitTree, target: PaneId) -> RemovePaneResult {
+pub(super) fn remove_pane_from_tree(tree: SplitTree, target: PaneId) -> RemovePaneResult {
     match tree {
         SplitTree::Leaf { pane } if pane == target => RemovePaneResult::Removed {
             tree: None,

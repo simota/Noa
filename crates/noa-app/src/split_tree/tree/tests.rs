@@ -929,3 +929,445 @@ fn pane_command_target_resolution_uses_focused_pane_for_terminal_commands() {
 
     assert_eq!(resolve_pane_command_target(AppCommand::Copy, None), None);
 }
+
+// ---------------------------------------------------------------------
+// Pane D&D (docs/specs/pane-dnd.md) — swap_pane / extract_pane / move_pane
+// ---------------------------------------------------------------------
+
+use super::ops::pane_ids;
+
+#[test]
+fn swap_pane_exchanges_leaf_ids_and_preserves_tree_shape() {
+    let a = PaneId::new(1);
+    let b = PaneId::new(2);
+    let mut tree = SplitTree::split_even(
+        SplitOrientation::Horizontal,
+        SplitTree::leaf(a),
+        SplitTree::leaf(b),
+    );
+
+    assert!(swap_pane(&mut tree, a, b));
+
+    assert_eq!(
+        tree,
+        SplitTree::split_even(
+            SplitOrientation::Horizontal,
+            SplitTree::leaf(b),
+            SplitTree::leaf(a),
+        )
+    );
+}
+
+#[test]
+fn move_pane_edge_insert_direction_and_order_matches_axis_convention() {
+    let moved = PaneId::new(1);
+    let target = PaneId::new(2);
+
+    for direction in [
+        Direction::Left,
+        Direction::Right,
+        Direction::Up,
+        Direction::Down,
+    ] {
+        // Seed `moved` and `target` as siblings on the *opposite* axis so
+        // `move_pane`'s edge-insert exercises a fresh axis group for
+        // `direction` rather than the adjacent-same-axis-group case (that
+        // case has its own regression test below).
+        let seed_orientation = match direction.split_orientation() {
+            SplitOrientation::Horizontal => SplitOrientation::Vertical,
+            SplitOrientation::Vertical => SplitOrientation::Horizontal,
+        };
+        let mut tree = SplitTree::split_even(
+            seed_orientation,
+            SplitTree::leaf(moved),
+            SplitTree::leaf(target),
+        );
+
+        let outcome = move_pane(&mut tree, moved, target, direction, true).unwrap();
+        assert!(!outcome.tab_should_close);
+
+        // Directional correctness: moved always ends up on `direction`'s
+        // side of target, regardless of tree child order.
+        let layout = compute_layout(&tree, Rect::new(0, 0, 100, 100));
+        let moved_rect = rect_for(&layout, moved);
+        let target_rect = rect_for(&layout, target);
+        let spatially_correct = match direction {
+            Direction::Left => moved_rect.right() <= target_rect.x,
+            Direction::Right => target_rect.right() <= moved_rect.x,
+            Direction::Up => moved_rect.bottom() <= target_rect.y,
+            Direction::Down => target_rect.bottom() <= moved_rect.y,
+        };
+        assert!(spatially_correct, "{direction:?}");
+
+        // Insertion order: which child comes first in the tree must match
+        // `places_new_split_before_existing()`, exactly like
+        // `split_left_places_new_pane_on_the_left_and_focus_target_first`
+        // above (AC-6).
+        let SplitTree::Split {
+            orientation, first, ..
+        } = &tree
+        else {
+            panic!("{direction:?}: expected the reinserted tree to be a single split");
+        };
+        assert_eq!(*orientation, direction.split_orientation(), "{direction:?}");
+        let SplitTree::Leaf { pane: first_pane } = first.as_ref() else {
+            panic!("{direction:?}: expected a leaf first child");
+        };
+        let expected_first = if direction.places_new_split_before_existing() {
+            moved
+        } else {
+            target
+        };
+        assert_eq!(*first_pane, expected_first, "{direction:?}");
+    }
+}
+
+#[test]
+fn move_pane_adjacent_in_same_axis_group_collapses_and_reinserts_correctly() {
+    // Omen A3: `moved` and `target` are the only two siblings in this
+    // horizontal group, so extracting `moved` collapses the split entirely
+    // down to `target`'s own leaf before `target` gets re-split against
+    // `moved` on `direction`'s side. Composition must resolve `target` by
+    // value post-collapse, not by a stale pre-extraction path.
+    let moved = PaneId::new(1);
+    let target = PaneId::new(2);
+    let mut tree = SplitTree::split_even(
+        SplitOrientation::Horizontal,
+        SplitTree::leaf(moved),
+        SplitTree::leaf(target),
+    );
+
+    let outcome = move_pane(&mut tree, moved, target, Direction::Right, true).unwrap();
+    assert!(!outcome.tab_should_close);
+
+    assert_eq!(
+        tree,
+        SplitTree::split_even(
+            SplitOrientation::Horizontal,
+            SplitTree::leaf(target),
+            SplitTree::leaf(moved),
+        )
+    );
+}
+
+#[test]
+fn move_pane_axis_cap_exceeded_is_rejected_and_tree_unchanged() {
+    let first = PaneId::new(1);
+    let second = PaneId::new(2);
+    let third = PaneId::new(3);
+    let moved = PaneId::new(4);
+    // A 3-pane row already at MAX_PANES_PER_AXIS, plus `moved` split off on
+    // the other axis (mirrors `adding_beyond_three_panes_in_one_axis_is_rejected`).
+    let mut tree = SplitTree::split_even(
+        SplitOrientation::Vertical,
+        SplitTree::split(
+            SplitOrientation::Horizontal,
+            1.0 / 3.0,
+            SplitTree::leaf(first),
+            SplitTree::split_even(
+                SplitOrientation::Horizontal,
+                SplitTree::leaf(second),
+                SplitTree::leaf(third),
+            ),
+        ),
+        SplitTree::leaf(moved),
+    );
+    let before = tree.clone();
+
+    let result = move_pane(&mut tree, moved, third, Direction::Right, true);
+
+    assert_eq!(result, Err(MoveError::MaxPanesExceeded));
+    assert_eq!(tree, before);
+}
+
+#[test]
+fn move_pane_per_tab_cap_rejected_via_tab_cap_ok_leaves_tree_unchanged() {
+    // AC-27: the per-tab cap (MAX_PANES_PER_TAB=9) needs pixel geometry this
+    // pure tree layer doesn't have (Omen A5) — the caller computes it and
+    // passes `tab_cap_ok`. This is a fresh axis group, so the axis cap alone
+    // would allow the insert; `tab_cap_ok=false` is what rejects it here.
+    let moved = PaneId::new(1);
+    let target = PaneId::new(2);
+    let mut tree = SplitTree::split_even(
+        SplitOrientation::Vertical,
+        SplitTree::leaf(moved),
+        SplitTree::leaf(target),
+    );
+    let before = tree.clone();
+
+    let result = move_pane(&mut tree, moved, target, Direction::Right, false);
+
+    assert_eq!(result, Err(MoveError::MaxPanesExceeded));
+    assert_eq!(tree, before);
+}
+
+#[test]
+fn self_swap_and_self_move_are_no_ops() {
+    let pane = PaneId::new(1);
+    let other = PaneId::new(2);
+    let mut tree = SplitTree::split_even(
+        SplitOrientation::Horizontal,
+        SplitTree::leaf(pane),
+        SplitTree::leaf(other),
+    );
+    let before = tree.clone();
+
+    assert!(!swap_pane(&mut tree, pane, pane));
+    assert_eq!(tree, before);
+
+    let result = move_pane(&mut tree, pane, pane, Direction::Right, true);
+    assert_eq!(result, Err(MoveError::InvalidPanes));
+    assert_eq!(tree, before);
+}
+
+#[test]
+fn swap_and_move_with_nonexistent_pane_are_rejected() {
+    let pane = PaneId::new(1);
+    let other = PaneId::new(2);
+    let missing = PaneId::new(99);
+    let mut tree = SplitTree::split_even(
+        SplitOrientation::Horizontal,
+        SplitTree::leaf(pane),
+        SplitTree::leaf(other),
+    );
+    let before = tree.clone();
+
+    assert!(!swap_pane(&mut tree, pane, missing));
+    assert_eq!(tree, before);
+
+    let result = move_pane(&mut tree, pane, missing, Direction::Right, true);
+    assert_eq!(result, Err(MoveError::InvalidPanes));
+    assert_eq!(tree, before);
+
+    let result = move_pane(&mut tree, missing, pane, Direction::Right, true);
+    assert_eq!(result, Err(MoveError::InvalidPanes));
+    assert_eq!(tree, before);
+}
+
+#[test]
+fn swap_pane_with_zoom_force_unzooms_when_either_pane_was_zoomed() {
+    let a = PaneId::new(1);
+    let b = PaneId::new(2);
+    let mut tree = SplitTree::split_even(
+        SplitOrientation::Horizontal,
+        SplitTree::leaf(a),
+        SplitTree::leaf(b),
+    );
+
+    let outcome = swap_pane_with_zoom(&mut tree, a, b, Some(a));
+    assert!(outcome.swapped);
+    assert_eq!(outcome.zoomed, None, "no dangling zoom target after swap");
+}
+
+// P2-3 (FR-6): a successful swap force-unzooms even when the zoomed pane is
+// neither `a` nor `b` — a zoomed pane fills the whole tab, so `c`'s zoom
+// would otherwise hide the (still real) swap between `a` and `b`. This test
+// used to assert the opposite (`outcome.zoomed == Some(c)`, "unrelated zoom
+// left intact"); that was the bug FR-6 requires fixing (zoom C, then a swap
+// of A<->B was invisible behind C's zoom).
+#[test]
+fn swap_pane_with_zoom_force_unzooms_even_for_an_unrelated_zoom_target() {
+    let a = PaneId::new(1);
+    let b = PaneId::new(2);
+    let c = PaneId::new(3);
+    let mut tree = SplitTree::split_even(
+        SplitOrientation::Horizontal,
+        SplitTree::leaf(a),
+        SplitTree::split_even(SplitOrientation::Vertical, SplitTree::leaf(b), SplitTree::leaf(c)),
+    );
+
+    let outcome = swap_pane_with_zoom(&mut tree, a, b, Some(c));
+    assert!(outcome.swapped);
+    assert_eq!(
+        outcome.zoomed, None,
+        "a successful swap unzooms unconditionally, regardless of which pane was zoomed"
+    );
+}
+
+#[test]
+fn swap_pane_with_zoom_rejected_self_swap_leaves_zoom_intact() {
+    let a = PaneId::new(1);
+    let b = PaneId::new(2);
+    let mut tree = SplitTree::split_even(
+        SplitOrientation::Horizontal,
+        SplitTree::leaf(a),
+        SplitTree::leaf(b),
+    );
+    let before = tree.clone();
+
+    let outcome = swap_pane_with_zoom(&mut tree, a, a, Some(a));
+    assert!(!outcome.swapped);
+    assert_eq!(outcome.zoomed, Some(a), "rejected op leaves zoom state untouched");
+    assert_eq!(tree, before);
+}
+
+#[test]
+fn move_pane_with_zoom_force_unzooms_moved_or_target_before_transform() {
+    let moved = PaneId::new(1);
+    let target = PaneId::new(2);
+    let mut tree = SplitTree::split_even(
+        SplitOrientation::Vertical,
+        SplitTree::leaf(moved),
+        SplitTree::leaf(target),
+    );
+
+    let outcome = move_pane_with_zoom(&mut tree, moved, target, Direction::Right, true, Some(target));
+    assert!(outcome.move_result.is_ok());
+    assert_eq!(outcome.zoomed, None, "no dangling zoom target after move");
+}
+
+// P2-3 (FR-6) companion to the swap-side test above: a successful move also
+// force-unzooms when the zoomed pane is neither `moved` nor `target`.
+#[test]
+fn move_pane_with_zoom_force_unzooms_even_for_an_unrelated_zoom_target() {
+    let moved = PaneId::new(1);
+    let target = PaneId::new(2);
+    let zoomed_elsewhere = PaneId::new(3);
+    let mut tree = SplitTree::split_even(
+        SplitOrientation::Horizontal,
+        SplitTree::split_even(
+            SplitOrientation::Vertical,
+            SplitTree::leaf(moved),
+            SplitTree::leaf(target),
+        ),
+        SplitTree::leaf(zoomed_elsewhere),
+    );
+
+    let outcome = move_pane_with_zoom(
+        &mut tree,
+        moved,
+        target,
+        Direction::Right,
+        true,
+        Some(zoomed_elsewhere),
+    );
+    assert!(outcome.move_result.is_ok());
+    assert_eq!(
+        outcome.zoomed, None,
+        "a successful move unzooms unconditionally, regardless of which pane was zoomed"
+    );
+}
+
+#[test]
+fn move_pane_with_zoom_rejected_op_leaves_zoom_intact_and_tree_unchanged() {
+    let moved = PaneId::new(1);
+    let target = PaneId::new(2);
+    let mut tree = SplitTree::split_even(
+        SplitOrientation::Vertical,
+        SplitTree::leaf(moved),
+        SplitTree::leaf(target),
+    );
+    let before = tree.clone();
+
+    // moved == target -> InvalidPanes, rejected before any zoom mutation.
+    let outcome = move_pane_with_zoom(&mut tree, moved, moved, Direction::Right, true, Some(moved));
+    assert_eq!(outcome.move_result, Err(MoveError::InvalidPanes));
+    assert_eq!(outcome.zoomed, Some(moved));
+    assert_eq!(tree, before);
+}
+
+/// AC-23. The proptest crate is unavailable offline in this environment
+/// (verified: no cached crate, no network access in this sandbox); a seeded
+/// deterministic LCG (Numerical-Recipes constants) is used instead to
+/// generate pseudo-random operation sequences. Every `Split` node holds
+/// exactly 2 children by the `SplitTree` type's own definition, so "every
+/// Split has 2+ children or is
+/// collapsed" is a compiler-enforced invariant here, not something this test
+/// needs to check by hand; what it does check is the set of live leaf
+/// `PaneId`s against an independently tracked expected set, and that no
+/// operation panics.
+#[test]
+fn dnd_operation_sequence_property_preserves_pane_id_set_and_never_panics() {
+    struct Lcg(u64);
+    impl Lcg {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+
+        fn next_range(&mut self, bound: usize) -> usize {
+            (self.next_u64() % bound as u64) as usize
+        }
+    }
+
+    const DIRECTIONS: [Direction; 4] = [
+        Direction::Left,
+        Direction::Right,
+        Direction::Up,
+        Direction::Down,
+    ];
+
+    for seed in [1u64, 42, 12345, 999_999] {
+        let mut rng = Lcg(seed);
+        let mut next_id = 2u64;
+        let mut tree = SplitTree::split_even(
+            SplitOrientation::Horizontal,
+            SplitTree::leaf(PaneId::new(0)),
+            SplitTree::leaf(PaneId::new(1)),
+        );
+        let mut expected: Vec<PaneId> = vec![PaneId::new(0), PaneId::new(1)];
+
+        for _ in 0..500 {
+            let mut live = Vec::new();
+            pane_ids(&tree, &mut live);
+            live.sort_by_key(|pane| pane.get());
+            let mut expected_sorted = expected.clone();
+            expected_sorted.sort_by_key(|pane| pane.get());
+            assert_eq!(
+                live, expected_sorted,
+                "seed {seed}: leaf PaneId set drifted from the tracked expected set"
+            );
+
+            match rng.next_range(4) {
+                0 => {
+                    // split: attach a fresh pane next to a random existing one.
+                    let target = expected[rng.next_range(expected.len())];
+                    let new_pane = PaneId::new(next_id);
+                    next_id += 1;
+                    let direction = DIRECTIONS[rng.next_range(4)];
+                    if split_pane_in_direction(&mut tree, target, new_pane, direction) {
+                        expected.push(new_pane);
+                    }
+                }
+                1 => {
+                    // close: remove a random existing pane, unless it is the
+                    // last one (close_pane's own contract closes the tab
+                    // instead of leaving an empty tree).
+                    if expected.len() > 1 {
+                        let index = rng.next_range(expected.len());
+                        let pane = expected[index];
+                        let outcome = close_pane(&mut tree, pane);
+                        assert!(!outcome.tab_should_close);
+                        expected.remove(index);
+                    }
+                }
+                2 => {
+                    // swap_pane: exchange two random existing panes (a == b
+                    // is a valid, expected no-op input here).
+                    let a = expected[rng.next_range(expected.len())];
+                    let b = expected[rng.next_range(expected.len())];
+                    swap_pane(&mut tree, a, b);
+                }
+                _ => {
+                    // move_pane: relocate a random pane next to another;
+                    // success or rejection, the tracked identity set never
+                    // changes (moved is detached and reinserted, not
+                    // recreated).
+                    if expected.len() > 1 {
+                        let moved_index = rng.next_range(expected.len());
+                        let moved = expected[moved_index];
+                        let mut target = expected[rng.next_range(expected.len())];
+                        if target == moved {
+                            target = expected[(moved_index + 1) % expected.len()];
+                        }
+                        let direction = DIRECTIONS[rng.next_range(4)];
+                        let _ = move_pane(&mut tree, moved, target, direction, true);
+                    }
+                }
+            }
+        }
+    }
+}

@@ -355,7 +355,7 @@ impl App {
     /// to scale 1.0 for an unknown window. Also folds in [`Self::sidebar_font_zoom`]
     /// so the sidebar's own font-size setting scales cards and hit-testing
     /// coherently with the chrome drawn from `sidebar_draw_model`.
-    pub(super) fn sidebar_metrics(&self, window_id: WindowId) -> SidebarMetrics {
+    pub(in crate::app) fn sidebar_metrics(&self, window_id: WindowId) -> SidebarMetrics {
         let scale = self
             .windows
             .get(&window_id)
@@ -398,6 +398,29 @@ impl App {
         else {
             return;
         };
+        let visible = !self.sidebar_visible_groups.contains(&group);
+        self.set_group_sidebar_visible(group, visible);
+    }
+
+    /// Force `group`'s sidebar to `visible` (pane-dnd FR-13): the shared core
+    /// [`toggle_sidebar`](Self::toggle_sidebar) (FR-4) funnels through this
+    /// too, so a manual toggle and a drag's auto-reveal/restore can never
+    /// disagree about what a visibility change resets (scroll/menu/rename) or
+    /// how it's applied (grid-first relayout). A no-op when `group` already
+    /// matches `visible`.
+    pub(in crate::app) fn set_group_sidebar_visible(
+        &mut self,
+        group: WindowGroupId,
+        visible: bool,
+    ) {
+        if self.sidebar_visible_groups.contains(&group) == visible {
+            return;
+        }
+        if visible {
+            self.sidebar_visible_groups.insert(group);
+        } else {
+            self.sidebar_visible_groups.remove(&group);
+        }
         let tabs: Vec<WindowId> = self
             .window_order
             .iter()
@@ -408,9 +431,6 @@ impl App {
                     .is_some_and(|state| state.group == group)
             })
             .collect();
-        if !self.sidebar_visible_groups.remove(&group) {
-            self.sidebar_visible_groups.insert(group);
-        }
         // Per-window sidebar UI state resets on any visibility change: scroll
         // returns to the top and any open card menu closes.
         for window_id in &tabs {
@@ -419,9 +439,9 @@ impl App {
                 state.sidebar_menu = None;
             }
         }
-        // A toggle invalidates an inline rename hosted by this group (the
-        // editor is a sidebar surface); a rename in another window survives,
-        // since its sidebar didn't change.
+        // A visibility change invalidates an inline rename hosted by this
+        // group (the editor is a sidebar surface); a rename in another window
+        // survives, since its sidebar didn't change.
         if self.sidebar_rename.as_ref().is_some_and(|session| {
             self.windows
                 .get(&session.window_id)

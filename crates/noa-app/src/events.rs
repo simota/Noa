@@ -71,10 +71,12 @@ pub enum UserEvent {
     /// The pty's child process exited (or errored) — the app should close.
     PtyExit(WindowId, PaneId),
     /// AppleScript `input text`: write text to a resolved pane's pty on the
-    /// main thread (applescript R-7). The `window_id`/`pane_id` are frozen at
-    /// AE-resolve time; the write is dropped if the target is gone, and the
-    /// bracketed-paste wrapping is decided at process time from the pane's
-    /// live mode. Never touches winit objects from the AE handler (R-11).
+    /// main thread (applescript R-7). The `window_id`/`pane_id` are captured at
+    /// AE-resolve time but re-resolved to the pane's current window at process
+    /// time (P1-1), so a cross-tab move between queue and receipt still writes;
+    /// the write is dropped only if the pane closed entirely. Bracketed-paste
+    /// wrapping is decided at process time from the pane's live mode. Never
+    /// touches winit objects from the AE handler (R-11).
     WriteText {
         window_id: WindowId,
         pane_id: PaneId,
@@ -86,15 +88,17 @@ pub enum UserEvent {
     /// re-orders the window (even when `pane_id` is already focused), and when
     /// `activate_app` is set it also brings the whole app forward
     /// (`activateIgnoringOtherApps`) for the application-level `activate`. Ids
-    /// frozen at AE-resolve time.
+    /// captured at AE-resolve time but re-resolved to the pane's current window
+    /// at process time (P1-1), so it raises where the pane now lives.
     RaiseWindow {
         window_id: WindowId,
         pane_id: PaneId,
         activate_app: bool,
     },
     /// AppleScript `close` on a terminal (applescript R-6/AC-16): close one
-    /// split pane through the existing confirm/close path. Ids frozen at
-    /// AE-resolve time.
+    /// split pane through the existing confirm/close path. Ids captured at
+    /// AE-resolve time but re-resolved to the pane's current window at process
+    /// time (P1-1), so it closes the pane wherever it now lives.
     ClosePane {
         window_id: WindowId,
         pane_id: PaneId,

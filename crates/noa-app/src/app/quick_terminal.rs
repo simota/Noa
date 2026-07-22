@@ -774,7 +774,7 @@ impl App {
         };
 
         let window_id = window.id();
-        let initial_pane = PaneId::new(1);
+        let initial_pane = PaneId::alloc();
         let initial_rect = PaneRectApp::new(0, 0, surface_config.width, surface_config.height);
         let metrics = self.gpu.as_ref()?.font.metrics();
         let grid = grid_size_for_pane_rect(initial_rect, metrics, self.padding);
@@ -811,7 +811,6 @@ impl App {
                 split_tree: SplitTree::leaf(initial_pane),
                 zoomed: None,
                 focused_pane: initial_pane,
-                next_pane_id: 2,
                 surfaces,
                 last_mouse_pane: Some(initial_pane),
                 last_mouse_point: None,

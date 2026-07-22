@@ -13,33 +13,41 @@ impl App {
             return;
         };
 
-        // v3 paging: hit-test against the current page's slice only — every
+        // v3 paging: hit-test against the current page's tab slice only — every
         // tile on a page is live (no placeholders), so `layout.tiles` alone
         // covers the whole grid.
         let page_view = self.overview_page_view();
         let Some(layout) = self.overview_layout(&page_view.slice) else {
             return;
         };
-        let Some(target) = overview_tile_target_at_point(&page_view.slice, &layout.tiles, point)
+        let Some(target_tab) =
+            overview_tile_target_at_point(&page_view.slice, &layout.tiles, point)
         else {
             return;
         };
+        // Overview U1: a click selects the tab AND focuses the pane under the
+        // pointer within that tab's internal layout (preserving the per-pane
+        // click UX). Resolve the clicked pane against the tab's scaled sub-rects
+        // before dismissing; fall back to the tab's own focused pane when the
+        // point is over a divider gap.
+        let target_pane =
+            self.overview_tab_pane_at_point(target_tab, &layout.tiles, &page_view.slice, point);
         // The clicked tile becomes the selection too, not just the focus
         // target — a click and an arrow-keyed Return should leave the
         // Overview in the same selected state. The index is page-local.
-        if let Some(index) = page_view.slice.iter().position(|id| *id == target)
+        if let Some(index) = page_view.slice.iter().position(|id| *id == target_tab)
             && let Some(overview) = self.overview_window.as_mut()
         {
             overview.selected = index;
         }
-        self.focus_tile_from_overview(target);
+        self.focus_tile_from_overview(target_tab, target_pane);
     }
 
-    /// The close-button (✕) target under the last cursor point, or `None`
-    /// (REQ-OV-13), hit-tested against the current page's tiles only (v3
+    /// The close-button (✕) target tab under the last cursor point, or `None`
+    /// (REQ-OV-13), hit-tested against the current page's tab tiles only (v3
     /// paging — every page tile is live, so there is no separate placeholder
     /// row to chain in anymore).
-    pub(in crate::app) fn overview_close_target_at_last_cursor(&self) -> Option<OverviewTileId> {
+    pub(in crate::app) fn overview_close_target_at_last_cursor(&self) -> Option<WindowId> {
         let overview = self.overview_window.as_ref()?;
         let point = overview.last_cursor_point?;
         let metrics = self.overview_metrics()?;
@@ -48,20 +56,34 @@ impl App {
         overview_close_target_at_point(&page_view.slice, &layout.tiles, point, metrics)
     }
 
-    pub(in crate::app) fn focus_tile_from_overview(&mut self, tile_id: OverviewTileId) {
+    /// Activate a tab tile from the Overview: focus `pane` within `window_id`
+    /// (or the tab's own focused pane when `pane` is `None`, e.g. a keyboard
+    /// activation or a click over a divider gap) and dismiss the overlay
+    /// (Exposé semantics — the host window's terminal becomes usable again).
+    pub(in crate::app) fn focus_tile_from_overview(
+        &mut self,
+        window_id: WindowId,
+        pane: Option<PaneId>,
+    ) {
         let Some(window) = self
             .windows
-            .get(&tile_id.window_id)
+            .get(&window_id)
             .map(|state| state.window.clone())
         else {
             return;
         };
-        // Exposé semantics: activating a tile dismisses the overlay so the
-        // host window's terminal is usable again (the host may itself be the
-        // activation target).
+        let pane = pane
+            .filter(|pane| {
+                self.windows
+                    .get(&window_id)
+                    .is_some_and(|state| state.contains_pane(*pane))
+            })
+            .or_else(|| self.windows.get(&window_id).map(|state| state.focused_pane));
         self.hide_tab_overview();
-        self.focus_pane(tile_id.window_id, tile_id.pane_id);
-        self.focused = Some(tile_id.window_id);
+        if let Some(pane) = pane {
+            self.focus_pane(window_id, pane);
+        }
+        self.focused = Some(window_id);
         window.focus_window();
     }
 
@@ -166,6 +188,9 @@ impl App {
     /// REQ-OV-16 / palette R-7 parity / REQ-OV-20 v3 paging), and request a
     /// redraw.
     pub(in crate::app) fn set_overview_search_query(&mut self, query: String) {
+        // A query edit re-filters and re-slots every tile, so an in-flight
+        // drag's source/target tiles no longer mean what they did — cancel it.
+        self.cancel_overview_pane_drag();
         if let Some(overview) = self.overview_window.as_mut() {
             overview.search_query = query;
             overview.page = 0;
@@ -205,7 +230,7 @@ impl App {
     /// (`direction < 0`) page (v3 paging, REQ-OV-18), clamped at the ends
     /// (no wrap, `page_step`). A no-op when already at that end.
     pub(in crate::app) fn step_overview_page(&mut self, direction: isize) {
-        let len = self.overview_source_tile_ids().len();
+        let len = self.overview_source_tab_ids().len();
         let Some(current_page) = self.overview_window.as_ref().map(|overview| overview.page) else {
             return;
         };
@@ -228,7 +253,7 @@ impl App {
             MouseScrollDelta::LineDelta(_, y) => y * WHEEL_PAGE_THRESHOLD,
             MouseScrollDelta::PixelDelta(position) => position.y as f32,
         };
-        let len = self.overview_source_tile_ids().len();
+        let len = self.overview_source_tab_ids().len();
         let Some((page, wheel_accum)) = self
             .overview_window
             .as_ref()
@@ -253,6 +278,10 @@ impl App {
     /// fresh mirrors rather than showing whatever tab last occupied that tile
     /// texture slot's *stale* pooled frame, and request a redraw.
     pub(in crate::app) fn set_overview_page(&mut self, page: usize) {
+        // v1: no page auto-flip target-follow — a page change during a drag
+        // cancels it (the source/target tiles of the new page are a different
+        // set), rather than trying to carry the drag across pages.
+        self.cancel_overview_pane_drag();
         if let Some(overview) = self.overview_window.as_mut() {
             overview.page = page;
             overview.selected = 0;
@@ -331,7 +360,7 @@ impl App {
         let Some(&target) = page_view.slice.get(page_view.selected_in_page) else {
             return;
         };
-        self.focus_tile_from_overview(target);
+        self.focus_tile_from_overview(target, None);
     }
 
     /// Cmd+`n` (1-indexed) jumps straight to the `n`-th live tile of the
@@ -347,7 +376,7 @@ impl App {
         if let Some(overview) = self.overview_window.as_mut() {
             overview.selected = n - 1;
         }
-        self.focus_tile_from_overview(target);
+        self.focus_tile_from_overview(target, None);
     }
 
     /// Route a host-window event to the Overview while the overlay is
@@ -371,6 +400,10 @@ impl App {
                     overview.last_cursor_point = point;
                 }
                 self.update_overview_hover();
+                // Advance an in-flight pane drag (threshold promotion + chip/
+                // highlight repaint) after the hover update, so the drop-target
+                // highlight reads the freshly-resolved `hovered` tile.
+                self.drag_active_overview_pane();
                 true
             }
             WindowEvent::CursorLeft { .. } => {
@@ -380,19 +413,38 @@ impl App {
                 true
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if *button == MouseButton::Left && *state == ElementState::Pressed {
-                    // REQ-OV-13: the close-button corner wins over tile-focus.
-                    // Close the targeted pane; `close_pane` falls back to
-                    // closing the tab when it was the last pane.
-                    if let Some(target) = self.overview_close_target_at_last_cursor() {
-                        self.hide_tab_overview();
-                        if let Some(window_state) = self.windows.get(&target.window_id) {
-                            window_state.window.focus_window();
+                if *button == MouseButton::Left {
+                    match *state {
+                        ElementState::Pressed => {
+                            // REQ-OV-13: the close-button corner wins over the
+                            // tile body. Close the targeted pane (`close_pane`
+                            // falls back to closing the tab when it was the last
+                            // pane); otherwise arm a pending pane drag from the
+                            // tile under the press. A below-threshold release
+                            // resolves that drag back to the old plain-click
+                            // tile focus (`finish_overview_pane_drag`).
+                            if let Some(target_tab) = self.overview_close_target_at_last_cursor() {
+                                // Overview U1: the tab tile's close button closes
+                                // the tab's focused pane (`close_pane` falls back
+                                // to closing the whole tab when it was the last
+                                // pane).
+                                let focused_pane = self
+                                    .windows
+                                    .get(&target_tab)
+                                    .map(|state| state.focused_pane);
+                                self.hide_tab_overview();
+                                if let Some(window_state) = self.windows.get(&target_tab) {
+                                    window_state.window.focus_window();
+                                }
+                                self.focused = Some(target_tab);
+                                if let Some(pane) = focused_pane {
+                                    self.request_close_pane(event_loop, target_tab, pane);
+                                }
+                            } else {
+                                self.arm_overview_pane_drag();
+                            }
                         }
-                        self.focused = Some(target.window_id);
-                        self.request_close_pane(event_loop, target.window_id, target.pane_id);
-                    } else {
-                        self.focus_overview_tile_at_last_cursor();
+                        ElementState::Released => self.finish_overview_pane_drag(event_loop),
                     }
                 }
                 true

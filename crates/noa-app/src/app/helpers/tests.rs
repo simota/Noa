@@ -152,17 +152,6 @@ fn split_creation_direction_gate_matches_axis_requirements() {
 }
 
 #[test]
-fn mint_available_pane_id_skips_ids_already_used_by_tree_or_surface() {
-    let mut next = 2;
-    let used = [PaneId::new(2), PaneId::new(3)];
-
-    let pane = mint_available_pane_id(&mut next, |candidate| used.contains(&candidate));
-
-    assert_eq!(pane, PaneId::new(4));
-    assert_eq!(next, 5);
-}
-
-#[test]
 fn quick_terminal_progress_is_linear_and_clamped() {
     let duration = Duration::from_millis(200);
     assert!((quick_terminal_progress(Duration::ZERO, duration)).abs() < 0.001);
@@ -1194,33 +1183,6 @@ fn split_tree_pane_ids_returns_all_leaves_in_tree_order() {
         split_tree_pane_ids(&tree),
         vec![PaneId::new(1), PaneId::new(2), PaneId::new(3)]
     );
-}
-
-#[test]
-fn overview_window_order_excludes_overview_and_closed_tabs() {
-    let window_order = [1_u8, 2, 3, 4];
-    let live_windows = |id| id != 3;
-    let panes_for_window = |id| vec![id + 10];
-
-    let sources =
-        overview_tile_source_order(&window_order, live_windows, panes_for_window, Some(4));
-
-    assert_eq!(sources, vec![(1, 11), (2, 12)]);
-}
-
-#[test]
-fn overview_window_order_expands_each_tab_to_panes_in_leaf_order() {
-    let window_order = [1_u8, 2, 3];
-    let live_windows = |id| id != 2;
-    let panes_for_window = |id| match id {
-        1 => vec![11, 12, 13],
-        3 => vec![31],
-        _ => Vec::new(),
-    };
-
-    let sources = overview_tile_source_order(&window_order, live_windows, panes_for_window, None);
-
-    assert_eq!(sources, vec![(1, 11), (1, 12), (1, 13), (3, 31)]);
 }
 
 #[test]

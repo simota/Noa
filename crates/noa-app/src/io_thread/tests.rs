@@ -21,7 +21,7 @@ fn feed_terminal_raw(
     raw_attach: &RawAttachTap,
 ) -> TerminalOutput {
     let auto_approve = AutoApprovePublish {
-        enabled: Arc::new(AtomicBool::new(false)),
+        enabled: Arc::new(Mutex::new(Arc::new(AtomicBool::new(false)))),
         guards: Arc::new(Mutex::new(
             crate::auto_approve::AutoApproveInputGuards::default(),
         )),
@@ -351,7 +351,7 @@ fn feed_terminal_ipc(
     ipc_row_cache: &mut IpcRowCache,
 ) -> TerminalOutput {
     let auto_approve = AutoApprovePublish {
-        enabled: Arc::new(AtomicBool::new(false)),
+        enabled: Arc::new(Mutex::new(Arc::new(AtomicBool::new(false)))),
         guards: Arc::new(Mutex::new(
             crate::auto_approve::AutoApproveInputGuards::default(),
         )),
@@ -686,7 +686,7 @@ fn tap_present_but_no_output_subscriber_keeps_ipc_output_none() {
     );
 
     let auto_approve = AutoApprovePublish {
-        enabled: Arc::new(AtomicBool::new(false)),
+        enabled: Arc::new(Mutex::new(Arc::new(AtomicBool::new(false)))),
         guards: Arc::new(Mutex::new(
             crate::auto_approve::AutoApproveInputGuards::default(),
         )),
@@ -756,7 +756,7 @@ fn output_subscriber_for_one_pane_does_not_gate_open_for_another_pane() {
     let mut last_ipc_push = None;
     let mut ipc_row_cache = IpcRowCache::default();
     let auto_approve = AutoApprovePublish {
-        enabled: Arc::new(AtomicBool::new(false)),
+        enabled: Arc::new(Mutex::new(Arc::new(AtomicBool::new(false)))),
         guards: Arc::new(Mutex::new(
             crate::auto_approve::AutoApproveInputGuards::default(),
         )),
@@ -801,7 +801,7 @@ fn ipc_output_full_resends_after_a_subscriber_appears_following_a_period_with_no
     let mut last_ipc_push = None;
     let mut ipc_row_cache = IpcRowCache::default();
     let auto_approve = AutoApprovePublish {
-        enabled: Arc::new(AtomicBool::new(false)),
+        enabled: Arc::new(Mutex::new(Arc::new(AtomicBool::new(false)))),
         guards: Arc::new(Mutex::new(
             crate::auto_approve::AutoApproveInputGuards::default(),
         )),
@@ -1266,7 +1266,7 @@ fn feed_terminal_batch_chunked_locking_matches_single_lock_result() {
     let chunked_terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
     let mut chunked_stream = noa_vt::Stream::new();
     let auto_approve = AutoApprovePublish {
-        enabled: Arc::new(AtomicBool::new(false)),
+        enabled: Arc::new(Mutex::new(Arc::new(AtomicBool::new(false)))),
         guards: Arc::new(Mutex::new(
             crate::auto_approve::AutoApproveInputGuards::default(),
         )),
@@ -1359,7 +1359,7 @@ fn feed_terminal_batch_chunked_locking_matches_single_lock_for_osc_and_dcs() {
     let chunks: Vec<&[u8]> = bytes.chunks(CHUNK).collect();
     let (&first, rest) = chunks.split_first().expect("at least one chunk");
     let auto_approve = AutoApprovePublish {
-        enabled: Arc::new(AtomicBool::new(false)),
+        enabled: Arc::new(Mutex::new(Arc::new(AtomicBool::new(false)))),
         guards: Arc::new(Mutex::new(
             crate::auto_approve::AutoApproveInputGuards::default(),
         )),
@@ -2326,7 +2326,7 @@ fn bench_feed_terminal_batch_large_flood() {
     let sidebar = test_sidebar_publish(true);
     let mut last_sidebar_publish = None;
     let auto_approve = AutoApprovePublish {
-        enabled: Arc::new(AtomicBool::new(false)),
+        enabled: Arc::new(Mutex::new(Arc::new(AtomicBool::new(false)))),
         guards: Arc::new(Mutex::new(
             crate::auto_approve::AutoApproveInputGuards::default(),
         )),
@@ -2436,4 +2436,34 @@ fn spin_traffic_resets_after_two_quiet_windows() {
     let t1 = t0 + HOT_SPIN_WINDOW * 2;
     traffic.record(t1, 16);
     assert!(traffic.wants_spin(t1));
+}
+
+/// AC-13 (unit half, pane-dnd L2(e)): once a cross-tab move stores the
+/// destination window id into the shared cell (`App::move_pane_to_tab_at`'s
+/// `Ordering::Release` store), every subsequent read via
+/// `current_card_target` — the single choke point every
+/// `Redraw`/`PtyExit`/`Clipboard{Write,Read}`/`Notify`/`AutoApprove` send
+/// site and the `SessionCardId` it carries route through — reflects the new
+/// window, not the value the cell was seeded with at spawn.
+#[test]
+fn current_card_target_reflects_a_cross_tab_move_store() {
+    let pane_id = crate::split_tree::PaneId::new(7);
+    let window_id = Arc::new(std::sync::atomic::AtomicU64::new(1));
+
+    let (before_window, before_card) = spawn::current_card_target(&window_id, pane_id);
+    assert_eq!(before_window, winit::window::WindowId::from(1u64));
+    assert_eq!(
+        before_card,
+        crate::session_store::SessionCardId::new(crate::session_store::SessionWindowId(1), pane_id)
+    );
+
+    // The cross-tab move commit's store.
+    window_id.store(2, Ordering::Release);
+
+    let (after_window, after_card) = spawn::current_card_target(&window_id, pane_id);
+    assert_eq!(after_window, winit::window::WindowId::from(2u64));
+    assert_eq!(
+        after_card,
+        crate::session_store::SessionCardId::new(crate::session_store::SessionWindowId(2), pane_id)
+    );
 }

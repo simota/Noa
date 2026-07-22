@@ -88,19 +88,6 @@ pub(crate) fn can_create_split_in_direction(
     can_create_split(pane_count, rect, direction.split_orientation())
 }
 
-pub(crate) fn mint_available_pane_id(
-    next: &mut u64,
-    mut is_used: impl FnMut(PaneId) -> bool,
-) -> PaneId {
-    loop {
-        let pane = PaneId::new(*next);
-        *next = next.checked_add(1).unwrap_or(1);
-        if !is_used(pane) {
-            return pane;
-        }
-    }
-}
-
 pub(crate) fn grid_size_for_pane_rect(
     rect: PaneRectApp,
     metrics: noa_font::Metrics,

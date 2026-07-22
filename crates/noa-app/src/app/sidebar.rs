@@ -263,8 +263,8 @@ impl SidebarTextRun {
 
 /// One session card's own rounded-card render: its window-space rect, the
 /// per-card grid, background color, selection flag, and the text runs in the
-/// card's local texture space. Only fully-visible cards get one; partially
-/// scrolled cards stay flat on the backdrop.
+/// card's local texture space. Fully-visible cards get one; a partially
+/// scrolled card carries a clipping `src_uv`.
 #[derive(Clone, Debug, PartialEq)]
 struct SidebarCardDraw {
     rect: SidebarRect,
@@ -279,6 +279,11 @@ struct SidebarCardDraw {
     /// attention / bell), or `None` for an idle card.
     accent: Option<Rgb>,
     runs: Vec<SidebarTextRun>,
+    /// Source-UV sub-rect `[u, v, w, h]` for sampling the full-height card
+    /// texture. `[0, 0, 1, 1]` for a fully-visible card; a partial (edge-
+    /// clipped) drop-target card samples only its visible vertical slice so its
+    /// full-height content is not squashed into the clipped `rect`.
+    src_uv: [f32; 4],
 }
 
 /// The open card `…` menu popup, composited above the cards so a rounded card

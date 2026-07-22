@@ -243,7 +243,6 @@ pub(super) struct WindowState {
     pub(super) split_tree: SplitTree,
     pub(super) zoomed: Option<PaneId>,
     pub(super) focused_pane: PaneId,
-    pub(super) next_pane_id: u64,
     pub(super) surfaces: HashMap<PaneId, Surface>,
     pub(super) last_mouse_pane: Option<PaneId>,
     pub(super) last_mouse_point: Option<split_tree::Point>,
@@ -430,6 +429,15 @@ pub(super) struct SidebarDrag {
     pub(super) active: bool,
 }
 
+/// Whether a drag (the Tab Overview's layout-minimap pane drag,
+/// [`OverviewPaneDrag`]) has crossed its start threshold yet: a press-then-
+/// release without crossing it is a plain click (FR-1/AC-2), never a drag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PaneDragPhase {
+    Pending,
+    Active,
+}
+
 #[derive(Default)]
 pub(super) struct FileDropState {
     hovered_paths: Vec<PathBuf>,
@@ -525,6 +533,32 @@ pub(super) struct OverviewWindowState {
     /// sites (e.g. `overview_close_target_at_last_cursor`) call it without a
     /// mutable borrow.
     pub(super) source_tile_ids_cache: RefCell<Option<OverviewSourceTileIdsCache>>,
+    /// An in-flight pane drag started from a tile (overview D&D). Recorded on
+    /// a left-press over a tile's body, promoted to [`PaneDragPhase::Active`]
+    /// once the pointer crosses the DPR-scaled threshold; a below-threshold
+    /// release is a plain tile click. `None` whenever no drag is in flight.
+    pub(super) pane_drag: Option<OverviewPaneDrag>,
+}
+
+/// An in-flight overview pane drag (overview D&D), isomorphic to the
+/// main-view [`PaneDrag`]. Overview tiles are now tab-unit (U1): a tile
+/// reproduces its tab's internal split layout, so a press resolves to a
+/// *specific pane* inside that tab ([`OverviewTileId`] carries both
+/// `window_id` and `pane_id`). A release resolves against the pane under the
+/// pointer and its 60/40 zone (`session_overview::resolve_overview_drop`):
+/// an in-tab center/edge drop swaps/splits within the tab, a cross-tab drop
+/// moves the pane into another tab at the target pane's edge, and a
+/// self/foreign-group/no-pane release cancels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct OverviewPaneDrag {
+    /// The pane the press landed on — the pane being moved (and its tab).
+    pub(super) source: OverviewTileId,
+    /// Pointer position at press (physical px), for the drag threshold.
+    pub(super) start_point: split_tree::Point,
+    /// Latest pointer position (physical px), updated on cursor-moved — drives
+    /// the floating chip while [`PaneDragPhase::Active`].
+    pub(super) current_point: split_tree::Point,
+    pub(super) phase: PaneDragPhase,
 }
 
 /// Cache key shared by the search and hint pills: both are small ANSI text
@@ -546,13 +580,14 @@ pub(super) struct OverviewPillKey {
     pub(super) rect: PaneRectApp,
 }
 
-/// The unfiltered tab/pane order `overview_source_tile_ids` last computed,
-/// the query it was filtered with, and the resulting (possibly filtered)
-/// order — see `overview_source_tile_ids_cache_hit` for the hit/miss rule.
+/// The unfiltered TAB order `overview_source_tab_ids` last computed, the query
+/// it was filtered with, and the resulting (possibly filtered) order — see
+/// `overview_source_tab_ids_cache_hit` for the hit/miss rule. Keyed by tab
+/// (`WindowId`) since Overview tiles are tab-unit (U1).
 pub(super) struct OverviewSourceTileIdsCache {
-    pub(super) unfiltered: Vec<OverviewTileId>,
+    pub(super) unfiltered: Vec<WindowId>,
     pub(super) query: String,
-    pub(super) result: Vec<OverviewTileId>,
+    pub(super) result: Vec<WindowId>,
 }
 
 /// One in-flight quick-look zoom transition on the overview's selected tile.
@@ -1015,6 +1050,27 @@ pub(super) struct LocalSurfaceTransport {
     pub(super) auto_approve_feedback_tx: Sender<crate::io_thread::AutoApproveFeedback>,
     pub(super) resize_tx: Sender<GridSize>,
     pub(super) io_thread: Option<crate::io_thread::IoThreadHandle>,
+    /// The shared cell backing this pane's io thread's `Redraw`/`PtyExit`/
+    /// `Clipboard{Write,Read}`/`Notify`/`AutoApprove` event targets and its
+    /// `SessionCardId` (pane-dnd L2(e)). Seeded with this pane's spawn-time
+    /// window id; a cross-tab move (`App::move_pane_to_tab_at`) stores the
+    /// destination window id here so every subsequent event from this pane's
+    /// io thread — without a respawn — targets the tab it now lives in.
+    pub(super) io_window_id: Arc<AtomicU64>,
+    /// P2-1: the swappable holder backing this pane's io thread's
+    /// auto-approve enable check (`AutoApprovePublish::enabled`). Seeded at
+    /// spawn with the source tab's `Arc<AtomicBool>`; a cross-tab move
+    /// (`App::move_pane_to_tab_at`) swaps in the destination tab's flag here —
+    /// including future toggles, since the io thread re-reads through this
+    /// holder on every batch rather than a value baked in once at spawn.
+    pub(super) auto_approve_flag: Arc<Mutex<Arc<AtomicBool>>>,
+    /// P2-4: the swappable holder backing this pane's io thread's redraw
+    /// pacing clock (`RedrawFloorHandle`). Seeded at spawn with the source
+    /// tab's shared `RedrawFloor`; a cross-tab move re-points it at the
+    /// destination tab's clock so the pane coalesces redraws with its new
+    /// tab-mates and keeps tracking that tab's monitor-refresh-derived
+    /// interval, rather than an orphaned clock nothing else still writes to.
+    pub(super) redraw_floor: crate::io_thread::RedrawFloorHandle,
 }
 
 pub(super) struct RemoteSurfaceTransport {
@@ -1259,7 +1315,6 @@ mod chrome_textures_tests {
     // itself a rebuild, so it must never clear the rebuild counter — the
     // eventual GUI-integrated AC-18 check relies on the counter being
     // cumulative across the reset that a theme confirm triggers.
-    #[cfg(debug_assertions)]
     #[test]
     fn reset_does_not_clear_rebuild_count() {
         let mut textures = ChromeTextures::default();

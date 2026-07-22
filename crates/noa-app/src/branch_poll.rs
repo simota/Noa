@@ -60,6 +60,18 @@ pub(crate) enum ProbeControl {
     },
     /// Drop every probe whose id is not in this live set (GC choke point).
     Retain(HashSet<SessionCardId>),
+    /// Pane-dnd P2-5: move an already-registered probe to a new card id
+    /// (cross-tab move), preserving its accumulated `ProcessProbeEntry`
+    /// state (backoff, last-seen name) rather than dropping and re-creating
+    /// it. Without this, `move_pane_to_tab_at`'s `session_store.rekey` makes
+    /// the probe's old id vanish from the next `retain_process_probes` GC's
+    /// live set — the probe is dropped and nothing re-registers it under the
+    /// new id, so foreground-process/metrics updates for that pane stop
+    /// forever. A no-op when `old` has no registered probe.
+    Rekey {
+        old: SessionCardId,
+        new: SessionCardId,
+    },
     /// Turn the panel-metrics-view metrics tick on/off (FR-7/NFR-1): `true`
     /// while the process-monitor overlay is open, `false` on close. Fully
     /// independent of the process-name adaptive schedule above — it must
@@ -181,6 +193,15 @@ impl BranchPollHandle {
         let _ = self
             .probe_tx
             .send(ProbeControl::Retain(live.iter().copied().collect()));
+    }
+
+    /// Pane-dnd P2-5: move a registered probe to its new card id after a
+    /// cross-tab move, mirroring [`crate::session_store::SessionStore::rekey`]
+    /// — same probe, new id, called alongside that rekey from
+    /// `App::move_pane_to_tab_at` so the probe's GC never sees the old id go
+    /// live while the new one is unregistered (or vice versa).
+    pub(crate) fn rekey_process_probe(&self, old: SessionCardId, new: SessionCardId) {
+        let _ = self.probe_tx.send(ProbeControl::Rekey { old, new });
     }
 
     /// Turn the metrics tick on/off (panel-metrics-view FR-7): the
@@ -316,6 +337,11 @@ fn worker_loop(
                 }
                 Ok(ProbeControl::Retain(live)) => {
                     probes.retain(|id, _| live.contains(id));
+                }
+                Ok(ProbeControl::Rekey { old, new }) => {
+                    if let Some(entry) = probes.remove(&old) {
+                        probes.insert(new, entry);
+                    }
                 }
                 Ok(ProbeControl::MetricsActive(active)) => {
                     metrics_active = active;

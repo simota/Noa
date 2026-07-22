@@ -50,12 +50,12 @@ use crate::session;
 use crate::session_overview::{
     OVERVIEW_GRID_CAP, OVERVIEW_MAX_RENDER_TILES_PER_FRAME, OVERVIEW_TILE_MIN_RENDER_INTERVAL,
     OverviewAction, OverviewChrome, OverviewEscapeAction, OverviewLayout, OverviewMetrics,
-    OverviewRenderCandidate, compute_overview_grid, hit_test_overview_grid,
-    move_overview_selection, overview_backlog_decision, overview_bg_color, overview_border_color,
-    overview_card_color, overview_chrome_bands, overview_chrome_border_color,
-    overview_chrome_pill_color, overview_close_hit_test, overview_escape_action,
-    overview_focus_ring_color, overview_hint_bar_rect, overview_hint_bar_row,
-    overview_initial_selection, overview_key_action, overview_label_padding,
+    OverviewRenderCandidate, PaneZone, classify_pane_zone, compute_overview_grid,
+    hit_test_overview_grid, move_overview_selection, overview_backlog_decision, overview_bg_color,
+    overview_border_color, overview_card_color, overview_chrome_bands,
+    overview_chrome_border_color, overview_chrome_pill_color, overview_close_hit_test,
+    overview_escape_action, overview_focus_ring_color, overview_hint_bar_rect,
+    overview_hint_bar_row, overview_initial_selection, overview_key_action, overview_label_padding,
     overview_placeholder_source_ids, overview_search_field_rect, overview_search_field_row,
     overview_tab_filter, overview_tile_labels, overview_title_bar_color, overview_zoom_rect,
     sanitize_placeholder_label, select_due_overview_tile_ids, title_bar_row_ansi,
@@ -65,8 +65,8 @@ use crate::split_tree::{
     self, Direction, HitTarget, ImeOp, MAX_PANES_PER_TAB, MIN_PANE_SIZE_PX, PaneId,
     Rect as PaneRectApp, SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitResizeDrag, SplitTree,
     can_add_pane_in_direction, equalize, focus_in_direction, focus_switch_plan, hit_test,
-    resize_split, resize_split_to_drag_point, split_pane_in_direction,
-    split_resize_drag_target_at_point, zoom_resize_targets, zoom_toggle,
+    move_pane_with_zoom, resize_split, resize_split_to_drag_point, split_pane_in_direction,
+    split_resize_drag_target_at_point, swap_pane_with_zoom, zoom_resize_targets, zoom_toggle,
 };
 use crate::{AppCommand, ViewportScroll};
 
@@ -81,6 +81,8 @@ mod input_ops;
 mod ipc;
 mod lifecycle;
 mod overview;
+mod pane_drag;
+mod pane_drag_render;
 mod quick_terminal;
 mod remote_ui;
 mod render;
@@ -167,7 +169,13 @@ pub struct App {
     windows: HashMap<WindowId, WindowState>,
     window_order: Vec<WindowId>,
     overview_window: Option<OverviewWindowState>,
-    overview_tiles: HashMap<OverviewTileId, OverviewTileRenderState>,
+    /// Per-TAB overview tile render state (Overview U1): the grid lays out one
+    /// tile per tab (window), so dirty/last-render is tracked by `WindowId`.
+    /// A pane's pty output marks its whole tab dirty via
+    /// `mark_overview_tile_dirty` (which derives the tab from the pane's id),
+    /// and the tab's tile is recomposited from all its panes on the next due
+    /// frame.
+    overview_tiles: HashMap<WindowId, OverviewTileRenderState>,
     /// The window the user last interacted with — drives tab/window spawning,
     /// command targets, and the quick terminal. Deliberately *sticky*: it keeps
     /// pointing at the last-focused window while the app is backgrounded so a

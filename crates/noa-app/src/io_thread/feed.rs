@@ -117,7 +117,7 @@ pub(super) fn feed_terminal(
     last_sidebar_publish: &mut Option<Instant>,
 ) -> TerminalOutput {
     let auto_approve = AutoApprovePublish {
-        enabled: Arc::new(AtomicBool::new(false)),
+        enabled: Arc::new(Mutex::new(Arc::new(AtomicBool::new(false)))),
         guards: Arc::new(Mutex::new(AutoApproveInputGuards::default())),
     };
     let mut auto_approve_state = AutoApproveState::default();

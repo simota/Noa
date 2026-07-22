@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
+
 /// The longest the io thread withholds a redraw while an application holds
 /// synchronized output (DECSET 2026) open. Mode 2026 has no standardized
 /// timeout — the spec leaves it to the terminal, tmux uses 1s — and Ghostty
@@ -254,3 +256,21 @@ impl RedrawFloor {
         RedrawDecision::Now
     }
 }
+
+/// P2-4: a swappable pointer to a pane's current window's [`RedrawFloor`].
+/// The io thread's own loop only ever calls `decide`/`decide_input_echo`/
+/// `claim_deadline`/`record` through a lock on this handle rather than
+/// holding a bare `RedrawFloor` in its closure — a cross-tab pane move
+/// (`App::move_pane_to_tab_at`) re-points a moved pane at its destination tab's
+/// shared clock by swapping the value behind this `Mutex` (mirrors the
+/// `io_window_id: Arc<AtomicU64>` cell's role for event routing), so the
+/// pane immediately coalesces its redraws with its new tab-mates instead of
+/// keeping the old tab's now-orphaned clock running forever.
+///
+/// Cost: one `parking_lot::Mutex` lock (a handful of nanoseconds, uncontended
+/// outside the rare cross-tab-move write) per redraw decision on the io
+/// thread's hot per-batch path, in place of the previous zero-cost direct
+/// field access. `RedrawFloor` itself stays cheap to lock over — its methods
+/// only ever touch a couple of `Arc<AtomicU64>` loads/stores — so this does
+/// not add any new contention beyond the lock acquisition itself.
+pub(crate) type RedrawFloorHandle = Arc<Mutex<RedrawFloor>>;

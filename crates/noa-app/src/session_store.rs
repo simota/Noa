@@ -246,6 +246,41 @@ impl SessionDelta {
             | SessionDelta::Metrics { id, .. } => *id,
         }
     }
+
+    /// Pane-dnd P1-1 remediation: rebuild this delta targeting a different
+    /// [`SessionCardId`], every other field unchanged. Used by the
+    /// `UserEvent::SessionDelta` receiver (`app/event_loop.rs`) to re-target a
+    /// delta that was already queued on the `EventLoopProxy` with a
+    /// pre-cross-tab-move id before it reaches `apply` — see
+    /// `App::resolve_pane_window`.
+    pub fn with_id(self, id: SessionCardId) -> Self {
+        match self {
+            SessionDelta::Upsert {
+                seq,
+                name,
+                cwd,
+                busy,
+                updated_at,
+                preview,
+                ..
+            } => SessionDelta::Upsert {
+                id,
+                seq,
+                name,
+                cwd,
+                busy,
+                updated_at,
+                preview,
+            },
+            SessionDelta::Remove { .. } => SessionDelta::Remove { id },
+            SessionDelta::Branch { branch, icon, .. } => SessionDelta::Branch { id, branch, icon },
+            SessionDelta::Rename { name, .. } => SessionDelta::Rename { id, name },
+            SessionDelta::Bell { .. } => SessionDelta::Bell { id },
+            SessionDelta::Attention { .. } => SessionDelta::Attention { id },
+            SessionDelta::Process { process, .. } => SessionDelta::Process { id, process },
+            SessionDelta::Metrics { metrics, .. } => SessionDelta::Metrics { id, metrics },
+        }
+    }
 }
 
 /// The central session registry (FR-1). Owned by the main thread; mutated only
@@ -618,6 +653,36 @@ impl SessionStore {
         }
     }
 
+    /// Re-key a card from `old` to `new` (pane-dnd FR-8/FR-12/AC-24): a
+    /// cross-tab pane move changes which window a card belongs to without
+    /// otherwise touching its state (name/cwd/flags/preview) or its position
+    /// in the manual/auto order — unlike [`retire`](Self::retire), this never
+    /// tombstones `old`, so a late in-flight `Upsert` still addressed to it
+    /// would (correctly) recreate a stale duplicate rather than being
+    /// silently swallowed; the io thread's shared `window_id` cell (io_thread
+    /// spec L2(e)) is what actually stops that from happening in practice.
+    /// A no-op (returns `false`) when `old` has no live card, `old == new`,
+    /// or `new` already names a live card.
+    pub fn rekey(&mut self, old: SessionCardId, new: SessionCardId) -> bool {
+        if old == new || self.cards.contains_key(&new) {
+            return false;
+        }
+        let Some(card) = self.cards.remove(&old) else {
+            return false;
+        };
+        self.cards.insert(new, card);
+        for id in self
+            .manual_order
+            .iter_mut()
+            .chain(self.auto_order.iter_mut())
+        {
+            if *id == old {
+                *id = new;
+            }
+        }
+        true
+    }
+
     /// Drop every card whose id is not in `live_ids` (GC choke point, FR-12).
     /// Called from all five teardown sites so the store cannot outlive the
     /// panes it mirrors; removed ids are tombstoned like an explicit
@@ -802,6 +867,91 @@ mod tests {
             updated_at: wall(10, 0),
             preview: None,
         }
+    }
+
+    // Pane-dnd P1-1: `with_id` rebuilds every variant at a new id, preserving
+    // every other field — the receiver-side re-resolution
+    // (`App::resolve_pane_window`) relies on this to re-target a delta that
+    // was already queued with a pre-cross-tab-move id before it reaches
+    // `apply`.
+    #[test]
+    fn with_id_rebuilds_every_variant_at_the_new_id_preserving_other_fields() {
+        let old = card_id(1, 1);
+        let new = card_id(2, 1);
+
+        let delta = upsert(old, 7, "shell");
+        assert_eq!(delta.clone().with_id(new).id(), new);
+        assert_eq!(
+            delta.with_id(new),
+            SessionDelta::Upsert {
+                id: new,
+                seq: 7,
+                name: "shell".to_string(),
+                cwd: "/repo".to_string(),
+                busy: false,
+                updated_at: wall(10, 0),
+                preview: None,
+            }
+        );
+
+        assert_eq!(
+            SessionDelta::Remove { id: old }.with_id(new),
+            SessionDelta::Remove { id: new }
+        );
+        assert_eq!(
+            SessionDelta::Branch {
+                id: old,
+                branch: Some("main".to_string()),
+                icon: IconKind::Rust,
+            }
+            .with_id(new),
+            SessionDelta::Branch {
+                id: new,
+                branch: Some("main".to_string()),
+                icon: IconKind::Rust,
+            }
+        );
+        assert_eq!(
+            SessionDelta::Rename {
+                id: old,
+                name: "renamed".to_string(),
+            }
+            .with_id(new),
+            SessionDelta::Rename {
+                id: new,
+                name: "renamed".to_string(),
+            }
+        );
+        assert_eq!(
+            SessionDelta::Bell { id: old }.with_id(new),
+            SessionDelta::Bell { id: new }
+        );
+        assert_eq!(
+            SessionDelta::Attention { id: old }.with_id(new),
+            SessionDelta::Attention { id: new }
+        );
+        assert_eq!(
+            SessionDelta::Process {
+                id: old,
+                process: Some("zsh".to_string()),
+            }
+            .with_id(new),
+            SessionDelta::Process {
+                id: new,
+                process: Some("zsh".to_string()),
+            }
+        );
+        assert_eq!(
+            SessionDelta::Metrics {
+                id: old,
+                metrics: None,
+            }
+            .with_id(new),
+            SessionDelta::Metrics {
+                id: new,
+                metrics: None,
+            }
+        );
     }
 
     // AC-1 (FR-1): Upsert then Remove grows then shrinks the store, and the id
@@ -1253,6 +1403,59 @@ mod tests {
         assert!(!store.move_card_before(card_id(1, 2), Some(card_id(1, 1))));
         // Unknown card.
         assert!(!store.move_card_before(card_id(9, 9), None));
+    }
+
+    // AC-24 (FR-12): a cross-tab pane move re-keys the card to the
+    // destination window, preserving its state and its manual-order slot,
+    // and leaves nothing behind under the source window.
+    #[test]
+    fn rekey_moves_card_and_preserves_manual_order_slot() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(1, 1), 1, "a"));
+        store.apply(upsert(card_id(1, 2), 1, "b"));
+        store.apply(SessionDelta::Rename {
+            id: card_id(1, 1),
+            name: "renamed".to_string(),
+        });
+        // Materialize a manual order (a, b) so the re-key must update it too.
+        assert!(store.move_card_before(card_id(1, 1), Some(card_id(1, 2))));
+
+        let old = card_id(1, 1);
+        let new = card_id(2, 1);
+        assert!(store.rekey(old, new));
+
+        assert!(
+            store.get(&old).is_none(),
+            "no ghost card under the source window"
+        );
+        let card = store
+            .get(&new)
+            .expect("card lives under the destination window");
+        assert_eq!(card.display_name(), "renamed");
+        // The manual-order slot moved with it: still first, ahead of (1, 2).
+        assert_eq!(store.ordered_ids(), vec![new, card_id(1, 2)]);
+    }
+
+    // Rejection cases: no live card under `old`, `old == new`, or `new`
+    // already naming a live card — every one is a no-op.
+    #[test]
+    fn rekey_rejects_missing_self_and_collision() {
+        let mut store = SessionStore::new();
+        store.apply(upsert(card_id(1, 1), 1, "a"));
+        store.apply(upsert(card_id(2, 1), 1, "b"));
+
+        assert!(
+            !store.rekey(card_id(9, 9), card_id(9, 8)),
+            "no live card under `old`"
+        );
+        assert!(!store.rekey(card_id(1, 1), card_id(1, 1)), "old == new");
+        assert!(
+            !store.rekey(card_id(1, 1), card_id(2, 1)),
+            "`new` already names a live card"
+        );
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.get(&card_id(1, 1)).unwrap().display_name(), "a");
+        assert_eq!(store.get(&card_id(2, 1)).unwrap().display_name(), "b");
     }
 
     // Attention float still wins over a manual order: a reordered list keeps its

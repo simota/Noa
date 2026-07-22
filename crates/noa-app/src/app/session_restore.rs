@@ -212,25 +212,21 @@ impl App {
         if tab.split.leaf_count() <= 1 {
             return;
         }
-        let Some((root_pane, next_pane_id, placeholder_rect)) =
-            self.windows.get(&window_id).map(|state| {
-                (
-                    state.focused_pane,
-                    state.next_pane_id,
-                    PaneRectApp::new(
-                        0,
-                        0,
-                        state.surface_config.width,
-                        state.surface_config.height,
-                    ),
-                )
-            })
-        else {
+        let Some((root_pane, placeholder_rect)) = self.windows.get(&window_id).map(|state| {
+            (
+                state.focused_pane,
+                PaneRectApp::new(
+                    0,
+                    0,
+                    state.surface_config.width,
+                    state.surface_config.height,
+                ),
+            )
+        }) else {
             return;
         };
 
         let mut minter = PaneMinter {
-            next: next_pane_id,
             root: Some(root_pane),
         };
         let mut leaves = Vec::new();
@@ -319,7 +315,6 @@ impl App {
             .collect::<Vec<_>>();
         if let Some(state) = self.windows.get_mut(&window_id) {
             state.split_tree = tree;
-            state.next_pane_id = minter.next;
             for (pane, surface) in spawned {
                 state.surfaces.insert(pane, surface);
             }
@@ -351,9 +346,12 @@ impl App {
 }
 
 /// Mints pane ids while rebuilding a saved split tree, handing out the existing
-/// initial pane (`root`) for the first leaf and fresh sequential ids after.
+/// initial pane (`root`) for the first leaf and a fresh process-global id
+/// ([`PaneId::alloc`]) for every leaf after that. Saved sessions never
+/// persist the old `PaneId` values (`session::PaneNode` carries only cwd/
+/// remote info), so there is nothing to seed the allocator from — every
+/// restored pane simply gets whatever id is next in line.
 struct PaneMinter {
-    next: u64,
     root: Option<PaneId>,
 }
 
@@ -362,11 +360,7 @@ impl PaneMinter {
     fn mint(&mut self) -> (PaneId, bool) {
         match self.root.take() {
             Some(pane) => (pane, true),
-            None => {
-                let pane = PaneId::new(self.next);
-                self.next += 1;
-                (pane, false)
-            }
+            None => (PaneId::alloc(), false),
         }
     }
 }
@@ -482,10 +476,7 @@ mod tests {
             }),
         };
         let root = PaneId::new(7);
-        let mut minter = PaneMinter {
-            next: 8,
-            root: Some(root),
-        };
+        let mut minter = PaneMinter { root: Some(root) };
         let mut leaves = Vec::new();
 
         let _tree = build_split_tree(&node, &mut minter, &mut leaves);

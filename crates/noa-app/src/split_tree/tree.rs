@@ -10,6 +10,7 @@ mod focus;
 mod hit_test;
 mod layout;
 mod ops;
+mod reposition;
 mod resize;
 #[cfg(test)]
 mod tests;
@@ -24,6 +25,7 @@ pub use layout::compute_layout;
 pub use ops::{
     can_add_pane_in_direction, contains_pane, equalize, split_pane, split_pane_in_direction,
 };
+pub use reposition::{MoveError, RemoveOutcome, extract_pane, move_pane, swap_pane};
 pub use resize::{
     SplitResizeDrag, resize_split, resize_split_to_drag_point, split_resize_drag_target_at_point,
 };
@@ -32,6 +34,6 @@ pub use types::{
     MIN_PANE_SIZE_PX, PaneId, Point, Rect, SPLIT_RESIZE_STEP_PX, SplitOrientation, SplitTree,
 };
 pub use zoom::{
-    ZoomCloseOutcome, ZoomDecision, close_pane_with_zoom, zoom_decision, zoom_resize_targets,
-    zoom_toggle,
+    ZoomCloseOutcome, ZoomDecision, ZoomMoveOutcome, ZoomSwapOutcome, close_pane_with_zoom,
+    move_pane_with_zoom, swap_pane_with_zoom, zoom_decision, zoom_resize_targets, zoom_toggle,
 };

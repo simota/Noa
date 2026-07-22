@@ -60,6 +60,37 @@ fn overview_content_viewport(
     }
 }
 
+/// Aspect-fit `source_size` centered inside a tile-local `dest` sub-rectangle
+/// `(x, y, w, h)` (Overview U1/Stage 2). Unlike [`overview_content_viewport`]
+/// (which fits into the whole tile content region below the title band), this
+/// fits into an arbitrary pane sub-rect — the same downscale-without-stretch
+/// rule, so a pane whose thumbnail cell has a different aspect than the source
+/// frame is letterboxed within its cell rather than squeezed.
+fn fit_viewport_in(dest: (u32, u32, u32, u32), source_size: PixelSize) -> BlitViewport {
+    let (dx, dy, dw, dh) = dest;
+    let dest_w = dw as f32;
+    let dest_h = dh as f32;
+    if dest_w <= 0.0 || dest_h <= 0.0 {
+        return BlitViewport {
+            x: dx as f32,
+            y: dy as f32,
+            w: 0.0,
+            h: 0.0,
+        };
+    }
+    let source_w = source_size.w.max(1) as f32;
+    let source_h = source_size.h.max(1) as f32;
+    let scale = (dest_w / source_w).min(dest_h / source_h);
+    let w = (source_w * scale).min(dest_w);
+    let h = (source_h * scale).min(dest_h);
+    BlitViewport {
+        x: dx as f32 + (dest_w - w) * 0.5,
+        y: dy as f32 + (dest_h - h) * 0.5,
+        w,
+        h,
+    }
+}
+
 pub struct BlitPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -167,6 +198,38 @@ impl BlitPipeline {
         clear: wgpu::Color,
         viewport: (f32, f32, f32, f32),
     ) {
+        self.blit_impl(device, queue, src, dst, Some(clear), viewport);
+    }
+
+    /// Like [`Self::blit`] but *without* clearing `dst` — the destination is
+    /// loaded and `src` is composited into `viewport` on top of whatever is
+    /// already there. Used for tab-unit tile composition (Overview U1): the
+    /// caller clears the whole tab tile once, then composites each pane's
+    /// mirror into its own scaled sub-rect, so the panes and the card-color
+    /// divider gaps between them all coexist in one tile texture.
+    fn blit_into(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        src: &wgpu::TextureView,
+        dst: &wgpu::TextureView,
+        viewport: (f32, f32, f32, f32),
+    ) {
+        self.blit_impl(device, queue, src, dst, None, viewport);
+    }
+
+    /// Shared body of [`Self::blit`] / [`Self::blit_into`]: `clear` selects the
+    /// load op (`Some` clears the whole `dst` first, `None` loads it), then the
+    /// full `src` is downscale-sampled into the `viewport` sub-rectangle.
+    fn blit_impl(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        src: &wgpu::TextureView,
+        dst: &wgpu::TextureView,
+        clear: Option<wgpu::Color>,
+        viewport: (f32, f32, f32, f32),
+    ) {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("noa-overview-blit-bind-group"),
             layout: &self.bind_group_layout,
@@ -186,6 +249,7 @@ impl BlitPipeline {
             label: Some("noa-overview-blit-encoder"),
         });
         {
+            let load = clear.map_or(wgpu::LoadOp::Load, wgpu::LoadOp::Clear);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("noa-overview-blit-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -193,7 +257,7 @@ impl BlitPipeline {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
+                        load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -250,12 +314,22 @@ pub struct CardTexturePlacement<'a> {
     pub selected: bool,
 }
 
+/// The `src_uv` for an un-clipped card: sample the whole texture.
+const FULL_SRC_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CardUniformsRaw {
     rect: [f32; 4],
     border_color: [f32; 4],
     glow_color: [f32; 4],
+    /// Source UV sub-rect `[u, v, w, h]`; `[0, 0, 1, 1]` samples the full
+    /// texture (every existing caller). A clipped draw passes a sub-rect so a
+    /// shrunk destination quad still maps to the same source texels — see
+    /// `card.wgsl`. std140: keeps the vec4-first group (rect/border/glow/src_uv
+    /// at offsets 0/16/32/48), then the vec2 + scalars, so the struct rounds to
+    /// 96 bytes (CLAUDE.md GPU gotcha).
+    src_uv: [f32; 4],
     surface_size: [f32; 2],
     corner_radius: f32,
     border_width: f32,
@@ -450,6 +524,7 @@ impl CardPipeline {
             placements,
             None,
             1.0,
+            FULL_SRC_UV,
         );
     }
 
@@ -476,6 +551,40 @@ impl CardPipeline {
             placements,
             None,
             opacity,
+            FULL_SRC_UV,
+        );
+    }
+
+    /// Overlay a single already-rendered texture as a rounded card, but with
+    /// the destination quad clipped to a sub-rect of its full extent and the
+    /// texture sampled over the matching `src_uv` sub-rect — the visible pixels
+    /// map to the same source texels the un-clipped card would show at those
+    /// window coordinates. Used by the pane-drag floating snapshot when it
+    /// slides past a window edge (the caller computes both rects together so
+    /// the card stays glued to the cursor instead of stretching or snapping to
+    /// the edge). `placements` should carry the clipped destination rect.
+    #[allow(clippy::too_many_arguments)]
+    pub fn overlay_texture_cards_clipped(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        surface_size: PixelSize,
+        style: &CardStyle,
+        placements: &[CardTexturePlacement<'_>],
+        src_uv: [f32; 4],
+        opacity: f32,
+    ) {
+        self.draw_texture_cards(
+            device,
+            queue,
+            target,
+            surface_size,
+            style,
+            placements,
+            None,
+            opacity,
+            src_uv,
         );
     }
 
@@ -507,6 +616,7 @@ impl CardPipeline {
         placements: &[CardTexturePlacement<'_>],
         clear: Option<[f32; 4]>,
         opacity: f32,
+        src_uv: [f32; 4],
     ) {
         let surface = [surface_size.w.max(1) as f32, surface_size.h.max(1) as f32];
         let clock = self.pool_clock.get().wrapping_add(1);
@@ -530,6 +640,7 @@ impl CardPipeline {
                 ],
                 border_color,
                 glow_color,
+                src_uv,
                 surface_size: surface,
                 corner_radius: style.corner_radius,
                 border_width,
@@ -915,6 +1026,47 @@ impl OverviewThumbnailResources {
         Ok(())
     }
 
+    /// Composite one pane's mirror into `dest_rect` (tile-local px, a sub-rect
+    /// within the tile's content region) of `tiles[tile_index]`, *without*
+    /// clearing the rest of the tile (Overview U1/Stage 2). The caller clears
+    /// the whole tab tile once ([`Self::clear_tile`]) before compositing each
+    /// of its panes here, so all the tab's panes plus the card-color divider
+    /// gaps between them coexist in one tile texture. `source_size` is the
+    /// pane's real pixel size; the mirror is downscaled aspect-fit and centered
+    /// within `dest_rect` (same no-stretch rule as the single-pane path).
+    pub fn render_pane_into_tile_subrect(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut Renderer,
+        source_size: PixelSize,
+        tile_index: usize,
+        dest_rect: (u32, u32, u32, u32),
+    ) -> anyhow::Result<()> {
+        if renderer.target_format() != self.format {
+            anyhow::bail!(
+                "overview texture format {:?} does not match renderer target format {:?}",
+                self.format,
+                renderer.target_format()
+            );
+        }
+        if tile_index >= self.tiles.len() {
+            anyhow::bail!("overview tile index {tile_index} is out of range");
+        }
+        self.ensure_scratch_size(device, source_size);
+        let tile = &self.tiles[tile_index];
+        let viewport = fit_viewport_in(dest_rect, self.scratch.size);
+        renderer.draw(device, queue, &self.scratch.view);
+        self.blit.blit_into(
+            device,
+            queue,
+            &self.scratch.view,
+            &tile.view,
+            (viewport.x, viewport.y, viewport.w, viewport.h),
+        );
+        Ok(())
+    }
+
     /// Composite every placed tile onto `target` as a rounded card with a
     /// border / focus ring (REQ-OV-12/14). The pass clears `target` to the
     /// card `background`, so this both clears the surface and draws the cards.
@@ -951,6 +1103,7 @@ impl OverviewThumbnailResources {
             &texture_placements,
             Some(style.background),
             1.0,
+            FULL_SRC_UV,
         );
     }
 }

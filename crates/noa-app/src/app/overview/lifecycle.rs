@@ -61,6 +61,7 @@ impl App {
             Some(overview) => {
                 overview.host = host;
                 overview.last_cursor_point = None;
+                overview.pane_drag = None;
             }
             None => {
                 self.overview_window = Some(OverviewWindowState {
@@ -79,6 +80,7 @@ impl App {
                     search_pill_cache: None,
                     hint_pill_cache: None,
                     source_tile_ids_cache: RefCell::new(None),
+                    pane_drag: None,
                 });
             }
         }
@@ -98,22 +100,16 @@ impl App {
             overview.zoom_anim = None;
         }
         // REQ-OV-14 (v3 paging): jump straight to the page containing the
-        // focused pane's tile and select it page-locally, else page 0 /
+        // focused *tab*'s tile and select it page-locally, else page 0 /
         // selection 0. `overview_initial_selection` with `live_tile_count =
-        // source_tile_ids.len()` (no cap) gives the focused tile's *global*
+        // source_tab_ids.len()` (no cap) gives the focused tab's *global*
         // index in the unpaged source order (or 0 when absent), which page
         // math below turns into a page + page-local selection.
-        let source_tile_ids = self.overview_source_tile_ids();
-        let focused_tile = self.focused.and_then(|window_id| {
-            let state = self.windows.get(&window_id)?;
-            Some(OverviewTileId::new(window_id, state.focused_pane))
-        });
-        let global_index = overview_initial_selection(
-            &source_tile_ids,
-            source_tile_ids.len(),
-            focused_tile.as_ref(),
-        );
-        let (page, selected) = if source_tile_ids.is_empty() {
+        let source_tab_ids = self.overview_source_tab_ids();
+        let focused_tab = self.focused.filter(|id| self.windows.contains_key(id));
+        let global_index =
+            overview_initial_selection(&source_tab_ids, source_tab_ids.len(), focused_tab.as_ref());
+        let (page, selected) = if source_tab_ids.is_empty() {
             (0, 0)
         } else {
             (
@@ -181,6 +177,8 @@ impl App {
             overview.search_pill_cache = None;
             overview.hint_pill_cache = None;
             overview.source_tile_ids_cache = RefCell::new(None);
+            // An in-flight drag can't survive the overlay teardown.
+            overview.pane_drag = None;
         }
         for state in self.windows.values() {
             for surface in state.surfaces.values() {
@@ -225,13 +223,21 @@ impl App {
             .is_none_or(|state| state.occluded)
     }
 
+    /// Mark the TAB that owns `tile_id`'s pane dirty (Overview U1): tiles are
+    /// tab-unit, so any pane's pty output dirties its whole tab tile, which is
+    /// then recomposited from all its panes on the next due frame. External
+    /// callers keep passing an [`OverviewTileId`] (`{window, pane}`); only the
+    /// `window_id` half is the key.
     pub(in crate::app) fn mark_overview_tile_dirty(&mut self, tile_id: OverviewTileId) {
-        self.overview_tiles.entry(tile_id).or_default().dirty = true;
+        self.overview_tiles
+            .entry(tile_id.window_id)
+            .or_default()
+            .dirty = true;
     }
 
     pub(in crate::app) fn mark_all_overview_tiles_dirty(&mut self) {
-        for tile_id in self.overview_source_tile_ids() {
-            self.mark_overview_tile_dirty(tile_id);
+        for window_id in self.overview_source_tab_ids() {
+            self.overview_tiles.entry(window_id).or_default().dirty = true;
         }
     }
 
@@ -256,22 +262,19 @@ impl App {
     /// the frame.
     pub(in crate::app) fn overview_tile_candidates(
         &self,
-        source_tile_ids: &[OverviewTileId],
-    ) -> Vec<OverviewRenderCandidate<OverviewTileId>> {
-        source_tile_ids
+        source_tab_ids: &[WindowId],
+    ) -> Vec<OverviewRenderCandidate<WindowId>> {
+        source_tab_ids
             .iter()
-            .filter_map(|tile_id| {
-                let state = self.windows.get(&tile_id.window_id)?;
-                if !state.contains_pane(tile_id.pane_id) {
-                    return None;
-                }
+            .filter_map(|window_id| {
+                self.windows.get(window_id)?;
                 let tile = self
                     .overview_tiles
-                    .get(tile_id)
+                    .get(window_id)
                     .copied()
                     .unwrap_or_default();
                 Some(OverviewRenderCandidate {
-                    id: *tile_id,
+                    id: *window_id,
                     dirty: tile.dirty,
                     last_render_at: tile.last_render_at,
                 })
@@ -281,10 +284,10 @@ impl App {
 
     pub(in crate::app) fn due_overview_tile_ids(
         &self,
-        source_tile_ids: &[OverviewTileId],
+        source_tab_ids: &[WindowId],
         now: Instant,
-    ) -> Vec<OverviewTileId> {
-        let candidates = self.overview_tile_candidates(source_tile_ids);
+    ) -> Vec<WindowId> {
+        let candidates = self.overview_tile_candidates(source_tab_ids);
         select_due_overview_tile_ids(
             &candidates,
             now,

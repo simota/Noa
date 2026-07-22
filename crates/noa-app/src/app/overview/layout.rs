@@ -23,16 +23,16 @@ impl App {
     /// separate "did anything change" signal to keep in sync and risk
     /// getting wrong. An empty query is the identity (short-circuited to
     /// skip both the filter and the cache on the common path).
-    pub(in crate::app) fn overview_source_tile_ids(&self) -> Vec<OverviewTileId> {
-        let ordered = overview_tile_source_order(
-            &self.window_order,
-            |id| self.windows.contains_key(&id),
-            |id| self.overview_pane_ids_for_window(id),
-            None,
-        )
-        .into_iter()
-        .map(|(window_id, pane_id)| OverviewTileId::new(window_id, pane_id))
-        .collect::<Vec<_>>();
+    pub(in crate::app) fn overview_source_tab_ids(&self) -> Vec<WindowId> {
+        // Overview tiles are tab-unit (U1): one tile per live window, in
+        // `window_order`. The overview no longer owns its own window (it
+        // renders into the host), so nothing is excluded here.
+        let ordered: Vec<WindowId> = self
+            .window_order
+            .iter()
+            .copied()
+            .filter(|id| self.windows.contains_key(id))
+            .collect();
         let query = self
             .overview_window
             .as_ref()
@@ -54,10 +54,12 @@ impl App {
                 return hit.to_vec();
             }
         }
-        let titles: Vec<(OverviewTileId, String)> = ordered
+        // REQ-OV-16: the filter narrows by TAB title (each tile is a tab), so
+        // typing a query keeps the tabs whose title matches.
+        let titles: Vec<(WindowId, String)> = ordered
             .iter()
             .map(|id| {
-                let title = self.overview_tile_label(*id).unwrap_or_default();
+                let title = self.overview_tab_label(*id).unwrap_or_default();
                 (*id, title)
             })
             .collect();
@@ -72,6 +74,28 @@ impl App {
         result
     }
 
+    /// The pane under `point` within `window_id`'s tab tile (Overview U1), or
+    /// `None` when the point is over a divider gap / outside the tile. Resolves
+    /// the tab's tile rect from `tile_rects` (index-parallel with `slice`),
+    /// carves off its title band, lays the tab's `SplitTree` into the content
+    /// region at thumbnail scale, and hit-tests the scaled pane sub-rects — the
+    /// pure `session_overview::tab_tile_*` seam.
+    pub(in crate::app) fn overview_tab_pane_at_point(
+        &self,
+        window_id: WindowId,
+        tile_rects: &[PaneRectApp],
+        slice: &[WindowId],
+        point: split_tree::Point,
+    ) -> Option<PaneId> {
+        let index = slice.iter().position(|id| *id == window_id)?;
+        let tile = *tile_rects.get(index)?;
+        let metrics = self.overview_metrics()?;
+        let state = self.windows.get(&window_id)?;
+        let content = crate::session_overview::tab_tile_content_rect(tile, metrics.title_bar_h);
+        let pane_rects = crate::session_overview::tab_tile_pane_rects(content, &state.split_tree);
+        crate::session_overview::tab_tile_pane_at_point(&pane_rects, point)
+    }
+
     pub(in crate::app) fn overview_pane_ids_for_window(&self, window_id: WindowId) -> Vec<PaneId> {
         let Some(state) = self.windows.get(&window_id) else {
             return Vec::new();
@@ -82,31 +106,57 @@ impl App {
             .collect()
     }
 
-    pub(in crate::app) fn overview_tile_label(&self, tile_id: OverviewTileId) -> Option<String> {
-        let state = self.windows.get(&tile_id.window_id)?;
-        if !state.contains_pane(tile_id.pane_id) {
-            return None;
-        }
-        // A pane that needs a look (attention request / unread bell, FR-16) or
-        // is running a program is marked with a leading `●` — the band renderer
-        // colors it by the same dot semantics as the sidebar (red / yellow /
-        // blue). The attention mark blinks in phase with the sidebar (FR-A2)
-        // via `overview_tile_dot_color`'s blink gating.
-        let title = if self.overview_tile_dot_color(tile_id).is_some() {
+    /// A tab tile's title (Overview U1): the window's title, prefixed with a
+    /// `●` needs-a-look marker when any pane in the tab wants attention (the
+    /// band renderer colors it by [`Self::overview_tab_dot_color`]'s aggregate
+    /// dot semantics). `None` for a window that no longer exists.
+    pub(in crate::app) fn overview_tab_label(&self, window_id: WindowId) -> Option<String> {
+        let state = self.windows.get(&window_id)?;
+        let title = if self.overview_tab_dot_color(window_id).is_some() {
             format!("● {}", state.title)
         } else {
             state.title.clone()
         };
-        if state.pane_count() <= 1 {
-            return Some(title);
+        Some(title)
+    }
+
+    /// The aggregate status-dot color for a tab tile's title band (Overview
+    /// U1): the highest-priority dot across all the tab's panes — red (a pane
+    /// in its attention blink) outranks yellow (an unread bell) outranks blue
+    /// (a busy program); `None` when every pane is idle. Mirrors the per-pane
+    /// [`Self::overview_tile_dot_color`] semantics, rolled up to the tab so the
+    /// one tab tile reflects any pane that needs a look (FR-11/FR-16).
+    pub(in crate::app) fn overview_tab_dot_color(
+        &self,
+        window_id: WindowId,
+    ) -> Option<noa_core::Rgb> {
+        let palette = crate::chrome::palette();
+        let mut best: Option<noa_core::Rgb> = None;
+        // Priority order: red > yellow > blue. Walk the tab's panes and keep
+        // the strongest dot seen; short-circuit once red (the strongest) is
+        // found.
+        for pane_id in self.overview_pane_ids_for_window(window_id) {
+            let Some(color) = self.overview_tile_dot_color(OverviewTileId::new(window_id, pane_id))
+            else {
+                continue;
+            };
+            if color == palette.dot_red {
+                return Some(color);
+            }
+            let rank = |c: noa_core::Rgb| {
+                if c == palette.dot_yellow {
+                    2
+                } else if c == palette.dot_blue {
+                    1
+                } else {
+                    0
+                }
+            };
+            if best.is_none_or(|current| rank(color) > rank(current)) {
+                best = Some(color);
+            }
         }
-        let pane_number = self
-            .overview_pane_ids_for_window(tile_id.window_id)
-            .iter()
-            .position(|pane_id| *pane_id == tile_id.pane_id)
-            .map(|index| index + 1)
-            .unwrap_or_else(|| tile_id.pane_id.get() as usize);
-        Some(format!("{title} [pane {pane_number}]"))
+        best
     }
 
     /// The Overview window's search / grid / hint bands (REQ-OV-11/16/17).
@@ -139,12 +189,12 @@ impl App {
 
     pub(in crate::app) fn overview_layout(
         &self,
-        source_tile_ids: &[OverviewTileId],
+        source_tab_ids: &[WindowId],
     ) -> Option<OverviewLayout> {
         let metrics = self.overview_metrics()?;
         let chrome = self.overview_chrome()?;
         Some(compute_overview_grid(
-            source_tile_ids.len(),
+            source_tab_ids.len(),
             chrome.grid_bounds,
             OVERVIEW_GRID_CAP,
             metrics.tile_gutter,
@@ -168,8 +218,8 @@ impl App {
     /// needed), and every mutating call site that changes `page` already
     /// calls `clamp_overview_page` itself before storing.
     pub(in crate::app) fn overview_page_view(&self) -> OverviewPageView {
-        let source_tile_ids = self.overview_source_tile_ids();
-        let len = source_tile_ids.len();
+        let source_tab_ids = self.overview_source_tab_ids();
+        let len = source_tab_ids.len();
         let page_count = overview_page_count(len, OVERVIEW_GRID_CAP);
         let raw_page = self
             .overview_window
@@ -177,7 +227,7 @@ impl App {
             .map_or(0, |overview| overview.page);
         let page = clamp_overview_page(raw_page, len, OVERVIEW_GRID_CAP);
         let range = overview_page_slice_range(len, OVERVIEW_GRID_CAP, page);
-        let slice = source_tile_ids[range].to_vec();
+        let slice = source_tab_ids[range].to_vec();
         let raw_selected = self
             .overview_window
             .as_ref()
@@ -194,9 +244,9 @@ impl App {
 
 /// Return value of [`App::overview_page_view`] — see its doc comment.
 pub(in crate::app) struct OverviewPageView {
-    /// The current page's tiles, in row-major source order — always ≤
+    /// The current page's tab tiles, in row-major source order — always ≤
     /// `OVERVIEW_GRID_CAP` and always live (no placeholders).
-    pub(in crate::app) slice: Vec<OverviewTileId>,
+    pub(in crate::app) slice: Vec<WindowId>,
     /// The clamped 0-indexed current page.
     pub(in crate::app) page: usize,
     /// Total pages (`ceil(filtered_len / OVERVIEW_GRID_CAP)`, minimum 1).

@@ -9,6 +9,12 @@ struct CardUniforms {
     rect: vec4<f32>,
     border_color: vec4<f32>,
     glow_color: vec4<f32>,
+    // Source UV sub-rect `[u, v, w, h]` sampled across the quad; `[0,0,1,1]`
+    // for a full draw. A clipped draw (e.g. the pane-drag snapshot sliding
+    // past a window edge) shrinks the quad AND passes the matching sub-rect
+    // so the visible pixels still map to the same source texels — the card
+    // stays glued to the cursor instead of stretching.
+    src_uv: vec4<f32>,
     surface_size: vec2<f32>,
     corner_radius: f32,
     border_width: f32,
@@ -51,7 +57,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     var out: VertexOut;
     out.position = vec4<f32>(ndc, 0.0, 1.0);
     out.local_px = corner * draw_size - vec2<f32>(outset);
-    out.uv = out.local_px / u.rect.zw;
+    out.uv = u.src_uv.xy + (out.local_px / u.rect.zw) * u.src_uv.zw;
     return out;
 }
 

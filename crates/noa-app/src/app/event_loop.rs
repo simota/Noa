@@ -4,6 +4,74 @@
 use super::*;
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
+impl App {
+    /// Pane-dnd P1-1 remediation (`docs/specs/pane-dnd.md` L2(e)): re-resolve
+    /// a pane-scoped `UserEvent`'s window at *receive* time rather than
+    /// trusting the `window_id` baked into the message. The io thread's
+    /// shared `io_window_id` cell (`current_card_target`,
+    /// `io_thread/spawn.rs`) only changes what *future* sends see — a
+    /// `Redraw`/`PtyExit`/`SessionDelta`/`Clipboard{Write,Read}`/`Notify`/
+    /// `AutoApprove` event already sitting in the `EventLoopProxy`'s queue
+    /// when a cross-tab move commits still carries the pre-move id, since
+    /// that id is copied into the message the moment it's constructed.
+    ///
+    /// `PaneId` is process-global and never reused ([`PaneId::alloc`]), so at
+    /// most one live `WindowState` can ever contain a given pane — falling
+    /// back to a full scan when the event's own `window_id` no longer holds
+    /// it is therefore unambiguous. Returns `None` only when the pane isn't
+    /// live anywhere (it closed since the event was sent), which every call
+    /// site already treats as a droppable stale event.
+    pub(super) fn resolve_pane_window(
+        &self,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) -> Option<WindowId> {
+        if self
+            .windows
+            .get(&window_id)
+            .is_some_and(|state| state.contains_pane(pane_id))
+        {
+            return Some(window_id);
+        }
+        self.windows
+            .iter()
+            .find(|(_, state)| state.contains_pane(pane_id))
+            .map(|(id, _)| *id)
+    }
+
+    /// Pure decision for a queued `UserEvent::SessionDelta` once its target
+    /// pane's *current* window has been resolved via [`resolve_pane_window`]
+    /// (P2-3, pane-dnd review round 4). `None` drops the delta outright;
+    /// `Some` carries the delta to apply, re-targeted to `resolved`'s id when
+    /// it differs from the id the delta already carries.
+    ///
+    /// The `None` case (the pane no longer lives *anywhere*) needs its own
+    /// per-variant reasoning: [`SessionDelta::Remove`] is generated
+    /// specifically to retire a dead card, so this is its ordinary path —
+    /// dropping it would leave a ghost card behind forever (the same failure
+    /// shape, in reverse, as the stale-id resurrection this whole function
+    /// exists to prevent elsewhere). Every other variant describes still-live
+    /// state for a pane that is now fully gone; applying any of them — with
+    /// either the stale id or a guessed one — would only resurrect or mutate
+    /// a ghost card, so those are dropped.
+    fn resolved_session_delta(
+        resolved: Option<WindowId>,
+        original_id: crate::session_store::SessionCardId,
+        delta: crate::session_store::SessionDelta,
+    ) -> Option<crate::session_store::SessionDelta> {
+        let original_window = WindowId::from(original_id.window_id.0);
+        match resolved {
+            Some(resolved) if resolved != original_window => {
+                Some(delta.with_id(Self::session_card_id(resolved, original_id.pane_id)))
+            }
+            Some(_) => Some(delta),
+            None => {
+                matches!(delta, crate::session_store::SessionDelta::Remove { .. }).then_some(delta)
+            }
+        }
+    }
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         crate::startup_trace::mark("resumed");
@@ -54,6 +122,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
             UserEvent::SessionDelta(delta) => {
+                // P1-1/P2-3: re-target a delta queued before a cross-tab move
+                // committed, or drop one whose pane has since closed entirely
+                // — see `resolved_session_delta`.
+                let original_id = delta.id();
+                let resolved = self.resolve_pane_window(
+                    WindowId::from(original_id.window_id.0),
+                    original_id.pane_id,
+                );
+                let Some(delta) = Self::resolved_session_delta(resolved, original_id, delta) else {
+                    return;
+                };
                 if let crate::session_store::SessionDelta::Bell { id } = &delta {
                     let window_id = WindowId::from(id.window_id.0);
                     if self.windows.contains_key(&window_id)
@@ -89,17 +168,25 @@ impl ApplicationHandler<UserEvent> for App {
                 signature,
                 region_hash,
                 disable_after,
-            } => self.handle_auto_approve(id, signature, region_hash, disable_after),
+            } => {
+                // P1-1: rebuild `id` against the pane's current window before
+                // dispatching, same rationale as the `SessionDelta` arm above.
+                let id = match self.resolve_pane_window(WindowId::from(id.window_id.0), id.pane_id)
+                {
+                    Some(resolved) => Self::session_card_id(resolved, id.pane_id),
+                    None => id,
+                };
+                self.handle_auto_approve(id, signature, region_hash, disable_after)
+            }
             UserEvent::ClipboardWrite {
                 window_id,
                 pane_id,
                 text,
             } => {
-                if !self
-                    .windows
-                    .get(&window_id)
-                    .is_some_and(|state| state.contains_pane(pane_id))
-                {
+                // P1-1: a stale `window_id` must not drop a still-live pane's
+                // OSC 52 write just because it moved tabs after this event was
+                // queued.
+                if self.resolve_pane_window(window_id, pane_id).is_none() {
                     return;
                 }
                 if let Err(err) = self.clipboard.set_text(&text) {
@@ -111,13 +198,11 @@ impl ApplicationHandler<UserEvent> for App {
                 pane_id,
                 target,
             } => {
-                if !self
-                    .windows
-                    .get(&window_id)
-                    .is_some_and(|state| state.contains_pane(pane_id))
-                {
+                // P1-1: resolve to the pane's current window so a moved
+                // pane's read prompt/fulfillment lands in the right tab.
+                let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
                     return;
-                }
+                };
                 match self.config.clipboard_read {
                     noa_config::ClipboardAccess::Allow => {
                         self.fulfill_clipboard_read(window_id, pane_id, &target);
@@ -136,13 +221,12 @@ impl ApplicationHandler<UserEvent> for App {
                 title,
                 body,
             } => {
-                if !self
-                    .windows
-                    .get(&window_id)
-                    .is_some_and(|state| state.contains_pane(pane_id))
-                {
+                // P1-1: resolve to the pane's current window — both the
+                // focus check below and the Attention delta's card id must
+                // agree with where the pane actually lives now.
+                let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
                     return;
-                }
+                };
                 if crate::notification::should_notify(self.os_focused, window_id) {
                     crate::notification::post_notification(title.as_deref(), &body);
                     // The notifying pane (typically an AI agent awaiting the
@@ -158,6 +242,15 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Redraw(window_id, pane_id) => {
+                // P1-1/P1-2: resolve to the pane's current window. This is
+                // also what neutralizes a `Remote`-transport pane's
+                // `WinitConnectionNotifier`, which bakes in its `window_id`
+                // at attach time and is never re-pointed on a cross-tab move
+                // (see `App::move_pane_to_tab_at`'s doc comment) — every Redraw
+                // it sends is re-targeted right here regardless.
+                let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
+                    return;
+                };
                 // Every pty-driven redraw pushes the post-burst memory trim
                 // out; it fires once, MEMORY_TRIM_QUIESCENCE after the burst.
                 self.arm_memory_trim();
@@ -217,19 +310,19 @@ impl ApplicationHandler<UserEvent> for App {
                 pane_id,
                 text,
             } => {
-                // Ids were frozen at AE-resolve time (applescript Amendment
-                // 1.5); a target that closed since then just drops the write.
-                if self
-                    .windows
-                    .get(&window_id)
-                    .is_some_and(|state| state.contains_pane(pane_id))
-                {
-                    let bracketed = self.bracketed_paste(window_id, pane_id);
-                    if let Some(bytes) = input::applescript_input_bytes(&text, bracketed) {
-                        self.mark_pane_paste_input(window_id, pane_id);
-                        self.snap_pane_viewport_to_bottom(window_id, pane_id);
-                        self.write_pane_pty_bytes(window_id, pane_id, bytes);
-                    }
+                // P1-1: re-resolve the pane's *current* window at receive time.
+                // The ids were frozen when the AE was resolved; if the pane was
+                // moved to another tab between then and now it's still live, so
+                // resolve rather than dropping the write. A target that closed
+                // entirely resolves to `None` and drops as before.
+                let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
+                    return;
+                };
+                let bracketed = self.bracketed_paste(window_id, pane_id);
+                if let Some(bytes) = input::applescript_input_bytes(&text, bracketed) {
+                    self.mark_pane_paste_input(window_id, pane_id);
+                    self.snap_pane_viewport_to_bottom(window_id, pane_id);
+                    self.write_pane_pty_bytes(window_id, pane_id, bytes);
                 }
             }
             UserEvent::RaiseWindow {
@@ -237,41 +330,40 @@ impl ApplicationHandler<UserEvent> for App {
                 pane_id,
                 activate_app,
             } => {
-                if self
+                // P1-1: raise the pane's *current* window, so a `select tab`/
+                // `focus` racing a cross-tab move focuses where the pane now
+                // lives instead of no-oping against the old (still-live) window.
+                let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
+                    return;
+                };
+                self.focused = Some(window_id);
+                // Move split focus (a no-op when `pane_id` is already
+                // focused) …
+                self.focus_pane(window_id, pane_id);
+                // … then raise the native tab/window regardless, so a
+                // `select tab`/`focus`/`activate window` always re-orders
+                // the UI even on the no-op focus path.
+                if let Some(window) = self
                     .windows
                     .get(&window_id)
-                    .is_some_and(|state| state.contains_pane(pane_id))
+                    .map(|state| state.window.clone())
                 {
-                    self.focused = Some(window_id);
-                    // Move split focus (a no-op when `pane_id` is already
-                    // focused) …
-                    self.focus_pane(window_id, pane_id);
-                    // … then raise the native tab/window regardless, so a
-                    // `select tab`/`focus`/`activate window` always re-orders
-                    // the UI even on the no-op focus path.
-                    if let Some(window) = self
-                        .windows
-                        .get(&window_id)
-                        .map(|state| state.window.clone())
-                    {
-                        window.focus_window();
-                    }
-                    #[cfg(target_os = "macos")]
-                    if activate_app {
-                        crate::macos_window::activate_app();
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    let _ = activate_app;
+                    window.focus_window();
                 }
+                #[cfg(target_os = "macos")]
+                if activate_app {
+                    crate::macos_window::activate_app();
+                }
+                #[cfg(not(target_os = "macos"))]
+                let _ = activate_app;
             }
             UserEvent::ClosePane { window_id, pane_id } => {
-                if self
-                    .windows
-                    .get(&window_id)
-                    .is_some_and(|state| state.contains_pane(pane_id))
-                {
-                    self.request_close_pane(event_loop, window_id, pane_id);
-                }
+                // P1-1: close the pane wherever it now lives, so a close racing
+                // a cross-tab move doesn't silently no-op against the old window.
+                let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
+                    return;
+                };
+                self.request_close_pane(event_loop, window_id, pane_id);
             }
             UserEvent::SpawnTab {
                 window_target,
@@ -357,6 +449,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::PtyExit(window_id, pane_id) => {
+                // P1-1: resolve to the pane's current window so a pty exit
+                // racing a cross-tab move closes the right tab's pane instead
+                // of silently no-oping against the old (still-live) window.
+                let Some(window_id) = self.resolve_pane_window(window_id, pane_id) else {
+                    return;
+                };
                 // The quick terminal isn't a saved/tabbed window, so its shell
                 // exiting tears the whole drop-down down rather than routing
                 // through the tab-close path (which walks `window_order`).
@@ -468,6 +566,13 @@ impl ApplicationHandler<UserEvent> for App {
                     self.os_focused = None;
                 }
                 self.finish_active_split_drag(window_id);
+                // Cancel an in-flight overview pane drag when its host window
+                // loses focus (Cmd-Tab / native tab switch mid-drag): the
+                // eventual mouse-up may land elsewhere or never arrive, so the
+                // drag must not survive the defocus.
+                if self.overview_host() == Some(window_id) {
+                    self.cancel_overview_pane_drag();
+                }
                 // A live composition left open across a focus loss otherwise
                 // keeps `keyboard_preedit_should_swallow_key` swallowing every
                 // key once focus returns, until the IME happens to emit
@@ -1216,7 +1321,6 @@ impl App {
                 surface.last_mouse_cell = None;
             }
         }
-
         self.update_sidebar_button_hover(window_id, None);
         self.sync_hover_link(window_id);
 
@@ -1689,5 +1793,67 @@ impl App {
         if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod resolved_session_delta_tests {
+    use super::*;
+    use crate::session_store::SessionDelta;
+
+    fn card(window: u64, pane: u64) -> SessionCardId {
+        SessionCardId::new(SessionWindowId(window), PaneId::new(pane))
+    }
+
+    // P2-3 (pane-dnd review round 4): the pane is still live at the id the
+    // delta already carries — pass it through untouched.
+    #[test]
+    fn same_window_delta_is_returned_unchanged() {
+        let id = card(10, 1);
+        let delta = SessionDelta::Bell { id };
+
+        let resolved = App::resolved_session_delta(Some(WindowId::from(10u64)), id, delta);
+
+        assert_eq!(resolved.map(|delta| delta.id()), Some(id));
+    }
+
+    // A cross-tab move rekeyed the pane to a new window before this queued
+    // delta arrived — re-target it (P1-1) rather than resurrecting a ghost
+    // card at the stale id.
+    #[test]
+    fn moved_pane_delta_is_retargeted_to_the_new_window() {
+        let original = card(10, 1);
+        let delta = SessionDelta::Bell { id: original };
+
+        let resolved = App::resolved_session_delta(Some(WindowId::from(20u64)), original, delta);
+
+        assert_eq!(resolved.map(|delta| delta.id()), Some(card(20, 1)));
+    }
+
+    // The pane has closed entirely (live nowhere) since this `Remove` was
+    // queued. `Remove` exists to retire exactly that dead card, so this is
+    // its expected path — apply it unchanged rather than leaving a ghost
+    // card behind forever.
+    #[test]
+    fn remove_for_a_fully_gone_pane_still_applies() {
+        let id = card(10, 1);
+        let delta = SessionDelta::Remove { id };
+
+        let resolved = App::resolved_session_delta(None, id, delta);
+
+        assert_eq!(resolved.map(|delta| delta.id()), Some(id));
+    }
+
+    // Every other delta kind describes still-live state for a pane that's
+    // now fully gone — applying it (old id or not) would only resurrect or
+    // mutate a ghost card, so it must be dropped instead.
+    #[test]
+    fn non_remove_delta_for_a_fully_gone_pane_is_dropped() {
+        let id = card(10, 1);
+        let delta = SessionDelta::Bell { id };
+
+        let resolved = App::resolved_session_delta(None, id, delta);
+
+        assert!(resolved.is_none());
     }
 }

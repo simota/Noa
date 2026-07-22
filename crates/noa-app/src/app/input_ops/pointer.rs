@@ -241,7 +241,8 @@ impl App {
     }
 
     /// Pointer cursor while a link is Cmd+hovered in `window_id`'s
-    /// under-the-mouse pane, the platform default otherwise.
+    /// under-the-mouse pane (or the sidebar `+` button is under the pointer),
+    /// the platform default otherwise.
     pub(in crate::app) fn update_cursor_icon(&self, window_id: WindowId) {
         let Some(state) = self.windows.get(&window_id) else {
             return;

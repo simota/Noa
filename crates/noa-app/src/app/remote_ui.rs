@@ -766,6 +766,40 @@ impl App {
         }
     }
 
+    /// Pane-dnd P2-3 (review round 9): dismiss the `Attach Remote` retry UI
+    /// when it references the moved `(window_id, pane_id)`. `RemoteUiPhase::
+    /// Retry` is the only phase that pins a specific pane, and its Enter
+    /// (`handle_remote_retry_key`) re-resolves that pane under `session.
+    /// window_id`; after a cross-tab move the pane no longer lives there, so
+    /// Enter would error "Remote pane is no longer available" (source tab
+    /// survives) or the overlay would dangle on a closed window (source tab
+    /// closed). Mirrors the Esc dismiss path (`remote_ui = None` + redraw),
+    /// matching how [`App::move_pane_to_tab_at`] already tears down the confirm
+    /// dialog, sidebar rename, and send-selection picker. `Loading`/`Picker`/
+    /// `EndpointInput`/`Error` never hold the moved pane, so they are left
+    /// untouched — a `Loading` session in particular must stay owned until its
+    /// worker result is reconciled (see the Esc guard in `handle_remote_ui_key`).
+    /// Remote panes *can* be moved even though their notifier isn't re-pointed
+    /// (`move_pane_to_tab_at`'s P1-2 note: receiver-side re-resolution covers
+    /// their events), so this teardown genuinely fires for them.
+    pub(super) fn dismiss_remote_ui_for_moved_pane(
+        &mut self,
+        window_id: WindowId,
+        pane_id: PaneId,
+    ) {
+        let references = self.remote_ui.as_ref().is_some_and(|session| {
+            session.window_id == window_id
+                && matches!(
+                    session.phase,
+                    RemoteUiPhase::Retry { pane_id: retry_pane, .. } if retry_pane == pane_id
+                )
+        });
+        if references {
+            self.remote_ui = None;
+            self.request_window_redraw(window_id);
+        }
+    }
+
     pub(in crate::app) fn handle_remote_ui_key(
         &mut self,
         event_loop: &ActiveEventLoop,

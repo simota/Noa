@@ -171,6 +171,23 @@ impl ProcessMonitor {
         self.refresh(rows);
     }
 
+    /// Rewrite every held row whose id is `old` to `new`, in place (pane-dnd
+    /// P2, review round 13). Called when a pane is moved cross-tab while the
+    /// overlay is open: the session-store rekey changes the moved pane's card
+    /// id from `(source_window, pane)` to `(dest_window, pane)`, but the rows
+    /// captured here still carry the old id. Because `selected` is a positional
+    /// index and no row is reordered or removed, the selection keeps pointing
+    /// at the same (now-rekeyed) row — so `selected_id` follows the moved pane
+    /// to its new window instead of resetting or naming a stale one. A no-op
+    /// when no held row matches `old`.
+    pub fn rekey_row(&mut self, old: SessionCardId, new: SessionCardId) {
+        for row in &mut self.rows {
+            if row.id == old {
+                row.id = new;
+            }
+        }
+    }
+
     pub fn rows(&self) -> &[MonitorRow] {
         &self.rows
     }
@@ -455,6 +472,34 @@ mod tests {
         empty.move_selection(1);
         empty.move_selection(-1);
         assert_eq!(empty.selected_id(), None);
+    }
+
+    // Pane-dnd P2 (review round 13): rekeying the selected row's id in place
+    // keeps the selection on that row, so `selected_id` follows the moved pane
+    // to its new window rather than reporting a stale card id.
+    #[test]
+    fn rekey_row_moves_selection_id_to_the_new_card_without_reordering() {
+        let rows = vec![
+            row(1, 1, Some("a"), Some(100), Some(1)),
+            row(1, 2, Some("b"), Some(200), Some(1)),
+        ];
+        let mut monitor = ProcessMonitor::open(rows);
+        // CPU-desc: b (200) at index 0, a (100) at index 1. Select a.
+        monitor.move_selection(1);
+        assert_eq!(monitor.selected(), 1);
+        assert_eq!(monitor.selected_id(), Some(id(1, 1)));
+
+        // Move pane (1,1) to window 2: its card id becomes (2,1).
+        monitor.rekey_row(id(1, 1), id(2, 1));
+        // Selection index unchanged (no reorder), id follows the moved pane.
+        assert_eq!(monitor.selected(), 1);
+        assert_eq!(monitor.selected_id(), Some(id(2, 1)));
+        // The unaffected row is untouched.
+        assert_eq!(monitor.rows()[0].id, id(1, 2));
+
+        // A rekey whose `old` matches no held row is a no-op.
+        monitor.rekey_row(id(9, 9), id(8, 8));
+        assert_eq!(monitor.selected_id(), Some(id(2, 1)));
     }
 
     // AC-15 (FR-8): the non-macOS/no-sample degradation — every value "—".

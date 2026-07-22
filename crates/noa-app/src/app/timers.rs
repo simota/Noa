@@ -555,10 +555,9 @@ impl App {
         match self.sidebar_autosort_deadline {
             Some(deadline) if now < deadline => Some(deadline),
             _ => {
-                let drag_active = self
-                    .windows
-                    .values()
-                    .any(|state| state.sidebar_drag.as_ref().is_some_and(|drag| drag.active));
+                let drag_active = self.windows.values().any(|state| {
+                    state.sidebar_drag.as_ref().is_some_and(|drag| drag.active)
+                });
                 if !drag_active && self.session_store.refresh_auto_order() {
                     self.request_sidebar_redraw();
                 }

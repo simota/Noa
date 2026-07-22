@@ -511,7 +511,7 @@ impl App {
         }
 
         let window_id = window.id();
-        let initial_pane = PaneId::new(1);
+        let initial_pane = PaneId::alloc();
         let initial_rect = content_inset_bounds(
             PaneRectApp::new(0, 0, surface_config.width, surface_config.height),
             crate::macos_window::top_chrome_inset_px(&window).unwrap_or_else(|| {
@@ -561,7 +561,6 @@ impl App {
                 split_tree: SplitTree::leaf(initial_pane),
                 zoomed: None,
                 focused_pane: initial_pane,
-                next_pane_id: 2,
                 surfaces,
                 last_mouse_pane: Some(initial_pane),
                 last_mouse_point: None,
@@ -768,6 +767,17 @@ impl App {
         let auto_approve_guards = Arc::new(Mutex::new(
             crate::auto_approve::AutoApproveInputGuards::default(),
         ));
+        // P2-1: the io thread reads the auto-approve enable flag through
+        // this swappable holder rather than the bare `Arc<AtomicBool>`
+        // itself, so a later cross-tab move (`App::move_pane_to_tab_at`) can
+        // re-point it at the destination tab's flag — including future
+        // toggles, since the holder is re-read on every batch rather than
+        // the value being copied once at spawn time.
+        let auto_approve_flag = Arc::new(Mutex::new(auto_approve_enabled.clone()));
+        // P2-4: same swappable-holder shape as `auto_approve_flag` above, for
+        // this pane's redraw-floor clock (see `RedrawFloorHandle`).
+        let redraw_floor_handle: crate::io_thread::RedrawFloorHandle =
+            Arc::new(Mutex::new(redraw_floor));
         let overview_snapshot = Arc::new(Mutex::new(None));
         let overview_publish = crate::io_thread::OverviewPublish {
             slot: overview_snapshot.clone(),
@@ -778,7 +788,7 @@ impl App {
             preview_lines: self.sidebar_preview_lines_gate.clone(),
         };
         let auto_approve = crate::io_thread::AutoApprovePublish {
-            enabled: auto_approve_enabled.clone(),
+            enabled: auto_approve_flag.clone(),
             guards: auto_approve_guards.clone(),
         };
         let ipc_tap = self.ipc_output_tap(window_id, pane_id);
@@ -792,11 +802,19 @@ impl App {
         // so keyboard/paste input writes straight to the writer thread.
         let pty_writer = pty.writer();
         let input_echo_seq = Arc::new(AtomicU64::new(0));
+        // Pane-dnd L2(e): the io thread's event-target window id lives behind
+        // this shared cell rather than baked into its closure, so a later
+        // cross-tab move can redirect it without a respawn. `io_window_id`
+        // (below) is the main-thread's clone of the same cell.
+        let io_window_id = Arc::new(AtomicU64::new(u64::from(window_id)));
         let io_thread = crate::io_thread::spawn(
             pty,
             terminal.clone(),
             self.proxy.clone(),
-            crate::io_thread::IoThreadTarget { window_id, pane_id },
+            crate::io_thread::IoThreadTarget {
+                window_id: io_window_id.clone(),
+                pane_id,
+            },
             resize_rx,
             pty_input_rx,
             auto_approve_feedback_rx,
@@ -804,7 +822,7 @@ impl App {
             overview_publish,
             sidebar_publish,
             auto_approve,
-            redraw_floor,
+            redraw_floor_handle.clone(),
             ipc_tap,
             raw_attach_tap,
         );
@@ -818,6 +836,9 @@ impl App {
                 auto_approve_feedback_tx,
                 resize_tx,
                 io_thread: Some(io_thread),
+                io_window_id,
+                auto_approve_flag,
+                redraw_floor: redraw_floor_handle,
             }),
             grid_size,
             rect,
@@ -1006,6 +1027,11 @@ impl App {
             self.overview_visible = false;
             self.overview_visible_gate.store(false, Ordering::Relaxed);
         }
+        // A non-host tab closing keeps the overlay alive but removes its tiles;
+        // an in-flight overview drag referencing the vanished window must not
+        // survive (a no-op when the host closed above, or when no drag exists —
+        // including the `move_pane_to_tab_at` self-call after it took the drag).
+        self.cancel_overview_pane_drag();
         let outcome = close_tab_outcome(
             &self.window_order,
             self.focused,
@@ -1028,8 +1054,8 @@ impl App {
             state.shutdown();
         }
         self.window_order.retain(|id| *id != window_id);
-        self.overview_tiles
-            .retain(|tile_id, _| tile_id.window_id != window_id);
+        // Overview tiles are tab-unit (U1): drop the closed tab's tile state.
+        self.overview_tiles.remove(&window_id);
         // A prompt targeting the closed window would otherwise linger
         // forever: its window can no longer deliver keys (so not even
         // Escape reaches it) and the open-guard would block every future
@@ -1270,6 +1296,9 @@ impl App {
         pane_id: PaneId,
     ) {
         self.end_copy_mode_for_pane(window_id, pane_id);
+        // A closing pane may be an overview drag's source or target tile — the
+        // tile set is about to change, so cancel any in-flight overview drag.
+        self.cancel_overview_pane_drag();
         let should_close_tab = self
             .windows
             .get(&window_id)
@@ -1323,8 +1352,8 @@ impl App {
             self.close_tab(event_loop, window_id);
             return;
         }
-        self.overview_tiles
-            .remove(&OverviewTileId::new(window_id, pane_id));
+        // The surviving tab's tile must recomposite without the closed pane
+        // (Overview U1); its tab-tile state persists and is re-rendered fresh.
         self.mark_all_overview_tiles_dirty();
         // GC choke point (FR-12): the closed pane's card is dropped from the
         // store. `close_pane_after_pty_exit` reaches this through `close_pane`.

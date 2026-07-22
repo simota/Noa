@@ -68,6 +68,29 @@ impl App {
         self.request_window_redraw(window_id);
     }
 
+    /// Pane-dnd P2 (review round 13): when a pane is moved cross-tab while this
+    /// overlay is open, its session-store card id changes from
+    /// `(source_window, pane)` to `(dest_window, pane)`. Rekey the overlay's
+    /// held rows to match immediately, then rebuild from the (already-rekeyed)
+    /// store so the row's window-relative label is correct too. Order matters:
+    /// [`ProcessMonitor::refresh`] preserves the selection by matching the
+    /// *currently held* selected row's id against the fresh store rows — so the
+    /// in-place rekey must run first, otherwise refresh would look up the stale
+    /// old id, find no match among the new-id store rows, and reset the
+    /// selection to row 0 instead of following the moved pane. A no-op when the
+    /// overlay is closed.
+    pub(in crate::app) fn rekey_process_monitor_card(
+        &mut self,
+        old: SessionCardId,
+        new: SessionCardId,
+    ) {
+        let Some(session) = self.process_monitor.as_mut() else {
+            return;
+        };
+        session.state.rekey_row(old, new);
+        self.refresh_process_monitor();
+    }
+
     /// The single close choke point (open/close side effects, panel-metrics-view
     /// L2): turns the metrics tick back off and clears every card's metrics
     /// (so a reopen never flashes the previous session's stale numbers)

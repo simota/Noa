@@ -96,8 +96,11 @@ impl App {
             let Some(target_rect) = state.surfaces.get(&target).map(|surface| surface.rect) else {
                 return false;
             };
-            let tab_cap_ok =
-                can_create_split(state.pane_count(), target_rect, direction.split_orientation());
+            let tab_cap_ok = can_create_split(
+                state.pane_count(),
+                target_rect,
+                direction.split_orientation(),
+            );
             let outcome = move_pane_with_zoom(
                 &mut state.split_tree,
                 source,

@@ -1173,7 +1173,11 @@ fn swap_pane_with_zoom_force_unzooms_even_for_an_unrelated_zoom_target() {
     let mut tree = SplitTree::split_even(
         SplitOrientation::Horizontal,
         SplitTree::leaf(a),
-        SplitTree::split_even(SplitOrientation::Vertical, SplitTree::leaf(b), SplitTree::leaf(c)),
+        SplitTree::split_even(
+            SplitOrientation::Vertical,
+            SplitTree::leaf(b),
+            SplitTree::leaf(c),
+        ),
     );
 
     let outcome = swap_pane_with_zoom(&mut tree, a, b, Some(c));
@@ -1197,7 +1201,11 @@ fn swap_pane_with_zoom_rejected_self_swap_leaves_zoom_intact() {
 
     let outcome = swap_pane_with_zoom(&mut tree, a, a, Some(a));
     assert!(!outcome.swapped);
-    assert_eq!(outcome.zoomed, Some(a), "rejected op leaves zoom state untouched");
+    assert_eq!(
+        outcome.zoomed,
+        Some(a),
+        "rejected op leaves zoom state untouched"
+    );
     assert_eq!(tree, before);
 }
 
@@ -1211,7 +1219,14 @@ fn move_pane_with_zoom_force_unzooms_moved_or_target_before_transform() {
         SplitTree::leaf(target),
     );
 
-    let outcome = move_pane_with_zoom(&mut tree, moved, target, Direction::Right, true, Some(target));
+    let outcome = move_pane_with_zoom(
+        &mut tree,
+        moved,
+        target,
+        Direction::Right,
+        true,
+        Some(target),
+    );
     assert!(outcome.move_result.is_ok());
     assert_eq!(outcome.zoomed, None, "no dangling zoom target after move");
 }

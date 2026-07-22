@@ -126,8 +126,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // committed, or drop one whose pane has since closed entirely
                 // — see `resolved_session_delta`.
                 let original_id = delta.id();
-                let resolved = self
-                    .resolve_pane_window(WindowId::from(original_id.window_id.0), original_id.pane_id);
+                let resolved = self.resolve_pane_window(
+                    WindowId::from(original_id.window_id.0),
+                    original_id.pane_id,
+                );
                 let Some(delta) = Self::resolved_session_delta(resolved, original_id, delta) else {
                     return;
                 };
@@ -169,7 +171,8 @@ impl ApplicationHandler<UserEvent> for App {
             } => {
                 // P1-1: rebuild `id` against the pane's current window before
                 // dispatching, same rationale as the `SessionDelta` arm above.
-                let id = match self.resolve_pane_window(WindowId::from(id.window_id.0), id.pane_id) {
+                let id = match self.resolve_pane_window(WindowId::from(id.window_id.0), id.pane_id)
+                {
                     Some(resolved) => Self::session_card_id(resolved, id.pane_id),
                     None => id,
                 };

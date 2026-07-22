@@ -20,7 +20,8 @@ impl App {
         let Some(layout) = self.overview_layout(&page_view.slice) else {
             return;
         };
-        let Some(target_tab) = overview_tile_target_at_point(&page_view.slice, &layout.tiles, point)
+        let Some(target_tab) =
+            overview_tile_target_at_point(&page_view.slice, &layout.tiles, point)
         else {
             return;
         };
@@ -29,7 +30,8 @@ impl App {
         // click UX). Resolve the clicked pane against the tab's scaled sub-rects
         // before dismissing; fall back to the tab's own focused pane when the
         // point is over a divider gap.
-        let target_pane = self.overview_tab_pane_at_point(target_tab, &layout.tiles, &page_view.slice, point);
+        let target_pane =
+            self.overview_tab_pane_at_point(target_tab, &layout.tiles, &page_view.slice, point);
         // The clicked tile becomes the selection too, not just the focus
         // target — a click and an arrow-keyed Return should leave the
         // Overview in the same selected state. The index is page-local.

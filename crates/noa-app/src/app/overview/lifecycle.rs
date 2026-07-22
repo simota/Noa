@@ -229,7 +229,10 @@ impl App {
     /// callers keep passing an [`OverviewTileId`] (`{window, pane}`); only the
     /// `window_id` half is the key.
     pub(in crate::app) fn mark_overview_tile_dirty(&mut self, tile_id: OverviewTileId) {
-        self.overview_tiles.entry(tile_id.window_id).or_default().dirty = true;
+        self.overview_tiles
+            .entry(tile_id.window_id)
+            .or_default()
+            .dirty = true;
     }
 
     pub(in crate::app) fn mark_all_overview_tiles_dirty(&mut self) {

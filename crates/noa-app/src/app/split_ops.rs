@@ -10,7 +10,11 @@ use super::*;
 /// of being silently dropped by `reconcile_session_store`'s liveness GC on
 /// the next tick. A no-op (map untouched) when `old` isn't present, e.g. a
 /// card that never received attention.
-fn rekey_card_entry<V>(map: &mut HashMap<SessionCardId, V>, old: SessionCardId, new: SessionCardId) {
+fn rekey_card_entry<V>(
+    map: &mut HashMap<SessionCardId, V>,
+    old: SessionCardId,
+    new: SessionCardId,
+) {
     if let Some(value) = map.remove(&old) {
         map.insert(new, value);
     }
@@ -223,7 +227,6 @@ impl App {
         self.focus_pane(window_id, next);
     }
 
-
     /// Cross-tab pane move with an explicit destination insertion target
     /// (Overview U3). `dest_target` names *where* in `dest_window` the pane
     /// lands: `None` keeps the sidebar-drop behavior (to the right of
@@ -409,13 +412,9 @@ impl App {
         // rather than the "cheap and self-contained" recompute an in-place
         // update would need. Cancel outright instead, matching the
         // confirm-dialog and rename treatment above.
-        if self
-            .send_selection_picker
-            .as_ref()
-            .is_some_and(|session| {
-                send_selection_picker_references_pane(session, source_window, pane)
-            })
-        {
+        if self.send_selection_picker.as_ref().is_some_and(|session| {
+            send_selection_picker_references_pane(session, source_window, pane)
+        }) {
             self.send_selection_picker = None;
             self.request_window_redraw(source_window);
         }
@@ -900,7 +899,10 @@ mod tests {
                 .expect("valid loopback endpoint"),
         };
         assert!(confirm_action_references_pane(&retry_detached_remote, pane));
-        assert!(!confirm_action_references_pane(&retry_detached_remote, other));
+        assert!(!confirm_action_references_pane(
+            &retry_detached_remote,
+            other
+        ));
 
         let paste = ConfirmAction::Paste {
             window_id,
@@ -1080,8 +1082,15 @@ mod tests {
         );
 
         assert!(
-            cross_tab_move(&source, moved, &dest, dest_focused, Direction::Right, tab_cap_ok)
-                .is_none()
+            cross_tab_move(
+                &source,
+                moved,
+                &dest,
+                dest_focused,
+                Direction::Right,
+                tab_cap_ok
+            )
+            .is_none()
         );
     }
 
@@ -1216,7 +1225,10 @@ mod tests {
 
         rekey_card_entry(&mut map, old, new);
 
-        assert!(!map.contains_key(&old), "old key must not remain (no stale entry)");
+        assert!(
+            !map.contains_key(&old),
+            "old key must not remain (no stale entry)"
+        );
         assert_eq!(
             map.get(&new).copied(),
             Some(onset),

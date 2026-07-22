@@ -161,10 +161,7 @@ impl IpcShared {
     /// closes that window — a rekey can only run entirely before or entirely
     /// after, and either ordering resolves a matching key/handle pair.
     /// Mirrors [`AppIpcBackend::resolve_attach_pane`]'s single-lock shape.
-    pub(crate) fn resolve_terminal(
-        &self,
-        pane: PaneRef,
-    ) -> Result<Arc<Mutex<Terminal>>, IpcError> {
+    pub(crate) fn resolve_terminal(&self, pane: PaneRef) -> Result<Arc<Mutex<Terminal>>, IpcError> {
         let key = self.registry.resolve(pane).ok_or(IpcError::UnknownPane)?;
         self.terminals
             .get(&key)
@@ -768,7 +765,10 @@ mod tests {
         );
         assert!(
             Arc::ptr_eq(
-                shared.terminals.get(&(20, 1)).expect("terminal moved to the new key"),
+                shared
+                    .terminals
+                    .get(&(20, 1))
+                    .expect("terminal moved to the new key"),
                 &terminal
             ),
             "the same terminal handle follows the pane, not a fresh lookup"

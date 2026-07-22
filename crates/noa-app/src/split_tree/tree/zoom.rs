@@ -150,7 +150,10 @@ pub fn move_pane_with_zoom(
 ) -> ZoomMoveOutcome {
     let move_result = move_pane(tree, moved, target, direction, tab_cap_ok);
     if move_result.is_err() {
-        return ZoomMoveOutcome { zoomed, move_result };
+        return ZoomMoveOutcome {
+            zoomed,
+            move_result,
+        };
     }
 
     ZoomMoveOutcome {

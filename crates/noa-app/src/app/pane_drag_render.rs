@@ -27,13 +27,19 @@ pub(in crate::app) fn pane_zone_highlight_rect(
             bounds.h.saturating_sub(my * 2),
         ),
         Some(Direction::Left) => split_tree::Rect::new(bounds.x, bounds.y, mx, bounds.h),
-        Some(Direction::Right) => {
-            split_tree::Rect::new(bounds.x + bounds.w.saturating_sub(mx), bounds.y, mx, bounds.h)
-        }
+        Some(Direction::Right) => split_tree::Rect::new(
+            bounds.x + bounds.w.saturating_sub(mx),
+            bounds.y,
+            mx,
+            bounds.h,
+        ),
         Some(Direction::Up) => split_tree::Rect::new(bounds.x, bounds.y, bounds.w, my),
-        Some(Direction::Down) => {
-            split_tree::Rect::new(bounds.x, bounds.y + bounds.h.saturating_sub(my), bounds.w, my)
-        }
+        Some(Direction::Down) => split_tree::Rect::new(
+            bounds.x,
+            bounds.y + bounds.h.saturating_sub(my),
+            bounds.w,
+            my,
+        ),
     }
 }
 

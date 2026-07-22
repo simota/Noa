@@ -694,8 +694,11 @@ impl App {
             .as_ref()
             .and_then(|overview| overview.pane_drag)
             .filter(|drag| drag.phase == PaneDragPhase::Active);
-        let drag_source_index = active_drag
-            .and_then(|drag| source_tab_ids.iter().position(|id| *id == drag.source.window_id));
+        let drag_source_index = active_drag.and_then(|drag| {
+            source_tab_ids
+                .iter()
+                .position(|id| *id == drag.source.window_id)
+        });
         // U4 floating chip: the dragged *pane*'s sub-rect of its tab tile
         // texture, as a normalized `src_uv` plus the sub-rect's pixel size (for
         // the chip's aspect). Resolved before the gpu/overview borrows so the
@@ -734,8 +737,8 @@ impl App {
         // foreign window group, or the pointer over a divider gap / no pane.
         // Reuses the pure `pane_zone_highlight_rect` the main-view pane drag
         // draws, so the highlight always matches what a release resolves to.
-        let drag_zone_highlight: Option<(usize, PaneRectApp, [f32; 4])> = active_drag
-            .and_then(|drag| {
+        let drag_zone_highlight: Option<(usize, PaneRectApp, [f32; 4])> =
+            active_drag.and_then(|drag| {
                 let (dest_tab, target_pane, zone) = self.overview_drop_target_at_last_cursor()?;
                 let same_group = {
                     let source_group = self

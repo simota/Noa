@@ -61,7 +61,10 @@ impl App {
         let state = self.windows.get(&tab)?;
         let content = crate::session_overview::tab_tile_content_rect(tile, metrics.title_bar_h);
         let pane_rects = crate::session_overview::tab_tile_pane_rects(content, &state.split_tree);
-        let (pane, rect) = pane_rects.iter().find(|(_, rect)| rect.contains(point)).copied()?;
+        let (pane, rect) = pane_rects
+            .iter()
+            .find(|(_, rect)| rect.contains(point))
+            .copied()?;
         Some((tab, pane, classify_pane_zone(rect, point)))
     }
 

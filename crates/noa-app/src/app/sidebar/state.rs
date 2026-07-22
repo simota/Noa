@@ -408,7 +408,11 @@ impl App {
     /// disagree about what a visibility change resets (scroll/menu/rename) or
     /// how it's applied (grid-first relayout). A no-op when `group` already
     /// matches `visible`.
-    pub(in crate::app) fn set_group_sidebar_visible(&mut self, group: WindowGroupId, visible: bool) {
+    pub(in crate::app) fn set_group_sidebar_visible(
+        &mut self,
+        group: WindowGroupId,
+        visible: bool,
+    ) {
         if self.sidebar_visible_groups.contains(&group) == visible {
             return;
         }

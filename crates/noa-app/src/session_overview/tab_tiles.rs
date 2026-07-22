@@ -195,11 +195,17 @@ mod tests {
     #[test]
     fn content_rect_reserves_the_title_band() {
         let tile = TileRect::new(10, 20, 200, 150);
-        assert_eq!(tab_tile_content_rect(tile, 30), TileRect::new(10, 50, 200, 120));
+        assert_eq!(
+            tab_tile_content_rect(tile, 30),
+            TileRect::new(10, 50, 200, 120)
+        );
         // A tile shorter than the band degenerates to zero height, never
         // underflows.
         let short = TileRect::new(0, 0, 100, 20);
-        assert_eq!(tab_tile_content_rect(short, 30), TileRect::new(0, 20, 100, 0));
+        assert_eq!(
+            tab_tile_content_rect(short, 30),
+            TileRect::new(0, 20, 100, 0)
+        );
     }
 
     // U1: a single-pane tab fills the whole content region; hit-testing
@@ -231,8 +237,14 @@ mod tests {
         let rects = tab_tile_pane_rects(content, &tree);
         assert_eq!(rects.len(), 2);
         // Left pane on the left, right pane on the right.
-        assert_eq!(tab_tile_pane_at_point(&rects, Point::new(20, 90)), Some(pane(1)));
-        assert_eq!(tab_tile_pane_at_point(&rects, Point::new(180, 90)), Some(pane(2)));
+        assert_eq!(
+            tab_tile_pane_at_point(&rects, Point::new(20, 90)),
+            Some(pane(1))
+        );
+        assert_eq!(
+            tab_tile_pane_at_point(&rects, Point::new(180, 90)),
+            Some(pane(2))
+        );
     }
 
     // pane-dnd AC-4: the 60/40 coordinate table, one axis varied at a time —
@@ -240,7 +252,10 @@ mod tests {
     #[test]
     fn classify_pane_zone_matches_l2c_coordinate_table() {
         let bounds = TileRect::new(0, 0, 100, 100);
-        assert_eq!(classify_pane_zone(bounds, Point::new(50, 50)), PaneZone::Center);
+        assert_eq!(
+            classify_pane_zone(bounds, Point::new(50, 50)),
+            PaneZone::Center
+        );
         assert_eq!(
             classify_pane_zone(bounds, Point::new(10, 50)),
             PaneZone::Edge(Direction::Left)
@@ -261,7 +276,10 @@ mod tests {
 
     #[test]
     fn classify_pane_zone_center_for_zero_size_rect() {
-        assert_eq!(classify_pane_zone(TileRect::new(0, 0, 0, 0), Point::new(0, 0)), PaneZone::Center);
+        assert_eq!(
+            classify_pane_zone(TileRect::new(0, 0, 0, 0), Point::new(0, 0)),
+            PaneZone::Center
+        );
     }
 
     // U2: an in-tab center drop swaps; an in-tab edge drop splits at that edge.
@@ -331,7 +349,8 @@ mod tests {
                 direction: Direction::Up
             }
         );
-        let center = resolve_overview_drop(1u64, 10u64, Some((2u64, 20u64, PaneZone::Center)), true);
+        let center =
+            resolve_overview_drop(1u64, 10u64, Some((2u64, 20u64, PaneZone::Center)), true);
         assert_eq!(
             center,
             OverviewDrop::CrossTab {

@@ -141,6 +141,12 @@ pub struct AppConfig {
     /// `quick-terminal-animation-duration`: how long the quick terminal takes
     /// to slide fully in or out, in seconds. `0` shows/hides it instantly.
     pub quick_terminal_animation_duration: f32,
+    /// `scratch-terminal-key`: the in-app chord toggling the scratch
+    /// terminal popup. `None`/empty-string sentinel disables it.
+    pub scratch_terminal_key: Option<String>,
+    /// `scratch-terminal-size`: the scratch terminal popup's grid size in
+    /// cells.
+    pub scratch_terminal_size: noa_config::ScratchTerminalSize,
     /// `sidebar-enabled`: app-wide initial visibility of the session sidebar,
     /// seeded into each window's per-window toggle at creation (FR-4/FR-13).
     pub sidebar_enabled: bool,
@@ -287,6 +293,8 @@ impl AppConfig {
             quick_terminal_screen: config.quick_terminal_screen,
             quick_terminal_position: config.quick_terminal_position,
             quick_terminal_animation_duration: config.quick_terminal_animation_duration,
+            scratch_terminal_key: config.scratch_terminal_key,
+            scratch_terminal_size: config.scratch_terminal_size,
             sidebar_enabled: config.sidebar_enabled,
             sidebar_width: config.sidebar_width,
             sidebar_font_size: config.sidebar_font_size,

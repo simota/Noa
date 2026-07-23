@@ -86,6 +86,7 @@ mod pane_drag_render;
 mod quick_terminal;
 mod remote_ui;
 mod render;
+mod scratch_terminal;
 mod session_restore;
 mod sidebar;
 mod split_ops;
@@ -95,6 +96,7 @@ mod timers;
 pub use config::AppConfig;
 use config_reload::ConfigWatcher;
 use quick_terminal::QuickTerminalState;
+use scratch_terminal::ScratchTerminalState;
 use state::*;
 
 use config::{
@@ -340,6 +342,12 @@ pub struct App {
     /// session capture and the tab select/cycle collections — mirroring the
     /// `overview_window` precedent for a non-tab auxiliary window.
     quick_terminal: Option<QuickTerminalState>,
+    /// The scratch terminal popup (`docs/specs/scratch-terminal.md`), if
+    /// currently shown — `Some` *is* "shown" (R4/R5, unlike the quick
+    /// terminal's separate hidden/visible axis). Its window lives in
+    /// `windows` for the same reasons as `quick_terminal`, and is likewise
+    /// excluded from `window_order`.
+    scratch_terminal: Option<ScratchTerminalState>,
     /// The registered global quick-terminal hotkey, kept alive for the app's
     /// lifetime (dropping it unregisters). `None` until installed, or when no
     /// `quick-terminal-hotkey` is configured / registration failed.
@@ -663,9 +671,13 @@ impl App {
         let initial_cursor_style =
             resolve_cursor_style(config.cursor_style, config.cursor_style_blink);
         let background_image = load_background_image_runtime(&config);
-        let (keybinds, keybind_diagnostics) =
+        let (mut keybinds, keybind_diagnostics) =
             KeybindEngine::from_config(&config.keybinds, config.sidebar_hotkey.as_deref());
         for diagnostic in keybind_diagnostics {
+            log::warn!("config keybind: {diagnostic}");
+        }
+        for diagnostic in keybinds.apply_scratch_terminal_key(config.scratch_terminal_key.as_deref())
+        {
             log::warn!("config keybind: {diagnostic}");
         }
         // Clone the proxy for the session-metadata worker before `proxy` is
@@ -764,6 +776,7 @@ impl App {
             session_restore_attempted: false,
             restoring: false,
             quick_terminal: None,
+            scratch_terminal: None,
             quick_terminal_hotkey: None,
             hotkey_install_attempted: false,
             secure_input: crate::secure_input::SecureInput::new(),

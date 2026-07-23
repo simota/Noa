@@ -461,6 +461,11 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.is_quick_terminal_window(window_id) {
                     self.end_copy_mode_for_window(window_id);
                     self.destroy_quick_terminal();
+                } else if self.is_scratch_terminal_window(window_id) {
+                    // scratch-terminal R4-c: the popup's own shell exiting
+                    // (e.g. `exit`) tears the whole popup down, same as the
+                    // quick terminal.
+                    self.destroy_scratch_terminal();
                 } else {
                     self.close_pane_after_pty_exit(event_loop, window_id, pane_id)
                 }
@@ -504,6 +509,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.end_copy_mode_for_window(window_id);
                 self.start_quick_terminal_hide();
             }
+            WindowEvent::CloseRequested if self.is_scratch_terminal_window(window_id) => {
+                self.destroy_scratch_terminal();
+            }
             WindowEvent::CloseRequested => self.request_close_tab(event_loop, window_id),
             WindowEvent::RedrawRequested => self.redraw(window_id),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -525,6 +533,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.end_copy_mode_if_focus_changed();
                 if self.is_quick_terminal_window(window_id) {
                     self.mark_quick_terminal_focused(window_id);
+                }
+                if self.is_scratch_terminal_window(window_id) {
+                    self.mark_scratch_terminal_focused(window_id);
                 }
                 self.reset_cursor_blink_phase();
                 // Focus gain is the moment an externally edited config should
@@ -615,6 +626,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if self.is_quick_terminal_window(window_id) {
                     self.maybe_autohide_quick_terminal();
+                }
+                if self.is_scratch_terminal_window(window_id) {
+                    // R4-b: the popup's own focus loss destroys it outright
+                    // (no autohide toggle — always on, unlike the quick
+                    // terminal's `quick-terminal-autohide`).
+                    self.maybe_autoclose_scratch_terminal(window_id);
                 }
             }
             WindowEvent::Occluded(occluded) => {

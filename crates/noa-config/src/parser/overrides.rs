@@ -63,6 +63,8 @@ pub(crate) fn build_overrides(
     let mut quick_terminal_screen = None;
     let mut quick_terminal_position = None;
     let mut quick_terminal_animation_duration = None;
+    let mut scratch_terminal_key = None;
+    let mut scratch_terminal_size = None;
     let mut sidebar_enabled = None;
     let mut sidebar_width = None;
     let mut sidebar_font_size = None;
@@ -293,6 +295,23 @@ pub(crate) fn build_overrides(
                 quick_terminal_animation_duration =
                     parse_non_negative_f32(path, directive, &mut diagnostics);
             }
+            "scratch-terminal-key" => {
+                // Mirror `sidebar-hotkey`: the chord is stored verbatim for
+                // the app-layer keybind engine to interpret; `none`/`off`/
+                // `false`/empty normalize to the empty-string sentinel that
+                // disables it.
+                scratch_terminal_key = Some(match directive.value.as_deref() {
+                    None => String::new(),
+                    Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+                        "" | "none" | "off" | "false" => String::new(),
+                        _ => value.to_string(),
+                    },
+                });
+            }
+            "scratch-terminal-size" => {
+                scratch_terminal_size =
+                    parse_scratch_terminal_size(path, directive, &mut diagnostics);
+            }
             "sidebar-enabled" => {
                 sidebar_enabled = parse_bool_directive(path, directive, &mut diagnostics);
             }
@@ -433,6 +452,8 @@ pub(crate) fn build_overrides(
             quick_terminal_screen,
             quick_terminal_position,
             quick_terminal_animation_duration,
+            scratch_terminal_key,
+            scratch_terminal_size,
             sidebar_enabled,
             sidebar_width,
             sidebar_font_size,
@@ -538,6 +559,8 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "quick-terminal-screen"
             | "quick-terminal-position"
             | "quick-terminal-animation-duration"
+            | "scratch-terminal-key"
+            | "scratch-terminal-size"
             | "sidebar-enabled"
             | "sidebar-width"
             | "sidebar-font-size"

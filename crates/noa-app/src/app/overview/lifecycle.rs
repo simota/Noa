@@ -52,7 +52,11 @@ impl App {
         // falling back to the frontmost tab.
         let Some(host) = self
             .focused
-            .filter(|id| self.windows.contains_key(id) && !self.is_quick_terminal_window(*id))
+            .filter(|id| {
+                self.windows.contains_key(id)
+                    && !self.is_quick_terminal_window(*id)
+                    && !self.is_scratch_terminal_window(*id)
+            })
             .or_else(|| self.window_order.first().copied())
         else {
             return;

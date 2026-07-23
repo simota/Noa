@@ -16,7 +16,7 @@ impl App {
     ) {
         let window_id = WindowId::from(id.window_id.0);
         let pane_id = id.pane_id;
-        if self.is_quick_terminal_window(window_id) {
+        if self.is_quick_terminal_window(window_id) || self.is_scratch_terminal_window(window_id) {
             return;
         }
 
@@ -137,7 +137,7 @@ impl App {
         let Some(window_id) = self.focused else {
             return;
         };
-        if self.is_quick_terminal_window(window_id) {
+        if self.is_quick_terminal_window(window_id) || self.is_scratch_terminal_window(window_id) {
             return;
         }
         let Some(state) = self.windows.get(&window_id) else {

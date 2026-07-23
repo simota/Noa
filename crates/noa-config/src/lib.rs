@@ -44,6 +44,15 @@ pub const DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION: f32 = 0.2;
 /// default; noa binds one so the drop-down works out of the box. Set
 /// `quick-terminal-hotkey = none` to disable it.)
 pub const DEFAULT_QUICK_TERMINAL_HOTKEY: &str = "cmd+grave";
+/// `scratch-terminal-key` default: `cmd+shift+t`, an in-app keybind (not a
+/// global hotkey — see [`crate::KeybindConfig`]/`noa-app`'s `KeybindEngine`).
+/// Set `scratch-terminal-key = none` to disable it.
+pub const DEFAULT_SCRATCH_TERMINAL_KEY: &str = "cmd+shift+t";
+/// `scratch-terminal-size` default: 100x25 cells.
+pub const DEFAULT_SCRATCH_TERMINAL_SIZE: ScratchTerminalSize = ScratchTerminalSize {
+    cols: 100,
+    rows: 25,
+};
 /// `sidebar-width` default: the session sidebar's width in points when visible.
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 360.0;
 /// Smallest supported `sidebar-width` value. Narrower widths leave no room
@@ -340,6 +349,17 @@ pub struct QuickTerminalSize {
     pub secondary: Option<QuickTerminalSizeDim>,
 }
 
+/// `scratch-terminal-size`: the scratch terminal's footprint in terminal
+/// cells (not points/px like [`QuickTerminalSize`] — the scratch popup's grid
+/// is what matters, not its on-screen size), `<cols>x<rows>` (e.g. `100x25`).
+/// Clamped to at most 90% of the focused window's inner grid at spawn time
+/// (`noa-app`'s scratch-terminal spawn path), not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScratchTerminalSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
 /// `resize-overlay`: whether the `cols × rows` grid-size toast shows during a
 /// live resize. Mirrors Ghostty's `resize-overlay`. Default `after-first`
 /// (every resize except the window's initial layout).
@@ -584,6 +604,17 @@ pub struct StartupConfig {
     /// panel shows/hides instantly). Default
     /// [`DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION`], matching Ghostty.
     pub quick_terminal_animation_duration: f32,
+    /// `scratch-terminal-key`: the in-app chord that toggles the scratch
+    /// terminal popup (scratch-terminal R1). Unlike
+    /// [`Self::quick_terminal_hotkey`] it is *not* a system-wide hotkey — it
+    /// only fires while noa is focused. Defaults to
+    /// [`DEFAULT_SCRATCH_TERMINAL_KEY`]; the empty-string sentinel (from
+    /// `none`/`off`/`false`/empty) disables it.
+    pub scratch_terminal_key: Option<String>,
+    /// `scratch-terminal-size`: the scratch terminal popup's grid size — see
+    /// [`ScratchTerminalSize`]. Default [`DEFAULT_SCRATCH_TERMINAL_SIZE`]
+    /// (100x25 cells), clamped to the focused window's inner size at spawn.
+    pub scratch_terminal_size: ScratchTerminalSize,
     /// `sidebar-enabled`: app-wide initial visibility of the session sidebar.
     /// Per-window visibility is toggled from this starting value at runtime.
     /// Default off. noa-specific key (no Ghostty analog).
@@ -713,6 +744,8 @@ impl Default for StartupConfig {
             quick_terminal_screen: QuickTerminalScreen::default(),
             quick_terminal_position: QuickTerminalPosition::default(),
             quick_terminal_animation_duration: DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION,
+            scratch_terminal_key: Some(DEFAULT_SCRATCH_TERMINAL_KEY.to_string()),
+            scratch_terminal_size: DEFAULT_SCRATCH_TERMINAL_SIZE,
             sidebar_enabled: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_font_size: DEFAULT_SIDEBAR_FONT_SIZE,
@@ -785,6 +818,8 @@ pub struct ConfigOverrides {
     pub quick_terminal_screen: Option<QuickTerminalScreen>,
     pub quick_terminal_position: Option<QuickTerminalPosition>,
     pub quick_terminal_animation_duration: Option<f32>,
+    pub scratch_terminal_key: Option<String>,
+    pub scratch_terminal_size: Option<ScratchTerminalSize>,
     pub sidebar_enabled: Option<bool>,
     pub sidebar_width: Option<f32>,
     pub sidebar_font_size: Option<f32>,
@@ -874,6 +909,8 @@ macro_rules! impl_redacted_config_debug {
                         "quick_terminal_animation_duration",
                         &self.quick_terminal_animation_duration,
                     )
+                    .field("scratch_terminal_key", &self.scratch_terminal_key)
+                    .field("scratch_terminal_size", &self.scratch_terminal_size)
                     .field("sidebar_enabled", &self.sidebar_enabled)
                     .field("sidebar_width", &self.sidebar_width)
                     .field("sidebar_font_size", &self.sidebar_font_size)
@@ -1002,6 +1039,12 @@ impl ConfigOverrides {
             quick_terminal_animation_duration: higher_priority
                 .quick_terminal_animation_duration
                 .or(self.quick_terminal_animation_duration),
+            scratch_terminal_key: higher_priority
+                .scratch_terminal_key
+                .or(self.scratch_terminal_key),
+            scratch_terminal_size: higher_priority
+                .scratch_terminal_size
+                .or(self.scratch_terminal_size),
             sidebar_enabled: higher_priority.sidebar_enabled.or(self.sidebar_enabled),
             sidebar_width: higher_priority.sidebar_width.or(self.sidebar_width),
             sidebar_font_size: higher_priority.sidebar_font_size.or(self.sidebar_font_size),
@@ -1116,6 +1159,10 @@ impl ConfigOverrides {
             quick_terminal_animation_duration: self
                 .quick_terminal_animation_duration
                 .unwrap_or(base.quick_terminal_animation_duration),
+            scratch_terminal_key: self.scratch_terminal_key.or(base.scratch_terminal_key),
+            scratch_terminal_size: self
+                .scratch_terminal_size
+                .unwrap_or(base.scratch_terminal_size),
             sidebar_enabled: self.sidebar_enabled.unwrap_or(base.sidebar_enabled),
             sidebar_width: self.sidebar_width.unwrap_or(base.sidebar_width),
             sidebar_font_size: self.sidebar_font_size.unwrap_or(base.sidebar_font_size),
@@ -1401,6 +1448,8 @@ mod tests {
                 quick_terminal_screen: QuickTerminalScreen::Mouse,
                 quick_terminal_position: QuickTerminalPosition::Top,
                 quick_terminal_animation_duration: DEFAULT_QUICK_TERMINAL_ANIMATION_DURATION,
+                scratch_terminal_key: Some(DEFAULT_SCRATCH_TERMINAL_KEY.to_string()),
+                scratch_terminal_size: DEFAULT_SCRATCH_TERMINAL_SIZE,
                 sidebar_enabled: false,
                 sidebar_width: DEFAULT_SIDEBAR_WIDTH,
                 sidebar_font_size: DEFAULT_SIDEBAR_FONT_SIZE,
@@ -1473,6 +1522,25 @@ mod tests {
             QuickTerminalSize {
                 primary: Some(QuickTerminalSizeDim::Percent(40.0)),
                 secondary: None,
+            }
+        );
+    }
+
+    #[test]
+    fn scratch_terminal_key_defaults_to_cmd_shift_t() {
+        assert_eq!(
+            StartupConfig::default().scratch_terminal_key.as_deref(),
+            Some("cmd+shift+t")
+        );
+    }
+
+    #[test]
+    fn scratch_terminal_size_defaults_to_100x25() {
+        assert_eq!(
+            StartupConfig::default().scratch_terminal_size,
+            ScratchTerminalSize {
+                cols: 100,
+                rows: 25,
             }
         );
     }

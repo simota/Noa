@@ -8,7 +8,8 @@ use crate::{
     MAX_SIDEBAR_WIDTH, MIN_BACKGROUND_IMAGE_INTERVAL_SECS, MIN_SIDEBAR_FONT_SIZE,
     MIN_SIDEBAR_WIDTH, MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle,
     PaletteOverride, QuickTerminalPosition, QuickTerminalScreen, QuickTerminalSize,
-    QuickTerminalSizeDim, ResizeOverlay, SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
+    QuickTerminalSizeDim, ResizeOverlay, ScratchTerminalSize, SyntheticStyleMode,
+    ThemeAppearancePair, WindowSaveState,
 };
 
 use super::diagnostics::*;
@@ -598,6 +599,33 @@ pub(super) fn parse_quick_terminal_size(
         primary: Some(primary),
         secondary,
     })
+}
+
+/// Parse `scratch-terminal-size`: `<cols>x<rows>` in terminal cells (e.g.
+/// `100x25`). Both sides must be positive integers; anything else diagnoses.
+pub(super) fn parse_scratch_terminal_size(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<ScratchTerminalSize> {
+    let value = directive.value.as_deref()?;
+    let Some((cols, rows)) = value.split_once(['x', 'X']) else {
+        diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+        return None;
+    };
+    let parsed = cols
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .zip(rows.trim().parse::<u16>().ok())
+        .filter(|(cols, rows)| *cols > 0 && *rows > 0);
+    match parsed {
+        Some((cols, rows)) => Some(ScratchTerminalSize { cols, rows }),
+        None => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
+            None
+        }
+    }
 }
 
 /// Parse `sidebar-preview-lines`: the number of trailing output rows shown on

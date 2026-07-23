@@ -709,8 +709,9 @@ impl App {
         std::path::Path::new(&cwd).is_dir().then_some(cwd)
     }
 
-    /// cwd of the currently focused pane, for a newly spawned tab to inherit.
-    fn focused_pane_cwd(&self) -> Option<String> {
+    /// cwd of the currently focused pane, for a newly spawned tab (or the
+    /// scratch terminal popup, scratch-terminal R3) to inherit.
+    pub(super) fn focused_pane_cwd(&self) -> Option<String> {
         let window_id = self.focused?;
         let pane_id = self.windows.get(&window_id)?.focused_pane;
         self.pane_cwd(window_id, pane_id)
@@ -1056,97 +1057,7 @@ impl App {
         self.window_order.retain(|id| *id != window_id);
         // Overview tiles are tab-unit (U1): drop the closed tab's tile state.
         self.overview_tiles.remove(&window_id);
-        // A prompt targeting the closed window would otherwise linger
-        // forever: its window can no longer deliver keys (so not even
-        // Escape reaches it) and the open-guard would block every future
-        // cmd+f app-wide.
-        if self
-            .search_prompt
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            self.search_prompt = None;
-        }
-        // C4 (R-11, FM3): the window-bound palette leaks the same way — a
-        // closed window can deliver no keys (not even Escape), so a palette
-        // still targeting it would strand a dead-window reference and the
-        // toggle would never rebuild a fresh session. `close_pane` needs no
-        // twin clear: the palette is window-bound, so a pane-only close
-        // leaves it valid, and a whole-tab close always routes here.
-        if self
-            .command_palette
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            self.command_palette = None;
-        }
-        if self
-            .send_selection_picker
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            self.send_selection_picker = None;
-        }
-        // Same leak shape again for the "Set Tab Title" prompt.
-        if self
-            .tab_title_prompt
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            self.tab_title_prompt = None;
-        }
-        // Same leak shape for an inline sidebar rename bound to the closed
-        // window. It is modal for that window's keyboard and cannot receive
-        // Escape/Enter once the tab is gone.
-        if self
-            .sidebar_rename
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            self.sidebar_rename = None;
-        }
-        // Same leak shape as the palette: a theme-settings overlay bound to
-        // the closed window would strand a dead-window reference. Drop the
-        // preview along with it — nothing else can clear it once its owning
-        // window is gone.
-        if self
-            .theme_settings
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            self.theme_settings = None;
-            if let Some(gpu) = self.gpu.as_mut() {
-                gpu.preview_theme = None;
-            }
-        }
-        // Same leak shape as the palette: a process-monitor overlay bound to
-        // the closed window would strand a dead-window reference and leave
-        // the metrics tick running forever. Route through the real close
-        // choke point (not a bare field clear) so the tick turns back off and
-        // every card's metrics are cleared, exactly like an Esc close.
-        if self
-            .process_monitor
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            self.close_process_monitor();
-        }
-        // Same leak shape as the palette: a confirm dialog bound to the closed
-        // window could deliver no keys (not even Escape), stranding a modal.
-        if self
-            .confirm_dialog
-            .as_ref()
-            .is_some_and(|session| session.window_id == window_id)
-        {
-            self.confirm_dialog = None;
-        }
-        if self
-            .modal_preedit
-            .as_ref()
-            .is_some_and(|preedit| preedit.window_id == window_id)
-        {
-            self.modal_preedit = None;
-        }
+        self.clear_window_bound_overlays(window_id);
 
         match outcome {
             TabCloseOutcome::Stale => {}
@@ -1197,6 +1108,93 @@ impl App {
         // A closed window may have been the only one showing a sidebar.
         self.refresh_sidebar_visible_gate();
         self.persist_session();
+    }
+
+    /// Clear every window-bound overlay/modal session pinned to `window_id`
+    /// once that window is gone (or, for the scratch terminal popup,
+    /// destroyed outright — scratch-terminal fix 2). Each of these would
+    /// otherwise strand a dead-window reference: the window can deliver no
+    /// more keys (not even Escape), so a session still targeting it would
+    /// linger forever and block whatever open-guard it holds app-wide.
+    /// Shared by [`Self::close_tab`] and [`Self::destroy_scratch_terminal`]
+    /// so the two teardown paths can't drift apart.
+    pub(super) fn clear_window_bound_overlays(&mut self, window_id: WindowId) {
+        if self
+            .search_prompt
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.search_prompt = None;
+        }
+        if self
+            .command_palette
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.command_palette = None;
+        }
+        if self
+            .send_selection_picker
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.send_selection_picker = None;
+        }
+        if self
+            .tab_title_prompt
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.tab_title_prompt = None;
+        }
+        if self
+            .sidebar_rename
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.sidebar_rename = None;
+        }
+        if self
+            .theme_settings
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.theme_settings = None;
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.preview_theme = None;
+            }
+        }
+        if self
+            .process_monitor
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.close_process_monitor();
+        }
+        if self
+            .confirm_dialog
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.confirm_dialog = None;
+        }
+        if self
+            .modal_preedit
+            .as_ref()
+            .is_some_and(|preedit| preedit.window_id == window_id)
+        {
+            self.modal_preedit = None;
+        }
+        // The `Attach Remote` overlay is window-bound the same way; a session
+        // still targeting the closed/destroyed window would strand a dead
+        // reference (its retry path re-resolves panes under `window_id`).
+        if self
+            .remote_ui
+            .as_ref()
+            .is_some_and(|session| session.window_id == window_id)
+        {
+            self.remote_ui = None;
+        }
     }
 
     /// Close the entire focused logical window: every tab in its AppKit tab
@@ -1366,6 +1364,12 @@ impl App {
     }
 
     pub(super) fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
+        // scratch-terminal R4-f: tear the popup down explicitly rather than
+        // leaving it visible behind (or as host of) a quit confirmation
+        // dialog. `App`'s `Drop` also sweeps every window in `self.windows`
+        // (including the popup's) on actual process exit, so this only
+        // matters for the confirm-quit path below, not orphaned ptys.
+        self.destroy_scratch_terminal();
         if !self.config.confirm_quit {
             event_loop.exit();
             return;

@@ -55,6 +55,13 @@ pub enum AppCommand {
     Quit,
     ToggleCommandPalette,
     ToggleQuickTerminal,
+    /// Toggle the scratch terminal popup (scratch-terminal R1): a single-
+    /// instance, use-once-and-discard terminal centered on the focused
+    /// window, spawned in the focused pane's cwd. Unlike
+    /// [`Self::ToggleQuickTerminal`] this is an in-app-only chord — no global
+    /// hotkey — so it carries no menu id either (mirrors `SelectTab`'s
+    /// `menu_id() -> ""`).
+    ToggleScratchTerminal,
     ToggleSecureKeyboardEntry,
     ToggleSidebar,
     ToggleAutoApprove,
@@ -258,6 +265,7 @@ impl AppCommand {
             AppCommand::Quit => Self::QUIT_MENU_ID,
             AppCommand::ToggleCommandPalette => Self::TOGGLE_COMMAND_PALETTE_MENU_ID,
             AppCommand::ToggleQuickTerminal => Self::TOGGLE_QUICK_TERMINAL_MENU_ID,
+            AppCommand::ToggleScratchTerminal => "",
             AppCommand::ToggleSecureKeyboardEntry => Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID,
             AppCommand::ToggleSidebar => Self::TOGGLE_SIDEBAR_MENU_ID,
             AppCommand::ToggleAutoApprove => Self::TOGGLE_AUTO_APPROVE_MENU_ID,
@@ -421,6 +429,7 @@ impl AppCommand {
             Self::Quit => "app.quit",
             Self::ToggleCommandPalette => "command-palette.toggle",
             Self::ToggleQuickTerminal => "quick-terminal.toggle",
+            Self::ToggleScratchTerminal => "scratch-terminal.toggle",
             Self::ToggleSecureKeyboardEntry => "secure-keyboard-entry.toggle",
             Self::ToggleSidebar => "sidebar.toggle",
             Self::ToggleAutoApprove => "auto-approve.toggle",
@@ -500,6 +509,7 @@ impl AppCommand {
             "app.quit" => Some(Self::Quit),
             "command-palette.toggle" => Some(Self::ToggleCommandPalette),
             "quick-terminal.toggle" => Some(Self::ToggleQuickTerminal),
+            "scratch-terminal.toggle" => Some(Self::ToggleScratchTerminal),
             "secure-keyboard-entry.toggle" => Some(Self::ToggleSecureKeyboardEntry),
             "sidebar.toggle" => Some(Self::ToggleSidebar),
             "auto-approve.toggle" => Some(Self::ToggleAutoApprove),

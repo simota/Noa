@@ -71,6 +71,23 @@ impl App {
         if should_dismiss_remote_ui(command, remote_ui_loading) {
             self.remote_ui = None;
         }
+        // scratch-terminal R4-d/R6: while the scratch popup is focused,
+        // `cmd+w` closes it (instead of the normal tab-close path, which
+        // assumes a `window_order`-tracked tab) and window/tab-management
+        // commands are no-ops — the popup has no splits/tabs/sidebar to act
+        // on. Everything else (terminal-level commands, the toggle itself,
+        // app-level commands like Quit) passes through unchanged.
+        if let Some(window_id) = self.focused
+            && self.is_scratch_terminal_window(window_id)
+        {
+            if command == AppCommand::CloseTab {
+                self.destroy_scratch_terminal();
+                return;
+            }
+            if super::scratch_terminal::scratch_terminal_command_blocked(command) {
+                return;
+            }
+        }
         match command {
             AppCommand::About => crate::app_actions::show_about(),
             // R-22: Cmd+, now opens the GUI settings overlay instead of the
@@ -173,6 +190,7 @@ impl App {
             AppCommand::ToggleProcessMonitor => self.toggle_process_monitor(),
             AppCommand::ToggleFullscreen => self.toggle_fullscreen(),
             AppCommand::ToggleQuickTerminal => self.toggle_quick_terminal(event_loop),
+            AppCommand::ToggleScratchTerminal => self.toggle_scratch_terminal(event_loop),
             AppCommand::ToggleSecureKeyboardEntry => self.toggle_secure_keyboard_entry(),
             AppCommand::ToggleSidebar => self.toggle_sidebar(),
             AppCommand::ToggleAutoApprove => self.toggle_auto_approve(),

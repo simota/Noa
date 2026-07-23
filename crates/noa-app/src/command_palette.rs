@@ -106,6 +106,7 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::Quit => "Quit Noa",
         AppCommand::ToggleCommandPalette => "Toggle Command Palette",
         AppCommand::ToggleQuickTerminal => "Toggle Quick Terminal",
+        AppCommand::ToggleScratchTerminal => "Toggle Scratch Terminal",
         AppCommand::ToggleSecureKeyboardEntry => "Toggle Secure Keyboard Entry",
         AppCommand::ToggleSidebar => "Toggle Sidebar",
         AppCommand::ToggleAutoApprove => "Toggle Auto Approve",
@@ -185,6 +186,7 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::ToggleTabOverview,
         AppCommand::ToggleFullscreen,
         AppCommand::ToggleQuickTerminal,
+        AppCommand::ToggleScratchTerminal,
         AppCommand::ToggleSecureKeyboardEntry,
         AppCommand::ToggleSidebar,
         AppCommand::ToggleAutoApprove,
@@ -375,6 +377,7 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         AppCommand::NewWindow | AppCommand::CloseWindow => CommandCategory::Window,
         AppCommand::ToggleCommandPalette
         | AppCommand::ToggleQuickTerminal
+        | AppCommand::ToggleScratchTerminal
         | AppCommand::ToggleSecureKeyboardEntry
         | AppCommand::ToggleSidebar
         | AppCommand::ToggleAutoApprove => CommandCategory::Toggles,

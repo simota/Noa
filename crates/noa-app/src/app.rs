@@ -484,6 +484,18 @@ pub struct App {
     /// `about_to_wait` + `WaitUntil` mechanism then arms no timer for this at
     /// all, same as every other idle-power-sensitive tick here.
     bg_refresh_wake_deadline: Option<Instant>,
+    /// Trailing-edge debounce deadline for the native-tab-title re-assert
+    /// (reviewer P2 round 2): `relayout_and_resize_window` fires on every
+    /// `WindowEvent::Resized` during a divider drag, and flushing on every
+    /// `about_to_wait` iteration (round 1's fix) still pushed `NSWindowTab
+    /// .title` to every window on every such iteration — O(events × windows)
+    /// during a drag with many tabs. Each relayout now pushes this deadline
+    /// forward instead (`Instant::now() + NATIVE_TAB_TITLE_FLUSH_DEBOUNCE`),
+    /// so a continuous drag coalesces to exactly one all-window AppKit pass
+    /// once the drag goes quiet; `None` between bursts and right after a
+    /// flush (mirrors `debounce::Debouncer`'s pending-slot shape).
+    #[cfg(target_os = "macos")]
+    native_tab_title_flush_deadline: Option<Instant>,
 }
 
 /// The wgpu foundation prewarmed on a worker: adapter/device are requested
@@ -778,6 +790,8 @@ impl App {
             last_bg_refresh: None,
             dirty_occluded_windows: HashSet::new(),
             bg_refresh_wake_deadline: None,
+            #[cfg(target_os = "macos")]
+            native_tab_title_flush_deadline: None,
         }
     }
 

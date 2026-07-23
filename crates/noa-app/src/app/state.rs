@@ -357,6 +357,18 @@ pub(super) const RESIZE_OVERLAY_DURATION: Duration = Duration::from_millis(750);
 /// running on every cell-width boundary.
 pub(super) const RESIZE_REFLOW_THROTTLE_INTERVAL: Duration = Duration::from_millis(80);
 
+/// Trailing-edge debounce gap for the native-tab-title re-assert
+/// (`App::native_tab_title_flush_deadline`, reviewer P2 round 2): unlike
+/// [`RESIZE_REFLOW_THROTTLE_INTERVAL`] (a periodic *throttle* that still
+/// fires mid-drag), this is a pure *debounce* — every relayout pushes the
+/// deadline back, so a continuous divider drag (whose `Resized` events land
+/// well under this gap apart) coalesces to exactly one all-window AppKit
+/// pass after the drag goes quiet. Reuses the same 150ms window as
+/// `theme_settings::FONT_SIZE_DEBOUNCE_WINDOW`, the existing precedent in
+/// this codebase for "wait for quiet, then fire once".
+#[cfg(target_os = "macos")]
+pub(super) const NATIVE_TAB_TITLE_FLUSH_DEBOUNCE: Duration = Duration::from_millis(150);
+
 /// How long the R-31 commit-Undo toast stays up. Deliberately longer than
 /// [`RESIZE_OVERLAY_DURATION`]'s 750ms: a resize toast is purely
 /// informational and can afford to be brief even during a rapid drag, but

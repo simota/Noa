@@ -1030,6 +1030,14 @@ impl ApplicationHandler<UserEvent> for App {
         // at the earliest across them.
         let blink_deadline = self.tick_cursor_blink();
         let resize_throttle_deadline = self.tick_resize_throttle();
+        #[cfg(target_os = "macos")]
+        let native_tab_title_deadline = self.tick_native_tab_titles();
+        // Off-macOS `native_tab_title_flush_deadline` doesn't exist (the
+        // native-tab-title quirk is macOS-only), so this tick never has
+        // anything to report there — keep the aggregation array below
+        // cross-platform rather than cfg-splitting it too.
+        #[cfg(not(target_os = "macos"))]
+        let native_tab_title_deadline: Option<Instant> = None;
         let overview_deadline = self.tick_overview_backlog();
         let quick_terminal_deadline = self.tick_quick_terminal();
         let attention_deadline = self.tick_attention_blink();
@@ -1045,6 +1053,7 @@ impl ApplicationHandler<UserEvent> for App {
         let deadline = [
             blink_deadline,
             resize_throttle_deadline,
+            native_tab_title_deadline,
             overview_deadline,
             quick_terminal_deadline,
             attention_deadline,

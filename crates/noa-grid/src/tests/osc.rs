@@ -392,14 +392,20 @@ fn scroll_to_prompt_without_marks_is_a_noop() {
 
 #[test]
 fn osc_protocol_state_clears_on_full_reset() {
-    let t = run(b"\x1b]7;file://localhost/tmp\x07\
+    let mut t = run(b"\x1b]7;file://localhost/tmp\x07\
           \x1b]8;;https://example.test\x07A\
           \x1b]133;A\x07\
+          \x1b]9;4;1;42\x07\
           \x1bc");
 
     assert!(t.cwd.is_none());
     assert!(t.hyperlinks.is_empty());
     assert!(t.shell_marks.is_empty());
+    assert_eq!(t.progress(), None);
+    assert_eq!(
+        t.take_pending_progress_update(),
+        Some(crate::ProgressUpdate::Clear)
+    );
     assert_eq!(cell(&t, 0, 0).hyperlink, None);
 }
 
@@ -428,16 +434,125 @@ fn osc9_empty_body_queues_nothing() {
 }
 
 #[test]
-fn osc9_4_progress_report_is_not_a_notification() {
-    // ConEmu/Windows Terminal progress: `OSC 9;4;<state>;<pct>`. noa has no
-    // progress UI, so it is silently ignored rather than notified.
+fn osc9_4_progress_report_updates_typed_state_without_notification() {
     let mut t = run(b"\x1b]9;4;1;50\x07");
     assert!(t.take_pending_notifications().is_empty());
+    let progress = t.progress().unwrap();
+    assert!(matches!(progress, crate::TerminalProgress::Normal(_)));
+    assert_eq!(progress.value().unwrap().get(), 50);
+    assert_eq!(
+        t.take_pending_progress_update(),
+        Some(crate::ProgressUpdate::Set(progress))
+    );
+    assert_eq!(t.take_pending_progress_update(), None);
 }
 
 #[test]
 fn osc9_4_progress_clear_is_not_a_notification() {
-    let mut t = run(b"\x1b]9;4;0\x07");
+    let mut t = run(b"\x1b]9;4;1;50\x07\x1b]9;4;0;0\x07");
+    assert!(t.take_pending_notifications().is_empty());
+    assert_eq!(t.progress(), None);
+    assert_eq!(
+        t.take_pending_progress_update(),
+        Some(crate::ProgressUpdate::Clear)
+    );
+}
+
+#[test]
+fn osc9_4_supports_all_states_and_last_write_wins() {
+    let mut t = run(b"\x1b]9;4;3\x07\x1b]9;4;4;20\x07\x1b]9;4;2;75\x07");
+    let progress = t.progress().unwrap();
+    assert!(matches!(progress, crate::TerminalProgress::Error(_)));
+    assert_eq!(progress.value().unwrap().get(), 75);
+    assert_eq!(
+        t.take_pending_progress_update(),
+        Some(crate::ProgressUpdate::Set(progress))
+    );
+}
+
+#[test]
+fn osc9_4_error_and_pause_accept_optional_percentages() {
+    let mut t = run(b"\x1b]9;4;2\x07");
+    assert_eq!(t.progress(), Some(crate::TerminalProgress::Error(None)));
+
+    t = run(b"\x1b]9;4;2;\x07");
+    assert_eq!(t.progress(), Some(crate::TerminalProgress::Error(None)));
+
+    t = run(b"\x1b]9;4;4\x07");
+    assert_eq!(t.progress(), Some(crate::TerminalProgress::Paused(None)));
+
+    t = run(b"\x1b]9;4;4;\x07");
+    assert_eq!(t.progress(), Some(crate::TerminalProgress::Paused(None)));
+}
+
+#[test]
+fn osc9_4_state_four_is_paused() {
+    let mut t = run(b"\x1b]9;4;4;20\x07");
+    let progress = t.progress().unwrap();
+    assert!(matches!(
+        progress,
+        crate::TerminalProgress::Paused(Some(_))
+    ));
+    assert_eq!(progress.value().unwrap().get(), 20);
+    assert_eq!(
+        t.take_pending_progress_update(),
+        Some(crate::ProgressUpdate::Set(progress))
+    );
+}
+
+#[test]
+fn osc9_4_completion_survives_a_trailing_clear_in_the_same_feed() {
+    let mut t = run(b"\x1b]9;4;1;100\x07\x1b]9;4;0\x07");
+    assert_eq!(t.progress(), None);
+    assert_eq!(
+        t.take_pending_progress_update(),
+        Some(crate::ProgressUpdate::Clear)
+    );
+    assert_eq!(
+        t.take_pending_progress_cue(),
+        Some(crate::ProgressCue::Complete)
+    );
+    assert_eq!(t.take_pending_progress_cue(), None);
+}
+
+#[test]
+fn osc9_4_error_transition_survives_a_trailing_clear_in_the_same_feed() {
+    let mut t = run(b"\x1b]9;4;2\x07\x1b]9;4;0\x07");
+    assert_eq!(t.progress(), None);
+    assert_eq!(
+        t.take_pending_progress_update(),
+        Some(crate::ProgressUpdate::Clear)
+    );
+    assert_eq!(
+        t.take_pending_progress_cue(),
+        Some(crate::ProgressCue::Error)
+    );
+    assert_eq!(t.take_pending_progress_cue(), None);
+}
+
+#[test]
+fn osc9_4_error_then_completion_keeps_only_the_last_cue() {
+    let mut t = run(b"\x1b]9;4;2\x07\x1b]9;4;1;100\x07");
+    assert_eq!(
+        t.take_pending_progress_cue(),
+        Some(crate::ProgressCue::Complete)
+    );
+}
+
+#[test]
+fn osc9_4_completion_then_error_keeps_only_the_last_cue() {
+    let mut t = run(b"\x1b]9;4;1;100\x07\x1b]9;4;2\x07");
+    assert_eq!(
+        t.take_pending_progress_cue(),
+        Some(crate::ProgressCue::Error)
+    );
+}
+
+#[test]
+fn osc9_4_rejects_invalid_percentages_without_changing_state() {
+    let mut t = run(b"\x1b]9;4;1;101\x07\x1b]9;4;2;nope\x07");
+    assert_eq!(t.progress(), None);
+    assert_eq!(t.take_pending_progress_update(), None);
     assert!(t.take_pending_notifications().is_empty());
 }
 

@@ -8,6 +8,7 @@ use crate::cursor::{Cursor, CursorStyle, SavedCursor};
 use crate::screen::Screen;
 
 use super::Terminal;
+use crate::TerminalProgress;
 
 /// DEC private modes that affect client-mode input encoding or the replayed
 /// screen state. Alternate-screen selection is emitted separately because it
@@ -37,8 +38,9 @@ impl Terminal {
     ///
     /// Feeding the returned bytes through [`noa_vt::Stream`] into a fresh
     /// [`Terminal`] of the same size reconstructs the visible cells and the VT
-    /// state needed by client-mode attachment. Scrollback, window metadata,
-    /// images, and hyperlinks are intentionally outside this seed.
+    /// state needed by client-mode attachment. Scrollback, most window
+    /// metadata, images, and hyperlinks are intentionally outside this seed;
+    /// task progress is included because it is live session UI state.
     pub fn synthetic_seed(&self) -> Vec<u8> {
         let mut seed = String::new();
         seed.push_str("\x1bc"); // RIS: make the seed independent of replica state.
@@ -124,9 +126,29 @@ impl Terminal {
             seed.push_str("\x1b[>4;2m");
         }
         write_default_cursor_style(&mut seed, self.default_cursor_style);
+        write_progress(&mut seed, self.progress);
 
         seed.into_bytes()
     }
+}
+
+fn write_progress(seed: &mut String, progress: Option<TerminalProgress>) {
+    let Some(progress) = progress else {
+        return;
+    };
+    match progress {
+        TerminalProgress::Normal(value) => write!(seed, "\x1b]9;4;1;{}\x1b\\", value.get()),
+        TerminalProgress::Error(Some(value)) => {
+            write!(seed, "\x1b]9;4;2;{}\x1b\\", value.get())
+        }
+        TerminalProgress::Error(None) => write!(seed, "\x1b]9;4;2\x1b\\"),
+        TerminalProgress::Indeterminate => write!(seed, "\x1b]9;4;3;0\x1b\\"),
+        TerminalProgress::Paused(Some(value)) => {
+            write!(seed, "\x1b]9;4;4;{}\x1b\\", value.get())
+        }
+        TerminalProgress::Paused(None) => write!(seed, "\x1b]9;4;4\x1b\\"),
+    }
+    .expect("writing to String cannot fail");
 }
 
 fn restore_declrmm_from_inactive_screen(seed: &mut String, terminal: &Terminal) -> bool {
@@ -919,5 +941,48 @@ mod tests {
         stream.feed(&source.synthetic_seed(), &mut replica);
 
         assert_eq!(replica.primary.grid[0].cells, source.primary.grid[0].cells);
+    }
+
+    #[test]
+    fn synthetic_seed_replaces_or_clears_task_progress() {
+        let size = GridSize::new(4, 2);
+        let mut source = Terminal::new(size);
+        let mut source_stream = Stream::new();
+        source_stream.feed(b"\x1b]9;4;4;37\x07", &mut source);
+
+        let mut replica = Terminal::new(size);
+        let mut replica_stream = Stream::new();
+        replica_stream.feed(b"\x1b]9;4;2;80\x07", &mut replica);
+        let _ = replica.take_pending_progress_update();
+        replica_stream.feed(&source.synthetic_seed(), &mut replica);
+
+        assert_eq!(replica.progress(), source.progress());
+        let progress = replica.progress().unwrap();
+        assert!(matches!(progress, crate::TerminalProgress::Paused(Some(_))));
+        assert_eq!(
+            replica.take_pending_progress_update(),
+            Some(crate::ProgressUpdate::Set(progress))
+        );
+
+        source_stream.feed(b"\x1b]9;4;4\x07", &mut source);
+        replica_stream.feed(&source.synthetic_seed(), &mut replica);
+        assert_eq!(
+            replica.progress(),
+            Some(crate::TerminalProgress::Paused(None))
+        );
+        assert_eq!(
+            replica.take_pending_progress_update(),
+            Some(crate::ProgressUpdate::Set(crate::TerminalProgress::Paused(
+                None
+            )))
+        );
+
+        source_stream.feed(b"\x1b]9;4;0;0\x07", &mut source);
+        replica_stream.feed(&source.synthetic_seed(), &mut replica);
+        assert_eq!(replica.progress(), None);
+        assert_eq!(
+            replica.take_pending_progress_update(),
+            Some(crate::ProgressUpdate::Clear)
+        );
     }
 }

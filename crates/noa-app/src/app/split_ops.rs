@@ -6,10 +6,10 @@ use super::*;
 /// Pane-dnd P3 (review round 6): move a single entry from `old` to `new` in
 /// a `SessionCardId`-keyed side table, alongside the session-store's own
 /// card rekey (`SessionStore::rekey`) — shared by `move_pane_to_tab_at` for
-/// `App::attention_onset` so its blink-timer entry follows the card instead
-/// of being silently dropped by `reconcile_session_store`'s liveness GC on
-/// the next tick. A no-op (map untouched) when `old` isn't present, e.g. a
-/// card that never received attention.
+/// `App::attention_flash_until` so its transient visual entry follows the card
+/// instead of being silently dropped by `reconcile_session_store`'s liveness
+/// GC on the next tick. A no-op (map untouched) when `old` isn't present, e.g.
+/// a card that never received attention.
 fn rekey_card_entry<V>(
     map: &mut HashMap<SessionCardId, V>,
     old: SessionCardId,
@@ -638,26 +638,21 @@ impl App {
             Self::session_card_id(source_window, pane),
             Self::session_card_id(dest_window, pane),
         );
-        // P3 (review round 6): the moved pane's attention blink onset
-        // follows it too. `attention_onset` is keyed by the same
-        // `SessionCardId` the rekey above just changed, but it lives on
-        // `App`, not in `self.session_store` — the card's `attention` flag
-        // survives the store rekey on its own, but without this its onset
-        // timestamp does not, and `reconcile_session_store`'s
-        // `attention_onset.retain(|id, _| live.contains(id))` drops the
-        // stale old-keyed entry on the very next reconcile. That collapses
-        // the blink to steady-on immediately instead of continuing its
-        // remaining `ATTENTION_BLINK_DURATION`, since `attention_marker_
-        // visible` treats a missing onset as already-settled (`None =>
-        // true`). Preserves the original `Instant` rather than restarting
-        // it, so the blink's remaining duration carries over unchanged.
+        // The moved pane's one-shot attention emphasis follows it too. This
+        // table lives on `App`, outside the rekeyed session store, so preserve
+        // its original deadline instead of ending or restarting the effect.
         rekey_card_entry(
-            &mut self.attention_onset,
+            &mut self.attention_flash_until,
+            Self::session_card_id(source_window, pane),
+            Self::session_card_id(dest_window, pane),
+        );
+        rekey_card_entry(
+            &mut self.progress_flashes,
             Self::session_card_id(source_window, pane),
             Self::session_card_id(dest_window, pane),
         );
         // P3 (review round 9): the moved pane's auto-approve flash follows it
-        // too, for the same reason as `attention_onset` above — it's keyed by
+        // too, for the same reason as `attention_flash_until` above — it's keyed by
         // the same `SessionCardId` the store rekey just changed, but lives on
         // `App`. Without this rekey the sidebar model looks the flash up under
         // the card's *new* id (`sidebar/model.rs`), misses it, and the flash
@@ -780,6 +775,7 @@ impl App {
         if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();
         }
+        self.mark_overview_label_dirty(OverviewTileId::new(window_id, pane_id));
     }
 
     pub(super) fn resize_focused_split(&mut self, window_id: WindowId, direction: Direction) {

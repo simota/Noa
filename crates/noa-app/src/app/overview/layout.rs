@@ -6,6 +6,25 @@ use crate::session_overview::{
     clamp_overview_page, overview_page_count, overview_page_slice_range,
 };
 
+fn progress_label(progress: noa_grid::TerminalProgress) -> String {
+    use noa_grid::TerminalProgress;
+    let (marker, value) = match progress {
+        TerminalProgress::Normal(value) => ("", Some(value.get())),
+        TerminalProgress::Error(None) => return "[!···]".to_string(),
+        TerminalProgress::Error(Some(value)) => ("!", Some(value.get())),
+        TerminalProgress::Indeterminate => return "[···]".to_string(),
+        TerminalProgress::Paused(None) => return "[Ⅱ···]".to_string(),
+        TerminalProgress::Paused(Some(value)) => ("Ⅱ", Some(value.get())),
+    };
+    let value = value.expect("determinate progress always carries a value");
+    let filled = (usize::from(value) * 4).div_ceil(100);
+    format!(
+        "[{marker}{}{} {value}%]",
+        "█".repeat(filled),
+        "░".repeat(4 - filled)
+    )
+}
+
 impl App {
     /// REQ-OV-16: the "Search sessions" filter narrows the source set here,
     /// the single seam every downstream consumer (redraw / hit-test / nav /
@@ -15,14 +34,14 @@ impl App {
     /// a live query it reformats and clones every tab's title to filter, so
     /// the result is memoized on `OverviewWindowState.source_tile_ids_cache`.
     ///
-    /// The memo key is the *unfiltered* order itself (cheap: `WindowId` /
-    /// `PaneId` pairs, no strings) plus the query string, compared against
-    /// what produced the cached result — a hit requires both to match
-    /// exactly, so any tab/pane add, remove, or reorder (which changes the
-    /// unfiltered order) or query edit invalidates it for free; there is no
-    /// separate "did anything change" signal to keep in sync and risk
-    /// getting wrong. An empty query is the identity (short-circuited to
-    /// skip both the filter and the cache on the common path).
+    /// The memo key is the *unfiltered* order and each tab's focused pane
+    /// (cheap: `WindowId` / `PaneId` pairs, no strings) plus the query string,
+    /// compared against what produced the cached result. A hit requires all
+    /// three to match exactly, so tab/pane add, remove, reorder, focus changes,
+    /// cross-tab pane moves, or query edits invalidate it without relying on
+    /// every mutation path to remember a separate signal. An empty query is
+    /// the identity (short-circuited to skip both the filter and the cache on
+    /// the common path).
     pub(in crate::app) fn overview_source_tab_ids(&self) -> Vec<WindowId> {
         // Overview tiles are tab-unit (U1): one tile per live window, in
         // `window_order`. The overview no longer owns its own window (it
@@ -40,14 +59,20 @@ impl App {
         if query.is_empty() {
             return ordered;
         }
+        let focused_panes: Vec<_> = ordered
+            .iter()
+            .filter_map(|id| self.windows.get(id).map(|state| (*id, state.focused_pane)))
+            .collect();
         if let Some(overview) = self.overview_window.as_ref() {
             let cache = overview.source_tile_ids_cache.borrow();
             if let Some(cached) = cache.as_ref()
                 && let Some(hit) = overview_source_tile_ids_cache_hit(
                     &cached.unfiltered,
+                    &cached.focused_panes,
                     &cached.query,
                     &cached.result,
                     &ordered,
+                    &focused_panes,
                     query,
                 )
             {
@@ -67,6 +92,7 @@ impl App {
         if let Some(overview) = self.overview_window.as_ref() {
             *overview.source_tile_ids_cache.borrow_mut() = Some(OverviewSourceTileIdsCache {
                 unfiltered: ordered,
+                focused_panes,
                 query: query.to_string(),
                 result: result.clone(),
             });
@@ -112,12 +138,18 @@ impl App {
     /// dot semantics). `None` for a window that no longer exists.
     pub(in crate::app) fn overview_tab_label(&self, window_id: WindowId) -> Option<String> {
         let state = self.windows.get(&window_id)?;
+        let id = Self::session_card_id(window_id, state.focused_pane);
+        let progress = self
+            .session_store
+            .get(&id)
+            .and_then(|card| card.progress)
+            .map(progress_label);
         let title = if self.overview_tab_dot_color(window_id).is_some() {
             format!("● {}", state.title)
         } else {
             state.title.clone()
         };
-        Some(title)
+        Some(progress.map_or(title.clone(), |progress| format!("{progress} {title}")))
     }
 
     /// The aggregate status-dot color for a tab tile's title band (Overview
@@ -256,53 +288,139 @@ pub(in crate::app) struct OverviewPageView {
 }
 
 /// Hit/miss rule for `App::overview_source_tile_ids`'s memo: the cached
-/// filtered `result` is reusable only if the unfiltered order it was
-/// computed from and the query both match the current call exactly.
-/// Generic over the ordered element type so the rule is unit-testable
-/// without constructing `OverviewTileId`s, which wrap a live
-/// `winit::window::WindowId` that isn't constructible outside a real window.
-fn overview_source_tile_ids_cache_hit<'a, T: PartialEq>(
+/// filtered `result` is reusable only if the unfiltered order, focused pane
+/// fingerprint, and query that produced it all match the current call exactly.
+/// Generic over both key element types so the rule is unit-testable without
+/// constructing live `winit::window::WindowId`s.
+fn overview_source_tile_ids_cache_hit<'a, T: PartialEq, F: PartialEq>(
     cached_unfiltered: &[T],
+    cached_focused_panes: &[F],
     cached_query: &str,
     cached_result: &'a [T],
     ordered: &[T],
+    focused_panes: &[F],
     query: &str,
 ) -> Option<&'a [T]> {
-    (cached_unfiltered == ordered && cached_query == query).then_some(cached_result)
+    (cached_unfiltered == ordered && cached_focused_panes == focused_panes && cached_query == query)
+        .then_some(cached_result)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::overview_source_tile_ids_cache_hit;
+    use super::{overview_source_tile_ids_cache_hit, progress_label};
+
+    #[test]
+    fn progress_label_is_compact_and_state_redundant() {
+        let value = |value| noa_grid::ProgressValue::new(value).unwrap();
+        assert_eq!(
+            progress_label(noa_grid::TerminalProgress::Normal(value(50))),
+            "[██░░ 50%]"
+        );
+        assert_eq!(
+            progress_label(noa_grid::TerminalProgress::Paused(Some(value(25)))),
+            "[Ⅱ█░░░ 25%]"
+        );
+        assert_eq!(
+            progress_label(noa_grid::TerminalProgress::Error(Some(value(75)))),
+            "[!███░ 75%]"
+        );
+        assert_eq!(
+            progress_label(noa_grid::TerminalProgress::Error(None)),
+            "[!···]"
+        );
+        assert_eq!(
+            progress_label(noa_grid::TerminalProgress::Paused(None)),
+            "[Ⅱ···]"
+        );
+        assert_eq!(
+            progress_label(noa_grid::TerminalProgress::Indeterminate),
+            "[···]"
+        );
+    }
 
     #[test]
     fn cache_hits_when_order_and_query_are_unchanged() {
         let unfiltered = [1, 2, 3];
+        let focused = [(1, 11), (2, 21), (3, 31)];
         let result = [1, 3];
-        let hit = overview_source_tile_ids_cache_hit(&unfiltered, "a", &result, &unfiltered, "a");
+        let hit = overview_source_tile_ids_cache_hit(
+            &unfiltered,
+            &focused,
+            "a",
+            &result,
+            &unfiltered,
+            &focused,
+            "a",
+        );
         assert_eq!(hit, Some(result.as_slice()));
     }
 
     #[test]
     fn cache_misses_when_query_changes() {
         let unfiltered = [1, 2, 3];
+        let focused = [(1, 11), (2, 21), (3, 31)];
         let result = [1, 3];
-        let hit = overview_source_tile_ids_cache_hit(&unfiltered, "a", &result, &unfiltered, "ab");
+        let hit = overview_source_tile_ids_cache_hit(
+            &unfiltered,
+            &focused,
+            "a",
+            &result,
+            &unfiltered,
+            &focused,
+            "ab",
+        );
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn cache_misses_when_a_tabs_focused_pane_changes() {
+        let unfiltered = [1, 2, 3];
+        let cached_focused = [(1, 11), (2, 21), (3, 31)];
+        let current_focused = [(1, 11), (2, 22), (3, 31)];
+        let result = [1, 3];
+        let hit = overview_source_tile_ids_cache_hit(
+            &unfiltered,
+            &cached_focused,
+            "50%",
+            &result,
+            &unfiltered,
+            &current_focused,
+            "50%",
+        );
         assert_eq!(hit, None);
     }
 
     #[test]
     fn cache_misses_when_a_tile_is_added_or_removed() {
         let unfiltered = [1, 2, 3];
+        let focused = [(1, 11), (2, 21), (3, 31)];
         let result = [1, 3];
         let grown = [1, 2, 3, 4];
+        let grown_focused = [(1, 11), (2, 21), (3, 31), (4, 41)];
         assert_eq!(
-            overview_source_tile_ids_cache_hit(&unfiltered, "a", &result, &grown, "a"),
+            overview_source_tile_ids_cache_hit(
+                &unfiltered,
+                &focused,
+                "a",
+                &result,
+                &grown,
+                &grown_focused,
+                "a"
+            ),
             None
         );
         let shrunk = [1, 2];
+        let shrunk_focused = [(1, 11), (2, 21)];
         assert_eq!(
-            overview_source_tile_ids_cache_hit(&unfiltered, "a", &result, &shrunk, "a"),
+            overview_source_tile_ids_cache_hit(
+                &unfiltered,
+                &focused,
+                "a",
+                &result,
+                &shrunk,
+                &shrunk_focused,
+                "a"
+            ),
             None
         );
     }
@@ -310,28 +428,39 @@ mod tests {
     #[test]
     fn cache_misses_when_tiles_reorder_with_the_same_members() {
         let unfiltered = [1, 2, 3];
+        let focused = [(1, 11), (2, 21), (3, 31)];
         let result = [1, 3];
         let reordered = [3, 2, 1];
-        let hit = overview_source_tile_ids_cache_hit(&unfiltered, "a", &result, &reordered, "a");
+        let reordered_focused = [(3, 31), (2, 21), (1, 11)];
+        let hit = overview_source_tile_ids_cache_hit(
+            &unfiltered,
+            &focused,
+            "a",
+            &result,
+            &reordered,
+            &reordered_focused,
+            "a",
+        );
         assert_eq!(hit, None);
     }
 
-    // C1 (v3 paging): the memo key is `(unfiltered order, query)` only —
-    // `overview_source_tile_ids_cache_hit`'s signature has no page parameter
-    // at all, so a page flip (which touches neither the unfiltered order nor
-    // the query) structurally cannot invalidate this cache. This pins that
-    // down at the call-site level: identical `unfiltered`/`query` still hit
-    // no matter how many times `App::overview_page_view`'s page changed in
-    // between (`overview_page_view` reads the memoized result and slices it
-    // by page *after* this hit/miss decision, entirely outside this function).
+    // C1 (v3 paging): page is not part of the memo key, so a page flip cannot
+    // invalidate the cache while order, focused panes, and query are stable.
     #[test]
     fn cache_hit_is_unaffected_by_page_flips_because_page_is_not_part_of_the_key() {
         let unfiltered: Vec<u32> = (0..25).collect();
+        let focused: Vec<_> = unfiltered.iter().map(|id| (*id, id + 100)).collect();
         let result = unfiltered.clone();
         for _ in 0..3 {
-            // Simulates repeated page flips (0 -> 1 -> 2 -> 0 -> ...)
-            // happening between calls: nothing here ever varies by page.
-            let hit = overview_source_tile_ids_cache_hit(&unfiltered, "", &result, &unfiltered, "");
+            let hit = overview_source_tile_ids_cache_hit(
+                &unfiltered,
+                &focused,
+                "",
+                &result,
+                &unfiltered,
+                &focused,
+                "",
+            );
             assert_eq!(hit, Some(result.as_slice()));
         }
     }

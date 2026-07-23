@@ -3,7 +3,7 @@ use crate::kitty_keyboard::SetMode;
 use crate::osc::{
     CwdOsc, HyperlinkOsc, ShellIntegrationOsc, ShellIntegrationOscKind, handle_clipboard_osc,
     handle_color_osc, parse_cwd_osc, parse_hyperlink_osc, parse_notification_osc,
-    parse_shell_integration_osc,
+    parse_progress_osc, parse_shell_integration_osc,
 };
 use noa_core::{CellAttrs, Color};
 use noa_vt::{
@@ -432,6 +432,7 @@ impl Handler for Terminal {
     }
 
     fn full_reset(&mut self) {
+        self.set_progress(None);
         self.invalidate_grid_coordinate_space();
         let scrollback_limit = self.primary.scrollback_limit_bytes();
         self.primary = crate::screen::Screen::new(self.size.cols, self.size.rows);
@@ -633,6 +634,19 @@ impl Handler for Terminal {
                 HyperlinkOsc::Start(hyperlink) => self.set_current_hyperlink(hyperlink),
                 HyperlinkOsc::End => self.clear_current_hyperlink(),
                 HyperlinkOsc::Malformed => {}
+            }
+            return;
+        }
+        // Progress has a dedicated state channel. Even malformed reports must
+        // not fall through and appear as OSC 9 desktop notification text.
+        if data.starts_with(b"9;4;") {
+            if let Some(update) = parse_progress_osc(data) {
+                match update {
+                    crate::osc::ProgressUpdate::Clear => self.set_progress(None),
+                    crate::osc::ProgressUpdate::Set(progress) => {
+                        self.set_progress(Some(progress));
+                    }
+                }
             }
             return;
         }

@@ -445,6 +445,8 @@ pub fn spawn(
                     ipc_publish_pending_at = output.ipc_output_publish_pending;
                     let sidebar_bell = output.sidebar_bell;
                     let sidebar_upsert = output.sidebar_upsert.take();
+                    let progress_update = output.progress_update.take();
+                    let progress_cue = output.progress_cue;
                     let auto_approve_candidate = output.auto_approve.take();
                     if sidebar_bell
                         && proxy
@@ -466,6 +468,33 @@ pub fn spawn(
                                 busy: upsert.busy,
                                 updated_at: crate::localtime::wall_clock_now(),
                                 preview: upsert.preview,
+                            }))
+                            .is_err()
+                        {
+                            break; // event loop gone
+                        }
+                    }
+                    if let Some(cue) = progress_cue {
+                        let id = current_card_target(&window_id, pane_id).1;
+                        let delta = match cue {
+                            noa_grid::ProgressCue::Complete => {
+                                SessionDelta::ProgressComplete { id }
+                            }
+                            noa_grid::ProgressCue::Error => SessionDelta::ProgressError { id },
+                        };
+                        if proxy.send_event(UserEvent::SessionDelta(delta)).is_err() {
+                            break; // event loop gone
+                        }
+                    }
+                    if let Some(update) = progress_update {
+                        let progress = match update {
+                            noa_grid::ProgressUpdate::Clear => None,
+                            noa_grid::ProgressUpdate::Set(progress) => Some(progress),
+                        };
+                        if proxy
+                            .send_event(UserEvent::SessionDelta(SessionDelta::Progress {
+                                id: current_card_target(&window_id, pane_id).1,
+                                progress,
                             }))
                             .is_err()
                         {

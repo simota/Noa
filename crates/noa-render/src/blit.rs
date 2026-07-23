@@ -339,18 +339,20 @@ struct CardUniformsRaw {
     _padding: [f32; 2],
 }
 
-/// One pooled card's GPU resources, keyed by the sampled texture view's
-/// identity (see [`CardPipeline::draw_texture_cards`]). `last_used` is a
-/// pool-local logical clock for LRU eviction.
+/// One pooled card's GPU resources, keyed by the sampled texture view and its
+/// occurrence within a draw call (see [`CardPipeline::draw_texture_cards`]).
+/// `last_used` is a pool-local logical clock for LRU eviction.
 struct PooledCard {
     buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     last_used: u64,
 }
 
-/// Cap on the number of distinct (texture-view-keyed) card resources one
-/// `CardPipeline` retains. In steady state the pool holds one entry per tile
-/// / pill actually drawn (a handful), but a search query mints a new pill
+type CardPoolKey = (wgpu::TextureView, usize);
+
+/// Cap on the number of card uniform slots one `CardPipeline` retains. In
+/// steady state the pool holds one entry per tile / pill / repeated-view
+/// placement actually drawn (a handful), but a search query mints a new pill
 /// texture per keystroke (REQ-OV-16) — bound the pool so a long typing burst
 /// can't grow it without limit; least-recently-used entries (typically old
 /// query rasters no longer drawn) are evicted first.
@@ -368,7 +370,7 @@ pub struct CardPipeline {
     /// updated) uniforms. `RefCell` because the pool is populated from
     /// `draw_texture_cards(&self, ...)`, which many call sites invoke
     /// through a shared `&CardPipeline`.
-    pool: RefCell<HashMap<wgpu::TextureView, PooledCard>>,
+    pool: RefCell<HashMap<CardPoolKey, PooledCard>>,
     /// Logical clock incremented once per `draw_texture_cards` call, used to
     /// stamp `PooledCard::last_used` for LRU eviction.
     pool_clock: Cell<u64>,
@@ -588,23 +590,19 @@ impl CardPipeline {
         );
     }
 
-    /// Draw every placement as a rounded card, reusing a pooled uniform
-    /// buffer + bind group per distinct sampled `TextureView` instead of
-    /// allocating fresh ones every call (see [`CardPipeline::pool`]). A
-    /// placement whose view is already pooled just gets its uniforms
-    /// rewritten via `queue.write_buffer` — no `create_buffer` /
-    /// `create_bind_group`; a placement drawn for the first time (or whose
-    /// pool entry was evicted) still allocates exactly as before.
+    /// Draw every placement as a rounded card, reusing a pooled uniform buffer
+    /// and bind group per sampled `TextureView` and its occurrence within this
+    /// call instead of allocating fresh ones every frame (see
+    /// [`CardPipeline::pool`]). A placement whose slot is already pooled just
+    /// gets its uniforms rewritten via `queue.write_buffer` — no
+    /// `create_buffer` / `create_bind_group`; a placement drawn for the first
+    /// time (or whose pool entry was evicted) still allocates exactly as
+    /// before.
     ///
-    /// The pool is keyed purely by texture-view identity, not by call site
-    /// or slot position: this same `CardPipeline` instance is shared across
-    /// several logically distinct draws per frame (search pill, hint pill,
-    /// hover ring, zoom ring, per-tile attention rings), so a position-based
-    /// key would collide between them. Two placements that happen to share
-    /// one view within a single call share one pool entry and are drawn
-    /// with whichever uniforms were written last — fine today (every real
-    /// caller passes one placement per distinct view per call) but worth
-    /// knowing if that ever changes.
+    /// The occurrence index gives repeated placements of one texture separate
+    /// uniforms while preserving one stable slot for the common single-
+    /// placement case. A destination position is deliberately not part of the
+    /// key so moving cards can continue to reuse their GPU resources.
     #[allow(clippy::too_many_arguments)]
     fn draw_texture_cards(
         &self,
@@ -622,8 +620,27 @@ impl CardPipeline {
         let clock = self.pool_clock.get().wrapping_add(1);
         self.pool_clock.set(clock);
 
+        let mut occurrences = Vec::<(wgpu::TextureView, usize)>::new();
+        let placement_keys: Vec<_> = placements
+            .iter()
+            .map(|placement| {
+                let view = placement.texture_view.clone();
+                let occurrence = if let Some((_, next)) =
+                    occurrences.iter_mut().find(|(seen, _)| seen == &view)
+                {
+                    let current = *next;
+                    *next += 1;
+                    current
+                } else {
+                    occurrences.push((view.clone(), 1));
+                    0
+                };
+                (view, occurrence)
+            })
+            .collect();
+
         let mut pool = self.pool.borrow_mut();
-        for placement in placements {
+        for (placement, pool_key) in placements.iter().zip(&placement_keys) {
             let (border_color, border_width, glow_width) = if placement.selected {
                 (style.focus_color, style.focus_width, style.focus_glow_width)
             } else {
@@ -649,7 +666,7 @@ impl CardPipeline {
                 _padding: [0.0; 2],
             };
 
-            if let Some(pooled) = pool.get_mut(placement.texture_view) {
+            if let Some(pooled) = pool.get_mut(pool_key) {
                 queue.write_buffer(&pooled.buffer, 0, bytemuck::bytes_of(&uniforms));
                 pooled.last_used = clock;
                 continue;
@@ -681,16 +698,21 @@ impl CardPipeline {
                 ],
             });
 
+            // Every key in this call is needed by the render pass below,
+            // including placements we have not visited yet. Evict only stale
+            // keys outside the current batch; an oversized batch may exceed
+            // the steady-state cap briefly.
             if pool.len() >= CARD_POOL_CAP
                 && let Some(lru_key) = pool
                     .iter()
+                    .filter(|(key, _)| !placement_keys.contains(key))
                     .min_by_key(|(_, pooled)| pooled.last_used)
                     .map(|(key, _)| key.clone())
             {
                 pool.remove(&lru_key);
             }
             pool.insert(
-                placement.texture_view.clone(),
+                pool_key.clone(),
                 PooledCard {
                     buffer,
                     bind_group,
@@ -722,20 +744,32 @@ impl CardPipeline {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
-            for placement in placements {
+            for pool_key in &placement_keys {
                 let pooled = pool
-                    .get(placement.texture_view)
+                    .get(pool_key)
                     .expect("pool entry inserted or refreshed above for every placement");
                 pass.set_bind_group(0, &pooled.bind_group, &[]);
                 pass.draw(0..6, 0..1);
             }
         }
         queue.submit(Some(encoder.finish()));
+        // The submitted command buffer retains its bind groups, so current
+        // batch entries can be released now without invalidating this draw.
+        while pool.len() > CARD_POOL_CAP {
+            let Some(lru_key) = pool
+                .iter()
+                .min_by_key(|(_, pooled)| pooled.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            pool.remove(&lru_key);
+        }
     }
 
-    /// Distinct texture views currently pooled — a headless-GPU-test probe
-    /// for the reuse behavior in `draw_texture_cards` (redrawing the same
-    /// view should not grow this).
+    /// Texture/occurrence uniform slots currently pooled — a headless-GPU-test
+    /// probe for the reuse behavior in `draw_texture_cards` (redrawing the
+    /// same placement set should not grow this).
     pub fn card_pool_len_for_test(&self) -> usize {
         self.pool.borrow().len()
     }

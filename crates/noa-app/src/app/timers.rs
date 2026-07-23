@@ -446,80 +446,6 @@ impl App {
         self.live_wallpaper_deadline
     }
 
-    /// Whether an attention marker is currently visible for `id` (FR-A1).
-    pub(super) fn attention_marker_visible(&self, id: &SessionCardId) -> bool {
-        match self.attention_onset.get(id) {
-            Some(onset) => crate::sidebar::attention_blink_on(
-                onset.elapsed(),
-                ATTENTION_BLINK_DURATION,
-                ATTENTION_BLINK_INTERVAL,
-            ),
-            None => true,
-        }
-    }
-
-    fn any_attention_blinking(&self) -> bool {
-        self.attention_onset
-            .values()
-            .any(|onset| onset.elapsed() < ATTENTION_BLINK_DURATION)
-    }
-
-    /// Advance the attention blink and return the next wake-up deadline.
-    pub(super) fn tick_attention_blink(&mut self) -> Option<Instant> {
-        if !self.any_attention_blinking() {
-            // Final repaint on disarm so the settled steady-on marker is drawn.
-            if self.attention_blink_deadline.take().is_some() {
-                self.request_sidebar_redraw();
-                self.mark_attention_overview_tiles_dirty();
-            }
-            return None;
-        }
-        let now = Instant::now();
-        if let Some(deadline) = self.attention_blink_deadline
-            && now < deadline
-        {
-            return Some(deadline);
-        }
-        // An elapsed deadline means a marker crossed a phase boundary: repaint.
-        // A fresh arm (`None`) skips it — the apply site already repainted the
-        // onset frame.
-        if self.attention_blink_deadline.is_some() {
-            self.request_sidebar_redraw();
-            self.mark_attention_overview_tiles_dirty();
-        }
-        // Wake at the earliest onset-relative phase boundary across every
-        // blinking marker, not `now + interval`: the visible phase is computed
-        // from each onset, so an unaligned deadline would paint every flip
-        // late and jitter the duty cycle (worst with staggered onsets).
-        self.attention_blink_deadline = self.next_attention_blink_deadline(now);
-        self.attention_blink_deadline
-    }
-
-    /// The earliest next blink phase boundary across all attention onsets, or
-    /// `None` when every marker has settled.
-    fn next_attention_blink_deadline(&self, now: Instant) -> Option<Instant> {
-        self.attention_onset
-            .values()
-            .filter_map(|onset| {
-                crate::sidebar::next_attention_blink_boundary(
-                    now.saturating_duration_since(*onset),
-                    ATTENTION_BLINK_DURATION,
-                    ATTENTION_BLINK_INTERVAL,
-                )
-                .map(|boundary| *onset + boundary)
-            })
-            .min()
-    }
-
-    fn mark_attention_overview_tiles_dirty(&mut self) {
-        let ids: Vec<SessionCardId> = self.attention_onset.keys().copied().collect();
-        for id in ids {
-            let window_id = WindowId::from(id.window_id.0);
-            self.mark_overview_tile_dirty(OverviewTileId::new(window_id, id.pane_id));
-        }
-        self.request_overview_redraw();
-    }
-
     /// Repaint visible sidebars once a minute so relative timestamps advance.
     pub(super) fn tick_sidebar_clock(&mut self) -> Option<Instant> {
         if !self.any_sidebar_visible() {
@@ -569,9 +495,8 @@ impl App {
         }
     }
 
-    /// Expire transient per-window overlays (the `cols × rows` resize toast
-    /// and the `visual-bell` flash), repainting a window whose overlay just
-    /// ended, and report the earliest pending expiry.
+    /// Expire transient visual effects, repainting the affected surfaces when
+    /// an effect ends, and report the earliest pending expiry.
     pub(super) fn tick_transient_overlays(&mut self) -> Option<Instant> {
         let now = Instant::now();
         let mut next: Option<Instant> = None;
@@ -604,6 +529,36 @@ impl App {
             }
         });
         if self.auto_approve_flash_until.len() != before {
+            self.request_sidebar_redraw();
+        }
+        let mut expired_attention = Vec::new();
+        self.attention_flash_until.retain(|id, until| {
+            if now >= *until {
+                expired_attention.push(*id);
+                false
+            } else {
+                next = Some(next.map_or(*until, |n| n.min(*until)));
+                true
+            }
+        });
+        if !expired_attention.is_empty() {
+            self.request_sidebar_redraw();
+            for id in expired_attention {
+                let window_id = WindowId::from(id.window_id.0);
+                self.mark_overview_tile_dirty(OverviewTileId::new(window_id, id.pane_id));
+            }
+            self.request_overview_redraw();
+        }
+        let before = self.progress_flashes.len();
+        self.progress_flashes.retain(|_, flash| {
+            if now >= flash.until {
+                false
+            } else {
+                next = Some(next.map_or(flash.until, |n| n.min(flash.until)));
+                true
+            }
+        });
+        if self.progress_flashes.len() != before {
             self.request_sidebar_redraw();
         }
         next

@@ -671,18 +671,27 @@ impl App {
         // a page has no placeholder rows, so the two orders coincide
         // exactly). Resolved before the gpu/overview borrows so the ring
         // pass needs no `self` access.
-        let attention_tiles: Vec<bool> = source_tab_ids
+        let attention_tiles: Vec<(bool, bool)> = source_tab_ids
             .iter()
             .map(|window_id| {
-                // A tab tile wants attention if ANY of its panes does.
-                self.overview_pane_ids_for_window(*window_id)
-                    .iter()
-                    .any(|pane_id| {
+                // A tab tile wants attention if any pane does; its ring gets a
+                // glow only during the one-shot arrival emphasis.
+                self.overview_pane_ids_for_window(*window_id).iter().fold(
+                    (false, false),
+                    |(attention, emphasized), pane_id| {
                         let card_id = Self::session_card_id(*window_id, *pane_id);
-                        self.session_store
+                        let pane_attention = self
+                            .session_store
                             .get(&card_id)
-                            .is_some_and(|card| card.attention)
-                    })
+                            .is_some_and(|card| card.attention);
+                        let pane_emphasized = pane_attention
+                            && self
+                                .attention_flash_until
+                                .get(&card_id)
+                                .is_some_and(|until| now < *until);
+                        (attention || pane_attention, emphasized || pane_emphasized)
+                    },
+                )
             })
             .collect();
 
@@ -974,33 +983,58 @@ impl App {
 
             // Persistent red attention ring over non-focused/non-hovered tiles
             // with a pending interaction request (FR-16). Focus and hover keep
-            // the blue accent ring; the title-band dot still marks attention,
-            // so hovering an attention tile never turns the hover affordance
-            // pink/red.
+            // the blue accent ring; during the bounded arrival cue only their
+            // blue glow strengthens, so interaction state is preserved without
+            // hiding the new notification.
             for (index, rect) in tile_rects.iter().enumerate() {
-                if !overview_attention_ring_visible(
-                    attention_tiles.get(index).copied().unwrap_or(false),
-                    index,
-                    selected,
-                    hovered,
-                ) {
+                let (attention, emphasized) = attention_tiles
+                    .get(index)
+                    .copied()
+                    .unwrap_or((false, false));
+                if !overview_attention_ring_visible(attention, emphasized, index, selected, hovered)
+                {
                     continue;
                 }
                 let Some(tile_view) = thumbnails.tile_texture_view(index) else {
                     continue;
+                };
+                let interaction_ring = index == selected || hovered == Some(index);
+                let style = if interaction_ring {
+                    overview_attention_arrival_card_style(metrics, index == selected)
+                } else {
+                    overview_attention_card_style(metrics, emphasized)
+                };
+                let placement_rect = if index == selected
+                    && zoom_factor > 0.0
+                    && let Some(bounds) = zoom_bounds
+                {
+                    let target = overview_zoom_rect(bounds, *rect);
+                    let lerp_dim = |a: u32, b: u32| {
+                        crate::anim::lerp(a as f32, b as f32, zoom_factor)
+                            .round()
+                            .max(0.0) as u32
+                    };
+                    PaneRectApp::new(
+                        lerp_dim(rect.x, target.x),
+                        lerp_dim(rect.y, target.y),
+                        lerp_dim(rect.w, target.w),
+                        lerp_dim(rect.h, target.h),
+                    )
+                } else {
+                    *rect
                 };
                 chrome_card.pipeline.overlay_texture_cards(
                     &gpu.device,
                     &gpu.queue,
                     &view,
                     surface_size,
-                    &overview_attention_card_style(metrics),
+                    &style,
                     &[CardTexturePlacement {
                         texture_view: &tile_view,
-                        x: rect.x,
-                        y: rect.y,
-                        w: rect.w,
-                        h: rect.h,
+                        x: placement_rect.x,
+                        y: placement_rect.y,
+                        w: placement_rect.w,
+                        h: placement_rect.h,
                         selected: true,
                     }],
                 );
@@ -1157,11 +1191,12 @@ impl App {
 
 fn overview_attention_ring_visible(
     attention: bool,
+    emphasized: bool,
     index: usize,
     selected: usize,
     hovered: Option<usize>,
 ) -> bool {
-    attention && index != selected && hovered != Some(index)
+    attention && (emphasized || (index != selected && hovered != Some(index)))
 }
 
 /// Hit/miss rule for the search/hint pill cache
@@ -1182,11 +1217,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn overview_attention_ring_does_not_override_selected_or_hovered_tiles() {
-        assert!(overview_attention_ring_visible(true, 2, 0, None));
-        assert!(!overview_attention_ring_visible(true, 2, 2, None));
-        assert!(!overview_attention_ring_visible(true, 2, 0, Some(2)));
-        assert!(!overview_attention_ring_visible(false, 2, 0, None));
+    fn overview_attention_arrival_remains_visible_on_selected_or_hovered_tiles() {
+        assert!(overview_attention_ring_visible(true, false, 2, 0, None));
+        assert!(!overview_attention_ring_visible(true, false, 2, 2, None));
+        assert!(!overview_attention_ring_visible(true, false, 2, 0, Some(2)));
+        assert!(overview_attention_ring_visible(true, true, 2, 2, None));
+        assert!(overview_attention_ring_visible(true, true, 2, 0, Some(2)));
+        assert!(!overview_attention_ring_visible(false, true, 2, 0, None));
     }
 
     fn pill_key(query: &str, live_tile_count: usize) -> OverviewPillKey {

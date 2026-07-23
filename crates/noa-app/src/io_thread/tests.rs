@@ -1435,6 +1435,124 @@ fn feed_drains_the_bell_regardless_of_sidebar_visibility() {
 }
 
 #[test]
+fn feed_drains_progress_changes_once_regardless_of_sidebar_visibility() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+
+    let output = feed_terminal(
+        &terminal,
+        &mut stream,
+        b"\x1b]9;4;1;42\x07",
+        &overview,
+        &mut last_overview_publish,
+        &test_sidebar_publish(false),
+        &mut None,
+    );
+    let Some(noa_grid::ProgressUpdate::Set(progress)) = output.progress_update else {
+        panic!("expected a progress update");
+    };
+    assert_eq!(progress.value().unwrap().get(), 42);
+    assert_eq!(output.progress_cue, None);
+
+    let quiet = feed_terminal(
+        &terminal,
+        &mut stream,
+        b"x",
+        &overview,
+        &mut last_overview_publish,
+        &test_sidebar_publish(true),
+        &mut None,
+    );
+    assert_eq!(quiet.progress_update, None);
+    assert_eq!(quiet.progress_cue, None);
+}
+
+#[test]
+fn feed_preserves_completion_when_clear_is_the_final_progress_update() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+
+    let output = feed_terminal(
+        &terminal,
+        &mut stream,
+        b"\x1b]9;4;1;100\x07\x1b]9;4;0\x07",
+        &overview,
+        &mut last_overview_publish,
+        &test_sidebar_publish(false),
+        &mut None,
+    );
+
+    assert_eq!(
+        output.progress_update,
+        Some(noa_grid::ProgressUpdate::Clear)
+    );
+    assert_eq!(output.progress_cue, Some(noa_grid::ProgressCue::Complete));
+    assert_eq!(terminal.lock().progress(), None);
+}
+
+#[test]
+fn feed_preserves_error_when_clear_is_the_final_progress_update() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+
+    let output = feed_terminal(
+        &terminal,
+        &mut stream,
+        b"\x1b]9;4;2\x07\x1b]9;4;0\x07",
+        &overview,
+        &mut last_overview_publish,
+        &test_sidebar_publish(false),
+        &mut None,
+    );
+
+    assert_eq!(
+        output.progress_update,
+        Some(noa_grid::ProgressUpdate::Clear)
+    );
+    assert_eq!(output.progress_cue, Some(noa_grid::ProgressCue::Error));
+    assert_eq!(terminal.lock().progress(), None);
+}
+
+#[test]
+fn feed_keeps_only_the_last_progress_cue_in_batch() {
+    let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
+    let mut stream = noa_vt::Stream::new();
+    let overview = test_overview_publish();
+    let mut last_overview_publish = None;
+
+    let completed = feed_terminal(
+        &terminal,
+        &mut stream,
+        b"\x1b]9;4;2\x07\x1b]9;4;1;100\x07",
+        &overview,
+        &mut last_overview_publish,
+        &test_sidebar_publish(false),
+        &mut None,
+    );
+    assert_eq!(
+        completed.progress_cue,
+        Some(noa_grid::ProgressCue::Complete)
+    );
+
+    let errored = feed_terminal(
+        &terminal,
+        &mut stream,
+        b"\x1b]9;4;0\x07\x1b]9;4;1;100\x07\x1b]9;4;2\x07",
+        &overview,
+        &mut last_overview_publish,
+        &test_sidebar_publish(false),
+        &mut None,
+    );
+    assert_eq!(errored.progress_cue, Some(noa_grid::ProgressCue::Error));
+}
+
+#[test]
 fn feed_terminal_returns_pending_writes_after_releasing_lock() {
     let terminal = Arc::new(Mutex::new(Terminal::new(GridSize::new(80, 24))));
     let mut stream = noa_vt::Stream::new();

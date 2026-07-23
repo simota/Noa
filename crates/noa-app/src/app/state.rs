@@ -132,10 +132,12 @@ pub(super) struct ChromeTextures {
     /// `CHROME_ACCENT` strip composited at the insertion gap during an active
     /// card drag.
     pub(super) sidebar_drop_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
-    /// Reused scratch texture for the per-card status accent bar (busy /
-    /// attention / bell) composited along a card's left edge; refilled with
-    /// each card's accent color in turn like the card scratch.
+    /// Reused scratch texture for the categorical per-card status rail,
+    /// composited along a card's left edge and refilled with each state color.
     pub(super) sidebar_accent_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// Reused solid-color scratch for the actual `OSC 9;4` progress track and
+    /// fill drawn along the bottom of session cards.
+    pub(super) sidebar_progress_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// Reused scratch texture for subtle horizontal rules between flat sidebar
     /// card rows.
     pub(super) sidebar_rule_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
@@ -180,6 +182,7 @@ impl ChromeTextures {
         self.sidebar_divider_tex = None;
         self.sidebar_drop_tex = None;
         self.sidebar_accent_tex = None;
+        self.sidebar_progress_tex = None;
         self.sidebar_rule_tex = None;
         self.palette_scratch = None;
         self.scrollbar_tex = None;
@@ -592,12 +595,14 @@ pub(super) struct OverviewPillKey {
     pub(super) rect: PaneRectApp,
 }
 
-/// The unfiltered TAB order `overview_source_tab_ids` last computed, the query
-/// it was filtered with, and the resulting (possibly filtered) order — see
+/// The unfiltered TAB order and focused pane per tab that
+/// `overview_source_tab_ids` last observed, the query it was filtered with,
+/// and the resulting (possibly filtered) order — see
 /// `overview_source_tab_ids_cache_hit` for the hit/miss rule. Keyed by tab
 /// (`WindowId`) since Overview tiles are tab-unit (U1).
 pub(super) struct OverviewSourceTileIdsCache {
     pub(super) unfiltered: Vec<WindowId>,
+    pub(super) focused_panes: Vec<(WindowId, PaneId)>,
     pub(super) query: String,
     pub(super) result: Vec<WindowId>,
 }
@@ -1186,12 +1191,11 @@ impl Surface {
 /// focused and displayable.
 pub(super) const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
-/// How long an attention marker blinks before settling to a steady mark
-/// (FR-A1). Compile-time (no config knob in v1).
-pub(super) const ATTENTION_BLINK_DURATION: Duration = Duration::from_secs(6);
-
-/// The blink half-period (~1.5 Hz).
-pub(super) const ATTENTION_BLINK_INTERVAL: Duration = Duration::from_millis(333);
+/// One-shot emphasis when a card first enters attention state. The persistent
+/// indicator/rail carries the state after this short, non-repeating cue.
+pub(super) const ATTENTION_FLASH_DURATION: Duration = Duration::from_millis(150);
+pub(super) const PROGRESS_SUCCESS_FLASH_DURATION: Duration = Duration::from_millis(300);
+pub(super) const PROGRESS_ERROR_FLASH_DURATION: Duration = Duration::from_millis(200);
 
 /// Card styling for the Session Overview composite (REQ-OV-12/14). A function
 /// (not a const) because the chrome colors follow the terminal theme's
@@ -1210,10 +1214,35 @@ pub(super) fn overview_card_style(metrics: OverviewMetrics) -> CardStyle {
 }
 
 /// Attention styling for an Overview tile with a pending interaction request.
-pub(super) fn overview_attention_card_style(metrics: OverviewMetrics) -> CardStyle {
+pub(super) fn overview_attention_card_style(
+    metrics: OverviewMetrics,
+    emphasized: bool,
+) -> CardStyle {
     CardStyle {
         focus_color: crate::chrome::rgba(crate::chrome::palette().dot_red),
         focus_width: crate::chrome::RING_ATTENTION * metrics.scale(),
+        focus_glow_width: if emphasized {
+            crate::chrome::GLOW_ATTENTION * metrics.scale()
+        } else {
+            0.0
+        },
+        ..overview_card_style(metrics)
+    }
+}
+
+/// Arrival-only attention cue for a tile whose blue selection/hover affordance
+/// must remain authoritative. It keeps the interaction ring color and width,
+/// and strengthens only its glow for the bounded attention flash.
+pub(super) fn overview_attention_arrival_card_style(
+    metrics: OverviewMetrics,
+    selected: bool,
+) -> CardStyle {
+    CardStyle {
+        focus_width: if selected {
+            metrics.card_focus_width
+        } else {
+            crate::chrome::RING_HOVER * metrics.scale()
+        },
         focus_glow_width: crate::chrome::GLOW_ATTENTION * metrics.scale(),
         ..overview_card_style(metrics)
     }
@@ -1317,6 +1346,7 @@ mod chrome_textures_tests {
         assert!(textures.sidebar_divider_tex.is_none());
         assert!(textures.sidebar_drop_tex.is_none());
         assert!(textures.sidebar_accent_tex.is_none());
+        assert!(textures.sidebar_progress_tex.is_none());
         assert!(textures.sidebar_rule_tex.is_none());
         assert!(textures.palette_scratch.is_none());
         assert!(textures.scrollbar_tex.is_none());

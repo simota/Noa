@@ -25,7 +25,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **DA / DSR responses** — DA1 `ESC[?62;4;22c`, cursor position report, etc.
 - **DEC private modes** — DECAWM, DECTCEM, DECCKM, DECNKM / DECPAM, DECLRMM, DECOM, etc.
 - **Mouse tracking** — X10 / 1000 / 1002 / 1003, encodings Legacy / UTF-8 (1005) / Urxvt (1015) / SGR (1006)
-- **OSC** — 0/2 (title, stack via 22/23), 7 (cwd), 8 (hyperlinks), 9/777 (notifications), 52 (clipboard, with policy), 4 / color family, 133 (shell integration marks)
+- **OSC** — 0/2 (title, stack via 22/23), 7 (cwd), 8 (hyperlinks), 9/777 (notifications), 9;4 (task progress), 52 (clipboard, with policy), 4 / color family, 133 (shell integration marks)
 - **Kitty graphics protocol** — image command parsing + image-layer rendering
 - **Sixel graphics** — parsing of `DCS Pa;Pb;Ph q ... ST`, Sixel rasterization, rendering through the existing image layer
 - **Kitty keyboard protocol** — full support for all 5 flags (disambiguate / event-types / alternate-keys / all-keys / associated-text), push / pop / set stack
@@ -43,8 +43,8 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **Command palette** — fuzzy (subsequence) search to run actions
 - **Search prompt** — incremental search UI
 - **Theme & settings overlay** — a theme/settings editor with live preview opened from `Settings…` (⌘,), writes back to config
-- **Sidebar (session list)** — per-window session cards, process badges, inline rename
-- **Agent attention** — classification of agent processes (claude, etc.), bell-to-attention escalation, blinking, Dock attention, git branch polling
+- **Sidebar (session list)** — per-window session cards, process badges, inline rename, OSC 9;4 determinate/indeterminate progress
+- **Agent attention** — agent-process classification, bell-to-attention escalation, categorical status rails, one-shot arrival emphasis, Dock attention
 - **About panel** — version + git hash + build date, bundled-icon resolution
 - **Confirmation dialogs** — paste protection / OSC 52 / close confirmation
 - **IME preedit** — underlined display of in-progress composition text

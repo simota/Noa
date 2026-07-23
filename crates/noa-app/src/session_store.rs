@@ -140,6 +140,8 @@ pub struct SessionCard {
     /// card's window gains focus.
     pub attention: bool,
     pub busy: bool,
+    /// Task progress reported by the foreground application via `OSC 9;4`.
+    pub progress: Option<noa_grid::TerminalProgress>,
     /// Per-tab agent-prompt auto approval is enabled for this card's tab.
     pub auto_approve_enabled: bool,
     /// Rolling audit of injected approvals, capped by the store.
@@ -216,6 +218,18 @@ pub enum SessionDelta {
     /// desktop notification (OSC 9/777) while its window was unfocused. Cleared
     /// alongside bells when the card's window gains focus.
     Attention { id: SessionCardId },
+    /// Replace or clear the pane's `OSC 9;4` task progress.
+    Progress {
+        id: SessionCardId,
+        progress: Option<noa_grid::TerminalProgress>,
+    },
+    /// One-shot cue that progress reached normal 100%. Kept separate from the
+    /// current progress state so a trailing Clear can still leave a success
+    /// flash without storing stale 100% progress on the card.
+    ProgressComplete { id: SessionCardId },
+    /// One-shot cue that progress entered Error. Like completion, this is
+    /// independent from the current state so a trailing Clear cannot erase it.
+    ProgressError { id: SessionCardId },
     /// Update the tty's foreground process name (session-metadata worker). Posted
     /// on a poll tick, so it carries only the process; other fields are untouched.
     Process {
@@ -242,6 +256,9 @@ impl SessionDelta {
             | SessionDelta::Rename { id, .. }
             | SessionDelta::Bell { id }
             | SessionDelta::Attention { id }
+            | SessionDelta::Progress { id, .. }
+            | SessionDelta::ProgressComplete { id }
+            | SessionDelta::ProgressError { id }
             | SessionDelta::Process { id, .. }
             | SessionDelta::Metrics { id, .. } => *id,
         }
@@ -277,6 +294,9 @@ impl SessionDelta {
             SessionDelta::Rename { name, .. } => SessionDelta::Rename { id, name },
             SessionDelta::Bell { .. } => SessionDelta::Bell { id },
             SessionDelta::Attention { .. } => SessionDelta::Attention { id },
+            SessionDelta::Progress { progress, .. } => SessionDelta::Progress { id, progress },
+            SessionDelta::ProgressComplete { .. } => SessionDelta::ProgressComplete { id },
+            SessionDelta::ProgressError { .. } => SessionDelta::ProgressError { id },
             SessionDelta::Process { process, .. } => SessionDelta::Process { id, process },
             SessionDelta::Metrics { metrics, .. } => SessionDelta::Metrics { id, metrics },
         }
@@ -588,6 +608,7 @@ impl SessionStore {
                                 unread_bell: false,
                                 attention: false,
                                 busy,
+                                progress: None,
                                 auto_approve_enabled: false,
                                 auto_approve_audit: VecDeque::new(),
                                 process: None,
@@ -630,6 +651,13 @@ impl SessionStore {
                     card.attention = true;
                 }
             }
+            SessionDelta::Progress { id, progress } => {
+                if let Some(card) = self.cards.get_mut(&id) {
+                    card.progress = progress;
+                }
+            }
+            SessionDelta::ProgressComplete { .. } => {}
+            SessionDelta::ProgressError { .. } => {}
             SessionDelta::Process { id, process } => {
                 if let Some(card) = self.cards.get_mut(&id) {
                     card.process = process;
@@ -930,6 +958,27 @@ mod tests {
             SessionDelta::Attention { id: old }.with_id(new),
             SessionDelta::Attention { id: new }
         );
+        let progress =
+            noa_grid::TerminalProgress::Normal(noa_grid::ProgressValue::new(42).unwrap());
+        assert_eq!(
+            SessionDelta::Progress {
+                id: old,
+                progress: Some(progress),
+            }
+            .with_id(new),
+            SessionDelta::Progress {
+                id: new,
+                progress: Some(progress),
+            }
+        );
+        assert_eq!(
+            SessionDelta::ProgressComplete { id: old }.with_id(new),
+            SessionDelta::ProgressComplete { id: new }
+        );
+        assert_eq!(
+            SessionDelta::ProgressError { id: old }.with_id(new),
+            SessionDelta::ProgressError { id: new }
+        );
         assert_eq!(
             SessionDelta::Process {
                 id: old,
@@ -1110,6 +1159,7 @@ mod tests {
             unread_bell: false,
             attention: false,
             busy: false,
+            progress: None,
             auto_approve_enabled: false,
             auto_approve_audit: VecDeque::new(),
             process: None,
@@ -1150,6 +1200,28 @@ mod tests {
             ..base
         };
         assert_eq!(status_dot(&attention), StatusDot::Red);
+    }
+
+    #[test]
+    fn progress_is_replaced_preserved_by_upsert_and_cleared() {
+        let mut store = SessionStore::new();
+        let id = card_id(1, 1);
+        store.apply(upsert(id, 1, "build"));
+        let progress =
+            noa_grid::TerminalProgress::Normal(noa_grid::ProgressValue::new(42).unwrap());
+        store.apply(SessionDelta::Progress {
+            id,
+            progress: Some(progress),
+        });
+        store.apply(upsert(id, 2, "build"));
+        assert_eq!(store.get(&id).unwrap().progress, Some(progress));
+
+        store.apply(SessionDelta::Progress { id, progress: None });
+        assert_eq!(store.get(&id).unwrap().progress, None);
+
+        store.apply(SessionDelta::ProgressComplete { id });
+        store.apply(SessionDelta::ProgressError { id });
+        assert_eq!(store.get(&id).unwrap().progress, None);
     }
 
     // FR-16: `Attention` sets the flag, an `Upsert` preserves it, and a window

@@ -6,6 +6,10 @@ use super::super::*;
 // self-contained.
 use crate::session_overview::overview_wheel_accum_on_show;
 
+fn overview_label_change_reflows_tiles(query: Option<&str>) -> bool {
+    query.is_some_and(|query| !query.is_empty())
+}
+
 impl App {
     pub(in crate::app) fn toggle_tab_overview(&mut self) {
         if let Some(next_visible) = tab_overview_visibility_after_dispatch(
@@ -241,6 +245,27 @@ impl App {
         }
     }
 
+    /// Invalidate an Overview label after its focused pane or searchable
+    /// session state changes. A live filter can add/remove a tab and shift
+    /// every later slot, so all currently matching tiles must be redrawn;
+    /// without a filter only the owning tab's title band changed.
+    pub(in crate::app) fn mark_overview_label_dirty(&mut self, tile_id: OverviewTileId) {
+        let reflows_tiles = overview_label_change_reflows_tiles(
+            self.overview_window
+                .as_ref()
+                .map(|overview| overview.search_query.as_str()),
+        );
+        if let Some(overview) = self.overview_window.as_ref() {
+            overview.source_tile_ids_cache.borrow_mut().take();
+        }
+        if reflows_tiles {
+            self.mark_all_overview_tiles_dirty();
+        } else {
+            self.mark_overview_tile_dirty(tile_id);
+        }
+        self.request_overview_redraw();
+    }
+
     pub(in crate::app) fn overview_redraw_decision_for_pane(
         &self,
         window_id: WindowId,
@@ -294,5 +319,17 @@ impl App {
             OVERVIEW_TILE_MIN_RENDER_INTERVAL,
             OVERVIEW_MAX_RENDER_TILES_PER_FRAME,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overview_label_change_reflows_tiles;
+
+    #[test]
+    fn overview_label_change_reflows_only_with_a_live_filter() {
+        assert!(!overview_label_change_reflows_tiles(None));
+        assert!(!overview_label_change_reflows_tiles(Some("")));
+        assert!(overview_label_change_reflows_tiles(Some("50%")));
     }
 }

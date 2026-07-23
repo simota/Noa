@@ -815,46 +815,6 @@ pub fn agent_display_name(kind: AgentKind, process: &str) -> &str {
     }
 }
 
-/// Whether an attention marker is in its **visible** phase (FR-A1). `elapsed`
-/// is the time since the attention onset; the marker blinks at a 50% duty cycle
-/// with a half-period of `interval` for the first `duration`, then settles to a
-/// steady on. Pure and unit-testable — the caller supplies the wall/monotonic
-/// elapsed so no clock is read here (mirrors the `now`-as-parameter rule).
-pub fn attention_blink_on(
-    elapsed: std::time::Duration,
-    duration: std::time::Duration,
-    interval: std::time::Duration,
-) -> bool {
-    if elapsed >= duration {
-        // Settled: steady visible until the window is focused (FR-16 clear).
-        return true;
-    }
-    let interval_ms = interval.as_millis().max(1);
-    let ticks = elapsed.as_millis() / interval_ms;
-    // Even half-periods are "on", odd are "off", so the marker starts visible.
-    ticks.is_multiple_of(2)
-}
-
-/// The elapsed time (since onset) of the next [`attention_blink_on`] phase
-/// boundary strictly after `elapsed`, clamped to `duration` (the settle
-/// instant, so the final partial half-period still gets a wake-up), or `None`
-/// once settled. Blink repaints must be scheduled at these boundaries — not at
-/// `now + interval` — because the visible phase is computed from the onset: an
-/// unaligned deadline paints every flip late and the duty cycle jitters.
-pub fn next_attention_blink_boundary(
-    elapsed: std::time::Duration,
-    duration: std::time::Duration,
-    interval: std::time::Duration,
-) -> Option<std::time::Duration> {
-    if elapsed >= duration {
-        return None;
-    }
-    let interval_ms = interval.as_millis().max(1);
-    let next_ms = (elapsed.as_millis() / interval_ms + 1) * interval_ms;
-    let boundary = std::time::Duration::from_millis(next_ms.min(u128::from(u64::MAX)) as u64);
-    Some(boundary.min(duration))
-}
-
 /// Truncate `s` tail-first to at most `max` characters, prefixing an ellipsis
 /// so the most-specific (rightmost) path segment stays visible (FR-2).
 fn truncate_tail(s: &str, max: usize) -> String {
@@ -1647,69 +1607,6 @@ mod tests {
         assert_eq!(bands.header.h, 0);
         assert_eq!(bands.toolbar.h, 20);
         assert_eq!(bands.viewport.h, 0);
-    }
-
-    // AC-A1 (FR-A1): the blink is visible at onset, hidden a half-period in,
-    // and steady-visible once the blink window elapses.
-    #[test]
-    fn attention_blink_on_toggles_then_settles() {
-        use std::time::Duration;
-        let dur = Duration::from_secs(6);
-        let iv = Duration::from_millis(333);
-
-        // At onset and just after → visible.
-        assert!(attention_blink_on(Duration::ZERO, dur, iv));
-        assert!(attention_blink_on(Duration::from_millis(100), dur, iv));
-        // One half-period in → hidden.
-        assert!(!attention_blink_on(Duration::from_millis(400), dur, iv));
-        // Two half-periods in → visible again.
-        assert!(attention_blink_on(Duration::from_millis(700), dur, iv));
-        // Past the blink window → steady visible regardless of phase.
-        assert!(attention_blink_on(dur, dur, iv));
-        assert!(attention_blink_on(Duration::from_secs(60), dur, iv));
-        // Degenerate zero interval never divides by zero.
-        assert!(attention_blink_on(
-            Duration::from_millis(100),
-            dur,
-            Duration::ZERO
-        ));
-    }
-
-    // FR-A1: the next blink wake-up lands exactly on the onset-relative phase
-    // boundary (not `now + interval`), is clamped to the settle instant, and
-    // stops once settled.
-    #[test]
-    fn next_attention_blink_boundary_is_phase_aligned_and_clamped() {
-        use std::time::Duration;
-        let dur = Duration::from_secs(6);
-        let iv = Duration::from_millis(333);
-        // Mid-phase: the next boundary is the end of the current half-period.
-        assert_eq!(
-            next_attention_blink_boundary(Duration::from_millis(100), dur, iv),
-            Some(Duration::from_millis(333))
-        );
-        // Exactly on a boundary: the *next* one, never the same instant.
-        assert_eq!(
-            next_attention_blink_boundary(Duration::from_millis(333), dur, iv),
-            Some(Duration::from_millis(666))
-        );
-        // The last partial half-period clamps to the settle instant so the
-        // final repaint still gets a wake-up.
-        assert_eq!(
-            next_attention_blink_boundary(Duration::from_millis(5994), dur, iv),
-            Some(dur)
-        );
-        // Settled: no further boundaries.
-        assert_eq!(next_attention_blink_boundary(dur, dur, iv), None);
-        assert_eq!(
-            next_attention_blink_boundary(Duration::from_secs(60), dur, iv),
-            None
-        );
-        // Degenerate zero interval never divides by zero.
-        assert_eq!(
-            next_attention_blink_boundary(Duration::from_millis(1), dur, Duration::ZERO),
-            Some(Duration::from_millis(2))
-        );
     }
 
     // AC-16b (FR-14): the eligibility predicate excludes quick-terminal windows.

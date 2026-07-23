@@ -56,6 +56,11 @@ pub(super) struct TerminalOutput {
     pub(super) pending_clipboard_writes: Vec<String>,
     pub(super) pending_clipboard_reads: Vec<String>,
     pub(super) pending_notifications: Vec<noa_grid::Notification>,
+    /// Last `OSC 9;4` change parsed in this batch, if any.
+    pub(super) progress_update: Option<noa_grid::ProgressUpdate>,
+    /// Last completion/error cue in this batch. A trailing Clear preserves the
+    /// cue, while a later transition replaces an earlier one.
+    pub(super) progress_cue: Option<noa_grid::ProgressCue>,
     pub(super) synchronized_output: bool,
     /// Trailing-flush deadline owed by this feed's throttled overview
     /// publish (Fix B defect 1: a burst's final feed can land inside the
@@ -317,6 +322,8 @@ pub(super) fn feed_terminal_batch<T: AsRef<[u8]>>(
         pending_clipboard_writes: term.take_pending_clipboard_writes(),
         pending_clipboard_reads: term.take_pending_clipboard_reads(),
         pending_notifications: term.take_pending_notifications(),
+        progress_update: term.take_pending_progress_update(),
+        progress_cue: term.take_pending_progress_cue(),
         synchronized_output: term.modes.synchronized_output(),
         overview_publish_pending,
         sidebar_upsert: None,

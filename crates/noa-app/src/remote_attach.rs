@@ -320,6 +320,17 @@ trait ConnectionNotifier: Send + Sync + 'static {
     /// a remote pane's bell escalates to an attention request / sidebar
     /// unread flag the same way a local one does.
     fn bell(&self) {}
+
+    /// An `OSC 9;4` task-progress change was drained from remote output.
+    fn progress(&self, _update: noa_grid::ProgressUpdate) {}
+
+    /// Normal progress reached 100%, independently of the final progress
+    /// state drained from the same remote batch.
+    fn progress_completed(&self) {}
+
+    /// Progress entered Error, independently of the final state drained from
+    /// the same remote batch.
+    fn progress_error(&self) {}
 }
 
 #[derive(Default)]
@@ -406,6 +417,36 @@ impl ConnectionNotifier for WinitConnectionNotifier {
         let _ = self
             .proxy
             .send_event(UserEvent::SessionDelta(SessionDelta::Bell { id }));
+    }
+
+    fn progress(&self, update: noa_grid::ProgressUpdate) {
+        let id = SessionCardId::new(SessionWindowId(u64::from(self.window_id)), self.pane_id);
+        let progress = match update {
+            noa_grid::ProgressUpdate::Clear => None,
+            noa_grid::ProgressUpdate::Set(progress) => Some(progress),
+        };
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SessionDelta(SessionDelta::Progress {
+                id,
+                progress,
+            }));
+    }
+
+    fn progress_completed(&self) {
+        let id = SessionCardId::new(SessionWindowId(u64::from(self.window_id)), self.pane_id);
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SessionDelta(SessionDelta::ProgressComplete {
+                id,
+            }));
+    }
+
+    fn progress_error(&self) {
+        let id = SessionCardId::new(SessionWindowId(u64::from(self.window_id)), self.pane_id);
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SessionDelta(SessionDelta::ProgressError { id }));
     }
 }
 
@@ -1677,8 +1718,13 @@ fn feed_remote_seed<N: ConnectionNotifier>(
     let _ = terminal.take_pending_writes();
     let _ = terminal.take_pending_clipboard_reads();
     let _ = terminal.take_pending_clipboard_writes();
+    let progress = terminal.take_pending_progress_update();
+    let _ = terminal.take_pending_progress_cue();
     notifier.publish_overview(&terminal);
     drop(terminal);
+    if let Some(progress) = progress {
+        notifier.progress(progress);
+    }
     notifier.redraw();
 }
 
@@ -1707,6 +1753,8 @@ fn feed_remote_bytes<N: ConnectionNotifier>(
     // extraction (`io_thread::feed::feed_terminal_batch`) — a remote pane's
     // bell must escalate/flag even while the sidebar or window is hidden.
     let bell = terminal.take_pending_bell();
+    let progress = terminal.take_pending_progress_update();
+    let progress_cue = terminal.take_pending_progress_cue();
     let _ = terminal.take_pending_writes();
     let _ = terminal.take_pending_clipboard_reads();
     let _ = terminal.take_pending_clipboard_writes();
@@ -1714,6 +1762,14 @@ fn feed_remote_bytes<N: ConnectionNotifier>(
     drop(terminal);
     if bell {
         notifier.bell();
+    }
+    match progress_cue {
+        Some(noa_grid::ProgressCue::Complete) => notifier.progress_completed(),
+        Some(noa_grid::ProgressCue::Error) => notifier.progress_error(),
+        None => {}
+    }
+    if let Some(progress) = progress {
+        notifier.progress(progress);
     }
     notifier.redraw();
     RemoteFeedOutcome {
@@ -2330,6 +2386,9 @@ mod tests {
         overview: Option<RemoteOverviewPublisher>,
         redraws_with_snapshot: Arc<AtomicUsize>,
         bells: Arc<AtomicUsize>,
+        progress_updates: Arc<Mutex<Vec<noa_grid::ProgressUpdate>>>,
+        progress_completions: Arc<AtomicUsize>,
+        progress_errors: Arc<AtomicUsize>,
     }
 
     impl ConnectionNotifier for FakeNotifier {
@@ -2358,6 +2417,18 @@ mod tests {
 
         fn bell(&self) {
             self.bells.fetch_add(1, Ordering::AcqRel);
+        }
+
+        fn progress(&self, update: noa_grid::ProgressUpdate) {
+            self.progress_updates.lock().push(update);
+        }
+
+        fn progress_completed(&self) {
+            self.progress_completions.fetch_add(1, Ordering::AcqRel);
+        }
+
+        fn progress_error(&self) {
+            self.progress_errors.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -2635,6 +2706,133 @@ mod tests {
         assert_eq!(remote_terminal.scrollback_text(), expected_text);
         drop(remote_terminal);
         assert!(handle.shutdown_and_join_timeout(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn remote_seed_publishes_replaced_and_cleared_task_progress() {
+        let size = GridSize::new(4, 2);
+        let mut source = Terminal::new(size);
+        let mut source_stream = noa_vt::Stream::new();
+        source_stream.feed(b"\x1b]9;4;4;37\x07", &mut source);
+
+        let replica = terminal_with_size(size);
+        let mut replica_stream = noa_vt::Stream::new();
+        {
+            let mut replica = replica.lock();
+            replica_stream.feed(b"\x1b]9;4;2;80\x07", &mut *replica);
+            let _ = replica.take_pending_progress_update();
+        }
+        let notifier = FakeNotifier::default();
+
+        feed_remote_seed(
+            &mut replica_stream,
+            &replica,
+            &source.synthetic_seed(),
+            size,
+            &notifier,
+        );
+        assert_eq!(replica.lock().progress(), source.progress());
+        assert_eq!(
+            notifier.progress_updates.lock().as_slice(),
+            &[noa_grid::ProgressUpdate::Set(source.progress().unwrap())]
+        );
+
+        source_stream.feed(b"\x1b]9;4;0;0\x07", &mut source);
+        feed_remote_seed(
+            &mut replica_stream,
+            &replica,
+            &source.synthetic_seed(),
+            size,
+            &notifier,
+        );
+        assert_eq!(replica.lock().progress(), None);
+        assert_eq!(
+            notifier.progress_updates.lock().as_slice(),
+            &[
+                noa_grid::ProgressUpdate::Set(noa_grid::TerminalProgress::Paused(Some(
+                    noa_grid::ProgressValue::new(37).unwrap(),
+                ))),
+                noa_grid::ProgressUpdate::Clear,
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_batch_preserves_completion_before_a_trailing_clear() {
+        let size = GridSize::new(4, 2);
+        let terminal = terminal_with_size(size);
+        let mut stream = noa_vt::Stream::new();
+        let notifier = FakeNotifier::default();
+
+        feed_remote_bytes(
+            &mut stream,
+            &terminal,
+            b"\x1b]9;4;1;100\x07\x1b]9;4;0\x07",
+            &notifier,
+        );
+
+        assert_eq!(terminal.lock().progress(), None);
+        assert_eq!(notifier.progress_completions.load(Ordering::Acquire), 1);
+        assert_eq!(notifier.progress_errors.load(Ordering::Acquire), 0);
+        assert_eq!(
+            notifier.progress_updates.lock().as_slice(),
+            &[noa_grid::ProgressUpdate::Clear]
+        );
+    }
+
+    #[test]
+    fn remote_batch_preserves_error_before_a_trailing_clear() {
+        let size = GridSize::new(4, 2);
+        let terminal = terminal_with_size(size);
+        let mut stream = noa_vt::Stream::new();
+        let notifier = FakeNotifier::default();
+
+        feed_remote_bytes(
+            &mut stream,
+            &terminal,
+            b"\x1b]9;4;2\x07\x1b]9;4;0\x07",
+            &notifier,
+        );
+
+        assert_eq!(terminal.lock().progress(), None);
+        assert_eq!(notifier.progress_completions.load(Ordering::Acquire), 0);
+        assert_eq!(notifier.progress_errors.load(Ordering::Acquire), 1);
+        assert_eq!(
+            notifier.progress_updates.lock().as_slice(),
+            &[noa_grid::ProgressUpdate::Clear]
+        );
+    }
+
+    #[test]
+    fn remote_seed_sync_does_not_publish_transition_cues() {
+        let size = GridSize::new(4, 2);
+        let mut source = Terminal::new(size);
+        let mut source_stream = noa_vt::Stream::new();
+        let replica = terminal_with_size(size);
+        let mut replica_stream = noa_vt::Stream::new();
+        let notifier = FakeNotifier::default();
+
+        source_stream.feed(b"\x1b]9;4;1;100\x07", &mut source);
+        feed_remote_seed(
+            &mut replica_stream,
+            &replica,
+            &source.synthetic_seed(),
+            size,
+            &notifier,
+        );
+        source_stream.feed(b"\x1b]9;4;2\x07", &mut source);
+        feed_remote_seed(
+            &mut replica_stream,
+            &replica,
+            &source.synthetic_seed(),
+            size,
+            &notifier,
+        );
+
+        assert_eq!(replica.lock().progress(), source.progress());
+        assert_eq!(notifier.progress_completions.load(Ordering::Acquire), 0);
+        assert_eq!(notifier.progress_errors.load(Ordering::Acquire), 0);
+        assert_eq!(notifier.progress_updates.lock().len(), 2);
     }
 
     #[test]

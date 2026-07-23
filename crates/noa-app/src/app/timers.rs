@@ -643,6 +643,37 @@ impl App {
         })
     }
 
+    /// Flush the debounced native-tab-title re-assert (reviewer P2 round 2 on
+    /// the native-tab-title relayout fix): `relayout_and_resize_window` only
+    /// pushes `native_tab_title_flush_deadline` forward rather than pushing
+    /// `NSWindowTab.title` inline or on every `about_to_wait` pass, because it
+    /// runs once per `Resized` event during a divider drag — either of those
+    /// would cost O(events × windows) across a drag with many tabs. Standard
+    /// `about_to_wait` timer shape: `None` pending → report no deadline;
+    /// still inside the debounce window → report the deadline back so
+    /// `about_to_wait` arms `WaitUntil` and the flush isn't stranded waiting
+    /// for the next unrelated event; due → clear it and do the single
+    /// all-window pass. A continuous drag keeps pushing the deadline back
+    /// (see `relayout_and_resize_window`), so it collapses to exactly one
+    /// pass after the drag goes quiet; a one-off relayout (font/sidebar/
+    /// split) still flushes `NATIVE_TAB_TITLE_FLUSH_DEBOUNCE` later even if
+    /// the app goes idle immediately after.
+    #[cfg(target_os = "macos")]
+    pub(super) fn tick_native_tab_titles(&mut self) -> Option<Instant> {
+        let deadline = self.native_tab_title_flush_deadline?;
+        let now = Instant::now();
+        if now < deadline {
+            return Some(deadline);
+        }
+        self.native_tab_title_flush_deadline = None;
+        for state in self.windows.values() {
+            if !state.title.is_empty() {
+                crate::macos_window::set_native_tab_title(&state.window, &state.title);
+            }
+        }
+        None
+    }
+
     /// Fire any window's due grid-reflow throttle (item 1) and report the
     /// earliest pending trailing wake-up. Each window's `resize_throttle`
     /// coalesced its mid-drag relayouts; this delivers the trailing apply —

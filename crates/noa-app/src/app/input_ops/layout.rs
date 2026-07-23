@@ -70,6 +70,23 @@ impl App {
                 crate::macos_window::install_titlebar_backdrop(&state.window, gpu.theme.default_bg);
             }
         }
+        // AppKit re-derives a tab button's label from its window's `.title`
+        // on every tab-group layout pass (macos_window.rs:69), and the direct
+        // AppKit calls above (background color, titlebar backdrop) can
+        // retrigger one — so a relayout here can silently regress *another*
+        // window's already-correct tab title back to a stale cached value.
+        // Push the debounce deadline back rather than re-asserting every
+        // window's `NSWindowTab.title` inline: this function runs once per
+        // `Resized` event during a divider drag, and even a per-iteration
+        // flush (round 1 of this fix) is O(events × windows) across a drag
+        // with many tabs (reviewer P2 round 2). `tick_native_tab_titles`
+        // (pumped in `about_to_wait`) fires the single all-window pass only
+        // once the drag has gone quiet for `NATIVE_TAB_TITLE_FLUSH_DEBOUNCE`.
+        #[cfg(target_os = "macos")]
+        {
+            self.native_tab_title_flush_deadline =
+                Some(Instant::now() + NATIVE_TAB_TITLE_FLUSH_DEBOUNCE);
+        }
 
         let Some(metrics) = self.gpu.as_ref().map(|gpu| gpu.font.metrics()) else {
             return;

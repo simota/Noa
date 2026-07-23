@@ -646,6 +646,11 @@ impl App {
             Self::session_card_id(source_window, pane),
             Self::session_card_id(dest_window, pane),
         );
+        rekey_card_entry(
+            &mut self.progress_flashes,
+            Self::session_card_id(source_window, pane),
+            Self::session_card_id(dest_window, pane),
+        );
         // P3 (review round 9): the moved pane's auto-approve flash follows it
         // too, for the same reason as `attention_flash_until` above — it's keyed by
         // the same `SessionCardId` the store rekey just changed, but lives on

@@ -5,6 +5,65 @@ use super::*;
 const SIDEBAR_CARD_RULE_HEIGHT: f32 = 1.0;
 const SIDEBAR_CARD_RULE_BORDER_MIX: f32 = 0.34;
 const SIDEBAR_CARD_STATIC_FILL_OPACITY: f32 = 0.0;
+const SIDEBAR_CARD_FLASH_FILL_OPACITY: f32 = 1.0;
+const SIDEBAR_PROGRESS_HEIGHT: f32 = 3.0;
+const SIDEBAR_PROGRESS_INSET_X: f32 = 5.0;
+
+/// Filled portions of the bottom progress track. Determinate progress uses a
+/// validated percentage; indeterminate progress uses a static three-segment
+/// silhouette so it remains meaningful without a continuous animation loop.
+fn progress_fill_rects(track: SidebarRect, kind: ProgressBarKind) -> Vec<SidebarRect> {
+    if track.w == 0 || track.h == 0 {
+        return Vec::new();
+    }
+    match kind {
+        ProgressBarKind::Determinate(percent) => {
+            let width = ((u64::from(track.w) * u64::from(percent) + 50) / 100) as u32;
+            (width > 0)
+                .then(|| SidebarRect::new(track.x, track.y, width.min(track.w), track.h))
+                .into_iter()
+                .collect()
+        }
+        ProgressBarKind::Indeterminate => {
+            let unit = (track.w / 7).max(1);
+            [0, 3, 6]
+                .into_iter()
+                .filter_map(|index| {
+                    let x = track.x.saturating_add(index * unit);
+                    let right = x.saturating_add(unit).min(track.right());
+                    (right > x).then(|| SidebarRect::new(x, track.y, right - x, track.h))
+                })
+                .collect()
+        }
+    }
+}
+
+fn progress_track_rect(card: SidebarRect, scale: f32) -> SidebarRect {
+    let inset = (SIDEBAR_PROGRESS_INSET_X * scale).round() as u32;
+    let track_h = ((SIDEBAR_PROGRESS_HEIGHT * scale).round().max(1.0) as u32).min(card.h);
+    SidebarRect::new(
+        card.x.saturating_add(inset),
+        card.bottom().saturating_sub(track_h),
+        card.w.saturating_sub(inset.saturating_mul(2)),
+        track_h,
+    )
+}
+
+fn sidebar_model_has_progress(model: &SidebarDrawModel) -> bool {
+    model.cards.iter().any(|card| card.progress_bar.is_some())
+        || model
+            .dragging
+            .as_ref()
+            .is_some_and(|card| card.progress_bar.is_some())
+}
+
+fn sidebar_card_fill_opacity(flash_fill: bool) -> f32 {
+    if flash_fill {
+        SIDEBAR_CARD_FLASH_FILL_OPACITY
+    } else {
+        SIDEBAR_CARD_STATIC_FILL_OPACITY
+    }
+}
 
 /// Resolve categorical status-rail geometry. Activity is deliberately broken
 /// into three equal-looking segments so it cannot be mistaken for a 100%
@@ -105,6 +164,103 @@ fn rasterize_runs(
     renderer.set_clear_color(clear_color);
     renderer.sync_atlas(device, queue, font);
     renderer.draw(device, queue, view);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_sidebar_progress(
+    renderer: &mut Renderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    font: &mut FontGrid,
+    theme: &Theme,
+    pipeline: &CardPipeline,
+    band_view: &wgpu::TextureView,
+    band_size: PixelSize,
+    progress_view: &wgpu::TextureView,
+    card_w: u32,
+    scale: f32,
+    panel_bg: Rgb,
+    card_rect: SidebarRect,
+    progress: ProgressBar,
+) {
+    let track = progress_track_rect(card_rect, scale);
+    if track.w == 0 || track.h == 0 {
+        return;
+    }
+    let scratch_size = PixelSize {
+        w: card_w.max(1),
+        h: (SIDEBAR_PROGRESS_HEIGHT * scale).round().max(1.0) as u32,
+    };
+    let track_color = mix_rgb(panel_bg, chrome().divider, 0.58);
+    rasterize_runs(
+        renderer,
+        device,
+        queue,
+        font,
+        theme,
+        progress_view,
+        scratch_size,
+        GridSize { cols: 1, rows: 1 },
+        track_color,
+        1.0,
+        &[],
+    );
+    let style = |color: Rgb| CardStyle {
+        background: rgb_to_rgba(color),
+        border_color: [0.0; 4],
+        focus_color: [0.0; 4],
+        corner_radius: track.h as f32 / 2.0,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: 0.0,
+    };
+    pipeline.overlay_texture_cards(
+        device,
+        queue,
+        band_view,
+        band_size,
+        &style(track_color),
+        &[CardTexturePlacement {
+            texture_view: progress_view,
+            x: track.x,
+            y: track.y,
+            w: track.w,
+            h: track.h,
+            selected: false,
+        }],
+    );
+    rasterize_runs(
+        renderer,
+        device,
+        queue,
+        font,
+        theme,
+        progress_view,
+        scratch_size,
+        GridSize { cols: 1, rows: 1 },
+        progress.color,
+        1.0,
+        &[],
+    );
+    let placements: Vec<_> = progress_fill_rects(track, progress.kind)
+        .into_iter()
+        .map(|rect| CardTexturePlacement {
+            texture_view: progress_view,
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+            selected: false,
+        })
+        .collect();
+    pipeline.overlay_texture_cards(
+        device,
+        queue,
+        band_view,
+        band_size,
+        &style(progress.color),
+        &placements,
+    );
 }
 
 /// Ensure `slot` holds a scratch render texture of exactly `size`/`format`,
@@ -723,14 +879,36 @@ fn draw_sidebar_new_button(
 
 /// Pass 2 — each fully-visible card as text-only content over the seamless
 /// band, plus the categorical per-card status rail along
-/// its left edge. The card texture clear is transparent, so rows do not create
-/// a separate rectangular surface; status bars and rules carry the boundaries.
+/// its left edge. Static card texture clears are transparent, so rows do not
+/// create a separate rectangular surface; a bounded one-shot cue temporarily
+/// makes its selected background opaque before this composite.
 fn draw_sidebar_cards(
     gpu: &mut GpuState,
     model: &SidebarDrawModel,
     band_size: PixelSize,
     surface_format: wgpu::TextureFormat,
 ) {
+    // The dragged card is removed from `model.cards`. Ensure its progress
+    // scratch before the static-card early return so a one-card sidebar can
+    // start reporting progress while that sole card is being dragged.
+    let progress_h = (SIDEBAR_PROGRESS_HEIGHT * model.scale).round().max(1.0) as u32;
+    let any_progress = sidebar_model_has_progress(model);
+    if any_progress
+        && ensure_scratch(
+            &mut gpu.chrome_textures.sidebar_progress_tex,
+            &gpu.device,
+            PixelSize {
+                w: model.card_w.max(1),
+                h: progress_h,
+            },
+            surface_format,
+            "noa-sidebar-progress",
+        )
+    {
+        #[cfg(debug_assertions)]
+        gpu.chrome_textures.record_rebuild();
+    }
+
     if model.cards.is_empty() {
         return;
     }
@@ -781,6 +959,11 @@ fn draw_sidebar_cards(
         .sidebar_accent_tex
         .as_ref()
         .map(|t| &t.2);
+    let progress_view = gpu
+        .chrome_textures
+        .sidebar_progress_tex
+        .as_ref()
+        .map(|t| &t.2);
     let card_size = PixelSize {
         w: model.card_w,
         h: model.card_h,
@@ -797,7 +980,7 @@ fn draw_sidebar_cards(
             card_size,
             card_draw.grid,
             card_draw.bg,
-            SIDEBAR_CARD_STATIC_FILL_OPACITY,
+            sidebar_card_fill_opacity(card_draw.flash_fill),
             &card_draw.runs,
         );
         // Attention keeps the same flat row treatment as Selected; the red
@@ -877,6 +1060,27 @@ fn draw_sidebar_cards(
                     &placements,
                 );
             }
+        }
+
+        if let Some(progress) = card_draw.progress_bar
+            && let Some(progress_view) = progress_view
+        {
+            draw_sidebar_progress(
+                renderer,
+                &gpu.device,
+                &gpu.queue,
+                &mut gpu.sidebar_font,
+                theme,
+                pipeline,
+                band_view,
+                band_size,
+                progress_view,
+                model.card_w,
+                model.scale,
+                panel_bg,
+                card_draw.rect,
+                progress,
+            );
         }
     }
 }
@@ -1064,6 +1268,11 @@ fn draw_sidebar_drag(
         focus_glow_width: 0.0,
     };
     let theme = active_theme(&gpu.theme, &gpu.preview_theme);
+    let progress_view = gpu
+        .chrome_textures
+        .sidebar_progress_tex
+        .as_ref()
+        .map(|texture| &texture.2);
     let (Some(renderer), Some((_, _, band_view)), Some(card), Some((_, _, card_view))) = (
         gpu.chrome_textures.sidebar_renderer.as_mut(),
         gpu.chrome_textures.sidebar_band.as_ref(),
@@ -1103,6 +1312,26 @@ fn draw_sidebar_drag(
             selected: true,
         }],
     );
+    if let Some(progress) = drag.progress_bar
+        && let Some(progress_view) = progress_view
+    {
+        draw_sidebar_progress(
+            renderer,
+            &gpu.device,
+            &gpu.queue,
+            &mut gpu.sidebar_font,
+            theme,
+            &card.pipeline,
+            band_view,
+            band_size,
+            progress_view,
+            model.card_w,
+            model.scale,
+            panel_bg,
+            drag.rect,
+            progress,
+        );
+    }
 }
 
 /// Pass 3 — the `…` menu popup, composited above the cards.
@@ -1186,9 +1415,11 @@ mod tests {
                 rect: SidebarRect::new(8, 40, 216, 120),
                 grid: GridSize { cols: 24, rows: 8 },
                 bg: Rgb::new(10, 11, 12),
+                flash_fill: false,
                 selected: true,
                 attention: false,
                 status_rail: None,
+                progress_bar: None,
                 runs: vec![SidebarTextRun::new(
                     1,
                     1,
@@ -1229,6 +1460,20 @@ mod tests {
     }
 
     #[test]
+    fn one_shot_card_fill_is_opaque_while_static_cards_remain_text_only() {
+        assert_eq!(
+            sidebar_card_fill_opacity(false),
+            SIDEBAR_CARD_STATIC_FILL_OPACITY
+        );
+        assert_eq!(
+            sidebar_card_fill_opacity(true),
+            SIDEBAR_CARD_FLASH_FILL_OPACITY
+        );
+        assert_eq!(sidebar_card_fill_opacity(false), 0.0);
+        assert_eq!(sidebar_card_fill_opacity(true), 1.0);
+    }
+
+    #[test]
     fn status_rail_geometry_distinguishes_activity_bell_and_attention() {
         let card = SidebarRect::new(8, 20, 216, 100);
         assert_eq!(
@@ -1262,6 +1507,46 @@ mod tests {
     }
 
     #[test]
+    fn progress_geometry_is_proportional_or_static_segmented() {
+        let track = SidebarRect::new(5, 97, 70, 3);
+        assert_eq!(
+            progress_fill_rects(track, ProgressBarKind::Determinate(42)),
+            vec![SidebarRect::new(5, 97, 29, 3)]
+        );
+        assert!(progress_fill_rects(track, ProgressBarKind::Determinate(0)).is_empty());
+        assert_eq!(
+            progress_fill_rects(track, ProgressBarKind::Indeterminate),
+            vec![
+                SidebarRect::new(5, 97, 10, 3),
+                SidebarRect::new(35, 97, 10, 3),
+                SidebarRect::new(65, 97, 10, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn progress_track_stays_inside_a_short_clipped_card() {
+        let card = SidebarRect::new(8, 40, 216, 1);
+        assert_eq!(
+            progress_track_rect(card, 1.0),
+            SidebarRect::new(13, 40, 206, 1)
+        );
+    }
+
+    #[test]
+    fn dragged_progress_card_requires_progress_scratch() {
+        let mut model = cache_model();
+        let mut drag = model.cards.remove(0);
+        drag.progress_bar = Some(ProgressBar {
+            kind: ProgressBarKind::Determinate(50),
+            color: Rgb::new(1, 2, 3),
+        });
+        model.dragging = Some(drag);
+
+        assert!(sidebar_model_has_progress(&model));
+    }
+
+    #[test]
     fn identical_sidebar_raster_key_hits() {
         let key = cache_key(cache_model());
         let next = key.clone();
@@ -1276,12 +1561,18 @@ mod tests {
         let previous = cache_key(model.clone());
         let mut changed_hover = model.clone();
         changed_hover.new_button_hover = true;
+        let mut changed_flash = model.clone();
+        changed_flash.cards[0].flash_fill = true;
         let mut changed_text = model;
         changed_text.runs[0].text.push_str(" changed");
 
         assert!(!sidebar_cache_hit(
             Some(&previous),
             &cache_key(changed_hover)
+        ));
+        assert!(!sidebar_cache_hit(
+            Some(&previous),
+            &cache_key(changed_flash)
         ));
         assert!(!sidebar_cache_hit(
             Some(&previous),

@@ -135,6 +135,9 @@ pub(super) struct ChromeTextures {
     /// Reused scratch texture for the categorical per-card status rail,
     /// composited along a card's left edge and refilled with each state color.
     pub(super) sidebar_accent_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
+    /// Reused solid-color scratch for the actual `OSC 9;4` progress track and
+    /// fill drawn along the bottom of session cards.
+    pub(super) sidebar_progress_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// Reused scratch texture for subtle horizontal rules between flat sidebar
     /// card rows.
     pub(super) sidebar_rule_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
@@ -179,6 +182,7 @@ impl ChromeTextures {
         self.sidebar_divider_tex = None;
         self.sidebar_drop_tex = None;
         self.sidebar_accent_tex = None;
+        self.sidebar_progress_tex = None;
         self.sidebar_rule_tex = None;
         self.palette_scratch = None;
         self.scrollbar_tex = None;
@@ -1176,6 +1180,8 @@ pub(super) const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 /// One-shot emphasis when a card first enters attention state. The persistent
 /// indicator/rail carries the state after this short, non-repeating cue.
 pub(super) const ATTENTION_FLASH_DURATION: Duration = Duration::from_millis(150);
+pub(super) const PROGRESS_SUCCESS_FLASH_DURATION: Duration = Duration::from_millis(300);
+pub(super) const PROGRESS_ERROR_FLASH_DURATION: Duration = Duration::from_millis(200);
 
 /// Card styling for the Session Overview composite (REQ-OV-12/14). A function
 /// (not a const) because the chrome colors follow the terminal theme's
@@ -1308,6 +1314,7 @@ mod chrome_textures_tests {
         assert!(textures.sidebar_divider_tex.is_none());
         assert!(textures.sidebar_drop_tex.is_none());
         assert!(textures.sidebar_accent_tex.is_none());
+        assert!(textures.sidebar_progress_tex.is_none());
         assert!(textures.sidebar_rule_tex.is_none());
         assert!(textures.palette_scratch.is_none());
         assert!(textures.scrollbar_tex.is_none());

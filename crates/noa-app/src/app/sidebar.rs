@@ -67,6 +67,7 @@ const SIDEBAR_CARD_SELECTED_BG_MIX: f32 = 0.20;
 const SIDEBAR_CARD_HOVER_BG_MIX: f32 = 0.10;
 const SIDEBAR_CARD_AUTO_FLASH_ACCENT_MIX: f32 = 0.12;
 const SIDEBAR_CARD_ATTENTION_FLASH_MIX: f32 = 0.10;
+const SIDEBAR_CARD_PROGRESS_FLASH_MIX: f32 = 0.12;
 
 // Toolbar `+` button chrome (logical px). Borderless: just the `+` glyph at
 // rest, with a subtle rounded fill + brighter glyph on hover.
@@ -158,6 +159,42 @@ struct StatusRail {
     color: Rgb,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProgressBarKind {
+    Determinate(u8),
+    Indeterminate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ProgressBar {
+    kind: ProgressBarKind,
+    color: Rgb,
+}
+
+fn card_progress_bar(card: &SessionCard) -> Option<ProgressBar> {
+    use noa_grid::TerminalProgress;
+    let progress = card.progress?;
+    let (kind, color) = match progress {
+        TerminalProgress::Normal(value) => {
+            (ProgressBarKind::Determinate(value.get()), chrome().dot_blue)
+        }
+        TerminalProgress::Error(value) => (
+            value.map_or(ProgressBarKind::Indeterminate, |value| {
+                ProgressBarKind::Determinate(value.get())
+            }),
+            chrome().dot_red,
+        ),
+        TerminalProgress::Indeterminate => (ProgressBarKind::Indeterminate, chrome().dot_blue),
+        TerminalProgress::Paused(value) => (
+            value.map_or(ProgressBarKind::Indeterminate, |value| {
+                ProgressBarKind::Determinate(value.get())
+            }),
+            chrome().dot_yellow,
+        ),
+    };
+    Some(ProgressBar { kind, color })
+}
+
 /// The status rail along a card's left edge. Precedence mirrors
 /// [`status_dot`]: attention > bell > busy > idle.
 fn card_status_rail(card: &SessionCard) -> Option<StatusRail> {
@@ -218,12 +255,26 @@ fn sidebar_auto_flash_card_bg(panel_bg: Rgb) -> Rgb {
     )
 }
 
-fn sidebar_attention_flash_card_bg(panel_bg: Rgb) -> Rgb {
-    mix_rgb(
-        sidebar_card_bg(panel_bg),
-        chrome().dot_red,
-        SIDEBAR_CARD_ATTENTION_FLASH_MIX,
-    )
+fn sidebar_attention_flash_card_bg(panel_bg: Rgb, selected: bool) -> Rgb {
+    let base = if selected {
+        sidebar_selected_card_bg(panel_bg)
+    } else {
+        sidebar_card_bg(panel_bg)
+    };
+    mix_rgb(base, chrome().dot_red, SIDEBAR_CARD_ATTENTION_FLASH_MIX)
+}
+
+fn sidebar_progress_flash_card_bg(panel_bg: Rgb, selected: bool, kind: ProgressFlashKind) -> Rgb {
+    let base = if selected {
+        sidebar_selected_card_bg(panel_bg)
+    } else {
+        sidebar_card_bg(panel_bg)
+    };
+    let accent = match kind {
+        ProgressFlashKind::Success => chrome().dot_green,
+        ProgressFlashKind::Error => chrome().dot_red,
+    };
+    mix_rgb(base, accent, SIDEBAR_CARD_PROGRESS_FLASH_MIX)
 }
 
 /// A fixed-slot status indicator with shape and color redundancy. The Nerd Font
@@ -288,6 +339,10 @@ struct SidebarCardDraw {
     rect: SidebarRect,
     grid: GridSize,
     bg: Rgb,
+    /// The selected `bg` is normally text-only over the seamless band. A
+    /// bounded arrival/progress cue sets this so the color becomes an actual
+    /// card-surface fill for the lifetime of the flash.
+    flash_fill: bool,
     selected: bool,
     /// A pending interaction request (FR-16): non-focused cards get a red ring
     /// and glow, while the focused card keeps its blue focus ring and uses the
@@ -296,6 +351,10 @@ struct SidebarCardDraw {
     /// Categorical status marker along the card's left edge, or `None` for
     /// idle. Its shape, not its filled length, carries the meaning.
     status_rail: Option<StatusRail>,
+    /// Actual `OSC 9;4` progress along the card's bottom edge. This is kept
+    /// separate from the categorical left rail so percentage and status are
+    /// never encoded by the same geometry.
+    progress_bar: Option<ProgressBar>,
     runs: Vec<SidebarTextRun>,
     /// Source-UV sub-rect `[u, v, w, h]` for sampling the full-height card
     /// texture. `[0, 0, 1, 1]` for a fully-visible card; a partial (edge-

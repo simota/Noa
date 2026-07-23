@@ -140,6 +140,18 @@ struct PathProbeEntry {
     waiters: Vec<WindowId>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProgressFlashKind {
+    Success,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProgressFlash {
+    kind: ProgressFlashKind,
+    until: Instant,
+}
+
 pub struct App {
     config: AppConfig,
     config_watcher: ConfigWatcher,
@@ -240,6 +252,9 @@ pub struct App {
     /// card id. Set only on the `false→true` transition, so repeat requests do
     /// not restart visual motion while attention is already pending.
     attention_flash_until: HashMap<SessionCardId, Instant>,
+    /// Bounded, one-shot completion/error feedback for `OSC 9;4` transitions.
+    /// The persistent bar and label carry meaning after this cue expires.
+    progress_flashes: HashMap<SessionCardId, ProgressFlash>,
     /// Short-lived card flash after an automatic approval is injected.
     auto_approve_flash_until: HashMap<SessionCardId, Instant>,
     /// The `(window, pane)` currently carrying a non-`None` `Surface::hover_link`,
@@ -713,6 +728,7 @@ impl App {
             kitty_anim_origin: None,
             kitty_anim_deadline: None,
             attention_flash_until: HashMap::new(),
+            progress_flashes: HashMap::new(),
             auto_approve_flash_until: HashMap::new(),
             hovered_link: None,
             path_probe_cache: HashMap::new(),

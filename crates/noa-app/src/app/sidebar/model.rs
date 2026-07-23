@@ -77,8 +77,8 @@ impl App {
         let new_button_hover = state.sidebar_button_hover;
 
         // Card text on the flat backdrop, plus a transparent text overlay for
-        // every fully-visible card (FR-2). Partially-scrolled cards stay on the
-        // backdrop.
+        // every fully-visible card (FR-2). A top-clipped progress card is also
+        // promoted because its real bottom edge (and progress bar) is visible.
         let now = crate::localtime::wall_clock_now();
         let now_instant = Instant::now();
         let home = home_dir();
@@ -127,7 +127,10 @@ impl App {
             let menu_hint =
                 hovered_id == Some(card_rects.id) || state.sidebar_menu == Some(card_rects.id);
             let full = card_rects.bounds.h == layout_metrics.card_h;
-            let via_overlay = full;
+            let progress_bar = card_progress_bar(card);
+            let clipped_at_top = !full && card_rects.bounds.y == layout.viewport.y;
+            let via_overlay =
+                sidebar_card_uses_overlay(full, clipped_at_top, progress_bar.is_some());
             // Text lives in the overlay for a promoted card; only a flat
             // (non-promoted) partial card writes its text straight to the band.
             if !via_overlay {
@@ -146,6 +149,11 @@ impl App {
                     .attention_flash_until
                     .get(&card_rects.id)
                     .is_some_and(|until| now_instant < *until);
+                let progress_flash = self
+                    .progress_flashes
+                    .get(&card_rects.id)
+                    .filter(|flash| now_instant < flash.until)
+                    .map(|flash| flash.kind);
                 let local = layout_metrics.card_local_rects(card_rects.id, card_w);
                 let mut card_runs = Vec::new();
                 emit_card_text(
@@ -181,23 +189,28 @@ impl App {
                     ]
                 };
                 let selected_bg = sidebar_selected_card_bg(panel_bg);
+                let flash_fill = auto_flash || attention_flash || progress_flash.is_some();
                 cards.push(SidebarCardDraw {
                     rect: card_rects.bounds,
                     grid: card_grid,
                     bg: if auto_flash {
                         sidebar_auto_flash_card_bg(panel_bg)
+                    } else if attention_flash {
+                        sidebar_attention_flash_card_bg(panel_bg, selected)
+                    } else if let Some(kind) = progress_flash {
+                        sidebar_progress_flash_card_bg(panel_bg, selected, kind)
                     } else if selected {
                         selected_bg
-                    } else if attention_flash {
-                        sidebar_attention_flash_card_bg(panel_bg)
                     } else if hovered_id == Some(card_rects.id) {
                         sidebar_hover_card_bg(panel_bg)
                     } else {
                         sidebar_card_bg(panel_bg)
                     },
+                    flash_fill,
                     selected,
                     attention: card.attention,
                     status_rail: card_status_rail(card),
+                    progress_bar,
                     runs: card_runs,
                     src_uv,
                 });
@@ -277,9 +290,11 @@ impl App {
                     ),
                     grid: card_grid,
                     bg: sidebar_selected_card_bg(panel_bg),
+                    flash_fill: false,
                     selected: true,
                     attention: false,
                     status_rail: None,
+                    progress_bar: card_progress_bar(card),
                     runs: card_runs,
                     src_uv: [0.0, 0.0, 1.0, 1.0],
                 };
@@ -317,6 +332,10 @@ impl App {
             background_opacity: self.config.background_opacity,
         })
     }
+}
+
+fn sidebar_card_uses_overlay(full: bool, clipped_at_top: bool, has_progress: bool) -> bool {
+    full || (clipped_at_top && has_progress)
 }
 
 /// The viewer's home directory, resolved once and cached: it drives every
@@ -581,6 +600,22 @@ mod tests {
     use super::*;
     use crate::session_store::{PreviewSpan, SessionStore, WallClock};
     use noa_core::Color;
+
+    #[test]
+    fn top_clipped_progress_card_uses_overlay() {
+        assert!(sidebar_card_uses_overlay(false, true, true));
+    }
+
+    #[test]
+    fn partial_card_without_a_visible_progress_edge_stays_on_the_band() {
+        assert!(!sidebar_card_uses_overlay(false, true, false));
+        assert!(!sidebar_card_uses_overlay(false, false, true));
+    }
+
+    #[test]
+    fn full_card_always_uses_overlay() {
+        assert!(sidebar_card_uses_overlay(true, false, false));
+    }
 
     fn wall(hour: u32, minute: u32) -> WallClock {
         WallClock {
@@ -1085,5 +1120,16 @@ mod tests {
             out.iter()
                 .any(|run| { run.text.contains("AUTO N/A") && run.text.contains("PROCESS N/A") })
         );
+    }
+
+    #[test]
+    fn attention_flash_tints_both_resting_and_selected_backgrounds() {
+        let panel = Rgb::new(10, 20, 30);
+        let resting = sidebar_attention_flash_card_bg(panel, false);
+        let selected = sidebar_attention_flash_card_bg(panel, true);
+
+        assert_ne!(resting, sidebar_card_bg(panel));
+        assert_ne!(selected, sidebar_selected_card_bg(panel));
+        assert_ne!(selected, resting);
     }
 }

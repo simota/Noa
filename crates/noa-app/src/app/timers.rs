@@ -549,6 +549,18 @@ impl App {
             }
             self.request_overview_redraw();
         }
+        let before = self.progress_flashes.len();
+        self.progress_flashes.retain(|_, flash| {
+            if now >= flash.until {
+                false
+            } else {
+                next = Some(next.map_or(flash.until, |n| n.min(flash.until)));
+                true
+            }
+        });
+        if self.progress_flashes.len() != before {
+            self.request_sidebar_redraw();
+        }
         next
     }
 

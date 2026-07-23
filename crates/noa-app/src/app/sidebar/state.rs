@@ -11,6 +11,25 @@ fn arm_attention_flash(
     }
 }
 
+fn progress_flash_for_delta(delta: &SessionDelta) -> Option<(ProgressFlashKind, Duration)> {
+    match delta {
+        SessionDelta::ProgressComplete { .. } => {
+            Some((ProgressFlashKind::Success, PROGRESS_SUCCESS_FLASH_DURATION))
+        }
+        SessionDelta::ProgressError { .. } => {
+            Some((ProgressFlashKind::Error, PROGRESS_ERROR_FLASH_DURATION))
+        }
+        _ => None,
+    }
+}
+
+fn delta_changes_overview_label(delta: &SessionDelta) -> bool {
+    matches!(
+        delta,
+        SessionDelta::Bell { .. } | SessionDelta::Attention { .. } | SessionDelta::Progress { .. }
+    )
+}
+
 impl App {
     /// The GUI-agnostic card key for a window/pane (NFR-6): winit's stable
     /// `WindowId` ↔ `u64` mapping is the single conversion point, matching what
@@ -76,6 +95,17 @@ impl App {
                 Instant::now(),
             );
         }
+        if let Some((kind, duration)) = progress_flash_for_delta(&delta)
+            && self.session_store.get(&delta.id()).is_some()
+        {
+            self.progress_flashes.insert(
+                delta.id(),
+                ProgressFlash {
+                    kind,
+                    until: Instant::now() + duration,
+                },
+            );
+        }
         // A cwd change (new card or a changed cwd on an existing one) triggers a
         // branch + icon poll on the dedicated worker (FR-8/FR-9), never on the
         // io read loop (NFR-2/AC-18). Compared before `apply` moves the delta.
@@ -88,12 +118,11 @@ impl App {
         {
             self.request_branch_poll(*id, cwd.clone());
         }
-        // Bell/attention flags also surface on the tab overview's title band
-        // (FR-16), so the flagged pane's tile must re-stamp its label.
-        let flags_overview_tile = matches!(
-            &delta,
-            SessionDelta::Bell { .. } | SessionDelta::Attention { .. }
-        );
+        // Bell/attention/progress also surface in the searchable Overview
+        // label. Remember that before `apply` moves the delta; the shared
+        // label-dirty path below invalidates the filter after the new state is
+        // visible and redraws every tile when the live result set can reflow.
+        let flags_overview_tile = delta_changes_overview_label(&delta);
         let upsert_window = match &delta {
             SessionDelta::Upsert { id, .. } => Some(id.window_id),
             _ => None,
@@ -128,8 +157,7 @@ impl App {
             self.request_window_redraw(window_id);
         }
         if flags_overview_tile {
-            self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
-            self.request_overview_redraw();
+            self.mark_overview_label_dirty(OverviewTileId::new(window_id, pane_id));
         }
     }
 
@@ -273,6 +301,7 @@ impl App {
         }
         // Drop transient attention emphasis for sessions that no longer exist.
         self.attention_flash_until.retain(|id, _| live.contains(id));
+        self.progress_flashes.retain(|id, _| live.contains(id));
         // An inline rename on a torn-down card has nothing to commit to — and
         // one whose *editing* window closed is just as stranded: the card can
         // belong to another window in the group and stay live, but key routing
@@ -297,10 +326,11 @@ impl App {
         self.attention_flash_until
             .retain(|id, _| id.window_id != sw);
         self.request_sidebar_redraw();
-        for pane_id in self.overview_pane_ids_for_window(window_id) {
-            self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
+        if let Some(pane_id) = self.windows.get(&window_id).map(|state| state.focused_pane) {
+            self.mark_overview_label_dirty(OverviewTileId::new(window_id, pane_id));
+        } else {
+            self.request_overview_redraw();
         }
-        self.request_overview_redraw();
     }
 
     /// Whether a window may host a sidebar (FR-14): everything but the
@@ -491,5 +521,39 @@ mod tests {
 
         assert_eq!(flashes[&id], first_deadline);
         assert_eq!(first_deadline, now + ATTENTION_FLASH_DURATION);
+    }
+
+    #[test]
+    fn only_one_shot_progress_deltas_arm_flashes() {
+        let id = SessionCardId::new(SessionWindowId(1), PaneId::new(2));
+        let pct = |value| noa_grid::ProgressValue::new(value).unwrap();
+        let synced_complete = SessionDelta::Progress {
+            id,
+            progress: Some(noa_grid::TerminalProgress::Normal(pct(100))),
+        };
+        let synced_error = SessionDelta::Progress {
+            id,
+            progress: Some(noa_grid::TerminalProgress::Error(None)),
+        };
+
+        assert_eq!(progress_flash_for_delta(&synced_complete), None);
+        assert_eq!(progress_flash_for_delta(&synced_error), None);
+        assert_eq!(
+            progress_flash_for_delta(&SessionDelta::ProgressComplete { id }),
+            Some((ProgressFlashKind::Success, PROGRESS_SUCCESS_FLASH_DURATION))
+        );
+        assert_eq!(
+            progress_flash_for_delta(&SessionDelta::ProgressError { id }),
+            Some((ProgressFlashKind::Error, PROGRESS_ERROR_FLASH_DURATION))
+        );
+    }
+
+    #[test]
+    fn progress_delta_changes_the_overview_label() {
+        let id = SessionCardId::new(SessionWindowId(1), PaneId::new(2));
+        assert!(delta_changes_overview_label(&SessionDelta::Progress {
+            id,
+            progress: Some(noa_grid::TerminalProgress::Indeterminate),
+        }));
     }
 }

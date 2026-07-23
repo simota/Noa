@@ -343,6 +343,105 @@ pub struct Notification {
     pub body: String,
 }
 
+/// A validated determinate progress percentage reported by `OSC 9;4`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProgressValue(u8);
+
+impl ProgressValue {
+    pub const fn new(value: u8) -> Option<Self> {
+        if value <= 100 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        let value = std::str::from_utf8(bytes).ok()?.parse::<u8>().ok()?;
+        Self::new(value)
+    }
+}
+
+/// Current task progress published by a terminal application via `OSC 9;4`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalProgress {
+    Normal(ProgressValue),
+    Error(Option<ProgressValue>),
+    Indeterminate,
+    /// ConEmu names wire state 4 "paused"; Microsoft Terminal displays the
+    /// same state as "Warning". Keep the origin protocol's semantic name.
+    Paused(Option<ProgressValue>),
+}
+
+impl TerminalProgress {
+    pub const fn value(self) -> Option<ProgressValue> {
+        match self {
+            Self::Normal(value) => Some(value),
+            Self::Error(value) | Self::Paused(value) => value,
+            Self::Indeterminate => None,
+        }
+    }
+}
+
+/// A change to task progress. `Clear` distinguishes an explicit removal from
+/// the absence of any report since the last drain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressUpdate {
+    Clear,
+    Set(TerminalProgress),
+}
+
+/// The last one-shot visual cue reached while processing task progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressCue {
+    Complete,
+    Error,
+}
+
+fn parse_optional_progress_value(value: Option<&[u8]>) -> Option<Option<ProgressValue>> {
+    match value {
+        None | Some(b"") => Some(None),
+        Some(value) => ProgressValue::parse(value).map(Some),
+    }
+}
+
+pub(crate) fn parse_progress_osc(data: &[u8]) -> Option<ProgressUpdate> {
+    let rest = data.strip_prefix(b"9;4;")?;
+    let mut fields = rest.split(|byte| *byte == b';');
+    let state = fields.next()?;
+    let value = fields.next();
+    if fields.next().is_some() {
+        return None;
+    }
+
+    match state {
+        b"0" if value
+            .is_none_or(|value| value.is_empty() || ProgressValue::parse(value).is_some()) =>
+        {
+            Some(ProgressUpdate::Clear)
+        }
+        b"1" => Some(ProgressUpdate::Set(TerminalProgress::Normal(
+            ProgressValue::parse(value?)?,
+        ))),
+        b"2" => Some(ProgressUpdate::Set(TerminalProgress::Error(
+            parse_optional_progress_value(value)?,
+        ))),
+        b"3" if value
+            .is_none_or(|value| value.is_empty() || ProgressValue::parse(value).is_some()) =>
+        {
+            Some(ProgressUpdate::Set(TerminalProgress::Indeterminate))
+        }
+        b"4" => Some(ProgressUpdate::Set(TerminalProgress::Paused(
+            parse_optional_progress_value(value)?,
+        ))),
+        _ => None,
+    }
+}
+
 /// Parse OSC 9 (`9;<body>`) and OSC 777 (`777;notify;<title>;<body>`) desktop
 /// notification requests. Returns `None` when `data` is neither, when the body
 /// is empty, or when OSC 777's subcommand isn't `notify`. OSC 9's body is taken
@@ -354,8 +453,9 @@ pub(crate) fn parse_notification_osc(data: &[u8]) -> Option<Notification> {
             return None;
         }
         // `OSC 9;4;<state>;<pct> ST` is the ConEmu/Windows Terminal progress
-        // report, not a desktop notification. noa has no progress UI, so (like
-        // Ghostty) it is silently ignored rather than shown as a notification.
+        // report, not a desktop notification. The dedicated progress parser
+        // handles valid reports; malformed reports are still never surfaced as
+        // user-authored notification text.
         // Only the exact `9;4;` form is a progress report; `9;4x…` and a bare
         // `9;4` stay ordinary notifications.
         if body.starts_with(b"4;") {

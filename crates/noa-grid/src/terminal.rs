@@ -17,7 +17,9 @@ use crate::cursor::CursorStyle;
 use crate::kitty::ImageStore;
 use crate::kitty_keyboard::KittyKeyboard;
 use crate::modes::ModeState;
-use crate::osc::{Notification, Osc52Policy, TerminalColors};
+use crate::osc::{
+    Notification, Osc52Policy, ProgressCue, ProgressUpdate, TerminalColors, TerminalProgress,
+};
 use crate::screen::Screen;
 use crate::search::SearchMatch;
 use crate::selection::SelectionPoint;
@@ -116,6 +118,13 @@ pub struct Terminal {
     /// [`Terminal::take_pending_notifications`]. Bounded at
     /// [`NOTIFICATION_QUEUE_CAP`]; the oldest is evicted on overflow.
     pending_notifications: VecDeque<Notification>,
+    /// Current `OSC 9;4` task state and its last-write-wins app-layer delta.
+    progress: Option<TerminalProgress>,
+    pending_progress_update: Option<ProgressUpdate>,
+    /// Last one-shot transition cue in the current feed. A trailing Clear does
+    /// not erase it, while a later completion/error replaces an earlier cue so
+    /// retry order is preserved.
+    pending_progress_cue: Option<ProgressCue>,
     /// Set by `BEL` (`0x07`); drained by [`Terminal::take_pending_bell`].
     pending_bell: bool,
     /// Cell size in pixels, from the last `noa-app` pixel-metrics update.
@@ -193,6 +202,9 @@ impl Terminal {
             pending_clipboard_writes: Vec::new(),
             pending_clipboard_reads: Vec::new(),
             pending_notifications: VecDeque::new(),
+            progress: None,
+            pending_progress_update: None,
+            pending_progress_cue: None,
             pending_bell: false,
             cell_width_px: 0,
             cell_height_px: 0,
@@ -644,6 +656,21 @@ impl Terminal {
         self.pending_notifications.drain(..).collect()
     }
 
+    /// Current task progress reported by the foreground terminal application.
+    pub const fn progress(&self) -> Option<TerminalProgress> {
+        self.progress
+    }
+
+    /// Drain the final progress change since the previous call.
+    pub fn take_pending_progress_update(&mut self) -> Option<ProgressUpdate> {
+        self.pending_progress_update.take()
+    }
+
+    /// Drain the last one-shot progress cue since the previous call.
+    pub fn take_pending_progress_cue(&mut self) -> Option<ProgressCue> {
+        self.pending_progress_cue.take()
+    }
+
     /// Build the OSC 52 reply carrying `text` for selection `target`
     /// (e.g. `"c"`), to be written back to the pty by the app layer.
     pub fn osc52_read_reply(target: &str, text: &str) -> Vec<u8> {
@@ -759,6 +786,25 @@ impl Terminal {
             self.pending_notifications.pop_front();
         }
         self.pending_notifications.push_back(notification);
+    }
+
+    fn set_progress(&mut self, progress: Option<TerminalProgress>) {
+        if self.progress == progress {
+            return;
+        }
+        if matches!(progress, Some(TerminalProgress::Normal(value)) if value.get() == 100) {
+            self.pending_progress_cue = Some(ProgressCue::Complete);
+        }
+        if matches!(progress, Some(TerminalProgress::Error(_)))
+            && !matches!(self.progress, Some(TerminalProgress::Error(_)))
+        {
+            self.pending_progress_cue = Some(ProgressCue::Error);
+        }
+        self.progress = progress;
+        self.pending_progress_update = Some(match progress {
+            Some(progress) => ProgressUpdate::Set(progress),
+            None => ProgressUpdate::Clear,
+        });
     }
 
     /// Scroll the viewport to the nearest shell-integration prompt mark

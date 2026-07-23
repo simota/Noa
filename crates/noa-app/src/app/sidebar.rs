@@ -63,6 +63,7 @@ const SIDEBAR_CARD_PANEL_BG_MIX: f32 = 0.08;
 const SIDEBAR_CARD_SELECTED_BG_MIX: f32 = 0.20;
 const SIDEBAR_CARD_HOVER_BG_MIX: f32 = 0.10;
 const SIDEBAR_CARD_AUTO_FLASH_ACCENT_MIX: f32 = 0.12;
+const SIDEBAR_CARD_ATTENTION_FLASH_MIX: f32 = 0.10;
 
 // Toolbar `+` button chrome (logical px). Borderless: just the `+` glyph at
 // rest, with a subtle rounded fill + brighter glyph on hover.
@@ -138,19 +139,42 @@ fn icon_color(icon: crate::session_store::IconKind) -> Rgb {
     }
 }
 
-/// The color of the status accent bar along a card's left edge, or `None` for
-/// an idle card (no bar — absence is the idle signal). Attention follows the
-/// blink phase (`attention_marker`) so the bar blinks with the dot; busy and
-/// unread-bell are steady.
-fn card_accent(card: &SessionCard, attention_marker: bool) -> Option<Rgb> {
+/// Categorical status-rail geometry. The rail deliberately never represents a
+/// percentage: `Activity` is segmented, `UnreadBell` is a short notch, and
+/// `Attention` is a solid full-height marker. Idle cards have no rail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusRailKind {
+    Activity,
+    UnreadBell,
+    Attention,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StatusRail {
+    kind: StatusRailKind,
+    color: Rgb,
+}
+
+/// The status rail along a card's left edge. Precedence mirrors
+/// [`status_dot`]: attention > bell > busy > idle.
+fn card_status_rail(card: &SessionCard) -> Option<StatusRail> {
     if card.attention {
-        return attention_marker.then(|| chrome().dot_red);
+        return Some(StatusRail {
+            kind: StatusRailKind::Attention,
+            color: chrome().dot_red,
+        });
     }
     if card.unread_bell {
-        return Some(chrome().dot_yellow);
+        return Some(StatusRail {
+            kind: StatusRailKind::UnreadBell,
+            color: chrome().dot_yellow,
+        });
     }
     if card.busy {
-        return Some(chrome().dot_blue);
+        return Some(StatusRail {
+            kind: StatusRailKind::Activity,
+            color: chrome().dot_blue,
+        });
     }
     None
 }
@@ -191,38 +215,29 @@ fn sidebar_auto_flash_card_bg(panel_bg: Rgb) -> Rgb {
     )
 }
 
-/// The card's status dot with the attention blink applied (FR-A1): while an
-/// attention marker is in its hidden phase, show the underlying status (bell /
-/// busy / idle) instead of the red attention dot, so the dot blinks red↔status.
-/// A settled or visible-phase attention keeps the red dot.
-fn effective_status_dot(card: &SessionCard, attention_marker: bool) -> StatusDot {
-    if card.attention && !attention_marker {
-        if card.unread_bell {
-            StatusDot::Yellow
-        } else if card.busy {
-            StatusDot::Blue
-        } else {
-            StatusDot::Green
-        }
-    } else {
-        status_dot(card)
-    }
+fn sidebar_attention_flash_card_bg(panel_bg: Rgb) -> Rgb {
+    mix_rgb(
+        sidebar_card_bg(panel_bg),
+        chrome().dot_red,
+        SIDEBAR_CARD_ATTENTION_FLASH_MIX,
+    )
 }
 
-/// The dot glyph color for a card's status (FR-11), driven by the pure
-/// `status_dot` mapping in `session_store` (AC-13).
-fn status_dot_rgb(dot: StatusDot) -> Rgb {
+/// A fixed-slot status indicator with shape and color redundancy. The Nerd Font
+/// fallback already bundled by `noa-font` covers these Font Awesome codepoints.
+fn status_indicator(dot: StatusDot) -> (&'static str, Rgb) {
     match dot {
-        StatusDot::Blue => chrome().dot_blue,
-        StatusDot::Green => chrome().dot_green,
-        StatusDot::Yellow => chrome().dot_yellow,
-        StatusDot::Red => chrome().dot_red,
+        StatusDot::Blue => ("\u{f04b}", chrome().dot_blue), // play
+        StatusDot::Green => ("\u{f10c}", chrome().dot_green), // circle-o
+        StatusDot::Yellow => ("\u{f0f3}", chrome().dot_yellow), // bell
+        StatusDot::Red => ("\u{f12a}", chrome().dot_red),   // exclamation
     }
 }
 
-/// The label appended to a card's process row while it awaits the user's reply
-/// (FR-16), e.g. `✳ Claude Code · 応答待ち`.
-const ATTENTION_LABEL: &str = "応答待ち";
+/// OSC 9/777 means a notification exists, not necessarily that a program is
+/// blocked on user input. Keep the label accurate until a dedicated
+/// response-required protocol exists.
+const ATTENTION_LABEL: &str = "通知あり";
 
 fn rgb_to_rgba(color: Rgb) -> [f32; 4] {
     [
@@ -235,7 +250,7 @@ fn rgb_to_rgba(color: Rgb) -> [f32; 4] {
 
 /// One positioned text run in a synthetic sidebar grid (already converted from
 /// the pure layout's pixel rects to cell coordinates). `bg` fills the run's
-/// cells (used by the `…` menu popup and the selected-card accent bar); `None`
+/// cells (used by the `…` menu popup and selected-card treatment); `None`
 /// leaves the underlying background showing. `bold` renders the run's cells in
 /// the bold weight (card names).
 #[derive(Clone, Debug, PartialEq)]
@@ -273,11 +288,11 @@ struct SidebarCardDraw {
     selected: bool,
     /// A pending interaction request (FR-16): non-focused cards get a red ring
     /// and glow, while the focused card keeps its blue focus ring and uses the
-    /// red dot/label for the request state.
+    /// red indicator/label for the request state.
     attention: bool,
-    /// The status accent bar color along the card's left edge (busy /
-    /// attention / bell), or `None` for an idle card.
-    accent: Option<Rgb>,
+    /// Categorical status marker along the card's left edge, or `None` for
+    /// idle. Its shape, not its filled length, carries the meaning.
+    status_rail: Option<StatusRail>,
     runs: Vec<SidebarTextRun>,
     /// Source-UV sub-rect `[u, v, w, h]` for sampling the full-height card
     /// texture. `[0, 0, 1, 1]` for a fully-visible card; a partial (edge-

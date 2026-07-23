@@ -44,7 +44,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **Search prompt** — incremental search UI
 - **Theme & settings overlay** — a theme/settings editor with live preview opened from `Settings…` (⌘,), writes back to config
 - **Sidebar (session list)** — per-window session cards, process badges, inline rename
-- **Agent attention** — classification of agent processes (claude, etc.), bell-to-attention escalation, blinking, Dock attention, git branch polling
+- **Agent attention** — agent-process classification, bell-to-attention escalation, categorical status rails, one-shot arrival emphasis, Dock attention
 - **About panel** — version + git hash + build date, bundled-icon resolution
 - **Confirmation dialogs** — paste protection / OSC 52 / close confirmation
 - **IME preedit** — underlined display of in-progress composition text

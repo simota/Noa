@@ -236,19 +236,12 @@ pub struct App {
     /// Next scheduled Kitty animation frame wake-up; `None` while no stored image
     /// is animating (the event loop then needs no wake-up for this).
     kitty_anim_deadline: Option<Instant>,
-    /// Monotonic onset of each card's current attention request (FR-A1), keyed
-    /// by card id. Set on the `false→true` attention transition and removed
-    /// when the flag is cleared (window focus) or the session is torn down.
-    /// Drives the blink phase (`sidebar::attention_blink_on(onset.elapsed())`)
-    /// and whether the blink timer stays armed. FR-A7: never reset while an
-    /// attention is already pending, so a repeat request doesn't restart the
-    /// blink.
-    attention_onset: HashMap<SessionCardId, Instant>,
+    /// Deadline for each card's one-shot attention-arrival emphasis, keyed by
+    /// card id. Set only on the `false→true` transition, so repeat requests do
+    /// not restart visual motion while attention is already pending.
+    attention_flash_until: HashMap<SessionCardId, Instant>,
     /// Short-lived card flash after an automatic approval is injected.
     auto_approve_flash_until: HashMap<SessionCardId, Instant>,
-    /// Next scheduled attention-blink repaint; `None` while no card is within
-    /// its blink window (the event loop then needs no wake-up for this).
-    attention_blink_deadline: Option<Instant>,
     /// The `(window, pane)` currently carrying a non-`None` `Surface::hover_link`,
     /// if any — tracked so [`App::sync_hover_link`] can clear it when the
     /// mouse moves to a different pane/window (or off any pane) without
@@ -719,9 +712,8 @@ impl App {
             memory_trim_deadline: Some(Instant::now() + timers::MEMORY_TRIM_QUIESCENCE),
             kitty_anim_origin: None,
             kitty_anim_deadline: None,
-            attention_onset: HashMap::new(),
+            attention_flash_until: HashMap::new(),
             auto_approve_flash_until: HashMap::new(),
-            attention_blink_deadline: None,
             hovered_link: None,
             path_probe_cache: HashMap::new(),
             next_path_probe_generation: 0,

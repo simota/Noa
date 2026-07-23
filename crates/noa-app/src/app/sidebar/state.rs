@@ -1,5 +1,16 @@
 use super::*;
 
+fn arm_attention_flash(
+    flashes: &mut HashMap<SessionCardId, Instant>,
+    id: SessionCardId,
+    already_pending: bool,
+    now: Instant,
+) {
+    if !already_pending {
+        flashes.insert(id, now + ATTENTION_FLASH_DURATION);
+    }
+}
+
 impl App {
     /// The GUI-agnostic card key for a window/pane (NFR-6): winit's stable
     /// `WindowId` ↔ `u64` mapping is the single conversion point, matching what
@@ -52,20 +63,18 @@ impl App {
         ) {
             return;
         }
-        // Record the blink onset on the false→true attention transition (FR-A1);
-        // FR-A7 keeps the existing onset if attention is already pending so a
-        // repeat request doesn't restart the blink. A card the store doesn't
-        // hold gets no onset either — `apply` drops the flag for it, and an
-        // onset without the flag would just tick the blink timer for nothing.
-        // No timer re-arm is needed here: `about_to_wait` runs after this event
-        // and extends the deadline chain to this onset's next phase boundary.
+        // Emphasize only the false→true attention transition. A repeat request
+        // cannot restart the effect while attention is already pending, and an
+        // unknown card gets no stray timer entry because `apply` drops it.
         if let SessionDelta::Attention { id } = &delta
-            && self
-                .session_store
-                .get(id)
-                .is_some_and(|card| !card.attention)
+            && let Some(card) = self.session_store.get(id)
         {
-            self.attention_onset.insert(*id, Instant::now());
+            arm_attention_flash(
+                &mut self.attention_flash_until,
+                *id,
+                card.attention,
+                Instant::now(),
+            );
         }
         // A cwd change (new card or a changed cwd on an existing one) triggers a
         // branch + icon poll on the dedicated worker (FR-8/FR-9), never on the
@@ -262,9 +271,8 @@ impl App {
         if let Some(worker) = self.branch_poll.as_ref() {
             worker.retain_process_probes(&live);
         }
-        // Drop attention-blink onsets for sessions that no longer exist, so the
-        // blink timer can't stay armed for a torn-down card (FR-A1).
-        self.attention_onset.retain(|id, _| live.contains(id));
+        // Drop transient attention emphasis for sessions that no longer exist.
+        self.attention_flash_until.retain(|id, _| live.contains(id));
         // An inline rename on a torn-down card has nothing to commit to — and
         // one whose *editing* window closed is just as stranded: the card can
         // belong to another window in the group and stay live, but key routing
@@ -283,10 +291,11 @@ impl App {
     pub(in crate::app) fn clear_session_bell_for_window(&mut self, window_id: WindowId) {
         self.session_store
             .clear_bell_for_window(SessionWindowId(u64::from(window_id)));
-        // Drop the blink onsets for this window so the timer disarms and the
-        // marker stops (FR-A6). The store already cleared the attention flags.
+        // The store already cleared the persistent attention flags; discard any
+        // remaining arrival emphasis for the same window as well.
         let sw = SessionWindowId(u64::from(window_id));
-        self.attention_onset.retain(|id, _| id.window_id != sw);
+        self.attention_flash_until
+            .retain(|id, _| id.window_id != sw);
         self.request_sidebar_redraw();
         for pane_id in self.overview_pane_ids_for_window(window_id) {
             self.mark_overview_tile_dirty(OverviewTileId::new(window_id, pane_id));
@@ -463,5 +472,24 @@ impl App {
         if let Some(focused) = self.focused {
             self.update_focused_ime_cursor_area(focused);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_attention_does_not_restart_one_shot_emphasis() {
+        let id = SessionCardId::new(SessionWindowId(1), PaneId::new(2));
+        let now = Instant::now();
+        let mut flashes = HashMap::new();
+        arm_attention_flash(&mut flashes, id, false, now);
+        let first_deadline = flashes[&id];
+
+        arm_attention_flash(&mut flashes, id, true, now + Duration::from_millis(50));
+
+        assert_eq!(flashes[&id], first_deadline);
+        assert_eq!(first_deadline, now + ATTENTION_FLASH_DURATION);
     }
 }

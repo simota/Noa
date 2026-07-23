@@ -132,9 +132,8 @@ pub(super) struct ChromeTextures {
     /// `CHROME_ACCENT` strip composited at the insertion gap during an active
     /// card drag.
     pub(super) sidebar_drop_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
-    /// Reused scratch texture for the per-card status accent bar (busy /
-    /// attention / bell) composited along a card's left edge; refilled with
-    /// each card's accent color in turn like the card scratch.
+    /// Reused scratch texture for the categorical per-card status rail,
+    /// composited along a card's left edge and refilled with each state color.
     pub(super) sidebar_accent_tex: Option<(PixelSize, wgpu::Texture, wgpu::TextureView)>,
     /// Reused scratch texture for subtle horizontal rules between flat sidebar
     /// card rows.
@@ -1174,12 +1173,9 @@ impl Surface {
 /// focused and displayable.
 pub(super) const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
-/// How long an attention marker blinks before settling to a steady mark
-/// (FR-A1). Compile-time (no config knob in v1).
-pub(super) const ATTENTION_BLINK_DURATION: Duration = Duration::from_secs(6);
-
-/// The blink half-period (~1.5 Hz).
-pub(super) const ATTENTION_BLINK_INTERVAL: Duration = Duration::from_millis(333);
+/// One-shot emphasis when a card first enters attention state. The persistent
+/// indicator/rail carries the state after this short, non-repeating cue.
+pub(super) const ATTENTION_FLASH_DURATION: Duration = Duration::from_millis(150);
 
 /// Card styling for the Session Overview composite (REQ-OV-12/14). A function
 /// (not a const) because the chrome colors follow the terminal theme's
@@ -1198,11 +1194,18 @@ pub(super) fn overview_card_style(metrics: OverviewMetrics) -> CardStyle {
 }
 
 /// Attention styling for an Overview tile with a pending interaction request.
-pub(super) fn overview_attention_card_style(metrics: OverviewMetrics) -> CardStyle {
+pub(super) fn overview_attention_card_style(
+    metrics: OverviewMetrics,
+    emphasized: bool,
+) -> CardStyle {
     CardStyle {
         focus_color: crate::chrome::rgba(crate::chrome::palette().dot_red),
         focus_width: crate::chrome::RING_ATTENTION * metrics.scale(),
-        focus_glow_width: crate::chrome::GLOW_ATTENTION * metrics.scale(),
+        focus_glow_width: if emphasized {
+            crate::chrome::GLOW_ATTENTION * metrics.scale()
+        } else {
+            0.0
+        },
         ..overview_card_style(metrics)
     }
 }

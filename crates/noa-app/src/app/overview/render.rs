@@ -671,18 +671,27 @@ impl App {
         // a page has no placeholder rows, so the two orders coincide
         // exactly). Resolved before the gpu/overview borrows so the ring
         // pass needs no `self` access.
-        let attention_tiles: Vec<bool> = source_tab_ids
+        let attention_tiles: Vec<(bool, bool)> = source_tab_ids
             .iter()
             .map(|window_id| {
-                // A tab tile wants attention if ANY of its panes does.
-                self.overview_pane_ids_for_window(*window_id)
-                    .iter()
-                    .any(|pane_id| {
+                // A tab tile wants attention if any pane does; its ring gets a
+                // glow only during the one-shot arrival emphasis.
+                self.overview_pane_ids_for_window(*window_id).iter().fold(
+                    (false, false),
+                    |(attention, emphasized), pane_id| {
                         let card_id = Self::session_card_id(*window_id, *pane_id);
-                        self.session_store
+                        let pane_attention = self
+                            .session_store
                             .get(&card_id)
-                            .is_some_and(|card| card.attention)
-                    })
+                            .is_some_and(|card| card.attention);
+                        let pane_emphasized = pane_attention
+                            && self
+                                .attention_flash_until
+                                .get(&card_id)
+                                .is_some_and(|until| now < *until);
+                        (attention || pane_attention, emphasized || pane_emphasized)
+                    },
+                )
             })
             .collect();
 
@@ -978,12 +987,11 @@ impl App {
             // so hovering an attention tile never turns the hover affordance
             // pink/red.
             for (index, rect) in tile_rects.iter().enumerate() {
-                if !overview_attention_ring_visible(
-                    attention_tiles.get(index).copied().unwrap_or(false),
-                    index,
-                    selected,
-                    hovered,
-                ) {
+                let (attention, emphasized) = attention_tiles
+                    .get(index)
+                    .copied()
+                    .unwrap_or((false, false));
+                if !overview_attention_ring_visible(attention, index, selected, hovered) {
                     continue;
                 }
                 let Some(tile_view) = thumbnails.tile_texture_view(index) else {
@@ -994,7 +1002,7 @@ impl App {
                     &gpu.queue,
                     &view,
                     surface_size,
-                    &overview_attention_card_style(metrics),
+                    &overview_attention_card_style(metrics, emphasized),
                     &[CardTexturePlacement {
                         texture_view: &tile_view,
                         x: rect.x,

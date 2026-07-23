@@ -108,7 +108,6 @@ impl App {
             let tab_title = self.tab_title_override_for_card(&card_rects.id);
             let mut lines: CardLines = card_lines(card, now, home, tab_title.as_deref());
             lines.remote_unsupported = self.session_card_is_remote(&card_rects.id);
-            let marker = self.attention_marker_visible(&card_rects.id);
             let renaming = self
                 .sidebar_rename
                 .as_ref()
@@ -133,8 +132,7 @@ impl App {
             // (non-promoted) partial card writes its text straight to the band.
             if !via_overlay {
                 emit_card_text(
-                    &mut runs, card_rects, card, &lines, &band_cell, marker, palette, renaming,
-                    menu_hint,
+                    &mut runs, card_rects, card, &lines, &band_cell, palette, renaming, menu_hint,
                 );
             }
 
@@ -142,6 +140,10 @@ impl App {
                 let selected = card_rects.id == selected_id;
                 let auto_flash = self
                     .auto_approve_flash_until
+                    .get(&card_rects.id)
+                    .is_some_and(|until| now_instant < *until);
+                let attention_flash = self
+                    .attention_flash_until
                     .get(&card_rects.id)
                     .is_some_and(|until| now_instant < *until);
                 let local = layout_metrics.card_local_rects(card_rects.id, card_w);
@@ -152,7 +154,6 @@ impl App {
                     card,
                     &lines,
                     &card_cell,
-                    marker,
                     palette,
                     renaming,
                     menu_hint,
@@ -187,6 +188,8 @@ impl App {
                         sidebar_auto_flash_card_bg(panel_bg)
                     } else if selected {
                         selected_bg
+                    } else if attention_flash {
+                        sidebar_attention_flash_card_bg(panel_bg)
                     } else if hovered_id == Some(card_rects.id) {
                         sidebar_hover_card_bg(panel_bg)
                     } else {
@@ -194,7 +197,7 @@ impl App {
                     },
                     selected,
                     attention: card.attention,
-                    accent: card_accent(card, marker),
+                    status_rail: card_status_rail(card),
                     runs: card_runs,
                     src_uv,
                 });
@@ -250,7 +253,6 @@ impl App {
                 let tab_title = self.tab_title_override_for_card(&drag.card);
                 let mut lines = card_lines(card, now, home, tab_title.as_deref());
                 lines.remote_unsupported = self.session_card_is_remote(&drag.card);
-                let marker = self.attention_marker_visible(&drag.card);
                 let local = layout_metrics.card_local_rects(drag.card, card_w);
                 let mut card_runs = Vec::new();
                 emit_card_text(
@@ -259,7 +261,6 @@ impl App {
                     card,
                     &lines,
                     &card_cell,
-                    marker,
                     palette,
                     None,
                     false,
@@ -278,7 +279,7 @@ impl App {
                     bg: sidebar_selected_card_bg(panel_bg),
                     selected: true,
                     attention: false,
-                    accent: None,
+                    status_rail: None,
                     runs: card_runs,
                     src_uv: [0.0, 0.0, 1.0, 1.0],
                 };
@@ -415,7 +416,7 @@ fn right_aligned_run(
     })
 }
 
-/// Emit one card's text runs (status dot, project icon, bold name with the
+/// Emit one card's text runs (status indicator, project icon, bold name with the
 /// right-aligned updated-time, the meta row `process · ⎇ branch · cwd`, and
 /// the configured preview rows) through `to_cell`. Shared by the flat backdrop
 /// (window coords) and each card overlay (card-local coords) so both agree on
@@ -430,21 +431,18 @@ fn emit_card_text(
     card: &SessionCard,
     lines: &CardLines,
     to_cell: &impl Fn(u32, u32) -> (u16, u16),
-    attention_marker: bool,
     palette: &[Rgb; 256],
     renaming: Option<&str>,
     menu_hint: bool,
 ) {
-    // The status dot is nf-fa-circle (U+F111), not `●` (U+25CF): the project
-    // icon next to it is a Nerd Font glyph whose optical center sits at the
-    // cell's vertical center, while `●` sits on the text baseline (~1.5px
-    // lower at 14px) — drawing the dot from the same Nerd Font keeps the two
-    // glyphs on the name row vertically aligned.
+    // Keep every status shape in the same one-cell Nerd Font slot so changing
+    // state never shifts the project name horizontally.
+    let (status_glyph, status_fg) = status_indicator(status_dot(card));
     out.extend(window_run(
         to_cell,
         rects.dot,
-        "\u{f111}".to_string(),
-        status_dot_rgb(effective_status_dot(card, attention_marker)),
+        status_glyph.to_string(),
+        status_fg,
         false,
     ));
     out.extend(window_run(
@@ -492,8 +490,8 @@ fn emit_card_text(
     // idle); any other process shows green `✳` while running, dim `❯` while
     // idle. The git branch and the dim cwd follow on the same row. A pending
     // interaction request (FR-16) overrides the badge with the attention color
-    // and appends the waiting label; the label is held steady while pending
-    // (only the dot blinks, via `effective_status_dot`) so it stays legible.
+    // and appends an accurate notification label. The indicator and label stay
+    // steady; arrival is emphasized once by the card background/ring.
     if rects.meta.w > 0 && rects.meta.h > 0 {
         let (badge, badge_fg) = if lines.remote_unsupported {
             ("PROCESS N/A".to_string(), chrome().dim_fg)
@@ -844,6 +842,43 @@ mod tests {
         store.get(&id).unwrap().clone()
     }
 
+    #[test]
+    fn status_indicator_uses_distinct_shapes_and_colors() {
+        let cases = [
+            (StatusDot::Blue, "\u{f04b}", chrome().dot_blue),
+            (StatusDot::Green, "\u{f10c}", chrome().dot_green),
+            (StatusDot::Yellow, "\u{f0f3}", chrome().dot_yellow),
+            (StatusDot::Red, "\u{f12a}", chrome().dot_red),
+        ];
+        for (status, expected_glyph, expected_color) in cases {
+            let (glyph, color) = status_indicator(status);
+            assert_eq!(glyph, expected_glyph);
+            assert_eq!(color, expected_color);
+        }
+    }
+
+    #[test]
+    fn status_rail_is_categorical_and_follows_attention_precedence() {
+        let mut card = store_card(false, "cargo");
+        assert_eq!(card_status_rail(&card), None);
+
+        card.busy = true;
+        assert_eq!(
+            card_status_rail(&card).map(|rail| rail.kind),
+            Some(StatusRailKind::Activity)
+        );
+        card.unread_bell = true;
+        assert_eq!(
+            card_status_rail(&card).map(|rail| rail.kind),
+            Some(StatusRailKind::UnreadBell)
+        );
+        card.attention = true;
+        assert_eq!(
+            card_status_rail(&card).map(|rail| rail.kind),
+            Some(StatusRailKind::Attention)
+        );
+    }
+
     /// Non-zero sub-rects so every run region emits; one preview row.
     fn card_rects() -> CardRects {
         CardRects {
@@ -872,7 +907,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            false,
             &palette,
             None,
             false,
@@ -900,7 +934,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            false,
             &palette,
             None,
             false,
@@ -925,7 +958,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            false,
             &palette,
             None,
             false,
@@ -935,6 +967,29 @@ mod tests {
             out.iter().all(|r| !r.text.is_empty()),
             "no empty-text run is emitted"
         );
+    }
+
+    #[test]
+    fn emit_card_text_uses_neutral_notification_copy_for_attention() {
+        let mut card = store_card(true, "claude");
+        card.attention = true;
+        let lines = card_lines(&card, wall(10, 3), None, None);
+        let palette = [Rgb::new(0, 0, 0); 256];
+        let to_cell = cell_at();
+        let mut out = Vec::new();
+        emit_card_text(
+            &mut out,
+            &card_rects(),
+            &card,
+            &lines,
+            &to_cell,
+            &palette,
+            None,
+            false,
+        );
+
+        assert!(out.iter().any(|run| run.text.contains(ATTENTION_LABEL)));
+        assert!(out.iter().all(|run| !run.text.contains("応答待ち")));
     }
 
     #[test]
@@ -950,7 +1005,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            false,
             &palette,
             Some("foo"),
             false,
@@ -982,7 +1036,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            false,
             &palette,
             None,
             true,
@@ -999,7 +1052,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            false,
             &palette,
             None,
             false,
@@ -1024,7 +1076,6 @@ mod tests {
             &card,
             &lines,
             &to_cell,
-            false,
             &palette,
             None,
             false,

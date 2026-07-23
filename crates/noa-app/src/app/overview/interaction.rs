@@ -330,18 +330,15 @@ impl App {
     }
 
     /// The status-dot color for a tile's title band, mirroring the sidebar's
-    /// dot semantics (FR-11/FR-16): red while the attention marker is in its
-    /// visible blink phase, else yellow for an unread bell, blue for a busy
-    /// program, and `None` for idle (no dot). During the attention blink's
-    /// hidden phase the underlying bell/busy color shows, so the band blinks
-    /// in phase with the sidebar (FR-A2).
+    /// precedence (FR-11/FR-16): red for attention, else yellow for an unread
+    /// bell, blue for a busy program, and `None` for idle.
     pub(in crate::app) fn overview_tile_dot_color(
         &self,
         tile_id: OverviewTileId,
     ) -> Option<noa_core::Rgb> {
         let card_id = Self::session_card_id(tile_id.window_id, tile_id.pane_id);
         let card = self.session_store.get(&card_id)?;
-        if card.attention && self.attention_marker_visible(&card_id) {
+        if card.attention {
             Some(crate::chrome::palette().dot_red)
         } else if card.unread_bell {
             Some(crate::chrome::palette().dot_yellow)

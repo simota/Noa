@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-07-23
+
+### Added
+
+- Sidebar session cards report categorical shell activity (via OSC 133) through
+  status rails and surface task progress (determinate, indeterminate, paused,
+  and error states) on cards and in the Tab Overview, with repeated attention
+  blinking replaced by a bounded one-shot emphasis (#42)
+
+### Changed
+
+- Full pane rebuilds (e.g. tab-switch reveals that miss the warm-cache fast
+  path) memoize per-(char, style) font/glyph resolution instead of rescanning
+  the whole font stack per cell: warm-atlas full rebuild 38ms -> 14ms (-63%),
+  cold-atlas 76ms -> 53ms (-30%) (#43)
+
+### Fixed
+
+- Native tab labels no longer regress to stale cached values after a relayout
+  (pane split/close, font size change, sidebar toggle, fullscreen): AppKit
+  re-derives tab labels from window titles on tab-group layout passes, so a
+  debounced all-window title re-assert now runs once the relayout burst goes
+  quiet (#41)
+
 ## [0.2.2] - 2026-07-22
 
 ### Added

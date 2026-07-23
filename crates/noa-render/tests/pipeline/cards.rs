@@ -195,6 +195,120 @@ fn overview_card_pipeline_pools_repeated_texture_views() {
     );
 }
 
+#[test]
+fn card_pipeline_draws_repeated_view_placements_beyond_pool_cap() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping repeated placement test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let source = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("noa-test-repeated-card-source"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &source,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[255, 255, 255, 255],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let surface_size = PixelSize { w: 70, h: 28 };
+    let (target, target_view) = render_target(&device, surface_size.w, surface_size.h);
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("noa-test-repeated-card-clear"),
+    });
+    {
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("noa-test-repeated-card-clear-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+    }
+    queue.submit(Some(encoder.finish()));
+
+    let card = CardPipeline::new(&device, format, wgpu::BlendState::ALPHA_BLENDING);
+    let style = CardStyle {
+        background: [0.0; 4],
+        border_color: [0.0; 4],
+        focus_color: [0.0; 4],
+        corner_radius: 0.0,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: 0.0,
+    };
+    let placements: Vec<_> = (0..34)
+        .map(|index| CardTexturePlacement {
+            texture_view: &source_view,
+            x: 1 + index * 2,
+            y: 8,
+            w: 1,
+            h: 12,
+            selected: false,
+        })
+        .collect();
+
+    card.overlay_texture_cards(
+        &device,
+        &queue,
+        &target_view,
+        surface_size,
+        &style,
+        &placements,
+    );
+
+    let pixels = read_rgba_pixels(&device, &queue, &target, surface_size.w, surface_size.h);
+    for placement in &placements {
+        let x = placement.x + placement.w / 2;
+        let y = placement.y + placement.h / 2;
+        let offset = ((y * surface_size.w + x) * 4) as usize;
+        assert_eq!(
+            &pixels[offset..offset + 4],
+            &[255, 255, 255, 255],
+            "every placement sharing one texture view must retain its own uniform"
+        );
+    }
+    assert_eq!(
+        card.card_pool_len_for_test(),
+        32,
+        "the pool must return to its cap after the oversized batch is submitted"
+    );
+}
+
 /// The session sidebar composites its rasterized band texture onto a window
 /// surface with `CardPipeline::overlay_texture_cards` (flat: corner_radius 0,
 /// border_width 0) — the same shader/uniform path as overview cards but the

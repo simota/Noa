@@ -182,7 +182,7 @@ basics.
 |----|------------|---------------|--------|
 | `REQ-PROTO-001` | OSC 8 hyperlinks | Partial | Hyperlink range state is stored; hover/activation affordances and copy/open actions remain |
 | `REQ-PROTO-002` | OSC 7 cwd | Partial | Per-terminal cwd tracking is implemented; title, new surface inheritance, and AppleScript integration remain |
-| `REQ-PROTO-003` | OSC 9 notifications | Missing | Implement notification and progress policy hooks |
+| `REQ-PROTO-003` | OSC 9 notifications and progress | Complete | Desktop notifications plus typed OSC 9;4 progress state and session UI are implemented |
 | `REQ-PROTO-004` | OSC 52 clipboard | Partial | OSC 52 write policy, base64 decode, decoded-size limit, and read-deny default are implemented; full read/query policy remains |
 | `REQ-PROTO-005` | Kitty graphics | Missing | Implement image storage, placement, rendering, limits, and cleanup |
 | `REQ-PROTO-006` | Kitty keyboard | Missing | Implement enhanced keyboard protocol negotiation and encoding |
@@ -292,7 +292,7 @@ Exit criteria:
   References `REQ-PROTO-001`.
 - [x] `IMPL-PROTO-002`: Implement OSC 7 working directory tracking. References
   `REQ-PROTO-002`.
-- [ ] `IMPL-PROTO-003`: Add notification and progress event hooks. References
+- [x] `IMPL-PROTO-003`: Add notification and progress event hooks. References
   `REQ-PROTO-003`.
 - [ ] `IMPL-PROTO-004`: Complete OSC 52 clipboard read/write policy. References
   `REQ-PROTO-004`.

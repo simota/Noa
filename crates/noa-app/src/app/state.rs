@@ -583,12 +583,14 @@ pub(super) struct OverviewPillKey {
     pub(super) rect: PaneRectApp,
 }
 
-/// The unfiltered TAB order `overview_source_tab_ids` last computed, the query
-/// it was filtered with, and the resulting (possibly filtered) order — see
+/// The unfiltered TAB order and focused pane per tab that
+/// `overview_source_tab_ids` last observed, the query it was filtered with,
+/// and the resulting (possibly filtered) order — see
 /// `overview_source_tab_ids_cache_hit` for the hit/miss rule. Keyed by tab
 /// (`WindowId`) since Overview tiles are tab-unit (U1).
 pub(super) struct OverviewSourceTileIdsCache {
     pub(super) unfiltered: Vec<WindowId>,
+    pub(super) focused_panes: Vec<(WindowId, PaneId)>,
     pub(super) query: String,
     pub(super) result: Vec<WindowId>,
 }
@@ -1212,6 +1214,24 @@ pub(super) fn overview_attention_card_style(
         } else {
             0.0
         },
+        ..overview_card_style(metrics)
+    }
+}
+
+/// Arrival-only attention cue for a tile whose blue selection/hover affordance
+/// must remain authoritative. It keeps the interaction ring color and width,
+/// and strengthens only its glow for the bounded attention flash.
+pub(super) fn overview_attention_arrival_card_style(
+    metrics: OverviewMetrics,
+    selected: bool,
+) -> CardStyle {
+    CardStyle {
+        focus_width: if selected {
+            metrics.card_focus_width
+        } else {
+            crate::chrome::RING_HOVER * metrics.scale()
+        },
+        focus_glow_width: crate::chrome::GLOW_ATTENTION * metrics.scale(),
         ..overview_card_style(metrics)
     }
 }

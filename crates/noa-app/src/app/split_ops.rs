@@ -775,6 +775,7 @@ impl App {
         if let Some(state) = self.windows.get(&window_id) {
             state.window.request_redraw();
         }
+        self.mark_overview_label_dirty(OverviewTileId::new(window_id, pane_id));
     }
 
     pub(super) fn resize_focused_split(&mut self, window_id: WindowId, direction: Direction) {

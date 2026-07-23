@@ -161,6 +161,21 @@ pub struct FontGrid {
     /// so a genuinely-uncovered glyph is probed once, not on every
     /// segmentation pass, and never re-runs the (relatively costly) resolution.
     cascade_misses: HashSet<char>,
+    /// Memoizes `resolve_glyph_for_style`'s successful `(font_index,
+    /// glyph_id)` result per `(char, style)` (tab-switch reveal perf:
+    /// `resolve_face_for_style` runs once per CELL, every row, on every full
+    /// pane rebuild — segmentation needs the face boundary before the shape
+    /// cache is ever consulted, so a warm shape cache does not save this
+    /// work). Without this, every cell re-scans the whole font stack,
+    /// reconstructing a `FontRef` and re-walking its cmap per candidate face,
+    /// for a `(char, style)` mapping that is invariant for the grid's
+    /// lifetime. Safe to cache permanently, never invalidated: a later
+    /// dynamic-fallback face is only ever APPENDED to the stack
+    /// (`try_dynamic_fallback`/`push_dynamic_fallback`), so it can never
+    /// change which face an already-resolved `(char, style)` hit earlier in
+    /// the stack. Only successful resolutions are cached, mirroring
+    /// `cascade_misses`'s reciprocal permanent cache for failures.
+    resolved_glyph_cache: HashMap<(char, StyleKey), (usize, u16)>,
 }
 
 impl FontGrid {
@@ -214,6 +229,7 @@ impl FontGrid {
             clock: 0,
             atlas_eviction_generation: 0,
             cascade_misses: HashSet::new(),
+            resolved_glyph_cache: HashMap::new(),
         })
     }
 
@@ -252,6 +268,7 @@ impl FontGrid {
             clock: 0,
             atlas_eviction_generation: 0,
             cascade_misses: HashSet::new(),
+            resolved_glyph_cache: HashMap::new(),
         })
     }
 
@@ -341,8 +358,13 @@ impl FontGrid {
     }
 
     fn resolve_glyph_for_style(&mut self, ch: char, style: StyleKey) -> (usize, u16) {
+        let cache_key = (ch, style);
+        if let Some(&hit) = self.resolved_glyph_cache.get(&cache_key) {
+            return hit;
+        }
         let font_style = FontStyle::from_bold_italic(style.bold, style.italic);
         if let Some(hit) = self.lookup_glyph_in_stack(ch, font_style) {
+            self.resolved_glyph_cache.insert(cache_key, hit);
             return hit;
         }
         // The curated stack (primary + emoji/Nerd fallbacks, plus any face an
@@ -352,6 +374,7 @@ impl FontGrid {
         if self.try_dynamic_fallback(ch)
             && let Some(hit) = self.lookup_glyph_in_stack(ch, font_style)
         {
+            self.resolved_glyph_cache.insert(cache_key, hit);
             return hit;
         }
         (0, 0)

@@ -37,7 +37,10 @@ fn session_delta_should_apply(
     window_os_focused: bool,
 ) -> bool {
     match delta {
-        SessionDelta::Upsert { .. } => window_eligible,
+        SessionDelta::Upsert { .. }
+        | SessionDelta::Progress { .. }
+        | SessionDelta::ProgressComplete { .. }
+        | SessionDelta::ProgressError { .. } => window_eligible,
         SessionDelta::Bell { .. } | SessionDelta::Attention { .. } => {
             window_eligible && !window_os_focused
         }

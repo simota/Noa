@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-07-24
+
+### Added
+
+- Scratch terminal: a disposable centered popup shell (cmd+shift+t) that spawns
+  in the focused pane's OSC 7 cwd and is destroyed on toggle, focus loss, shell
+  exit, cmd+w, config reload, or quit. Discoverable via the View menu and
+  Settings; marked ephemeral with an accent ring and a persistent
+  "Scratch Terminal — <cwd>" badge. Config: `scratch-terminal-key`,
+  `scratch-terminal-size` (#45)
+
+### Changed
+
+- Legacy Japanese documentation (KEYBINDINGS, parity plan/README, feature
+  specs) translated to English (#45)
+
+### Fixed
+
+- Native tab reordering no longer breaks the window↔tab-item association:
+  AppKit auto-appends new native tabs before Noa repositions them, so an
+  existing member is now detached before reinsertion, keeping window order and
+  tab labels in sync (#46)
+
 ## [0.2.3] - 2026-07-23
 
 ### Added

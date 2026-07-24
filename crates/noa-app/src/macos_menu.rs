@@ -54,6 +54,13 @@ pub(crate) struct MacosMenu {
     split_context_auto_approve: CheckMenuItem,
     split_context_send_selection: MenuItem,
     quick_terminal: MenuItem,
+    /// The "Scratch Terminal" item (kaizen item 1), retained so its
+    /// accelerator can track the keybind engine's effective
+    /// `ToggleScratchTerminal` chord (see
+    /// [`MacosMenu::set_scratch_terminal_chord`]) — same pattern as
+    /// `sidebar` below, since `scratch-terminal-key` is an in-app-only
+    /// chord, not a global hotkey like `quick_terminal_hotkey`.
+    scratch_terminal: MenuItem,
     /// The "Sidebar" item, retained so its accelerator can track the
     /// `sidebar-hotkey` config (see [`MacosMenu::set_sidebar_hotkey`]).
     sidebar: MenuItem,
@@ -89,6 +96,7 @@ impl MacosMenu {
     pub(crate) fn install(
         proxy: EventLoopProxy<UserEvent>,
         quick_terminal_hotkey: Option<&str>,
+        scratch_terminal_chord: Option<&str>,
         sidebar_chord: Option<&str>,
     ) -> anyhow::Result<Self> {
         let menu = Menu::new();
@@ -135,6 +143,12 @@ impl MacosMenu {
             "Quick Terminal",
             true,
             quick_terminal_accelerator(quick_terminal_hotkey),
+        );
+        let scratch_terminal = MenuItem::with_id(
+            AppCommand::ToggleScratchTerminal.menu_id(),
+            "Scratch Terminal",
+            true,
+            scratch_terminal_accelerator(scratch_terminal_chord),
         );
         let sidebar = MenuItem::with_id(
             AppCommand::ToggleSidebar.menu_id(),
@@ -363,6 +377,7 @@ impl MacosMenu {
                 ),
                 &open_theme_picker,
                 &quick_terminal,
+                &scratch_terminal,
                 &sidebar,
                 &auto_approve,
                 &PredefinedMenuItem::separator(),
@@ -458,6 +473,7 @@ impl MacosMenu {
             secure_keyboard_entry,
             auto_approve,
             quick_terminal,
+            scratch_terminal,
             sidebar,
         })
     }
@@ -511,6 +527,26 @@ impl MacosMenu {
         };
         if let Err(err) = result {
             log::warn!("failed to update Sidebar menu accelerator: {err}");
+        }
+    }
+
+    /// Reflect the keybind engine's *effective* `ToggleScratchTerminal`
+    /// chord in the Scratch Terminal menu item's shortcut column — same
+    /// reasoning as [`Self::set_sidebar_chord`] (`scratch-terminal-key` is
+    /// in-app-only, so the accelerator must track the engine, not the raw
+    /// config value).
+    pub(crate) fn set_scratch_terminal_chord(&self, chord: Option<&str>) {
+        let result = match scratch_terminal_accelerator(chord) {
+            Some(accelerator) => self.scratch_terminal.set_accelerator(Some(accelerator)),
+            None => self
+                .scratch_terminal
+                .set_key_accelerator(Some(KeyAccelerator::new(
+                    None,
+                    AcceleratorKey::Character(String::new()),
+                ))),
+        };
+        if let Err(err) = result {
+            log::warn!("failed to update Scratch Terminal menu accelerator: {err}");
         }
     }
 
@@ -671,6 +707,13 @@ fn quick_terminal_accelerator(hotkey: Option<&str>) -> Option<Accelerator> {
 /// menu's shortcut column goes blank — never a chord the engine would route
 /// elsewhere).
 fn sidebar_accelerator(chord: Option<&str>) -> Option<Accelerator> {
+    chord.and_then(accelerator_from_hotkey)
+}
+
+/// The Scratch Terminal item's accelerator for the keybind engine's
+/// effective `ToggleScratchTerminal` chord — same shape as
+/// [`sidebar_accelerator`] (an in-app-only chord, not a global hotkey).
+fn scratch_terminal_accelerator(chord: Option<&str>) -> Option<Accelerator> {
     chord.and_then(accelerator_from_hotkey)
 }
 
@@ -935,5 +978,32 @@ mod tests {
             accelerator_from_hotkey("cmd+alt+b")
         );
         assert!(sidebar_accelerator(Some("cmd+unknown-key")).is_none());
+    }
+
+    // Kaizen item 1: `ToggleScratchTerminal` now has a real menu id, and its
+    // accelerator tracks the keybind engine's effective chord exactly like
+    // `ToggleSidebar`'s does (same underlying `accelerator_from_hotkey`
+    // parser, same in-app-only semantics).
+    #[test]
+    fn scratch_terminal_menu_item_has_a_real_menu_id() {
+        assert_ne!(AppCommand::ToggleScratchTerminal.menu_id(), "");
+        assert_eq!(
+            AppCommand::from_menu_id(AppCommand::ToggleScratchTerminal.menu_id()),
+            Some(AppCommand::ToggleScratchTerminal)
+        );
+    }
+
+    #[test]
+    fn scratch_terminal_accelerator_tracks_the_effective_engine_chord() {
+        assert!(scratch_terminal_accelerator(None).is_none());
+        assert_eq!(
+            scratch_terminal_accelerator(Some("cmd+shift+t")),
+            Some(cmd_shift_accelerator(Code::KeyT))
+        );
+        assert_eq!(
+            scratch_terminal_accelerator(Some("cmd+alt+b")),
+            accelerator_from_hotkey("cmd+alt+b")
+        );
+        assert!(scratch_terminal_accelerator(Some("cmd+unknown-key")).is_none());
     }
 }

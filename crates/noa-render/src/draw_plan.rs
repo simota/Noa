@@ -67,11 +67,16 @@ pub enum DrawOp {
 /// [`DrawOp::PaneCells`] per visible pane in layout order, then
 /// [`DrawOp::Dividers`], then an optional [`DrawOp::FocusIndicator`]. When
 /// `zoomed` names a live pane, only that pane emits cells and divider/focus
-/// geometry is suppressed.
+/// geometry is suppressed. `force_ring` (scratch-terminal kaizen item 4)
+/// draws the focus indicator around the sole pane even when there is only
+/// one visible pane — normally suppressed then, since a single pane needs no
+/// ring to disambiguate focus from its siblings; the scratch terminal popup
+/// (always exactly one pane) uses this as a thin ephemerality cue instead.
 pub fn build_draw_plan(
     layout: &[(PaneId, PaneRect)],
     focused: Option<PaneId>,
     zoomed: Option<PaneId>,
+    force_ring: bool,
 ) -> Vec<DrawOp> {
     let zoomed = zoomed.filter(|pane| layout.iter().any(|(candidate, _)| candidate == pane));
     let mut plan = Vec::with_capacity(layout.len() + 3);
@@ -96,7 +101,7 @@ pub fn build_draw_plan(
     };
     plan.push(DrawOp::Dividers { rects });
 
-    if let Some((pane, rects)) = focus_indicator(layout, focused, zoomed) {
+    if let Some((pane, rects)) = focus_indicator(layout, focused, zoomed, force_ring) {
         plan.push(DrawOp::FocusIndicator { pane, rects });
     }
 
@@ -170,12 +175,13 @@ fn focus_indicator(
     layout: &[(PaneId, PaneRect)],
     focused: Option<PaneId>,
     zoomed: Option<PaneId>,
+    force_ring: bool,
 ) -> Option<(PaneId, Vec<PaneRect>)> {
     let visible_count = layout
         .iter()
         .filter(|(pane, _)| zoomed.is_none_or(|zoomed| zoomed == *pane))
         .count();
-    if visible_count <= 1 {
+    if visible_count <= 1 && !force_ring {
         return None;
     }
 
@@ -251,7 +257,7 @@ mod tests {
             (right, PaneRect::new(51, 0, 49, 20)),
         ];
 
-        let plan = build_draw_plan(&layout, None, None);
+        let plan = build_draw_plan(&layout, None, None, false);
 
         assert_eq!(plan.first(), Some(&DrawOp::Clear));
         assert!(matches!(plan.get(1), Some(DrawOp::PaneCells { pane, .. }) if *pane == left));
@@ -270,7 +276,7 @@ mod tests {
             (PaneId::new(3), PaneRect::new(51, 21, 49, 20)),
         ];
 
-        let plan = build_draw_plan(&layout, None, None);
+        let plan = build_draw_plan(&layout, None, None, false);
         let cells = pane_cells(&plan);
 
         assert_eq!(
@@ -299,7 +305,7 @@ mod tests {
             (PaneId::new(2), PaneRect::new(51, 0, 49, 20)),
         ];
 
-        let plan = build_draw_plan(&layout, None, Some(PaneId::new(2)));
+        let plan = build_draw_plan(&layout, None, Some(PaneId::new(2)), false);
 
         assert_eq!(
             pane_cells(&plan),
@@ -319,8 +325,8 @@ mod tests {
             (PaneId::new(3), PaneRect::new(0, 68, 40, 32)),
         ];
 
-        let horizontal_plan = build_draw_plan(&horizontal_gap, None, None);
-        let vertical_plan = build_draw_plan(&vertical_gap, None, None);
+        let horizontal_plan = build_draw_plan(&horizontal_gap, None, None, false);
+        let vertical_plan = build_draw_plan(&vertical_gap, None, None, false);
 
         assert!(
             matches!(horizontal_plan.last(), Some(DrawOp::Dividers { rects }) if rects.is_empty()),
@@ -341,7 +347,7 @@ mod tests {
             (right, PaneRect::new(51, 0, 49, 20)),
         ];
 
-        let plan = build_draw_plan(&layout, Some(right), None);
+        let plan = build_draw_plan(&layout, Some(right), None, false);
 
         assert!(matches!(plan.get(3), Some(DrawOp::Dividers { .. })));
         assert!(
@@ -368,19 +374,36 @@ mod tests {
             (PaneId::new(2), PaneRect::new(51, 0, 49, 20)),
         ];
 
-        let single = build_draw_plan(&layout[..1], Some(PaneId::new(1)), None);
+        let single = build_draw_plan(&layout[..1], Some(PaneId::new(1)), None, false);
         assert!(
             single
                 .iter()
                 .all(|op| !matches!(op, DrawOp::FocusIndicator { .. }))
         );
 
-        let zoomed = build_draw_plan(&layout, Some(PaneId::new(2)), Some(PaneId::new(2)));
+        let zoomed = build_draw_plan(&layout, Some(PaneId::new(2)), Some(PaneId::new(2)), false);
         assert!(
             zoomed
                 .iter()
                 .all(|op| !matches!(op, DrawOp::FocusIndicator { .. }))
         );
         assert!(matches!(zoomed.last(), Some(DrawOp::Dividers { rects }) if rects.is_empty()));
+    }
+
+    // scratch-terminal kaizen item 4: `force_ring` is the one override that
+    // still draws a focus indicator around a single visible pane, giving the
+    // scratch terminal popup (always exactly one pane) its ephemerality cue.
+    #[test]
+    fn force_ring_draws_focus_indicator_for_a_single_visible_pane() {
+        let layout = [(PaneId::new(1), PaneRect::new(0, 0, 50, 20))];
+
+        let plan = build_draw_plan(&layout, Some(PaneId::new(1)), None, true);
+        assert_eq!(
+            plan.last(),
+            Some(&DrawOp::FocusIndicator {
+                pane: PaneId::new(1),
+                rects: focus_indicator_rects(PaneRect::new(0, 0, 50, 20)),
+            })
+        );
     }
 }

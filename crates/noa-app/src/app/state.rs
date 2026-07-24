@@ -745,6 +745,8 @@ mod theme_settings_session_tests {
             server_bind: noa_config::DEFAULT_SERVER_BIND.to_string(),
             server_scopes: "read".to_string(),
             server_status: "Stopped".to_string(),
+            scratch_terminal_key: "cmd+shift+t".to_string(),
+            scratch_terminal_size: (100, 25),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),

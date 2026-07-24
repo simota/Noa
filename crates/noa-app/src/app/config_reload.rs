@@ -281,6 +281,14 @@ impl App {
                         .chord_for(crate::commands::AppCommand::ToggleSidebar)
                         .as_deref(),
                 );
+                // Same reasoning for the Scratch Terminal item's accelerator
+                // (kaizen item 1): `scratch-terminal-key` or an explicit
+                // keybind can both move the effective chord.
+                menu.set_scratch_terminal_chord(
+                    self.keybinds
+                        .chord_for(crate::commands::AppCommand::ToggleScratchTerminal)
+                        .as_deref(),
+                );
             }
         }
         if hotkeys_changed {

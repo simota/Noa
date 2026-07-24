@@ -377,6 +377,18 @@ impl KeybindEngine {
     }
 }
 
+/// Whether `spec` parses as a valid keybind chord (`KeyTrigger::parse`),
+/// without normalizing the empty/`none`/`off`/`false` disable sentinel
+/// (callers that accept a sentinel check that themselves — see
+/// `apply_scratch_terminal_key`). Exposed for the Settings panel's
+/// `ScratchTerminalKey` row (kaizen item 3), which needs to validate
+/// free-typed chord text the same way `noa-config`'s parser and this
+/// module's own `apply_scratch_terminal_key` do, without duplicating the
+/// trigger grammar in `theme_settings`.
+pub(crate) fn is_valid_keybind_chord(spec: &str) -> bool {
+    KeyTrigger::parse(spec).is_ok()
+}
+
 /// The closed `perform action` set for the AppleScript bridge (applescript
 /// R-8/L2): only these action names are accepted; everything else yields
 /// `errAEEventNotHandled`. Reuses [`AppCommand`] variants (no new commands),

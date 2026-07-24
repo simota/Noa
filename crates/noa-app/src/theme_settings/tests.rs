@@ -52,6 +52,8 @@ fn init() -> ThemeSettingsInit {
         server_bind: noa_config::DEFAULT_SERVER_BIND.to_string(),
         server_scopes: "read".to_string(),
         server_status: "Stopped".to_string(),
+        scratch_terminal_key: "cmd+shift+t".to_string(),
+        scratch_terminal_size: (100, 25),
         theme_pair: None,
         carryover: None,
         favorites: std::sync::Arc::new(std::collections::HashSet::new()),
@@ -924,6 +926,145 @@ fn quick_terminal_height_row_adjusts_clamps_and_commits() {
         updates.iter().find(|(k, _)| k == "quick-terminal-size"),
         Some(&("quick-terminal-size".to_string(), "0.10".to_string()))
     );
+}
+
+// Kaizen item 3: cols/rows step together on one ←→ press (mirrors
+// `WindowPadding`), clamp independently, and commit as `<cols>x<rows>`.
+#[test]
+fn scratch_terminal_size_row_adjusts_clamps_and_commits() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::ScratchTerminalSize);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::ScratchTerminalSize)].draft,
+        RowDraft::ScratchTerminalSize(100, 25)
+    );
+
+    let effect = settings.adjust(1, Instant::now());
+    assert_eq!(effect, RowEffect::None);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::ScratchTerminalSize)].draft,
+        RowDraft::ScratchTerminalSize(105, 26)
+    );
+    assert!(!settings.restart_note(SettingsRowKind::ScratchTerminalSize));
+
+    for _ in 0..200 {
+        settings.adjust(-1, Instant::now());
+    }
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::ScratchTerminalSize)].draft,
+        RowDraft::ScratchTerminalSize(10, 5)
+    );
+    for _ in 0..200 {
+        settings.adjust(1, Instant::now());
+    }
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::ScratchTerminalSize)].draft,
+        RowDraft::ScratchTerminalSize(500, 200)
+    );
+
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "scratch-terminal-size"),
+        Some(&("scratch-terminal-size".to_string(), "500x200".to_string()))
+    );
+}
+
+// Kaizen item 3: typed text commits as-is when it parses as a valid chord
+// (same grammar `noa-config`'s parser and `KeybindEngine` use), is skipped
+// (not written at all) when non-empty but invalid, and the empty "disabled"
+// sentinel is written normally, exactly like the config parser's own
+// `none`/off handling for `scratch-terminal-key`.
+#[test]
+fn scratch_terminal_key_row_types_and_validates_before_commit() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::ScratchTerminalKey);
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::ScratchTerminalKey)].draft,
+        RowDraft::ScratchTerminalKey("cmd+shift+t".to_string())
+    );
+
+    // Backspacing the seeded default down to empty, then typing a fresh,
+    // valid chord.
+    for _ in 0.."cmd+shift+t".len() {
+        settings.backspace(Instant::now());
+    }
+    settings.push_text("cmd+shift+u", Instant::now());
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::ScratchTerminalKey)].draft,
+        RowDraft::ScratchTerminalKey("cmd+shift+u".to_string())
+    );
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "scratch-terminal-key"),
+        Some(&(
+            "scratch-terminal-key".to_string(),
+            "cmd+shift+u".to_string()
+        ))
+    );
+}
+
+#[test]
+fn scratch_terminal_key_row_skips_an_invalid_nonempty_chord_on_commit() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::ScratchTerminalKey);
+    for _ in 0.."cmd+shift+t".len() {
+        settings.backspace(Instant::now());
+    }
+    settings.push_text("not-a-real-chord", Instant::now());
+    assert!(
+        settings.rows()[row_index(SettingsRowKind::ScratchTerminalKey)].touched,
+        "typing still marks the row touched even though commit will skip it"
+    );
+
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "scratch-terminal-key"),
+        None,
+        "an invalid, non-empty chord must never be written"
+    );
+}
+
+#[test]
+fn scratch_terminal_key_row_commits_the_empty_disable_sentinel() {
+    let mut settings = ThemeSettings::open(settings_init());
+    move_to_row(&mut settings, SettingsRowKind::ScratchTerminalKey);
+    for _ in 0.."cmd+shift+t".len() {
+        settings.backspace(Instant::now());
+    }
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::ScratchTerminalKey)].draft,
+        RowDraft::ScratchTerminalKey(String::new())
+    );
+
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "scratch-terminal-key"),
+        Some(&("scratch-terminal-key".to_string(), String::new()))
+    );
+}
+
+// Judge fix 2: typing one of the documented disable sentinels
+// (CONFIGURATION.md: `none`/`off`/`false`, case-insensitive) must not be
+// rejected as an "invalid chord" and silently dropped — it normalizes to the
+// empty sentinel and commits, exactly like the config-file parser's own
+// `scratch-terminal-key = none` handling.
+#[test]
+fn scratch_terminal_key_row_normalizes_disable_sentinels_before_commit() {
+    for sentinel in ["none", "off", "false", "NONE", "Off", "FALSE", "  none  "] {
+        let mut settings = ThemeSettings::open(settings_init());
+        move_to_row(&mut settings, SettingsRowKind::ScratchTerminalKey);
+        for _ in 0.."cmd+shift+t".len() {
+            settings.backspace(Instant::now());
+        }
+        settings.push_text(sentinel, Instant::now());
+
+        let updates = settings.commit_updates();
+        assert_eq!(
+            updates.iter().find(|(k, _)| k == "scratch-terminal-key"),
+            Some(&("scratch-terminal-key".to_string(), String::new())),
+            "{sentinel:?} should normalize to the empty disable sentinel"
+        );
+    }
 }
 
 #[test]
@@ -1865,8 +2006,8 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
 // App QR action brings it to 30 (+1).
 #[test]
 fn settings_row_kind_count_includes_remote_app_qr_action() {
-    assert_eq!(SettingsRowKind::COUNT, 30);
-    assert_eq!(SettingsRowKind::ALL.len(), 30);
+    assert_eq!(SettingsRowKind::COUNT, 32);
+    assert_eq!(SettingsRowKind::ALL.len(), 32);
 }
 
 // settings-panel-server-status: the status row is read-only (mirrors
@@ -2984,7 +3125,7 @@ fn every_mutator_that_changes_state_changes_the_fingerprint() {
     // `adjust`, edited only via text entry) goes through `push_text`.
     fn exercise(settings: &mut ThemeSettings, kind: SettingsRowKind, now: Instant) {
         match kind {
-            SettingsRowKind::BackgroundImage => {
+            SettingsRowKind::BackgroundImage | SettingsRowKind::ScratchTerminalKey => {
                 settings.push_text("x", now);
             }
             SettingsRowKind::BackgroundOpacity | SettingsRowKind::BackgroundImageOpacity => {

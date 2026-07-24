@@ -99,6 +99,23 @@ pub(super) fn scratch_terminal_origin(
     )
 }
 
+/// The scratch popup's initial OS window title (kaizen item 5): invisible
+/// chrome (the popup is borderless) but exposed to AX/Mission
+/// Control/window-switcher UI, so the resolved cwd is worth surfacing even
+/// though nothing else about the window shows it. A spawn-time snapshot that
+/// stands for the popup's whole lifetime: `refresh_window_title` (the
+/// generic per-window dynamic-title refresh that would otherwise supersede
+/// it with the shell's own OSC title on the very next redraw — including the
+/// pre-show `redraw()` call below, before the window is ever visible) is
+/// explicitly skipped for this window (see its own doc comment), so this
+/// title is never overwritten.
+pub(super) fn scratch_terminal_window_title(cwd: Option<&str>) -> String {
+    match cwd {
+        Some(cwd) => format!("Scratch Terminal — {cwd}"),
+        None => "Scratch Terminal".to_string(),
+    }
+}
+
 /// scratch-terminal R3: the cwd a freshly spawned popup should inherit.
 /// `focused_pane_cwd` is already a live check (`pane_cwd`'s `Path::is_dir`
 /// guard runs at call time, not from a cache), so this is a direct
@@ -181,7 +198,7 @@ impl App {
         );
 
         let attrs = WindowAttributes::default()
-            .with_title("Scratch Terminal")
+            .with_title(scratch_terminal_window_title(cwd.as_deref()))
             .with_decorations(false)
             .with_inner_size(PhysicalSize::new(width, height))
             .with_position(PhysicalPosition::new(origin_x, origin_y))
@@ -499,6 +516,21 @@ mod tests {
             scratch_terminal_spawn_cwd(Some("/tmp".to_string())),
             Some("/tmp".to_string())
         );
+    }
+
+    // Kaizen item 5: the spawn-time window title includes the resolved cwd
+    // when there is one, and falls back to the bare label otherwise.
+    #[test]
+    fn window_title_includes_cwd_when_present() {
+        assert_eq!(
+            scratch_terminal_window_title(Some("/tmp")),
+            "Scratch Terminal — /tmp"
+        );
+    }
+
+    #[test]
+    fn window_title_falls_back_without_cwd() {
+        assert_eq!(scratch_terminal_window_title(None), "Scratch Terminal");
     }
 
     // R6: window/tab management commands are blocked; terminal-level

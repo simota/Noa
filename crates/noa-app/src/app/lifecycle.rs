@@ -1461,6 +1461,9 @@ impl App {
                     self.proxy.clone(),
                     self.config.quick_terminal_hotkey.as_deref(),
                     self.keybinds
+                        .chord_for(crate::commands::AppCommand::ToggleScratchTerminal)
+                        .as_deref(),
+                    self.keybinds
                         .chord_for(crate::commands::AppCommand::ToggleSidebar)
                         .as_deref(),
                 )

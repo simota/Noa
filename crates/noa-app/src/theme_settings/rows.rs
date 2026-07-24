@@ -131,10 +131,23 @@ pub(crate) enum SettingsRowKind {
     /// since there is no "value" to reset — only a transient copy-status
     /// display.
     ServerTokenCopy,
+    /// `scratch-terminal-key` (scratch-terminal kaizen item 3): the in-app
+    /// chord that toggles the scratch terminal popup. A free-text row like
+    /// `BackgroundImage`, but its typed text is validated against the same
+    /// chord grammar the config parser and `KeybindEngine` use
+    /// (`crate::commands::is_valid_keybind_chord`) — an invalid, non-empty
+    /// value is never written (mirrors `FontFamily`'s empty-default skip in
+    /// `commit_updates`).
+    ScratchTerminalKey,
+    /// `scratch-terminal-size`: the scratch terminal popup's grid size in
+    /// cells. Two-axis numeric like `WindowPadding`, but reload-exempt (a
+    /// scratch popup toggle reads the live config value fresh, exactly like
+    /// `QuickTerminalHeight`) rather than restart-only.
+    ScratchTerminalSize,
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 30;
+    pub(crate) const COUNT: usize = 32;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -166,6 +179,8 @@ impl SettingsRowKind {
         Self::ServerScopes,
         Self::ServerRemoteAppQr,
         Self::ServerTokenCopy,
+        Self::ScratchTerminalKey,
+        Self::ScratchTerminalSize,
     ];
 
     /// R-8: the fixed live/commit-only classification, one row's kind at a
@@ -227,6 +242,8 @@ impl SettingsRowKind {
             Self::ServerScopes => "Server Scopes",
             Self::ServerRemoteAppQr => "Remote App QR",
             Self::ServerTokenCopy => "Server Token",
+            Self::ScratchTerminalKey => "Scratch Terminal Key",
+            Self::ScratchTerminalSize => "Scratch Terminal Size",
         }
     }
 
@@ -293,6 +310,12 @@ impl SettingsRowKind {
             }
             Self::ServerTokenCopy => {
                 "Copy the bearer token to the clipboard. The token is never displayed."
+            }
+            Self::ScratchTerminalKey => {
+                "In-app chord that toggles the scratch terminal popup. Applies on save."
+            }
+            Self::ScratchTerminalSize => {
+                "Scratch terminal popup grid size, in columns x rows. Applies on save."
             }
         }
     }
@@ -420,6 +443,13 @@ pub(crate) enum RowDraft {
     /// `App` actually performs (or fails) the clipboard write outside the
     /// pure state machine.
     ServerTokenCopy(TokenCopyStatus),
+    /// Free-typed chord text for [`SettingsRowKind::ScratchTerminalKey`] —
+    /// same shape as `BackgroundImage`'s plain string, not yet validated at
+    /// the type level (validation happens at `commit_updates` time, mirrors
+    /// the config parser's own "invalid value ignored" policy).
+    ScratchTerminalKey(String),
+    /// `(cols, rows)` for [`SettingsRowKind::ScratchTerminalSize`].
+    ScratchTerminalSize(u16, u16),
 }
 
 /// [`RowDraft::ServerTokenCopy`]'s three faces — deliberately holds no
@@ -509,6 +539,14 @@ impl RowDraft {
                 TokenCopyStatus::Copied => "Copied \u{2713}".to_string(),
                 TokenCopyStatus::Failed => "Copy failed".to_string(),
             },
+            RowDraft::ScratchTerminalKey(chord) => {
+                if chord.is_empty() {
+                    "None".to_string()
+                } else {
+                    chord.clone()
+                }
+            }
+            RowDraft::ScratchTerminalSize(cols, rows) => format!("{cols}x{rows}"),
         }
     }
 
@@ -598,6 +636,13 @@ impl RowDraft {
             SettingsRowKind::ServerScopes => RowDraft::ServerScopes(d.server_scopes),
             SettingsRowKind::ServerRemoteAppQr => RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
             SettingsRowKind::ServerTokenCopy => RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
+            SettingsRowKind::ScratchTerminalKey => RowDraft::ScratchTerminalKey(
+                d.scratch_terminal_key.unwrap_or_default(),
+            ),
+            SettingsRowKind::ScratchTerminalSize => RowDraft::ScratchTerminalSize(
+                d.scratch_terminal_size.cols,
+                d.scratch_terminal_size.rows,
+            ),
         }
     }
 }
@@ -618,6 +663,15 @@ pub(crate) fn settings_row_display_value(
             return "|".to_string();
         }
         return format!("{path}|");
+    }
+    if editing
+        && kind == SettingsRowKind::ScratchTerminalKey
+        && let RowDraft::ScratchTerminalKey(chord) = draft
+    {
+        if chord.is_empty() {
+            return "|".to_string();
+        }
+        return format!("{chord}|");
     }
 
     draft.display_value()
@@ -803,6 +857,11 @@ pub(crate) struct ThemeSettingsInit {
     /// taking those `noa-ipc` types directly (keeps `noa_ipc` out of
     /// `theme_settings`'s dependency surface).
     pub(crate) server_status: String,
+    /// `scratch-terminal-key`'s raw value, already normalized to the empty
+    /// string for "unset"/disabled (`RowDraft::ScratchTerminalKey`'s
+    /// `display_value` already treats an empty draft as "None").
+    pub(crate) scratch_terminal_key: String,
+    pub(crate) scratch_terminal_size: (u16, u16),
 }
 
 /// [`SettingsRowKind::ServerStatus`]'s display text (E) for a given

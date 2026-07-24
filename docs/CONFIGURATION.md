@@ -204,6 +204,15 @@ See [noa-server-protocol.md](api/noa-server-protocol.md) for scope and attach-ch
 See [KEYBINDINGS.md](KEYBINDINGS.md#global-system-hotkeys) for the syntax of global hotkey chords and
 the corresponding keys.
 
+## Scratch Terminal
+
+A disposable popup terminal, centered on the focused window and spawned in the focused pane's cwd (falling back to noa's own process cwd when none is reported). Distinct from the Quick Terminal above: no animation, no persistence across toggles, single instance, and no global hotkey. It closes on: re-pressing the toggle chord, the popup losing focus, the shell exiting, `cmd+w` inside the popup, a config reload, or app quit — always tearing down the pty immediately, with no confirmation.
+
+| Key | Accepted values | Default | Description |
+|---|---|---|---|
+| `scratch-terminal-key` | in-app keybind chord, or `none` / `off` / `false` | `cmd+shift+t` | Toggles the scratch terminal popup. **Not** a system-wide hotkey — it only fires while noa is focused. `none` / an empty value disables the command outright (the chord then falls through to the pty). A chord already used by another binding is rejected with a diagnostic |
+| `scratch-terminal-size` | `<cols>x<rows>` in terminal cells | `100x25` | The popup's grid size, e.g. `120x40`. Clamped to at most 90% of the focused window's inner size on each axis |
+
 ## macOS
 
 | Key | Accepted values | Default | Description |

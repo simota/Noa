@@ -574,7 +574,7 @@ fn overlay_boundary_stays_correct_after_a_per_row_patched_rebuild_fm16() {
              (no overlay appended yet)"
     );
 
-    renderer.draw_panes(&device, &queue, &view, &layout, Some(pane_a), None);
+    renderer.draw_panes(&device, &queue, &view, &layout, Some(pane_a), None, false);
 
     let all_instances = renderer.instances_for_test();
     assert!(

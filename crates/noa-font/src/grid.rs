@@ -305,15 +305,16 @@ impl FontGrid {
             thicken: self.font_cfg.thicken,
             thicken_strength: self.font_cfg.thicken_strength,
         };
-        // Ghostty does not shrink ordinary text glyphs to fit their cell span
-        // — only its generated Nerd Font/Powerline icon codepoints are
-        // cell-constrained (see `raster::rasterize_with_variations`'s
-        // `fit_width` doc comment). `font_index` is the icon-fallback check's
-        // seam here since it is already resolved for this codepoint.
-        let fit_width = self
-            .font_stack
-            .is_icon_fallback_face(font_index)
-            .then(|| f32::from(span_for_char(ch)) * self.metrics.cell_w);
+        // DEC-1: deliberate deviation from Ghostty. Ghostty fits only its
+        // generated Nerd Font/Powerline icon codepoints to the cell span and
+        // lets every other glyph overflow. noa instead offers every glyph its
+        // allotted span as `fit_width`, so a fallback-font glyph whose natural
+        // advance overshoots the cell (e.g. `①` and other East-Asian-Ambiguous
+        // symbols some macOS fallback fonts size ~2 cells wide) is downscaled
+        // to fit instead of overlapping its neighbor. `rasterize_with_variations`
+        // only shrinks when `advance > fit * 1.1`, so glyphs that already fit
+        // (ordinary Latin, in-width CJK) are untouched — same natural raster.
+        let fit_width = Some(f32::from(span_for_char(ch)) * self.metrics.cell_w);
         let glyph = rasterize_with_variations(
             &mut self.ctx,
             font,
@@ -605,13 +606,11 @@ impl FontGrid {
             self.font_stack
                 .is_native_style_face(face_id.0 as usize, font_style),
         );
-        // See the matching comment in `get_or_raster`: only Nerd Font
-        // icon/Powerline glyphs are fit to their cell span; ordinary text
-        // glyphs render at natural size, per Ghostty parity.
-        let fit_width = self
-            .font_stack
-            .is_icon_fallback_face(face_id.0 as usize)
-            .then(|| f32::from(span) * self.metrics.cell_w);
+        // DEC-1: deliberate deviation from Ghostty — see the matching comment
+        // in `get_or_raster`. Every glyph is offered its allotted span, so an
+        // oversized fallback glyph is downscaled to fit rather than overflowing
+        // its neighbor; in-width glyphs (advance <= fit * 1.1) are untouched.
+        let fit_width = Some(f32::from(span) * self.metrics.cell_w);
         let glyph = rasterize_with_variations(
             &mut self.ctx,
             font,
@@ -980,18 +979,17 @@ mod tests {
         assert_eq!(grid.mask_atlas_generation(), generation);
     }
 
-    /// Regression (Scout RCA, verified against Ghostty upstream; supersedes
-    /// the old `narrow_fallback_glyph_fits_within_its_cell_span` pin, which
-    /// asserted the opposite): Ghostty does not shrink ordinary text glyphs
-    /// to fit their cell span — only its generated Nerd Font/Powerline icon
-    /// codepoints are cell-constrained (`nerd_font_attributes.zig`). `①` (a
-    /// circled digit some macOS fallback fonts size for a wider layout than
-    /// noa's single-cell East-Asian-Ambiguous width) is ordinary text, not a
-    /// Nerd Font icon, so it must rasterize at its natural size and may
-    /// overflow its cell — exactly like `※` in
-    /// `ordinary_text_glyph_is_not_shrunk_to_fit_its_span` above.
+    /// Regression (DEC-1 — deliberate deviation from Ghostty for readability;
+    /// inverts the earlier
+    /// `narrow_fallback_glyph_renders_at_natural_size_and_is_not_fit_to_its_cell_span`
+    /// pin, which asserted the opposite parity behavior): noa fits every glyph
+    /// to its allotted cell span. `①` (a circled digit some macOS fallback
+    /// fonts size ~2 cells wide, though noa assigns it a single-cell
+    /// East-Asian-Ambiguous width) must therefore be downscaled so its
+    /// rasterized width lands within its one-cell span (plus the 10% shrink
+    /// tolerance), rather than overflowing into its neighbor.
     #[test]
-    fn narrow_fallback_glyph_renders_at_natural_size_and_is_not_fit_to_its_cell_span() {
+    fn oversized_fallback_glyph_is_fit_to_its_single_cell_span() {
         let mut grid = match FontGrid::new(14.0, FontConfig::default()) {
             Ok(g) => g,
             Err(e) => {
@@ -1018,21 +1016,34 @@ mod tests {
             None,
         );
 
+        // '①' occupies a single cell (East-Asian-Ambiguous width in noa).
+        let span_px = grid.metrics.cell_w;
         let info = grid.get_or_raster(CIRCLED_ONE);
         assert!(
             info.atlas_size[0] > 0 && info.atlas_size[1] > 0,
             "'①' should rasterize to a non-empty atlas region: {:?}",
             info.atlas_size
         );
-        assert_eq!(
-            (natural.width, natural.height),
-            (info.atlas_size[0] as u32, info.atlas_size[1] as u32),
-            "'①' is ordinary text (not a Nerd Font icon) and must rasterize at its natural \
-             size regardless of its allotted single-cell span: natural {}x{}, got {:?}",
-            natural.width,
-            natural.height,
-            info.atlas_size
-        );
+
+        // Only meaningful when this environment's fallback glyph actually
+        // overshoots the cell; otherwise the natural raster already fits and
+        // there is nothing to constrain.
+        if natural.width as f32 > span_px * 1.1 {
+            assert!(
+                (info.atlas_size[0] as f32) <= span_px * 1.1,
+                "'①' overflows its single-cell span ({:.1}px) and must be fit-to-cell \
+                 (DEC-1): natural width {}px, fitted atlas width {}px",
+                span_px,
+                natural.width,
+                info.atlas_size[0]
+            );
+            assert!(
+                u32::from(info.atlas_size[0]) < natural.width,
+                "'①' should be downscaled below its natural width: natural {}px, got {}px",
+                natural.width,
+                info.atlas_size[0]
+            );
+        }
     }
 
     /// A CJK codepoint absent from the (CJK-free) startup stack is resolved
@@ -1814,36 +1825,30 @@ mod tests {
         );
     }
 
-    /// Regression (Scout RCA, verified against Ghostty upstream): Ghostty
-    /// does not shrink ordinary monochrome text glyphs to fit their cell
-    /// span — only specific generated/icon codepoints (Nerd Font icon
-    /// tables) are constrained to a cell box; every other glyph rasterizes
-    /// at its natural size and may overflow. noa-font's fit-to-cell downscale
-    /// (`raster::rasterize_with_variations`, ~line 257-288) is applied
-    /// unconditionally whenever a glyph's advance exceeds its allotted span
-    /// by more than 10%, with no distinction for U+203B `※` — a
-    /// single-column (East\_Asian\_Width=Ambiguous, narrow per parity) CJK
-    /// punctuation mark rasterized from a real cmap-resolved font glyph, not
-    /// a generated icon. This shrinks `※` to roughly half its natural ink
-    /// size (Scout measured ~12x12px vs a natural ~20x20px at 24px font).
+    /// Regression (DEC-1 — deliberate deviation from Ghostty; replaces the
+    /// earlier `ordinary_text_glyph_is_not_shrunk_to_fit_its_span` pin that
+    /// asserted the opposite): fit-to-cell is offered to every glyph, but the
+    /// downscale only fires when a glyph's advance overshoots its span by more
+    /// than 10%. An ordinary glyph whose natural raster already fits its cell
+    /// (`M` at span=1 — Latin, well within a monospace advance) must therefore
+    /// be left at its natural size, byte-for-byte, not shrunk. This guards the
+    /// "in-width glyphs unchanged" half of the deviation.
     #[test]
-    fn ordinary_text_glyph_is_not_shrunk_to_fit_its_span() {
-        const REFERENCE_MARK: char = '\u{203B}'; // '※'
+    fn in_width_glyph_is_not_shrunk_by_fit_to_cell() {
+        const LETTER_M: char = 'M';
 
         let mut grid = skip_if_no_font!(FontGrid::new(24.0, FontConfig::default()));
-        if !grid.has_glyph(REFERENCE_MARK) {
-            eprintln!("skipping: no installed font can render U+203B");
+        if !grid.has_glyph(LETTER_M) {
+            eprintln!("skipping: no installed font can render 'M'");
             return;
         }
 
         let style = StyleKey::default();
-        let (font_index, glyph_id) = grid.resolve_glyph_for_style(REFERENCE_MARK, style);
+        let (font_index, glyph_id) = grid.resolve_glyph_for_style(LETTER_M, style);
         let face_id = FaceId(font_index as u16);
 
-        // The TRUE natural (un-fitted) raster: invoke the same rasterizer
-        // `raster_shaped` uses, but with `fit_width: None` so the fit-to-cell
-        // downscale branch cannot trigger — this is the Ghostty-parity
-        // ground truth for an ordinary text glyph's size.
+        // The natural (un-fitted) raster: same rasterizer `raster_shaped` uses,
+        // but with `fit_width: None` so the downscale branch cannot trigger.
         let font_data = &grid.font_stack.faces()[font_index];
         let font = font_data.font_ref().expect("resolved face must parse");
         let natural = rasterize_with_variations(
@@ -1856,16 +1861,74 @@ mod tests {
             None,
         );
 
-        // span=1 is what noa-grid actually assigns U+203B (Ambiguous width,
-        // narrow per parity — see `noa-grid`'s `print_width`).
+        // Precondition: 'M' must genuinely fit its single cell in this font;
+        // otherwise there is nothing to prove about the no-shrink path.
+        assert!(
+            natural.width as f32 <= grid.metrics.cell_w * 1.1,
+            "test precondition: 'M' should fit a single cell ({:.1}px), natural width {}px",
+            grid.metrics.cell_w,
+            natural.width
+        );
+
+        // span=1 with fit-to-cell now enabled for all glyphs.
         let fitted = grid.raster_shaped(face_id, glyph_id, style, 1);
 
         assert_eq!(
             (natural.width, natural.height),
             (fitted.atlas_size[0] as u32, fitted.atlas_size[1] as u32),
-            "an ordinary text glyph must rasterize at its natural size regardless of its \
-             allotted cell span (Ghostty does not shrink ordinary text glyphs to fit — only \
-             generated icon codepoints are cell-constrained): natural {}x{}, span=1-fitted {:?}",
+            "an in-width glyph must keep its natural raster — fit-to-cell only shrinks glyphs \
+             that overshoot their span by >10% (DEC-1): natural {}x{}, span=1-fitted {:?}",
+            natural.width,
+            natural.height,
+            fitted.atlas_size
+        );
+    }
+
+    /// Regression (DEC-1): a wide CJK glyph that fits its 2-cell span must also
+    /// be left unshrunk. Complements `in_width_glyph_is_not_shrunk_by_fit_to_cell`
+    /// (span=1, Latin) with the span=2 wide-cell case, confirming the no-shrink
+    /// path holds regardless of span width.
+    #[test]
+    fn in_width_wide_cjk_glyph_is_not_shrunk_by_fit_to_cell() {
+        const KANJI: char = '日'; // wide (span 2)
+
+        let mut grid = skip_if_no_font!(FontGrid::new(24.0, FontConfig::default()));
+        if !grid.has_glyph(KANJI) {
+            eprintln!("skipping: no installed font can render U+65E5");
+            return;
+        }
+
+        let style = StyleKey::default();
+        let (font_index, glyph_id) = grid.resolve_glyph_for_style(KANJI, style);
+        let face_id = FaceId(font_index as u16);
+
+        let font_data = &grid.font_stack.faces()[font_index];
+        let font = font_data.font_ref().expect("resolved face must parse");
+        let natural = rasterize_with_variations(
+            &mut ScaleContext::new(),
+            font,
+            glyph_id,
+            grid.px_size,
+            &[],
+            GlyphSynthesis::default(),
+            None,
+        );
+
+        // Precondition: '日' fits its 2-cell span in this font.
+        assert!(
+            natural.width as f32 <= grid.metrics.cell_w * 2.0 * 1.1,
+            "test precondition: '日' should fit a 2-cell span ({:.1}px), natural width {}px",
+            grid.metrics.cell_w * 2.0,
+            natural.width
+        );
+
+        let fitted = grid.raster_shaped(face_id, glyph_id, style, 2);
+
+        assert_eq!(
+            (natural.width, natural.height),
+            (fitted.atlas_size[0] as u32, fitted.atlas_size[1] as u32),
+            "an in-width wide glyph must keep its natural raster (DEC-1): natural {}x{}, \
+             span=2-fitted {:?}",
             natural.width,
             natural.height,
             fitted.atlas_size

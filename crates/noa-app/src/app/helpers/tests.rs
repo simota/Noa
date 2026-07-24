@@ -1029,6 +1029,110 @@ fn stale_deferred_tab_close_focus_restore_is_ignored() {
 }
 
 #[test]
+fn native_tab_move_removes_an_auto_appended_member_before_reinsertion() {
+    let macos_window = include_str!("../../macos_window.rs");
+    let insert_start = macos_window
+        .find("#[cfg(target_os = \"macos\")]\nfn insert_tab_after_impl")
+        .expect("native tab insertion helper must exist");
+    let insert = &macos_window[insert_start..];
+    let insert_end = insert
+        .find("#[cfg(not(target_os = \"macos\"))]")
+        .expect("macOS insertion helper must end before its non-macOS stub");
+    let body = &insert[..insert_end];
+
+    let already_target = body
+        .find("if new_index == Some(target_index)")
+        .expect("already-adjacent member must remain a no-op");
+    let already_target = &body[already_target..];
+    let already_target_end = already_target
+        .find("return true;")
+        .expect("already-adjacent member must return success");
+    assert!(
+        !already_target[..already_target_end].contains("removeWindow")
+            && !already_target[..already_target_end].contains("insertWindow"),
+        "a member already after its anchor must not be removed or reinserted"
+    );
+
+    let existing_member = body
+        .find("if new_index.is_some()")
+        .expect("an auto-appended existing member must take an explicit move path");
+    let move_path = &body[existing_member..];
+    let remove = move_path
+        .find("msg_send![tab_group, removeWindow: new]")
+        .expect("the existing member must be removed before reinsertion");
+    let insert_at = move_path
+        .find("msg_send![tab_group, insertWindow: new, atIndex:")
+        .expect("the removed member must be reinserted at the anchor-relative index");
+    assert!(
+        remove < insert_at,
+        "removeWindow: new must precede insertWindow: new so AppKit moves, rather than aliases, an auto-appended tab"
+    );
+    let rechecked = &move_path[remove..insert_at];
+    assert!(
+        rechecked.contains("msg_send![anchor, tabGroup]")
+            && rechecked.contains("msg_send![tab_group, windows]")
+            && rechecked.contains("candidate == anchor")
+            && rechecked.contains("candidate == new"),
+        "the move path must re-fetch anchor/new membership from tabGroup.windows after removal"
+    );
+
+    let after_remove = &move_path[remove..];
+    let detached_anchor_start = after_remove
+        .find("if tab_group.is_null()")
+        .expect("the post-remove anchor group must be checked for two-member detachment");
+    let detached_anchor = &after_remove[detached_anchor_start..];
+    let detached_anchor_end = detached_anchor
+        .find("return false;")
+        .expect("the detached-anchor recovery branch must return after restoring membership");
+    assert!(
+        detached_anchor[..detached_anchor_end]
+            .contains("msg_send![anchor, addTabbedWindow: new, ordered:"),
+        "when removal leaves anchor.tabGroup nil, re-tab new through anchor before returning false"
+    );
+
+    let missing_windows_start = after_remove
+        .find("if windows.is_null()")
+        .expect("the post-remove windows lookup must retain a nil guard");
+    let missing_windows = &after_remove[missing_windows_start..];
+    let missing_windows_end = missing_windows
+        .find("return false;")
+        .expect("the missing-windows recovery branch must return after fallback");
+    assert!(
+        missing_windows[..missing_windows_end].contains("msg_send![tab_group, addWindow: new]"),
+        "a live group with unavailable windows must add new back before returning false"
+    );
+
+    let missing_anchor_start = after_remove
+        .find("let Some(anchor_index) = anchor_index else")
+        .expect("the post-remove anchor membership must retain a nil guard");
+    let missing_anchor = &after_remove[missing_anchor_start..];
+    let missing_anchor_end = missing_anchor
+        .find("return false;")
+        .expect("the missing-anchor recovery branch must return after fallback");
+    assert!(
+        missing_anchor[..missing_anchor_end].contains("msg_send![tab_group, addWindow: new]"),
+        "a live group missing its anchor must add new back before returning false"
+    );
+
+    let after_insert = &move_path[insert_at..];
+    assert!(
+        after_insert.contains("candidate == anchor && next == new"),
+        "the moved member must be adjacency-verified after reinsertion"
+    );
+    assert!(
+        after_insert.contains("msg_send![tab_group, addWindow: new]")
+            && after_insert.contains("false"),
+        "a failed move must preserve the safe native append fallback"
+    );
+    assert!(
+        !body.contains("setSelectedWindow:")
+            && !body.contains("FinalizeNativeTabSelection")
+            && !body.contains("schedule_native_tab_selection"),
+        "tab ordering must not depend on synchronous selection or delayed selection retries"
+    );
+}
+
+#[test]
 fn close_confirm_message_names_scope_and_count() {
     assert_eq!(
         close_confirm_message(CloseConfirmTarget::Pane, 1),

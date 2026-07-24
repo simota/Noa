@@ -143,8 +143,9 @@ fn insert_tab_after_impl(anchor_window: &Window, new_window: &Window) -> bool {
 
     // SAFETY: tab creation runs on winit's main (window-owning) thread. Both
     // NSViews come from live winit window handles, every returned object is
-    // nil-checked, and the insertion index is derived from the tab group's
-    // current `windows` array before `insertWindow:atIndex:` is sent.
+    // nil-checked. An AppKit-created tab can already be appended to the group,
+    // so a non-adjacent member is first removed and only then reinserted at a
+    // freshly derived anchor-relative index.
     unsafe {
         let anchor: *mut AnyObject = msg_send![anchor_view, window];
         let new: *mut AnyObject = msg_send![new_view, window];
@@ -178,10 +179,46 @@ fn insert_tab_after_impl(anchor_window: &Window, new_window: &Window) -> bool {
         if new_index == Some(target_index) {
             return true;
         }
-        let Ok(target_index) = isize::try_from(target_index) else {
+
+        if new_index.is_some() {
+            let _: () = msg_send![tab_group, removeWindow: new];
+        }
+
+        // Removing an auto-appended member changes the native indices. Re-read
+        // the group and its membership rather than reusing stale positions.
+        let tab_group: *mut AnyObject = msg_send![anchor, tabGroup];
+        if tab_group.is_null() {
+            let ordered: isize = 1;
+            let _: () = msg_send![anchor, addTabbedWindow: new, ordered: ordered];
+            return false;
+        }
+        let windows: *mut AnyObject = msg_send![tab_group, windows];
+        if windows.is_null() {
+            let _: () = msg_send![tab_group, addWindow: new];
+            return false;
+        }
+        let count: usize = msg_send![windows, count];
+        let mut anchor_index = None;
+        let mut new_index = None;
+        for index in 0..count {
+            let candidate: *mut AnyObject = msg_send![windows, objectAtIndex: index];
+            if candidate == anchor {
+                anchor_index = Some(index);
+            }
+            if candidate == new {
+                new_index = Some(index);
+            }
+        }
+        let Some(anchor_index) = anchor_index else {
+            let _: () = msg_send![tab_group, addWindow: new];
             return false;
         };
-        let _: () = msg_send![tab_group, insertWindow: new, atIndex: target_index];
+        let target_index = anchor_index + 1;
+        if new_index.is_none()
+            && let Ok(target_index) = isize::try_from(target_index)
+        {
+            let _: () = msg_send![tab_group, insertWindow: new, atIndex: target_index];
+        }
 
         let windows: *mut AnyObject = msg_send![tab_group, windows];
         if !windows.is_null() {

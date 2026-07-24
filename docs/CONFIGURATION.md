@@ -45,7 +45,7 @@ saving the config from *inside a focused noa pane* (e.g. editing it in `vim` in 
 window): the edit then applies within ≤3s (this was 500ms in earlier builds). Workaround when
 that matters: briefly refocus the window, or use the settings UI.
 
-## Deviations from Ghostty defaults (既定値の逸脱)
+## Deviations from Ghostty defaults
 
 noa is a fidelity clone, so out-of-the-box behavior differences are kept rare, deliberate, and
 listed here. Each one has a config value that restores Ghostty parity.
@@ -116,7 +116,7 @@ font-variation = wght=550
 | `minimum-contrast` | finite decimal `1.0..=21.0` | `1.0` | Lower bound of the WCAG contrast ratio. `1.0` means no correction |
 | `cursor-style` | `block`, `bar`, `underline` | blinking block | `block_hollow` is recognized but ignored as unsupported |
 | `cursor-style-blink` | `true`, `false` | equivalent to `true` | Cursor blinking. It also blinks when only the shape is specified |
-| `cursor-stop-blinking-after` | non-negative integer (seconds) | `10` | noa-specific key whose **default deviates from Ghostty** (which blinks forever) — see [Deviations from Ghostty defaults](#deviations-from-ghostty-defaults-既定値の逸脱): after this many seconds with no keyboard/IME input or output on the focused pane, the cursor settles solid so an idle noa schedules no blink wake-ups. Any activity resumes blinking. `0` never stops (Ghostty-parity behavior) |
+| `cursor-stop-blinking-after` | non-negative integer (seconds) | `10` | noa-specific key whose **default deviates from Ghostty** (which blinks forever) — see [Deviations from Ghostty defaults](#deviations-from-ghostty-defaults): after this many seconds with no keyboard/IME input or output on the focused pane, the cursor settles solid so an idle noa schedules no blink wake-ups. Any activity resumes blinking. `0` never stops (Ghostty-parity behavior) |
 | `background-opacity` | finite decimal | `1.0` | Clamped to `0.0..=1.0` |
 | `background-blur-radius` | `true`, `false`, non-negative integer | `0` | macOS blur. `true` maps to `20`, `false` to `0`; integers are clamped to `0..=64` |
 
@@ -194,7 +194,7 @@ See [noa-server-protocol.md](api/noa-server-protocol.md) for scope and attach-ch
 | `quick-terminal-hotkey` | global hotkey chord, or `none` / `off` / `false` | `cmd+grave` | System-wide hotkey for the Quick Terminal. An empty value also disables it |
 | `quick-terminal-size` | positive finite decimal, or percentage | `0.4` | Ratio relative to screen height. Clamped to `0.1..=1.0`. e.g. `40%` |
 | `quick-terminal-autohide` | `true`, `false` | `true` | Automatically hide when focus is lost |
-| `quick-terminal-screen` | `main`, `mouse`, `macos-menu-bar` | `mouse` | Which display the quick terminal appears on, resolved fresh on every show. **Default deviates from Ghostty (`main`)** — see [Deviations from Ghostty defaults](#deviations-from-ghostty-defaults-既定値の逸脱) |
+| `quick-terminal-screen` | `main`, `mouse`, `macos-menu-bar` | `mouse` | Which display the quick terminal appears on, resolved fresh on every show. **Default deviates from Ghostty (`main`)** — see [Deviations from Ghostty defaults](#deviations-from-ghostty-defaults) |
 | `sidebar-enabled` | `true`, `false` | `false` | Initial sidebar visibility for new windows |
 | `sidebar-width` | finite decimal `200..=600` | `360` | Sidebar width (points) |
 | `sidebar-font-size` | finite decimal `8..=20` | `11.5` | Session sidebar font size (points) |

@@ -228,7 +228,7 @@ noa-pty. The mask is display-side only.
   with `override=None` it returns the existing shell-title/fallback
   result.
 - **AC-TTL-6** (REQ-TTL-6) [manual-visual] — Given the prompt open,
-  When the user composes "日本語" via IME and commits, Then the preedit
+  When the user composes "Japanese" via IME and commits, Then the preedit
   is visible during composition and the committed text lands in the
   buffer.
 - **AC-TTL-7** (REQ-TTL-7) [manual-visual] — Given two tabs A and B,

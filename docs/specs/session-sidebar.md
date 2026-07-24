@@ -6,7 +6,7 @@
 - status: `locked` (2026-07-05)
 - owner: simota
 - build-path: **apex** (`/nexus apex` — design → risk gate → implementation loop → AC verification → ship. L3 AC is the verification contract. 7 [manual] ACs require human confirmation)
-- source mockup: `~/Downloads/ChatGPT Image 2026年7月5日 08_43_15.png`
+- source mockup: `~/Downloads/ChatGPT Image 2026-07-05 08_43_15.png`
 
 ## L0 — Vision
 noa's current tabs are native macOS tabs, and the only overview is the separate Tab Overview window. When working across multiple projects in parallel, there's no way to constantly see "what's happening in which session" (cwd, branch, last output, running state) and switch instantly. So we're adding a persistent left sidebar listing session cards (icon, name, cwd, branch, updated time, status dot, last-output 2-line preview).
@@ -130,7 +130,7 @@ Header bar: busy label (reduced form) + centered title + session-name pill. + bu
 - **FR-13 Config keys**: adds `sidebar-enabled` (bool initial value), `sidebar-width` (points, default 360), `sidebar-hotkey` (toggle chord, following the existing parse/dispatch pattern of `quick-terminal-hotkey`), and `sidebar-preview-lines` (card last-output preview line count, default 3) to noa-config. No generic keybind→action system is introduced.
 - **FR-14 Quick-terminal exclusion**: quick-terminal windows are excluded from the sidebar, and no inset is applied either.
 - **FR-15 Scroll**: when the card count exceeds the sidebar's visible area, vertical scrolling (with clamped scroll offset) reaches every card. No grouping/collapsing.
-- **FR-16 Attention (notification indicator)**: when a pane in a non-focused window issues an OSC 9/777 desktop notification, an `attention` flag is set on that session card. This shows as (a) red exclamation icon + solid status rail (priority: attention > bell > busy > idle), (b) `· 通知あり` appended to the process line, and (c) a persistent red marker/ring in the tab overview. The initial transition gets a one-shot 150 ms emphasis and then stays still. Cleared together with unread bell when the window gains focus. Notifications on the currently focused window don't raise attention because the user is already looking at it.
+- **FR-16 Attention (notification indicator)**: when a pane in a non-focused window issues an OSC 9/777 desktop notification, an `attention` flag is set on that session card. This shows as (a) red exclamation icon + solid status rail (priority: attention > bell > busy > idle), (b) `· 通知あり` ("notification") appended to the process line, and (c) a persistent red marker/ring in the tab overview. The initial transition gets a one-shot 150 ms emphasis and then stays still. Cleared together with unread bell when the window gains focus. Notifications on the currently focused window don't raise attention because the user is already looking at it.
 
 ### Non-Functional
 - **NFR-1 No render-path lock**: the render path never locks Terminal, reading session state only via a publish slot of the same shape as `overview_snapshot`.

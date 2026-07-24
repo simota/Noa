@@ -76,7 +76,7 @@ and is never dumped):
 - `<row>`, `<x0>-<x1>` — 0-based row and inclusive column range.
 - `"<text>"` — the run's visible text (`\` and `"` are backslash-escaped).
   Wide cells fold lead + spacer into one run, so a range wider than the text
-  is how the dump encodes wideness (e.g. `[0-1] "漢"`).
+  is how the dump encodes wideness (e.g. a double-width CJK glyph such as `[0-1] "漢"`).
 - `fg=` / `bg=` — omitted when default; palette colors as the bare index
   (`fg=196`), truecolor as `#rrggbb`.
 - `ul=` — underline color, omitted when unset.

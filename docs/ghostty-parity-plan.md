@@ -178,7 +178,7 @@ A dropdown terminal that slides in from the top of the screen via a global hotke
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `quick-terminal-hotkey` | string | `cmd+grave` | Global hotkey for toggling. Uses `cmd+grave`-style syntax (same notation as in-app keybindings). `grave` / `backtick` / `` ` `` are synonyms. `backslash` registers both the ANSI `\` and the JIS `¥` / `ろ` variants. `none` / `off` / an empty value skips hotkey registration. |
+| `quick-terminal-hotkey` | string | `cmd+grave` | Global hotkey for toggling. Uses `cmd+grave`-style syntax (same notation as in-app keybindings). `grave` / `backtick` / `` ` `` are synonyms. `backslash` registers both the ANSI `\` and the JIS Yen (`¥`) / Ro key variants. `none` / `off` / an empty value skips hotkey registration. |
 | `quick-terminal-size` | fraction or `%` | `0.4` | Panel height as a fraction of screen height. `0.4` or `40%`. Clamped to `0.1..=1.0`. |
 | `quick-terminal-autohide` | bool | `true` | Automatically hide when focus is lost. |
 

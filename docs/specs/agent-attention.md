@@ -15,7 +15,7 @@ When several Claude Code / Codex / agy sessions run concurrently, Noa should
 make a newly raised notification easy to notice without leaving a distracting
 animation running. OSC 9/777 indicates that a notification exists; it does not
 prove that the process is blocked awaiting a response. The UI therefore uses
-the neutral label `通知あり` and preserves the notification until the relevant
+the neutral label `通知あり` ("notification") and preserves the notification until the relevant
 window gains focus.
 
 - **audience**: developers running multiple concurrent terminal sessions
@@ -40,7 +40,7 @@ window gains focus.
 - **Arrival cue**: one-shot emphasis for `ATTENTION_FLASH_DURATION` (150 ms)
 - **Notification scope**: sidebar cards + tab overview + Dock/OS notification
 - **Detection triggers**: OSC 9/777 + known-agent BEL
-- **Copy**: `通知あり`; do not claim “awaiting response” without a dedicated
+- **Copy**: `通知あり` ("notification"); do not claim “awaiting response” without a dedicated
   response-required protocol
 
 ## L1 — Requirements
@@ -55,7 +55,7 @@ window gains focus.
 - **FR-A2 One-shot arrival emphasis**: a card's `false → true` attention
   transition briefly tints its sidebar background and strengthens the Overview
   ring glow. At expiry, one repaint removes the emphasis while the stable red
-  indicator, solid rail/ring, and `通知あり` label remain.
+  indicator, solid rail/ring, and `通知あり` ("notification") label remain.
 - **FR-A3 Attention promotion on BEL detection**: known agent processes
   (`ClaudeCode`/`Codex`/`Agy`) promote BEL to `SessionDelta::Attention`.
   Generic or unresolved processes remain `SessionDelta::Bell`.
@@ -111,6 +111,6 @@ window gains focus.
 ## Open Questions
 
 - Should a future protocol expose a distinct “response required” state and
-  permit stronger copy than `通知あり`?
+  permit stronger copy than `通知あり` ("notification")?
 - Should the 150 ms duration become configurable if Noa later adds a global
   reduced-motion/animation preference?

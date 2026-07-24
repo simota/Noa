@@ -276,7 +276,8 @@ impl App {
     pub(in crate::app) fn live_session_card_ids(&self) -> Vec<SessionCardId> {
         let mut ids = Vec::new();
         for (window_id, state) in &self.windows {
-            if self.is_quick_terminal_window(*window_id) || self.is_scratch_terminal_window(*window_id)
+            if self.is_quick_terminal_window(*window_id)
+                || self.is_scratch_terminal_window(*window_id)
             {
                 continue;
             }

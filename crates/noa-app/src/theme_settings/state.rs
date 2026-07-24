@@ -804,7 +804,9 @@ impl ThemeSettings {
                     SettingsRowKind::FontSize => self.push_font_size_digits(text, now),
                     SettingsRowKind::BackgroundImage => self.push_background_image_text(text),
                     SettingsRowKind::FontFamily => self.push_font_family_query(text),
-                    SettingsRowKind::ScratchTerminalKey => self.push_scratch_terminal_key_text(text),
+                    SettingsRowKind::ScratchTerminalKey => {
+                        self.push_scratch_terminal_key_text(text)
+                    }
                     _ => {}
                 }
             }
@@ -966,7 +968,9 @@ impl ThemeSettings {
         // starts a fresh buffer (replacing whatever chord was there),
         // matching the free-text `BackgroundImage` row's own convention.
         let next = {
-            let text = self.scratch_terminal_key_text.get_or_insert_with(String::new);
+            let text = self
+                .scratch_terminal_key_text
+                .get_or_insert_with(String::new);
             text.push_str(&filtered);
             text.clone()
         };
@@ -1396,12 +1400,14 @@ impl ThemeSettings {
                 let RowDraft::ScratchTerminalSize(cols, rows) = self.rows[idx].draft else {
                     return RowEffect::None;
                 };
-                let new_cols = (cols as i32 + delta * SCRATCH_TERMINAL_COLS_STEP)
-                    .clamp(SCRATCH_TERMINAL_COLS_MIN as i32, SCRATCH_TERMINAL_COLS_MAX as i32)
-                    as u16;
-                let new_rows = (rows as i32 + delta * SCRATCH_TERMINAL_ROWS_STEP)
-                    .clamp(SCRATCH_TERMINAL_ROWS_MIN as i32, SCRATCH_TERMINAL_ROWS_MAX as i32)
-                    as u16;
+                let new_cols = (cols as i32 + delta * SCRATCH_TERMINAL_COLS_STEP).clamp(
+                    SCRATCH_TERMINAL_COLS_MIN as i32,
+                    SCRATCH_TERMINAL_COLS_MAX as i32,
+                ) as u16;
+                let new_rows = (rows as i32 + delta * SCRATCH_TERMINAL_ROWS_STEP).clamp(
+                    SCRATCH_TERMINAL_ROWS_MIN as i32,
+                    SCRATCH_TERMINAL_ROWS_MAX as i32,
+                ) as u16;
                 if new_cols != cols || new_rows != rows {
                     self.rows[idx].draft = RowDraft::ScratchTerminalSize(new_cols, new_rows);
                     self.rows[idx].touched = true;
@@ -2038,7 +2044,10 @@ impl ThemeSettings {
                     }
                 }
                 RowDraft::ScratchTerminalSize(cols, rows) => {
-                    updates.push(("scratch-terminal-size".to_string(), format!("{cols}x{rows}")));
+                    updates.push((
+                        "scratch-terminal-size".to_string(),
+                        format!("{cols}x{rows}"),
+                    ));
                 }
             }
         }

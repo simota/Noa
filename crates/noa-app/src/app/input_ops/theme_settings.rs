@@ -1111,11 +1111,10 @@ impl App {
                 // mirroring `sync_quick_terminal_size_from_committed_rows`.
                 RowDraft::ScratchTerminalKey(_) => {}
                 RowDraft::ScratchTerminalSize(cols, rows) => {
-                    self.config.scratch_terminal_size =
-                        noa_config::ScratchTerminalSize {
-                            cols: *cols,
-                            rows: *rows,
-                        };
+                    self.config.scratch_terminal_size = noa_config::ScratchTerminalSize {
+                        cols: *cols,
+                        rows: *rows,
+                    };
                 }
                 // `ServerTokenCopy`/`ServerStatus` never set `touched`
                 // (`ThemeSettings::adjust`/`reset_selected_row` both no-op

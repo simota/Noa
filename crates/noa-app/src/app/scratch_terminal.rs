@@ -335,7 +335,11 @@ impl App {
         };
         renderer.set_background_opacity(self.config.background_opacity);
         renderer.set_alpha_blending(alpha_blending);
-        renderer.set_background_image(&gpu.device, &gpu.queue, self.background_image.current_image());
+        renderer.set_background_image(
+            &gpu.device,
+            &gpu.queue,
+            self.background_image.current_image(),
+        );
         renderer.resize(PixelSize {
             w: surface_config.width,
             h: surface_config.height,
@@ -616,7 +620,10 @@ mod tests {
             scratch_terminal_badge_label(None, Some("/Users/simota")),
             "Scratch Terminal"
         );
-        assert_eq!(scratch_terminal_badge_label(Some(""), None), "Scratch Terminal");
+        assert_eq!(
+            scratch_terminal_badge_label(Some(""), None),
+            "Scratch Terminal"
+        );
     }
 
     #[test]
@@ -630,7 +637,10 @@ mod tests {
     // $HOME collapses to `~`, matching the sidebar's own cwd convention.
     #[test]
     fn collapse_home_tilde_replaces_the_home_prefix() {
-        assert_eq!(collapse_home_tilde("/Users/simota", Some("/Users/simota")), "~");
+        assert_eq!(
+            collapse_home_tilde("/Users/simota", Some("/Users/simota")),
+            "~"
+        );
         assert_eq!(
             collapse_home_tilde("/Users/simota/repos/Noa", Some("/Users/simota")),
             "~/repos/Noa"
@@ -664,7 +674,9 @@ mod tests {
         assert!(label.ends_with("crates/noa-app/src/app"), "{label}");
         assert_eq!(
             label.chars().count(),
-            SCRATCH_TERMINAL_LABEL_PREFIX.chars().count() + 3 + SCRATCH_TERMINAL_BADGE_CWD_MAX_CHARS
+            SCRATCH_TERMINAL_LABEL_PREFIX.chars().count()
+                + 3
+                + SCRATCH_TERMINAL_BADGE_CWD_MAX_CHARS
         );
     }
 

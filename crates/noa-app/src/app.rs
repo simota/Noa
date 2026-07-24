@@ -676,7 +676,8 @@ impl App {
         for diagnostic in keybind_diagnostics {
             log::warn!("config keybind: {diagnostic}");
         }
-        for diagnostic in keybinds.apply_scratch_terminal_key(config.scratch_terminal_key.as_deref())
+        for diagnostic in
+            keybinds.apply_scratch_terminal_key(config.scratch_terminal_key.as_deref())
         {
             log::warn!("config keybind: {diagnostic}");
         }

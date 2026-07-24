@@ -636,9 +636,9 @@ impl RowDraft {
             SettingsRowKind::ServerScopes => RowDraft::ServerScopes(d.server_scopes),
             SettingsRowKind::ServerRemoteAppQr => RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
             SettingsRowKind::ServerTokenCopy => RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
-            SettingsRowKind::ScratchTerminalKey => RowDraft::ScratchTerminalKey(
-                d.scratch_terminal_key.unwrap_or_default(),
-            ),
+            SettingsRowKind::ScratchTerminalKey => {
+                RowDraft::ScratchTerminalKey(d.scratch_terminal_key.unwrap_or_default())
+            }
             SettingsRowKind::ScratchTerminalSize => RowDraft::ScratchTerminalSize(
                 d.scratch_terminal_size.cols,
                 d.scratch_terminal_size.rows,

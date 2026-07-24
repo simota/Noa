@@ -1156,7 +1156,10 @@ fn scratch_terminal_key_normalizes_disable_sentinels() {
 
     let (overrides, diagnostics) = parse_overrides(path(), "scratch-terminal-key = cmd+shift+u");
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    assert_eq!(overrides.scratch_terminal_key.as_deref(), Some("cmd+shift+u"));
+    assert_eq!(
+        overrides.scratch_terminal_key.as_deref(),
+        Some("cmd+shift+u")
+    );
 }
 
 #[test]

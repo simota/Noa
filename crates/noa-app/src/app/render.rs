@@ -840,10 +840,12 @@ impl App {
             );
         }
         // On macOS the four modal overlays (palette, theme settings, confirm
-        // dialog, resize toast) render as native AppKit cards — blur
-        // material, system font — instead of wgpu-composited cards. Display
-        // only: input/IME stays on the winit path. Off macOS the wgpu card
-        // path below keeps drawing.
+        // dialog, resize toast) plus the scratch terminal's non-modal
+        // identity badge render as native AppKit cards — blur material,
+        // system font — instead of wgpu-composited cards. Display only:
+        // input/IME stays on the winit path. Off macOS the wgpu card path
+        // below keeps drawing (the scratch badge has no non-macOS fallback —
+        // R2's accent ring alone still identifies the popup there).
         #[cfg(target_os = "macos")]
         {
             let colors = crate::macos_overlay::OverlayColors::from_style(
@@ -906,6 +908,27 @@ impl App {
                 &state.window,
                 &mut state.native_overlays,
                 toast_text.as_deref(),
+                &colors,
+            );
+            // scratch-terminal kaizen cycle 2: a persistent identity badge
+            // (unlike the transient toast above) while this window is the
+            // scratch popup — the accent ring alone doesn't say what the
+            // window is. Read live (not the spawn-time snapshot `with_title`
+            // uses) so a `cd` inside the popup keeps the badge current.
+            let scratch_badge_text = scratch_terminal_ring.then(|| {
+                let cwd = state
+                    .surfaces
+                    .get(&state.focused_pane)
+                    .and_then(|surface| surface.terminal.lock().cwd.clone());
+                super::scratch_terminal::scratch_terminal_badge_label(
+                    cwd.as_deref(),
+                    super::scratch_terminal::scratch_terminal_home_dir(),
+                )
+            });
+            crate::macos_overlay::sync_scratch_badge(
+                &state.window,
+                &mut state.native_overlays,
+                scratch_badge_text.as_deref(),
                 &colors,
             );
         }

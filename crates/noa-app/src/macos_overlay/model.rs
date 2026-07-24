@@ -31,6 +31,11 @@ pub(crate) struct NativeOverlayCache {
     pub(crate) confirm: Option<u64>,
     pub(crate) title_prompt: Option<u64>,
     pub(crate) toast: Option<u64>,
+    /// The scratch terminal popup's identity badge (kaizen cycle 2) —
+    /// distinct from `toast` so a live resize-overlay toast on the popup
+    /// (if it were ever resizable) can never collide with this persistent
+    /// badge's cache slot.
+    pub(crate) scratch_badge: Option<u64>,
     /// Debug-only instrumentation (NFR-7/AC-58, mirrors the app-wide
     /// `ChromeTextures::record_rebuild`/`rebuild_count` pattern):
     /// incremented once per real `sync_theme_settings` dispatch to

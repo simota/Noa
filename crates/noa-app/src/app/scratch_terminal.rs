@@ -99,6 +99,11 @@ pub(super) fn scratch_terminal_origin(
     )
 }
 
+/// The shared "Scratch Terminal" identity prefix — the OS window title
+/// (kaizen item 5) and the in-popup badge (kaizen cycle 2) both start with
+/// it, followed by " — <cwd>" when a cwd is known.
+pub(super) const SCRATCH_TERMINAL_LABEL_PREFIX: &str = "Scratch Terminal";
+
 /// The scratch popup's initial OS window title (kaizen item 5): invisible
 /// chrome (the popup is borderless) but exposed to AX/Mission
 /// Control/window-switcher UI, so the resolved cwd is worth surfacing even
@@ -108,12 +113,81 @@ pub(super) fn scratch_terminal_origin(
 /// it with the shell's own OSC title on the very next redraw — including the
 /// pre-show `redraw()` call below, before the window is ever visible) is
 /// explicitly skipped for this window (see its own doc comment), so this
-/// title is never overwritten.
+/// title is never overwritten. Unlike the badge below, the raw cwd is used
+/// verbatim — invisible chrome has no width to fit.
 pub(super) fn scratch_terminal_window_title(cwd: Option<&str>) -> String {
     match cwd {
-        Some(cwd) => format!("Scratch Terminal — {cwd}"),
-        None => "Scratch Terminal".to_string(),
+        Some(cwd) => format!("{SCRATCH_TERMINAL_LABEL_PREFIX} — {cwd}"),
+        None => SCRATCH_TERMINAL_LABEL_PREFIX.to_string(),
     }
+}
+
+/// Max chars of the tilde-collapsed cwd shown in the in-popup identity
+/// badge (kaizen cycle 2) before tail-truncating — the badge is a
+/// fixed-width pill (unlike the OS window title above, which has no such
+/// constraint), so a deeply nested project path must be kept in check.
+const SCRATCH_TERMINAL_BADGE_CWD_MAX_CHARS: usize = 28;
+
+/// The scratch popup's persistent in-window identity badge text (kaizen
+/// cycle 2, shape A): "Scratch Terminal — <cwd>", with `$HOME` collapsed to
+/// `~` and the cwd tail-truncated (keeping the most specific, rightmost
+/// path segment, prefixed with `…`) so the badge pill stays a reasonable
+/// width even for a deeply nested project. `cwd`/`home_dir` are both plain
+/// inputs (no filesystem access here) so this is fully unit-testable.
+pub(super) fn scratch_terminal_badge_label(cwd: Option<&str>, home_dir: Option<&str>) -> String {
+    match cwd.filter(|c| !c.is_empty()) {
+        Some(cwd) => {
+            let collapsed = collapse_home_tilde(cwd, home_dir);
+            let truncated = truncate_path_tail(&collapsed, SCRATCH_TERMINAL_BADGE_CWD_MAX_CHARS);
+            format!("{SCRATCH_TERMINAL_LABEL_PREFIX} — {truncated}")
+        }
+        None => SCRATCH_TERMINAL_LABEL_PREFIX.to_string(),
+    }
+}
+
+/// Replace a leading `$HOME` path component with `~` (e.g. `/Users/simota` →
+/// `~`, `/Users/simota/repos/Noa` → `~/repos/Noa`) — a no-op when `home_dir`
+/// is `None`/empty or `path` isn't actually under it.
+fn collapse_home_tilde(path: &str, home_dir: Option<&str>) -> String {
+    let Some(home) = home_dir.filter(|h| !h.is_empty()) else {
+        return path.to_string();
+    };
+    if path == home {
+        return "~".to_string();
+    }
+    if let Some(rest) = path.strip_prefix(home)
+        && rest.starts_with('/')
+    {
+        return format!("~{rest}");
+    }
+    path.to_string()
+}
+
+/// Truncate `path` to at most `max_chars` characters, keeping the *tail*
+/// (the most specific, rightmost segment) and prefixing an ellipsis —
+/// `~/very/deeply/nested/project/dir` becomes `…ply/nested/project/dir`
+/// rather than losing the part that actually identifies the directory.
+/// A no-op when `path` already fits.
+fn truncate_path_tail(path: &str, max_chars: usize) -> String {
+    let char_count = path.chars().count();
+    if char_count <= max_chars || max_chars == 0 {
+        return path.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let tail: String = {
+        let mut chars: Vec<char> = path.chars().rev().take(keep).collect();
+        chars.reverse();
+        chars.into_iter().collect()
+    };
+    format!("\u{2026}{tail}")
+}
+
+/// The viewer's home directory, resolved once and cached — mirrors
+/// `sidebar/model.rs`'s own `home_dir()` (kept separate rather than shared
+/// across modules for one three-line `OnceLock`).
+pub(super) fn scratch_terminal_home_dir() -> Option<&'static str> {
+    static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| std::env::var("HOME").ok()).as_deref()
 }
 
 /// scratch-terminal R3: the cwd a freshly spawned popup should inherit.
@@ -531,6 +605,81 @@ mod tests {
     #[test]
     fn window_title_falls_back_without_cwd() {
         assert_eq!(scratch_terminal_window_title(None), "Scratch Terminal");
+    }
+
+    // Kaizen cycle 2: the in-popup badge falls back to the bare prefix
+    // without a cwd, and formats "prefix — cwd" when one is known, same
+    // shape as the window title.
+    #[test]
+    fn badge_label_falls_back_without_cwd() {
+        assert_eq!(
+            scratch_terminal_badge_label(None, Some("/Users/simota")),
+            "Scratch Terminal"
+        );
+        assert_eq!(scratch_terminal_badge_label(Some(""), None), "Scratch Terminal");
+    }
+
+    #[test]
+    fn badge_label_includes_cwd_when_present() {
+        assert_eq!(
+            scratch_terminal_badge_label(Some("/tmp"), None),
+            "Scratch Terminal — /tmp"
+        );
+    }
+
+    // $HOME collapses to `~`, matching the sidebar's own cwd convention.
+    #[test]
+    fn collapse_home_tilde_replaces_the_home_prefix() {
+        assert_eq!(collapse_home_tilde("/Users/simota", Some("/Users/simota")), "~");
+        assert_eq!(
+            collapse_home_tilde("/Users/simota/repos/Noa", Some("/Users/simota")),
+            "~/repos/Noa"
+        );
+    }
+
+    #[test]
+    fn collapse_home_tilde_leaves_unrelated_paths_and_missing_home_alone() {
+        // Not actually under home (a same-prefix sibling directory, e.g.
+        // `/Users/simota2`, must not be mistaken for a home subdirectory).
+        assert_eq!(
+            collapse_home_tilde("/Users/simota2/project", Some("/Users/simota")),
+            "/Users/simota2/project"
+        );
+        assert_eq!(collapse_home_tilde("/tmp", None), "/tmp");
+        assert_eq!(collapse_home_tilde("/tmp", Some("")), "/tmp");
+    }
+
+    #[test]
+    fn badge_label_collapses_home_and_tail_truncates_a_deep_path() {
+        assert_eq!(
+            scratch_terminal_badge_label(Some("/Users/simota/repos/Noa"), Some("/Users/simota")),
+            "Scratch Terminal — ~/repos/Noa"
+        );
+
+        let deep = "/Users/simota/repos/github.com/Noa/crates/noa-app/src/app";
+        let label = scratch_terminal_badge_label(Some(deep), Some("/Users/simota"));
+        // Fits within the fixed budget, keeps the rightmost (most specific)
+        // segment, and is prefixed with an ellipsis to signal truncation.
+        assert!(label.starts_with("Scratch Terminal — \u{2026}"), "{label}");
+        assert!(label.ends_with("crates/noa-app/src/app"), "{label}");
+        assert_eq!(
+            label.chars().count(),
+            SCRATCH_TERMINAL_LABEL_PREFIX.chars().count() + 3 + SCRATCH_TERMINAL_BADGE_CWD_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn truncate_path_tail_is_a_no_op_when_already_short_enough() {
+        assert_eq!(truncate_path_tail("~/repos/Noa", 28), "~/repos/Noa");
+        assert_eq!(truncate_path_tail("exact-len", 9), "exact-len");
+    }
+
+    #[test]
+    fn truncate_path_tail_keeps_the_rightmost_segment_with_an_ellipsis() {
+        let truncated = truncate_path_tail("~/a/very/deeply/nested/project/dir", 20);
+        assert_eq!(truncated.chars().count(), 20);
+        assert!(truncated.starts_with('\u{2026}'));
+        assert!(truncated.ends_with("project/dir"));
     }
 
     // R6: window/tab management commands are blocked; terminal-level

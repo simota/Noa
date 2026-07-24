@@ -160,6 +160,9 @@ impl Default for KeybindEngine {
             // R-24: default chord for the theme picker half of the split
             // overlay (verified unused in this list before adding it).
             ("cmd+shift+,", AppCommand::OpenThemePicker),
+            // scratch-terminal R1: default chord for the scratch terminal
+            // popup (verified unused in this list before adding it).
+            ("cmd+shift+t", AppCommand::ToggleScratchTerminal),
         ];
         let bindings = specs
             .into_iter()
@@ -306,6 +309,64 @@ impl KeybindEngine {
             .collect()
     }
 
+    /// Apply `scratch-terminal-key` (scratch-terminal R1): rebind
+    /// `ToggleScratchTerminal` to `spec`, mirroring `sidebar-hotkey`'s
+    /// in-app-only override (not a global hotkey — see
+    /// `App::install_global_hotkey_if_needed`, which never touches this
+    /// command). `None` leaves the default `cmd+shift+t` binding untouched;
+    /// an empty/`none`/`off`/`false` sentinel (already normalized by
+    /// `noa-config`) disables the command entirely; an unparseable or
+    /// already-taken chord is diagnosed and the existing binding is kept —
+    /// except (fix 4) when `spec` is exactly the built-in default chord
+    /// (`noa-config`'s `scratch_terminal_key` field defaults to
+    /// `Some(DEFAULT_SCRATCH_TERMINAL_KEY)` even when the user never set
+    /// `scratch-terminal-key` at all, so this call runs on every
+    /// startup/reload regardless): losing that unrequested default to the
+    /// user's own explicit `keybind` entry is expected, not misconfiguration,
+    /// so it yields silently instead of diagnosing every time.
+    pub(crate) fn apply_scratch_terminal_key(&mut self, spec: Option<&str>) -> Vec<String> {
+        let mut diagnostics = Vec::new();
+        let Some(spec) = spec else {
+            return diagnostics;
+        };
+        if spec.trim().is_empty() {
+            self.bindings
+                .retain(|binding| binding.command != AppCommand::ToggleScratchTerminal);
+            return diagnostics;
+        }
+        match KeyTrigger::parse(spec) {
+            Ok(trigger) => {
+                let conflict = self
+                    .bindings
+                    .iter()
+                    .find(|binding| {
+                        binding.trigger.overlaps(&trigger)
+                            && binding.command != AppCommand::ToggleScratchTerminal
+                    })
+                    .map(|binding| binding.command.action_name());
+                if let Some(taken_by) = conflict {
+                    if spec != noa_config::DEFAULT_SCRATCH_TERMINAL_KEY {
+                        diagnostics.push(format!(
+                            "scratch-terminal-key `{spec}` conflicts with `{taken_by}`; value ignored"
+                        ));
+                    }
+                } else {
+                    self.bindings
+                        .retain(|binding| binding.command != AppCommand::ToggleScratchTerminal);
+                    self.remove_trigger(&trigger);
+                    self.bindings.push(KeyBinding {
+                        trigger,
+                        command: AppCommand::ToggleScratchTerminal,
+                    });
+                }
+            }
+            Err(error) => diagnostics.push(format!(
+                "invalid scratch-terminal-key `{spec}`: {error}; value ignored"
+            )),
+        }
+        diagnostics
+    }
+
     /// Remove every binding whose trigger can match the same keypress as
     /// `trigger` (`KeyTrigger::overlaps`, not `==`): resolve() returns the
     /// first match, so leaving a merely structurally-different overlapping
@@ -314,6 +375,18 @@ impl KeybindEngine {
         self.bindings
             .retain(|binding| !binding.trigger.overlaps(trigger));
     }
+}
+
+/// Whether `spec` parses as a valid keybind chord (`KeyTrigger::parse`),
+/// without normalizing the empty/`none`/`off`/`false` disable sentinel
+/// (callers that accept a sentinel check that themselves — see
+/// `apply_scratch_terminal_key`). Exposed for the Settings panel's
+/// `ScratchTerminalKey` row (kaizen item 3), which needs to validate
+/// free-typed chord text the same way `noa-config`'s parser and this
+/// module's own `apply_scratch_terminal_key` do, without duplicating the
+/// trigger grammar in `theme_settings`.
+pub(crate) fn is_valid_keybind_chord(spec: &str) -> bool {
+    KeyTrigger::parse(spec).is_ok()
 }
 
 /// The closed `perform action` set for the AppleScript bridge (applescript
@@ -407,6 +480,7 @@ fn ghostty_action_alias(action: &str) -> Option<AppCommand> {
         "prompt_surface_title" | "set_tab_title" => Some(AppCommand::SetTabTitle),
         "toggle_command_palette" => Some(AppCommand::ToggleCommandPalette),
         "toggle_quick_terminal" => Some(AppCommand::ToggleQuickTerminal),
+        "toggle_scratch_terminal" => Some(AppCommand::ToggleScratchTerminal),
         "toggle_secure_keyboard_entry" => Some(AppCommand::ToggleSecureKeyboardEntry),
         "toggle_sidebar" => Some(AppCommand::ToggleSidebar),
         "toggle_auto_approve" => Some(AppCommand::ToggleAutoApprove),
@@ -755,6 +829,129 @@ mod tests {
             engine.resolve(&Key::Character("f".into()), ModifiersState::SUPER),
             Some(AppCommand::Search(SearchAction::Find)),
             "cmd+f with live SUPER must still trigger Search/Find"
+        );
+    }
+
+    // scratch-terminal R1: the default engine binds `cmd+shift+t` to
+    // `ToggleScratchTerminal` out of the box.
+    #[test]
+    fn default_engine_binds_cmd_shift_t_to_toggle_scratch_terminal() {
+        let engine = KeybindEngine::default();
+        assert_eq!(
+            engine.resolve(
+                &Key::Character("t".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::ToggleScratchTerminal)
+        );
+    }
+
+    // AC-2: `scratch-terminal-key = ""` (already normalized by noa-config to
+    // the empty sentinel) disables the command outright — no chord resolves
+    // to it, so the key falls through to the pty.
+    #[test]
+    fn scratch_terminal_key_empty_sentinel_disables_command() {
+        let mut engine = KeybindEngine::default();
+        let diagnostics = engine.apply_scratch_terminal_key(Some(""));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            engine.resolve(
+                &Key::Character("t".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            None
+        );
+    }
+
+    // A configured chord replaces the default one-for-one: the new chord
+    // resolves, the old default stops resolving, and re-applying the same
+    // spec is idempotent (no duplicate bindings).
+    #[test]
+    fn scratch_terminal_key_rebinds_to_configured_chord() {
+        let mut engine = KeybindEngine::default();
+        let diagnostics = engine.apply_scratch_terminal_key(Some("cmd+shift+u"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            engine.resolve(
+                &Key::Character("u".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::ToggleScratchTerminal)
+        );
+        assert_eq!(
+            engine.resolve(
+                &Key::Character("t".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            None
+        );
+
+        let diagnostics = engine.apply_scratch_terminal_key(Some("cmd+shift+u"));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            engine
+                .bindings
+                .iter()
+                .filter(|b| b.command == AppCommand::ToggleScratchTerminal)
+                .count(),
+            1
+        );
+    }
+
+    // A chord already serving another command is rejected (diagnosed,
+    // default kept) — same policy as `sidebar-hotkey`.
+    #[test]
+    fn scratch_terminal_key_conflicting_with_another_binding_is_rejected() {
+        let mut engine = KeybindEngine::default();
+        let diagnostics = engine.apply_scratch_terminal_key(Some("cmd+w"));
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(diagnostics[0].contains("conflicts with"), "{diagnostics:?}");
+        assert_eq!(
+            engine.resolve(
+                &Key::Character("t".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::ToggleScratchTerminal)
+        );
+    }
+
+    // Fix 4: the *unrequested* default chord (`scratch_terminal_key` resolves
+    // to `Some(DEFAULT_SCRATCH_TERMINAL_KEY)` even when the user never set
+    // `scratch-terminal-key`) losing to the user's own explicit `keybind`
+    // entry must not warn on every startup/reload.
+    #[test]
+    fn scratch_terminal_key_default_conflicting_with_explicit_keybind_yields_silently() {
+        let (mut engine, diagnostics) = KeybindEngine::from_config_test(&[KeybindConfig::Bind {
+            trigger: "cmd+shift+t".to_string(),
+            action: "window.new".to_string(),
+        }]);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let diagnostics =
+            engine.apply_scratch_terminal_key(Some(noa_config::DEFAULT_SCRATCH_TERMINAL_KEY));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            engine.resolve(
+                &Key::Character("t".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::NewWindow),
+            "the user's explicit rebind must win over the unrequested default"
+        );
+    }
+
+    // `None` (no config override) leaves the default binding untouched.
+    #[test]
+    fn scratch_terminal_key_none_keeps_default_binding() {
+        let mut engine = KeybindEngine::default();
+        let diagnostics = engine.apply_scratch_terminal_key(None);
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            engine.resolve(
+                &Key::Character("t".into()),
+                ModifiersState::SUPER | ModifiersState::SHIFT
+            ),
+            Some(AppCommand::ToggleScratchTerminal)
         );
     }
 

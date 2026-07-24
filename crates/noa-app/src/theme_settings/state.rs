@@ -81,6 +81,15 @@ const SIDEBAR_FONT_SIZE_STEP: f32 = 0.5;
 const QUICK_TERMINAL_SIZE_STEP: f32 = 0.05;
 const QUICK_TERMINAL_SIZE_MIN: f32 = 0.1;
 const QUICK_TERMINAL_SIZE_MAX: f32 = 1.0;
+/// Scratch terminal cols/rows step per ←→ press (moved together, like
+/// `WindowPadding`'s x/y — one row, one gesture) and a pragmatic UI range;
+/// `noa-config` itself only requires both sides positive.
+const SCRATCH_TERMINAL_COLS_STEP: i32 = 5;
+const SCRATCH_TERMINAL_ROWS_STEP: i32 = 1;
+const SCRATCH_TERMINAL_COLS_MIN: u16 = 10;
+const SCRATCH_TERMINAL_COLS_MAX: u16 = 500;
+const SCRATCH_TERMINAL_ROWS_MIN: u16 = 5;
+const SCRATCH_TERMINAL_ROWS_MAX: u16 = 200;
 
 /// R-9: `scrollback-limit` step per ←→ press (1 MB), and a pragmatic UI
 /// ceiling (`noa-config` itself has no documented maximum — this only
@@ -190,6 +199,9 @@ pub(crate) struct ThemeSettings {
     /// edits, reset on navigation like `font_size_digits`/
     /// `background_image_text`.
     font_family_query: Option<String>,
+    /// Text-entry buffer for `scratch-terminal-key` (kaizen item 3) — same
+    /// append-only shape as `background_image_text`.
+    scratch_terminal_key_text: Option<String>,
     /// R-11 gate: set once at open from the opacity at that moment. A
     /// window can't transition opaque<->transparent at runtime, so this
     /// never changes for the life of one overlay session.
@@ -422,6 +434,17 @@ impl ThemeSettings {
                         draft: RowDraft::ServerTokenCopy(TokenCopyStatus::Idle),
                         touched: false,
                     },
+                    SettingsRow {
+                        draft: RowDraft::ScratchTerminalKey(init.scratch_terminal_key.clone()),
+                        touched: false,
+                    },
+                    SettingsRow {
+                        draft: RowDraft::ScratchTerminalSize(
+                            init.scratch_terminal_size.0,
+                            init.scratch_terminal_size.1,
+                        ),
+                        touched: false,
+                    },
                 ],
                 init.background_opacity >= 1.0,
             ),
@@ -450,6 +473,7 @@ impl ThemeSettings {
             font_size_digits: None,
             background_image_text: None,
             font_family_query: None,
+            scratch_terminal_key_text: None,
             opaque_at_startup,
             available_font_families: Arc::new(init.available_font_families),
             commit_error: None,
@@ -780,6 +804,9 @@ impl ThemeSettings {
                     SettingsRowKind::FontSize => self.push_font_size_digits(text, now),
                     SettingsRowKind::BackgroundImage => self.push_background_image_text(text),
                     SettingsRowKind::FontFamily => self.push_font_family_query(text),
+                    SettingsRowKind::ScratchTerminalKey => {
+                        self.push_scratch_terminal_key_text(text)
+                    }
                     _ => {}
                 }
             }
@@ -834,6 +861,20 @@ impl ThemeSettings {
                             self.apply_font_family_query(&query);
                         }
                     }
+                    SettingsRowKind::ScratchTerminalKey => {
+                        let idx = self.selected_row;
+                        let next = {
+                            let text = self.scratch_terminal_key_text.get_or_insert_with(|| {
+                                match &self.rows[idx].draft {
+                                    RowDraft::ScratchTerminalKey(chord) => chord.clone(),
+                                    _ => String::new(),
+                                }
+                            });
+                            text.pop();
+                            text.clone()
+                        };
+                        self.set_scratch_terminal_key_text(next);
+                    }
                     _ => {}
                 }
             }
@@ -844,6 +885,7 @@ impl ThemeSettings {
         self.font_size_digits = None;
         self.background_image_text = None;
         self.font_family_query = None;
+        self.scratch_terminal_key_text = None;
     }
 
     fn push_font_size_digits(&mut self, text: &str, now: Instant) {
@@ -913,6 +955,35 @@ impl ThemeSettings {
         };
         if current != &value {
             self.rows[idx].draft = RowDraft::BackgroundImage(value);
+            self.rows[idx].touched = true;
+        }
+    }
+
+    fn push_scratch_terminal_key_text(&mut self, text: &str) {
+        let filtered: String = text.chars().filter(|c| !c.is_control()).collect();
+        if filtered.is_empty() {
+            return;
+        }
+        // Mirrors `push_background_image_text`: the first typed character
+        // starts a fresh buffer (replacing whatever chord was there),
+        // matching the free-text `BackgroundImage` row's own convention.
+        let next = {
+            let text = self
+                .scratch_terminal_key_text
+                .get_or_insert_with(String::new);
+            text.push_str(&filtered);
+            text.clone()
+        };
+        self.set_scratch_terminal_key_text(next);
+    }
+
+    fn set_scratch_terminal_key_text(&mut self, value: String) {
+        let idx = self.selected_row;
+        let RowDraft::ScratchTerminalKey(current) = &self.rows[idx].draft else {
+            return;
+        };
+        if current != &value {
+            self.rows[idx].draft = RowDraft::ScratchTerminalKey(value);
             self.rows[idx].touched = true;
         }
     }
@@ -1319,6 +1390,30 @@ impl ThemeSettings {
             // draft here — `App` performs the actual clipboard write and
             // reports the outcome back through `set_server_token_copy_status`.
             SettingsRowKind::ServerTokenCopy => RowEffect::CopyServerToken,
+            // Free-typed chord text (like `FontFamily`'s query, but with no
+            // catalog to cycle through) — ←→ has nothing to step.
+            SettingsRowKind::ScratchTerminalKey => RowEffect::None,
+            // Cols and rows move together on one ←→ step, same reasoning as
+            // `WindowPadding`'s x/y (one row, one gesture; a future increment
+            // can split them if that turns out to matter).
+            SettingsRowKind::ScratchTerminalSize => {
+                let RowDraft::ScratchTerminalSize(cols, rows) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let new_cols = (cols as i32 + delta * SCRATCH_TERMINAL_COLS_STEP).clamp(
+                    SCRATCH_TERMINAL_COLS_MIN as i32,
+                    SCRATCH_TERMINAL_COLS_MAX as i32,
+                ) as u16;
+                let new_rows = (rows as i32 + delta * SCRATCH_TERMINAL_ROWS_STEP).clamp(
+                    SCRATCH_TERMINAL_ROWS_MIN as i32,
+                    SCRATCH_TERMINAL_ROWS_MAX as i32,
+                ) as u16;
+                if new_cols != cols || new_rows != rows {
+                    self.rows[idx].draft = RowDraft::ScratchTerminalSize(new_cols, new_rows);
+                    self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
         }
     }
 
@@ -1929,6 +2024,31 @@ impl ThemeSettings {
                 RowDraft::ServerTokenCopy(_) => {}
                 // Same "never touched" contract as `ServerTokenCopy` above.
                 RowDraft::ServerStatus(_) => {}
+                // Mirrors `FontFamily`'s empty-default skip: an invalid,
+                // non-empty chord is never written (validated with the same
+                // grammar `noa-config`'s parser and `KeybindEngine` use), so
+                // a typo can't silently persist a chord nothing will ever
+                // resolve. `none`/`off`/`false` (case-insensitive) are
+                // normalized to the empty disable sentinel first — the same
+                // sentinels `noa-config`'s own parser and
+                // CONFIGURATION.md's documented `scratch-terminal-key`
+                // values accept — so typing one of them here doesn't get
+                // rejected as "invalid" and silently dropped; it disables
+                // the command like the config file would. An empty/
+                // normalized value IS meaningful and is written normally.
+                RowDraft::ScratchTerminalKey(chord) => {
+                    let normalized = normalize_scratch_terminal_key(chord);
+                    if normalized.is_empty() || crate::commands::is_valid_keybind_chord(&normalized)
+                    {
+                        updates.push(("scratch-terminal-key".to_string(), normalized));
+                    }
+                }
+                RowDraft::ScratchTerminalSize(cols, rows) => {
+                    updates.push((
+                        "scratch-terminal-size".to_string(),
+                        format!("{cols}x{rows}"),
+                    ));
+                }
             }
         }
         updates
@@ -2158,6 +2278,19 @@ pub(crate) fn revert_updates(
 /// `None` here — nothing to explain waiting on a restart) and
 /// [`ThemeSettings::liveness`] (badges these `OnSave`, not `OnLaunch`) so
 /// the two lists can never drift apart.
+/// Normalize a typed `scratch-terminal-key` value the same way
+/// `noa-config`'s parser does for the config-file key (and `sidebar-hotkey`/
+/// `quick-terminal-hotkey` before it): `none`/`off`/`false` (trimmed,
+/// case-insensitive), or already-empty/whitespace-only text, all become the
+/// empty disable sentinel; anything else passes through unchanged (still
+/// unvalidated as a chord — the caller checks that separately).
+fn normalize_scratch_terminal_key(chord: &str) -> String {
+    match chord.trim().to_ascii_lowercase().as_str() {
+        "" | "none" | "off" | "false" => String::new(),
+        _ => chord.to_string(),
+    }
+}
+
 fn is_reload_exempt(row: SettingsRowKind) -> bool {
     matches!(
         row,
@@ -2191,6 +2324,13 @@ fn is_reload_exempt(row: SettingsRowKind) -> bool {
             | SettingsRowKind::ServerPort
             | SettingsRowKind::ServerBind
             | SettingsRowKind::ServerScopes
+            // scratch-terminal kaizen item 3: `App::apply_reloaded_config`'s
+            // `scratch_terminal_key_changed` diff rebinds the keybind engine
+            // and `App::request_quit`'s explicit teardown/`config_reload.rs`'s
+            // unconditional `destroy_scratch_terminal` cover the rest — same
+            // "picked up without a restart" shape as the group above.
+            | SettingsRowKind::ScratchTerminalKey
+            | SettingsRowKind::ScratchTerminalSize
     )
 }
 
@@ -2272,6 +2412,11 @@ fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
         }
         RowDraft::ServerPort(v) => v.hash(hasher),
         RowDraft::ServerTokenCopy(status) => (*status as u8).hash(hasher),
+        RowDraft::ScratchTerminalKey(chord) => chord.hash(hasher),
+        RowDraft::ScratchTerminalSize(cols, rows) => {
+            cols.hash(hasher);
+            rows.hash(hasher);
+        }
     }
 }
 

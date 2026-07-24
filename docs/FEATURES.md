@@ -79,6 +79,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 | Behavior | `scrollback-limit`, `clipboard-read`, `clipboard-paste-protection`, `confirm-quit`, `alpha-blending`, `title-report`, `resize-overlay`, `auto-approve`, `send-selection-send-enter` |
 | macOS | `macos-option-as-alt`, `macos-titlebar-style`, `macos-non-native-fullscreen`, `macos-titlebar-proxy-icon` |
 | Quick Terminal | `quick-terminal-hotkey/-size/-autohide` |
+| Scratch Terminal | `scratch-terminal-key/-size` |
 | Sidebar | `sidebar-enabled/-width/-hotkey/-preview-lines` |
 
 - **Ghostty config import** — import with migration statistics
@@ -92,6 +93,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 - **Native menu bar** — Noa / File / Edit / View / Window / Help. `Settings…` (⌘,) opens the theme & settings overlay
 - **Fullscreen toggle** — `⌘⌃F` / View menu / command palette. Defaults to native macOS fullscreen; `macos-non-native-fullscreen = true` switches to borderless fullscreen
 - **Quick Terminal** — a dropdown terminal triggered by a global hotkey (default ⌘\`), with auto-hide support
+- **Scratch Terminal** — a disposable popup terminal (default ⌘⇧T, in-app only) centered on the focused window, opened in the focused pane's cwd; closes on toggle/focus-loss/shell-exit/⌘W, with no persistence
 - **Secure keyboard entry** — toggleable
 - **Titlebar proxy icon** — reflects the focused pane's OSC 7 pwd in the titlebar proxy icon; disabled with `macos-titlebar-proxy-icon = hidden`
 - **Quick Look word lookup** — a trackpad force click (deep press) shows a dictionary popup for the word under the pointer; does not change the selection

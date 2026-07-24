@@ -884,10 +884,13 @@ impl Renderer {
     /// state (uniforms, atlas, instance buffer) first.
     pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView) {
         let layout = [(DEFAULT_PANE_ID, self.full_viewport_rect())];
-        self.draw_panes(device, queue, view, &layout, None, None);
+        self.draw_panes(device, queue, view, &layout, None, None, false);
     }
 
     /// Draw the layout most recently supplied to [`Renderer::rebuild_panes`].
+    /// `force_ring` (scratch-terminal kaizen item 4) draws the accent focus
+    /// ring around the sole pane even for a single-pane layout — the app
+    /// layer passes `true` only for the scratch terminal popup's window.
     pub fn draw_rebuilt_panes(
         &mut self,
         device: &wgpu::Device,
@@ -895,12 +898,14 @@ impl Renderer {
         view: &wgpu::TextureView,
         focused: Option<PaneId>,
         zoomed: Option<PaneId>,
+        force_ring: bool,
     ) {
         let layout = self.pane_layout.clone();
-        self.draw_panes(device, queue, view, &layout, focused, zoomed);
+        self.draw_panes(device, queue, view, &layout, focused, zoomed, force_ring);
     }
 
     /// Draw a split-pane layout into `view` using the pure draw-plan order.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_panes(
         &mut self,
         device: &wgpu::Device,
@@ -909,8 +914,9 @@ impl Renderer {
         layout: &[(PaneId, PaneRect)],
         focused: Option<PaneId>,
         zoomed: Option<PaneId>,
+        force_ring: bool,
     ) {
-        let plan = build_draw_plan(layout, focused, zoomed);
+        let plan = build_draw_plan(layout, focused, zoomed, force_ring);
         self.ensure_pane_gpu_count(device, layout.len());
         self.upload_uniforms(queue, layout);
         self.prepare_overlay_instances(&plan);

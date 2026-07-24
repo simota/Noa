@@ -35,3 +35,9 @@ pub(in crate::macos_overlay) fn rebuild_title_prompt(
 ) {
 }
 pub(in crate::macos_overlay) fn rebuild_toast(_: &Window, _: Option<&str>, _: &OverlayColors) {}
+pub(in crate::macos_overlay) fn rebuild_scratch_badge(
+    _: &Window,
+    _: Option<&str>,
+    _: &OverlayColors,
+) {
+}

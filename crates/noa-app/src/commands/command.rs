@@ -55,6 +55,14 @@ pub enum AppCommand {
     Quit,
     ToggleCommandPalette,
     ToggleQuickTerminal,
+    /// Toggle the scratch terminal popup (scratch-terminal R1): a single-
+    /// instance, use-once-and-discard terminal centered on the focused
+    /// window, spawned in the focused pane's cwd. Unlike
+    /// [`Self::ToggleQuickTerminal`] this is an in-app-only chord — no global
+    /// hotkey — but it does have a View-menu item (kaizen item 1), whose
+    /// accelerator tracks the keybind engine's effective chord the same way
+    /// [`Self::ToggleSidebar`]'s does.
+    ToggleScratchTerminal,
     ToggleSecureKeyboardEntry,
     ToggleSidebar,
     ToggleAutoApprove,
@@ -185,6 +193,8 @@ impl AppCommand {
     pub(crate) const TOGGLE_COMMAND_PALETTE_MENU_ID: &'static str =
         "noa.view.toggle-command-palette";
     pub(crate) const TOGGLE_QUICK_TERMINAL_MENU_ID: &'static str = "noa.view.toggle-quick-terminal";
+    pub(crate) const TOGGLE_SCRATCH_TERMINAL_MENU_ID: &'static str =
+        "noa.view.toggle-scratch-terminal";
     pub(crate) const TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID: &'static str =
         "noa.app.toggle-secure-keyboard-entry";
     pub(crate) const TOGGLE_SIDEBAR_MENU_ID: &'static str = "noa.view.toggle-sidebar";
@@ -258,6 +268,7 @@ impl AppCommand {
             AppCommand::Quit => Self::QUIT_MENU_ID,
             AppCommand::ToggleCommandPalette => Self::TOGGLE_COMMAND_PALETTE_MENU_ID,
             AppCommand::ToggleQuickTerminal => Self::TOGGLE_QUICK_TERMINAL_MENU_ID,
+            AppCommand::ToggleScratchTerminal => Self::TOGGLE_SCRATCH_TERMINAL_MENU_ID,
             AppCommand::ToggleSecureKeyboardEntry => Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID,
             AppCommand::ToggleSidebar => Self::TOGGLE_SIDEBAR_MENU_ID,
             AppCommand::ToggleAutoApprove => Self::TOGGLE_AUTO_APPROVE_MENU_ID,
@@ -327,6 +338,7 @@ impl AppCommand {
             Self::QUIT_MENU_ID => Some(Self::Quit),
             Self::TOGGLE_COMMAND_PALETTE_MENU_ID => Some(Self::ToggleCommandPalette),
             Self::TOGGLE_QUICK_TERMINAL_MENU_ID => Some(Self::ToggleQuickTerminal),
+            Self::TOGGLE_SCRATCH_TERMINAL_MENU_ID => Some(Self::ToggleScratchTerminal),
             Self::TOGGLE_SECURE_KEYBOARD_ENTRY_MENU_ID => Some(Self::ToggleSecureKeyboardEntry),
             Self::TOGGLE_SIDEBAR_MENU_ID => Some(Self::ToggleSidebar),
             Self::TOGGLE_AUTO_APPROVE_MENU_ID => Some(Self::ToggleAutoApprove),
@@ -421,6 +433,7 @@ impl AppCommand {
             Self::Quit => "app.quit",
             Self::ToggleCommandPalette => "command-palette.toggle",
             Self::ToggleQuickTerminal => "quick-terminal.toggle",
+            Self::ToggleScratchTerminal => "scratch-terminal.toggle",
             Self::ToggleSecureKeyboardEntry => "secure-keyboard-entry.toggle",
             Self::ToggleSidebar => "sidebar.toggle",
             Self::ToggleAutoApprove => "auto-approve.toggle",
@@ -500,6 +513,7 @@ impl AppCommand {
             "app.quit" => Some(Self::Quit),
             "command-palette.toggle" => Some(Self::ToggleCommandPalette),
             "quick-terminal.toggle" => Some(Self::ToggleQuickTerminal),
+            "scratch-terminal.toggle" => Some(Self::ToggleScratchTerminal),
             "secure-keyboard-entry.toggle" => Some(Self::ToggleSecureKeyboardEntry),
             "sidebar.toggle" => Some(Self::ToggleSidebar),
             "auto-approve.toggle" => Some(Self::ToggleAutoApprove),

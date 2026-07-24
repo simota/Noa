@@ -198,3 +198,27 @@ pub(crate) fn sync_toast(
     cache.toast = hash;
     imp::rebuild_toast(window, text, colors);
 }
+
+/// Sync the scratch terminal popup's persistent identity badge (kaizen
+/// cycle 2; window-centered like the toast, but top-anchored and left
+/// showing for the popup's whole lifetime instead of fading — the caller
+/// passes `Some` every redraw while the popup is shown, `None` to tear it
+/// down).
+pub(crate) fn sync_scratch_badge(
+    window: &Window,
+    cache: &mut NativeOverlayCache,
+    text: Option<&str>,
+    colors: &OverlayColors,
+) {
+    let hash = text.map(|t| {
+        hash_u64(|h| {
+            t.hash(h);
+            colors.hash_into(h);
+        })
+    });
+    if cache.scratch_badge == hash {
+        return;
+    }
+    cache.scratch_badge = hash;
+    imp::rebuild_scratch_badge(window, text, colors);
+}

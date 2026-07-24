@@ -57,7 +57,7 @@ fn split_pipeline_syncs_same_frame_new_glyphs_for_two_panes() {
 
     let (_target, view) = render_target(&device, 128, 32);
     device.push_error_scope(wgpu::ErrorFilter::Validation);
-    renderer.draw_panes(&device, &queue, &view, &layout, None, None);
+    renderer.draw_panes(&device, &queue, &view, &layout, None, None, false);
     let err = pollster::block_on(device.pop_error_scope());
 
     assert!(
@@ -110,7 +110,7 @@ fn split_pipeline_draws_three_pane_plan_with_overlays_without_validation_error()
         },
     ];
     let focused = layout[1].0;
-    let plan = build_draw_plan(&layout, Some(focused), None);
+    let plan = build_draw_plan(&layout, Some(focused), None, false);
     assert!(
         plan.iter()
             .any(|op| matches!(op, DrawOp::Dividers { rects } if !rects.is_empty())),
@@ -126,7 +126,7 @@ fn split_pipeline_draws_three_pane_plan_with_overlays_without_validation_error()
 
     let (_target, view) = render_target(&device, 160, 96);
     device.push_error_scope(wgpu::ErrorFilter::Validation);
-    renderer.draw_panes(&device, &queue, &view, &layout, Some(focused), None);
+    renderer.draw_panes(&device, &queue, &view, &layout, Some(focused), None, false);
     let err = pollster::block_on(device.pop_error_scope());
 
     assert!(
@@ -190,7 +190,7 @@ fn split_overlays_draw_after_final_pane_image_band_without_validation_error() {
         },
     ];
     let focused = layout[2].0;
-    let plan = build_draw_plan(&layout, Some(focused), None);
+    let plan = build_draw_plan(&layout, Some(focused), None, false);
     assert!(
         plan.iter()
             .any(|op| matches!(op, DrawOp::Dividers { rects } if !rects.is_empty())),
@@ -206,7 +206,7 @@ fn split_overlays_draw_after_final_pane_image_band_without_validation_error() {
 
     let (_target, view) = render_target(&device, 160, 96);
     device.push_error_scope(wgpu::ErrorFilter::Validation);
-    renderer.draw_panes(&device, &queue, &view, &layout, Some(focused), None);
+    renderer.draw_panes(&device, &queue, &view, &layout, Some(focused), None, false);
     let err = pollster::block_on(device.pop_error_scope());
 
     assert!(
@@ -255,7 +255,7 @@ fn split_pipeline_rebuilds_all_pane_bind_groups_after_atlas_reallocation() {
     renderer.rebuild_panes(&initial_panes, &mut font, &Theme::new());
     renderer.sync_atlas(&device, &queue, &mut font);
     let (_initial_target, initial_view) = render_target(&device, 512, 256);
-    renderer.draw_panes(&device, &queue, &initial_view, &layout, None, None);
+    renderer.draw_panes(&device, &queue, &initial_view, &layout, None, None, false);
 
     let before_counts = renderer.pane_bind_group_rebuild_counts();
     assert_eq!(before_counts.len(), 2);
@@ -287,7 +287,7 @@ fn split_pipeline_rebuilds_all_pane_bind_groups_after_atlas_reallocation() {
     device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.sync_atlas(&device, &queue, &mut font);
     let after_counts = renderer.pane_bind_group_rebuild_counts();
-    renderer.draw_panes(&device, &queue, &view, &layout, None, None);
+    renderer.draw_panes(&device, &queue, &view, &layout, None, None, false);
     let err = pollster::block_on(device.pop_error_scope());
 
     assert_eq!(after_counts.len(), before_counts.len());
@@ -398,7 +398,7 @@ fn split_pipeline_rebuilds_bind_groups_after_color_only_atlas_reallocation() {
     renderer.rebuild_panes(&initial_panes, &mut font, &Theme::new());
     renderer.sync_atlas(&device, &queue, &mut font);
     let (_initial_target, initial_view) = render_target(&device, 512, 256);
-    renderer.draw_panes(&device, &queue, &initial_view, &layout, None, None);
+    renderer.draw_panes(&device, &queue, &initial_view, &layout, None, None, false);
 
     let before_counts = renderer.pane_bind_group_rebuild_counts();
     assert_eq!(before_counts.len(), 2);
@@ -455,7 +455,7 @@ fn split_pipeline_rebuilds_bind_groups_after_color_only_atlas_reallocation() {
     device.push_error_scope(wgpu::ErrorFilter::Validation);
     renderer.sync_atlas(&device, &queue, &mut font);
     let after_counts = renderer.pane_bind_group_rebuild_counts();
-    renderer.draw_panes(&device, &queue, &view, &layout, None, None);
+    renderer.draw_panes(&device, &queue, &view, &layout, None, None, false);
     let err = pollster::block_on(device.pop_error_scope());
 
     assert_eq!(after_counts.len(), before_counts.len());

@@ -109,9 +109,14 @@ pub fn run_action(action: CliAction) -> anyhow::Result<()> {
             for diagnostic in diagnostics {
                 eprintln!("{}", diagnostic.message);
             }
-            let (keybinds, diagnostics) =
+            let (mut keybinds, diagnostics) =
                 KeybindEngine::from_config(&config.keybinds, config.sidebar_hotkey.as_deref());
             for diagnostic in diagnostics {
+                eprintln!("config keybind: {diagnostic}");
+            }
+            for diagnostic in
+                keybinds.apply_scratch_terminal_key(config.scratch_terminal_key.as_deref())
+            {
                 eprintln!("config keybind: {diagnostic}");
             }
             print!("{}", list_keybinds_output(&keybinds));

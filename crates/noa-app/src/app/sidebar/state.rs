@@ -276,7 +276,9 @@ impl App {
     pub(in crate::app) fn live_session_card_ids(&self) -> Vec<SessionCardId> {
         let mut ids = Vec::new();
         for (window_id, state) in &self.windows {
-            if self.is_quick_terminal_window(*window_id) {
+            if self.is_quick_terminal_window(*window_id)
+                || self.is_scratch_terminal_window(*window_id)
+            {
                 continue;
             }
             for pane_id in state.surfaces.keys() {
@@ -333,10 +335,13 @@ impl App {
         }
     }
 
-    /// Whether a window may host a sidebar (FR-14): everything but the
-    /// quick-terminal window.
+    /// Whether a window may host a sidebar (FR-14, scratch-terminal R6):
+    /// everything but the quick-terminal window and the scratch terminal
+    /// popup.
     pub(in crate::app) fn window_sidebar_eligible(&self, window_id: WindowId) -> bool {
-        crate::sidebar::is_sidebar_eligible(self.is_quick_terminal_window(window_id))
+        crate::sidebar::is_sidebar_eligible(
+            self.is_quick_terminal_window(window_id) || self.is_scratch_terminal_window(window_id),
+        )
     }
 
     /// The sidebar's pixel inset for a window's pane area (FR-4/FR-14): the

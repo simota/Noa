@@ -282,6 +282,19 @@ impl App {
     /// value (tab-close title-freeze fix). Keyed by `focused_pane`, never by
     /// tab index/order.
     pub(super) fn refresh_window_title(&mut self, window_id: WindowId) {
+        // scratch-terminal kaizen fix: the popup is borderless, never in a
+        // native tab, and excluded from every tab-title-facing surface, so
+        // the dynamic shell/cwd title this function otherwise computes buys
+        // it nothing — worse, it would immediately overwrite the spawn-time
+        // `Scratch Terminal — <cwd>` title (kaizen item 5) with the generic
+        // fallback the very first time this runs (the pre-show `redraw()`
+        // call in `spawn_scratch_terminal`, before the window is ever
+        // visible), so AX/Mission Control would never see the cwd. Skip
+        // entirely and let the spawn-time title stand for the popup's whole
+        // lifetime.
+        if self.is_scratch_terminal_window(window_id) {
+            return;
+        }
         let focused_process = self.focused_pane_process(window_id);
         let Some(state) = self.windows.get_mut(&window_id) else {
             return;
@@ -350,6 +363,11 @@ impl App {
         let sidebar_model = self.sidebar_draw_model(window_id);
         let copy_mode_pane = self.copy_mode_pane_for_redraw(window_id);
         let padding = self.padding;
+        // scratch-terminal kaizen item 4: resolved up front for the same
+        // reason as `padding`/`sidebar_model` above — `state`/`gpu` are
+        // borrowed mutably below, so this can't be read inline at the
+        // `draw_rebuilt_panes` call site.
+        let scratch_terminal_ring = self.is_scratch_terminal_window(window_id);
         // Resolve the open palette's render payload up front (like the sidebar
         // model) so the rounded card can be composited after the panes without
         // re-borrowing `self` — the palette is drawn as its own card (H), not
@@ -786,6 +804,7 @@ impl App {
             &view,
             Some(render_pane_id(state.focused_pane)),
             state.zoomed.map(render_pane_id),
+            scratch_terminal_ring,
         );
         // Scrollback thumbs along scrolled panes' right edges (state-driven:
         // only panes with `viewport_offset > 0` collected one).
@@ -821,10 +840,12 @@ impl App {
             );
         }
         // On macOS the four modal overlays (palette, theme settings, confirm
-        // dialog, resize toast) render as native AppKit cards — blur
-        // material, system font — instead of wgpu-composited cards. Display
-        // only: input/IME stays on the winit path. Off macOS the wgpu card
-        // path below keeps drawing.
+        // dialog, resize toast) plus the scratch terminal's non-modal
+        // identity badge render as native AppKit cards — blur material,
+        // system font — instead of wgpu-composited cards. Display only:
+        // input/IME stays on the winit path. Off macOS the wgpu card path
+        // below keeps drawing (the scratch badge has no non-macOS fallback —
+        // R2's accent ring alone still identifies the popup there).
         #[cfg(target_os = "macos")]
         {
             let colors = crate::macos_overlay::OverlayColors::from_style(
@@ -887,6 +908,27 @@ impl App {
                 &state.window,
                 &mut state.native_overlays,
                 toast_text.as_deref(),
+                &colors,
+            );
+            // scratch-terminal kaizen cycle 2: a persistent identity badge
+            // (unlike the transient toast above) while this window is the
+            // scratch popup — the accent ring alone doesn't say what the
+            // window is. Read live (not the spawn-time snapshot `with_title`
+            // uses) so a `cd` inside the popup keeps the badge current.
+            let scratch_badge_text = scratch_terminal_ring.then(|| {
+                let cwd = state
+                    .surfaces
+                    .get(&state.focused_pane)
+                    .and_then(|surface| surface.terminal.lock().cwd.clone());
+                super::scratch_terminal::scratch_terminal_badge_label(
+                    cwd.as_deref(),
+                    super::scratch_terminal::scratch_terminal_home_dir(),
+                )
+            });
+            crate::macos_overlay::sync_scratch_badge(
+                &state.window,
+                &mut state.native_overlays,
+                scratch_badge_text.as_deref(),
                 &colors,
             );
         }

@@ -182,7 +182,7 @@ aliases: `cmd`/`command`/`super`/`meta`, `ctrl`/`control`, `alt`/`option`,
   `;`/`semicolon`, `,`/`comma`, `.`/`period`, `/`/`slash`
 - Basic keys: `enter`/`return`, `tab`, `space`, `escape`/`esc`
 - Backtick: `grave`, `backtick`, `` ` ``
-- Backslash: `backslash` or `\`. Registers both ANSI `\` and JIS `¥` / `ろ`
+- Backslash: `backslash` or `\`. Registers both ANSI `\` and the JIS Yen (`¥`) / Ro key
   simultaneously
 - JIS-specific: `yen`/`jis-yen`/`intl-yen`,
   `underscore`/`jis-underscore`/`intl-ro` (aliases for `_` and `-` also work)

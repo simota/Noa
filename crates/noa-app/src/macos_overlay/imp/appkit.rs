@@ -32,6 +32,7 @@ const ID_PROCESS_MONITOR: &str = "noa.native-overlay.process-monitor";
 const ID_CONFIRM: &str = "noa.native-overlay.confirm";
 const ID_TITLE_PROMPT: &str = "noa.native-overlay.title-prompt";
 const ID_TOAST: &str = "noa.native-overlay.toast";
+const ID_SCRATCH_BADGE: &str = "noa.native-overlay.scratch-badge";
 
 /// Palette metrics (points).
 const PALETTE_WIDTH: f64 = 560.0;
@@ -1965,6 +1966,94 @@ pub(in crate::macos_overlay) fn rebuild_toast(
             NSRect::new(
                 NSPoint::new(8.0, from_top(pill_h, 9.0, 16.0)),
                 NSSize::new(pill_w - 16.0, 16.0),
+            ),
+        );
+        if !label.is_null() {
+            set_alignment(label, ALIGN_CENTER);
+            let _: () = msg_send![effect, addSubview: label];
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// scratch terminal badge (kaizen cycle 2)
+// -----------------------------------------------------------------------
+
+/// Fixed margin (points) between the badge's top edge and the popup
+/// window's top edge — unlike the resize toast (vertically centered), this
+/// badge sits at the top so it reads as window chrome rather than
+/// transient feedback (it floats over the top rows, display-only).
+const SCRATCH_BADGE_TOP_MARGIN: f64 = 8.0;
+const SCRATCH_BADGE_HEIGHT: f64 = 24.0;
+/// Must match `scratch_terminal::SCRATCH_TERMINAL_LABEL_PREFIX` exactly —
+/// the accent/semibold run below covers exactly this many leading chars of
+/// the formatted label.
+const SCRATCH_BADGE_PREFIX: &str = "Scratch Terminal";
+
+/// Sync the scratch terminal popup's persistent identity badge: a small
+/// top-anchored pill reading "Scratch Terminal — <cwd>" (already formatted
+/// by `scratch_terminal_badge_label`, including tilde-collapse and tail
+/// truncation) — `None` removes it. Display-only, same non-modal contract
+/// as `rebuild_toast`, but positioned at the top rather than centered and
+/// left showing for the popup's whole lifetime rather than fading (the
+/// caller passes `Some` every redraw while the popup is shown).
+pub(in crate::macos_overlay) fn rebuild_scratch_badge(
+    window: &Window,
+    text: Option<&str>,
+    colors: &OverlayColors,
+) {
+    let view = content_view(window);
+    if view.is_null() {
+        return;
+    }
+    unsafe {
+        let Some(text) = text else {
+            remove_subview(view, ID_SCRATCH_BADGE);
+            return;
+        };
+        let bounds: NSRect = msg_send![view, bounds];
+        // Proportional system font (not `mono_digit_font` — this is a label,
+        // not shifting digits), so the per-char width is a rougher estimate
+        // than the toast's; generous padding absorbs it.
+        let pill_w = (text.chars().count() as f64 * 6.5 + 32.0).max(96.0);
+        let pill_h = SCRATCH_BADGE_HEIGHT;
+        let pane = PaneRectPt {
+            x: (bounds.size.width - pill_w) / 2.0,
+            y: SCRATCH_BADGE_TOP_MARGIN,
+            w: pill_w,
+            h: pill_h,
+        };
+        let card_frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(pill_w, pill_h));
+        let (root, effect) = card_for(
+            view,
+            ID_SCRATCH_BADGE,
+            pane,
+            false,
+            card_frame,
+            MATERIAL_HUD_WINDOW,
+            colors,
+            pill_h / 2.0,
+        );
+        if root.is_null() || effect.is_null() {
+            return;
+        }
+
+        // The "Scratch Terminal" prefix renders accent + semibold (brand
+        // book: UI_ACCENT for the identity cue), the " — <cwd>" remainder in
+        // the normal low-contrast surface foreground.
+        let prefix_chars = SCRATCH_BADGE_PREFIX
+            .chars()
+            .count()
+            .min(text.chars().count());
+        let label = make_match_label(
+            text,
+            &(0..prefix_chars).collect::<Vec<_>>(),
+            11.0,
+            ns_color(colors.surface_fg, 1.0),
+            ns_color(colors.accent, 1.0),
+            NSRect::new(
+                NSPoint::new(10.0, from_top(pill_h, 4.5, 15.0)),
+                NSSize::new(pill_w - 20.0, 15.0),
             ),
         );
         if !label.is_null() {

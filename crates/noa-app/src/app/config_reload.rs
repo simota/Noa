@@ -158,6 +158,11 @@ impl App {
     }
 
     fn apply_reloaded_config(&mut self, next: AppConfig) {
+        // scratch-terminal R4-e: config reload never applies to a live
+        // popup (Scope: out — no live-reload path for it), so a shown
+        // popup is discarded outright rather than risking stale settings.
+        self.destroy_scratch_terminal();
+
         let previous = self.config.clone();
         let mut applied = next;
 
@@ -186,9 +191,13 @@ impl App {
             previous.sidebar_preview_lines != applied.sidebar_preview_lines;
         let sidebar_font_size_changed = previous.sidebar_font_size != applied.sidebar_font_size;
         let sidebar_hotkey_changed = previous.sidebar_hotkey != applied.sidebar_hotkey;
-        // `sidebar-hotkey` feeds the keybind engine (in-app chord), so a
-        // change to either input rebuilds it.
-        let keybinds_changed = previous.keybinds != applied.keybinds || sidebar_hotkey_changed;
+        let scratch_terminal_key_changed =
+            previous.scratch_terminal_key != applied.scratch_terminal_key;
+        // `sidebar-hotkey`/`scratch-terminal-key` feed the keybind engine
+        // (in-app chords), so a change to any of these rebuilds it.
+        let keybinds_changed = previous.keybinds != applied.keybinds
+            || sidebar_hotkey_changed
+            || scratch_terminal_key_changed;
         let server_restart = decide_server_restart(&previous, &applied);
         let quick_terminal_hotkey_changed =
             previous.quick_terminal_hotkey != applied.quick_terminal_hotkey;
@@ -242,11 +251,16 @@ impl App {
             self.restart_ipc_server();
         }
         if keybinds_changed {
-            let (keybinds, diagnostics) = KeybindEngine::from_config(
+            let (mut keybinds, diagnostics) = KeybindEngine::from_config(
                 &self.config.keybinds,
                 self.config.sidebar_hotkey.as_deref(),
             );
             for diagnostic in diagnostics {
+                log::warn!("config reload keybind: {diagnostic}");
+            }
+            for diagnostic in
+                keybinds.apply_scratch_terminal_key(self.config.scratch_terminal_key.as_deref())
+            {
                 log::warn!("config reload keybind: {diagnostic}");
             }
             self.keybinds = keybinds;
@@ -265,6 +279,14 @@ impl App {
                 menu.set_sidebar_chord(
                     self.keybinds
                         .chord_for(crate::commands::AppCommand::ToggleSidebar)
+                        .as_deref(),
+                );
+                // Same reasoning for the Scratch Terminal item's accelerator
+                // (kaizen item 1): `scratch-terminal-key` or an explicit
+                // keybind can both move the effective chord.
+                menu.set_scratch_terminal_chord(
+                    self.keybinds
+                        .chord_for(crate::commands::AppCommand::ToggleScratchTerminal)
                         .as_deref(),
                 );
             }

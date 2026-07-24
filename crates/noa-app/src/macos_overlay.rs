@@ -1,5 +1,6 @@
 //! Native AppKit modal-overlay cards for macOS: the command palette, the
-//! theme-settings overlay, the confirm dialog, and the resize toast.
+//! theme-settings overlay, the confirm dialog, the resize toast, and the
+//! scratch terminal's persistent identity badge.
 //!
 //! Display layer only. Input, focus, and IME all stay on the existing winit
 //! path (`input_ops.rs` + `ModalImeTarget`): the native views never become
@@ -26,6 +27,6 @@ mod tests;
 pub(crate) use model::cg;
 pub(crate) use model::{NativeOverlayCache, OverlayColors, PaneRectPt, TITLE_PROMPT_HINT};
 pub(crate) use sync::{
-    sync_command_palette, sync_confirm_dialog, sync_process_monitor, sync_theme_settings,
-    sync_title_prompt, sync_toast,
+    sync_command_palette, sync_confirm_dialog, sync_process_monitor, sync_scratch_badge,
+    sync_theme_settings, sync_title_prompt, sync_toast,
 };

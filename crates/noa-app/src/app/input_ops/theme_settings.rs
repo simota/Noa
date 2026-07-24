@@ -231,6 +231,11 @@ impl App {
             server_bind: self.config.server_bind.clone(),
             server_scopes: self.config.server_scopes.clone(),
             server_status: self.server_status_display(),
+            scratch_terminal_key: self.config.scratch_terminal_key.clone().unwrap_or_default(),
+            scratch_terminal_size: (
+                self.config.scratch_terminal_size.cols,
+                self.config.scratch_terminal_size.rows,
+            ),
         };
         self.theme_settings = Some(ThemeSettingsSession {
             window_id,
@@ -1093,6 +1098,24 @@ impl App {
                 | RowDraft::ServerPort(_)
                 | RowDraft::ServerBind(_)
                 | RowDraft::ServerScopes(_) => {}
+                // `scratch-terminal-key` is the same shape as the group
+                // above: `App::apply_reloaded_config`'s
+                // `scratch_terminal_key_changed` diff is what actually
+                // rebuilds the keybind engine (`KeybindEngine::
+                // apply_scratch_terminal_key`), so mirroring it here would
+                // erase that diff and silently skip the rebind.
+                // `scratch-terminal-size` has no such diff-gated apply step
+                // (a popup toggle just reads `self.config.
+                // scratch_terminal_size` fresh, exactly like
+                // `quick_terminal_size`) — mirrored immediately below,
+                // mirroring `sync_quick_terminal_size_from_committed_rows`.
+                RowDraft::ScratchTerminalKey(_) => {}
+                RowDraft::ScratchTerminalSize(cols, rows) => {
+                    self.config.scratch_terminal_size = noa_config::ScratchTerminalSize {
+                        cols: *cols,
+                        rows: *rows,
+                    };
+                }
                 // `ServerTokenCopy`/`ServerStatus` never set `touched`
                 // (`ThemeSettings::adjust`/`reset_selected_row` both no-op
                 // both), so this loop can't actually reach here — kept
@@ -1519,6 +1542,8 @@ mod commit_theme_settings_tests {
             server_bind: noa_config::DEFAULT_SERVER_BIND.to_string(),
             server_scopes: "read".to_string(),
             server_status: "Stopped".to_string(),
+            scratch_terminal_key: "cmd+shift+t".to_string(),
+            scratch_terminal_size: (100, 25),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),
@@ -1662,6 +1687,8 @@ mod commit_theme_settings_tests {
             server_bind: noa_config::DEFAULT_SERVER_BIND.to_string(),
             server_scopes: "read".to_string(),
             server_status: "Stopped".to_string(),
+            scratch_terminal_key: "cmd+shift+t".to_string(),
+            scratch_terminal_size: (100, 25),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),

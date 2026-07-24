@@ -180,6 +180,7 @@ fn command_requires_pre_dispatch_exit(command: AppCommand) -> bool {
             | AppCommand::CloseWindow
             | AppCommand::PipeScrollbackToPager
             | AppCommand::ToggleQuickTerminal
+            | AppCommand::ToggleScratchTerminal
     )
 }
 

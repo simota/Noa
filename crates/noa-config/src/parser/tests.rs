@@ -7,8 +7,8 @@ use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess,
     ConfigOverrides, CursorShape, FontConfig, FontFeature, FontVariation, KeybindConfig,
     MacosOptionAsAlt, MacosTitlebarStyle, PaletteOverride, QuickTerminalPosition,
-    QuickTerminalScreen, QuickTerminalSize, QuickTerminalSizeDim, SyntheticStyleMode,
-    ThemeAppearancePair, WindowSaveState,
+    QuickTerminalScreen, QuickTerminalSize, QuickTerminalSizeDim, ScratchTerminalSize,
+    SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
 };
 
 use super::*;
@@ -1117,6 +1117,55 @@ fn quick_terminal_size_rejects_invalid_values() {
         assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
         assert!(diagnostics[0].message.contains("quick-terminal-size"));
     }
+}
+
+#[test]
+fn scratch_terminal_size_parses_cols_x_rows() {
+    let (overrides, diagnostics) = parse_overrides(path(), "scratch-terminal-size = 120x40");
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        overrides.scratch_terminal_size,
+        Some(ScratchTerminalSize {
+            cols: 120,
+            rows: 40,
+        })
+    );
+}
+
+#[test]
+fn scratch_terminal_size_rejects_invalid_values() {
+    for value in ["abc", "100", "0x25", "100x0", "100x", "x25", "100xabc"] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("scratch-terminal-size = {value}"));
+
+        assert_eq!(overrides.scratch_terminal_size, None, "{value:?}");
+        assert_eq!(diagnostics.len(), 1, "{value:?}: {diagnostics:?}");
+        assert!(diagnostics[0].message.contains("scratch-terminal-size"));
+    }
+}
+
+#[test]
+fn scratch_terminal_key_normalizes_disable_sentinels() {
+    for disabled in ["", "none", "off", "false", "None", "OFF"] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("scratch-terminal-key = {disabled}"));
+        assert!(diagnostics.is_empty(), "{disabled:?}: {diagnostics:?}");
+        assert_eq!(overrides.scratch_terminal_key.as_deref(), Some(""));
+    }
+
+    let (overrides, diagnostics) = parse_overrides(path(), "scratch-terminal-key = cmd+shift+u");
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        overrides.scratch_terminal_key.as_deref(),
+        Some("cmd+shift+u")
+    );
+}
+
+#[test]
+fn scratch_terminal_keys_are_supported_scalar_keys_for_import() {
+    assert!(is_supported_scalar_key("scratch-terminal-key"));
+    assert!(is_supported_scalar_key("scratch-terminal-size"));
 }
 
 #[test]

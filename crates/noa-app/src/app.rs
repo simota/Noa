@@ -99,10 +99,13 @@ use quick_terminal::QuickTerminalState;
 use scratch_terminal::ScratchTerminalState;
 use state::*;
 
+// `window_created_transparent` belongs to this unconditional group, not the
+// macOS one below: every window-creation path records what it asked for
+// (`WindowState::created_transparent`) on every platform.
 use config::{
     BackgroundImageRuntime, alpha_blending_mode, apply_palette_overrides, effective_theme_name,
     font_config_from_noa_config, load_background_image_runtime, resolve_cursor_style,
-    resolve_grid_padding,
+    resolve_grid_padding, window_created_transparent,
 };
 #[cfg(target_os = "macos")]
 use config::{apply_macos_titlebar_style, macos_option_as_alt, needs_macos_titlebar_backdrop};

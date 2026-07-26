@@ -266,7 +266,13 @@ impl App {
             );
             // Chrome (sidebar/overview) polarity follows the terminal
             // theme: a light theme gets light chrome.
-            crate::chrome::select_palette(theme.is_light());
+            // `glassmorphism = true` resolves `background-opacity` /
+            // `background-blur-radius` to the recommended glass pair
+            // (`noa_config::apply_glassmorphism_defaults`), so the window
+            // this palette draws into is always translucent and blurred —
+            // there is no "frosted chrome over an opaque window" case left
+            // to warn about here.
+            crate::chrome::select_palette(theme.is_light(), self.config.glassmorphism);
 
             let caps = surface.get_capabilities(&adapter);
             let alpha_blending = alpha_blending_mode(&self.config.font);
@@ -339,8 +345,13 @@ impl App {
                         self.config.macos_titlebar_style,
                         self.config.background_opacity,
                         self.background_image.has_visible_image(),
+                        self.config.glassmorphism,
                     ) {
-                        crate::macos_window::install_titlebar_backdrop(&window, theme.default_bg);
+                        crate::macos_window::install_titlebar_backdrop(
+                            &window,
+                            theme.default_bg,
+                            self.config.glassmorphism,
+                        );
                     }
                 }
                 match surface.get_current_texture() {
@@ -429,6 +440,7 @@ impl App {
                 palette_card: None,
                 palette_padding: noa_core::GridPadding::ZERO,
                 palette_scrim: None,
+                palette_shadow_source: None,
             });
             (surface, Some(surface_config))
         };
@@ -505,8 +517,13 @@ impl App {
                 self.config.macos_titlebar_style,
                 self.config.background_opacity,
                 self.background_image.has_visible_image(),
+                self.config.glassmorphism,
             ) {
-                crate::macos_window::install_titlebar_backdrop(&window, bg);
+                crate::macos_window::install_titlebar_backdrop(
+                    &window,
+                    bg,
+                    self.config.glassmorphism,
+                );
             }
         }
 
@@ -553,6 +570,7 @@ impl App {
         self.windows.insert(
             window_id,
             WindowState {
+                created_transparent: window_created_transparent(self.config.background_opacity),
                 window: window.clone(),
                 group,
                 surface,
@@ -657,7 +675,7 @@ impl App {
             // A transparent window is required for `background-opacity` to
             // reveal anything behind it; the surface alpha mode and the
             // renderer's clear alpha carry the actual opacity.
-            .with_transparent(self.config.background_opacity < 1.0);
+            .with_transparent(window_created_transparent(self.config.background_opacity));
         #[cfg(target_os = "macos")]
         {
             // Tabs in the same group share a `tabbingIdentifier`, so AppKit

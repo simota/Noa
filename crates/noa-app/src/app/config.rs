@@ -68,6 +68,16 @@ pub struct AppConfig {
     /// `background-blur-radius` in points (`0..=64`, 0 = off). Applied as a
     /// native macOS window background blur; a no-op on other platforms.
     pub background_blur_radius: u16,
+    /// The pair as configured, before `glassmorphism` took it over
+    /// (`noa_config::StartupConfig::configured_background_*`) — equal to the
+    /// effective values whenever the toggle is off. Carried so the Settings
+    /// panel's Undo restores what the user had rather than the derived pair.
+    pub configured_background_opacity: f32,
+    pub configured_background_blur_radius: u16,
+    /// `glassmorphism`: translucent frosted chrome (sidebar / tab overview)
+    /// instead of opaque. Default off, and off installs the byte-identical
+    /// opaque chrome palette — no extra draw work, no extra state.
+    pub glassmorphism: bool,
     /// `background-image`: path to a PNG laid behind the terminal grid, or the
     /// reserved value `noa` for the bundled wallpaper directory. `None` leaves
     /// the background image disabled. Missing or undecodable paths log a
@@ -270,6 +280,9 @@ impl AppConfig {
             cursor_stop_blinking_after_secs: config.cursor_stop_blinking_after_secs,
             background_opacity: config.background_opacity,
             background_blur_radius: config.background_blur_radius,
+            configured_background_opacity: config.configured_background_opacity,
+            configured_background_blur_radius: config.configured_background_blur_radius,
+            glassmorphism: config.glassmorphism,
             background_image: config.background_image,
             background_image_opacity: config.background_image_opacity,
             background_image_position: config.background_image_position,
@@ -1050,13 +1063,36 @@ pub(super) fn apply_macos_titlebar_style(
     }
 }
 
+/// Whether a window created under `background_opacity` gets AppKit's
+/// transparent treatment. The single source for both the creation attribute
+/// (`with_transparent`) and the `WindowState::created_transparent` record of
+/// what was asked for, so the two can never drift apart.
+pub(super) fn window_created_transparent(background_opacity: f32) -> bool {
+    background_opacity < 1.0
+}
+
+/// Whether the native titlebar/tab-bar strip needs one of noa's backdrop
+/// views behind it (`macos_window::install_titlebar_backdrop`).
+///
+/// The `Transparent` + background-image carve-out exists because a
+/// full-size content view already supplies defined pixels up there, making
+/// the opaque backdrop redundant. That reasoning does not extend to
+/// `glass`: its backdrop is not a fallback for undefined pixels but the tab
+/// bar's *appearance* — the vibrancy view is what makes the strip frosted
+/// instead of a solid bar. Dropping it because a wallpaper happens to be
+/// visible would leave the titlebar as the one un-frosted surface on
+/// screen, so glass keeps its backdrop whenever the window is see-through
+/// at all.
 pub(super) fn needs_macos_titlebar_backdrop(
     style: noa_config::MacosTitlebarStyle,
     background_opacity: f32,
     has_visible_background_image: bool,
+    glass: bool,
 ) -> bool {
     background_opacity < 1.0
-        && (style != noa_config::MacosTitlebarStyle::Transparent || !has_visible_background_image)
+        && (glass
+            || style != noa_config::MacosTitlebarStyle::Transparent
+            || !has_visible_background_image)
 }
 
 #[cfg(test)]
@@ -1228,22 +1264,52 @@ mod tests {
         assert!(needs_macos_titlebar_backdrop(
             noa_config::MacosTitlebarStyle::Native,
             0.85,
+            false,
             false
         ));
         assert!(needs_macos_titlebar_backdrop(
             noa_config::MacosTitlebarStyle::Transparent,
             0.85,
+            false,
             false
         ));
         assert!(!needs_macos_titlebar_backdrop(
             noa_config::MacosTitlebarStyle::Transparent,
             0.85,
-            true
+            true,
+            false
         ));
         assert!(!needs_macos_titlebar_backdrop(
             noa_config::MacosTitlebarStyle::Native,
             1.0,
+            false,
             false
+        ));
+    }
+
+    // Glassmorphism's backdrop is the tab bar's frosted *appearance*, not a
+    // fallback for undefined pixels, so the background-image carve-out must
+    // not take it away — that would leave the titlebar as the one un-frosted
+    // surface on screen. An opaque window still needs nothing either way.
+    #[test]
+    fn glass_titlebar_backdrop_survives_a_visible_background_image() {
+        assert!(needs_macos_titlebar_backdrop(
+            noa_config::MacosTitlebarStyle::Transparent,
+            0.5,
+            true,
+            true
+        ));
+        assert!(needs_macos_titlebar_backdrop(
+            noa_config::MacosTitlebarStyle::Native,
+            0.5,
+            true,
+            true
+        ));
+        assert!(!needs_macos_titlebar_backdrop(
+            noa_config::MacosTitlebarStyle::Transparent,
+            1.0,
+            true,
+            true
         ));
     }
 

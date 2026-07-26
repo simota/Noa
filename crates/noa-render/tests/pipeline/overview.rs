@@ -28,6 +28,7 @@ fn overview_blit_pipeline_draws_tile_without_validation_error() {
         1,
         TEST_TITLE_BAR_H,
         TEST_CARD_COLOR,
+        wgpu::BlendState::ALPHA_BLENDING,
     );
     assert_eq!(overview.format(), renderer.target_format());
     assert_eq!(overview.scratch_size(), scratch_size);
@@ -72,6 +73,7 @@ fn overview_blit_scratch_resizes_to_source_frame_without_validation_error() {
         1,
         TEST_TITLE_BAR_H,
         TEST_CARD_COLOR,
+        wgpu::BlendState::ALPHA_BLENDING,
     );
     assert_eq!(overview.scratch_size(), initial_scratch_size);
 
@@ -111,6 +113,7 @@ fn overview_blit_tile_pixel_hash_tracks_content_changes() {
         1,
         TEST_TITLE_BAR_H,
         TEST_CARD_COLOR,
+        wgpu::BlendState::ALPHA_BLENDING,
     );
 
     rebuild_text_frame(&mut renderer, &mut font, &device, &queue, "AAA");
@@ -176,6 +179,7 @@ fn overview_freshly_allocated_tiles_are_cleared_not_uninitialized() {
         2,
         TEST_TITLE_BAR_H,
         TEST_CARD_COLOR,
+        wgpu::BlendState::ALPHA_BLENDING,
     );
 
     // Tile 0 is never rendered — it must still read back as a uniform card
@@ -238,6 +242,7 @@ fn overview_pane_subrect_composition_places_panes_in_distinct_regions() {
         1,
         TEST_TITLE_BAR_H,
         TEST_CARD_COLOR,
+        wgpu::BlendState::ALPHA_BLENDING,
     );
 
     // Two side-by-side pane cells inside the content region (below the title
@@ -334,6 +339,7 @@ fn overview_blit_resources_drop_before_renderer_without_validation_error() {
                 1,
                 TEST_TITLE_BAR_H,
                 TEST_CARD_COLOR,
+                wgpu::BlendState::ALPHA_BLENDING,
             );
             overview
                 .render_existing_renderer_to_tile(&device, &queue, &mut renderer, scratch_size, 0)

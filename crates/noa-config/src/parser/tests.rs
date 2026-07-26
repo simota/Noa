@@ -599,6 +599,27 @@ fn background_blur_radius_parses_int_bool_and_clamps() {
     }
 }
 
+// `glassmorphism` is an opt-in appearance flag: absent from the config it
+// must stay `None` so the resolved default (off) wins, and it accepts the same
+// truthy spellings as every other bool key.
+#[test]
+fn glassmorphism_parses_bool_and_defaults_to_unset() {
+    let (absent, diagnostics) = parse_overrides(path(), "font-size = 13");
+    assert_eq!(absent.glassmorphism, None);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    for (value, expected) in [("true", true), ("false", false)] {
+        let (overrides, diagnostics) = parse_overrides(path(), &format!("glassmorphism = {value}"));
+        assert_eq!(overrides.glassmorphism, Some(expected), "{value:?}");
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+    }
+
+    let (invalid, diagnostics) = parse_overrides(path(), "glassmorphism = frosted");
+    assert_eq!(invalid.glassmorphism, None);
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].message.contains("glassmorphism"));
+}
+
 #[test]
 fn background_blur_radius_rejects_non_integer() {
     let (overrides, diagnostics) = parse_overrides(path(), "background-blur-radius = blurry");

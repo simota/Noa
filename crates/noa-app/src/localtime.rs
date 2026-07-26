@@ -5,7 +5,7 @@
 //! Unix-epoch second count before decomposing it. Isolated here because the
 //! only portable source is platform-specific (Foundation on macOS); everywhere
 //! else it degrades to UTC (offset 0), which keeps the dominant relative forms
-//! ("3分前", "2時間前") exact and only shifts the absolute "昨日 HH:MM" clock.
+//! (`3m ago`, `2h ago`) exact and only shifts the absolute `Yday HH:MM` clock.
 //!
 //! Queried once per sidebar publish (a cheap Foundation call), not cached, so a
 //! DST transition or timezone change is picked up without app restart.

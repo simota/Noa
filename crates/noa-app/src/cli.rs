@@ -344,6 +344,7 @@ fn show_config_output(config: &StartupConfig) -> String {
         "background-blur-radius",
         &config.background_blur_radius.to_string(),
     );
+    push_line(&mut out, "glassmorphism", &config.glassmorphism.to_string());
     push_line(
         &mut out,
         "scrollback-limit",

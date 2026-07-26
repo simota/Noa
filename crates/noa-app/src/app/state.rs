@@ -57,6 +57,13 @@ pub(super) struct GpuState {
     /// 1x1 translucent-black texture drawn as a full-pane card behind the
     /// palette; the modal scrim dimming the pane underneath.
     pub(super) palette_scrim: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// 1x1 fully transparent texture, the source for the modal card's
+    /// drop-shadow pass. The shadow pass exists only for the glow *outside*
+    /// the card shape, and `card.wgsl` returns that glow before it samples
+    /// the source at all — so a transparent source makes the pass contribute
+    /// nothing inside the card, leaving the fill to the single pass that
+    /// carries it (see `sidebar::palette::composite_modal_card`).
+    pub(super) palette_shadow_source: Option<(wgpu::Texture, wgpu::TextureView)>,
 }
 
 /// The single chokepoint every draw-path theme read must go through
@@ -257,6 +264,18 @@ pub(super) struct WindowState {
     pub(super) last_mouse_physical_position: Option<PhysicalPosition<f64>>,
     pub(super) active_split_drag: Option<SplitResizeDrag>,
     pub(super) occluded: bool,
+    /// Whether this window was *created* with `with_transparent(true)`.
+    /// AppKit fixes a window's opacity at creation — a window built opaque
+    /// can never become see-through in place, and one built transparent
+    /// stays capable of it — so this, not the current effective
+    /// `background-opacity`, is what decides whether a transparency change
+    /// can preview live (R-11's gate, `ThemeSettings::opaque_at_startup`).
+    /// Recomputing it from the live opacity would misreport both directions:
+    /// a `glassmorphism = true` arriving by config reload lowers the opacity
+    /// without making an opaque window transparent, and turning it back off
+    /// raises the opacity in a window that is still perfectly capable of
+    /// transparency.
+    pub(super) created_transparent: bool,
     pub(super) title: String,
     /// A user-set tab title (tab-title REQ-TTL-2/5). While `Some`, it masks
     /// the shell-driven title on the native tab label and overview tile;
@@ -593,6 +612,15 @@ pub(super) struct OverviewPillKey {
     /// cached pill texture.
     pub(super) page: usize,
     pub(super) rect: PaneRectApp,
+    /// The pill face color the cached texture was rasterized with, as raw
+    /// `f32` bits (this key is `Eq`, and bit equality is exactly the
+    /// "same color" test wanted here). Folded in because the chrome palette
+    /// is swappable at runtime — a theme polarity flip or a `glassmorphism`
+    /// toggle changes this color, and neither `query`/`count`/`page`/`rect`
+    /// nor `ChromeTextures::reset` (which owns only the sidebar's textures)
+    /// would otherwise invalidate the pill, leaving an opaque pill on a
+    /// frosted surface until the window happened to resize.
+    pub(super) chrome_pill: [u32; 4],
 }
 
 /// The unfiltered TAB order and focused pane per tab that
@@ -617,6 +645,12 @@ pub(super) struct OverviewZoomAnim {
 
 pub(super) struct OverviewChromeCardPipeline {
     pub(super) format: wgpu::TextureFormat,
+    /// Whether `pipeline` was built with the glass (alpha-replacing) blend.
+    /// A pipeline's blend state is fixed at creation, so this is part of the
+    /// cache key: a `glassmorphism` toggle has to rebuild, and keying on it
+    /// explicitly means the rebuild does not depend on
+    /// `ChromeTextures::reset` happening to run on that path.
+    pub(super) glass: bool,
     pub(super) pipeline: CardPipeline,
 }
 
@@ -719,6 +753,9 @@ mod theme_settings_session_tests {
             cursor_style: noa_config::CursorShape::Block,
             background_opacity: 1.0,
             background_blur_radius: 0,
+            configured_background_opacity: 1.0,
+            configured_background_blur_radius: 0,
+            window_created_transparent: false,
             background_image: String::new(),
             background_image_opacity: 1.0,
             background_image_position: noa_config::BackgroundImagePosition::Center,
@@ -732,6 +769,7 @@ mod theme_settings_session_tests {
             sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
             sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
+            glassmorphism: false,
             confirm_quit: true,
             send_selection_send_enter: false,
             font_family: "Menlo".to_string(),

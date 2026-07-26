@@ -1,18 +1,23 @@
 use super::super::*;
 
 impl App {
-    pub(in crate::app) fn ensure_overview_thumbnails(&mut self, layout: &OverviewLayout) {
+    /// Returns whether the tile textures were (re)allocated, which the caller
+    /// must treat as "every tile's content is gone": a fresh allocation is
+    /// only cleared to the card color, so a tile that was clean keeps its
+    /// place in the grid as an empty card until something else happens to
+    /// dirty it — pty output on that tab, or reopening the Overview.
+    pub(in crate::app) fn ensure_overview_thumbnails(&mut self, layout: &OverviewLayout) -> bool {
         let Some(host_config) = self.overview_host_surface_config() else {
-            return;
+            return false;
         };
         let Some(metrics) = self.overview_metrics() else {
-            return;
+            return false;
         };
         let Some(gpu) = self.gpu.as_ref() else {
-            return;
+            return false;
         };
         let Some(overview) = self.overview_window.as_mut() else {
-            return;
+            return false;
         };
 
         // Placeholder tiles (REQ-OV-10) are the same uniform size as live
@@ -22,7 +27,7 @@ impl App {
         let tile_count = layout.tiles.len() + layout.placeholders.len();
         if tile_count == 0 {
             overview.thumbnails = None;
-            return;
+            return false;
         }
         let tile_size = PixelSize {
             w: layout.tiles[0].w.max(1),
@@ -34,10 +39,21 @@ impl App {
         };
         let format = host_config.format;
 
+        // The card color is part of staleness, not just the geometry: tile
+        // textures are cleared to it once, at allocation, and nothing
+        // re-clears them afterward. A runtime palette swap (theme polarity,
+        // `glassmorphism`) therefore has to rebuild them, or an Overview
+        // opened before the swap keeps compositing tiles that carry the old
+        // face — opaque under a frosted palette, translucent after it is
+        // turned back off — until the tile size or count happens to change.
+        let card_color = overview_card_color();
+        let card_blend = overview_card_blend();
         let stale = overview.thumbnails.as_ref().is_none_or(|thumbnails| {
             thumbnails.format() != format
                 || thumbnails.tile_size() != tile_size
                 || thumbnails.tile_count() != tile_count
+                || thumbnails.card_color() != card_color
+                || thumbnails.card_blend() != card_blend
         });
         if stale {
             overview.thumbnails = Some(OverviewThumbnailResources::new(
@@ -48,9 +64,11 @@ impl App {
                 tile_size,
                 tile_count,
                 metrics.title_bar_h,
-                overview_card_color(),
+                card_color,
+                card_blend,
             ));
         }
+        stale
     }
 
     /// Render each due tile's source pane into the shared scratch texture and
@@ -217,14 +235,16 @@ impl App {
         let Some(overview) = self.overview_window.as_mut() else {
             return;
         };
+        let glass = crate::chrome::palette().is_glass();
         let stale = overview
             .chrome_card
             .as_ref()
-            .is_none_or(|chrome| chrome.format != format);
+            .is_none_or(|chrome| chrome.format != format || chrome.glass != glass);
         if stale {
             overview.chrome_card = Some(OverviewChromeCardPipeline {
                 format,
-                pipeline: CardPipeline::new(&gpu.device, format, wgpu::BlendState::ALPHA_BLENDING),
+                glass,
+                pipeline: CardPipeline::new(&gpu.device, format, overview_card_blend()),
             });
         }
     }
@@ -477,6 +497,7 @@ impl App {
             live_tile_count,
             page,
             rect,
+            chrome_pill: pill_color_key(overview_chrome_pill_color()),
         };
         if let Some(hit) = self
             .overview_window
@@ -561,6 +582,7 @@ impl App {
             live_tile_count,
             page,
             rect,
+            chrome_pill: pill_color_key(overview_chrome_pill_color()),
         };
         if let Some(hit) = self
             .overview_window
@@ -1152,9 +1174,19 @@ impl App {
                 .min(page_view.slice.len().saturating_sub(1));
         }
         let now = Instant::now();
+        // Resource allocation runs *before* the due-tile selection, not after:
+        // a rebuild leaves every tile texture holding nothing but the card
+        // color, so the tiles it wiped have to be dirty by the time this
+        // frame picks its work. Selecting first would render the old dirty
+        // set into fresh textures and present the rest as empty cards until
+        // pty output happened to dirty them (a live theme-polarity or
+        // `glassmorphism` change is exactly that case — nothing else about
+        // the grid changes, so nothing else would ever redraw them).
+        if self.ensure_overview_thumbnails(&layout) {
+            self.mark_all_overview_tiles_dirty();
+        }
         let due_tile_ids = self.due_overview_tile_ids(&page_view.slice, now);
 
-        self.ensure_overview_thumbnails(&layout);
         self.render_due_overview_tiles(&due_tile_ids, &page_view.slice);
         self.render_due_overview_title_bands(&due_tile_ids, &page_view.slice, &layout);
         self.render_overview_placeholder_labels(&page_view.slice, &layout);
@@ -1199,6 +1231,38 @@ fn overview_attention_ring_visible(
     attention && (emphasized || (index != selected && hovered != Some(index)))
 }
 
+/// The blend every Overview composite — tiles and chrome alike — is built
+/// with.
+///
+/// Under an opaque palette this is plain alpha blending, and the surface it
+/// draws onto is opaque anyway. Under `glassmorphism` nothing on this
+/// surface is opaque: the backdrop clears to `backdrop_alpha`, cards and
+/// pills carry `surface_alpha`/`pill_alpha`, and live tiles carry the
+/// window's own opacity. Blending would then *add* alpha at every layer — a
+/// card face would land at `0.16 + 0.18·(1 - 0.16)`, and each extra pass a
+/// hover ring, attention ring, or zoom draws over the same tile would push
+/// it further — so the glass would visibly thicken with interaction state.
+/// `ALPHA_REPLACE` writes each surface's own alpha instead, leaving the
+/// density a property of the palette rather than of what the pointer is
+/// doing. (Its trade-off, a coverage-faded corner writing a lower alpha than
+/// the backdrop instead of blending into it, is a ~1px rim on rounded
+/// tiles — the same trade the sidebar band takes.)
+fn overview_card_blend() -> wgpu::BlendState {
+    if crate::chrome::palette().is_glass() {
+        CardPipeline::ALPHA_REPLACE
+    } else {
+        wgpu::BlendState::ALPHA_BLENDING
+    }
+}
+
+/// The chrome-color half of [`OverviewPillKey`]: raw `f32` bits, so a color
+/// the palette can swap at runtime (theme polarity, `glassmorphism`) takes
+/// part in an `Eq` key. Bit equality is the right test — these are the same
+/// constants re-read, not the result of arithmetic that could round.
+fn pill_color_key(color: [f32; 4]) -> [u32; 4] {
+    color.map(f32::to_bits)
+}
+
 /// Hit/miss rule for the search/hint pill cache
 /// (`render_overview_search_texture` / `render_overview_hint_texture`): the
 /// cached value is reusable only if its key matches the current call's
@@ -1226,12 +1290,21 @@ mod tests {
         assert!(!overview_attention_ring_visible(false, true, 2, 0, None));
     }
 
+    /// A fixed pill color, never `overview_chrome_pill_color()`: that reads
+    /// the process-global chrome palette, which `chrome`'s own tests swap
+    /// between dark/light/glass under a lock private to that module. Two
+    /// `pill_key` calls straddling such a swap would differ despite
+    /// identical inputs, and these cache tests are about the key's *rules*,
+    /// not about which color is installed.
+    const TEST_PILL_COLOR: [f32; 4] = [0.13, 0.14, 0.21, 1.0];
+
     fn pill_key(query: &str, live_tile_count: usize) -> OverviewPillKey {
         OverviewPillKey {
             query: query.to_string(),
             live_tile_count,
             page: 0,
             rect: PaneRectApp::new(0, 0, 200, 32),
+            chrome_pill: pill_color_key(TEST_PILL_COLOR),
         }
     }
 
@@ -1254,6 +1327,34 @@ mod tests {
         let cached = Some((pill_key("noa", 3), "pill-texture"));
         let hit = overview_pill_cache_hit(cached.as_ref(), &pill_key("noa", 4));
         assert_eq!(hit, None);
+    }
+
+    // The chrome palette is swappable at runtime (theme polarity, a
+    // `glassmorphism` toggle), and nothing else invalidates these caches —
+    // `ChromeTextures::reset` owns only the sidebar's textures. Without the
+    // color in the key, a pill rasterized before the swap keeps compositing
+    // afterward: opaque on a frosted surface, or frosted after the toggle is
+    // turned back off, until the query, count, page, or rect happens to move.
+    #[test]
+    fn pill_cache_misses_when_the_chrome_pill_color_changes() {
+        let cached = Some((pill_key("noa", 3), "pill-texture"));
+        let repainted = OverviewPillKey {
+            chrome_pill: pill_color_key([0.1, 0.2, 0.3, 0.4]),
+            ..pill_key("noa", 3)
+        };
+        let hit = overview_pill_cache_hit(cached.as_ref(), &repainted);
+        assert_eq!(hit, None);
+    }
+
+    // The glass variants differ from their opaque counterparts in the alpha
+    // channel alone, so an RGB-only key would miss exactly the case this
+    // exists for.
+    #[test]
+    fn pill_color_key_separates_colors_that_differ_only_in_alpha() {
+        let opaque = pill_color_key([0.13, 0.14, 0.21, 1.0]);
+        let frosted = pill_color_key([0.13, 0.14, 0.21, 0.34]);
+        assert_ne!(opaque, frosted);
+        assert_eq!(opaque, pill_color_key([0.13, 0.14, 0.21, 1.0]));
     }
 
     #[test]

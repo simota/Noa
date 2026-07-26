@@ -672,37 +672,58 @@ fn top_chrome_inset_px_impl(_window: &Window) -> Option<u32> {
 /// call finds and refreshes the existing view instead of stacking a second.
 #[cfg(target_os = "macos")]
 const TITLEBAR_BACKDROP_ID: &str = "noa.titlebar.opaque-backdrop";
+/// The frosted variant's identifier. Deliberately distinct from
+/// [`TITLEBAR_BACKDROP_ID`] so a `glassmorphism` toggle can tell the two
+/// apart and swap them: the views are different AppKit classes, so the
+/// color-refresh reuse path can't convert one into the other.
+const TITLEBAR_GLASS_BACKDROP_ID: &str = "noa.titlebar.glass-backdrop";
 
-/// Install (or refresh) an opaque, `bg`-colored view filling the native
-/// titlebar + tab-bar strip.
+/// Install (or refresh) the view filling the native titlebar + tab-bar strip:
+/// an opaque `bg`-colored layer, or — under `glass` — an `NSVisualEffectView`
+/// that blurs the desktop behind the window.
 ///
 /// Meaningful for translucent normal windows (`background-opacity < 1.0`) with
 /// visible AppKit titlebar/tab chrome: AppKit composites its tab chrome — the
 /// lazily-allocated hover highlight `NSVisualEffectView` especially — against
 /// undefined semi-transparent underlay pixels, which surfaces as magenta
-/// diagonal-stripe garbage on some machines. Backing the strip with an opaque
-/// layer (the iTerm2/Ghostty approach) gives that chrome defined content to
-/// composite over. No-op off macOS or when the AppKit hierarchy can't be
-/// reached.
+/// diagonal-stripe garbage on some machines. Both variants exist to give that
+/// chrome defined content to composite over; the opaque one (the
+/// iTerm2/Ghostty approach) is the default, and the frosted one keeps that
+/// guarantee — a vibrancy view's own backing store is AppKit-managed and
+/// always defined — while letting the tab strip read as glass instead of a
+/// solid bar, which is the whole point of `glassmorphism`. No-op off macOS or
+/// when the AppKit hierarchy can't be reached.
 ///
-/// Idempotent via [`TITLEBAR_BACKDROP_ID`]; a repeat call (e.g. a theme
-/// reload) updates the existing view's color rather than adding another.
-pub(crate) fn install_titlebar_backdrop(window: &Window, bg: noa_core::Rgb) {
-    install_titlebar_backdrop_impl(window, bg);
+/// Idempotent per variant; a repeat call (e.g. a theme reload) updates the
+/// existing view rather than adding another, and a call in the *other* mode
+/// removes the stale variant first.
+pub(crate) fn install_titlebar_backdrop(window: &Window, bg: noa_core::Rgb, glass: bool) {
+    install_titlebar_backdrop_impl(window, bg, glass);
 }
 
-/// Remove Noa's titlebar backdrop view when a full-size content view can supply
-/// defined pixels itself, such as a visible terminal background image.
+/// Remove Noa's titlebar backdrop view (either variant) when a full-size
+/// content view can supply defined pixels itself, such as a visible terminal
+/// background image.
 pub(crate) fn remove_titlebar_backdrop(window: &Window) {
     remove_titlebar_backdrop_impl(window);
 }
 
 #[cfg(target_os = "macos")]
-fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
+fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb, glass: bool) {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
     use objc2_foundation::{NSRect, NSString};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    // NSVisualEffectMaterial.headerView — the material AppKit itself uses for
+    // titlebar/toolbar strips, so the tab bar keeps its native weighting.
+    const NS_VISUAL_EFFECT_MATERIAL_HEADER_VIEW: isize = 10;
+    // NSVisualEffectBlendingMode.behindWindow — blur what is *behind the
+    // window* (the desktop), not the window's own content below the strip.
+    const NS_VISUAL_EFFECT_BLENDING_BEHIND_WINDOW: isize = 0;
+    // NSVisualEffectState.active — stay frosted even when the window is not
+    // key, matching how the rest of noa's chrome ignores activation state.
+    const NS_VISUAL_EFFECT_STATE_ACTIVE: isize = 1;
 
     // NSWindowOrderingMode::Below — order the backdrop behind its siblings so
     // the tab bar and title controls keep drawing on top of it.
@@ -721,7 +742,17 @@ fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
         return;
     };
     let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
-    let identifier = NSString::from_str(TITLEBAR_BACKDROP_ID);
+    let identifier = NSString::from_str(if glass {
+        TITLEBAR_GLASS_BACKDROP_ID
+    } else {
+        TITLEBAR_BACKDROP_ID
+    });
+    // The variant this call replaces, if a previous one installed it.
+    let stale_identifier = NSString::from_str(if glass {
+        TITLEBAR_BACKDROP_ID
+    } else {
+        TITLEBAR_GLASS_BACKDROP_ID
+    });
 
     // SAFETY: `ns_view` is winit's live AppKit `NSView` for this window and we
     // are on the main (window-owning) thread. Every selector below is
@@ -793,31 +824,53 @@ fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
         // keeps objc2's debug-mode encoding verification satisfied.
         let cg_color: *mut crate::macos_overlay::cg::CGColor = msg_send![color, CGColor];
 
-        // Idempotency: reuse an existing backdrop, just refreshing its color.
+        // Idempotency: reuse this variant's existing backdrop (refreshing the
+        // opaque one's color — the frosted one has no theme-derived state),
+        // and drop the other variant's if a `glassmorphism` toggle left it
+        // behind. Both passes walk the same snapshot; the reuse `return` is
+        // taken only after the stale removal, so the two never coexist.
         let container_subviews: *mut AnyObject = msg_send![container, subviews];
         if !container_subviews.is_null() {
             let n: usize = msg_send![container_subviews, count];
+            let mut reusable: *mut AnyObject = std::ptr::null_mut();
             for i in 0..n {
                 let view: *mut AnyObject = msg_send![container_subviews, objectAtIndex: i];
                 if view.is_null() {
                     continue;
                 }
                 let ident: *mut AnyObject = msg_send![view, identifier];
-                if !ident.is_null() {
-                    let same: bool = msg_send![ident, isEqualToString: &*identifier];
-                    if same {
-                        let layer: *mut AnyObject = msg_send![view, layer];
-                        if !layer.is_null() {
-                            let _: () = msg_send![layer, setBackgroundColor: cg_color];
-                        }
-                        return;
+                if ident.is_null() {
+                    continue;
+                }
+                let same: bool = msg_send![ident, isEqualToString: &*identifier];
+                if same {
+                    reusable = view;
+                    continue;
+                }
+                let stale: bool = msg_send![ident, isEqualToString: &*stale_identifier];
+                if stale {
+                    let _: () = msg_send![view, removeFromSuperview];
+                }
+            }
+            if !reusable.is_null() {
+                if !glass {
+                    let layer: *mut AnyObject = msg_send![reusable, layer];
+                    if !layer.is_null() {
+                        let _: () = msg_send![layer, setBackgroundColor: cg_color];
                     }
                 }
+                return;
             }
         }
 
-        // Create the opaque, layer-backed backdrop sized to the container.
-        let Some(view_class) = AnyClass::get(c"NSView") else {
+        // Create the backdrop sized to the container: a vibrancy view under
+        // `glass`, else the opaque layer-backed one.
+        let class_name = if glass {
+            c"NSVisualEffectView"
+        } else {
+            c"NSView"
+        };
+        let Some(view_class) = AnyClass::get(class_name) else {
             return;
         };
         let bounds: NSRect = msg_send![container, bounds];
@@ -827,13 +880,19 @@ fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
             return;
         }
         let _: () = msg_send![view, setIdentifier: &*identifier];
-        let _: () = msg_send![view, setWantsLayer: true];
         let _: () =
             msg_send![view, setAutoresizingMask: NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE];
-        let layer: *mut AnyObject = msg_send![view, layer];
-        if !layer.is_null() {
-            let _: () = msg_send![layer, setBackgroundColor: cg_color];
-            let _: () = msg_send![layer, setOpaque: true];
+        if glass {
+            let _: () = msg_send![view, setMaterial: NS_VISUAL_EFFECT_MATERIAL_HEADER_VIEW];
+            let _: () = msg_send![view, setBlendingMode: NS_VISUAL_EFFECT_BLENDING_BEHIND_WINDOW];
+            let _: () = msg_send![view, setState: NS_VISUAL_EFFECT_STATE_ACTIVE];
+        } else {
+            let _: () = msg_send![view, setWantsLayer: true];
+            let layer: *mut AnyObject = msg_send![view, layer];
+            if !layer.is_null() {
+                let _: () = msg_send![layer, setBackgroundColor: cg_color];
+                let _: () = msg_send![layer, setOpaque: true];
+            }
         }
         // Positioned below all existing subviews so tab-bar chrome stays on top.
         let _: () = msg_send![
@@ -842,11 +901,17 @@ fn install_titlebar_backdrop_impl(window: &Window, bg: noa_core::Rgb) {
             positioned: NS_WINDOW_BELOW,
             relativeTo: std::ptr::null_mut::<AnyObject>(),
         ];
+        // `alloc`/`initWithFrame:` handed us a +1 reference and `addSubview:`
+        // took its own; balance ours here, or the view outlives every later
+        // `removeFromSuperview` (which only drops the container's) and each
+        // `glassmorphism` toggle strands another view — plus, for the
+        // vibrancy variant, its backing store — per window.
+        let _: () = msg_send![view, release];
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn install_titlebar_backdrop_impl(_window: &Window, _bg: noa_core::Rgb) {}
+fn install_titlebar_backdrop_impl(_window: &Window, _bg: noa_core::Rgb, _glass: bool) {}
 
 #[cfg(target_os = "macos")]
 fn remove_titlebar_backdrop_impl(window: &Window) {
@@ -864,7 +929,10 @@ fn remove_titlebar_backdrop_impl(window: &Window) {
         return;
     };
     let ns_view = appkit.ns_view.as_ptr().cast::<AnyObject>();
-    let identifier = NSString::from_str(TITLEBAR_BACKDROP_ID);
+    let identifiers = [
+        NSString::from_str(TITLEBAR_BACKDROP_ID),
+        NSString::from_str(TITLEBAR_GLASS_BACKDROP_ID),
+    ];
 
     unsafe {
         let ns_window: *mut AnyObject = msg_send![ns_view, window];
@@ -925,10 +993,12 @@ fn remove_titlebar_backdrop_impl(window: &Window) {
             if ident.is_null() {
                 continue;
             }
-            let same: bool = msg_send![ident, isEqualToString: &*identifier];
-            if same {
-                let _: () = msg_send![view, removeFromSuperview];
-                return;
+            for identifier in &identifiers {
+                let same: bool = msg_send![ident, isEqualToString: &**identifier];
+                if same {
+                    let _: () = msg_send![view, removeFromSuperview];
+                    break;
+                }
             }
         }
     }

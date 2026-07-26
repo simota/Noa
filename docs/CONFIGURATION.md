@@ -117,8 +117,9 @@ font-variation = wght=550
 | `cursor-style` | `block`, `bar`, `underline` | blinking block | `block_hollow` is recognized but ignored as unsupported |
 | `cursor-style-blink` | `true`, `false` | equivalent to `true` | Cursor blinking. It also blinks when only the shape is specified |
 | `cursor-stop-blinking-after` | non-negative integer (seconds) | `10` | noa-specific key whose **default deviates from Ghostty** (which blinks forever) — see [Deviations from Ghostty defaults](#deviations-from-ghostty-defaults): after this many seconds with no keyboard/IME input or output on the focused pane, the cursor settles solid so an idle noa schedules no blink wake-ups. Any activity resumes blinking. `0` never stops (Ghostty-parity behavior) |
-| `background-opacity` | finite decimal | `1.0` | Clamped to `0.0..=1.0` |
-| `background-blur-radius` | `true`, `false`, non-negative integer | `0` | macOS blur. `true` maps to `20`, `false` to `0`; integers are clamped to `0..=64` |
+| `background-opacity` | finite decimal | `1.0` | Clamped to `0.0..=1.0`. **Ignored while `glassmorphism = true`** (that key installs `0.50`) |
+| `background-blur-radius` | `true`, `false`, non-negative integer | `0` | macOS blur. `true` maps to `20`, `false` to `0`; integers are clamped to `0..=64`. **Ignored while `glassmorphism = true`** (that key installs `64`, the maximum) |
+| `glassmorphism` | `true`, `false` | `false` | noa-specific key. Renders noa's own chrome (session sidebar, tab overview) as translucent frosted panes with a brightened rim instead of opaque ones, matching the native overlays. Off installs the byte-identical opaque chrome palette, so it costs nothing when unused. On, it **takes over `background-opacity` (`0.50`) and `background-blur-radius` (`64`)**: frosted chrome over an opaque window has nothing behind it to show through, so those two keys are resolved from this one instead of being honored — configured values are ignored, and a warning names them. Turn `glassmorphism` off to control them yourself. A window created opaque can't become translucent in place, so enabling it in a running opaque session takes full effect on the next launch |
 
 The list of themes can be inspected with `noa +list-themes`.
 

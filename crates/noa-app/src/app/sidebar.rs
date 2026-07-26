@@ -291,7 +291,7 @@ fn status_indicator(dot: StatusDot) -> (&'static str, Rgb) {
 /// OSC 9/777 means a notification exists, not necessarily that a program is
 /// blocked on user input. Keep the label accurate until a dedicated
 /// response-required protocol exists.
-const ATTENTION_LABEL: &str = "通知あり";
+const ATTENTION_LABEL: &str = "notification";
 
 fn rgb_to_rgba(color: Rgb) -> [f32; 4] {
     [

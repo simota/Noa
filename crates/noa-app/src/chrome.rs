@@ -83,6 +83,99 @@ pub struct ChromePalette {
     pub dot_green: Rgb,
     pub dot_yellow: Rgb,
     pub dot_red: Rgb,
+    /// Alpha for the chrome backdrop (sidebar panel fill, overview surface
+    /// clear). `1.0` in both opaque palettes; below `1.0` only under
+    /// [`glassify`] (`glassmorphism = true`).
+    pub backdrop_alpha: f32,
+    /// Alpha for large chrome surfaces — sidebar/overview cards and title
+    /// bands. `1.0` in both opaque palettes.
+    pub surface_alpha: f32,
+    /// Alpha for small transient chrome — search/hint pills, menu popups.
+    /// Kept above [`Self::surface_alpha`] so short text on a pill stays
+    /// legible against whatever shows through. `1.0` in both opaque palettes.
+    pub pill_alpha: f32,
+}
+
+impl ChromePalette {
+    /// Whether this palette is a glass variant. Most alpha-aware call sites
+    /// multiply unconditionally rather than branching on this; the ones that
+    /// do branch are the two the multiply cannot express — the sidebar band's
+    /// clear alpha (`0.0` opaque, `backdrop_alpha` glass: scaling `0.0` would
+    /// stay `0.0`) and the blend state its composite pipeline is built with,
+    /// which is fixed at pipeline creation.
+    pub fn is_glass(&self) -> bool {
+        self.surface_alpha < 1.0
+    }
+
+    /// Straight display-space RGBA for a backdrop fill.
+    pub fn backdrop_rgba(&self, color: Rgb) -> [f32; 4] {
+        with_alpha(color, self.backdrop_alpha)
+    }
+
+    /// Straight display-space RGBA for a card / band face.
+    pub fn surface_rgba(&self, color: Rgb) -> [f32; 4] {
+        with_alpha(color, self.surface_alpha)
+    }
+
+    /// Straight display-space RGBA for a pill / popup face.
+    pub fn pill_rgba(&self, color: Rgb) -> [f32; 4] {
+        with_alpha(color, self.pill_alpha)
+    }
+}
+
+/// Backdrop alpha under `glassmorphism = true`. The chrome composites with
+/// `CardPipeline::ALPHA_REPLACE`, so this *is* the final window alpha over
+/// the chrome's area rather than a factor on top of `background-opacity` —
+/// most of the blurred desktop reads straight through the panel. At this
+/// level the face is barely a tint and the pane is held together by its rim
+/// and its text — which is the look, not a compromise on the way to it.
+const GLASS_BACKDROP_ALPHA: f32 = 0.18;
+/// Card / band alpha under `glassmorphism = true`.
+const GLASS_SURFACE_ALPHA: f32 = 0.16;
+/// Pill / popup alpha under `glassmorphism = true` — deliberately the most
+/// opaque of the three; pills carry the smallest text.
+const GLASS_PILL_ALPHA: f32 = 0.34;
+/// Alpha for the shared overlay surfaces — command palette, search prompt,
+/// confirm dialogs — under `glassmorphism = true`. Higher than the chrome
+/// alphas above because these cards float over the *terminal grid* rather
+/// than over the desktop: they blend with running output, so they keep more
+/// weight than the chrome faces above — enough that the text under a dialog
+/// reads as texture behind glass rather than as competing content.
+const GLASS_OVERLAY_ALPHA: f32 = 0.68;
+/// How far the frosted rim pulls the border tokens toward [`ChromePalette::fg`].
+/// A translucent face loses the face-vs-backdrop luminance step that normally
+/// draws the card edge, so the edge has to be carried by the stroke instead —
+/// and the more transparent the face, the more of that job the rim inherits.
+const GLASS_RIM_MIX: f32 = 0.70;
+
+/// Derive the frosted-glass variant of an opaque palette: translucent faces
+/// plus a brightened rim so each surface still reads as a distinct plane once
+/// the face alone no longer separates it from the backdrop. Hues are
+/// untouched, so a glass palette keeps its light/dark polarity.
+pub fn glassify(base: ChromePalette) -> ChromePalette {
+    ChromePalette {
+        border: mix(base.border, base.fg, GLASS_RIM_MIX),
+        pill_border: mix(base.pill_border, base.fg, GLASS_RIM_MIX),
+        backdrop_alpha: GLASS_BACKDROP_ALPHA,
+        surface_alpha: GLASS_SURFACE_ALPHA,
+        pill_alpha: GLASS_PILL_ALPHA,
+        ..base
+    }
+}
+
+/// Linear channel mix (`t` = 0 → `a`, 1 → `b`).
+fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
+    let ch = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Rgb::new(ch(a.r, b.r), ch(a.g, b.g), ch(a.b, b.b))
+}
+
+fn with_alpha(color: Rgb, alpha: f32) -> [f32; 4] {
+    [
+        color.r as f32 / 255.0,
+        color.g as f32 / 255.0,
+        color.b as f32 / 255.0,
+        alpha,
+    ]
 }
 
 /// The original dark chrome — byte-identical to the `CHROME_*` constants.
@@ -102,6 +195,9 @@ pub const CHROME_DARK: ChromePalette = ChromePalette {
     dot_green: CHROME_DOT_GREEN,
     dot_yellow: CHROME_DOT_YELLOW,
     dot_red: CHROME_DOT_RED,
+    backdrop_alpha: 1.0,
+    surface_alpha: 1.0,
+    pill_alpha: 1.0,
 };
 
 /// Light-polarity chrome for light terminal themes: the same relationships as
@@ -124,6 +220,9 @@ pub const CHROME_LIGHT: ChromePalette = ChromePalette {
     dot_green: Rgb::new(0x2c, 0x9e, 0x50),
     dot_yellow: Rgb::new(0xb9, 0x8a, 0x1e),
     dot_red: Rgb::new(0xe0, 0x31, 0x31),
+    backdrop_alpha: 1.0,
+    surface_alpha: 1.0,
+    pill_alpha: 1.0,
 };
 
 /// The chrome polarity chosen from the resolved terminal theme, set at
@@ -138,12 +237,17 @@ static ACTIVE_PALETTE: parking_lot::RwLock<Option<ChromePalette>> = parking_lot:
 /// confirm swapping in a newly resolved theme, or a second window reusing
 /// the shared GPU) now replaces it rather than no-op'ing — see
 /// [`swap_palette`] to install an already-built [`ChromePalette`] directly.
-pub fn select_palette(theme_is_light: bool) {
-    swap_palette(if theme_is_light {
+/// `glass` installs the [`glassify`]'d variant of the chosen polarity
+/// (`glassmorphism = true`); `false` installs the byte-identical opaque
+/// palette this function has always installed, so the default path is
+/// unchanged.
+pub fn select_palette(theme_is_light: bool, glass: bool) {
+    let base = if theme_is_light {
         CHROME_LIGHT
     } else {
         CHROME_DARK
-    });
+    };
+    swap_palette(if glass { glassify(base) } else { base });
 }
 
 /// Replace the active chrome palette in place (theme-settings-ui R-13's
@@ -151,6 +255,17 @@ pub fn select_palette(theme_is_light: bool) {
 /// call; no GPU/renderer state lives here, so this alone never needs a
 /// texture rebuild (that is [`super::state::ChromeTextures::reset`]'s job).
 pub fn swap_palette(new: ChromePalette) {
+    // The overlay surfaces (command palette, prompts, dialogs) are painted
+    // from `noa_render::OverlayStyle`, not from this palette, but they are
+    // the same UI language and must frost together — so the one place that
+    // installs a palette also installs their alpha. Doing it here rather
+    // than at each `select_palette` call site means no path can install a
+    // glass palette and leave the overlays opaque.
+    noa_render::set_overlay_surface_alpha(if new.is_glass() {
+        GLASS_OVERLAY_ALPHA
+    } else {
+        1.0
+    });
     *ACTIVE_PALETTE.write() = Some(new);
 }
 
@@ -230,6 +345,114 @@ mod tests {
         // Leave the shared static in its default polarity for any other test
         // in this process that reads it via `palette()`.
         swap_palette(CHROME_DARK);
+    }
+
+    // The whole point of the default-off contract: `glassmorphism = false`
+    // must install exactly the palette that existed before the flag did, so
+    // every alpha-aware call site multiplies by 1.0 and every color is
+    // untouched. A regression here is a silent visual/perf change for users
+    // who never opted in.
+    #[test]
+    fn opaque_palettes_are_fully_opaque_and_unmodified() {
+        for base in [CHROME_DARK, CHROME_LIGHT] {
+            assert_eq!(base.backdrop_alpha, 1.0);
+            assert_eq!(base.surface_alpha, 1.0);
+            assert_eq!(base.pill_alpha, 1.0);
+            assert!(!base.is_glass());
+            assert_eq!(base.surface_rgba(base.card), rgba(base.card));
+            assert_eq!(base.backdrop_rgba(base.bg), rgba(base.bg));
+            assert_eq!(base.pill_rgba(base.pill), rgba(base.pill));
+        }
+    }
+
+    #[test]
+    fn select_palette_off_installs_the_opaque_palette() {
+        let _guard = PALETTE_TEST_LOCK.lock();
+        select_palette(false, false);
+        assert_eq!(palette(), CHROME_DARK);
+        select_palette(true, false);
+        assert_eq!(palette(), CHROME_LIGHT);
+        swap_palette(CHROME_DARK);
+    }
+
+    #[test]
+    fn select_palette_on_installs_the_glass_palette() {
+        let _guard = PALETTE_TEST_LOCK.lock();
+        select_palette(false, true);
+        let dark_glass = palette();
+        assert_eq!(dark_glass, glassify(CHROME_DARK));
+        assert!(dark_glass.is_glass());
+        select_palette(true, true);
+        assert_eq!(palette(), glassify(CHROME_LIGHT));
+        swap_palette(CHROME_DARK);
+    }
+
+    // Glass changes alpha and the rim, never the face hues — so a glass
+    // palette keeps its light/dark polarity and every hue-derived cue (status
+    // dots, accent ring, text) stays exactly where the opaque palette put it.
+    #[test]
+    fn glassify_preserves_hues_and_only_lightens_the_rim() {
+        for base in [CHROME_DARK, CHROME_LIGHT] {
+            let glass = glassify(base);
+            assert_eq!(glass.bg, base.bg);
+            assert_eq!(glass.card, base.card);
+            assert_eq!(glass.card_selected, base.card_selected);
+            assert_eq!(glass.band, base.band);
+            assert_eq!(glass.accent, base.accent);
+            assert_eq!(glass.fg, base.fg);
+            assert_eq!(glass.dim_fg, base.dim_fg);
+            assert_eq!(glass.dot_red, base.dot_red);
+            assert_ne!(glass.border, base.border);
+            assert_ne!(glass.pill_border, base.pill_border);
+            assert!(glass.backdrop_alpha < 1.0);
+            assert!(glass.surface_alpha < 1.0);
+            // Pills carry the smallest text, so they stay the most opaque.
+            assert!(glass.pill_alpha > glass.surface_alpha);
+        }
+    }
+
+    // The overlay surfaces frost with the chrome, from the same install:
+    // a glass palette installs the overlay alpha, and the opaque palettes
+    // put it back to 1.0 so turning `glassmorphism` off leaves no
+    // half-translucent command palette behind.
+    #[test]
+    fn swapping_a_palette_installs_the_matching_overlay_alpha() {
+        let _guard = PALETTE_TEST_LOCK.lock();
+        swap_palette(glassify(CHROME_DARK));
+        assert_eq!(noa_render::overlay_surface_alpha(), GLASS_OVERLAY_ALPHA);
+
+        swap_palette(CHROME_DARK);
+        assert_eq!(noa_render::overlay_surface_alpha(), 1.0);
+
+        select_palette(true, true);
+        assert_eq!(noa_render::overlay_surface_alpha(), GLASS_OVERLAY_ALPHA);
+        select_palette(true, false);
+        assert_eq!(noa_render::overlay_surface_alpha(), 1.0);
+        swap_palette(CHROME_DARK);
+    }
+
+    // The overlay cards float over the terminal grid rather than over the
+    // desktop, so they must keep more weight than the chrome surfaces that
+    // sit directly on the blurred background — while still being glass.
+    #[test]
+    fn overlay_alpha_stays_above_the_chrome_surface_alphas() {
+        let _guard = PALETTE_TEST_LOCK.lock();
+        swap_palette(glassify(CHROME_DARK));
+        let glass = palette();
+        let overlay = noa_render::overlay_surface_alpha();
+        assert!(overlay > glass.pill_alpha, "overlay={overlay}");
+        assert!(overlay < 1.0, "overlay={overlay}");
+        swap_palette(CHROME_DARK);
+    }
+
+    #[test]
+    fn glass_alphas_reach_the_rgba_helpers() {
+        let glass = glassify(CHROME_DARK);
+        assert_eq!(glass.surface_rgba(glass.card)[3], glass.surface_alpha);
+        assert_eq!(glass.backdrop_rgba(glass.bg)[3], glass.backdrop_alpha);
+        assert_eq!(glass.pill_rgba(glass.pill)[3], glass.pill_alpha);
+        // RGB is untouched by the alpha helpers.
+        assert_eq!(glass.surface_rgba(glass.card)[..3], rgba(glass.card)[..3]);
     }
 
     // Deadlock regression: `palette()` must copy the value out and drop its

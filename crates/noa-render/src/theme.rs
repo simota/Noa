@@ -7,6 +7,8 @@
 //! ramp) plus a default foreground/background, mirroring Ghostty's default
 //! theme.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use noa_core::{Color, DEFAULT_BG, DEFAULT_CURSOR, DEFAULT_FG, Rgb, xterm_palette};
 use noa_grid::TerminalColors;
 
@@ -282,6 +284,35 @@ pub struct OverlayStyle {
 /// so the selection cue reads the same across themes.
 const OVERLAY_ACCENT: Rgb = UI_ACCENT;
 
+/// Alpha applied to overlay *surface fills* (card face, highlighted row) —
+/// `1.0` normally, below it under `glassmorphism`, so the navigation surfaces
+/// (command palette, search prompt, confirm dialogs) read as frosted panes
+/// like the sidebar and tab overview rather than as the one opaque element
+/// left on screen. Stored as `f32` bits: a process-wide display token set
+/// once per palette install, read on every overlay build.
+///
+/// Text, borders, and accents deliberately stay opaque — the alpha is a
+/// property of the *surface*, and translucent glyphs would cost legibility
+/// for no glass gain.
+static OVERLAY_SURFACE_ALPHA: AtomicU32 = AtomicU32::new(1.0_f32.to_bits());
+
+/// Install the overlay surface alpha (see [`OVERLAY_SURFACE_ALPHA`]). Called
+/// from the same place the chrome palette is installed, so the two never
+/// disagree about whether this session is frosted.
+pub fn set_overlay_surface_alpha(alpha: f32) {
+    OVERLAY_SURFACE_ALPHA.store(alpha.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+}
+
+/// The active overlay surface alpha.
+pub fn overlay_surface_alpha() -> f32 {
+    f32::from_bits(OVERLAY_SURFACE_ALPHA.load(Ordering::Relaxed))
+}
+
+fn rgba_surface(color: Rgb) -> [f32; 4] {
+    let [r, g, b, _] = rgba(color);
+    [r, g, b, overlay_surface_alpha()]
+}
+
 impl OverlayStyle {
     /// Derive the overlay palette from `theme`:
     /// - `surface_bg` = 8% of the way from the terminal bg toward its fg — an
@@ -310,7 +341,7 @@ impl OverlayStyle {
     }
 
     pub fn surface_bg(&self) -> [f32; 4] {
-        rgba(self.surface_bg)
+        rgba_surface(self.surface_bg)
     }
 
     pub fn surface_fg(&self) -> [f32; 4] {
@@ -340,9 +371,11 @@ impl OverlayStyle {
     }
 
     /// The highlighted palette row's background — a step brighter than
-    /// `surface_bg` (D).
+    /// `surface_bg` (D). Carries the same surface alpha: it is painted *over*
+    /// the card face, so an opaque row inside a frosted card would read as a
+    /// solid bar floating on glass.
     pub fn selected_bg(&self) -> [f32; 4] {
-        rgba(self.selected_bg)
+        rgba_surface(self.selected_bg)
     }
 }
 
@@ -511,5 +544,51 @@ mod tests {
         let light_style = OverlayStyle::from_theme(&light);
         assert!(light_style.surface_bg.r < light.default_bg.r);
         assert!(light_style.muted_fg.r > light.default_fg.r);
+    }
+
+    // `OVERLAY_SURFACE_ALPHA` is a process-wide static and cargo runs tests
+    // in parallel, so any test that installs a value must serialize against
+    // every other one that reads it.
+    static OVERLAY_ALPHA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    // Glassmorphism frosts the overlay *surfaces* only: the card face and the
+    // highlighted row carry the installed alpha, while text, borders, and the
+    // accent stay fully opaque (translucent glyphs would cost legibility for
+    // no glass gain). RGB is never touched by the alpha.
+    #[test]
+    fn overlay_surface_alpha_reaches_only_the_surface_fills() {
+        let _guard = OVERLAY_ALPHA_TEST_LOCK.lock().unwrap();
+        let style = OverlayStyle::from_theme(&Theme::new());
+        assert_eq!(style.surface_bg()[3], 1.0);
+
+        set_overlay_surface_alpha(0.82);
+        assert_eq!(overlay_surface_alpha(), 0.82);
+        assert_eq!(style.surface_bg()[3], 0.82);
+        assert_eq!(style.selected_bg()[3], 0.82);
+        assert_eq!(style.surface_bg()[..3], rgba(style.surface_bg)[..3]);
+        for opaque in [
+            style.surface_fg(),
+            style.muted_fg(),
+            style.border(),
+            style.accent(),
+            style.accent_bg(),
+            style.accent_fg(),
+        ] {
+            assert_eq!(opaque[3], 1.0);
+        }
+
+        // Restore the default for every other test in this process.
+        set_overlay_surface_alpha(1.0);
+        assert_eq!(style.surface_bg()[3], 1.0);
+    }
+
+    #[test]
+    fn overlay_surface_alpha_clamps_to_the_unit_range() {
+        let _guard = OVERLAY_ALPHA_TEST_LOCK.lock().unwrap();
+        set_overlay_surface_alpha(2.5);
+        assert_eq!(overlay_surface_alpha(), 1.0);
+        set_overlay_surface_alpha(-1.0);
+        assert_eq!(overlay_surface_alpha(), 0.0);
+        set_overlay_surface_alpha(1.0);
     }
 }

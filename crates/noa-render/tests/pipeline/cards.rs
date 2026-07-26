@@ -38,6 +38,7 @@ fn overview_card_pipeline_composites_tiles_without_validation_error() {
         2,
         TEST_TITLE_BAR_H,
         TEST_CARD_COLOR,
+        wgpu::BlendState::ALPHA_BLENDING,
     );
     // Populate both tiles (mirror in the content region, card color in the band).
     for tile_index in 0..2 {
@@ -700,5 +701,235 @@ fn command_palette_card_composites_without_validation_error() {
     assert!(
         pixels.chunks_exact(4).any(|px| px != first),
         "command-palette card produced a uniform frame (nothing drawn)"
+    );
+}
+
+/// A frosted card must stay frosted only where it is *surface*. `card.wgsl`
+/// takes the fill's alpha from the sampled texture, so a translucent source
+/// (a `glassmorphism` modal card, the sidebar band) would otherwise drag the
+/// border stroke down with it and leave the card without an edge against
+/// whatever shows through. The stroke takes the border color's own alpha
+/// instead; the fill keeps the source's.
+///
+/// Drawn over a target cleared to fully transparent, so the readback alpha is
+/// exactly what the shader emitted.
+#[test]
+fn card_border_stays_opaque_over_a_translucent_source() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping card border alpha test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let size = 64u32;
+
+    // Source: a uniformly half-transparent surface, the way a frosted modal
+    // card's scratch texture is cleared.
+    let source = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("noa-test-translucent-source"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let (target_tex, target_view) = render_target(&device, size, size);
+    clear_view(
+        &device,
+        &queue,
+        &source_view,
+        wgpu::Color {
+            r: 0.1,
+            g: 0.1,
+            b: 0.14,
+            a: 0.5,
+        },
+    );
+    clear_view(&device, &queue, &target_view, wgpu::Color::TRANSPARENT);
+
+    let card = CardPipeline::new(&device, format, wgpu::BlendState::ALPHA_BLENDING);
+    let style = CardStyle {
+        background: [0.0; 4],
+        // Opaque stroke, 4px wide.
+        border_color: [0.9, 0.9, 0.95, 1.0],
+        focus_color: [0.0; 4],
+        corner_radius: 0.0,
+        border_width: 4.0,
+        focus_width: 0.0,
+        focus_glow_width: 0.0,
+    };
+    card.overlay_texture_cards(
+        &device,
+        &queue,
+        &target_view,
+        PixelSize { w: size, h: size },
+        &style,
+        &[CardTexturePlacement {
+            texture_view: &source_view,
+            x: 0,
+            y: 0,
+            w: size,
+            h: size,
+            selected: false,
+        }],
+    );
+
+    let pixels = read_rgba_pixels(&device, &queue, &target_tex, size, size);
+    let alpha_at = |x: u32, y: u32| pixels[((y * size + x) * 4 + 3) as usize];
+
+    // Interior: the surface's own alpha, untouched.
+    let fill = alpha_at(size / 2, size / 2);
+    assert!(
+        (100..=150).contains(&fill),
+        "card fill should stay translucent (~128), got {fill}"
+    );
+
+    // Stroke: the border color's alpha, not the surface's.
+    let stroke = alpha_at(1, size / 2);
+    assert!(
+        stroke >= 240,
+        "card border should stay opaque (~255), got {stroke}"
+    );
+}
+
+/// Glassmorphism fix 2 regression: a selected card's focus-glow ring must
+/// tint the backdrop's color without replacing its alpha. `card.wgsl` splits
+/// the glow into its own `fs_glow` entry point, drawn with
+/// `CardPipeline::GLOW_PRESERVE_DST_ALPHA` (dst-alpha kept as-is) instead of
+/// the face's blend — under `ALPHA_REPLACE` (the Overview/sidebar blend
+/// under `glassmorphism`, see `overview_card_blend`), the old combined
+/// shader's alpha factors (`src·1 + dst·0`) let the glow's own 0.45->0
+/// falloff overwrite whatever destination alpha was already there, punching
+/// a fading transparent halo around every selected/attention/zoomed tile.
+#[test]
+fn card_glow_preserves_destination_alpha_under_alpha_replace() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping card glow dst-alpha test");
+        return;
+    };
+    let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let size = 80u32;
+
+    // A 1x1 opaque white tile. Glow pixels never sample it — `fs_glow`
+    // returns before `textureSample` — so its content is irrelevant; it
+    // only needs to be a valid bound texture for the card's bind group.
+    let tile = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("noa-test-glow-tile"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tile,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[255, 255, 255, 255],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    let tile_view = tile.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let (target_tex, target_view) = render_target(&device, size, size);
+    // A translucent backdrop, matching a `glassmorphism` scratch texture's
+    // clear alpha — the value the glow must NOT replace.
+    let backdrop = wgpu::Color {
+        r: 0.05,
+        g: 0.05,
+        b: 0.08,
+        a: 0.8,
+    };
+    clear_view(&device, &queue, &target_view, backdrop);
+
+    let card = CardPipeline::new(&device, format, CardPipeline::ALPHA_REPLACE);
+    let style = CardStyle {
+        background: [0.0; 4],
+        border_color: [0.0; 4],
+        focus_color: [1.0, 0.55, 0.15, 1.0],
+        corner_radius: 8.0,
+        border_width: 0.0,
+        focus_width: 0.0,
+        focus_glow_width: 10.0,
+    };
+    let placement = CardTexturePlacement {
+        texture_view: &tile_view,
+        x: 20,
+        y: 20,
+        w: 40,
+        h: 30,
+        selected: true,
+    };
+
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    card.overlay_texture_cards(
+        &device,
+        &queue,
+        &target_view,
+        PixelSize { w: size, h: size },
+        &style,
+        &[placement],
+    );
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll device after card glow composite");
+    let err = pollster::block_on(device.pop_error_scope());
+    assert!(
+        err.is_none(),
+        "wgpu validation error during card glow composite: {err:?}"
+    );
+
+    let pixels = read_rgba_pixels(&device, &queue, &target_tex, size, size);
+    let px_at = |x: u32, y: u32| {
+        let offset = ((y * size + x) * 4) as usize;
+        &pixels[offset..offset + 4]
+    };
+    let backdrop_alpha = (backdrop.a * 255.0).round() as i16;
+
+    // 3px left of the card's left edge (rect x=20), vertically centered —
+    // well inside the 10px glow spread and well outside the rounded-rect
+    // coverage (no antialiased boundary pixel; d ~= 3px here).
+    let glow_px = px_at(17, 35);
+    assert!(
+        (i16::from(glow_px[3]) - backdrop_alpha).abs() <= 6,
+        "glow ring must preserve destination alpha (backdrop {backdrop_alpha}), got {glow_px:?}"
+    );
+    // The glow still tints color toward the focus color — confirms the glow
+    // pass actually drew there, not just that nothing touched alpha.
+    assert!(
+        glow_px[0] > 90,
+        "glow ring should tint the backdrop's red channel toward the focus color, got {glow_px:?}"
+    );
+
+    // Outside the outset quad entirely (card rect - glow_width in every
+    // direction) — must stay exactly the original backdrop.
+    let untouched = px_at(2, 2);
+    assert_eq!(
+        untouched[3], backdrop_alpha as u8,
+        "pixels outside the glow spread must be untouched, got {untouched:?}"
     );
 }

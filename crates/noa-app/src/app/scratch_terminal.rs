@@ -276,7 +276,7 @@ impl App {
             .with_decorations(false)
             .with_inner_size(PhysicalSize::new(width, height))
             .with_position(PhysicalPosition::new(origin_x, origin_y))
-            .with_transparent(self.config.background_opacity < 1.0)
+            .with_transparent(window_created_transparent(self.config.background_opacity))
             .with_visible(false);
         #[cfg(target_os = "macos")]
         let attrs = attrs.with_option_as_alt(macos_option_as_alt(self.config.macos_option_as_alt));
@@ -378,6 +378,7 @@ impl App {
         self.windows.insert(
             window_id,
             WindowState {
+                created_transparent: window_created_transparent(self.config.background_opacity),
                 window: window.clone(),
                 group,
                 surface,

@@ -205,6 +205,14 @@ impl App {
             cursor_style,
             background_opacity: self.config.background_opacity,
             background_blur_radius: self.config.background_blur_radius,
+            configured_background_opacity: self.config.configured_background_opacity,
+            configured_background_blur_radius: self.config.configured_background_blur_radius,
+            // The window's own creation-time capability, not a value derived
+            // from the live config — see the field's doc comment.
+            window_created_transparent: self
+                .windows
+                .get(&window_id)
+                .is_some_and(|state| state.created_transparent),
             background_image,
             background_image_opacity: self.config.background_image_opacity,
             background_image_position: self.config.background_image_position,
@@ -218,6 +226,7 @@ impl App {
             sidebar_width: self.config.sidebar_width,
             sidebar_font_size: self.config.sidebar_font_size,
             quick_terminal_size: quick_terminal_height_fraction(self.config.quick_terminal_size),
+            glassmorphism: self.config.glassmorphism,
             confirm_quit: self.config.confirm_quit,
             send_selection_send_enter: self.config.send_selection_send_enter,
             font_family,
@@ -821,13 +830,56 @@ impl App {
         // reloads immediately instead of the user waiting out the interval.
         self.expedite_config_watch();
         self.sync_config_from_committed_live_rows(session.state.rows());
+        let glassmorphism = self.config.glassmorphism;
         if let Some(gpu) = self.gpu.as_mut() {
             let new_theme = active_theme(&gpu.theme, &gpu.preview_theme).clone();
             gpu.theme = new_theme;
             gpu.preview_theme = None;
-            crate::chrome::select_palette(gpu.theme.is_light());
+            crate::chrome::select_palette(gpu.theme.is_light(), glassmorphism);
             gpu.chrome_textures.reset();
         }
+        // `glassmorphism` has no continuous live preview (unlike
+        // `background-opacity`/`-blur-radius`, which are already applied to
+        // every window frame-by-frame as the user adjusts them) and its own
+        // `config_reload.rs` reload-diff (`glassmorphism_changed`) never
+        // fires for this commit — the mirror two lines up already moved
+        // `self.config.glassmorphism` to the new value, for
+        // `select_palette` above, so `previous == applied` by the time the
+        // watcher reloads the just-written file. Drive the one remaining
+        // piece `apply_reloaded_theme` would otherwise have done — the
+        // native macOS titlebar backdrop — directly, now that `gpu.theme`
+        // and the chrome palette/textures above already reflect the new
+        // value. Idempotent (recomputes install-vs-remove from current
+        // state) and cheap, so unconditional here is simpler than gating it
+        // on the `Glassmorphism` row specifically having been touched.
+        //
+        // Deliberately *not* the no-arg `refresh_macos_window_backgrounds()`
+        // wrapper: that reads `self.config.background_opacity` as-is, but
+        // this commit never mirrors that field for a glass-only toggle (only
+        // `BackgroundOpacity`-row edits do, and `snap_glass_managed_rows`
+        // keeps that row untouched while glass is on) — it stays at its
+        // pre-toggle value until the reload re-derives it from the file.
+        // `noa_config::resolved_background_opacity` reproduces that
+        // derivation (`apply_glassmorphism_defaults`'s exact rule) locally
+        // so the native backdrop/background color land on the value the
+        // reload is about to converge on anyway, instead of flashing
+        // through whatever the pre-toggle opacity happened to be — visible
+        // whenever the configured opacity isn't already
+        // `noa_config::GLASS_BACKGROUND_OPACITY` (0.50).
+        //
+        // `background-blur-radius` needs no equivalent call here: unlike
+        // `glassmorphism`, it is never mirrored into `self.config` by this
+        // commit (there is no live-reader forcing it, the way
+        // `select_palette` above forces the opacity mirror), so
+        // `config_reload.rs`'s `blur_changed`/`opacity_changed` diff stays
+        // intact and `apply_reloaded_background_blur` still fires on the
+        // very next (expedited) reload tick, exactly as it did before this
+        // fix — no gap was introduced.
+        let effective_background_opacity = noa_config::resolved_background_opacity(
+            self.config.glassmorphism,
+            self.config.configured_background_opacity,
+        );
+        self.refresh_macos_window_backgrounds_at(effective_background_opacity);
         if updates.iter().any(|(key, _)| key == "theme") {
             // R-34/ADR-4 in-memory counterpart: a pair config's committed
             // `updates` value is the whole `"light:X,dark:Y"` string (not a
@@ -949,13 +1001,22 @@ impl App {
         let overrides = self.theme_overrides();
         let reverted_theme_name =
             (!payload.revert.theme_name.is_empty()).then(|| payload.revert.theme_name.clone());
+        // The *reverted* value, not `self.config.glassmorphism`: the commit
+        // has already been applied to `self.config`, and the field is only
+        // restored further down (`sync_reverted_confirm_quit_and_...`).
+        // Selecting from the committed value would re-install the palette
+        // this undo exists to drop — and nothing downstream would correct
+        // it: by the time the watcher reloads, file and memory agree, so its
+        // reload-diff sees no `glassmorphism` change and never re-selects.
+        // The chrome and overlay alphas would stay post-commit for good.
+        let glassmorphism = payload.revert.glassmorphism;
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.theme = crate::theme::resolve_theme_with_overrides(
                 reverted_theme_name.as_deref(),
                 &overrides,
             );
             gpu.preview_theme = None;
-            crate::chrome::select_palette(gpu.theme.is_light());
+            crate::chrome::select_palette(gpu.theme.is_light(), glassmorphism);
             gpu.chrome_textures.reset();
         }
         match &payload.theme_pair {
@@ -974,6 +1035,16 @@ impl App {
         self.config.font_size = payload.revert.font_size;
         self.config.background_opacity = payload.revert.background_opacity;
         self.config.background_blur_radius = payload.revert.background_blur_radius;
+        // The `configured_*` twins too, symmetrically with the commit path's
+        // `mirror_committed_background_*`: those move the twin with the
+        // effective value, so an undo that restored only the effective one
+        // would leave the pair disagreeing until the next reload — and
+        // `commit_theme_settings` derives the effective opacity from the
+        // twin (`noa_config::resolved_background_opacity`), so a glass
+        // toggle in that window would resolve against the undone value.
+        self.config.configured_background_opacity = payload.revert.configured_background_opacity;
+        self.config.configured_background_blur_radius =
+            payload.revert.configured_background_blur_radius;
         self.config.background_image = (!payload.revert.background_image.is_empty())
             .then(|| PathBuf::from(&payload.revert.background_image));
         self.config.background_image_opacity = payload.revert.background_image_opacity;
@@ -985,7 +1056,15 @@ impl App {
         sync_reverted_confirm_quit_and_quick_terminal_size(&mut self.config, &payload.revert);
         self.apply_runtime_font_size(window_id, payload.revert.font_size);
         self.apply_live_cursor_style(payload.revert.cursor_style);
-        self.apply_live_background_opacity(payload.revert.background_opacity);
+        // The *full* apply, not `apply_live_background_opacity`: that one
+        // only moves the renderer's uniform, and an undo can cross the
+        // opaque/translucent boundary (glassmorphism off resolves the
+        // opacity back to 1.0 and leaves the surface Opaque). The swapchain
+        // would then discard the restored alpha and the glass would not come
+        // back. `self.config` already holds the reverted value here, and the
+        // watcher cannot rescue this: its reload-diff compares against that
+        // same updated config and sees nothing to do.
+        self.apply_reloaded_background_opacity();
         self.apply_live_background_blur(
             payload.revert.background_blur_radius,
             payload.revert.background_opacity,
@@ -1030,11 +1109,25 @@ impl App {
             }
             match &row.draft {
                 RowDraft::FontSize(v) => self.config.font_size = *v,
+                // The `configured_*` twin moves with the effective value:
+                // it means "what the config file asked for", and the commit
+                // just wrote this row to the file. Keeping it in sync is
+                // what lets `commit_theme_settings` derive the effective
+                // opacity through `noa_config::resolved_background_opacity`
+                // — with a stale twin that derivation hands back the
+                // *previous* opacity and undoes the live preview at save
+                // time, which the reload can't repair (the mirror above
+                // has already flattened `opacity_changed`). Only reached
+                // for a row the user actually touched, and `glassmorphism`
+                // holds these two at `touched = false` while it owns them
+                // (`snap_glass_managed_rows`), so turning glass back off
+                // still restores the user's own value rather than the
+                // glass one.
                 RowDraft::BackgroundOpacity(v) => {
-                    self.config.background_opacity = *v;
+                    mirror_committed_background_opacity(&mut self.config, *v);
                 }
                 RowDraft::BackgroundBlurRadius(v) => {
-                    self.config.background_blur_radius = *v;
+                    mirror_committed_background_blur_radius(&mut self.config, *v);
                 }
                 RowDraft::BackgroundImage(v) => {
                     self.config.background_image =
@@ -1074,6 +1167,24 @@ impl App {
                     self.apply_live_sidebar_font_size(*v);
                 }
                 RowDraft::QuickTerminalHeight(_) => {}
+                // Mirrored (unlike the reload-applied group below) because
+                // `commit_theme_settings`'s own `chrome::select_palette`
+                // call, right after this loop returns, reads
+                // `self.config.glassmorphism` and needs the new value
+                // immediately — a P2-confirmed bug once left this as the
+                // *only* apply, though: mirroring here makes
+                // `config_reload.rs`'s `glassmorphism_changed` diff go false
+                // before the watcher's next poll ever sees it, so nothing
+                // downstream removed a stale native titlebar backdrop when
+                // the toggle went back off. `commit_theme_settings` now
+                // drives that refresh directly (see its
+                // `refresh_macos_window_backgrounds_at` call, given the
+                // opacity `noa_config::resolved_background_opacity` derives
+                // rather than the stale `self.config.background_opacity`)
+                // instead of depending on the reload path picking it up.
+                RowDraft::Glassmorphism(v) => {
+                    self.config.glassmorphism = *v;
+                }
                 RowDraft::ConfirmQuit(v) => {
                     self.config.confirm_quit = *v;
                 }
@@ -1195,8 +1306,15 @@ impl App {
     /// true — `adjust`/`revert` only report this effect for a
     /// transparent-started session.
     fn apply_live_background_opacity(&mut self, opacity: f32) {
-        for state in self.windows.values_mut() {
-            state.renderer.set_background_opacity(opacity);
+        // The full apply, not just the renderer's uniform: an `Opaque`
+        // swapchain throws the alpha away, and a see-through window sits at
+        // exactly that setting whenever its opacity currently resolves to
+        // `1.0` (what turning `glassmorphism` off does). Previewing a lower
+        // value would then change nothing on screen, and the commit would
+        // mirror the same value into `self.config`, leaving the watcher's
+        // reload-diff with nothing to fix.
+        self.apply_background_opacity_to_windows(opacity);
+        for state in self.windows.values() {
             state.window.request_redraw();
         }
     }
@@ -1302,10 +1420,40 @@ fn sync_reverted_confirm_quit_and_quick_terminal_size(
     config: &mut AppConfig,
     revert: &crate::theme_settings::RevertValues,
 ) {
+    config.glassmorphism = revert.glassmorphism;
     config.confirm_quit = revert.confirm_quit;
     config.send_selection_send_enter = revert.send_selection_send_enter;
     config.quick_terminal_size =
         quick_terminal_size_from_height_fraction(revert.quick_terminal_size);
+}
+
+/// Mirror a committed `background-opacity` row into `config`, moving the
+/// `configured_*` twin with it.
+///
+/// The twin means "what the config file asked for", and the commit that
+/// reaches here has just written this row to the file — so the two move
+/// together. This is not bookkeeping: `commit_theme_settings` derives the
+/// opacity it refreshes the macOS window background and titlebar backdrop
+/// at through [`noa_config::resolved_background_opacity`], which reads the
+/// twin. Left stale, that derivation hands back the *previous* opacity and
+/// reverts, at save time, the background the live preview already got
+/// right — and the reload cannot repair it, because mirroring the
+/// effective value above has already flattened `config_reload.rs`'s
+/// `opacity_changed` diff.
+///
+/// Only reached for a row the user actually touched, and `glassmorphism`
+/// holds this row at `touched = false` for as long as it owns it
+/// (`ThemeSettings::snap_glass_managed_rows`), so the twin keeps the user's
+/// own value across a glass toggle rather than picking up the glass one.
+fn mirror_committed_background_opacity(config: &mut AppConfig, opacity: f32) {
+    config.background_opacity = opacity;
+    config.configured_background_opacity = opacity;
+}
+
+/// As [`mirror_committed_background_opacity`], for `background-blur-radius`.
+fn mirror_committed_background_blur_radius(config: &mut AppConfig, radius: u16) {
+    config.background_blur_radius = radius;
+    config.configured_background_blur_radius = radius;
 }
 
 fn sync_quick_terminal_size_from_committed_rows(
@@ -1507,6 +1655,59 @@ mod commit_theme_settings_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    // Regression (P1): committing a `background-opacity` change with
+    // `glassmorphism` off used to leave `configured_background_opacity` at
+    // the previous value, so `commit_theme_settings`'s
+    // `resolved_background_opacity` derivation refreshed the macOS window
+    // background and titlebar backdrop at the *old* opacity — undoing at
+    // save time what the live preview had already applied, with no reload
+    // able to repair it (mirroring the effective value flattens
+    // `opacity_changed`). Deliberately uses two values that differ from
+    // each other and from `GLASS_BACKGROUND_OPACITY`, so neither a stale
+    // twin nor the glass takeover can pass by coincidence.
+    #[test]
+    fn committing_background_opacity_moves_the_configured_twin_with_it() {
+        let mut config = AppConfig::from_startup(
+            noa_config::StartupConfig::default(),
+            false,
+            noa_config::ConfigOverrides::default(),
+        );
+        mirror_committed_background_opacity(&mut config, 1.0);
+        mirror_committed_background_blur_radius(&mut config, 0);
+
+        mirror_committed_background_opacity(&mut config, 0.8);
+        mirror_committed_background_blur_radius(&mut config, 12);
+
+        assert_eq!(config.background_opacity, 0.8);
+        assert_eq!(config.background_blur_radius, 12);
+        assert_eq!(
+            config.configured_background_opacity, 0.8,
+            "the twin must move with the committed value, not lag a commit behind"
+        );
+        assert_eq!(config.configured_background_blur_radius, 12);
+
+        // The derivation `commit_theme_settings` actually performs: with
+        // glass off it must reproduce what the user just saved, which is
+        // what the native background gets refreshed at.
+        assert_eq!(
+            noa_config::resolved_background_opacity(false, config.configured_background_opacity),
+            0.8,
+            "a stale twin here is what reverted the live-previewed background on save"
+        );
+        assert_eq!(
+            noa_config::resolved_background_blur_radius(
+                false,
+                config.configured_background_blur_radius
+            ),
+            12
+        );
+        // With glass on the takeover still wins, unchanged by this fix.
+        assert_eq!(
+            noa_config::resolved_background_opacity(true, config.configured_background_opacity),
+            noa_config::GLASS_BACKGROUND_OPACITY
+        );
+    }
+
     #[test]
     fn quick_terminal_size_syncs_from_committed_row_into_app_config() {
         let mut settings = ThemeSettings::open(ThemeSettingsInit {
@@ -1516,6 +1717,9 @@ mod commit_theme_settings_tests {
             cursor_style: noa_config::CursorShape::Block,
             background_opacity: 1.0,
             background_blur_radius: 0,
+            configured_background_opacity: 1.0,
+            configured_background_blur_radius: 0,
+            window_created_transparent: false,
             background_image: String::new(),
             background_image_opacity: 1.0,
             background_image_position: noa_config::BackgroundImagePosition::Center,
@@ -1529,6 +1733,7 @@ mod commit_theme_settings_tests {
             sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
             sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
+            glassmorphism: false,
             confirm_quit: true,
             send_selection_send_enter: false,
             font_family: "Menlo".to_string(),
@@ -1598,6 +1803,8 @@ mod commit_theme_settings_tests {
             cursor_style: noa_config::CursorShape::Block,
             background_opacity: 1.0,
             background_blur_radius: 0,
+            configured_background_opacity: 1.0,
+            configured_background_blur_radius: 0,
             background_image: String::new(),
             background_image_opacity: 1.0,
             background_image_position: noa_config::BackgroundImagePosition::Center,
@@ -1611,6 +1818,7 @@ mod commit_theme_settings_tests {
             window_padding_x: 2.0,
             window_padding_y: 2.0,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
+            glassmorphism: false,
             confirm_quit: true,
             send_selection_send_enter: false,
             font_family: "Menlo".to_string(),
@@ -1661,6 +1869,9 @@ mod commit_theme_settings_tests {
             cursor_style: noa_config::CursorShape::Block,
             background_opacity: 1.0,
             background_blur_radius: 0,
+            configured_background_opacity: 1.0,
+            configured_background_blur_radius: 0,
+            window_created_transparent: false,
             background_image: "/tmp/wall.png".to_string(),
             background_image_opacity: 1.0,
             background_image_position: noa_config::BackgroundImagePosition::Center,
@@ -1674,6 +1885,7 @@ mod commit_theme_settings_tests {
             sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
             sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
+            glassmorphism: false,
             confirm_quit: true,
             send_selection_send_enter: false,
             font_family: "Menlo".to_string(),

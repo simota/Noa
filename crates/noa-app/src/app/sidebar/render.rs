@@ -65,6 +65,19 @@ fn sidebar_card_fill_opacity(flash_fill: bool) -> f32 {
     }
 }
 
+/// Scale a chrome raster's clear alpha by the palette alpha of its surface
+/// class.
+///
+/// The sidebar composites through `overlay_texture_cards`, which ignores
+/// `CardStyle::background` entirely — `card.wgsl` takes its output alpha from
+/// the sampled texture (`tex.a`). A surface is therefore exactly as
+/// translucent as the alpha it was *rasterized* with, and a glass palette
+/// only reaches the screen if it is applied here, at raster time. Opaque
+/// palettes carry `1.0`, so every call is a no-op with `glassmorphism` off.
+fn chrome_raster_alpha(base: f32, palette_alpha: f32) -> f32 {
+    (base * palette_alpha).clamp(0.0, 1.0)
+}
+
 /// Resolve categorical status-rail geometry. Activity is deliberately broken
 /// into three equal-looking segments so it cannot be mistaken for a 100%
 /// progress bar; bell is a centered notch; attention is a solid rail.
@@ -366,7 +379,7 @@ fn composite_sidebar_band_cache(
     model: &SidebarDrawModel,
 ) {
     let flat_style = CardStyle {
-        background: rgb_to_rgba(active_theme(&gpu.theme, &gpu.preview_theme).default_bg),
+        background: chrome().backdrop_rgba(active_theme(&gpu.theme, &gpu.preview_theme).default_bg),
         border_color: [0.0; 4],
         focus_color: [0.0, 0.0, 0.0, 1.0],
         corner_radius: 0.0,
@@ -516,6 +529,10 @@ fn ensure_sidebar_pipelines(
     {
         gpu.chrome_textures.sidebar_card = Some(OverviewChromeCardPipeline {
             format: surface_format,
+            // Cards composite *into the band texture*, not onto the window,
+            // so they never need to rewrite the window's alpha — this one
+            // stays alpha-blending in both modes.
+            glass: false,
             // Static sidebar cards now render as transparent text layers over a
             // seamless band; alpha blending preserves already-drawn chrome where
             // those layers have no fill.
@@ -528,22 +545,37 @@ fn ensure_sidebar_pipelines(
         #[cfg(debug_assertions)]
         gpu.chrome_textures.record_rebuild();
     }
+    let band_glass = chrome().is_glass();
     if gpu
         .chrome_textures
         .sidebar_band_card
         .as_ref()
-        .is_none_or(|card| card.format != surface_format)
+        .is_none_or(|card| card.format != surface_format || card.glass != band_glass)
     {
         gpu.chrome_textures.sidebar_band_card = Some(OverviewChromeCardPipeline {
             format: surface_format,
-            // The band backdrop is transparent outside its text runs; plain
-            // alpha blending leaves the pane pass's clear color + background
-            // image untouched there, so the band background is pixel-identical
-            // to the panes'.
+            glass: band_glass,
+            // Opaque palette: the band backdrop is transparent outside its
+            // text runs, and plain alpha blending leaves the pane pass's
+            // clear color + background image untouched there, so the band
+            // background is pixel-identical to the panes'.
+            //
+            // Glass palette: the band carries its own `backdrop_alpha` (see
+            // `draw_sidebar_band_runs`) and has to *lower* the window alpha
+            // the pane pass already wrote — blending can only drive alpha up
+            // (`src + dst·(1-src)`), so the panel could never end up more
+            // see-through than the panes it sits beside. `ALPHA_REPLACE`
+            // writes the band's alpha instead of accumulating it. Safe here
+            // because the band is a plain rectangle (`corner_radius = 0`), so
+            // no coverage-faded corner can punch a hole in the window.
             pipeline: CardPipeline::new(
                 &gpu.device,
                 surface_format,
-                wgpu::BlendState::ALPHA_BLENDING,
+                if band_glass {
+                    CardPipeline::ALPHA_REPLACE
+                } else {
+                    wgpu::BlendState::ALPHA_BLENDING
+                },
             ),
         });
         #[cfg(debug_assertions)]
@@ -641,9 +673,34 @@ fn draw_sidebar_band_runs(gpu: &mut GpuState, model: &SidebarDrawModel, band_siz
         band_size,
         model.grid,
         base_bg,
-        0.0,
+        // Opaque palette: a fully transparent backdrop, so the band shows the
+        // pane pass's own pixels (clear color + background image) and the two
+        // surfaces match exactly.
+        //
+        // Glass palette: the band is a pane of its own, tinted with the theme
+        // background at `backdrop_alpha`. This is the only place that alpha
+        // can enter the picture — the composite reads it from the sampled
+        // texture (`card.wgsl`: `coverage * tex.a`) and ignores
+        // `CardStyle::background` entirely — and it is paired with the
+        // alpha-replacing blend selected in `ensure_sidebar_pipelines`, so
+        // the sidebar ends up *more* see-through than the panes rather than
+        // less.
+        sidebar_band_backdrop_alpha(chrome()),
         &model.runs,
     );
+}
+
+/// The band's clear alpha: `0.0` under an opaque palette (show the panes'
+/// own pixels), the palette's `backdrop_alpha` under a glass one (the band
+/// becomes its own frosted pane). Not a multiplication — `0.0` scaled by any
+/// alpha is still `0.0`, which is exactly how the glass backdrop went
+/// missing before.
+fn sidebar_band_backdrop_alpha(palette: crate::chrome::ChromePalette) -> f32 {
+    if palette.is_glass() {
+        palette.backdrop_alpha
+    } else {
+        0.0
+    }
 }
 
 /// Pass 1b — hairline divider over the band's rightmost pixel(s): a solid
@@ -780,11 +837,12 @@ fn draw_sidebar_new_button(
             btn_size,
             GridSize { cols: 1, rows: 1 },
             chrome().card,
-            model.background_opacity,
+            chrome_raster_alpha(model.background_opacity, chrome().surface_alpha),
             &[],
         );
+        let palette = chrome();
         let button_style = CardStyle {
-            background: rgb_to_rgba(chrome().card),
+            background: palette.surface_rgba(palette.card),
             border_color: [0.0; 4],
             focus_color: [0.0; 4],
             corner_radius: TOOLBAR_BUTTON_RADIUS * model.scale,
@@ -914,7 +972,7 @@ fn draw_sidebar_cards(
     }
     let panel_bg = active_theme(&gpu.theme, &gpu.preview_theme).default_bg;
     let card_style = CardStyle {
-        background: rgb_to_rgba(sidebar_card_bg(panel_bg)),
+        background: chrome().surface_rgba(sidebar_card_bg(panel_bg)),
         border_color: [0.0; 4],
         focus_color: [0.0; 4],
         corner_radius: 0.0,
@@ -1259,7 +1317,7 @@ fn draw_sidebar_drag(
     };
     let panel_bg = active_theme(&gpu.theme, &gpu.preview_theme).default_bg;
     let card_style = CardStyle {
-        background: rgb_to_rgba(sidebar_card_bg(panel_bg)),
+        background: chrome().surface_rgba(sidebar_card_bg(panel_bg)),
         border_color: [0.0; 4],
         focus_color: [0.0; 4],
         corner_radius: 0.0,
@@ -1294,7 +1352,8 @@ fn draw_sidebar_drag(
         },
         drag.grid,
         drag.bg,
-        model.background_opacity,
+        // The floating drag ghost is a card, so it frosts like one.
+        chrome_raster_alpha(model.background_opacity, chrome().surface_alpha),
         &drag.runs,
     );
     card.pipeline.overlay_texture_cards(
@@ -1361,12 +1420,16 @@ fn draw_sidebar_menu(gpu: &mut GpuState, model: &SidebarDrawModel, band_size: Pi
         },
         menu.grid,
         chrome().pill,
-        1.0,
+        // The one chrome surface that used to rasterize fully opaque: with a
+        // glass palette installed, a solid menu popup was the only opaque
+        // plane left on the sidebar.
+        chrome_raster_alpha(1.0, chrome().pill_alpha),
         &menu.runs,
     );
+    let palette = chrome();
     let menu_style = CardStyle {
-        background: rgb_to_rgba(chrome().pill),
-        border_color: rgb_to_rgba(chrome().border),
+        background: palette.pill_rgba(palette.pill),
+        border_color: rgb_to_rgba(palette.border),
         focus_color: [0.0; 4],
         corner_radius: crate::chrome::RADIUS_SM * model.scale,
         border_width: 1.0 * model.scale,
@@ -1471,6 +1534,63 @@ mod tests {
         );
         assert_eq!(sidebar_card_fill_opacity(false), 0.0);
         assert_eq!(sidebar_card_fill_opacity(true), 1.0);
+    }
+
+    // The composite takes a surface's alpha from the texture it sampled
+    // (`card.wgsl`: `coverage * tex.a`), never from `CardStyle::background` —
+    // so the palette alpha has to be folded into the raster clear. Opaque
+    // palettes must leave every raster exactly as it was.
+    #[test]
+    fn chrome_raster_alpha_is_a_no_op_under_an_opaque_palette() {
+        for base in [0.0, 0.5, 0.85, 1.0] {
+            assert_eq!(chrome_raster_alpha(base, 1.0), base);
+        }
+        let opaque = crate::chrome::CHROME_DARK;
+        assert_eq!(chrome_raster_alpha(1.0, opaque.pill_alpha), 1.0);
+        assert_eq!(chrome_raster_alpha(0.85, opaque.surface_alpha), 0.85);
+    }
+
+    #[test]
+    fn chrome_raster_alpha_frosts_under_a_glass_palette() {
+        let glass = crate::chrome::glassify(crate::chrome::CHROME_DARK);
+        // The menu popup: opaque raster, frosted by the pill alpha.
+        assert_eq!(chrome_raster_alpha(1.0, glass.pill_alpha), glass.pill_alpha);
+        assert!(chrome_raster_alpha(1.0, glass.pill_alpha) < 1.0);
+        // A window-opacity-scaled surface frosts on top of that scaling, and
+        // the product can never leave the unit range.
+        let scaled = chrome_raster_alpha(0.5, glass.surface_alpha);
+        assert!(scaled < 0.5 && scaled > 0.0);
+        assert_eq!(
+            chrome_raster_alpha(2.0, glass.surface_alpha),
+            1.0_f32.min(2.0 * glass.surface_alpha)
+        );
+        assert!(chrome_raster_alpha(10.0, glass.pill_alpha) <= 1.0);
+    }
+
+    // The band is the sidebar's own pane: transparent under an opaque
+    // palette (so it shows the panes' pixels — clear color and background
+    // image — and matches them exactly), its own frosted plane under a glass
+    // one. A multiply can't express this: the opaque case is `0.0`, and
+    // `0.0 * backdrop_alpha` is still `0.0` — which is how the glass backdrop
+    // reached nothing at all before.
+    #[test]
+    fn sidebar_band_stays_pane_transparent_under_an_opaque_palette() {
+        for opaque in [crate::chrome::CHROME_DARK, crate::chrome::CHROME_LIGHT] {
+            assert_eq!(sidebar_band_backdrop_alpha(opaque), 0.0);
+        }
+    }
+
+    #[test]
+    fn sidebar_band_carries_the_backdrop_alpha_under_a_glass_palette() {
+        for base in [crate::chrome::CHROME_DARK, crate::chrome::CHROME_LIGHT] {
+            let glass = crate::chrome::glassify(base);
+            let alpha = sidebar_band_backdrop_alpha(glass);
+            assert_eq!(alpha, glass.backdrop_alpha);
+            // Strictly between "invisible" and "opaque" — the band has to be
+            // a real, tinted pane for the alpha-replacing composite to be
+            // worth anything.
+            assert!(alpha > 0.0 && alpha < 1.0, "alpha={alpha}");
+        }
     }
 
     #[test]

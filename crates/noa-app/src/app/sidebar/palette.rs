@@ -74,6 +74,10 @@ fn ensure_card_pipeline(gpu: &mut GpuState, surface_format: wgpu::TextureFormat)
     {
         gpu.palette_card = Some(OverviewChromeCardPipeline {
             format: surface_format,
+            // Overlay cards float over the terminal grid and blend with it;
+            // their translucency comes from `OverlayStyle`'s surface alpha,
+            // not from rewriting the window's alpha channel.
+            glass: false,
             pipeline: CardPipeline::new(
                 &gpu.device,
                 surface_format,
@@ -148,7 +152,7 @@ fn rgb_from_rgba(c: [f32; 4]) -> Rgb {
 }
 
 /// Ensure the shared 1x1 scrim texture exists (its alpha carries the modal
-/// scrim opacity).
+/// scrim opacity), plus the drop-shadow source every card composite needs.
 fn ensure_scrim(gpu: &mut GpuState) {
     let GpuState {
         device,
@@ -165,15 +169,51 @@ fn ensure_scrim(gpu: &mut GpuState) {
         "noa-command-palette-scrim",
         [0, 0, 0, PALETTE_SCRIM_ALPHA],
     );
+    ensure_shadow_source(gpu);
+}
+
+/// Ensure the fully transparent 1x1 source the drop-shadow pass samples
+/// exists (see [`GpuState::palette_shadow_source`]). Separate from
+/// [`ensure_scrim`] because the toast card needs it without wanting the
+/// modal scrim — it dims nothing.
+fn ensure_shadow_source(gpu: &mut GpuState) {
+    let GpuState {
+        device,
+        queue,
+        palette_shadow_source,
+        ..
+    } = gpu;
+    let _ = ensure_tint_texture(
+        device,
+        queue,
+        palette_shadow_source,
+        "noa-command-palette-shadow-source",
+        [0, 0, 0, 0],
+    );
 }
 
 /// Composite the already-rasterized `palette_scratch` block as a modal card
 /// over the pane: a translucent scrim dimming the whole pane, then a soft
-/// black drop shadow, then the elevated surface with a themed 1px border —
-/// two card-pipeline passes (shadow+fill, then fill+border) over the same
-/// texture. Shared by the command palette and the confirm dialog so every
-/// modal carries identical chrome. `opacity` scales all three passes (the
-/// open fade-in); 1.0 is fully settled.
+/// black drop shadow, then the elevated surface with a themed 1px border.
+/// Shared by the command palette and the confirm dialog so every modal
+/// carries identical chrome. `opacity` scales every pass (the open
+/// fade-in); 1.0 is fully settled.
+///
+/// The card's *fill* is drawn by exactly one of these passes. The shadow
+/// pass samples a fully transparent 1x1 source instead of the scratch, so it
+/// contributes only the glow outside the card shape (`card.wgsl` returns the
+/// glow before it ever samples the texture) — drawing the real fill in both
+/// passes would blend it over itself, which is invisible while the surface
+/// is opaque but drives a frosted one from `0.68` to `0.90` and defeats the
+/// glass.
+///
+/// The glass alpha itself lives in the scratch's *clear color*, which is the
+/// only stage that touches the fill alone: glyphs blend over it opaque
+/// (`a_src + a_dst·(1-a_src)` = 1 for a covered pixel), non-default cell
+/// backgrounds draw their own opaque quads, and `card.wgsl` gives the border
+/// stroke the border color's alpha. Applying it here instead — as this
+/// pass's `opacity` — would scale the *whole* sampled texture, taking the
+/// text and the stroke down with the surface.
 #[allow(clippy::too_many_arguments)]
 fn composite_modal_card(
     gpu: &GpuState,
@@ -242,15 +282,27 @@ fn composite_modal_card(
         }],
         opacity,
     );
+    // Glow only: the transparent source contributes nothing inside the card
+    // shape, leaving the fill to the border pass below.
     card.overlay_texture_cards_with_opacity(
         &gpu.device,
         &gpu.queue,
         view,
         surface_size,
         &shadow_style,
-        &[placement(true)],
+        &[CardTexturePlacement {
+            texture_view: &gpu.palette_shadow_source.as_ref().unwrap().1,
+            x,
+            y,
+            w: block_px.w,
+            h: block_px.h,
+            selected: true,
+        }],
         opacity,
     );
+    // The one pass that draws the surface: fill + border. The glass alpha is
+    // *not* applied here — `card.wgsl` multiplies `u.opacity` into the whole
+    // sampled texture, which would take the glyphs down with the fill.
     card.overlay_texture_cards_with_opacity(
         &gpu.device,
         &gpu.queue,
@@ -342,6 +394,7 @@ pub(in crate::app) fn draw_command_palette_card(
     if gpu.palette_renderer.is_none()
         || gpu.palette_card.is_none()
         || gpu.chrome_textures.palette_scratch.is_none()
+        || gpu.palette_shadow_source.is_none()
     {
         return;
     }
@@ -365,12 +418,15 @@ pub(in crate::app) fn draw_command_palette_card(
         let scratch_view = &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2;
         let renderer = gpu.palette_renderer.as_mut().unwrap();
         renderer.resize(block_px);
-        renderer.set_clear_color(style.surface_bg());
         renderer.rebuild_cells(
             &snapshot,
             &mut gpu.font,
             active_theme(&gpu.theme, &gpu.preview_theme),
         );
+        // After `rebuild_cells` (which resets clear_color from the snapshot's
+        // opaque bg) so the scratch's fill actually carries the palette's
+        // translucent surface alpha under glassmorphism.
+        renderer.set_clear_color(style.surface_bg());
         renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
@@ -429,6 +485,7 @@ pub(in crate::app) fn draw_confirm_dialog_card(
     if gpu.palette_renderer.is_none()
         || gpu.palette_card.is_none()
         || gpu.chrome_textures.palette_scratch.is_none()
+        || gpu.palette_shadow_source.is_none()
     {
         return;
     }
@@ -442,12 +499,15 @@ pub(in crate::app) fn draw_confirm_dialog_card(
         let scratch_view = &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2;
         let renderer = gpu.palette_renderer.as_mut().unwrap();
         renderer.resize(block_px);
-        renderer.set_clear_color(style.surface_bg());
         renderer.rebuild_cells(
             &snapshot,
             &mut gpu.font,
             active_theme(&gpu.theme, &gpu.preview_theme),
         );
+        // After `rebuild_cells` (which resets clear_color from the snapshot's
+        // opaque bg) so the scratch's fill actually carries the palette's
+        // translucent surface alpha under glassmorphism.
+        renderer.set_clear_color(style.surface_bg());
         renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
@@ -487,6 +547,7 @@ pub(in crate::app) fn draw_toast_card(
     let metrics = gpu.font.metrics();
     let (interior, block_px) = modal_block_geometry(metrics, cols, 1);
     ensure_overlay_card_gpu(gpu, surface_format, interior);
+    ensure_shadow_source(gpu);
     if ensure_scratch(
         &mut gpu.chrome_textures.palette_scratch,
         &gpu.device,
@@ -500,6 +561,7 @@ pub(in crate::app) fn draw_toast_card(
     if gpu.palette_renderer.is_none()
         || gpu.palette_card.is_none()
         || gpu.chrome_textures.palette_scratch.is_none()
+        || gpu.palette_shadow_source.is_none()
     {
         return;
     }
@@ -523,12 +585,15 @@ pub(in crate::app) fn draw_toast_card(
         let scratch_view = &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2;
         let renderer = gpu.palette_renderer.as_mut().unwrap();
         renderer.resize(block_px);
-        renderer.set_clear_color(style.surface_bg());
         renderer.rebuild_cells(
             &snapshot,
             &mut gpu.font,
             active_theme(&gpu.theme, &gpu.preview_theme),
         );
+        // After `rebuild_cells` (which resets clear_color from the snapshot's
+        // opaque bg) so the scratch's fill actually carries the palette's
+        // translucent surface alpha under glassmorphism.
+        renderer.set_clear_color(style.surface_bg());
         renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
@@ -554,22 +619,27 @@ pub(in crate::app) fn draw_toast_card(
         focus_width: 1.0 * scale,
         focus_glow_width: 0.0,
     };
-    let placement = |selected| CardTexturePlacement {
-        texture_view: &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2,
-        x,
-        y,
-        w: block_px.w,
-        h: block_px.h,
-        selected,
-    };
     let card = &gpu.palette_card.as_ref().unwrap().pipeline;
+    // Same one-fill discipline as `composite_modal_card`: the shadow pass
+    // draws the glow from a fully transparent source, so the surface is
+    // composited exactly once. Compositing the real scratch in both passes
+    // blends the fill over itself — invisible while it is opaque, but a
+    // frosted `glassmorphism` toast would climb from 0.68 to ~0.90 and end
+    // up the one near-solid surface on screen.
     card.overlay_texture_cards(
         &gpu.device,
         &gpu.queue,
         view,
         surface_size,
         &shadow_style,
-        &[placement(true)],
+        &[CardTexturePlacement {
+            texture_view: &gpu.palette_shadow_source.as_ref().unwrap().1,
+            x,
+            y,
+            w: block_px.w,
+            h: block_px.h,
+            selected: true,
+        }],
     );
     card.overlay_texture_cards(
         &gpu.device,
@@ -577,7 +647,14 @@ pub(in crate::app) fn draw_toast_card(
         view,
         surface_size,
         &border_style,
-        &[placement(false)],
+        &[CardTexturePlacement {
+            texture_view: &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2,
+            x,
+            y,
+            w: block_px.w,
+            h: block_px.h,
+            selected: false,
+        }],
     );
 }
 
@@ -648,6 +725,7 @@ pub(in crate::app) fn draw_theme_settings_card(
     if gpu.palette_renderer.is_none()
         || gpu.palette_card.is_none()
         || gpu.chrome_textures.palette_scratch.is_none()
+        || gpu.palette_shadow_source.is_none()
     {
         return;
     }
@@ -674,8 +752,11 @@ pub(in crate::app) fn draw_theme_settings_card(
         let scratch_view = &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2;
         let renderer = gpu.palette_renderer.as_mut().unwrap();
         renderer.resize(block_px);
-        renderer.set_clear_color(style.surface_bg());
         renderer.rebuild_cells(&snapshot, &mut gpu.font, theme);
+        // After `rebuild_cells` (which resets clear_color from the snapshot's
+        // opaque bg) so the scratch's fill actually carries the palette's
+        // translucent surface alpha under glassmorphism.
+        renderer.set_clear_color(style.surface_bg());
         renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }
@@ -745,6 +826,7 @@ pub(in crate::app) fn draw_process_monitor_card(
     if gpu.palette_renderer.is_none()
         || gpu.palette_card.is_none()
         || gpu.chrome_textures.palette_scratch.is_none()
+        || gpu.palette_shadow_source.is_none()
     {
         return;
     }
@@ -770,8 +852,11 @@ pub(in crate::app) fn draw_process_monitor_card(
         let scratch_view = &gpu.chrome_textures.palette_scratch.as_ref().unwrap().2;
         let renderer = gpu.palette_renderer.as_mut().unwrap();
         renderer.resize(block_px);
-        renderer.set_clear_color(style.surface_bg());
         renderer.rebuild_cells(&snapshot, &mut gpu.font, theme);
+        // After `rebuild_cells` (which resets clear_color from the snapshot's
+        // opaque bg) so the scratch's fill actually carries the palette's
+        // translucent surface alpha under glassmorphism.
+        renderer.set_clear_color(style.surface_bg());
         renderer.sync_atlas(&gpu.device, &gpu.queue, &mut gpu.font);
         renderer.draw(&gpu.device, &gpu.queue, scratch_view);
     }

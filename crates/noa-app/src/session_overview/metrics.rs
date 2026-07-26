@@ -38,25 +38,30 @@ pub const OVERVIEW_SEARCH_BAND_H: u32 = 64;
 /// (REQ-OV-17). Compile-time constant.
 pub const OVERVIEW_HINT_BAND_H: u32 = 54;
 
-/// Mockup-parity chrome palette (REQ-OV-12/14, v2) — no config knob (⚠G
-/// precedent), but the light/dark polarity follows the terminal theme via the
-/// shared [`crate::chrome`] palette (selected once at startup), so the
-/// overview and the session sidebar stay visually unified. Returned as
+/// Mockup-parity chrome palette (REQ-OV-12/14, v2) — no per-color config knob
+/// (⚠G precedent), but the light/dark polarity follows the terminal theme via
+/// the shared [`crate::chrome`] palette (selected once at startup), so the
+/// overview and the session sidebar stay visually unified. The alpha comes
+/// from that same palette too: `1.0` unless `glassmorphism = true` installed a
+/// frosted variant, so the opaque default path is byte-identical. Returned as
 /// straight display-space RGBA because the Overview surface uses a
 /// **non-sRGB** format (`Bgra8Unorm`, see `preferred_surface_format`), so
 /// these are written to the target unchanged (no gamma re-encode).
 ///
 /// Backdrop behind every card (mockup: "暗色の背景").
 pub fn overview_bg_color() -> [f32; 4] {
-    crate::chrome::rgba(crate::chrome::palette().bg)
+    let p = crate::chrome::palette();
+    p.backdrop_rgba(p.bg)
 }
 /// Card face — one step lighter than [`overview_bg_color`] (mockup: "一段明るいカード面").
 pub fn overview_card_color() -> [f32; 4] {
-    crate::chrome::rgba(crate::chrome::palette().card)
+    let p = crate::chrome::palette();
+    p.surface_rgba(p.card)
 }
 /// Title-bar band — distinguishable from the card face (mockup: "区別可能な帯").
 pub fn overview_title_bar_color() -> [f32; 4] {
-    crate::chrome::rgba(crate::chrome::palette().band)
+    let p = crate::chrome::palette();
+    p.surface_rgba(p.band)
 }
 /// Thin resting card border.
 pub fn overview_border_color() -> [f32; 4] {
@@ -68,7 +73,8 @@ pub fn overview_focus_ring_color() -> [f32; 4] {
 }
 /// Search / hint pill face in the overview chrome.
 pub fn overview_chrome_pill_color() -> [f32; 4] {
-    crate::chrome::rgba(crate::chrome::palette().pill)
+    let p = crate::chrome::palette();
+    p.pill_rgba(p.pill)
 }
 /// Thin border around search and hint pills.
 pub fn overview_chrome_border_color() -> [f32; 4] {

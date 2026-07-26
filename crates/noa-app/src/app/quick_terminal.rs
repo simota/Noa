@@ -704,7 +704,7 @@ impl App {
             .with_decorations(false)
             .with_inner_size(PhysicalSize::new(geometry.width, geometry.height))
             .with_position(PhysicalPosition::new(geometry.hidden_x, geometry.hidden_y))
-            .with_transparent(self.config.background_opacity < 1.0)
+            .with_transparent(window_created_transparent(self.config.background_opacity))
             // Never on screen until the show path explicitly reveals it
             // (RC1): avoids ordering an unpainted window front.
             .with_visible(false);
@@ -803,6 +803,7 @@ impl App {
         self.windows.insert(
             window_id,
             WindowState {
+                created_transparent: window_created_transparent(self.config.background_opacity),
                 window,
                 group,
                 surface,

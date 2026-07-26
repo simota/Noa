@@ -257,6 +257,103 @@ fn palette_scroll_window_keeps_the_selection_visible() {
     assert_eq!(palette_scroll_window(5, 0, 0), (0, 0));
 }
 
+/// sRGB electro-optical inverse (linear -> sRGB-encoded), the GPU operation
+/// this test needs to reconstruct what a `Bgra8UnormSrgb` target's automatic
+/// encode-on-write does. `noa-render` never needs this direction in
+/// production (the GPU performs it in hardware), so it lives only here.
+fn linear_to_srgb(channel: f32) -> f32 {
+    let channel = channel.clamp(0.0, 1.0);
+    if channel <= 0.003_130_8 {
+        channel * 12.92
+    } else {
+        1.055 * channel.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Glassmorphism color-space regression (review follow-up on the alpha fix):
+/// `selected_row_wash_color` must reproduce `OverlayStyle::selected_bg()`'s
+/// RGB — the OLD sRGB-space-lerped color — once actually composited by the
+/// GPU, not just carry the right alpha. Reconstructs both the sRGB-target
+/// path (linear blend, matching `Renderer`'s `Bgra8UnormSrgb` use) and the
+/// non-sRGB path (direct blend, no pre-linearization) for a dark and a light
+/// theme, mirroring `overlay_style_tracks_theme_polarity`'s fixtures
+/// (`crates/noa-render/src/theme.rs`).
+#[test]
+fn selected_row_wash_reproduces_the_old_srgb_lerp_after_gpu_blend() {
+    fn reconstruct(quad: [u8; 4], surface_srgb: [f32; 3], target_format_is_srgb: bool) -> [f32; 3] {
+        let a = f32::from(quad[3]) / 255.0;
+        let q = [
+            f32::from(quad[0]) / 255.0,
+            f32::from(quad[1]) / 255.0,
+            f32::from(quad[2]) / 255.0,
+        ];
+        if target_format_is_srgb {
+            // Both the quad and the destination were pre-linearized before
+            // packing (`surface_output_rgba`); the GPU blends those linear
+            // values, and the `*Srgb` target's automatic encode-on-write
+            // stores the sRGB-encoded result — decode, blend, re-encode.
+            let s = surface_srgb.map(srgb_to_linear);
+            std::array::from_fn(|i| linear_to_srgb(q[i] * a + s[i] * (1.0 - a)))
+        } else {
+            // No pre-linearization: the GPU blends the stored values as-is.
+            std::array::from_fn(|i| q[i] * a + surface_srgb[i] * (1.0 - a))
+        }
+    }
+
+    // sRGB-to-u8 with the same rounding `to_u8_color`/`Rgb` use elsewhere,
+    // so the tolerances below are in the same units as the theme's own
+    // 8-bit channels.
+    let to_byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round();
+
+    let dark = Theme::new();
+    let mut light = Theme::new();
+    light.default_fg = noa_core::Rgb::new(0x20, 0x20, 0x20);
+    light.default_bg = noa_core::Rgb::new(0xf7, 0xf7, 0xf7);
+
+    for (theme_name, theme) in [("dark", &dark), ("light", &light)] {
+        let style = OverlayStyle::from_theme(theme);
+        let target = style.selected_bg(); // the OLD sRGB-lerped color to reproduce
+        let surface = style.surface_bg();
+
+        for target_format_is_srgb in [true, false] {
+            let quad = selected_row_wash_color(&style, target_format_is_srgb);
+            let reconstructed = reconstruct(
+                quad,
+                [surface[0], surface[1], surface[2]],
+                target_format_is_srgb,
+            );
+
+            // Non-sRGB targets don't pre-linearize at all (see
+            // `selected_row_wash_color`'s else branch), so this path was
+            // never affected by the color-space bug and should reproduce
+            // the old blend essentially exactly regardless of theme.
+            //
+            // sRGB targets: dark themes solve exactly (no clamp needed —
+            // verified against the review's own worked numbers). Light
+            // themes can clamp (target darker than `(1-a)*surface` alone
+            // reaches even at quad = 0), so that case gets a wider,
+            // explicitly-bounded tolerance instead of pretending it's exact.
+            let tolerance = if target_format_is_srgb && theme_name == "light" {
+                24.0
+            } else {
+                2.0
+            };
+            for (channel, name) in [0, 1, 2].into_iter().zip(["r", "g", "b"]) {
+                let got = to_byte(reconstructed[channel]);
+                let want = to_byte(target[channel]);
+                assert!(
+                    (got - want).abs() <= tolerance,
+                    "{theme_name} theme, target_format_is_srgb={target_format_is_srgb}, \
+                     channel {name}: composited selected-row wash should reproduce \
+                     OverlayStyle::selected_bg() ({want}) within {tolerance}, got {got} \
+                     (light+sRGB is the one case this can't hit exactly — see \
+                     `selected_row_wash_color`'s doc on the light-theme clamp)"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn command_palette_overlay_emits_bg_and_glyph_instances_and_clears_on_close() {
     let Some(mut font) = font_with_rasterized_m() else {
@@ -304,27 +401,36 @@ fn command_palette_overlay_emits_bg_and_glyph_instances_and_clears_on_close() {
     let mut with_palette = Vec::new();
     rebuild_cell_instances(&mut with_palette, &snap, &mut font, &theme, false);
 
+    // Only the selected row draws a background quad (its accent wash): the
+    // other three (query + two non-selected entries) are the block's own
+    // surface color, already carried by the scratch's clear (glassmorphism
+    // alpha-double-apply fix) — see `append_command_palette_instances`'s
+    // `selected_wash`.
     let bg_with = with_palette.iter().filter(|i| i.flags == 0).count();
     assert!(
         bg_with > bg_before,
-        "opening the palette must add background quads"
+        "opening the palette must add the selected row's background quad"
     );
-    // The block spans 4 grid rows (query + 3 entries); at least those
-    // rows must carry palette instances.
-    let rows_touched: std::collections::BTreeSet<u16> = with_palette
+    let bg_rows_touched: std::collections::BTreeSet<u16> = with_palette
         .iter()
         .filter(|i| i.flags == 0)
         .map(|i| i.grid_pos[1])
         .collect();
-    assert!(
-        rows_touched.len() >= 4,
-        "query row plus three entry rows must all draw: {rows_touched:?}"
+    assert_eq!(
+        bg_rows_touched.len(),
+        1,
+        "exactly the selected row draws a background quad: {bg_rows_touched:?}"
     );
+    // The block spans 4 grid rows (query + 3 entries); all four still emit
+    // glyphs even though only one of them also emits a background quad.
+    let glyph_rows_touched: std::collections::BTreeSet<u16> = with_palette
+        .iter()
+        .filter(|i| i.flags & CellInstance::FLAG_GLYPH != 0)
+        .map(|i| i.grid_pos[1])
+        .collect();
     assert!(
-        with_palette
-            .iter()
-            .any(|i| i.flags & CellInstance::FLAG_GLYPH != 0),
-        "the palette text must emit glyph instances"
+        glyph_rows_touched.len() >= 4,
+        "query row plus three entry rows must all draw text: {glyph_rows_touched:?}"
     );
 
     snap.command_palette = None;
@@ -356,20 +462,22 @@ fn command_palette_overlay_shows_empty_state_for_zero_results() {
     let mut with_empty_palette = Vec::new();
     rebuild_cell_instances(&mut with_empty_palette, &snap, &mut font, &theme, false);
 
-    let rows_touched: std::collections::BTreeSet<u16> = with_empty_palette
+    // Neither row draws a background quad here: the query row and the
+    // empty-state row are both the block's own surface color, already
+    // carried by the scratch's clear (glassmorphism alpha-double-apply fix).
+    assert_eq!(
+        with_empty_palette.iter().filter(|i| i.flags == 0).count(),
+        0,
+        "no selected row in the empty state, so no background quads are drawn"
+    );
+    let glyph_rows_touched: std::collections::BTreeSet<u16> = with_empty_palette
         .iter()
-        .filter(|i| i.flags == 0)
+        .filter(|i| i.flags & CellInstance::FLAG_GLYPH != 0)
         .map(|i| i.grid_pos[1])
         .collect();
     assert!(
-        rows_touched.len() >= 2,
-        "query row and empty-state row must both draw: {rows_touched:?}"
-    );
-    assert!(
-        with_empty_palette
-            .iter()
-            .any(|i| i.flags & CellInstance::FLAG_GLYPH != 0),
-        "the empty-state text must emit glyph instances"
+        glyph_rows_touched.len() >= 2,
+        "query row and empty-state row must both draw text: {glyph_rows_touched:?}"
     );
 }
 
@@ -390,7 +498,10 @@ fn confirm_dialog_overlay_emits_bg_and_glyph_instances_and_clears_on_close() {
 
     let mut closed = Vec::new();
     rebuild_cell_instances(&mut closed, &snap, &mut font, &theme, false);
-    let bg_before = closed.iter().filter(|i| i.flags == 0).count();
+    let glyphs_before = closed
+        .iter()
+        .filter(|i| i.flags & CellInstance::FLAG_GLYPH != 0)
+        .count();
 
     snap.confirm_dialog = Some(crate::ConfirmDialogSnapshot {
         message: "Paste 3 line(s) of text?".to_string(),
@@ -399,33 +510,44 @@ fn confirm_dialog_overlay_emits_bg_and_glyph_instances_and_clears_on_close() {
     let mut with_dialog = Vec::new();
     rebuild_cell_instances(&mut with_dialog, &snap, &mut font, &theme, false);
 
+    // NOT a background-quad count: both dialog rows are the block's own
+    // surface color, which the scratch's clear already carries (glassmorphism
+    // alpha-double-apply fix), so `append_confirm_dialog_instances` draws
+    // zero `flags == 0` quads for them by design — see
+    // `confirm_dialog_glyph_rows`'s doc. Glyphs are still the right proxy.
     assert!(
-        with_dialog.iter().filter(|i| i.flags == 0).count() > bg_before,
-        "opening the dialog must add background quads"
+        with_dialog
+            .iter()
+            .filter(|i| i.flags & CellInstance::FLAG_GLYPH != 0)
+            .count()
+            > glyphs_before,
+        "opening the dialog must add glyph instances"
+    );
+    assert_eq!(
+        with_dialog.iter().filter(|i| i.flags == 0).count(),
+        0,
+        "the dialog draws no background quads of its own (relies on the scratch's clear)"
     );
     // A message row and a hint row.
     let rows_touched: std::collections::BTreeSet<u16> = with_dialog
         .iter()
-        .filter(|i| i.flags == 0)
+        .filter(|i| i.flags & CellInstance::FLAG_GLYPH != 0)
         .map(|i| i.grid_pos[1])
         .collect();
     assert!(
         rows_touched.len() >= 2,
         "message and hint rows must both draw: {rows_touched:?}"
     );
-    assert!(
-        with_dialog
-            .iter()
-            .any(|i| i.flags & CellInstance::FLAG_GLYPH != 0),
-        "the dialog text must emit glyph instances"
-    );
 
     snap.confirm_dialog = None;
     let mut reclosed = Vec::new();
     rebuild_cell_instances(&mut reclosed, &snap, &mut font, &theme, false);
     assert_eq!(
-        reclosed.iter().filter(|i| i.flags == 0).count(),
-        bg_before,
+        reclosed
+            .iter()
+            .filter(|i| i.flags & CellInstance::FLAG_GLYPH != 0)
+            .count(),
+        glyphs_before,
         "closing the dialog removes its overlay instances"
     );
 }
@@ -440,19 +562,22 @@ fn confirm_dialog_is_two_rows_regardless_of_grid_height() {
     // The dialog block itself is always the compact message + hint pair;
     // its breathing room comes from noa-app's rounded-card composite, not
     // from padding rows in the instance stream.
-    let tall = confirm_dialog_bg_rows(&mut font, &theme, 40, 10);
+    let tall = confirm_dialog_glyph_rows(&mut font, &theme, 40, 10);
     assert_eq!(tall, 2, "tall grid draws the compact 2-row form");
-    let short = confirm_dialog_bg_rows(&mut font, &theme, 40, 4);
+    let short = confirm_dialog_glyph_rows(&mut font, &theme, 40, 4);
     assert_eq!(short, 2, "short grid draws the compact 2-row form");
-    let tiny = confirm_dialog_bg_rows(&mut font, &theme, 40, 1);
+    let tiny = confirm_dialog_glyph_rows(&mut font, &theme, 40, 1);
     assert_eq!(tiny, 0, "a one-row grid cannot host the dialog");
 }
 
-/// Count the distinct grid rows carrying confirm-dialog overlay background
-/// quads (`flags == 0`) for a `cols` x `rows` grid. The default block
-/// cursor paints a `FLAG_CURSOR` quad, not a plain bg quad, so it is not
-/// counted here.
-fn confirm_dialog_bg_rows(font: &mut FontGrid, theme: &Theme, cols: u16, rows: u16) -> usize {
+/// Count the distinct grid rows carrying confirm-dialog overlay glyph
+/// instances for a `cols` x `rows` grid. NOT background quads
+/// (`flags == 0`): the dialog's two rows are always the block's own surface
+/// color (glassmorphism alpha-double-apply fix), which the scratch's own
+/// clear already carries, so neither row draws a background quad at all —
+/// see `append_confirm_dialog_instances`. Glyphs are still emitted
+/// unconditionally, so they're the right proxy for "did this row render."
+fn confirm_dialog_glyph_rows(font: &mut FontGrid, theme: &Theme, cols: u16, rows: u16) -> usize {
     let mut terminal = Terminal::new(GridSize::new(cols, rows));
     let mut snap = FrameSnapshot::from_terminal(&mut terminal);
     snap.confirm_dialog = Some(crate::ConfirmDialogSnapshot {
@@ -462,7 +587,7 @@ fn confirm_dialog_bg_rows(font: &mut FontGrid, theme: &Theme, cols: u16, rows: u
     let mut inst = Vec::new();
     rebuild_cell_instances(&mut inst, &snap, font, theme, false);
     inst.iter()
-        .filter(|i| i.flags == 0)
+        .filter(|i| i.flags & CellInstance::FLAG_GLYPH != 0)
         .map(|i| i.grid_pos[1])
         .collect::<std::collections::BTreeSet<u16>>()
         .len()

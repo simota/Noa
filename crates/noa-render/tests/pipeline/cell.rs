@@ -1,8 +1,11 @@
 use super::shared::*;
-use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, PixelSize, Rgb};
+use noa_core::{CellAttrs, Color, DEFAULT_GRID_PADDING, GridPadding, PixelSize, Rgb};
 use noa_font::FontGrid;
 use noa_grid::{Cell, Cursor, Row, SearchState, Selection, SelectionPoint, TerminalColors};
-use noa_render::{CommandPaletteSnapshot, FrameSnapshot, Renderer, Theme};
+use noa_render::{
+    CommandPaletteSnapshot, FrameSnapshot, OverlayStyle, PaletteRow, Renderer, Theme,
+    command_palette_layout, overlay_surface_alpha, set_overlay_surface_alpha,
+};
 
 #[test]
 fn cell_pipeline_builds_without_validation_error() {
@@ -268,6 +271,200 @@ fn command_palette_overlay_draws_one_frame_without_validation_error() {
         "wgpu validation error drawing the command-palette overlay: {err:?}"
     );
 }
+
+/// Glassmorphism fix-1-followup regression: the command-palette scratch's
+/// alpha must be uniform across the whole card face — the clear (fix 1)
+/// carries `overlay_surface_alpha()`, and a plain row must NOT also draw an
+/// `overlay_surface_alpha()`-carrying background quad on top of it (that
+/// double-applies the alpha, e.g. `0.68 + 0.68*0.32 = 0.898` instead of
+/// `0.68`). The selected row is the one row that legitimately needs a
+/// different fill (its accent wash); see `append_command_palette_instances`'s
+/// `selected_wash` for why that can only be *bounded* close to the target
+/// alpha, not made exactly equal, under ordinary "over" blending.
+///
+/// This draws the raw cell-instance scratch directly (no card composite —
+/// that's `cards.rs`'s job), so it observes exactly what `noa-app`'s
+/// `set_clear_color`-after-`rebuild_cells` + `draw` sequence would produce.
+#[test]
+fn command_palette_surface_alpha_is_uniform_across_plain_and_selected_rows() {
+    let Some((device, queue)) = device_queue() else {
+        eprintln!("no wgpu adapter available — skipping command-palette surface-alpha test");
+        return;
+    };
+    let mut font =
+        FontGrid::new(14.0, noa_font::FontConfig::default()).expect("load a system monospace font");
+    // Zero padding: grid cell (c, r) maps to pixel (c*cell_w, r*cell_h)
+    // exactly, so the probe pixels below don't need to account for a margin.
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        &mut font,
+        GridPadding::new(0.0, 0.0, 0.0, 0.0),
+    )
+    .expect("build renderer");
+
+    let cols = 30u16;
+    let rows_n = 8u16;
+    let (cell_w, cell_h) = {
+        let m = font.metrics();
+        (m.cell_w, m.cell_h)
+    };
+    let surface_size = PixelSize {
+        w: (f32::from(cols) * cell_w).ceil() as u32,
+        h: (f32::from(rows_n) * cell_h).ceil() as u32,
+    };
+    renderer.resize(surface_size);
+
+    let palette = CommandPaletteSnapshot {
+        query: "sp".to_string(),
+        rows: vec![
+            PaletteRow::Entry {
+                title: "Split Right".to_string(),
+                hint: None,
+                match_positions: vec![],
+                enabled: true,
+            },
+            PaletteRow::Entry {
+                title: "Split Down".to_string(),
+                hint: None,
+                match_positions: vec![],
+                enabled: true,
+            },
+            PaletteRow::Entry {
+                title: "Toggle Split Zoom".to_string(),
+                hint: None,
+                match_positions: vec![],
+                enabled: true,
+            },
+        ],
+        selected: 1,
+        total_entries: 3,
+    };
+    // Row 0 (query) and entry index 0 are plain; entry index 1 ("Split
+    // Down") is selected. Computed the same way the app computes it, so this
+    // test breaks (loudly) if the block's geometry formula ever changes.
+    let layout =
+        command_palette_layout(&palette, cols, rows_n).expect("palette layout for a roomy grid");
+    let query_row = layout.y0;
+    let selected_row = layout.y0 + 1 + 1; // list_y0 (y0+1) + entry index 1
+    let plain_entry_row = layout.y0 + 1; // list_y0 + entry index 0
+    // Row 0 of the grid sits above the block (`layout.y0 >= 1` here), so it's
+    // untouched by any palette instance — a pure "clear only" probe, standing
+    // in for the card's own interior padding margin in production (both are
+    // fed by nothing but the clear).
+    assert!(query_row >= 1, "test fixture assumption: block below row 0");
+
+    let rows: Vec<Row> = (0..rows_n)
+        .map(|_| Row::from_cells(vec![Cell::default(); cols as usize], false, true))
+        .collect();
+    // Cursor hidden: `Cursor::default()` is visible at (0, 0) by construction
+    // (DECTCEM defaults on), which would otherwise paint an opaque block over
+    // the very "clear only" probe pixel this test relies on.
+    let cursor = Cursor {
+        visible: false,
+        ..Cursor::default()
+    };
+    let snap = FrameSnapshot {
+        scroll_shift: 0,
+        row_dirty: vec![true; rows.len()],
+        rows,
+        cursor,
+        copy_cursor: None,
+        colors: TerminalColors::default(),
+        selection: None,
+        search: SearchState::default(),
+        row_base: 0,
+        abs_row_base: 0,
+        active_is_alt: false,
+        cols,
+        rows_n,
+        focused: true,
+        cursor_blink_visible: false,
+        hover_link: None,
+        search_prompt: None,
+        command_palette: Some(palette),
+        confirm_dialog: None,
+        preedit: None,
+        image_placements: Vec::new(),
+        images: Vec::new(),
+    };
+
+    let target = 0.68_f32;
+    set_overlay_surface_alpha(target);
+    assert_eq!(overlay_surface_alpha(), target);
+
+    renderer.rebuild_cells(&snap, &mut font, &Theme::new());
+    // After `rebuild_cells` (mirrors `noa-app`'s fix-1 ordering — see
+    // `crates/noa-app/src/app/sidebar/palette.rs`'s `set_clear_color` call
+    // sites) so this clear isn't clobbered by the snapshot's own default bg.
+    let style = OverlayStyle::from_theme(&Theme::new());
+    renderer.set_clear_color(style.surface_bg());
+    renderer.sync_atlas(&device, &queue, &mut font);
+
+    let (target_tex, view) = render_target(&device, surface_size.w, surface_size.h);
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    renderer.draw(&device, &queue, &view);
+    let err = pollster::block_on(device.pop_error_scope());
+    // Always restore, even on assertion failure below, so a failing run
+    // doesn't leak a translucent surface alpha into whatever test runs next
+    // in this process.
+    set_overlay_surface_alpha(1.0);
+    assert!(
+        err.is_none(),
+        "wgpu validation error during command-palette surface-alpha draw: {err:?}"
+    );
+
+    let pixels = read_rgba_pixels(&device, &queue, &target_tex, surface_size.w, surface_size.h);
+    let alpha_at = |col: u16, row: u16| {
+        let x = (f32::from(col) * cell_w + cell_w * 0.5) as u32;
+        let y = (f32::from(row) * cell_h + cell_h * 0.5) as u32;
+        let offset = ((y * surface_size.w + x) * 4 + 3) as usize;
+        pixels[offset]
+    };
+    // Column `layout.x0`: the block's leading pad column, always a literal
+    // space (`palette_line`'s one-space margin) — no glyph ink there, so the
+    // sampled alpha is purely the row's background treatment.
+    let probe_col = layout.x0;
+
+    let expected = (target * 255.0).round() as i16;
+    let padding_alpha = i16::from(alpha_at(probe_col, 0));
+    let plain_alpha = i16::from(alpha_at(probe_col, plain_entry_row));
+    let query_alpha = i16::from(alpha_at(probe_col, query_row));
+    let selected_alpha = i16::from(alpha_at(probe_col, selected_row));
+
+    for (label, got) in [
+        ("padding (row 0, outside the block)", padding_alpha),
+        ("plain entry row", plain_alpha),
+        ("query row", query_alpha),
+    ] {
+        assert!(
+            (got - expected).abs() <= 3,
+            "{label} alpha should equal overlay_surface_alpha() ({expected}), got {got}"
+        );
+    }
+
+    // The selected row can't be made exactly `expected` (see the module doc
+    // above), but it must land much closer to it than the pre-fix bug did:
+    // pre-fix this pixel would read ~229 (`0.68 + 0.68*0.32`, i.e.
+    // `rgba_surface(selected_bg)` stacked on the clear); this fix's formula
+    // gives `0.20 + 0.68*0.80 = 0.744` -> ~190.
+    let expected_selected = (SELECTED_ROW_WASH_ALPHA_FOR_TEST
+        + target * (1.0 - SELECTED_ROW_WASH_ALPHA_FOR_TEST))
+        * 255.0;
+    assert!(
+        (f32::from(selected_alpha) - expected_selected).abs() <= 4.0,
+        "selected row alpha should be ~{expected_selected:.0} (wash formula), got {selected_alpha}"
+    );
+    assert!(
+        selected_alpha < 210,
+        "selected row alpha {selected_alpha} is too close to the pre-fix bug's ~229 (0.68 stacked on 0.68)"
+    );
+}
+// Mirrors `SELECTED_ROW_WASH_ALPHA` in `crates/noa-render/src/renderer/overlay.rs`
+// (private to that module) — kept here only so this test's expected-value
+// formula is self-documenting; update both if that constant ever changes.
+const SELECTED_ROW_WASH_ALPHA_FOR_TEST: f32 = 0.20;
 
 /// WP4 (REQ-NF-4, AC-WP4-03): draw one frame via a full rebuild (the first
 /// frame through a fresh `PaneRenderCache`) and a second frame via the

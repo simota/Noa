@@ -232,12 +232,11 @@ pub(super) fn append_command_palette_instances(
 
     let style = OverlayStyle::from_theme(theme);
     let color = |c: [f32; 4]| to_u8_color(surface_output_rgba(c, target_format_is_srgb));
-    let surface_bg = color(style.surface_bg());
     let surface_fg = color(style.surface_fg());
     let muted_fg = color(style.muted_fg());
     let border = color(style.border());
     let accent = color(style.accent());
-    let selected_bg = color(style.selected_bg());
+    let selected_wash = selected_row_wash_color(&style, target_format_is_srgb);
 
     // `shown/total` counter (A): how many entries are on screen vs the total
     // matched, shown only when the list is windowed short.
@@ -298,13 +297,17 @@ pub(super) fn append_command_palette_instances(
             *slot = muted_fg;
         }
     }
+    // `None`: this row's background is the block's own surface color, which
+    // the scratch's clear already carries (glassmorphism fix 1) — an
+    // additional quad here would just double-apply `overlay_surface_alpha()`
+    // on top of the clear for no visual gain (same RGB either way).
     emit_palette_row(
         instances,
         font,
         metrics,
         x0,
         y0,
-        surface_bg,
+        None,
         &query_text,
         &query_fg,
         &query_bold,
@@ -335,7 +338,7 @@ pub(super) fn append_command_palette_instances(
         let fg = vec![muted_fg; text.chars().count()];
         let bold = vec![false; text.chars().count()];
         emit_palette_row(
-            instances, font, metrics, x0, list_y0, surface_bg, &text, &fg, &bold,
+            instances, font, metrics, x0, list_y0, None, &text, &fg, &bold,
         );
     } else {
         for (i, row) in visible.iter().enumerate() {
@@ -346,9 +349,7 @@ pub(super) fn append_command_palette_instances(
                     let text = palette_line(label, None, inner);
                     let fg = vec![muted_fg; text.chars().count()];
                     let bold = vec![false; text.chars().count()];
-                    emit_palette_row(
-                        instances, font, metrics, x0, y, surface_bg, &text, &fg, &bold,
-                    );
+                    emit_palette_row(instances, font, metrics, x0, y, None, &text, &fg, &bold);
                 }
                 PaletteRow::Entry {
                     title,
@@ -357,7 +358,7 @@ pub(super) fn append_command_palette_instances(
                     enabled,
                 } => {
                     let selected = offset + i == palette.selected;
-                    let row_bg = if selected { selected_bg } else { surface_bg };
+                    let row_bg = selected.then_some(selected_wash);
                     let text = palette_line(title, hint.as_deref(), inner);
                     let ncols = text.chars().count();
                     let base_fg = if *enabled { surface_fg } else { muted_fg };
@@ -422,6 +423,13 @@ const PALETTE_CARET: char = '\u{258F}';
 /// width only ever exceeds this for unusually long titles/queries, and only
 /// shrinks below it when the pane itself is narrower.
 const PALETTE_MIN_INNER: usize = 56;
+/// Alpha of the selected row's accent wash quad (D), independent of
+/// `overlay_surface_alpha()` — see the long comment at
+/// [`selected_row_wash_color`] for why this can't just be
+/// `OverlayStyle::selected_bg()`. `0.20` matches the mix fraction
+/// `OverlayStyle::from_theme` uses for `selected_bg`'s own (opaque-path /
+/// native-overlay) RGB, so the two stay visually consistent.
+const SELECTED_ROW_WASH_ALPHA: f32 = 0.20;
 
 /// The resolved geometry of the palette block for a given grid: where it sits,
 /// how big it is (in grid cells), and which slice of `rows` is visible. Shared
@@ -530,11 +538,87 @@ pub fn command_palette_layout(
     })
 }
 
-/// Emit one palette row: its `block_w` background cells then its shaped glyph
-/// run, with a per-column foreground and per-column bold flag (so match
-/// highlights and dimmed hints paint within a single row). `text` is
-/// `inner + 2` columns of ASCII/width-1 glyphs, so column index equals char
-/// index.
+/// The selected row's accent wash color (D). NOT `style.selected_bg()`: that
+/// stamps `overlay_surface_alpha()` into its own alpha, which is meant for
+/// contexts (the macOS native overlay) that paint it as this row's *only*
+/// fill. Here it's drawn as an extra quad on top of a scratch already
+/// cleared to `overlay_surface_alpha()` (glassmorphism fix 1) — standard
+/// "over" blending can only ever *raise* alpha above whatever's underneath
+/// for any nonzero quad alpha (`src_a + dst_a*(1-src_a) > dst_a` whenever
+/// `dst_a < 1`), so reusing the surface alpha here would double-apply it,
+/// exactly like the plain rows used to (they now emit no quad at all —
+/// `overlay_surface_alpha()` reaches them purely through the clear). Using a
+/// *fixed* low wash alpha instead bounds the overshoot: at
+/// `overlay_surface_alpha() = 0.68`, this row lands at
+/// `0.20 + 0.68*0.80 = 0.744` instead of the old `0.68 + 0.68*0.32 = 0.898` —
+/// closer to the other rows' exact `0.68`, though not identical (that would
+/// need a second draw pass with a dst-alpha-preserving blend, ordered
+/// between this row's background and its glyphs — more machinery than one
+/// row's density warrants). At `overlay_surface_alpha() = 1.0` (glassmorphism
+/// off) this is exactly `0.20 + 1.0*0.80 = 1.0`, so the non-glass render is
+/// unaffected.
+///
+/// Color space: `OverlayStyle::selected_bg`'s original color (`theme.rs`'s
+/// `blend(surface_bg, OVERLAY_ACCENT, 0.20)`) lerps 8-bit sRGB channels
+/// directly. But this quad is composited by the GPU's fixed-function blend
+/// hardware, which — whenever the render target is an `*Srgb` format
+/// (`target_format_is_srgb`) — blends in LINEAR light, not sRGB-encoded
+/// values (`surface_output_rgba` pre-linearizes every other color this
+/// module emits for exactly that reason). A plain accent quad at
+/// `SELECTED_ROW_WASH_ALPHA` would therefore mix a visibly brighter, more
+/// saturated color than the old sRGB-space blend intended on a dark theme —
+/// a silent restyle, not just an alpha change. Pre-compensate: solve for the
+/// LINEAR quad value `q` that reproduces the OLD sRGB-lerped `selected_bg`
+/// once the GPU blends it against `surface_bg` at this wash's alpha `a`:
+/// ```text
+/// s2l(q) = (s2l(target) - (1 - a) * s2l(surface)) / a
+/// ```
+/// where `target` is the old `selected_bg`, `surface` is `surface_bg`, and
+/// `s2l` is the sRGB electro-optical transfer function (`srgb_to_linear`) —
+/// packed directly as the linear value (skipping a redundant
+/// encode-then-decode round trip through `color()`, which would only cost
+/// precision). For a light theme `q` can go negative — the target is darker
+/// than `(1 - a) * surface` alone reaches even at `q = 0` — so no quad color
+/// can hit it exactly at this alpha; clamped to `0.0` and the (still
+/// bounded, still smaller than reusing `overlay_surface_alpha()` would have
+/// been) residual is accepted. See
+/// `selected_row_wash_reproduces_the_old_srgb_lerp_after_gpu_blend` in
+/// `renderer/tests/overlay.rs` for the measured error in both cases.
+///
+/// Skipped when the target ISN'T sRGB: there `surface_output_rgba` is a
+/// passthrough, so the GPU blends the stored values directly and a plain
+/// accent quad already reproduces the old sRGB-space math with no
+/// compensation needed.
+pub(super) fn selected_row_wash_color(
+    style: &OverlayStyle,
+    target_format_is_srgb: bool,
+) -> [u8; 4] {
+    let a = SELECTED_ROW_WASH_ALPHA;
+    if target_format_is_srgb {
+        let [tr, tg, tb, _] = style.selected_bg();
+        let [sr, sg, sb, _] = style.surface_bg();
+        let compensate = |target: f32, surface: f32| {
+            ((srgb_to_linear(target) - (1.0 - a) * srgb_to_linear(surface)) / a).clamp(0.0, 1.0)
+        };
+        to_u8_color([
+            compensate(tr, sr),
+            compensate(tg, sg),
+            compensate(tb, sb),
+            a,
+        ])
+    } else {
+        let [ar, ag, ab, _] = style.accent();
+        to_u8_color(surface_output_rgba([ar, ag, ab, a], target_format_is_srgb))
+    }
+}
+
+/// Emit one palette row: its `block_w` background cells (if `bg` is `Some` —
+/// `None` means this row's background is the block's own surface color,
+/// already carried by the scratch's clear, so no quad is drawn for it; see
+/// [`append_command_palette_instances`]) then its shaped glyph run, with a
+/// per-column foreground and per-column bold flag (so match highlights and
+/// dimmed hints paint within a single row). `text` is `inner + 2` columns of
+/// ASCII/width-1 glyphs, so column index equals char index.
 #[allow(clippy::too_many_arguments)]
 fn emit_palette_row(
     instances: &mut Vec<CellInstance>,
@@ -542,21 +626,23 @@ fn emit_palette_row(
     metrics: Metrics,
     x0: u16,
     y: u16,
-    bg: [u8; 4],
+    bg: Option<[u8; 4]>,
     text: &str,
     fg_by_col: &[[u8; 4]],
     bold_by_col: &[bool],
 ) {
     let cells = palette_segment_cells(text, fg_by_col, bold_by_col);
-    for i in 0..cells.len() as u16 {
-        instances.push(CellInstance {
-            glyph_pos: [0, 0],
-            glyph_size: [0, 0],
-            bearing: [0, 0],
-            grid_pos: [x0 + i, y],
-            color: bg,
-            flags: 0,
-        });
+    if let Some(bg) = bg {
+        for i in 0..cells.len() as u16 {
+            instances.push(CellInstance {
+                glyph_pos: [0, 0],
+                glyph_size: [0, 0],
+                bearing: [0, 0],
+                grid_pos: [x0 + i, y],
+                color: bg,
+                flags: 0,
+            });
+        }
     }
     for mut run in segment_row(font, &cells) {
         run.start_col += x0;
@@ -639,28 +725,21 @@ pub(super) fn append_confirm_dialog_instances(
     };
 
     let style = OverlayStyle::from_theme(theme);
-    let surface_bg = to_u8_color(surface_output_rgba(
-        style.surface_bg(),
-        target_format_is_srgb,
-    ));
     let surface_fg = to_u8_color(surface_output_rgba(
         style.surface_fg(),
         target_format_is_srgb,
     ));
     let muted_fg = to_u8_color(surface_output_rgba(style.muted_fg(), target_format_is_srgb));
 
+    // Both rows are the block's own surface color (the dialog has no
+    // selected/differing row) — `None` so neither draws a background quad;
+    // the scratch's clear already carries `overlay_surface_alpha()`
+    // (glassmorphism fix 1), and a same-color quad on top would just
+    // double-apply it, as the whole card used to before this fix.
     let inner = layout.inner as usize;
     let rows = [
-        OverlayRow::uniform(
-            palette_line(&dialog.message, None, inner),
-            surface_bg,
-            surface_fg,
-        ),
-        OverlayRow::uniform(
-            palette_line(&dialog.hint, None, inner),
-            surface_bg,
-            muted_fg,
-        ),
+        OverlayRow::uniform(palette_line(&dialog.message, None, inner), None, surface_fg),
+        OverlayRow::uniform(palette_line(&dialog.hint, None, inner), None, muted_fg),
     ];
     for (i, row) in rows.iter().enumerate() {
         append_overlay_row(
@@ -724,19 +803,24 @@ pub fn confirm_dialog_layout(
     })
 }
 
-/// One row of a modal overlay block: a full-`block_w`-column line of text, a
-/// background color, and a per-column foreground (so a palette entry can paint
-/// its title and its dimmed keybind hint in different colors within one row).
+/// One row of a modal overlay block: a full-`block_w`-column line of text, an
+/// optional background color, and a per-column foreground (so a palette entry
+/// can paint its title and its dimmed keybind hint in different colors within
+/// one row).
 pub(super) struct OverlayRow {
     text: String,
-    bg: [u8; 4],
+    /// `None` when this row's background is the block's own surface color —
+    /// already carried by the scratch's clear, so no quad is drawn (see
+    /// [`append_confirm_dialog_instances`]). `Some` for a row that needs a
+    /// visibly different fill.
+    bg: Option<[u8; 4]>,
     /// One foreground color per column of `text`.
     fg: Vec<[u8; 4]>,
 }
 
 impl OverlayRow {
     /// A row painted in a single foreground color.
-    fn uniform(text: String, bg: [u8; 4], fg: [u8; 4]) -> Self {
+    fn uniform(text: String, bg: Option<[u8; 4]>, fg: [u8; 4]) -> Self {
         let cols = text.chars().count();
         OverlayRow {
             text,
@@ -747,7 +831,8 @@ impl OverlayRow {
 }
 
 /// Emit one overlay row's background rects (`block_w` cells wide, from `row`'s
-/// text length) plus its per-column-colored shaped glyphs at grid row `y`.
+/// text length, skipped entirely when `row.bg` is `None`) plus its
+/// per-column-colored shaped glyphs at grid row `y`.
 pub(super) fn append_overlay_row(
     instances: &mut Vec<CellInstance>,
     font: &mut FontGrid,
@@ -757,15 +842,17 @@ pub(super) fn append_overlay_row(
     row: &OverlayRow,
 ) {
     let cells = overlay_segment_cells(&row.text, &row.fg);
-    for i in 0..cells.len() as u16 {
-        instances.push(CellInstance {
-            glyph_pos: [0, 0],
-            glyph_size: [0, 0],
-            bearing: [0, 0],
-            grid_pos: [x0 + i, y],
-            color: row.bg,
-            flags: 0,
-        });
+    if let Some(bg) = row.bg {
+        for i in 0..cells.len() as u16 {
+            instances.push(CellInstance {
+                glyph_pos: [0, 0],
+                glyph_size: [0, 0],
+                bearing: [0, 0],
+                grid_pos: [x0 + i, y],
+                color: bg,
+                flags: 0,
+            });
+        }
     }
     for mut run in segment_row(font, &cells) {
         run.start_col += x0;

@@ -55,6 +55,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **Cursor styles** — block / bar / underline / hollow, focus / blink phase support
 - **Underline rendering** — single / double / curly / dotted / dashed, hover-link underline
 - **Background transparency / blur** — `background-opacity`, `background-blur-radius` (native macOS blur)
+- **Glassmorphism mode** — `glassmorphism` (default off): translucent frosted sidebar / tab-overview / titlebar-tab-bar chrome and frosted command palette / prompts / dialogs over the blurred desktop; on, it takes over `background-opacity` / `background-blur-radius` with its own recommended pair
 - **Background image** — `background-image` (single file / directory rotation), fit / position / repeat / opacity / interval settings
 - **minimum-contrast** — enforcement of a WCAG contrast-ratio floor
 - **Font pipeline** — font-kit discovery → rustybuzz shaping → swash rasterization → etagere atlas (monochrome + color emoji)
@@ -72,7 +73,7 @@ For the type, allowed values, defaults, and clamp/fallback rules of every key, s
 |---|---|
 | Window | `window-width/height`, `window-padding-x/-y`, `window-save-state` |
 | Font | `font-family[-bold/-italic/-bold-italic]`, `font-size`, `font-feature`, `font-variation*`, `font-synthetic-style`, `font-thicken[-strength]` |
-| Color/theme | `theme`, `background`, `foreground`, `cursor-color`, `selection-foreground/background`, `minimum-contrast`, `background-opacity`, `background-blur-radius` |
+| Color/theme | `theme`, `background`, `foreground`, `cursor-color`, `selection-foreground/background`, `minimum-contrast`, `background-opacity`, `background-blur-radius`, `glassmorphism` |
 | Background image | `background-image`, `background-image-opacity/-position/-fit/-repeat/-interval` |
 | Cursor | `cursor-style`, `cursor-style-blink`, `cursor-stop-blinking-after` |
 | Bell | `visual-bell`, `audible-bell`, `audible-bell-dock-bounce`, `audible-bell-when-unfocused` |

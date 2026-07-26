@@ -75,6 +75,24 @@ pub const DEFAULT_SIDEBAR_PREVIEW_LINES: usize = 5;
 /// Largest supported `sidebar-preview-lines` value. Higher values make each
 /// card too tall for the sidebar's dense session-list use case.
 pub const MAX_SIDEBAR_PREVIEW_LINES: usize = 20;
+/// `background-opacity` installed when `glassmorphism = true`, replacing
+/// whatever the config resolved to. Frosted chrome only reads as glass when
+/// there is something behind the window to show through, and a window is only
+/// see-through below `1.0` — leaving the user's value in place is what made
+/// `glassmorphism = true` look like it did nothing at all. Deliberately
+/// aggressive — half the window is the desktop behind it — because the point
+/// of the toggle is the glass, not a hint of it. What keeps text readable at
+/// this level is the companion blur, not the opacity: see
+/// [`GLASS_BACKGROUND_BLUR_RADIUS`], which is pinned to its maximum for
+/// exactly that reason. Users who want a heavier pane turn `glassmorphism`
+/// off and set `background-opacity` themselves.
+pub const GLASS_BACKGROUND_OPACITY: f32 = 0.50;
+/// `background-blur-radius` installed when `glassmorphism = true`: the
+/// maximum the key accepts. At [`GLASS_BACKGROUND_OPACITY`] the desktop is
+/// half the pixels on screen, so it has to be blurred past recognition —
+/// diffuse color instead of shapes — or wallpaper detail reads as noise
+/// under the text. Frosted glass, not clear glass.
+pub const GLASS_BACKGROUND_BLUR_RADIUS: u16 = 64;
 /// `server-port` default (noa-server spec DEC-3: fixed value, no discovery).
 pub const DEFAULT_SERVER_PORT: u16 = 61771;
 /// Default bind address for the `noa-server` socket: loopback-only. LAN
@@ -524,13 +542,39 @@ pub struct StartupConfig {
     /// Default [`DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS`]; set `0` to
     /// restore Ghostty-parity behavior.
     pub cursor_stop_blinking_after_secs: u64,
-    /// `background-opacity`: 0.0..=1.0, clamped. Consumed by the transparency
-    /// follow-up; plumbed through for now. Default is fully opaque.
+    /// `background-opacity`: 0.0..=1.0, clamped. Default is fully opaque.
+    /// **Ignored while `glassmorphism` is on** — that toggle installs
+    /// [`GLASS_BACKGROUND_OPACITY`] instead (see
+    /// [`apply_glassmorphism_defaults`]).
     pub background_opacity: f32,
     /// `background-blur-radius`: native macOS window background blur radius in
     /// points, `0..=64` (0 = no blur). Only visible with `background_opacity`
-    /// below 1.0. No-op on non-macOS.
+    /// below 1.0. No-op on non-macOS. **Ignored while `glassmorphism` is on**
+    /// — that toggle installs [`GLASS_BACKGROUND_BLUR_RADIUS`] instead.
     pub background_blur_radius: u16,
+    /// What `background-opacity` / `background-blur-radius` resolved to
+    /// *before* [`apply_glassmorphism_defaults`] took them over — equal to
+    /// the effective values whenever `glassmorphism` is off.
+    ///
+    /// Kept because the effective values are derived while the toggle is on,
+    /// and anything that writes config back (the Settings panel's Undo) must
+    /// restore what the user actually had, not the derived pair. Without
+    /// this, one undo would silently rewrite the fallback appearance that
+    /// turning `glassmorphism` off is supposed to return to.
+    pub configured_background_opacity: f32,
+    pub configured_background_blur_radius: u16,
+    /// `glassmorphism`: render noa's own chrome (session sidebar, tab
+    /// overview) as translucent frosted panes instead of opaque ones, so the
+    /// blurred desktop behind a translucent window shows through — the same
+    /// visual language the native AppKit overlays already use. Default off;
+    /// off installs the byte-identical opaque chrome palette, so it costs
+    /// nothing. On, it *takes over* `background-opacity` and
+    /// `background-blur-radius` — frosted chrome over an opaque window shows
+    /// nothing through, so those two keys resolve to
+    /// [`GLASS_BACKGROUND_OPACITY`] / [`GLASS_BACKGROUND_BLUR_RADIUS`]
+    /// regardless of what the config set them to (a diagnostic names any
+    /// value that was overridden). noa-specific key (no Ghostty analog).
+    pub glassmorphism: bool,
     /// `background-image`: path to a PNG laid behind the terminal grid, or the
     /// reserved value `noa` for Noa's bundled wallpaper directory. `None`
     /// leaves the background as the clear color only. Values are stored
@@ -724,6 +768,9 @@ impl Default for StartupConfig {
             cursor_stop_blinking_after_secs: DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS,
             background_opacity: 1.0,
             background_blur_radius: 0,
+            configured_background_opacity: 1.0,
+            configured_background_blur_radius: 0,
+            glassmorphism: false,
             background_image: None,
             background_image_opacity: 1.0,
             background_image_position: BackgroundImagePosition::default(),
@@ -798,6 +845,7 @@ pub struct ConfigOverrides {
     pub cursor_stop_blinking_after_secs: Option<u64>,
     pub background_opacity: Option<f32>,
     pub background_blur_radius: Option<u16>,
+    pub glassmorphism: Option<bool>,
     pub background_image: Option<PathBuf>,
     pub background_image_opacity: Option<f32>,
     pub background_image_position: Option<BackgroundImagePosition>,
@@ -880,6 +928,7 @@ macro_rules! impl_redacted_config_debug {
                     )
                     .field("background_opacity", &self.background_opacity)
                     .field("background_blur_radius", &self.background_blur_radius)
+                    .field("glassmorphism", &self.glassmorphism)
                     .field("background_image", &self.background_image)
                     .field("background_image_opacity", &self.background_image_opacity)
                     .field("background_image_position", &self.background_image_position)
@@ -987,6 +1036,7 @@ impl ConfigOverrides {
             background_blur_radius: higher_priority
                 .background_blur_radius
                 .or(self.background_blur_radius),
+            glassmorphism: higher_priority.glassmorphism.or(self.glassmorphism),
             background_image: higher_priority.background_image.or(self.background_image),
             background_image_opacity: higher_priority
                 .background_image_opacity
@@ -1115,6 +1165,12 @@ impl ConfigOverrides {
             background_blur_radius: self
                 .background_blur_radius
                 .unwrap_or(base.background_blur_radius),
+            // Overwritten wholesale by `apply_glassmorphism_defaults` at the
+            // end of resolution; the values here are placeholders that never
+            // reach a caller.
+            configured_background_opacity: base.configured_background_opacity,
+            configured_background_blur_radius: base.configured_background_blur_radius,
+            glassmorphism: self.glassmorphism.unwrap_or(base.glassmorphism),
             background_image: self.background_image.or(base.background_image),
             background_image_opacity: self
                 .background_image_opacity
@@ -1212,8 +1268,9 @@ pub fn load_startup_config(
 pub fn load_startup_config_without_files(
     cli: ConfigOverrides,
 ) -> anyhow::Result<(StartupConfig, Vec<Diagnostic>)> {
+    let diagnostics = Vec::from_iter(glass_override_diagnostic(&glass_overridden_keys(&cli)));
     let config = finalize_startup_config(cli.apply_to(StartupConfig::default()))?;
-    Ok((config, Vec::new()))
+    Ok((config, diagnostics))
 }
 
 pub fn load_startup_config_from(
@@ -1237,7 +1294,9 @@ pub fn load_startup_config_from(
         });
     }
 
-    let config = finalize_startup_config(file.merge(cli).apply_to(StartupConfig::default()))?;
+    let merged = file.merge(cli);
+    diagnostics.extend(glass_override_diagnostic(&glass_overridden_keys(&merged)));
+    let config = finalize_startup_config(merged.apply_to(StartupConfig::default()))?;
     Ok((config, diagnostics))
 }
 
@@ -1245,10 +1304,96 @@ fn finalize_startup_config(config: StartupConfig) -> anyhow::Result<StartupConfi
     finalize_startup_config_with_home(config, dirs::home_dir().as_deref())
 }
 
+/// `glassmorphism = true` takes over the window-transparency keys outright:
+/// [`GLASS_BACKGROUND_OPACITY`] / [`GLASS_BACKGROUND_BLUR_RADIUS`] replace
+/// whatever `background-opacity` / `background-blur-radius` resolved to,
+/// including explicitly configured values. Frosted chrome over an opaque
+/// window is a no-op (nothing shows through), so the two keys are not really
+/// independent of the toggle — honoring them would only reproduce the
+/// "glassmorphism does nothing" report that motivated this.
+///
+/// Applied once here, at the end of resolution, so every consumer — window
+/// transparency at creation, the renderer, macOS blur, the Settings panel,
+/// the `config` dump — sees the same values, on startup and on every live
+/// reload alike. [`glass_overridden_keys`] names the keys this silences so
+/// the loaders can say so in a diagnostic.
+fn apply_glassmorphism_defaults(config: &mut StartupConfig) {
+    // Recorded whether or not the takeover happens, so the pair is always
+    // "what the config actually asked for" and no caller has to branch on
+    // the toggle to know that.
+    config.configured_background_opacity = config.background_opacity;
+    config.configured_background_blur_radius = config.background_blur_radius;
+    config.background_opacity =
+        resolved_background_opacity(config.glassmorphism, config.configured_background_opacity);
+    config.background_blur_radius = resolved_background_blur_radius(
+        config.glassmorphism,
+        config.configured_background_blur_radius,
+    );
+}
+
+/// The `background-opacity` [`apply_glassmorphism_defaults`] resolves to,
+/// exposed standalone so a caller that needs the *effective* value ahead of
+/// the next full resolution pass — the Settings panel's own commit of the
+/// `glassmorphism` row, which mirrors the toggle into `AppConfig` directly
+/// rather than going through `StartupConfig` resolution again — can derive
+/// it without re-implementing this branch at a second site where it could
+/// drift from the rule above. `apply_glassmorphism_defaults` itself is
+/// written in terms of this function precisely so there is exactly one
+/// place the rule lives.
+pub fn resolved_background_opacity(glassmorphism: bool, configured_background_opacity: f32) -> f32 {
+    if glassmorphism {
+        GLASS_BACKGROUND_OPACITY
+    } else {
+        configured_background_opacity
+    }
+}
+
+/// As [`resolved_background_opacity`], for `background-blur-radius`.
+pub fn resolved_background_blur_radius(
+    glassmorphism: bool,
+    configured_background_blur_radius: u16,
+) -> u16 {
+    if glassmorphism {
+        GLASS_BACKGROUND_BLUR_RADIUS
+    } else {
+        configured_background_blur_radius
+    }
+}
+
+/// Which explicitly configured keys [`apply_glassmorphism_defaults`] is about
+/// to override, given the merged overrides that produced the config. Empty
+/// unless `glassmorphism` resolves to `true` *and* the user actually set one
+/// of them — an untouched key is a default, not something to warn about.
+fn glass_overridden_keys(overrides: &ConfigOverrides) -> Vec<&'static str> {
+    if !overrides.glassmorphism.unwrap_or(false) {
+        return Vec::new();
+    }
+    let mut keys = Vec::new();
+    if overrides.background_opacity.is_some() {
+        keys.push("background-opacity");
+    }
+    if overrides.background_blur_radius.is_some() {
+        keys.push("background-blur-radius");
+    }
+    keys
+}
+
+fn glass_override_diagnostic(keys: &[&'static str]) -> Option<Diagnostic> {
+    (!keys.is_empty()).then(|| Diagnostic {
+        message: format!(
+            "glassmorphism = true overrides {} with the recommended {GLASS_BACKGROUND_OPACITY:.2} \
+             / {GLASS_BACKGROUND_BLUR_RADIUS}; unset glassmorphism to control {} yourself",
+            keys.join(" and "),
+            if keys.len() == 1 { "it" } else { "them" }
+        ),
+    })
+}
+
 fn finalize_startup_config_with_home(
     mut config: StartupConfig,
     home: Option<&Path>,
 ) -> anyhow::Result<StartupConfig> {
+    apply_glassmorphism_defaults(&mut config);
     if config.client_token.is_none()
         && let Some(path) = config.client_token_file.as_deref()
     {
@@ -1428,6 +1573,9 @@ mod tests {
                 cursor_stop_blinking_after_secs: DEFAULT_CURSOR_STOP_BLINKING_AFTER_SECS,
                 background_opacity: 1.0,
                 background_blur_radius: 0,
+                configured_background_opacity: 1.0,
+                configured_background_blur_radius: 0,
+                glassmorphism: false,
                 background_image: None,
                 background_image_opacity: 1.0,
                 background_image_position: BackgroundImagePosition::default(),
@@ -2038,6 +2186,164 @@ font-size = 15.5
         assert!(message.contains(token_path.to_string_lossy().as_ref()));
         assert!(!message.contains("secret-marker"));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    // Regression lock for a stale-titlebar-backdrop bug (P2, noa-app): the
+    // fix derives the *effective* opacity/blur at a Settings-panel
+    // `glassmorphism` commit via these two functions instead of
+    // open-coding the branch a second time. Deliberately uses a configured
+    // opacity that is NOT `GLASS_BACKGROUND_OPACITY` (0.50) — the bug's
+    // original repro happened to configure exactly 0.50, which made the
+    // stale (pre-derivation) value coincidentally correct and hid the bug
+    // from that one input. A configured value of `1.0` (this test) would
+    // have caught it: the stale value and the resolved value disagree.
+    #[test]
+    fn resolved_background_opacity_and_blur_take_over_only_while_glass_is_on() {
+        assert_eq!(
+            resolved_background_opacity(true, 1.0),
+            GLASS_BACKGROUND_OPACITY
+        );
+        assert_eq!(resolved_background_opacity(false, 1.0), 1.0);
+        assert_eq!(
+            resolved_background_blur_radius(true, 0),
+            GLASS_BACKGROUND_BLUR_RADIUS
+        );
+        assert_eq!(resolved_background_blur_radius(false, 0), 0);
+
+        // `apply_glassmorphism_defaults` must agree with these standalone
+        // functions — it is written in terms of them, but pin the
+        // equivalence directly so the two can't silently diverge.
+        let mut config = StartupConfig {
+            glassmorphism: true,
+            background_opacity: 1.0,
+            background_blur_radius: 0,
+            ..StartupConfig::default()
+        };
+        apply_glassmorphism_defaults(&mut config);
+        assert_eq!(
+            config.background_opacity,
+            resolved_background_opacity(true, 1.0)
+        );
+        assert_eq!(
+            config.background_blur_radius,
+            resolved_background_blur_radius(true, 0)
+        );
+    }
+
+    // `glassmorphism = true` owns the window-transparency keys: an explicit
+    // `background-opacity = 1.00` (the exact config that made the frosted
+    // chrome look like it did nothing — an opaque window shows nothing
+    // through) resolves to the recommended pair instead, and the ignored
+    // keys are named in a diagnostic rather than silently dropped.
+    #[test]
+    fn glassmorphism_replaces_configured_background_opacity_and_blur() {
+        let dir = unique_temp_dir("glass-overrides");
+        let config_path = dir.join("config");
+        let legacy_path = dir.join("config.toml");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            &config_path,
+            "glassmorphism = true\nbackground-opacity = 1.00\nbackground-blur-radius = 0\n",
+        )
+        .unwrap();
+
+        let (config, diagnostics) =
+            load_startup_config_from(&config_path, &legacy_path, ConfigOverrides::default())
+                .unwrap();
+
+        assert_eq!(config.background_opacity, GLASS_BACKGROUND_OPACITY);
+        assert_eq!(config.background_blur_radius, GLASS_BACKGROUND_BLUR_RADIUS);
+        // Below 1.0 is the whole point: that is what makes the window
+        // transparent at creation, so the frosted panes have something
+        // behind them.
+        assert!(config.background_opacity < 1.0);
+        assert_eq!(diagnostics.len(), 1);
+        let message = &diagnostics[0].message;
+        assert!(message.contains("background-opacity"), "{message}");
+        assert!(message.contains("background-blur-radius"), "{message}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    // The override is unconditional, not a floor: a deliberately *more*
+    // transparent value is replaced too, so "glassmorphism on" always means
+    // one known-good look.
+    #[test]
+    fn glassmorphism_replaces_a_more_transparent_configured_value_too() {
+        let mut config = StartupConfig {
+            glassmorphism: true,
+            background_opacity: 0.4,
+            background_blur_radius: 5,
+            ..StartupConfig::default()
+        };
+        apply_glassmorphism_defaults(&mut config);
+        assert_eq!(config.background_opacity, GLASS_BACKGROUND_OPACITY);
+        assert_eq!(config.background_blur_radius, GLASS_BACKGROUND_BLUR_RADIUS);
+    }
+
+    // Default-off contract: with the toggle off the two keys are exactly
+    // what the config said, and nothing is reported.
+    #[test]
+    fn glassmorphism_off_leaves_the_background_keys_alone() {
+        let dir = unique_temp_dir("glass-off");
+        let config_path = dir.join("config");
+        let legacy_path = dir.join("config.toml");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            &config_path,
+            "background-opacity = 1.00\nbackground-blur-radius = 20\n",
+        )
+        .unwrap();
+
+        let (config, diagnostics) =
+            load_startup_config_from(&config_path, &legacy_path, ConfigOverrides::default())
+                .unwrap();
+
+        assert!(!config.glassmorphism);
+        assert_eq!(config.background_opacity, 1.0);
+        assert_eq!(config.background_blur_radius, 20);
+        assert!(diagnostics.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    // Nothing to warn about when the user never set the keys — the values
+    // being replaced are defaults, not choices.
+    #[test]
+    fn glassmorphism_alone_forces_the_pair_without_a_diagnostic() {
+        let dir = unique_temp_dir("glass-only");
+        let config_path = dir.join("config");
+        let legacy_path = dir.join("config.toml");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&config_path, "glassmorphism = true\n").unwrap();
+
+        let (config, diagnostics) =
+            load_startup_config_from(&config_path, &legacy_path, ConfigOverrides::default())
+                .unwrap();
+
+        assert_eq!(config.background_opacity, GLASS_BACKGROUND_OPACITY);
+        assert_eq!(config.background_blur_radius, GLASS_BACKGROUND_BLUR_RADIUS);
+        assert!(diagnostics.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    // `--config-default-files=false` resolves through a different loader;
+    // the takeover must not be file-path-specific.
+    #[test]
+    fn glassmorphism_forces_the_pair_without_config_files_too() {
+        let cli = ConfigOverrides {
+            glassmorphism: Some(true),
+            background_opacity: Some(1.0),
+            ..Default::default()
+        };
+
+        let (config, diagnostics) = load_startup_config_without_files(cli).unwrap();
+
+        assert_eq!(config.background_opacity, GLASS_BACKGROUND_OPACITY);
+        assert_eq!(config.background_blur_radius, GLASS_BACKGROUND_BLUR_RADIUS);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("background-opacity"));
     }
 
     #[test]

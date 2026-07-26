@@ -43,6 +43,7 @@ pub(crate) fn build_overrides(
     let mut cursor_stop_blinking_after_secs = None;
     let mut background_opacity = None;
     let mut background_blur_radius = None;
+    let mut glassmorphism = None;
     let mut background_image = None;
     let mut background_image_opacity = None;
     let mut background_image_position = None;
@@ -216,6 +217,9 @@ pub(crate) fn build_overrides(
             }
             "background-blur-radius" => {
                 background_blur_radius = parse_blur_radius(path, directive, &mut diagnostics);
+            }
+            "glassmorphism" => {
+                glassmorphism = parse_bool_directive(path, directive, &mut diagnostics);
             }
             "background-image" => {
                 background_image = parse_background_image(directive);
@@ -432,6 +436,7 @@ pub(crate) fn build_overrides(
             cursor_stop_blinking_after_secs,
             background_opacity,
             background_blur_radius,
+            glassmorphism,
             background_image,
             background_image_opacity,
             background_image_position,
@@ -539,6 +544,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "alpha-blending"
             | "background-opacity"
             | "background-blur-radius"
+            | "glassmorphism"
             | "background-image"
             | "background-image-opacity"
             | "background-image-position"

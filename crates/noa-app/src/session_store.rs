@@ -838,12 +838,24 @@ pub fn civil_from_unix_secs(secs: i64) -> WallClock {
     }
 }
 
+/// Three-letter English month abbreviations, indexed by `month - 1`. Used by
+/// [`format_relative_time`]'s older-than-yesterday branch; a fixed table (not
+/// a locale lookup) because every other noa UI string is fixed English too.
+const MONTH_ABBREV: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
 /// Format a wall-clock timestamp relative to `now` (FR-10). `now` is a
 /// parameter (no `Instant::now()` inside) so the formatter is pure and its
 /// boundaries are directly testable. Rules, keyed off the calendar-day gap:
-/// - same day: `たった今` / `N分前` / `N時間前`
-/// - yesterday: `昨日 HH:MM`
-/// - older: `M月D日`
+/// - same day: `just now` / `Nm ago` / `Nh ago`
+/// - yesterday: `Yday HH:MM`
+/// - older: `Mon D`
+///
+/// Every form is kept within the ~11 cells the right-aligned updated-time
+/// column affords (`CARD_UPDATED_W`, sidebar.rs) — hence `Yday` rather than
+/// the spelled-out `Yesterday HH:MM`, which would overrun into the card's
+/// name column.
 pub fn format_relative_time(now: WallClock, updated: WallClock) -> String {
     let day_diff = days_from_civil(now.year, now.month, now.day)
         - days_from_civil(updated.year, updated.month, updated.day);
@@ -854,16 +866,23 @@ pub fn format_relative_time(now: WallClock, updated: WallClock) -> String {
         let updated_min = (updated.hour * 60 + updated.minute) as i64;
         let elapsed = (now_min - updated_min).max(0);
         if elapsed < 1 {
-            "たった今".to_string()
+            "just now".to_string()
         } else if elapsed < 60 {
-            format!("{elapsed}分前")
+            format!("{elapsed}m ago")
         } else {
-            format!("{}時間前", elapsed / 60)
+            format!("{}h ago", elapsed / 60)
         }
     } else if day_diff == 1 {
-        format!("昨日 {:02}:{:02}", updated.hour, updated.minute)
+        format!("Yday {:02}:{:02}", updated.hour, updated.minute)
     } else {
-        format!("{}月{}日", updated.month, updated.day)
+        // `month` comes from `civil_from_days`, which yields 1..=12; the
+        // fallback keeps the formatter total rather than panicking on a
+        // corrupted timestamp.
+        let month = MONTH_ABBREV
+            .get(updated.month.saturating_sub(1) as usize)
+            .copied()
+            .unwrap_or("???");
+        format!("{month} {}", updated.day)
     }
 }
 
@@ -1287,11 +1306,11 @@ mod tests {
         let now = wall(10, 3);
 
         // Same day, 3 minutes earlier.
-        assert_eq!(format_relative_time(now, wall(10, 0)), "3分前");
+        assert_eq!(format_relative_time(now, wall(10, 0)), "3m ago");
         // Same day, exact same minute.
-        assert_eq!(format_relative_time(now, wall(10, 3)), "たった今");
+        assert_eq!(format_relative_time(now, wall(10, 3)), "just now");
         // Same day, 2 hours earlier.
-        assert_eq!(format_relative_time(wall(12, 0), wall(10, 0)), "2時間前");
+        assert_eq!(format_relative_time(wall(12, 0), wall(10, 0)), "2h ago");
 
         // Yesterday at 23:47.
         let yesterday = WallClock {
@@ -1300,7 +1319,7 @@ mod tests {
             minute: 47,
             ..now
         };
-        assert_eq!(format_relative_time(now, yesterday), "昨日 23:47");
+        assert_eq!(format_relative_time(now, yesterday), "Yday 23:47");
 
         // Older than yesterday → date form.
         let older = WallClock {
@@ -1309,7 +1328,57 @@ mod tests {
             minute: 15,
             ..now
         };
-        assert_eq!(format_relative_time(now, older), "7月1日");
+        assert_eq!(format_relative_time(now, older), "Jul 1");
+    }
+
+    // FR-10: every form has to fit the right-aligned updated-time column
+    // (`CARD_UPDATED_W`, ~11 cells at the sidebar font) — the whole reason the
+    // strings are abbreviated (`Yday`, `Nm ago`) rather than spelled out. An
+    // overlong form is drawn last and silently eats into the card's name, so
+    // pin the widest value each branch can produce.
+    #[test]
+    fn every_relative_time_form_fits_the_updated_column() {
+        const MAX_CELLS: usize = 11;
+        let now = wall(10, 3);
+        let at = |day: u32, hour: u32, minute: u32| WallClock {
+            day,
+            hour,
+            minute,
+            ..now
+        };
+
+        let widest = [
+            // Same day: "just now", then the longest minute/hour counts.
+            format_relative_time(now, now),
+            format_relative_time(wall(10, 59), wall(10, 0)),
+            format_relative_time(wall(23, 59), wall(0, 0)),
+            // Yesterday, with two-digit hour and minute.
+            format_relative_time(now, at(4, 23, 47)),
+            // Older, with the longest month abbreviation and a two-digit day.
+            format_relative_time(
+                now,
+                WallClock {
+                    month: 12,
+                    day: 31,
+                    hour: 8,
+                    minute: 15,
+                    ..now
+                },
+            ),
+        ];
+
+        for value in widest {
+            // Pure ASCII by construction, so `chars()` is the cell count.
+            assert!(
+                value.chars().count() <= MAX_CELLS,
+                "{value:?} is {} cells, over the {MAX_CELLS}-cell column",
+                value.chars().count()
+            );
+            assert!(
+                value.is_ascii(),
+                "{value:?} must stay ASCII — a wide glyph would double its cell cost"
+            );
+        }
     }
 
     #[test]

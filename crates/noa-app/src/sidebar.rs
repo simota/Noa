@@ -64,7 +64,8 @@ const CARD_MENU_W: u32 = 22;
 const CARD_LINE_H: u32 = 15;
 const CARD_NAME_H: u32 = 18;
 /// Width of the right-aligned updated-time region on the name row (fits
-/// `昨日 23:47` in the sidebar's small font).
+/// `Yday 23:47`, the widest form `format_relative_time` emits, in the
+/// sidebar's small font).
 const CARD_UPDATED_W: u32 = 78;
 
 // Card interior row baselines (top-relative): the name row (dot, icon, name,
@@ -1017,7 +1018,7 @@ mod tests {
             lines.updated,
             format_relative_time(wall(10, 3), wall(10, 0))
         );
-        assert_eq!(lines.updated, "3分前");
+        assert_eq!(lines.updated, "3m ago");
 
         // The running-process row shows the detected foreground process.
         assert_eq!(lines.process, "cargo");

@@ -282,6 +282,13 @@ impl BlitPipeline {
 /// knob); this struct just carries them across the crate boundary.
 #[derive(Clone, Copy, Debug)]
 pub struct CardStyle {
+    /// The card *fill*, used only by the paths that clear their target with
+    /// it (`composite_cards`). The texture-card overlays
+    /// (`overlay_texture_cards*`) never read it: `card.wgsl` builds its
+    /// output from the sampled texture and the border stroke, and takes its
+    /// alpha from `tex.a` alone. A translucent surface on those paths must
+    /// therefore be *rasterized* translucent — setting an alpha here does
+    /// nothing.
     pub background: [f32; 4],
     pub border_color: [f32; 4],
     pub focus_color: [f32; 4],
@@ -360,6 +367,11 @@ const CARD_POOL_CAP: usize = 32;
 
 pub struct CardPipeline {
     pipeline: wgpu::RenderPipeline,
+    /// Glow/focus-ring-only pipeline (`fs_glow`), drawn separately from
+    /// `pipeline` so it can use `GLOW_PRESERVE_DST_ALPHA` regardless of
+    /// which blend `pipeline` was constructed with — see that constant's
+    /// doc comment.
+    glow_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// Per-card uniform buffer + bind group, reused across frames when the
@@ -392,6 +404,30 @@ impl CardPipeline {
         alpha: wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::One,
             dst_factor: wgpu::BlendFactor::Zero,
+            operation: wgpu::BlendOperation::Add,
+        },
+    };
+
+    /// Blend for the glow/focus-ring pass (`fs_glow`, see its doc comment in
+    /// `card.wgsl`). Color is a normal over-blend, same as `ALPHA_REPLACE`'s
+    /// and `ALPHA_BLENDING`'s color factors — only the alpha channel differs:
+    /// the destination's existing alpha is kept as-is (`dst·1`) rather than
+    /// replaced or accumulated (`src·0`), so a glow drawn under
+    /// `ALPHA_REPLACE` tints color without eroding whatever alpha the face
+    /// pass (or an earlier composite) already wrote there. Under an opaque
+    /// backdrop (`ALPHA_BLENDING` mode, dst alpha already 1) this is
+    /// numerically identical to the old combined-shader behavior, since 1
+    /// held unchanged equals 1 accumulated toward — the split only changes
+    /// output where dst alpha is < 1, i.e. under glassmorphism.
+    pub const GLOW_PRESERVE_DST_ALPHA: wgpu::BlendState = wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::SrcAlpha,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::One,
             operation: wgpu::BlendOperation::Add,
         },
     };
@@ -485,6 +521,43 @@ impl CardPipeline {
             cache: None,
         });
 
+        // Same layout/vertex stage as `pipeline`, but draws only the glow
+        // ring (`fs_glow`) with `GLOW_PRESERVE_DST_ALPHA` instead of the
+        // caller-selected face blend — see that constant's doc comment.
+        let glow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("noa-overview-card-glow-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_glow"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(Self::GLOW_PRESERVE_DST_ALPHA),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("noa-overview-card-sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -498,6 +571,7 @@ impl CardPipeline {
 
         Self {
             pipeline,
+            glow_pipeline,
             bind_group_layout,
             sampler,
             pool: RefCell::new(HashMap::new()),
@@ -639,6 +713,12 @@ impl CardPipeline {
             })
             .collect();
 
+        // Parallel to `placement_keys`: whether this placement's glow ring
+        // is actually visible, so the render pass below skips the extra
+        // `glow_pipeline` draw call for the common (unselected) case instead
+        // of issuing one that's guaranteed to discard every fragment.
+        let mut glow_flags = Vec::<bool>::with_capacity(placements.len());
+
         let mut pool = self.pool.borrow_mut();
         for (placement, pool_key) in placements.iter().zip(&placement_keys) {
             let (border_color, border_width, glow_width) = if placement.selected {
@@ -648,6 +728,7 @@ impl CardPipeline {
             };
             let mut glow_color = style.focus_color;
             glow_color[3] = if placement.selected { 0.45 } else { 0.0 };
+            glow_flags.push(glow_width > 0.0 && glow_color[3] > 0.0);
             let uniforms = CardUniformsRaw {
                 rect: [
                     placement.x as f32,
@@ -743,12 +824,23 @@ impl CardPipeline {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(&self.pipeline);
-            for pool_key in &placement_keys {
+            // Per placement: glow ring first, then the card face — the same
+            // relative order the old single-shader draw produced (both
+            // regions came out of one `pass.draw` per placement, in
+            // placement order). The two pipelines' fragments never overlap
+            // (`fs_main` only covers `coverage > 0`, `fs_glow` only
+            // `coverage <= 0`), so this split changes blend math, not
+            // layering.
+            for (pool_key, has_glow) in placement_keys.iter().zip(&glow_flags) {
                 let pooled = pool
                     .get(pool_key)
                     .expect("pool entry inserted or refreshed above for every placement");
                 pass.set_bind_group(0, &pooled.bind_group, &[]);
+                if *has_glow {
+                    pass.set_pipeline(&self.glow_pipeline);
+                    pass.draw(0..6, 0..1);
+                }
+                pass.set_pipeline(&self.pipeline);
                 pass.draw(0..6, 0..1);
             }
         }
@@ -802,6 +894,11 @@ pub struct OverviewThumbnailResources {
     tile_size: PixelSize,
     title_bar_h: u32,
     card_color: [f32; 4],
+    /// The blend `card` was built with. A pipeline's blend state is fixed at
+    /// creation, so a caller whose compositing model can change at runtime
+    /// (`glassmorphism`) has to treat this as part of staleness — see
+    /// [`Self::card_blend`].
+    card_blend: wgpu::BlendState,
 }
 
 impl OverviewThumbnailResources {
@@ -815,9 +912,10 @@ impl OverviewThumbnailResources {
         tile_count: usize,
         title_bar_h: u32,
         card_color: [f32; 4],
+        card_blend: wgpu::BlendState,
     ) -> Self {
         let blit = BlitPipeline::new(device, format);
-        let card = CardPipeline::new(device, format, wgpu::BlendState::ALPHA_BLENDING);
+        let card = CardPipeline::new(device, format, card_blend);
         let scratch = OverviewScratchTexture::new(device, format, scratch_size);
         let tiles = (0..tile_count)
             .map(|_| OverviewTileTexture::new(device, format, tile_size))
@@ -840,6 +938,7 @@ impl OverviewThumbnailResources {
             tile_size,
             title_bar_h,
             card_color,
+            card_blend,
         };
         // Freshly allocated tile textures hold uninitialized memory; a tile
         // that never receives its first mirror would otherwise be composited
@@ -859,6 +958,7 @@ impl OverviewThumbnailResources {
         tile_count: usize,
         title_bar_h: u32,
         card_color: [f32; 4],
+        card_blend: wgpu::BlendState,
     ) -> Self {
         Self::new(
             device,
@@ -869,6 +969,7 @@ impl OverviewThumbnailResources {
             tile_count,
             title_bar_h,
             card_color,
+            card_blend,
         )
     }
 
@@ -896,6 +997,20 @@ impl OverviewThumbnailResources {
 
     pub fn tile_count(&self) -> usize {
         self.tiles.len()
+    }
+
+    /// The blend the tile composite was built with (see the field).
+    pub fn card_blend(&self) -> wgpu::BlendState {
+        self.card_blend
+    }
+
+    /// The card face color every tile texture was cleared to at allocation.
+    /// Exposed so a caller whose palette can change at runtime (a theme
+    /// polarity flip, a `glassmorphism` toggle) can treat a color change as
+    /// a reason to rebuild — the tiles carry the old color baked in, and no
+    /// later draw re-clears them.
+    pub fn card_color(&self) -> [f32; 4] {
+        self.card_color
     }
 
     pub fn title_bar_h(&self) -> u32 {

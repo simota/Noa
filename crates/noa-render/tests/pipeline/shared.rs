@@ -273,3 +273,33 @@ pub(crate) fn image_snapshot(
         }],
     }
 }
+
+/// Clear `view` to `color` in a pass of its own — for tests that need a
+/// known starting state before an overlay composite (`LoadOp::Load`) so the
+/// alpha they read back is exactly what the shader emitted.
+pub(crate) fn clear_view(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    view: &wgpu::TextureView,
+    color: wgpu::Color,
+) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("noa-test-clear-encoder"),
+    });
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("noa-test-clear-pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(color),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+    queue.submit(Some(encoder.finish()));
+}

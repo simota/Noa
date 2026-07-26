@@ -19,6 +19,9 @@ fn init() -> ThemeSettingsInit {
         cursor_style: CursorShape::Block,
         background_opacity: 1.0,
         background_blur_radius: 0,
+        configured_background_opacity: 1.0,
+        configured_background_blur_radius: 0,
+        window_created_transparent: false,
         background_image: String::new(),
         background_image_opacity: 1.0,
         background_image_position: BackgroundImagePosition::Center,
@@ -35,6 +38,7 @@ fn init() -> ThemeSettingsInit {
         // this row only ever edits a plain fraction (see
         // `quick_terminal_height_fraction` at the `App` layer).
         quick_terminal_size: 0.4,
+        glassmorphism: false,
         confirm_quit: true,
         send_selection_send_enter: false,
         font_family: "Menlo".to_string(),
@@ -93,6 +97,10 @@ fn settings_init() -> ThemeSettingsInit {
 fn transparent_init() -> ThemeSettingsInit {
     ThemeSettingsInit {
         background_opacity: 0.9,
+        configured_background_opacity: 0.9,
+        // The gate is now the window's creation-time capability, not a value
+        // derived from this opacity — a session over a see-through window.
+        window_created_transparent: true,
         ..settings_init()
     }
 }
@@ -1109,6 +1117,387 @@ fn send_selection_send_enter_row_toggles_and_commits_without_restart_note() {
     );
 }
 
+// The `glassmorphism` row is a plain On/Off toggle that badges `ON SAVE`
+// (not `ON LAUNCH`) in a session that can already show it: it has no
+// continuous live preview while being edited, but `App::commit_theme_settings`
+// re-selects the chrome palette (and, since the P2 stale-titlebar-backdrop
+// fix, refreshes the native macOS backdrop) directly the moment the row is
+// saved — see `SettingsRowKind::Glassmorphism`'s doc comment for why that
+// can no longer be left to `ConfigWatcher`'s reload-diff pass.
+#[test]
+fn glassmorphism_row_toggles_and_commits_on_save_without_restart_note() {
+    let mut settings = ThemeSettings::open(transparent_init());
+    let idx = row_index(SettingsRowKind::Glassmorphism);
+    // The panel opens showing the default-off value.
+    assert_eq!(settings.rows()[idx].draft, RowDraft::Glassmorphism(false));
+
+    move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
+    assert_eq!(settings.adjust(1, Instant::now()), RowEffect::None);
+    assert_eq!(settings.rows()[idx].draft, RowDraft::Glassmorphism(true));
+    assert!(!settings.restart_note(SettingsRowKind::Glassmorphism));
+    assert_eq!(
+        settings.liveness(SettingsRowKind::Glassmorphism),
+        Liveness::OnSave
+    );
+
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "glassmorphism"),
+        Some(&("glassmorphism".to_string(), "true".to_string()))
+    );
+}
+
+// Switching glassmorphism on in a session that started opaque cannot show
+// anything through the frosted chrome until the window is recreated
+// see-through — the same R-11 constraint the opacity/blur rows already
+// carry, so the row reports it the same way instead of silently doing
+// nothing visible (the original "glassmorphism doesn't apply" report).
+#[test]
+fn glassmorphism_switched_on_reports_opaque_startup_in_an_opaque_session() {
+    let mut settings = ThemeSettings::open(settings_init());
+    assert!(settings.opaque_at_startup());
+    // Off, the row says nothing about transparency — it changes nothing
+    // that needs a see-through window.
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::Glassmorphism),
+        RestartReason::None
+    );
+
+    move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
+    settings.adjust(1, Instant::now());
+
+    assert_eq!(
+        settings.restart_reason(SettingsRowKind::Glassmorphism),
+        RestartReason::OpaqueStartup
+    );
+    assert_eq!(
+        settings.liveness(SettingsRowKind::Glassmorphism),
+        Liveness::OnLaunch
+    );
+}
+
+// Turning glassmorphism on snaps the two keys it takes over onto the values
+// the resolver will install (`noa_config::apply_glassmorphism_defaults`), so
+// the panel never displays an opacity/blur the running config won't have —
+// and leaves them untouched, so the commit writes only the toggle.
+#[test]
+fn glassmorphism_snaps_the_transparency_rows_it_manages_without_writing_them() {
+    let mut settings = ThemeSettings::open(transparent_init());
+    move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
+    settings.adjust(1, Instant::now());
+
+    let opacity = row_index(SettingsRowKind::BackgroundOpacity);
+    let blur = row_index(SettingsRowKind::BackgroundBlurRadius);
+    assert_eq!(
+        settings.rows()[opacity].draft,
+        RowDraft::BackgroundOpacity(noa_config::GLASS_BACKGROUND_OPACITY)
+    );
+    assert_eq!(
+        settings.rows()[blur].draft,
+        RowDraft::BackgroundBlurRadius(noa_config::GLASS_BACKGROUND_BLUR_RADIUS)
+    );
+    assert!(!settings.rows()[opacity].touched);
+    assert!(!settings.rows()[blur].touched);
+
+    let updates = settings.commit_updates();
+    assert!(updates.iter().all(|(k, _)| k != "background-opacity"));
+    assert!(updates.iter().all(|(k, _)| k != "background-blur-radius"));
+}
+
+// Turning glassmorphism back off in the same session hands the two rows
+// back exactly as they were — draft *and* `touched`. Otherwise an on/off
+// round trip would leave the glass pair behind as if the user had chosen
+// it: a later step would move off 0.50 instead of their own value, and an
+// untouched save would show a panel disagreeing with the resolved config.
+#[test]
+fn toggling_glassmorphism_off_restores_the_transparency_rows_it_took_over() {
+    let mut settings = ThemeSettings::open(transparent_init());
+    let opacity = row_index(SettingsRowKind::BackgroundOpacity);
+    let blur = row_index(SettingsRowKind::BackgroundBlurRadius);
+
+    // A deliberate, non-default edit before the toggle.
+    move_to_row(&mut settings, SettingsRowKind::BackgroundOpacity);
+    settings.adjust(-1, Instant::now());
+    let edited = settings.rows()[opacity].clone();
+    let untouched_blur = settings.rows()[blur].clone();
+    assert!(edited.touched);
+
+    move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
+    settings.adjust(1, Instant::now());
+    assert_eq!(
+        settings.rows()[opacity].draft,
+        RowDraft::BackgroundOpacity(noa_config::GLASS_BACKGROUND_OPACITY)
+    );
+
+    settings.adjust(1, Instant::now());
+    assert_eq!(settings.rows()[opacity].draft, edited.draft);
+    assert!(
+        settings.rows()[opacity].touched,
+        "the edit must still commit"
+    );
+    assert_eq!(settings.rows()[blur], untouched_blur);
+
+    // The rows are adjustable again, from the restored value.
+    move_to_row(&mut settings, SettingsRowKind::BackgroundOpacity);
+    assert_ne!(settings.adjust(-1, Instant::now()), RowEffect::None);
+}
+
+// R-11's gate is the window's creation-time capability, never the live
+// opacity. AppKit fixes opacity at creation, and `glassmorphism` moves the
+// effective opacity underneath a window that is already built: an opaque
+// window that a config reload gave `0.50` still cannot preview transparency
+// (it must not claim `LIVE`), and a see-through window whose glass was just
+// turned off resolves back to `1.0` while remaining perfectly capable of it
+// (it must not claim `ON LAUNCH`).
+#[test]
+fn the_live_preview_gate_follows_the_window_not_the_effective_opacity() {
+    // Opaque window, glass-lowered opacity: still gated.
+    let opaque_window = ThemeSettings::open(ThemeSettingsInit {
+        glassmorphism: true,
+        background_opacity: noa_config::GLASS_BACKGROUND_OPACITY,
+        background_blur_radius: noa_config::GLASS_BACKGROUND_BLUR_RADIUS,
+        window_created_transparent: false,
+        ..settings_init()
+    });
+    assert!(opaque_window.opaque_at_startup());
+    assert_eq!(
+        opaque_window.restart_reason(SettingsRowKind::BackgroundOpacity),
+        RestartReason::OpaqueStartup
+    );
+    assert_eq!(
+        opaque_window.liveness(SettingsRowKind::BackgroundOpacity),
+        Liveness::OnLaunch
+    );
+
+    // See-through window back at a fully opaque value: not gated.
+    let transparent_window = ThemeSettings::open(ThemeSettingsInit {
+        glassmorphism: false,
+        background_opacity: 1.0,
+        configured_background_opacity: 1.0,
+        window_created_transparent: true,
+        ..settings_init()
+    });
+    assert!(!transparent_window.opaque_at_startup());
+    assert_eq!(
+        transparent_window.restart_reason(SettingsRowKind::BackgroundOpacity),
+        RestartReason::None
+    );
+    assert_eq!(
+        transparent_window.liveness(SettingsRowKind::BackgroundOpacity),
+        Liveness::Live
+    );
+}
+
+// A session that *opens* with glassmorphism on has rows already holding the
+// derived pair, so the restore point must come from the configured values
+// instead. Otherwise the glass pair becomes its own restore point: turning
+// the toggle off would show 0.50 / 64 rather than the user's fallback
+// 0.9 / 5, and the next adjustment would overwrite that fallback from the
+// wrong base.
+#[test]
+fn a_session_opened_under_glassmorphism_restores_the_configured_pair() {
+    let mut settings = ThemeSettings::open(ThemeSettingsInit {
+        glassmorphism: true,
+        // What the resolver installed...
+        background_opacity: noa_config::GLASS_BACKGROUND_OPACITY,
+        background_blur_radius: noa_config::GLASS_BACKGROUND_BLUR_RADIUS,
+        // ...over what the config file actually asks for.
+        configured_background_opacity: 0.9,
+        configured_background_blur_radius: 5,
+        window_created_transparent: true,
+        ..settings_init()
+    });
+    let opacity = row_index(SettingsRowKind::BackgroundOpacity);
+    let blur = row_index(SettingsRowKind::BackgroundBlurRadius);
+
+    // While it is on, the panel shows what is actually in effect.
+    assert_eq!(
+        settings.rows()[opacity].draft,
+        RowDraft::BackgroundOpacity(noa_config::GLASS_BACKGROUND_OPACITY)
+    );
+
+    move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
+    settings.adjust(1, Instant::now()); // off
+
+    assert_eq!(
+        settings.rows()[opacity].draft,
+        RowDraft::BackgroundOpacity(0.9)
+    );
+    assert_eq!(
+        settings.rows()[blur].draft,
+        RowDraft::BackgroundBlurRadius(5)
+    );
+    // Restored, not edited: these are what the file already says, so the
+    // commit writes only the toggle.
+    assert!(!settings.rows()[opacity].touched);
+    assert!(!settings.rows()[blur].touched);
+    let updates = settings.commit_updates();
+    assert!(updates.iter().all(|(k, _)| k != "background-opacity"));
+
+    // And a following adjustment steps from the fallback, not from 0.50.
+    move_to_row(&mut settings, SettingsRowKind::BackgroundOpacity);
+    settings.adjust(-1, Instant::now());
+    let RowDraft::BackgroundOpacity(stepped) = settings.rows()[opacity].draft else {
+        unreachable!("the row holds its own draft variant");
+    };
+    assert!(stepped < 0.9 && stepped > noa_config::GLASS_BACKGROUND_OPACITY);
+}
+
+// An opacity edit made *before* the toggle still has to reach disk when the
+// session saves with glassmorphism on: while the toggle is on that value is
+// the fallback appearance — what the window returns to when it is turned
+// back off — so dropping it would silently discard a deliberate setting.
+#[test]
+fn edits_made_before_glassmorphism_still_commit_when_saving_with_it_on() {
+    let mut settings = ThemeSettings::open(transparent_init());
+    move_to_row(&mut settings, SettingsRowKind::BackgroundOpacity);
+    settings.adjust(-1, Instant::now());
+    let RowDraft::BackgroundOpacity(edited) =
+        settings.rows()[row_index(SettingsRowKind::BackgroundOpacity)].draft
+    else {
+        unreachable!("the row holds its own draft variant");
+    };
+
+    move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
+    settings.adjust(1, Instant::now());
+
+    let updates = settings.commit_updates();
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "glassmorphism"),
+        Some(&("glassmorphism".to_string(), "true".to_string()))
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "background-opacity"),
+        Some(&("background-opacity".to_string(), format!("{edited:.2}")))
+    );
+    // The untouched sibling contributes nothing — only the real edit does.
+    assert!(updates.iter().all(|(k, _)| k != "background-blur-radius"));
+}
+
+// A second on/off round trip must still restore the *user's* values, not
+// the glass pair captured by the first one.
+#[test]
+fn repeated_glassmorphism_toggles_never_capture_the_glass_pair_as_the_restore_point() {
+    let mut settings = ThemeSettings::open(transparent_init());
+    let opacity = row_index(SettingsRowKind::BackgroundOpacity);
+    let original = settings.rows()[opacity].clone();
+
+    move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
+    for _ in 0..2 {
+        settings.adjust(1, Instant::now()); // on
+        settings.adjust(1, Instant::now()); // off
+    }
+
+    assert_eq!(settings.rows()[opacity], original);
+}
+
+// Reset is the other route from on to off (the row's default is `false`),
+// so it has to hand the managed rows back exactly as the toggle does —
+// otherwise the restore point stays stashed while the rows still display the
+// glass pair, and the next adjustment edits that instead of the user's value.
+#[test]
+fn resetting_the_glassmorphism_row_restores_the_transparency_rows_too() {
+    let mut settings = ThemeSettings::open(transparent_init());
+    let opacity = row_index(SettingsRowKind::BackgroundOpacity);
+    let blur = row_index(SettingsRowKind::BackgroundBlurRadius);
+    let original_opacity = settings.rows()[opacity].clone();
+    let original_blur = settings.rows()[blur].clone();
+
+    move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
+    settings.adjust(1, Instant::now());
+    assert_eq!(
+        settings.rows()[opacity].draft,
+        RowDraft::BackgroundOpacity(noa_config::GLASS_BACKGROUND_OPACITY)
+    );
+
+    settings.reset_selected_row(Instant::now());
+
+    assert_eq!(
+        settings.rows()[row_index(SettingsRowKind::Glassmorphism)].draft,
+        RowDraft::Glassmorphism(false)
+    );
+    assert_eq!(settings.rows()[opacity], original_opacity);
+    assert_eq!(settings.rows()[blur], original_blur);
+}
+
+// R-25: a Tab hop is one editing task, so the glass restore point travels
+// with the rows. Without it the reopened session re-snaps from rows that are
+// *already* the glass pair, and turning glassmorphism off afterward can
+// never get back to what the user had.
+#[test]
+fn tab_carryover_preserves_the_glass_restore_point_across_the_hop() {
+    let mut settings = ThemeSettings::open(transparent_init());
+    let opacity = row_index(SettingsRowKind::BackgroundOpacity);
+    move_to_row(&mut settings, SettingsRowKind::BackgroundOpacity);
+    settings.adjust(-1, Instant::now());
+    let edited = settings.rows()[opacity].clone();
+
+    move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
+    settings.adjust(1, Instant::now());
+
+    // Settings -> Theme -> Settings, carrying the session both ways.
+    let theme = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Theme,
+        carryover: Some(settings.carryover()),
+        ..transparent_init()
+    });
+    let mut back = ThemeSettings::open(ThemeSettingsInit {
+        mode: ThemeSettingsMode::Settings,
+        carryover: Some(theme.carryover()),
+        ..transparent_init()
+    });
+
+    move_to_row(&mut back, SettingsRowKind::Glassmorphism);
+    back.adjust(1, Instant::now()); // off again
+
+    assert_eq!(back.rows()[opacity], edited);
+}
+
+// While glassmorphism owns them, the two rows are display-only: neither a
+// ←→ step nor a reset may move them, since the next reload would discard
+// whatever they showed.
+#[test]
+fn glass_managed_transparency_rows_reject_adjust_and_reset() {
+    let mut settings = ThemeSettings::open(transparent_init());
+    move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
+    settings.adjust(1, Instant::now());
+
+    for kind in [
+        SettingsRowKind::BackgroundOpacity,
+        SettingsRowKind::BackgroundBlurRadius,
+    ] {
+        let idx = row_index(kind);
+        let before = settings.rows()[idx].clone();
+        move_to_row(&mut settings, kind);
+
+        assert_eq!(settings.adjust(-1, Instant::now()), RowEffect::None);
+        assert_eq!(settings.rows()[idx], before, "{kind:?} moved on adjust");
+
+        assert_eq!(
+            settings.reset_selected_row(Instant::now()),
+            RowEffect::None,
+            "{kind:?} reset produced an effect"
+        );
+        assert_eq!(settings.rows()[idx], before, "{kind:?} moved on reset");
+    }
+}
+
+// The lock is conditional on the toggle, not permanent: with glassmorphism
+// off, both rows step normally (guards against the managed check leaking
+// into the default configuration).
+#[test]
+fn transparency_rows_still_adjust_while_glassmorphism_is_off() {
+    let mut settings = ThemeSettings::open(transparent_init());
+    let idx = row_index(SettingsRowKind::BackgroundOpacity);
+    let before = settings.rows()[idx].draft.clone();
+
+    move_to_row(&mut settings, SettingsRowKind::BackgroundOpacity);
+    settings.adjust(-1, Instant::now());
+
+    assert_ne!(settings.rows()[idx].draft, before);
+    assert!(settings.rows()[idx].touched);
+}
+
 // R-17/NFR-6, Theme mode: `commit_updates` can only ever contain the
 // `theme` key now — the settings section doesn't exist in this mode, so no
 // row can ever become `touched` (an untouched row's draft can equal the
@@ -2002,12 +2391,13 @@ fn default_for_maps_every_row_kind_to_its_documented_startup_default() {
 // (settings-panel-server-status) brings it to 25 (+1), the LAN bind-
 // address row (server-bind) brings it to 26 (+1), the sidebar-width row
 // brings it to 27 (+1), the sidebar-font-size row brings it to 28 (+1),
-// the send-selection-send-enter row brings it to 29 (+1), and the Remote
-// App QR action brings it to 30 (+1).
+// the send-selection-send-enter row brings it to 29 (+1), the Remote
+// App QR action brings it to 30 (+1), and the `glassmorphism` row brings
+// the array to its current length (+1 on top of the scratch-terminal rows).
 #[test]
 fn settings_row_kind_count_includes_remote_app_qr_action() {
-    assert_eq!(SettingsRowKind::COUNT, 32);
-    assert_eq!(SettingsRowKind::ALL.len(), 32);
+    assert_eq!(SettingsRowKind::COUNT, 33);
+    assert_eq!(SettingsRowKind::ALL.len(), 33);
 }
 
 // settings-panel-server-status: the status row is read-only (mirrors
@@ -3476,6 +3866,8 @@ fn sample_revert(theme_name: &str) -> RevertValues {
         cursor_style: CursorShape::Bar,
         background_opacity: 0.8,
         background_blur_radius: 5,
+        configured_background_opacity: 0.8,
+        configured_background_blur_radius: 5,
         background_image: "/tmp/wall.png".to_string(),
         background_image_opacity: 0.5,
         background_image_position: BackgroundImagePosition::Center,
@@ -3489,6 +3881,7 @@ fn sample_revert(theme_name: &str) -> RevertValues {
         window_padding_x: 2.0,
         window_padding_y: 2.0,
         macos_titlebar_style: MacosTitlebarStyle::Native,
+        glassmorphism: false,
         confirm_quit: true,
         send_selection_send_enter: false,
         font_family: "Menlo".to_string(),
@@ -3511,6 +3904,59 @@ fn revert_updates_writes_every_snapshot_field_unconditionally() {
     assert_eq!(
         updates.iter().find(|(k, _)| k == "cursor-style"),
         Some(&("cursor-style".to_string(), "bar".to_string()))
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "background-blur-radius"),
+        Some(&("background-blur-radius".to_string(), "5".to_string()))
+    );
+}
+
+// Undo writes the *configured* pair, never the effective one. Under
+// glassmorphism the effective values are derived (0.50 / 64), so writing
+// those back would overwrite what the user actually had — an unset key would
+// gain a value, an explicit `0.9 / 5` would be destroyed — permanently, and
+// invisibly until glassmorphism is turned off and the wrong appearance shows.
+#[test]
+fn revert_updates_restores_the_configured_pair_not_the_glass_derived_one() {
+    let revert = RevertValues {
+        glassmorphism: true,
+        background_opacity: noa_config::GLASS_BACKGROUND_OPACITY,
+        background_blur_radius: noa_config::GLASS_BACKGROUND_BLUR_RADIUS,
+        configured_background_opacity: 0.9,
+        configured_background_blur_radius: 5,
+        ..sample_revert("3024 Day")
+    };
+
+    let updates = revert_updates(&revert, None);
+
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "background-opacity"),
+        Some(&("background-opacity".to_string(), "0.90".to_string()))
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "background-blur-radius"),
+        Some(&("background-blur-radius".to_string(), "5".to_string()))
+    );
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "glassmorphism"),
+        Some(&("glassmorphism".to_string(), "true".to_string()))
+    );
+}
+
+// With glassmorphism off the configured and effective pairs are equal by
+// construction, so this is the same write the undo has always made.
+#[test]
+fn revert_updates_still_restores_the_transparency_keys_without_glassmorphism() {
+    let revert = RevertValues {
+        glassmorphism: false,
+        ..sample_revert("3024 Day")
+    };
+
+    let updates = revert_updates(&revert, None);
+
+    assert_eq!(
+        updates.iter().find(|(k, _)| k == "background-opacity"),
+        Some(&("background-opacity".to_string(), "0.80".to_string()))
     );
     assert_eq!(
         updates.iter().find(|(k, _)| k == "background-blur-radius"),

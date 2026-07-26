@@ -184,6 +184,13 @@ pub(crate) struct ThemeSettings {
     highlight_moved: bool,
     selected_row: usize,
     rows: [SettingsRow; SettingsRowKind::COUNT],
+    /// The `BackgroundOpacity` / `BackgroundBlurRadius` rows exactly as they
+    /// stood when `glassmorphism` was switched on in this session and took
+    /// them over. `None` until that happens (and again once they are handed
+    /// back), so a session that merely *opened* under glassmorphism has
+    /// nothing to restore. See [`Self::snap_glass_managed_rows`] /
+    /// [`Self::restore_glass_managed_rows`].
+    pre_glass_rows: Option<(SettingsRow, SettingsRow)>,
     snapshot: RevertValues,
     font_size_debounce: Debouncer<f32>,
     /// Accumulates digit keystrokes typed directly into the focused
@@ -274,15 +281,19 @@ impl ThemeSettings {
     /// active theme (SHAPE), every settings row seeded from `init`'s live
     /// values with `touched = false`.
     pub(crate) fn open(init: ThemeSettingsInit) -> Self {
-        let (snapshot, rows, opaque_at_startup) = match &init.carryover {
+        let (snapshot, rows, opaque_at_startup, pre_glass_rows) = match &init.carryover {
             // R-25/FM-04: a Tab reopen carries the whole-editing-task
             // snapshot/rows/opacity-gate forward untouched rather than
             // re-deriving them from `init`'s live values — see
-            // `ThemeSettingsCarryover`'s doc comment for why.
+            // `ThemeSettingsCarryover`'s doc comment for why. The glass
+            // restore point travels with the rows for the same reason: the
+            // rows arrive already snapped, so a rebuilt restore point would
+            // capture the glass pair instead of the user's own values.
             Some(carry) => (
                 carry.snapshot.clone(),
                 carry.rows.clone(),
                 carry.opaque_at_startup,
+                carry.pre_glass_rows.clone(),
             ),
             None => (
                 RevertValues {
@@ -291,6 +302,8 @@ impl ThemeSettings {
                     cursor_style: init.cursor_style,
                     background_opacity: init.background_opacity,
                     background_blur_radius: init.background_blur_radius,
+                    configured_background_opacity: init.configured_background_opacity,
+                    configured_background_blur_radius: init.configured_background_blur_radius,
                     background_image: init.background_image.clone(),
                     background_image_opacity: init.background_image_opacity,
                     background_image_position: init.background_image_position,
@@ -304,6 +317,7 @@ impl ThemeSettings {
                     window_padding_x: init.window_padding_x,
                     window_padding_y: init.window_padding_y,
                     macos_titlebar_style: init.macos_titlebar_style,
+                    glassmorphism: init.glassmorphism,
                     confirm_quit: init.confirm_quit,
                     send_selection_send_enter: init.send_selection_send_enter,
                     font_family: init.font_family.clone(),
@@ -383,6 +397,10 @@ impl ThemeSettings {
                         touched: false,
                     },
                     SettingsRow {
+                        draft: RowDraft::Glassmorphism(init.glassmorphism),
+                        touched: false,
+                    },
+                    SettingsRow {
                         draft: RowDraft::ConfirmQuit(init.confirm_quit),
                         touched: false,
                     },
@@ -446,7 +464,10 @@ impl ThemeSettings {
                         touched: false,
                     },
                 ],
-                init.background_opacity >= 1.0,
+                !init.window_created_transparent,
+                // A fresh session has nothing to restore: `glassmorphism`
+                // has not been switched on *within* it yet.
+                None,
             ),
         };
         let filter = init
@@ -468,6 +489,7 @@ impl ThemeSettings {
             highlight_moved: false,
             selected_row,
             rows,
+            pre_glass_rows,
             snapshot,
             font_size_debounce: Debouncer::new(FONT_SIZE_DEBOUNCE_WINDOW),
             font_size_digits: None,
@@ -495,6 +517,22 @@ impl ThemeSettings {
             attribute_filter: None,
             wheel_accum: 0.0,
         };
+        // A session opened with `glassmorphism` already on shows the values
+        // the resolver installs for it, not whatever `background-opacity` /
+        // `background-blur-radius` happen to sit in the config file (the
+        // running config already has the glass pair — this keeps the panel
+        // honest even if it were opened from a staler snapshot).
+        //
+        // The restore point has to be seeded from the *configured* pair
+        // first, though: the rows already hold the derived values here, so
+        // letting `snap_glass_managed_rows` stash them would make the glass
+        // pair its own restore point — turning the toggle off would then
+        // show `0.50 / 64` instead of the user's fallback `0.9 / 5`, and the
+        // next adjustment would overwrite that fallback from the wrong base.
+        if settings.glass_draft() {
+            settings.seed_glass_restore_point_from_configured();
+            settings.snap_glass_managed_rows();
+        }
         settings.recompute_filtered();
         match &init.carryover {
             // R-25 (AC-34): restore the carried highlight rather than
@@ -548,6 +586,7 @@ impl ThemeSettings {
             rows: self.rows.clone(),
             snapshot: self.snapshot.clone(),
             opaque_at_startup: self.opaque_at_startup,
+            pre_glass_rows: self.pre_glass_rows.clone(),
         }
     }
 
@@ -611,36 +650,150 @@ impl ThemeSettings {
         self.opaque_at_startup
     }
 
+    /// The `glassmorphism` row's current draft — `false` if the panel was
+    /// somehow built with a mismatched draft variant (unreachable: `rows[i]`
+    /// always holds `SettingsRowKind::ALL[i]`'s variant).
+    fn glass_draft(&self) -> bool {
+        matches!(
+            self.rows[row_index(SettingsRowKind::Glassmorphism)],
+            SettingsRow {
+                draft: RowDraft::Glassmorphism(true),
+                ..
+            }
+        )
+    }
+
+    /// Rows `glassmorphism` takes over: while it is on, `background-opacity`
+    /// and `background-blur-radius` resolve to the recommended glass pair
+    /// (`noa_config::apply_glassmorphism_defaults`) no matter what this panel
+    /// or the config file says, so editing them here would show a value the
+    /// next reload throws away. They are displayed (snapped to the values
+    /// that will actually apply) but not adjustable.
+    fn row_is_glass_managed(&self, row: SettingsRowKind) -> bool {
+        self.glass_draft()
+            && matches!(
+                row,
+                SettingsRowKind::BackgroundOpacity | SettingsRowKind::BackgroundBlurRadius
+            )
+    }
+
+    /// Pull the two managed rows onto the values `glassmorphism = true`
+    /// resolves to, so the panel never displays an opacity/blur the running
+    /// config will not have. Left `touched = false`: the toggle itself is
+    /// what gets written, and the resolver derives these from it — writing
+    /// them too would bake a redundant pair of keys into the config file
+    /// that goes stale the moment glassmorphism is turned back off.
+    fn snap_glass_managed_rows(&mut self) {
+        let opacity = row_index(SettingsRowKind::BackgroundOpacity);
+        let blur = row_index(SettingsRowKind::BackgroundBlurRadius);
+        // Stash what the two rows held so switching glassmorphism back off in
+        // the same session can hand them back (`restore_glass_managed_rows`).
+        // Only the first snap stashes: a second one would capture the glass
+        // pair itself and lose the user's values. Cloning the whole
+        // `SettingsRow` carries `touched` too — an edit made before the
+        // toggle must still commit if the toggle is undone.
+        if self.pre_glass_rows.is_none() {
+            self.pre_glass_rows = Some((self.rows[opacity].clone(), self.rows[blur].clone()));
+        }
+        self.rows[opacity] = SettingsRow {
+            draft: RowDraft::BackgroundOpacity(noa_config::GLASS_BACKGROUND_OPACITY),
+            touched: false,
+        };
+        self.rows[blur] = SettingsRow {
+            draft: RowDraft::BackgroundBlurRadius(noa_config::GLASS_BACKGROUND_BLUR_RADIUS),
+            touched: false,
+        };
+    }
+
+    /// Build the glass restore point from the *configured* pair — the values
+    /// the config asked for before `glassmorphism` took the two keys over
+    /// (`noa_config::StartupConfig::configured_background_*`, carried here
+    /// through [`RevertValues`]). Used only when a session opens with the
+    /// toggle already on, where the rows arrive holding the derived pair and
+    /// so cannot supply a restore point themselves.
+    ///
+    /// Untouched: these are what the config file already says, so switching
+    /// the toggle off and saving writes nothing for them. A later edit marks
+    /// them the usual way.
+    ///
+    /// Never overwrites an existing restore point — a Tab hop carries one
+    /// forward, and it holds edits this session made before the toggle.
+    fn seed_glass_restore_point_from_configured(&mut self) {
+        if self.pre_glass_rows.is_some() {
+            return;
+        }
+        self.pre_glass_rows = Some((
+            SettingsRow {
+                draft: RowDraft::BackgroundOpacity(self.snapshot.configured_background_opacity),
+                touched: false,
+            },
+            SettingsRow {
+                draft: RowDraft::BackgroundBlurRadius(
+                    self.snapshot.configured_background_blur_radius,
+                ),
+                touched: false,
+            },
+        ));
+    }
+
+    /// Undo [`Self::snap_glass_managed_rows`] when the toggle goes back off:
+    /// the two rows return to the drafts (and `touched` flags) they held
+    /// before glassmorphism took them over. Without this, turning the toggle
+    /// on and off again would leave the glass pair behind as if the user had
+    /// chosen it — a later ← / → step would move off `0.50` instead of their
+    /// own value, and even an untouched save would show a panel that
+    /// disagrees with the config the next reload resolves.
+    ///
+    /// The restore point comes from one of two places, and both are the
+    /// user's own values: rows stashed when the toggle was switched on in
+    /// this session, or — for a session that *opened* with it on — the
+    /// configured pair ([`Self::seed_glass_restore_point_from_configured`]).
+    /// A no-op only when the toggle has never been on at all, where there is
+    /// nothing to hand back.
+    fn restore_glass_managed_rows(&mut self) {
+        let Some((opacity_row, blur_row)) = self.pre_glass_rows.take() else {
+            return;
+        };
+        self.rows[row_index(SettingsRowKind::BackgroundOpacity)] = opacity_row;
+        self.rows[row_index(SettingsRowKind::BackgroundBlurRadius)] = blur_row;
+    }
+
+    /// Rows whose effect needs a see-through window: the two transparency
+    /// keys themselves, and `glassmorphism` once its draft is on (frosted
+    /// chrome over an opaque window shows nothing through, and a window
+    /// created opaque cannot become translucent in place — R-11's original
+    /// constraint, now reachable through the toggle too).
+    fn row_needs_a_transparent_window(&self, row: SettingsRowKind) -> bool {
+        match row {
+            SettingsRowKind::BackgroundOpacity | SettingsRowKind::BackgroundBlurRadius => true,
+            SettingsRowKind::Glassmorphism => self.glass_draft(),
+            _ => false,
+        }
+    }
+
     /// R-1/R-11: why `row` should show the "applies after restart" note
-    /// instead of a live preview right now. Two independent cases: a *live*
-    /// opacity/blur row whose session started opaque (R-11's original
-    /// case — `FontSize`/`CursorStyle` always apply live regardless), or
-    /// any *commit-only* row (`FontFamily`/`WindowPadding`/
-    /// `MacosTitlebarStyle`) the user has actually edited — those have
-    /// no runtime-apply path at all (`App::commit_theme_settings`), so a
-    /// touched edit persists to config but only takes effect on the next
-    /// launch. The two cases carry distinct [`RestartReason`] variants so
-    /// the UI can explain *why* (AC-1/AC-2) instead of one blanket note.
+    /// instead of a live preview right now. Two independent cases: a row that
+    /// needs a see-through window in a session that started opaque (R-11's
+    /// original opacity/blur case, plus `Glassmorphism` switched on — see
+    /// [`Self::row_needs_a_transparent_window`]; `FontSize`/`CursorStyle`
+    /// always apply live regardless), or any *commit-only* row
+    /// (`FontFamily`/`WindowPadding`/`MacosTitlebarStyle`) the user has
+    /// actually edited — those have no runtime-apply path at all
+    /// (`App::commit_theme_settings`), so a touched edit persists to config
+    /// but only takes effect on the next launch. The two cases carry distinct
+    /// [`RestartReason`] variants so the UI can explain *why* (AC-1/AC-2)
+    /// instead of one blanket note.
     pub(crate) fn restart_reason(&self, row: SettingsRowKind) -> RestartReason {
+        if self.opaque_at_startup && self.row_needs_a_transparent_window(row) {
+            return RestartReason::OpaqueStartup;
+        }
         if row.is_live() {
-            return if self.opaque_at_startup
-                && matches!(
-                    row,
-                    SettingsRowKind::BackgroundOpacity | SettingsRowKind::BackgroundBlurRadius
-                ) {
-                RestartReason::OpaqueStartup
-            } else {
-                RestartReason::None
-            };
+            return RestartReason::None;
         }
         if is_reload_exempt(row) {
             return RestartReason::None;
         }
-        let index = SettingsRowKind::ALL
-            .iter()
-            .position(|kind| *kind == row)
-            .expect("SettingsRowKind::ALL contains every variant");
-        if self.rows[index].touched {
+        if self.rows[row_index(row)].touched {
             RestartReason::CommitOnly
         } else {
             RestartReason::None
@@ -670,12 +823,10 @@ impl ThemeSettings {
     /// `WindowPadding`/`MacosTitlebarStyle`), which persists to config but
     /// changes nothing this session.
     pub(crate) fn liveness(&self, row: SettingsRowKind) -> Liveness {
-        if row.is_live() {
-            if self.restart_reason(row) == RestartReason::OpaqueStartup {
-                Liveness::OnLaunch
-            } else {
-                Liveness::Live
-            }
+        if self.restart_reason(row) == RestartReason::OpaqueStartup {
+            Liveness::OnLaunch
+        } else if row.is_live() {
+            Liveness::Live
         } else if is_reload_exempt(row) {
             Liveness::OnSave
         } else {
@@ -1012,6 +1163,9 @@ impl ThemeSettings {
             return RowEffect::None;
         }
         let idx = self.selected_row;
+        if self.row_is_glass_managed(SettingsRowKind::ALL[idx]) {
+            return RowEffect::None;
+        }
         match SettingsRowKind::ALL[idx] {
             SettingsRowKind::FontSize => {
                 let RowDraft::FontSize(current) = self.rows[idx].draft else {
@@ -1237,6 +1391,20 @@ impl ThemeSettings {
                 if (new - current).abs() > f32::EPSILON {
                     self.rows[idx].draft = RowDraft::QuickTerminalHeight(new);
                     self.rows[idx].touched = true;
+                }
+                RowEffect::None
+            }
+            SettingsRowKind::Glassmorphism => {
+                let RowDraft::Glassmorphism(current) = self.rows[idx].draft else {
+                    return RowEffect::None;
+                };
+                let on = !current;
+                self.rows[idx].draft = RowDraft::Glassmorphism(on);
+                self.rows[idx].touched = true;
+                if on {
+                    self.snap_glass_managed_rows();
+                } else {
+                    self.restore_glass_managed_rows();
                 }
                 RowEffect::None
             }
@@ -1567,9 +1735,24 @@ impl ThemeSettings {
         ) {
             return RowEffect::None;
         }
+        // Same reason `adjust` refuses these: while `glassmorphism` owns the
+        // two transparency keys, resetting one to its default would display
+        // — and, being `touched`, write — a value the next reload discards.
+        if self.row_is_glass_managed(kind) {
+            return RowEffect::None;
+        }
         let default = RowDraft::default_for(kind);
+        let glass_was_on = self.glass_draft();
         self.rows[idx].draft = default.clone();
         self.rows[idx].touched = true;
+        // Reset is the other way `glassmorphism` can go off (its default is
+        // `false`), and it has to hand the two managed rows back exactly as
+        // the toggle does — otherwise the restore point stays stashed while
+        // the rows keep displaying the glass pair, and the next adjustment
+        // would edit *that* instead of the user's own value.
+        if kind == SettingsRowKind::Glassmorphism && glass_was_on && !self.glass_draft() {
+            self.restore_glass_managed_rows();
+        }
         self.clear_row_input_state();
         // G1: `FontFamily`'s default is always the empty string (fix F2),
         // which `commit_updates()` deliberately never writes (noa-config's
@@ -1897,7 +2080,20 @@ impl ThemeSettings {
                 None => updates.push(("theme".to_string(), name.to_string())),
             }
         }
-        for row in &self.rows {
+        // Rows `glassmorphism` took over mid-session are stashed rather than
+        // edited from here on, and the stash keeps whatever the user had
+        // already typed into them. Those edits still have to reach disk: with
+        // the toggle on they are the *fallback* appearance — what the window
+        // returns to the moment glassmorphism is turned back off — so
+        // dropping them would silently discard a deliberate setting. The
+        // stashed rows commit exactly like any other touched row; the live
+        // rows they were swapped out for hold derived values and are
+        // untouched, so they contribute nothing here.
+        let stashed = self
+            .pre_glass_rows
+            .iter()
+            .flat_map(|(opacity, blur)| [opacity, blur]);
+        for row in self.rows.iter().chain(stashed) {
             if !row.touched {
                 continue;
             }
@@ -1979,6 +2175,9 @@ impl ThemeSettings {
                 }
                 RowDraft::QuickTerminalHeight(size) => {
                     updates.push(("quick-terminal-size".to_string(), format!("{size:.2}")));
+                }
+                RowDraft::Glassmorphism(on) => {
+                    updates.push(("glassmorphism".to_string(), on.to_string()));
                 }
                 RowDraft::ConfirmQuit(confirm) => {
                     updates.push(("confirm-quit".to_string(), confirm.to_string()));
@@ -2191,13 +2390,20 @@ pub(crate) fn revert_updates(
         }
     }
     updates.push(("font-size".to_string(), format!("{}", revert.font_size)));
+    // The *configured* pair, never the effective one: while `glassmorphism`
+    // is on the effective values are derived
+    // (`noa_config::apply_glassmorphism_defaults`), so writing them back
+    // would overwrite what the user actually had — an unset key would gain
+    // `0.50 / 64`, an explicit `0.9 / 5` would be destroyed — silently
+    // changing the appearance the moment glassmorphism is turned off. With
+    // the toggle off the two are equal, so this is the same write as before.
     updates.push((
         "background-opacity".to_string(),
-        format!("{:.2}", revert.background_opacity),
+        format!("{:.2}", revert.configured_background_opacity),
     ));
     updates.push((
         "background-blur-radius".to_string(),
-        revert.background_blur_radius.to_string(),
+        revert.configured_background_blur_radius.to_string(),
     ));
     updates.push((
         "background-image".to_string(),
@@ -2258,6 +2464,10 @@ pub(crate) fn revert_updates(
         "macos-titlebar-style".to_string(),
         macos_titlebar_style_config_value(revert.macos_titlebar_style).to_string(),
     ));
+    updates.push((
+        "glassmorphism".to_string(),
+        revert.glassmorphism.to_string(),
+    ));
     updates.push(("confirm-quit".to_string(), revert.confirm_quit.to_string()));
     updates.push((
         "send-selection-send-enter".to_string(),
@@ -2291,6 +2501,16 @@ fn normalize_scratch_terminal_key(chord: &str) -> String {
     }
 }
 
+/// `row`'s index into [`SettingsRowKind::ALL`] — the same index its draft
+/// occupies in [`ThemeSettings::rows`] (the two arrays are kept in lockstep
+/// order by construction).
+fn row_index(row: SettingsRowKind) -> usize {
+    SettingsRowKind::ALL
+        .iter()
+        .position(|kind| *kind == row)
+        .expect("SettingsRowKind::ALL contains every variant")
+}
+
 fn is_reload_exempt(row: SettingsRowKind) -> bool {
     matches!(
         row,
@@ -2300,6 +2520,7 @@ fn is_reload_exempt(row: SettingsRowKind) -> bool {
             | SettingsRowKind::BackgroundImageFit
             | SettingsRowKind::BackgroundImageRepeat
             | SettingsRowKind::BackgroundImageInterval
+            | SettingsRowKind::Glassmorphism
             | SettingsRowKind::ConfirmQuit
             | SettingsRowKind::SendSelectionSendEnter
             | SettingsRowKind::QuickTerminalHeight
@@ -2390,6 +2611,7 @@ fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
         }
         RowDraft::BackgroundImageFit(fit) => background_image_fit_value(*fit).hash(hasher),
         RowDraft::BackgroundImageRepeat(v)
+        | RowDraft::Glassmorphism(v)
         | RowDraft::ConfirmQuit(v)
         | RowDraft::SendSelectionSendEnter(v) => v.hash(hasher),
         RowDraft::BackgroundImageInterval(v) => v.hash(hasher),

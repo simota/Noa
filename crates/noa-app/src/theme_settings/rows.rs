@@ -63,6 +63,21 @@ pub(crate) enum SettingsRowKind {
     SidebarWidth,
     SidebarFontSize,
     QuickTerminalHeight,
+    /// `glassmorphism`. Reload-exempt like `ConfirmQuit`: `Liveness::OnSave`,
+    /// no continuous live preview while the row is being edited. Unlike
+    /// `ConfirmQuit`, though, its commit-time apply is *not* left to
+    /// `ConfigWatcher` picking up the write — `App::commit_theme_settings`
+    /// mirrors the new value into `self.config` for its own immediate
+    /// `chrome::select_palette` call, which leaves `app/config_reload.rs`'s
+    /// `glassmorphism_changed` diff with nothing to see on the next poll, so
+    /// `commit_theme_settings` re-selects the chrome palette, drops the
+    /// textures painted with the old one, and refreshes the native macOS
+    /// titlebar backdrop directly instead. Switching it on also takes over
+    /// `BackgroundOpacity`/`BackgroundBlurRadius` (see
+    /// `ThemeSettings::row_is_glass_managed`), and — in a session that
+    /// started opaque — carries `RestartReason::OpaqueStartup`, since a
+    /// window created opaque cannot become see-through in place.
+    Glassmorphism,
     ConfirmQuit,
     /// `send-selection-send-enter`. Same reload-exempt classification as
     /// `ConfirmQuit`: no live-preview path, but `commit_theme_settings`
@@ -147,7 +162,7 @@ pub(crate) enum SettingsRowKind {
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 32;
+    pub(crate) const COUNT: usize = 33;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -166,6 +181,7 @@ impl SettingsRowKind {
         Self::SidebarWidth,
         Self::SidebarFontSize,
         Self::QuickTerminalHeight,
+        Self::Glassmorphism,
         Self::ConfirmQuit,
         Self::SendSelectionSendEnter,
         Self::ScrollbackLimit,
@@ -229,6 +245,7 @@ impl SettingsRowKind {
             Self::SidebarWidth => "Sidebar Width",
             Self::SidebarFontSize => "Sidebar Font Size",
             Self::QuickTerminalHeight => "Quick Terminal Height",
+            Self::Glassmorphism => "Glassmorphism",
             Self::ConfirmQuit => "Confirm Quit",
             Self::SendSelectionSendEnter => "Send Selection Enter",
             Self::ScrollbackLimit => "Scrollback Limit",
@@ -253,10 +270,10 @@ impl SettingsRowKind {
         match self {
             Self::FontSize => "Terminal text point size. Applies live.",
             Self::BackgroundOpacity => {
-                "Window background transparency, from 0 (clear) to 1 (opaque)."
+                "Window background transparency, from 0 (clear) to 1 (opaque). Managed by Glassmorphism while that is on."
             }
             Self::BackgroundBlurRadius => {
-                "macOS background blur strength behind a transparent window."
+                "macOS background blur strength behind a transparent window. Managed by Glassmorphism while that is on."
             }
             Self::BackgroundImage => "Path to an image, or a directory of images, behind the grid.",
             Self::BackgroundImageOpacity => {
@@ -277,6 +294,9 @@ impl SettingsRowKind {
             Self::SidebarFontSize => "Session sidebar font size in points. Applies live.",
             Self::QuickTerminalHeight => {
                 "Drop-down quick terminal's height as a fraction of the screen."
+            }
+            Self::Glassmorphism => {
+                "Frosted translucent sidebar and tab-overview chrome. Takes over window opacity and blur with its own recommended pair. Applies on save."
             }
             Self::ConfirmQuit => "Ask for confirmation before quitting the app.",
             Self::SendSelectionSendEnter => {
@@ -403,6 +423,7 @@ pub(crate) enum RowDraft {
     SidebarWidth(f32),
     SidebarFontSize(f32),
     QuickTerminalHeight(f32),
+    Glassmorphism(bool),
     ConfirmQuit(bool),
     SendSelectionSendEnter(bool),
     ScrollbackLimit(usize),
@@ -499,6 +520,13 @@ impl RowDraft {
             RowDraft::SidebarWidth(w) => format!("{w:.0}"),
             RowDraft::SidebarFontSize(v) => format!("{v:.1}"),
             RowDraft::QuickTerminalHeight(size) => format!("{:.0}%", size * 100.0),
+            RowDraft::Glassmorphism(on) => {
+                if *on {
+                    "On".to_string()
+                } else {
+                    "Off".to_string()
+                }
+            }
             RowDraft::ConfirmQuit(confirm) => {
                 if *confirm {
                     "On".to_string()
@@ -612,6 +640,7 @@ impl RowDraft {
                 };
                 RowDraft::QuickTerminalHeight(fraction)
             }
+            SettingsRowKind::Glassmorphism => RowDraft::Glassmorphism(d.glassmorphism),
             SettingsRowKind::ConfirmQuit => RowDraft::ConfirmQuit(d.confirm_quit),
             SettingsRowKind::SendSelectionSendEnter => {
                 RowDraft::SendSelectionSendEnter(d.send_selection_send_enter)
@@ -729,6 +758,13 @@ pub(crate) struct RevertValues {
     pub(crate) cursor_style: CursorShape,
     pub(crate) background_opacity: f32,
     pub(crate) background_blur_radius: u16,
+    /// The pair as *configured*, before `glassmorphism` took it over
+    /// (`noa_config::StartupConfig::configured_background_*`). Equal to the
+    /// two above whenever the toggle is off. `revert_updates` writes these,
+    /// never the effective ones — undoing must restore what the user had,
+    /// not the values the toggle derives.
+    pub(crate) configured_background_opacity: f32,
+    pub(crate) configured_background_blur_radius: u16,
     pub(crate) background_image: String,
     pub(crate) background_image_opacity: f32,
     pub(crate) background_image_position: BackgroundImagePosition,
@@ -746,6 +782,7 @@ pub(crate) struct RevertValues {
     pub(crate) window_padding_x: f32,
     pub(crate) window_padding_y: f32,
     pub(crate) macos_titlebar_style: MacosTitlebarStyle,
+    pub(crate) glassmorphism: bool,
     pub(crate) confirm_quit: bool,
     pub(crate) send_selection_send_enter: bool,
     pub(crate) font_family: String,
@@ -796,6 +833,13 @@ pub(crate) struct ThemeSettingsCarryover {
     pub(crate) rows: [SettingsRow; SettingsRowKind::COUNT],
     pub(crate) snapshot: RevertValues,
     pub(crate) opaque_at_startup: bool,
+    /// The `BackgroundOpacity`/`BackgroundBlurRadius` rows as they stood
+    /// before `glassmorphism` took them over in this session, if it did.
+    /// Carried for the same reason `rows` is: a Tab hop is one editing task,
+    /// so the restore point has to survive it — rebuilding it on reopen
+    /// would capture the already-snapped glass pair as if it were the
+    /// user's own values.
+    pub(crate) pre_glass_rows: Option<(SettingsRow, SettingsRow)>,
 }
 
 /// Everything `App` must supply to open the overlay — the session's live
@@ -825,6 +869,19 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) cursor_style: CursorShape,
     pub(crate) background_opacity: f32,
     pub(crate) background_blur_radius: u16,
+    /// The pair as *configured*, before `glassmorphism` took it over
+    /// (`noa_config::StartupConfig::configured_background_*`). Equal to the
+    /// two above whenever the toggle is off. Carried into the session's
+    /// `RevertValues` snapshot so Undo can restore them.
+    pub(crate) configured_background_opacity: f32,
+    pub(crate) configured_background_blur_radius: u16,
+    /// Whether the window this session opens over was *created* with AppKit
+    /// transparency (`WindowState::created_transparent`). Drives R-11's
+    /// live-preview gate: a window's opacity capability is fixed at
+    /// creation, so the current effective `background-opacity` is the wrong
+    /// question — a reload can move it in either direction without changing
+    /// what the window can actually do.
+    pub(crate) window_created_transparent: bool,
     pub(crate) background_image: String,
     pub(crate) background_image_opacity: f32,
     pub(crate) background_image_position: BackgroundImagePosition,
@@ -838,6 +895,7 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) sidebar_width: f32,
     pub(crate) sidebar_font_size: f32,
     pub(crate) quick_terminal_size: f32,
+    pub(crate) glassmorphism: bool,
     pub(crate) confirm_quit: bool,
     pub(crate) send_selection_send_enter: bool,
     pub(crate) font_family: String,

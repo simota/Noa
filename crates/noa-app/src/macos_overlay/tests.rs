@@ -16,6 +16,9 @@ fn settings_init() -> ThemeSettingsInit {
         // below uses `transparent_settings_init` instead.
         background_opacity: 1.0,
         background_blur_radius: 0,
+        configured_background_opacity: 1.0,
+        configured_background_blur_radius: 0,
+        window_created_transparent: false,
         background_image: String::new(),
         background_image_opacity: 1.0,
         background_image_position: noa_config::BackgroundImagePosition::Center,
@@ -29,6 +32,7 @@ fn settings_init() -> ThemeSettingsInit {
         sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
         sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
         quick_terminal_size: 0.4,
+        glassmorphism: false,
         confirm_quit: true,
         send_selection_send_enter: false,
         font_family: "Menlo".to_string(),
@@ -57,6 +61,10 @@ fn settings_init() -> ThemeSettingsInit {
 fn transparent_settings_init() -> ThemeSettingsInit {
     ThemeSettingsInit {
         background_opacity: 0.9,
+        configured_background_opacity: 0.9,
+        // R-11's gate reads the window's creation-time capability now, not
+        // this opacity — a session over a see-through window.
+        window_created_transparent: true,
         ..settings_init()
     }
 }
@@ -174,6 +182,9 @@ fn test_theme_settings_init() -> ThemeSettingsInit {
         cursor_style: noa_config::CursorShape::Block,
         background_opacity: 1.0,
         background_blur_radius: 0,
+        configured_background_opacity: 1.0,
+        configured_background_blur_radius: 0,
+        window_created_transparent: false,
         background_image: String::new(),
         background_image_opacity: 1.0,
         background_image_position: noa_config::BackgroundImagePosition::Center,
@@ -187,6 +198,7 @@ fn test_theme_settings_init() -> ThemeSettingsInit {
         sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
         sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
         quick_terminal_size: 0.4,
+        glassmorphism: false,
         confirm_quit: true,
         send_selection_send_enter: false,
         font_family: "Menlo".to_string(),

@@ -37,4 +37,7 @@ pub use snapshot::{
     CommandPaletteSnapshot, ConfirmDialogSnapshot, FrameSnapshot, FrameSnapshotRecycle, HoverLink,
     ImagePlacementSnapshot, PaletteRow, Preedit, SnapshotImage,
 };
-pub use theme::{OverlayStyle, Theme, UI_ACCENT, blend, contrast_ratio};
+pub use theme::{
+    OverlayStyle, Theme, UI_ACCENT, blend, contrast_ratio, overlay_surface_alpha,
+    set_overlay_surface_alpha,
+};

@@ -607,7 +607,7 @@ impl App {
             self.config.macos_titlebar_style,
             opacity,
             self.background_image.has_visible_image(),
-            self.config.glassmorphism,
+            self.config.glassmorphism.is_on(),
         );
         for state in self.windows.values() {
             crate::macos_window::set_window_background_color(
@@ -619,7 +619,7 @@ impl App {
                 crate::macos_window::install_titlebar_backdrop(
                     &state.window,
                     gpu.theme.default_bg,
-                    self.config.glassmorphism,
+                    self.config.glassmorphism.is_on(),
                 );
             } else {
                 crate::macos_window::remove_titlebar_backdrop(&state.window);
@@ -819,8 +819,9 @@ mod tests {
             false,
             noa_config::ConfigOverrides::default(),
         );
-        assert!(
-            !base.glassmorphism,
+        assert_eq!(
+            base.glassmorphism,
+            noa_config::GlassLevel::Off,
             "test assumes the documented default-off start"
         );
 
@@ -830,7 +831,7 @@ mod tests {
         // `glassmorphism_changed`/`apply_reloaded_theme` still legitimately
         // serve.
         let mut applied = base.clone();
-        applied.glassmorphism = true;
+        applied.glassmorphism = noa_config::GlassLevel::One;
         assert_ne!(base.glassmorphism, applied.glassmorphism);
 
         // The panel commit's mirror collapses `previous` onto the same

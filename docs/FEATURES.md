@@ -55,7 +55,7 @@ A from-scratch DFA parser plus a `Handler` trait separating parsing from state.
 - **Cursor styles** — block / bar / underline / hollow, focus / blink phase support
 - **Underline rendering** — single / double / curly / dotted / dashed, hover-link underline
 - **Background transparency / blur** — `background-opacity`, `background-blur-radius` (native macOS blur)
-- **Glassmorphism mode** — `glassmorphism` (default off): translucent frosted sidebar / tab-overview / titlebar-tab-bar chrome and frosted command palette / prompts / dialogs over the blurred desktop; on, it takes over `background-opacity` / `background-blur-radius` with its own recommended pair
+- **Glassmorphism mode** — `glassmorphism` (`off`/`1`–`5`, default `off`, higher = more transparent): translucent frosted sidebar / tab-overview / titlebar-tab-bar chrome and frosted command palette / prompts / dialogs over the blurred desktop; the rim takes over drawing each pane's edge as the faces thin out, reaching the foreground color at `5`. Any on-level takes over `background-opacity` / `background-blur-radius` with that level's own recommended pair
 - **Background image** — `background-image` (single file / directory rotation), fit / position / repeat / opacity / interval settings
 - **minimum-contrast** — enforcement of a WCAG contrast-ratio floor
 - **Font pipeline** — font-kit discovery → rustybuzz shaping → swash rasterization → etagere atlas (monochrome + color emoji)

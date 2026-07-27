@@ -66,12 +66,12 @@ impl App {
                 self.config.macos_titlebar_style,
                 self.config.background_opacity,
                 has_visible_background_image,
-                self.config.glassmorphism,
+                self.config.glassmorphism.is_on(),
             ) {
                 crate::macos_window::install_titlebar_backdrop(
                     &state.window,
                     gpu.theme.default_bg,
-                    self.config.glassmorphism,
+                    self.config.glassmorphism.is_on(),
                 );
             }
         }

@@ -1690,21 +1690,27 @@ mod commit_theme_settings_tests {
         // glass off it must reproduce what the user just saved, which is
         // what the native background gets refreshed at.
         assert_eq!(
-            noa_config::resolved_background_opacity(false, config.configured_background_opacity),
+            noa_config::resolved_background_opacity(
+                noa_config::GlassLevel::Off,
+                config.configured_background_opacity
+            ),
             0.8,
             "a stale twin here is what reverted the live-previewed background on save"
         );
         assert_eq!(
             noa_config::resolved_background_blur_radius(
-                false,
+                noa_config::GlassLevel::Off,
                 config.configured_background_blur_radius
             ),
             12
         );
         // With glass on the takeover still wins, unchanged by this fix.
         assert_eq!(
-            noa_config::resolved_background_opacity(true, config.configured_background_opacity),
-            noa_config::GLASS_BACKGROUND_OPACITY
+            noa_config::resolved_background_opacity(
+                noa_config::GlassLevel::One,
+                config.configured_background_opacity
+            ),
+            noa_config::glass_background_opacity(noa_config::GlassLevel::One)
         );
     }
 
@@ -1733,7 +1739,7 @@ mod commit_theme_settings_tests {
             sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
             sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
-            glassmorphism: false,
+            glassmorphism: noa_config::GlassLevel::Off,
             confirm_quit: true,
             send_selection_send_enter: false,
             font_family: "Menlo".to_string(),
@@ -1818,7 +1824,7 @@ mod commit_theme_settings_tests {
             window_padding_x: 2.0,
             window_padding_y: 2.0,
             macos_titlebar_style: noa_config::MacosTitlebarStyle::Native,
-            glassmorphism: false,
+            glassmorphism: noa_config::GlassLevel::Off,
             confirm_quit: true,
             send_selection_send_enter: false,
             font_family: "Menlo".to_string(),
@@ -1885,7 +1891,7 @@ mod commit_theme_settings_tests {
             sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
             sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
-            glassmorphism: false,
+            glassmorphism: noa_config::GlassLevel::Off,
             confirm_quit: true,
             send_selection_send_enter: false,
             font_family: "Menlo".to_string(),

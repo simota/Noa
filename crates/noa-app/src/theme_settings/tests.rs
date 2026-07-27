@@ -1,5 +1,7 @@
 use super::*;
-use noa_config::{BackgroundImageFit, BackgroundImagePosition, CursorShape, MacosTitlebarStyle};
+use noa_config::{
+    BackgroundImageFit, BackgroundImagePosition, CursorShape, GlassLevel, MacosTitlebarStyle,
+};
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -38,7 +40,7 @@ fn init() -> ThemeSettingsInit {
         // this row only ever edits a plain fraction (see
         // `quick_terminal_height_fraction` at the `App` layer).
         quick_terminal_size: 0.4,
-        glassmorphism: false,
+        glassmorphism: GlassLevel::Off,
         confirm_quit: true,
         send_selection_send_enter: false,
         font_family: "Menlo".to_string(),
@@ -1117,7 +1119,7 @@ fn send_selection_send_enter_row_toggles_and_commits_without_restart_note() {
     );
 }
 
-// The `glassmorphism` row is a plain On/Off toggle that badges `ON SAVE`
+// The `glassmorphism` row is a 4-step level cycle that badges `ON SAVE`
 // (not `ON LAUNCH`) in a session that can already show it: it has no
 // continuous live preview while being edited, but `App::commit_theme_settings`
 // re-selects the chrome palette (and, since the P2 stale-titlebar-backdrop
@@ -1129,11 +1131,17 @@ fn glassmorphism_row_toggles_and_commits_on_save_without_restart_note() {
     let mut settings = ThemeSettings::open(transparent_init());
     let idx = row_index(SettingsRowKind::Glassmorphism);
     // The panel opens showing the default-off value.
-    assert_eq!(settings.rows()[idx].draft, RowDraft::Glassmorphism(false));
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::Glassmorphism(GlassLevel::Off)
+    );
 
     move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
     assert_eq!(settings.adjust(1, Instant::now()), RowEffect::None);
-    assert_eq!(settings.rows()[idx].draft, RowDraft::Glassmorphism(true));
+    assert_eq!(
+        settings.rows()[idx].draft,
+        RowDraft::Glassmorphism(GlassLevel::One)
+    );
     assert!(!settings.restart_note(SettingsRowKind::Glassmorphism));
     assert_eq!(
         settings.liveness(SettingsRowKind::Glassmorphism),
@@ -1143,8 +1151,84 @@ fn glassmorphism_row_toggles_and_commits_on_save_without_restart_note() {
     let updates = settings.commit_updates();
     assert_eq!(
         updates.iter().find(|(k, _)| k == "glassmorphism"),
-        Some(&("glassmorphism".to_string(), "true".to_string()))
+        Some(&("glassmorphism".to_string(), "1".to_string()))
     );
+}
+
+// The row walks every step and wraps, in both directions — the key grew from
+// a bool into a level precisely so the panel can reach the higher ones, and a
+// cycle that silently stopped short (or wrapped early) would leave the most
+// transparent levels reachable only by hand-editing the config. Driven off
+// `GlassLevel::ALL` rather than a literal list so adding a level extends the
+// walk here instead of leaving this test passing over a stale prefix — which
+// is exactly how level `4` was briefly unreachable from the panel.
+#[test]
+fn glassmorphism_row_cycles_through_every_level_in_both_directions() {
+    let mut settings = ThemeSettings::open(transparent_init());
+    let idx = row_index(SettingsRowKind::Glassmorphism);
+    move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
+
+    // From `Off`, one full lap forward lands on every other level in order
+    // and returns to `Off`.
+    let forward: Vec<_> = GlassLevel::ALL
+        .iter()
+        .skip(1)
+        .copied()
+        .chain([GlassLevel::Off])
+        .collect();
+    for expected in forward {
+        settings.adjust(1, Instant::now());
+        assert_eq!(
+            settings.rows()[idx].draft,
+            RowDraft::Glassmorphism(expected),
+            "forward cycle"
+        );
+    }
+
+    let backward: Vec<_> = GlassLevel::ALL
+        .iter()
+        .skip(1)
+        .rev()
+        .copied()
+        .chain([GlassLevel::Off])
+        .collect();
+    for expected in backward {
+        settings.adjust(-1, Instant::now());
+        assert_eq!(
+            settings.rows()[idx].draft,
+            RowDraft::Glassmorphism(expected),
+            "reverse cycle"
+        );
+    }
+}
+
+// Each on-level owns a *different* opacity, so the managed rows have to
+// re-snap on every step while the toggle stays on — not just on the
+// `Off -> on` transition. Displaying level 1's `0.50` while the draft says
+// `3` would show a pair the next reload throws away, which is the exact
+// failure the snap exists to prevent. The restore point must survive those
+// re-snaps intact: it is still the user's own pre-glass pair, never a
+// derived one.
+#[test]
+fn stepping_between_glass_levels_re_snaps_the_managed_rows_without_moving_the_restore_point() {
+    let mut settings = ThemeSettings::open(transparent_init());
+    let opacity = row_index(SettingsRowKind::BackgroundOpacity);
+    let configured = settings.rows()[opacity].draft.clone();
+
+    move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
+    for level in GlassLevel::ON_LEVELS {
+        settings.adjust(1, Instant::now());
+        assert_eq!(
+            settings.rows()[opacity].draft,
+            RowDraft::BackgroundOpacity(noa_config::glass_background_opacity(level)),
+            "managed opacity follows level {level}"
+        );
+    }
+
+    // Back to `Off` (one more step wraps): the rows return to what the user
+    // actually had, not to the top level's derived opacity.
+    settings.adjust(1, Instant::now());
+    assert_eq!(settings.rows()[opacity].draft, configured);
 }
 
 // Switching glassmorphism on in a session that started opaque cannot show
@@ -1190,11 +1274,11 @@ fn glassmorphism_snaps_the_transparency_rows_it_manages_without_writing_them() {
     let blur = row_index(SettingsRowKind::BackgroundBlurRadius);
     assert_eq!(
         settings.rows()[opacity].draft,
-        RowDraft::BackgroundOpacity(noa_config::GLASS_BACKGROUND_OPACITY)
+        RowDraft::BackgroundOpacity(noa_config::glass_background_opacity(GlassLevel::One))
     );
     assert_eq!(
         settings.rows()[blur].draft,
-        RowDraft::BackgroundBlurRadius(noa_config::GLASS_BACKGROUND_BLUR_RADIUS)
+        RowDraft::BackgroundBlurRadius(noa_config::glass_background_blur_radius(GlassLevel::One))
     );
     assert!(!settings.rows()[opacity].touched);
     assert!(!settings.rows()[blur].touched);
@@ -1223,13 +1307,13 @@ fn toggling_glassmorphism_off_restores_the_transparency_rows_it_took_over() {
     assert!(edited.touched);
 
     move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
-    settings.adjust(1, Instant::now());
+    settings.adjust(1, Instant::now()); // off -> 1
     assert_eq!(
         settings.rows()[opacity].draft,
-        RowDraft::BackgroundOpacity(noa_config::GLASS_BACKGROUND_OPACITY)
+        RowDraft::BackgroundOpacity(noa_config::glass_background_opacity(GlassLevel::One))
     );
 
-    settings.adjust(1, Instant::now());
+    settings.adjust(-1, Instant::now()); // 1 -> off
     assert_eq!(settings.rows()[opacity].draft, edited.draft);
     assert!(
         settings.rows()[opacity].touched,
@@ -1253,9 +1337,9 @@ fn toggling_glassmorphism_off_restores_the_transparency_rows_it_took_over() {
 fn the_live_preview_gate_follows_the_window_not_the_effective_opacity() {
     // Opaque window, glass-lowered opacity: still gated.
     let opaque_window = ThemeSettings::open(ThemeSettingsInit {
-        glassmorphism: true,
-        background_opacity: noa_config::GLASS_BACKGROUND_OPACITY,
-        background_blur_radius: noa_config::GLASS_BACKGROUND_BLUR_RADIUS,
+        glassmorphism: GlassLevel::One,
+        background_opacity: noa_config::glass_background_opacity(GlassLevel::One),
+        background_blur_radius: noa_config::glass_background_blur_radius(GlassLevel::One),
         window_created_transparent: false,
         ..settings_init()
     });
@@ -1271,7 +1355,7 @@ fn the_live_preview_gate_follows_the_window_not_the_effective_opacity() {
 
     // See-through window back at a fully opaque value: not gated.
     let transparent_window = ThemeSettings::open(ThemeSettingsInit {
-        glassmorphism: false,
+        glassmorphism: GlassLevel::Off,
         background_opacity: 1.0,
         configured_background_opacity: 1.0,
         window_created_transparent: true,
@@ -1297,10 +1381,10 @@ fn the_live_preview_gate_follows_the_window_not_the_effective_opacity() {
 #[test]
 fn a_session_opened_under_glassmorphism_restores_the_configured_pair() {
     let mut settings = ThemeSettings::open(ThemeSettingsInit {
-        glassmorphism: true,
+        glassmorphism: GlassLevel::One,
         // What the resolver installed...
-        background_opacity: noa_config::GLASS_BACKGROUND_OPACITY,
-        background_blur_radius: noa_config::GLASS_BACKGROUND_BLUR_RADIUS,
+        background_opacity: noa_config::glass_background_opacity(GlassLevel::One),
+        background_blur_radius: noa_config::glass_background_blur_radius(GlassLevel::One),
         // ...over what the config file actually asks for.
         configured_background_opacity: 0.9,
         configured_background_blur_radius: 5,
@@ -1313,11 +1397,11 @@ fn a_session_opened_under_glassmorphism_restores_the_configured_pair() {
     // While it is on, the panel shows what is actually in effect.
     assert_eq!(
         settings.rows()[opacity].draft,
-        RowDraft::BackgroundOpacity(noa_config::GLASS_BACKGROUND_OPACITY)
+        RowDraft::BackgroundOpacity(noa_config::glass_background_opacity(GlassLevel::One))
     );
 
     move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
-    settings.adjust(1, Instant::now()); // off
+    settings.adjust(-1, Instant::now()); // 1 -> off
 
     assert_eq!(
         settings.rows()[opacity].draft,
@@ -1340,7 +1424,7 @@ fn a_session_opened_under_glassmorphism_restores_the_configured_pair() {
     let RowDraft::BackgroundOpacity(stepped) = settings.rows()[opacity].draft else {
         unreachable!("the row holds its own draft variant");
     };
-    assert!(stepped < 0.9 && stepped > noa_config::GLASS_BACKGROUND_OPACITY);
+    assert!(stepped < 0.9 && stepped > noa_config::glass_background_opacity(GlassLevel::One));
 }
 
 // An opacity edit made *before* the toggle still has to reach disk when the
@@ -1364,7 +1448,7 @@ fn edits_made_before_glassmorphism_still_commit_when_saving_with_it_on() {
     let updates = settings.commit_updates();
     assert_eq!(
         updates.iter().find(|(k, _)| k == "glassmorphism"),
-        Some(&("glassmorphism".to_string(), "true".to_string()))
+        Some(&("glassmorphism".to_string(), "1".to_string()))
     );
     assert_eq!(
         updates.iter().find(|(k, _)| k == "background-opacity"),
@@ -1384,10 +1468,22 @@ fn repeated_glassmorphism_toggles_never_capture_the_glass_pair_as_the_restore_po
 
     move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
     for _ in 0..2 {
-        settings.adjust(1, Instant::now()); // on
-        settings.adjust(1, Instant::now()); // off
+        settings.adjust(1, Instant::now()); // off -> 1
+        settings.adjust(-1, Instant::now()); // 1 -> off
     }
+    assert_eq!(settings.rows()[opacity], original);
 
+    // A level change while staying *on* (1 -> 2 -> 3 -> …) re-snaps the
+    // displayed pair but must not touch the restore point either — only the
+    // `Off <-> on` edges do that. One full lap is the strongest version of
+    // this check: by the time it lands back on `Off`, the restore point must
+    // still be the original pre-glass values, never any of the glass pairs it
+    // passed through along the way. Lap length comes from `GlassLevel::ALL`,
+    // so adding a level lengthens the lap here rather than leaving this
+    // stopping mid-ladder and asserting against a snapped row.
+    for _ in GlassLevel::ALL {
+        settings.adjust(1, Instant::now());
+    }
     assert_eq!(settings.rows()[opacity], original);
 }
 
@@ -1407,14 +1503,14 @@ fn resetting_the_glassmorphism_row_restores_the_transparency_rows_too() {
     settings.adjust(1, Instant::now());
     assert_eq!(
         settings.rows()[opacity].draft,
-        RowDraft::BackgroundOpacity(noa_config::GLASS_BACKGROUND_OPACITY)
+        RowDraft::BackgroundOpacity(noa_config::glass_background_opacity(GlassLevel::One))
     );
 
     settings.reset_selected_row(Instant::now());
 
     assert_eq!(
         settings.rows()[row_index(SettingsRowKind::Glassmorphism)].draft,
-        RowDraft::Glassmorphism(false)
+        RowDraft::Glassmorphism(GlassLevel::Off)
     );
     assert_eq!(settings.rows()[opacity], original_opacity);
     assert_eq!(settings.rows()[blur], original_blur);
@@ -1448,7 +1544,7 @@ fn tab_carryover_preserves_the_glass_restore_point_across_the_hop() {
     });
 
     move_to_row(&mut back, SettingsRowKind::Glassmorphism);
-    back.adjust(1, Instant::now()); // off again
+    back.adjust(-1, Instant::now()); // off again
 
     assert_eq!(back.rows()[opacity], edited);
 }
@@ -3881,7 +3977,7 @@ fn sample_revert(theme_name: &str) -> RevertValues {
         window_padding_x: 2.0,
         window_padding_y: 2.0,
         macos_titlebar_style: MacosTitlebarStyle::Native,
-        glassmorphism: false,
+        glassmorphism: GlassLevel::Off,
         confirm_quit: true,
         send_selection_send_enter: false,
         font_family: "Menlo".to_string(),
@@ -3919,9 +4015,9 @@ fn revert_updates_writes_every_snapshot_field_unconditionally() {
 #[test]
 fn revert_updates_restores_the_configured_pair_not_the_glass_derived_one() {
     let revert = RevertValues {
-        glassmorphism: true,
-        background_opacity: noa_config::GLASS_BACKGROUND_OPACITY,
-        background_blur_radius: noa_config::GLASS_BACKGROUND_BLUR_RADIUS,
+        glassmorphism: GlassLevel::One,
+        background_opacity: noa_config::glass_background_opacity(GlassLevel::One),
+        background_blur_radius: noa_config::glass_background_blur_radius(GlassLevel::One),
         configured_background_opacity: 0.9,
         configured_background_blur_radius: 5,
         ..sample_revert("3024 Day")
@@ -3939,7 +4035,7 @@ fn revert_updates_restores_the_configured_pair_not_the_glass_derived_one() {
     );
     assert_eq!(
         updates.iter().find(|(k, _)| k == "glassmorphism"),
-        Some(&("glassmorphism".to_string(), "true".to_string()))
+        Some(&("glassmorphism".to_string(), "1".to_string()))
     );
 }
 
@@ -3948,7 +4044,7 @@ fn revert_updates_restores_the_configured_pair_not_the_glass_derived_one() {
 #[test]
 fn revert_updates_still_restores_the_transparency_keys_without_glassmorphism() {
     let revert = RevertValues {
-        glassmorphism: false,
+        glassmorphism: GlassLevel::Off,
         ..sample_revert("3024 Day")
     };
 

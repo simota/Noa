@@ -2,7 +2,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use noa_config::{
-    BackgroundImageFit, BackgroundImagePosition, CursorShape, MacosOptionAsAlt, MacosTitlebarStyle,
+    BackgroundImageFit, BackgroundImagePosition, CursorShape, GlassLevel, MacosOptionAsAlt,
+    MacosTitlebarStyle,
 };
 
 /// Which half of the (now-split) overlay owns ↑↓/←→ navigation. A session's
@@ -63,20 +64,22 @@ pub(crate) enum SettingsRowKind {
     SidebarWidth,
     SidebarFontSize,
     QuickTerminalHeight,
-    /// `glassmorphism`. Reload-exempt like `ConfirmQuit`: `Liveness::OnSave`,
-    /// no continuous live preview while the row is being edited. Unlike
-    /// `ConfirmQuit`, though, its commit-time apply is *not* left to
-    /// `ConfigWatcher` picking up the write — `App::commit_theme_settings`
-    /// mirrors the new value into `self.config` for its own immediate
-    /// `chrome::select_palette` call, which leaves `app/config_reload.rs`'s
-    /// `glassmorphism_changed` diff with nothing to see on the next poll, so
-    /// `commit_theme_settings` re-selects the chrome palette, drops the
-    /// textures painted with the old one, and refreshes the native macOS
-    /// titlebar backdrop directly instead. Switching it on also takes over
-    /// `BackgroundOpacity`/`BackgroundBlurRadius` (see
-    /// `ThemeSettings::row_is_glass_managed`), and — in a session that
-    /// started opaque — carries `RestartReason::OpaqueStartup`, since a
-    /// window created opaque cannot become see-through in place.
+    /// `glassmorphism` — a 4-step level (`Off`/`1`/`2`/`3`), cycled rather
+    /// than flipped (`ThemeSettings::adjust`). Reload-exempt like
+    /// `ConfirmQuit`: `Liveness::OnSave`, no continuous live preview while
+    /// the row is being edited. Unlike `ConfirmQuit`, though, its commit-time
+    /// apply is *not* left to `ConfigWatcher` picking up the write —
+    /// `App::commit_theme_settings` mirrors the new value into `self.config`
+    /// for its own immediate `chrome::select_palette` call, which leaves
+    /// `app/config_reload.rs`'s `glassmorphism_changed` diff with nothing to
+    /// see on the next poll, so `commit_theme_settings` re-selects the chrome
+    /// palette, drops the textures painted with the old one, and refreshes
+    /// the native macOS titlebar backdrop directly instead. Moving onto any
+    /// on-level also takes over `BackgroundOpacity`/`BackgroundBlurRadius`
+    /// (see `ThemeSettings::row_is_glass_managed`), re-snapping them to the
+    /// new level's pair on every level change while staying on — and, in a
+    /// session that started opaque, carries `RestartReason::OpaqueStartup`,
+    /// since a window created opaque cannot become see-through in place.
     Glassmorphism,
     ConfirmQuit,
     /// `send-selection-send-enter`. Same reload-exempt classification as
@@ -296,7 +299,7 @@ impl SettingsRowKind {
                 "Drop-down quick terminal's height as a fraction of the screen."
             }
             Self::Glassmorphism => {
-                "Frosted translucent sidebar and tab-overview chrome. Takes over window opacity and blur with its own recommended pair. Applies on save."
+                "Frosted translucent sidebar and tab-overview chrome, 4 steps (Off/1/2/3, higher = more transparent). Takes over window opacity and blur with the level's own recommended pair. Applies on save."
             }
             Self::ConfirmQuit => "Ask for confirmation before quitting the app.",
             Self::SendSelectionSendEnter => {
@@ -423,7 +426,7 @@ pub(crate) enum RowDraft {
     SidebarWidth(f32),
     SidebarFontSize(f32),
     QuickTerminalHeight(f32),
-    Glassmorphism(bool),
+    Glassmorphism(GlassLevel),
     ConfirmQuit(bool),
     SendSelectionSendEnter(bool),
     ScrollbackLimit(usize),
@@ -520,11 +523,16 @@ impl RowDraft {
             RowDraft::SidebarWidth(w) => format!("{w:.0}"),
             RowDraft::SidebarFontSize(v) => format!("{v:.1}"),
             RowDraft::QuickTerminalHeight(size) => format!("{:.0}%", size * 100.0),
-            RowDraft::Glassmorphism(on) => {
-                if *on {
-                    "On".to_string()
-                } else {
-                    "Off".to_string()
+            // The level's own `Display` impl already renders exactly this
+            // ("off"/"1"/"2"/"3") — reuse it rather than a second table that
+            // could drift from the config-file spelling, capitalized to
+            // match this column's other On/Off-style rows.
+            RowDraft::Glassmorphism(level) => {
+                let text = level.to_string();
+                let mut chars = text.chars();
+                match chars.next() {
+                    Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                    None => text,
                 }
             }
             RowDraft::ConfirmQuit(confirm) => {
@@ -782,7 +790,7 @@ pub(crate) struct RevertValues {
     pub(crate) window_padding_x: f32,
     pub(crate) window_padding_y: f32,
     pub(crate) macos_titlebar_style: MacosTitlebarStyle,
-    pub(crate) glassmorphism: bool,
+    pub(crate) glassmorphism: GlassLevel,
     pub(crate) confirm_quit: bool,
     pub(crate) send_selection_send_enter: bool,
     pub(crate) font_family: String,
@@ -895,7 +903,7 @@ pub(crate) struct ThemeSettingsInit {
     pub(crate) sidebar_width: f32,
     pub(crate) sidebar_font_size: f32,
     pub(crate) quick_terminal_size: f32,
-    pub(crate) glassmorphism: bool,
+    pub(crate) glassmorphism: GlassLevel,
     pub(crate) confirm_quit: bool,
     pub(crate) send_selection_send_enter: bool,
     pub(crate) font_family: String,

@@ -75,9 +75,10 @@ pub struct AppConfig {
     pub configured_background_opacity: f32,
     pub configured_background_blur_radius: u16,
     /// `glassmorphism`: translucent frosted chrome (sidebar / tab overview)
-    /// instead of opaque. Default off, and off installs the byte-identical
+    /// as a 4-step level (`off`/`1`/`2`/`3`, higher = more transparent)
+    /// instead of a plain on/off flag. `Off` installs the byte-identical
     /// opaque chrome palette — no extra draw work, no extra state.
-    pub glassmorphism: bool,
+    pub glassmorphism: noa_config::GlassLevel,
     /// `background-image`: path to a PNG laid behind the terminal grid, or the
     /// reserved value `noa` for the bundled wallpaper directory. `None` leaves
     /// the background image disabled. Missing or undecodable paths log a

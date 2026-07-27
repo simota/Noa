@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use noa_config::{
-    BackgroundImageFit, BackgroundImagePosition, CursorShape, MacosOptionAsAlt, MacosTitlebarStyle,
+    BackgroundImageFit, BackgroundImagePosition, CursorShape, GlassLevel, MacosOptionAsAlt,
+    MacosTitlebarStyle,
 };
 
 use crate::command_palette::fuzzy_match;
@@ -529,9 +530,10 @@ impl ThemeSettings {
         // pair its own restore point — turning the toggle off would then
         // show `0.50 / 64` instead of the user's fallback `0.9 / 5`, and the
         // next adjustment would overwrite that fallback from the wrong base.
-        if settings.glass_draft() {
+        let opened_glass_level = settings.glass_draft();
+        if opened_glass_level.is_on() {
             settings.seed_glass_restore_point_from_configured();
-            settings.snap_glass_managed_rows();
+            settings.snap_glass_managed_rows(opened_glass_level);
         }
         settings.recompute_filtered();
         match &init.carryover {
@@ -650,57 +652,64 @@ impl ThemeSettings {
         self.opaque_at_startup
     }
 
-    /// The `glassmorphism` row's current draft — `false` if the panel was
-    /// somehow built with a mismatched draft variant (unreachable: `rows[i]`
-    /// always holds `SettingsRowKind::ALL[i]`'s variant).
-    fn glass_draft(&self) -> bool {
-        matches!(
-            self.rows[row_index(SettingsRowKind::Glassmorphism)],
-            SettingsRow {
-                draft: RowDraft::Glassmorphism(true),
-                ..
-            }
-        )
+    /// The `glassmorphism` row's current draft level — `GlassLevel::Off` if
+    /// the panel was somehow built with a mismatched draft variant
+    /// (unreachable: `rows[i]` always holds `SettingsRowKind::ALL[i]`'s
+    /// variant).
+    fn glass_draft(&self) -> GlassLevel {
+        match self.rows[row_index(SettingsRowKind::Glassmorphism)].draft {
+            RowDraft::Glassmorphism(level) => level,
+            _ => GlassLevel::Off,
+        }
     }
 
-    /// Rows `glassmorphism` takes over: while it is on, `background-opacity`
-    /// and `background-blur-radius` resolve to the recommended glass pair
-    /// (`noa_config::apply_glassmorphism_defaults`) no matter what this panel
-    /// or the config file says, so editing them here would show a value the
-    /// next reload throws away. They are displayed (snapped to the values
-    /// that will actually apply) but not adjustable.
+    /// Rows `glassmorphism` takes over: while it is on any level,
+    /// `background-opacity` and `background-blur-radius` resolve to that
+    /// level's recommended glass pair (`noa_config::apply_glassmorphism_defaults`)
+    /// no matter what this panel or the config file says, so editing them
+    /// here would show a value the next reload throws away. They are
+    /// displayed (snapped to the values that will actually apply) but not
+    /// adjustable.
     fn row_is_glass_managed(&self, row: SettingsRowKind) -> bool {
-        self.glass_draft()
+        self.glass_draft().is_on()
             && matches!(
                 row,
                 SettingsRowKind::BackgroundOpacity | SettingsRowKind::BackgroundBlurRadius
             )
     }
 
-    /// Pull the two managed rows onto the values `glassmorphism = true`
-    /// resolves to, so the panel never displays an opacity/blur the running
-    /// config will not have. Left `touched = false`: the toggle itself is
-    /// what gets written, and the resolver derives these from it — writing
-    /// them too would bake a redundant pair of keys into the config file
-    /// that goes stale the moment glassmorphism is turned back off.
-    fn snap_glass_managed_rows(&mut self) {
+    /// Pull the two managed rows onto the values `level` resolves to, so the
+    /// panel never displays an opacity/blur the running config will not
+    /// have. Left `touched = false`: the toggle itself is what gets written,
+    /// and the resolver derives these from it — writing them too would bake
+    /// a redundant pair of keys into the config file that goes stale the
+    /// moment glassmorphism is turned back off.
+    ///
+    /// Called on every move onto or between on-levels (`Off -> 1`, but also
+    /// `1 -> 2`, `2 -> 3`, …) — the second case is why the restore-point
+    /// stash below is gated on `pre_glass_rows.is_none()` rather than on
+    /// "was the previous level Off": a level change while already on must
+    /// re-snap the *displayed* pair to the new level without disturbing the
+    /// restore point, which still has to be the user's own pre-glass values.
+    fn snap_glass_managed_rows(&mut self, level: GlassLevel) {
         let opacity = row_index(SettingsRowKind::BackgroundOpacity);
         let blur = row_index(SettingsRowKind::BackgroundBlurRadius);
         // Stash what the two rows held so switching glassmorphism back off in
         // the same session can hand them back (`restore_glass_managed_rows`).
-        // Only the first snap stashes: a second one would capture the glass
-        // pair itself and lose the user's values. Cloning the whole
-        // `SettingsRow` carries `touched` too — an edit made before the
-        // toggle must still commit if the toggle is undone.
+        // Only the first snap (the `Off -> `some on-level` transition)
+        // stashes: a later one (a level change while staying on) would
+        // capture the glass pair itself and lose the user's values.
+        // Cloning the whole `SettingsRow` carries `touched` too — an edit
+        // made before the toggle must still commit if the toggle is undone.
         if self.pre_glass_rows.is_none() {
             self.pre_glass_rows = Some((self.rows[opacity].clone(), self.rows[blur].clone()));
         }
         self.rows[opacity] = SettingsRow {
-            draft: RowDraft::BackgroundOpacity(noa_config::GLASS_BACKGROUND_OPACITY),
+            draft: RowDraft::BackgroundOpacity(noa_config::glass_background_opacity(level)),
             touched: false,
         };
         self.rows[blur] = SettingsRow {
-            draft: RowDraft::BackgroundBlurRadius(noa_config::GLASS_BACKGROUND_BLUR_RADIUS),
+            draft: RowDraft::BackgroundBlurRadius(noa_config::glass_background_blur_radius(level)),
             touched: false,
         };
     }
@@ -766,7 +775,7 @@ impl ThemeSettings {
     fn row_needs_a_transparent_window(&self, row: SettingsRowKind) -> bool {
         match row {
             SettingsRowKind::BackgroundOpacity | SettingsRowKind::BackgroundBlurRadius => true,
-            SettingsRowKind::Glassmorphism => self.glass_draft(),
+            SettingsRowKind::Glassmorphism => self.glass_draft().is_on(),
             _ => false,
         }
     }
@@ -1394,17 +1403,30 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
+            // Cycles `Off -> 1 -> .. -> 5 -> Off` (delta = +1) or the reverse
+            // (delta = -1), same `cycle` helper every other sample-set row
+            // uses. A level change that stays on (`1 -> 2`, `2 -> 3`, …) must
+            // re-snap the managed rows to the new pair without disturbing
+            // the restore point; only the `Off <-> on` transitions snap/
+            // restore the toggle-level machinery itself.
+            //
+            // `GlassLevel::ALL`, never a literal list: a slice written out
+            // here keeps compiling when a level is added and silently drops
+            // it off the end of the cycle, leaving it reachable only by
+            // hand-editing the config file.
             SettingsRowKind::Glassmorphism => {
                 let RowDraft::Glassmorphism(current) = self.rows[idx].draft else {
                     return RowEffect::None;
                 };
-                let on = !current;
-                self.rows[idx].draft = RowDraft::Glassmorphism(on);
-                self.rows[idx].touched = true;
-                if on {
-                    self.snap_glass_managed_rows();
-                } else {
-                    self.restore_glass_managed_rows();
+                let new = cycle(&GlassLevel::ALL, current, delta);
+                if new != current {
+                    self.rows[idx].draft = RowDraft::Glassmorphism(new);
+                    self.rows[idx].touched = true;
+                    if new.is_on() {
+                        self.snap_glass_managed_rows(new);
+                    } else {
+                        self.restore_glass_managed_rows();
+                    }
                 }
                 RowEffect::None
             }
@@ -1742,15 +1764,15 @@ impl ThemeSettings {
             return RowEffect::None;
         }
         let default = RowDraft::default_for(kind);
-        let glass_was_on = self.glass_draft();
+        let glass_was_on = self.glass_draft().is_on();
         self.rows[idx].draft = default.clone();
         self.rows[idx].touched = true;
         // Reset is the other way `glassmorphism` can go off (its default is
-        // `false`), and it has to hand the two managed rows back exactly as
-        // the toggle does — otherwise the restore point stays stashed while
-        // the rows keep displaying the glass pair, and the next adjustment
-        // would edit *that* instead of the user's own value.
-        if kind == SettingsRowKind::Glassmorphism && glass_was_on && !self.glass_draft() {
+        // `GlassLevel::Off`), and it has to hand the two managed rows back
+        // exactly as the toggle does — otherwise the restore point stays
+        // stashed while the rows keep displaying the glass pair, and the
+        // next adjustment would edit *that* instead of the user's own value.
+        if kind == SettingsRowKind::Glassmorphism && glass_was_on && !self.glass_draft().is_on() {
             self.restore_glass_managed_rows();
         }
         self.clear_row_input_state();
@@ -2176,8 +2198,8 @@ impl ThemeSettings {
                 RowDraft::QuickTerminalHeight(size) => {
                     updates.push(("quick-terminal-size".to_string(), format!("{size:.2}")));
                 }
-                RowDraft::Glassmorphism(on) => {
-                    updates.push(("glassmorphism".to_string(), on.to_string()));
+                RowDraft::Glassmorphism(level) => {
+                    updates.push(("glassmorphism".to_string(), level.to_string()));
                 }
                 RowDraft::ConfirmQuit(confirm) => {
                     updates.push(("confirm-quit".to_string(), confirm.to_string()));
@@ -2611,9 +2633,12 @@ fn hash_row_draft_value(draft: &RowDraft, hasher: &mut impl Hasher) {
         }
         RowDraft::BackgroundImageFit(fit) => background_image_fit_value(*fit).hash(hasher),
         RowDraft::BackgroundImageRepeat(v)
-        | RowDraft::Glassmorphism(v)
         | RowDraft::ConfirmQuit(v)
         | RowDraft::SendSelectionSendEnter(v) => v.hash(hasher),
+        // `GlassLevel` has no `Hash` impl (not in its derive list — kept
+        // minimal like every other `noa_config` enum here), so reuse its
+        // `Display` string the same way the other config enums below do.
+        RowDraft::Glassmorphism(level) => level.to_string().hash(hasher),
         RowDraft::BackgroundImageInterval(v) => v.hash(hasher),
         RowDraft::CursorStyle(shape) => cursor_shape_config_value(*shape).hash(hasher),
         RowDraft::WindowPadding(x, y) => {

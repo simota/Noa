@@ -312,7 +312,7 @@ pub(super) fn parse_bool_directive(
     }
 }
 
-/// `glassmorphism`: a 4-step level, not a plain bool, but still has to accept
+/// `glassmorphism`: a 6-step level, not a plain bool, but still has to accept
 /// every spelling `glassmorphism = true`/`false` configs already use
 /// (backward compatibility is a hard requirement — an existing `= true`
 /// config must keep resolving to level `1`, byte-identical to before this
@@ -329,6 +329,8 @@ pub(super) fn parse_glassmorphism(
         "on" | "true" | "yes" | "1" => Some(GlassLevel::One),
         "2" => Some(GlassLevel::Two),
         "3" => Some(GlassLevel::Three),
+        "4" => Some(GlassLevel::Four),
+        "5" => Some(GlassLevel::Five),
         _ => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
             None

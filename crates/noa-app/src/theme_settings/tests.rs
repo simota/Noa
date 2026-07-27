@@ -1155,22 +1155,28 @@ fn glassmorphism_row_toggles_and_commits_on_save_without_restart_note() {
     );
 }
 
-// The row walks all four steps and wraps, in both directions — the key grew
-// from a bool into a level precisely so the panel can reach `2`/`3`, and a
-// cycle that silently stopped at `1` (or wrapped one step early) would leave
-// the two most transparent levels reachable only by hand-editing the config.
+// The row walks every step and wraps, in both directions — the key grew from
+// a bool into a level precisely so the panel can reach the higher ones, and a
+// cycle that silently stopped short (or wrapped early) would leave the most
+// transparent levels reachable only by hand-editing the config. Driven off
+// `GlassLevel::ALL` rather than a literal list so adding a level extends the
+// walk here instead of leaving this test passing over a stale prefix — which
+// is exactly how level `4` was briefly unreachable from the panel.
 #[test]
-fn glassmorphism_row_cycles_through_all_four_levels_in_both_directions() {
+fn glassmorphism_row_cycles_through_every_level_in_both_directions() {
     let mut settings = ThemeSettings::open(transparent_init());
     let idx = row_index(SettingsRowKind::Glassmorphism);
     move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
 
-    for expected in [
-        GlassLevel::One,
-        GlassLevel::Two,
-        GlassLevel::Three,
-        GlassLevel::Off,
-    ] {
+    // From `Off`, one full lap forward lands on every other level in order
+    // and returns to `Off`.
+    let forward: Vec<_> = GlassLevel::ALL
+        .iter()
+        .skip(1)
+        .copied()
+        .chain([GlassLevel::Off])
+        .collect();
+    for expected in forward {
         settings.adjust(1, Instant::now());
         assert_eq!(
             settings.rows()[idx].draft,
@@ -1178,12 +1184,15 @@ fn glassmorphism_row_cycles_through_all_four_levels_in_both_directions() {
             "forward cycle"
         );
     }
-    for expected in [
-        GlassLevel::Three,
-        GlassLevel::Two,
-        GlassLevel::One,
-        GlassLevel::Off,
-    ] {
+
+    let backward: Vec<_> = GlassLevel::ALL
+        .iter()
+        .skip(1)
+        .rev()
+        .copied()
+        .chain([GlassLevel::Off])
+        .collect();
+    for expected in backward {
         settings.adjust(-1, Instant::now());
         assert_eq!(
             settings.rows()[idx].draft,
@@ -1207,7 +1216,7 @@ fn stepping_between_glass_levels_re_snaps_the_managed_rows_without_moving_the_re
     let configured = settings.rows()[opacity].draft.clone();
 
     move_to_row(&mut settings, SettingsRowKind::Glassmorphism);
-    for level in [GlassLevel::One, GlassLevel::Two, GlassLevel::Three] {
+    for level in GlassLevel::ON_LEVELS {
         settings.adjust(1, Instant::now());
         assert_eq!(
             settings.rows()[opacity].draft,
@@ -1217,7 +1226,7 @@ fn stepping_between_glass_levels_re_snaps_the_managed_rows_without_moving_the_re
     }
 
     // Back to `Off` (one more step wraps): the rows return to what the user
-    // actually had, not to level 3's derived `0.20`.
+    // actually had, not to the top level's derived opacity.
     settings.adjust(1, Instant::now());
     assert_eq!(settings.rows()[opacity].draft, configured);
 }
@@ -1464,17 +1473,17 @@ fn repeated_glassmorphism_toggles_never_capture_the_glass_pair_as_the_restore_po
     }
     assert_eq!(settings.rows()[opacity], original);
 
-    // A level change while staying *on* (1 -> 2 -> 3) re-snaps the displayed
-    // pair but must not touch the restore point either — only the
-    // `Off <-> on` edges do that. Wrapping all the way around
-    // (Off -> 1 -> 2 -> 3 -> Off) is the strongest version of this check:
-    // by the time it lands back on `Off`, the restore point must still be
-    // the original pre-glass values, never any of the three glass pairs it
-    // passed through along the way.
-    settings.adjust(1, Instant::now()); // off -> 1
-    settings.adjust(1, Instant::now()); // 1 -> 2
-    settings.adjust(1, Instant::now()); // 2 -> 3
-    settings.adjust(1, Instant::now()); // 3 -> off (wraps)
+    // A level change while staying *on* (1 -> 2 -> 3 -> …) re-snaps the
+    // displayed pair but must not touch the restore point either — only the
+    // `Off <-> on` edges do that. One full lap is the strongest version of
+    // this check: by the time it lands back on `Off`, the restore point must
+    // still be the original pre-glass values, never any of the glass pairs it
+    // passed through along the way. Lap length comes from `GlassLevel::ALL`,
+    // so adding a level lengthens the lap here rather than leaving this
+    // stopping mid-ladder and asserting against a snapped row.
+    for _ in GlassLevel::ALL {
+        settings.adjust(1, Instant::now());
+    }
     assert_eq!(settings.rows()[opacity], original);
 }
 

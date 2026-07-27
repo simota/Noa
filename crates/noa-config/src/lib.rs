@@ -75,10 +75,10 @@ pub const DEFAULT_SIDEBAR_PREVIEW_LINES: usize = 5;
 /// Largest supported `sidebar-preview-lines` value. Higher values make each
 /// card too tall for the sidebar's dense session-list use case.
 pub const MAX_SIDEBAR_PREVIEW_LINES: usize = 20;
-/// `glassmorphism` level: `off`, or one of three increasing degrees of
+/// `glassmorphism` level: `off`, or one of five increasing degrees of
 /// transparency. `One` is the toggle's original fixed look — kept
 /// byte-identical to what `glassmorphism = true` has always resolved to, so
-/// existing configs don't change appearance — while `Two`/`Three` trade
+/// existing configs don't change appearance — while `Two`..`Five` trade
 /// progressively more window/chrome opacity for more of the desktop showing
 /// through. See [`glass_background_opacity`]/[`glass_background_blur_radius`]
 /// for the per-level window pair, and `noa-app`'s `chrome::glassify` for the
@@ -92,9 +92,46 @@ pub enum GlassLevel {
     One,
     Two,
     Three,
+    Four,
+    /// The structural ceiling: the faces are barely a breath of tint and the
+    /// panes are held together by their rims alone, which have reached the
+    /// foreground color outright (`chrome::glassify`'s rim mix is `1.0` here
+    /// and cannot go further). A sixth level would have nothing left to take
+    /// away and no edge left to compensate with.
+    Five,
 }
 
 impl GlassLevel {
+    /// Every level, in ascending-transparency order — the order the Settings
+    /// panel cycles through and the order any "does this ladder go the right
+    /// way" test walks.
+    ///
+    /// Exists because the alternative is a hand-written `[Off, One, Two, ..]`
+    /// at each of those sites, and those are *slices*, not `match`es: adding
+    /// a variant leaves them compiling and silently short. That is exactly
+    /// how level `4` was unreachable from the panel for one build. Anything
+    /// that enumerates levels reads this array instead, so the compiler's
+    /// arity check on the const is the one place the count is asserted.
+    pub const ALL: [GlassLevel; 6] = [
+        GlassLevel::Off,
+        GlassLevel::One,
+        GlassLevel::Two,
+        GlassLevel::Three,
+        GlassLevel::Four,
+        GlassLevel::Five,
+    ];
+
+    /// [`Self::ALL`] without [`GlassLevel::Off`] — the levels that actually
+    /// install glass, for the per-level tables that have no meaningful `Off`
+    /// entry.
+    pub const ON_LEVELS: [GlassLevel; 5] = [
+        GlassLevel::One,
+        GlassLevel::Two,
+        GlassLevel::Three,
+        GlassLevel::Four,
+        GlassLevel::Five,
+    ];
+
     /// Whether this level turns glassmorphism on at all — `Off` is the only
     /// level that doesn't, so every "is glass on" call site collapses to this
     /// one check instead of a `!= GlassLevel::Off` scattered everywhere.
@@ -113,6 +150,8 @@ impl std::fmt::Display for GlassLevel {
             GlassLevel::One => "1",
             GlassLevel::Two => "2",
             GlassLevel::Three => "3",
+            GlassLevel::Four => "4",
+            GlassLevel::Five => "5",
         })
     }
 }
@@ -124,9 +163,13 @@ impl std::fmt::Display for GlassLevel {
 /// is what made `glassmorphism = true` look like it did nothing at all.
 /// Level `1` (`0.50`) is deliberately aggressive already — half the window is
 /// the desktop behind it, because the point of the toggle is the glass, not a
-/// hint of it; `2`/`3` push further still (`0.35`/`0.20`) for users who want
-/// more of the desktop to show through. What keeps text readable at every
-/// level is the companion blur, not the opacity: see
+/// hint of it; `2`..`5` push further still (`0.35`/`0.20`/`0.12`/`0.06`) for
+/// users who want more of the desktop to show through. The top two are a
+/// pane you read *through* rather than one you read *on*: at `5` the window
+/// contributes six percent of its own pixels and everything holding the
+/// terminal together is the text, which is never faded, and the rim. What
+/// keeps text readable at every level is the companion blur, not the
+/// opacity: see
 /// [`glass_background_blur_radius`], which is pinned to its maximum for
 /// exactly that reason. Users who want a heavier pane turn `glassmorphism`
 /// off and set `background-opacity` themselves. `Off` is never read through
@@ -138,6 +181,8 @@ pub fn glass_background_opacity(level: GlassLevel) -> f32 {
         GlassLevel::One => 0.50,
         GlassLevel::Two => 0.35,
         GlassLevel::Three => 0.20,
+        GlassLevel::Four => 0.12,
+        GlassLevel::Five => 0.06,
     }
 }
 /// `background-blur-radius` installed when `glassmorphism` is on: the
@@ -2461,14 +2506,29 @@ font-size = 15.5
     // Blur has no headroom left above `1`'s maximum, so it stays flat.
     #[test]
     fn glass_background_opacity_strictly_decreases_by_level() {
-        let one = glass_background_opacity(GlassLevel::One);
-        let two = glass_background_opacity(GlassLevel::Two);
-        let three = glass_background_opacity(GlassLevel::Three);
-        assert!(one > two, "one={one} two={two}");
-        assert!(two > three, "two={two} three={three}");
-        assert!(three > 0.0, "level 3 must still be a real, visible pane");
+        for pair in GlassLevel::ON_LEVELS.windows(2) {
+            let (lower, higher) = (
+                glass_background_opacity(pair[0]),
+                glass_background_opacity(pair[1]),
+            );
+            assert!(
+                lower > higher,
+                "{:?}={lower} {:?}={higher}",
+                pair[0],
+                pair[1]
+            );
+        }
+        let top = glass_background_opacity(
+            *GlassLevel::ON_LEVELS
+                .last()
+                .expect("ON_LEVELS is non-empty"),
+        );
+        assert!(
+            top > 0.0,
+            "the top level must still be a real, visible pane"
+        );
 
-        for level in [GlassLevel::One, GlassLevel::Two, GlassLevel::Three] {
+        for level in GlassLevel::ON_LEVELS {
             assert_eq!(glass_background_blur_radius(level), 64);
         }
         assert_eq!(glass_background_blur_radius(GlassLevel::Off), 0);
@@ -2480,7 +2540,7 @@ font-size = 15.5
     // already pins).
     #[test]
     fn resolved_background_opacity_tracks_every_on_level() {
-        for level in [GlassLevel::One, GlassLevel::Two, GlassLevel::Three] {
+        for level in GlassLevel::ON_LEVELS {
             assert_eq!(
                 resolved_background_opacity(level, 1.0),
                 glass_background_opacity(level)
@@ -2496,23 +2556,24 @@ font-size = 15.5
     // config, end to end through the real loader — not just the standalone
     // functions above.
     #[test]
-    fn glassmorphism_three_resolves_more_transparent_than_one() {
-        let cli_one = ConfigOverrides {
-            glassmorphism: Some(GlassLevel::One),
-            ..Default::default()
+    fn a_higher_level_resolves_more_transparent_end_to_end() {
+        let resolved = |level| {
+            let (config, _) = load_startup_config_without_files(ConfigOverrides {
+                glassmorphism: Some(level),
+                ..Default::default()
+            })
+            .unwrap();
+            config.background_opacity
         };
-        let cli_three = ConfigOverrides {
-            glassmorphism: Some(GlassLevel::Three),
-            ..Default::default()
-        };
-        let (one, _) = load_startup_config_without_files(cli_one).unwrap();
-        let (three, _) = load_startup_config_without_files(cli_three).unwrap();
-        assert!(
-            three.background_opacity < one.background_opacity,
-            "three={} one={}",
-            three.background_opacity,
-            one.background_opacity
-        );
+        for pair in GlassLevel::ON_LEVELS.windows(2) {
+            let (lower, higher) = (resolved(pair[0]), resolved(pair[1]));
+            assert!(
+                higher < lower,
+                "{:?}={lower} must be less transparent than {:?}={higher}",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 
     // The diagnostic must interpolate the actual level's pair, not a fixed

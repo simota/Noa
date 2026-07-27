@@ -137,33 +137,50 @@ impl ChromePalette {
 /// the chrome's area rather than a factor on top of `background-opacity` —
 /// most of the blurred desktop reads straight through the panel. Level `1`
 /// is already barely a tint, held together by its rim and its text — the
-/// look, not a compromise on the way to it; `2`/`3` push further still,
+/// look, not a compromise on the way to it; `2`..`5` push further still,
 /// matching `noa-config`'s window-opacity levels getting more aggressive too.
+/// The top two stay deliberately above zero: at `0.0` the panel stops being
+/// a plane at all and the sidebar reads as text floating on the desktop
+/// rather than as glass laid over it, which is a different thing than more
+/// transparency. `0.014` is about the least tint that still separates the
+/// pane from what is behind it once the rim is doing the rest of the work.
 fn glass_backdrop_alpha(level: GlassLevel) -> f32 {
     match level {
         GlassLevel::Off => 1.0,
         GlassLevel::One => 0.18,
         GlassLevel::Two => 0.12,
         GlassLevel::Three => 0.07,
+        GlassLevel::Four => 0.040,
+        GlassLevel::Five => 0.020,
     }
 }
-/// Card / band alpha per on-level of `glassmorphism`.
+/// Card / band alpha per on-level of `glassmorphism`. Tracks
+/// [`glass_backdrop_alpha`] a step lighter — a card sitting *on* the panel
+/// only has to separate from it, not from the desktop.
 fn glass_surface_alpha(level: GlassLevel) -> f32 {
     match level {
         GlassLevel::Off => 1.0,
         GlassLevel::One => 0.16,
         GlassLevel::Two => 0.10,
         GlassLevel::Three => 0.06,
+        GlassLevel::Four => 0.034,
+        GlassLevel::Five => 0.014,
     }
 }
 /// Pill / popup alpha per on-level of `glassmorphism` — deliberately the most
-/// opaque of the three at every level; pills carry the smallest text.
+/// opaque of the three at every level; pills carry the smallest text. Its
+/// ladder is the shallowest of the three for that reason: by level `5` the
+/// backdrop has given up nine tenths of its opacity and the pill only three
+/// quarters, because a search pill that faded in step would be unreadable
+/// well before the panel behind it stopped being legible.
 fn glass_pill_alpha(level: GlassLevel) -> f32 {
     match level {
         GlassLevel::Off => 1.0,
         GlassLevel::One => 0.34,
         GlassLevel::Two => 0.26,
         GlassLevel::Three => 0.18,
+        GlassLevel::Four => 0.125,
+        GlassLevel::Five => 0.085,
     }
 }
 /// Alpha for the shared overlay surfaces — command palette, search prompt,
@@ -179,6 +196,8 @@ fn glass_overlay_alpha(level: GlassLevel) -> f32 {
         GlassLevel::One => 0.68,
         GlassLevel::Two => 0.58,
         GlassLevel::Three => 0.48,
+        GlassLevel::Four => 0.40,
+        GlassLevel::Five => 0.32,
     }
 }
 /// How far the frosted rim pulls the border tokens toward [`ChromePalette::fg`],
@@ -187,12 +206,22 @@ fn glass_overlay_alpha(level: GlassLevel) -> f32 {
 /// edge has to be carried by the stroke instead — and the more transparent
 /// the face gets at a higher level, the more of that job the rim has to
 /// inherit, so this climbs alongside the alphas above falling.
+///
+/// `Five` reaches `1.0`: the rim *is* [`ChromePalette::fg`], the same value
+/// the pane's own text is drawn in. That is the ceiling in the literal
+/// sense — there is nothing past "the edge is as present as the content" —
+/// and it is why [`noa_config::GlassLevel`] stops at five. It is also what
+/// keeps the top levels reading as glass rather than as absence: a face at
+/// `0.014` contributes almost nothing, so every bit of the pane's geometry
+/// has to come from a bright, fully-present edge.
 fn glass_rim_mix(level: GlassLevel) -> f32 {
     match level {
         GlassLevel::Off => 0.0,
         GlassLevel::One => 0.70,
         GlassLevel::Two => 0.80,
         GlassLevel::Three => 0.88,
+        GlassLevel::Four => 0.94,
+        GlassLevel::Five => 1.00,
     }
 }
 
@@ -460,7 +489,7 @@ mod tests {
     #[test]
     fn glassify_preserves_hues_and_only_lightens_the_rim() {
         for base in [CHROME_DARK, CHROME_LIGHT] {
-            for level in [GlassLevel::One, GlassLevel::Two, GlassLevel::Three] {
+            for level in GlassLevel::ON_LEVELS {
                 let glass = glassify(base, level);
                 assert_eq!(glass.bg, base.bg);
                 assert_eq!(glass.card, base.card);
@@ -496,31 +525,53 @@ mod tests {
     }
 
     // Each level strictly more transparent than the last (alphas fall, rim
-    // mix rises to carry more of the edge) — the 4-step split is an actual
-    // step, not four names for one look.
+    // mix rises to carry more of the edge) — the 5-step ladder is an actual
+    // ladder, not five names for one look.
     #[test]
     fn glass_alphas_strictly_decrease_and_rim_mix_strictly_increases_by_level() {
         for base in [CHROME_DARK, CHROME_LIGHT] {
-            let one = glassify(base, GlassLevel::One);
-            let two = glassify(base, GlassLevel::Two);
-            let three = glassify(base, GlassLevel::Three);
+            let ladder: Vec<_> = GlassLevel::ON_LEVELS
+                .iter()
+                .map(|&level| glassify(base, level))
+                .collect();
 
-            assert!(one.backdrop_alpha > two.backdrop_alpha);
-            assert!(two.backdrop_alpha > three.backdrop_alpha);
-            assert!(one.surface_alpha > two.surface_alpha);
-            assert!(two.surface_alpha > three.surface_alpha);
-            assert!(one.pill_alpha > two.pill_alpha);
-            assert!(two.pill_alpha > three.pill_alpha);
-            assert!(one.overlay_alpha > two.overlay_alpha);
-            assert!(two.overlay_alpha > three.overlay_alpha);
-            assert!(three.backdrop_alpha > 0.0, "level 3 must stay a real pane");
+            for pair in ladder.windows(2) {
+                let (lower, higher) = (pair[0], pair[1]);
+                assert!(lower.backdrop_alpha > higher.backdrop_alpha);
+                assert!(lower.surface_alpha > higher.surface_alpha);
+                assert!(lower.pill_alpha > higher.pill_alpha);
+                assert!(lower.overlay_alpha > higher.overlay_alpha);
 
-            // The rim mix isn't a public field (it's baked into `border`/
-            // `pill_border` at `glassify` time), so recover it the same way
-            // `glassify` derives it and compare monotonicity on that.
-            assert!(glass_rim_mix(GlassLevel::One) < glass_rim_mix(GlassLevel::Two));
-            assert!(glass_rim_mix(GlassLevel::Two) < glass_rim_mix(GlassLevel::Three));
+                // The rim mix isn't a public field — it is baked into
+                // `border`/`pill_border` at `glassify` time — so measure it
+                // where it lands rather than re-reading the table `glassify`
+                // itself reads. Asserting on `glass_rim_mix()` directly would
+                // hold by construction for *any* `glassify`, including one
+                // that pinned every level to the same rim, which is precisely
+                // the regression this ladder exists to catch.
+                assert!(
+                    rim_distance(base, higher) > rim_distance(base, lower),
+                    "the rim must travel further toward fg at each level"
+                );
+            }
+
+            let top = ladder.last().copied().expect("ON_LEVELS is non-empty");
+            assert!(
+                top.backdrop_alpha > 0.0 && top.surface_alpha > 0.0,
+                "the most transparent level must still be a pane, not absence"
+            );
         }
+    }
+
+    /// How far `glass`'s rim has been pulled from the opaque palette's border
+    /// toward its foreground, as a plain channel-sum distance. Measured on
+    /// `glassify`'s actual output — see its caller for why the private table
+    /// is deliberately not consulted here.
+    fn rim_distance(base: ChromePalette, glass: ChromePalette) -> i32 {
+        let channel = |a: u8, b: u8| (a as i32 - b as i32).abs();
+        channel(glass.border.r, base.border.r)
+            + channel(glass.border.g, base.border.g)
+            + channel(glass.border.b, base.border.b)
     }
 
     // The overlay surfaces frost with the chrome, from the same install:
@@ -556,7 +607,7 @@ mod tests {
     #[test]
     fn overlay_alpha_stays_above_the_chrome_surface_alphas() {
         let _guard = PALETTE_TEST_LOCK.lock();
-        for level in [GlassLevel::One, GlassLevel::Two, GlassLevel::Three] {
+        for level in GlassLevel::ON_LEVELS {
             swap_palette(glassify(CHROME_DARK, level));
             let glass = palette();
             let overlay = noa_render::overlay_surface_alpha();

@@ -621,6 +621,8 @@ fn glassmorphism_parses_bool_and_defaults_to_unset() {
         ("1", GlassLevel::One),
         ("2", GlassLevel::Two),
         ("3", GlassLevel::Three),
+        ("4", GlassLevel::Four),
+        ("5", GlassLevel::Five),
         // Case-insensitive.
         ("TRUE", GlassLevel::One),
         ("Off", GlassLevel::Off),
@@ -635,10 +637,26 @@ fn glassmorphism_parses_bool_and_defaults_to_unset() {
     assert_eq!(diagnostics.len(), 1);
     assert!(diagnostics[0].message.contains("glassmorphism"));
 
-    let (invalid_level, diagnostics) = parse_overrides(path(), "glassmorphism = 4");
+    let (invalid_level, diagnostics) = parse_overrides(path(), "glassmorphism = 6");
     assert_eq!(invalid_level.glassmorphism, None);
     assert_eq!(diagnostics.len(), 1);
     assert!(diagnostics[0].message.contains("glassmorphism"));
+}
+
+// `GlassLevel`'s `Display` is the only thing that writes this key back — the
+// Settings panel's commit and undo, and the `noa --config` dump all go
+// through it — and `parse_glassmorphism` is the only thing that reads it.
+// They are two independent tables in two crates, so nothing but this test
+// stops them drifting: a `Display` the parser rejects would make every panel
+// save of the glass row write a value that the next load discards with a
+// diagnostic, i.e. a setting that appears to save and never takes effect.
+#[test]
+fn every_glass_level_round_trips_through_its_own_display_spelling() {
+    for level in GlassLevel::ALL {
+        let (overrides, diagnostics) = parse_overrides(path(), &format!("glassmorphism = {level}"));
+        assert_eq!(overrides.glassmorphism, Some(level), "{level:?}");
+        assert!(diagnostics.is_empty(), "{level:?}: {diagnostics:?}");
+    }
 }
 
 #[test]

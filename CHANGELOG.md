@@ -9,16 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Glassmorphism: the `glassmorphism` key now takes a 4-step level (`off`/`1`/
-  `2`/`3`, higher = more transparent) instead of a plain on/off flag. `1` is
+- Glassmorphism: the `glassmorphism` key now takes a 5-step level (`off` and
+  `1`–`5`, higher = more transparent) instead of a plain on/off flag. `1` is
   byte-identical to what `true` has always resolved to (0.50 window opacity /
-  64 blur radius); `2`/`3` push further (0.35/0.20) for more of the desktop to
-  show through, with the chrome alphas (sidebar/overview backdrop, surface,
-  pill, and the shared overlay cards) stepping down to match. Existing
-  `glassmorphism = true`/`false` configs keep working and resolve to `1`/`off`
-  respectively — this is a widening of the key's accepted values, not a
-  breaking change. The Settings panel's Glassmorphism row now cycles through
-  all four steps instead of flipping a toggle
+  64 blur radius); `2`–`5` push further (0.35 / 0.20 / 0.12 / 0.06) for more
+  of the desktop to show through, with the chrome alphas (sidebar/overview
+  backdrop, surface, pill, and the shared overlay cards) stepping down to
+  match and the rim brightening to carry the edge a thinner face no longer
+  draws — at `5` it reaches the foreground color, which is where the ladder
+  stops. Existing `glassmorphism = true`/`false` configs keep working and
+  resolve to `1`/`off` respectively; reading a config written for the old key
+  is unaffected. Note that the *written* spelling changes: the Settings panel
+  and `noa --config` now emit `off`/`1`…`5`, so saving or reverting from the
+  panel rewrites a hand-written `glassmorphism = true` as `glassmorphism = 1`.
+  The panel's Glassmorphism row cycles through all six steps instead of
+  flipping a toggle
 
 ## [0.2.5] - 2026-07-27
 

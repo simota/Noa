@@ -1403,26 +1403,22 @@ impl ThemeSettings {
                 }
                 RowEffect::None
             }
-            // Cycles `Off -> 1 -> 2 -> 3 -> Off` (delta = +1) or the reverse
+            // Cycles `Off -> 1 -> .. -> 5 -> Off` (delta = +1) or the reverse
             // (delta = -1), same `cycle` helper every other sample-set row
-            // uses. A level change that stays on (`1 -> 2`, `2 -> 3`) must
+            // uses. A level change that stays on (`1 -> 2`, `2 -> 3`, …) must
             // re-snap the managed rows to the new pair without disturbing
             // the restore point; only the `Off <-> on` transitions snap/
             // restore the toggle-level machinery itself.
+            //
+            // `GlassLevel::ALL`, never a literal list: a slice written out
+            // here keeps compiling when a level is added and silently drops
+            // it off the end of the cycle, leaving it reachable only by
+            // hand-editing the config file.
             SettingsRowKind::Glassmorphism => {
                 let RowDraft::Glassmorphism(current) = self.rows[idx].draft else {
                     return RowEffect::None;
                 };
-                let new = cycle(
-                    &[
-                        GlassLevel::Off,
-                        GlassLevel::One,
-                        GlassLevel::Two,
-                        GlassLevel::Three,
-                    ],
-                    current,
-                    delta,
-                );
+                let new = cycle(&GlassLevel::ALL, current, delta);
                 if new != current {
                     self.rows[idx].draft = RowDraft::Glassmorphism(new);
                     self.rows[idx].touched = true;

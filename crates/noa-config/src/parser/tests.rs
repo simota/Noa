@@ -5,8 +5,8 @@ use noa_core::Rgb;
 
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess,
-    ConfigOverrides, CursorShape, FontConfig, FontFeature, FontVariation, KeybindConfig,
-    MacosOptionAsAlt, MacosTitlebarStyle, PaletteOverride, QuickTerminalPosition,
+    ConfigOverrides, CursorShape, FontConfig, FontFeature, FontVariation, GlassLevel,
+    KeybindConfig, MacosOptionAsAlt, MacosTitlebarStyle, PaletteOverride, QuickTerminalPosition,
     QuickTerminalScreen, QuickTerminalSize, QuickTerminalSizeDim, ScratchTerminalSize,
     SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
 };
@@ -599,16 +599,32 @@ fn background_blur_radius_parses_int_bool_and_clamps() {
     }
 }
 
-// `glassmorphism` is an opt-in appearance flag: absent from the config it
-// must stay `None` so the resolved default (off) wins, and it accepts the same
-// truthy spellings as every other bool key.
+// `glassmorphism` is an opt-in appearance level: absent from the config it
+// must stay `None` so the resolved default (`GlassLevel::Off`) wins. It
+// accepts every legacy bool spelling for backward compatibility — an
+// existing `glassmorphism = true` config must keep resolving to level `1`
+// — plus the bare `2`/`3` level spellings, all case-insensitively.
 #[test]
 fn glassmorphism_parses_bool_and_defaults_to_unset() {
     let (absent, diagnostics) = parse_overrides(path(), "font-size = 13");
     assert_eq!(absent.glassmorphism, None);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
-    for (value, expected) in [("true", true), ("false", false)] {
+    for (value, expected) in [
+        ("off", GlassLevel::Off),
+        ("false", GlassLevel::Off),
+        ("no", GlassLevel::Off),
+        ("0", GlassLevel::Off),
+        ("on", GlassLevel::One),
+        ("true", GlassLevel::One),
+        ("yes", GlassLevel::One),
+        ("1", GlassLevel::One),
+        ("2", GlassLevel::Two),
+        ("3", GlassLevel::Three),
+        // Case-insensitive.
+        ("TRUE", GlassLevel::One),
+        ("Off", GlassLevel::Off),
+    ] {
         let (overrides, diagnostics) = parse_overrides(path(), &format!("glassmorphism = {value}"));
         assert_eq!(overrides.glassmorphism, Some(expected), "{value:?}");
         assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
@@ -616,6 +632,11 @@ fn glassmorphism_parses_bool_and_defaults_to_unset() {
 
     let (invalid, diagnostics) = parse_overrides(path(), "glassmorphism = frosted");
     assert_eq!(invalid.glassmorphism, None);
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].message.contains("glassmorphism"));
+
+    let (invalid_level, diagnostics) = parse_overrides(path(), "glassmorphism = 4");
+    assert_eq!(invalid_level.glassmorphism, None);
     assert_eq!(diagnostics.len(), 1);
     assert!(diagnostics[0].message.contains("glassmorphism"));
 }

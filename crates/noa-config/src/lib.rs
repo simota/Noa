@@ -75,24 +75,82 @@ pub const DEFAULT_SIDEBAR_PREVIEW_LINES: usize = 5;
 /// Largest supported `sidebar-preview-lines` value. Higher values make each
 /// card too tall for the sidebar's dense session-list use case.
 pub const MAX_SIDEBAR_PREVIEW_LINES: usize = 20;
-/// `background-opacity` installed when `glassmorphism = true`, replacing
-/// whatever the config resolved to. Frosted chrome only reads as glass when
-/// there is something behind the window to show through, and a window is only
-/// see-through below `1.0` — leaving the user's value in place is what made
-/// `glassmorphism = true` look like it did nothing at all. Deliberately
-/// aggressive — half the window is the desktop behind it — because the point
-/// of the toggle is the glass, not a hint of it. What keeps text readable at
-/// this level is the companion blur, not the opacity: see
-/// [`GLASS_BACKGROUND_BLUR_RADIUS`], which is pinned to its maximum for
+/// `glassmorphism` level: `off`, or one of three increasing degrees of
+/// transparency. `One` is the toggle's original fixed look — kept
+/// byte-identical to what `glassmorphism = true` has always resolved to, so
+/// existing configs don't change appearance — while `Two`/`Three` trade
+/// progressively more window/chrome opacity for more of the desktop showing
+/// through. See [`glass_background_opacity`]/[`glass_background_blur_radius`]
+/// for the per-level window pair, and `noa-app`'s `chrome::glassify` for the
+/// per-level chrome alpha tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlassLevel {
+    /// Opaque chrome, unmodified window transparency keys. Default.
+    #[default]
+    Off,
+    /// The original `glassmorphism = true` look.
+    One,
+    Two,
+    Three,
+}
+
+impl GlassLevel {
+    /// Whether this level turns glassmorphism on at all — `Off` is the only
+    /// level that doesn't, so every "is glass on" call site collapses to this
+    /// one check instead of a `!= GlassLevel::Off` scattered everywhere.
+    pub fn is_on(self) -> bool {
+        self != GlassLevel::Off
+    }
+}
+
+impl std::fmt::Display for GlassLevel {
+    /// Renders exactly the spelling `glassmorphism` accepts back for that
+    /// level — what config-file writeback (the Settings panel's commit/undo)
+    /// and `noa --config` print.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            GlassLevel::Off => "off",
+            GlassLevel::One => "1",
+            GlassLevel::Two => "2",
+            GlassLevel::Three => "3",
+        })
+    }
+}
+
+/// `background-opacity` installed when `glassmorphism` is on, replacing
+/// whatever the config resolved to, keyed by level. Frosted chrome only reads
+/// as glass when there is something behind the window to show through, and a
+/// window is only see-through below `1.0` — leaving the user's value in place
+/// is what made `glassmorphism = true` look like it did nothing at all.
+/// Level `1` (`0.50`) is deliberately aggressive already — half the window is
+/// the desktop behind it, because the point of the toggle is the glass, not a
+/// hint of it; `2`/`3` push further still (`0.35`/`0.20`) for users who want
+/// more of the desktop to show through. What keeps text readable at every
+/// level is the companion blur, not the opacity: see
+/// [`glass_background_blur_radius`], which is pinned to its maximum for
 /// exactly that reason. Users who want a heavier pane turn `glassmorphism`
-/// off and set `background-opacity` themselves.
-pub const GLASS_BACKGROUND_OPACITY: f32 = 0.50;
-/// `background-blur-radius` installed when `glassmorphism = true`: the
-/// maximum the key accepts. At [`GLASS_BACKGROUND_OPACITY`] the desktop is
-/// half the pixels on screen, so it has to be blurred past recognition —
-/// diffuse color instead of shapes — or wallpaper detail reads as noise
-/// under the text. Frosted glass, not clear glass.
-pub const GLASS_BACKGROUND_BLUR_RADIUS: u16 = 64;
+/// off and set `background-opacity` themselves. `Off` is never read through
+/// this function by a real caller (see [`resolved_background_opacity`]), but
+/// returns `1.0` — fully opaque — rather than an arbitrary placeholder.
+pub fn glass_background_opacity(level: GlassLevel) -> f32 {
+    match level {
+        GlassLevel::Off => 1.0,
+        GlassLevel::One => 0.50,
+        GlassLevel::Two => 0.35,
+        GlassLevel::Three => 0.20,
+    }
+}
+/// `background-blur-radius` installed when `glassmorphism` is on: the
+/// maximum the key accepts, at every on-level alike. At level `1`'s opacity
+/// ([`glass_background_opacity`]) the desktop is already half the pixels on
+/// screen, so it has to be blurred past recognition — diffuse color instead
+/// of shapes — or wallpaper detail reads as noise under the text; the more
+/// transparent higher levels only need *at least* that much blur, and the key
+/// has no higher value left to give them. Frosted glass, not clear glass, at
+/// every step. `0` (no blur) for `Off`.
+pub fn glass_background_blur_radius(level: GlassLevel) -> u16 {
+    if level.is_on() { 64 } else { 0 }
+}
 /// `server-port` default (noa-server spec DEC-3: fixed value, no discovery).
 pub const DEFAULT_SERVER_PORT: u16 = 61771;
 /// Default bind address for the `noa-server` socket: loopback-only. LAN
@@ -544,13 +602,13 @@ pub struct StartupConfig {
     pub cursor_stop_blinking_after_secs: u64,
     /// `background-opacity`: 0.0..=1.0, clamped. Default is fully opaque.
     /// **Ignored while `glassmorphism` is on** — that toggle installs
-    /// [`GLASS_BACKGROUND_OPACITY`] instead (see
+    /// [`glass_background_opacity`] (at the configured level) instead (see
     /// [`apply_glassmorphism_defaults`]).
     pub background_opacity: f32,
     /// `background-blur-radius`: native macOS window background blur radius in
     /// points, `0..=64` (0 = no blur). Only visible with `background_opacity`
     /// below 1.0. No-op on non-macOS. **Ignored while `glassmorphism` is on**
-    /// — that toggle installs [`GLASS_BACKGROUND_BLUR_RADIUS`] instead.
+    /// — that toggle installs [`glass_background_blur_radius`] instead.
     pub background_blur_radius: u16,
     /// What `background-opacity` / `background-blur-radius` resolved to
     /// *before* [`apply_glassmorphism_defaults`] took them over — equal to
@@ -566,15 +624,18 @@ pub struct StartupConfig {
     /// `glassmorphism`: render noa's own chrome (session sidebar, tab
     /// overview) as translucent frosted panes instead of opaque ones, so the
     /// blurred desktop behind a translucent window shows through — the same
-    /// visual language the native AppKit overlays already use. Default off;
-    /// off installs the byte-identical opaque chrome palette, so it costs
-    /// nothing. On, it *takes over* `background-opacity` and
+    /// visual language the native AppKit overlays already use. A 4-step level
+    /// (`off`/`1`/`2`/`3`, higher = more transparent) rather than a plain
+    /// on/off flag — see [`GlassLevel`]. Default [`GlassLevel::Off`]; `Off`
+    /// installs the byte-identical opaque chrome palette, so it costs
+    /// nothing. Any on-level *takes over* `background-opacity` and
     /// `background-blur-radius` — frosted chrome over an opaque window shows
     /// nothing through, so those two keys resolve to
-    /// [`GLASS_BACKGROUND_OPACITY`] / [`GLASS_BACKGROUND_BLUR_RADIUS`]
-    /// regardless of what the config set them to (a diagnostic names any
-    /// value that was overridden). noa-specific key (no Ghostty analog).
-    pub glassmorphism: bool,
+    /// [`glass_background_opacity`] / [`glass_background_blur_radius`] at
+    /// this level regardless of what the config set them to (a diagnostic
+    /// names any value that was overridden). noa-specific key (no Ghostty
+    /// analog).
+    pub glassmorphism: GlassLevel,
     /// `background-image`: path to a PNG laid behind the terminal grid, or the
     /// reserved value `noa` for Noa's bundled wallpaper directory. `None`
     /// leaves the background as the clear color only. Values are stored
@@ -770,7 +831,7 @@ impl Default for StartupConfig {
             background_blur_radius: 0,
             configured_background_opacity: 1.0,
             configured_background_blur_radius: 0,
-            glassmorphism: false,
+            glassmorphism: GlassLevel::Off,
             background_image: None,
             background_image_opacity: 1.0,
             background_image_position: BackgroundImagePosition::default(),
@@ -845,7 +906,7 @@ pub struct ConfigOverrides {
     pub cursor_stop_blinking_after_secs: Option<u64>,
     pub background_opacity: Option<f32>,
     pub background_blur_radius: Option<u16>,
-    pub glassmorphism: Option<bool>,
+    pub glassmorphism: Option<GlassLevel>,
     pub background_image: Option<PathBuf>,
     pub background_image_opacity: Option<f32>,
     pub background_image_position: Option<BackgroundImagePosition>,
@@ -1268,7 +1329,11 @@ pub fn load_startup_config(
 pub fn load_startup_config_without_files(
     cli: ConfigOverrides,
 ) -> anyhow::Result<(StartupConfig, Vec<Diagnostic>)> {
-    let diagnostics = Vec::from_iter(glass_override_diagnostic(&glass_overridden_keys(&cli)));
+    let level = cli.glassmorphism.unwrap_or_default();
+    let diagnostics = Vec::from_iter(glass_override_diagnostic(
+        level,
+        &glass_overridden_keys(&cli),
+    ));
     let config = finalize_startup_config(cli.apply_to(StartupConfig::default()))?;
     Ok((config, diagnostics))
 }
@@ -1295,7 +1360,11 @@ pub fn load_startup_config_from(
     }
 
     let merged = file.merge(cli);
-    diagnostics.extend(glass_override_diagnostic(&glass_overridden_keys(&merged)));
+    let level = merged.glassmorphism.unwrap_or_default();
+    diagnostics.extend(glass_override_diagnostic(
+        level,
+        &glass_overridden_keys(&merged),
+    ));
     let config = finalize_startup_config(merged.apply_to(StartupConfig::default()))?;
     Ok((config, diagnostics))
 }
@@ -1304,13 +1373,14 @@ fn finalize_startup_config(config: StartupConfig) -> anyhow::Result<StartupConfi
     finalize_startup_config_with_home(config, dirs::home_dir().as_deref())
 }
 
-/// `glassmorphism = true` takes over the window-transparency keys outright:
-/// [`GLASS_BACKGROUND_OPACITY`] / [`GLASS_BACKGROUND_BLUR_RADIUS`] replace
-/// whatever `background-opacity` / `background-blur-radius` resolved to,
-/// including explicitly configured values. Frosted chrome over an opaque
-/// window is a no-op (nothing shows through), so the two keys are not really
-/// independent of the toggle — honoring them would only reproduce the
-/// "glassmorphism does nothing" report that motivated this.
+/// `glassmorphism` at any on-level takes over the window-transparency keys
+/// outright: [`glass_background_opacity`] / [`glass_background_blur_radius`]
+/// (at the configured level) replace whatever `background-opacity` /
+/// `background-blur-radius` resolved to, including explicitly configured
+/// values. Frosted chrome over an opaque window is a no-op (nothing shows
+/// through), so the two keys are not really independent of the toggle —
+/// honoring them would only reproduce the "glassmorphism does nothing"
+/// report that motivated this.
 ///
 /// Applied once here, at the end of resolution, so every consumer — window
 /// transparency at creation, the renderer, macOS blur, the Settings panel,
@@ -1334,15 +1404,15 @@ fn apply_glassmorphism_defaults(config: &mut StartupConfig) {
 /// The `background-opacity` [`apply_glassmorphism_defaults`] resolves to,
 /// exposed standalone so a caller that needs the *effective* value ahead of
 /// the next full resolution pass — the Settings panel's own commit of the
-/// `glassmorphism` row, which mirrors the toggle into `AppConfig` directly
+/// `glassmorphism` row, which mirrors the level into `AppConfig` directly
 /// rather than going through `StartupConfig` resolution again — can derive
 /// it without re-implementing this branch at a second site where it could
 /// drift from the rule above. `apply_glassmorphism_defaults` itself is
 /// written in terms of this function precisely so there is exactly one
 /// place the rule lives.
-pub fn resolved_background_opacity(glassmorphism: bool, configured_background_opacity: f32) -> f32 {
-    if glassmorphism {
-        GLASS_BACKGROUND_OPACITY
+pub fn resolved_background_opacity(level: GlassLevel, configured_background_opacity: f32) -> f32 {
+    if level.is_on() {
+        glass_background_opacity(level)
     } else {
         configured_background_opacity
     }
@@ -1350,11 +1420,11 @@ pub fn resolved_background_opacity(glassmorphism: bool, configured_background_op
 
 /// As [`resolved_background_opacity`], for `background-blur-radius`.
 pub fn resolved_background_blur_radius(
-    glassmorphism: bool,
+    level: GlassLevel,
     configured_background_blur_radius: u16,
 ) -> u16 {
-    if glassmorphism {
-        GLASS_BACKGROUND_BLUR_RADIUS
+    if level.is_on() {
+        glass_background_blur_radius(level)
     } else {
         configured_background_blur_radius
     }
@@ -1362,10 +1432,10 @@ pub fn resolved_background_blur_radius(
 
 /// Which explicitly configured keys [`apply_glassmorphism_defaults`] is about
 /// to override, given the merged overrides that produced the config. Empty
-/// unless `glassmorphism` resolves to `true` *and* the user actually set one
-/// of them — an untouched key is a default, not something to warn about.
+/// unless `glassmorphism` resolves to an on-level *and* the user actually set
+/// one of them — an untouched key is a default, not something to warn about.
 fn glass_overridden_keys(overrides: &ConfigOverrides) -> Vec<&'static str> {
-    if !overrides.glassmorphism.unwrap_or(false) {
+    if !overrides.glassmorphism.unwrap_or_default().is_on() {
         return Vec::new();
     }
     let mut keys = Vec::new();
@@ -1378,14 +1448,21 @@ fn glass_overridden_keys(overrides: &ConfigOverrides) -> Vec<&'static str> {
     keys
 }
 
-fn glass_override_diagnostic(keys: &[&'static str]) -> Option<Diagnostic> {
-    (!keys.is_empty()).then(|| Diagnostic {
-        message: format!(
-            "glassmorphism = true overrides {} with the recommended {GLASS_BACKGROUND_OPACITY:.2} \
-             / {GLASS_BACKGROUND_BLUR_RADIUS}; unset glassmorphism to control {} yourself",
-            keys.join(" and "),
-            if keys.len() == 1 { "it" } else { "them" }
-        ),
+/// `level`'s actual resolved pair is interpolated into the message (not a
+/// fixed 0.50/64) so the diagnostic stays accurate at every on-level, not
+/// just the original level `1`.
+fn glass_override_diagnostic(level: GlassLevel, keys: &[&'static str]) -> Option<Diagnostic> {
+    (!keys.is_empty()).then(|| {
+        let opacity = glass_background_opacity(level);
+        let blur = glass_background_blur_radius(level);
+        Diagnostic {
+            message: format!(
+                "glassmorphism = {level} overrides {} with the recommended {opacity:.2} \
+                 / {blur}; unset glassmorphism to control {} yourself",
+                keys.join(" and "),
+                if keys.len() == 1 { "it" } else { "them" }
+            ),
+        }
     })
 }
 
@@ -1575,7 +1652,7 @@ mod tests {
                 background_blur_radius: 0,
                 configured_background_opacity: 1.0,
                 configured_background_blur_radius: 0,
-                glassmorphism: false,
+                glassmorphism: GlassLevel::Off,
                 background_image: None,
                 background_image_opacity: 1.0,
                 background_image_position: BackgroundImagePosition::default(),
@@ -2192,29 +2269,29 @@ font-size = 15.5
     // fix derives the *effective* opacity/blur at a Settings-panel
     // `glassmorphism` commit via these two functions instead of
     // open-coding the branch a second time. Deliberately uses a configured
-    // opacity that is NOT `GLASS_BACKGROUND_OPACITY` (0.50) — the bug's
-    // original repro happened to configure exactly 0.50, which made the
-    // stale (pre-derivation) value coincidentally correct and hid the bug
-    // from that one input. A configured value of `1.0` (this test) would
-    // have caught it: the stale value and the resolved value disagree.
+    // opacity that is NOT `glass_background_opacity(GlassLevel::One)` (0.50)
+    // — the bug's original repro happened to configure exactly 0.50, which
+    // made the stale (pre-derivation) value coincidentally correct and hid
+    // the bug from that one input. A configured value of `1.0` (this test)
+    // would have caught it: the stale value and the resolved value disagree.
     #[test]
     fn resolved_background_opacity_and_blur_take_over_only_while_glass_is_on() {
         assert_eq!(
-            resolved_background_opacity(true, 1.0),
-            GLASS_BACKGROUND_OPACITY
+            resolved_background_opacity(GlassLevel::One, 1.0),
+            glass_background_opacity(GlassLevel::One)
         );
-        assert_eq!(resolved_background_opacity(false, 1.0), 1.0);
+        assert_eq!(resolved_background_opacity(GlassLevel::Off, 1.0), 1.0);
         assert_eq!(
-            resolved_background_blur_radius(true, 0),
-            GLASS_BACKGROUND_BLUR_RADIUS
+            resolved_background_blur_radius(GlassLevel::One, 0),
+            glass_background_blur_radius(GlassLevel::One)
         );
-        assert_eq!(resolved_background_blur_radius(false, 0), 0);
+        assert_eq!(resolved_background_blur_radius(GlassLevel::Off, 0), 0);
 
         // `apply_glassmorphism_defaults` must agree with these standalone
         // functions — it is written in terms of them, but pin the
         // equivalence directly so the two can't silently diverge.
         let mut config = StartupConfig {
-            glassmorphism: true,
+            glassmorphism: GlassLevel::One,
             background_opacity: 1.0,
             background_blur_radius: 0,
             ..StartupConfig::default()
@@ -2222,19 +2299,19 @@ font-size = 15.5
         apply_glassmorphism_defaults(&mut config);
         assert_eq!(
             config.background_opacity,
-            resolved_background_opacity(true, 1.0)
+            resolved_background_opacity(GlassLevel::One, 1.0)
         );
         assert_eq!(
             config.background_blur_radius,
-            resolved_background_blur_radius(true, 0)
+            resolved_background_blur_radius(GlassLevel::One, 0)
         );
     }
 
-    // `glassmorphism = true` owns the window-transparency keys: an explicit
-    // `background-opacity = 1.00` (the exact config that made the frosted
-    // chrome look like it did nothing — an opaque window shows nothing
-    // through) resolves to the recommended pair instead, and the ignored
-    // keys are named in a diagnostic rather than silently dropped.
+    // `glassmorphism = true` (level `1`) owns the window-transparency keys:
+    // an explicit `background-opacity = 1.00` (the exact config that made
+    // the frosted chrome look like it did nothing — an opaque window shows
+    // nothing through) resolves to the recommended pair instead, and the
+    // ignored keys are named in a diagnostic rather than silently dropped.
     #[test]
     fn glassmorphism_replaces_configured_background_opacity_and_blur() {
         let dir = unique_temp_dir("glass-overrides");
@@ -2252,8 +2329,14 @@ font-size = 15.5
             load_startup_config_from(&config_path, &legacy_path, ConfigOverrides::default())
                 .unwrap();
 
-        assert_eq!(config.background_opacity, GLASS_BACKGROUND_OPACITY);
-        assert_eq!(config.background_blur_radius, GLASS_BACKGROUND_BLUR_RADIUS);
+        assert_eq!(
+            config.background_opacity,
+            glass_background_opacity(GlassLevel::One)
+        );
+        assert_eq!(
+            config.background_blur_radius,
+            glass_background_blur_radius(GlassLevel::One)
+        );
         // Below 1.0 is the whole point: that is what makes the window
         // transparent at creation, so the frosted panes have something
         // behind them.
@@ -2267,18 +2350,24 @@ font-size = 15.5
 
     // The override is unconditional, not a floor: a deliberately *more*
     // transparent value is replaced too, so "glassmorphism on" always means
-    // one known-good look.
+    // one known-good look per level.
     #[test]
     fn glassmorphism_replaces_a_more_transparent_configured_value_too() {
         let mut config = StartupConfig {
-            glassmorphism: true,
+            glassmorphism: GlassLevel::One,
             background_opacity: 0.4,
             background_blur_radius: 5,
             ..StartupConfig::default()
         };
         apply_glassmorphism_defaults(&mut config);
-        assert_eq!(config.background_opacity, GLASS_BACKGROUND_OPACITY);
-        assert_eq!(config.background_blur_radius, GLASS_BACKGROUND_BLUR_RADIUS);
+        assert_eq!(
+            config.background_opacity,
+            glass_background_opacity(GlassLevel::One)
+        );
+        assert_eq!(
+            config.background_blur_radius,
+            glass_background_blur_radius(GlassLevel::One)
+        );
     }
 
     // Default-off contract: with the toggle off the two keys are exactly
@@ -2300,7 +2389,7 @@ font-size = 15.5
             load_startup_config_from(&config_path, &legacy_path, ConfigOverrides::default())
                 .unwrap();
 
-        assert!(!config.glassmorphism);
+        assert_eq!(config.glassmorphism, GlassLevel::Off);
         assert_eq!(config.background_opacity, 1.0);
         assert_eq!(config.background_blur_radius, 20);
         assert!(diagnostics.is_empty());
@@ -2322,8 +2411,14 @@ font-size = 15.5
             load_startup_config_from(&config_path, &legacy_path, ConfigOverrides::default())
                 .unwrap();
 
-        assert_eq!(config.background_opacity, GLASS_BACKGROUND_OPACITY);
-        assert_eq!(config.background_blur_radius, GLASS_BACKGROUND_BLUR_RADIUS);
+        assert_eq!(
+            config.background_opacity,
+            glass_background_opacity(GlassLevel::One)
+        );
+        assert_eq!(
+            config.background_blur_radius,
+            glass_background_blur_radius(GlassLevel::One)
+        );
         assert!(diagnostics.is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2333,17 +2428,112 @@ font-size = 15.5
     #[test]
     fn glassmorphism_forces_the_pair_without_config_files_too() {
         let cli = ConfigOverrides {
-            glassmorphism: Some(true),
+            glassmorphism: Some(GlassLevel::One),
             background_opacity: Some(1.0),
             ..Default::default()
         };
 
         let (config, diagnostics) = load_startup_config_without_files(cli).unwrap();
 
-        assert_eq!(config.background_opacity, GLASS_BACKGROUND_OPACITY);
-        assert_eq!(config.background_blur_radius, GLASS_BACKGROUND_BLUR_RADIUS);
+        assert_eq!(
+            config.background_opacity,
+            glass_background_opacity(GlassLevel::One)
+        );
+        assert_eq!(
+            config.background_blur_radius,
+            glass_background_blur_radius(GlassLevel::One)
+        );
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("background-opacity"));
+    }
+
+    // AC-4: `glassmorphism = true` (level `1`) must keep resolving to exactly
+    // the pair it always has — existing configs that opted in before the
+    // 4-level split shipped must not change appearance.
+    #[test]
+    fn level_one_matches_the_original_true_resolution() {
+        assert_eq!(glass_background_opacity(GlassLevel::One), 0.50);
+        assert_eq!(glass_background_blur_radius(GlassLevel::One), 64);
+    }
+
+    // AC-5: each level strictly more transparent than the last, so the
+    // 4-step split is actually a *step* and not four names for one look.
+    // Blur has no headroom left above `1`'s maximum, so it stays flat.
+    #[test]
+    fn glass_background_opacity_strictly_decreases_by_level() {
+        let one = glass_background_opacity(GlassLevel::One);
+        let two = glass_background_opacity(GlassLevel::Two);
+        let three = glass_background_opacity(GlassLevel::Three);
+        assert!(one > two, "one={one} two={two}");
+        assert!(two > three, "two={two} three={three}");
+        assert!(three > 0.0, "level 3 must still be a real, visible pane");
+
+        for level in [GlassLevel::One, GlassLevel::Two, GlassLevel::Three] {
+            assert_eq!(glass_background_blur_radius(level), 64);
+        }
+        assert_eq!(glass_background_blur_radius(GlassLevel::Off), 0);
+        assert_eq!(glass_background_opacity(GlassLevel::Off), 1.0);
+    }
+
+    // `resolved_background_opacity` must track the same per-level pair for
+    // every on-level, not just `1` (the case the regression-lock test above
+    // already pins).
+    #[test]
+    fn resolved_background_opacity_tracks_every_on_level() {
+        for level in [GlassLevel::One, GlassLevel::Two, GlassLevel::Three] {
+            assert_eq!(
+                resolved_background_opacity(level, 1.0),
+                glass_background_opacity(level)
+            );
+            assert_eq!(
+                resolved_background_blur_radius(level, 0),
+                glass_background_blur_radius(level)
+            );
+        }
+    }
+
+    // A level-3 config resolves strictly more transparent than a level-1
+    // config, end to end through the real loader — not just the standalone
+    // functions above.
+    #[test]
+    fn glassmorphism_three_resolves_more_transparent_than_one() {
+        let cli_one = ConfigOverrides {
+            glassmorphism: Some(GlassLevel::One),
+            ..Default::default()
+        };
+        let cli_three = ConfigOverrides {
+            glassmorphism: Some(GlassLevel::Three),
+            ..Default::default()
+        };
+        let (one, _) = load_startup_config_without_files(cli_one).unwrap();
+        let (three, _) = load_startup_config_without_files(cli_three).unwrap();
+        assert!(
+            three.background_opacity < one.background_opacity,
+            "three={} one={}",
+            three.background_opacity,
+            one.background_opacity
+        );
+    }
+
+    // The diagnostic must interpolate the actual level's pair, not a fixed
+    // 0.50/64 — a level-`2` override has to say `0.35`, not the level-1 value.
+    #[test]
+    fn glass_override_diagnostic_names_the_configured_levels_pair() {
+        let cli = ConfigOverrides {
+            glassmorphism: Some(GlassLevel::Two),
+            background_opacity: Some(1.0),
+            ..Default::default()
+        };
+        let (config, diagnostics) = load_startup_config_without_files(cli).unwrap();
+        assert_eq!(
+            config.background_opacity,
+            glass_background_opacity(GlassLevel::Two)
+        );
+        assert_eq!(diagnostics.len(), 1);
+        let message = &diagnostics[0].message;
+        assert!(message.contains("glassmorphism = 2"), "{message}");
+        assert!(message.contains("0.35"), "{message}");
+        assert!(!message.contains("0.50"), "{message}");
     }
 
     #[test]

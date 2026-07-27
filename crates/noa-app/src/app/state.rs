@@ -271,10 +271,10 @@ pub(super) struct WindowState {
     /// `background-opacity`, is what decides whether a transparency change
     /// can preview live (R-11's gate, `ThemeSettings::opaque_at_startup`).
     /// Recomputing it from the live opacity would misreport both directions:
-    /// a `glassmorphism = true` arriving by config reload lowers the opacity
-    /// without making an opaque window transparent, and turning it back off
-    /// raises the opacity in a window that is still perfectly capable of
-    /// transparency.
+    /// a `glassmorphism` on-level arriving by config reload lowers the
+    /// opacity without making an opaque window transparent, and turning it
+    /// back off raises the opacity in a window that is still perfectly
+    /// capable of transparency.
     pub(super) created_transparent: bool,
     pub(super) title: String,
     /// A user-set tab title (tab-title REQ-TTL-2/5). While `Some`, it masks
@@ -769,7 +769,7 @@ mod theme_settings_session_tests {
             sidebar_width: noa_config::DEFAULT_SIDEBAR_WIDTH,
             sidebar_font_size: noa_config::DEFAULT_SIDEBAR_FONT_SIZE,
             quick_terminal_size: 0.4,
-            glassmorphism: false,
+            glassmorphism: noa_config::GlassLevel::Off,
             confirm_quit: true,
             send_selection_send_enter: false,
             font_family: "Menlo".to_string(),

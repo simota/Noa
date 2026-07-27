@@ -4,7 +4,7 @@ use noa_core::Rgb;
 
 use crate::{
     AlphaBlendingMode, BackgroundImageFit, BackgroundImagePosition, ClipboardAccess, CursorShape,
-    FontFeature, FontVariation, MAX_SIDEBAR_FONT_SIZE, MAX_SIDEBAR_PREVIEW_LINES,
+    FontFeature, FontVariation, GlassLevel, MAX_SIDEBAR_FONT_SIZE, MAX_SIDEBAR_PREVIEW_LINES,
     MAX_SIDEBAR_WIDTH, MIN_BACKGROUND_IMAGE_INTERVAL_SECS, MIN_SIDEBAR_FONT_SIZE,
     MIN_SIDEBAR_WIDTH, MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle,
     PaletteOverride, QuickTerminalPosition, QuickTerminalScreen, QuickTerminalSize,
@@ -307,6 +307,30 @@ pub(super) fn parse_bool_directive(
         "false" => Some(false),
         other => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+/// `glassmorphism`: a 4-step level, not a plain bool, but still has to accept
+/// every spelling `glassmorphism = true`/`false` configs already use
+/// (backward compatibility is a hard requirement — an existing `= true`
+/// config must keep resolving to level `1`, byte-identical to before this
+/// key grew levels). Case-insensitive, matching the rest of this file's
+/// sentinel-normalizing keys (`quick-terminal-hotkey`, `sidebar-hotkey`).
+pub(super) fn parse_glassmorphism(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<GlassLevel> {
+    let value = directive.value.as_deref()?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "false" | "no" | "0" => Some(GlassLevel::Off),
+        "on" | "true" | "yes" | "1" => Some(GlassLevel::One),
+        "2" => Some(GlassLevel::Two),
+        "3" => Some(GlassLevel::Three),
+        _ => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
             None
         }
     }

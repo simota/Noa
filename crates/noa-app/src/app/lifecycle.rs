@@ -266,8 +266,8 @@ impl App {
             );
             // Chrome (sidebar/overview) polarity follows the terminal
             // theme: a light theme gets light chrome.
-            // `glassmorphism = true` resolves `background-opacity` /
-            // `background-blur-radius` to the recommended glass pair
+            // `glassmorphism` at any on-level resolves `background-opacity` /
+            // `background-blur-radius` to that level's recommended glass pair
             // (`noa_config::apply_glassmorphism_defaults`), so the window
             // this palette draws into is always translucent and blurred —
             // there is no "frosted chrome over an opaque window" case left
@@ -345,12 +345,12 @@ impl App {
                         self.config.macos_titlebar_style,
                         self.config.background_opacity,
                         self.background_image.has_visible_image(),
-                        self.config.glassmorphism,
+                        self.config.glassmorphism.is_on(),
                     ) {
                         crate::macos_window::install_titlebar_backdrop(
                             &window,
                             theme.default_bg,
-                            self.config.glassmorphism,
+                            self.config.glassmorphism.is_on(),
                         );
                     }
                 }
@@ -517,12 +517,12 @@ impl App {
                 self.config.macos_titlebar_style,
                 self.config.background_opacity,
                 self.background_image.has_visible_image(),
-                self.config.glassmorphism,
+                self.config.glassmorphism.is_on(),
             ) {
                 crate::macos_window::install_titlebar_backdrop(
                     &window,
                     bg,
-                    self.config.glassmorphism,
+                    self.config.glassmorphism.is_on(),
                 );
             }
         }

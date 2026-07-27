@@ -42,9 +42,9 @@ pub const OVERVIEW_HINT_BAND_H: u32 = 54;
 /// (⚠G precedent), but the light/dark polarity follows the terminal theme via
 /// the shared [`crate::chrome`] palette (selected once at startup), so the
 /// overview and the session sidebar stay visually unified. The alpha comes
-/// from that same palette too: `1.0` unless `glassmorphism = true` installed a
-/// frosted variant, so the opaque default path is byte-identical. Returned as
-/// straight display-space RGBA because the Overview surface uses a
+/// from that same palette too: `1.0` unless `glassmorphism` (any on-level)
+/// installed a frosted variant, so the opaque default path is byte-identical.
+/// Returned as straight display-space RGBA because the Overview surface uses a
 /// **non-sRGB** format (`Bgra8Unorm`, see `preferred_surface_format`), so
 /// these are written to the target unchanged (no gamma re-encode).
 ///

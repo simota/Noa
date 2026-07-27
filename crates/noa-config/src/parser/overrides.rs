@@ -219,7 +219,7 @@ pub(crate) fn build_overrides(
                 background_blur_radius = parse_blur_radius(path, directive, &mut diagnostics);
             }
             "glassmorphism" => {
-                glassmorphism = parse_bool_directive(path, directive, &mut diagnostics);
+                glassmorphism = parse_glassmorphism(path, directive, &mut diagnostics);
             }
             "background-image" => {
                 background_image = parse_background_image(directive);

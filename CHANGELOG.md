@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- Glassmorphism: the `glassmorphism` key now takes a 4-step level (`off`/`1`/
+  `2`/`3`, higher = more transparent) instead of a plain on/off flag. `1` is
+  byte-identical to what `true` has always resolved to (0.50 window opacity /
+  64 blur radius); `2`/`3` push further (0.35/0.20) for more of the desktop to
+  show through, with the chrome alphas (sidebar/overview backdrop, surface,
+  pill, and the shared overlay cards) stepping down to match. Existing
+  `glassmorphism = true`/`false` configs keep working and resolve to `1`/`off`
+  respectively — this is a widening of the key's accepted values, not a
+  breaking change. The Settings panel's Glassmorphism row now cycles through
+  all four steps instead of flipping a toggle
+
 ## [0.2.5] - 2026-07-27
 
 ### Added

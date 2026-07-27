@@ -1552,7 +1552,8 @@ mod tests {
 
     #[test]
     fn chrome_raster_alpha_frosts_under_a_glass_palette() {
-        let glass = crate::chrome::glassify(crate::chrome::CHROME_DARK);
+        let glass =
+            crate::chrome::glassify(crate::chrome::CHROME_DARK, noa_config::GlassLevel::One);
         // The menu popup: opaque raster, frosted by the pill alpha.
         assert_eq!(chrome_raster_alpha(1.0, glass.pill_alpha), glass.pill_alpha);
         assert!(chrome_raster_alpha(1.0, glass.pill_alpha) < 1.0);
@@ -1583,7 +1584,7 @@ mod tests {
     #[test]
     fn sidebar_band_carries_the_backdrop_alpha_under_a_glass_palette() {
         for base in [crate::chrome::CHROME_DARK, crate::chrome::CHROME_LIGHT] {
-            let glass = crate::chrome::glassify(base);
+            let glass = crate::chrome::glassify(base, noa_config::GlassLevel::One);
             let alpha = sidebar_band_backdrop_alpha(glass);
             assert_eq!(alpha, glass.backdrop_alpha);
             // Strictly between "invisible" and "opaque" — the band has to be

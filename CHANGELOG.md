@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-07-27
+
+### Added
+
+- Glassmorphism: the `glassmorphism` key renders noa's own chrome — the session
+  sidebar, the tab overview, the modal cards — as frosted glass over a
+  see-through window. Off by default. When on it takes `background-opacity` and
+  `background-blur-radius` over outright rather than composing with them (a
+  frosted panel over an opaque window is a no-op), and hands the configured pair
+  back when turned off again. Exposed in the Settings panel and applied live,
+  both on a config reload and on a toggle committed from the panel (#49)
+
+### Changed
+
+- Sidebar session cards render their relative timestamps and the attention label
+  in English; they were the last Japanese strings left in the UI (#49)
+
+### Fixed
+
+- Oversized fallback glyphs are fit to their cell span instead of overlapping
+  the neighboring cell. Circled digits (U+2460+, East-Asian-Ambiguous, width 1)
+  resolve to macOS fallback faces whose glyphs advance ~2 cells; the
+  fit-to-cell shrink existed but was gated to Nerd Font icon faces for Ghostty
+  parity. A deliberate deviation from Ghostty in favor of readability (#48)
+
 ## [0.2.4] - 2026-07-24
 
 ### Added

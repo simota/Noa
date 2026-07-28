@@ -52,6 +52,38 @@ impl Screen {
         inserted
     }
 
+    /// Insert already-built `rows` as the oldest history, ahead of everything
+    /// currently retained. The styled counterpart of
+    /// [`Self::prepend_plain_text_history`]: restored scrollback
+    /// (`scrollback-persist`) carries real colors, attributes, hyperlinks and
+    /// combining tails, so it cannot go through the plain-text path, which
+    /// re-derives every cell at the default pen.
+    ///
+    /// Rows are rewrapped to this screen's width first, so a snapshot taken in
+    /// a narrower window does not restore with its old soft-wraps frozen in.
+    /// Returns the number of rows actually inserted.
+    pub(crate) fn prepend_row_history(&mut self, rows: Vec<Row>) -> usize {
+        if rows.is_empty() || !self.scrollback_enabled || self.cols == 0 {
+            return 0;
+        }
+        let rows = crate::snapshot::rewrap(rows, self.cols);
+        let inserted = rows.len();
+        if inserted == 0 {
+            return 0;
+        }
+
+        let evicted = self.scrollback.prepend_rows(&rows);
+        self.rows_evicted = self.rows_evicted.saturating_add(evicted);
+        for placement in &mut self.kitty_placements {
+            placement.anchor_abs_row = placement.anchor_abs_row.saturating_add(inserted);
+        }
+        self.selection = None;
+        self.search.clear();
+        self.scroll_shift = 0;
+        self.clamp_viewport();
+        inserted.saturating_sub(evicted)
+    }
+
     fn plain_text_rows(text: &str, cols: u16) -> Vec<Row> {
         let mut staging = Screen::with_scrollback(cols, 1, true);
         staging.set_scrollback_limit_bytes(usize::MAX);

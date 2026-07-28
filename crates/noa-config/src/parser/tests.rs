@@ -8,7 +8,7 @@ use crate::{
     ConfigOverrides, CursorShape, FontConfig, FontFeature, FontVariation, GlassLevel,
     KeybindConfig, MacosOptionAsAlt, MacosTitlebarStyle, PaletteOverride, QuickTerminalPosition,
     QuickTerminalScreen, QuickTerminalSize, QuickTerminalSizeDim, ScratchTerminalSize,
-    SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
+    ScrollbackPersist, SyntheticStyleMode, ThemeAppearancePair, WindowSaveState,
 };
 
 use super::*;
@@ -996,6 +996,52 @@ fn window_save_state_rejects_unknown_value() {
 #[test]
 fn window_save_state_is_a_supported_scalar_key_for_import() {
     assert!(is_supported_scalar_key("window-save-state"));
+}
+
+#[test]
+fn scrollback_persist_parses_each_mode() {
+    for (value, expected) in [
+        ("never", ScrollbackPersist::Never),
+        ("tail", ScrollbackPersist::Tail),
+    ] {
+        let (overrides, diagnostics) =
+            parse_overrides(path(), &format!("scrollback-persist = {value}"));
+        assert_eq!(overrides.scrollback_persist, Some(expected), "{value:?}");
+        assert!(diagnostics.is_empty(), "{value:?}: {diagnostics:?}");
+    }
+}
+
+#[test]
+fn scrollback_persist_max_age_days_parses_zero_as_no_expiry() {
+    let (overrides, diagnostics) = parse_overrides(path(), "scrollback-persist-max-age-days = 0");
+    assert_eq!(overrides.scrollback_persist_max_age_days, Some(0));
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
+fn scrollback_persist_max_age_days_rejects_a_unit_suffix() {
+    // noa's config has no unit-suffix syntax anywhere; `7d` must diagnose
+    // rather than silently parse as 7.
+    let (overrides, diagnostics) = parse_overrides(path(), "scrollback-persist-max-age-days = 7d");
+    assert_eq!(overrides.scrollback_persist_max_age_days, None);
+    assert_eq!(diagnostics.len(), 1);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("scrollback-persist-max-age-days")
+    );
+}
+
+#[test]
+fn scrollback_persist_keys_are_supported_scalar_keys_for_import() {
+    for key in [
+        "scrollback-persist",
+        "scrollback-persist-limit",
+        "scrollback-persist-total-limit",
+        "scrollback-persist-max-age-days",
+    ] {
+        assert!(is_supported_scalar_key(key), "{key}");
+    }
 }
 
 #[test]

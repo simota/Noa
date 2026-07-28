@@ -53,6 +53,10 @@ pub(crate) fn build_overrides(
     let mut scrollback_limit = None;
     let mut image_storage_limit = None;
     let mut window_save_state = None;
+    let mut scrollback_persist = None;
+    let mut scrollback_persist_limit = None;
+    let mut scrollback_persist_total_limit = None;
+    let mut scrollback_persist_max_age_days = None;
     let mut macos_option_as_alt = None;
     let mut macos_titlebar_style = None;
     let mut macos_non_native_fullscreen = None;
@@ -251,6 +255,18 @@ pub(crate) fn build_overrides(
             "window-save-state" => {
                 window_save_state = parse_window_save_state(path, directive, &mut diagnostics);
             }
+            "scrollback-persist" => {
+                scrollback_persist = parse_scrollback_persist(path, directive, &mut diagnostics);
+            }
+            "scrollback-persist-limit" => {
+                scrollback_persist_limit = parse_usize(path, directive, &mut diagnostics);
+            }
+            "scrollback-persist-total-limit" => {
+                scrollback_persist_total_limit = parse_usize(path, directive, &mut diagnostics);
+            }
+            "scrollback-persist-max-age-days" => {
+                scrollback_persist_max_age_days = parse_u64(path, directive, &mut diagnostics);
+            }
             "macos-option-as-alt" => {
                 macos_option_as_alt = parse_macos_option_as_alt(path, directive, &mut diagnostics);
             }
@@ -446,6 +462,10 @@ pub(crate) fn build_overrides(
             scrollback_limit,
             image_storage_limit,
             window_save_state,
+            scrollback_persist,
+            scrollback_persist_limit,
+            scrollback_persist_total_limit,
+            scrollback_persist_max_age_days,
             macos_option_as_alt,
             macos_titlebar_style,
             macos_non_native_fullscreen,
@@ -554,6 +574,10 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "scrollback-limit"
             | "image-storage-limit"
             | "window-save-state"
+            | "scrollback-persist"
+            | "scrollback-persist-limit"
+            | "scrollback-persist-total-limit"
+            | "scrollback-persist-max-age-days"
             | "macos-option-as-alt"
             | "macos-titlebar-style"
             | "macos-non-native-fullscreen"

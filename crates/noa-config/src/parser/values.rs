@@ -8,7 +8,7 @@ use crate::{
     MAX_SIDEBAR_WIDTH, MIN_BACKGROUND_IMAGE_INTERVAL_SECS, MIN_SIDEBAR_FONT_SIZE,
     MIN_SIDEBAR_WIDTH, MacosOptionAsAlt, MacosTitlebarProxyIcon, MacosTitlebarStyle,
     PaletteOverride, QuickTerminalPosition, QuickTerminalScreen, QuickTerminalSize,
-    QuickTerminalSizeDim, ResizeOverlay, ScratchTerminalSize, SyntheticStyleMode,
+    QuickTerminalSizeDim, ResizeOverlay, ScratchTerminalSize, ScrollbackPersist, SyntheticStyleMode,
     ThemeAppearancePair, WindowSaveState,
 };
 
@@ -758,6 +758,41 @@ pub(super) fn parse_window_save_state(
         "always" => Some(WindowSaveState::Always),
         other => {
             diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+pub(super) fn parse_scrollback_persist(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<ScrollbackPersist> {
+    let value = directive.value.as_deref()?;
+    match value {
+        "never" => Some(ScrollbackPersist::Never),
+        "tail" => Some(ScrollbackPersist::Tail),
+        other => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, other));
+            None
+        }
+    }
+}
+
+/// Parse a non-negative day count (`scrollback-persist-max-age-days`). `0` is
+/// valid and disables expiry. Matches the crate's plain-integer convention for
+/// time-valued keys (`cursor-stop-blinking-after`, `background-image-interval`)
+/// — there is no unit-suffix syntax anywhere in noa's config.
+pub(super) fn parse_u64(
+    path: &Path,
+    directive: &Directive,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<u64> {
+    let value = directive.value.as_deref()?;
+    match value.parse::<u64>() {
+        Ok(parsed) => Some(parsed),
+        Err(_) => {
+            diagnostics.push(invalid_value_diagnostic(path, &directive.key, value));
             None
         }
     }

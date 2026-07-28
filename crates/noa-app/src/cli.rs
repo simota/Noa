@@ -366,6 +366,29 @@ fn show_config_output(config: &StartupConfig) -> String {
     );
     push_line(
         &mut out,
+        "scrollback-persist",
+        match config.scrollback_persist {
+            noa_config::ScrollbackPersist::Never => "never",
+            noa_config::ScrollbackPersist::Tail => "tail",
+        },
+    );
+    push_line(
+        &mut out,
+        "scrollback-persist-limit",
+        &config.scrollback_persist_limit.to_string(),
+    );
+    push_line(
+        &mut out,
+        "scrollback-persist-total-limit",
+        &config.scrollback_persist_total_limit.to_string(),
+    );
+    push_line(
+        &mut out,
+        "scrollback-persist-max-age-days",
+        &config.scrollback_persist_max_age_days.to_string(),
+    );
+    push_line(
+        &mut out,
         "macos-option-as-alt",
         match config.macos_option_as_alt {
             MacosOptionAsAlt::None => "false",

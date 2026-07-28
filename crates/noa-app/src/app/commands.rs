@@ -175,7 +175,7 @@ impl App {
             AppCommand::SendSelectionToPane => self.open_send_selection_picker(),
             AppCommand::ExportScrollback => self.export_scrollback_to_temp_file(),
             AppCommand::DiscardRestoredHistory => self.discard_focused_pane_record(),
-            AppCommand::CheckpointScrollback => self.capture_scrollback_snapshots(false),
+            AppCommand::CheckpointScrollback => self.checkpoint_scrollback_now(),
             AppCommand::PipeScrollbackToPager => self.pipe_scrollback_to_pager(event_loop),
             AppCommand::Terminal(action) => self.handle_terminal_action(action),
             AppCommand::FontSize(action) => self.handle_font_size_action(action),

@@ -102,6 +102,9 @@ impl App {
                 continue;
             };
             let mut term = surface.terminal.lock();
+            // Read while the lock is held; the record-region validity check
+            // below runs after it is released.
+            let coordinate_generation = term.grid_coordinate_generation();
             let active = term.active();
             let cursor = active.cursor;
             let (active_cols, active_rows) = (active.cols, active.rows);
@@ -168,7 +171,15 @@ impl App {
                 pane_owns_keyboard_focus(window_id, pane_id, self.os_focused, state.focused_pane);
             snapshot.cursor_blink_visible = self.cursor_blink_visible;
             snapshot.hover_link = surface.hover_link;
-            snapshot.record_rows = surface.record_rows.clone();
+            // Restored history is marked, but only while those session-absolute
+            // indices still name the rows they were computed for: a reflow or a
+            // scrollback clear renumbers the space, and the alternate screen is
+            // a different space entirely (its rows would collide with the
+            // record's range and paint a gutter over a live full-screen app).
+            snapshot.record_rows = (!snapshot.active_is_alt
+                && surface.record_generation == coordinate_generation)
+                .then(|| surface.record_rows.clone())
+                .flatten();
             snapshots.push((pane_id, surface.rect, snapshot));
         }
         let panes = snapshots
@@ -550,6 +561,9 @@ impl App {
                 continue;
             };
             let mut term = surface.terminal.lock();
+            // Read while the lock is held; the record-region validity check
+            // below runs after it is released.
+            let coordinate_generation = term.grid_coordinate_generation();
             let copy_mode_state = (copy_mode_pane == Some(pane_id)).then(|| {
                 &mut self
                     .copy_mode
@@ -681,9 +695,15 @@ impl App {
             snapshot.cursor_blink_visible = self.cursor_blink_visible;
             patch_copy_mode_cursor(&mut snapshot, pane_copy_cursor);
             snapshot.hover_link = surface.hover_link;
-            // Restored history is marked so it cannot be mistaken for this
-            // session's output (`scrollback-persist`).
-            snapshot.record_rows = surface.record_rows.clone();
+            // Restored history is marked, but only while those session-absolute
+            // indices still name the rows they were computed for: a reflow or a
+            // scrollback clear renumbers the space, and the alternate screen is
+            // a different space entirely (its rows would collide with the
+            // record's range and paint a gutter over a live full-screen app).
+            snapshot.record_rows = (!snapshot.active_is_alt
+                && surface.record_generation == coordinate_generation)
+                .then(|| surface.record_rows.clone())
+                .flatten();
             // Neither the palette nor the confirm dialog draws in the pane
             // cell pass — both are composited as rounded modal cards after
             // the panes (H). Leave `snapshot.command_palette` and

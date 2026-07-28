@@ -396,10 +396,18 @@ pub struct App {
     /// (`scrollback-persist`). Separate from `session_persister` because
     /// snapshots are far larger and fire on different triggers — quit and idle
     /// checkpoints, not every structural change. Its `Drop` flushes.
-    scrollback_persister: crate::scrollback_persist::ScrollbackPersister,
+    /// `None` when no data directory resolves. Persistence is then simply
+    /// unavailable — the read and collect paths already bail on that, and
+    /// falling back to the process's working directory would write terminal
+    /// output somewhere nothing can restore or reclaim it from, after chmodding
+    /// a directory noa did not create.
+    scrollback_persister: Option<crate::scrollback_persist::ScrollbackPersister>,
     /// Feeds `scrollback_persist::mint_key`, so two panes minted in the same
     /// clock tick still get distinct snapshot keys.
     scrollback_key_counter: u64,
+    /// When the current run of un-checkpointed output began. Anchors the
+    /// checkpoint ceiling so a pane that never goes quiet is still captured.
+    scrollback_dirty_since: Option<Instant>,
     /// When the idle scrollback checkpoint should next fire, or `None` when
     /// nothing has changed since the last one.
     scrollback_checkpoint_deadline: Option<Instant>,
@@ -802,10 +810,10 @@ impl App {
             session_store: SessionStore::new(),
             branch_poll: Some(crate::branch_poll::spawn(proxy_for_branch_poll)),
             session_persister: crate::session_persist::SessionPersister::spawn(),
-            scrollback_persister: crate::scrollback_persist::ScrollbackPersister::spawn(
-                noa_config::scrollback_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
-            ),
+            scrollback_persister: noa_config::scrollback_dir()
+                .map(crate::scrollback_persist::ScrollbackPersister::spawn),
             scrollback_key_counter: 0,
+            scrollback_dirty_since: None,
             scrollback_checkpoint_deadline: None,
             last_scrollback_checkpoint: None,
             sidebar_visible_gate,

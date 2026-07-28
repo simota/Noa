@@ -16,14 +16,27 @@ pub(super) const CHECKPOINT_QUIESCENCE: std::time::Duration = std::time::Duratio
 pub(super) const CHECKPOINT_MAX_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(60);
 
+/// Floor on how soon the ceiling may fire, so a burst arriving after a long
+/// idle still gets a moment to settle instead of being captured mid-stream.
+const CHECKPOINT_MIN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Scrollback persistence (`scrollback-persist`): capture each pane's tail to
 /// disk, restore it on launch as a marked record region, and keep the snapshot
 /// directory inside its budgets.
 ///
 /// Spec: `docs/specs/scrollback-persistence.md`.
 impl App {
+    /// Whether scrollback should be captured at all.
+    ///
+    /// Gated on `window-save-state` as well as `scrollback-persist`: the key
+    /// that makes a snapshot reachable is written by `persist_session`, which
+    /// is a no-op while session state is disabled. Capturing anyway would write
+    /// terminal output to disk that nothing can ever restore — cost with no
+    /// benefit, which is the worst trade available for this feature.
     pub(super) fn scrollback_persist_enabled(&self) -> bool {
         self.config.scrollback_persist.persists()
+            && self.config.window_save_state.restores()
+            && self.scrollback_persister.is_some()
     }
 
     /// Mint this pane's snapshot key if it does not have one yet, and return
@@ -75,6 +88,10 @@ impl App {
         }
         let limit = self.config.scrollback_persist_limit;
         if limit == 0 {
+            // Not "skip this round": a zero budget is the user saying to retain
+            // nothing, and leaving the previous file in place would restore
+            // output captured before they said so.
+            self.purge_scrollback_snapshots();
             return;
         }
         let saved_at = store::now_unix();
@@ -99,21 +116,39 @@ impl App {
             else {
                 continue;
             };
-            // The lock is held only for the encode; the write is the worker's.
-            let annotation = surface.annotation_row;
-            let encoded = surface
-                .terminal
-                .lock()
-                .scrollback_snapshot_bytes(limit, saved_at, annotation);
+            let encoded = {
+                let terminal = surface.terminal.lock();
+                // A stale index would exclude an unrelated *live* row from the
+                // record instead of the separator.
+                let annotation = (surface.record_generation
+                    == terminal.grid_coordinate_generation())
+                .then_some(surface.annotation_row)
+                .flatten();
+                terminal.scrollback_snapshot_bytes(limit, saved_at, annotation)
+            };
             surface.scrollback_dirty = false;
+            let Some(persister) = self.scrollback_persister.as_ref() else {
+                continue;
+            };
             match encoded {
-                Some(bytes) => self.scrollback_persister.save(key, bytes),
+                Some(bytes) => persister.save(key, bytes),
                 // A pane with nothing to show must not restore last week's
                 // output: drop any snapshot it previously wrote.
-                None => self.scrollback_persister.discard(key),
+                None => persister.discard(key),
             }
         }
         self.last_scrollback_checkpoint = Some(Instant::now());
+    }
+
+    /// Command entry point: capture every pane now.
+    ///
+    /// Pairs the capture with `persist_session` for the same reason the timer
+    /// does — a key minted here but absent from `session.json` is an orphan the
+    /// next launch's collector deletes, which is precisely the crash this
+    /// command is invoked to survive.
+    pub(super) fn checkpoint_scrollback_now(&mut self) {
+        self.capture_scrollback_snapshots(false);
+        self.persist_session();
     }
 
     /// Note that `pane` produced output, so the next checkpoint captures it.
@@ -128,6 +163,7 @@ impl App {
         {
             surface.scrollback_dirty = true;
         }
+        self.scrollback_dirty_since.get_or_insert_with(Instant::now);
         self.arm_scrollback_checkpoint();
     }
 
@@ -137,13 +173,19 @@ impl App {
     fn arm_scrollback_checkpoint(&mut self) {
         let now = Instant::now();
         let quiescent = now + CHECKPOINT_QUIESCENCE;
-        let ceiling = self
-            .last_scrollback_checkpoint
-            .map(|last| last + CHECKPOINT_MAX_INTERVAL);
-        self.scrollback_checkpoint_deadline = Some(match ceiling {
-            Some(ceiling) => quiescent.min(ceiling.max(now)),
-            None => quiescent,
-        });
+        // Anchor the ceiling on the start of the current dirty streak, not on
+        // the last checkpoint: before the very first one there is no last
+        // checkpoint, and a pane emitting faster than the quiescence window
+        // would otherwise push its deadline forever and never be captured at
+        // all — exactly the long first build whose tail matters most.
+        let anchor = *self
+            .scrollback_dirty_since
+            .get_or_insert(self.last_scrollback_checkpoint.unwrap_or(now));
+        // Clamp from below as well: after a long idle the ceiling is already in
+        // the past, and firing on the first byte of a new burst is the mid-burst
+        // stall the quiescence window exists to avoid.
+        let ceiling = (anchor + CHECKPOINT_MAX_INTERVAL).max(now + CHECKPOINT_MIN_GRACE);
+        self.scrollback_checkpoint_deadline = Some(quiescent.min(ceiling));
     }
 
     /// Fire the idle checkpoint when due. Returns the next deadline for
@@ -154,6 +196,7 @@ impl App {
             return Some(deadline);
         }
         self.scrollback_checkpoint_deadline = None;
+        self.scrollback_dirty_since = None;
         self.capture_scrollback_snapshots(true);
         // A checkpoint can mint a pane's first key. Without re-writing the
         // topology, a crash would leave `session.json` claiming that pane has
@@ -261,6 +304,8 @@ impl App {
         surface.record_rows = saved_at.and(record_rows.clone());
         // Both the separator and the notice are the last row inserted.
         surface.annotation_row = record_rows.map(|rows| rows.end - 1);
+        // Stamped *after* the insert, which bumps the generation itself.
+        surface.record_generation = surface.terminal.lock().grid_coordinate_generation();
         // Restoring is not output; without this the pane would be captured
         // again immediately, rewriting the file it was just restored from.
         surface.scrollback_dirty = false;
@@ -294,16 +339,59 @@ impl App {
             return false;
         };
         let Some(record) = surface.record_rows.take() else {
+            surface.annotation_row = None;
             return false;
         };
-        surface
-            .terminal
-            .lock()
-            .discard_history_prefix(record.end.saturating_sub(record.start));
-        if let Some(key) = surface.scrollback_key.clone() {
-            self.scrollback_persister.discard(key);
+        surface.annotation_row = None;
+        {
+            let mut terminal = surface.terminal.lock();
+            if surface.record_generation != terminal.grid_coordinate_generation() {
+                // The rows those indices named are gone; dropping that many rows
+                // off the front now would take live history instead.
+                return false;
+            }
+            terminal.discard_history_prefix(record.end.saturating_sub(record.start));
+        }
+        if let Some(key) = surface.scrollback_key.clone()
+            && let Some(persister) = self.scrollback_persister.as_ref()
+        {
+            persister.discard(key);
         }
         true
+    }
+
+    /// Delete every record this session owns, now rather than at the next
+    /// launch's collector.
+    ///
+    /// Someone who reacts to the privacy implication by turning the setting off
+    /// means "stop keeping this", not "stop keeping it the next time you happen
+    /// to start". Called on the `Tail -> Never` transition and when the budget
+    /// is set to zero.
+    pub(super) fn purge_scrollback_snapshots(&mut self) {
+        let keys: Vec<String> = self
+            .windows
+            .values()
+            .flat_map(|state| state.surfaces.values())
+            .filter_map(|surface| surface.scrollback_key.clone())
+            .collect();
+        if let Some(persister) = self.scrollback_persister.as_ref() {
+            for key in keys {
+                persister.discard(key);
+            }
+        }
+        for state in self.windows.values_mut() {
+            for surface in state.surfaces.values_mut() {
+                surface.scrollback_key = None;
+                surface.scrollback_dirty = false;
+            }
+        }
+        // Drop anything left from earlier runs too — nothing is referenced now.
+        if let Some(dir) = noa_config::scrollback_dir()
+            && dir.exists()
+        {
+            store::collect(&dir, &HashSet::new(), 0, 0);
+        }
+        self.persist_session();
     }
 
     /// Forget a record region once eviction has consumed it, so a pane that
@@ -315,7 +403,20 @@ impl App {
                 if surface.record_rows.is_none() && surface.annotation_row.is_none() {
                     continue;
                 }
-                let oldest = surface.terminal.lock().active_oldest_row();
+                let (oldest, generation) = {
+                    let terminal = surface.terminal.lock();
+                    (
+                        terminal.active_oldest_row(),
+                        terminal.grid_coordinate_generation(),
+                    )
+                };
+                if surface.record_generation != generation {
+                    // A reflow or a scrollback clear renumbered every row: these
+                    // indices no longer name anything.
+                    surface.record_rows = None;
+                    surface.annotation_row = None;
+                    continue;
+                }
                 // The annotation is tracked even without a record (the Stage 0
                 // notice has no record behind it), and a stale absolute index
                 // would skip an unrelated live row from the next capture.

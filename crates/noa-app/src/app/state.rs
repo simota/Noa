@@ -1058,6 +1058,17 @@ pub(super) struct Surface {
     /// from capture: it is chrome the app wrote, and re-capturing it would
     /// leave one more behind in the history on every relaunch.
     pub(super) annotation_row: Option<usize>,
+    /// The terminal's coordinate generation when `record_rows`/`annotation_row`
+    /// were computed.
+    ///
+    /// Both are session-absolute row indices, and a column-count reflow or a
+    /// scrollback clear renumbers that space wholesale — the terminal bumps its
+    /// generation exactly when that happens, and deliberately does *not* bump it
+    /// for ordinary eviction (which preserves numbering). Comparing against it
+    /// is therefore the complete staleness test: without it the gutter paints
+    /// over live rows, capture's `skip_row` deletes a real row from the record,
+    /// and `Discard restored history` drops live history off the front.
+    pub(super) record_generation: u64,
     /// Whether this pane produced output since its last checkpoint. Keeps the
     /// idle checkpoint from re-encoding panes that have not changed.
     pub(super) scrollback_dirty: bool,
@@ -1222,6 +1233,7 @@ impl Surface {
             scrollback_key: None,
             record_rows: None,
             annotation_row: None,
+            record_generation: 0,
             scrollback_dirty: false,
             snapshot_recycle: noa_render::FrameSnapshotRecycle::default(),
             kitty_animation_flag,

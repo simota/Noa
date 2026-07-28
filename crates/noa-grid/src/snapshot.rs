@@ -58,6 +58,15 @@ const CELL_ENCODED_BYTES: usize = 12;
 /// Encoded per-row overhead: `wrapped` + cell count.
 const ROW_ENCODED_BYTES: usize = 5;
 
+/// Ceiling on a single persisted hyperlink target.
+///
+/// OSC 8 payloads are bounded only by the parser's 12 MiB `MAX_OSC_BYTES`, and
+/// a link lives in the side table rather than in any row, so one of them can
+/// carry a snapshot past its whole byte budget while the row walk sees nothing.
+/// A target longer than this is not something anyone is going to click; the
+/// cell's text is persisted either way, only the link is dropped.
+const MAX_PERSISTED_LINK_BYTES: usize = 4096;
+
 /// Color tags. `Option<Color>::None` (no underline color) needs a value
 /// distinct from every `Some`, hence the fourth tag.
 const TAG_DEFAULT: u32 = 0;
@@ -185,6 +194,10 @@ impl BodyWriter {
         let Some(link) = registry.get(id.get()) else {
             return 0;
         };
+        if link.uri.len() + link.id.as_deref().map_or(0, str::len) > MAX_PERSISTED_LINK_BYTES {
+            self.link_lookup.insert(id, 0);
+            return 0;
+        }
         self.links.push(link.clone());
         let index = self.links.len() as u32;
         self.link_lookup.insert(id, index);
@@ -351,12 +364,33 @@ pub fn encode_tail(
         spent += size;
         start = index;
     }
-    let tail = &rows[start..];
-    if tail.iter().all(|row| trimmed_cells(row).is_empty()) {
+    if rows[start..]
+        .iter()
+        .all(|row| trimmed_cells(row).is_empty())
+    {
         return None;
     }
-    let body = encode_body(tail, registry);
-    frame(&body, cols, saved_at, tail.len() as u32)
+
+    // The row walk above only accounts for row bodies. The style, hyperlink and
+    // grapheme tables are written alongside them and are *not* bounded by cell
+    // count: one OSC 8 URI can reach the parser's 12 MiB ceiling on its own, so
+    // a link-heavy tail can blow a 1 MiB budget with a handful of rows. Encode
+    // for real and drop the oldest rows until it fits, so the configured limit
+    // is a limit rather than an estimate.
+    loop {
+        let tail = &rows[start..];
+        let body = encode_body(tail, registry);
+        if body.len() <= max_bytes || tail.len() <= 1 {
+            return frame(&body, cols, saved_at, tail.len() as u32);
+        }
+        // Halve rather than step: the overshoot is usually a table entry the
+        // per-row estimate cannot see, so a linear walk would re-encode the
+        // whole tail once per row.
+        start += (tail.len() / 2).max(1);
+        if rows[start..].iter().all(|row| trimmed_cells(row).is_empty()) {
+            return None;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -544,13 +578,18 @@ fn emit_logical_line(line: &[Cell], width: usize, out: &mut Vec<Row>) {
     let mut start = 0usize;
     while start < line.len() {
         let mut end = (start + width).min(line.len());
-        // Never strand a wide lead from its spacer across the split.
+        // Never strand a wide lead from its spacer across the split — but never
+        // back off past `start` either: at width 1 a wide glyph would otherwise
+        // make `end == start`, and the loop would emit blank rows forever
+        // without consuming a single cell.
         if end < line.len()
+            && end > start + 1
             && line[end].attrs.contains(CellAttrs::WIDE_SPACER)
             && line[end - 1].attrs.contains(CellAttrs::WIDE)
         {
             end -= 1;
         }
+        debug_assert!(end > start, "every iteration must consume at least one cell");
         let mut cells = line[start..end].to_vec();
         cells.resize(width, Cell::default());
         let wrapped = end < line.len();
@@ -763,6 +802,65 @@ mod tests {
     }
 
     #[test]
+    fn rewrap_terminates_when_a_wide_glyph_cannot_fit_the_width() {
+        // Backing off to keep a wide lead with its spacer must never leave the
+        // split at the row start: that consumes nothing and loops forever.
+        let wide = styled('あ', Color::Default, CellAttrs::WIDE);
+        let spacer = styled(' ', Color::Default, CellAttrs::WIDE_SPACER);
+        let row = Row::from_cells(vec![wide, spacer], false, false);
+
+        let out = rewrap(vec![row], 1);
+
+        assert_eq!(out.len(), 2, "one cell per row, no more");
+        assert_eq!(out[0].cells[0].ch, 'あ');
+        assert!(out[1].cells[0].attrs.contains(CellAttrs::WIDE_SPACER));
+    }
+
+    #[test]
+    fn the_budget_counts_the_side_tables_not_just_the_rows() {
+        // A single huge URI lives in the link table, which the per-row size
+        // estimate cannot see. The encoded file must still respect the budget.
+        let uri = "https://example.com/".to_string() + &"a".repeat(200_000);
+        let registry = vec![Hyperlink {
+            uri: uri.clone(),
+            id: None,
+        }];
+        let mut linked = Cell {
+            ch: 'x',
+            ..Cell::default()
+        };
+        linked.hyperlink = HyperlinkId::new(0);
+        let rows = vec![
+            row_of("plain older line", 40),
+            Row::from_cells(vec![linked], false, false),
+        ];
+
+        let bytes = encode_tail(&rows, 40, 0, &registry, 4096).expect("something encodes");
+        assert!(
+            bytes.len() <= 4096,
+            "encoded {} bytes against a 4096 budget",
+            bytes.len()
+        );
+        let decoded = decode(&bytes).expect("decodes");
+        assert!(
+            decoded.hyperlinks.iter().all(|link| link.uri != uri),
+            "an oversized link must not reach the file at all"
+        );
+        let text: String = decoded
+            .rows
+            .last()
+            .expect("the linked row survives")
+            .cells
+            .iter()
+            .map(|cell| cell.ch)
+            .collect();
+        assert!(
+            text.starts_with('x'),
+            "dropping the link must not drop the text: {text:?}"
+        );
+    }
+
+    #[test]
     fn rewrap_preserves_blank_lines_between_paragraphs() {
         let rows = vec![row_of("a", 4), row_of("", 4), row_of("b", 4)];
         let out = rewrap(rows, 4);
@@ -787,3 +885,4 @@ mod tests {
         assert!(decoded.hyperlinks.is_empty());
     }
 }
+

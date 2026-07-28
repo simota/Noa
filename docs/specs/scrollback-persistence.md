@@ -301,7 +301,10 @@ DEC-3 / 4 / 5 は仮決め。実装着手までに異議があれば差し替え
 | **D-4** | `scrollback-persist-max-age = 7d` | `scrollback-persist-max-age-days = 7` | noa の config には suffix 構文がどこにも無い（`cursor-stop-blinking-after` も `background-image-interval` も素の整数秒）。単位はキー名で表すのが既存の規約 |
 | **D-5** | per-pane 上限は「圧縮後バイト」 | 「エンコード後・deflate 前バイト」 | 圧縮後で予算を切るには、切って圧縮して溢れたらやり直す必要がある。圧縮前は一度で確定でき、圧縮は必ず約束より小さくする方向にしか効かない |
 | **D-6** | `SESSION_VERSION` を 2 へ | **3** へ | 2 は remote ペインのメタデータで既に使用済みだった |
-| **D-7** | （提案に無し） | 記録の破棄は既存 scrollback を作り直して実装 | ページは packed 後は不変で、ページ単位でしか evict されない。`erase_display(Scrollback)` はライブ履歴まで消してしまうため、残存行を materialize して詰め直す O(n) 経路を足した。ユーザー起点の稀なコマンドなので、bulk-output のホットパスには触っていない |
+| **D-8** | （提案に無し） | 記録の破棄は既存 scrollback を作り直して実装 | ページは packed 後は不変で、ページ単位でしか evict されない。`erase_display(Scrollback)` はライブ履歴まで消してしまうため、残存行を materialize して詰め直す O(n) 経路を足した。ユーザー起点の稀なコマンドなので、bulk-output のホットパスには触っていない |
+
+| **D-8** | 記録領域のガター範囲は常に有効 | 座標が再採番されたら**マーキングだけ捨てる** | `record_rows`/`annotation_row` は絶対行のキャッシュで、列数 reflow と scrollback clear は空間ごと振り直す。`Terminal::grid_coordinate_generation` はまさにその2つで bump し、通常の eviction では bump しない（既存テストが保証）ので、これを突き合わせるのが完全な陳腐化判定になる。不一致時はガターと `skip_row` と Discard を止める — 誤った行を消すより、印が消えるほうが遥かに軽い。境界そのものはセパレータ**行**（=内容）なので reflow を跨いで残り、AC-3 は維持される |
+| **D-9** | （提案に無し） | 永続化リンクは 4 KiB で打ち切る | OSC 8 のペイロード上限はパーサの 12 MiB。リンクは side table に載るため行単位の予算計算からは見えず、**URI 1本でスナップショット全体の上限を突破**できた。これより長い URL は誰も踏まないので、セルの文字は残しリンクだけ落とす |
 
 ### 未実装（Stage 2 送り）
 

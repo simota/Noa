@@ -214,7 +214,17 @@ impl App {
             previous.quick_terminal_hotkey != applied.quick_terminal_hotkey;
         let hotkeys_changed = quick_terminal_hotkey_changed;
 
+        let scrollback_persist_disabled = previous.scrollback_persist.persists()
+            && !(applied.scrollback_persist.persists() && applied.window_save_state.restores());
+
         self.config = applied;
+
+        if scrollback_persist_disabled {
+            // Turning it off means "stop keeping this", not "stop keeping it
+            // the next time you happen to launch" — drop what is already on
+            // disk now (`docs/specs/scrollback-persistence.md` §4.6).
+            self.purge_scrollback_snapshots();
+        }
 
         if padding_changed {
             self.padding =

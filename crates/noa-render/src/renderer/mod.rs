@@ -182,6 +182,12 @@ struct FrameInvalidationKey {
     /// full-pane-invalidation bundle as the other pane-wide triggers rather
     /// than tracking affected rows individually.
     hover_link: Option<HoverLink>,
+    /// The restored-record row range (`FrameSnapshot::record_rows`). Like
+    /// `hover_link`, this has no corresponding `Row::dirty` bit — it changes
+    /// with the caller's own restore bookkeeping, not terminal output — so a
+    /// change here also forces every row in the pane dirty rather than
+    /// tracking affected rows individually.
+    record_rows: Option<Range<usize>>,
     /// Identity of the [`FontGrid`] atlas pair. Unlike generation counters,
     /// this changes whenever a new FontGrid is constructed, even if the new
     /// atlas starts at the same generation and size as the old one.
@@ -214,6 +220,7 @@ fn frame_invalidation_key_matches(
         && key.atlas_eviction_generation == atlas_eviction_generation
         && key.selection == snap.selection
         && key.hover_link == snap.hover_link
+        && key.record_rows == snap.record_rows
         && key.colors == snap.colors
         && key.theme == *theme
         && key.search == snap.search

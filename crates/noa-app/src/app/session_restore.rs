@@ -80,6 +80,18 @@ impl App {
         match tree {
             SplitTree::Leaf { pane } => session::PaneNode::Leaf {
                 cwd: self.pane_cwd(window_id, *pane),
+                // Only claim a snapshot while persistence is on: with the key
+                // absent, the launch collector treats the file as an orphan
+                // and the directory drains itself.
+                scrollback: self
+                    .scrollback_persist_enabled()
+                    .then(|| {
+                        self.windows
+                            .get(&window_id)
+                            .and_then(|state| state.surfaces.get(pane))
+                            .and_then(|surface| surface.scrollback_key.clone())
+                    })
+                    .flatten(),
                 remote: self
                     .windows
                     .get(&window_id)
@@ -127,13 +139,21 @@ impl App {
     /// missing/malformed/empty file is a silent no-op — startup is never
     /// blocked by session state.
     pub(super) fn restore_session_if_enabled(&mut self, event_loop: &ActiveEventLoop) {
+        let saved = noa_config::session_state_path().and_then(|path| session::load(&path));
+        // Collect before any early return: snapshots outlive the setting that
+        // wrote them, so turning restore (or persistence) off must still drain
+        // the directory rather than stranding records on disk forever.
+        self.collect_scrollback_snapshots(
+            saved
+                .as_ref()
+                .map(referenced_scrollback_keys)
+                .unwrap_or_default(),
+        );
+
         if !self.config.window_save_state.restores() || self.config.cli_grid_override {
             return;
         }
-        let Some(path) = noa_config::session_state_path() else {
-            return;
-        };
-        let Some(state) = session::load(&path) else {
+        let Some(state) = saved else {
             return;
         };
         if state.windows.is_empty() {
@@ -182,6 +202,16 @@ impl App {
                 tab_ids.push(window_id);
                 if let Some(state) = self.windows.get_mut(&window_id) {
                     state.title_override = tab.title.clone();
+                }
+                // The tab's initial surface *is* the tree's first leaf, so its
+                // record loads here; `materialize_tab` handles the rest once
+                // their surfaces exist.
+                if let Some(root_pane) = self.windows.get(&window_id).map(|s| s.focused_pane) {
+                    self.restore_pane_record(
+                        window_id,
+                        root_pane,
+                        tab.split.first_leaf_scrollback(),
+                    );
                 }
                 self.materialize_tab(window_id, tab);
             }
@@ -326,6 +356,12 @@ impl App {
         for (pane_id, identity) in remote_cards {
             self.register_remote_session_card(window_id, pane_id, &identity);
         }
+        for leaf in &leaves {
+            if leaf.is_root || leaf.remote.is_some() {
+                continue;
+            }
+            self.restore_pane_record(window_id, leaf.pane, leaf.scrollback.clone());
+        }
         self.relayout_and_resize_window(window_id);
     }
 
@@ -371,6 +407,9 @@ struct LeafSpec {
     pane: PaneId,
     cwd: Option<String>,
     remote: Option<session::RemotePane>,
+    /// The leaf's persisted scrollback key, restored into the pane once its
+    /// surface exists.
+    scrollback: Option<String>,
     is_root: bool,
 }
 
@@ -383,12 +422,17 @@ fn build_split_tree(
     leaves: &mut Vec<LeafSpec>,
 ) -> SplitTree {
     match node {
-        session::PaneNode::Leaf { cwd, remote } => {
+        session::PaneNode::Leaf {
+            cwd,
+            remote,
+            scrollback,
+        } => {
             let (pane, is_root) = minter.mint();
             leaves.push(LeafSpec {
                 pane,
                 cwd: cwd.clone(),
                 remote: remote.clone(),
+                scrollback: scrollback.clone(),
                 is_root,
             });
             SplitTree::leaf(pane)
@@ -409,6 +453,31 @@ fn build_split_tree(
             )
         }
     }
+}
+
+/// Every snapshot key a saved session claims. Anything else in the snapshot
+/// directory is an orphan the collector may drop.
+fn referenced_scrollback_keys(state: &session::SessionState) -> std::collections::HashSet<String> {
+    fn walk(node: &session::PaneNode, out: &mut std::collections::HashSet<String>) {
+        match node {
+            session::PaneNode::Leaf { scrollback, .. } => {
+                if let Some(key) = scrollback {
+                    out.insert(key.clone());
+                }
+            }
+            session::PaneNode::Split { first, second, .. } => {
+                walk(first, out);
+                walk(second, out);
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    for window in &state.windows {
+        for tab in &window.tabs {
+            walk(&tab.split, &mut out);
+        }
+    }
+    out
 }
 
 fn collect_leaf_ids(tree: &SplitTree, out: &mut Vec<PaneId>) {
@@ -469,10 +538,12 @@ mod tests {
             first: Box::new(session::PaneNode::Leaf {
                 cwd: None,
                 remote: Some(remote.clone()),
+                scrollback: None,
             }),
             second: Box::new(session::PaneNode::Leaf {
                 cwd: Some("/local".to_string()),
                 remote: None,
+                scrollback: None,
             }),
         };
         let root = PaneId::new(7);

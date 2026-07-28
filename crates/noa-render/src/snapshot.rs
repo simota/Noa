@@ -262,6 +262,15 @@ pub struct FrameSnapshot {
     pub image_placements: Vec<ImagePlacementSnapshot>,
     /// Pixel data for the images `image_placements` references (deduped by id).
     pub images: Vec<SnapshotImage>,
+    /// Session-absolute row range (same coordinate space as `abs_row_base`,
+    /// NOT `row_base` — it must stay meaningful across scrollback eviction)
+    /// that was rehydrated from a persisted scrollback snapshot rather than
+    /// produced by live pty output (`scrollback-persist`, spec §5). `None`
+    /// draws no restored-record marker at all. Set by the caller (`noa-app`,
+    /// from its per-pane restore bookkeeping) after the fact, like
+    /// `hover_link`; `from_terminal` and every other constructor default to
+    /// `None`.
+    pub record_rows: Option<std::ops::Range<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -419,6 +428,7 @@ impl FrameSnapshot {
             preedit: None,
             image_placements,
             images,
+            record_rows: None,
         }
     }
 
@@ -494,6 +504,7 @@ impl FrameSnapshot {
             preedit: None,
             image_placements,
             images,
+            record_rows: None,
         }
     }
 
@@ -534,6 +545,7 @@ impl FrameSnapshot {
         snapshot.preedit = None;
         snapshot.image_placements = image_placements;
         snapshot.images = images;
+        snapshot.record_rows = None;
     }
 
     /// Refresh a publish slot for the Session Overview.

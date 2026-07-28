@@ -24,6 +24,8 @@ pub fn resolve_pane_command_target(
         | AppCommand::Paste
         | AppCommand::SendSelectionToPane
         | AppCommand::ExportScrollback
+        | AppCommand::DiscardRestoredHistory
+        | AppCommand::CheckpointScrollback
         | AppCommand::PipeScrollbackToPager
         | AppCommand::Terminal(_)
         | AppCommand::FontSize(_)

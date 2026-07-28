@@ -125,5 +125,6 @@ fn baseline_snapshot(chars: [char; 3]) -> FrameSnapshot {
         preedit: None,
         image_placements: Vec::new(),
         images: Vec::new(),
+        record_rows: None,
     }
 }

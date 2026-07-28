@@ -36,6 +36,8 @@ pub(crate) fn command_palette_title(command: AppCommand) -> &'static str {
         AppCommand::AttachRemote => "Attach Remote",
         AppCommand::SendSelectionToPane => "Send Selection to Pane",
         AppCommand::ExportScrollback => "Export Scrollback to File",
+        AppCommand::DiscardRestoredHistory => "Discard Restored History",
+        AppCommand::CheckpointScrollback => "Checkpoint Scrollback Now",
         AppCommand::PipeScrollbackToPager => "Pipe Scrollback to Pager",
         AppCommand::Terminal(TerminalAction::Clear) => "Clear Screen",
         AppCommand::Terminal(TerminalAction::ClearScrollback) => "Clear Scrollback",
@@ -143,6 +145,8 @@ pub(crate) fn command_palette_entries() -> &'static [AppCommand] {
         AppCommand::AttachRemote,
         AppCommand::SendSelectionToPane,
         AppCommand::ExportScrollback,
+        AppCommand::DiscardRestoredHistory,
+        AppCommand::CheckpointScrollback,
         AppCommand::PipeScrollbackToPager,
         AppCommand::Terminal(TerminalAction::Clear),
         AppCommand::Terminal(TerminalAction::ClearScrollback),
@@ -350,7 +354,10 @@ pub(crate) fn command_category(command: AppCommand) -> CommandCategory {
         | AppCommand::Paste
         | AppCommand::SendSelectionToPane
         | AppCommand::Terminal(TerminalAction::SelectAll) => CommandCategory::Clipboard,
-        AppCommand::ExportScrollback | AppCommand::PipeScrollbackToPager => CommandCategory::Scroll,
+        AppCommand::ExportScrollback
+        | AppCommand::PipeScrollbackToPager
+        | AppCommand::DiscardRestoredHistory
+        | AppCommand::CheckpointScrollback => CommandCategory::Scroll,
         AppCommand::Terminal(TerminalAction::Clear)
         | AppCommand::Terminal(TerminalAction::ClearScrollback)
         | AppCommand::FontSize(_)

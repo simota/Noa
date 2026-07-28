@@ -168,6 +168,7 @@ impl App {
                 pane_owns_keyboard_focus(window_id, pane_id, self.os_focused, state.focused_pane);
             snapshot.cursor_blink_visible = self.cursor_blink_visible;
             snapshot.hover_link = surface.hover_link;
+            snapshot.record_rows = surface.record_rows.clone();
             snapshots.push((pane_id, surface.rect, snapshot));
         }
         let panes = snapshots
@@ -680,6 +681,9 @@ impl App {
             snapshot.cursor_blink_visible = self.cursor_blink_visible;
             patch_copy_mode_cursor(&mut snapshot, pane_copy_cursor);
             snapshot.hover_link = surface.hover_link;
+            // Restored history is marked so it cannot be mistaken for this
+            // session's output (`scrollback-persist`).
+            snapshot.record_rows = surface.record_rows.clone();
             // Neither the palette nor the confirm dialog draws in the pane
             // cell pass — both are composited as rounded modal cards after
             // the panes (H). Leave `snapshot.command_palette` and

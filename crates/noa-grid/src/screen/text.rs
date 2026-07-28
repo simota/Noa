@@ -84,6 +84,36 @@ impl Screen {
         inserted.saturating_sub(evicted)
     }
 
+    /// Drop the oldest `count` scrollback rows, keeping everything after them.
+    ///
+    /// Used to discard a restored record without touching the live session
+    /// that has accumulated since (`erase_display(Scrollback)` would take
+    /// both). Scrollback pages are immutable once packed and evict whole, so
+    /// this rebuilds the survivors rather than cutting into a page — an O(n)
+    /// walk of retained history, which is fine for a rare user-initiated
+    /// command and keeps the bulk-output path untouched.
+    ///
+    /// Session-absolute row numbers of the survivors are preserved, so
+    /// anything anchored to them (kitty placements, shell marks) stays put.
+    /// Returns the number of rows actually dropped.
+    pub(crate) fn discard_history_prefix(&mut self, count: usize) -> usize {
+        let dropped = count.min(self.scrollback.len());
+        if dropped == 0 {
+            return 0;
+        }
+        let survivors: Vec<Row> = (dropped..self.scrollback.len())
+            .filter_map(|y| self.scrollback.row(y))
+            .collect();
+        self.scrollback.clear();
+        self.scrollback.prepend_rows(&survivors);
+        self.rows_evicted = self.rows_evicted.saturating_add(dropped);
+        self.selection = None;
+        self.search.clear();
+        self.scroll_shift = 0;
+        self.clamp_viewport();
+        dropped
+    }
+
     fn plain_text_rows(text: &str, cols: u16) -> Vec<Row> {
         let mut staging = Screen::with_scrollback(cols, 1, true);
         staging.set_scrollback_limit_bytes(usize::MAX);

@@ -1,8 +1,8 @@
 # Scrollback persistence（記録ビュー）
 
-**Status: PROPOSAL — 方針確定、実装未着手。**
-Q1 / Q2 は回答済み（§10 決定事項）。Q3–Q5 は既定値で仮決めし、異議がなければ
-その値で実装する。
+**Status: 実装済み（Stage 0 + Stage 1）。GUI 目視確認は未。**
+Q1 / Q2 は回答済み、Q3–Q5 は仮決めのまま実装（§10 決定事項）。実装中に確定した
+逸脱・縮小は §12 に記録した。
 **Provenance: synthetic (`synthetic: true`)。** 発端は Plea が生成した合成ペルソナ
 「陽菜 (27) / 継続ビギナー / 個人 Mac」の要望であり、実ユーザーの検証済みの声では
 ない。需要そのものが仮説であることを、優先度判断のときに必ず思い出すこと。
@@ -59,7 +59,7 @@ D-1 は D-2 を実装しなくても単独で解消でき、コストが桁違�
 |---|---|---|
 | セッション復元 | `docs/specs/session-restore.md`, `crates/noa-app/src/session.rs` | 復元の入れ物。leaf にスナップショット参照を 1 フィールド追加 |
 | 非同期書き出しワーカー | `crates/noa-app/src/session_persist.rs` | コアレス済み・アトミック書き込み・Drop で flush。スナップショット書き出しも相乗り |
-| ページ化 scrollback | `crates/noa-grid/src/scrollback.rs` | `PackedCell` + ページ単位 `StyleTable` + grapheme table。**保存形式はこの packed 表現をそのまま使う**（新形式を発明しない） |
+| ページ化 scrollback | `crates/noa-grid/src/scrollback.rs` | `PackedCell` + ページ単位 `StyleTable` + grapheme table。~~保存形式にそのまま使う~~ → プロセススコープの id を含むため不可（§4.1 実装時の訂正）。実際の形式は `crates/noa-grid/src/snapshot.rs` |
 | 行の折返しフラグ | `Row::wrapped` (`cell.rs:151`) | 復元後にウィンドウ幅が変わったとき `screen/reflow.rs` が正しく reflow するために必須。保存対象 |
 | テキスト抽出 | `Screen::scrollback_text_tail(max_bytes)` (`screen/text.rs:435`) | Stage 1 のフォールバック実装（色を捨てる版）に流用可 |
 | 検索 | `noa-grid/src/search.rs` | 復元領域も scrollback なので**追加実装なしで検索対象になる** |
@@ -78,10 +78,14 @@ D-1 は D-2 を実装しなくても単独で解消でき、コストが桁違�
 | (b) **描画済みの行（cells + attrs）を保存** | 決定的、副作用ゼロ、行数で有界 | **採用** |
 | (c) プレーンテキストのみ | 最安 | 単独では却下。色が落ちると「赤 = エラー」という初心者の唯一の手掛かりが消える。Stage 1 の縮退パスとしてのみ保持 |
 
-(b) は `PagedScrollback` が既に持っている packed 表現（`PackedCell` +
-`StyleId` → `StyleTable`、`GraphemeId` → grapheme table、`HyperlinkId`）と 1:1 で
-対応する。**保存＝ページのシリアライズ、復元＝ページのデシリアライズ**であり、
-新しい中間表現を作らない。
+**実装時の訂正:** 当初は「packed 表現をそのまま直列化する」つもりだったが、これは
+不可能だった。packed 表現の 2 つの id が*プロセス*スコープだからである ——
+`GraphemeId` はグローバルな `LazyLock` interner の索引であり、`HyperlinkId` は
+`Terminal::hyperlinks` の索引。どちらもディスクに書くと**次のプロセスでは別の
+テキストにデコードされる**。したがって形式は materialize 済みの `Row`/`Cell`
+レベルで動き、両者を内容（クラスタのバイト列、リンクの URI）へ解決してからロード
+時に id を張り直す。スタイルはスナップショット単位で再 intern し、残りは deflate
+が回収する。
 
 ### 4.2 保存範囲（scope）
 
@@ -99,9 +103,9 @@ D-1 は D-2 を実装しなくても単独で解消でき、コストが桁違�
 
 | キャップ | 既定値 | 単位 | 目的 |
 |---|---|---|---|
-| `scrollback-persist-limit` | 1 MiB | 圧縮後バイト／ペイン | 保存するテールの上限。**これが唯一の量的つまみ**（1 画面だけ欲しい人は小さくする） |
-| `scrollback-persist-total-limit` | 64 MiB | 圧縮後バイト／全体 | ディスク総量。超過時はペインの最終活動時刻で LRU 破棄 |
-| `scrollback-persist-max-age` | 7d | 時間 | 古い記録の自動失効 |
+| `scrollback-persist-limit` | 1 MiB | **エンコード後・deflate 前**のバイト／ペイン | 保存するテールの上限。**これが唯一の量的つまみ**（1 画面だけ欲しい人は小さくする）。圧縮前で測るのは、キャプチャ側が二度圧縮せずに予算を確定できる唯一の量だから。ディスク上のファイルは必ずこれより小さい |
+| `scrollback-persist-total-limit` | 64 MiB | 実ファイルサイズ／全体 | ディスク総量。起動時に実サイズで検査し、超過時は mtime の古い順に破棄 |
+| `scrollback-persist-max-age-days` | 7 | 日（整数） | 古い記録の自動失効。`0` で無期限。suffix 構文は noa の config に存在しないので `7d` は診断エラー |
 
 さらに起動時 GC: `session.json` から参照されていないスナップショットファイルは
 削除する（孤児回収）。
@@ -112,19 +116,23 @@ D-1 は D-2 を実装しなくても単独で解消でき、コストが桁違�
 する処理を同じ頻度で回すのは論外。スナップショットのトリガは別立てにする:
 
 1. **クリーン終了時**（winit `exiting`）— 主経路。
-2. **アイドルチェックポイント** — 60 秒ごと、かつ「前回チェックポイント以降に
-   そのペインが出力を出した」かつ「直近 2 秒出力が止まっている」ときのみ。
-   クラッシュ耐性はここから来る。
-3. **明示コマンド** — コマンドパレット `Checkpoint scrollback`（デバッグ／手動保存）。
+2. **アイドルチェックポイント** — 出力が **5 秒**止まったら、前回チェックポイント
+   以降に出力を出したペインだけを捕捉する。静穏だけを条件にすると*出力が止まらない
+   限り一度も走らない* —— まさに末尾を残したい長時間ビルドが該当する —— ので、
+   前回から **60 秒**を上限として、洪水中でも必ず一度は走る。クラッシュ耐性はここ
+   から来る。
+3. **明示コマンド** — コマンドパレット `Checkpoint Scrollback Now`。
 
-キャプチャ（`Arc<Mutex<Terminal>>` の読み取り）はメインスレッド、シリアライズと
-書き込みは `SessionPersister` 相当のワーカー。ロック保持時間は行の move-out のみ。
+キャプチャ（`Arc<Mutex<Terminal>>` の読み取り＋エンコード）はメインスレッド、
+ディスク書き込みは専用ワーカー（`scrollback_persist::ScrollbackPersister`）。
+キーごとにコアレスするので、10 ペインぶんのチェックポイントが重なっても各ペインの
+最新バイト列だけが書かれる。
 
 ### 4.5 ファイル形式
 
 `<data-dir>/noa/scrollback/<pane-key>.nsb`（macOS では
 `~/Library/Application Support/noa/scrollback/`）。`session.json` の leaf に
-`"scrollback": "<pane-key>"` を 1 フィールド追加する（`SESSION_VERSION` を 2 へ）。
+`"scrollback": "<pane-key>"` を 1 フィールド追加する（`SESSION_VERSION` は 2 → **3**。2 は remote メタデータで既に使われていた）。pane-key は 16 桁小文字 hex に限定し、`session.json` は編集可能なファイルである以上、パストラバーサルの入力口として扱って検証する。
 **バージョン不一致・破損・欠落は「記録なし」に落ちるだけで、起動を阻害しない**
 （既存 session.json と同じ規約）。
 
@@ -135,7 +143,7 @@ flags   u16              bit0: deflate, bit1: encrypted
 cols    u32              保存時のグリッド幅（reflow 判断用）
 saved_at u64             Unix 秒（記録ビューのラベル表示に使う）
 rows    u32              行数
-payload …                deflate(packed rows ++ style table ++ grapheme table)
+payload …                deflate(style table ++ link table ++ grapheme table ++ rows)
 ```
 
 serde は使わない（`noa-config` / `session.rs` の手書きパーサ規約に合わせる）。
@@ -185,10 +193,10 @@ noa 拡張として既定 `never`**。AC-1 の意図は Stage 0 が担保する 
 ```
 
 - **セパレータ行**: 全幅の淡い罫 + 保存時刻ラベル。pty 由来ではない合成行。
-- **左ガター罫**: 記録領域の各行に 1px のアクセント淡色の縦罫。減光は**しない**
-  （陽菜が読みたいのはその文字であり、読みにくくしては本末転倒）。
-- **「記録」バッジ**: ビューポートが記録領域に掛かっている間だけ表示。
-  既存のバッジ語彙（scratch terminal バッジ、エージェントバッジ）に揃える。
+- **左ガター**: 記録領域の各行の**第 0 桁**にアクセント淡色の背景矩形（実装上の
+  逸脱については §12 D-2）。減光は**しない**（陽菜が読みたいのはその文字であり、
+  読みにくくしては本末転倒）。選択・検索ヒット・カーソルはガターより優先される。
+- ~~**「記録」バッジ**~~ → 見送り（§12 D-3）。
 - 記録領域は**通常の scrollback**なので、選択・コピー・検索はそのまま効く。
 - 記録領域では shell integration のセマンティクス（プロンプトジャンプ再実行等）は
   無効。OSC 8 リンクは有効のまま。
@@ -211,7 +219,7 @@ noa 拡張として既定 `never`**。AC-1 の意図は Stage 0 が担保する 
 
 | Stage | 内容 | 閉じる AC | 規模の目安 |
 |---|---|---|---|
-| **0 — 正直さ** | 復元されたペインに 1 行の告知（「レイアウトを復元しました。直前の出力は保存されていません。記録を残すには `scrollback-persist = screen`」）。`session-restore.md` と Settings のコピー更新。**永続化なし** | AC-2 | 数ファイル。単独で ship 可 |
+| **0 — 正直さ** | 復元されたペインに 1 行の告知（`layout restored · previous output was not saved · set scrollback-persist = tail to keep it`）。Settings に `Persist Scrollback` 行。**永続化なし** | AC-2 | 実装済み |
 | **1 — 履歴テール永続化** | 末尾 `scrollback-persist-limit` バイトぶんの履歴を属性付きで保存／復元（deflate 圧縮）。記録ビュー（セパレータ + ガター + バッジ）。ファイル形式・権限・Time Machine 除外・起動時 GC のベースライン。復元領域は既存 `search.rs` でそのまま検索対象になる | AC-1, AC-3 | 本命。`noa-grid` に serialize/deserialize、`noa-app` に capture/restore/記録ビュー、`noa-config` に 4 キー |
 | **2 — 堅牢化** | Keychain 暗号化、総量 LRU、`max-age` 失効、`+scrollback-gc` サブコマンド、ペイン単位の非保存トグル | — | 独立して後追い可 |
 
@@ -227,8 +235,8 @@ noa 拡張として既定 `never`**。AC-1 の意図は Stage 0 が担保する 
 | `scrollback-persist` | `never` \| `tail` | `never` |
 | `scrollback-persist-limit` | バイト | `1048576` |
 | `scrollback-persist-total-limit` | バイト | `67108864` |
-| `scrollback-persist-max-age` | 期間 | `7d` |
-| `scrollback-persist-encrypt` | bool | `false`（Stage 2） |
+| `scrollback-persist-max-age-days` | 整数（日） | `7` |
+| `scrollback-persist-encrypt` | bool | `false`（Stage 2・未実装） |
 
 `+show-config` への露出と、`theme_settings/rows.rs` の `SettingsRowKind::COUNT`
 bump を忘れないこと。
@@ -278,3 +286,36 @@ DEC-3 / 4 / 5 は仮決め。実装着手までに異議があれば差し替え
 5. スナップショットファイルを壊す → 正常起動、記録なし、エラーなし。
 6. scratch terminal を開いて終了 → そのペインの記録は作られない。
 7. `ls -l@` でパーミッション `0600` とバックアップ除外属性を確認。
+
+---
+
+## 12. 実装時に確定した逸脱（提案からの差分）
+
+提案どおりに作れなかった／作らなかった点。理由込みで残す。
+
+| # | 提案 | 実装 | 理由 |
+|---|---|---|---|
+| **D-1** | packed scrollback 表現をそのまま直列化 | materialize 済み `Row`/`Cell` を独自形式で直列化 | packed 表現の `GraphemeId` / `HyperlinkId` がプロセススコープ。ディスクに書くと次のプロセスで別テキストにデコードされる（§4.1） |
+| **D-2** | 記録領域の左に **1px** の縦罫 | 第 0 桁の**セル 1 個ぶん**の背景矩形 | サブセル幅の矩形は新しい GPU プリミティブ（シェーダ／頂点レイアウト変更）を要求する。`CLAUDE.md` の GPU 罠の項が明示的に警告している領域であり、境界の可読性はセル粒度でも損なわれない。1 行あたり矩形 1 個で、選択の背景と同じ既存パスに乗る |
+| **D-3** | ビューポートが記録領域に掛かっている間の「記録」バッジ | **未実装** | バッジはネイティブ AppKit オーバーレイ経路（scratch バッジと同じ）で、境界を示すという目的に対して費用が見合わない。セパレータ行は自分自身にラベル（`record · saved <時刻> · live below`）を持ち、記録領域に入るには必ずその行を跨ぐので、区別は成立している。バッジは追認が取れたら follow-up |
+| **D-4** | `scrollback-persist-max-age = 7d` | `scrollback-persist-max-age-days = 7` | noa の config には suffix 構文がどこにも無い（`cursor-stop-blinking-after` も `background-image-interval` も素の整数秒）。単位はキー名で表すのが既存の規約 |
+| **D-5** | per-pane 上限は「圧縮後バイト」 | 「エンコード後・deflate 前バイト」 | 圧縮後で予算を切るには、切って圧縮して溢れたらやり直す必要がある。圧縮前は一度で確定でき、圧縮は必ず約束より小さくする方向にしか効かない |
+| **D-6** | `SESSION_VERSION` を 2 へ | **3** へ | 2 は remote ペインのメタデータで既に使用済みだった |
+| **D-7** | （提案に無し） | 記録の破棄は既存 scrollback を作り直して実装 | ページは packed 後は不変で、ページ単位でしか evict されない。`erase_display(Scrollback)` はライブ履歴まで消してしまうため、残存行を materialize して詰め直す O(n) 経路を足した。ユーザー起点の稀なコマンドなので、bulk-output のホットパスには触っていない |
+
+### 未実装（Stage 2 送り）
+
+- `scrollback-persist-encrypt`（Keychain + AES-256-GCM）。v1 のベースラインは
+  FileVault + `0600`/`0700` + バックアップ除外のまま（DEC-3）。
+- kitty graphics / sixel のプレースホルダ置換（現状は画像セルが素の文字として落ちる）。
+- 記録バッジ（D-3）。
+
+### GUI 目視確認が必要な項目
+
+自動テストで押さえられていない部分。実機で見ること:
+
+1. 記録セパレータの見え方（罫の連続性・時刻の可読性・テーマ light/dark 双方）。
+2. 第 0 桁ガターの色が、記録領域の文字を読みにくくしていないこと（特に light テーマ）。
+3. 復元直後のビューポート位置（記録の末尾＝ライブ直前が見えていること）。
+4. Settings の `Persist Scrollback` 行の表示とバッジ種別。
+5. 幅を変えて再起動したときの reflow の見え方（§11 手順 3）。

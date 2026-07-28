@@ -11,11 +11,12 @@
 use std::fs;
 use std::path::Path;
 
-/// Current schema version. Version 2 adds per-leaf remote metadata. The
-/// reader intentionally accepts v1 as well, but the writer always emits v2
-/// so an older binary rejects a remote-aware session instead of silently
-/// respawning its leaves as local shells.
-pub const SESSION_VERSION: u32 = 2;
+/// Current schema version. Version 2 adds per-leaf remote metadata; version 3
+/// adds the per-leaf persisted-scrollback key. The reader intentionally
+/// accepts older versions as well, but the writer always emits the current
+/// one so an older binary rejects a session it would misinterpret instead of
+/// silently respawning its leaves with the wrong shape.
+pub const SESSION_VERSION: u32 = 3;
 const MIN_SESSION_VERSION: u32 = 1;
 
 /// The whole persisted session: every logical window, plus which one had OS
@@ -69,6 +70,13 @@ pub enum PaneNode {
         /// Present only for a remote Client Mode leaf. Credentials and
         /// transient connection state are deliberately never persisted.
         remote: Option<RemotePane>,
+        /// Key of this leaf's persisted scrollback snapshot, when
+        /// `scrollback-persist` captured one. Names a file under
+        /// `noa-config::scrollback_dir()`; the contents live there rather
+        /// than inline because this document is rewritten on every
+        /// structural change, and a megabyte of terminal output is not
+        /// something to rewrite on each split.
+        scrollback: Option<String>,
     },
     Split {
         orientation: Orientation,
@@ -109,6 +117,16 @@ impl PaneNode {
         match self {
             PaneNode::Leaf { remote, .. } => remote.clone(),
             PaneNode::Split { first, .. } => first.first_leaf_remote(),
+        }
+    }
+
+    /// Persisted scrollback key of the left-most leaf, when it has one. That
+    /// leaf keeps hosting the tab's initial surface on restore, so its record
+    /// is loaded there rather than through the split-materialization path.
+    pub fn first_leaf_scrollback(&self) -> Option<String> {
+        match self {
+            PaneNode::Leaf { scrollback, .. } => scrollback.clone(),
+            PaneNode::Split { first, .. } => first.first_leaf_scrollback(),
         }
     }
 
@@ -191,7 +209,11 @@ fn serialize_tab(out: &mut String, tab: &TabSession) {
 fn serialize_node(out: &mut String, node: &PaneNode) {
     out.push('{');
     match node {
-        PaneNode::Leaf { cwd, remote } => {
+        PaneNode::Leaf {
+            cwd,
+            remote,
+            scrollback,
+        } => {
             push_key(out, "type");
             push_string(out, "leaf");
             out.push(',');
@@ -204,6 +226,12 @@ fn serialize_node(out: &mut String, node: &PaneNode) {
             push_key(out, "remote");
             match remote {
                 Some(remote) => serialize_remote(out, remote),
+                None => out.push_str("null"),
+            }
+            out.push(',');
+            push_key(out, "scrollback");
+            match scrollback {
+                Some(key) => push_string(out, key),
                 None => out.push_str("null"),
             }
         }
@@ -388,7 +416,19 @@ fn parse_node(value: &json::Value, version: u32) -> Option<PaneNode> {
                     Some(remote) => Some(parse_remote(remote)?),
                 }
             };
-            Some(PaneNode::Leaf { cwd, remote })
+            let scrollback = if version < 3 {
+                None
+            } else {
+                match object.field("scrollback") {
+                    None | Some(json::Value::Null) => None,
+                    Some(key) => Some(key.as_str()?.to_string()),
+                }
+            };
+            Some(PaneNode::Leaf {
+                cwd,
+                remote,
+                scrollback,
+            })
         }
         "split" => {
             let orientation = match object.field("orientation")?.as_str()? {
@@ -716,6 +756,7 @@ mod tests {
                         split: PaneNode::Leaf {
                             cwd: Some("/home/user".to_string()),
                             remote: None,
+                            scrollback: None,
                         },
                     }],
                 },
@@ -732,6 +773,7 @@ mod tests {
                                 first: Box::new(PaneNode::Leaf {
                                     cwd: Some("/a".to_string()),
                                     remote: None,
+                                    scrollback: None,
                                 }),
                                 second: Box::new(PaneNode::Split {
                                     orientation: Orientation::Vertical,
@@ -739,10 +781,12 @@ mod tests {
                                     first: Box::new(PaneNode::Leaf {
                                         cwd: None,
                                         remote: None,
+                                        scrollback: None,
                                     }),
                                     second: Box::new(PaneNode::Leaf {
                                         cwd: Some("/b/c".to_string()),
                                         remote: None,
+                                        scrollback: None,
                                     }),
                                 }),
                             },
@@ -753,6 +797,7 @@ mod tests {
                             split: PaneNode::Leaf {
                                 cwd: None,
                                 remote: None,
+                                scrollback: None,
                             },
                         },
                     ],
@@ -781,15 +826,18 @@ mod tests {
                 first: Box::new(PaneNode::Leaf {
                     cwd: Some("/one".to_string()),
                     remote: None,
+                    scrollback: None,
                 }),
                 second: Box::new(PaneNode::Leaf {
                     cwd: Some("/two".to_string()),
                     remote: None,
+                    scrollback: None,
                 }),
             }),
             second: Box::new(PaneNode::Leaf {
                 cwd: None,
                 remote: None,
+                scrollback: None,
             }),
         };
         assert_eq!(split.leaf_count(), 3);
@@ -823,6 +871,7 @@ mod tests {
                     split: PaneNode::Leaf {
                         cwd: Some("/path/with \"quote\"\tand\\slash".to_string()),
                         remote: None,
+                        scrollback: None,
                     },
                 }],
             }],
@@ -865,15 +914,71 @@ mod tests {
                             pane_id: 42,
                             cached_title: Some("remote shell".to_string()),
                         }),
+                        scrollback: None,
                     },
                 }],
             }],
         };
 
         let text = serialize(&state);
-        assert!(text.contains("\"version\":2"));
+        assert!(text.contains("\"version\":3"));
         assert!(!text.contains("token"));
         assert_eq!(parse(&text), Some(state));
+    }
+
+    #[test]
+    fn a_leaf_scrollback_key_roundtrips() {
+        let state = SessionState {
+            focused_window: Some(0),
+            windows: vec![WindowSession {
+                frame: None,
+                focused_tab: 0,
+                tabs: vec![TabSession {
+                    focused_leaf: 0,
+                    title: None,
+                    split: PaneNode::Split {
+                        orientation: Orientation::Horizontal,
+                        ratio: 0.5,
+                        first: Box::new(PaneNode::Leaf {
+                            cwd: Some("/a".to_string()),
+                            remote: None,
+                            scrollback: Some("3f1c8a02b7d94e56".to_string()),
+                        }),
+                        second: Box::new(PaneNode::Leaf {
+                            cwd: None,
+                            remote: None,
+                            scrollback: None,
+                        }),
+                    },
+                }],
+            }],
+        };
+
+        let text = serialize(&state);
+        assert!(text.contains("\"scrollback\":\"3f1c8a02b7d94e56\""));
+        assert_eq!(parse(&text), Some(state.clone()));
+        assert_eq!(
+            state.windows[0].tabs[0].split.first_leaf_scrollback().as_deref(),
+            Some("3f1c8a02b7d94e56"),
+            "the first leaf's key is what the restored root pane loads"
+        );
+    }
+
+    #[test]
+    fn a_v2_session_parses_with_no_record_rather_than_being_rejected() {
+        // A file written by a build that predates scrollback persistence must
+        // still restore its topology; it simply has no record to show.
+        let v2 = r#"{"version":2,"focused_window":0,"windows":[{"frame":null,
+            "focused_tab":0,"tabs":[{"focused_leaf":0,"title":null,
+            "split":{"type":"leaf","cwd":"/a","remote":null}}]}]}"#;
+        let parsed = parse(v2).expect("a v2 session still parses");
+        assert!(matches!(
+            parsed.windows[0].tabs[0].split,
+            PaneNode::Leaf {
+                scrollback: None,
+                ..
+            }
+        ));
     }
 
     #[test]

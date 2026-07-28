@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use noa_config::{
     BackgroundImageFit, BackgroundImagePosition, CursorShape, GlassLevel, MacosOptionAsAlt,
-    MacosTitlebarStyle,
+    MacosTitlebarStyle, ScrollbackPersist,
 };
 
 /// Which half of the (now-split) overlay owns ↑↓/←→ navigation. A session's
@@ -162,10 +162,25 @@ pub(crate) enum SettingsRowKind {
     /// scratch popup toggle reads the live config value fresh, exactly like
     /// `QuickTerminalHeight`) rather than restart-only.
     ScratchTerminalSize,
+    /// `scrollback-persist`: whether each pane's scrollback tail is written
+    /// to disk on exit and restored on launch (`docs/specs/scrollback-persistence.md`).
+    /// A plain two-state flip like `ConfirmQuit` (`adjust` toggles it), but
+    /// reload-exempt like `ScrollbackLimit`/`CursorStyleBlink` rather than
+    /// live: the value is read fresh only when a pane is *created*
+    /// (`App::scrollback_persist_enabled`), so an edit here has no running
+    /// pane to apply to — it takes effect for panes opened after the
+    /// commit, picked up by `ConfigWatcher`'s normal reload like the rest of
+    /// that group, no special `commit_theme_settings` mirroring needed.
+    /// The initial draft is seeded from the live config
+    /// (`ThemeSettingsInit::scrollback_persist`), not from the default. A
+    /// row that reports `Off` while output is in fact being written to disk
+    /// would be worse than no row at all — this one exists so a user can see
+    /// whether their terminal is recording.
+    ScrollbackPersist,
 }
 
 impl SettingsRowKind {
-    pub(crate) const COUNT: usize = 33;
+    pub(crate) const COUNT: usize = 34;
     pub(crate) const ALL: [SettingsRowKind; Self::COUNT] = [
         Self::FontSize,
         Self::BackgroundOpacity,
@@ -200,6 +215,7 @@ impl SettingsRowKind {
         Self::ServerTokenCopy,
         Self::ScratchTerminalKey,
         Self::ScratchTerminalSize,
+        Self::ScrollbackPersist,
     ];
 
     /// R-8: the fixed live/commit-only classification, one row's kind at a
@@ -264,6 +280,7 @@ impl SettingsRowKind {
             Self::ServerTokenCopy => "Server Token",
             Self::ScratchTerminalKey => "Scratch Terminal Key",
             Self::ScratchTerminalSize => "Scratch Terminal Size",
+            Self::ScrollbackPersist => "Persist Scrollback",
         }
     }
 
@@ -339,6 +356,9 @@ impl SettingsRowKind {
             }
             Self::ScratchTerminalSize => {
                 "Scratch terminal popup grid size, in columns x rows. Applies on save."
+            }
+            Self::ScrollbackPersist => {
+                "Keep each pane's scrollback tail on disk across restarts — writes terminal output to disk, so it's opt-in. Applies on save."
             }
         }
     }
@@ -474,6 +494,8 @@ pub(crate) enum RowDraft {
     ScratchTerminalKey(String),
     /// `(cols, rows)` for [`SettingsRowKind::ScratchTerminalSize`].
     ScratchTerminalSize(u16, u16),
+    /// `scrollback-persist` for [`SettingsRowKind::ScrollbackPersist`].
+    ScrollbackPersist(ScrollbackPersist),
 }
 
 /// [`RowDraft::ServerTokenCopy`]'s three faces — deliberately holds no
@@ -583,6 +605,10 @@ impl RowDraft {
                 }
             }
             RowDraft::ScratchTerminalSize(cols, rows) => format!("{cols}x{rows}"),
+            RowDraft::ScrollbackPersist(mode) => match mode {
+                ScrollbackPersist::Never => "Off".to_string(),
+                ScrollbackPersist::Tail => "Record Tail".to_string(),
+            },
         }
     }
 
@@ -680,6 +706,7 @@ impl RowDraft {
                 d.scratch_terminal_size.cols,
                 d.scratch_terminal_size.rows,
             ),
+            SettingsRowKind::ScrollbackPersist => RowDraft::ScrollbackPersist(d.scrollback_persist),
         }
     }
 }
@@ -928,6 +955,8 @@ pub(crate) struct ThemeSettingsInit {
     /// `display_value` already treats an empty draft as "None").
     pub(crate) scratch_terminal_key: String,
     pub(crate) scratch_terminal_size: (u16, u16),
+    /// `scrollback-persist`: whether panes save and restore their scrollback.
+    pub(crate) scrollback_persist: noa_config::ScrollbackPersist,
 }
 
 /// [`SettingsRowKind::ServerStatus`]'s display text (E) for a given

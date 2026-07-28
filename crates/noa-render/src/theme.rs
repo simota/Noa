@@ -154,6 +154,22 @@ impl Theme {
     pub(crate) fn contrast_adjusted_fg(&self, fg: Rgb, bg: Rgb) -> Rgb {
         ensure_minimum_contrast(fg, bg, self.minimum_contrast)
     }
+
+    /// Left-gutter accent for a restored-record row range
+    /// (`FrameSnapshot::record_rows` — scrollback rehydrated from a
+    /// persisted snapshot rather than live pty output, `scrollback-persist`
+    /// spec §5). A 50/50 blend of this theme's own selection and
+    /// active-search highlight backgrounds rather than a hardcoded hue:
+    /// both already have to read clearly against `default_bg` in every
+    /// theme to do their own job, so mixing them yields a third accent that
+    /// inherits the same light/dark-theme visibility guarantee for free —
+    /// the same derivation `OverlayStyle` uses for its own accent colors.
+    /// A method rather than a stored field: `Theme` is built via an
+    /// exhaustive struct literal in `noa-app`, so a new required field would
+    /// have to be threaded through there too.
+    pub fn record_gutter(&self) -> Rgb {
+        blend(self.selection_bg, self.active_search_bg, 0.5)
+    }
 }
 
 pub(crate) fn rgba(rgb: Rgb) -> [f32; 4] {

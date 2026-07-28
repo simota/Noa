@@ -2,7 +2,15 @@
 
 Ghostty-parity Phase 6 item: persist and restore the window / tab / split
 **topology** and each pane's **cwd** across launches. Terminal *contents* are
-never restored (matching Ghostty).
+not restored by this feature (matching Ghostty).
+
+Restoring the layout but not the output is a promise the layout makes and the
+contents break, so the two are wired together deliberately: a pane restored
+with no record shows a one-line notice saying its output was not saved and
+naming the key that would change that. Contents are opt-in through the
+separate `scrollback-persist` key — see
+[`scrollback-persistence.md`](scrollback-persistence.md), which also owns the
+`scrollback` field this document's leaf schema carries.
 
 ## `window-save-state`
 
@@ -21,8 +29,10 @@ Surfaced by `+show-config` and accepted by the Ghostty config importer
 
 `<data-dir>/noa/session.json` (`noa-config::session_state_path`); on macOS
 `<data-dir>` is `~/Library/Application Support`. Written atomically (temp file +
-rename). A versioned, hand-written JSON document (`SESSION_VERSION = 1`; the
-crate has no serde, matching the hand-written config parser). Schema:
+rename). A versioned, hand-written JSON document (`SESSION_VERSION = 3`; the
+crate has no serde, matching the hand-written config parser). Version 2 added
+per-leaf `remote` metadata, version 3 the per-leaf `scrollback` snapshot key.
+Schema:
 
 ```json
 {
@@ -35,8 +45,10 @@ crate has no serde, matching the hand-written config parser). Schema:
       "tabs": [
         { "focused_leaf": 0,
           "split": { "type": "split", "orientation": "horizontal", "ratio": 0.5,
-                     "first":  { "type": "leaf", "cwd": "/a" },
-                     "second": { "type": "leaf", "cwd": null } } }
+                     "first":  { "type": "leaf", "cwd": "/a",
+                                 "remote": null, "scrollback": "3f1c8a02b7d94e56" },
+                     "second": { "type": "leaf", "cwd": null,
+                                 "remote": null, "scrollback": null } } }
       ]
     }
   ]
@@ -49,6 +61,10 @@ crate has no serde, matching the hand-written config parser). Schema:
   in pre-order.
 - A **leaf**'s `cwd` is the OSC 7 cwd (8635cdb) when it still resolves to a local
   directory, else `null` (the pane then opens in the process cwd).
+- A **leaf**'s `scrollback` names its persisted snapshot under
+  `<data-dir>/noa/scrollback/`, or `null` when `scrollback-persist` is off or
+  the pane has nothing saved. Keys are validated as 16 lowercase hex digits on
+  read: this file is user-writable and the key is interpolated into a path.
 
 A missing, unreadable, malformed, or version-mismatched file parses to "no
 session" — startup is **never** blocked by session state.

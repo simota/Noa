@@ -108,6 +108,18 @@ pub struct AppConfig {
     /// `window-save-state`: whether the window/tab/split session is saved on
     /// exit and restored on launch. `never` disables both.
     pub window_save_state: noa_config::WindowSaveState,
+    /// `scrollback-persist`: whether each pane's scrollback tail is saved on
+    /// exit and restored on launch, alongside the topology.
+    pub scrollback_persist: noa_config::ScrollbackPersist,
+    /// `scrollback-persist-limit`: per-pane cap on captured scrollback, in
+    /// bytes of encoded payload.
+    pub scrollback_persist_limit: usize,
+    /// `scrollback-persist-total-limit`: cap on the snapshot directory's total
+    /// on-disk size, enforced at launch.
+    pub scrollback_persist_total_limit: usize,
+    /// `scrollback-persist-max-age-days`: snapshot expiry, enforced at launch
+    /// (`0` never expires).
+    pub scrollback_persist_max_age_days: u64,
     /// `macos-option-as-alt`: which Option key(s) the macOS window layer
     /// rewrites as terminal Alt.
     pub macos_option_as_alt: noa_config::MacosOptionAsAlt,
@@ -293,6 +305,10 @@ impl AppConfig {
             scrollback_limit: config.scrollback_limit,
             image_storage_limit: config.image_storage_limit,
             window_save_state: config.window_save_state,
+            scrollback_persist: config.scrollback_persist,
+            scrollback_persist_limit: config.scrollback_persist_limit,
+            scrollback_persist_total_limit: config.scrollback_persist_total_limit,
+            scrollback_persist_max_age_days: config.scrollback_persist_max_age_days,
             macos_option_as_alt: config.macos_option_as_alt,
             macos_titlebar_style: config.macos_titlebar_style,
             macos_non_native_fullscreen: config.macos_non_native_fullscreen,

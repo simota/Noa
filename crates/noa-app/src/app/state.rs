@@ -785,6 +785,7 @@ mod theme_settings_session_tests {
             server_status: "Stopped".to_string(),
             scratch_terminal_key: "cmd+shift+t".to_string(),
             scratch_terminal_size: (100, 25),
+            scrollback_persist: noa_config::ScrollbackPersist::default(),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),
@@ -1041,6 +1042,20 @@ pub(super) struct Surface {
     pub(super) hover_link: Option<HoverLink>,
     /// The Session Overview mirror's read-only publish slot (Fix B, REQ-NF-6).
     pub(super) overview_snapshot: Arc<Mutex<Option<Arc<FrameSnapshot>>>>,
+    /// Key of this pane's persisted scrollback snapshot, when
+    /// `scrollback-persist` is on. Minted once and then stable for the pane's
+    /// life so checkpoints overwrite one file rather than littering the
+    /// directory, and so a restored pane keeps writing to the file it was
+    /// restored from. `None` while persistence is off.
+    pub(super) scrollback_key: Option<String>,
+    /// Session-absolute rows this pane restored from a snapshot — the record
+    /// region, drawn with a gutter so restored history is not mistaken for
+    /// live output. Shrinks as scrollback eviction eats into it and is cleared
+    /// once the whole region has scrolled out.
+    pub(super) record_rows: Option<std::ops::Range<usize>>,
+    /// Whether this pane produced output since its last checkpoint. Keeps the
+    /// idle checkpoint from re-encoding panes that have not changed.
+    pub(super) scrollback_dirty: bool,
     /// Previous frame's snapshot rows + viewport identity, handed back after
     /// each redraw so `FrameSnapshot::from_terminal_recycle` can reuse row/cell
     /// allocations and skip clean-row copies when the viewport is unchanged.
@@ -1199,6 +1214,9 @@ impl Surface {
             rect,
             hover_link: None,
             overview_snapshot,
+            scrollback_key: None,
+            record_rows: None,
+            scrollback_dirty: false,
             snapshot_recycle: noa_render::FrameSnapshotRecycle::default(),
             kitty_animation_flag,
             cursor_blink_state: CursorBlinkState::default(),

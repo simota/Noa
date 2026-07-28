@@ -69,6 +69,7 @@ pub(crate) fn snapshot_for_text(text: &str) -> FrameSnapshot {
         preedit: None,
         image_placements: Vec::new(),
         images: Vec::new(),
+        record_rows: None,
     }
 }
 
@@ -271,6 +272,7 @@ pub(crate) fn image_snapshot(
             height: 4,
             rgba: Arc::from(rgba),
         }],
+        record_rows: None,
     }
 }
 

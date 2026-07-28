@@ -150,6 +150,7 @@ fn cell_pipeline_draws_one_frame_without_validation_error() {
         preedit: None,
         image_placements: Vec::new(),
         images: Vec::new(),
+        record_rows: None,
     };
     let theme = Theme::new();
 
@@ -256,6 +257,7 @@ fn command_palette_overlay_draws_one_frame_without_validation_error() {
         preedit: None,
         image_placements: Vec::new(),
         images: Vec::new(),
+        record_rows: None,
     };
 
     renderer.rebuild_cells(&snap, &mut font, &Theme::new());
@@ -388,6 +390,7 @@ fn command_palette_surface_alpha_is_uniform_across_plain_and_selected_rows() {
         preedit: None,
         image_placements: Vec::new(),
         images: Vec::new(),
+        record_rows: None,
     };
 
     let target = 0.68_f32;
@@ -527,6 +530,7 @@ fn cell_pipeline_draws_full_then_dirty_patched_frame_without_validation_error() 
             preedit: None,
             image_placements: Vec::new(),
             images: Vec::new(),
+            record_rows: None,
         }
     }
 
@@ -651,6 +655,7 @@ fn cell_pipeline_draws_color_glyph_without_validation_error_and_samples_passthro
         preedit: None,
         image_placements: Vec::new(),
         images: Vec::new(),
+        record_rows: None,
     };
     let theme = Theme::new();
 

@@ -245,6 +245,7 @@ impl App {
                 self.config.scratch_terminal_size.cols,
                 self.config.scratch_terminal_size.rows,
             ),
+            scrollback_persist: self.config.scrollback_persist,
         };
         self.theme_settings = Some(ThemeSettingsSession {
             window_id,
@@ -1208,7 +1209,8 @@ impl App {
                 | RowDraft::ServerEnable(_)
                 | RowDraft::ServerPort(_)
                 | RowDraft::ServerBind(_)
-                | RowDraft::ServerScopes(_) => {}
+                | RowDraft::ServerScopes(_)
+                | RowDraft::ScrollbackPersist(_) => {}
                 // `scratch-terminal-key` is the same shape as the group
                 // above: `App::apply_reloaded_config`'s
                 // `scratch_terminal_key_changed` diff is what actually
@@ -1755,6 +1757,7 @@ mod commit_theme_settings_tests {
             server_status: "Stopped".to_string(),
             scratch_terminal_key: "cmd+shift+t".to_string(),
             scratch_terminal_size: (100, 25),
+            scrollback_persist: noa_config::ScrollbackPersist::default(),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),
@@ -1907,6 +1910,7 @@ mod commit_theme_settings_tests {
             server_status: "Stopped".to_string(),
             scratch_terminal_key: "cmd+shift+t".to_string(),
             scratch_terminal_size: (100, 25),
+            scrollback_persist: noa_config::ScrollbackPersist::default(),
             theme_pair: None,
             carryover: None,
             favorites: std::sync::Arc::new(std::collections::HashSet::new()),

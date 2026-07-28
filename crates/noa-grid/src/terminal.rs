@@ -520,6 +520,17 @@ impl Terminal {
         inserted
     }
 
+    /// Drop the oldest `count` rows of the primary screen's scrollback — the
+    /// restored record, without the live history that followed it. Returns the
+    /// number of rows dropped.
+    pub fn discard_history_prefix(&mut self, count: usize) -> usize {
+        let dropped = self.primary.discard_history_prefix(count);
+        if dropped > 0 {
+            self.invalidate_grid_coordinate_space();
+        }
+        dropped
+    }
+
     pub fn set_search_query(&mut self, query: impl Into<String>) {
         self.active_mut().set_search_query(query);
     }

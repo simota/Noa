@@ -540,6 +540,20 @@ fn pane_wide_invalidation_triggers_are_covered_fm11() {
         );
     }
 
+    // 7b. record_rows (restored-record gutter row range). Like hover_link,
+    // this carries no terminal damage (it changes with the caller's own
+    // restore bookkeeping), so it needs the same full-pane invalidation.
+    {
+        let snap_a = baseline_snapshot(['A', 'B', 'C']);
+        let mut snap_b = baseline_snapshot(['A', 'B', 'C']);
+        snap_b.record_rows = Some(0..2);
+        let rebuilt = rebuild_twice(110, &snap_a, &theme, &snap_b, &theme);
+        assert_eq!(
+            rebuilt, 3,
+            "a record_rows change must force a full pane rebuild"
+        );
+    }
+
     // 8. cursor movement — the narrower case: dirties exactly the two
     // affected rows, NOT a full-pane invalidation.
     {

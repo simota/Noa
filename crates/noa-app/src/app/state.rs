@@ -1053,6 +1053,11 @@ pub(super) struct Surface {
     /// live output. Shrinks as scrollback eviction eats into it and is cleared
     /// once the whole region has scrolled out.
     pub(super) record_rows: Option<std::ops::Range<usize>>,
+    /// Session-absolute row of the synthetic annotation this pane was restored
+    /// with — the record separator, or the Stage 0 "not saved" notice. Excluded
+    /// from capture: it is chrome the app wrote, and re-capturing it would
+    /// leave one more behind in the history on every relaunch.
+    pub(super) annotation_row: Option<usize>,
     /// Whether this pane produced output since its last checkpoint. Keeps the
     /// idle checkpoint from re-encoding panes that have not changed.
     pub(super) scrollback_dirty: bool,
@@ -1216,6 +1221,7 @@ impl Surface {
             overview_snapshot,
             scrollback_key: None,
             record_rows: None,
+            annotation_row: None,
             scrollback_dirty: false,
             snapshot_recycle: noa_render::FrameSnapshotRecycle::default(),
             kitty_animation_flag,

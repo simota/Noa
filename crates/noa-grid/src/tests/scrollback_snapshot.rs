@@ -7,7 +7,7 @@ use crate::snapshot;
 /// the way a relaunch does.
 fn restore_into(source: &Terminal, cols: u16, rows: u16, max_bytes: usize) -> Terminal {
     let bytes = source
-        .scrollback_snapshot_bytes(max_bytes, 1_700_000_000)
+        .scrollback_snapshot_bytes(max_bytes, 1_700_000_000, None)
         .expect("a terminal with output produces a snapshot");
     let decoded = snapshot::decode(&bytes).expect("a snapshot noa just wrote decodes");
     let mut restored = Terminal::new(GridSize::new(cols, rows));
@@ -116,13 +116,13 @@ fn the_alternate_screen_is_never_captured() {
 #[test]
 fn a_terminal_that_produced_nothing_has_no_snapshot() {
     let source = run_size(20, 4, b"");
-    assert!(source.scrollback_snapshot_bytes(1 << 20, 0).is_none());
+    assert!(source.scrollback_snapshot_bytes(1 << 20, 0, None).is_none());
 }
 
 #[test]
 fn a_zero_budget_captures_nothing() {
     let source = run_size(20, 4, b"something\r\n");
-    assert!(source.scrollback_snapshot_bytes(0, 0).is_none());
+    assert!(source.scrollback_snapshot_bytes(0, 0, None).is_none());
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn a_small_budget_keeps_the_newest_lines() {
 fn restoring_leaves_the_live_grid_and_cursor_alone() {
     let source = run_size(20, 4, b"history\r\n");
     let bytes = source
-        .scrollback_snapshot_bytes(1 << 20, 0)
+        .scrollback_snapshot_bytes(1 << 20, 0, None)
         .expect("snapshot");
     let decoded = snapshot::decode(&bytes).expect("decodes");
 
@@ -180,7 +180,7 @@ fn restoring_twice_stacks_the_older_record_first() {
     // the reading order ends up chronological.
     for source in [&newer, &older] {
         let bytes = source
-            .scrollback_snapshot_bytes(1 << 20, 0)
+            .scrollback_snapshot_bytes(1 << 20, 0, None)
             .expect("snapshot");
         restored.restore_scrollback_snapshot(snapshot::decode(&bytes).expect("decodes"));
     }
@@ -189,4 +189,51 @@ fn restoring_twice_stacks_the_older_record_first() {
     let older_at = text.find("older").expect("older present");
     let newer_at = text.find("newer").expect("newer present");
     assert!(older_at < newer_at, "chronological order: {text:?}");
+}
+
+#[test]
+fn a_skipped_row_is_left_out_of_the_capture() {
+    // The app inserts a synthetic separator row when it restores a record.
+    // Capturing it would bake it into the next record, and every relaunch
+    // would leave one more behind until the history is a stack of separators.
+    let source = run_size(20, 4, b"real output\r\nSEPARATOR\r\nmore output\r\n");
+    let separator_abs = source
+        .active_absolute_row(1)
+        .map(|_| 1)
+        .expect("row 1 exists");
+
+    let bytes = source
+        .scrollback_snapshot_bytes(1 << 20, 0, Some(separator_abs))
+        .expect("snapshot");
+    let decoded = snapshot::decode(&bytes).expect("decodes");
+    let text: Vec<String> = decoded
+        .rows
+        .iter()
+        .map(|row| row.cells.iter().map(|c| c.ch).collect::<String>().trim_end().to_string())
+        .collect();
+
+    assert!(text.iter().any(|line| line == "real output"), "{text:?}");
+    assert!(text.iter().any(|line| line == "more output"), "{text:?}");
+    assert!(
+        !text.iter().any(|line| line == "SEPARATOR"),
+        "the skipped row must not survive: {text:?}"
+    );
+}
+
+#[test]
+fn a_skipped_row_below_the_eviction_point_is_ignored() {
+    // `skip_row` is session-absolute; a stale index from before eviction must
+    // not silently drop an unrelated live row.
+    let source = run_size(20, 4, b"alpha\r\nbeta\r\n");
+    let bytes = source
+        .scrollback_snapshot_bytes(1 << 20, 0, Some(usize::MAX))
+        .expect("snapshot");
+    let decoded = snapshot::decode(&bytes).expect("decodes");
+    let text: Vec<String> = decoded
+        .rows
+        .iter()
+        .map(|row| row.cells.iter().map(|c| c.ch).collect::<String>().trim_end().to_string())
+        .collect();
+    assert!(text.iter().any(|line| line == "alpha"), "{text:?}");
+    assert!(text.iter().any(|line| line == "beta"), "{text:?}");
 }

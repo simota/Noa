@@ -439,11 +439,22 @@ impl Terminal {
     ///
     /// Returns `None` when there is nothing worth saving — an empty or fully
     /// blank primary screen, or a zero budget.
-    pub fn scrollback_snapshot_bytes(&self, max_bytes: usize, saved_at: u64) -> Option<Vec<u8>> {
+    /// `skip_row` omits one session-absolute row from the capture. The app
+    /// passes the record separator it inserted at restore: that row is chrome
+    /// the app synthesized, not something the program printed, so re-capturing
+    /// it would bake it into the next record and leave one more behind on every
+    /// relaunch until the history is a stack of separators.
+    pub fn scrollback_snapshot_bytes(
+        &self,
+        max_bytes: usize,
+        saved_at: u64,
+        skip_row: Option<usize>,
+    ) -> Option<Vec<u8>> {
         if max_bytes == 0 {
             return None;
         }
         let screen = &self.primary;
+        let skip_row = skip_row.and_then(|abs| abs.checked_sub(screen.rows_evicted()));
         // The live grid is blank below the cursor; without this the record
         // would restore with a screenful of empty lines after its last line.
         let mut end = screen.total_rows();
@@ -457,6 +468,9 @@ impl Terminal {
         let mut collected = Vec::new();
         let mut spent = 0usize;
         for y in (0..end).rev() {
+            if Some(y) == skip_row {
+                continue;
+            }
             let Some(row) = screen.absolute_row(y) else {
                 break;
             };

@@ -54,7 +54,10 @@ fn stamp(saved_at: u64, local_offset_seconds: i64) -> String {
 fn ruled(label: &str, cols: u16) -> String {
     let width = usize::from(cols);
     let label = format!(" {label} ");
-    if label.chars().count() + 4 > width {
+    // A bare sentence with no rule reads as output rather than as a boundary,
+    // so keep at least one rule character on each side; only a pane too narrow
+    // for even that falls back to the label alone.
+    if label.chars().count() + 2 > width {
         return label.trim().to_string();
     }
     let remaining = width - label.chars().count();

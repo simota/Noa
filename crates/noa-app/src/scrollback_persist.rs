@@ -483,7 +483,7 @@ mod tests {
         let mut stream = noa_vt::Stream::new();
         stream.feed(b"error: something broke\r\n", &mut terminal);
         let encoded = terminal
-            .scrollback_snapshot_bytes(1 << 20, 1_700_000_000)
+            .scrollback_snapshot_bytes(1 << 20, 1_700_000_000, None)
             .expect("a terminal with output encodes");
 
         let dir = temp_dir("seam");

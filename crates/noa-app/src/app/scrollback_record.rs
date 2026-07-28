@@ -100,10 +100,11 @@ impl App {
                 continue;
             };
             // The lock is held only for the encode; the write is the worker's.
+            let annotation = surface.annotation_row;
             let encoded = surface
                 .terminal
                 .lock()
-                .scrollback_snapshot_bytes(limit, saved_at);
+                .scrollback_snapshot_bytes(limit, saved_at, annotation);
             surface.scrollback_dirty = false;
             match encoded {
                 Some(bytes) => self.scrollback_persister.save(key, bytes),
@@ -257,7 +258,9 @@ impl App {
         };
         // The notice is a live annotation about *this* launch, not recovered
         // history — marking it as record would claim a record exists.
-        surface.record_rows = saved_at.and(record_rows);
+        surface.record_rows = saved_at.and(record_rows.clone());
+        // Both the separator and the notice are the last row inserted.
+        surface.annotation_row = record_rows.map(|rows| rows.end - 1);
         // Restoring is not output; without this the pane would be captured
         // again immediately, rewriting the file it was just restored from.
         surface.scrollback_dirty = false;
@@ -309,14 +312,22 @@ impl App {
     pub(super) fn prune_record_regions(&mut self) {
         for state in self.windows.values_mut() {
             for surface in state.surfaces.values_mut() {
-                let Some(record) = surface.record_rows.clone() else {
+                if surface.record_rows.is_none() && surface.annotation_row.is_none() {
                     continue;
-                };
+                }
                 let oldest = surface.terminal.lock().active_oldest_row();
-                if oldest >= record.end {
-                    surface.record_rows = None;
-                } else if oldest > record.start {
-                    surface.record_rows = Some(oldest..record.end);
+                // The annotation is tracked even without a record (the Stage 0
+                // notice has no record behind it), and a stale absolute index
+                // would skip an unrelated live row from the next capture.
+                if surface.annotation_row.is_some_and(|row| oldest > row) {
+                    surface.annotation_row = None;
+                }
+                if let Some(record) = surface.record_rows.clone() {
+                    if oldest >= record.end {
+                        surface.record_rows = None;
+                    } else if oldest > record.start {
+                        surface.record_rows = Some(oldest..record.end);
+                    }
                 }
             }
         }

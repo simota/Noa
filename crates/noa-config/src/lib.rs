@@ -755,6 +755,11 @@ pub struct StartupConfig {
     /// `scrollback-persist-max-age-days`: persisted scrollback older than this
     /// is discarded at launch (`0` never expires). noa-specific key.
     pub scrollback_persist_max_age_days: u64,
+    /// `scrollback-persist-encrypt`: encrypt snapshots with a key held in the
+    /// login keychain. noa-specific key; off by default because it makes the
+    /// records unreadable once the keychain entry is gone, which is a real cost
+    /// to accept deliberately rather than by default.
+    pub scrollback_persist_encrypt: bool,
     /// `macos-option-as-alt`: which Option key(s) should be rewritten as
     /// terminal Alt by the macOS window layer. Default preserves existing
     /// platform text behavior.
@@ -936,6 +941,7 @@ impl Default for StartupConfig {
             scrollback_persist_limit: DEFAULT_SCROLLBACK_PERSIST_LIMIT,
             scrollback_persist_total_limit: DEFAULT_SCROLLBACK_PERSIST_TOTAL_LIMIT,
             scrollback_persist_max_age_days: DEFAULT_SCROLLBACK_PERSIST_MAX_AGE_DAYS,
+            scrollback_persist_encrypt: false,
             macos_option_as_alt: MacosOptionAsAlt::default(),
             macos_titlebar_style: MacosTitlebarStyle::default(),
             macos_non_native_fullscreen: false,
@@ -1015,6 +1021,7 @@ pub struct ConfigOverrides {
     pub scrollback_persist_limit: Option<usize>,
     pub scrollback_persist_total_limit: Option<usize>,
     pub scrollback_persist_max_age_days: Option<u64>,
+    pub scrollback_persist_encrypt: Option<bool>,
     pub macos_option_as_alt: Option<MacosOptionAsAlt>,
     pub macos_titlebar_style: Option<MacosTitlebarStyle>,
     pub macos_non_native_fullscreen: Option<bool>,
@@ -1110,6 +1117,10 @@ macro_rules! impl_redacted_config_debug {
                     .field(
                         "scrollback_persist_max_age_days",
                         &self.scrollback_persist_max_age_days,
+                    )
+                    .field(
+                        "scrollback_persist_encrypt",
+                        &self.scrollback_persist_encrypt,
                     )
                     .field("macos_option_as_alt", &self.macos_option_as_alt)
                     .field("macos_titlebar_style", &self.macos_titlebar_style)
@@ -1238,6 +1249,9 @@ impl ConfigOverrides {
             scrollback_persist_max_age_days: higher_priority
                 .scrollback_persist_max_age_days
                 .or(self.scrollback_persist_max_age_days),
+            scrollback_persist_encrypt: higher_priority
+                .scrollback_persist_encrypt
+                .or(self.scrollback_persist_encrypt),
             macos_option_as_alt: higher_priority
                 .macos_option_as_alt
                 .or(self.macos_option_as_alt),
@@ -1380,6 +1394,9 @@ impl ConfigOverrides {
             scrollback_persist_max_age_days: self
                 .scrollback_persist_max_age_days
                 .unwrap_or(base.scrollback_persist_max_age_days),
+            scrollback_persist_encrypt: self
+                .scrollback_persist_encrypt
+                .unwrap_or(base.scrollback_persist_encrypt),
             macos_option_as_alt: self.macos_option_as_alt.unwrap_or(base.macos_option_as_alt),
             macos_titlebar_style: self
                 .macos_titlebar_style
@@ -1807,6 +1824,7 @@ mod tests {
                 scrollback_persist_limit: DEFAULT_SCROLLBACK_PERSIST_LIMIT,
                 scrollback_persist_total_limit: DEFAULT_SCROLLBACK_PERSIST_TOTAL_LIMIT,
                 scrollback_persist_max_age_days: DEFAULT_SCROLLBACK_PERSIST_MAX_AGE_DAYS,
+                scrollback_persist_encrypt: false,
                 macos_option_as_alt: MacosOptionAsAlt::default(),
                 macos_titlebar_style: MacosTitlebarStyle::default(),
                 macos_non_native_fullscreen: false,

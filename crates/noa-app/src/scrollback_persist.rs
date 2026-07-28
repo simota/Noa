@@ -283,6 +283,7 @@ enum Job {
         input: noa_grid::ScrollbackSnapshotInput,
         saved_at: u64,
         max_bytes: usize,
+        encrypt: bool,
     },
     Remove {
         key: String,
@@ -328,6 +329,7 @@ impl ScrollbackPersister {
                                 input,
                                 saved_at,
                                 max_bytes,
+                                encrypt,
                             } => {
                                 let encoded = noa_grid::snapshot::encode_tail(
                                     &input.rows,
@@ -336,6 +338,26 @@ impl ScrollbackPersister {
                                     &input.hyperlinks,
                                     max_bytes,
                                 );
+                                let encoded = match (encoded, encrypt) {
+                                    (Some(bytes), false) => Some(bytes),
+                                    (Some(bytes), true) => {
+                                        match crate::scrollback_crypt::seal(&bytes) {
+                                            Some(sealed) => Some(sealed),
+                                            // Encryption was asked for and is
+                                            // unavailable: refuse rather than
+                                            // quietly store the record in the
+                                            // clear.
+                                            None => {
+                                                log::warn!(
+                                                    "scrollback-persist-encrypt is on but no key \
+                                                     is available; snapshot {key} not written"
+                                                );
+                                                None
+                                            }
+                                        }
+                                    }
+                                    (None, _) => None,
+                                };
                                 match encoded {
                                     Some(bytes) => {
                                         if let Err(err) = write(&worker_dir, &key, &bytes) {
@@ -344,8 +366,8 @@ impl ScrollbackPersister {
                                             );
                                         }
                                     }
-                                    // Nothing worth keeping: drop whatever the
-                                    // pane wrote earlier.
+                                    // Nothing worth keeping (or nothing safe to
+                                    // keep): drop whatever the pane wrote earlier.
                                     None => remove(&worker_dir, &key),
                                 }
                             }
@@ -369,6 +391,7 @@ impl ScrollbackPersister {
         input: noa_grid::ScrollbackSnapshotInput,
         saved_at: u64,
         max_bytes: usize,
+        encrypt: bool,
     ) {
         if let Some(tx) = self.tx.as_ref() {
             let _ = tx.send(Job::Write {
@@ -376,6 +399,7 @@ impl ScrollbackPersister {
                 input,
                 saved_at,
                 max_bytes,
+                encrypt,
             });
         }
     }
@@ -606,7 +630,13 @@ mod tests {
         let key = mint_key(8);
         let persister = ScrollbackPersister::spawn(dir.clone());
         for generation in 0..20u8 {
-            persister.save(key.clone(), input_of(&format!("gen{generation}")), 0, 1 << 20);
+            persister.save(
+                key.clone(),
+                input_of(&format!("gen{generation}")),
+                0,
+                1 << 20,
+                false,
+            );
         }
         drop(persister);
 
@@ -624,7 +654,13 @@ mod tests {
         let dir = temp_dir("worker-encode");
         let key = mint_key(20);
         let mut persister = ScrollbackPersister::spawn(dir.clone());
-        persister.save(key.clone(), input_of("encoded by the worker"), 4242, 1 << 20);
+        persister.save(
+            key.clone(),
+            input_of("encoded by the worker"),
+            4242,
+            1 << 20,
+            false,
+        );
         persister.flush();
 
         let decoded = noa_grid::snapshot::decode(&read(&dir, &key).expect("written"))
@@ -638,7 +674,7 @@ mod tests {
         let dir = temp_dir("discard");
         let key = mint_key(9);
         let mut persister = ScrollbackPersister::spawn(dir.clone());
-        persister.save(key.clone(), input_of("doomed"), 0, 1 << 20);
+        persister.save(key.clone(), input_of("doomed"), 0, 1 << 20, false);
         persister.discard(key.clone());
         persister.flush();
 

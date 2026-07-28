@@ -57,6 +57,7 @@ pub(crate) fn build_overrides(
     let mut scrollback_persist_limit = None;
     let mut scrollback_persist_total_limit = None;
     let mut scrollback_persist_max_age_days = None;
+    let mut scrollback_persist_encrypt = None;
     let mut macos_option_as_alt = None;
     let mut macos_titlebar_style = None;
     let mut macos_non_native_fullscreen = None;
@@ -267,6 +268,9 @@ pub(crate) fn build_overrides(
             "scrollback-persist-max-age-days" => {
                 scrollback_persist_max_age_days = parse_u64(path, directive, &mut diagnostics);
             }
+            "scrollback-persist-encrypt" => {
+                scrollback_persist_encrypt = parse_bool_directive(path, directive, &mut diagnostics);
+            }
             "macos-option-as-alt" => {
                 macos_option_as_alt = parse_macos_option_as_alt(path, directive, &mut diagnostics);
             }
@@ -466,6 +470,7 @@ pub(crate) fn build_overrides(
             scrollback_persist_limit,
             scrollback_persist_total_limit,
             scrollback_persist_max_age_days,
+            scrollback_persist_encrypt,
             macos_option_as_alt,
             macos_titlebar_style,
             macos_non_native_fullscreen,
@@ -578,6 +583,7 @@ pub(crate) fn is_supported_scalar_key(key: &str) -> bool {
             | "scrollback-persist-limit"
             | "scrollback-persist-total-limit"
             | "scrollback-persist-max-age-days"
+            | "scrollback-persist-encrypt"
             | "macos-option-as-alt"
             | "macos-titlebar-style"
             | "macos-non-native-fullscreen"

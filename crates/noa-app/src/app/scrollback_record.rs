@@ -156,7 +156,13 @@ impl App {
                 continue;
             };
             match input {
-                Some(input) => persister.save(key, input, saved_at, limit),
+                Some(input) => persister.save(
+                    key,
+                    input,
+                    saved_at,
+                    limit,
+                    self.config.scrollback_persist_encrypt,
+                ),
                 // A pane with nothing to show must not restore last week's
                 // output: drop any snapshot it previously wrote.
                 None => persister.discard(key),
@@ -264,6 +270,14 @@ impl App {
                     let key = (*key).clone();
                     scope.spawn(move || {
                         let bytes = store::read(&dir, &key)?;
+                        // Branch on the container, not on the config: a file
+                        // written before encryption was turned on still reads,
+                        // and one written before it was turned off is not lost.
+                        let bytes = if crate::scrollback_crypt::is_sealed(&bytes) {
+                            crate::scrollback_crypt::open(&bytes)?
+                        } else {
+                            bytes
+                        };
                         Some((key, noa_grid::snapshot::decode_within(&bytes, ceiling)?))
                     })
                 })

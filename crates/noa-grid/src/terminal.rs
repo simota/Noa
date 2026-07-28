@@ -493,9 +493,10 @@ impl Terminal {
             if Some(y) == skip_row {
                 continue;
             }
-            let Some(row) = screen.absolute_row(y) else {
+            let Some(mut row) = screen.absolute_row(y) else {
                 break;
             };
+            crate::snapshot::mark_images(&mut row);
             let size = crate::snapshot::encoded_row_size(&row);
             if spent + size > max_bytes && !collected.is_empty() {
                 break;

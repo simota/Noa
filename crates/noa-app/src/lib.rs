@@ -35,6 +35,7 @@ mod notification;
 mod process_monitor;
 mod record_view;
 mod remote_attach;
+mod scrollback_crypt;
 mod scrollback_persist;
 mod search_prompt;
 mod secure_input;

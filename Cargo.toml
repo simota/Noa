@@ -57,6 +57,8 @@ unicode-width     = "0.2"
 png        = "0.18"
 qrcode     = { version = "0.14", default-features = false }
 flate2     = "1"
+aes-gcm    = "0.11"
+security-framework = "3"
 zune-jpeg  = "0.5"
 image-webp = "0.2"
 

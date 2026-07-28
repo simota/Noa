@@ -315,6 +315,44 @@ fn trimmed_cells(row: &Row) -> &[Cell] {
     &row.cells[..end]
 }
 
+/// Text a persisted record shows where an image used to be.
+const IMAGE_MARKER: &str = "[image]";
+
+/// Replace kitty-graphics placeholder cells with a text marker.
+///
+/// Placeholder cells carry a private-use scalar plus diacritics encoding a
+/// row/column into an image that lives in the terminal's image store — which is
+/// not persisted and would not exist in the next process anyway. Serializing
+/// them verbatim restores a run of tofu; dropping them silently would erase the
+/// fact that something was there. A marker says what the row held without
+/// pretending the image came back.
+pub(crate) fn mark_images(row: &mut Row) {
+    let mut index = 0;
+    while index < row.cells.len() {
+        if row.cells[index].ch != crate::kitty_placeholder::PLACEHOLDER {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < row.cells.len()
+            && row.cells[index].ch == crate::kitty_placeholder::PLACEHOLDER
+        {
+            index += 1;
+        }
+        let template = Cell {
+            attrs: row.cells[start].attrs & !(CellAttrs::WIDE | CellAttrs::WIDE_SPACER),
+            ..Cell::default()
+        };
+        for (offset, slot) in row.cells[start..index].iter_mut().enumerate() {
+            *slot = Cell {
+                ch: IMAGE_MARKER.chars().nth(offset).unwrap_or(' '),
+                ..template
+            };
+            slot.grapheme = None;
+        }
+    }
+}
+
 /// Whether `row` holds nothing a restored record would show. The capture drops
 /// a trailing run of these (the live grid is blank below the cursor); a leading
 /// run inside the budget is kept, since it is history the program printed.
@@ -778,6 +816,47 @@ mod tests {
         // 200 identically-styled cells must not cost 200 style entries; the
         // whole file should stay far under the raw cell footprint.
         assert!(bytes.len() < 200 * CELL_ENCODED_BYTES, "{}", bytes.len());
+    }
+
+    #[test]
+    fn image_placeholders_become_a_marker_rather_than_tofu() {
+        // The image itself is not persisted and would not exist next process;
+        // the placeholder scalars would restore as a run of unknown glyphs.
+        let placeholder = Cell {
+            ch: crate::kitty_placeholder::PLACEHOLDER,
+            attrs: CellAttrs::WIDE,
+            ..Cell::default()
+        };
+        let mut row = Row::from_cells(
+            vec![
+                Cell {
+                    ch: 'a',
+                    ..Cell::default()
+                },
+                placeholder,
+                placeholder,
+                placeholder,
+            ],
+            false,
+            false,
+        );
+
+        mark_images(&mut row);
+
+        let text: String = row.cells.iter().map(|cell| cell.ch).collect();
+        assert_eq!(text, "a[im");
+        assert!(
+            row.cells[1..]
+                .iter()
+                .all(|cell| !cell.attrs.contains(CellAttrs::WIDE)),
+            "the marker is plain text, not a wide-glyph pair"
+        );
+        assert!(
+            !row.cells
+                .iter()
+                .any(|cell| cell.ch == crate::kitty_placeholder::PLACEHOLDER),
+            "no placeholder scalar may survive into the file"
+        );
     }
 
     #[test]

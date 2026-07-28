@@ -33,6 +33,8 @@ image-webp.workspace = true
 dirs.workspace = true
 unicode-width.workspace = true
 libc.workspace = true
+aes-gcm.workspace = true
+security-framework.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.19", default-features = false }

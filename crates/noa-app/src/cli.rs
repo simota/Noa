@@ -389,6 +389,11 @@ fn show_config_output(config: &StartupConfig) -> String {
     );
     push_line(
         &mut out,
+        "scrollback-persist-encrypt",
+        &config.scrollback_persist_encrypt.to_string(),
+    );
+    push_line(
+        &mut out,
         "macos-option-as-alt",
         match config.macos_option_as_alt {
             MacosOptionAsAlt::None => "false",

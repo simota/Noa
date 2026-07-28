@@ -120,6 +120,8 @@ pub struct AppConfig {
     /// `scrollback-persist-max-age-days`: snapshot expiry, enforced at launch
     /// (`0` never expires).
     pub scrollback_persist_max_age_days: u64,
+    /// `scrollback-persist-encrypt`: seal snapshots with a keychain-held key.
+    pub scrollback_persist_encrypt: bool,
     /// `macos-option-as-alt`: which Option key(s) the macOS window layer
     /// rewrites as terminal Alt.
     pub macos_option_as_alt: noa_config::MacosOptionAsAlt,
@@ -309,6 +311,7 @@ impl AppConfig {
             scrollback_persist_limit: config.scrollback_persist_limit,
             scrollback_persist_total_limit: config.scrollback_persist_total_limit,
             scrollback_persist_max_age_days: config.scrollback_persist_max_age_days,
+            scrollback_persist_encrypt: config.scrollback_persist_encrypt,
             macos_option_as_alt: config.macos_option_as_alt,
             macos_titlebar_style: config.macos_titlebar_style,
             macos_non_native_fullscreen: config.macos_non_native_fullscreen,
